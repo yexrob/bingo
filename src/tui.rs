@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -12,6 +12,7 @@ use rsmarkdown_tui::activities::{
 };
 use rsmarkdown_tui::app::App;
 use rsmarkdown_tui::Component;
+use rsmarkdown_tui::activities::activities_path_get_mut;
 use rsmarkdown_tui::permission::{DialogAction, PermissionRequest};
 use rsmarkdown_tui::renderer::theme::Theme;
 use rsmarkdown_tui::renderer::StreamMarkdownRenderer;
@@ -131,6 +132,10 @@ pub struct BingoChat {
     width: usize,
     scroll: u16,
     auto_scroll: bool,
+    /// 消息区顶（组件局部坐标）：点击行 → doc 行的偏移。
+    msg_top: u16,
+    /// 上次 draw 的可展开活动行范围（doc 坐标），供鼠标点击折叠/展开。
+    activity_ranges: Vec<rsmarkdown_tui::activities::ActivityRowRange>,
     theme: Theme,
 }
 
@@ -168,6 +173,8 @@ impl BingoChat {
             width: 80,
             scroll: 0,
             auto_scroll: true,
+            msg_top: 0,
+            activity_ranges: Vec::new(),
             theme: Theme::dark(),
         }
     }
@@ -341,6 +348,28 @@ impl BingoChat {
             && let Ok(request) = self.asks_rx.try_recv()
         {
             self.pending_ask = Some(request);
+        }
+    }
+
+    /// 点击（doc 坐标）命中的活动行 → 折叠/展开（鼠标点击展开）。
+    fn toggle_at(&mut self, doc_row: u16) -> bool {
+        let Some(range) = self
+            .activity_ranges
+            .iter()
+            .find(|r| doc_row >= r.start && doc_row < r.end)
+        else {
+            return false;
+        };
+        let path = range.path.clone();
+        let Some(msg) = self.messages.get_mut(range.message) else {
+            return false;
+        };
+        if let Some(act) = activities_path_get_mut(&mut msg.activities, &path) {
+            act.toggle();
+            self.auto_scroll = false;
+            true
+        } else {
+            false
         }
     }
 
@@ -611,8 +640,9 @@ impl Component for BingoChat {
             );
         }
 
-        // 消息区：欢迎卡片 + 消息作为同一滚动流（卡片随消息增长上移滚出）
         let msg_top = warn_y + warn_height;
+        self.msg_top = msg_top;
+        // 消息区：欢迎卡片 + 消息作为同一滚动流（卡片随消息增长上移滚出）
         let msg_bottom_limit = area.height.saturating_sub(2); // 分隔线 + 输入
         let spinner = rsmarkdown_tui::activities::spinner(self.tick);
         let mut rows: Vec<Line<'static>> = Vec::new();
@@ -624,6 +654,7 @@ impl Component for BingoChat {
             &self.cwd,
             area.width as usize,
         ));
+        let mut activity_ranges: Vec<rsmarkdown_tui::activities::ActivityRowRange> = Vec::new();
         for i in 0..self.messages.len() {
             match self.messages[i].role {
                 Role::User => {
@@ -653,14 +684,15 @@ impl Component for BingoChat {
                             lines
                         }
                     };
-                    let (lines, _ranges) = layout_activities(
-                        0,
+                    let (lines, ranges) = layout_activities(
+                        i,
                         rows.len() as u16,
                         &self.messages[i].activities,
                         spinner,
                         &self.theme,
                         &mut render,
                     );
+                    activity_ranges.extend(ranges);
                     rows.extend(lines);
                     let reply = render(&self.messages[i].text);
                     for (j, line) in reply.into_iter().enumerate() {
@@ -678,6 +710,8 @@ impl Component for BingoChat {
                 }
             }
         }
+
+        self.activity_ranges = activity_ranges;
 
         // 消息区高度：跟随内容，不超过可用空间
         let needed = rows.len() as u16;
@@ -793,6 +827,27 @@ impl Component for BingoChat {
                     _ => false,
                 }
             }
+            Event::Mouse(m) => match m.kind {
+                MouseEventKind::ScrollUp => {
+                    self.scroll = self.scroll.saturating_sub(3);
+                    self.auto_scroll = false;
+                    true
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll = self.scroll.saturating_add(3);
+                    self.auto_scroll = false;
+                    true
+                }
+                // 点击可展开活动的标题行 → 折叠/展开
+                MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                    if m.row >= self.msg_top {
+                        let doc_row = self.scroll + (m.row - self.msg_top);
+                        self.toggle_at(doc_row);
+                    }
+                    true
+                }
+                _ => false,
+            }
             _ => false,
         }
     }
@@ -877,3 +932,88 @@ pub fn run_tui_session(session: Arc<Session>) -> Result<(), Box<dyn std::error::
 
 #[allow(dead_code)]
 fn _assert_send(_: Pin<Box<dyn std::future::Future<Output = bool> + Send>>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsmarkdown_tui::activities::{ToolCall, ToolStatus};
+
+    fn test_chat() -> BingoChat {
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (asks_tx, asks_rx) = mpsc::unbounded_channel();
+        let session = Arc::new(Session {
+            client: crate::api::client::Client::new("test-key".to_string(), "https://example.com".to_string()),
+            model: "test-model".to_string(),
+            permission_mode: crate::permission::PermissionMode::Default,
+            settings: crate::settings::Settings::default(),
+            system: Vec::new(),
+            transcript: None,
+            depth: 0,
+            home: std::env::temp_dir(),
+            quiet: true,
+        });
+        BingoChat::new(session, events_tx, events_rx, asks_tx, asks_rx)
+    }
+
+    fn tool_activity() -> Activity {
+        let mut hint = Activity::new(ActivityKind::Tool(ToolCall::running("Bash", "")));
+        hint.set_content(vec![Line::from("output line 1"), Line::from("output line 2")]);
+        hint.expand_hint = Some("ctrl+o to expand".to_string());
+        hint
+    }
+
+    #[test]
+    fn click_toggles_tool_activity() {
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: "reply".to_string(),
+            activities: vec![tool_activity()],
+        });
+        let area = Rect { x: 0, y: 0, width: 100, height: 30 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        assert!(!chat.activity_ranges.is_empty(), "draw must populate ranges");
+
+        let range = &chat.activity_ranges[0];
+        assert_eq!(range.path, vec![0]);
+        let header_row = range.start;
+        let doc_row = header_row + chat.scroll;
+        assert!(chat.toggle_at(doc_row));
+        let act = &chat.messages[0].activities[0];
+        assert!(act.is_expanded(), "click on header expands");
+        let _ = chat;
+    }
+
+    #[test]
+    fn click_collapses_again() {
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: "reply".to_string(),
+            activities: vec![tool_activity()],
+        });
+        let area = Rect { x: 0, y: 0, width: 100, height: 30 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        let range = &chat.activity_ranges[0];
+        let doc_row = range.start + chat.scroll;
+        assert!(chat.toggle_at(doc_row));
+        assert!(chat.toggle_at(doc_row));
+        assert!(!chat.messages[0].activities[0].is_expanded());
+    }
+
+    #[test]
+    fn click_outside_ranges_is_noop() {
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: "reply".to_string(),
+            activities: vec![tool_activity()],
+        });
+        let area = Rect { x: 0, y: 0, width: 100, height: 30 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        assert!(!chat.toggle_at(999), "no range -> no toggle");
+    }
+}
