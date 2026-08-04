@@ -8,8 +8,8 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use rsmarkdown_core::{MarkdownProcessor, Renderer};
 use rsmarkdown_tui::activities::{
-    activities_path_get_mut, diff_lines, layout_activities, Activity, ActivityKind, Diff,
-    Thinking, ThinkingState, ToolCall, ToolStatus,
+    activities_path_get_mut, diff_lines, Activity, ActivityKind, Diff, Thinking,
+    ThinkingState, ToolCall, ToolStatus,
 };
 use rsmarkdown_tui::app::App;
 use rsmarkdown_tui::Component;
@@ -99,6 +99,8 @@ struct UiMessage {
     role: Role,
     text: String,
     activities: Vec<Activity>,
+    /// activities[i] 创建时 text 的字符数：渲染时 text 与活动按模型输出顺序交错。
+    insert_points: Vec<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -195,6 +197,7 @@ impl BingoChat {
                         role: Role::Assistant,
                         text: String::new(),
                         activities: Vec::new(),
+                        insert_points: Vec::new(),
                     });
                     self.stream_msg = Some(self.messages.len() - 1);
                     self.busy = true;
@@ -212,6 +215,7 @@ impl BingoChat {
                     hint.expand_hint = Some("ctrl+o to expand".to_string());
                     if let Some(i) = self.stream_msg {
                         self.messages[i].activities.push(hint);
+                        self.messages[i].insert_points.push(0);
                     }
                 }
                 UiEvent::TextDelta(text) => {
@@ -277,6 +281,8 @@ impl BingoChat {
                             hint.set_content(content);
                             hint.expand_hint = Some("ctrl+o to expand".to_string());
                             self.messages[i].activities.push(hint);
+                            let text_len = self.messages[i].text.chars().count();
+                            self.messages[i].insert_points.push(text_len);
                         }
                     }
                 }
@@ -304,6 +310,8 @@ impl BingoChat {
                     hint.expand_hint = Some("ctrl+o to expand".to_string());
                     if let Some(i) = self.stream_msg {
                         self.messages[i].activities.push(hint);
+                        let text_len = self.messages[i].text.chars().count();
+                        self.messages[i].insert_points.push(text_len);
                     }
                 }
                 UiEvent::ToolDone(done) => {
@@ -354,10 +362,22 @@ impl BingoChat {
                     // 原位收尾：thinking 在它发生的位置转完成态（不重排到回复之后）；
                     // 从未收到 delta 的空占位直接移除（避免出现无内容的空行）。
                     if let Some(i) = self.stream_msg {
-                        self.messages[i].activities.retain(|a| {
-                            !(matches!(a.kind, ActivityKind::Thinking(_))
-                                && a.content.is_empty())
-                        });
+                        // 同步移除：空占位 thinking 与它的插入点。
+                        let mut keep = Vec::new();
+                        for (idx, a) in self.messages[i].activities.iter().enumerate() {
+                            if matches!(a.kind, ActivityKind::Thinking(_)) && a.content.is_empty() {
+                                continue;
+                            }
+                            keep.push(idx);
+                        }
+                        if keep.len() != self.messages[i].activities.len() {
+                            self.messages[i].activities =
+                                keep.iter().map(|&k| self.messages[i].activities[k].clone()).collect();
+                            self.messages[i].insert_points = keep
+                                .iter()
+                                .map(|&k| self.messages[i].insert_points[k])
+                                .collect();
+                        }
                         for hint in &mut self.messages[i].activities {
                             if let ActivityKind::Thinking(t) = &mut hint.kind
                                 && t.state == ThinkingState::Running
@@ -386,6 +406,7 @@ impl BingoChat {
                             role: Role::Assistant,
                             text: format!("[error] {message}"),
                             activities: msg.activities,
+                            insert_points: msg.insert_points,
                         });
                     }
                 }
@@ -465,6 +486,7 @@ impl BingoChat {
             role: Role::User,
             text: text.clone(),
             activities: Vec::new(),
+            insert_points: Vec::new(),
         });
         self.busy = true;
         // 新一轮开始前复位中断信号（同一 Sender 跨轮复用）。
@@ -771,27 +793,70 @@ impl Component for BingoChat {
                             lines
                         }
                     };
-                    let (lines, ranges) = layout_activities(
-                        i,
-                        rows.len() as u16,
-                        &self.messages[i].activities,
-                        spinner,
-                        &self.theme,
-                        &mut render,
-                    );
-                    activity_ranges.extend(ranges);
-                    rows.extend(lines);
-                    let reply = render(&self.messages[i].text);
-                    for (j, line) in reply.into_iter().enumerate() {
-                        if j == 0 {
-                            let mut spans = vec![Span::styled(
-                                "⏺ ",
-                                ratatui::style::Style::default().fg(self.theme.claude),
-                            )];
-                            spans.extend(line.spans);
-                            rows.push(Line::from(spans));
-                        } else {
-                            rows.push(line);
+                    // text 与活动按模型输出顺序交错：活动创建时记录的 text
+                    // 字符位置（insert_points）决定它插入在哪段正文之间
+                    // （Claude Code：正文与工具调用逐段交叉，而非聚合）。
+                    let msg = &self.messages[i];
+                    let text = &msg.text;
+                    let char_bounds: Vec<usize> = text
+                        .char_indices()
+                        .map(|(b, _)| b)
+                        .collect();
+                    let mut rendered_chars = 0usize;
+                    let mut rendered_bytes = 0usize;
+                    for (idx, act) in msg.activities.iter().enumerate() {
+                        let pos_chars = msg
+                            .insert_points
+                            .get(idx)
+                            .copied()
+                            .unwrap_or(rendered_chars)
+                            .min(text.chars().count());
+                        if pos_chars > rendered_chars {
+                            let seg_end = char_bounds
+                                .get(pos_chars)
+                                .copied()
+                                .unwrap_or(text.len());
+                            let reply = render(&text[rendered_bytes..seg_end]);
+                            for (j, line) in reply.into_iter().enumerate() {
+                                if j == 0 {
+                                    let mut spans = vec![Span::styled(
+                                        "⏺ ",
+                                        ratatui::style::Style::default().fg(self.theme.claude),
+                                    )];
+                                    spans.extend(line.spans);
+                                    rows.push(Line::from(spans));
+                                } else {
+                                    rows.push(line);
+                                }
+                            }
+                            rendered_chars = pos_chars;
+                            rendered_bytes = seg_end;
+                        }
+                        let (lines, mut local) = rsmarkdown_tui::activities::layout_activity(
+                            act,
+                            &[idx],
+                            i,
+                            rows.len() as u16,
+                            spinner,
+                            &self.theme,
+                            &mut render,
+                        );
+                        rows.extend(lines);
+                        activity_ranges.append(&mut local);
+                    }
+                    if rendered_bytes < text.len() {
+                        let reply = render(&text[rendered_bytes..]);
+                        for (j, line) in reply.into_iter().enumerate() {
+                            if j == 0 {
+                                let mut spans = vec![Span::styled(
+                                    "⏺ ",
+                                    ratatui::style::Style::default().fg(self.theme.claude),
+                                )];
+                                spans.extend(line.spans);
+                                rows.push(Line::from(spans));
+                            } else {
+                                rows.push(line);
+                            }
                         }
                     }
                 }
@@ -1079,6 +1144,7 @@ mod tests {
             role: Role::Assistant,
             text: "reply".to_string(),
             activities: vec![tool_activity()],
+            insert_points: vec![0],
         });
         let area = Rect { x: 0, y: 0, width: 100, height: 30 };
         let mut buf = Buffer::empty(area);
@@ -1102,6 +1168,7 @@ mod tests {
             role: Role::Assistant,
             text: "reply".to_string(),
             activities: vec![tool_activity()],
+            insert_points: vec![0],
         });
         let area = Rect { x: 0, y: 0, width: 100, height: 30 };
         let mut buf = Buffer::empty(area);
@@ -1120,6 +1187,7 @@ mod tests {
             role: Role::Assistant,
             text: "reply".to_string(),
             activities: vec![tool_activity()],
+            insert_points: vec![0],
         });
         let area = Rect { x: 0, y: 0, width: 100, height: 30 };
         let mut buf = Buffer::empty(area);
@@ -1178,5 +1246,34 @@ mod tests {
         let acts = &chat.messages[0].activities;
         assert_eq!(acts.len(), 1);
         assert_eq!(thinking_text(&acts[0]), "ab");
+    }
+
+    /// 交错渲染：text 与活动按插入点交叉（模型输出 text → tool → text 顺序）。
+    #[test]
+    fn interleaves_text_and_activities_in_order() {
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: "hello world".to_string(),
+            activities: vec![tool_activity()],
+            insert_points: vec![5],
+        });
+        let area = Rect { x: 0, y: 0, width: 100, height: 40 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        let lines: Vec<String> = (0..40)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        let joined = lines.join("\n");
+        let hello = joined.find("hello").expect("first text before tool");
+        let tool = joined.find("Bash").expect("tool row");
+        let world = joined.find("world").expect("trailing text after tool");
+        assert!(hello < tool, "text before tool: {joined}");
+        assert!(tool < world, "tool before trailing text: {joined}");
     }
 }
