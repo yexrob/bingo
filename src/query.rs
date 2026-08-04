@@ -303,12 +303,22 @@ pub async fn run_query(
                     tool,
                     input: gated_input,
                 }),
-                PermissionBehavior::Deny => blocks.push(tool_result_error(
-                    &id,
-                    format!(
-                        "<permission_error>permission denied: {name} ({reason})</permission_error>"
-                    ),
-                )),
+                PermissionBehavior::Deny => {
+                    blocks.push(tool_result_error(
+                        &id,
+                        format!(
+                            "<permission_error>permission denied: {name} ({reason})</permission_error>"
+                        ),
+                    ));
+                    // 拒绝也要收尾 UI 活动：工具行显示被拒绝而不是永远旋转。
+                    let summary = summarize_input(&name, &input);
+                    (ui.on_tool_done)(&ToolCallDone {
+                        name,
+                        summary,
+                        output: format!("permission denied: {reason}"),
+                        is_error: true,
+                    });
+                }
                 PermissionBehavior::Ask => unreachable!("ask resolved by gate_tool"),
             }
         }
