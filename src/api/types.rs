@@ -63,6 +63,8 @@ pub struct Request {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub system: String,
     pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<serde_json::Value>,
     pub stream: bool,
 }
 

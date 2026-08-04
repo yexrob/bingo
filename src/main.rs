@@ -4,10 +4,14 @@ use clap::Parser;
 
 use crate::api::client::Client;
 use crate::api::types::DEFAULT_MODEL;
+use crate::permission::PermissionMode;
 use crate::query::run_query;
 
 mod api;
+mod permission;
 mod query;
+mod tool;
+mod tools;
 
 #[derive(Debug, Parser)]
 #[command(name = "bingo", version, about = "Rust agent CLI")]
@@ -19,6 +23,10 @@ struct Cli {
     /// 使用的模型
     #[arg(long, default_value = DEFAULT_MODEL)]
     model: String,
+
+    /// 权限模式
+    #[arg(long, default_value = "default")]
+    permission_mode: String,
 
     /// prompt；缺省时从 stdin 读取
     prompt: Vec<String>,
@@ -41,7 +49,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    let permission_mode: PermissionMode = cli.permission_mode.parse()?;
+
     let client = Client::from_env()?;
-    run_query(&client, &cli.model, &prompt).await?;
+    run_query(&client, &cli.model, permission_mode, &prompt).await?;
     Ok(())
 }

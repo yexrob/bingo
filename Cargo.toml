@@ -12,5 +12,6 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 futures-util = "0.3"
 async-stream = "0.3"
+async-trait = "0.1.91"
 
 [dev-dependencies]
