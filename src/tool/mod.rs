@@ -77,6 +77,14 @@ pub fn parse_input<T: for<'a> Deserialize<'a>>(
     serde_json::from_value(input.clone()).map_err(|e| ToolError::failed(format!("bad input: {e}")))
 }
 
+/// 由 input 结构体生成 inputSchema（schemars，单一来源，D2）。
+/// 去掉 `$schema` 键：工具 schema 随 tool_params 发给模型，保持既有形状。
+pub fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
+    let mut generator = schemars::r#gen::SchemaGenerator::default();
+    serde_json::to_value(T::json_schema(&mut generator))
+        .unwrap_or_else(|_| serde_json::json!({ "type": "object" }))
+}
+
 /// 注册表里按名字找工具。
 pub fn find_tool<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> Option<&'a dyn Tool> {
     tools.iter().map(|t| t.as_ref()).find(|t| t.name() == name)
@@ -94,4 +102,48 @@ pub fn tool_params(tools: &[Box<dyn Tool>]) -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    use crate::tool::bash::BashTool;
+    use crate::tool::read::ReadTool;
+
+    #[test]
+    fn agent_schema_matches_input_struct() {
+        // 回归：schema 与 input 结构体单一来源（D2）。曾漂移——结构体缺 description。
+        let schema = schema_for::<agent::AgentInput>();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["required"], json!(["prompt"]));
+        assert_eq!(schema["additionalProperties"], json!(false));
+        assert!(schema["properties"]["description"].is_object());
+        assert_eq!(schema["properties"]["description"]["type"], json!(["string", "null"]));
+    }
+
+    #[test]
+    fn read_schema_shape() {
+        let schema = ReadTool::new().input_schema();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["required"], json!(["file_path"]));
+        assert_eq!(schema["additionalProperties"], json!(false));
+        assert_eq!(schema["properties"]["file_path"]["type"], "string");
+        assert_eq!(schema["properties"]["file_path"]["description"], "要读取的文件路径（绝对或相对）");
+    }
+
+    #[test]
+    fn bash_schema_optional_timeout() {
+        let schema = BashTool::new().input_schema();
+        assert_eq!(schema["required"], json!(["command"]));
+        // Option 字段不入 required
+        assert!(!schema["required"].as_array().unwrap().contains(&json!("timeout")));
+    }
+
+    #[test]
+    fn schema_has_no_dollar_schema_key() {
+        let schema = ReadTool::new().input_schema();
+        assert!(schema.get("$schema").is_none(), "发给模型的形状不含 $schema: {schema}");
+    }
 }

@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EditInput {
     #[serde(rename = "file_path")]
     pub file_path: String,
@@ -12,6 +12,7 @@ pub struct EditInput {
     #[serde(rename = "new_string")]
     pub new_string: String,
     #[serde(rename = "replace_all", default)]
+    #[schemars(description = "replace every occurrence")]
     pub replace_all: bool,
 }
 
@@ -28,16 +29,7 @@ impl Tool for EditTool {
             .into()
     }
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string"},
-                "old_string": {"type": "string"},
-                "new_string": {"type": "string"},
-                "replace_all": {"type": "boolean", "description": "replace every occurrence"}
-            },
-            "required": ["file_path", "old_string", "new_string"]
-        })
+        super::schema_for::<EditInput>()
     }
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         false

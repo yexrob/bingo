@@ -23,5 +23,6 @@ globset = "0.4.20"
 regex = "1.13.1"
 html2md = "0.2.15"
 url = "2.5.8"
+schemars = { version = "0.8", features = ["derive"] }
 
 [dev-dependencies]

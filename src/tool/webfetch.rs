@@ -95,10 +95,11 @@ fn cache_put(url: String, entry: CacheEntry) {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WebFetchInput {
     pub url: String,
     #[serde(default)]
+    #[schemars(description = "what to extract from the page (accepted, content is returned verbatim)")]
     pub prompt: Option<String>,
 }
 
@@ -123,14 +124,7 @@ impl Tool for WebFetchTool {
             .into()
     }
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "url": {"type": "string"},
-                "prompt": {"type": "string", "description": "what to extract from the page (accepted, content is returned verbatim)"}
-            },
-            "required": ["url"]
-        })
+        super::schema_for::<WebFetchInput>()
     }
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true

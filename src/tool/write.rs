@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WriteInput {
     #[serde(rename = "file_path")]
     pub file_path: String,
@@ -23,14 +23,7 @@ impl Tool for WriteTool {
             .into()
     }
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string"},
-                "content": {"type": "string"}
-            },
-            "required": ["file_path", "content"]
-        })
+        super::schema_for::<WriteInput>()
     }
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         false

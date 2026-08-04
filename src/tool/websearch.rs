@@ -10,12 +10,15 @@ const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// 单次搜索最多回填的结果数。
 const MAX_RESULTS: usize = 8;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WebSearchInput {
+    #[schemars(description = "the search query")]
     pub query: String,
     #[serde(rename = "allowed_domains", default)]
+    #[schemars(description = "only include results from these domains")]
     pub allowed_domains: Vec<String>,
     #[serde(rename = "blocked_domains", default)]
+    #[schemars(description = "never include results from these domains")]
     pub blocked_domains: Vec<String>,
 }
 
@@ -50,17 +53,7 @@ impl Tool for WebSearchTool {
         )
     }
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "the search query"},
-                "allowed_domains": {"type": "array", "items": {"type": "string"},
-                    "description": "only include results from these domains"},
-                "blocked_domains": {"type": "array", "items": {"type": "string"},
-                    "description": "never include results from these domains"}
-            },
-            "required": ["query"]
-        })
+        super::schema_for::<WebSearchInput>()
     }
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true

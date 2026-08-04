@@ -9,8 +9,10 @@ use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 /// 单次读取的最大字符数，超出截断（Claude Code 同款策略）。
 const MAX_READ_CHARS: usize = 20_000;
 
-#[derive(Debug, Deserialize)]
-struct ReadInput {
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ReadInput {
+    #[schemars(description = "要读取的文件路径（绝对或相对）")]
     file_path: String,
 }
 
@@ -39,17 +41,7 @@ impl Tool for ReadTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "要读取的文件路径（绝对或相对）"
-                }
-            },
-            "required": ["file_path"],
-            "additionalProperties": false
-        })
+        super::schema_for::<ReadInput>()
     }
 
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {

@@ -62,7 +62,7 @@
 
 ### D2. Tool 协议：trait + schemars，权限独立成门
 
-- Zod 等价物：`schemars` 生成 inputSchema；模型回传参数先 `jsonschema` 校验再 serde 反序列化。
+- Zod 等价物：`schemars` 生成 inputSchema（`schema_for::<T>()`，input 结构体单一来源；模型回传参数 serde 反序列化即校验，错误以 is_error 回填模型。jsonschema 校验器不引入——9 个静态简单 schema 无收益，serde 已覆盖类型错误）。
 - Tool 用 trait（name/aliases + inputSchema + call + isConcurrencySafe + isReadOnly/isDestructive + validateInput + interruptBehavior），默认 fail-closed（非并发安全、allow）。
 - `checkPermissions` 不进 trait——权限是横切面，走统一权限门（参考 goose 2026：工具注册走 rmcp model，权限独立 `Permission` 门）。
 

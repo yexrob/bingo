@@ -8,10 +8,12 @@ use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 /// Glob 结果上限：防模型一次拿到超长列表（超出截断并注明）。
 const MAX_GLOB_RESULTS: usize = 500;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GlobInput {
+    #[schemars(description = "glob pattern, e.g. **/*.rs")]
     pub pattern: String,
     #[serde(default)]
+    #[schemars(description = "directory to search (default: cwd)")]
     pub path: Option<String>,
 }
 
@@ -28,14 +30,7 @@ impl Tool for GlobTool {
             .into()
     }
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": "glob pattern, e.g. **/*.rs"},
-                "path": {"type": "string", "description": "directory to search (default: cwd)"}
-            },
-            "required": ["pattern"]
-        })
+        super::schema_for::<GlobInput>()
     }
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true

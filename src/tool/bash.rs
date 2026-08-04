@@ -8,10 +8,13 @@ use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 struct BashInput {
+    #[schemars(description = "要执行的 shell 命令")]
     command: String,
     #[serde(default)]
+    #[schemars(description = "超时秒数，默认 120")]
     timeout: Option<u64>,
 }
 
@@ -40,21 +43,7 @@ impl Tool for BashTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "要执行的 shell 命令"
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "超时秒数，默认 120"
-                }
-            },
-            "required": ["command"],
-            "additionalProperties": false
-        })
+        super::schema_for::<BashInput>()
     }
 
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {

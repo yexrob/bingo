@@ -9,9 +9,16 @@ use crate::tool::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
 const MAX_AGENT_DEPTH: usize = 3;
 
-#[derive(Debug, Deserialize)]
-struct AgentInput {
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentInput {
+    #[schemars(description = "子代理的独立任务指令")]
     prompt: String,
+    /// 任务简述（可选），随 header 显示。
+    #[serde(default)]
+    #[allow(dead_code)]
+    #[schemars(description = "任务简述（可选）")]
+    description: Option<String>,
 }
 
 /// 子代理工具（对标 Claude Code Task，D14）：递归 queryLoop，
@@ -55,21 +62,7 @@ impl Tool for AgentTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": "子代理的独立任务指令"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "任务简述（可选）"
-                }
-            },
-            "required": ["prompt"],
-            "additionalProperties": false
-        })
+        super::schema_for::<AgentInput>()
     }
 
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {

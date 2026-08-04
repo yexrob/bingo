@@ -10,13 +10,16 @@ const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// Grep 结果上限（行数）。
 const MAX_GREP_LINES: usize = 200;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GrepInput {
+    #[schemars(description = "regular expression")]
     pub pattern: String,
     #[serde(default)]
+    #[schemars(description = "directory to search (default: cwd)")]
     pub path: Option<String>,
     /// 仅搜索匹配该 glob 的文件（如 "*.rs"）。
     #[serde(default)]
+    #[schemars(description = "only search files matching this glob")]
     pub glob: Option<String>,
 }
 
@@ -33,15 +36,7 @@ impl Tool for GrepTool {
             .into()
     }
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": "regular expression"},
-                "path": {"type": "string", "description": "directory to search (default: cwd)"},
-                "glob": {"type": "string", "description": "only search files matching this glob"}
-            },
-            "required": ["pattern"]
-        })
+        super::schema_for::<GrepInput>()
     }
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
