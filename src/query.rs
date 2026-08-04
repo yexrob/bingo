@@ -84,7 +84,9 @@ pub fn headless_hooks() -> UiHooks {
                 eprintln!("{prompt}");
                 let answer = tokio::task::spawn_blocking(move || {
                     let mut line = String::new();
-                    let _ = std::io::stdin().lock().read_line(&mut line);
+                    if let Err(e) = std::io::stdin().lock().read_line(&mut line) {
+                        eprintln!("[bingo] warning: cannot read answer from stdin: {e}");
+                    }
                     line.trim().to_ascii_lowercase()
                 })
                 .await
@@ -254,8 +256,10 @@ pub async fn run_query(
 
     let mut messages = initial_messages;
     messages.push(Message::user_text(user_input));
-    if let Some(t) = &session.transcript {
-        let _ = t.append(messages.last().unwrap());
+    if let Some(t) = &session.transcript
+        && let Err(e) = t.append(messages.last().unwrap())
+    {
+        (ui.on_warning)(format!("transcript append failed: {e}"));
     }
     loop {
         check_and_compact(session, &mut messages).await;
@@ -268,8 +272,10 @@ pub async fn run_query(
             &mut ui.on_event as &mut (dyn FnMut(&StreamEvent) + Send),
         )
         .await?;
-        if let Some(t) = &session.transcript {
-            let _ = t.append(&assistant);
+        if let Some(t) = &session.transcript
+            && let Err(e) = t.append(&assistant)
+        {
+            (ui.on_warning)(format!("transcript append failed: {e}"));
         }
         if tool_uses.is_empty() {
             println!();
@@ -365,8 +371,10 @@ pub async fn run_query(
             role: Role::User,
             content: blocks,
         });
-        if let Some(t) = &session.transcript {
-            let _ = t.append(messages.last().unwrap());
+        if let Some(t) = &session.transcript
+            && let Err(e) = t.append(messages.last().unwrap())
+        {
+            (ui.on_warning)(format!("transcript append failed: {e}"));
         }
     }
 }

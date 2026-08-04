@@ -62,11 +62,15 @@ pub async fn maybe_compact(
         tools: Vec::new(),
         stream: false,
     };
-    let summary = session
-        .client
-        .complete_text(&request)
-        .await
-        .unwrap_or_else(|_| "[compact failed: no summary]".to_string());
+    let summary = match session.client.complete_text(&request).await {
+        Ok(s) => s,
+        Err(e) => {
+            if !session.quiet {
+                eprintln!("[bingo] warning: context compaction failed: {e}");
+            }
+            "[compact failed: no summary]".to_string()
+        }
+    };
 
     let mut compacted = vec![Message::user_text(format!(
         "（此前对话的摘要，来自自动压缩）\n{summary}"

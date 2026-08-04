@@ -73,8 +73,14 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
         tools: Vec::new(),
         stream: false,
     };
-    let Ok(facts) = session.client.complete_text(&request).await else {
-        return;
+    let facts = match session.client.complete_text(&request).await {
+        Ok(f) => f,
+        Err(e) => {
+            if !session.quiet {
+                eprintln!("[bingo] memory: extract failed: {e}");
+            }
+            return;
+        }
     };
     let facts = facts.trim();
     if facts.is_empty() {
@@ -82,7 +88,12 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
     }
 
     let path = memory_file(home, cwd);
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    if let Err(e) = std::fs::create_dir_all(path.parent().unwrap()) {
+        if !session.quiet {
+            eprintln!("[bingo] memory: cannot create dir: {e}");
+        }
+        return;
+    }
     let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
     let mut added = 0;
     for line in facts.lines() {
@@ -97,7 +108,12 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
     if added > 0 {
         // 截断超长记忆
         let lines: Vec<&str> = existing.lines().take(MEMORY_MAX_LINES).collect();
-        let _ = std::fs::write(&path, lines.join("\n") + "\n");
+        if let Err(e) = std::fs::write(&path, lines.join("\n") + "\n") {
+            if !session.quiet {
+                eprintln!("[bingo] memory: write failed: {e}");
+            }
+            return;
+        }
         if !session.quiet {
             eprintln!("[bingo] memory: added {added} facts -> {}", path.display());
         }

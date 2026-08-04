@@ -78,7 +78,9 @@ async fn run_hook(
     let input_text = input.to_string();
     use tokio::io::AsyncWriteExt;
     let mut stdin = stdin;
-    let _ = stdin.write_all(input_text.as_bytes()).await;
+    if let Err(e) = stdin.write_all(input_text.as_bytes()).await {
+        eprintln!("[bingo] warning: failed to write hook stdin: {e}");
+    }
     drop(stdin);
 
     let output = tokio::time::timeout(HOOK_TIMEOUT, child.wait_with_output())
@@ -121,12 +123,19 @@ pub async fn run_pre_tool_use(
             tool_input: &input,
             permission_mode,
         };
-        let Ok(output) = run_hook(command, &serde_json::to_value(hook_input).unwrap()).await else {
-            continue;
+        let output = match run_hook(command, &serde_json::to_value(hook_input).unwrap()).await {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("[bingo] warning: PreToolUse hook failed: {e}");
+                continue;
+            }
         };
         let parsed: PreToolUseOutput = match serde_json::from_value(output) {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!("[bingo] warning: PreToolUse hook returned bad JSON: {e}");
+                continue;
+            }
         };
         if let Some(updated) = parsed.updated_input {
             input = updated;

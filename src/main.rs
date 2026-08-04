@@ -55,7 +55,15 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = match std::env::var("HOME") {
+        Ok(h) => PathBuf::from(h),
+        Err(_) => {
+            if !cli.print {
+                eprintln!("[bingo] warning: HOME is not set; using current dir for state");
+            }
+            PathBuf::new()
+        }
+    };
     let project_dir = std::env::current_dir()?;
     let user_dir = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -82,10 +90,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("[bingo] continuing transcript: {}", t.path().display());
                 (Some(t.clone()), t.load_messages()?)
             }
-            None => (create_transcript(&home, &project_dir).ok(), Vec::new()),
+            None => match create_transcript(&home, &project_dir) {
+                Ok(t) => (Some(t), Vec::new()),
+                Err(e) => {
+                    if !cli.print {
+                        eprintln!("[bingo] warning: cannot create transcript (history will not persist): {e}");
+                    }
+                    (None, Vec::new())
+                }
+            },
         }
     } else {
-        (create_transcript(&home, &project_dir).ok(), Vec::new())
+        match create_transcript(&home, &project_dir) {
+            Ok(t) => (Some(t), Vec::new()),
+            Err(e) => {
+                if !cli.print {
+                    eprintln!("[bingo] warning: cannot create transcript (history will not persist): {e}");
+                }
+                (None, Vec::new())
+            }
+        }
     };
 
     let session = Arc::new(Session {

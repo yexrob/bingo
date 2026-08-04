@@ -433,7 +433,13 @@ impl BingoChat {
             let mut ui = tui_hooks(events.clone(), asks);
             // 多轮连续性：加载 transcript 历史作为本轮上下文（每轮独立 run_query）。
             let history = match session.transcript.as_ref() {
-                Some(t) => t.load_messages().unwrap_or_default(),
+                Some(t) => match t.load_messages() {
+                    Ok(msgs) => msgs,
+                    Err(e) => {
+                        (ui.on_warning)(format!("transcript load failed: {e}"));
+                        Vec::new()
+                    }
+                },
                 None => Vec::new(),
             };
             let result = crate::query::run_query(&session, history, &text, &mut ui).await;
