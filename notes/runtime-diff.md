@@ -55,7 +55,7 @@
 2. ✅ P1-4 预算分级 + 熔断（budget.rs/compact.rs，完成）
 3. ✅ P1-6 hook exit 2（hooks.rs，完成）
 4. ✅ P1-5 工具输出上限（query.rs 统一裁剪，完成）
-5. P2 按对标清单推进（工具面 → hooks 事件 → 规则表）
+5. ✅ P2（2026-08-04 完成）：工具面 Glob/Grep/Edit/Write/WebFetch → acceptEdits 语义 → 权限规则表 + safetyCheck → hooks 事件扩展
 
 > 注：Codex 未查到项（stream_max_retries 默认值、退避参数、模型窗口表）不阻塞——那些是模型商细节，bingo 用 CC 数值即可。
 
@@ -74,3 +74,23 @@
 - 工具执行中 C-c → sleep 60 照常跑完回填 ✓ → "回合已中断" ✓
 - 流式输出中 C-c → 散文 5 秒处截断，回合立即结束 ✓
 - 单元测试 45 个（新增：400 解析、裁剪、阈值层级、hook exit 2/PostToolUse block、上下文重算保底）
+
+## 6. P2 落地记录（2026-08-04）
+
+- **工具面**（对标 CC 工具池）：
+  - `Glob`：globset 递归、上限 500 条、跳过符号链接目录
+  - `Grep`：regex 搜索、单文件 2MB/二进制跳过、200 行上限
+  - `Edit`：old_string 精确替换（replace_all 支持）、is_destructive + is_edit_tool
+  - `Write`：覆盖写 + 自动建父目录
+  - `WebFetch`：HTML→纯文本轻量转换、30s 超时、100k 截断（简化自 CC 的 readability 管线）
+- **acceptEdits 语义**：`is_edit_tool` trait 标记（Edit/Write），acceptEdits 模式自动允许；Bash 等其他工具照常询问——**未实现**：CC 的 diff 预览（依赖编辑器侧，本地 CLI 无 IDE 集成）。
+- **权限规则表**：settings `permissions.allow/deny/ask`，规则语法 `Tool(content)`（`Bash(git *)` 命令前缀、路径工具前缀匹配、`mcp__server` 前缀）；判定顺序对标 CC：deny → ask 规则（**bypass 也尊重**）→ 只读 → safetyCheck → bypass → acceptEdits → allow 规则 → 模式默认。
+- **safetyCheck**：写工具目标含 `.git/.claude/.vscode/.idea` 段 → 必须 ask（bypass/acceptEdits 免疫）。未做 CC 的 shell 配置（.zshrc 等）与 Read 侧检查。
+- **hooks 事件扩展**：UserPromptSubmit（exit 2 / decision:block 阻止提交）、Stop（exit 2 → stderr 注入模型重试一次，防循环）、SessionStart、SessionEnd（1.5s 快速超时，对标 `SESSION_END_HOOK_TIMEOUT_MS_DEFAULT`）。
+- **未做**（留后续）：WebSearch（需外部服务）、diff 预览、CLAUDE_ENV_FILE 会话环境、plugin/权限 hook（prompt/http/agent 型 hook）。
+
+### P2 验证（2026-08-04 实测）
+
+- acceptEdits：`✓ Write` 无模态直接执行；Glob 列出 26 个 rust 文件 ✓
+- 规则 deny：`Bash(rm -rf)` 在 bypassPermissions 下仍被拒绝，模型如实汇报 ✓
+- 单元测试 51 个（新增：acceptEdits 分支、deny/ask/allow 规则、safetyCheck 优先级、UserPromptSubmit/Stop block）
