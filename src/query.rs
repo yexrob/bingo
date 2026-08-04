@@ -293,6 +293,12 @@ fn summarize_input(tool_name: &str, input: &serde_json::Value) -> String {
             .and_then(|c| c.as_str())
             .map(|c| format!("$ {c}"))
             .unwrap_or_else(|| "Bash".to_string()),
+        // 搜索摘要显示查询（Claude Code 风格：Web Search("query")）
+        ("WebSearch", serde_json::Value::Object(map)) => map
+            .get("query")
+            .and_then(|q| q.as_str())
+            .map(|q| format!("Web Search({q:?})"))
+            .unwrap_or_else(|| "Web Search".to_string()),
         (_, serde_json::Value::Object(map)) => map
             .iter()
             .take(1)

@@ -13,6 +13,7 @@ pub mod glob;
 pub mod grep;
 pub mod read;
 pub mod webfetch;
+pub mod websearch;
 pub mod write;
 
 /// 工具执行上下文：随 queryLoop 一轮共享。

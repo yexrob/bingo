@@ -8,6 +8,7 @@ use crate::tool::glob::GlobTool;
 use crate::tool::grep::GrepTool;
 use crate::tool::read::ReadTool;
 use crate::tool::webfetch::WebFetchTool;
+use crate::tool::websearch::WebSearchTool;
 use crate::tool::write::WriteTool;
 use crate::tool::Tool;
 
@@ -24,6 +25,7 @@ pub async fn assemble_tools(
         Box::new(EditTool),
         Box::new(WriteTool),
         Box::new(WebFetchTool),
+        Box::new(WebSearchTool),
         Box::new(AgentTool::new(session.clone())),
     ];
     match crate::mcp::connect_servers(&session.settings.mcp_servers).await {
