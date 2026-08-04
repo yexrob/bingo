@@ -16,7 +16,7 @@ pub struct AgentInput {
     prompt: String,
     /// 后台化：立即返回 async_launched，完成时通知主 agent。
     #[serde(default)]
-    #[schemars(description = "后台执行（默认 false）：立即返回任务 id，完成时通知")]
+    #[schemars(description = "异步执行（默认 true）：立即返回任务 id，主 agent 不等待；设 false 则同步等待结果")]
     background: Option<bool>,
     /// 任务简述（可选），随 header 显示。
     #[serde(default)]
@@ -216,7 +216,8 @@ impl Tool for AgentTool {
                 "max agent depth ({MAX_AGENT_DEPTH}) exceeded"
             )));
         }
-        if params.background.unwrap_or(false) {
+        // 默认异步：主 agent 不等待子 agent，完成通知注入下一轮。
+        if params.background.unwrap_or(true) {
             return self.launch_background(&params, ctx);
         }
 
