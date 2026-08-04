@@ -27,6 +27,8 @@ use crate::query::{Session, ToolCallDone, UiHooks};
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     TurnStart,
+    /// 一批 toolcall 全部执行完（query loop 一轮收口）。
+    RoundEnd,
     TextDelta(String),
     ThinkingDelta(String),
     /// message_delta 的输出 token 累计值。
@@ -51,6 +53,7 @@ pub fn tui_hooks(
 ) -> UiHooks {
     let tool_events = events.clone();
     let ready_events = events.clone();
+    let round_events = events.clone();
     let warn_events = events.clone();
     UiHooks {
         on_event: Box::new(move |event| match event {
@@ -80,6 +83,9 @@ pub fn tui_hooks(
                 diff: done.diff.clone(),
                 duration_ms: done.duration_ms,
             }));
+        }),
+        on_round_end: Box::new(move || {
+            let _ = round_events.send(UiEvent::RoundEnd);
         }),
         on_warning: Box::new(move |message| {
             let _ = warn_events.send(UiEvent::Warning(message));
@@ -579,6 +585,15 @@ impl BingoChat {
                             None => self.messages[i].groups[g].read_ops += 1,
                         },
                         CollapseKind::List => self.messages[i].groups[g].list += 1,
+                    }
+                }
+                UiEvent::RoundEnd => {
+                    // 一批 toolcall 收口：清 active，下一轮模型响应的 Read/Search 开新组
+                    // （跨轮聚合曾导致"上一轮没找到 → 思考 → 下一轮工具挂进旧组"）。
+                    if let Some(i) = self.stream_msg
+                        && let Some(g) = self.messages[i].groups.last_mut()
+                    {
+                        g.active = false;
                     }
                 }
                 UiEvent::ToolDone(done) => {
@@ -2258,6 +2273,59 @@ mod fold_roundtrip_live_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("3210ms"), "real duration: {joined}");
+    }
+
+    #[test]
+    fn round_end_starts_new_group_next_round() {
+        // 回归：上一轮 Searching 没找到 → 下一轮（新一批 toolcall）的 Read
+        // 不得聚合进旧组。RoundEnd 收口后新工具开新组。
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        // 轮 1：Searching（Grep 入组）
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Grep".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Grep".into(),
+            input: json!({"pattern": "nomatch"}),
+        });
+        chat.drain_events();
+        assert_eq!(chat.messages[0].groups.len(), 1, "round 1 group");
+        // 轮 1 收口（工具执行完，下一轮模型响应前）
+        let _ = chat.events.send(UiEvent::RoundEnd);
+        chat.drain_events();
+        // 轮 2：thinking（不断组语义不受影响）后新 Grep——必须开新组
+        let _ = chat.events.send(UiEvent::ThinkingDelta("hmm".into()));
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Grep".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Grep".into(),
+            input: json!({"pattern": "another"}),
+        });
+        chat.drain_events();
+        assert_eq!(chat.messages[0].groups.len(), 2, "round 2 opens new group");
+        // 组 2 归属正确
+        let idx = chat.messages[0].activities.len() - 1;
+        assert_eq!(chat.messages[0].group_of[idx], Some(1));
+        // 同轮内连续 Read 仍聚合（既有语义不破坏）
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Read".into(),
+            input: json!({"file_path": "a.md"}),
+        });
+        chat.drain_events();
+        assert_eq!(chat.messages[0].groups.len(), 2, "same-round Read joins group 2");
+        let idx = chat.messages[0].activities.len() - 1;
+        assert_eq!(chat.messages[0].group_of[idx], Some(1));
     }
 
     #[test]

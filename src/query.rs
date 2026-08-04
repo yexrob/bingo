@@ -85,6 +85,8 @@ pub struct UiHooks {
     /// 工具 block 完整（含 input）时回调：折叠判定需要输入（Bash 命令分类）。
     pub on_tool_ready: Box<dyn Fn(String, serde_json::Value) + Send>,
     pub on_tool_done: Box<dyn Fn(&ToolCallDone) + Send>,
+    /// 一轮模型响应及其工具全部执行完：折叠组按批收口，下一轮工具开新组。
+    pub on_round_end: Box<dyn Fn() + Send>,
     pub on_warning: Box<dyn Fn(String) + Send>,
     /// 权限询问：工具名 + 理由 → 是否允许（异步：TUI 模态可能等待用户）。
     pub ask: Box<AskFn>,
@@ -101,6 +103,7 @@ pub fn headless_hooks() -> UiHooks {
         }),
         on_tool_ready: Box::new(|_name, _input| {}),
         on_tool_done: Box::new(|_| {}),
+        on_round_end: Box::new(|| {}),
         on_warning: Box::new(|message| eprintln!("[bingo] warning: {message}")),
         ask: Box::new(|tool_name, reason| {
             let prompt = format!("允许 {tool_name} 执行吗？({reason}) [y/N] ");
@@ -513,6 +516,8 @@ pub async fn run_query(
         {
             (ui.on_warning)(format!("transcript append failed: {e}"));
         }
+        // 本批工具全部收口：折叠组按批聚合，下一轮模型响应的工具开新组。
+        (ui.on_round_end)();
         if stop_after_tools || is_cancelled(&cancel_rx) {
             return Ok(QueryOutcome {
                 messages,
