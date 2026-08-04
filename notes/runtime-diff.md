@@ -87,7 +87,18 @@
 - **权限规则表**：settings `permissions.allow/deny/ask`，规则语法 `Tool(content)`（`Bash(git *)` 命令前缀、路径工具前缀匹配、`mcp__server` 前缀）；判定顺序对标 CC：deny → ask 规则（**bypass 也尊重**）→ 只读 → safetyCheck → bypass → acceptEdits → allow 规则 → 模式默认。
 - **safetyCheck**：写工具目标含 `.git/.claude/.vscode/.idea` 段 → 必须 ask（bypass/acceptEdits 免疫）。未做 CC 的 shell 配置（.zshrc 等）与 Read 侧检查。
 - **hooks 事件扩展**：UserPromptSubmit（exit 2 / decision:block 阻止提交）、Stop（exit 2 → stderr 注入模型重试一次，防循环）、SessionStart、SessionEnd（1.5s 快速超时，对标 `SESSION_END_HOOK_TIMEOUT_MS_DEFAULT`）。
-- **未做**（留后续）：WebSearch（需外部服务）、CLAUDE_ENV_FILE 会话环境、plugin/权限 hook（prompt/http/agent 型 hook）。
+- **未做**（留后续）：CLAUDE_ENV_FILE 会话环境、plugin/权限 hook（prompt/http/agent 型 hook）。
+
+## 9. WebSearch 对齐（2026-08-04）
+
+CC 的 WebSearchTool 依赖 Anthropic API 的**服务器端 `web_search` 工具**（模型发起 server_tool_use，API 内部搜索），bingo 无此端点 → 工具自实现后端（无 key DuckDuckGo HTML 端点）：
+
+- 输入 `{query, allowed_domains, blocked_domains}` 对齐 CC schema（双域名集互斥校验）；结果 8 条上限。
+- 回填格式对齐 CC `mapToolResultToToolResultBlockParam`：`Web search results for query: "..."` + `Links: [...]`（title/url/snippet）+ `REMINDER: 必须附 markdown 来源`。
+- description 注入当前年份与强制 Sources 段（对齐 CC prompt.ts 的 CRITICAL REQUIREMENT）；实测模型遵守（输出带 Sources）。
+- UI 工具行 `Web Search("query")` 对齐 CC 显示。
+- 差异：CC 单次 API 调用内自动多搜索（max_uses 8），bingo 一次查询一次后端请求；无 `Did N searches in Xs` chrome（展开直接显示结果列表）。
+- 实测：headless 强制搜索返回真实结果（Rust 2026 相关）；天气对比场景模型偏好 WebFetch wttr.in（DeepSeek 知识里的直达路径，工具选择权在模型）。74 tests。
 
 ## 8. WebFetch 对齐（2026-08-04）
 
