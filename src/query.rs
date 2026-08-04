@@ -344,6 +344,7 @@ pub async fn run_query(
     let ctx = ToolContext {
         cwd: std::env::current_dir()
             .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
+        watch: session.watch.clone(),
     };
 
     // UserPromptSubmit：hook 可阻止本次提交（对标 Claude Code）。
@@ -367,6 +368,15 @@ pub async fn run_query(
     let mut cancel_rx = cancel;
     loop {
         check_and_compact(session, &mut messages).await;
+        // 后台任务通知注入（执行中动态感知）：每次推理前把待消费的状态转换
+        // 通知（轮次/完成/失败）注入上下文；回合结束未消费的留到下回合。
+        let notes = session.watch.consume_notifications();
+        if !notes.is_empty() {
+            messages.push(Message::user_text(format!(
+                "<task-notifications>\n{}\n</task-notifications>",
+                notes.join("\n")
+            )));
+        }
         let turn = one_turn(
             &session.client,
             &session.model,

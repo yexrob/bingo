@@ -2,7 +2,6 @@
 //!
 //! 每个 watchable 有状态机（Running → Idle → Done/Failed/Cancelled），
 //! 状态转换广播给 TUI，终态通知排队注入主 agent 上下文。
-#![allow(dead_code)] // 阶段 2 接入 Bash/Agent 后移除
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -18,6 +17,8 @@ pub enum WatchState {
     Idle,
     Done,
     Failed,
+    /// 取消终态（kill 入口落地后使用）。
+    #[allow(dead_code)]
     Cancelled,
 }
 
@@ -59,6 +60,8 @@ pub trait Watchable: Send + Sync {
 /// 广播给订阅者（TUI）的事件。
 #[derive(Debug, Clone)]
 pub struct WatchEvent {
+    /// 事件来源标识（TUI 按 label 定位，id 供程序化订阅方使用）。
+    #[allow(dead_code)]
     pub id: WatchId,
     pub label: String,
     pub state: WatchState,
@@ -67,7 +70,8 @@ pub struct WatchEvent {
     pub ts: Instant,
 }
 
-/// 快照：供 TUI 初始渲染 / 状态查询。
+/// 快照：供 TUI 初始渲染 / 状态查询（当前展示层按 label 驱动，API 预留）。
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct WatchSnapshot {
     pub id: WatchId,
@@ -227,6 +231,8 @@ impl WatchRegistry {
         self.tx.subscribe()
     }
 
+    /// 当前全部 watchable 快照（TUI 初始渲染 / 状态查询）。
+    #[allow(dead_code)]
     pub fn snapshot(&self) -> Vec<WatchSnapshot> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
@@ -254,15 +260,15 @@ impl WatchRegistry {
             if is_same_idle {
                 if let Some((_, _, count, last)) = &mut pending {
                     *count += 1;
-                    if let Some(d) = n.detail {
-                        *last = d;
+                    if let Some(d) = &n.detail {
+                        *last = d.clone();
                     }
                 }
             } else {
                 if let Some((id, label, count, last)) = pending.take() {
                     out.push(format_notification(id, label, count, last));
                 }
-                pending = Some((n.id, n.label, 1, n.detail.unwrap_or_default()));
+                pending = Some((n.id, n.label, 1, notification_body(&n.detail, &n.payload)));
             }
         }
         if let Some((id, label, count, last)) = pending.take() {
@@ -270,6 +276,24 @@ impl WatchRegistry {
         }
         out
     }
+}
+
+/// 通知正文：detail + payload（截断防上下文膨胀）。
+fn notification_body(detail: &Option<String>, payload: &Option<serde_json::Value>) -> String {
+    const MAX_PAYLOAD_CHARS: usize = 4000;
+    let mut body = detail.clone().unwrap_or_default();
+    if let Some(text) = payload.as_ref().and_then(|p| p.as_str().map(str::to_string)) {
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        if text.chars().count() > MAX_PAYLOAD_CHARS {
+            body.push_str(&text.chars().take(MAX_PAYLOAD_CHARS).collect::<String>());
+            body.push_str("…[truncated]");
+        } else {
+            body.push_str(&text);
+        }
+    }
+    body
 }
 
 fn format_notification(id: WatchId, label: String, count: u32, last: String) -> String {

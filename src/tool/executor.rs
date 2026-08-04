@@ -134,7 +134,7 @@ mod tests {
             .collect();
 
         let start = Instant::now();
-        let outcomes = execute_calls(calls, &ToolContext { cwd: Default::default() }).await;
+        let outcomes = execute_calls(calls, &ToolContext { cwd: Default::default(), watch: crate::watch::WatchRegistry::new() }).await;
         let elapsed = start.elapsed();
 
         assert!(elapsed < Duration::from_millis(250), "not parallel: {elapsed:?}");
@@ -165,7 +165,7 @@ mod tests {
             .collect();
 
         let start = Instant::now();
-        let outcomes = execute_calls(calls, &ToolContext { cwd: Default::default() }).await;
+        let outcomes = execute_calls(calls, &ToolContext { cwd: Default::default(), watch: crate::watch::WatchRegistry::new() }).await;
         let elapsed = start.elapsed();
 
         assert!(elapsed >= Duration::from_millis(90), "not serial: {elapsed:?}");
@@ -202,7 +202,7 @@ mod tests {
         ];
 
         let outcomes =
-            execute_calls(calls, &ToolContext { cwd: Default::default() }).await;
+            execute_calls(calls, &ToolContext { cwd: Default::default(), watch: crate::watch::WatchRegistry::new() }).await;
 
         let ids: Vec<&str> = outcomes.iter().map(|o| o.tool_use_id.as_str()).collect();
         assert_eq!(ids, vec!["r1", "r2", "b1", "r3"]);

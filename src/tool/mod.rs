@@ -17,9 +17,11 @@ pub mod websearch;
 pub mod write;
 
 /// 工具执行上下文：随 queryLoop 一轮共享。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolContext {
     pub cwd: PathBuf,
+    /// Watchable 注册中心（后台任务生命周期与通知）。
+    pub watch: std::sync::Arc<crate::watch::WatchRegistry>,
 }
 
 /// 工具执行结果：content 即回填给模型的 tool_result content。
