@@ -37,6 +37,7 @@ fn subagent_hooks(output: Arc<Mutex<String>>, permission_mode: PermissionMode) -
                 output.push_str(text);
             }
         }),
+        on_tool_ready: Box::new(|_name, _input| {}),
         on_tool_done: Box::new(|_| {}),
         on_warning: Box::new(|_| {}),
         ask: Box::new(move |_tool_name, _reason| Box::pin(async move { bypass })),

@@ -32,6 +32,8 @@ pub enum UiEvent {
     /// message_delta 的输出 token 累计值。
     OutputTokens(u64),
     ToolStart { name: String },
+    /// 工具 block 流式接收完整（含 input）：折叠判定时机。
+    ToolReady { name: String, input: serde_json::Value },
     ToolDone(ToolCallDone),
     TurnEnd,
     /// 非致命警告（如 MCP 连接失败），显示在边框与分隔线之间。
@@ -48,6 +50,7 @@ pub fn tui_hooks(
     asks: mpsc::UnboundedSender<AskRequest>,
 ) -> UiHooks {
     let tool_events = events.clone();
+    let ready_events = events.clone();
     let warn_events = events.clone();
     UiHooks {
         on_event: Box::new(move |event| match event {
@@ -64,6 +67,9 @@ pub fn tui_hooks(
                 let _ = events.send(UiEvent::OutputTokens(*tokens));
             }
             _ => {}
+        }),
+        on_tool_ready: Box::new(move |name, input| {
+            let _ = ready_events.send(UiEvent::ToolReady { name, input });
         }),
         on_tool_done: Box::new(move |done| {
             let _ = tool_events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
@@ -101,6 +107,197 @@ struct UiMessage {
     activities: Vec<Activity>,
     /// activities[i] 创建时 text 的字符数：渲染时 text 与活动按模型输出顺序交错。
     insert_points: Vec<usize>,
+    /// 连续 Read/Search 折叠组（Claude Code collapseReadSearchGroups）。
+    groups: Vec<CollapseGroup>,
+    /// activities[i] 所属折叠组索引（None = 独立活动）。
+    group_of: Vec<Option<usize>>,
+}
+
+/// Read/Search 连续操作的折叠组：折叠为一行规则摘要（`Read 3 files`）。
+struct CollapseGroup {
+    /// 组内活动索引（顺序）。
+    activities: Vec<usize>,
+    /// 搜索操作数（Grep/Glob/搜索类 Bash）。
+    search: usize,
+    /// Read 文件路径（去重计数，Claude Code 用 Set.size）。
+    read_paths: Vec<String>,
+    /// 无路径的读取操作数（如 Bash cat 管道）。
+    read_ops: usize,
+    /// 列举操作数（ls/tree/du）。
+    list: usize,
+    /// 组仍开放（进行中 → 摘要用进行时 + …）。
+    active: bool,
+    /// ctrl+o / 点击展开组内逐工具。
+    expanded: bool,
+}
+
+/// 工具的可折叠分类（Claude Code isSearchOrReadCommand）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum CollapseKind {
+    Search,
+    /// Read 或读取类 Bash：携带文件路径（Bash 类为 None）。
+    Read(Option<String>),
+    List,
+}
+
+/// 折叠组行的点击动作。携带消息索引：点击旧消息的行时目标必须是
+/// 那一条消息，而不是最后一条。
+#[derive(Clone, Copy)]
+enum ClickAction {
+    Group { message: usize, group: usize },
+}
+
+/// Read/Search 类工具判定（Claude Code isSearchOrReadCommand 的最小面）。
+/// Bash 走命令分类；Read/Grep/Glob 固定可折叠。
+fn classify_tool(name: &str, input: &serde_json::Value) -> Option<CollapseKind> {
+    match name {
+        "Read" => input
+            .get("file_path")
+            .and_then(|p| p.as_str())
+            .map(|p| CollapseKind::Read(Some(p.to_string()))),
+        "Grep" | "Glob" => Some(CollapseKind::Search),
+        "Bash" => input
+            .get("command")
+            .and_then(|c| c.as_str())
+            .and_then(classify_bash_command),
+        _ => None,
+    }
+}
+
+/// Bash 命令分类（Claude Code isSearchOrReadBashCommand 简化版）：
+/// 按 && / || / | / ; 分段，跳过量词/重定向目标与语义中性命令，
+/// 所有段都必须属于搜索/读取/列举集合；混合时按 list > search > read 归位。
+fn classify_bash_command(command: &str) -> Option<CollapseKind> {
+    const SEARCH: &[&str] = &[
+        "find", "grep", "rg", "ag", "ack", "locate", "which", "whereis",
+    ];
+    const READ: &[&str] = &[
+        "cat", "head", "tail", "less", "more", "wc", "stat", "file", "strings",
+        "jq", "awk", "cut", "sort", "uniq", "tr",
+    ];
+    const LIST: &[&str] = &["ls", "tree", "du"];
+    const NEUTRAL: &[&str] = &["echo", "printf", "true", "false", ":"];
+    let mut seen = false;
+    let mut list = false;
+    let mut search = false;
+    let mut read = false;
+    let mut skip_next = false;
+    for part in command.split(['&', '|', ';']) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if part.starts_with('>') {
+            skip_next = true;
+            continue;
+        }
+        let base = part.split_whitespace().next().unwrap_or("");
+        if NEUTRAL.contains(&base) {
+            continue;
+        }
+        seen = true;
+        if LIST.contains(&base) {
+            list = true;
+        } else if SEARCH.contains(&base) {
+            search = true;
+        } else if READ.contains(&base) {
+            read = true;
+        } else {
+            return None;
+        }
+    }
+    if !seen {
+        return None;
+    }
+    if list {
+        Some(CollapseKind::List)
+    } else if search {
+        Some(CollapseKind::Search)
+    } else if read {
+        Some(CollapseKind::Read(None))
+    } else {
+        None
+    }
+}
+
+/// 折叠组摘要文本（Claude Code getSearchReadSummaryText 的对应物）：
+/// `Searched for 2 patterns, read 3 files`；进行中（组未关闭且还有 Running
+/// 工具）用进行时 + 末尾 …。
+fn collapse_summary(g: &CollapseGroup, in_progress: bool) -> String {
+    let active = in_progress;
+    let mut parts: Vec<String> = Vec::new();
+    let mut push = |verb_done: &str, verb_ing: &str, body: String| {
+        if parts.is_empty() {
+            let v = if active { verb_ing } else { verb_done };
+            parts.push(format!("{}{body}", capitalize(v)));
+        } else {
+            let v = if active { verb_ing } else { verb_done };
+            parts.push(format!("{v}{body}"));
+        }
+    };
+    if g.search > 0 {
+        push(
+            "searched for",
+            "searching for",
+            format!(" {} {}", g.search, if g.search == 1 { "pattern" } else { "patterns" }),
+        );
+    }
+    let read_count = if g.read_paths.is_empty() {
+        g.read_ops
+    } else {
+        g.read_paths.iter().collect::<std::collections::HashSet<_>>().len()
+    };
+    if read_count > 0 {
+        push(
+            "read",
+            "reading",
+            format!(" {} {}", read_count, if read_count == 1 { "file" } else { "files" }),
+        );
+    }
+    if g.list > 0 {
+        push(
+            "listed",
+            "listing",
+            format!(" {} {}", g.list, if g.list == 1 { "directory" } else { "directories" }),
+        );
+    }
+    let text = parts.join(", ");
+    if active {
+        format!("{text}…")
+    } else {
+        text
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// 展开态 1 行结果摘要（Claude Code renderToolResultMessage 的对应物）。
+fn result_summary(name: &str, output: &str) -> Option<String> {
+    let lines = output.lines().filter(|l| !l.trim().is_empty()).count();
+    match name {
+        "Read" => Some(format!("Read {lines} lines")),
+        "Grep" => Some(format!(
+            "Found {} {}",
+            lines,
+            if lines == 1 { "match" } else { "matches" }
+        )),
+        "Glob" => Some(format!(
+            "Found {} {}",
+            lines,
+            if lines == 1 { "file" } else { "files" }
+        )),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -112,7 +309,7 @@ enum Role {
 /// bingo 的聊天组件：消息流 + 活动提示 + 输入框 + 权限模态。
 pub struct BingoChat {
     session: Arc<Session>,
-    events: mpsc::UnboundedSender<UiEvent>,
+    pub(super) events: mpsc::UnboundedSender<UiEvent>,
     asks: mpsc::UnboundedSender<AskRequest>,
     events_rx: mpsc::UnboundedReceiver<UiEvent>,
     asks_rx: mpsc::UnboundedReceiver<AskRequest>,
@@ -141,6 +338,10 @@ pub struct BingoChat {
     msg_top: u16,
     /// 上次 draw 的可展开活动行范围（doc 坐标），供鼠标点击折叠/展开。
     activity_ranges: Vec<rsmarkdown_tui::activities::ActivityRowRange>,
+    /// 折叠组行的点击范围（doc 坐标）：这些行不属于单个 Activity。
+    click_ranges: Vec<(u16, u16, ClickAction)>,
+    /// 等待 ToolReady（完整 input）归类的工具活动索引（FIFO）。
+    pending_tools: Vec<usize>,
     theme: Theme,
     /// 中断信号：busy 时 Ctrl+C / Esc → send(true)，回合内流读取立即中止。
     cancel_tx: tokio::sync::watch::Sender<bool>,
@@ -183,6 +384,8 @@ impl BingoChat {
             auto_scroll: true,
             msg_top: 0,
             activity_ranges: Vec::new(),
+            click_ranges: Vec::new(),
+            pending_tools: Vec::new(),
             theme: Theme::dark(),
             cancel_tx: tokio::sync::watch::channel(false).0,
         }
@@ -193,11 +396,14 @@ impl BingoChat {
             match event {
                 UiEvent::TurnStart => {
                     self.thinking_buf.clear();
+                    self.pending_tools.clear();
                     self.messages.push(UiMessage {
                         role: Role::Assistant,
                         text: String::new(),
                         activities: Vec::new(),
                         insert_points: Vec::new(),
+                        groups: Vec::new(),
+                        group_of: Vec::new(),
                     });
                     self.stream_msg = Some(self.messages.len() - 1);
                     self.busy = true;
@@ -216,11 +422,18 @@ impl BingoChat {
                     if let Some(i) = self.stream_msg {
                         self.messages[i].activities.push(hint);
                         self.messages[i].insert_points.push(0);
+                        self.messages[i].group_of.push(None);
                     }
                 }
                 UiEvent::TextDelta(text) => {
-                    if let Some(i) = self.stream_msg {
+                    if let Some(i) = self.stream_msg
+                        && !text.is_empty()
+                    {
+                        // assistant 正文打断连续 Read/Search 组（CC isTextBreaker）。
                         self.messages[i].text.push_str(&text);
+                        if let Some(g) = self.messages[i].groups.last_mut() {
+                            g.active = false;
+                        }
                     }
                 }
                 UiEvent::ThinkingDelta(thinking) => {
@@ -283,6 +496,7 @@ impl BingoChat {
                             self.messages[i].activities.push(hint);
                             let text_len = self.messages[i].text.chars().count();
                             self.messages[i].insert_points.push(text_len);
+                            self.messages[i].group_of.push(None);
                         }
                     }
                 }
@@ -309,9 +523,57 @@ impl BingoChat {
                     )));
                     hint.expand_hint = Some("ctrl+o to expand".to_string());
                     if let Some(i) = self.stream_msg {
-                        self.messages[i].activities.push(hint);
+                        let idx = self.messages[i].activities.len();
                         let text_len = self.messages[i].text.chars().count();
+                        self.messages[i].activities.push(hint);
                         self.messages[i].insert_points.push(text_len);
+                        self.messages[i].group_of.push(None);
+                        self.pending_tools.push(idx);
+                    }
+                }
+                // 工具 block 完整（含 input）：判定 Read/Search 折叠归组。
+                UiEvent::ToolReady { name, input } => {
+                    let Some(i) = self.stream_msg else { return };
+                    let Some(idx) = self.pending_tools.first().copied() else {
+                        return;
+                    };
+                    self.pending_tools.remove(0);
+                    let kind = classify_tool(&name, &input);
+                    let Some(kind) = kind else {
+                        // 非 Read/Search 工具：打断进行中的折叠组。
+                        if let Some(g) = self.messages[i].groups.last_mut() {
+                            g.active = false;
+                        }
+                        return;
+                    };
+                    // 入组：末尾有开放组则续组，否则开新组。
+                    let open = self.messages[i]
+                        .groups
+                        .last()
+                        .is_some_and(|g| g.active && !g.activities.is_empty());
+                    let g = if open {
+                        self.messages[i].groups.len() - 1
+                    } else {
+                        self.messages[i].groups.push(CollapseGroup {
+                            activities: Vec::new(),
+                            search: 0,
+                            read_paths: Vec::new(),
+                            read_ops: 0,
+                            list: 0,
+                            active: true,
+                            expanded: false,
+                        });
+                        self.messages[i].groups.len() - 1
+                    };
+                    self.messages[i].group_of[idx] = Some(g);
+                    self.messages[i].groups[g].activities.push(idx);
+                    match kind {
+                        CollapseKind::Search => self.messages[i].groups[g].search += 1,
+                        CollapseKind::Read(path) => match path {
+                            Some(p) => self.messages[i].groups[g].read_paths.push(p),
+                            None => self.messages[i].groups[g].read_ops += 1,
+                        },
+                        CollapseKind::List => self.messages[i].groups[g].list += 1,
                     }
                 }
                 UiEvent::ToolDone(done) => {
@@ -333,7 +595,9 @@ impl BingoChat {
                         self.messages[i].activities[pos] = hint;
                         continue;
                     }
-                    for hint in &mut self.messages[i].activities {
+                    let group_of = self.messages[i].group_of.clone();
+                    for (hint_idx, hint) in self.messages[i].activities.iter_mut().enumerate()
+                    {
                         if let ActivityKind::Tool(call) = &mut hint.kind
                             && call.name == done.name.as_str()
                             && call.status == ToolStatus::Running
@@ -345,14 +609,26 @@ impl BingoChat {
                             };
                             call.summary = done.summary.clone();
                             call.duration_ms = 0;
-                            let content: Vec<Line<'static>> = done
-                                .output
-                                .lines()
-                                .filter(|l| !l.trim().is_empty())
-                                .take(4)
-                                .map(|l| Line::from(l.to_string()))
-                                .collect();
-                            hint.set_content(content);
+                            let in_group = group_of
+                                .get(hint_idx)
+                                .copied()
+                                .flatten()
+                                .is_some();
+                            if in_group {
+                                // 组内工具：展开态只显示 1 行结果摘要（CC verbose）。
+                                call.result_summary = result_summary(&done.name, &done.output);
+                            } else {
+                                // 独立工具：展开显示全部输出（真实展开）。
+                                let content: Vec<Line<'static>> = done
+                                    .output
+                                    .lines()
+                                    .filter(|l| !l.trim().is_empty())
+                                    .map(|l| Line::from(l.to_string()))
+                                    .collect();
+                                hint.set_content(content);
+                            }
+                            // 只更新第一个匹配的 Running 工具（并行同名工具按序消费）。
+                            break;
                         }
                     }
                 }
@@ -362,6 +638,9 @@ impl BingoChat {
                     // 原位收尾：thinking 在它发生的位置转完成态（不重排到回复之后）；
                     // 从未收到 delta 的空占位直接移除（避免出现无内容的空行）。
                     if let Some(i) = self.stream_msg {
+                        if let Some(g) = self.messages[i].groups.last_mut() {
+                            g.active = false;
+                        }
                         // 同步移除：空占位 thinking 与它的插入点。
                         let mut keep = Vec::new();
                         for (idx, a) in self.messages[i].activities.iter().enumerate() {
@@ -371,11 +650,27 @@ impl BingoChat {
                             keep.push(idx);
                         }
                         if keep.len() != self.messages[i].activities.len() {
+                            let old_to_new: std::collections::HashMap<usize, usize> = keep
+                                .iter()
+                                .enumerate()
+                                .map(|(new, old)| (*old, new))
+                                .collect();
+                            for g in &mut self.messages[i].groups {
+                                g.activities = g
+                                    .activities
+                                    .iter()
+                                    .filter_map(|a| old_to_new.get(a).copied())
+                                    .collect();
+                            }
                             self.messages[i].activities =
                                 keep.iter().map(|&k| self.messages[i].activities[k].clone()).collect();
                             self.messages[i].insert_points = keep
                                 .iter()
                                 .map(|&k| self.messages[i].insert_points[k])
+                                .collect();
+                            self.messages[i].group_of = keep
+                                .iter()
+                                .map(|&k| self.messages[i].group_of[k])
                                 .collect();
                         }
                         for hint in &mut self.messages[i].activities {
@@ -407,6 +702,8 @@ impl BingoChat {
                             text: format!("[error] {message}"),
                             activities: msg.activities,
                             insert_points: msg.insert_points,
+                            groups: msg.groups,
+                            group_of: msg.group_of,
                         });
                     }
                 }
@@ -435,45 +732,68 @@ impl BingoChat {
     }
 
     /// 点击（doc 坐标）命中的活动行 → 折叠/展开（鼠标点击展开）。
+    /// 折叠组行 / text 折叠提示行 → 对应折叠/展开。
     fn toggle_at(&mut self, doc_row: u16) -> bool {
-        let Some(range) = self
+        if let Some(range) = self
             .activity_ranges
             .iter()
             .find(|r| doc_row >= r.start && doc_row < r.end)
-        else {
+        {
+            let path = range.path.clone();
+            let Some(msg) = self.messages.get_mut(range.message) else {
+                return false;
+            };
+            if let Some(act) = activities_path_get_mut(&mut msg.activities, &path) {
+                act.toggle();
+                self.auto_scroll = false;
+                return true;
+            }
             return false;
-        };
-        let path = range.path.clone();
-        let Some(msg) = self.messages.get_mut(range.message) else {
-            return false;
-        };
-        if let Some(act) = activities_path_get_mut(&mut msg.activities, &path) {
-            act.toggle();
+        }
+        if let Some((_, _, action)) = self
+            .click_ranges
+            .iter()
+            .find(|(start, end, _)| doc_row >= *start && doc_row < *end)
+            && let ClickAction::Group { message, group } = action
+            && let Some(msg) = self.messages.get_mut(*message)
+        {
+            msg.groups[*group].expanded = !msg.groups[*group].expanded;
             self.auto_scroll = false;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// 折叠/展开最近的可展开活动（ctrl+o）。
-    fn toggle_recent_expand(&mut self) -> bool {
-        if let Some(i) = self.messages.len().checked_sub(1) {
-            return Self::toggle_in(&mut self.messages[i].activities);
+            return true;
         }
         false
     }
 
-    fn toggle_in(activities: &mut [Activity]) -> bool {
-        if let Some(i) = activities.iter().rposition(|a| a.expanded) {
-            activities[i].expanded = false;
+    /// ctrl+o：全局展开/折叠 transcript（Claude Code app:toggleTranscript）。
+    /// 优先级：展开的组先折叠回聚合态（点击展开组后 ctrl+o 必须能回去）；
+    /// 否则有折叠项 → 全部展开；否则全部折叠。
+    fn toggle_transcript(&mut self) -> bool {
+        let Some(i) = self.messages.len().checked_sub(1) else {
+            return false;
+        };
+        if self.messages[i].groups.iter().any(|g| g.expanded) {
+            for g in &mut self.messages[i].groups {
+                g.expanded = false;
+            }
+            self.auto_scroll = false;
             return true;
         }
-        if let Some(i) = activities.iter().rposition(|a| a.expandable()) {
-            activities[i].expanded = true;
-            return true;
+        let any_collapsed = self.messages[i]
+            .activities
+            .iter()
+            .any(|a| !a.expanded && a.expandable())
+            || self.messages[i]
+                .groups
+                .iter()
+                .any(|g| !g.expanded && !g.activities.is_empty());
+        for act in &mut self.messages[i].activities {
+            act.expanded = any_collapsed;
         }
-        false
+        for g in &mut self.messages[i].groups {
+            g.expanded = any_collapsed;
+        }
+        self.auto_scroll = false;
+        true
     }
 
     fn submit(&mut self) {
@@ -487,6 +807,8 @@ impl BingoChat {
             text: text.clone(),
             activities: Vec::new(),
             insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
         });
         self.busy = true;
         // 新一轮开始前复位中断信号（同一 Sender 跨轮复用）。
@@ -735,6 +1057,11 @@ impl Component for BingoChat {
         self.drain_events();
         self.drain_asks();
         self.width = area.width as usize;
+        let mut click_ranges: Vec<(u16, u16, ClickAction)> = Vec::new();
+        let theme_claude = self.theme.claude;
+        let theme_dim = self.theme.dim();
+        let theme_text = self.theme.text();
+        let theme_thinking = self.theme.thinking();
 
         let warn_height = if self.warnings.is_empty() { 0 } else { 1 } as u16;
         // 警告行固定在最顶部（不随消息滚动）
@@ -804,6 +1131,23 @@ impl Component for BingoChat {
                         .collect();
                     let mut rendered_chars = 0usize;
                     let mut rendered_bytes = 0usize;
+                    // text 段折叠：段 >2 行时折叠为首 2 行 + 提示（CC `… +N lines`）。
+                    // 返回折叠提示行行号（None = 未折叠）。
+                    let push_text = |rows: &mut Vec<Line<'static>>,
+                                         reply: Vec<Line<'static>>| {
+                        for (j, line) in reply.into_iter().enumerate() {
+                            if j == 0 {
+                                let mut spans = vec![Span::styled(
+                                    "⏺ ",
+                                    ratatui::style::Style::default().fg(theme_claude),
+                                )];
+                                spans.extend(line.spans);
+                                rows.push(Line::from(spans));
+                            } else {
+                                rows.push(line);
+                            }
+                        }
+                    };
                     for (idx, act) in msg.activities.iter().enumerate() {
                         let pos_chars = msg
                             .insert_points
@@ -817,20 +1161,59 @@ impl Component for BingoChat {
                                 .copied()
                                 .unwrap_or(text.len());
                             let reply = render(&text[rendered_bytes..seg_end]);
-                            for (j, line) in reply.into_iter().enumerate() {
-                                if j == 0 {
-                                    let mut spans = vec![Span::styled(
-                                        "⏺ ",
-                                        ratatui::style::Style::default().fg(self.theme.claude),
-                                    )];
-                                    spans.extend(line.spans);
-                                    rows.push(Line::from(spans));
-                                } else {
-                                    rows.push(line);
-                                }
-                            }
+                            push_text(&mut rows, reply);
                             rendered_chars = pos_chars;
                             rendered_bytes = seg_end;
+                        }
+                        let group_idx = msg.group_of.get(idx).copied().flatten();
+                        let group_collapsed = group_idx.is_some_and(|g| {
+                            !msg.groups[g].expanded
+                        });
+                        let is_group_head = group_idx.is_some_and(|g| {
+                            msg.groups[g].activities.first() == Some(&idx)
+                        });
+                        if group_collapsed && !is_group_head {
+                            // 组折叠：只有组首渲染折叠行，其余活动跳过。
+                            continue;
+                        }
+                        if let Some(g) = group_idx
+                            && !msg.groups[g].expanded
+                        {
+                            // 折叠组：一行规则摘要（`Read 3 files (ctrl+o to expand)`）。
+                            // 时态按组内是否还有 Running 工具实时判定：工具全部
+                            // 完成后立即转过去时（CC isActiveGroup 语义）。
+                            let in_progress = msg.groups[g].active
+                                && msg.groups[g].activities.iter().any(|&ai| {
+                                    matches!(
+                                        msg.activities.get(ai),
+                                        Some(a) if matches!(
+                                            &a.kind,
+                                            ActivityKind::Tool(t)
+                                                if t.status == ToolStatus::Running
+                                        )
+                                    )
+                                });
+                            let summary = collapse_summary(&msg.groups[g], in_progress);
+                            let row = rows.len() as u16;
+                            let mut spans = Vec::new();
+                            if msg.groups[g].active {
+                                spans.push(Span::styled(
+                                    format!("{spinner} "),
+                                    theme_thinking,
+                                ));
+                            }
+                            spans.push(Span::styled(summary, theme_text));
+                            spans.push(Span::styled(
+                                " (ctrl+o to expand)".to_string(),
+                                theme_dim,
+                            ));
+                            rows.push(Line::from(spans));
+                            click_ranges.push((
+                                row,
+                                row + 1,
+                                ClickAction::Group { message: i, group: g },
+                            ));
+                            continue;
                         }
                         let (lines, mut local) = rsmarkdown_tui::activities::layout_activity(
                             act,
@@ -846,24 +1229,14 @@ impl Component for BingoChat {
                     }
                     if rendered_bytes < text.len() {
                         let reply = render(&text[rendered_bytes..]);
-                        for (j, line) in reply.into_iter().enumerate() {
-                            if j == 0 {
-                                let mut spans = vec![Span::styled(
-                                    "⏺ ",
-                                    ratatui::style::Style::default().fg(self.theme.claude),
-                                )];
-                                spans.extend(line.spans);
-                                rows.push(Line::from(spans));
-                            } else {
-                                rows.push(line);
-                            }
-                        }
+                        push_text(&mut rows, reply);
                     }
                 }
             }
         }
 
         self.activity_ranges = activity_ranges;
+        self.click_ranges = click_ranges;
 
         // 消息区高度：跟随内容，不超过可用空间
         let needed = rows.len() as u16;
@@ -953,7 +1326,7 @@ impl Component for BingoChat {
                         true
                     }
                     KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.toggle_recent_expand();
+                        self.toggle_transcript();
                         true
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
@@ -1112,7 +1485,7 @@ mod tests {
     use super::*;
     use rsmarkdown_tui::activities::ToolCall;
 
-    fn test_chat() -> BingoChat {
+    pub(super) fn test_chat() -> BingoChat {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
         let session = Arc::new(Session {
@@ -1145,6 +1518,8 @@ mod tests {
             text: "reply".to_string(),
             activities: vec![tool_activity()],
             insert_points: vec![0],
+            groups: Vec::new(),
+            group_of: vec![None],
         });
         let area = Rect { x: 0, y: 0, width: 100, height: 30 };
         let mut buf = Buffer::empty(area);
@@ -1169,6 +1544,8 @@ mod tests {
             text: "reply".to_string(),
             activities: vec![tool_activity()],
             insert_points: vec![0],
+            groups: Vec::new(),
+            group_of: vec![None],
         });
         let area = Rect { x: 0, y: 0, width: 100, height: 30 };
         let mut buf = Buffer::empty(area);
@@ -1188,6 +1565,8 @@ mod tests {
             text: "reply".to_string(),
             activities: vec![tool_activity()],
             insert_points: vec![0],
+            groups: Vec::new(),
+            group_of: vec![None],
         });
         let area = Rect { x: 0, y: 0, width: 100, height: 30 };
         let mut buf = Buffer::empty(area);
@@ -1257,6 +1636,8 @@ mod tests {
             text: "hello world".to_string(),
             activities: vec![tool_activity()],
             insert_points: vec![5],
+            groups: Vec::new(),
+            group_of: vec![None],
         });
         let area = Rect { x: 0, y: 0, width: 100, height: 40 };
         let mut buf = Buffer::empty(area);
@@ -1275,5 +1656,482 @@ mod tests {
         let world = joined.find("world").expect("trailing text after tool");
         assert!(hello < tool, "text before tool: {joined}");
         assert!(tool < world, "tool before trailing text: {joined}");
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn bash_classifier_collapsible_commands() {
+        assert_eq!(
+            classify_bash_command("cat README.md"),
+            Some(CollapseKind::Read(None))
+        );
+        assert_eq!(
+            classify_bash_command("grep -rn foo src/"),
+            Some(CollapseKind::Search)
+        );
+        assert_eq!(
+            classify_bash_command("ls -la ."),
+            Some(CollapseKind::List)
+        );
+        assert_eq!(
+            classify_bash_command("cat a | grep foo"),
+            Some(CollapseKind::Search)
+        );
+        assert_eq!(
+            classify_bash_command("ls dir && echo \"---\" && ls dir2"),
+            Some(CollapseKind::List)
+        );
+        assert_eq!(
+            classify_bash_command("head -20 file > /tmp/out"),
+            Some(CollapseKind::Read(None))
+        );
+    }
+
+    #[test]
+    fn bash_classifier_other_commands_not_collapsible() {
+        assert_eq!(classify_bash_command("git log --oneline -10"), None);
+        assert_eq!(classify_bash_command("npm install"), None);
+        assert_eq!(classify_bash_command("echo hello"), None);
+        assert_eq!(classify_bash_command("ls && git status"), None);
+        assert_eq!(classify_bash_command(""), None);
+    }
+
+    #[test]
+    fn tool_classifier_read_grep_glob() {
+        assert_eq!(
+            classify_tool("Read", &json!({"file_path": "a.md"})),
+            Some(CollapseKind::Read(Some("a.md".to_string())))
+        );
+        assert_eq!(classify_tool("Read", &json!({})), None);
+        assert_eq!(classify_tool("Grep", &json!({"pattern": "x"})), Some(CollapseKind::Search));
+        assert_eq!(classify_tool("Glob", &json!({"glob": "**/*.rs"})), Some(CollapseKind::Search));
+        assert_eq!(classify_tool("Bash", &json!({"command": "git log"})), None);
+        assert_eq!(classify_tool("WebFetch", &json!({"url": "x"})), None);
+    }
+
+    #[test]
+    fn summary_past_tense_counts() {
+        let mut g = CollapseGroup {
+            activities: vec![0, 1, 2],
+            search: 1,
+            read_paths: vec!["a.md".into(), "b.md".into(), "c.md".into()],
+            read_ops: 0,
+            list: 0,
+            active: false,
+            expanded: false,
+        };
+        assert_eq!(collapse_summary(&g, false), "Searched for 1 pattern, read 3 files");
+        g.search = 2;
+        assert_eq!(collapse_summary(&g, false), "Searched for 2 patterns, read 3 files");
+        g.active = true;
+        assert_eq!(
+            collapse_summary(&g, true),
+            "Searching for 2 patterns, reading 3 files…"
+        );
+    }
+
+    #[test]
+    fn summary_read_paths_dedupe_and_ops_fallback() {
+        let g = CollapseGroup {
+            activities: vec![0, 1],
+            search: 0,
+            read_paths: vec!["a.md".into(), "a.md".into()],
+            read_ops: 0,
+            list: 0,
+            active: false,
+            expanded: false,
+        };
+        assert_eq!(collapse_summary(&g, false), "Read 1 file");
+        let g = CollapseGroup {
+            activities: vec![0],
+            search: 0,
+            read_paths: vec![],
+            read_ops: 2,
+            list: 1,
+            active: false,
+            expanded: false,
+        };
+        assert_eq!(collapse_summary(&g, false), "Read 2 files, listed 1 directory");
+    }
+
+    #[test]
+    fn result_summaries() {
+        assert_eq!(
+            result_summary("Read", "line1\nline2\n\nline3"),
+            Some("Read 3 lines".to_string())
+        );
+        assert_eq!(result_summary("Grep", "a:1:x\nb:2:y"), Some("Found 2 matches".to_string()));
+        assert_eq!(result_summary("Glob", "a.rs\nb.rs"), Some("Found 2 files".to_string()));
+        assert_eq!(result_summary("Bash", "out"), None);
+    }
+}
+
+#[cfg(test)]
+mod fold_render_tests {
+    use super::*;
+    use serde_json::json;
+    use tests::test_chat;
+
+    fn render_lines(chat: &mut BingoChat, height: u16) -> Vec<String> {
+        let area = Rect { x: 0, y: 0, width: 120, height };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        (0..height)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn parallel_reads_collapse_to_one_line() {
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        // 两个并行 Read：ToolStart 建活动，ToolReady 入组。
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Read".into(),
+            input: json!({"file_path": "a.md"}),
+        });
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Read".into(),
+            input: json!({"file_path": "b.md"}),
+        });
+        chat.drain_events();
+        let lines = render_lines(&mut chat, 20);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Reading 2 files"), "active summary: {joined}");
+        assert!(joined.contains("ctrl+o to expand"), "fold hint: {joined}");
+        assert!(!joined.contains("a.md"), "paths hidden when collapsed: {joined}");
+    }
+
+    #[test]
+    fn group_done_uses_past_tense() {
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Read".into(),
+            input: json!({"file_path": "a.md"}),
+        });
+        chat.drain_events();
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::TurnEnd);
+        chat.drain_events();
+        let lines = render_lines(&mut chat, 20);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Read 1 file"), "past tense: {joined}");
+    }
+
+    #[test]
+    fn ctrl_o_expands_group_to_individual_tools() {
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        for path in ["a.md", "b.md"] {
+            let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+            chat.drain_events();
+            let _ = chat.events.send(UiEvent::ToolReady {
+                name: "Read".into(),
+                input: json!({"file_path": path}),
+            });
+            chat.drain_events();
+        }
+        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            name: "Read".into(),
+            summary: "Read a.md".into(),
+            output: "l1\nl2\nl3".into(),
+            is_error: false,
+            diff: None,
+        }));
+        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            name: "Read".into(),
+            summary: "Read b.md".into(),
+            output: "x\ny".into(),
+            is_error: false,
+            diff: None,
+        }));
+        chat.drain_events();
+        // ctrl+o 全局展开
+        assert!(chat.toggle_transcript());
+        let lines = render_lines(&mut chat, 30);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Read a.md"), "expanded first tool: {joined}");
+        assert!(joined.contains("Read b.md"), "expanded second tool: {joined}");
+        assert!(joined.contains("Read 3 lines"), "result summary row: {joined}");
+        assert!(!joined.contains("Reading 2 files"), "no collapse line: {joined}");
+    }
+
+    #[test]
+    fn non_collapsible_tool_breaks_group() {
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Read".into(),
+            input: json!({"file_path": "a.md"}),
+        });
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Bash".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Bash".into(),
+            input: json!({"command": "git status"}),
+        });
+        chat.drain_events();
+        let lines = render_lines(&mut chat, 20);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Read 1 file"), "group rendered: {joined}");
+        assert!(joined.contains("Bash"), "bash independent: {joined}");
+        assert!(
+            !joined.contains("Reading"),
+            "group closed by bash: {joined}"
+        );
+    }
+
+    #[test]
+    fn tool_after_thinking_placeholder_groups_without_panic() {
+        // 回归：TurnStart 占位 thinking 后接工具——group_of 必须与 activities 同步，
+        // 否则 ToolReady 用 activities 索引写 group_of 时越界。
+        let mut chat = test_chat();
+        chat.stream_msg = Some(0);
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        // 模拟 TurnStart 占位 thinking
+        let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
+            state: ThinkingState::Running,
+            duration_ms: 0,
+            digest: None,
+            stage: "Thinking",
+            tokens: None,
+            start_tick: 0,
+        }));
+        hint.expand_hint = Some("ctrl+o to expand".to_string());
+        chat.messages[0].activities.push(hint);
+        chat.messages[0].insert_points.push(0);
+        chat.messages[0].group_of.push(None);
+        // 工具事件
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Read".into(),
+            input: json!({"file_path": "a.md"}),
+        });
+        chat.drain_events();
+        let lines = render_lines(&mut chat, 30);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Reading 1 file"), "group row: {joined}");
+    }
+
+    #[test]
+    fn interleaved_group_keeps_text_position() {
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: "let me read".to_string(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        let _ = chat.events.send(UiEvent::TextDelta("let me read".into()));
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Read".into(),
+            input: json!({"file_path": "a.md"}),
+        });
+        chat.drain_events();
+        let lines = render_lines(&mut chat, 20);
+        let joined = lines.join("\n");
+        let text_pos = joined.find("let me read").expect("text");
+        let group_pos = joined.find("Reading 1 file").expect("group line");
+        assert!(text_pos < group_pos, "text before group: {joined}");
+    }
+}
+
+#[cfg(test)]
+mod fold_toggle_tests {
+    use super::*;
+    use serde_json::json;
+    use tests::test_chat;
+
+    fn build_group_chat(chat: &mut BingoChat, finish_tools: bool) {
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        for path in ["a.md", "b.md"] {
+            let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+            chat.drain_events();
+            let _ = chat.events.send(UiEvent::ToolReady {
+                name: "Read".into(),
+                input: json!({"file_path": path}),
+            });
+            chat.drain_events();
+        }
+        if finish_tools {
+            for (summary, out) in [("Read a.md", "l1\nl2\nl3"), ("Read b.md", "x\ny")] {
+                let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                    name: "Read".into(),
+                    summary: summary.into(),
+                    output: out.into(),
+                    is_error: false,
+                    diff: None,
+                }));
+            }
+            chat.drain_events();
+        }
+        chat.stream_msg = None;
+    }
+
+    fn finish_turn(chat: &mut BingoChat) {
+        chat.stream_msg = Some(0);
+        let _ = chat.events.send(UiEvent::TurnEnd);
+        chat.drain_events();
+        chat.stream_msg = None;
+    }
+
+    fn visible(chat: &mut BingoChat) -> String {
+        let area = Rect { x: 0, y: 0, width: 120, height: 40 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        (0..40)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn ctrl_o_round_trip_collapses_group_back() {
+        let mut chat = test_chat();
+        build_group_chat(&mut chat, true);
+        finish_turn(&mut chat);
+        // 初始：折叠组（完成态过去时）
+        assert!(visible(&mut chat).contains("Read 2 files"), "collapsed first");
+        // 展开
+        assert!(chat.toggle_transcript());
+        let expanded = visible(&mut chat);
+        assert!(expanded.contains("Read a.md"), "expanded: {expanded}");
+        assert!(!expanded.contains("Read 2 files"), "no collapse line: {expanded}");
+        // 再折叠
+        assert!(chat.toggle_transcript());
+        let collapsed = visible(&mut chat);
+        assert!(
+            collapsed.contains("Read 2 files"),
+            "collapsed again: {collapsed}"
+        );
+        assert!(!collapsed.contains("Read a.md"), "tools hidden: {collapsed}");
+    }
+
+    #[test]
+    fn active_group_round_trip_uses_present_tense() {
+        let mut chat = test_chat();
+        build_group_chat(&mut chat, false);
+        // 未 TurnEnd 且工具 Running：组 active，折叠行用进行时
+        assert!(
+            visible(&mut chat).contains("Reading 2 files"),
+            "active collapsed: {}",
+            visible(&mut chat)
+        );
+        assert!(chat.toggle_transcript());
+        let expanded = visible(&mut chat);
+        assert!(expanded.contains("Read"), "expanded shows tools: {expanded}");
+        assert!(!expanded.contains("Reading 2 files"), "no collapse line");
+        assert!(chat.toggle_transcript());
+        let collapsed = visible(&mut chat);
+        assert!(
+            collapsed.contains("Reading 2 files"),
+            "active collapsed again: {collapsed}"
+        );
+    }
+
+    #[test]
+    fn click_group_then_ctrl_o_collapses() {
+        let mut chat = test_chat();
+        build_group_chat(&mut chat, true);
+        finish_turn(&mut chat);
+        let area = Rect { x: 0, y: 0, width: 120, height: 40 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        // 点击组折叠行展开
+        let row = chat
+            .click_ranges
+            .iter()
+            .find(|(_, _, a)| matches!(a, ClickAction::Group { .. }))
+            .map(|(start, ..)| *start)
+            .expect("group fold row");
+        assert!(chat.toggle_at(row), "click expands group");
+        let expanded = visible(&mut chat);
+        assert!(expanded.contains("Read a.md"), "click expanded: {expanded}");
+        // ctrl+o 折叠回
+        assert!(chat.toggle_transcript());
+        let collapsed = visible(&mut chat);
+        assert!(
+            collapsed.contains("Read 2 files"),
+            "ctrl+o collapsed: {collapsed}"
+        );
     }
 }

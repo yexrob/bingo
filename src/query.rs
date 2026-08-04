@@ -80,6 +80,8 @@ pub type AskFn = dyn Fn(&str, &str) -> std::pin::Pin<Box<dyn std::future::Future
 /// UI 挂钩：流事件、工具完成、权限询问、非致命警告。
 pub struct UiHooks {
     pub on_event: Box<dyn FnMut(&StreamEvent) + Send>,
+    /// 工具 block 完整（含 input）时回调：折叠判定需要输入（Bash 命令分类）。
+    pub on_tool_ready: Box<dyn Fn(String, serde_json::Value) + Send>,
     pub on_tool_done: Box<dyn Fn(&ToolCallDone) + Send>,
     pub on_warning: Box<dyn Fn(String) + Send>,
     /// 权限询问：工具名 + 理由 → 是否允许（异步：TUI 模态可能等待用户）。
@@ -95,6 +97,7 @@ pub fn headless_hooks() -> UiHooks {
                 let _ = std::io::stdout().flush();
             }
         }),
+        on_tool_ready: Box::new(|_name, _input| {}),
         on_tool_done: Box::new(|_| {}),
         on_warning: Box::new(|message| eprintln!("[bingo] warning: {message}")),
         ask: Box::new(|tool_name, reason| {
@@ -132,7 +135,7 @@ async fn one_turn(
     messages: &[Message],
     tools: &[Box<dyn Tool>],
     system: &[SystemBlock],
-    on_event: &mut (dyn FnMut(&StreamEvent) + Send),
+    ui: &mut UiHooks,
     mut cancel: Option<&mut watch::Receiver<bool>>,
 ) -> Result<Turn, QueryError> {
     let request = Request {
@@ -164,7 +167,7 @@ async fn one_turn(
         };
         let Some(event) = event else { break };
         let event = event?;
-        on_event(&event);
+        (ui.on_event)(&event);
         if let Err(e) = acc.push(&event) {
             return Err(QueryError::Protocol(e));
         }
@@ -180,6 +183,7 @@ async fn one_turn(
                         name: name.clone(),
                         input: input.clone(),
                     });
+                    (ui.on_tool_ready)(name.clone(), input.clone());
                 }
             }
             _ => {}
@@ -362,7 +366,7 @@ pub async fn run_query(
             &messages,
             &tools,
             &session.system,
-            &mut ui.on_event as &mut (dyn FnMut(&StreamEvent) + Send),
+            &mut *ui,
             cancel_rx.as_mut(),
         )
         .await?;
