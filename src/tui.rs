@@ -731,9 +731,20 @@ impl BingoChat {
         self.renderer.lines().to_vec()
     }
 
-    /// 点击（doc 坐标）命中的活动行 → 折叠/展开（鼠标点击展开）。
-    /// 折叠组行 / text 折叠提示行 → 对应折叠/展开。
+    /// 点击（doc 坐标）命中的行 → 折叠/展开（鼠标点击）。
+    /// 折叠组行、组展开态组首工具行优先（点击折叠组）；其次活动行。
     fn toggle_at(&mut self, doc_row: u16) -> bool {
+        if let Some((_, _, action)) = self
+            .click_ranges
+            .iter()
+            .find(|(start, end, _)| doc_row >= *start && doc_row < *end)
+            && let ClickAction::Group { message, group } = action
+            && let Some(msg) = self.messages.get_mut(*message)
+        {
+            msg.groups[*group].expanded = !msg.groups[*group].expanded;
+            self.auto_scroll = false;
+            return true;
+        }
         if let Some(range) = self
             .activity_ranges
             .iter()
@@ -749,17 +760,6 @@ impl BingoChat {
                 return true;
             }
             return false;
-        }
-        if let Some((_, _, action)) = self
-            .click_ranges
-            .iter()
-            .find(|(start, end, _)| doc_row >= *start && doc_row < *end)
-            && let ClickAction::Group { message, group } = action
-            && let Some(msg) = self.messages.get_mut(*message)
-        {
-            msg.groups[*group].expanded = !msg.groups[*group].expanded;
-            self.auto_scroll = false;
-            return true;
         }
         false
     }
@@ -1224,6 +1224,17 @@ impl Component for BingoChat {
                             &self.theme,
                             &mut render,
                         );
+                        // 组展开态：组首工具行同时是聚合行的位置——点击它折叠回组
+                        // （组内工具无独立内容，toggle 工具无意义）。
+                        if let Some(g) = group_idx
+                            && let Some(first) = local.first()
+                        {
+                            click_ranges.push((
+                                first.start,
+                                first.end,
+                                ClickAction::Group { message: i, group: g },
+                            ));
+                        }
                         rows.extend(lines);
                         activity_ranges.append(&mut local);
                     }
@@ -2133,5 +2144,137 @@ mod fold_toggle_tests {
             collapsed.contains("Read 2 files"),
             "ctrl+o collapsed: {collapsed}"
         );
+    }
+}
+
+#[cfg(test)]
+mod fold_roundtrip_live_tests {
+    use super::*;
+    use serde_json::json;
+    use tests::test_chat;
+
+    fn visible(chat: &mut BingoChat) -> String {
+        let area = Rect { x: 0, y: 0, width: 120, height: 40 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        (0..40)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn start_group(chat: &mut BingoChat) {
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        for path in ["a.md", "b.md"] {
+            let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+            chat.drain_events();
+            let _ = chat.events.send(UiEvent::ToolReady {
+                name: "Read".into(),
+                input: json!({"file_path": path}),
+            });
+            chat.drain_events();
+        }
+    }
+
+    #[test]
+    fn expand_running_then_complete_then_collapse_back() {
+        let mut chat = test_chat();
+        start_group(&mut chat);
+        // 执行中：聚合行进行时
+        assert!(visible(&mut chat).contains("Reading 2 files"), "running fold");
+        // 执行中展开
+        assert!(chat.toggle_transcript());
+        assert!(!visible(&mut chat).contains("Reading 2 files"), "expanded");
+        // 工具完成 + turn 结束（模拟真实顺序）
+        for (summary, out) in [("Read a.md", "l1\nl2\nl3"), ("Read b.md", "x\ny")] {
+            let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "Read".into(),
+                summary: summary.into(),
+                output: out.into(),
+                is_error: false,
+                diff: None,
+            }));
+        }
+        chat.drain_events();
+        chat.stream_msg = Some(0);
+        let _ = chat.events.send(UiEvent::TurnEnd);
+        chat.drain_events();
+        chat.stream_msg = None;
+        // 折叠回：聚合行（过去时）
+        assert!(chat.toggle_transcript());
+        let collapsed = visible(&mut chat);
+        assert!(
+            collapsed.contains("Read 2 files"),
+            "collapsed after turn: {collapsed}"
+        );
+    }
+
+    #[test]
+    fn click_expanded_group_head_collapses_back() {
+        let mut chat = test_chat();
+        start_group(&mut chat);
+        fn group_rows(chat: &mut BingoChat) -> Vec<(u16, u16)> {
+            let area = Rect { x: 0, y: 0, width: 120, height: 40 };
+            let mut buf = Buffer::empty(area);
+            chat.draw(area, &mut buf);
+            chat.click_ranges
+                .iter()
+                .filter(|(_, _, a)| matches!(a, ClickAction::Group { .. }))
+                .map(|(start, end, _)| (*start, *end))
+                .collect()
+        }
+        let first_rows = group_rows(&mut chat);
+        let fold_row = first_rows.first().expect("group fold row").0;
+        assert!(chat.toggle_at(fold_row), "click expands");
+        let head_row = group_rows(&mut chat).first().expect("group head row").0;
+        assert!(head_row >= fold_row, "head row after fold row");
+        assert!(chat.toggle_at(head_row), "click head collapses");
+        let collapsed = visible(&mut chat);
+        assert!(
+            collapsed.contains("Reading 2 files"),
+            "collapsed again: {collapsed}"
+        );
+    }
+
+    #[test]
+    fn collapse_after_expand_then_expand_again() {
+        let mut chat = test_chat();
+        start_group(&mut chat);
+        chat.stream_msg = Some(0);
+        for (summary, out) in [("Read a.md", "l1"), ("Read b.md", "x")] {
+            let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "Read".into(),
+                summary: summary.into(),
+                output: out.into(),
+                is_error: false,
+                diff: None,
+            }));
+        }
+        chat.drain_events();
+        chat.stream_msg = None;
+        // 展开 → 折叠 → 再展开 → 再折叠（多次往返）
+        for _ in 0..3 {
+            assert!(chat.toggle_transcript());
+            assert!(!visible(&mut chat).contains("Read 2 files"), "expanded state");
+            assert!(chat.toggle_transcript());
+            assert!(
+                visible(&mut chat).contains("Read 2 files"),
+                "collapsed state: {}",
+                visible(&mut chat)
+            );
+        }
     }
 }
