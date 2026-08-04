@@ -20,6 +20,7 @@ mod hooks;
 mod mcp;
 mod memory;
 mod permission;
+mod preapproved;
 mod query;
 mod settings;
 mod system;

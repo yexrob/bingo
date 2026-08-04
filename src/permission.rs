@@ -55,7 +55,8 @@ fn ask(reason: impl Into<String>) -> PermissionResult {
 }
 
 /// 规则内容匹配：`Tool(content)` 的 content 对当前调用是否成立。
-/// Bash 匹配命令前缀；文件类工具匹配路径前缀；`*` 匹配一切；`prefix:` 前缀忽略。
+/// Bash 匹配命令前缀；文件类工具匹配路径前缀；WebFetch 支持 `domain:` 与 URL 前缀；
+/// `*` 匹配一切；`prefix:` 前缀忽略。
 fn content_matches(tool_name: &str, input: &serde_json::Value, content: &str) -> bool {
     let content = content
         .strip_prefix("prefix:")
@@ -70,7 +71,18 @@ fn content_matches(tool_name: &str, input: &serde_json::Value, content: &str) ->
             .get("file_path")
             .or_else(|| input.get("path"))
             .and_then(|v| v.as_str()),
-        "WebFetch" => input.get("url").and_then(|v| v.as_str()),
+        "WebFetch" => {
+            let url = input.get("url").and_then(|v| v.as_str());
+            if let Some(domain) = content.strip_prefix("domain:")
+                && let Some(url) = url
+                && let Ok(parsed) = url::Url::parse(url)
+                && let Some(host) = parsed.host_str()
+            {
+                // domain: 规则按 hostname 匹配（对标 Claude Code WebFetchTool）。
+                return host == domain.trim_end_matches('*');
+            }
+            url
+        }
         _ => None,
     };
     target.is_some_and(|t| t.starts_with(content))
@@ -137,8 +149,19 @@ pub fn can_use_tool(
     if rule_hits(ask_rules, &name, input) {
         return ask(format!("permission rule requires confirmation: {name}"));
     }
-    // 3. 只读工具直接放行
-    if tool.is_read_only(input) {
+    // 2b. WebFetch 预批准域名自动放行（对标 Claude Code isPreapprovedHost）。
+    //     注意：无 url 字段的畸形调用不命中，继续走后续检查。
+    if name == "WebFetch"
+        && let Some(url) = input.get("url").and_then(|v| v.as_str())
+        && crate::preapproved::is_preapproved_url(url)
+    {
+        return PermissionResult {
+            behavior: PermissionBehavior::Allow,
+            reason: "preapproved host".into(),
+        };
+    }
+    // 3. 只读工具直接放行（WebFetch 例外：非预批准域名仍需用户批准，对标 Claude Code）
+    if tool.is_read_only(input) && name != "WebFetch" {
         return PermissionResult {
             behavior: PermissionBehavior::Allow,
             reason: "read-only tool".into(),
@@ -272,6 +295,52 @@ mod tests {
         let tool = crate::tool::bash::BashTool::new();
         let input = serde_json::json!({"command": "git status"});
         let all = vec!["Bash(git)".to_string()];
+        let result = can_use_tool(
+            &tool as &dyn Tool,
+            &input,
+            PermissionMode::Default,
+            &[],
+            &[],
+            &all,
+        );
+        assert_eq!(result.behavior, PermissionBehavior::Allow);
+    }
+
+    #[test]
+    fn webfetch_preapproved_host_auto_allows() {
+        let tool = crate::tool::webfetch::WebFetchTool;
+        let input = serde_json::json!({"url": "https://doc.rust-lang.org/book/"});
+        let result = can_use_tool(
+            &tool as &dyn Tool,
+            &input,
+            PermissionMode::Default,
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(result.behavior, PermissionBehavior::Allow);
+    }
+
+    #[test]
+    fn webfetch_unknown_host_asks() {
+        let tool = crate::tool::webfetch::WebFetchTool;
+        let input = serde_json::json!({"url": "https://example.com/page"});
+        let result = can_use_tool(
+            &tool as &dyn Tool,
+            &input,
+            PermissionMode::Default,
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(result.behavior, PermissionBehavior::Ask);
+    }
+
+    #[test]
+    fn webfetch_domain_rule_matches_hostname() {
+        let tool = crate::tool::webfetch::WebFetchTool;
+        let input = serde_json::json!({"url": "https://internal.example.com/docs"});
+        let all = vec!["WebFetch(domain:internal.example.com)".to_string()];
         let result = can_use_tool(
             &tool as &dyn Tool,
             &input,
