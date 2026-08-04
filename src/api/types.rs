@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const API_BASE: &str = "https://api.anthropic.com";
 pub const API_VERSION: &str = "2023-06-01";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-5";
-pub const DEFAULT_MAX_TOKENS: u32 = 8192;
+pub const DEFAULT_MAX_TOKENS: u32 = 64_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
