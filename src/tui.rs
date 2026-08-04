@@ -221,19 +221,23 @@ impl BingoChat {
                 }
                 UiEvent::ThinkingDelta(thinking) => {
                     if let Some(i) = self.stream_msg {
-                        // 多轮 thinking 各自成块：最后一轮还在流（末尾是
-                        // thinking）则续写；工具轮之后的 delta 开新块。
-                        let last_is_thinking = self.messages[i]
+                        // 多轮 thinking 各自成块：末尾是运行态 thinking 则续写它，
+                        // 否则（末尾是工具行或已完成的旧块）开新块。
+                        let last_is_running_thinking = self.messages[i]
                             .activities
                             .last()
-                            .is_some_and(|a| matches!(a.kind, ActivityKind::Thinking(_)));
-                        if last_is_thinking {
+                            .is_some_and(|a| {
+                                matches!(&a.kind, ActivityKind::Thinking(t)
+                                    if t.state == ThinkingState::Running)
+                            });
+                        if last_is_running_thinking {
                             self.thinking_buf.push_str(&thinking);
                             let buf = self.thinking_buf.clone();
                             let content = self.render_thinking(&buf);
                             if let Some(hint) = self.messages[i]
                                 .activities
                                 .iter_mut()
+                                .rev()
                                 .find(|a| matches!(a.kind, ActivityKind::Thinking(_)))
                             {
                                 hint.set_content(content);
@@ -1121,5 +1125,58 @@ mod tests {
         let mut buf = Buffer::empty(area);
         chat.draw(area, &mut buf);
         assert!(!chat.toggle_at(999), "no range -> no toggle");
+    }
+
+    fn thinking_text(hint: &Activity) -> String {
+        hint.content
+            .iter()
+            .map(|l| l.to_string().trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end()
+            .to_string()
+    }
+
+    /// 多轮 thinking：工具轮后的 delta 必须开新块，后续 delta 续写到新块
+    /// （不得写到已完成的旧块——回归：iter_mut().find() 错写首个块）。
+    #[test]
+    fn tool_turn_thinking_blocks_stay_separate() {
+        let mut chat = test_chat();
+        let (tx, rx) = mpsc::unbounded_channel();
+        chat.events_rx = rx;
+        tx.send(UiEvent::TurnStart).unwrap();
+        chat.drain_events();
+        tx.send(UiEvent::ThinkingDelta("plan the fetch".into())).unwrap();
+        chat.drain_events();
+        tx.send(UiEvent::ToolStart { name: "WebFetch".into() }).unwrap();
+        chat.drain_events();
+        tx.send(UiEvent::ThinkingDelta("got it".into())).unwrap();
+        tx.send(UiEvent::ThinkingDelta(", summarizing".into())).unwrap();
+        chat.drain_events();
+
+        let acts = &chat.messages[0].activities;
+        assert_eq!(acts.len(), 3, "thinking + tool + new thinking");
+        let (first, tool, second) = (&acts[0], &acts[1], &acts[2]);
+        assert!(matches!(&first.kind, ActivityKind::Thinking(t) if t.state == ThinkingState::Done));
+        assert!(matches!(tool.kind, ActivityKind::Tool(_)));
+        assert_eq!(thinking_text(first), "plan the fetch");
+        assert_eq!(thinking_text(second), "got it, summarizing");
+        assert!(matches!(&second.kind, ActivityKind::Thinking(t) if t.state == ThinkingState::Running));
+    }
+
+    /// 单轮内连续 delta 续写同一块。
+    #[test]
+    fn single_turn_thinking_accumulates() {
+        let mut chat = test_chat();
+        let (tx, rx) = mpsc::unbounded_channel();
+        chat.events_rx = rx;
+        tx.send(UiEvent::TurnStart).unwrap();
+        tx.send(UiEvent::ThinkingDelta("a".into())).unwrap();
+        tx.send(UiEvent::ThinkingDelta("b".into())).unwrap();
+        chat.drain_events();
+
+        let acts = &chat.messages[0].activities;
+        assert_eq!(acts.len(), 1);
+        assert_eq!(thinking_text(&acts[0]), "ab");
     }
 }
