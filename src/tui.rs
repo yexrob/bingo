@@ -97,8 +97,6 @@ struct UiMessage {
     role: Role,
     text: String,
     activities: Vec<Activity>,
-    /// 回复之后渲染的收尾活动（Claude Code：thinking 完成行在回复下方）。
-    trailing: Vec<Activity>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -183,7 +181,6 @@ impl BingoChat {
                         role: Role::Assistant,
                         text: String::new(),
                         activities: Vec::new(),
-                        trailing: Vec::new(),
                     });
                     self.stream_msg = Some(self.messages.len() - 1);
                     self.busy = true;
@@ -209,19 +206,27 @@ impl BingoChat {
                 UiEvent::ThinkingDelta(thinking) => {
                     if let Some(i) = self.stream_msg {
                         self.thinking_buf.push_str(&thinking);
-                        self.messages[i]
+                        let content = vec![Line::from(self.thinking_buf.clone())];
+                        // 原位更新：占位 thinking 在 TurnStart 已存在，
+                        // 延迟到达的 delta 只改内容不重建（保位置不变）。
+                        if let Some(hint) = self.messages[i]
                             .activities
-                            .retain(|a| !matches!(a.kind, ActivityKind::Thinking(_)));
-                        let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
-                            state: ThinkingState::Running,
-                            duration_ms: self.tick * 33,
-                            digest: None,
-                            stage: thinking_stage(self.messages.len()),
-                            tokens: None,
-                        }));
-                        hint.set_content(vec![Line::from(self.thinking_buf.clone())]);
-                        hint.expand_hint = Some("ctrl+o to expand".to_string());
-                        self.messages[i].activities.push(hint);
+                            .iter_mut()
+                            .find(|a| matches!(a.kind, ActivityKind::Thinking(_)))
+                        {
+                            hint.set_content(content);
+                        } else {
+                            let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
+                                state: ThinkingState::Running,
+                                duration_ms: self.tick * 33,
+                                digest: None,
+                                stage: thinking_stage(self.messages.len()),
+                                tokens: None,
+                            }));
+                            hint.set_content(content);
+                            hint.expand_hint = Some("ctrl+o to expand".to_string());
+                            self.messages[i].activities.push(hint);
+                        }
                     }
                 }
                 UiEvent::OutputTokens(_tokens) => {}
@@ -265,28 +270,19 @@ impl BingoChat {
                 UiEvent::TurnEnd => {
                     self.busy = false;
                     self.output_tokens = 0;
-                    // thinking 完成行移到回复之后（Claude Code：`✻ Crunched for 25s` 在末尾）
-                    let Some(i) = self.stream_msg else {
-                        return;
-                    };
-                    let mut trailing = Vec::new();
-                    for hint in std::mem::take(&mut self.messages[i].activities) {
-                        if let ActivityKind::Thinking(t) = &hint.kind
-                            && t.state == ThinkingState::Running
-                        {
-                            let mut done = hint;
-                            if let ActivityKind::Thinking(t) = &mut done.kind {
+                    // 原位收尾：thinking 在它发生的位置转完成态（不重排到回复之后）。
+                    if let Some(i) = self.stream_msg {
+                        for hint in &mut self.messages[i].activities {
+                            if let ActivityKind::Thinking(t) = &mut hint.kind
+                                && t.state == ThinkingState::Running
+                            {
                                 t.state = ThinkingState::Done;
                                 t.duration_ms = self.tick * 33;
+                                hint.expanded = false;
                             }
-                            done.expanded = false;
-                            trailing.push(done);
-                        } else {
-                            trailing.push(hint);
                         }
                     }
                     self.stream_msg = None;
-                    self.messages[i].trailing = trailing;
                 }
                 UiEvent::Warning(message) => {
                     if !self.warnings.iter().any(|w| w == &message) {
@@ -301,7 +297,6 @@ impl BingoChat {
                             role: Role::Assistant,
                             text: format!("[error] {message}"),
                             activities: msg.activities,
-                            trailing: msg.trailing,
                         });
                     }
                 }
@@ -347,7 +342,6 @@ impl BingoChat {
             role: Role::User,
             text: text.clone(),
             activities: Vec::new(),
-            trailing: Vec::new(),
         });
         self.busy = true;
 
@@ -649,15 +643,6 @@ impl Component for BingoChat {
                             rows.push(line);
                         }
                     }
-                    let (trailing, _) = layout_activities(
-                        0,
-                        rows.len() as u16,
-                        &self.messages[i].trailing,
-                        spinner,
-                        &self.theme,
-                        &mut render,
-                    );
-                    rows.extend(trailing);
                 }
             }
         }
