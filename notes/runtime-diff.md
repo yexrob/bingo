@@ -100,6 +100,14 @@ CC 的 WebSearchTool 依赖 Anthropic API 的**服务器端 `web_search` 工具*
 - 差异：CC 单次 API 调用内自动多搜索（max_uses 8），bingo 一次查询一次后端请求；无 `Did N searches in Xs` chrome（展开直接显示结果列表）。
 - 实测：headless 强制搜索返回真实结果（Rust 2026 相关）；天气对比场景模型偏好 WebFetch wttr.in（DeepSeek 知识里的直达路径，工具选择权在模型）。74 tests。
 
+## 10. 渲染顺序对齐（2026-08-04）
+
+用户实测发现 assistant 回复渲染把 **text 聚合到 activities 之后**（thinking/工具行全部在前）——模型正文（如"我来搜索一下"）本应在工具行之前，显示时却落在其后，与 CC 的"按模型输出顺序逐段交叉"不符。
+
+- 修复：`UiMessage.insert_points` 记录每个活动创建时的 text 字符位置；draw() 按插入点把 text 分段，段间用库新增的 `layout_activity` 单活动 API 渲染活动行（库 `07d83bf`）。
+- 实测（上海天气会话）：`thinking → 正文("页面数据是 JS 动态加载的...") → WebFetch → thinking → 正文 → WebSearch("上海 今天 实时温度...") → 正文(最终回复)` 完全按模型顺序交叉。
+- 75 tests。
+
 ## 8. WebFetch 对齐（2026-08-04）
 
 对标 CC WebFetchTool（WebFetchTool.ts + utils.ts + preapproved.ts）移植：
