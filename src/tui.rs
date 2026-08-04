@@ -453,7 +453,13 @@ impl BingoChat {
             let watch_events = events.clone();
             let mut rx = session.watch.subscribe();
             handle.spawn(async move {
-            while let Ok(ev) = rx.recv().await {
+            loop {
+                // Lagged：消费者落后丢事件——重同步继续，不退出转发。
+                let ev = match rx.recv().await {
+                    Ok(ev) => ev,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
                 if watch_events
                     .send(UiEvent::WatchEvent {
                         label: ev.label,
@@ -475,7 +481,7 @@ impl BingoChat {
                             }
                         },
                         detail: ev.detail,
-                        duration_ms: ev.ts.elapsed().as_millis() as u64,
+                        duration_ms: ev.elapsed_ms,
                         payload: ev.payload,
                     })
                     .is_err()

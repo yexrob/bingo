@@ -67,7 +67,8 @@ pub struct WatchEvent {
     pub state: WatchState,
     pub detail: Option<String>,
     pub payload: Option<serde_json::Value>,
-    pub ts: Instant,
+    /// watchable 已运行毫秒（注册时刻起算）。
+    pub elapsed_ms: u64,
 }
 
 /// 快照：供 TUI 初始渲染 / 状态查询（当前展示层按 label 驱动，API 预留）。
@@ -96,6 +97,7 @@ struct Entry {
     state: WatchState,
     detail: Option<String>,
     payload: Option<serde_json::Value>,
+    born: Instant,
 }
 
 struct Inner {
@@ -138,6 +140,7 @@ impl WatchRegistry {
                     state: poll.state,
                     detail: poll.detail.clone(),
                     payload: poll.payload.clone(),
+                    born: Instant::now(),
                 },
             );
             id
@@ -162,7 +165,7 @@ impl WatchRegistry {
             state: poll.state,
             detail: poll.detail.clone(),
             payload: poll.payload.clone(),
-            ts: Instant::now(),
+            elapsed_ms: 0,
         });
         let interval = watchable.check_interval();
         if let Some(interval) = interval {
@@ -217,13 +220,21 @@ impl WatchRegistry {
             }
             label
         };
+        let elapsed_ms = {
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner
+                .entries
+                .get(&id)
+                .map(|e| e.born.elapsed().as_millis() as u64)
+                .unwrap_or(0)
+        };
         let _ = self.tx.send(WatchEvent {
             id,
             label,
             state,
             detail,
             payload,
-            ts: Instant::now(),
+            elapsed_ms,
         });
     }
 

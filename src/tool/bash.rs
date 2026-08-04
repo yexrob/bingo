@@ -96,7 +96,7 @@ impl Tool for BashTool {
         // 周期命令（watch/while/until/for/tail -f）自动后台化：
         // 立即返回 async_launched，后台执行 + 轮次检查 + 完成通知。
         if let Some(interval) = periodic_bash_interval(&params.command) {
-            return launch_background(&params, ctx, interval, timeout).await;
+            return launch_background(&params, ctx, interval).await;
         }
 
         let mut command = tokio::process::Command::new("/bin/zsh");
@@ -144,7 +144,6 @@ async fn launch_background(
     params: &BashInput,
     ctx: &ToolContext,
     interval: Duration,
-    timeout: Duration,
 ) -> Result<ToolResult, ToolError> {
     let cell = Arc::new(BashCell::new());
     let label = format!("$ {}", params.command);
@@ -157,7 +156,8 @@ async fn launch_background(
     let command = params.command.clone();
     let cwd = ctx.cwd.clone();
     tokio::spawn(async move {
-        match run_streaming(&command, &cwd, timeout, cell.clone()).await {
+        // 后台任务独立生命周期：周期命令不受单次 timeout 限制。
+        match run_streaming(&command, &cwd, None, cell.clone()).await {
             Ok((text, code)) => {
                 watch.set_state(
                     id,
@@ -188,7 +188,7 @@ async fn launch_background(
 async fn run_streaming(
     command: &str,
     cwd: &std::path::Path,
-    timeout: Duration,
+    timeout: Option<Duration>,
     cell: Arc<BashCell>,
 ) -> Result<(String, i32), String> {
     let mut child = tokio::process::Command::new("/bin/zsh")
@@ -227,13 +227,19 @@ async fn run_streaming(
             }
         }));
     }
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(e)) => return Err(format!("failed to wait: {e}")),
-        Err(_) => {
-            let _ = child.kill().await;
-            return Err(format!("command timed out after {}s", timeout.as_secs()));
-        }
+    let status = match timeout {
+        Some(t) => match tokio::time::timeout(t, child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => return Err(format!("failed to wait: {e}")),
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(format!("command timed out after {}s", t.as_secs()));
+            }
+        },
+        None => match child.wait().await {
+            Ok(status) => status,
+            Err(e) => return Err(format!("failed to wait: {e}")),
+        },
     };
     for reader in readers {
         let _ = reader.await;
