@@ -28,6 +28,7 @@ mod tool;
 mod tools;
 mod transcript;
 mod tui;
+mod watch;
 
 #[derive(Debug, Parser)]
 #[command(name = "bingo", version, about = "Rust agent CLI")]
@@ -124,6 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         home: home.clone(),
         quiet: !cli.print,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        watch: crate::watch::WatchRegistry::new(),
     });
 
     let mode_str = session.permission_mode_str();

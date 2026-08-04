@@ -1621,6 +1621,7 @@ mod tests {
             home: std::env::temp_dir(),
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            watch: crate::watch::WatchRegistry::new(),
         });
         BingoChat::new(session, events_tx, events_rx, asks_tx, asks_rx)
     }

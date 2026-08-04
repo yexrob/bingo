@@ -59,6 +59,8 @@ pub struct Session {
     pub quiet: bool,
     /// 自动压缩连续失败计数（熔断：MAX_COMPACT_FAILURES 后跳过）。
     pub compact_failures: Arc<std::sync::atomic::AtomicU64>,
+    /// Watchable 注册中心（命令/agent 状态观察与通知）。
+    pub watch: Arc<crate::watch::WatchRegistry>,
 }
 
 /// 单个工具完成事件。

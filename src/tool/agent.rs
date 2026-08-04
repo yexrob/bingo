@@ -97,6 +97,7 @@ impl Tool for AgentTool {
             home: self.session.home.clone(),
             quiet: self.session.quiet,
             compact_failures: self.session.compact_failures.clone(),
+            watch: self.session.watch.clone(),
         });
 
         let output = Arc::new(Mutex::new(String::new()));
