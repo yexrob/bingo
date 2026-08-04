@@ -224,7 +224,8 @@ impl BingoChat {
                             .is_some_and(|a| matches!(a.kind, ActivityKind::Thinking(_)));
                         if last_is_thinking {
                             self.thinking_buf.push_str(&thinking);
-                            let content = vec![Line::from(self.thinking_buf.clone())];
+                            let buf = self.thinking_buf.clone();
+                            let content = self.render_thinking(&buf);
                             if let Some(hint) = self.messages[i]
                                 .activities
                                 .iter_mut()
@@ -254,6 +255,8 @@ impl BingoChat {
                                 !(matches!(a.kind, ActivityKind::Thinking(_))
                                     && a.content.is_empty())
                             });
+                            let buf = self.thinking_buf.clone();
+                            let content = self.render_thinking(&buf);
                             let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                                 state: ThinkingState::Running,
                                 duration_ms: self.tick * 33,
@@ -261,7 +264,7 @@ impl BingoChat {
                                 stage: thinking_stage(self.messages.len()),
                                 tokens: None,
                             }));
-                            hint.set_content(vec![Line::from(thinking.clone())]);
+                            hint.set_content(content);
                             hint.expand_hint = Some("ctrl+o to expand".to_string());
                             self.messages[i].activities.push(hint);
                         }
@@ -353,6 +356,18 @@ impl BingoChat {
         {
             self.pending_ask = Some(request);
         }
+    }
+
+    /// thinking 内容走 markdown streaming 渲染（代码块/列表随流更新，
+    /// 换行按渲染结果自然成行）。每次以完整文本重渲染（thinking 增量不大）。
+    fn render_thinking(&mut self, text: &str) -> Vec<Line<'static>> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+        self.renderer.set_width(self.width);
+        let doc = self.processor.process_streaming(text);
+        self.renderer.render(&doc);
+        self.renderer.lines().to_vec()
     }
 
     /// 点击（doc 坐标）命中的活动行 → 折叠/展开（鼠标点击展开）。
