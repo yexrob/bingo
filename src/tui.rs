@@ -20,6 +20,7 @@ use rsmarkdown_tui::{FooterBadge, run_tui};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::api::types::StreamEvent;
+use crate::permission::PermissionMode;
 use crate::query::{Session, ToolCallDone, UiHooks};
 
 /// agent task → 组件的事件通道。
@@ -33,6 +34,8 @@ pub enum UiEvent {
     ToolStart { name: String },
     ToolDone(ToolCallDone),
     TurnEnd,
+    /// 非致命警告（如 MCP 连接失败），显示在边框与分隔线之间。
+    Warning(String),
     Error(String),
 }
 
@@ -45,6 +48,7 @@ pub fn tui_hooks(
     asks: mpsc::UnboundedSender<AskRequest>,
 ) -> UiHooks {
     let tool_events = events.clone();
+    let warn_events = events.clone();
     UiHooks {
         on_event: Box::new(move |event| match event {
             StreamEvent::TextDelta { text, .. } => {
@@ -68,6 +72,9 @@ pub fn tui_hooks(
                 output: done.output.clone(),
                 is_error: done.is_error,
             }));
+        }),
+        on_warning: Box::new(move |message| {
+            let _ = warn_events.send(UiEvent::Warning(message));
         }),
         ask: Box::new(move |tool_name, reason| {
             let request = PermissionRequest::new(
@@ -114,15 +121,18 @@ pub struct BingoChat {
     stream_msg: Option<usize>,
     thinking_buf: String,
     activities: Vec<Activity>,
-    /// 当前展开目标：None 表示最近的可展开活动。
     output_tokens: u64,
     tick: u64,
+    warnings: Vec<String>,
+    user: String,
+    cwd: String,
     pending_ask: Option<(PermissionRequest, oneshot::Sender<DialogAction>)>,
     processor: MarkdownProcessor,
     renderer: StreamMarkdownRenderer,
     reply_cache: HashMap<String, Vec<Line<'static>>>,
     width: usize,
     scroll: u16,
+    auto_scroll: bool,
     theme: Theme,
 }
 
@@ -149,12 +159,18 @@ impl BingoChat {
             activities: Vec::new(),
             output_tokens: 0,
             tick: 0,
+            warnings: Vec::new(),
+            user: std::env::var("USER").unwrap_or_else(|_| "user".to_string()),
+            cwd: std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
             pending_ask: None,
             processor: MarkdownProcessor::default(),
             renderer: StreamMarkdownRenderer::new(80),
             reply_cache: HashMap::new(),
             width: 80,
             scroll: 0,
+            auto_scroll: true,
             theme: Theme::dark(),
         }
     }
@@ -250,6 +266,11 @@ impl BingoChat {
                         self.messages[i].activities = std::mem::take(&mut self.activities);
                     }
                 }
+                UiEvent::Warning(message) => {
+                    if !self.warnings.iter().any(|w| w == &message) {
+                        self.warnings.push(message);
+                    }
+                }
                 UiEvent::Error(message) => {
                     self.busy = false;
                     self.stream_msg = None;
@@ -333,6 +354,134 @@ impl BingoChat {
 
 }
 
+fn center(text: &str, width: usize) -> String {
+    let len = text.chars().count();
+    if len >= width {
+        return text.to_string();
+    }
+    let pad = (width - len) / 2;
+    format!("{}{}", " ".repeat(pad), text)
+}
+
+fn column_row(
+    theme: &Theme,
+    left_w: usize,
+    right_w: usize,
+    left: Option<(String, ratatui::style::Color)>,
+    right: Option<(String, ratatui::style::Color)>,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    let (l_text, l_color) = left.unwrap_or_else(|| (String::new(), theme.dim().fg.unwrap_or(theme.text)));
+    let l_len = l_text.chars().count();
+    spans.push(Span::styled(l_text, ratatui::style::Style::default().fg(l_color)));
+    spans.push(Span::styled(
+        format!("{}│", " ".repeat(left_w.saturating_sub(l_len))),
+        theme.dim(),
+    ));
+    if let Some((r_text, r_color)) = right {
+        spans.push(Span::styled(r_text, ratatui::style::Style::default().fg(r_color)));
+    }
+    let _ = right_w;
+    Line::from(spans)
+}
+
+/// 欢迎面板（启动横幅，1:1 对齐 Claude Code）：左栏 logo/欢迎/身份，
+/// 右栏 Tips 与 What's new。
+fn welcome_rows(
+    theme: &Theme,
+    user: &str,
+    model: &str,
+    mode: &str,
+    cwd: &str,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let left_w = width * 3 / 5;
+    let right_w = width.saturating_sub(left_w + 1);
+    let accent = theme.tool_running;
+    let mut rows = Vec::new();
+
+    let logo = ["    ▐▛█▜▌", "   ▝▜███▛▘", "     ▘ ▘"];
+    for line in logo {
+        rows.push(column_row(
+            theme,
+            left_w,
+            right_w,
+            Some((center(line, left_w), theme.text)),
+            None,
+        ));
+    }
+    rows.push(column_row(theme, left_w, right_w, None, None));
+    rows.push(column_row(
+        theme,
+        left_w,
+        right_w,
+        Some((center(&format!("Welcome back {user}!"), left_w), theme.text)),
+        Some(("Tips for getting started".to_string(), accent)),
+    ));
+    rows.push(column_row(theme, left_w, right_w, None, None));
+    rows.push(column_row(
+        theme,
+        left_w,
+        right_w,
+        Some((center(&format!("{model} · {mode}"), left_w), theme.dim().fg.unwrap_or(theme.text))),
+        Some(("Enter 发送 · Esc 切换输入".to_string(), theme.text)),
+    ));
+    rows.push(column_row(
+        theme,
+        left_w,
+        right_w,
+        Some((center(user, left_w), theme.text)),
+        Some(("ctrl+o 展开/折叠工具输出".to_string(), theme.text)),
+    ));
+    rows.push(column_row(
+        theme,
+        left_w,
+        right_w,
+        Some((center(cwd, left_w), theme.dim().fg.unwrap_or(theme.text))),
+        Some(("MCP 服务配置在 settings.json".to_string(), theme.text)),
+    ));
+    rows.push(column_row(theme, left_w, right_w, None, Some(("─".repeat(right_w).to_string(), theme.dim().fg.unwrap_or(theme.text)))));
+    rows.push(column_row(
+        theme,
+        left_w,
+        right_w,
+        None,
+        Some(("What's new".to_string(), accent)),
+    ));
+    rows.push(column_row(
+        theme,
+        left_w,
+        right_w,
+        None,
+        Some(("流式主循环 · Tool 协议 · 权限门".to_string(), theme.text)),
+    ));
+    rows.push(column_row(
+        theme,
+        left_w,
+        right_w,
+        None,
+        Some(("Hooks · MCP · 子代理 · 自动记忆".to_string(), theme.text)),
+    ));
+    rows.push(column_row(
+        theme,
+        left_w,
+        right_w,
+        None,
+        Some(("transcript 持久化 · --continue".to_string(), theme.text)),
+    ));
+    rows
+}
+
+fn permission_mode_label(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Default => "default",
+        PermissionMode::AcceptEdits => "acceptEdits",
+        PermissionMode::BypassPermissions => "bypassPermissions",
+        PermissionMode::DontAsk => "dontAsk",
+        PermissionMode::Plan => "plan",
+    }
+}
+
 fn summarize(text: &str) -> String {
     let trimmed = text.trim();
     let first = trimmed.lines().next().unwrap_or(trimmed);
@@ -354,15 +503,21 @@ impl Component for BingoChat {
         self.drain_asks();
         self.width = area.width as usize;
 
-        // Claude Code 布局：消息区带边框 → 分隔线 → ❯ 输入行
-        let input_height = 2u16;
+        // Claude Code 布局：消息区带边框 → 警告行(可选) → 分隔线 → ❯ 输入行
+        let warn_height = if self.warnings.is_empty() { 0 } else { 1 } as u16;
+        let input_height = 1 + warn_height + 1;
         let bordered = area.height.saturating_sub(input_height);
-        let [border_area, sep_area, input_area] = Layout::vertical([
-            Constraint::Length(bordered),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .areas(area);
+        let mut chunks = vec![Constraint::Length(bordered)];
+        if warn_height > 0 {
+            chunks.push(Constraint::Length(warn_height));
+        }
+        chunks.push(Constraint::Length(1));
+        chunks.push(Constraint::Length(1));
+        let areas = Layout::vertical(chunks).split(area);
+        let border_area = areas[0];
+        let warn_area = if warn_height > 0 { Some(areas[1]) } else { None };
+        let sep_area = areas[areas.len() - 2];
+        let input_area = areas[areas.len() - 1];
 
         let block = ratatui::widgets::Block::default()
             .borders(ratatui::widgets::Borders::ALL)
@@ -374,6 +529,16 @@ impl Component for BingoChat {
             ]));
         let inner = block.inner(border_area);
         block.render(border_area, buf);
+
+        if let Some(warn_area) = warn_area {
+            let warn = self.warnings.first().cloned().unwrap_or_default();
+            buf.set_string(
+                warn_area.x,
+                warn_area.y,
+                format!(" ⚠ {warn}"),
+                ratatui::style::Style::default().fg(self.theme.warning),
+            );
+        }
 
         for x in 0..sep_area.width {
             buf.set_string(
@@ -396,6 +561,14 @@ impl Component for BingoChat {
 
         let spinner = rsmarkdown_tui::activities::spinner(self.tick);
         let mut rows: Vec<Line<'static>> = Vec::new();
+        rows.extend(welcome_rows(
+            &self.theme,
+            &self.user,
+            &self.session.model,
+            permission_mode_label(self.session.permission_mode),
+            &self.cwd,
+            inner.width as usize,
+        ));
         for i in 0..self.messages.len() {
             match self.messages[i].role {
                 Role::User => {
@@ -440,10 +613,15 @@ impl Component for BingoChat {
         }
 
         let total = rows.len() as u16;
-        let scroll = self
-            .scroll
-            .min(total.saturating_sub(inner.height));
+        let max_scroll = total.saturating_sub(inner.height);
+        if self.auto_scroll {
+            self.scroll = max_scroll;
+        }
+        let scroll = self.scroll.min(max_scroll);
         self.scroll = scroll;
+        if scroll == max_scroll {
+            self.auto_scroll = true;
+        }
         for (y, line) in rows
             .iter()
             .skip(scroll as usize)
@@ -484,6 +662,35 @@ impl Component for BingoChat {
                     }
                     KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         self.toggle_recent_expand();
+                        true
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.auto_scroll = false;
+                        self.scroll = self.scroll.saturating_add(1);
+                        true
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.auto_scroll = false;
+                        self.scroll = self.scroll.saturating_sub(1);
+                        true
+                    }
+                    KeyCode::PageDown => {
+                        self.auto_scroll = false;
+                        self.scroll = self.scroll.saturating_add(10);
+                        true
+                    }
+                    KeyCode::PageUp => {
+                        self.auto_scroll = false;
+                        self.scroll = self.scroll.saturating_sub(10);
+                        true
+                    }
+                    KeyCode::Char('g') => {
+                        self.auto_scroll = false;
+                        self.scroll = 0;
+                        true
+                    }
+                    KeyCode::Char('G') => {
+                        self.auto_scroll = true;
                         true
                     }
                     _ => false,

@@ -96,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         transcript,
         depth: 0,
         home: home.clone(),
+        quiet: !cli.print,
     });
 
     if cli.print {

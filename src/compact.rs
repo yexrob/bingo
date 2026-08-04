@@ -88,7 +88,7 @@ pub async fn check_and_compact(session: &Session, messages: &mut Vec<Message>) {
     else {
         return;
     };
-    if tokens > 0 {
+    if tokens > 0 && !session.quiet {
         eprintln!("[bingo] context: {tokens} tokens");
     }
     maybe_compact(session, messages, tokens).await;

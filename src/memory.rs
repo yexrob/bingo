@@ -98,7 +98,9 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
         // 截断超长记忆
         let lines: Vec<&str> = existing.lines().take(MEMORY_MAX_LINES).collect();
         let _ = std::fs::write(&path, lines.join("\n") + "\n");
-        eprintln!("[bingo] memory: added {added} facts -> {}", path.display());
+        if !session.quiet {
+            eprintln!("[bingo] memory: added {added} facts -> {}", path.display());
+        }
     }
 }
 

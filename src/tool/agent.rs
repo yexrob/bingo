@@ -38,6 +38,7 @@ fn subagent_hooks(output: Arc<Mutex<String>>, permission_mode: PermissionMode) -
             }
         }),
         on_tool_done: Box::new(|_| {}),
+        on_warning: Box::new(|_| {}),
         ask: Box::new(move |_tool_name, _reason| Box::pin(async move { bypass })),
     }
 }
@@ -99,6 +100,7 @@ impl Tool for AgentTool {
             transcript: None,
             depth: self.session.depth + 1,
             home: self.session.home.clone(),
+            quiet: self.session.quiet,
         });
 
         let output = Arc::new(Mutex::new(String::new()));

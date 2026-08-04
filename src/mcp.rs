@@ -44,12 +44,10 @@ pub async fn connect_servers(
                 server: server_name.clone(),
                 detail: e.to_string(),
             })?;
-        let tool_count = listed.len();
         let service = Arc::new(service);
         for tool in listed {
             tools.push(Box::new(McpTool::new(server_name, tool, service.clone())));
         }
-        eprintln!("[bingo] connected MCP server {server_name}: {tool_count} tools");
     }
     Ok(tools)
 }

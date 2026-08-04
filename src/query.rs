@@ -40,6 +40,8 @@ pub struct Session {
     pub depth: usize,
     /// 用户 home（memdir 记忆定位）。
     pub home: PathBuf,
+    /// 交互式 TUI 会话：抑制 stderr 进度打印（避免污染屏幕）。
+    pub quiet: bool,
 }
 
 /// 单个工具完成事件。
@@ -56,10 +58,11 @@ pub type AskFn = dyn Fn(&str, &str) -> std::pin::Pin<Box<dyn std::future::Future
     + Send
     + Sync;
 
-/// UI 挂钩：流事件、工具完成、权限询问。
+/// UI 挂钩：流事件、工具完成、权限询问、非致命警告。
 pub struct UiHooks {
     pub on_event: Box<dyn FnMut(&StreamEvent) + Send>,
     pub on_tool_done: Box<dyn Fn(&ToolCallDone) + Send>,
+    pub on_warning: Box<dyn Fn(String) + Send>,
     /// 权限询问：工具名 + 理由 → 是否允许（异步：TUI 模态可能等待用户）。
     pub ask: Box<AskFn>,
 }
@@ -74,6 +77,7 @@ pub fn headless_hooks() -> UiHooks {
             }
         }),
         on_tool_done: Box::new(|_| {}),
+        on_warning: Box::new(|message| eprintln!("[bingo] warning: {message}")),
         ask: Box::new(|tool_name, reason| {
             let prompt = format!("允许 {tool_name} 执行吗？({reason}) [y/N] ");
             Box::pin(async move {
@@ -242,7 +246,7 @@ pub async fn run_query(
     user_input: &str,
     ui: &mut UiHooks,
 ) -> Result<Vec<Message>, QueryError> {
-    let tools = crate::tools::assemble_tools(session).await;
+    let tools = crate::tools::assemble_tools(session, &mut ui.on_warning).await;
     let ctx = ToolContext {
         cwd: std::env::current_dir()
             .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
