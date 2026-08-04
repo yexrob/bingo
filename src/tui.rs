@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use rsmarkdown_core::{MarkdownProcessor, Renderer};
@@ -501,65 +501,16 @@ impl Component for BingoChat {
     fn draw(&mut self, area: Rect, buf: &mut Buffer) {
         self.drain_events();
         self.drain_asks();
-        self.width = area.width as usize;
+        self.width = area.width.saturating_sub(2) as usize;
 
-        // Claude Code 布局：消息区带边框 → 警告行(可选) → 分隔线 → ❯ 输入行
         let warn_height = if self.warnings.is_empty() { 0 } else { 1 } as u16;
-        let input_height = 1 + warn_height + 1;
-        let bordered = area.height.saturating_sub(input_height);
-        let mut chunks = vec![Constraint::Length(bordered)];
-        if warn_height > 0 {
-            chunks.push(Constraint::Length(warn_height));
-        }
-        chunks.push(Constraint::Length(1));
-        chunks.push(Constraint::Length(1));
-        let areas = Layout::vertical(chunks).split(area);
-        let border_area = areas[0];
-        let warn_area = if warn_height > 0 { Some(areas[1]) } else { None };
-        let sep_area = areas[areas.len() - 2];
-        let input_area = areas[areas.len() - 1];
+        // 输入行下方固定结构：警告行(可选) + 分隔线 + 输入行
+        let fixed_height = 1 + warn_height + 1;
+        let avail = area.height.saturating_sub(fixed_height);
 
-        let block = ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_style(self.theme.dim())
-            .title(Line::from(vec![
-                Span::styled(" bingo v0.1.0", self.theme.tool_running()),
-                Span::styled(format!(" · {}", self.session.model), self.theme.text()),
-                Span::styled(" ", self.theme.text()),
-            ]));
-        let inner = block.inner(border_area);
-        block.render(border_area, buf);
-
-        if let Some(warn_area) = warn_area {
-            let warn = self.warnings.first().cloned().unwrap_or_default();
-            buf.set_string(
-                warn_area.x,
-                warn_area.y,
-                format!(" ⚠ {warn}"),
-                ratatui::style::Style::default().fg(self.theme.warning),
-            );
-        }
-
-        for x in 0..sep_area.width {
-            buf.set_string(
-                sep_area.x + x,
-                sep_area.y,
-                "─",
-                ratatui::style::Style::default().fg(self.theme.dim().fg.unwrap_or(
-                    ratatui::style::Color::DarkGray,
-                )),
-            );
-        }
-
-        let caret = if self.typing { '▋' } else { ' ' };
-        let input_line = Line::from(vec![
-            Span::styled("❯ ", self.theme.tool_running()),
-            Span::styled(self.input.clone(), self.theme.text()),
-            Span::styled(caret.to_string(), self.theme.tool_running()),
-        ]);
-        buf.set_line(0, input_area.y, &input_line, input_area.width);
-
+        // 先算内容行（宽度 = 边框内宽）
         let spinner = rsmarkdown_tui::activities::spinner(self.tick);
+        let content_width = area.width.saturating_sub(2);
         let mut rows: Vec<Line<'static>> = Vec::new();
         rows.extend(welcome_rows(
             &self.theme,
@@ -567,14 +518,14 @@ impl Component for BingoChat {
             &self.session.model,
             permission_mode_label(self.session.permission_mode),
             &self.cwd,
-            inner.width as usize,
+            content_width as usize,
         ));
         for i in 0..self.messages.len() {
             match self.messages[i].role {
                 Role::User => {
                     rows.push(Line::from(vec![
                         Span::styled("❯ ", self.theme.tool_running()),
-                        Span::styled(self.messages[i].text.clone(), self.theme.text()),
+                        Span::styled(self.messages[i].text.clone(), self.theme.text),
                     ]));
                 }
                 Role::Assistant => {
@@ -612,6 +563,58 @@ impl Component for BingoChat {
             }
         }
 
+        // 边框高度跟随内容：内容少时边框矮、输入框紧贴内容；超屏时占满
+        let needed = (rows.len() as u16).saturating_add(2).max(6);
+        let bordered = needed.min(avail).max(3);
+        let border_rect = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: bordered,
+        };
+
+        let block = ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Gray))
+            .title(Line::from(vec![
+                Span::styled(
+                    format!(" bingo v0.1.0 · {}", self.session.model),
+                    self.theme.text,
+                ),
+                Span::styled(" ", self.theme.text),
+            ]));
+        let inner = block.inner(border_rect);
+        block.render(border_rect, buf);
+
+        if warn_height > 0 {
+            let warn = self.warnings.first().cloned().unwrap_or_default();
+            buf.set_string(
+                area.x,
+                border_rect.y + bordered,
+                format!(" ⚠ {warn}"),
+                ratatui::style::Style::default().fg(self.theme.warning),
+            );
+        }
+
+        let sep_y = border_rect.y + bordered + warn_height;
+        for x in 0..area.width {
+            buf.set_string(
+                area.x + x,
+                sep_y,
+                "─",
+                ratatui::style::Style::default().fg(ratatui::style::Color::Gray),
+            );
+        }
+
+        let caret = if self.typing { '▋' } else { ' ' };
+        let input_line = Line::from(vec![
+            Span::styled("❯ ", self.theme.tool_running()),
+            Span::styled(self.input.clone(), self.theme.text),
+            Span::styled(caret.to_string(), self.theme.tool_running()),
+        ]);
+        buf.set_line(area.x, sep_y + 1, &input_line, area.width);
+
+        // 内容滚动（内容超出边框高度时）
         let total = rows.len() as u16;
         let max_scroll = total.saturating_sub(inner.height);
         if self.auto_scroll {
