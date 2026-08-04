@@ -69,10 +69,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "default".to_string())
         .parse()?;
 
-    let system = build_system(
+    let client = Client::from_env()?;
+    let mut system = build_system(
         &load_memory(&home, &project_dir),
         load_project_memory(&home, &project_dir),
     );
+    if client.is_deepseek() {
+        for block in &mut system {
+            block.cache = false;
+        }
+    }
 
     let (transcript, initial_messages): (Option<Transcript>, Vec<Message>) = if cli.continue_ {
         match latest_transcript(&home)? {
@@ -86,7 +92,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (create_transcript(&home, &project_dir).ok(), Vec::new())
     };
 
-    let client = Client::from_env()?;
     let session = Arc::new(Session {
         client,
         model: cli.model,

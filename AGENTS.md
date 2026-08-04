@@ -25,3 +25,8 @@ Rust 实现的 agent CLI（本地 agent harness）。
 
 - Conventional Commits，祈使句，短。仅在真有信息时写正文与 issue 脚注。
 - 只提交用户要求的变更；不提交 secrets。
+
+## 禁止
+
+1. 使用unsafe
+2. unwrap 或 expect，必须处理每个异常

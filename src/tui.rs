@@ -6,7 +6,6 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Widget;
 use rsmarkdown_core::{MarkdownProcessor, Renderer};
 use rsmarkdown_tui::activities::{
     layout_activities, Activity, ActivityKind, Thinking, ThinkingState, ToolCall, ToolStatus,
@@ -382,15 +381,17 @@ fn column_row(
         format!("{}│", " ".repeat(left_w.saturating_sub(l_len))),
         theme.dim(),
     ));
+    let mut r_len = 0;
     if let Some((r_text, r_color)) = right {
+        r_len = r_text.chars().count();
         spans.push(Span::styled(r_text, ratatui::style::Style::default().fg(r_color)));
     }
-    let _ = right_w;
+    spans.push(Span::styled(
+        " ".repeat(right_w.saturating_sub(r_len)),
+        theme.dim(),
+    ));
     Line::from(spans)
 }
-
-/// 欢迎面板固定行数（不含边框）。
-const WELCOME_ROWS: u16 = 14;
 
 /// 欢迎面板（启动横幅，1:1 对齐 Claude Code）：左栏 logo/欢迎/身份，
 /// 右栏 Tips 与 What's new。
@@ -499,6 +500,41 @@ fn thinking_stage(seed: usize) -> &'static str {
     THINKING_WORDS[seed % THINKING_WORDS.len()]
 }
 
+/// 欢迎卡片行（带 ╭╮ 边框），作为滚动内容的一部分——消息增长时随流上移。
+fn welcome_card_rows(
+    theme: &Theme,
+    user: &str,
+    model: &str,
+    mode: &str,
+    cwd: &str,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let gray = ratatui::style::Style::default().fg(ratatui::style::Color::Gray);
+    let title = format!(" bingo v0.1.0 · {model} ");
+    let title_len = title.chars().count();
+    let mut rows = Vec::new();
+    rows.push(Line::from(Span::styled(
+        format!(
+            "╭{}{}╮",
+            title,
+            "─".repeat(width.saturating_sub(title_len + 2))
+        ),
+        gray,
+    )));
+    let inner_w = width.saturating_sub(2);
+    for line in welcome_rows(theme, user, model, mode, cwd, inner_w) {
+        let mut spans = vec![Span::styled("│", gray)];
+        spans.extend(line.spans);
+        spans.push(Span::styled("│", gray));
+        rows.push(Line::from(spans));
+    }
+    rows.push(Line::from(Span::styled(
+        format!("╰{}╯", "─".repeat(width.saturating_sub(2))),
+        gray,
+    )));
+    rows
+}
+
 fn permission_mode_label(mode: PermissionMode) -> &'static str {
     match mode {
         PermissionMode::Default => "default",
@@ -520,45 +556,8 @@ impl Component for BingoChat {
         self.width = area.width as usize;
 
         let warn_height = if self.warnings.is_empty() { 0 } else { 1 } as u16;
-
-        // 欢迎卡片（固定顶部，带边框）——只包 welcome，不包消息
-        let welcome_h = WELCOME_ROWS + 2;
-        let card_height = welcome_h.min(area.height.saturating_sub(4));
-        let card_rect = Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: card_height,
-        };
-        let card = ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Gray))
-            .title(Line::from(vec![
-                Span::styled(
-                    format!(" bingo v0.1.0 · {}", self.session.model),
-                    self.theme.text,
-                ),
-                Span::styled(" ", self.theme.text),
-            ]));
-        let card_inner = card.inner(card_rect);
-        card.render(card_rect, buf);
-        for (y, line) in welcome_rows(
-            &self.theme,
-            &self.user,
-            &self.session.model,
-            permission_mode_label(self.session.permission_mode),
-            &self.cwd,
-            card_inner.width as usize,
-        )
-        .iter()
-        .take(card_inner.height as usize)
-        .enumerate()
-        {
-            buf.set_line(card_inner.x, card_inner.y + y as u16, line, card_inner.width);
-        }
-
-        // 警告行（卡片下方，可选）
-        let warn_y = card_rect.y + card_height;
+        // 警告行固定在最顶部（不随消息滚动）
+        let warn_y = area.y;
         if warn_height > 0 {
             let warn = self.warnings.first().cloned().unwrap_or_default();
             buf.set_string(
@@ -569,11 +568,19 @@ impl Component for BingoChat {
             );
         }
 
-        // 消息区：无边框，跟随内容（少时紧贴消息，多时占满剩余并滚动）
+        // 消息区：欢迎卡片 + 消息作为同一滚动流（卡片随消息增长上移滚出）
         let msg_top = warn_y + warn_height;
         let msg_bottom_limit = area.height.saturating_sub(2); // 分隔线 + 输入
         let spinner = rsmarkdown_tui::activities::spinner(self.tick);
         let mut rows: Vec<Line<'static>> = Vec::new();
+        rows.extend(welcome_card_rows(
+            &self.theme,
+            &self.user,
+            &self.session.model,
+            permission_mode_label(self.session.permission_mode),
+            &self.cwd,
+            area.width as usize,
+        ));
         for i in 0..self.messages.len() {
             match self.messages[i].role {
                 Role::User => {
@@ -796,7 +803,7 @@ impl Component for BingoChat {
     }
 }
 
-/// 启动 TUI 会话。
+/// 启动 TUI 会话。draw/event 崩溃时恢复终端并报告（不裸退）。
 pub fn run_tui_session(session: Arc<Session>) -> Result<(), Box<dyn std::error::Error>> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (asks_tx, asks_rx) = mpsc::unbounded_channel();
@@ -809,7 +816,25 @@ pub fn run_tui_session(session: Arc<Session>) -> Result<(), Box<dyn std::error::
         asks_rx,
     ))]);
     app.set_status_bar(false);
-    run_tui(&mut app)?;
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = run_tui(&mut app);
+    }));
+    if let Err(payload) = result {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture
+        );
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_else(|| "unknown panic".to_string());
+        eprintln!("[bingo] TUI panicked: {message}");
+        eprintln!("[bingo] run with RUST_BACKTRACE=1 for details");
+    }
     Ok(())
 }
 

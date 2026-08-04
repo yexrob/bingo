@@ -48,6 +48,11 @@ impl Client {
         }
     }
 
+    /// DeepSeek 兼容端点对 cache_control 处理不稳定（偶发挂起），需禁用。
+    pub fn is_deepseek(&self) -> bool {
+        self.base_url.contains("deepseek")
+    }
+
     fn headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", HeaderValue::from_str(&self.api_key).unwrap());
