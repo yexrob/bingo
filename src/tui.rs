@@ -385,6 +385,9 @@ fn column_row(
     Line::from(spans)
 }
 
+/// 欢迎面板固定行数（不含边框）。
+const WELCOME_ROWS: u16 = 14;
+
 /// 欢迎面板（启动横幅，1:1 对齐 Claude Code）：左栏 logo/欢迎/身份，
 /// 右栏 Tips 与 What's new。
 fn welcome_rows(
@@ -501,25 +504,63 @@ impl Component for BingoChat {
     fn draw(&mut self, area: Rect, buf: &mut Buffer) {
         self.drain_events();
         self.drain_asks();
-        self.width = area.width.saturating_sub(2) as usize;
+        self.width = area.width as usize;
 
         let warn_height = if self.warnings.is_empty() { 0 } else { 1 } as u16;
-        // 输入行下方固定结构：警告行(可选) + 分隔线 + 输入行
-        let fixed_height = 1 + warn_height + 1;
-        let avail = area.height.saturating_sub(fixed_height);
 
-        // 先算内容行（宽度 = 边框内宽）
-        let spinner = rsmarkdown_tui::activities::spinner(self.tick);
-        let content_width = area.width.saturating_sub(2);
-        let mut rows: Vec<Line<'static>> = Vec::new();
-        rows.extend(welcome_rows(
+        // 欢迎卡片（固定顶部，带边框）——只包 welcome，不包消息
+        let welcome_h = WELCOME_ROWS + 2;
+        let card_height = welcome_h.min(area.height.saturating_sub(4));
+        let card_rect = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: card_height,
+        };
+        let card = ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Gray))
+            .title(Line::from(vec![
+                Span::styled(
+                    format!(" bingo v0.1.0 · {}", self.session.model),
+                    self.theme.text,
+                ),
+                Span::styled(" ", self.theme.text),
+            ]));
+        let card_inner = card.inner(card_rect);
+        card.render(card_rect, buf);
+        for (y, line) in welcome_rows(
             &self.theme,
             &self.user,
             &self.session.model,
             permission_mode_label(self.session.permission_mode),
             &self.cwd,
-            content_width as usize,
-        ));
+            card_inner.width as usize,
+        )
+        .iter()
+        .take(card_inner.height as usize)
+        .enumerate()
+        {
+            buf.set_line(card_inner.x, card_inner.y + y as u16, line, card_inner.width);
+        }
+
+        // 警告行（卡片下方，可选）
+        let warn_y = card_rect.y + card_height;
+        if warn_height > 0 {
+            let warn = self.warnings.first().cloned().unwrap_or_default();
+            buf.set_string(
+                area.x,
+                warn_y,
+                format!(" ⚠ {warn}"),
+                ratatui::style::Style::default().fg(self.theme.warning),
+            );
+        }
+
+        // 消息区：无边框，跟随内容（少时紧贴消息，多时占满剩余并滚动）
+        let msg_top = warn_y + warn_height;
+        let msg_bottom_limit = area.height.saturating_sub(2); // 分隔线 + 输入
+        let spinner = rsmarkdown_tui::activities::spinner(self.tick);
+        let mut rows: Vec<Line<'static>> = Vec::new();
         for i in 0..self.messages.len() {
             match self.messages[i].role {
                 Role::User => {
@@ -563,40 +604,18 @@ impl Component for BingoChat {
             }
         }
 
-        // 边框高度跟随内容：内容少时边框矮、输入框紧贴内容；超屏时占满
-        let needed = (rows.len() as u16).saturating_add(2).max(6);
-        let bordered = needed.min(avail).max(3);
-        let border_rect = Rect {
+        // 消息区高度：跟随内容，不超过可用空间
+        let needed = rows.len() as u16;
+        let max_msg_h = msg_bottom_limit.saturating_sub(msg_top);
+        let msg_h = needed.min(max_msg_h).max(1);
+        let msg_rect = Rect {
             x: area.x,
-            y: area.y,
+            y: msg_top,
             width: area.width,
-            height: bordered,
+            height: msg_h,
         };
 
-        let block = ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Gray))
-            .title(Line::from(vec![
-                Span::styled(
-                    format!(" bingo v0.1.0 · {}", self.session.model),
-                    self.theme.text,
-                ),
-                Span::styled(" ", self.theme.text),
-            ]));
-        let inner = block.inner(border_rect);
-        block.render(border_rect, buf);
-
-        if warn_height > 0 {
-            let warn = self.warnings.first().cloned().unwrap_or_default();
-            buf.set_string(
-                area.x,
-                border_rect.y + bordered,
-                format!(" ⚠ {warn}"),
-                ratatui::style::Style::default().fg(self.theme.warning),
-            );
-        }
-
-        let sep_y = border_rect.y + bordered + warn_height;
+        let sep_y = msg_rect.y + msg_h;
         for x in 0..area.width {
             buf.set_string(
                 area.x + x,
@@ -614,9 +633,9 @@ impl Component for BingoChat {
         ]);
         buf.set_line(area.x, sep_y + 1, &input_line, area.width);
 
-        // 内容滚动（内容超出边框高度时）
+        // 消息滚动（内容超出消息区时）
         let total = rows.len() as u16;
-        let max_scroll = total.saturating_sub(inner.height);
+        let max_scroll = total.saturating_sub(msg_h);
         if self.auto_scroll {
             self.scroll = max_scroll;
         }
@@ -628,10 +647,10 @@ impl Component for BingoChat {
         for (y, line) in rows
             .iter()
             .skip(scroll as usize)
-            .take(inner.height as usize)
+            .take(msg_h as usize)
             .enumerate()
         {
-            buf.set_line(inner.x, inner.y + y as u16, line, inner.width);
+            buf.set_line(msg_rect.x, msg_rect.y + y as u16, line, msg_rect.width);
         }
     }
 
