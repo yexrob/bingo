@@ -205,17 +205,44 @@ impl BingoChat {
                 }
                 UiEvent::ThinkingDelta(thinking) => {
                     if let Some(i) = self.stream_msg {
-                        self.thinking_buf.push_str(&thinking);
-                        let content = vec![Line::from(self.thinking_buf.clone())];
-                        // 原位更新：占位 thinking 在 TurnStart 已存在，
-                        // 延迟到达的 delta 只改内容不重建（保位置不变）。
-                        if let Some(hint) = self.messages[i]
+                        // 多轮 thinking 各自成块：最后一轮还在流（末尾是
+                        // thinking）则续写；工具轮之后的 delta 开新块。
+                        let last_is_thinking = self.messages[i]
                             .activities
-                            .iter_mut()
-                            .find(|a| matches!(a.kind, ActivityKind::Thinking(_)))
-                        {
-                            hint.set_content(content);
+                            .last()
+                            .is_some_and(|a| matches!(a.kind, ActivityKind::Thinking(_)));
+                        if last_is_thinking {
+                            self.thinking_buf.push_str(&thinking);
+                            let content = vec![Line::from(self.thinking_buf.clone())];
+                            if let Some(hint) = self.messages[i]
+                                .activities
+                                .iter_mut()
+                                .find(|a| matches!(a.kind, ActivityKind::Thinking(_)))
+                            {
+                                hint.set_content(content);
+                            }
                         } else {
+                            // 工具轮后的新一段思考。DeepSeek 兼容层偶发把
+                            // 同一段 thinking 在 tool_use 前后各发一遍：
+                            // 内容与上一轮相同则视为重复，不新开块。
+                            let dup = thinking == self.thinking_buf
+                                || self.messages[i]
+                                    .activities
+                                    .iter()
+                                    .rev()
+                                    .find(|a| matches!(a.kind, ActivityKind::Thinking(_)))
+                                    .is_some_and(|a| {
+                                        a.content.first().is_some_and(|l| l.to_string() == thinking)
+                                    });
+                            if dup {
+                                continue;
+                            }
+                            // 清掉从未收到 delta 的空占位，然后新开一块（排在工具行之后）。
+                            self.thinking_buf = thinking.clone();
+                            self.messages[i].activities.retain(|a| {
+                                !(matches!(a.kind, ActivityKind::Thinking(_))
+                                    && a.content.is_empty())
+                            });
                             let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                                 state: ThinkingState::Running,
                                 duration_ms: self.tick * 33,
@@ -223,7 +250,7 @@ impl BingoChat {
                                 stage: thinking_stage(self.messages.len()),
                                 tokens: None,
                             }));
-                            hint.set_content(content);
+                            hint.set_content(vec![Line::from(thinking.clone())]);
                             hint.expand_hint = Some("ctrl+o to expand".to_string());
                             self.messages[i].activities.push(hint);
                         }
@@ -270,8 +297,13 @@ impl BingoChat {
                 UiEvent::TurnEnd => {
                     self.busy = false;
                     self.output_tokens = 0;
-                    // 原位收尾：thinking 在它发生的位置转完成态（不重排到回复之后）。
+                    // 原位收尾：thinking 在它发生的位置转完成态（不重排到回复之后）；
+                    // 从未收到 delta 的空占位直接移除（避免出现无内容的空行）。
                     if let Some(i) = self.stream_msg {
+                        self.messages[i].activities.retain(|a| {
+                            !(matches!(a.kind, ActivityKind::Thinking(_))
+                                && a.content.is_empty())
+                        });
                         for hint in &mut self.messages[i].activities {
                             if let ActivityKind::Thinking(t) = &mut hint.kind
                                 && t.state == ThinkingState::Running
