@@ -89,6 +89,17 @@
 - **hooks 事件扩展**：UserPromptSubmit（exit 2 / decision:block 阻止提交）、Stop（exit 2 → stderr 注入模型重试一次，防循环）、SessionStart、SessionEnd（1.5s 快速超时，对标 `SESSION_END_HOOK_TIMEOUT_MS_DEFAULT`）。
 - **未做**（留后续）：WebSearch（需外部服务）、CLAUDE_ENV_FILE 会话环境、plugin/权限 hook（prompt/http/agent 型 hook）。
 
+## 8. WebFetch 对齐（2026-08-04）
+
+对标 CC WebFetchTool（WebFetchTool.ts + utils.ts + preapproved.ts）移植：
+
+- **权限**：预批准域名列表（`src/preapproved.rs`，代码类文档域名，路径条目强制段边界）→ 自动放行；`WebFetch(domain:host)` 规则内容匹配；**非预批准域名即使 acceptEdits 也询问**（WebFetch 从通用只读放行中排除）。CC 的域名 blocklist 预检（api.anthropic.com）与 `skipWebFetchPreflight` 不移植（企业面）。
+- **请求**：http→https 升级、validateURL（2000 字符/无凭据/hostname ≥2 段）、手动重定向（同 host ±www 才跟随，10 跳上限；跨 host 返回 REDIRECT DETECTED 提示模型重新 fetch，301/302/307/308 语义同 CC）、60s 超时、10MB 上限、UA + `Accept: text/markdown, text/html, */*`。
+- **转换**：html2md（turndown 移植）替代手写去标签；非 HTML 原文返回。
+- **缓存**：15 分钟 TTL、50MB 总量 LRU（URL 键，缓存前 URL）。
+- **差异**（如实标注）：CC 用 Haiku 次模型按 prompt 总结（版权约束），bingo 无次模型 → 返回原文（prompt 字段接受但忽略）；二进制内容不落盘；无 maxResultSizeChars 持久化（统一 50k 裁剪已有）。
+- 实测：rust-lang.org 抓取正常（html2md 转换 + preapproved 自动放行）。69 tests。
+
 ## 7. diff 预览（2026-08-04 补）
 
 rsmarkdown-tui 本就内置 unified diff 渲染（`Diff::parse_unified` + `diff_lines` + `ActivityKind::Diff`），此前误判为"缺 IDE 集成"。接入：
