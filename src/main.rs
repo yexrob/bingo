@@ -15,6 +15,7 @@ use crate::transcript::{create as create_transcript, latest as latest_transcript
 mod api;
 mod budget;
 mod hooks;
+mod mcp;
 mod permission;
 mod query;
 mod settings;

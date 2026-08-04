@@ -18,6 +18,7 @@ pub struct ToolContext {
 #[derive(Debug)]
 pub struct ToolResult {
     pub content: serde_json::Value,
+    pub is_error: bool,
 }
 
 #[derive(Debug, Error)]
@@ -36,8 +37,8 @@ impl ToolError {
 /// 默认 fail-closed：非并发安全、非只读、允许（权限交给统一门）。
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+    fn name(&self) -> String;
+    fn description(&self) -> String;
     fn input_schema(&self) -> serde_json::Value;
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         false

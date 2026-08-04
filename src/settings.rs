@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -15,6 +17,18 @@ pub struct Settings {
     #[serde(rename = "permissionMode")]
     pub permission_mode: Option<String>,
     pub hooks: HooksConfig,
+    #[serde(rename = "mcpServers")]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
+}
+
+/// MCP server 定义（对标 Claude Code mcpServers）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServerConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -69,6 +83,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     }
     if !layer.hooks.post_tool_use.is_empty() {
         base.hooks.post_tool_use = layer.hooks.post_tool_use;
+    }
+    if !layer.mcp_servers.is_empty() {
+        base.mcp_servers = layer.mcp_servers;
     }
 }
 

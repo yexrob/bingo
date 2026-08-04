@@ -117,7 +117,7 @@ async fn gate_tool(
 ) -> (PermissionBehavior, String, serde_json::Value) {
     let (hook_behavior, hook_reason, hook_input) = run_pre_tool_use(
         hooks,
-        tool.name(),
+        &tool.name(),
         input,
         permission_mode_str(mode),
     )
@@ -164,6 +164,14 @@ fn render_result(result: &ToolResult) -> String {
     }
 }
 
+fn result_block(tool_use_id: &str, result: &ToolResult) -> ContentBlock {
+    if result.is_error {
+        tool_result_error(tool_use_id, render_result(result))
+    } else {
+        tool_result_text(tool_use_id, render_result(result))
+    }
+}
+
 /// 一轮查询的上下文。
 pub struct QueryConfig<'a> {
     pub client: &'a Client,
@@ -186,7 +194,7 @@ pub async fn run_query(cfg: QueryConfig<'_>, user_input: &str) -> Result<(), Que
         transcript,
         initial_messages,
     } = cfg;
-    let tools = crate::tools::base_tools();
+    let tools = crate::tools::assemble_tools(&settings.mcp_servers).await;
     let ctx = ToolContext {
         cwd: std::env::current_dir()
             .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
@@ -245,7 +253,7 @@ pub async fn run_query(cfg: QueryConfig<'_>, user_input: &str) -> Result<(), Que
         for outcome in outcomes {
             match outcome.result {
                 Ok(result) => {
-                    blocks.push(tool_result_text(&outcome.tool_use_id, render_result(&result)));
+                    blocks.push(result_block(&outcome.tool_use_id, &result));
                     if let Some(ContentBlock::ToolUse { name, input, .. }) = tool_uses
                         .iter()
                         .find(|t| matches!(t, ContentBlock::ToolUse { id, .. } if id == &outcome.tool_use_id))

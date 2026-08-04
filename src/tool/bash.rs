@@ -31,12 +31,12 @@ impl Default for BashTool {
 
 #[async_trait]
 impl Tool for BashTool {
-    fn name(&self) -> &'static str {
-        "Bash"
+    fn name(&self) -> String {
+        "Bash".to_string()
     }
 
-    fn description(&self) -> &'static str {
-        "在本地 shell 中执行命令，返回 stdout/stderr 与退出码。"
+    fn description(&self) -> String {
+        "在本地 shell 中执行命令，返回 stdout/stderr 与退出码。".to_string()
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -107,6 +107,7 @@ impl Tool for BashTool {
 
         Ok(ToolResult {
             content: serde_json::Value::String(text),
+            is_error: false,
         })
     }
 }

@@ -74,11 +74,11 @@ mod tests {
 
     #[async_trait]
     impl Tool for FakeTool {
-        fn name(&self) -> &'static str {
-            self.name
+        fn name(&self) -> String {
+            self.name.to_string()
         }
-        fn description(&self) -> &'static str {
-            ""
+        fn description(&self) -> String {
+            String::new()
         }
         fn input_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object"})
@@ -101,6 +101,7 @@ mod tests {
             self.counter.fetch_add(1, Ordering::SeqCst);
             Ok(ToolResult {
                 content: serde_json::Value::Null,
+                is_error: false,
             })
         }
     }

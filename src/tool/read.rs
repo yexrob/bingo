@@ -30,12 +30,12 @@ impl Default for ReadTool {
 
 #[async_trait]
 impl Tool for ReadTool {
-    fn name(&self) -> &'static str {
-        "Read"
+    fn name(&self) -> String {
+        "Read".to_string()
     }
 
-    fn description(&self) -> &'static str {
-        "读取文件内容，支持绝对路径与相对路径。"
+    fn description(&self) -> String {
+        "读取文件内容，支持绝对路径与相对路径。".to_string()
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -91,6 +91,7 @@ impl Tool for ReadTool {
 
         Ok(ToolResult {
             content: serde_json::Value::String(text),
+            is_error: false,
         })
     }
 }
