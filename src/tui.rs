@@ -1025,7 +1025,7 @@ fn _assert_send(_: Pin<Box<dyn std::future::Future<Output = bool> + Send>>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsmarkdown_tui::activities::{ToolCall, ToolStatus};
+    use rsmarkdown_tui::activities::ToolCall;
 
     fn test_chat() -> BingoChat {
         let (events_tx, events_rx) = mpsc::unbounded_channel();

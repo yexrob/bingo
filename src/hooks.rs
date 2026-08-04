@@ -6,7 +6,10 @@ use thiserror::Error;
 use crate::permission::PermissionBehavior;
 use crate::settings::{HookRule, HooksConfig};
 
+/// 普通 hook 超时。
 const HOOK_TIMEOUT: Duration = Duration::from_secs(60);
+/// SessionEnd 快速收尾超时（对标 Claude Code SESSION_END_HOOK_TIMEOUT_MS_DEFAULT 1.5s）。
+const SESSION_END_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Error)]
 pub enum HookError {
@@ -47,6 +50,10 @@ fn commands_for<'a>(config: &'a HooksConfig, event: &'a str, tool_name: &str) ->
         "PostToolUse" => matched(&config.post_tool_use, tool_name),
         "PreCompact" => matched(&config.pre_compact, tool_name),
         "PostCompact" => matched(&config.post_compact, tool_name),
+        "UserPromptSubmit" => matched(&config.user_prompt_submit, tool_name),
+        "Stop" => matched(&config.stop, tool_name),
+        "SessionStart" => matched(&config.session_start, tool_name),
+        "SessionEnd" => matched(&config.session_end, tool_name),
         _ => return Vec::new(),
     };
     rules
@@ -60,9 +67,10 @@ fn commands_for<'a>(config: &'a HooksConfig, event: &'a str, tool_name: &str) ->
 /// 执行一条 hook：stdin 喂 JSON，stdout 解析 JSON。
 /// 返回 (退出码, stdout JSON, stderr)。退出码语义对标 Claude Code：
 /// 0 = 成功；2 = blocking（stderr 注入模型）；其他非零 = 仅用户可见。
-async fn run_hook(
+async fn run_hook_with_timeout(
     command: &str,
     input: &serde_json::Value,
+    timeout: Duration,
 ) -> Result<(i32, serde_json::Value, String), HookError> {
     let mut child = tokio::process::Command::new("/bin/zsh")
         .arg("-c")
@@ -85,7 +93,7 @@ async fn run_hook(
     }
     drop(stdin);
 
-    let output = tokio::time::timeout(HOOK_TIMEOUT, child.wait_with_output())
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
         .map_err(|_| HookError::Failed(format!("hook timed out: {command}")))?;
     let output = output.map_err(|e| HookError::Failed(format!("wait failed: {e}")))?;
@@ -104,6 +112,13 @@ async fn run_hook(
         }
     };
     Ok((code, parsed, stderr.trim().to_string()))
+}
+
+async fn run_hook(
+    command: &str,
+    input: &serde_json::Value,
+) -> Result<(i32, serde_json::Value, String), HookError> {
+    run_hook_with_timeout(command, input, HOOK_TIMEOUT).await
 }
 
 /// PreToolUse：按顺序执行所有匹配 hook；任一返回 deny/ask 即生效，
@@ -235,6 +250,102 @@ pub async fn run_post_tool_use(
     blocked
 }
 
+/// UserPromptSubmit：用户提交消息时执行。exit 2 / JSON decision=block → 阻止本次提交。
+pub async fn run_user_prompt_submit(
+    config: &HooksConfig,
+    prompt: &str,
+    permission_mode: &str,
+) -> bool {
+    let commands = commands_for(config, "UserPromptSubmit", "");
+    for command in commands {
+        let input = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "user_prompt": prompt,
+            "permission_mode": permission_mode,
+        });
+        match run_hook(command, &input).await {
+            Ok((2, _, stderr)) => {
+                eprintln!("[bingo] UserPromptSubmit hook blocked: {stderr}");
+                return true;
+            }
+            Ok((code, output, stderr)) => {
+                if code != 0 {
+                    eprintln!("[bingo] UserPromptSubmit hook exited {code}: {stderr}");
+                    continue;
+                }
+                let blocked = output
+                    .get("decision")
+                    .and_then(|d| d.as_str())
+                    .is_some_and(|d| d == "block");
+                if blocked {
+                    eprintln!("[bingo] UserPromptSubmit hook blocked the prompt");
+                    return true;
+                }
+            }
+            Err(e) => {
+                eprintln!("[bingo] UserPromptSubmit hook warning: {e}");
+            }
+        }
+    }
+    false
+}
+
+/// Stop：回合正常结束时执行。exit 2 → 返回 blocking stderr（调用方注入模型并重试）。
+pub async fn run_stop_hooks(
+    config: &HooksConfig,
+    permission_mode: &str,
+) -> Option<String> {
+    let commands = commands_for(config, "Stop", "");
+    for command in commands {
+        let input = serde_json::json!({
+            "hook_event_name": "Stop",
+            "permission_mode": permission_mode,
+        });
+        match run_hook(command, &input).await {
+            Ok((2, _, stderr)) => {
+                eprintln!("[bingo] Stop hook blocked continuation: {stderr}");
+                return Some(stderr);
+            }
+            Ok((code, _, stderr)) if code != 0 => {
+                eprintln!("[bingo] Stop hook exited {code}: {stderr}");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[bingo] Stop hook warning: {e}");
+            }
+        }
+    }
+    None
+}
+
+/// SessionStart：会话开始时执行（无决策语义，失败不阻断）。
+pub async fn run_session_start(config: &HooksConfig, permission_mode: &str) {
+    let commands = commands_for(config, "SessionStart", "");
+    for command in commands {
+        let input = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "permission_mode": permission_mode,
+        });
+        if let Err(e) = run_hook(command, &input).await {
+            eprintln!("[bingo] SessionStart hook warning: {e}");
+        }
+    }
+}
+
+/// SessionEnd：会话结束时执行。快速超时（1.5s，对标 Claude Code）。
+pub async fn run_session_end(config: &HooksConfig, permission_mode: &str) {
+    let commands = commands_for(config, "SessionEnd", "");
+    for command in commands {
+        let input = serde_json::json!({
+            "hook_event_name": "SessionEnd",
+            "permission_mode": permission_mode,
+        });
+        if let Err(e) = run_hook_with_timeout(command, &input, SESSION_END_TIMEOUT).await {
+            eprintln!("[bingo] SessionEnd hook warning: {e}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +446,41 @@ mod tests {
         )
         .await;
         assert!(blocked);
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_exit_two_blocks_prompt() {
+        let config = serde_json::from_value(serde_json::json!({
+            "UserPromptSubmit": [{
+                "hooks": [{"type": "command", "command": "echo denied >&2; exit 2"}]
+            }]
+        }))
+        .unwrap();
+        let blocked = run_user_prompt_submit(&config, "hello", "default").await;
+        assert!(blocked);
+    }
+
+    #[tokio::test]
+    async fn stop_hook_exit_two_returns_blocking_stderr() {
+        let config = serde_json::from_value(serde_json::json!({
+            "Stop": [{
+                "hooks": [{"type": "command", "command": "echo review pending >&2; exit 2"}]
+            }]
+        }))
+        .unwrap();
+        let blocking = run_stop_hooks(&config, "default").await;
+        assert_eq!(blocking.as_deref(), Some("review pending"));
+    }
+
+    #[tokio::test]
+    async fn stop_hook_clean_exit_no_blocking() {
+        let config = serde_json::from_value(serde_json::json!({
+            "Stop": [{
+                "hooks": [{"type": "command", "command": "exit 0"}]
+            }]
+        }))
+        .unwrap();
+        let blocking = run_stop_hooks(&config, "default").await;
+        assert_eq!(blocking, None);
     }
 }

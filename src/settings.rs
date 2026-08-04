@@ -22,6 +22,17 @@ pub struct Settings {
     pub hooks: HooksConfig,
     #[serde(rename = "mcpServers")]
     pub mcp_servers: HashMap<String, McpServerConfig>,
+    /// 权限规则表（对标 Claude Code permissions.allow/deny/ask，规则语法 `Tool(content)`）。
+    pub permissions: PermissionRules,
+}
+
+/// 权限规则（对标 Claude Code settings permissions 段）。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PermissionRules {
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    pub ask: Vec<String>,
 }
 
 /// MCP server 定义（对标 Claude Code mcpServers）。
@@ -45,6 +56,14 @@ pub struct HooksConfig {
     pub pre_compact: Vec<HookRule>,
     #[serde(rename = "PostCompact")]
     pub post_compact: Vec<HookRule>,
+    #[serde(rename = "UserPromptSubmit")]
+    pub user_prompt_submit: Vec<HookRule>,
+    #[serde(rename = "Stop")]
+    pub stop: Vec<HookRule>,
+    #[serde(rename = "SessionStart")]
+    pub session_start: Vec<HookRule>,
+    #[serde(rename = "SessionEnd")]
+    pub session_end: Vec<HookRule>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -99,6 +118,25 @@ fn merge(base: &mut Settings, layer: Settings) {
     }
     if !layer.hooks.post_compact.is_empty() {
         base.hooks.post_compact = layer.hooks.post_compact;
+    }
+    if !layer.permissions.allow.is_empty() {
+        base.permissions.allow.extend(layer.permissions.allow);
+    }
+    if !layer.permissions.deny.is_empty() {
+        base.permissions.deny.extend(layer.permissions.deny);
+    }
+    if !layer.permissions.ask.is_empty() {
+        base.permissions.ask.extend(layer.permissions.ask);
+    }
+    for (base_hooks, layer_hooks) in [
+        (&mut base.hooks.user_prompt_submit, &layer.hooks.user_prompt_submit),
+        (&mut base.hooks.stop, &layer.hooks.stop),
+        (&mut base.hooks.session_start, &layer.hooks.session_start),
+        (&mut base.hooks.session_end, &layer.hooks.session_end),
+    ] {
+        if !layer_hooks.is_empty() {
+            *base_hooks = layer_hooks.clone();
+        }
     }
 }
 

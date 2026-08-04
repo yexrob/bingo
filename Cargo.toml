@@ -19,5 +19,7 @@ rmcp = { version = "3.1", features = ["client", "transport-child-process"] }
 mcp-client = "0.1.0"
 ratatui = "0.30.2"
 crossterm = "0.29.0"
+globset = "0.4.20"
+regex = "1.13.1"
 
 [dev-dependencies]

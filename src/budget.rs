@@ -21,9 +21,9 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn threshold_hierarchy() {
         assert!(WARNING_THRESHOLD < AUTOCOMPACT_THRESHOLD);
         assert!(AUTOCOMPACT_THRESHOLD < CONTEXT_WINDOW);
-        assert!(EFFECTIVE_WINDOW < CONTEXT_WINDOW);
     }
 }

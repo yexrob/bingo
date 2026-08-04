@@ -125,24 +125,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     });
 
-    if cli.print {
-        let prompt = if !cli.prompt.is_empty() {
-            cli.prompt.join(" ")
+    let mode_str = session.permission_mode_str();
+    crate::hooks::run_session_start(&session.settings.hooks, mode_str).await;
+
+    let result = async {
+        if cli.print {
+            let prompt = if !cli.prompt.is_empty() {
+                cli.prompt.join(" ")
+            } else {
+                let mut input = String::new();
+                std::io::stdin().read_to_string(&mut input)?;
+                input.trim().to_string()
+            };
+            if prompt.is_empty() {
+                eprintln!("no prompt provided");
+                std::process::exit(1);
+            }
+            let mut ui = headless_hooks();
+            let outcome = run_query(&session, initial_messages, &prompt, &mut ui, None).await?;
+            extract_memory(&session, &outcome.messages, &home, &project_dir).await;
         } else {
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input)?;
-            input.trim().to_string()
-        };
-        if prompt.is_empty() {
-            eprintln!("no prompt provided");
-            std::process::exit(1);
+            drop(initial_messages); // 交互模式下 --continue 历史由后续轮次复用
+            tui::run_tui_session(session.clone())?;
         }
-        let mut ui = headless_hooks();
-        let outcome = run_query(&session, initial_messages, &prompt, &mut ui, None).await?;
-        extract_memory(&session, &outcome.messages, &home, &project_dir).await;
-    } else {
-        drop(initial_messages); // 交互模式下 --continue 历史由后续轮次复用
-        tui::run_tui_session(session)?;
+        Ok::<(), Box<dyn std::error::Error>>(())
     }
-    Ok(())
+    .await;
+
+    crate::hooks::run_session_end(&session.settings.hooks, mode_str).await;
+    result
 }

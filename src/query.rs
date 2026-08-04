@@ -12,7 +12,7 @@ use crate::api::types::{
 };
 use crate::budget::MAX_RESULT_CHARS;
 use crate::compact::check_and_compact;
-use crate::hooks::{run_post_tool_use, run_pre_tool_use};
+use crate::hooks::{run_post_tool_use, run_pre_tool_use, run_stop_hooks, run_user_prompt_submit};
 use crate::permission::{can_use_tool, PermissionBehavior, PermissionMode};
 use crate::settings::{HooksConfig, Settings};
 use crate::tool::executor::{execute_calls, PendingCall};
@@ -213,6 +213,7 @@ async fn gate_tool(
     input: &serde_json::Value,
     mode: PermissionMode,
     hooks: &HooksConfig,
+    permissions: &crate::settings::PermissionRules,
     ask: &AskFn,
 ) -> (PermissionBehavior, String, serde_json::Value) {
     let (hook_behavior, hook_reason, hook_input) = run_pre_tool_use(
@@ -226,7 +227,14 @@ async fn gate_tool(
         return (hook_behavior, hook_reason, hook_input);
     }
 
-    let decision = can_use_tool(tool, &hook_input, mode);
+    let decision = can_use_tool(
+        tool,
+        &hook_input,
+        mode,
+        &permissions.deny,
+        &permissions.ask,
+        &permissions.allow,
+    );
     match decision.behavior {
         PermissionBehavior::Ask => {
             let reason = decision.reason;
@@ -251,6 +259,12 @@ fn permission_mode_str(mode: PermissionMode) -> &'static str {
         PermissionMode::BypassPermissions => "bypassPermissions",
         PermissionMode::DontAsk => "dontAsk",
         PermissionMode::Plan => "plan",
+    }
+}
+
+impl Session {
+    pub fn permission_mode_str(&self) -> &'static str {
+        permission_mode_str(self.permission_mode)
     }
 }
 
@@ -313,6 +327,15 @@ pub async fn run_query(
             .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
     };
 
+    // UserPromptSubmit：hook 可阻止本次提交（对标 Claude Code）。
+    if run_user_prompt_submit(&session.settings.hooks, user_input, permission_mode_str(session.permission_mode)).await
+    {
+        return Ok(QueryOutcome {
+            messages: initial_messages,
+            aborted: false,
+        });
+    }
+
     let mut messages = initial_messages;
     messages.push(Message::user_text(user_input));
     if let Some(t) = &session.transcript
@@ -321,6 +344,7 @@ pub async fn run_query(
         (ui.on_warning)(format!("transcript append failed: {e}"));
     }
     let mut recovery_count = 0u32;
+    let mut stop_hook_fired = false;
     let mut cancel_rx = cancel;
     loop {
         check_and_compact(session, &mut messages).await;
@@ -353,6 +377,20 @@ pub async fn run_query(
                 messages.push(Message::user_text(MAX_TOKENS_RESUME_PROMPT));
                 continue;
             }
+            // Stop hooks：exit 2 → blocking stderr 注入模型并重试一次（防循环）。
+            if !stop_hook_fired
+                && let Some(blocking) = run_stop_hooks(
+                    &session.settings.hooks,
+                    permission_mode_str(session.permission_mode),
+                )
+                .await
+            {
+                stop_hook_fired = true;
+                messages.push(Message::user_text(format!(
+                    "（Stop hook 阻止继续）\n{blocking}"
+                )));
+                continue;
+            }
             println!();
             return Ok(QueryOutcome { messages, aborted: false });
         }
@@ -378,6 +416,7 @@ pub async fn run_query(
                 &input,
                 session.permission_mode,
                 &session.settings.hooks,
+                &session.settings.permissions,
                 &*ui.ask,
             )
             .await;
@@ -490,7 +529,7 @@ mod tests {
     fn clamps_400_recomputation() {
         // max(3000, C − A − 1000)：窗口只剩 500 → 保底 3000
         let rem = 200_000u64.checked_sub(198_500).unwrap();
-        let recomputed = rem.checked_sub(1000).unwrap_or(0).max(3000);
+        let recomputed = rem.saturating_sub(1000).max(3000);
         assert_eq!(recomputed, 3000);
     }
 }

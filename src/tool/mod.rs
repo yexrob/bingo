@@ -6,8 +6,13 @@ use thiserror::Error;
 
 pub mod agent;
 pub mod bash;
+pub mod edit;
 pub mod executor;
+pub mod glob;
+pub mod grep;
 pub mod read;
+pub mod webfetch;
+pub mod write;
 
 /// 工具执行上下文：随 queryLoop 一轮共享。
 #[derive(Debug, Clone)]
@@ -48,6 +53,10 @@ pub trait Tool: Send + Sync {
         false
     }
     fn is_destructive(&self, _input: &serde_json::Value) -> bool {
+        false
+    }
+    /// 编辑类工具（Edit/Write 等）：acceptEdits 模式下自动允许，其他模式照常询问。
+    fn is_edit_tool(&self, _input: &serde_json::Value) -> bool {
         false
     }
     async fn call(

@@ -132,8 +132,8 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn compact_threshold_matches_budget() {
         assert!(AUTOCOMPACT_THRESHOLD < crate::budget::CONTEXT_WINDOW);
-        assert!(WARNING_THRESHOLD < AUTOCOMPACT_THRESHOLD);
     }
 }

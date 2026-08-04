@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn skips_empty_memory_files() {
         let tmp = std::env::temp_dir().join("bingo-memory-test");
-        let _ = std::fs::create_dir_all(&tmp.join(".claude"));
+        let _ = std::fs::create_dir_all(tmp.join(".claude"));
         std::fs::write(tmp.join("CLAUDE.md"), "  \n").unwrap();
         let memory = load_memory(&tmp, &tmp);
         assert!(memory.project.is_none());

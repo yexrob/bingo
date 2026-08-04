@@ -3,7 +3,12 @@ use std::sync::Arc;
 use crate::query::Session;
 use crate::tool::agent::AgentTool;
 use crate::tool::bash::BashTool;
+use crate::tool::edit::EditTool;
+use crate::tool::glob::GlobTool;
+use crate::tool::grep::GrepTool;
 use crate::tool::read::ReadTool;
+use crate::tool::webfetch::WebFetchTool;
+use crate::tool::write::WriteTool;
 use crate::tool::Tool;
 
 /// 基础工具池（对标 getAllBaseTools 的最小面）+ MCP + 子代理。
@@ -14,6 +19,11 @@ pub async fn assemble_tools(
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(BashTool::new()),
         Box::new(ReadTool::new()),
+        Box::new(GlobTool),
+        Box::new(GrepTool),
+        Box::new(EditTool),
+        Box::new(WriteTool),
+        Box::new(WebFetchTool),
         Box::new(AgentTool::new(session.clone())),
     ];
     match crate::mcp::connect_servers(&session.settings.mcp_servers).await {
