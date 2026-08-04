@@ -203,6 +203,7 @@ impl BingoChat {
                         digest: None,
                         stage: thinking_stage(self.messages.len()),
                         tokens: None,
+                        start_tick: self.tick,
                     }));
                     hint.expand_hint = Some("ctrl+o to expand".to_string());
                     if let Some(i) = self.stream_msg {
@@ -259,10 +260,11 @@ impl BingoChat {
                             let content = self.render_thinking(&buf);
                             let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                                 state: ThinkingState::Running,
-                                duration_ms: self.tick * 33,
+                                duration_ms: self.tick.saturating_sub(self.turn_start_tick) * 33,
                                 digest: None,
                                 stage: thinking_stage(self.messages.len()),
                                 tokens: None,
+                                start_tick: self.tick,
                             }));
                             hint.set_content(content);
                             hint.expand_hint = Some("ctrl+o to expand".to_string());
@@ -272,6 +274,21 @@ impl BingoChat {
                 }
                 UiEvent::OutputTokens(_tokens) => {}
                 UiEvent::ToolStart { name } => {
+                    // 模型转向工具调用：正在进行的 thinking 段到此结束，
+                    // 块转完成态（新段到达时再开新块）。
+                    if let Some(i) = self.stream_msg {
+                        for hint in &mut self.messages[i].activities {
+                            if let ActivityKind::Thinking(t) = &mut hint.kind
+                                && t.state == ThinkingState::Running
+                            {
+                                t.state = ThinkingState::Done;
+                                t.duration_ms = self
+                                    .tick
+                                    .saturating_sub(t.start_tick)
+                                    .saturating_mul(33);
+                            }
+                        }
+                    }
                     let name: &'static str = Box::leak(name.into_boxed_str());
                     let mut hint = Activity::new(ActivityKind::Tool(ToolCall::running(
                         name, "",
@@ -323,7 +340,10 @@ impl BingoChat {
                                 && t.state == ThinkingState::Running
                             {
                                 t.state = ThinkingState::Done;
-                                t.duration_ms = self.tick * 33;
+                                t.duration_ms = self
+                                    .tick
+                                    .saturating_sub(t.start_tick)
+                                    .saturating_mul(33);
                                 hint.expanded = false;
                             }
                         }
@@ -432,9 +452,15 @@ impl BingoChat {
             let _ = events.send(UiEvent::TurnStart);
             let mut ui = tui_hooks(events.clone(), asks);
             // 多轮连续性：加载 transcript 历史作为本轮上下文（每轮独立 run_query）。
+            // 新 session 的文件尚未创建（首次 append 才落盘）→ NotFound 视为空历史。
             let history = match session.transcript.as_ref() {
                 Some(t) => match t.load_messages() {
                     Ok(msgs) => msgs,
+                    Err(crate::transcript::TranscriptError::Io(e))
+                        if e.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        Vec::new()
+                    }
                     Err(e) => {
                         (ui.on_warning)(format!("transcript load failed: {e}"));
                         Vec::new()
@@ -884,7 +910,7 @@ impl Component for BingoChat {
 
     fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
-        // 运行态 thinking 连续计时（相对 turn 起点），不依赖 delta 到达。
+        // 运行态 thinking 每块独立计时（相对各自 start_tick），不依赖 delta 到达。
         for msg in &mut self.messages {
             for act in &mut msg.activities {
                 if let ActivityKind::Thinking(t) = &mut act.kind
@@ -892,7 +918,7 @@ impl Component for BingoChat {
                 {
                     t.duration_ms = self
                         .tick
-                        .saturating_sub(self.turn_start_tick)
+                        .saturating_sub(t.start_tick)
                         .saturating_mul(33);
                 }
             }

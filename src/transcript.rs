@@ -7,7 +7,7 @@ use crate::api::types::Message;
 
 #[derive(Debug, Error)]
 pub enum TranscriptError {
-    #[error("failed to write transcript: {0}")]
+    #[error("transcript io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("failed to parse transcript line: {0}")]
     Parse(#[from] serde_json::Error),
