@@ -83,11 +83,19 @@
   - `Edit`：old_string 精确替换（replace_all 支持）、is_destructive + is_edit_tool
   - `Write`：覆盖写 + 自动建父目录
   - `WebFetch`：HTML→纯文本轻量转换、30s 超时、100k 截断（简化自 CC 的 readability 管线）
-- **acceptEdits 语义**：`is_edit_tool` trait 标记（Edit/Write），acceptEdits 模式自动允许；Bash 等其他工具照常询问——**未实现**：CC 的 diff 预览（依赖编辑器侧，本地 CLI 无 IDE 集成）。
+- **acceptEdits 语义**：`is_edit_tool` trait 标记（Edit/Write），acceptEdits 模式自动允许；Bash 等其他工具照常询问。**diff 预览已落地**（见第 7 节，利用 rsmarkdown-tui 内建的 `ActivityKind::Diff`）。
 - **权限规则表**：settings `permissions.allow/deny/ask`，规则语法 `Tool(content)`（`Bash(git *)` 命令前缀、路径工具前缀匹配、`mcp__server` 前缀）；判定顺序对标 CC：deny → ask 规则（**bypass 也尊重**）→ 只读 → safetyCheck → bypass → acceptEdits → allow 规则 → 模式默认。
 - **safetyCheck**：写工具目标含 `.git/.claude/.vscode/.idea` 段 → 必须 ask（bypass/acceptEdits 免疫）。未做 CC 的 shell 配置（.zshrc 等）与 Read 侧检查。
 - **hooks 事件扩展**：UserPromptSubmit（exit 2 / decision:block 阻止提交）、Stop（exit 2 → stderr 注入模型重试一次，防循环）、SessionStart、SessionEnd（1.5s 快速超时，对标 `SESSION_END_HOOK_TIMEOUT_MS_DEFAULT`）。
-- **未做**（留后续）：WebSearch（需外部服务）、diff 预览、CLAUDE_ENV_FILE 会话环境、plugin/权限 hook（prompt/http/agent 型 hook）。
+- **未做**（留后续）：WebSearch（需外部服务）、CLAUDE_ENV_FILE 会话环境、plugin/权限 hook（prompt/http/agent 型 hook）。
+
+## 7. diff 预览（2026-08-04 补）
+
+rsmarkdown-tui 本就内置 unified diff 渲染（`Diff::parse_unified` + `diff_lines` + `ActivityKind::Diff`），此前误判为"缺 IDE 集成"。接入：
+
+- `src/tool/diff.rs`：行级 LCS unified diff 生成器（git 格式，`---/+++/@@/-/+/空格`），与库的 parse 契约对表；大文件（>2000 行）回退全量替换。
+- `ToolResult.diff` 携带预览（**不回填模型**）；`ToolCallDone.diff` 透传到 TUI；Edit/Write 完成时其工具行**原位替换**为 diff 活动（`✻ Edit · path · +N −M`，展开见彩色行）。
+- 实测：Edit `+1 −1`、Write 新建 `+1 −0` 均正确渲染。59 tests。
 
 ### P2 验证（2026-08-04 实测）
 
