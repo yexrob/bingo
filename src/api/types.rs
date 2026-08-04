@@ -133,6 +133,14 @@ struct ContentBlockDeltaPayload {
 #[derive(Debug, Deserialize)]
 struct MessageDeltaPayload {
     delta: MessageDeltaInner,
+    #[serde(default)]
+    usage: Option<UsagePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsagePayload {
+    #[serde(rename = "output_tokens", default)]
+    output_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,7 +173,10 @@ pub enum StreamEvent {
     SignatureDelta { index: usize, signature: String },
     InputJsonDelta { index: usize, partial_json: String },
     BlockStop { index: usize },
-    StopReason { stop_reason: Option<String> },
+    StopReason {
+        stop_reason: Option<String>,
+        output_tokens: Option<u64>,
+    },
     Done,
     ApiError { message: String },
 }
@@ -251,6 +262,7 @@ pub fn parse_sse_event(event: &str, data: &str) -> Result<Option<StreamEvent>, S
                 serde_json::from_str(data).map_err(|e| format!("bad message_delta: {e}"))?;
             Ok(Some(StreamEvent::StopReason {
                 stop_reason: p.delta.stop_reason,
+                output_tokens: p.usage.map(|u| u.output_tokens),
             }))
         }
         "message_stop" => Ok(Some(StreamEvent::Done)),
@@ -303,7 +315,13 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(ev, StreamEvent::StopReason { stop_reason: Some("end_turn".into()) });
+        assert_eq!(
+            ev,
+            StreamEvent::StopReason {
+                stop_reason: Some("end_turn".into()),
+                output_tokens: Some(42)
+            }
+        );
     }
 
     #[test]

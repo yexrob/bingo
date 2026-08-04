@@ -47,6 +47,7 @@ pub struct Session {
 pub struct ToolCallDone {
     pub name: String,
     pub summary: String,
+    pub output: String,
     pub is_error: bool,
 }
 
@@ -215,15 +216,21 @@ fn result_block(tool_use_id: &str, result: &ToolResult) -> ContentBlock {
     }
 }
 
-fn summarize_input(input: &serde_json::Value) -> String {
-    match input {
-        serde_json::Value::Object(map) => map
+fn summarize_input(tool_name: &str, input: &serde_json::Value) -> String {
+    match (tool_name, input) {
+        // Bash 摘要直接显示命令（Claude Code 风格）
+        ("Bash", serde_json::Value::Object(map)) => map
+            .get("command")
+            .and_then(|c| c.as_str())
+            .map(|c| format!("$ {c}"))
+            .unwrap_or_else(|| "Bash".to_string()),
+        (_, serde_json::Value::Object(map)) => map
             .iter()
             .take(1)
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join(" "),
-        other => other.to_string(),
+        (_, other) => other.to_string(),
     }
 }
 
@@ -314,7 +321,8 @@ pub async fn run_query(
                     {
                         (ui.on_tool_done)(&ToolCallDone {
                             name: name.clone(),
-                            summary: summarize_input(input),
+                            summary: summarize_input(name, input),
+                            output: render_result(&result),
                             is_error: result.is_error,
                         });
                         run_post_tool_use(

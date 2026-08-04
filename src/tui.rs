@@ -6,6 +6,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Widget;
 use rsmarkdown_core::{MarkdownProcessor, Renderer};
 use rsmarkdown_tui::activities::{
     layout_activities, Activity, ActivityKind, Thinking, ThinkingState, ToolCall, ToolStatus,
@@ -27,6 +28,8 @@ pub enum UiEvent {
     TurnStart,
     TextDelta(String),
     ThinkingDelta(String),
+    /// message_delta 的输出 token 累计值。
+    OutputTokens(u64),
     ToolStart { name: String },
     ToolDone(ToolCallDone),
     TurnEnd,
@@ -53,12 +56,16 @@ pub fn tui_hooks(
             StreamEvent::ToolUseStart { name, .. } => {
                 let _ = events.send(UiEvent::ToolStart { name: name.clone() });
             }
+            StreamEvent::StopReason { output_tokens: Some(tokens), .. } => {
+                let _ = events.send(UiEvent::OutputTokens(*tokens));
+            }
             _ => {}
         }),
         on_tool_done: Box::new(move |done| {
             let _ = tool_events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
                 name: done.name.clone(),
                 summary: done.summary.clone(),
+                output: done.output.clone(),
                 is_error: done.is_error,
             }));
         }),
@@ -107,6 +114,9 @@ pub struct BingoChat {
     stream_msg: Option<usize>,
     thinking_buf: String,
     activities: Vec<Activity>,
+    /// 当前展开目标：None 表示最近的可展开活动。
+    output_tokens: u64,
+    tick: u64,
     pending_ask: Option<(PermissionRequest, oneshot::Sender<DialogAction>)>,
     processor: MarkdownProcessor,
     renderer: StreamMarkdownRenderer,
@@ -137,6 +147,8 @@ impl BingoChat {
             stream_msg: None,
             thinking_buf: String::new(),
             activities: Vec::new(),
+            output_tokens: 0,
+            tick: 0,
             pending_ask: None,
             processor: MarkdownProcessor::default(),
             renderer: StreamMarkdownRenderer::new(80),
@@ -170,20 +182,31 @@ impl BingoChat {
                     let digest = summarize(&self.thinking_buf);
                     self.activities
                         .retain(|a| !matches!(a.kind, ActivityKind::Thinking(_)));
-                    self.activities.push(Activity::new(ActivityKind::Thinking(
-                        Thinking {
-                            state: ThinkingState::Running,
-                            duration_ms: 0,
-                            digest: (!digest.is_empty()).then_some(digest),
-                            stage: "thinking",
-                        },
-                    )));
+                    let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
+                        state: ThinkingState::Running,
+                        duration_ms: self.tick * 33,
+                        digest: (!digest.is_empty()).then_some(digest),
+                        stage: "thinking",
+                        tokens: (self.output_tokens > 0).then_some(self.output_tokens),
+                    }));
+                    hint.set_content(vec![Line::from(self.thinking_buf.clone())]);
+                    self.activities.push(hint);
+                }
+                UiEvent::OutputTokens(tokens) => {
+                    self.output_tokens = tokens;
+                    for hint in &mut self.activities {
+                        if let ActivityKind::Thinking(t) = &mut hint.kind {
+                            t.tokens = Some(tokens);
+                        }
+                    }
                 }
                 UiEvent::ToolStart { name } => {
                     let name: &'static str = Box::leak(name.into_boxed_str());
-                    self.activities.push(Activity::new(ActivityKind::Tool(
-                        ToolCall::running(name, ""),
+                    let mut hint = Activity::new(ActivityKind::Tool(ToolCall::running(
+                        name, "",
                     )));
+                    hint.expand_hint = Some("ctrl+o to expand".to_string());
+                    self.activities.push(hint);
                 }
                 UiEvent::ToolDone(done) => {
                     for hint in &mut self.activities {
@@ -197,12 +220,32 @@ impl BingoChat {
                                 ToolStatus::Done
                             };
                             call.summary = done.summary.clone();
+                            call.duration_ms = 0;
+                            let content: Vec<Line<'static>> = done
+                                .output
+                                .lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .take(4)
+                                .map(|l| Line::from(l.to_string()))
+                                .collect();
+                            hint.set_content(content);
                         }
                     }
                 }
                 UiEvent::TurnEnd => {
                     self.busy = false;
                     self.stream_msg = None;
+                    self.output_tokens = 0;
+                    for hint in &mut self.activities {
+                        if let ActivityKind::Thinking(t) = &mut hint.kind
+                            && t.state == ThinkingState::Running
+                        {
+                            t.state = ThinkingState::Done;
+                            t.duration_ms = self.tick * 33;
+                            t.digest = Some(summarize(&self.thinking_buf));
+                            hint.expanded = false;
+                        }
+                    }
                     if let Some(i) = self.messages.len().checked_sub(1) {
                         self.messages[i].activities = std::mem::take(&mut self.activities);
                     }
@@ -228,6 +271,30 @@ impl BingoChat {
         {
             self.pending_ask = Some(request);
         }
+    }
+
+    /// 折叠/展开最近的可展开活动（ctrl+o）。
+    fn toggle_recent_expand(&mut self) -> bool {
+        let toggled = Self::toggle_in(&mut self.activities);
+        if toggled {
+            return true;
+        }
+        if let Some(i) = self.messages.len().checked_sub(1) {
+            return Self::toggle_in(&mut self.messages[i].activities);
+        }
+        false
+    }
+
+    fn toggle_in(activities: &mut [Activity]) -> bool {
+        if let Some(i) = activities.iter().rposition(|a| a.expanded) {
+            activities[i].expanded = false;
+            return true;
+        }
+        if let Some(i) = activities.iter().rposition(|a| a.expandable()) {
+            activities[i].expanded = true;
+            return true;
+        }
+        false
     }
 
     fn submit(&mut self) {
@@ -287,24 +354,53 @@ impl Component for BingoChat {
         self.drain_asks();
         self.width = area.width as usize;
 
-        let [chat_area, input_area] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+        // Claude Code 布局：消息区带边框 → 分隔线 → ❯ 输入行
+        let input_height = 2u16;
+        let bordered = area.height.saturating_sub(input_height);
+        let [border_area, sep_area, input_area] = Layout::vertical([
+            Constraint::Length(bordered),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+
+        let block = ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(self.theme.dim())
+            .title(Line::from(vec![
+                Span::styled(" bingo v0.1.0", self.theme.tool_running()),
+                Span::styled(format!(" · {}", self.session.model), self.theme.text()),
+                Span::styled(" ", self.theme.text()),
+            ]));
+        let inner = block.inner(border_area);
+        block.render(border_area, buf);
+
+        for x in 0..sep_area.width {
+            buf.set_string(
+                sep_area.x + x,
+                sep_area.y,
+                "─",
+                ratatui::style::Style::default().fg(self.theme.dim().fg.unwrap_or(
+                    ratatui::style::Color::DarkGray,
+                )),
+            );
+        }
 
         let caret = if self.typing { '▋' } else { ' ' };
         let input_line = Line::from(vec![
-            Span::styled("you › ", self.theme.tool_running()),
+            Span::styled("❯ ", self.theme.tool_running()),
             Span::styled(self.input.clone(), self.theme.text()),
             Span::styled(caret.to_string(), self.theme.tool_running()),
         ]);
         buf.set_line(0, input_area.y, &input_line, input_area.width);
 
-        let spinner = rsmarkdown_tui::activities::spinner(0);
+        let spinner = rsmarkdown_tui::activities::spinner(self.tick);
         let mut rows: Vec<Line<'static>> = Vec::new();
         for i in 0..self.messages.len() {
             match self.messages[i].role {
                 Role::User => {
                     rows.push(Line::from(vec![
-                        Span::styled("you ", self.theme.tool_running()),
+                        Span::styled("❯ ", self.theme.tool_running()),
                         Span::styled(self.messages[i].text.clone(), self.theme.text()),
                     ]));
                 }
@@ -344,15 +440,17 @@ impl Component for BingoChat {
         }
 
         let total = rows.len() as u16;
-        let scroll = self.scroll.min(total.saturating_sub(chat_area.height));
+        let scroll = self
+            .scroll
+            .min(total.saturating_sub(inner.height));
         self.scroll = scroll;
         for (y, line) in rows
             .iter()
             .skip(scroll as usize)
-            .take(chat_area.height as usize)
+            .take(inner.height as usize)
             .enumerate()
         {
-            buf.set_line(0, chat_area.y + y as u16, line, chat_area.width);
+            buf.set_line(inner.x, inner.y + y as u16, line, inner.width);
         }
     }
 
@@ -384,11 +482,19 @@ impl Component for BingoChat {
                         self.typing = !self.typing;
                         true
                     }
+                    KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.toggle_recent_expand();
+                        true
+                    }
                     _ => false,
                 }
             }
             _ => false,
         }
+    }
+
+    fn on_tick(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
     }
 
     fn status(&self) -> String {
@@ -400,7 +506,7 @@ impl Component for BingoChat {
     }
 
     fn hints(&self) -> &'static str {
-        "type + Enter to send · Esc toggles input"
+        "Enter to send · Esc toggles input · ctrl+o expand"
     }
 
     fn footer_badges(&self) -> Vec<FooterBadge> {
@@ -439,6 +545,7 @@ pub fn run_tui_session(session: Arc<Session>) -> Result<(), Box<dyn std::error::
         asks_tx,
         asks_rx,
     ))]);
+    app.set_status_bar(false);
     run_tui(&mut app)?;
     Ok(())
 }

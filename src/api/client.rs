@@ -324,7 +324,7 @@ impl AssistantAccumulator {
                     return Err(format!("block index gap at {index}"));
                 }
             }
-            StreamEvent::StopReason { stop_reason } => {
+            StreamEvent::StopReason { stop_reason, .. } => {
                 self.stop_reason = stop_reason.clone();
             }
             _ => {}
