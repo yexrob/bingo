@@ -139,6 +139,8 @@ pub struct BingoChat {
     /// 上次 draw 的可展开活动行范围（doc 坐标），供鼠标点击折叠/展开。
     activity_ranges: Vec<rsmarkdown_tui::activities::ActivityRowRange>,
     theme: Theme,
+    /// 中断信号：busy 时 Ctrl+C / Esc → send(true)，回合内流读取立即中止。
+    cancel_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl BingoChat {
@@ -179,6 +181,7 @@ impl BingoChat {
             msg_top: 0,
             activity_ranges: Vec::new(),
             theme: Theme::dark(),
+            cancel_tx: tokio::sync::watch::channel(false).0,
         }
     }
 
@@ -444,10 +447,13 @@ impl BingoChat {
             activities: Vec::new(),
         });
         self.busy = true;
+        // 新一轮开始前复位中断信号（同一 Sender 跨轮复用）。
+        let _ = self.cancel_tx.send(false);
 
         let session = self.session.clone();
         let events = self.events.clone();
         let asks = self.asks.clone();
+        let cancel_rx = self.cancel_tx.subscribe();
         tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
             let mut ui = tui_hooks(events.clone(), asks);
@@ -468,11 +474,16 @@ impl BingoChat {
                 },
                 None => Vec::new(),
             };
-            let result = crate::query::run_query(&session, history, &text, &mut ui).await;
+            let result =
+                crate::query::run_query(&session, history, &text, &mut ui, Some(cancel_rx))
+                    .await;
             match result {
-                Ok(messages) => {
+                Ok(outcome) => {
+                    if outcome.aborted {
+                        let _ = events.send(UiEvent::Warning("回合已中断".to_string()));
+                    }
                     let cwd = std::env::current_dir().unwrap_or_default();
-                    crate::memory::extract_memory(&session, &messages, &session.home, &cwd)
+                    crate::memory::extract_memory(&session, &outcome.messages, &session.home, &cwd)
                         .await;
                     let _ = events.send(UiEvent::TurnEnd);
                 }
@@ -822,6 +833,15 @@ impl Component for BingoChat {
     fn event(&mut self, event: Event) -> bool {
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                // 回合运行中：Ctrl+C / Esc 中断当前回合（工具照常跑完，流中止）。
+                if self.busy
+                    && (key.code == KeyCode::Esc
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)))
+                {
+                    let _ = self.cancel_tx.send(true);
+                    return true;
+                }
                 if self.typing {
                     match key.code {
                         KeyCode::Char(c)
@@ -1020,6 +1040,7 @@ mod tests {
             depth: 0,
             home: std::env::temp_dir(),
             quiet: true,
+            compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
         BingoChat::new(session, events_tx, events_rx, asks_tx, asks_rx)
     }

@@ -145,3 +145,4 @@
 
 - goose（aaif-goose/goose，纯 Rust agent，permission 门 + execution + agents 结构）
 - rsmarkdown-tui README（组件 API、活动模型、权限模态契约）
+- [runtime 三方 diff（CC 2.1.88 leak / Codex / bingo 现状与差距分级）](./runtime-diff.md)

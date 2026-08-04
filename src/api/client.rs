@@ -6,12 +6,15 @@ use thiserror::Error;
 
 use super::sse::SseParser;
 use super::types::{parse_sse_event, Request, StreamEvent, API_BASE, API_VERSION};
-use super::types::{ContentBlock, Role, SystemBlock};
+use super::types::{ContentBlock, DEFAULT_MAX_TOKENS, Role, SystemBlock};
 
-pub const MAX_RETRIES: u32 = 2;
+pub const MAX_RETRIES: u32 = 5;
 
 /// 请求整体超时（连接 + 首字节）：服务器无响应时结束等待而不是无限挂。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 400 上下文超限时重算输出预算的下限（对标 Claude Code FLOOR_OUTPUT_TOKENS）。
+const FLOOR_OUTPUT_TOKENS: u32 = 3_000;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -71,13 +74,15 @@ impl Client {
         request: &Request,
     ) -> Result<impl futures_util::Stream<Item = Result<StreamEvent, ClientError>>, ClientError>
     {
+        // 400 上下文超限重算需要修改 max_tokens → 克隆一份可变请求。
+        let mut request = request.clone();
         let mut attempt = 0;
         loop {
             let builder = self
                 .http
                 .post(format!("{}/v1/messages", self.base_url))
                 .headers(self.headers())
-                .json(request);
+                .json(&request);
             match tokio::time::timeout(REQUEST_TIMEOUT, builder.send()).await {
                 Ok(Ok(response)) if response.status().is_success() => {
                     return Ok(self.stream_body(response));
@@ -100,6 +105,23 @@ impl Client {
                 Ok(Ok(response)) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
+                    // 400 输出预算超限：按 "input length and max_tokens exceed context limit: A + B > C"
+                    // 重算 max_tokens = max(3000, C − A − 1000) 重试一次（对标 Claude Code）。
+                    if status.as_u16() == 400
+                        && attempt == 0
+                        && body.contains("exceed context limit")
+                        && let Some((input, window)) = parse_context_limit(&body)
+                        && let Some(recomputed) = window
+                            .checked_sub(input)
+                            .and_then(|rem| rem.checked_sub(1000))
+                            .map(|rem| rem.max(FLOOR_OUTPUT_TOKENS as u64))
+                            .map(|v| v.min(DEFAULT_MAX_TOKENS as u64))
+                        && recomputed != request.max_tokens as u64
+                    {
+                        request.max_tokens = recomputed as u32;
+                        attempt += 1;
+                        continue;
+                    }
                     return Err(ClientError::Api { status: status.as_u16(), body });
                 }
                 Ok(Err(_transport)) if attempt < MAX_RETRIES => {
@@ -221,9 +243,9 @@ impl Client {
     }
 }
 
-/// 指数退避 + jitter：500ms → 1s → 2s。
+/// 指数退避 + jitter：500ms 起，cap 32s（对标 Claude Code 32_000ms 上限）。
 fn backoff(attempt: u32) -> Duration {
-    let base_ms = 500u64 << attempt.min(4);
+    let base_ms = (500u64 << attempt.min(6)).min(32_000);
     let jitter = rand_jitter(base_ms);
     Duration::from_millis(base_ms + jitter)
 }
@@ -239,6 +261,19 @@ fn rand_jitter(scale: u64) -> u64 {
 
 fn retryable(status: &reqwest::StatusCode) -> bool {
     status.is_server_error() || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// 从 400 错误体解析 (input_tokens, context_window)：取消息尾部 "A + B > C" 的 A 与 C。
+fn parse_context_limit(body: &str) -> Option<(u64, u64)> {
+    let nums: Vec<u64> = body
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().ok())
+        .collect::<Option<Vec<_>>>()?;
+    // "input length and max_tokens exceed context limit: 12345 + 64000 > 200000"
+    let input = *nums.get(nums.len().checked_sub(3)?)?;
+    let window = *nums.last()?;
+    (input < window).then_some((input, window))
 }
 
 /// 把一条完整 assistant 回复的流事件累积成回传消息。
@@ -371,7 +406,22 @@ impl AssistantAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::parse_sse_event;
     use crate::api::types::StreamEvent;
+
+    #[test]
+    fn parses_context_limit_error() {
+        let body = "400: input length and max_tokens exceed context limit: 12345 + 64000 > 200000";
+        assert_eq!(parse_context_limit(body), Some((12345, 200000)));
+    }
+
+    #[test]
+    fn rejects_malformed_context_limit() {
+        assert_eq!(parse_context_limit("boom 42"), None);
+        assert_eq!(parse_context_limit("400: overloaded"), None);
+        // A >= C 不可能：保护性拒绝
+        assert_eq!(parse_context_limit("900000 + 64000 > 200000"), None);
+    }
 
     fn ev(event: &str, data: &str) -> StreamEvent {
         parse_sse_event(event, data).unwrap().unwrap()

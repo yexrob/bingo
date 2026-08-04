@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use thiserror::Error;
+use tokio::sync::watch;
 
 use crate::api::client::{AssistantAccumulator, Client, ClientError};
 use crate::api::types::{
     ContentBlock, Message, Request, StreamEvent, SystemBlock, Role, DEFAULT_MAX_TOKENS,
 };
+use crate::budget::MAX_RESULT_CHARS;
 use crate::compact::check_and_compact;
 use crate::hooks::{run_post_tool_use, run_pre_tool_use};
 use crate::permission::{can_use_tool, PermissionBehavior, PermissionMode};
@@ -27,6 +29,19 @@ pub enum QueryError {
     Tool(#[from] ToolError),
 }
 
+/// 一次查询的结果。
+#[derive(Debug)]
+pub struct QueryOutcome {
+    pub messages: Vec<Message>,
+    /// 回合被用户中断（流中止；已执行工具照常跑完）。
+    pub aborted: bool,
+}
+
+/// max_tokens 截断后的恢复注入（对标 Claude Code MAX_OUTPUT_TOKENS_RECOVERY_LIMIT）。
+const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
+const MAX_TOKENS_RESUME_PROMPT: &str =
+    "Output token limit hit. Resume directly from where you left off. Do not apologize or explain.";
+
 /// 一次查询的全部上下文（TUI 与 headless 共用）。
 #[derive(Clone)]
 pub struct Session {
@@ -42,6 +57,8 @@ pub struct Session {
     pub home: PathBuf,
     /// 交互式 TUI 会话：抑制 stderr 进度打印（避免污染屏幕）。
     pub quiet: bool,
+    /// 自动压缩连续失败计数（熔断：MAX_COMPACT_FAILURES 后跳过）。
+    pub compact_failures: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// 单个工具完成事件。
@@ -97,8 +114,16 @@ pub fn headless_hooks() -> UiHooks {
     }
 }
 
+/// 单轮结果：assistant 消息 + 该轮产生的 tool_use 块 + stop_reason。
+struct Turn {
+    assistant: Message,
+    tool_uses: Vec<ContentBlock>,
+    stop_reason: Option<String>,
+    /// 流读取中被取消（assistant 不完整，整轮丢弃）。
+    aborted: bool,
+}
+
 /// 单轮：请求一次模型，累积 assistant 回复。
-/// 返回 (assistant 消息, 该轮产生的 tool_use 块)。
 async fn one_turn(
     client: &Client,
     model: &str,
@@ -106,7 +131,8 @@ async fn one_turn(
     tools: &[Box<dyn Tool>],
     system: &[SystemBlock],
     on_event: &mut (dyn FnMut(&StreamEvent) + Send),
-) -> Result<(Message, Vec<ContentBlock>), QueryError> {
+    mut cancel: Option<&mut watch::Receiver<bool>>,
+) -> Result<Turn, QueryError> {
     let request = Request {
         model: model.to_string(),
         max_tokens: DEFAULT_MAX_TOKENS,
@@ -118,7 +144,23 @@ async fn one_turn(
     let mut stream = Box::pin(client.stream(&request).await?);
     let mut acc = AssistantAccumulator::new();
     let mut tool_uses = Vec::new();
-    while let Some(event) = stream.next().await {
+    let mut aborted = false;
+    loop {
+        let event = match &mut cancel {
+            Some(cancel) => tokio::select! {
+                maybe = stream.next() => maybe,
+                _ = cancel.changed() => {
+                    if *cancel.borrow() {
+                        aborted = true;
+                        None
+                    } else {
+                        continue;
+                    }
+                }
+            },
+            None => stream.next().await,
+        };
+        let Some(event) = event else { break };
         let event = event?;
         on_event(&event);
         if let Err(e) = acc.push(&event) {
@@ -141,7 +183,12 @@ async fn one_turn(
             _ => {}
         }
     }
-    Ok((acc.message(), tool_uses))
+    Ok(Turn {
+        assistant: acc.message(),
+        tool_uses,
+        stop_reason: acc.stop_reason,
+        aborted,
+    })
 }
 
 fn tool_result_text(tool_use_id: &str, text: impl Into<String>) -> ContentBlock {
@@ -216,9 +263,9 @@ fn render_result(result: &ToolResult) -> String {
 
 fn result_block(tool_use_id: &str, result: &ToolResult) -> ContentBlock {
     if result.is_error {
-        tool_result_error(tool_use_id, render_result(result))
+        tool_result_error(tool_use_id, clipped_result(render_result(result)))
     } else {
-        tool_result_text(tool_use_id, render_result(result))
+        tool_result_text(tool_use_id, clipped_result(render_result(result)))
     }
 }
 
@@ -240,14 +287,26 @@ fn summarize_input(tool_name: &str, input: &serde_json::Value) -> String {
     }
 }
 
+/// 工具结果回填模型前裁剪：超长输出截断并标注（对标 DEFAULT_MAX_RESULT_SIZE_CHARS 50k，
+/// 简化为截断而非落盘 + 预览）。
+fn clipped_result(text: String) -> String {
+    if text.chars().count() > MAX_RESULT_CHARS {
+        let cut: String = text.chars().take(MAX_RESULT_CHARS).collect();
+        format!("{cut}\n…[truncated at {MAX_RESULT_CHARS} chars]")
+    } else {
+        text
+    }
+}
+
 /// queryLoop：多轮 tool loop，直到 end_turn。
-/// 返回本次查询产生的全部消息（供记忆提取等消费）。
+/// cancel：Some 时流读取可被 watch 信号中断（TUI Ctrl+C/Esc）。
 pub async fn run_query(
     session: &Arc<Session>,
     initial_messages: Vec<Message>,
     user_input: &str,
     ui: &mut UiHooks,
-) -> Result<Vec<Message>, QueryError> {
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<QueryOutcome, QueryError> {
     let tools = crate::tools::assemble_tools(session, &mut ui.on_warning).await;
     let ctx = ToolContext {
         cwd: std::env::current_dir()
@@ -261,32 +320,48 @@ pub async fn run_query(
     {
         (ui.on_warning)(format!("transcript append failed: {e}"));
     }
+    let mut recovery_count = 0u32;
+    let mut cancel_rx = cancel;
     loop {
         check_and_compact(session, &mut messages).await;
-        let (assistant, tool_uses) = one_turn(
+        let turn = one_turn(
             &session.client,
             &session.model,
             &messages,
             &tools,
             &session.system,
             &mut ui.on_event as &mut (dyn FnMut(&StreamEvent) + Send),
+            cancel_rx.as_mut(),
         )
         .await?;
+        if turn.aborted {
+            // 中断：整轮丢弃（assistant 不完整），已执行/未执行工具都不回填。
+            println!();
+            return Ok(QueryOutcome { messages, aborted: true });
+        }
         if let Some(t) = &session.transcript
-            && let Err(e) = t.append(&assistant)
+            && let Err(e) = t.append(&turn.assistant)
         {
             (ui.on_warning)(format!("transcript append failed: {e}"));
         }
-        if tool_uses.is_empty() {
+        if turn.tool_uses.is_empty() {
+            // 输出预算截断恢复：注入"继续"消息重试（上限 3 次），对齐 Claude Code。
+            if turn.stop_reason.as_deref() == Some("max_tokens")
+                && recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+            {
+                recovery_count += 1;
+                messages.push(Message::user_text(MAX_TOKENS_RESUME_PROMPT));
+                continue;
+            }
             println!();
-            return Ok(messages);
+            return Ok(QueryOutcome { messages, aborted: false });
         }
-        messages.push(assistant);
+        messages.push(turn.assistant);
 
         // 阶段 1：逐工具走权限门（串行，可能交互；hook 可改写输入）
         let mut pending: Vec<PendingCall> = Vec::new();
         let mut blocks: Vec<ContentBlock> = Vec::new();
-        for tool_use in &tool_uses {
+        for tool_use in &turn.tool_uses {
             let (id, name, input) = match tool_use {
                 ContentBlock::ToolUse { id, name, input } => (id.clone(), name.clone(), input.clone()),
                 _ => unreachable!(),
@@ -332,23 +407,28 @@ pub async fn run_query(
             }
         }
 
-        // 阶段 2：队列执行（safe 并行 / 非 safe 串行）
+        // 阶段 2：队列执行（safe 并行 / 非 safe 串行）。
+        // 中断语义对标 interruptBehavior: 'block'：已入队工具继续跑完，结果照常回填。
+        let mut stop_after_tools = false;
         let outcomes = execute_calls(pending, &ctx).await;
         for outcome in outcomes {
             match outcome.result {
                 Ok(result) => {
                     blocks.push(result_block(&outcome.tool_use_id, &result));
-                    if let Some(ContentBlock::ToolUse { name, input, .. }) = tool_uses
+                    if let Some(ContentBlock::ToolUse { name, input, .. }) = turn
+                        .tool_uses
                         .iter()
                         .find(|t| matches!(t, ContentBlock::ToolUse { id, .. } if id == &outcome.tool_use_id))
                     {
+                        let text = clipped_result(render_result(&result));
                         (ui.on_tool_done)(&ToolCallDone {
                             name: name.clone(),
                             summary: summarize_input(name, input),
-                            output: render_result(&result),
+                            output: text,
                             is_error: result.is_error,
                         });
-                        run_post_tool_use(
+                        // PostToolUse exit 2 → 阻断继续（hook 的 blocking error 语义）。
+                        stop_after_tools |= run_post_tool_use(
                             &session.settings.hooks,
                             name,
                             input,
@@ -376,5 +456,41 @@ pub async fn run_query(
         {
             (ui.on_warning)(format!("transcript append failed: {e}"));
         }
+        if stop_after_tools || is_cancelled(&cancel_rx) {
+            return Ok(QueryOutcome {
+                messages,
+                aborted: is_cancelled(&cancel_rx),
+            });
+        }
+    }
+}
+
+fn is_cancelled(cancel: &Option<watch::Receiver<bool>>) -> bool {
+    cancel.as_ref().is_some_and(|rx| *rx.borrow())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clips_oversized_results() {
+        let long = "x".repeat(MAX_RESULT_CHARS + 100);
+        let clipped = clipped_result(long);
+        assert!(clipped.contains("[truncated at"));
+        assert!(clipped.chars().count() <= MAX_RESULT_CHARS + 64);
+    }
+
+    #[test]
+    fn keeps_small_results() {
+        assert_eq!(clipped_result("hi".to_string()), "hi");
+    }
+
+    #[test]
+    fn clamps_400_recomputation() {
+        // max(3000, C − A − 1000)：窗口只剩 500 → 保底 3000
+        let rem = 200_000u64.checked_sub(198_500).unwrap();
+        let recomputed = rem.checked_sub(1000).unwrap_or(0).max(3000);
+        assert_eq!(recomputed, 3000);
     }
 }

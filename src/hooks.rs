@@ -58,10 +58,12 @@ fn commands_for<'a>(config: &'a HooksConfig, event: &'a str, tool_name: &str) ->
 }
 
 /// 执行一条 hook：stdin 喂 JSON，stdout 解析 JSON。
+/// 返回 (退出码, stdout JSON, stderr)。退出码语义对标 Claude Code：
+/// 0 = 成功；2 = blocking（stderr 注入模型）；其他非零 = 仅用户可见。
 async fn run_hook(
     command: &str,
     input: &serde_json::Value,
-) -> Result<serde_json::Value, HookError> {
+) -> Result<(i32, serde_json::Value, String), HookError> {
     let mut child = tokio::process::Command::new("/bin/zsh")
         .arg("-c")
         .arg(command)
@@ -88,23 +90,24 @@ async fn run_hook(
         .map_err(|_| HookError::Failed(format!("hook timed out: {command}")))?;
     let output = output.map_err(|e| HookError::Failed(format!("wait failed: {e}")))?;
 
+    let code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        return Err(HookError::Failed(format!(
-            "hook exited with {:?}: {stderr}",
-            output.status.code()
-        )));
-    }
-    if stdout.trim().is_empty() {
-        return Ok(serde_json::Value::Null);
-    }
-    serde_json::from_str(stdout.trim())
-        .map_err(|e| HookError::Failed(format!("bad hook output JSON: {e}")))
+    let parsed = if stdout.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        match serde_json::from_str(stdout.trim()) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(HookError::Failed(format!("bad hook output JSON: {e}")));
+            }
+        }
+    };
+    Ok((code, parsed, stderr.trim().to_string()))
 }
 
 /// PreToolUse：按顺序执行所有匹配 hook；任一返回 deny/ask 即生效，
-/// updatedInput 累积覆盖输入。hook 失败不阻断（记为 allow）。
+/// updatedInput 累积覆盖输入。exit 2 → 阻塞（stderr 作为原因）；其他失败不阻断。
 pub async fn run_pre_tool_use(
     config: &HooksConfig,
     tool_name: &str,
@@ -123,13 +126,27 @@ pub async fn run_pre_tool_use(
             tool_input: &input,
             permission_mode,
         };
-        let output = match run_hook(command, &serde_json::to_value(hook_input).unwrap()).await {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("[bingo] warning: PreToolUse hook failed: {e}");
-                continue;
-            }
-        };
+        let (code, output, stderr) =
+            match run_hook(command, &serde_json::to_value(hook_input).unwrap()).await {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("[bingo] warning: PreToolUse hook failed: {e}");
+                    continue;
+                }
+            };
+        if code == 2 {
+            // blocking：stderr 注入模型（对标 Claude Code exit 2）。
+            let reason = if stderr.is_empty() {
+                "blocked by PreToolUse hook".to_string()
+            } else {
+                stderr
+            };
+            return (PermissionBehavior::Deny, reason, input);
+        }
+        if code != 0 {
+            eprintln!("[bingo] PreToolUse hook exited {code}: {stderr}");
+            continue;
+        }
         let parsed: PreToolUseOutput = match serde_json::from_value(output) {
             Ok(p) => p,
             Err(e) => {
@@ -183,15 +200,16 @@ pub async fn run_post_compact(config: &HooksConfig, permission_mode: &str) {
     }
 }
 
-/// PostToolUse：执行匹配 hook，输出当前忽略（记录 stderr 失败）。不阻断。
+/// PostToolUse：执行匹配 hook。返回 true = exit 2（阻断继续，对标 Claude Code blocking error）。
 pub async fn run_post_tool_use(
     config: &HooksConfig,
     tool_name: &str,
     tool_input: &serde_json::Value,
     tool_result: &serde_json::Value,
     permission_mode: &str,
-) {
+) -> bool {
     let commands = commands_for(config, "PostToolUse", tool_name);
+    let mut blocked = false;
     for command in commands {
         let input = serde_json::json!({
             "hook_event_name": "PostToolUse",
@@ -200,10 +218,21 @@ pub async fn run_post_tool_use(
             "tool_response": tool_result,
             "permission_mode": permission_mode,
         });
-        if let Err(e) = run_hook(command, &input).await {
-            eprintln!("[bingo] PostToolUse hook warning: {e}");
+        match run_hook(command, &input).await {
+            Ok((2, _, stderr)) => {
+                eprintln!("[bingo] PostToolUse hook blocked continuation: {stderr}");
+                blocked = true;
+            }
+            Ok((code, _, stderr)) if code != 0 => {
+                eprintln!("[bingo] PostToolUse hook exited {code}: {stderr}");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[bingo] PostToolUse hook warning: {e}");
+            }
         }
     }
+    blocked
 }
 
 #[cfg(test)]
@@ -272,5 +301,39 @@ mod tests {
         )
         .await;
         assert_eq!(behavior, PermissionBehavior::Allow);
+    }
+
+    #[tokio::test]
+    async fn exit_two_blocks_with_stderr() {
+        let config = config_with(r#"echo "no git" >&2; exit 2"#);
+        let (behavior, reason, _) = run_pre_tool_use(
+            &config,
+            "Bash",
+            &serde_json::json!({"command": "ls"}),
+            "default",
+        )
+        .await;
+        assert_eq!(behavior, PermissionBehavior::Deny);
+        assert_eq!(reason, "no git");
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_exit_two_blocks() {
+        let config = serde_json::from_value(serde_json::json!({
+            "PostToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": "exit 2"}]
+            }]
+        }))
+        .unwrap();
+        let blocked = run_post_tool_use(
+            &config,
+            "Bash",
+            &serde_json::json!({"command": "ls"}),
+            &serde_json::json!("ok"),
+            "default",
+        )
+        .await;
+        assert!(blocked);
     }
 }

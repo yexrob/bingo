@@ -101,11 +101,14 @@ impl Tool for AgentTool {
             depth: self.session.depth + 1,
             home: self.session.home.clone(),
             quiet: self.session.quiet,
+            compact_failures: self.session.compact_failures.clone(),
         });
 
         let output = Arc::new(Mutex::new(String::new()));
         let mut ui = subagent_hooks(output.clone(), sub_session.permission_mode);
-        match crate::query::run_query(&sub_session, Vec::new(), &params.prompt, &mut ui).await {
+        match crate::query::run_query(&sub_session, Vec::new(), &params.prompt, &mut ui, None)
+            .await
+        {
             Ok(_messages) => {
                 let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 Ok(ToolResult {

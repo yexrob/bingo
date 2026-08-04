@@ -122,6 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         depth: 0,
         home: home.clone(),
         quiet: !cli.print,
+        compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     });
 
     if cli.print {
@@ -137,8 +138,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
         let mut ui = headless_hooks();
-        let messages = run_query(&session, initial_messages, &prompt, &mut ui).await?;
-        extract_memory(&session, &messages, &home, &project_dir).await;
+        let outcome = run_query(&session, initial_messages, &prompt, &mut ui, None).await?;
+        extract_memory(&session, &outcome.messages, &home, &project_dir).await;
     } else {
         drop(initial_messages); // 交互模式下 --continue 历史由后续轮次复用
         tui::run_tui_session(session)?;

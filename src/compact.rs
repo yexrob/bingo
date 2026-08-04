@@ -1,10 +1,11 @@
+use std::sync::atomic::Ordering;
+
 use crate::api::types::{ContentBlock, Message, Request};
+use crate::budget::{AUTOCOMPACT_THRESHOLD, MAX_COMPACT_FAILURES, WARNING_THRESHOLD};
 use crate::hooks::{run_post_compact, run_pre_compact};
 use crate::permission::PermissionMode;
 use crate::query::Session;
 
-/// 压缩触发阈值：占用上下文窗口比例。
-const COMPACT_FRACTION: f64 = 0.9;
 /// 压缩后保留的最近消息条数。
 const KEEP_RECENT: usize = 8;
 
@@ -17,6 +18,7 @@ const COMPACT_PROMPT: &str = "\
 ";
 
 /// 上下文超阈值时自动压缩：旧消息 → 模型摘要，保留最近 KEEP_RECENT 条。
+/// 成功清零熔断计数；失败递增（连续 MAX_COMPACT_FAILURES 次后由调用方跳过）。
 /// 返回是否发生了压缩。
 pub async fn maybe_compact(
     session: &Session,
@@ -26,8 +28,7 @@ pub async fn maybe_compact(
     if messages.len() <= KEEP_RECENT {
         return false;
     }
-    let fraction = tokens as f64 / crate::budget::CONTEXT_WINDOW as f64;
-    if fraction < COMPACT_FRACTION {
+    if tokens < AUTOCOMPACT_THRESHOLD {
         return false;
     }
 
@@ -63,8 +64,12 @@ pub async fn maybe_compact(
         stream: false,
     };
     let summary = match session.client.complete_text(&request).await {
-        Ok(s) => s,
+        Ok(s) => {
+            session.compact_failures.store(0, Ordering::SeqCst);
+            s
+        }
         Err(e) => {
+            session.compact_failures.fetch_add(1, Ordering::SeqCst);
             if !session.quiet {
                 eprintln!("[bingo] warning: context compaction failed: {e}");
             }
@@ -83,7 +88,7 @@ pub async fn maybe_compact(
     true
 }
 
-/// 每轮请求前调用：token 超阈值即压缩。
+/// 每轮请求前调用：token 超阈值即压缩；熔断后跳过并提醒。
 pub async fn check_and_compact(session: &Session, messages: &mut Vec<Message>) {
     let Ok(tokens) = session
         .client
@@ -95,7 +100,21 @@ pub async fn check_and_compact(session: &Session, messages: &mut Vec<Message>) {
     if tokens > 0 && !session.quiet {
         eprintln!("[bingo] context: {tokens} tokens");
     }
-    maybe_compact(session, messages, tokens).await;
+    if tokens >= AUTOCOMPACT_THRESHOLD {
+        if session.compact_failures.load(Ordering::SeqCst) >= MAX_COMPACT_FAILURES {
+            if !session.quiet {
+                eprintln!(
+                    "[bingo] warning: auto-compact disabled after {MAX_COMPACT_FAILURES} consecutive failures"
+                );
+            }
+        } else {
+            maybe_compact(session, messages, tokens).await;
+        }
+    } else if tokens >= WARNING_THRESHOLD && !session.quiet {
+        eprintln!(
+            "[bingo] warning: context at {tokens} tokens, auto-compact at {AUTOCOMPACT_THRESHOLD}"
+        );
+    }
 }
 
 fn permission_mode_str(mode: PermissionMode) -> &'static str {
@@ -113,14 +132,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fraction_threshold() {
-        let tokens = (COMPACT_FRACTION * crate::budget::CONTEXT_WINDOW as f64) as u64;
-        assert!(tokens as f64 / crate::budget::CONTEXT_WINDOW as f64 >= COMPACT_FRACTION);
-    }
-
-    #[test]
-    fn keeps_recent_budget() {
-        let tokens = (COMPACT_FRACTION * crate::budget::CONTEXT_WINDOW as f64) as u64;
-        assert!(tokens > 0);
+    fn compact_threshold_matches_budget() {
+        assert!(AUTOCOMPACT_THRESHOLD < crate::budget::CONTEXT_WINDOW);
+        assert!(WARNING_THRESHOLD < AUTOCOMPACT_THRESHOLD);
     }
 }
