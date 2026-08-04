@@ -132,6 +132,8 @@ struct CollapseGroup {
     read_ops: usize,
     /// 列举操作数（ls/tree/du）。
     list: usize,
+    /// 普通 Bash 操作数（CC fullscreen bash 类）。
+    bash: usize,
     /// 组仍开放（进行中 → 摘要用进行时 + …）。
     active: bool,
     /// ctrl+o / 点击展开组内逐工具。
@@ -147,6 +149,8 @@ enum CollapseKind {
     /// Read 或读取类 Bash：携带文件路径（Bash 类为 None）。
     Read(Option<String>),
     List,
+    /// 非搜索/读/列举的普通 Bash（CC fullscreen isBash 类）。
+    Bash,
 }
 
 /// 折叠组行的点击动作。携带消息索引：点击旧消息的行时目标必须是
@@ -165,12 +169,52 @@ fn classify_tool(name: &str, input: &serde_json::Value) -> Option<CollapseKind> 
             .and_then(|p| p.as_str())
             .map(|p| CollapseKind::Read(Some(p.to_string()))),
         "Grep" | "Glob" => Some(CollapseKind::Search),
-        "Bash" => input
-            .get("command")
-            .and_then(|c| c.as_str())
-            .and_then(classify_bash_command),
+        "Bash" => {
+            let kind = input
+                .get("command")
+                .and_then(|c| c.as_str())
+                .and_then(classify_bash_command);
+            if kind.is_some() {
+                kind
+            } else if input
+                .get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(bash_has_work)
+            {
+                // 非搜索/读/列举的普通命令：折叠为 bash 类（CC fullscreen）。
+                Some(CollapseKind::Bash)
+            } else {
+                // 纯中性命令（echo hi）不折叠。
+                None
+            }
+        }
         _ => None,
     }
+}
+
+/// 命令是否含非中性段（CC hasNonNeutralCommand）：纯 echo/printf 等不折叠。
+fn bash_has_work(command: &str) -> bool {
+    const NEUTRAL: &[&str] = &["echo", "printf", "true", "false", ":"];
+    let mut skip_next = false;
+    for part in command.split(['&', '|', ';']) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if part.starts_with('>') {
+            skip_next = true;
+            continue;
+        }
+        let base = part.split_whitespace().next().unwrap_or("");
+        if !NEUTRAL.contains(&base) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Bash 命令分类（Claude Code isSearchOrReadBashCommand 简化版）：
@@ -296,6 +340,13 @@ fn collapse_summary(g: &CollapseGroup, in_progress: bool) -> String {
             "listed",
             "listing",
             format!(" {} {}", g.list, if g.list == 1 { "directory" } else { "directories" }),
+        );
+    }
+    if g.bash > 0 {
+        push(
+            "ran",
+            "running",
+            format!(" {} bash {}", g.bash, if g.bash == 1 { "command" } else { "commands" }),
         );
     }
     let text = parts.join(", ");
@@ -597,6 +648,7 @@ impl BingoChat {
                             read_paths: Vec::new(),
                             read_ops: 0,
                             list: 0,
+                            bash: 0,
                             active: true,
                             expanded: false,
                             last_hint: None,
@@ -613,6 +665,7 @@ impl BingoChat {
                             None => self.messages[i].groups[g].read_ops += 1,
                         },
                         CollapseKind::List => self.messages[i].groups[g].list += 1,
+                        CollapseKind::Bash => self.messages[i].groups[g].bash += 1,
                     }
                 }
                 UiEvent::RoundEnd => {
@@ -1779,8 +1832,13 @@ mod fold_tests {
         assert_eq!(classify_tool("Read", &json!({})), None);
         assert_eq!(classify_tool("Grep", &json!({"pattern": "x"})), Some(CollapseKind::Search));
         assert_eq!(classify_tool("Glob", &json!({"glob": "**/*.rs"})), Some(CollapseKind::Search));
-        assert_eq!(classify_tool("Bash", &json!({"command": "git log"})), None);
+        // 普通 Bash（含 git log）折叠为 bash 类；纯中性命令不折叠。
+        assert_eq!(classify_tool("Bash", &json!({"command": "git log"})), Some(CollapseKind::Bash));
+        assert_eq!(classify_tool("Bash", &json!({"command": "echo hi"})), None);
+        assert_eq!(classify_tool("Bash", &json!({"command": "cargo test && echo done"})), Some(CollapseKind::Bash));
+        // 非折叠工具（CC 语义：WebSearch/WebFetch 不参与）断组。
         assert_eq!(classify_tool("WebFetch", &json!({"url": "x"})), None);
+        assert_eq!(classify_tool("WebSearch", &json!({"query": "x"})), None);
     }
 
     #[test]
@@ -1791,6 +1849,7 @@ mod fold_tests {
             read_paths: vec!["a.md".into(), "b.md".into(), "c.md".into()],
             read_ops: 0,
             list: 0,
+            bash: 0,
             active: false,
             expanded: false,
             last_hint: None,
@@ -1813,6 +1872,7 @@ mod fold_tests {
             read_paths: vec!["a.md".into(), "a.md".into()],
             read_ops: 0,
             list: 0,
+            bash: 0,
             active: false,
             expanded: false,
             last_hint: None,
@@ -1824,6 +1884,7 @@ mod fold_tests {
             read_paths: vec![],
             read_ops: 2,
             list: 1,
+            bash: 0,
             active: false,
             expanded: false,
             last_hint: None,
@@ -1990,20 +2051,20 @@ mod fold_render_tests {
             name: "Read".into(),
             input: json!({"file_path": "a.md"}),
         });
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Bash".into() });
+        let _ = chat.events.send(UiEvent::ToolStart { name: "WebSearch".into() });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
-            name: "Bash".into(),
-            input: json!({"command": "git status"}),
+            name: "WebSearch".into(),
+            input: json!({"query": "rust"}),
         });
         chat.drain_events();
         let lines = render_lines(&mut chat, 20);
         let joined = lines.join("\n");
         assert!(joined.contains("Read 1 file"), "group rendered: {joined}");
-        assert!(joined.contains("Bash"), "bash independent: {joined}");
+        assert!(joined.contains("WebSearch"), "websearch independent: {joined}");
         assert!(
             !joined.contains("Reading"),
-            "group closed by bash: {joined}"
+            "group closed by websearch: {joined}"
         );
     }
 
@@ -2314,6 +2375,71 @@ mod fold_roundtrip_live_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("3210ms"), "real duration: {joined}");
+    }
+
+    #[test]
+    fn bash_folds_into_group_with_count() {
+        // CC fullscreen：普通 Bash 折叠为 bash 类，摘要 "Ran 2 bash commands"，
+        // 且不与 Read/Search 互断。
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        for (name, input) in [
+            ("Bash", json!({"command": "cargo test"})),
+            ("Read", json!({"file_path": "a.md"})),
+            ("Bash", json!({"command": "npm run build"})),
+        ] {
+            let _ = chat.events.send(UiEvent::ToolStart { name: name.into() });
+            chat.drain_events();
+            let _ = chat.events.send(UiEvent::ToolReady { name: name.into(), input });
+            chat.drain_events();
+        }
+        assert_eq!(chat.messages[0].groups.len(), 1, "all fold into one group");
+        let g = &chat.messages[0].groups[0];
+        assert_eq!(g.bash, 2);
+        assert_eq!(g.read_ops, 0);
+        assert_eq!(g.read_paths, vec!["a.md".to_string()]);
+        assert_eq!(collapse_summary(g, false), "Read 1 file, ran 2 bash commands");
+        assert_eq!(collapse_summary(g, true), "Reading 1 file, running 2 bash commands…");
+        // 全部工具完成后：hint 消失、摘要转过去时、bash 计数保留。
+        for (summary, out) in [
+            ("Bash $ cargo test", "ok"),
+            ("Read a.md", "l1"),
+            ("Bash $ npm run build", "done"),
+        ] {
+            let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: summary.split(' ').next().unwrap().into(),
+                summary: summary.into(),
+                output: out.into(),
+                is_error: false,
+                diff: None,
+                duration_ms: 1,
+            }));
+            chat.drain_events();
+        }
+        let area = Rect { x: 0, y: 0, width: 120, height: 30 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        let joined: String = (0..30)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("Read 1 file, ran 2 bash commands"),
+            "final summary: {joined}"
+        );
     }
 
     #[test]
