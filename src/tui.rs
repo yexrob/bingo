@@ -121,7 +121,6 @@ pub struct BingoChat {
     /// 当前 assistant 消息索引。
     stream_msg: Option<usize>,
     thinking_buf: String,
-    activities: Vec<Activity>,
     output_tokens: u64,
     tick: u64,
     warnings: Vec<String>,
@@ -157,7 +156,6 @@ impl BingoChat {
             busy: false,
             stream_msg: None,
             thinking_buf: String::new(),
-            activities: Vec::new(),
             output_tokens: 0,
             tick: 0,
             warnings: Vec::new(),
@@ -189,6 +187,19 @@ impl BingoChat {
                     });
                     self.stream_msg = Some(self.messages.len() - 1);
                     self.busy = true;
+                    // 占位 thinking：端点延迟推送 delta 时（DeepSeek 常达数十秒），
+                    // 运行态行立即可见，用户能感知"正在思考"。
+                    let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
+                        state: ThinkingState::Running,
+                        duration_ms: 0,
+                        digest: None,
+                        stage: thinking_stage(self.messages.len()),
+                        tokens: None,
+                    }));
+                    hint.expand_hint = Some("ctrl+o to expand".to_string());
+                    if let Some(i) = self.stream_msg {
+                        self.messages[i].activities.push(hint);
+                    }
                 }
                 UiEvent::TextDelta(text) => {
                     if let Some(i) = self.stream_msg {
@@ -196,18 +207,22 @@ impl BingoChat {
                     }
                 }
                 UiEvent::ThinkingDelta(thinking) => {
-                    self.thinking_buf.push_str(&thinking);
-                    self.activities
-                        .retain(|a| !matches!(a.kind, ActivityKind::Thinking(_)));
-                    let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
-                        state: ThinkingState::Running,
-                        duration_ms: self.tick * 33,
-                        digest: None,
-                        stage: thinking_stage(self.messages.len()),
-                        tokens: None,
-                    }));
-                    hint.set_content(vec![Line::from(self.thinking_buf.clone())]);
-                    self.activities.push(hint);
+                    if let Some(i) = self.stream_msg {
+                        self.thinking_buf.push_str(&thinking);
+                        self.messages[i]
+                            .activities
+                            .retain(|a| !matches!(a.kind, ActivityKind::Thinking(_)));
+                        let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
+                            state: ThinkingState::Running,
+                            duration_ms: self.tick * 33,
+                            digest: None,
+                            stage: thinking_stage(self.messages.len()),
+                            tokens: None,
+                        }));
+                        hint.set_content(vec![Line::from(self.thinking_buf.clone())]);
+                        hint.expand_hint = Some("ctrl+o to expand".to_string());
+                        self.messages[i].activities.push(hint);
+                    }
                 }
                 UiEvent::OutputTokens(_tokens) => {}
                 UiEvent::ToolStart { name } => {
@@ -216,10 +231,15 @@ impl BingoChat {
                         name, "",
                     )));
                     hint.expand_hint = Some("ctrl+o to expand".to_string());
-                    self.activities.push(hint);
+                    if let Some(i) = self.stream_msg {
+                        self.messages[i].activities.push(hint);
+                    }
                 }
                 UiEvent::ToolDone(done) => {
-                    for hint in &mut self.activities {
+                    let Some(i) = self.stream_msg else {
+                        return;
+                    };
+                    for hint in &mut self.messages[i].activities {
                         if let ActivityKind::Tool(call) = &mut hint.kind
                             && call.name == done.name.as_str()
                             && call.status == ToolStatus::Running
@@ -244,11 +264,13 @@ impl BingoChat {
                 }
                 UiEvent::TurnEnd => {
                     self.busy = false;
-                    self.stream_msg = None;
                     self.output_tokens = 0;
                     // thinking 完成行移到回复之后（Claude Code：`✻ Crunched for 25s` 在末尾）
+                    let Some(i) = self.stream_msg else {
+                        return;
+                    };
                     let mut trailing = Vec::new();
-                    for hint in std::mem::take(&mut self.activities) {
+                    for hint in std::mem::take(&mut self.messages[i].activities) {
                         if let ActivityKind::Thinking(t) = &hint.kind
                             && t.state == ThinkingState::Running
                         {
@@ -263,9 +285,8 @@ impl BingoChat {
                             trailing.push(hint);
                         }
                     }
-                    if let Some(i) = self.messages.len().checked_sub(1) {
-                        self.messages[i].trailing = trailing;
-                    }
+                    self.stream_msg = None;
+                    self.messages[i].trailing = trailing;
                 }
                 UiEvent::Warning(message) => {
                     if !self.warnings.iter().any(|w| w == &message) {
@@ -298,10 +319,6 @@ impl BingoChat {
 
     /// 折叠/展开最近的可展开活动（ctrl+o）。
     fn toggle_recent_expand(&mut self) -> bool {
-        let toggled = Self::toggle_in(&mut self.activities);
-        if toggled {
-            return true;
-        }
         if let Some(i) = self.messages.len().checked_sub(1) {
             return Self::toggle_in(&mut self.messages[i].activities);
         }
@@ -833,7 +850,10 @@ pub fn run_tui_session(session: Arc<Session>) -> Result<(), Box<dyn std::error::
             .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
             .unwrap_or_else(|| "unknown panic".to_string());
         eprintln!("[bingo] TUI panicked: {message}");
-        eprintln!("[bingo] run with RUST_BACKTRACE=1 for details");
+        eprintln!(
+            "[bingo] backtrace:\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
     }
     Ok(())
 }

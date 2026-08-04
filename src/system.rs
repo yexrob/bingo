@@ -38,29 +38,23 @@ pub fn load_memory(home: &Path, cwd: &Path) -> Memory {
     Memory { user, project }
 }
 
-/// 拼装 system prompt：base 段始终缓存；记忆段随文件存在与否增减。
-pub fn build_system(memory: &Memory, project_memory: Option<String>) -> Vec<SystemBlock> {
-    let mut blocks = vec![SystemBlock {
-        text: BASE_PROMPT.to_string(),
-        cache: true,
-    }];
+/// 拼装 system prompt：base 段始终在前；记忆段随文件存在与否增减。
+/// `cache_control` 控制是否发送 cache_control（默认关闭，非官方端点不稳定）。
+pub fn build_system(
+    memory: &Memory,
+    project_memory: Option<String>,
+    cache_control: bool,
+) -> Vec<SystemBlock> {
+    let block = |text: String| SystemBlock { text, cache: cache_control };
+    let mut blocks = vec![block(BASE_PROMPT.to_string())];
     if let Some(user) = &memory.user {
-        blocks.push(SystemBlock {
-            text: format!("User-level memory (CLAUDE.md):\n{user}"),
-            cache: true,
-        });
+        blocks.push(block(format!("User-level memory (CLAUDE.md):\n{user}")));
     }
     if let Some(project) = &memory.project {
-        blocks.push(SystemBlock {
-            text: format!("Project-level memory (CLAUDE.md):\n{project}"),
-            cache: true,
-        });
+        blocks.push(block(format!("Project-level memory (CLAUDE.md):\n{project}")));
     }
     if let Some(mem) = project_memory {
-        blocks.push(SystemBlock {
-            text: format!("Persistent project memory (auto-extracted):\n{mem}"),
-            cache: true,
-        });
+        blocks.push(block(format!("Persistent project memory (auto-extracted):\n{mem}")));
     }
     blocks
 }
@@ -75,7 +69,7 @@ mod tests {
             user: Some("user rules".into()),
             project: Some("project rules".into()),
         };
-        let blocks = build_system(&memory, Some("mem facts".into()));
+        let blocks = build_system(&memory, Some("mem facts".into()), true);
         assert_eq!(blocks.len(), 4);
         assert!(blocks[3].text.contains("mem facts"));
         assert!(blocks[0].text.starts_with("You are bingo"));
@@ -85,9 +79,15 @@ mod tests {
     }
 
     #[test]
+    fn cache_control_off_by_default() {
+        let blocks = build_system(&Memory::default(), None, false);
+        assert!(blocks.iter().all(|b| !b.cache));
+    }
+
+    #[test]
     fn omits_missing_memory() {
         let memory = Memory::default();
-        let blocks = build_system(&memory, None);
+        let blocks = build_system(&memory, None, true);
         assert_eq!(blocks.len(), 1);
     }
 

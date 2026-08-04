@@ -70,15 +70,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
 
     let client = Client::from_env()?;
-    let mut system = build_system(
+    let system = build_system(
         &load_memory(&home, &project_dir),
         load_project_memory(&home, &project_dir),
+        settings.cache_control.unwrap_or(false),
     );
-    if client.is_deepseek() {
-        for block in &mut system {
-            block.cache = false;
-        }
-    }
 
     let (transcript, initial_messages): (Option<Transcript>, Vec<Message>) = if cli.continue_ {
         match latest_transcript(&home)? {

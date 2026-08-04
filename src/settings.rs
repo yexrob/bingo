@@ -16,6 +16,9 @@ pub enum SettingsError {
 pub struct Settings {
     #[serde(rename = "permissionMode")]
     pub permission_mode: Option<String>,
+    /// 发送 cache_control（prompt caching）。默认关闭：非官方端点处理不稳定。
+    #[serde(rename = "cacheControl")]
+    pub cache_control: Option<bool>,
     pub hooks: HooksConfig,
     #[serde(rename = "mcpServers")]
     pub mcp_servers: HashMap<String, McpServerConfig>,

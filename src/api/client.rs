@@ -10,6 +10,9 @@ use super::types::{ContentBlock, Role, SystemBlock};
 
 pub const MAX_RETRIES: u32 = 2;
 
+/// 请求整体超时（连接 + 首字节）：服务器无响应时结束等待而不是无限挂。
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("missing API key: set ANTHROPIC_API_KEY or DEEPSEEK_API_KEY")]
@@ -20,6 +23,9 @@ pub enum ClientError {
     Stream(String),
     #[error("transport error: {0}")]
     Transport(#[from] reqwest::Error),
+    /// 服务器在 REQUEST_TIMEOUT 内无响应。
+    #[error("request timed out after {REQUEST_TIMEOUT:?}")]
+    Timeout,
 }
 
 #[derive(Debug, Clone)]
@@ -48,11 +54,6 @@ impl Client {
         }
     }
 
-    /// DeepSeek 兼容端点对 cache_control 处理不稳定（偶发挂起），需禁用。
-    pub fn is_deepseek(&self) -> bool {
-        self.base_url.contains("deepseek")
-    }
-
     fn headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", HeaderValue::from_str(&self.api_key).unwrap());
@@ -77,11 +78,11 @@ impl Client {
                 .post(format!("{}/v1/messages", self.base_url))
                 .headers(self.headers())
                 .json(request);
-            match builder.send().await {
-                Ok(response) if response.status().is_success() => {
+            match tokio::time::timeout(REQUEST_TIMEOUT, builder.send()).await {
+                Ok(Ok(response)) if response.status().is_success() => {
                     return Ok(self.stream_body(response));
                 }
-                Ok(response) if retryable(&response.status()) => {
+                Ok(Ok(response)) if retryable(&response.status()) => {
                     let status = response.status();
                     let retry_after = response
                         .headers()
@@ -96,15 +97,18 @@ impl Client {
                     let delay = retry_after.unwrap_or_else(|| backoff(attempt));
                     tokio::time::sleep(delay).await;
                 }
-                Ok(response) => {
+                Ok(Ok(response)) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
                     return Err(ClientError::Api { status: status.as_u16(), body });
                 }
-                Err(_transport) if attempt < MAX_RETRIES => {
+                Ok(Err(_transport)) if attempt < MAX_RETRIES => {
                     tokio::time::sleep(backoff(attempt)).await;
                 }
-                Err(transport) => return Err(ClientError::Transport(transport)),
+                Ok(Err(transport)) => return Err(ClientError::Transport(transport)),
+                Err(_) => {
+                    return Err(ClientError::Timeout);
+                }
             }
             attempt += 1;
         }
