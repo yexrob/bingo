@@ -122,6 +122,8 @@ pub struct BingoChat {
     thinking_buf: String,
     output_tokens: u64,
     tick: u64,
+    /// TurnStart 时的 tick：运行态 thinking 的相对计时基准。
+    turn_start_tick: u64,
     warnings: Vec<String>,
     user: String,
     cwd: String,
@@ -161,6 +163,7 @@ impl BingoChat {
             thinking_buf: String::new(),
             output_tokens: 0,
             tick: 0,
+            turn_start_tick: 0,
             warnings: Vec::new(),
             user: std::env::var("USER").unwrap_or_else(|_| "user".to_string()),
             cwd: std::env::current_dir()
@@ -191,6 +194,7 @@ impl BingoChat {
                     });
                     self.stream_msg = Some(self.messages.len() - 1);
                     self.busy = true;
+                    self.turn_start_tick = self.tick;
                     // 占位 thinking：端点延迟推送 delta 时（DeepSeek 常达数十秒），
                     // 运行态行立即可见，用户能感知"正在思考"。
                     let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
@@ -854,6 +858,19 @@ impl Component for BingoChat {
 
     fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
+        // 运行态 thinking 连续计时（相对 turn 起点），不依赖 delta 到达。
+        for msg in &mut self.messages {
+            for act in &mut msg.activities {
+                if let ActivityKind::Thinking(t) = &mut act.kind
+                    && t.state == ThinkingState::Running
+                {
+                    t.duration_ms = self
+                        .tick
+                        .saturating_sub(self.turn_start_tick)
+                        .saturating_mul(33);
+                }
+            }
+        }
     }
 
     fn status(&self) -> String {
