@@ -5,14 +5,14 @@ pub const API_VERSION: &str = "2023-06-01";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-5";
 pub const DEFAULT_MAX_TOKENS: u32 = 8192;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     User,
     Assistant,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
@@ -27,7 +27,7 @@ pub enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         content: serde_json::Value,
-        #[serde(skip_serializing_if = "is_false")]
+        #[serde(default, skip_serializing_if = "is_false")]
         is_error: bool,
     },
     #[serde(rename_all = "snake_case")]
@@ -41,7 +41,7 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
@@ -56,12 +56,36 @@ impl Message {
     }
 }
 
+/// system prompt 单段（可携带 cache_control）。
+#[derive(Debug, Clone)]
+pub struct SystemBlock {
+    pub text: String,
+    /// 在 API 请求中携带 cache_control: ephemeral。
+    pub cache: bool,
+}
+
+impl Serialize for SystemBlock {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut block = serde_json::json!({
+            "type": "text",
+            "text": self.text,
+        });
+        if self.cache {
+            block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        }
+        block.serialize(serializer)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Request {
     pub model: String,
     pub max_tokens: u32,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub system: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub system: Vec<SystemBlock>,
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<serde_json::Value>,

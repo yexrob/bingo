@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use super::sse::SseParser;
 use super::types::{parse_sse_event, Request, StreamEvent, API_BASE, API_VERSION};
-use super::types::{ContentBlock, Role};
+use super::types::{ContentBlock, Role, SystemBlock};
 
 pub const MAX_RETRIES: u32 = 2;
 
@@ -103,6 +103,40 @@ impl Client {
             }
             attempt += 1;
         }
+    }
+
+    /// 输入 token 计数（D12：预算显示走官方 count_tokens API）。
+    pub async fn count_tokens(
+        &self,
+        model: &str,
+        system: &[SystemBlock],
+        messages: &[super::types::Message],
+    ) -> Result<u64, ClientError> {
+        let payload = serde_json::json!({
+            "model": model,
+            "system": system,
+            "messages": messages,
+        });
+        let response = self
+            .http
+            .post(format!("{}/v1/messages/count_tokens", self.base_url))
+            .headers(self.headers())
+            .json(&payload)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ClientError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let body: serde_json::Value = response.json().await?;
+        Ok(body
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0))
     }
 
     fn stream_body(

@@ -4,12 +4,16 @@ use futures_util::StreamExt;
 use thiserror::Error;
 
 use crate::api::client::{AssistantAccumulator, Client, ClientError};
-use crate::api::types::{ContentBlock, Message, Request, StreamEvent, Role, DEFAULT_MAX_TOKENS};
+use crate::api::types::{
+    ContentBlock, Message, Request, StreamEvent, SystemBlock, Role, DEFAULT_MAX_TOKENS,
+};
+use crate::budget::check_input_budget;
 use crate::hooks::{run_post_tool_use, run_pre_tool_use};
 use crate::permission::{can_use_tool, PermissionBehavior, PermissionMode};
 use crate::settings::{HooksConfig, Settings};
 use crate::tool::executor::{execute_calls, PendingCall};
 use crate::tool::{find_tool, tool_params, Tool, ToolContext, ToolError, ToolResult};
+use crate::transcript::Transcript;
 
 #[derive(Debug, Error)]
 pub enum QueryError {
@@ -36,12 +40,13 @@ async fn one_turn(
     model: &str,
     messages: &[Message],
     tools: &[Box<dyn Tool>],
+    system: &[SystemBlock],
     on_event: impl FnMut(&StreamEvent),
 ) -> Result<(Message, Vec<ContentBlock>), QueryError> {
     let request = Request {
         model: model.to_string(),
         max_tokens: DEFAULT_MAX_TOKENS,
-        system: String::new(),
+        system: system.to_vec(),
         messages: messages.to_vec(),
         tools: tool_params(tools),
         stream: true,
@@ -159,24 +164,44 @@ fn render_result(result: &ToolResult) -> String {
     }
 }
 
+/// 一轮查询的上下文。
+pub struct QueryConfig<'a> {
+    pub client: &'a Client,
+    pub model: &'a str,
+    pub permission_mode: PermissionMode,
+    pub settings: &'a Settings,
+    pub system: &'a [SystemBlock],
+    pub transcript: &'a Option<Transcript>,
+    pub initial_messages: Vec<Message>,
+}
+
 /// queryLoop：多轮 tool loop，直到 end_turn。
-pub async fn run_query(
-    client: &Client,
-    model: &str,
-    permission_mode: PermissionMode,
-    settings: &Settings,
-    user_input: &str,
-) -> Result<(), QueryError> {
+pub async fn run_query(cfg: QueryConfig<'_>, user_input: &str) -> Result<(), QueryError> {
+    let QueryConfig {
+        client,
+        model,
+        permission_mode,
+        settings,
+        system,
+        transcript,
+        initial_messages,
+    } = cfg;
     let tools = crate::tools::base_tools();
     let ctx = ToolContext {
         cwd: std::env::current_dir()
             .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
     };
 
-    let mut messages = vec![Message::user_text(user_input)];
+    let mut warned = false;
+    let mut messages = initial_messages;
+    messages.push(Message::user_text(user_input));
     loop {
+        check_input_budget(client, model, system, &messages, &mut warned).await;
         let (assistant, tool_uses) =
-            one_turn(client, model, &messages, &tools, print_text_delta).await?;
+            one_turn(client, model, &messages, &tools, system, print_text_delta).await?;
+        if let Some(t) = transcript {
+            let _ = t.append(&assistant);
+        }
         if tool_uses.is_empty() {
             println!();
             return Ok(());
@@ -248,5 +273,8 @@ pub async fn run_query(
             role: Role::User,
             content: blocks,
         });
+        if let Some(t) = transcript {
+            let _ = t.append(messages.last().unwrap());
+        }
     }
 }
