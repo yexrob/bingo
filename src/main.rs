@@ -8,14 +8,17 @@ use crate::api::client::Client;
 use crate::api::types::{Message, DEFAULT_MODEL};
 use crate::permission::PermissionMode;
 use crate::query::{headless_hooks, run_query, Session};
+use crate::memory::{extract_memory, load_project_memory};
 use crate::settings::load_settings;
 use crate::system::{build_system, load_memory};
 use crate::transcript::{create as create_transcript, latest as latest_transcript, Transcript};
 
 mod api;
 mod budget;
+mod compact;
 mod hooks;
 mod mcp;
+mod memory;
 mod permission;
 mod query;
 mod settings;
@@ -66,7 +69,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "default".to_string())
         .parse()?;
 
-    let system = build_system(&load_memory(&home, &project_dir));
+    let system = build_system(
+        &load_memory(&home, &project_dir),
+        load_project_memory(&home, &project_dir),
+    );
 
     let (transcript, initial_messages): (Option<Transcript>, Vec<Message>) = if cli.continue_ {
         match latest_transcript(&home)? {
@@ -88,6 +94,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings,
         system,
         transcript,
+        depth: 0,
+        home: home.clone(),
     });
 
     if cli.print {
@@ -103,7 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
         let mut ui = headless_hooks();
-        run_query(&session, initial_messages, &prompt, &mut ui).await?;
+        let messages = run_query(&session, initial_messages, &prompt, &mut ui).await?;
+        extract_memory(&session, &messages, &home, &project_dir).await;
     } else {
         drop(initial_messages); // 交互模式下 --continue 历史由后续轮次复用
         tui::run_tui_session(session)?;

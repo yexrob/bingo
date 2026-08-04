@@ -38,6 +38,10 @@ pub struct HooksConfig {
     pub pre_tool_use: Vec<HookRule>,
     #[serde(rename = "PostToolUse")]
     pub post_tool_use: Vec<HookRule>,
+    #[serde(rename = "PreCompact")]
+    pub pre_compact: Vec<HookRule>,
+    #[serde(rename = "PostCompact")]
+    pub post_compact: Vec<HookRule>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -86,6 +90,12 @@ fn merge(base: &mut Settings, layer: Settings) {
     }
     if !layer.mcp_servers.is_empty() {
         base.mcp_servers = layer.mcp_servers;
+    }
+    if !layer.hooks.pre_compact.is_empty() {
+        base.hooks.pre_compact = layer.hooks.pre_compact;
+    }
+    if !layer.hooks.post_compact.is_empty() {
+        base.hooks.post_compact = layer.hooks.post_compact;
     }
 }
 

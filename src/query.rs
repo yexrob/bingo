@@ -1,4 +1,6 @@
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use futures_util::StreamExt;
 use thiserror::Error;
@@ -7,7 +9,7 @@ use crate::api::client::{AssistantAccumulator, Client, ClientError};
 use crate::api::types::{
     ContentBlock, Message, Request, StreamEvent, SystemBlock, Role, DEFAULT_MAX_TOKENS,
 };
-use crate::budget::check_input_budget;
+use crate::compact::check_and_compact;
 use crate::hooks::{run_post_tool_use, run_pre_tool_use};
 use crate::permission::{can_use_tool, PermissionBehavior, PermissionMode};
 use crate::settings::{HooksConfig, Settings};
@@ -34,6 +36,10 @@ pub struct Session {
     pub settings: Settings,
     pub system: Vec<SystemBlock>,
     pub transcript: Option<Transcript>,
+    /// 子代理嵌套深度（Agent 工具递归）。
+    pub depth: usize,
+    /// 用户 home（memdir 记忆定位）。
+    pub home: PathBuf,
 }
 
 /// 单个工具完成事件。
@@ -222,30 +228,23 @@ fn summarize_input(input: &serde_json::Value) -> String {
 }
 
 /// queryLoop：多轮 tool loop，直到 end_turn。
+/// 返回本次查询产生的全部消息（供记忆提取等消费）。
 pub async fn run_query(
-    session: &Session,
+    session: &Arc<Session>,
     initial_messages: Vec<Message>,
     user_input: &str,
     ui: &mut UiHooks,
-) -> Result<(), QueryError> {
-    let tools = crate::tools::assemble_tools(&session.settings.mcp_servers).await;
+) -> Result<Vec<Message>, QueryError> {
+    let tools = crate::tools::assemble_tools(session).await;
     let ctx = ToolContext {
         cwd: std::env::current_dir()
             .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
     };
 
-    let mut warned = false;
     let mut messages = initial_messages;
     messages.push(Message::user_text(user_input));
     loop {
-        check_input_budget(
-            &session.client,
-            &session.model,
-            &session.system,
-            &messages,
-            &mut warned,
-        )
-        .await;
+        check_and_compact(session, &mut messages).await;
         let (assistant, tool_uses) = one_turn(
             &session.client,
             &session.model,
@@ -260,7 +259,7 @@ pub async fn run_query(
         }
         if tool_uses.is_empty() {
             println!();
-            return Ok(());
+            return Ok(messages);
         }
         messages.push(assistant);
 

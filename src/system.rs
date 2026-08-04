@@ -39,7 +39,7 @@ pub fn load_memory(home: &Path, cwd: &Path) -> Memory {
 }
 
 /// 拼装 system prompt：base 段始终缓存；记忆段随文件存在与否增减。
-pub fn build_system(memory: &Memory) -> Vec<SystemBlock> {
+pub fn build_system(memory: &Memory, project_memory: Option<String>) -> Vec<SystemBlock> {
     let mut blocks = vec![SystemBlock {
         text: BASE_PROMPT.to_string(),
         cache: true,
@@ -56,6 +56,12 @@ pub fn build_system(memory: &Memory) -> Vec<SystemBlock> {
             cache: true,
         });
     }
+    if let Some(mem) = project_memory {
+        blocks.push(SystemBlock {
+            text: format!("Persistent project memory (auto-extracted):\n{mem}"),
+            cache: true,
+        });
+    }
     blocks
 }
 
@@ -69,8 +75,9 @@ mod tests {
             user: Some("user rules".into()),
             project: Some("project rules".into()),
         };
-        let blocks = build_system(&memory);
-        assert_eq!(blocks.len(), 3);
+        let blocks = build_system(&memory, Some("mem facts".into()));
+        assert_eq!(blocks.len(), 4);
+        assert!(blocks[3].text.contains("mem facts"));
         assert!(blocks[0].text.starts_with("You are bingo"));
         assert!(blocks[1].text.contains("user rules"));
         assert!(blocks[2].text.contains("project rules"));
@@ -80,7 +87,7 @@ mod tests {
     #[test]
     fn omits_missing_memory() {
         let memory = Memory::default();
-        let blocks = build_system(&memory);
+        let blocks = build_system(&memory, None);
         assert_eq!(blocks.len(), 1);
     }
 

@@ -251,7 +251,10 @@ impl BingoChat {
             let mut ui = tui_hooks(events.clone(), asks);
             let result = crate::query::run_query(&session, Vec::new(), &text, &mut ui).await;
             match result {
-                Ok(()) => {
+                Ok(messages) => {
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    crate::memory::extract_memory(&session, &messages, &session.home, &cwd)
+                        .await;
                     let _ = events.send(UiEvent::TurnEnd);
                 }
                 Err(e) => {

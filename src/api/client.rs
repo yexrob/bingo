@@ -105,6 +105,44 @@ impl Client {
         }
     }
 
+    /// 非流式补全：返回回复文本（compact 摘要、记忆提取用）。
+    pub async fn complete_text(
+        &self,
+        request: &Request,
+    ) -> Result<String, ClientError> {
+        let mut request = request.clone();
+        request.stream = false;
+        let response = self
+            .http
+            .post(format!("{}/v1/messages", self.base_url))
+            .headers(self.headers())
+            .json(&request)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ClientError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let body: serde_json::Value = response.json().await?;
+        let mut text = String::new();
+        if let Some(blocks) = body.get("content").and_then(|c| c.as_array()) {
+            for block in blocks {
+                if let Some(t) = block
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .filter(|_| block.get("type").and_then(|t| t.as_str()) == Some("text"))
+                {
+                    text.push_str(t);
+                }
+            }
+        }
+        Ok(text)
+    }
+
     /// 输入 token 计数（D12：预算显示走官方 count_tokens API）。
     pub async fn count_tokens(
         &self,

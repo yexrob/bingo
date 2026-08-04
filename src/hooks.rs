@@ -40,11 +40,13 @@ fn matched<'a>(rules: &'a [HookRule], tool_name: &str) -> Vec<&'a HookRule> {
         .collect()
 }
 
-/// 匹配到的 hook 命令列表。
+/// 匹配到的 hook 命令列表。tool_name 为 None 表示事件不针对工具。
 fn commands_for<'a>(config: &'a HooksConfig, event: &'a str, tool_name: &str) -> Vec<&'a str> {
     let rules = match event {
         "PreToolUse" => matched(&config.pre_tool_use, tool_name),
         "PostToolUse" => matched(&config.post_tool_use, tool_name),
+        "PreCompact" => matched(&config.pre_compact, tool_name),
+        "PostCompact" => matched(&config.post_compact, tool_name),
         _ => return Vec::new(),
     };
     rules
@@ -142,6 +144,34 @@ pub async fn run_pre_tool_use(
         }
     }
     (PermissionBehavior::Allow, String::new(), input)
+}
+
+/// PreCompact：执行匹配 hook（无工具名）。失败不阻断。
+pub async fn run_pre_compact(config: &HooksConfig, permission_mode: &str) {
+    let commands = commands_for(config, "PreCompact", "");
+    for command in commands {
+        let input = serde_json::json!({
+            "hook_event_name": "PreCompact",
+            "permission_mode": permission_mode,
+        });
+        if let Err(e) = run_hook(command, &input).await {
+            eprintln!("[bingo] PreCompact hook warning: {e}");
+        }
+    }
+}
+
+/// PostCompact：执行匹配 hook。失败不阻断。
+pub async fn run_post_compact(config: &HooksConfig, permission_mode: &str) {
+    let commands = commands_for(config, "PostCompact", "");
+    for command in commands {
+        let input = serde_json::json!({
+            "hook_event_name": "PostCompact",
+            "permission_mode": permission_mode,
+        });
+        if let Err(e) = run_hook(command, &input).await {
+            eprintln!("[bingo] PostCompact hook warning: {e}");
+        }
+    }
 }
 
 /// PostToolUse：执行匹配 hook，输出当前忽略（记录 stderr 失败）。不阻断。

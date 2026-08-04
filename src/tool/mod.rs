@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use thiserror::Error;
 
+pub mod agent;
 pub mod bash;
 pub mod executor;
 pub mod read;
