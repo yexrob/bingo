@@ -79,7 +79,8 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> String {
-        "在本地 shell 中执行命令，返回 stdout/stderr 与退出码。".to_string()
+        "在本地 shell 中执行命令，返回 stdout/stderr 与退出码。周期命令（watch/while/until/for/tail -f）自动转为后台任务立即返回 async_launched，可配 notify_on/notify_regex 条件，输出命中即通知主 agent（无需等待命令结束）。"
+            .to_string()
     }
 
     fn input_schema(&self) -> serde_json::Value {

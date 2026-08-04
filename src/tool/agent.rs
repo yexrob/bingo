@@ -209,7 +209,8 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> String {
-        "派生子代理执行独立任务（深度受限），返回其最终结论。".to_string()
+        "派生子代理执行独立任务（深度受限）。默认异步执行：立即返回 async_launched 任务 id，主 agent 不等待，子代理完成时自动通知；background:false 可同步等待结果；notify_on 条件命中子代理产出内容时也会通知。"
+            .to_string()
     }
 
     fn input_schema(&self) -> serde_json::Value {
