@@ -47,6 +47,8 @@ pub struct WatchPoll {
     pub detail: Option<String>,
     /// 结构化数据（如完成的 final message）。
     pub payload: Option<serde_json::Value>,
+    /// 条件信号：检测到满足的条件（如 log 出现错误）时携带文本，无条件通知。
+    pub signal: Option<String>,
 }
 
 /// 可被 watch 的实体：声明自己的检查间隔与轮次语义。
@@ -55,6 +57,100 @@ pub trait Watchable: Send + Sync {
     fn poll(&self) -> WatchPoll;
     /// 周期轮询间隔；None = 不轮询（由实现者主动 set_state）。
     fn check_interval(&self) -> Option<Duration>;
+}
+
+/// 通知条件：对 watchable 喂入的内容增量（feed_content）做匹配，
+/// 命中即在轮询 tick 时触发信号（无条件通知）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotifyCondition {
+    /// 内容出现任一字样（子串匹配）。
+    Contains(Vec<String>),
+    /// 内容出现正则匹配。
+    Regex(String),
+    /// 累计行数超过阈值（突破时通知一次）。
+    #[allow(dead_code)] // 行数条件入口（如 notify_lines）落地后使用
+    LinesOver(usize),
+    /// 默认错误行模式（常见错误关键字）。
+    Errors,
+}
+
+/// 条件的轮询状态。
+struct ConditionState {
+    cond: NotifyCondition,
+    /// LinesOver 突破后不再重复通知。
+    fired: bool,
+}
+
+impl ConditionState {
+    fn new(cond: NotifyCondition) -> Self {
+        Self { cond, fired: false }
+    }
+    /// 对一轮内容缓冲匹配，返回信号文本（增量条件逐条匹配、聚合输出）。
+    fn match_buffer(&mut self, buffer: &[String], total_lines: usize) -> Option<String> {
+        match &self.cond {
+            NotifyCondition::Contains(patterns) => {
+                let hits: Vec<&str> = buffer
+                    .iter()
+                    .filter(|l| patterns.iter().any(|p| l.contains(p.as_str())))
+                    .map(|l| l.as_str())
+                    .collect();
+                if hits.is_empty() {
+                    None
+                } else {
+                    Some(format!(
+                        "命中条件 {}：{}",
+                        patterns.join("/"),
+                        hits.join(" | ")
+                    ))
+                }
+            }
+            NotifyCondition::Regex(pattern) => {
+                let re = match regex::Regex::new(pattern) {
+                    Ok(re) => re,
+                    Err(_) => return None,
+                };
+                let hits: Vec<&str> = buffer
+                    .iter()
+                    .filter(|l| re.is_match(l))
+                    .map(|l| l.as_str())
+                    .collect();
+                if hits.is_empty() {
+                    None
+                } else {
+                    Some(format!("命中条件 /{pattern}/：{}", hits.join(" | ")))
+                }
+            }
+            NotifyCondition::Errors => {
+                let hits: Vec<&str> = buffer
+                    .iter()
+                    .filter(|l| is_error_line(l))
+                    .map(|l| l.as_str())
+                    .collect();
+                if hits.is_empty() {
+                    None
+                } else {
+                    Some(format!("检测到错误行：{}", hits.join(" | ")))
+                }
+            }
+            NotifyCondition::LinesOver(n) => {
+                if !self.fired && total_lines > *n {
+                    self.fired = true;
+                    Some(format!("输出已超过 {n} 行（当前 {total_lines} 行）"))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// 常见错误行模式（默认 Errors 条件的信号源）。
+fn is_error_line(line: &str) -> bool {
+    const PATTERNS: &[&str] = &[
+        "error", "ERROR", "Error", "Traceback", "panic", "PANIC", "FATAL", "fatal",
+        "FAILED", "Exception", "❌",
+    ];
+    PATTERNS.iter().any(|p| line.contains(p))
 }
 
 /// 广播给订阅者（TUI）的事件。
@@ -67,6 +163,8 @@ pub struct WatchEvent {
     pub state: WatchState,
     pub detail: Option<String>,
     pub payload: Option<serde_json::Value>,
+    /// 条件信号文本（检测到满足条件时携带）。
+    pub signal: Option<String>,
     /// watchable 已运行毫秒（注册时刻起算）。
     pub elapsed_ms: u64,
 }
@@ -90,6 +188,7 @@ struct Notification {
     state: WatchState,
     detail: Option<String>,
     payload: Option<serde_json::Value>,
+    signal: Option<String>,
 }
 
 struct Entry {
@@ -98,6 +197,11 @@ struct Entry {
     detail: Option<String>,
     payload: Option<serde_json::Value>,
     born: Instant,
+    conditions: Vec<ConditionState>,
+    /// 本轮（两次 tick 之间）喂入的内容。
+    feed_buffer: Vec<String>,
+    /// 累计喂入行数（LinesOver 条件用）。
+    total_lines: usize,
 }
 
 struct Inner {
@@ -125,8 +229,18 @@ impl WatchRegistry {
         })
     }
 
-    /// 注册一个 watchable；带间隔的会 spawn 周期轮询任务。
+    /// 注册一个 watchable（无条件）；带间隔的会 spawn 周期轮询任务。
+    #[allow(dead_code)] // 未来无条件 watchable（如文件监控）落地后使用
     pub fn register(self: &Arc<Self>, watchable: Box<dyn Watchable>) -> WatchId {
+        self.register_with_conditions(watchable, Vec::new())
+    }
+
+    /// 注册并配置通知条件（内容增量 feed_content 按条件匹配 → 信号）。
+    pub fn register_with_conditions(
+        self: &Arc<Self>,
+        watchable: Box<dyn Watchable>,
+        conditions: Vec<NotifyCondition>,
+    ) -> WatchId {
         let poll = watchable.poll();
         let label = watchable.label();
         let id = {
@@ -141,6 +255,12 @@ impl WatchRegistry {
                     detail: poll.detail.clone(),
                     payload: poll.payload.clone(),
                     born: Instant::now(),
+                    conditions: conditions
+                        .into_iter()
+                        .map(ConditionState::new)
+                        .collect(),
+                    feed_buffer: Vec::new(),
+                    total_lines: 0,
                 },
             );
             id
@@ -157,6 +277,7 @@ impl WatchRegistry {
                     state: poll.state,
                     detail: poll.detail.clone(),
                     payload: poll.payload.clone(),
+                    signal: None,
                 });
         }
         let _ = self.tx.send(WatchEvent {
@@ -165,6 +286,7 @@ impl WatchRegistry {
             state: poll.state,
             detail: poll.detail.clone(),
             payload: poll.payload.clone(),
+            signal: None,
             elapsed_ms: 0,
         });
         let interval = watchable.check_interval();
@@ -180,6 +302,13 @@ impl WatchRegistry {
                         break;
                     }
                     let p = watchable.poll();
+                    if let Some(sig) = p.signal.clone() {
+                        registry.emit_signal(id, sig, p.detail.clone());
+                    }
+                    // 条件匹配：本轮喂入内容按通知条件命中 → 信号。
+                    for sig in registry.match_conditions(id) {
+                        registry.emit_signal(id, sig, p.detail.clone());
+                    }
                     let terminal = p.state.is_terminal();
                     registry.set_state(id, p.state, p.detail, p.payload);
                     if terminal {
@@ -189,6 +318,76 @@ impl WatchRegistry {
             });
         }
         id
+    }
+
+    /// 实现者喂入内容增量（一行或一个文本块）：条件引擎按通知条件匹配，
+    /// 命中由轮询 tick 聚合触发信号。
+    pub fn feed_content(&self, id: WatchId, text: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = inner.entries.get_mut(&id) else {
+            return;
+        };
+        entry.total_lines += text.lines().count();
+        entry.feed_buffer.push(text.to_string());
+    }
+
+    /// 匹配本轮喂入内容与通知条件，返回命中信号（增量条件逐条聚合）。
+    pub fn match_conditions(&self, id: WatchId) -> Vec<String> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = inner.entries.get_mut(&id) else {
+            return Vec::new();
+        };
+        let buffer = std::mem::take(&mut entry.feed_buffer);
+        let total = entry.total_lines;
+        let mut signals = Vec::new();
+        for cs in &mut entry.conditions {
+            if let Some(sig) = cs.match_buffer(&buffer, total) {
+                signals.push(sig);
+            }
+        }
+        signals
+    }
+
+    /// 条件信号：实现者检测到满足的条件（如 log 出现错误）时调用，
+    /// 无条件入通知队列 + 广播（不改变状态）。
+    pub fn emit_signal(&self, id: WatchId, signal: String, detail: Option<String>) {
+        let label = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(entry) = inner.entries.get_mut(&id) else {
+                return;
+            };
+            let label = entry.label.clone();
+            let state = entry.state;
+            if let Some(d) = &detail {
+                entry.detail = Some(d.clone());
+            }
+            inner.notifications.push_back(Notification {
+                id,
+                label: label.clone(),
+                state,
+                detail,
+                payload: None,
+                signal: Some(signal.clone()),
+            });
+            label
+        };
+        let elapsed_ms = {
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner
+                .entries
+                .get(&id)
+                .map(|e| e.born.elapsed().as_millis() as u64)
+                .unwrap_or(0)
+        };
+        let _ = self.tx.send(WatchEvent {
+            id,
+            label,
+            state: WatchState::Running,
+            detail: None,
+            payload: None,
+            signal: Some(signal),
+            elapsed_ms,
+        });
     }
 
     /// 当前是否终态（轮询循环据此停止）。
@@ -233,6 +432,7 @@ impl WatchRegistry {
                     state,
                     detail: detail.clone(),
                     payload: payload.clone(),
+                    signal: None,
                 });
             }
             label
@@ -251,6 +451,7 @@ impl WatchRegistry {
             state,
             detail,
             payload,
+            signal: None,
             elapsed_ms,
         });
     }
@@ -283,6 +484,16 @@ impl WatchRegistry {
         // (id, label, 轮次计数, 最近 detail)
         let mut pending: Option<(WatchId, String, u32, String)> = None;
         while let Some(n) = inner.notifications.pop_front() {
+            if let Some(sig) = n.signal {
+                if let Some((id, label, count, last)) = pending.take() {
+                    out.push(format_notification(id, label, count, last));
+                }
+                out.push(format!(
+                    "任务 {}（{}）：⚠ {sig}",
+                    n.id, n.label
+                ));
+                continue;
+            }
             let is_same_idle = n.state == WatchState::Idle
                 && pending.as_ref().is_some_and(|(id, ..)| *id == n.id);
             if is_same_idle {
@@ -372,6 +583,7 @@ mod tests {
                 state: WatchState::Running,
                 detail: None,
                 payload: None,
+                signal: None,
             }],
             index: AtomicUsize::new(0),
             interval: None,
@@ -391,6 +603,7 @@ mod tests {
                 state: WatchState::Running,
                 detail: None,
                 payload: None,
+                signal: None,
             }],
             index: AtomicUsize::new(0),
             interval: None,
@@ -414,6 +627,7 @@ mod tests {
                 state: WatchState::Running,
                 detail: None,
                 payload: None,
+                signal: None,
             }],
             index: AtomicUsize::new(0),
             interval: None,
@@ -438,6 +652,7 @@ mod tests {
                 state: WatchState::Running,
                 detail: Some("已产出 33 字符".into()),
                 payload: None,
+                signal: None,
             }],
             index: AtomicUsize::new(0),
             interval: None,
@@ -447,6 +662,96 @@ mod tests {
         assert_eq!(reg.snapshot()[0].state, WatchState::Done, "frozen");
     }
 
+    #[test]
+    fn condition_engine_matches_all_condition_kinds() {
+        // Contains：任一字样命中聚合输出
+        let mut cs = ConditionState::new(NotifyCondition::Contains(vec![
+            "DEPLOYED".into(),
+            "FAILED".into(),
+        ]));
+        assert!(
+            cs.match_buffer(&["INFO x".into(), "build DEPLOYED ok".into()], 2)
+                .is_some_and(|s| s.contains("DEPLOYED")),
+            "contains fires on pattern"
+        );
+        assert!(cs.match_buffer(&["INFO x".into()], 3).is_none(), "no hit");
+        // Errors：默认错误行
+        let mut cs = ConditionState::new(NotifyCondition::Errors);
+        assert!(
+            cs.match_buffer(&["ERROR: boom".into()], 1)
+                .is_some_and(|s| s.contains("ERROR: boom")),
+            "errors fires"
+        );
+        assert!(cs.match_buffer(&["INFO ok".into()], 2).is_none(), "clean line");
+        // Regex
+        let mut cs = ConditionState::new(NotifyCondition::Regex(r"\d{4}-\d{2}".into()));
+        assert!(cs.match_buffer(&["time 2026-08-05".into()], 1).is_some(), "regex fires");
+        // LinesOver：突破时一次
+        let mut cs = ConditionState::new(NotifyCondition::LinesOver(3));
+        assert!(cs.match_buffer(&[], 4).is_some(), "threshold crossed");
+        assert!(cs.match_buffer(&[], 9).is_none(), "fires once");
+    }
+
+    #[test]
+    fn feed_content_drives_condition_signals() {
+        // 端到端：feed_content → match_conditions（轮询 tick 的路径）。
+        let reg = watch();
+        let id = reg.register_with_conditions(
+            Box::new(FakeWatch {
+                label: "monitor",
+                sequence: vec![WatchPoll {
+                    state: WatchState::Running,
+                    detail: None,
+                    payload: None,
+                    signal: None,
+                }],
+                index: AtomicUsize::new(0),
+                interval: None,
+            }),
+            vec![NotifyCondition::Contains(vec!["boom".into()])],
+        );
+        reg.feed_content(id, "INFO line");
+        assert!(reg.match_conditions(id).is_empty(), "no hit yet");
+        reg.feed_content(id, "boom happened");
+        let signals = reg.match_conditions(id);
+        assert_eq!(signals.len(), 1, "{signals:?}");
+        assert!(signals[0].contains("boom"), "{}", signals[0]);
+        // 缓冲已清：再次 match 无信号
+        assert!(reg.match_conditions(id).is_empty(), "buffer drained");
+    }
+
+    #[tokio::test]
+    async fn signal_event_queues_and_broadcasts() {
+        let reg = watch();
+        let mut rx = reg.subscribe();
+        let id = reg.register(Box::new(FakeWatch {
+            label: "log-tail",
+            sequence: vec![WatchPoll {
+                state: WatchState::Running,
+                detail: None,
+                payload: None,
+                signal: None,
+            }],
+            index: AtomicUsize::new(0),
+            interval: None,
+        }));
+        let _ = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|_| unreachable!());
+        reg.emit_signal(id, "发现错误：boom".to_string(), Some("发现 1 个错误".into()));
+        let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(ev.signal.as_deref(), Some("发现错误：boom"));
+        let notes = reg.consume_notifications();
+        assert!(
+            notes.iter().any(|n| n.contains("发现错误") && n.contains("boom")),
+            "{notes:?}"
+        );
+    }
+
     #[tokio::test]
     async fn interval_polling_publishes_transitions() {
         let reg = watch();
@@ -454,11 +759,11 @@ mod tests {
         let id = reg.register(Box::new(FakeWatch {
             label: "slow",
             sequence: vec![
-                WatchPoll { state: WatchState::Running, detail: None, payload: None },
-                WatchPoll { state: WatchState::Idle, detail: Some("第 1 轮".into()), payload: None },
-                WatchPoll { state: WatchState::Idle, detail: Some("第 2 轮".into()), payload: None },
-                WatchPoll { state: WatchState::Done, detail: Some("fin".into()), payload: None },
-                WatchPoll { state: WatchState::Done, detail: Some("fin".into()), payload: None },
+                WatchPoll { state: WatchState::Running, detail: None, payload: None, signal: None },
+                WatchPoll { state: WatchState::Idle, detail: Some("第 1 轮".into()), payload: None, signal: None },
+                WatchPoll { state: WatchState::Idle, detail: Some("第 2 轮".into()), payload: None, signal: None },
+                WatchPoll { state: WatchState::Done, detail: Some("fin".into()), payload: None, signal: None },
+                WatchPoll { state: WatchState::Done, detail: Some("fin".into()), payload: None, signal: None },
             ],
             index: AtomicUsize::new(0),
             interval: Some(Duration::from_millis(5)),

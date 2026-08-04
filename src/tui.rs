@@ -44,6 +44,7 @@ pub enum UiEvent {
         detail: Option<String>,
         duration_ms: u64,
         payload: Option<serde_json::Value>,
+        signal: Option<String>,
     },
     TurnEnd,
     /// 非致命警告（如 MCP 连接失败），显示在边框与分隔线之间。
@@ -483,6 +484,7 @@ impl BingoChat {
                         detail: ev.detail,
                         duration_ms: ev.elapsed_ms,
                         payload: ev.payload,
+                        signal: ev.signal,
                     })
                     .is_err()
                 {
@@ -726,6 +728,7 @@ impl BingoChat {
                     detail,
                     duration_ms,
                     payload,
+                    signal,
                 } => {
                     let Some(i) = self.stream_msg else { return };
                     // 同 label 的 watch 活动原地更新（终态后保留，快照定格）。
@@ -764,6 +767,27 @@ impl BingoChat {
                         self.messages[i].activities.push(hint);
                         self.messages[i].insert_points.push(text_len);
                         self.messages[i].group_of.push(None);
+                    }
+                    // 条件信号或终态唤醒：不管用户状态（打字中/输入框有内容）都触发
+                    // 新回合；轮次 Idle 不触发（避免周期命令每轮唤醒一次）。
+                    let terminal = matches!(
+                        status,
+                        rsmarkdown_tui::activities::WatchStatus::Done
+                            | rsmarkdown_tui::activities::WatchStatus::Failed
+                            | rsmarkdown_tui::activities::WatchStatus::Cancelled
+                    );
+                    if terminal || signal.is_some() {
+                        // 信号/终态详情即时可见：更新活动 detail。
+                        if let Some(sig) = &signal
+                            && let Some(hint) = self.messages[i].activities.iter_mut().find(|a| {
+                                matches!(&a.kind, rsmarkdown_tui::activities::ActivityKind::Watch(w)
+                                    if w.label == *label)
+                            })
+                            && let rsmarkdown_tui::activities::ActivityKind::Watch(w) = &mut hint.kind
+                        {
+                            w.detail = Some(sig.clone());
+                        }
+                        self.submit_auto();
                     }
                 }
                 UiEvent::RoundEnd => {
@@ -1001,14 +1025,34 @@ impl BingoChat {
             self.input = text;
             return;
         }
-        self.messages.push(UiMessage {
-            role: Role::User,
-            text: text.clone(),
-            activities: Vec::new(),
-            insert_points: Vec::new(),
-            groups: Vec::new(),
-            group_of: Vec::new(),
-        });
+        self.start_turn(text, true);
+    }
+
+    /// 系统触发回合：watchable 信号/终态通知唤醒主 agent。
+    /// 无用户输入（通知在 run_query 首轮注入），模型直接响应；
+    /// 不管用户状态（输入框内容保留，回合自动跑）。
+    fn submit_auto(&mut self) {
+        // 回合进行中不另开（通知已在下一轮注入）；无 tokio runtime（测试）不触发。
+        if self.busy {
+            return;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        self.start_turn(String::new(), false);
+    }
+
+    fn start_turn(&mut self, text: String, show_user: bool) {
+        if show_user {
+            self.messages.push(UiMessage {
+                role: Role::User,
+                text: text.clone(),
+                activities: Vec::new(),
+                insert_points: Vec::new(),
+                groups: Vec::new(),
+                group_of: Vec::new(),
+            });
+        }
         self.busy = true;
         // 新一轮开始前复位中断信号（同一 Sender 跨轮复用）。
         let _ = self.cancel_tx.send(false);
@@ -2476,6 +2520,109 @@ mod fold_roundtrip_live_tests {
         assert!(joined.contains("3210ms"), "real duration: {joined}");
     }
 
+    #[tokio::test]
+    async fn terminal_watch_event_triggers_auto_turn_when_idle() {
+        // 回归：异步任务完成（终态通知）时主 agent idle → 自动发起新回合。
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        let _ = chat.events.send(UiEvent::WatchEvent {
+            label: "Agent: 长任务".into(),
+            status: rsmarkdown_tui::activities::WatchStatus::Running,
+            detail: None,
+            duration_ms: 0,
+            payload: None,
+            signal: None,
+        });
+        chat.drain_events();
+        assert!(!chat.busy);
+        let _ = chat.events.send(UiEvent::WatchEvent {
+            label: "Agent: 长任务".into(),
+            status: rsmarkdown_tui::activities::WatchStatus::Done,
+            detail: Some("完成".into()),
+            duration_ms: 30000,
+            payload: Some(serde_json::json!("结果")),
+            signal: None,
+        });
+        chat.drain_events();
+        // 自动回合已发起：TurnStart 处理 → 新 assistant 消息。
+        tokio::task::yield_now().await;
+        chat.drain_events();
+        assert!(chat.busy, "auto turn started");
+        assert_eq!(chat.messages.len(), 2, "new message for auto turn");
+    }
+
+    #[tokio::test]
+    async fn signal_triggers_auto_turn_even_while_typing() {
+        // 条件信号不管用户状态：输入框有内容也触发新回合。
+        let mut chat = test_chat();
+        chat.input = "我还在打字".to_string();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        let _ = chat.events.send(UiEvent::WatchEvent {
+            label: "tail -f app.log".into(),
+            status: rsmarkdown_tui::activities::WatchStatus::Running,
+            detail: None,
+            duration_ms: 0,
+            payload: None,
+            signal: None,
+        });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::WatchEvent {
+            label: "tail -f app.log".into(),
+            status: rsmarkdown_tui::activities::WatchStatus::Running,
+            detail: Some("发现 1 个错误".into()),
+            duration_ms: 12000,
+            payload: None,
+            signal: Some("发现错误：ERROR boom".into()),
+        });
+        chat.drain_events();
+        tokio::task::yield_now().await;
+        chat.drain_events();
+        assert!(chat.busy, "signal wakes despite typing");
+        assert_eq!(chat.input, "我还在打字", "input preserved");
+    }
+
+    #[test]
+    fn idle_round_notification_does_not_trigger_auto_turn() {
+        // 轮次 Idle（周期命令进度）不唤醒主 agent——防每轮打断。
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        let _ = chat.events.send(UiEvent::WatchEvent {
+            label: "watch ls".into(),
+            status: rsmarkdown_tui::activities::WatchStatus::Idle,
+            detail: Some("第 1 轮".into()),
+            duration_ms: 5000,
+            payload: None,
+            signal: None,
+        });
+        chat.drain_events();
+        assert!(!chat.busy, "idle round does not wake");
+        assert_eq!(chat.messages.len(), 1);
+    }
+
     #[test]
     fn watch_event_renders_inline_and_updates() {
         // Watchable 生命周期：Running 行 → 同 label 原地更新 → 终态含时长，
@@ -2496,6 +2643,7 @@ mod fold_roundtrip_live_tests {
             detail: None,
             duration_ms: 0,
             payload: None,
+            signal: None,
         });
         chat.drain_events();
         assert_eq!(chat.messages[0].activities.len(), 1);
@@ -2506,6 +2654,7 @@ mod fold_roundtrip_live_tests {
             detail: Some("第 2 轮".into()),
             duration_ms: 4000,
             payload: None,
+            signal: None,
         });
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "watch -n 2 ls".into(),
@@ -2513,6 +2662,7 @@ mod fold_roundtrip_live_tests {
             detail: None,
             duration_ms: 9000,
             payload: Some(serde_json::json!("done output")),
+            signal: None,
         });
         chat.drain_events();
         assert_eq!(chat.messages[0].activities.len(), 1, "updates in place");

@@ -18,6 +18,10 @@ pub struct AgentInput {
     #[serde(default)]
     #[schemars(description = "异步执行（默认 true）：立即返回任务 id，主 agent 不等待；设 false 则同步等待结果")]
     background: Option<bool>,
+    /// 通知条件：子 agent 产出内容出现任一字样即通知主 agent。
+    #[serde(default)]
+    #[schemars(description = "通知条件：子 agent 产出内容命中任一字样即通知")]
+    notify_on: Option<Vec<String>>,
     /// 任务简述（可选），随 header 显示。
     #[serde(default)]
     #[allow(dead_code)]
@@ -43,6 +47,8 @@ fn subagent_hooks(
     output: Arc<Mutex<String>>,
     cell: Arc<AgentCell>,
     permission_mode: PermissionMode,
+    watch: std::sync::Arc<crate::watch::WatchRegistry>,
+    id: crate::watch::WatchId,
 ) -> UiHooks {
     let bypass = permission_mode == PermissionMode::BypassPermissions;
     UiHooks {
@@ -52,6 +58,8 @@ fn subagent_hooks(
             {
                 output.push_str(text);
                 cell.record_chars(text.chars().count());
+                // 产出文本进条件引擎（notify_on 命中 → 信号通知）。
+                watch.feed_content(id, text);
             }
         }),
         on_tool_ready: Box::new(|_name, _input| {}),
@@ -72,18 +80,28 @@ impl AgentTool {
     ) -> Result<ToolResult, ToolError> {
         let cell = Arc::new(AgentCell::new());
         let label = agent_label(params);
-        let id = ctx.watch.register(Box::new(AgentWatch {
-            cell: cell.clone(),
-            label: label.clone(),
-            interval: Some(std::time::Duration::from_secs(5)),
-        }));
+        let conditions = params
+            .notify_on
+            .clone()
+            .map(|p| vec![crate::watch::NotifyCondition::Contains(p)])
+            .unwrap_or_default();
+        let id = ctx
+            .watch
+            .register_with_conditions(
+                Box::new(AgentWatch {
+                    cell: cell.clone(),
+                    label: label.clone(),
+                    interval: Some(std::time::Duration::from_secs(5)),
+                }),
+                conditions,
+            );
         let sub_session = self.build_sub_session();
         let prompt = params.prompt.clone();
         let watch = ctx.watch.clone();
         let permission_mode = sub_session.permission_mode;
         tokio::spawn(async move {
             let output = Arc::new(Mutex::new(String::new()));
-            let mut ui = subagent_hooks(output.clone(), cell, permission_mode);
+            let mut ui = subagent_hooks(output.clone(), cell, permission_mode, watch.clone(), id);
             match crate::query::run_query(&sub_session, Vec::new(), &prompt, &mut ui, None).await {
                 Ok(_messages) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -161,6 +179,7 @@ impl AgentCell {
                 self.chars.load(std::sync::atomic::Ordering::SeqCst)
             )),
             payload: None,
+            signal: None,
         }
     }
 }
@@ -226,18 +245,28 @@ impl Tool for AgentTool {
         // 前台子 agent 同样可 watch：Running（产出字符量）→ Done/Failed。
         let cell = Arc::new(AgentCell::new());
         let label = agent_label(&params);
+        let conditions = params
+            .notify_on
+            .clone()
+            .map(|p| vec![crate::watch::NotifyCondition::Contains(p)])
+            .unwrap_or_default();
         let id = ctx
             .watch
-            .register(Box::new(AgentWatch {
-                cell: cell.clone(),
-                label: label.clone(),
-                interval: Some(std::time::Duration::from_secs(5)),
-            }));
+            .register_with_conditions(
+                Box::new(AgentWatch {
+                    cell: cell.clone(),
+                    label: label.clone(),
+                    interval: Some(std::time::Duration::from_secs(5)),
+                }),
+                conditions,
+            );
         let output = Arc::new(Mutex::new(String::new()));
         let mut ui = subagent_hooks(
             output.clone(),
             cell.clone(),
             sub_session.permission_mode,
+            ctx.watch.clone(),
+            id,
         );
         match crate::query::run_query(&sub_session, Vec::new(), &params.prompt, &mut ui, None)
             .await

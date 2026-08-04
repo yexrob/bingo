@@ -47,6 +47,15 @@ struct BashInput {
     #[serde(default)]
     #[schemars(description = "超时秒数，默认 120")]
     timeout: Option<u64>,
+    /// 后台监控的通知条件：任一字样出现在输出中即触发通知（如 ["ERROR", "panic"]）。
+    /// 不设置时默认检测常见错误行。
+    #[serde(default)]
+    #[schemars(description = "后台监控通知条件：任一字样命中输出即通知（不设则默认检测错误行）")]
+    notify_on: Option<Vec<String>>,
+    /// 后台监控的正则通知条件：输出行匹配即触发通知。
+    #[serde(default)]
+    #[schemars(description = "后台监控正则通知条件：输出行匹配即通知")]
+    notify_regex: Option<String>,
 }
 
 pub struct BashTool;
@@ -145,19 +154,31 @@ async fn launch_background(
     ctx: &ToolContext,
     interval: Duration,
 ) -> Result<ToolResult, ToolError> {
+    let mut conditions = Vec::new();
+    if let Some(patterns) = params.notify_on.clone() {
+        conditions.push(crate::watch::NotifyCondition::Contains(patterns));
+    }
+    if let Some(re) = params.notify_regex.clone() {
+        conditions.push(crate::watch::NotifyCondition::Regex(re));
+    }
+    if conditions.is_empty() {
+        conditions.push(crate::watch::NotifyCondition::Errors);
+    }
     let cell = Arc::new(BashCell::new());
     let label = format!("$ {}", params.command);
-    let id = ctx.watch.register(Box::new(BashWatch {
-        cell: cell.clone(),
-        label: label.clone(),
-        interval: Some(interval),
-    }));
+    let id = ctx
+        .watch
+        .register_with_conditions(Box::new(BashWatch {
+            cell: cell.clone(),
+            label: label.clone(),
+            interval: Some(interval),
+        }), conditions);
     let watch = ctx.watch.clone();
     let command = params.command.clone();
     let cwd = ctx.cwd.clone();
     tokio::spawn(async move {
         // 后台任务独立生命周期：周期命令不受单次 timeout 限制。
-        match run_streaming(&command, &cwd, None, cell.clone()).await {
+        match run_streaming(&command, &cwd, None, cell, watch.clone(), id).await {
             Ok((text, code)) => {
                 watch.set_state(
                     id,
@@ -190,6 +211,8 @@ async fn run_streaming(
     cwd: &std::path::Path,
     timeout: Option<Duration>,
     cell: Arc<BashCell>,
+    watch: std::sync::Arc<crate::watch::WatchRegistry>,
+    id: crate::watch::WatchId,
 ) -> Result<(String, i32), String> {
     let mut child = tokio::process::Command::new("/bin/zsh")
         .arg("-c")
@@ -211,6 +234,7 @@ async fn run_streaming(
     for stream in streams {
         let cell = cell.clone();
         let buf = buf.clone();
+        let watch = watch.clone();
         readers.push(tokio::spawn(async move {
             let mut reader = tokio::io::BufReader::new(stream);
             loop {
@@ -218,7 +242,8 @@ async fn run_streaming(
                 match reader.read_line(&mut line).await {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
-                        cell.record_line();
+                        cell.record_line(&line);
+                        watch.feed_content(id, &line);
                         if let Ok(mut b) = buf.lock() {
                             b.push_str(&line);
                         }
@@ -266,7 +291,7 @@ impl BashCell {
             total_lines: AtomicUsize::new(0),
         }
     }
-    fn record_line(&self) {
+    fn record_line(&self, _line: &str) {
         self.line_delta.fetch_add(1, Ordering::SeqCst);
         self.total_lines.fetch_add(1, Ordering::SeqCst);
     }
@@ -279,6 +304,7 @@ impl BashCell {
                 state: crate::watch::WatchState::Idle,
                 detail: Some(format!("第 {rounds} 轮 · 输出 {delta} 行（累计 {total} 行）")),
                 payload: None,
+                signal: None,
             }
         } else {
             crate::watch::WatchPoll {
@@ -288,6 +314,7 @@ impl BashCell {
                     self.started.elapsed().as_secs()
                 )),
                 payload: None,
+                signal: None,
             }
         }
     }
