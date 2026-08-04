@@ -14,6 +14,8 @@ pub struct PendingCall<'a> {
 pub struct ExecOutcome {
     pub tool_use_id: String,
     pub result: Result<ToolResult, ToolError>,
+    /// 工具执行耗时（毫秒）。
+    pub duration_ms: u64,
 }
 
 /// 执行队列（对标 StreamingToolExecutor / toolOrchestration，D7）：
@@ -32,22 +34,25 @@ pub async fn execute_calls<'a>(
             .count();
         if safe_count > 0 {
             let batch = &rest[..safe_count.min(MAX_CONCURRENCY)];
-            let executed: Vec<(String, Result<ToolResult, ToolError>)> =
+            let executed: Vec<(String, Result<ToolResult, ToolError>, u64)> =
                 join_all(batch.iter().map(|c| async move {
+                    let start = std::time::Instant::now();
                     let result = c.tool.call(c.input.clone(), ctx).await;
-                    (c.tool_use_id.clone(), result)
+                    (c.tool_use_id.clone(), result, start.elapsed().as_millis() as u64)
                 }))
                 .await;
-            for (tool_use_id, result) in executed {
-                outcomes.push(ExecOutcome { tool_use_id, result });
+            for (tool_use_id, result, duration_ms) in executed {
+                outcomes.push(ExecOutcome { tool_use_id, result, duration_ms });
             }
             rest = &rest[batch.len()..];
         } else {
             let head = &rest[0];
+            let start = std::time::Instant::now();
             let result = head.tool.call(head.input.clone(), ctx).await;
             outcomes.push(ExecOutcome {
                 tool_use_id: head.tool_use_id.clone(),
                 result,
+                duration_ms: start.elapsed().as_millis() as u64,
             });
             rest = &rest[1..];
         }

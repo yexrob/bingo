@@ -78,6 +78,7 @@ pub fn tui_hooks(
                 output: done.output.clone(),
                 is_error: done.is_error,
                 diff: done.diff.clone(),
+                duration_ms: done.duration_ms,
             }));
         }),
         on_warning: Box::new(move |message| {
@@ -538,6 +539,10 @@ impl BingoChat {
                         return;
                     };
                     self.pending_tools.remove(0);
+                    // 执行中的 header 就带输入摘要（CC：`⏺ Agent description="…"`）。
+                    if let ActivityKind::Tool(call) = &mut self.messages[i].activities[idx].kind {
+                        call.summary = crate::query::summarize_input(&name, &input);
+                    }
                     let kind = classify_tool(&name, &input);
                     let Some(kind) = kind else {
                         // 非 Read/Search 工具：打断进行中的折叠组。
@@ -608,7 +613,7 @@ impl BingoChat {
                                 ToolStatus::Done
                             };
                             call.summary = done.summary.clone();
-                            call.duration_ms = 0;
+                            call.duration_ms = done.duration_ms;
                             let in_group = group_of
                                 .get(hint_idx)
                                 .copied()
@@ -1889,14 +1894,16 @@ mod fold_render_tests {
             summary: "Read a.md".into(),
             output: "l1\nl2\nl3".into(),
             is_error: false,
-            diff: None,
+            duration_ms: 0,
+        diff: None,
         }));
         let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
             name: "Read".into(),
             summary: "Read b.md".into(),
             output: "x\ny".into(),
             is_error: false,
-            diff: None,
+            duration_ms: 0,
+        diff: None,
         }));
         chat.drain_events();
         // ctrl+o 全局展开
@@ -2045,7 +2052,8 @@ mod fold_toggle_tests {
                     summary: summary.into(),
                     output: out.into(),
                     is_error: false,
-                    diff: None,
+                    duration_ms: 0,
+                diff: None,
                 }));
             }
             chat.drain_events();
@@ -2190,6 +2198,69 @@ mod fold_roundtrip_live_tests {
     }
 
     #[test]
+    fn running_tool_shows_input_summary_after_ready() {
+        // 回归：子 agent 执行中 header 就带 description（CC 同款），
+        // 而不是等 ToolDone 才显示。
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Agent".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Agent".into(),
+            input: json!({"description": "读取项目说明并总结", "prompt": "..."}),
+        });
+        chat.drain_events();
+        let area = Rect { x: 0, y: 0, width: 120, height: 30 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        let joined: String = (0..30)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let flat = joined.replace(' ', "");
+        assert!(
+            flat.contains("description=\"读取项目说明并总结\""),
+            "running header shows input summary: {joined}"
+        );
+        // 完成后 duration 用真实值（不再硬编码 0ms）
+        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            name: "Agent".into(),
+            summary: "Agent description=\"读取项目说明并总结\"".into(),
+            output: "line".into(),
+            is_error: false,
+            diff: None,
+            duration_ms: 3210,
+        }));
+        chat.drain_events();
+        let area = Rect { x: 0, y: 0, width: 120, height: 30 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        let joined: String = (0..30)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("3210ms"), "real duration: {joined}");
+    }
+
+    #[test]
     fn expand_running_then_complete_then_collapse_back() {
         let mut chat = test_chat();
         start_group(&mut chat);
@@ -2205,7 +2276,8 @@ mod fold_roundtrip_live_tests {
                 summary: summary.into(),
                 output: out.into(),
                 is_error: false,
-                diff: None,
+                duration_ms: 0,
+            diff: None,
             }));
         }
         chat.drain_events();
@@ -2260,7 +2332,8 @@ mod fold_roundtrip_live_tests {
                 summary: summary.into(),
                 output: out.into(),
                 is_error: false,
-                diff: None,
+                duration_ms: 0,
+            diff: None,
             }));
         }
         chat.drain_events();

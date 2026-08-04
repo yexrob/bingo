@@ -70,6 +70,8 @@ pub struct ToolCallDone {
     pub is_error: bool,
     /// 编辑类工具的 unified diff 预览（None = 无 diff）。
     pub diff: Option<String>,
+    /// 工具执行耗时（毫秒）。
+    pub duration_ms: u64,
 }
 
 /// 异步权限询问回调：工具名 + 理由 → 是否允许。
@@ -289,7 +291,7 @@ fn result_block(tool_use_id: &str, result: &ToolResult) -> ContentBlock {
     }
 }
 
-fn summarize_input(tool_name: &str, input: &serde_json::Value) -> String {
+pub(crate) fn summarize_input(tool_name: &str, input: &serde_json::Value) -> String {
     match (tool_name, input) {
         // Bash 摘要直接显示命令（Claude Code 风格）
         ("Bash", serde_json::Value::Object(map)) => map
@@ -453,6 +455,7 @@ pub async fn run_query(
                         output: format!("permission denied: {reason}"),
                         is_error: true,
                         diff: None,
+                        duration_ms: 0,
                     });
                 }
                 PermissionBehavior::Ask => unreachable!("ask resolved by gate_tool"),
@@ -479,6 +482,7 @@ pub async fn run_query(
                             output: text,
                             is_error: result.is_error,
                             diff: result.diff.clone(),
+                            duration_ms: outcome.duration_ms,
                         });
                         // PostToolUse exit 2 → 阻断继续（hook 的 blocking error 语义）。
                         stop_after_tools |= run_post_tool_use(
