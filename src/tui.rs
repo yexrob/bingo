@@ -98,6 +98,8 @@ struct UiMessage {
     role: Role,
     text: String,
     activities: Vec<Activity>,
+    /// 回复之后渲染的收尾活动（Claude Code：thinking 完成行在回复下方）。
+    trailing: Vec<Activity>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -184,6 +186,7 @@ impl BingoChat {
                         role: Role::Assistant,
                         text: String::new(),
                         activities: Vec::new(),
+                        trailing: Vec::new(),
                     });
                     self.stream_msg = Some(self.messages.len() - 1);
                     self.busy = true;
@@ -195,27 +198,19 @@ impl BingoChat {
                 }
                 UiEvent::ThinkingDelta(thinking) => {
                     self.thinking_buf.push_str(&thinking);
-                    let digest = summarize(&self.thinking_buf);
                     self.activities
                         .retain(|a| !matches!(a.kind, ActivityKind::Thinking(_)));
                     let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                         state: ThinkingState::Running,
                         duration_ms: self.tick * 33,
-                        digest: (!digest.is_empty()).then_some(digest),
-                        stage: "thinking",
-                        tokens: (self.output_tokens > 0).then_some(self.output_tokens),
+                        digest: None,
+                        stage: thinking_stage(self.messages.len()),
+                        tokens: None,
                     }));
                     hint.set_content(vec![Line::from(self.thinking_buf.clone())]);
                     self.activities.push(hint);
                 }
-                UiEvent::OutputTokens(tokens) => {
-                    self.output_tokens = tokens;
-                    for hint in &mut self.activities {
-                        if let ActivityKind::Thinking(t) = &mut hint.kind {
-                            t.tokens = Some(tokens);
-                        }
-                    }
-                }
+                UiEvent::OutputTokens(_tokens) => {}
                 UiEvent::ToolStart { name } => {
                     let name: &'static str = Box::leak(name.into_boxed_str());
                     let mut hint = Activity::new(ActivityKind::Tool(ToolCall::running(
@@ -252,18 +247,25 @@ impl BingoChat {
                     self.busy = false;
                     self.stream_msg = None;
                     self.output_tokens = 0;
-                    for hint in &mut self.activities {
-                        if let ActivityKind::Thinking(t) = &mut hint.kind
+                    // thinking 完成行移到回复之后（Claude Code：`✻ Crunched for 25s` 在末尾）
+                    let mut trailing = Vec::new();
+                    for hint in std::mem::take(&mut self.activities) {
+                        if let ActivityKind::Thinking(t) = &hint.kind
                             && t.state == ThinkingState::Running
                         {
-                            t.state = ThinkingState::Done;
-                            t.duration_ms = self.tick * 33;
-                            t.digest = Some(summarize(&self.thinking_buf));
-                            hint.expanded = false;
+                            let mut done = hint;
+                            if let ActivityKind::Thinking(t) = &mut done.kind {
+                                t.state = ThinkingState::Done;
+                                t.duration_ms = self.tick * 33;
+                            }
+                            done.expanded = false;
+                            trailing.push(done);
+                        } else {
+                            trailing.push(hint);
                         }
                     }
                     if let Some(i) = self.messages.len().checked_sub(1) {
-                        self.messages[i].activities = std::mem::take(&mut self.activities);
+                        self.messages[i].trailing = trailing;
                     }
                 }
                 UiEvent::Warning(message) => {
@@ -279,6 +281,7 @@ impl BingoChat {
                             role: Role::Assistant,
                             text: format!("[error] {message}"),
                             activities: msg.activities,
+                            trailing: msg.trailing,
                         });
                     }
                 }
@@ -328,6 +331,7 @@ impl BingoChat {
             role: Role::User,
             text: text.clone(),
             activities: Vec::new(),
+            trailing: Vec::new(),
         });
         self.busy = true;
 
@@ -475,6 +479,26 @@ fn welcome_rows(
     rows
 }
 
+/// Claude Code 风格的思考阶段俏皮词。
+const THINKING_WORDS: [&str; 12] = [
+    "Bootstrapping",
+    "Razzle-dazzling",
+    "Hashing",
+    "Pondering",
+    "Wrangling",
+    "Synthesizing",
+    "Mulling",
+    "Churning",
+    "Digesting",
+    "Concocting",
+    "Scheming",
+    "Weaving",
+];
+
+fn thinking_stage(seed: usize) -> &'static str {
+    THINKING_WORDS[seed % THINKING_WORDS.len()]
+}
+
 fn permission_mode_label(mode: PermissionMode) -> &'static str {
     match mode {
         PermissionMode::Default => "default",
@@ -482,17 +506,6 @@ fn permission_mode_label(mode: PermissionMode) -> &'static str {
         PermissionMode::BypassPermissions => "bypassPermissions",
         PermissionMode::DontAsk => "dontAsk",
         PermissionMode::Plan => "plan",
-    }
-}
-
-fn summarize(text: &str) -> String {
-    let trimmed = text.trim();
-    let first = trimmed.lines().next().unwrap_or(trimmed);
-    let chars: Vec<char> = first.chars().collect();
-    if chars.len() > 40 {
-        chars[..40].iter().collect()
-    } else {
-        first.to_string()
     }
 }
 
@@ -599,7 +612,28 @@ impl Component for BingoChat {
                         &mut render,
                     );
                     rows.extend(lines);
-                    rows.extend(render(&self.messages[i].text));
+                    let reply = render(&self.messages[i].text);
+                    for (j, line) in reply.into_iter().enumerate() {
+                        if j == 0 {
+                            let mut spans = vec![Span::styled(
+                                "⏺ ",
+                                ratatui::style::Style::default().fg(self.theme.claude),
+                            )];
+                            spans.extend(line.spans);
+                            rows.push(Line::from(spans));
+                        } else {
+                            rows.push(line);
+                        }
+                    }
+                    let (trailing, _) = layout_activities(
+                        0,
+                        rows.len() as u16,
+                        &self.messages[i].trailing,
+                        spinner,
+                        &self.theme,
+                        &mut render,
+                    );
+                    rows.extend(trailing);
                 }
             }
         }
