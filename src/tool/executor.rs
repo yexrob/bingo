@@ -102,6 +102,7 @@ mod tests {
             Ok(ToolResult {
                 content: serde_json::Value::Null,
                 is_error: false,
+                diff: None,
             })
         }
     }

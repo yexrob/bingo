@@ -73,7 +73,7 @@ impl Tool for EditTool {
         } else {
             content.replacen(&params.old_string, &params.new_string, 1)
         };
-        std::fs::write(&path, replaced)
+        std::fs::write(&path, &replaced)
             .map_err(|e| ToolError::failed(format!("cannot write {}: {e}", path.display())))?;
         let mut text = format!(
             "Edited {}: {} occurrence{} of old_string",
@@ -89,6 +89,52 @@ impl Tool for EditTool {
         Ok(ToolResult {
             content: serde_json::Value::String(text),
             is_error: false,
+            diff: super::diff::unified_diff(&params.file_path, &content, &replaced),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn edit_produces_diff() {
+        let path = std::env::temp_dir().join(format!("bingo-edit-diff-{}", std::process::id()));
+        std::fs::write(&path, "line one\nline two\nline three\n").unwrap();
+        let result = EditTool
+            .call(
+                serde_json::json!({
+                    "file_path": path.to_string_lossy(),
+                    "old_string": "line two",
+                    "new_string": "line TWO",
+                }),
+                &ToolContext { cwd: Default::default() },
+            )
+            .await
+            .unwrap();
+        assert!(result.diff.is_some(), "edit should produce a diff");
+        let d = result.diff.unwrap();
+        assert!(d.contains("-line two"), "diff: {d}");
+        assert!(d.contains("+line TWO"), "diff: {d}");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_produces_diff() {
+        let path = std::env::temp_dir().join(format!("bingo-write-diff-{}", std::process::id()));
+        let result = crate::tool::write::WriteTool
+            .call(
+                serde_json::json!({
+                    "file_path": path.to_string_lossy(),
+                    "content": "hello\nworld\n",
+                }),
+                &ToolContext { cwd: Default::default() },
+            )
+            .await
+            .unwrap();
+        let d = result.diff.unwrap();
+        assert!(d.contains("+hello"), "diff: {d}");
+        std::fs::remove_file(&path).unwrap();
     }
 }

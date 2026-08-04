@@ -108,6 +108,7 @@ impl Tool for BashTool {
         Ok(ToolResult {
             content: serde_json::Value::String(text),
             is_error: false,
+            diff: None,
         })
     }
 }

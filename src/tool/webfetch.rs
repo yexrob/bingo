@@ -82,6 +82,7 @@ impl Tool for WebFetchTool {
         Ok(ToolResult {
             content: serde_json::Value::String(format!("{}\n\n---\n{}", params.url, out)),
             is_error: false,
+            diff: None,
         })
     }
 }

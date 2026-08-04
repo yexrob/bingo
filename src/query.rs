@@ -68,6 +68,8 @@ pub struct ToolCallDone {
     pub summary: String,
     pub output: String,
     pub is_error: bool,
+    /// 编辑类工具的 unified diff 预览（None = 无 diff）。
+    pub diff: Option<String>,
 }
 
 /// 异步权限询问回调：工具名 + 理由 → 是否允许。
@@ -440,6 +442,7 @@ pub async fn run_query(
                         summary,
                         output: format!("permission denied: {reason}"),
                         is_error: true,
+                        diff: None,
                     });
                 }
                 PermissionBehavior::Ask => unreachable!("ask resolved by gate_tool"),
@@ -465,6 +468,7 @@ pub async fn run_query(
                             summary: summarize_input(name, input),
                             output: text,
                             is_error: result.is_error,
+                            diff: result.diff.clone(),
                         });
                         // PostToolUse exit 2 → 阻断继续（hook 的 blocking error 语义）。
                         stop_after_tools |= run_post_tool_use(

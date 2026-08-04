@@ -8,11 +8,11 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use rsmarkdown_core::{MarkdownProcessor, Renderer};
 use rsmarkdown_tui::activities::{
-    layout_activities, Activity, ActivityKind, Thinking, ThinkingState, ToolCall, ToolStatus,
+    activities_path_get_mut, diff_lines, layout_activities, Activity, ActivityKind, Diff,
+    Thinking, ThinkingState, ToolCall, ToolStatus,
 };
 use rsmarkdown_tui::app::App;
 use rsmarkdown_tui::Component;
-use rsmarkdown_tui::activities::activities_path_get_mut;
 use rsmarkdown_tui::permission::{DialogAction, PermissionRequest};
 use rsmarkdown_tui::renderer::theme::Theme;
 use rsmarkdown_tui::renderer::StreamMarkdownRenderer;
@@ -71,6 +71,7 @@ pub fn tui_hooks(
                 summary: done.summary.clone(),
                 output: done.output.clone(),
                 is_error: done.is_error,
+                diff: done.diff.clone(),
             }));
         }),
         on_warning: Box::new(move |message| {
@@ -305,6 +306,21 @@ impl BingoChat {
                     let Some(i) = self.stream_msg else {
                         return;
                     };
+                    // 编辑类工具：Running 工具行 → 原位替换为 unified diff 活动。
+                    if let Some(diff_text) = &done.diff
+                        && let Some(pos) = self.messages[i].activities.iter().position(|h| {
+                            matches!(&h.kind, ActivityKind::Tool(c)
+                                if c.name == done.name.as_str() && c.status == ToolStatus::Running)
+                        })
+                    {
+                        let diff = Diff::parse_unified(diff_text);
+                        let content = diff_lines(&diff, &self.theme);
+                        let mut hint = Activity::new(ActivityKind::Diff(diff));
+                        hint.expand_hint = Some("ctrl+o to expand".to_string());
+                        hint.set_content(content);
+                        self.messages[i].activities[pos] = hint;
+                        continue;
+                    }
                     for hint in &mut self.messages[i].activities {
                         if let ActivityKind::Tool(call) = &mut hint.kind
                             && call.name == done.name.as_str()

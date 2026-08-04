@@ -48,6 +48,7 @@ impl Tool for WriteTool {
     ) -> Result<ToolResult, ToolError> {
         let params: WriteInput = parse_input(&input)?;
         let path = std::path::PathBuf::from(&params.file_path);
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
             && let Err(e) = std::fs::create_dir_all(parent)
@@ -66,6 +67,7 @@ impl Tool for WriteTool {
                 bytes, params.file_path
             )),
             is_error: false,
+            diff: super::diff::unified_diff(&params.file_path, &old, &params.content),
         })
     }
 }

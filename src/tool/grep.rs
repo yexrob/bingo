@@ -75,6 +75,7 @@ impl Tool for GrepTool {
             return Ok(ToolResult {
                 content: serde_json::Value::String("no matches".into()),
                 is_error: false,
+                diff: None,
             });
         }
         let total = lines.len();
@@ -89,6 +90,7 @@ impl Tool for GrepTool {
         Ok(ToolResult {
             content: serde_json::Value::String(text),
             is_error: false,
+            diff: None,
         })
     }
 }

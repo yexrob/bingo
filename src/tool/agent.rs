@@ -118,6 +118,7 @@ impl Tool for AgentTool {
                         text
                     }),
                     is_error: false,
+                    diff: None,
                 })
             }
             Err(e) => Err(ToolError::failed(format!("subagent failed: {e}"))),

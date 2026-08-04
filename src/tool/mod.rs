@@ -6,6 +6,7 @@ use thiserror::Error;
 
 pub mod agent;
 pub mod bash;
+pub mod diff;
 pub mod edit;
 pub mod executor;
 pub mod glob;
@@ -21,10 +22,12 @@ pub struct ToolContext {
 }
 
 /// 工具执行结果：content 即回填给模型的 tool_result content。
-#[derive(Debug)]
+/// diff 为可选 unified diff 文本（Edit/Write 等编辑工具的 UI 预览，不回填模型）。
+#[derive(Debug, Default)]
 pub struct ToolResult {
     pub content: serde_json::Value,
     pub is_error: bool,
+    pub diff: Option<String>,
 }
 
 #[derive(Debug, Error)]
