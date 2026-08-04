@@ -5,6 +5,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 pub mod bash;
+pub mod executor;
 pub mod read;
 
 /// 工具执行上下文：随 queryLoop 一轮共享。
@@ -38,8 +39,6 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn input_schema(&self) -> serde_json::Value;
-    /// 供第 3 轮并发队列消费（safe 并行/非 safe 串行）。
-    #[expect(dead_code)]
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         false
     }

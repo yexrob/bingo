@@ -5,7 +5,10 @@ use thiserror::Error;
 
 use crate::api::client::{AssistantAccumulator, Client, ClientError};
 use crate::api::types::{ContentBlock, Message, Request, StreamEvent, Role, DEFAULT_MAX_TOKENS};
+use crate::hooks::{run_post_tool_use, run_pre_tool_use};
 use crate::permission::{can_use_tool, PermissionBehavior, PermissionMode};
+use crate::settings::{HooksConfig, Settings};
+use crate::tool::executor::{execute_calls, PendingCall};
 use crate::tool::{find_tool, tool_params, Tool, ToolContext, ToolError, ToolResult};
 
 #[derive(Debug, Error)]
@@ -73,29 +76,20 @@ async fn one_turn(
     Ok((acc.message(), tool_uses))
 }
 
-/// 执行一个 tool_use：查注册表 → 权限门 → call。
-async fn execute_tool(
-    tool: &dyn Tool,
-    input: &serde_json::Value,
-    ctx: &ToolContext,
-) -> Result<ToolResult, ToolError> {
-    tool.call(input.clone(), ctx).await
-}
-
-fn tool_result_block(tool_use_id: &str, content: serde_json::Value, is_error: bool) -> ContentBlock {
+fn tool_result_text(tool_use_id: &str, text: impl Into<String>) -> ContentBlock {
     ContentBlock::ToolResult {
         tool_use_id: tool_use_id.to_string(),
-        content,
-        is_error,
+        content: serde_json::Value::String(text.into()),
+        is_error: false,
     }
 }
 
-fn tool_result_text(tool_use_id: &str, text: impl Into<String>) -> ContentBlock {
-    tool_result_block(tool_use_id, serde_json::Value::String(text.into()), false)
-}
-
 fn tool_result_error(tool_use_id: &str, text: impl Into<String>) -> ContentBlock {
-    tool_result_block(tool_use_id, serde_json::Value::String(text.into()), true)
+    ContentBlock::ToolResult {
+        tool_use_id: tool_use_id.to_string(),
+        content: serde_json::Value::String(text.into()),
+        is_error: true,
+    }
 }
 
 /// 交互确认（headless）：stderr 提示，stdin 读 y/n。stdin 不可用时视为拒绝。
@@ -109,22 +103,59 @@ fn interactive_confirm(prompt: &str) -> bool {
     answer == "y" || answer == "yes"
 }
 
-/// 权限门 + 交互：返回最终行为。
+/// 权限门 + PreToolUse hook + 交互：返回最终决策与（可能被改写的）输入。
 async fn gate_tool(
     tool: &dyn Tool,
     input: &serde_json::Value,
     mode: PermissionMode,
-) -> PermissionBehavior {
-    let decision = can_use_tool(tool, input, mode);
+    hooks: &HooksConfig,
+) -> (PermissionBehavior, String, serde_json::Value) {
+    let (hook_behavior, hook_reason, hook_input) = run_pre_tool_use(
+        hooks,
+        tool.name(),
+        input,
+        permission_mode_str(mode),
+    )
+    .await;
+    if hook_behavior != PermissionBehavior::Allow {
+        return (hook_behavior, hook_reason, hook_input);
+    }
+
+    let decision = can_use_tool(tool, &hook_input, mode);
     match decision.behavior {
         PermissionBehavior::Ask => {
-            if interactive_confirm(&format!("允许 {} 执行 {:?} 吗？", tool.name(), input)) {
-                PermissionBehavior::Allow
+            if interactive_confirm(&format!(
+                "允许 {} 执行 {:?} 吗？",
+                tool.name(),
+                hook_input
+            )) {
+                (PermissionBehavior::Allow, String::new(), hook_input)
             } else {
-                PermissionBehavior::Deny
+                (
+                    PermissionBehavior::Deny,
+                    format!("user denied {}", tool.name()),
+                    hook_input,
+                )
             }
         }
-        other => other,
+        other => (other, decision.reason, hook_input),
+    }
+}
+
+fn permission_mode_str(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Default => "default",
+        PermissionMode::AcceptEdits => "acceptEdits",
+        PermissionMode::BypassPermissions => "bypassPermissions",
+        PermissionMode::DontAsk => "dontAsk",
+        PermissionMode::Plan => "plan",
+    }
+}
+
+fn render_result(result: &ToolResult) -> String {
+    match &result.content {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -133,11 +164,13 @@ pub async fn run_query(
     client: &Client,
     model: &str,
     permission_mode: PermissionMode,
+    settings: &Settings,
     user_input: &str,
 ) -> Result<(), QueryError> {
     let tools = crate::tools::base_tools();
     let ctx = ToolContext {
-        cwd: std::env::current_dir().map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
+        cwd: std::env::current_dir()
+            .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
     };
 
     let mut messages = vec![Message::user_text(user_input)];
@@ -150,47 +183,70 @@ pub async fn run_query(
         }
         messages.push(assistant);
 
-        let mut results = Vec::new();
-        for tool_use in tool_uses {
-            let (tool_use_id, name, input) = match &tool_use {
+        // 阶段 1：逐工具走权限门（串行，可能交互；hook 可改写输入）
+        let mut pending: Vec<PendingCall> = Vec::new();
+        let mut blocks: Vec<ContentBlock> = Vec::new();
+        for tool_use in &tool_uses {
+            let (id, name, input) = match tool_use {
                 ContentBlock::ToolUse { id, name, input } => (id.clone(), name.clone(), input.clone()),
                 _ => unreachable!(),
             };
-            let block = match find_tool(&tools, &name) {
-                None => tool_result_error(
-                    &tool_use_id,
+            let Some(tool) = find_tool(&tools, &name) else {
+                blocks.push(tool_result_error(
+                    &id,
                     format!("<tool_use_error>No such tool: {name}</tool_use_error>"),
-                ),
-                Some(tool) => {
-                    let behavior = gate_tool(tool, &input, permission_mode).await;
-                    match behavior {
-                        PermissionBehavior::Allow => {
-                            match execute_tool(tool, &input, &ctx).await {
-                                Ok(result) => tool_result_text(&tool_use_id, render_result(&result)),
-                                Err(e) => tool_result_error(&tool_use_id, e.to_string()),
-                            }
-                        }
-                        PermissionBehavior::Deny => tool_result_error(
-                            &tool_use_id,
-                            format!("<permission_error>permission denied: {}</permission_error>", tool.name()),
-                        ),
-                        PermissionBehavior::Ask => unreachable!("ask resolved by gate_tool"),
+                ));
+                continue;
+            };
+            let (behavior, reason, gated_input) = gate_tool(tool, &input, permission_mode, &settings.hooks).await;
+            match behavior {
+                PermissionBehavior::Allow => pending.push(PendingCall {
+                    tool_use_id: id,
+                    tool,
+                    input: gated_input,
+                }),
+                PermissionBehavior::Deny => blocks.push(tool_result_error(
+                    &id,
+                    format!(
+                        "<permission_error>permission denied: {name} ({reason})</permission_error>"
+                    ),
+                )),
+                PermissionBehavior::Ask => unreachable!("ask resolved by gate_tool"),
+            }
+        }
+
+        // 阶段 2：队列执行（safe 并行 / 非 safe 串行）
+        let outcomes = execute_calls(pending, &ctx).await;
+        for outcome in outcomes {
+            match outcome.result {
+                Ok(result) => {
+                    blocks.push(tool_result_text(&outcome.tool_use_id, render_result(&result)));
+                    if let Some(ContentBlock::ToolUse { name, input, .. }) = tool_uses
+                        .iter()
+                        .find(|t| matches!(t, ContentBlock::ToolUse { id, .. } if id == &outcome.tool_use_id))
+                    {
+                        run_post_tool_use(
+                            &settings.hooks,
+                            name,
+                            input,
+                            &result.content,
+                            permission_mode_str(permission_mode),
+                        )
+                        .await;
                     }
                 }
-            };
-            results.push(block);
+                Err(e) => {
+                    blocks.push(tool_result_error(
+                        &outcome.tool_use_id,
+                        format!("<tool_use_error>{e}</tool_use_error>"),
+                    ));
+                }
+            }
         }
+
         messages.push(Message {
             role: Role::User,
-            content: results,
+            content: blocks,
         });
-    }
-}
-
-/// tool_result 的 content 统一渲染为文本。
-fn render_result(result: &ToolResult) -> String {
-    match &result.content {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
     }
 }
