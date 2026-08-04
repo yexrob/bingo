@@ -175,6 +175,10 @@ impl WatchRegistry {
                 let mut ticker = tokio::time::interval(interval);
                 loop {
                     ticker.tick().await;
+                    // 外部已置终态（如子 agent 完成）：停止轮询，不再覆盖。
+                    if registry.is_terminal(id) {
+                        break;
+                    }
                     let p = watchable.poll();
                     let terminal = p.state.is_terminal();
                     registry.set_state(id, p.state, p.detail, p.payload);
@@ -185,6 +189,15 @@ impl WatchRegistry {
             });
         }
         id
+    }
+
+    /// 当前是否终态（轮询循环据此停止）。
+    pub fn is_terminal(&self, id: WatchId) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner
+            .entries
+            .get(&id)
+            .is_some_and(|e| e.state.is_terminal())
     }
 
     /// 实现者主动更新状态（无 interval 或轮询之外的即时变化）。
@@ -201,6 +214,10 @@ impl WatchRegistry {
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return;
             };
+            // 终态定格：Done/Failed 后的非终态更新（如轮询的 Running）不再覆盖。
+            if entry.state.is_terminal() && !state.is_terminal() {
+                return;
+            }
             if entry.state == state && entry.detail == detail {
                 return;
             }
@@ -409,6 +426,25 @@ mod tests {
         assert!(notes[0].contains("已完成 2 轮"), "merged: {}", notes[0]);
         assert!(notes[1].contains("fin"), "terminal: {}", notes[1]);
         assert!(reg.consume_notifications().is_empty(), "consumed");
+    }
+
+    #[test]
+    fn terminal_state_is_frozen_against_poll_override() {
+        // 回归：子 agent 完成（Done）后，interval 轮询的 Running 不得覆盖。
+        let reg = watch();
+        let id = reg.register(Box::new(FakeWatch {
+            label: "agent",
+            sequence: vec![WatchPoll {
+                state: WatchState::Running,
+                detail: Some("已产出 33 字符".into()),
+                payload: None,
+            }],
+            index: AtomicUsize::new(0),
+            interval: None,
+        }));
+        reg.set_state(id, WatchState::Done, Some("完成".into()), None);
+        reg.set_state(id, WatchState::Running, Some("已产出 33 字符".into()), None);
+        assert_eq!(reg.snapshot()[0].state, WatchState::Done, "frozen");
     }
 
     #[tokio::test]

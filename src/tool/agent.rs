@@ -71,13 +71,7 @@ impl AgentTool {
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let cell = Arc::new(AgentCell::new());
-        let label = format!(
-            "Agent: {}",
-            params
-                .description
-                .clone()
-                .unwrap_or_else(|| params.prompt.chars().take(40).collect())
-        );
+        let label = agent_label(params);
         let id = ctx.watch.register(Box::new(AgentWatch {
             cell: cell.clone(),
             label: label.clone(),
@@ -228,10 +222,20 @@ impl Tool for AgentTool {
 
         let sub_session = self.build_sub_session();
 
+        // 前台子 agent 同样可 watch：Running（产出字符量）→ Done/Failed。
+        let cell = Arc::new(AgentCell::new());
+        let label = agent_label(&params);
+        let id = ctx
+            .watch
+            .register(Box::new(AgentWatch {
+                cell: cell.clone(),
+                label: label.clone(),
+                interval: Some(std::time::Duration::from_secs(5)),
+            }));
         let output = Arc::new(Mutex::new(String::new()));
         let mut ui = subagent_hooks(
             output.clone(),
-            Arc::new(AgentCell::new()),
+            cell.clone(),
             sub_session.permission_mode,
         );
         match crate::query::run_query(&sub_session, Vec::new(), &params.prompt, &mut ui, None)
@@ -239,17 +243,43 @@ impl Tool for AgentTool {
         {
             Ok(_messages) => {
                 let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let content = if text.trim().is_empty() {
+                    "[subagent returned no text]".to_string()
+                } else {
+                    text
+                };
+                ctx.watch.set_state(
+                    id,
+                    crate::watch::WatchState::Done,
+                    Some("完成".to_string()),
+                    Some(serde_json::json!(content.clone())),
+                );
                 Ok(ToolResult {
-                    content: serde_json::Value::String(if text.trim().is_empty() {
-                        "[subagent returned no text]".to_string()
-                    } else {
-                        text
-                    }),
+                    content: serde_json::Value::String(content),
                     is_error: false,
                     diff: None,
                 })
             }
-            Err(e) => Err(ToolError::failed(format!("subagent failed: {e}"))),
+            Err(e) => {
+                ctx.watch.set_state(
+                    id,
+                    crate::watch::WatchState::Failed,
+                    Some(format!("subagent failed: {e}")),
+                    None,
+                );
+                Err(ToolError::failed(format!("subagent failed: {e}")))
+            }
         }
     }
+}
+
+/// Watch 行 label：优先 description，否则 prompt 摘要。
+fn agent_label(params: &AgentInput) -> String {
+    format!(
+        "Agent: {}",
+        params
+            .description
+            .clone()
+            .unwrap_or_else(|| params.prompt.chars().take(40).collect())
+    )
 }
