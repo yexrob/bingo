@@ -136,6 +136,8 @@ struct CollapseGroup {
     active: bool,
     /// ctrl+o / 点击展开组内逐工具。
     expanded: bool,
+    /// 组内最近一个工具的输入 hint（CC latestDisplayHint，执行中显示在 ⎿ 行）。
+    last_hint: Option<String>,
 }
 
 /// 工具的可折叠分类（Claude Code isSearchOrReadCommand）。
@@ -228,6 +230,30 @@ fn classify_bash_command(command: &str) -> Option<CollapseKind> {
         Some(CollapseKind::Read(None))
     } else {
         None
+    }
+}
+
+/// 折叠组执行中的 hint（CC latestDisplayHint）：组内最近工具的输入。
+/// Read → 裸路径、Grep/Glob → "pattern"、Bash → $ cmd。
+fn hint_for(name: &str, input: &serde_json::Value) -> String {
+    let map = input.as_object();
+    match name {
+        "Bash" => map
+            .and_then(|m| m.get("command"))
+            .and_then(|c| c.as_str())
+            .map(|c| format!("$ {c}"))
+            .unwrap_or_else(|| crate::query::summarize_input(name, input)),
+        "Read" => map
+            .and_then(|m| m.get("file_path"))
+            .and_then(|p| p.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::query::summarize_input(name, input)),
+        "Grep" | "Glob" => map
+            .and_then(|m| m.get("pattern"))
+            .and_then(|p| p.as_str())
+            .map(|p| format!("\"{p}\""))
+            .unwrap_or_else(|| crate::query::summarize_input(name, input)),
+        _ => crate::query::summarize_input(name, input),
     }
 }
 
@@ -573,11 +599,13 @@ impl BingoChat {
                             list: 0,
                             active: true,
                             expanded: false,
+                            last_hint: None,
                         });
                         self.messages[i].groups.len() - 1
                     };
                     self.messages[i].group_of[idx] = Some(g);
                     self.messages[i].groups[g].activities.push(idx);
+                    self.messages[i].groups[g].last_hint = Some(hint_for(&name, &input));
                     match kind {
                         CollapseKind::Search => self.messages[i].groups[g].search += 1,
                         CollapseKind::Read(path) => match path {
@@ -1233,6 +1261,16 @@ impl Component for BingoChat {
                                 row + 1,
                                 ClickAction::Group { message: i, group: g },
                             ));
+                            // 执行中的折叠组下方显示最近工具的输入（CC ⎿ 行）；
+                            // 组完成后该行消失（hint 只在进行时渲染）。
+                            if in_progress
+                                && let Some(hint) = &msg.groups[g].last_hint
+                            {
+                                rows.push(Line::from(Span::styled(
+                                    format!("  ⎿  {hint}"),
+                                    theme_dim,
+                                )));
+                            }
                             continue;
                         }
                         let (lines, mut local) = rsmarkdown_tui::activities::layout_activity(
@@ -1755,6 +1793,7 @@ mod fold_tests {
             list: 0,
             active: false,
             expanded: false,
+            last_hint: None,
         };
         assert_eq!(collapse_summary(&g, false), "Searched for 1 pattern, read 3 files");
         g.search = 2;
@@ -1776,6 +1815,7 @@ mod fold_tests {
             list: 0,
             active: false,
             expanded: false,
+            last_hint: None,
         };
         assert_eq!(collapse_summary(&g, false), "Read 1 file");
         let g = CollapseGroup {
@@ -1786,6 +1826,7 @@ mod fold_tests {
             list: 1,
             active: false,
             expanded: false,
+            last_hint: None,
         };
         assert_eq!(collapse_summary(&g, false), "Read 2 files, listed 1 directory");
     }
@@ -2273,6 +2314,71 @@ mod fold_roundtrip_live_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("3210ms"), "real duration: {joined}");
+    }
+
+    #[test]
+    fn running_group_shows_hint_line_then_hides_when_done() {
+        // CC latestDisplayHint：执行中折叠组下方显示最近工具的输入（⎿ 行），
+        // 组完成后消失。
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Read".into(),
+            input: json!({"file_path": "package.json"}),
+        });
+        chat.drain_events();
+        let area = Rect { x: 0, y: 0, width: 120, height: 30 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        let joined: String = (0..30)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("⎿") && joined.contains("package.json"),
+            "running group shows hint: {joined}"
+        );
+        // 工具完成 → 组不再 in_progress → hint 行消失，只剩过去时摘要。
+        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            name: "Read".into(),
+            summary: "Read package.json".into(),
+            output: "l1".into(),
+            is_error: false,
+            diff: None,
+            duration_ms: 3,
+        }));
+        chat.drain_events();
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        let joined: String = (0..30)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Read 1 file"), "past tense: {joined}");
+        assert!(
+            !joined.contains("⎿"),
+            "hint hidden when group done: {joined}"
+        );
     }
 
     #[test]
