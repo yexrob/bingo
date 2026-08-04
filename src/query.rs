@@ -25,11 +25,62 @@ pub enum QueryError {
     Tool(#[from] ToolError),
 }
 
-/// headless 模式：把文本增量实时打到 stdout。
-fn print_text_delta(event: &StreamEvent) {
-    if let StreamEvent::TextDelta { text, .. } = event {
-        let _ = std::io::stdout().write_all(text.as_bytes());
-        let _ = std::io::stdout().flush();
+/// 一次查询的全部上下文（TUI 与 headless 共用）。
+#[derive(Clone)]
+pub struct Session {
+    pub client: Client,
+    pub model: String,
+    pub permission_mode: PermissionMode,
+    pub settings: Settings,
+    pub system: Vec<SystemBlock>,
+    pub transcript: Option<Transcript>,
+}
+
+/// 单个工具完成事件。
+#[derive(Debug, Clone)]
+pub struct ToolCallDone {
+    pub name: String,
+    pub summary: String,
+    pub is_error: bool,
+}
+
+/// 异步权限询问回调：工具名 + 理由 → 是否允许。
+pub type AskFn = dyn Fn(&str, &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+    + Send
+    + Sync;
+
+/// UI 挂钩：流事件、工具完成、权限询问。
+pub struct UiHooks {
+    pub on_event: Box<dyn FnMut(&StreamEvent) + Send>,
+    pub on_tool_done: Box<dyn Fn(&ToolCallDone) + Send>,
+    /// 权限询问：工具名 + 理由 → 是否允许（异步：TUI 模态可能等待用户）。
+    pub ask: Box<AskFn>,
+}
+
+/// headless 默认挂钩：文本增量打 stdout；权限走 stdin 交互。
+pub fn headless_hooks() -> UiHooks {
+    UiHooks {
+        on_event: Box::new(|event| {
+            if let StreamEvent::TextDelta { text, .. } = event {
+                let _ = std::io::stdout().write_all(text.as_bytes());
+                let _ = std::io::stdout().flush();
+            }
+        }),
+        on_tool_done: Box::new(|_| {}),
+        ask: Box::new(|tool_name, reason| {
+            let prompt = format!("允许 {tool_name} 执行吗？({reason}) [y/N] ");
+            Box::pin(async move {
+                eprintln!("{prompt}");
+                let answer = tokio::task::spawn_blocking(move || {
+                    let mut line = String::new();
+                    let _ = std::io::stdin().lock().read_line(&mut line);
+                    line.trim().to_ascii_lowercase()
+                })
+                .await
+                .unwrap_or_default();
+                answer == "y" || answer == "yes"
+            })
+        }),
     }
 }
 
@@ -41,7 +92,7 @@ async fn one_turn(
     messages: &[Message],
     tools: &[Box<dyn Tool>],
     system: &[SystemBlock],
-    on_event: impl FnMut(&StreamEvent),
+    on_event: &mut (dyn FnMut(&StreamEvent) + Send),
 ) -> Result<(Message, Vec<ContentBlock>), QueryError> {
     let request = Request {
         model: model.to_string(),
@@ -54,7 +105,6 @@ async fn one_turn(
     let mut stream = Box::pin(client.stream(&request).await?);
     let mut acc = AssistantAccumulator::new();
     let mut tool_uses = Vec::new();
-    let mut on_event = on_event;
     while let Some(event) = stream.next().await {
         let event = event?;
         on_event(&event);
@@ -97,23 +147,13 @@ fn tool_result_error(tool_use_id: &str, text: impl Into<String>) -> ContentBlock
     }
 }
 
-/// 交互确认（headless）：stderr 提示，stdin 读 y/n。stdin 不可用时视为拒绝。
-fn interactive_confirm(prompt: &str) -> bool {
-    eprintln!("{prompt} [y/N]");
-    let mut line = String::new();
-    let Ok(_) = std::io::stdin().lock().read_line(&mut line) else {
-        return false;
-    };
-    let answer = line.trim().to_ascii_lowercase();
-    answer == "y" || answer == "yes"
-}
-
-/// 权限门 + PreToolUse hook + 交互：返回最终决策与（可能被改写的）输入。
+/// 权限门 + PreToolUse hook + UI 询问：返回最终决策与（可能被改写的）输入。
 async fn gate_tool(
     tool: &dyn Tool,
     input: &serde_json::Value,
     mode: PermissionMode,
     hooks: &HooksConfig,
+    ask: &AskFn,
 ) -> (PermissionBehavior, String, serde_json::Value) {
     let (hook_behavior, hook_reason, hook_input) = run_pre_tool_use(
         hooks,
@@ -129,11 +169,8 @@ async fn gate_tool(
     let decision = can_use_tool(tool, &hook_input, mode);
     match decision.behavior {
         PermissionBehavior::Ask => {
-            if interactive_confirm(&format!(
-                "允许 {} 执行 {:?} 吗？",
-                tool.name(),
-                hook_input
-            )) {
+            let reason = decision.reason;
+            if ask(&tool.name(), &reason).await {
                 (PermissionBehavior::Allow, String::new(), hook_input)
             } else {
                 (
@@ -172,29 +209,26 @@ fn result_block(tool_use_id: &str, result: &ToolResult) -> ContentBlock {
     }
 }
 
-/// 一轮查询的上下文。
-pub struct QueryConfig<'a> {
-    pub client: &'a Client,
-    pub model: &'a str,
-    pub permission_mode: PermissionMode,
-    pub settings: &'a Settings,
-    pub system: &'a [SystemBlock],
-    pub transcript: &'a Option<Transcript>,
-    pub initial_messages: Vec<Message>,
+fn summarize_input(input: &serde_json::Value) -> String {
+    match input {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .take(1)
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        other => other.to_string(),
+    }
 }
 
 /// queryLoop：多轮 tool loop，直到 end_turn。
-pub async fn run_query(cfg: QueryConfig<'_>, user_input: &str) -> Result<(), QueryError> {
-    let QueryConfig {
-        client,
-        model,
-        permission_mode,
-        settings,
-        system,
-        transcript,
-        initial_messages,
-    } = cfg;
-    let tools = crate::tools::assemble_tools(&settings.mcp_servers).await;
+pub async fn run_query(
+    session: &Session,
+    initial_messages: Vec<Message>,
+    user_input: &str,
+    ui: &mut UiHooks,
+) -> Result<(), QueryError> {
+    let tools = crate::tools::assemble_tools(&session.settings.mcp_servers).await;
     let ctx = ToolContext {
         cwd: std::env::current_dir()
             .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
@@ -204,10 +238,24 @@ pub async fn run_query(cfg: QueryConfig<'_>, user_input: &str) -> Result<(), Que
     let mut messages = initial_messages;
     messages.push(Message::user_text(user_input));
     loop {
-        check_input_budget(client, model, system, &messages, &mut warned).await;
-        let (assistant, tool_uses) =
-            one_turn(client, model, &messages, &tools, system, print_text_delta).await?;
-        if let Some(t) = transcript {
+        check_input_budget(
+            &session.client,
+            &session.model,
+            &session.system,
+            &messages,
+            &mut warned,
+        )
+        .await;
+        let (assistant, tool_uses) = one_turn(
+            &session.client,
+            &session.model,
+            &messages,
+            &tools,
+            &session.system,
+            &mut ui.on_event as &mut (dyn FnMut(&StreamEvent) + Send),
+        )
+        .await?;
+        if let Some(t) = &session.transcript {
             let _ = t.append(&assistant);
         }
         if tool_uses.is_empty() {
@@ -231,7 +279,14 @@ pub async fn run_query(cfg: QueryConfig<'_>, user_input: &str) -> Result<(), Que
                 ));
                 continue;
             };
-            let (behavior, reason, gated_input) = gate_tool(tool, &input, permission_mode, &settings.hooks).await;
+            let (behavior, reason, gated_input) = gate_tool(
+                tool,
+                &input,
+                session.permission_mode,
+                &session.settings.hooks,
+                &*ui.ask,
+            )
+            .await;
             match behavior {
                 PermissionBehavior::Allow => pending.push(PendingCall {
                     tool_use_id: id,
@@ -258,12 +313,17 @@ pub async fn run_query(cfg: QueryConfig<'_>, user_input: &str) -> Result<(), Que
                         .iter()
                         .find(|t| matches!(t, ContentBlock::ToolUse { id, .. } if id == &outcome.tool_use_id))
                     {
+                        (ui.on_tool_done)(&ToolCallDone {
+                            name: name.clone(),
+                            summary: summarize_input(input),
+                            is_error: result.is_error,
+                        });
                         run_post_tool_use(
-                            &settings.hooks,
+                            &session.settings.hooks,
                             name,
                             input,
                             &result.content,
-                            permission_mode_str(permission_mode),
+                            permission_mode_str(session.permission_mode),
                         )
                         .await;
                     }
@@ -281,7 +341,7 @@ pub async fn run_query(cfg: QueryConfig<'_>, user_input: &str) -> Result<(), Que
             role: Role::User,
             content: blocks,
         });
-        if let Some(t) = transcript {
+        if let Some(t) = &session.transcript {
             let _ = t.append(messages.last().unwrap());
         }
     }

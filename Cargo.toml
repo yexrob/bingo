@@ -12,8 +12,12 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 futures-util = "0.3"
 async-stream = "0.3"
+rsmarkdown-tui = { path = "/Users/yexrob/Episodes/Projects/rsmarkdown-tui/crates/tui" }
+rsmarkdown-core = { path = "/Users/yexrob/Episodes/Projects/rsmarkdown-tui/crates/core" }
 async-trait = "0.1.91"
 rmcp = { version = "3.1", features = ["client", "transport-child-process"] }
 mcp-client = "0.1.0"
+ratatui = "0.30.2"
+crossterm = "0.29.0"
 
 [dev-dependencies]

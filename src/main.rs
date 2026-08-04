@@ -1,15 +1,15 @@
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 
 use crate::api::client::Client;
-use crate::api::types::DEFAULT_MODEL;
+use crate::api::types::{Message, DEFAULT_MODEL};
 use crate::permission::PermissionMode;
-use crate::query::{run_query, QueryConfig};
+use crate::query::{headless_hooks, run_query, Session};
 use crate::settings::load_settings;
 use crate::system::{build_system, load_memory};
-use crate::api::types::Message;
 use crate::transcript::{create as create_transcript, latest as latest_transcript, Transcript};
 
 mod api;
@@ -23,6 +23,7 @@ mod system;
 mod tool;
 mod tools;
 mod transcript;
+mod tui;
 
 #[derive(Debug, Parser)]
 #[command(name = "bingo", version, about = "Rust agent CLI")]
@@ -43,26 +44,13 @@ struct Cli {
     #[arg(long)]
     continue_: bool,
 
-    /// prompt；缺省时从 stdin 读取
+    /// prompt；缺省时从 stdin 读取（交互模式忽略）
     prompt: Vec<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-
-    let prompt = if !cli.prompt.is_empty() {
-        cli.prompt.join(" ")
-    } else {
-        let mut input = String::new();
-        std::io::stdin().read_to_string(&mut input)?;
-        input.trim().to_string()
-    };
-
-    if prompt.is_empty() {
-        eprintln!("no prompt provided");
-        std::process::exit(1);
-    }
 
     let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
     let project_dir = std::env::current_dir()?;
@@ -93,15 +81,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let client = Client::from_env()?;
-    let config = QueryConfig {
-        client: &client,
-        model: &cli.model,
+    let session = Arc::new(Session {
+        client,
+        model: cli.model,
         permission_mode,
-        settings: &settings,
-        system: &system,
-        transcript: &transcript,
-        initial_messages,
-    };
-    run_query(config, &prompt).await?;
+        settings,
+        system,
+        transcript,
+    });
+
+    if cli.print {
+        let prompt = if !cli.prompt.is_empty() {
+            cli.prompt.join(" ")
+        } else {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            input.trim().to_string()
+        };
+        if prompt.is_empty() {
+            eprintln!("no prompt provided");
+            std::process::exit(1);
+        }
+        let mut ui = headless_hooks();
+        run_query(&session, initial_messages, &prompt, &mut ui).await?;
+    } else {
+        drop(initial_messages); // 交互模式下 --continue 历史由后续轮次复用
+        tui::run_tui_session(session)?;
+    }
     Ok(())
 }
