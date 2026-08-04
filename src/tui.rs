@@ -730,7 +730,19 @@ impl BingoChat {
                     payload,
                     signal,
                 } => {
-                    let Some(i) = self.stream_msg else { return };
+                    // 回合结束后的后台事件（轮询/信号）落在最后一条 assistant
+                    // 消息上继续更新（watch 行冻结曾因 stream_msg 为 None 丢弃）。
+                    let i = match self.stream_msg {
+                        Some(i) => i,
+                        None => match self
+                            .messages
+                            .iter()
+                            .rposition(|m| m.role == Role::Assistant)
+                        {
+                            Some(i) => i,
+                            None => return,
+                        },
+                    };
                     // 同 label 的 watch 活动原地更新（终态后保留，快照定格）。
                     let found = self.messages[i].activities.iter_mut().find(|a| {
                         matches!(&a.kind, rsmarkdown_tui::activities::ActivityKind::Watch(w)
