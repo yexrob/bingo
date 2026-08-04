@@ -254,6 +254,9 @@ pub async fn run_query(
 
     let mut messages = initial_messages;
     messages.push(Message::user_text(user_input));
+    if let Some(t) = &session.transcript {
+        let _ = t.append(messages.last().unwrap());
+    }
     loop {
         check_and_compact(session, &mut messages).await;
         let (assistant, tool_uses) = one_turn(

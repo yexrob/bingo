@@ -431,7 +431,12 @@ impl BingoChat {
         tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
             let mut ui = tui_hooks(events.clone(), asks);
-            let result = crate::query::run_query(&session, Vec::new(), &text, &mut ui).await;
+            // 多轮连续性：加载 transcript 历史作为本轮上下文（每轮独立 run_query）。
+            let history = match session.transcript.as_ref() {
+                Some(t) => t.load_messages().unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let result = crate::query::run_query(&session, history, &text, &mut ui).await;
             match result {
                 Ok(messages) => {
                     let cwd = std::env::current_dir().unwrap_or_default();

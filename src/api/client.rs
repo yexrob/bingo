@@ -121,13 +121,16 @@ impl Client {
     ) -> Result<String, ClientError> {
         let mut request = request.clone();
         request.stream = false;
-        let response = self
-            .http
-            .post(format!("{}/v1/messages", self.base_url))
-            .headers(self.headers())
-            .json(&request)
-            .send()
-            .await?;
+        let response = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            self.http
+                .post(format!("{}/v1/messages", self.base_url))
+                .headers(self.headers())
+                .json(&request)
+                .send(),
+        )
+        .await
+        .map_err(|_| ClientError::Timeout)??;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
