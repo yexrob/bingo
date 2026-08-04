@@ -7,6 +7,36 @@ use async_trait::async_trait;
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
+/// 周期命令默认检查间隔（无显式 -n 时）。
+#[allow(dead_code)] // 阶段 3 后台化接入后移除
+pub const DEFAULT_WATCH_INTERVAL_SECS: u64 = 5;
+
+/// 周期命令检查间隔识别：`watch -n N cmd` → N 秒；`watch cmd` /
+/// while/until/for 循环 / `tail -f` → 默认间隔。其余返回 None。
+#[allow(dead_code)] // 阶段 3 后台化接入后移除
+pub fn periodic_bash_interval(command: &str) -> Option<std::time::Duration> {
+    let mut parts = command.split_whitespace();
+    let first = parts.next()?;
+    if first == "watch" {
+        let mut args = parts;
+        let mut interval = DEFAULT_WATCH_INTERVAL_SECS;
+        while let Some(a) = args.next() {
+            if a == "-n" {
+                if let Some(n) = args.next().and_then(|n| n.parse::<u64>().ok())
+                    && n > 0
+                {
+                    interval = n;
+                }
+                break;
+            }
+        }
+        return Some(std::time::Duration::from_secs(interval));
+    }
+    if matches!(first, "while" | "until" | "for" | "tail") {
+        return Some(std::time::Duration::from_secs(DEFAULT_WATCH_INTERVAL_SECS));
+    }
+    None
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -99,5 +129,32 @@ impl Tool for BashTool {
             is_error: false,
             diff: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn periodic_interval_recognition() {
+        assert_eq!(
+            periodic_bash_interval("watch -n 2 ls"),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert_eq!(
+            periodic_bash_interval("watch ls"),
+            Some(std::time::Duration::from_secs(DEFAULT_WATCH_INTERVAL_SECS))
+        );
+        assert_eq!(
+            periodic_bash_interval("while true; do echo hi; sleep 1; done"),
+            Some(std::time::Duration::from_secs(DEFAULT_WATCH_INTERVAL_SECS))
+        );
+        assert_eq!(
+            periodic_bash_interval("tail -f /var/log/sys.log"),
+            Some(std::time::Duration::from_secs(DEFAULT_WATCH_INTERVAL_SECS))
+        );
+        assert_eq!(periodic_bash_interval("cargo test"), None);
+        assert_eq!(periodic_bash_interval("git status"), None);
     }
 }

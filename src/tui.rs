@@ -37,6 +37,14 @@ pub enum UiEvent {
     /// 工具 block 流式接收完整（含 input）：折叠判定时机。
     ToolReady { name: String, input: serde_json::Value },
     ToolDone(ToolCallDone),
+    /// Watchable 状态事件（命令/agent 生命周期，转发自 registry）。
+    WatchEvent {
+        label: String,
+        status: rsmarkdown_tui::activities::WatchStatus,
+        detail: Option<String>,
+        duration_ms: u64,
+        payload: Option<serde_json::Value>,
+    },
     TurnEnd,
     /// 非致命警告（如 MCP 连接失败），显示在边框与分隔线之间。
     Warning(String),
@@ -439,6 +447,44 @@ impl BingoChat {
         asks: mpsc::UnboundedSender<AskRequest>,
         asks_rx: mpsc::UnboundedReceiver<AskRequest>,
     ) -> Self {
+        // Watchable 事件转发：registry 广播 → UiEvent 通道（跨回合常驻）。
+        // 测试环境无 tokio runtime 时跳过（转发只在线程模型下有意义）。
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let watch_events = events.clone();
+            let mut rx = session.watch.subscribe();
+            handle.spawn(async move {
+            while let Ok(ev) = rx.recv().await {
+                if watch_events
+                    .send(UiEvent::WatchEvent {
+                        label: ev.label,
+                        status: match ev.state {
+                            crate::watch::WatchState::Running => {
+                                rsmarkdown_tui::activities::WatchStatus::Running
+                            }
+                            crate::watch::WatchState::Idle => {
+                                rsmarkdown_tui::activities::WatchStatus::Idle
+                            }
+                            crate::watch::WatchState::Done => {
+                                rsmarkdown_tui::activities::WatchStatus::Done
+                            }
+                            crate::watch::WatchState::Failed => {
+                                rsmarkdown_tui::activities::WatchStatus::Failed
+                            }
+                            crate::watch::WatchState::Cancelled => {
+                                rsmarkdown_tui::activities::WatchStatus::Cancelled
+                            }
+                        },
+                        detail: ev.detail,
+                        duration_ms: ev.ts.elapsed().as_millis() as u64,
+                        payload: ev.payload,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        }
         Self {
             session,
             events,
@@ -666,6 +712,52 @@ impl BingoChat {
                         },
                         CollapseKind::List => self.messages[i].groups[g].list += 1,
                         CollapseKind::Bash => self.messages[i].groups[g].bash += 1,
+                    }
+                }
+                UiEvent::WatchEvent {
+                    label,
+                    status,
+                    detail,
+                    duration_ms,
+                    payload,
+                } => {
+                    let Some(i) = self.stream_msg else { return };
+                    // 同 label 的 watch 活动原地更新（终态后保留，快照定格）。
+                    let found = self.messages[i].activities.iter_mut().find(|a| {
+                        matches!(&a.kind, rsmarkdown_tui::activities::ActivityKind::Watch(w)
+                            if w.label == *label)
+                    });
+                    if let Some(hint) = found {
+                        if let rsmarkdown_tui::activities::ActivityKind::Watch(w) = &mut hint.kind
+                        {
+                            w.status = status;
+                            w.duration_ms = duration_ms;
+                            if let Some(d) = &detail {
+                                w.detail = Some(d.clone());
+                            }
+                        }
+                        if let Some(text) = &payload.and_then(|p| p.as_str().map(str::to_string)) {
+                            let content: Vec<Line<'static>> = text
+                                .lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .map(|l| Line::from(l.to_string()))
+                                .collect();
+                            hint.set_content(content);
+                        }
+                    } else {
+                        let mut hint = Activity::new(rsmarkdown_tui::activities::ActivityKind::Watch(
+                            rsmarkdown_tui::activities::WatchCall {
+                                label: label.clone(),
+                                status,
+                                detail: detail.clone(),
+                                duration_ms,
+                            },
+                        ));
+                        hint.expand_hint = Some("ctrl+o to expand".to_string());
+                        let text_len = self.messages[i].text.chars().count();
+                        self.messages[i].activities.push(hint);
+                        self.messages[i].insert_points.push(text_len);
+                        self.messages[i].group_of.push(None);
                     }
                 }
                 UiEvent::RoundEnd => {
@@ -2376,6 +2468,76 @@ mod fold_roundtrip_live_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("3210ms"), "real duration: {joined}");
+    }
+
+    #[test]
+    fn watch_event_renders_inline_and_updates() {
+        // Watchable 生命周期：Running 行 → 同 label 原地更新 → 终态含时长，
+        // payload 可展开。
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        let _ = chat.events.send(UiEvent::WatchEvent {
+            label: "watch -n 2 ls".into(),
+            status: rsmarkdown_tui::activities::WatchStatus::Running,
+            detail: None,
+            duration_ms: 0,
+            payload: None,
+        });
+        chat.drain_events();
+        assert_eq!(chat.messages[0].activities.len(), 1);
+        // 轮次 Idle + 终态 Done：同 label 原地更新，不新增活动。
+        let _ = chat.events.send(UiEvent::WatchEvent {
+            label: "watch -n 2 ls".into(),
+            status: rsmarkdown_tui::activities::WatchStatus::Idle,
+            detail: Some("第 2 轮".into()),
+            duration_ms: 4000,
+            payload: None,
+        });
+        let _ = chat.events.send(UiEvent::WatchEvent {
+            label: "watch -n 2 ls".into(),
+            status: rsmarkdown_tui::activities::WatchStatus::Done,
+            detail: None,
+            duration_ms: 9000,
+            payload: Some(serde_json::json!("done output")),
+        });
+        chat.drain_events();
+        assert_eq!(chat.messages[0].activities.len(), 1, "updates in place");
+        let area = Rect { x: 0, y: 0, width: 120, height: 30 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        let joined: String = (0..30)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("watch -n 2 ls"), "header: {joined}");
+        assert!(joined.contains("✓"), "done glyph: {joined}");
+        // 展开：payload 作为内容渲染。
+        assert!(chat.toggle_transcript());
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        let joined: String = (0..30)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("done output"), "expanded: {joined}");
     }
 
     #[test]
