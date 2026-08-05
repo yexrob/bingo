@@ -78,12 +78,26 @@ fn read_opt(path: &Path) -> Option<String> {
 }
 
 /// 加载记忆层（对标 Claude Code 层级：user → project）。
+/// 项目级记忆源（按序读取，全部合并）：CLAUDE.md（Anthropic 惯例）+
+/// AGENTS.md（通用 agent 惯例，如 bingo 项目自身的规则）。
+const PROJECT_MEMORY_FILES: [&str; 4] = [
+    "CLAUDE.md",
+    ".claude/CLAUDE.md",
+    "AGENTS.md",
+    ".agents/AGENTS.md",
+];
+
 pub fn load_memory(home: &Path, cwd: &Path) -> Memory {
     let user = read_opt(&home.join(".claude").join("CLAUDE.md"));
-    let project = [cwd.join("CLAUDE.md"), cwd.join(".claude").join("CLAUDE.md")]
+    let project = PROJECT_MEMORY_FILES
         .iter()
-        .find_map(|p| read_opt(p));
-    Memory { user, project }
+        .filter_map(|f| read_opt(&cwd.join(f)))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Memory {
+        user,
+        project: (!project.is_empty()).then_some(project),
+    }
 }
 
 /// 拼装 system prompt：base 段始终在前；记忆段随文件存在与否增减。
@@ -113,7 +127,9 @@ pub fn build_system(
         blocks.push(block(format!("User-level memory (CLAUDE.md):\n{user}")));
     }
     if let Some(project) = &memory.project {
-        blocks.push(block(format!("Project-level memory (CLAUDE.md):\n{project}")));
+        blocks.push(block(format!(
+            "Project-level memory (CLAUDE.md / AGENTS.md):\n{project}"
+        )));
     }
     if let Some(mem) = project_memory {
         blocks.push(block(format!("Persistent project memory (auto-extracted):\n{mem}")));
@@ -184,6 +200,39 @@ mod tests {
         // base + env info，无记忆段。
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, BASE_PROMPT);
+    }
+
+    #[test]
+    fn loads_agents_md_and_merges_multiple_sources() {
+        let tmp = std::env::temp_dir().join(format!("bingo-memory-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("CLAUDE.md"), "claude rules").unwrap();
+        std::fs::write(tmp.join("AGENTS.md"), "agents rules").unwrap();
+        let memory = load_memory(&tmp, &tmp);
+        let project = memory.project.unwrap();
+        // CLAUDE.md 在前、AGENTS.md 在后，两者都保留。
+        assert!(project.contains("claude rules"), "{project}");
+        assert!(project.contains("agents rules"), "{project}");
+        assert!(
+            project.find("claude rules").unwrap() < project.find("agents rules").unwrap(),
+            "CLAUDE.md ordered first"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn agents_md_alone_loads() {
+        let tmp = std::env::temp_dir().join(format!("bingo-memory-agents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("AGENTS.md"), "project agents rules").unwrap();
+        let memory = load_memory(&tmp, &tmp);
+        assert!(
+            memory.project.is_some_and(|p| p.contains("project agents rules")),
+            "AGENTS.md alone loads"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
