@@ -192,6 +192,7 @@ impl Tool for TaskCreateTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskUpdateInput {
+    #[serde(rename = "taskId")]
     pub task_id: String,
     #[serde(default)]
     pub subject: Option<String>,
@@ -486,6 +487,7 @@ impl Tool for TaskUpdateTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskGetInput {
+    #[serde(rename = "taskId")]
     pub task_id: String,
 }
 
@@ -704,5 +706,31 @@ mod tests {
         let v = coerce_update(json!({"task_id": "3", "state": "in_progress"}));
         assert_eq!(v["taskId"], "3");
         assert_eq!(v["status"], "in_progress");
+    }
+
+    #[test]
+    fn task_update_parses_canonical_and_aliased_ids() {
+        // schema 键是 taskId（camelCase，对标 CC）；模型按 schema 传 taskId。
+        let canonical: TaskUpdateInput =
+            parse_input(&json!({"taskId": "3", "status": "in_progress"})).unwrap();
+        assert_eq!(canonical.task_id, "3");
+        // 历史/方言传 task_id：coerce 修复后同样可解析。
+        let aliased: TaskUpdateInput =
+            parse_input(&coerce_update(json!({"task_id": "3", "status": "in_progress"}))).unwrap();
+        assert_eq!(aliased.task_id, "3");
+        let by_id: TaskUpdateInput =
+            parse_input(&coerce_update(json!({"id": "3", "status": "completed"}))).unwrap();
+        assert_eq!(by_id.task_id, "3");
+    }
+
+    #[test]
+    fn task_get_schema_uses_camel_case_task_id() {
+        let schema = TaskGetTool.input_schema();
+        assert_eq!(schema["properties"]["taskId"]["type"], "string");
+        assert_eq!(schema["required"], json!(["taskId"]));
+        // TaskUpdate schema 与实现同源：taskId 为 required。
+        let update_schema = TaskUpdateTool.input_schema();
+        assert_eq!(update_schema["properties"]["taskId"]["type"], "string");
+        assert_eq!(update_schema["required"], json!(["taskId"]));
     }
 }
