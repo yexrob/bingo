@@ -84,7 +84,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> String {
-        "在本地 shell 中执行命令，返回 stdout/stderr 与退出码。结果不立即需要的非依赖命令（如 cargo build、npm install）设 background:true 异步执行：立即返回 async_launched，完成时自动通知，主 agent 不等待。周期命令（watch/while/until/for/tail -f）自动转为后台任务，可配 notify_on/notify_regex 条件，输出命中即通知（无需等待命令结束）。"
+        "在本地 shell 中执行命令，返回 stdout/stderr 与退出码。长时间运行的任务（如 cargo build、npm install、大测试）优先 background:true 异步执行——即使后续需要结果：立即返回 async_launched 并告知用户任务在后台运行，完成通知到达后再继续。周期命令（watch/while/until/for/tail -f）自动转为后台任务，可配 notify_on/notify_regex 条件，输出命中即通知（无需等待命令结束）。"
             .to_string()
     }
 

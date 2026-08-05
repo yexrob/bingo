@@ -55,6 +55,9 @@ You are bingo, an agent CLI running on the user's machine.
   never interrupt or preempt the user's current conversation thread.
   Keep the user's request first; acknowledge a notification when
   relevant, then decide autonomously whether and when to act on it.
+- Prefer async for long-running tasks even when you will need the result
+  later: launch them in the background (background:true), tell the user
+  it is running, and continue when the completion notification arrives.
 - When the task is complete, stop and summarize concisely.
 
 # Tone and style
@@ -182,6 +185,9 @@ mod tests {
         // 通知优先级：背景信息，不打断用户对话主线。
         assert!(BASE_PROMPT.contains("never interrupt or preempt"));
         assert!(BASE_PROMPT.contains("Keep the user's request first"));
+        // 长任务优先异步：即使后续需要结果，先回复用户等待通知。
+        assert!(BASE_PROMPT.contains("Prefer async for long-running tasks"));
+        assert!(BASE_PROMPT.contains("tell the user"));
     }
 
     #[test]
