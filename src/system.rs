@@ -51,6 +51,10 @@ You are bingo, an agent CLI running on the user's machine.
 - Background tasks (periodic commands, async agents) notify you when they
   complete or hit a condition — do NOT poll them or sleep-loop waiting.
   Configure a notify condition instead of checking repeatedly.
+- Background-task notifications are background information only: they
+  never interrupt or preempt the user's current conversation thread.
+  Keep the user's request first; acknowledge a notification when
+  relevant, then decide autonomously whether and when to act on it.
 - When the task is complete, stop and summarize concisely.
 
 # Tone and style
@@ -175,6 +179,9 @@ mod tests {
         // watch 语义：后台任务完成会通知，不要轮询。
         assert!(BASE_PROMPT.contains("do NOT poll them"));
         assert!(BASE_PROMPT.contains("notify condition"));
+        // 通知优先级：背景信息，不打断用户对话主线。
+        assert!(BASE_PROMPT.contains("never interrupt or preempt"));
+        assert!(BASE_PROMPT.contains("Keep the user's request first"));
     }
 
     #[test]
