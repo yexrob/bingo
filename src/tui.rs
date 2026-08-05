@@ -730,23 +730,13 @@ impl BingoChat {
                     payload,
                     signal,
                 } => {
-                    // 回合结束后的后台事件（轮询/信号）落在最后一条 assistant
-                    // 消息上继续更新（watch 行冻结曾因 stream_msg 为 None 丢弃）。
-                    let i = match self.stream_msg {
-                        Some(i) => i,
-                        None => match self
-                            .messages
-                            .iter()
-                            .rposition(|m| m.role == Role::Assistant)
-                        {
-                            Some(i) => i,
-                            None => return,
-                        },
-                    };
-                    // 同 label 的 watch 活动原地更新（终态后保留，快照定格）。
-                    let found = self.messages[i].activities.iter_mut().find(|a| {
-                        matches!(&a.kind, rsmarkdown_tui::activities::ActivityKind::Watch(w)
-                            if w.label == *label)
+                    // 全局按 label 找同 watchable 的活动（跨回合原地变状态：
+                    // 完成/失败事件不落到新消息底部，而是更新创建时的行）。
+                    let found = self.messages.iter_mut().find_map(|m| {
+                        m.activities.iter_mut().find(|a| {
+                            matches!(&a.kind, rsmarkdown_tui::activities::ActivityKind::Watch(w)
+                                if w.label == *label)
+                        })
                     });
                     if let Some(hint) = found {
                         if let rsmarkdown_tui::activities::ActivityKind::Watch(w) = &mut hint.kind
@@ -766,6 +756,18 @@ impl BingoChat {
                             hint.set_content(content);
                         }
                     } else {
+                        // 新建：落在当前回合消息（或最后一条 assistant 消息）。
+                        let target = match self.stream_msg {
+                            Some(i) => i,
+                            None => match self
+                                .messages
+                                .iter()
+                                .rposition(|m| m.role == Role::Assistant)
+                            {
+                                Some(i) => i,
+                                None => return,
+                            },
+                        };
                         let mut hint = Activity::new(rsmarkdown_tui::activities::ActivityKind::Watch(
                             rsmarkdown_tui::activities::WatchCall {
                                 label: label.clone(),
@@ -775,10 +777,10 @@ impl BingoChat {
                             },
                         ));
                         hint.expand_hint = Some("ctrl+o to expand".to_string());
-                        let text_len = self.messages[i].text.chars().count();
-                        self.messages[i].activities.push(hint);
-                        self.messages[i].insert_points.push(text_len);
-                        self.messages[i].group_of.push(None);
+                        let text_len = self.messages[target].text.chars().count();
+                        self.messages[target].activities.push(hint);
+                        self.messages[target].insert_points.push(text_len);
+                        self.messages[target].group_of.push(None);
                     }
                     // 条件信号或终态唤醒：不管用户状态（打字中/输入框有内容）都触发
                     // 新回合；轮次 Idle 不触发（避免周期命令每轮唤醒一次）。
@@ -789,11 +791,14 @@ impl BingoChat {
                             | rsmarkdown_tui::activities::WatchStatus::Cancelled
                     );
                     if terminal || signal.is_some() {
-                        // 信号/终态详情即时可见：更新活动 detail。
+                        // 信号/终态详情即时可见：更新活动 detail（全局定位）。
                         if let Some(sig) = &signal
-                            && let Some(hint) = self.messages[i].activities.iter_mut().find(|a| {
-                                matches!(&a.kind, rsmarkdown_tui::activities::ActivityKind::Watch(w)
-                                    if w.label == *label)
+                            && let Some(hint) = self.messages.iter_mut().find_map(|m| {
+                                m.activities.iter_mut().find(|a| {
+                                    matches!(&a.kind,
+                                        rsmarkdown_tui::activities::ActivityKind::Watch(w)
+                                            if w.label == *label)
+                                })
                             })
                             && let rsmarkdown_tui::activities::ActivityKind::Watch(w) = &mut hint.kind
                         {
@@ -870,6 +875,11 @@ impl BingoChat {
                 UiEvent::TurnEnd => {
                     self.busy = false;
                     self.output_tokens = 0;
+                    // 对话中到达的通知若未在回合内注入（模型已结束推理），
+                    // 回合结束后补触发自动回合，避免感知延迟到用户下条消息。
+                    if self.session.watch.has_wake_notifications() {
+                        self.submit_auto();
+                    }
                     // 原位收尾：thinking 在它发生的位置转完成态（不重排到回复之后）；
                     // 从未收到 delta 的空占位直接移除（避免出现无内容的空行）。
                     if let Some(i) = self.stream_msg {
@@ -2607,6 +2617,119 @@ mod fold_roundtrip_live_tests {
         chat.drain_events();
         assert!(chat.busy, "signal wakes despite typing");
         assert_eq!(chat.input, "我还在打字", "input preserved");
+    }
+
+    /// 测试用 watchable：状态恒 Running。
+    struct FakeWatchable;
+
+    impl crate::watch::Watchable for FakeWatchable {
+        fn label(&self) -> String {
+            "fake".to_string()
+        }
+        fn poll(&self) -> crate::watch::WatchPoll {
+            crate::watch::WatchPoll {
+                state: crate::watch::WatchState::Running,
+                detail: None,
+                payload: None,
+                signal: None,
+            }
+        }
+        fn check_interval(&self) -> Option<std::time::Duration> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_end_triggers_auto_turn_when_wake_notification_pending() {
+        // 回归：通知在回合中到达（busy 跳过触发）→ 回合结束补触发，感知不延迟。
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        chat.busy = true;
+        // 通过 registry 制造真实终态通知（busy 时事件处理跳过 auto turn）。
+        let watch = chat.session.watch.clone();
+        let id = watch.register(Box::new(FakeWatchable));
+        watch.set_state(
+            id,
+            crate::watch::WatchState::Done,
+            Some("完成".into()),
+            None,
+        );
+        assert!(watch.has_wake_notifications(), "notification queued");
+        chat.drain_events();
+        assert!(chat.busy, "still busy, no auto turn mid-turn");
+        // 回合结束：TurnEnd → 未消费的唤醒通知 → 补触发。
+        let _ = chat.events.send(UiEvent::TurnEnd);
+        chat.drain_events();
+        tokio::task::yield_now().await;
+        chat.drain_events();
+        assert!(chat.busy, "auto turn started after TurnEnd");
+        assert_eq!(chat.messages.len(), 2, "new message for wake turn");
+    }
+
+    #[test]
+    fn watch_event_updates_across_messages_in_place() {
+        // 回归：回合切换后，同一 agent 的完成事件更新原活动，不新加到底部。
+        let mut chat = test_chat();
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        chat.stream_msg = Some(0);
+        let _ = chat.events.send(UiEvent::WatchEvent {
+            label: "Agent: 探索".into(),
+            status: rsmarkdown_tui::activities::WatchStatus::Running,
+            detail: None,
+            duration_ms: 0,
+            payload: None,
+            signal: None,
+        });
+        chat.drain_events();
+        assert_eq!(chat.messages[0].activities.len(), 1);
+        // 回合结束（stream_msg=None）+ 新消息出现（模拟下一回合）。
+        let _ = chat.events.send(UiEvent::TurnEnd);
+        chat.drain_events();
+        chat.stream_msg = None;
+        chat.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: vec![],
+            insert_points: vec![],
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        // 完成事件：应更新消息 0 的活动，而不是在新消息底部新建。
+        let _ = chat.events.send(UiEvent::WatchEvent {
+            label: "Agent: 探索".into(),
+            status: rsmarkdown_tui::activities::WatchStatus::Done,
+            detail: Some("完成".into()),
+            duration_ms: 40000,
+            payload: None,
+            signal: None,
+        });
+        chat.drain_events();
+        assert_eq!(chat.messages[0].activities.len(), 1, "updated in place");
+        assert_eq!(chat.messages[1].activities.len(), 0, "no new row at bottom");
+        let w = match &chat.messages[0].activities[0].kind {
+            rsmarkdown_tui::activities::ActivityKind::Watch(w) => w,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            w.status,
+            rsmarkdown_tui::activities::WatchStatus::Done,
+            "in-place status change"
+        );
     }
 
     #[test]

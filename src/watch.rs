@@ -477,6 +477,14 @@ impl WatchRegistry {
             .collect()
     }
 
+    /// 是否有未消费的唤醒通知（终态或信号）——回合结束后据此补触发自动回合。
+    pub fn has_wake_notifications(&self) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.notifications.iter().any(|n| {
+            n.state.is_terminal() || n.signal.is_some()
+        })
+    }
+
     /// 取出待注入模型的通知（合并同 id 相邻 Idle 为一条轮次汇总）。
     pub fn consume_notifications(&self) -> Vec<String> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
