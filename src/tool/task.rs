@@ -450,7 +450,11 @@ impl Tool for TaskListTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        schema_for::<serde_json::Value>()
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        })
     }
 
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
