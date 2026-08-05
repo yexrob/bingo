@@ -1869,6 +1869,46 @@ mod tests {
         hint
     }
 
+    #[tokio::test]
+    async fn chat_tasks_reflect_store_changes() {
+        // TUI 任务区数据源 = 磁盘 store 实时快照（tick 广播链路的数据层）。
+        let chat = test_chat();
+        assert!(chat.tasks().is_empty());
+        let store = chat.session.tasks.clone();
+        let id = store
+            .create(&crate::tasks::Task {
+                id: String::new(),
+                subject: "fix flicker".into(),
+                description: String::new(),
+                active_form: None,
+                status: crate::tasks::TaskStatus::Pending,
+                owner: None,
+                blocks: Vec::new(),
+                blocked_by: Vec::new(),
+                metadata: Default::default(),
+            })
+            .await
+            .unwrap();
+        let items = chat.tasks();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "fix flicker");
+        assert_eq!(items[0].status, TodoStatus::Pending);
+        store
+            .update(
+                &id,
+                &crate::tasks::TaskPatch {
+                    status: Some(crate::tasks::TaskStatus::InProgress),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let items = chat.tasks();
+        assert_eq!(items[0].status, TodoStatus::InProgress);
+        store.delete(&id).await.unwrap();
+        assert!(chat.tasks().is_empty());
+    }
+
     #[test]
     fn click_toggles_tool_activity() {
         let mut chat = test_chat();
