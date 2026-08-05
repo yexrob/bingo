@@ -157,3 +157,40 @@
 - goose（aaif-goose/goose，纯 Rust agent，permission 门 + execution + agents 结构）
 - rsmarkdown-tui README（组件 API、活动模型、权限模态契约）
 - [runtime 三方 diff（CC 2.1.88 leak / Codex / bingo 现状与差距分级）](./runtime-diff.md)
+
+## 已定决策（续）
+
+### D16. TUI 渲染层迁移：ratatui + rsmarkdown-tui → iocraft（对标 CC 的 ink 架构）
+
+- **动因**：CC 的 TUI 是 ink（React 式声明组件）构建的；iocraft 是 Rust 端最接近 ink 的声明式组件库（hooks + flexbox + fullscreen render loop）。迁移后 bingo 的 UI 架构与 CC 同构，布局可 1:1 对标。
+- **取舍**：`rsmarkdown-tui`（App/Component 框架、~12k 行）整体弃用；`rsmarkdown-core`（markdown 流式解析，显示无关）保留。渲染层全部重写为 iocraft 元素（不保留 ratatui Line 适配桥）。
+- **新结构**：`src/tui/` — `chat.rs`（状态机 + 文档行构建，原样保留事件语义与折叠逻辑）、`line.rs`（样式化行模型）、`theme.rs`（CC 2.1.88 dark 令牌 1:1）、`markdown.rs`（AST → 行，renderer.rs 移植）、`activities.rs`（活动数据 + 头部/折叠布局移植）、`components.rs`（iocraft 根组件 + transcript）。
+- **布局对标点**（CC FullscreenLayout/REPL）：单列布局（无 sidebar）＝ sticky header + 滚动 transcript + 任务列表 + 通知行 + 输入行 + `╰──╯` 边框 + 1 行 footer；权限请求渲染在 transcript 底部（非模态）；消息块 marginTop=1；footer 左＝模式徽标（⏸ plan / ⏵⏵ accept edits）+ 快捷键 byline，右＝模型名。
+- **关键坑（已验证）**：iocraft `State::write()` 每次 deref 都标记 dirty → 组件 body 里无条件 write() 会导致无限重渲（mock 终端可观测为 ~350 帧/秒空转）。必须"受守卫的写入"：布局尺寸或文档 dirty 才写，dirty 由事件/tick 消费方置位。
+- **交互等价**：鼠标点击折叠/展开（`use_local_terminal_events` 本地坐标 → doc 行号）、滚轮、ctrl+o 全局展开、j/k/G/g/PageUp/Down 滚动、busy 时 Esc/Ctrl+C 中断、权限数字键选择。测试经 `mock_terminal_render_loop` + 行级 `build_rows` 双通道。
+
+### D17. TUI 渲染修复：diff 残留与小窗口错位（iocraft 0.8.4 实测）
+
+- **症状**：真实终端出现残影/重复行——thinking 运行态"卡住"后下一行重渲染、输入行 `❯ ▋` 多处残留、长回复正文短版/长版并存；窗口变小时更明显。
+- **根因（实测三链）**：
+  1. iocraft 全屏行 diff（`write_canvas` 逐行 MoveTo + 重写）在**行号位移**（markdown wrap 行数变化、消息增删、sticky 出现）时残留旧行——写入序列本身正确（逐帧解码验证），但终端状态与内存 prev 脱节。
+  2. `use_terminal_size` 依赖 Resize 事件，事件丢失/滞后时 canvas 高度与终端实际不符（tmux winsize 滞后：pane 16 行而 bingo 读到 24）→ MoveTo 越界 → 终端滚动 → 错位。
+  3. sticky header 占布局 1 行 → 出现/消失时内容整体位移。
+- **修复（bingo 侧，不改 iocraft）**：
+  1. sticky 改为**绝对定位 overlay**（不占布局，Transcript 内部 `Position::Absolute`）。
+  2. **doc 行数变化或 TurnEnd 时置 `FORCE_FULL_REDRAW` 全局标志**，自定义 hook（`use_force_redraw_on_resize`）在 `post_component_update` 消费 → `updater.clear_terminal_output()` 强制整屏清除重绘（绕开行 diff）。
+  3. 终端尺寸轮询（hook poll_change 读 crossterm size）→ 尺寸变化同样全清。
+- **验证**：真实 API（DeepSeek）tmux 多轮对话——流式正文、工具轮、thinking 块交替、小窗口（16 行）resize 往返，全部无残影。mock 回归 171 测试全绿。
+
+### D18. 主题配置（CC `theme` 设置 1:1）
+
+- **配置**：`settings.json` 新增 `"theme": "auto" | "dark" | "light"`（缺省 auto，对标 CC `ThemeSetting`）。
+- **auto 检测**（对标 CC `systemThemeWatcher`）：fullscreen 前临时进 raw mode 发 OSC 11 查询终端真实背景色（`ESC ] 11 ; ? ESC \`），按 BT.709 相对亮度判断深浅；其次 `$COLORFGBG` 种子；都无则回落 dark。坑：OSC 回复不带换行，规范模式行缓冲会吞掉，必须 raw mode 下读。
+- **令牌**：dark/light 两套均 1:1 对齐 CC 2.1.88 `theme.ts`（light 正文黑 `rgb(0,0,0)`、`userMessageBackground` 240、claude 橙两主题相同）。不支持 truecolor 时 RGB 降级 256 色（AnsiValue cube 近似）。
+- **欢迎页标题**：`Welcome back` 用 claude 橙（CC `color="claude"`），非白色。
+
+### D19. 流式残影根治：事件级强制全清（diff 路径残留）
+
+- **症状（用户真实终端 Ghostty，tmux 不可复现）**：流式正文增长时出现"半截覆盖"——新内容覆盖旧行部分区域，行尾残留旧字符；TurnEnd 全清后恢复。
+- **排查**：trace 证实 FORCE 全清链路本身正确（每次 doc 行数变化后 hook 都消费并全量重写，0 失配）；tmux/pty/模拟终端均无法复现 → 问题在 **diff 路径**：内容在行内增长（行数不变）时走 iocraft 行 diff，真实终端下残留旧行。DeepWiki 协查：`write_ansi_row_without_newline` 理论总会清行尾，row_eq 裁剪比较在背景色/填充场景可能误判相等（issue #142 族）。
+- **修复**：**任何事件处理（`drain_all` 返回 true，覆盖 TextDelta/ThinkingDelta/ToolStart 等）→ 立即置 `FORCE_FULL_REDRAW`** → 内容变化的帧全部走全量清除重绘，绕开行 diff。synchronized update（2026）下同帧原子完成，无闪烁；DeepWiki 确认该模式为 iocraft 惯用法（`use_output` 内部同款）。

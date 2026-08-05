@@ -189,7 +189,7 @@ mod tests {
         let old = "one\ntwo\nthree\nfour\nfive\n";
         let new = "one\ntwo\n2.5\nfour\nfive\nsix\n";
         let d = unified_diff("f.txt", old, new).unwrap();
-        let parsed = rsmarkdown_tui::activities::Diff::parse_unified(&d);
+        let parsed = crate::tui::activities::Diff::parse_unified(&d);
         assert_eq!(parsed.path, "f.txt");
         let (added, removed) = parsed.stats();
         assert_eq!(added, 2);

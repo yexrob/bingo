@@ -12,16 +12,16 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 futures-util = "0.3"
 async-stream = "0.3"
-rsmarkdown-tui = { path = "/Users/yexrob/Episodes/Projects/rsmarkdown-tui/crates/tui" }
 rsmarkdown-core = { path = "/Users/yexrob/Episodes/Projects/rsmarkdown-tui/crates/core" }
 async-trait = "0.1.91"
 rmcp = { version = "3.1", features = ["client", "transport-child-process"] }
-ratatui = "0.30.2"
-crossterm = "0.29.0"
 globset = "0.4.20"
 regex = "1.13.1"
 html2md = "0.2.15"
 url = "2.5.8"
 schemars = { version = "0.8", features = ["derive"] }
+iocraft = "0.8.4"
+unicode-width = "0.1"
+crossterm = "0.29"
 
 [dev-dependencies]

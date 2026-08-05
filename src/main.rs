@@ -154,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             extract_memory(&session, &outcome.messages, &home, &project_dir).await;
         } else {
             drop(initial_messages); // 交互模式下 --continue 历史由后续轮次复用
-            tui::run_tui_session(session.clone(), expand_rx)?;
+            tui::run_tui_session(session.clone(), expand_rx).await?;
         }
         Ok::<(), Box<dyn std::error::Error>>(())
     }

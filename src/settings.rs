@@ -16,6 +16,8 @@ pub enum SettingsError {
 pub struct Settings {
     #[serde(rename = "permissionMode")]
     pub permission_mode: Option<String>,
+    /// TUI 主题：auto（跟随终端背景）/ dark / light。默认 auto。
+    pub theme: Option<String>,
     /// 发送 cache_control（prompt caching）。默认关闭：非官方端点处理不稳定。
     #[serde(rename = "cacheControl")]
     pub cache_control: Option<bool>,
@@ -107,6 +109,9 @@ pub fn load_settings(
 fn merge(base: &mut Settings, layer: Settings) {
     if let Some(mode) = layer.permission_mode {
         base.permission_mode = Some(mode);
+    }
+    if let Some(theme) = layer.theme {
+        base.theme = Some(theme);
     }
     if !layer.hooks.pre_tool_use.is_empty() {
         base.hooks.pre_tool_use = layer.hooks.pre_tool_use;
