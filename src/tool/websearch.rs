@@ -1,3 +1,4 @@
+use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -148,16 +149,19 @@ async fn search(params: &WebSearchInput) -> Result<Vec<SearchHit>, ToolError> {
     Ok(parse_results(&html))
 }
 
-/// 解析 DDG HTML 结果块：`result__a`（标题/URL）与 `result__snippet`（摘要）。
-fn parse_results(html: &str) -> Vec<SearchHit> {
-    let mut hits = Vec::new();
-    // 结果块以 <div class="result results_links..."> 或 result__body 分隔。
-    // (?s)：a 标签与 snippet div 之间可能有换行。
-    let re = regex::Regex::new(
+/// DDG 结果块正则：`result__a`（标题/URL）与 `result__snippet`（摘要）。
+/// (?s)：a 标签与 snippet div 之间可能有换行。
+static RESULT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
         r#"(?s)class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</a>"#,
     )
-    .unwrap();
-    for cap in re.captures_iter(html) {
+    .expect("静态结果正则必须可编译")
+});
+
+/// 解析 DDG HTML 结果块。
+fn parse_results(html: &str) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    for cap in RESULT_RE.captures_iter(html) {
         let url = decode_entity(&cap[1]);
         let title = strip_tags(&decode_entity(&cap[2]));
         let snippet = strip_tags(&decode_entity(&cap[3]));

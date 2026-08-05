@@ -376,7 +376,7 @@ pub async fn run_query(
     let mut messages = initial_messages;
     messages.push(Message::user_text(user_input));
     if let Some(t) = &session.transcript
-        && let Err(e) = t.append(messages.last().unwrap())
+        && let Err(e) = t.append(messages.last().expect("messages 刚 push，非空"))
     {
         (ui.on_warning)(format!("transcript append failed: {e}"));
     }
@@ -541,7 +541,7 @@ pub async fn run_query(
             content: blocks,
         });
         if let Some(t) = &session.transcript
-            && let Err(e) = t.append(messages.last().unwrap())
+            && let Err(e) = t.append(messages.last().expect("messages 刚 push，非空"))
         {
             (ui.on_warning)(format!("transcript append failed: {e}"));
         }

@@ -2674,6 +2674,67 @@ mod fold_roundtrip_live_tests {
         assert_eq!(chat.messages.len(), 2, "new message for wake turn");
     }
 
+    #[tokio::test]
+    async fn draw_with_long_cjk_stream_and_activities_does_not_panic() {
+        // 复现：崩溃现场的渲染路径——流式中文正文 + 工具/watch 活动交错。
+        let mut chat = test_chat();
+        let _ = chat.events.send(UiEvent::TurnStart);
+        chat.drain_events();
+        let big = "clippy 基线在后台跑（任务 2）。以下是汇总与优化清单。\n\n---\n\n## 项目概览（子代理汇总）\n\n**bingo** 是 Rust 实现的本地 agent CLI（agent harness），完全对标 Claude Code 的主循环语义：模型只产出 tool_use，本地负责权限、并行、副作用、压缩、记忆与 UI。约 1 万行代码（tui.rs 3107 行最重）。\n\n- **两种运行方式**：交互式 TUI（rsmarkdown-tui）与 headless `--print`；`--continue` 恢复会话\n- **9 个内置工具** + MCP（stdio）适配；权限门五模式 × 规则表；8 个 Hooks 事件\n- **核心分层**：`api/`（字节级 SSE → 归一化事件）、`tool/`（Tool trait + schemars schema + 并发执行器 MAX_CONCURRENCY=10）、`query.rs`（流式主循环 + UiHooks 抽象）、`tui.rs`（交互层）\n- **watch 机制**：后台命令/子代理状态机，终态通知注入下一轮上下文\n- **验证**：`cargo build` + `cargo test`（123 个全部通过）\n\n---\n\n## 优化清单（已亲自核验）\n\n### P0 — 立即可做，低风险\n\n**1. 删除冗余依赖 `mcp-client = \"0.1.0\"`**（Cargo.toml:29）\nsrc/ 零引用（已 grep 确认），还会把 eventsource-client 拖进 Cargo.lock。真正的 MCP 客户端是 `rmcp`。删掉后 `cargo build` 即可验证。\n\n**2. websearch.rs:157 每次搜索都重新编译正则**\n`parse_results` 里 `Regex::new(...)` 每次调用都编译一次；且用 `.unwrap()`。提升为 `static`（`std::sync::LazyLock`，Rust 2024 标准库自带），顺带消掉这个 unwrap——一石二鸟。\n\n**3. 生产代码中的 unwrap/expect（违反 AGENTS.md 禁止项 2）**\n共 5 处，都\"实际不可达\"，但规则是\"必须处理每个异常\"：\n| 位置 | 内容 | 风险 |\n|---|---|---|\n| api/client.rs:62 | `HeaderValue::from_str(&api_key).unwrap()` | **唯一真正可能失败**：key 含非法字符即 panic，建议改优雅处理 |\n| hooks.rs:145 | `serde_json::to_value(hook_input).unwrap()` | 序列化不可失败 |\n| memory.rs:91 | `path.parent().unwrap()` | 路径必然有父目录 |\n| query.rs:379、544 | `messages.last().unwrap()` | push 之后必然 Some |\n\n全部换成带消息的 `expect(\"...\")` 或 `if let` 即可；client.rs:62 建议真正处理错误。\n\n### P1 — 设计层，可选\n\n**4. WebFetch/WebSearch 每次调用都 `reqwest::Client::new()`**\n无连接池复用。`ToolContext` 目前只挂 cwd + watch（query.rs:274），可挂一个共享 Client。对频繁 HTTP 的 harness 有实际收益。\n\n**5. watch.rs 四个预留未落地入口**（全部 `#[allow(dead_code)]`）\n`WatchState::Cancelled`（watch.rs:22）、`NotifyCondition::LinesOver`（:72）、`register()`（:234）、`snapshot()`（:465）。按项目\"做减法\"哲学：要么近期落地（如 kill 入口、notify_lines），要么删掉，别长期挂 dead code 注释。\n\n**6. `emit_signal` 广播状态失真**（watch.rs:353-394）\n广播给 TUI 的事件固定 `state: Running, detail: None`，即使真实状态是 Idle/终态；真实 detail 只进通知队列。TUI 端收到信号时会显示为 Running——行为与状态不一致，建议广播真实 state/detail（或加注释说明是刻意设计）。\n\n### P2 — 文档与实现不一致（来自前次审计记录，未逐条复核）\n\n- runtime-diff 总表：`MAX_RETRIES=2` → 实际 5（client.rs:13）；\"stop_reason 从不读取\" → 实际已读（max_tokens 恢复）\n- research.md：D5 说用 shlex（实际 `/bin/zsh -c`）、D4 说不用 ratatui（实际用了）、D3 声称 MCP \"stdio/streamable HTTP/OAuth 齐备\"（实际仅 stdio）\n- 代码有但文档没记：watch 通知机制、UI 折叠组、`MAX_AGENT_DEPTH=3`\n\n### P3 — 验证面\n\n**7. 缺 CLI 级集成测试**。123 个测试全部内嵌在 src，tests/ 只有 `fixtures/fake_mcp_server.py`。加一个 spawn 二进制的 `--print` 端到端测试，能覆盖主循环/权限门/TUI 边界这些单元测试测不到的组合。\n\n---\n\n建议顺序：先做 P0 的 1、2、3（半小时内完成，clippy + test 验证），再决定 P1。clippy 基线跑完我会把结果补进来。要不要我直接开始改 P0？";
+        for chunk in big.chars().collect::<Vec<_>>().chunks(120) {
+            let t: String = chunk.iter().collect();
+            let _ = chat.events.send(UiEvent::TextDelta(t));
+            chat.drain_events();
+        }
+        // 工具活动（插入点在文本中段）
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Bash".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Bash".into(),
+            input: json!({"command": "cargo clippy"}),
+        });
+        chat.drain_events();
+        // watch 活动
+        let _ = chat.events.send(UiEvent::WatchEvent {
+            label: "Agent: 核查".into(),
+            status: rsmarkdown_tui::activities::WatchStatus::Running,
+            detail: Some("已产出 100 字符".into()),
+            duration_ms: 5000,
+            payload: None,
+            signal: None,
+        });
+        chat.drain_events();
+        // 更多正文 + 工具完成
+        let _ = chat.events.send(UiEvent::TextDelta("后续正文，还有中文，继续。".into()));
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            name: "Bash".into(),
+            summary: "$ cargo clippy".into(),
+            output: "ok".into(),
+            is_error: false,
+            diff: None,
+            duration_ms: 3000,
+        }));
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::TurnEnd);
+        chat.drain_events();
+        // 回合结束后 watch 事件（落到最后消息）
+        let _ = chat.events.send(UiEvent::WatchEvent {
+            label: "Agent: 核查".into(),
+            status: rsmarkdown_tui::activities::WatchStatus::Done,
+            detail: Some("完成".into()),
+            duration_ms: 30000,
+            payload: None,
+            signal: None,
+        });
+        chat.drain_events();
+        let area = Rect { x: 0, y: 0, width: 120, height: 40 };
+        let mut buf = Buffer::empty(area);
+        chat.draw(area, &mut buf);
+        // 渲染完成即通过（曾因 char boundary panic 崩溃）。
+        assert_eq!(chat.messages.len(), 1, "single message rendered");
+    }
+
     #[test]
     fn watch_event_updates_across_messages_in_place() {
         // 回归：回合切换后，同一 agent 的完成事件更新原活动，不新加到底部。

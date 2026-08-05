@@ -141,8 +141,12 @@ pub async fn run_pre_tool_use(
             tool_input: &input,
             permission_mode,
         };
-        let (code, output, stderr) =
-            match run_hook(command, &serde_json::to_value(hook_input).unwrap()).await {
+        let (code, output, stderr) = match run_hook(
+            command,
+            &serde_json::to_value(hook_input).expect("HookInput 序列化不可失败"),
+        )
+        .await
+        {
                 Ok(o) => o,
                 Err(e) => {
                     eprintln!("[bingo] warning: PreToolUse hook failed: {e}");

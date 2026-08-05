@@ -20,6 +20,8 @@ const FLOOR_OUTPUT_TOKENS: u32 = 3_000;
 pub enum ClientError {
     #[error("missing API key: set ANTHROPIC_API_KEY or DEEPSEEK_API_KEY")]
     MissingApiKey,
+    #[error("invalid API key for HTTP header: {0}")]
+    InvalidApiKey(String),
     #[error("API error: HTTP {status}: {body}")]
     Api { status: u16, body: String },
     #[error("API stream error: {0}")]
@@ -57,15 +59,19 @@ impl Client {
         }
     }
 
-    fn headers(&self) -> HeaderMap {
+    fn headers(&self) -> Result<HeaderMap, ClientError> {
         let mut headers = HeaderMap::new();
-        headers.insert("x-api-key", HeaderValue::from_str(&self.api_key).unwrap());
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(&self.api_key)
+                .map_err(|e| ClientError::InvalidApiKey(e.to_string()))?,
+        );
         headers.insert(
             "anthropic-version",
             HeaderValue::from_static(API_VERSION),
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers
+        Ok(headers)
     }
 
     /// 发起流式请求，返回归一化事件流。
@@ -81,7 +87,7 @@ impl Client {
             let builder = self
                 .http
                 .post(format!("{}/v1/messages", self.base_url))
-                .headers(self.headers())
+                .headers(self.headers()?)
                 .json(&request);
             match tokio::time::timeout(REQUEST_TIMEOUT, builder.send()).await {
                 Ok(Ok(response)) if response.status().is_success() => {
@@ -147,7 +153,7 @@ impl Client {
             REQUEST_TIMEOUT,
             self.http
                 .post(format!("{}/v1/messages", self.base_url))
-                .headers(self.headers())
+                .headers(self.headers()?)
                 .json(&request)
                 .send(),
         )
@@ -192,7 +198,7 @@ impl Client {
         let response = self
             .http
             .post(format!("{}/v1/messages/count_tokens", self.base_url))
-            .headers(self.headers())
+            .headers(self.headers()?)
             .json(&payload)
             .send()
             .await?;

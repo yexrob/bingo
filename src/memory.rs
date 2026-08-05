@@ -88,7 +88,7 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
     }
 
     let path = memory_file(home, cwd);
-    if let Err(e) = std::fs::create_dir_all(path.parent().unwrap()) {
+    if let Err(e) = std::fs::create_dir_all(path.parent().expect("记忆文件路径必有父目录")) {
         if !session.quiet {
             eprintln!("[bingo] memory: cannot create dir: {e}");
         }
