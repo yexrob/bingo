@@ -68,7 +68,7 @@
 
 ### D3. MCP：rmcp（官方 rust-sdk）
 
-- `modelcontextprotocol/rust-sdk` 官方，3.1.0（2026-07-31），client 能力齐备：stdio（TokioChildProcess）、streamable HTTP、OAuth。
+- `modelcontextprotocol/rust-sdk` 官方，3.1.0（2026-07-31），client 能力：**落地仅 stdio**（TokioChildProcess）；streamable HTTP / OAuth 为 SDK 能力未启用。
 - mcpServers 配置 → 连接 → list_tools → 适配成同一 Tool trait（isMcp + mcpInfo）。
 - 不碰其它 MCP crate（mcp-server / mcplease 无 client 或初级）。
 
@@ -77,12 +77,12 @@
 - 路径依赖 `~/Episodes/Projects/rsmarkdown-tui/crates/tui`，待其发版后切 crates.io 版本。
 - 现成：StreamMarkdownRenderer（流式 markdown）、activities（思考/tool 提示 + spinner）、`App::ask` 权限模态、SlashCommandMenu、任务区、AgentView、Theme。
 - bingo 只做组件接线：Chat 组件接 stream 事件、权限卡接 canUseTool、TodoWrite → tasks、Agent 工具 → agents。
-- 不用 ratatui/tui-markdown 直接开发；不抄 goose 的 cliclack+rustyline 路线。
+- 不直接用 tui-markdown 开发；rsmarkdown-tui 底层基于 ratatui（经自有封装，不直接面向 ratatui 编程）；不抄 goose 的 cliclack+rustyline 路线。
 
 ### D5. 运行时与进程
 
 - tokio 单 runtime；crossterm EventStream + `tokio::select!` 事件循环；工具执行 JoinHandle/AbortHandle；输入打断 = select + watch channel。
-- Bash 工具：`tokio::process` + `shlex`（goose 同款，无 pty）；交互式 shell 再上 `portable-pty`。
+- Bash 工具：`tokio::process` + `/bin/zsh -c`（goose 同款无 pty；shlex 未用）；交互式 shell 再上 `portable-pty`。
 
 ### D6. Token 计数：官方 count_tokens API
 

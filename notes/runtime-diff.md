@@ -8,7 +8,7 @@
 
 | 维度 | Claude Code 2.1.88 | Codex | bingo（现状） |
 |---|---|---|---|
-| 停止信号 | **不用 stop_reason**，以流中实际 tool_use 块为唯一退出信号（query.ts:553-557）；终止原因全集 10 种 | `needs_follow_up`（有 tool call 或 compact 触发继续采样）；纯文本回复即回合结束 | 仅 `tool_uses.is_empty()`；**stop_reason 从不读取**（client.rs 记录但 query.rs 不用） |
+| 停止信号 | **不用 stop_reason**，以流中实际 tool_use 块为唯一退出信号（query.ts:553-557）；终止原因全集 10 种 | `needs_follow_up`（有 tool call 或 compact 触发继续采样）；纯文本回复即回合结束 | 仅 `tool_uses.is_empty()`；**stop_reason 已读取**：`max_tokens` 时注入恢复消息重试（上限 3 次） |
 | max_tokens 截断 | 两级恢复：① 同请求 8k→64k 升级（`ESCALATED_MAX_TOKENS=64_000`，每回合一次）；② 多轮 `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT=3`，注入 "Output token limit hit. Resume directly" isMeta 消息 | 无专门恢复路径；ContextWindowExceeded → compact | **无**。截断即静默结束；我们直接固定 64k（≈CC 升级后的值，但缺恢复语义） |
 | 中断 | AbortController `reason==='interrupt'`；工具 `interruptBehavior: 'cancel'\|'block'`（默认 block）；中断时所有 tool_use 生成 synthetic tool_result 保证消息合法 | Ctrl+C → turn 中止、不重发消息、返回礼貌 FunctionCallOutput | **无中断路径**（Esc 仅切输入模式） |
 | 并发 | `partitionToolCalls`：连续 safe 一批（`CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY` 默认 10）；StreamingToolExecutor 动态判定（无执行中 || 本工具 safe && 全部执行中 safe）；**Bash 出错杀兄弟工具**；context modifier 不支持并发 | RwLock：并行工具 read lock 并发、串行工具 write lock 独占（全局互斥，比 CC 简单） | 连续 safe 前缀分批、上限 10（≈CC partitionToolCalls）；无兄弟错误杀、无 interruptBehavior |
@@ -16,7 +16,7 @@
 | 工具结果大小 | `DEFAULT_MAX_RESULT_SIZE_CHARS=50_000` 超限持久化到 `<session>/tool-results/`，模型收 2_000 字节预览 + `<persisted-output>` | `log_preview()` 截断 | Read 单次 20k 字符硬截断（读不完再读，无 preview 协议）；Bash 输出无大小限制 |
 | Hooks | **26+ 事件**；command/prompt/agent/http 四型；exit 0/2/其他三档语义；**超时**：工具 10min、prompt 30s、SessionEnd 1.5s；并行执行、permission 聚合 deny>ask>allow；`CLAUDE_ENV_FILE` 会话环境脚本；async hooks；Stop hook 防循环（`stopHookActive`） | 11 事件（`ClaudeHooksEngine`，同源）；command 型；`additional_context_limit` 缺省 2_500 tokens | 4 事件（Pre/PostToolUse、Pre/PostCompact）；仅 command 型；60s 超时；**失败一律视为 allow**；顺序执行；无 exit 2 阻塞语义 |
 | 权限 | 模式 × **规则表**（`ToolName(ruleContent)` 语法，多来源合并）+ 工具自身 `checkPermissions` + `safetyCheck`（**bypass 免疫**）+ 内容 ask 规则（bypass 也尊重）+ speculative bash classifier 竞速 | **沙箱兜底**：read-only / workspace-write / danger-full-access × approval_policy（Never/OnRequest/UnlessTrusted/Granular）；未匹配命令按策略 Allow/Prompt/Forbidden | 模式 × 工具属性二元；**AcceptEdits 与 Default 行为相同**；无规则表；`is_destructive` 无任何工具覆写（仅装饰）；Plan 直接 deny 全部非只读 |
-| 重试 | `DEFAULT_MAX_RETRIES=10`、退避 `min(500·2^n, 32k)+25% 抖动`、Retry-After 优先；**400 max_tokens 超限重算** `max(3000, C−A−1000)`；529 ×3 → fallback 模型；**流空闲 90s 看门狗** → 非流式重试；持久重试心跳 30s | 上限 `stream_max_retries()`（默认值未查到）；指数退避；重试尽 → fallback transport（WS→HTTPS）；ContextWindowExceeded/UsageLimitReached 不重试 | `MAX_RETRIES=2`（共 3 次尝试）、仅 5xx/429、退避 500ms→2s；**无 400 重算、无流看门狗**；摘要/记忆/count_tokens 零重试 |
+| 重试 | `DEFAULT_MAX_RETRIES=10`、退避 `min(500·2^n, 32k)+25% 抖动`、Retry-After 优先；**400 max_tokens 超限重算** `max(3000, C−A−1000)`；529 ×3 → fallback 模型；**流空闲 90s 看门狗** → 非流式重试；持久重试心跳 30s | 上限 `stream_max_retries()`（默认值未查到）；指数退避；重试尽 → fallback transport（WS→HTTPS）；ContextWindowExceeded/UsageLimitReached 不重试 | `MAX_RETRIES=5`（共 6 次尝试）、仅 5xx/429、退避 500ms→2s；**无 400 重算、无流看门狗**；摘要/记忆/count_tokens 零重试 |
 | 会话 | claude.json 项目历史；`<session>/tool-results/` 目录 | rollout JSONL + SQLite 索引；**resume/fork 一等公民**（fork 用 history_base 引用不整段复制） | transcript JSONL + mtime 找 latest + `--continue`（语义≈两者）；无 fork |
 | 记忆 | memdir + memory-tool 交互读写 + prefetch + extract-memories stop hook | notes/history 跨窗口保留（compact 时） | 自动提取 facts 到 memdir 文件；无交互读写、无 prefetch（够用但弱） |
 
@@ -99,6 +99,14 @@ CC 的 WebSearchTool 依赖 Anthropic API 的**服务器端 `web_search` 工具*
 - UI 工具行 `Web Search("query")` 对齐 CC 显示。
 - 差异：CC 单次 API 调用内自动多搜索（max_uses 8），bingo 一次查询一次后端请求；无 `Did N searches in Xs` chrome（展开直接显示结果列表）。
 - 实测：headless 强制搜索返回真实结果（Rust 2026 相关）；天气对比场景模型偏好 WebFetch wttr.in（DeepSeek 知识里的直达路径，工具选择权在模型）。74 tests。
+
+## 11. Watchable 通知机制与 UI 折叠组（2026-08-05）
+
+代码已有但此前未记录的两块能力：
+
+- **watch 通知机制**（`src/watch.rs`）：任何实体（Bash 周期命令/普通命令、Agent 前台/后台）注册为 Watchable，状态机 Running → Idle（轮次）→ Done/Failed/Cancelled；条件通知（`NotifyCondition`：Contains/Regex/Errors/LinesOver，经 `feed_content` 内容增量匹配）；interval 轮询；终态/信号通知注入下一次推理上下文（loop 内每轮 `one_turn` 前），回合结束未消费的由 TUI 在 TurnEnd 后自动发起新回合——主 agent 不管 idle 还是对话中都能感知后台任务。触发异步：周期命令自动后台化、Bash `background:true`、Agent 默认异步（`background:false` 同步等待）。
+- **UI 折叠组**（`src/tui.rs`）：连续 Read/Search/Bash（search/read/list/bash 四类）折叠为一行规则摘要（`Searched for 2 patterns, read 1 file`），进行时/完成时态切换；组内 Running 工具实时判定；执行中折叠组下方 `⎿` 行显示最近工具输入；按模型响应轮次（RoundEnd）收口分组。
+- **`MAX_AGENT_DEPTH=3`**：子代理递归深度上限（agent.rs），超出返回错误。
 
 ## 10. 渲染顺序对齐（2026-08-04）
 
