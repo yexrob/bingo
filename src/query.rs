@@ -310,6 +310,23 @@ pub(crate) fn summarize_input(tool_name: &str, input: &serde_json::Value) -> Str
             .and_then(|q| q.as_str())
             .map(|q| format!("Web Search({q:?})"))
             .unwrap_or_else(|| "Web Search".to_string()),
+        // Agent 摘要显示 description（Claude Code 风格：工具行 = name + summary，
+        // summary 不含工具名），让并行 agent 的工具行可区分（曾退化为首字段
+        // background=true 重复显示）。
+        ("Agent", serde_json::Value::Object(map)) => {
+            if let Some(desc) = map.get("description").and_then(|d| d.as_str())
+                && !desc.is_empty()
+            {
+                format!("description=\"{desc}\"")
+            } else if let Some(p) = map.get("prompt").and_then(|p| p.as_str()) {
+                format!(
+                    "prompt=\"{}\"",
+                    p.chars().take(40).collect::<String>()
+                )
+            } else {
+                String::new()
+            }
+        }
         (_, serde_json::Value::Object(map)) => map
             .iter()
             .take(1)
@@ -558,6 +575,22 @@ mod tests {
     #[test]
     fn keeps_small_results() {
         assert_eq!(clipped_result("hi".to_string()), "hi");
+    }
+
+    #[test]
+    fn agent_summary_uses_description_to_distinguish_parallel_agents() {
+        let a = serde_json::json!({"background": true, "description": "深挖 TUI", "prompt": "..."});
+        let b = serde_json::json!({"background": true, "description": "核查机制", "prompt": "..."});
+        let sa = summarize_input("Agent", &a);
+        let sb = summarize_input("Agent", &b);
+        assert_eq!(sa, "description=\"深挖 TUI\"");
+        assert_eq!(sb, "description=\"核查机制\"");
+        assert_ne!(sa, sb, "parallel agents distinguishable");
+        // 无 description 时回退 prompt 摘要
+        let c = serde_json::json!({"background": true, "prompt": "长任务的提示词内容..."});
+        let sc = summarize_input("Agent", &c);
+        assert!(sc.starts_with("prompt=\""), "{sc}");
+        assert!(sc.len() < 60, "prompt truncated: {sc}");
     }
 
     #[test]
