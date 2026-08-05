@@ -56,6 +56,11 @@ struct BashInput {
     #[serde(default)]
     #[schemars(description = "后台监控正则通知条件：输出行匹配即通知")]
     notify_regex: Option<String>,
+    /// 后台化：立即返回 async_launched，完成时通知。对非依赖/长时命令
+    /// 使用（结果不立即需要时）；默认同步等待输出。
+    #[serde(default)]
+    #[schemars(description = "后台执行（默认 false）：立即返回任务 id，完成时通知；对结果不立即需要的命令使用")]
+    background: Option<bool>,
 }
 
 pub struct BashTool;
@@ -79,7 +84,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> String {
-        "在本地 shell 中执行命令，返回 stdout/stderr 与退出码。周期命令（watch/while/until/for/tail -f）自动转为后台任务立即返回 async_launched，可配 notify_on/notify_regex 条件，输出命中即通知主 agent（无需等待命令结束）。"
+        "在本地 shell 中执行命令，返回 stdout/stderr 与退出码。结果不立即需要的非依赖命令（如 cargo build、npm install）设 background:true 异步执行：立即返回 async_launched，完成时自动通知，主 agent 不等待。周期命令（watch/while/until/for/tail -f）自动转为后台任务，可配 notify_on/notify_regex 条件，输出命中即通知（无需等待命令结束）。"
             .to_string()
     }
 
@@ -106,7 +111,12 @@ impl Tool for BashTool {
         // 周期命令（watch/while/until/for/tail -f）自动后台化：
         // 立即返回 async_launched，后台执行 + 轮次检查 + 完成通知。
         if let Some(interval) = periodic_bash_interval(&params.command) {
-            return launch_background(&params, ctx, interval).await;
+            return launch_background(&params, ctx, Some(interval)).await;
+        }
+        // 显式后台化：非依赖/长时命令（如 cargo build、npm install），
+        // 结果不立即需要时主 agent 不等。
+        if params.background.unwrap_or(false) {
+            return launch_background(&params, ctx, None).await;
         }
 
         let mut command = tokio::process::Command::new("/bin/zsh");
@@ -153,7 +163,7 @@ impl Tool for BashTool {
 async fn launch_background(
     params: &BashInput,
     ctx: &ToolContext,
-    interval: Duration,
+    interval: Option<Duration>,
 ) -> Result<ToolResult, ToolError> {
     let mut conditions = Vec::new();
     if let Some(patterns) = params.notify_on.clone() {
@@ -172,7 +182,7 @@ async fn launch_background(
         .register_with_conditions(Box::new(BashWatch {
             cell: cell.clone(),
             label: label.clone(),
-            interval: Some(interval),
+            interval,
         }), conditions);
     let watch = ctx.watch.clone();
     let command = params.command.clone();
@@ -342,6 +352,45 @@ impl crate::watch::Watchable for BashWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn explicit_background_non_periodic_command_notifies() {
+        use crate::watch::WatchState;
+
+        let watch = crate::watch::WatchRegistry::new();
+        let ctx = ToolContext {
+            cwd: std::env::temp_dir(),
+            watch: watch.clone(),
+        };
+        let tool = BashTool::new();
+        let result = tool
+            .call(
+                serde_json::json!({"command": "sleep 0.4; echo finished", "background": true}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let text = result.content.as_str().unwrap();
+        assert!(text.contains("async_launched"), "launched: {text}");
+        let mut rx = watch.subscribe();
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut done = false;
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                Ok(Ok(ev)) if ev.state == WatchState::Done => {
+                    done = true;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert!(done, "explicit background reaches Done");
+        let notes = watch.consume_notifications();
+        assert!(
+            notes.iter().any(|n| n.contains("finished")),
+            "output in notification: {notes:?}"
+        );
+    }
 
     #[tokio::test]
     async fn periodic_command_backgrounds_and_notifies() {
