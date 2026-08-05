@@ -361,6 +361,7 @@ mod tests {
         let ctx = ToolContext {
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
+            http: reqwest::Client::new(),
         };
         let tool = BashTool::new();
         let result = tool
@@ -400,6 +401,7 @@ mod tests {
         let ctx = ToolContext {
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
+            http: reqwest::Client::new(),
         };
         let tool = BashTool::new();
         let result = tool

@@ -101,7 +101,7 @@ mod tests {
                     "old_string": "line two",
                     "new_string": "line TWO",
                 }),
-                &ToolContext { cwd: Default::default(), watch: crate::watch::WatchRegistry::new() },
+                &ToolContext { cwd: Default::default(), watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new() },
             )
             .await
             .unwrap();
@@ -121,7 +121,7 @@ mod tests {
                     "file_path": path.to_string_lossy(),
                     "content": "hello\nworld\n",
                 }),
-                &ToolContext { cwd: Default::default(), watch: crate::watch::WatchRegistry::new() },
+                &ToolContext { cwd: Default::default(), watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new() },
             )
             .await
             .unwrap();

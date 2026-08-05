@@ -22,6 +22,8 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     /// Watchable 注册中心（后台任务生命周期与通知）。
     pub watch: std::sync::Arc<crate::watch::WatchRegistry>,
+    /// 共享 HTTP 客户端（WebFetch/WebSearch 复用连接池；不跟随重定向）。
+    pub http: reqwest::Client,
 }
 
 /// 工具执行结果：content 即回填给模型的 tool_result content。

@@ -2655,7 +2655,7 @@ mod fold_roundtrip_live_tests {
         chat.busy = true;
         // 通过 registry 制造真实终态通知（busy 时事件处理跳过 auto turn）。
         let watch = chat.session.watch.clone();
-        let id = watch.register(Box::new(FakeWatchable));
+        let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new());
         watch.set_state(
             id,
             crate::watch::WatchState::Done,

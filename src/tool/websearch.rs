@@ -65,7 +65,7 @@ impl Tool for WebSearchTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: WebSearchInput = parse_input(&input)?;
         if params.query.trim().len() < 2 {
@@ -76,7 +76,7 @@ impl Tool for WebSearchTool {
                 "cannot specify both allowed_domains and blocked_domains",
             ));
         }
-        let hits = search(&params).await?;
+        let hits = search(&ctx.http, &params).await?;
         let hits = filter_hits(hits, &params);
 
         let mut out = format!("Web search results for query: \"{}\"\n\n", params.query);
@@ -119,8 +119,7 @@ fn current_year() -> u32 {
 }
 
 /// DuckDuckGo HTML 端点搜索（无 key）。返回原始命中（未过滤）。
-async fn search(params: &WebSearchInput) -> Result<Vec<SearchHit>, ToolError> {
-    let client = reqwest::Client::new();
+async fn search(client: &reqwest::Client, params: &WebSearchInput) -> Result<Vec<SearchHit>, ToolError> {
     let response = tokio::time::timeout(SEARCH_TIMEOUT, async {
         client
             .get("https://html.duckduckgo.com/html/")

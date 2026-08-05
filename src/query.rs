@@ -362,6 +362,10 @@ pub async fn run_query(
         cwd: std::env::current_dir()
             .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
         watch: session.watch.clone(),
+        http: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
     };
 
     // UserPromptSubmit：hook 可阻止本次提交（对标 Claude Code）。

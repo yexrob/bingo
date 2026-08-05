@@ -135,7 +135,7 @@ impl Tool for WebFetchTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: WebFetchInput = parse_input(&input)?;
         // prompt 语义对标 CC 的次模型总结；bingo 无次模型，接受但忽略。
@@ -158,11 +158,8 @@ impl Tool for WebFetchTool {
             });
         }
 
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| ToolError::failed(format!("http client failed: {e}")))?;
-        let (content, bytes, code, code_text, content_type) = fetch(&client, &upgraded, 0).await?;
+        let (content, bytes, code, code_text, content_type) =
+            fetch(&ctx.http, &upgraded, 0).await?;
 
         let mut result = content;
         if result.chars().count() > MAX_FETCH_CHARS {

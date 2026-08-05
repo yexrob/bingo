@@ -229,12 +229,6 @@ impl WatchRegistry {
         })
     }
 
-    /// 注册一个 watchable（无条件）；带间隔的会 spawn 周期轮询任务。
-    #[allow(dead_code)] // 未来无条件 watchable（如文件监控）落地后使用
-    pub fn register(self: &Arc<Self>, watchable: Box<dyn Watchable>) -> WatchId {
-        self.register_with_conditions(watchable, Vec::new())
-    }
-
     /// 注册并配置通知条件（内容增量 feed_content 按条件匹配 → 信号）。
     pub fn register_with_conditions(
         self: &Arc<Self>,
@@ -351,7 +345,7 @@ impl WatchRegistry {
     /// 条件信号：实现者检测到满足的条件（如 log 出现错误）时调用，
     /// 无条件入通知队列 + 广播（不改变状态）。
     pub fn emit_signal(&self, id: WatchId, signal: String, detail: Option<String>) {
-        let label = {
+        let (label, state, entry_detail) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return;
@@ -361,6 +355,7 @@ impl WatchRegistry {
             if let Some(d) = &detail {
                 entry.detail = Some(d.clone());
             }
+            let entry_detail = entry.detail.clone();
             inner.notifications.push_back(Notification {
                 id,
                 label: label.clone(),
@@ -369,7 +364,7 @@ impl WatchRegistry {
                 payload: None,
                 signal: Some(signal.clone()),
             });
-            label
+            (label, state, entry_detail)
         };
         let elapsed_ms = {
             let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -379,11 +374,12 @@ impl WatchRegistry {
                 .map(|e| e.born.elapsed().as_millis() as u64)
                 .unwrap_or(0)
         };
+        // 广播真实状态与 detail（曾固定 Running/None，TUI 显示与状态不一致）。
         let _ = self.tx.send(WatchEvent {
             id,
             label,
-            state: WatchState::Running,
-            detail: None,
+            state,
+            detail: entry_detail,
             payload: None,
             signal: Some(signal),
             elapsed_ms,
@@ -585,7 +581,7 @@ mod tests {
     async fn register_publishes_initial_state() {
         let reg = watch();
         let mut rx = reg.subscribe();
-        let id = reg.register(Box::new(FakeWatch {
+        let id = reg.register_with_conditions(Box::new(FakeWatch {
             label: "watch -n 2 ls",
             sequence: vec![WatchPoll {
                 state: WatchState::Running,
@@ -595,7 +591,7 @@ mod tests {
             }],
             index: AtomicUsize::new(0),
             interval: None,
-        }));
+        }), Vec::new());
         let ev = rx.recv().await.unwrap_or_else(|_| unreachable!());
         assert_eq!(ev.id, id);
         assert_eq!(ev.state, WatchState::Running);
@@ -605,7 +601,7 @@ mod tests {
     #[test]
     fn set_state_idempotent_and_notifies() {
         let reg = watch();
-        let id = reg.register(Box::new(FakeWatch {
+        let id = reg.register_with_conditions(Box::new(FakeWatch {
             label: "l",
             sequence: vec![WatchPoll {
                 state: WatchState::Running,
@@ -615,7 +611,7 @@ mod tests {
             }],
             index: AtomicUsize::new(0),
             interval: None,
-        }));
+        }), Vec::new());
         reg.set_state(id, WatchState::Running, None, None);
         assert_eq!(reg.snapshot()[0].state, WatchState::Running);
         reg.set_state(id, WatchState::Idle, Some("第 1 轮".into()), None);
@@ -629,7 +625,7 @@ mod tests {
     #[test]
     fn notifications_merge_consecutive_idle_rounds() {
         let reg = watch();
-        let id = reg.register(Box::new(FakeWatch {
+        let id = reg.register_with_conditions(Box::new(FakeWatch {
             label: "poll",
             sequence: vec![WatchPoll {
                 state: WatchState::Running,
@@ -639,7 +635,7 @@ mod tests {
             }],
             index: AtomicUsize::new(0),
             interval: None,
-        }));
+        }), Vec::new());
         reg.set_state(id, WatchState::Idle, Some("第 1 轮".into()), None);
         reg.set_state(id, WatchState::Idle, Some("第 2 轮".into()), None);
         reg.set_state(id, WatchState::Done, Some("fin".into()), None);
@@ -654,7 +650,7 @@ mod tests {
     fn terminal_state_is_frozen_against_poll_override() {
         // 回归：子 agent 完成（Done）后，interval 轮询的 Running 不得覆盖。
         let reg = watch();
-        let id = reg.register(Box::new(FakeWatch {
+        let id = reg.register_with_conditions(Box::new(FakeWatch {
             label: "agent",
             sequence: vec![WatchPoll {
                 state: WatchState::Running,
@@ -664,7 +660,7 @@ mod tests {
             }],
             index: AtomicUsize::new(0),
             interval: None,
-        }));
+        }), Vec::new());
         reg.set_state(id, WatchState::Done, Some("完成".into()), None);
         reg.set_state(id, WatchState::Running, Some("已产出 33 字符".into()), None);
         assert_eq!(reg.snapshot()[0].state, WatchState::Done, "frozen");
@@ -732,7 +728,7 @@ mod tests {
     async fn signal_event_queues_and_broadcasts() {
         let reg = watch();
         let mut rx = reg.subscribe();
-        let id = reg.register(Box::new(FakeWatch {
+        let id = reg.register_with_conditions(Box::new(FakeWatch {
             label: "log-tail",
             sequence: vec![WatchPoll {
                 state: WatchState::Running,
@@ -742,7 +738,7 @@ mod tests {
             }],
             index: AtomicUsize::new(0),
             interval: None,
-        }));
+        }), Vec::new());
         let _ = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap_or_else(|_| unreachable!())
@@ -764,7 +760,7 @@ mod tests {
     async fn interval_polling_publishes_transitions() {
         let reg = watch();
         let mut rx = reg.subscribe();
-        let id = reg.register(Box::new(FakeWatch {
+        let id = reg.register_with_conditions(Box::new(FakeWatch {
             label: "slow",
             sequence: vec![
                 WatchPoll { state: WatchState::Running, detail: None, payload: None, signal: None },
@@ -775,7 +771,7 @@ mod tests {
             ],
             index: AtomicUsize::new(0),
             interval: Some(Duration::from_millis(5)),
-        }));
+        }), Vec::new());
         // 初始事件 + 轮询事件：至少出现 Running → Idle → Done。
         let mut seen: Vec<WatchState> = Vec::new();
         for _ in 0..6 {
