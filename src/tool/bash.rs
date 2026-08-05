@@ -362,6 +362,10 @@ mod tests {
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
             http: reqwest::Client::new(),
+                        tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), &std::env::temp_dir())),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
         };
         let tool = BashTool::new();
         let result = tool
@@ -402,6 +406,10 @@ mod tests {
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
             http: reqwest::Client::new(),
+                        tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), &std::env::temp_dir())),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
         };
         let tool = BashTool::new();
         let result = tool

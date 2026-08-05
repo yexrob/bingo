@@ -4,6 +4,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::settings::HooksConfig;
+use crate::tasks::TaskStore;
+
 pub mod agent;
 pub mod bash;
 pub mod diff;
@@ -12,6 +15,7 @@ pub mod executor;
 pub mod glob;
 pub mod grep;
 pub mod read;
+pub mod task;
 pub mod webfetch;
 pub mod websearch;
 pub mod write;
@@ -24,6 +28,21 @@ pub struct ToolContext {
     pub watch: std::sync::Arc<crate::watch::WatchRegistry>,
     /// 共享 HTTP 客户端（WebFetch/WebSearch 复用连接池；不跟随重定向）。
     pub http: reqwest::Client,
+    /// Task 存储（Task 工具族；TUI 任务区同源）。
+    pub tasks: std::sync::Arc<TaskStore>,
+    /// Hooks 配置（TaskCreated/TaskCompleted 事件）。
+    pub hooks: HooksConfig,
+    /// 权限模式字符串（hook 输入契约）。
+    pub permission_mode: String,
+    /// 任务区展开信号（对标 CC set_expanded_view: tasks；headless 无订阅者）。
+    pub expand_tasks: tokio::sync::watch::Sender<bool>,
+}
+
+impl ToolContext {
+    /// 工具调用时通知 TUI 展开任务区（对标 Claude Code set_expanded_view: tasks）。
+    pub fn set_expanded_view_tasks(&self) {
+        let _ = self.expand_tasks.send(true);
+    }
 }
 
 /// 工具执行结果：content 即回填给模型的 tool_result content。

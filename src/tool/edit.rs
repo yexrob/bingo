@@ -101,7 +101,13 @@ mod tests {
                     "old_string": "line two",
                     "new_string": "line TWO",
                 }),
-                &ToolContext { cwd: Default::default(), watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new() },
+                &ToolContext {
+            cwd: Default::default(), watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), &std::env::temp_dir())),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+        },
             )
             .await
             .unwrap();
@@ -121,7 +127,13 @@ mod tests {
                     "file_path": path.to_string_lossy(),
                     "content": "hello\nworld\n",
                 }),
-                &ToolContext { cwd: Default::default(), watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new() },
+                &ToolContext {
+            cwd: Default::default(), watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), &std::env::temp_dir())),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+        },
             )
             .await
             .unwrap();

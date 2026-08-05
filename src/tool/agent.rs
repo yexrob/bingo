@@ -152,6 +152,9 @@ impl AgentTool {
             quiet: self.session.quiet,
             compact_failures: self.session.compact_failures.clone(),
             watch: self.session.watch.clone(),
+            tasks: self.session.tasks.clone(),
+            last_task_reminder_turn: self.session.last_task_reminder_turn.clone(),
+            expand_tasks: self.session.expand_tasks.clone(),
         })
     }
 }

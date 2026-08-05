@@ -24,6 +24,7 @@ mod preapproved;
 mod query;
 mod settings;
 mod system;
+mod tasks;
 mod tool;
 mod tools;
 mod transcript;
@@ -114,6 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let (expand_tx, expand_rx) = tokio::sync::watch::channel(false);
     let session = Arc::new(Session {
         client,
         model: cli.model,
@@ -126,6 +128,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         quiet: !cli.print,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         watch: crate::watch::WatchRegistry::new(),
+        tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, &project_dir)),
+        last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        expand_tasks: expand_tx,
     });
 
     let mode_str = session.permission_mode_str();
@@ -149,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             extract_memory(&session, &outcome.messages, &home, &project_dir).await;
         } else {
             drop(initial_messages); // 交互模式下 --continue 历史由后续轮次复用
-            tui::run_tui_session(session.clone())?;
+            tui::run_tui_session(session.clone(), expand_rx)?;
         }
         Ok::<(), Box<dyn std::error::Error>>(())
     }

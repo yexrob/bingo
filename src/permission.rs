@@ -194,6 +194,12 @@ pub fn can_use_tool(
     }
     match mode {
         PermissionMode::DontAsk => deny("dontAsk mode denies non-read-only tools"),
+        // Task 工具族豁免（对标 CC plan mode 提示 "create a task list to track the work"）：
+        // plan 模式允许建/改任务列表，其余非只读工具照常 deny。
+        PermissionMode::Plan if name.starts_with("Task") => PermissionResult {
+            behavior: PermissionBehavior::Allow,
+            reason: "plan mode allows task list management".into(),
+        },
         PermissionMode::Plan => deny("plan mode denies tool execution"),
         _ => {
             let mut reason = format!("{name} needs permission");

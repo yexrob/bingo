@@ -64,6 +64,10 @@ pub struct HooksConfig {
     pub session_start: Vec<HookRule>,
     #[serde(rename = "SessionEnd")]
     pub session_end: Vec<HookRule>,
+    #[serde(rename = "TaskCreated")]
+    pub task_created: Vec<HookRule>,
+    #[serde(rename = "TaskCompleted")]
+    pub task_completed: Vec<HookRule>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,6 +137,8 @@ fn merge(base: &mut Settings, layer: Settings) {
         (&mut base.hooks.stop, &layer.hooks.stop),
         (&mut base.hooks.session_start, &layer.hooks.session_start),
         (&mut base.hooks.session_end, &layer.hooks.session_end),
+        (&mut base.hooks.task_created, &layer.hooks.task_created),
+        (&mut base.hooks.task_completed, &layer.hooks.task_completed),
     ] {
         if !layer_hooks.is_empty() {
             *base_hooks = layer_hooks.clone();

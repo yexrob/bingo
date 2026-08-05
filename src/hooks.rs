@@ -54,6 +54,8 @@ fn commands_for<'a>(config: &'a HooksConfig, event: &'a str, tool_name: &str) ->
         "Stop" => matched(&config.stop, tool_name),
         "SessionStart" => matched(&config.session_start, tool_name),
         "SessionEnd" => matched(&config.session_end, tool_name),
+        "TaskCreated" => matched(&config.task_created, ""),
+        "TaskCompleted" => matched(&config.task_completed, ""),
         _ => return Vec::new(),
     };
     rules
@@ -348,6 +350,66 @@ pub async fn run_session_end(config: &HooksConfig, permission_mode: &str) {
             eprintln!("[bingo] SessionEnd hook warning: {e}");
         }
     }
+}
+
+/// Task 生命周期 hook 公共执行：exit 2 的 stderr 作为 blockingError 收集返回
+/// （对标 CC TaskCreated/TaskCompleted blockingError 聚合；调用方决定后果）。
+async fn run_task_lifecycle_hooks(
+    config: &HooksConfig,
+    event: &str,
+    task_id: &str,
+    subject: &str,
+    permission_mode: &str,
+) -> Vec<String> {
+    let commands = commands_for(config, event, "");
+    let mut blocking = Vec::new();
+    for command in commands {
+        let input = serde_json::json!({
+            "hook_event_name": event,
+            "task_id": task_id,
+            "subject": subject,
+            "permission_mode": permission_mode,
+        });
+        match run_hook(command, &input).await {
+            Ok((2, _, stderr)) => {
+                let reason = if stderr.is_empty() {
+                    format!("blocked by {event} hook")
+                } else {
+                    stderr
+                };
+                eprintln!("[bingo] {event} hook blocked: {reason}");
+                blocking.push(reason);
+            }
+            Ok((code, _, stderr)) if code != 0 => {
+                eprintln!("[bingo] {event} hook exited {code}: {stderr}");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[bingo] {event} hook warning: {e}");
+            }
+        }
+    }
+    blocking
+}
+
+/// TaskCreated：新任务创建后执行。blockingError → 任务被撤销（调用方处理）。
+pub async fn run_task_created(
+    config: &HooksConfig,
+    task_id: &str,
+    subject: &str,
+    permission_mode: &str,
+) -> Vec<String> {
+    run_task_lifecycle_hooks(config, "TaskCreated", task_id, subject, permission_mode).await
+}
+
+/// TaskCompleted：任务标记 completed 前执行。blockingError → 拒绝 completed（调用方处理）。
+pub async fn run_task_completed(
+    config: &HooksConfig,
+    task_id: &str,
+    subject: &str,
+    permission_mode: &str,
+) -> Vec<String> {
+    run_task_lifecycle_hooks(config, "TaskCompleted", task_id, subject, permission_mode).await
 }
 
 #[cfg(test)]

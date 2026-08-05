@@ -42,6 +42,78 @@ const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
 const MAX_TOKENS_RESUME_PROMPT: &str =
     "Output token limit hit. Resume directly from where you left off. Do not apologize or explain.";
 
+/// Task 提醒阈值（对标 Claude Code Wwn：TURNS_SINCE_WRITE / TURNS_BETWEEN_REMINDERS）。
+const TASK_REMINDER_TURNS: u64 = 10;
+const TASK_REMINDER_MARKER: &str = "[SYSTEM NOTIFICATION - TASK REMINDER]";
+
+/// 轮距计算（对标 CC jDb）：从消息尾部往回数 assistant 轮，
+/// 遇到含 TaskCreate/TaskUpdate tool_use（或 reminder 消息）即停。
+/// management = 距最近一次 Task 工具轮数；reminder = 距最近一次提醒轮数。
+/// 都没有出现过 → 视为超过阈值（返回 REMINDER_TURNS+1）。
+fn task_reminder_turn_distances(messages: &[Message]) -> (u64, u64) {
+    let mut since_management = 0u64;
+    let mut since_reminder = 0u64;
+    let mut management_seen = false;
+    let mut reminder_seen = false;
+    for message in messages.iter().rev() {
+        if message.role == Role::Assistant {
+            since_management += 1;
+            since_reminder += 1;
+            let uses_task_tool = message.content.iter().any(|b| {
+                matches!(b, ContentBlock::ToolUse { name, .. } if name == "TaskCreate" || name == "TaskUpdate")
+            });
+            if uses_task_tool {
+                management_seen = true;
+            }
+        } else if !reminder_seen {
+            let is_reminder = message.content.iter().any(|b| {
+                matches!(b, ContentBlock::Text { text } if text.starts_with(TASK_REMINDER_MARKER))
+            });
+            if is_reminder {
+                reminder_seen = true;
+            }
+        }
+        if management_seen && reminder_seen {
+            break;
+        }
+    }
+    let since_management = if management_seen { since_management } else { TASK_REMINDER_TURNS + 1 };
+    let since_reminder = if reminder_seen { since_reminder } else { TASK_REMINDER_TURNS + 1 };
+    (since_management, since_reminder)
+}
+
+/// 注入 task_reminder（对标 CC WDb）：Task 工具 10 轮未用 + 距上次提醒 10 轮。
+async fn maybe_inject_task_reminder(session: &Session, messages: &mut Vec<Message>) {
+    let (since_management, since_reminder) = task_reminder_turn_distances(messages);
+    if since_management < TASK_REMINDER_TURNS || since_reminder < TASK_REMINDER_TURNS {
+        return;
+    }
+    let items = match session.tasks.list().await {
+        Ok(items) => items,
+        Err(e) => {
+            eprintln!("[bingo] warning: task_reminder list failed: {e}");
+            return;
+        }
+    };
+    let mut text = format!(
+        "{TASK_REMINDER_MARKER}\nThe task tools haven't been used recently. If you're working on \
+tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and \
+TaskUpdate to update task status (set to in_progress when starting, completed when done). Also \
+consider cleaning up the task list if it has become stale. Only use these if relevant to the \
+current work. This is just a gentle reminder - ignore if not applicable. Make sure that you NEVER \
+mention this reminder to the user."
+    );
+    if !items.is_empty() {
+        let list = items
+            .iter()
+            .map(|t| format!("#{}. [{}] {}", t.id, t.status, t.subject))
+            .collect::<Vec<_>>()
+            .join("\n");
+        text.push_str(&format!("\n\nHere are the existing tasks:\n\n{list}"));
+    }
+    messages.push(Message::user_text(text));
+}
+
 /// 一次查询的全部上下文（TUI 与 headless 共用）。
 #[derive(Clone)]
 pub struct Session {
@@ -61,6 +133,12 @@ pub struct Session {
     pub compact_failures: Arc<std::sync::atomic::AtomicU64>,
     /// Watchable 注册中心（命令/agent 状态观察与通知）。
     pub watch: Arc<crate::watch::WatchRegistry>,
+    /// Task 存储（Task 工具族 + TUI 任务区 + reminder 注入同源）。
+    pub tasks: Arc<crate::tasks::TaskStore>,
+    /// 上次 task_reminder 注入的轮号（10 轮阈值，对标 CC TURNS_BETWEEN_REMINDERS）。
+    pub last_task_reminder_turn: Arc<std::sync::atomic::AtomicU64>,
+    /// 任务区展开信号（对标 CC set_expanded_view: tasks；TUI 自循环订阅）。
+    pub expand_tasks: watch::Sender<bool>,
 }
 
 /// 单个工具完成事件。
@@ -366,6 +444,10 @@ pub async fn run_query(
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
+        tasks: session.tasks.clone(),
+        hooks: session.settings.hooks.clone(),
+        permission_mode: permission_mode_str(session.permission_mode).to_string(),
+        expand_tasks: session.expand_tasks.clone(),
     };
 
     // UserPromptSubmit：hook 可阻止本次提交（对标 Claude Code）。
@@ -389,6 +471,8 @@ pub async fn run_query(
     let mut cancel_rx = cancel;
     loop {
         check_and_compact(session, &mut messages).await;
+        // task_reminder：Task 工具 10 轮未用 + 距上次提醒 10 轮（对标 CC WDb）。
+        maybe_inject_task_reminder(session, &mut messages).await;
         // 后台任务通知注入（执行中动态感知）：每次推理前把待消费的状态转换
         // 通知（轮次/完成/失败）注入上下文；回合结束未消费的留到下回合。
         let notes = session.watch.consume_notifications();

@@ -9,15 +9,14 @@ use ratatui::text::{Line, Span};
 use rsmarkdown_core::{MarkdownProcessor, Renderer};
 use rsmarkdown_tui::activities::{
     activities_path_get_mut, diff_lines, Activity, ActivityKind, Diff, Thinking,
-    ThinkingState, ToolCall, ToolStatus,
+    ThinkingState, TodoItem, TodoStatus, ToolCall, ToolStatus,
 };
 use rsmarkdown_tui::app::App;
 use rsmarkdown_tui::Component;
 use rsmarkdown_tui::permission::{DialogAction, PermissionRequest};
 use rsmarkdown_tui::renderer::theme::Theme;
 use rsmarkdown_tui::renderer::StreamMarkdownRenderer;
-use rsmarkdown_tui::{FooterBadge, run_tui};
-use tokio::sync::{mpsc, oneshot};
+use rsmarkdown_tui::FooterBadge;use tokio::sync::{mpsc, oneshot};
 
 use crate::api::types::StreamEvent;
 use crate::permission::PermissionMode;
@@ -1689,6 +1688,26 @@ impl Component for BingoChat {
         }
     }
 
+    /// 任务区广播：Task 存储磁盘快照 → TodoList（对标 CC TodoWrite → tasks 接线）。
+    fn tasks(&self) -> Vec<TodoItem> {
+        self.session
+            .tasks
+            .list_ui()
+            .into_iter()
+            .map(|t| {
+                let status = match t.status {
+                    crate::tasks::TaskStatus::Pending => TodoStatus::Pending,
+                    crate::tasks::TaskStatus::InProgress => TodoStatus::InProgress,
+                    crate::tasks::TaskStatus::Completed => TodoStatus::Done,
+                };
+                TodoItem {
+                    text: t.subject,
+                    status,
+                }
+            })
+            .collect()
+    }
+
     fn status(&self) -> String {
         if self.busy {
             "working…".to_string()
@@ -1726,7 +1745,13 @@ impl Component for BingoChat {
 }
 
 /// 启动 TUI 会话。draw/event 崩溃时恢复终端并报告（不裸退）。
-pub fn run_tui_session(session: Arc<Session>) -> Result<(), Box<dyn std::error::Error>> {
+/// 自循环 = rsmarkdown-tui `App::run` 的宿主等价物：每帧 draw + 事件路由 +
+/// tick，并额外轮询任务区展开信号（Task 工具调用 → `expand_tasks`，对标 CC
+/// `set_expanded_view: tasks`）。
+pub fn run_tui_session(
+    session: Arc<Session>,
+    mut expand_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (asks_tx, asks_rx) = mpsc::unbounded_channel();
 
@@ -1740,7 +1765,51 @@ pub fn run_tui_session(session: Arc<Session>) -> Result<(), Box<dyn std::error::
     app.set_status_bar(false);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = run_tui(&mut app);
+        use crossterm::event::poll;
+        use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+        use crossterm::{
+            execute,
+            terminal::{EnterAlternateScreen, LeaveAlternateScreen},
+            event::DisableMouseCapture,
+        };
+        use ratatui::backend::CrosstermBackend;
+        use ratatui::Terminal;
+        use std::io;
+        use std::time::Instant;
+
+        enable_raw_mode().expect("raw mode");
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen).expect("alt screen");
+        execute!(stdout, crossterm::event::EnableMouseCapture).expect("mouse capture");
+        let mut terminal = Terminal::new(CrosstermBackend::new(stdout)).expect("terminal");
+        let tick = std::time::Duration::from_millis(33);
+        let mut last_tick = Instant::now();
+        let result: Result<(), String> = (|| {
+            loop {
+                terminal
+                    .draw(|f| app.draw_frame(f.area(), f.buffer_mut()))
+                    .map_err(|e| e.to_string())?;
+                let timeout = tick.saturating_sub(last_tick.elapsed());
+                if poll(timeout).map_err(|e| e.to_string())?
+                    && !app.route(crossterm::event::read().map_err(|e| e.to_string())?)
+                {
+                    break;
+                }
+                // 任务工具调用 → 宿主展开任务区。
+                if expand_rx.has_changed().unwrap_or(false) && *expand_rx.borrow_and_update() {
+                    app.expand_tasks();
+                }
+                if last_tick.elapsed() >= tick {
+                    app.tick_components();
+                    last_tick = Instant::now();
+                }
+            }
+            Ok(())
+        })();
+        disable_raw_mode().ok();
+        execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+        execute!(terminal.backend_mut(), DisableMouseCapture).ok();
+        result
     }));
     if let Err(payload) = result {
         let _ = crossterm::terminal::disable_raw_mode();
@@ -1786,6 +1855,9 @@ mod tests {
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), &std::env::temp_dir())),
+            last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            expand_tasks: tokio::sync::watch::channel(false).0,
         });
         BingoChat::new(session, events_tx, events_rx, asks_tx, asks_rx)
     }
