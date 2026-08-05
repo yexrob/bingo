@@ -19,6 +19,8 @@
 | 重试 | `DEFAULT_MAX_RETRIES=10`、退避 `min(500·2^n, 32k)+25% 抖动`、Retry-After 优先；**400 max_tokens 超限重算** `max(3000, C−A−1000)`；529 ×3 → fallback 模型；**流空闲 90s 看门狗** → 非流式重试；持久重试心跳 30s | 上限 `stream_max_retries()`（默认值未查到）；指数退避；重试尽 → fallback transport（WS→HTTPS）；ContextWindowExceeded/UsageLimitReached 不重试 | `MAX_RETRIES=5`（共 6 次尝试）、仅 5xx/429、退避 500ms→2s；**无 400 重算、无流看门狗**；摘要/记忆/count_tokens 零重试 |
 | 会话 | claude.json 项目历史；`<session>/tool-results/` 目录 | rollout JSONL + SQLite 索引；**resume/fork 一等公民**（fork 用 history_base 引用不整段复制） | transcript JSONL + mtime 找 latest + `--continue`（语义≈两者）；无 fork |
 | 记忆 | memdir + memory-tool 交互读写 + prefetch + extract-memories stop hook | notes/history 跨窗口保留（compact 时） | 自动提取 facts 到 memdir 文件；无交互读写、无 prefetch（够用但弱） |
+| 任务追踪 | **v2 Task 工具族**（2.1.142+ 默认）：TaskCreate/TaskUpdate/TaskGet/TaskList，增量 patch by taskId，`deleted` 状态；**磁盘持久化** `~/.claude/tasks/<listId>/<id>.json`（listId = `CLAUDE_CODE_TASK_LIST_ID` \| teamName \| sessionId），每任务一文件 + 文件锁（withLock / v5 乐观锁 ifMatch+version），数字 id 递增，读时逐条 safeParse；**TaskCompleted hook 可阻断** completed（blockingError 聚合）；完成自动清理引用；`metadata._internal` 隐藏任务；调 tool 时 TUI `set_expanded_view: tasks`。v1 TodoWrite（全列表覆盖写、appState 内存）按 feature 并存 | —（无任务工具） | **无**。Task 工具族 + reminder 注入均缺；任务状态机是产品化面，见 research.md D15 |
+| 任务提醒注入 | 两套并存：`todo_reminder`（v1）/`task_reminder`（v2，读磁盘任务）；阈值 `TURNS_SINCE_WRITE=10`/`TURNS_BETWEEN_REMINDERS=10`（`Wwn` 常量）；开关 `CLAUDE_CODE_TODO_REMINDER_MODE` \| `tengu_soft_slate_nudge`（`off` 关闭）；v2 额外要求工具表含 TaskUpdate；渲染 `#id [status] subject`；"NEVER mention this reminder" meta 注入 | — | **无** |
 
 ## 2. 差距分级
 
@@ -40,6 +42,7 @@
 8. **工具面**：Glob/Grep/Edit/Write/WebFetch。没有写工具，AcceptEdits 模式无意义——**这解释了 acceptEdits 语义缺失**。
 9. **Hooks 事件扩展**：UserPromptSubmit/Stop/Notification/SessionStart/SessionEnd（SessionEnd 超时 1.5s 是 CC 的务实默认）。
 10. **权限规则表**：`ToolName(rule)` 语法 + `safetyCheck`（bypass 免疫）。Codex 走沙箱路线（另一方向，bingo 初期不引入——research.md D13 已定）。
+11. **Task 工具族 + 提醒注入**（D15）：TaskCreate/TaskUpdate/TaskGet/TaskList + 磁盘存储 + 文件锁 + TaskCreated/TaskCompleted hooks + 10/10 轮 reminder 注入。v2 语义（增量 patch），不做 owner/swarm 面。
 
 ## 3. 与 research.md 决策的一致性检查
 

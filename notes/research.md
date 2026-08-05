@@ -131,6 +131,17 @@
 - 首期只做子代理（Agent 工具递归 queryLoop，subagent 独立消息历史）。
 - worktree/teammate/团队协作面不做（对标 2.1.221 的产品化面，非核心 harness）；后续按需。
 
+### D15. 任务追踪：v2 Task 工具族（对标 2.1.221 实证）
+
+> 来源：2.1.221 二进制 `cli.bundle.min.js` 逆向（`~/Episodes/Resources/research/claude-code-re/output/clean/`），行号见 runtime-diff 表。v1 TodoWrite 是 v2 的语义前身，bingo 直接取 v2。
+
+- **工具面**：`TaskCreate`（subject/description/activeForm?/metadata?，一次一任务，输出 `{task:{id,subject}}`）、`TaskUpdate`（taskId + 可选字段，**增量 patch 语义**，status 增 `deleted` 永久删除并清理他任务引用）、`TaskGet`、`TaskList`（过滤 `metadata._internal`，completed 从 blockedBy 剔除）。共同属性：shouldDefer、无权限检查、renderToolUseMessage null（UI 走任务区）、调工具时 `set_expanded_view: tasks`。
+- **存储**：磁盘 `~/.claude/tasks/<listId>/<taskId>.json`（listId = `CLAUDE_CODE_TASK_LIST_ID` env > teamName > sessionId），每任务一文件，**跨会话持久化**；数字 id 递增（max+1）；读时逐条 safeParse；**文件锁**（withLock / v5 乐观锁 ifMatch+version，Bun 的 LSP kv 后端可选）。
+- **输入修复层**：coerceInput 把近似的 key 名修复（title/name→subject、content→description、active_form→activeForm、task 包裹拆包、缺 description 时 backfill），validationErrorSteer 给误用（tasks/todos 数组参数、Agent 参数）返回引导文案。
+- **Hooks**：新增 `TaskCreated` / `TaskCompleted` 事件；TaskCompleted 的 blockingError 可**拒绝** completed 状态。
+- **提醒注入**：`task_reminder` attachment，阈值 `TURNS_SINCE_WRITE=10` / `TURNS_BETWEEN_REMINDERS=10`；v2 额外要求工具表含 TaskUpdate；开关 `CLAUDE_CODE_TODO_REMINDER_MODE` / feature `tengu_soft_slate_nudge`；meta user message 注入 + "NEVER mention this reminder"。
+- **bingo 取法**：v2 增量语义（v1 全列表覆盖写在并发下是丢失更新温床）+ 磁盘持久化 + 单文件锁（与 transcript 文件习惯同构）；**砍** owner/swarm 分配（D14 已定不做 teammate）与 metadata merge（首版支持即可）；TaskCompleted 阻断 hook 对齐现有 hooks 语义；reminder 阈值直接取 10/10。实现归"对标清单"第 6 项后。
+
 ## 对标清单（按实现顺序）
 
 1. headless 最小闭环：API 客户端 + queryLoop + Read/Bash 工具 + 权限门（D1/D2/D7/D8）
