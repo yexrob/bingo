@@ -2241,7 +2241,9 @@ impl Chat {
         }
     }
 
-    /// 回合结束后处理：记忆抽取 + TurnEnd。
+    /// 回合结束后处理：先发 TurnEnd（busy 复位 / 完成行立即出现），
+    /// 记忆抽取后置——它是一次非流式模型调用（数秒），收尾不应阻塞
+    /// 回合结束的 UI 表现；抽取与下一回合（如 watch 唤醒）并行无碍。
     async fn finish_turn(
         events: &mpsc::UnboundedSender<UiEvent>,
         session: &Arc<Session>,
@@ -2250,9 +2252,9 @@ impl Chat {
         if outcome.aborted {
             let _ = events.send(UiEvent::Warning("回合已中断".to_string()));
         }
+        let _ = events.send(UiEvent::TurnEnd);
         let cwd = std::env::current_dir().unwrap_or_default();
         crate::memory::extract_memory(session, &outcome.messages, &session.home, &cwd).await;
-        let _ = events.send(UiEvent::TurnEnd);
     }
 
     fn start_turn(&mut self, text: String, show_user: bool) {

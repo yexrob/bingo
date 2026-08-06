@@ -460,19 +460,40 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
             }
             // inline：定稿行落盘 + 计算动态尾部起点。
             // 落盘边界 = 定稿推进与"尾部不超过屏幕"两者取高——canvas
-            // 高度恒 ≤ 终端高度，inline 擦除才不会落到 scrollback 里。
+            // 高度恒 < 终端高度，inline 擦除才不会落到 scrollback 里。
             let live_start = {
                 let s = chat.read();
                 let tasks = s.task_lines();
                 let warn_rows = if s.warnings.is_empty() { 0 } else { 1 };
                 let status_rows = usize::from(s.running_status().is_some());
+                // 实际 chrome 行数（与下方布局一一对应）：status + tasks +
+                // warn + border×2 + input + footer + suggestions/菜单 +
+                // "Waiting for permission…" 行（border×2+input 即那 3 行）。
+                let menu_rows = s
+                    .model_menu
+                    .as_ref()
+                    .map(|m| match &m.models {
+                        Some(mm) if !mm.loading => mm.models.len(),
+                        _ => m.providers.len(),
+                    })
+                    .unwrap_or(0)
+                    .min(crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5);
+                let slash_rows = s.slash_suggestions.len().max(menu_rows);
                 let chrome_total = tasks.len()
                     + warn_rows
                     + status_rows
                     + 3
-                    + s.slash_suggestions.len()
+                    + slash_rows
+                    + 1
                     + usize::from(s.pending_ask.is_some());
-                let max_live = (height as usize).saturating_sub(chrome_total);
+                // canvas = 尾部 + chrome 须严格小于终端高度：iocraft 在
+                // prev_canvas_height ≥ 终端高度时走 Clear(All)+Purge 并移
+                // 光标到 (0,0) 的兜底（inline 擦除不可靠的防御），大输出
+                // 时每帧整屏清除 + 重画 → 屏闪且清空用户 scrollback。留
+                // 1 行余量恒走相对擦除路径（只清 canvas 区域、原地重画）。
+                let max_live = (height as usize)
+                    .saturating_sub(chrome_total)
+                    .saturating_sub(1);
                 (*printed
                     .read())
                     .max(s.doc.settled.min(s.doc.rows.len()))
