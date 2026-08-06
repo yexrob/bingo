@@ -49,6 +49,24 @@ pub struct Settings {
     pub disabled_mcp_servers: Vec<String>,
     /// 权限规则表（allow/deny/ask，规则语法 `Tool(content)`）。
     pub permissions: PermissionRules,
+    /// 实验特性开关（`experimental`）。
+    #[serde(default)]
+    pub experimental: ExperimentalSettings,
+}
+
+/// 实验特性（默认全关）。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ExperimentalSettings {
+    /// agent 频道互发（`agentChannels`）：开启后主会话获得 Channel/Post
+    /// 工具，直接子代理获得 Post 工具。
+    #[serde(rename = "agentChannels", default)]
+    pub agent_channels: bool,
+    /// 每频道消息总上限（`channelMessageLimit`，默认 500；超限冻结频道并通知主 agent）。
+    #[serde(rename = "channelMessageLimit")]
+    pub channel_message_limit: Option<u64>,
+    /// 每 agent 每频道发言上限（`agentMessageLimit`，默认 50）。
+    #[serde(rename = "agentMessageLimit")]
+    pub agent_message_limit: Option<u64>,
 }
 
 /// 命名 provider（Anthropic 协议端点）。
@@ -198,6 +216,16 @@ fn merge(base: &mut Settings, layer: Settings) {
     if !layer.permissions.ask.is_empty() {
         base.permissions.ask.extend(layer.permissions.ask);
     }
+    // experimental：逐字段合并（开关任一层开启即开；上限后层覆盖前层）。
+    if layer.experimental.agent_channels {
+        base.experimental.agent_channels = true;
+    }
+    if let Some(v) = layer.experimental.channel_message_limit {
+        base.experimental.channel_message_limit = Some(v);
+    }
+    if let Some(v) = layer.experimental.agent_message_limit {
+        base.experimental.agent_message_limit = Some(v);
+    }
     for (base_hooks, layer_hooks) in [
         (&mut base.hooks.user_prompt_submit, &layer.hooks.user_prompt_submit),
         (&mut base.hooks.stop, &layer.hooks.stop),
@@ -317,6 +345,27 @@ mod tests {
         assert_eq!(settings.api_key.as_deref(), Some("sk-project"));
         assert_eq!(settings.api_base_url.as_deref(), Some("https://project.example"));
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn parses_experimental_settings() {
+        let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-exp", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // 缺省全关。
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert!(!settings.experimental.agent_channels);
+        assert!(settings.experimental.channel_message_limit.is_none());
+        write(
+            &tmp,
+            ".bingo/settings.json",
+            r#"{"experimental":{"agentChannels":true,"channelMessageLimit":100,"agentMessageLimit":10}}"#,
+        );
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert!(settings.experimental.agent_channels);
+        let limits = crate::channels::ChannelLimits::from_settings(&settings);
+        assert_eq!(limits.channel_total, 100);
+        assert_eq!(limits.per_agent, 10);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

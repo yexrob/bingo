@@ -29,6 +29,7 @@ pub const BINDINGS: &[Binding] = &[
     Binding { keys: "ctrl+_", description: "undo edit" },
     Binding { keys: "ctrl+o", description: "expand / collapse output" },
     Binding { keys: "ctrl+t", description: "toggle task list" },
+    Binding { keys: "ctrl+g", description: "agents / channels (↑↓ pick · enter open)" },
     Binding { keys: "ctrl+l", description: "redraw screen" },
     Binding { keys: "shift+tab", description: "cycle permission mode" },
     Binding { keys: "alt+t", description: "toggle extended thinking" },

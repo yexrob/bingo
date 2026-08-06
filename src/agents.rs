@@ -133,16 +133,40 @@ pub struct AgentStatus {
     pub pending: usize,
 }
 
+/// 信箱条目：hub 直接指令，或频道消息（醒来批量注入，同序）。
+#[derive(Debug, Clone)]
+pub enum InboxItem {
+    Direct(String),
+    Channel {
+        channel: String,
+        from: String,
+        text: String,
+        seq: u64,
+    },
+}
+
 /// SendMessage 的投递结果。
 pub enum Delivery {
     /// 实例忙：已排队，回合结束自动送达。
     Queued,
-    /// 实例空闲：以历史副本立即开新回合（排队旧指令一并并入）。
+    /// 实例空闲：以历史副本立即开新回合（信箱一并排空）。
     Start {
         session: Arc<Session>,
         history: Vec<Message>,
-        prompt: String,
+        items: Vec<InboxItem>,
     },
+}
+
+/// 频道投递结果（deposit）：同 Delivery，另有 Stopped 静默丢弃。
+pub enum DepositOutcome {
+    Queued,
+    Start {
+        session: Arc<Session>,
+        history: Vec<Message>,
+        items: Vec<InboxItem>,
+    },
+    /// 实例已停止：丢弃（停止的成员不再被唤醒）。
+    Dropped,
 }
 
 struct Entry {
@@ -151,33 +175,24 @@ struct Entry {
     state: AgentState,
     /// 最近一次完成回合后的完整消息历史（续话上下文）。
     history: Vec<Message>,
-    /// 忙碌期间排队的指令。
-    pending: Vec<String>,
+    /// 忙碌期间累积的信箱（指令 + 频道消息，回合边界批量注入）。
+    inbox: Vec<InboxItem>,
     session: Arc<Session>,
     abort: Option<tokio::task::AbortHandle>,
     /// 累计回合数（watch 行标注 `#N`）。
     runs: u64,
     /// 当前回合的 watch 行（stop/delete 置 Cancelled 用）。
     watch_id: Option<crate::watch::WatchId>,
+    /// 当前回合的流式产出（与 subagent_hooks 共享同一 Arc；
+    /// 回合结束清空——TUI 实例视图据此显示活尾）。
+    live: Option<Arc<Mutex<String>>>,
 }
 
 /// 会话级实例注册表（Session 持有 Arc，子会话共享）。
+/// 单锁承载状态机 + 信箱：投递（deposit/deliver）与回合收口（finish）
+/// 的"检查-认领"在同一把锁下原子完成，不存在丢失唤醒。
 pub struct AgentRegistry {
     inner: Mutex<HashMap<String, Entry>>,
-}
-
-/// 多条排队指令并成一个提示（保持送达顺序）。
-fn join_pending(msgs: &[String]) -> String {
-    if msgs.len() == 1 {
-        msgs[0].clone()
-    } else {
-        let mut out = String::from("收到多条追加指令（按序）：");
-        for m in msgs {
-            out.push_str("\n- ");
-            out.push_str(m);
-        }
-        out
-    }
 }
 
 impl AgentRegistry {
@@ -192,16 +207,22 @@ impl AgentRegistry {
     }
 
     /// 认领实例名：空闲直接用，被占用追加 `-2`/`-3`…（并行同名可区分）。
+    /// `main`/`user` 为 hub 与用户保留（频道成员名），永不下发。
     pub fn claim_name(&self, base: &str) -> String {
         let base = if base.trim().is_empty() { "agent" } else { base.trim() };
+        let taken = |inner: &HashMap<String, Entry>, name: &str| {
+            name == crate::channels::HUB_NAME
+                || name == crate::channels::USER_NAME
+                || inner.contains_key(name)
+        };
         let inner = self.lock();
-        if !inner.contains_key(base) {
+        if !taken(&inner, base) {
             return base.to_string();
         }
         let mut n = 2;
         loop {
             let candidate = format!("{base}-{n}");
-            if !inner.contains_key(&candidate) {
+            if !taken(&inner, &candidate) {
                 return candidate;
             }
             n += 1;
@@ -223,13 +244,36 @@ impl AgentRegistry {
                 description,
                 state: AgentState::Running,
                 history: Vec::new(),
-                pending: Vec::new(),
+                inbox: Vec::new(),
                 session,
                 abort: None,
                 runs: 0,
                 watch_id: None,
+                live: None,
             },
         );
+    }
+
+    /// 当前回合的流式产出缓冲（回合开始挂上，结束摘下）。
+    pub fn set_live(&self, name: &str, live: Option<Arc<Mutex<String>>>) {
+        if let Some(entry) = self.lock().get_mut(name) {
+            entry.live = live;
+        }
+    }
+
+    /// 实例视图数据：历史 + 活尾 + 状态（不存在返回 None）。
+    pub fn view_of(&self, name: &str) -> Option<(Vec<Message>, Option<String>, AgentState)> {
+        let inner = self.lock();
+        let entry = inner.get(name)?;
+        let live = entry.live.as_ref().map(|l| {
+            l.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        });
+        Some((entry.history.clone(), live, entry.state))
+    }
+
+    /// 实例深度（频道 cohort 校验：只允许 depth==1 的直接子代理入频道）。
+    pub fn depth_of(&self, name: &str) -> Option<usize> {
+        self.lock().get(name).map(|e| e.session.depth)
     }
 
     pub fn set_abort(&self, name: &str, abort: tokio::task::AbortHandle) {
@@ -256,28 +300,27 @@ impl AgentRegistry {
         }
     }
 
-    /// 回合完成：存入最新历史。有排队指令 → 保持 Running 并返回
-    /// (历史副本, 并入的下一提示)；无 → 转 Idle。
+    /// 回合完成：存入最新历史。信箱非空 → 保持 Running 并返回
+    /// (历史副本, 排空的信箱)；空 → 转 Idle。
     /// Stopped（回合中被停止）不复活、不返回续跑。
     pub fn finish(
         &self,
         name: &str,
         history: Vec<Message>,
-    ) -> Option<(Vec<Message>, String)> {
+    ) -> Option<(Vec<Message>, Vec<InboxItem>)> {
         let mut inner = self.lock();
         let entry = inner.get_mut(name)?;
         entry.history = history;
         if entry.state == AgentState::Stopped {
             return None;
         }
-        if entry.pending.is_empty() {
+        if entry.inbox.is_empty() {
             entry.state = AgentState::Idle;
             return None;
         }
-        let prompt = join_pending(&entry.pending);
-        entry.pending.clear();
+        let items = std::mem::take(&mut entry.inbox);
         entry.state = AgentState::Running;
-        Some((entry.history.clone(), prompt))
+        Some((entry.history.clone(), items))
     }
 
     /// 回合失败：保留失败前历史，转 Idle（可经 SendMessage 重试）。
@@ -289,8 +332,8 @@ impl AgentRegistry {
         }
     }
 
-    /// 投递消息：Running 排队；Idle 唤醒（返回续跑所需的会话与历史，
-    /// 旧排队指令一并并入）；Stopped/未知报错。
+    /// 投递 hub 指令：Running 排队；Idle 唤醒（返回续跑所需的会话、
+    /// 历史与排空的信箱）；Stopped/未知报错。
     pub fn deliver(&self, name: &str, message: &str) -> Result<Delivery, String> {
         let mut inner = self.lock();
         let Some(entry) = inner.get_mut(name) else {
@@ -306,23 +349,48 @@ impl AgentRegistry {
         };
         match entry.state {
             AgentState::Running => {
-                entry.pending.push(message.to_string());
+                entry.inbox.push(InboxItem::Direct(message.to_string()));
                 Ok(Delivery::Queued)
             }
             AgentState::Idle => {
-                entry.pending.push(message.to_string());
-                let prompt = join_pending(&entry.pending);
-                entry.pending.clear();
+                entry.inbox.push(InboxItem::Direct(message.to_string()));
+                let items = std::mem::take(&mut entry.inbox);
                 entry.state = AgentState::Running;
                 Ok(Delivery::Start {
                     session: entry.session.clone(),
                     history: entry.history.clone(),
-                    prompt,
+                    items,
                 })
             }
             AgentState::Stopped => Err(format!(
                 "{name} 已停止，不再接收指令（delete 可移除该实例）"
             )),
+        }
+    }
+
+    /// 投递频道消息：与 deliver 同构，但停止的成员静默丢弃（不报错——
+    /// 群发不因个别成员停止而失败）。
+    pub fn deposit(&self, name: &str, item: InboxItem) -> DepositOutcome {
+        let mut inner = self.lock();
+        let Some(entry) = inner.get_mut(name) else {
+            return DepositOutcome::Dropped;
+        };
+        match entry.state {
+            AgentState::Running => {
+                entry.inbox.push(item);
+                DepositOutcome::Queued
+            }
+            AgentState::Idle => {
+                entry.inbox.push(item);
+                let items = std::mem::take(&mut entry.inbox);
+                entry.state = AgentState::Running;
+                DepositOutcome::Start {
+                    session: entry.session.clone(),
+                    history: entry.history.clone(),
+                    items,
+                }
+            }
+            AgentState::Stopped => DepositOutcome::Dropped,
         }
     }
 
@@ -339,7 +407,7 @@ impl AgentRegistry {
         }
         let was_running = entry.state == AgentState::Running;
         entry.state = AgentState::Stopped;
-        entry.pending.clear();
+        entry.inbox.clear();
         if let Some(abort) = entry.abort.take() {
             abort.abort();
         }
@@ -363,7 +431,7 @@ impl AgentRegistry {
                 def: e.def.clone(),
                 description: e.description.clone(),
                 state: e.state,
-                pending: e.pending.len(),
+                pending: e.inbox.len(),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -396,6 +464,8 @@ mod tests {
             last_task_reminder_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
+            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            instance: None,
         })
     }
 
@@ -468,31 +538,81 @@ mod tests {
             Delivery::Queued => {}
             Delivery::Start { .. } => panic!("running 应排队"),
         }
-        // 回合完成 + 有排队 → 立即续跑（历史已存，提示为排队内容）。
+        // 回合完成 + 信箱非空 → 立即续跑（历史已存，信箱排空）。
         let next = reg.finish("scout", vec![Message::user_text("hi")]);
-        let (history, prompt) = next.unwrap_or_else(|| panic!("应续跑"));
+        let (history, items) = next.unwrap_or_else(|| panic!("应续跑"));
         assert_eq!(history.len(), 1, "续跑携带最新历史");
-        assert_eq!(prompt, "补充 A");
+        assert!(
+            matches!(&items[..], [InboxItem::Direct(m)] if m == "补充 A"),
+            "信箱内容"
+        );
         assert_eq!(reg.list()[0].state, AgentState::Running);
-        // 再次完成、无排队 → Idle。
+        // 再次完成、信箱空 → Idle。
         assert!(reg.finish("scout", Vec::new()).is_none());
         assert_eq!(reg.list()[0].state, AgentState::Idle);
-        // Idle：deliver 唤醒（Start 携带历史与提示）。
+        // Idle：deliver 唤醒（Start 携带历史与信箱）。
         match reg.deliver("scout", "再看 B").unwrap_or_else(|e| panic!("{e}")) {
-            Delivery::Start { prompt, .. } => assert_eq!(prompt, "再看 B"),
+            Delivery::Start { items, .. } => {
+                assert!(matches!(&items[..], [InboxItem::Direct(m)] if m == "再看 B"));
+            }
             Delivery::Queued => panic!("idle 应唤醒"),
         }
         assert_eq!(reg.list()[0].state, AgentState::Running);
     }
 
     #[test]
-    fn multiple_pending_messages_merge_in_order() {
+    fn inbox_accumulates_direct_and_channel_items_in_order() {
         let reg = AgentRegistry::new();
         reg.insert("w", None, "w".into(), test_session());
         let _ = reg.deliver("w", "先做 1");
-        let _ = reg.deliver("w", "再做 2");
-        let (_, prompt) = reg.finish("w", Vec::new()).unwrap_or_else(|| panic!("续跑"));
-        assert!(prompt.contains("- 先做 1\n- 再做 2"), "{prompt}");
+        match reg.deposit(
+            "w",
+            InboxItem::Channel {
+                channel: "t".into(),
+                from: "a".into(),
+                text: "报数".into(),
+                seq: 3,
+            },
+        ) {
+            DepositOutcome::Queued => {}
+            _ => panic!("running 应排队"),
+        }
+        let (_, items) = reg.finish("w", Vec::new()).unwrap_or_else(|| panic!("续跑"));
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], InboxItem::Direct(m) if m == "先做 1"), "同序");
+        assert!(
+            matches!(&items[1], InboxItem::Channel { seq: 3, from, .. } if from == "a"),
+            "频道条目携带 seq/from"
+        );
+        // Idle 时 deposit 唤醒；Stopped/未知静默丢弃。
+        assert!(reg.finish("w", Vec::new()).is_none());
+        match reg.deposit(
+            "w",
+            InboxItem::Channel {
+                channel: "t".into(),
+                from: "b".into(),
+                text: "x".into(),
+                seq: 4,
+            },
+        ) {
+            DepositOutcome::Start { items, .. } => assert_eq!(items.len(), 1),
+            _ => panic!("idle 应唤醒"),
+        }
+        let _ = reg.stop("w");
+        assert!(matches!(
+            reg.deposit("w", InboxItem::Direct("y".into())),
+            DepositOutcome::Dropped
+        ));
+        assert!(matches!(
+            reg.deposit("ghost", InboxItem::Direct("y".into())),
+            DepositOutcome::Dropped
+        ));
+    }
+
+    #[test]
+    fn hub_name_is_reserved() {
+        let reg = AgentRegistry::new();
+        assert_eq!(reg.claim_name("main"), "main-2", "main 为 hub 保留");
     }
 
     #[test]

@@ -29,13 +29,14 @@ impl WatchState {
     }
 }
 
-/// Watchable 类别：展示层据此选图标（⏺ 命令 / ◉ 子代理），
+/// Watchable 类别：展示层据此选图标（⏺ 命令 / ◉ 子代理 / ◇ 频道），
 /// 不影响状态机与通知语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WatchKind {
     #[default]
     Command,
     Agent,
+    Channel,
 }
 
 /// 会话内唯一的 watchable 标识。

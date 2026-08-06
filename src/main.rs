@@ -16,6 +16,7 @@ use crate::transcript::{create as create_transcript, latest as latest_transcript
 mod agents;
 mod api;
 mod budget;
+mod channels;
 mod compact;
 mod hooks;
 mod mcp;
@@ -142,6 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings.disabled_mcp_servers.iter().cloned().collect(),
     )));
     let _ = runtime.thinking_tx.send(settings.thinking_level.clone());
+    let channel_limits = crate::channels::ChannelLimits::from_settings(&settings);
     let session = Arc::new(Session {
         client,
         runtime,
@@ -157,6 +159,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         expand_tasks: expand_tx,
         agents: crate::agents::AgentRegistry::new(),
+        channels: crate::channels::ChannelRegistry::new(channel_limits),
+        instance: None,
     });
 
     let mode_str = session.permission_mode_str();

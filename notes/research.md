@@ -366,4 +366,19 @@
 - **续话与生命周期**（仅 depth==0 装配，hub-and-spoke）：`SendMessage(agent, message)` 忙碌排队（回合结束由同一后台任务链自动续跑下一回合）、空闲带历史唤醒（新 spawn）；`AgentControl(list|stop|delete)` 列表/停止（abort 当前回合 + watch 行置 Cancelled，历史保留）/删除（移除条目，名字释放）。多条排队指令按序并成一个提示。子代理仍可继续派生（深度上限 3）但不管理兄弟。
 - **展示**：`WatchKind` 贯穿 Watchable → WatchEvent → UiEvent → WatchCall（契约字段，替代 D28 的 label 前缀判定），子代理 watch 行 `◉ 名字 · 任务`，续跑回合 `◉ 名字 #N · 指令摘要`（每回合独立行，label 唯一避免 TUI 按 label 撞行）。
 - **遗留**：同步（background:false）子代理若整回合被用户中断，条目可能停留 Running（无驱动方）——AgentControl stop/delete 可清理；与旧版 watch 行孤儿同类，未新增失败面。
-- **第二步设计冻结（频道互发，实验开关后启动）**：能力普遍（人人可听可说）、选择自主（沉默是 agent 醒后的决定）；频道 = 成员名单（可见性 + 全序投递进信箱）；serial|free 提交校验（serial 弹回自适应 = 乐观锁，运行时只判陈旧、语义冲突由模型自判）；唤醒跟随投递、批次合并、无过滤；发件人 runtime 盖戳不可伪造；预算闸（沉默是吸收态，只需盯真实发言）+ 一切等待有超时。引擎零游戏/场景知识，点名纪律等全在提示词。范围：同父平面 cohort；观战 UI：transcript 内嵌 dim 行 + ctrl+T。
+- **第二步（频道互发，实验开关 `experimental.agentChannels`）已落地**：设计原则——能力普遍（人人可听可说）、选择自主（沉默是 agent 醒后的决定，不调用 Post 即沉默、零成本不传播唤醒）；引擎零游戏/场景知识，点名纪律等全在提示词。实现：
+  1. **`src/channels.rs`（纯状态）**：频道 = 成员名单 + serial|free + 单调 seq + 全量 log + 每成员 seen 游标 + 发言计数；`post()` 只做三件事——盖戳（from 由调用方从 `Session.instance` 取，模型无法指定）、serial 陈旧校验（seen < seq → `Stale{missed}` 弹回并把增量计入已读）、预算闸（每 agent 每频道 50 / 每频道 500，超限冻结 + hub_mail 一次警示）。hub 成员名恒 `main`（claim_name 保留）。
+  2. **投递唤醒（工具层编排）**：`AgentRegistry` 信箱泛化为 `InboxItem::Direct|Channel`，单锁原子"投递+认领"无丢失唤醒；Post 的 Sent 分支对每个成员 `deposit`——Idle 立即 `spawn_agent_loop`（`absorb_inbox` 格式化 `[#频道 第N条] 发件人: 内容` 并推进 seen 游标）、Running 信箱累积回合边界批量注入、Stopped 静默丢弃。hub 走 `hub_mail`：query loop 每轮推理前 `<channel-messages>` 注入；TUI 空闲时由 ◇ 行的 WatchEvent 触发 submit_auto（TurnEnd 检查兜底）。
+  3. **serial 弹回是工具结果不是错误**：`Post` 返回"未送出+增量+请重新决定"，模型在同回合 tool loop 内阅读增量后自判照发/改发/放弃——报数式顺序从竞争+重试中涌现（每轮竞争必有一人落地，收敛有保证）。
+  4. **工具面**：hub（depth 0 且开关开）得 `Channel`（create/invite/kick/list，成员限 depth==1 直接子代理，迟入无 backlog、seen 置当前头）+ `Post`；cohort 成员（depth 1 有实例名）只得 `Post`；更深层与关着开关时不装配。AgentControl delete 顺带清出全部频道。
+  5. **观战**：每频道一条 `◇ #名字` watch 行（WatchKind::Channel），post 时更新 detail（N 条 · 最近发言）与 payload（日志尾 50 条，ctrl+o 展开看全群聊）；Running 态更新不产生通知垃圾。
+  6. **v1 无引擎等待**：round_robin/gather 均已在讨论中删除（顺序=调度/协议，非传输），故无需超时机制；预算是唯一止损。settings 逐字段合并（开关任一层开启即开）。
+
+### D30. 实体视图：底部选择器 + 交替屏模态（agent 对话 / 微信式频道房间）
+
+- **需求**（用户点名，参照 CC 多 agent 展现）：agent 在底部展示，↑↓ 选择、回车进入该 agent 的对话；频道也在列表里，打开时强制全屏、微信式布局（他人靠左、我发的靠右）。
+- **选择器**（`chat.rs`）：底部实体区（chrome，输入框上方）——收起态一行 dim 摘要（`◉ scout(running) · ◇ #table(3) — ctrl+g 查看`），ctrl+g 聚焦后逐行 `❯` 选择（窗口滑动、上限 6 行）、Enter 置 `open_entity`、Esc 收起；快照经 `refresh_entities` 在 tick（每 15 tick）与 WatchEvent 时刷新，内容变化才 dirty。选择器按键先于全局 Esc 语义。
+- **模态**（`src/tui/entity.rs`）：write-once scrollback 决定 inline 没有"就地换内容"——两个视图都跑**交替屏**（fullscreen 宿主本就在交替屏则不嵌套进出）。自绘循环（ratatui Terminal 每帧全画）、贴底滚动 + ↑↓ 偏移、Esc/ctrl+c 返回；模态期间照常 `chat.tick + drain_all`（后台 agent 事件不丢，hub 的自动回合照常拉起）。**返回走确定性重画**：inline 置 pending_resize（清屏 + 回灌 + force_redraw 的既有 resize 管道，不赌交替屏恢复的保真度），fullscreen 置 force_redraw。
+- **agent 对话视图**：注册表历史（❯ 指令 subtle / 正文纯文本折行 / `⏺ 工具(摘要)` dim；tool_result 与 thinking 不进视图）+ **流式活尾**——`AgentRegistry.live` 持每回合与 subagent_hooks 共享的输出 Arc（回合始挂终摘），运行中打开能看到正在生成的文本 + `✻ 生成中…`。
+- **频道房间**：`user` 成为第三个保留成员（与 main 同样自动入席、不可移出、预算豁免、claim_name 保留）；气泡布局——他人靠左（名签 + code_block_bg，连续同发件人合并名签），user 靠右（user_message_bg，右对齐 pad；SegStyle 分段 bg，不用整行 Row.bg）；底部输入行 Enter 经 `deliver_post`（Post 工具同一投递/唤醒路径）以 user 身份发言；**渲染即已读**（每帧 mark_seen 到日志尾，serial 校验对着屏幕的人恒为最新，不弹回）。
+- 506 测试全绿（气泡布局/agent 视图/选择器状态机纯函数测试；模态循环与宿主接线为薄覆盖，与 fullscreen 同层）。

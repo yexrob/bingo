@@ -454,6 +454,7 @@ fn watch_header(w: &WatchCall, theme: &Theme) -> Line {
     };
     let glyph = match w.kind {
         crate::watch::WatchKind::Agent => "◉ ",
+        crate::watch::WatchKind::Channel => "◇ ",
         crate::watch::WatchKind::Command => "⏺ ",
     };
     let mut line = Line::styled(glyph, style);
@@ -828,6 +829,17 @@ mod tests {
             duration_ms: 0,
         }));
         assert_eq!(text(&render_lines(&agent_watch)[0]), "◉ reviewer · 整理笔记");
+
+        let channel_watch = Activity::new(ActivityKind::Watch(WatchCall {
+            label: "#table".into(),
+            kind: crate::watch::WatchKind::Channel,
+            status: WatchStatus::Running,
+            detail: Some("3 条 · 最近 a: 报数".into()),
+            duration_ms: 0,
+        }));
+        let lines = render_lines(&channel_watch);
+        assert_eq!(text(&lines[0]), "◇ #table");
+        assert_eq!(text(&lines[1]), "  ⎿  3 条 · 最近 a: 报数");
     }
 
     #[test]

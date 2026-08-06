@@ -198,6 +198,10 @@ pub struct Session {
     pub expand_tasks: watch::Sender<bool>,
     /// 子代理实例注册表（续话/生命周期；子会话共享同一表）。
     pub agents: Arc<crate::agents::AgentRegistry>,
+    /// agent 频道注册中心（实验特性；子会话共享同一表）。
+    pub channels: Arc<crate::channels::ChannelRegistry>,
+    /// 本会话的实例名（子代理 = Some(注册表名)；主会话 None，频道成员名 main）。
+    pub instance: Option<String>,
 }
 
 /// 单个工具完成事件。
@@ -679,6 +683,14 @@ async fn query_loop(
             messages.push(Message::user_text(format!(
                 "<task-notifications>\n{}\n</task-notifications>",
                 notes.join("\n")
+            )));
+        }
+        // 频道消息注入（hub 是成员的频道）：回合边界批量、同序。
+        let mail = session.channels.drain_hub_mail();
+        if !mail.is_empty() {
+            messages.push(Message::user_text(format!(
+                "<channel-messages>\n{}\n</channel-messages>",
+                mail.join("\n")
             )));
         }
         let turn = one_turn(
@@ -1214,6 +1226,8 @@ mod tests {
             last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
+            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            instance: None,
         })
     }
 
@@ -1320,6 +1334,8 @@ mod tests {
             last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
+            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            instance: None,
         });
         let mut ui = headless_hooks();
         let outcome = run_bash_command(
@@ -1554,6 +1570,8 @@ mod tests {
             last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
+            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            instance: None,
         });
         let mut ui = headless_hooks();
         let outcome = run_bash_command(&session, "htop", Vec::new(), &mut ui, None)

@@ -10,6 +10,7 @@ use crate::tasks::TaskStore;
 pub mod agent;
 pub mod ask;
 pub mod bash;
+pub mod channel;
 pub mod diff;
 pub mod edit;
 pub mod executor;

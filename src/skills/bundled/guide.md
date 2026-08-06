@@ -28,7 +28,9 @@ when_to_use: >-
   Ctrl+R 历史反向搜索 · Ctrl+A/E 行首尾 · Alt+B/F 按词移动 · Ctrl+W/U/K 删词/删到
   行首/行尾 · Ctrl+Y 粘回删除 · Ctrl+S 暂存/恢复输入 · Ctrl+_ 撤销 · ctrl+o
   展开/闭合切换（展开 = 重放完整 transcript 供终端上滑翻看；再按闭合折回
-  聚合态并清屏收拢）· Ctrl+T 显隐任务区 · Ctrl+L 清屏重画 · Shift+Tab 循环权限
+  聚合态并清屏收拢）· Ctrl+T 显隐任务区 · Ctrl+G agent/频道选择器（↑↓ 选、
+  Enter 打开全屏视图、Esc 关；agent 视图看该实例完整对话与流式产出，频道视图
+  是微信式群聊房间、可直接以 user 身份发言）· Ctrl+L 清屏重画 · Shift+Tab 循环权限
   模式（default → acceptEdits → plan）· Alt+T 思考开关 · busy 时回车把消息排队，
   回合结束自动发送。
 - 大段粘贴自动折叠为 `[Pasted text #N +M lines]` 占位，发送时展开真实内容
@@ -55,6 +57,7 @@ when_to_use: >-
 | `mcpServers` | object | `{name: {type?, command, args, env}}`（stdio，缺省）或 `{name: {type: "http", url, headers?}}`（streamable HTTP） |
 | `disabledMcpServers` | string[] | 禁用的 MCP 服务器名单（/mcp disable 写入） |
 | `permissions` | object | `{allow[], deny[], ask[]}`，规则语法 `Tool(content)`，`:*` 为前缀通配（如 `Bash(git push:*)`）；Bash 规则按子命令逐段匹配，路径规则匹配前归一化（详见诊断 4） |
+| `experimental` | object | 实验特性：`{"agentChannels": true}` 开启 agent 频道互发（主会话得 Channel/Post 工具，直接子代理得 Post）；`channelMessageLimit`（默认 500，超限冻结频道）/ `agentMessageLimit`（默认 50）为预算闸 |
 | `hooks` | object | PreToolUse/PostToolUse/PreCompact/PostCompact/UserPromptSubmit/Stop/SessionStart/SessionEnd/TaskCreated/TaskCompleted，matcher + command；matcher 为整串锚定正则（`Edit\|Write`、`mcp__.*`），非法正则退回全等匹配 |
 
 示例（.bingo/settings.json）：
@@ -141,6 +144,16 @@ when_to_use: >-
   **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`（同名项目层
   优先）；frontmatter `name/description/model/provider`，正文 = 子代理 system
   prompt；Agent 工具的 `agent` 参数引用。
+  **频道互发**（实验，`experimental.agentChannels`）：主 agent 用 Channel 工具
+  建频道/进出成员（成员限直接子代理，主 agent 名 `main` 自动入席），成员用 Post
+  发言——消息进全体成员上下文（同序），发件人由运行时盖戳；serial 频道落后
+  发言会被弹回并附新增消息（agent 阅读后自行改口/放弃，报数式顺序由此涌现），
+  free 频道允许交叉。频道在 transcript 显示为 `◇ #名字` 行（可展开看完整群聊）；
+  预算超限自动冻结频道并通知主 agent。
+  **底部实体区**：有实例/频道时输入框上方显示一行摘要，Ctrl+G 进入选择
+  （↑↓/Enter），agent 打开全屏对话视图（历史 + 流式活尾，只读），频道打开
+  全屏微信式房间——他人靠左带名签、你（user）靠右，底部输入 Enter 直接发言
+  （与 Post 同一投递路径，正常唤醒成员；渲染即已读，serial 不会弹你），Esc 返回。
 - **技能**：内置 `guide`（本指南）+ `~/.config/bingo/skills/` 与 `.bingo/skills/`
   目录技能（同名磁盘技能覆盖内置）；模型经 SkillTool 调用，用户经 `/技能名` 执行。
 - **图片**：模型回复中的 markdown 图片（`![alt](路径)`，支持相对路径/data/http(s)）

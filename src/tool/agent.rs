@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::agents::{AgentDef, AgentRegistry, Delivery};
+use crate::agents::{AgentDef, AgentRegistry, Delivery, InboxItem};
 use crate::api::types::{Message, SystemBlock};
+use crate::channels::ChannelRegistry;
 use crate::permission::PermissionMode;
 use crate::query::{Session, UiHooks};
 use crate::tool::{parse_input, Tool, ToolContext, ToolError, ToolResult};
@@ -96,13 +97,50 @@ fn subagent_hooks(
 }
 
 /// 单行摘要（label 用）：截到换行/40 字符。
-fn excerpt(text: &str) -> String {
+pub(crate) fn excerpt(text: &str) -> String {
     let line = text.lines().next().unwrap_or_default();
     let cut: String = line.chars().take(40).collect();
     if cut.chars().count() < text.chars().count() {
         format!("{cut}…")
     } else {
         cut
+    }
+}
+
+/// 信箱 → 回合提示：单条 hub 指令保持原文；混合/多条按序标注来源。
+/// 频道条目同时推进该成员的已读游标（消息随本回合进入其上下文）。
+pub(crate) fn absorb_inbox(
+    channels: &Arc<ChannelRegistry>,
+    name: &str,
+    items: &[InboxItem],
+) -> String {
+    let mut latest: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for item in items {
+        if let InboxItem::Channel { channel, seq, .. } = item {
+            let cursor = latest.entry(channel.as_str()).or_insert(0);
+            if *cursor < *seq {
+                *cursor = *seq;
+            }
+        }
+    }
+    for (channel, seq) in latest {
+        channels.mark_seen(name, channel, seq);
+    }
+    match items {
+        [InboxItem::Direct(m)] => m.clone(),
+        _ => items
+            .iter()
+            .map(|item| match item {
+                InboxItem::Direct(m) => format!("[追加指令] {m}"),
+                InboxItem::Channel {
+                    channel,
+                    from,
+                    text,
+                    seq,
+                } => format!("[#{channel} 第{seq}条] {from}: {text}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 
@@ -132,11 +170,11 @@ fn register_run_watch(
     )
 }
 
-/// 后台驱动一个实例的回合链：run_query → 历史落注册表 → 有排队指令则
+/// 后台驱动一个实例的回合链：run_query → 历史落注册表 → 信箱非空则
 /// 同任务续跑下一回合（新 watch 行），排空转 Idle。abort 句柄挂到注册表
 /// （stop/delete 可中止）。返回首回合的 watch id。
 #[allow(clippy::too_many_arguments)]
-fn spawn_agent_loop(
+pub(crate) fn spawn_agent_loop(
     registry: Arc<AgentRegistry>,
     watch: Arc<WatchRegistry>,
     name: String,
@@ -159,6 +197,7 @@ fn spawn_agent_loop(
         let mut run = (first_id, cell);
         loop {
             let output = Arc::new(Mutex::new(String::new()));
+            loop_registry.set_live(&name, Some(output.clone()));
             let mut ui = subagent_hooks(
                 output.clone(),
                 run.1.clone(),
@@ -169,6 +208,7 @@ fn spawn_agent_loop(
             match crate::query::run_query(&session, history, &prompt, &mut ui, None).await {
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    loop_registry.set_live(&name, None);
                     watch.set_state(
                         run.0,
                         WatchState::Done,
@@ -176,9 +216,9 @@ fn spawn_agent_loop(
                         Some(serde_json::json!(non_empty(text))),
                     );
                     match loop_registry.finish(&name, outcome.messages) {
-                        Some((next_history, next_prompt)) => {
+                        Some((next_history, items)) => {
                             history = next_history;
-                            prompt = next_prompt;
+                            prompt = absorb_inbox(&session.channels, &name, &items);
                             let cell = Arc::new(AgentCell::new());
                             let n = loop_registry.next_run(&name);
                             let label = format!("{name} #{n} · {}", excerpt(&prompt));
@@ -190,6 +230,7 @@ fn spawn_agent_loop(
                     }
                 }
                 Err(e) => {
+                    loop_registry.set_live(&name, None);
                     watch.set_state(
                         run.0,
                         WatchState::Failed,
@@ -229,19 +270,20 @@ impl AgentTool {
             })
     }
 
-    /// 实例登记：认领名字 + 注册表插入，返回 (实例名, 描述)。
-    fn register_instance(
+    /// 实例落地：认领名字 → 构造子会话（携带实例名，Post 盖戳用）→
+    /// 注册表登记。返回 (实例名, 描述, 子会话)。
+    fn spawn_instance(
         &self,
         params: &AgentInput,
         def: Option<&AgentDef>,
-        sub_session: &Arc<Session>,
-    ) -> (String, String) {
+    ) -> Result<(String, String, Arc<Session>), ToolError> {
         let base = params
             .name
             .clone()
             .or_else(|| def.map(|d| d.name.clone()))
             .unwrap_or_else(|| "agent".to_string());
         let name = self.session.agents.claim_name(&base);
+        let sub_session = self.build_sub_session(params, def, &name)?;
         let description = params
             .description
             .clone()
@@ -252,7 +294,7 @@ impl AgentTool {
             description.clone(),
             sub_session.clone(),
         );
-        (name, description)
+        Ok((name, description, sub_session))
     }
 
     fn launch_background(
@@ -261,8 +303,7 @@ impl AgentTool {
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let def = self.resolve_def(params)?;
-        let sub_session = self.build_sub_session(params, def)?;
-        let (name, description) = self.register_instance(params, def, &sub_session);
+        let (name, description, sub_session) = self.spawn_instance(params, def)?;
         let _ = self.session.agents.next_run(&name);
         let conditions = params
             .notify_on
@@ -299,6 +340,7 @@ impl AgentTool {
         &self,
         params: &AgentInput,
         def: Option<&AgentDef>,
+        instance: &str,
     ) -> Result<Arc<Session>, ToolError> {
         let model = params
             .model
@@ -352,6 +394,8 @@ impl AgentTool {
             last_task_reminder_turn: self.session.last_task_reminder_turn.clone(),
             expand_tasks: self.session.expand_tasks.clone(),
             agents: self.session.agents.clone(),
+            channels: self.session.channels.clone(),
+            instance: Some(instance.to_string()),
         }))
     }
 }
@@ -452,8 +496,7 @@ impl Tool for AgentTool {
         }
 
         let def = self.resolve_def(&params)?;
-        let sub_session = self.build_sub_session(&params, def)?;
-        let (name, description) = self.register_instance(&params, def, &sub_session);
+        let (name, description, sub_session) = self.spawn_instance(&params, def)?;
         let _ = self.session.agents.next_run(&name);
 
         // 前台子 agent 同样可 watch：Running（产出字符量）→ Done/Failed。
@@ -471,6 +514,7 @@ impl Tool for AgentTool {
         );
         self.session.agents.set_run_watch(&name, id);
         let output = Arc::new(Mutex::new(String::new()));
+        self.session.agents.set_live(&name, Some(output.clone()));
         let mut ui = subagent_hooks(
             output.clone(),
             cell.clone(),
@@ -478,9 +522,11 @@ impl Tool for AgentTool {
             ctx.watch.clone(),
             id,
         );
-        match crate::query::run_query(&sub_session, Vec::new(), &params.prompt, &mut ui, None)
-            .await
-        {
+        let sync_run =
+            crate::query::run_query(&sub_session, Vec::new(), &params.prompt, &mut ui, None)
+                .await;
+        self.session.agents.set_live(&name, None);
+        match sync_run {
             Ok(outcome) => {
                 let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let content = non_empty(text);
@@ -492,8 +538,9 @@ impl Tool for AgentTool {
                 );
                 // 同步路径工具串行执行，排队指令实际到不了这里；万一有，
                 // 交给后台环继续（同一续跑机制）。
-                if let Some((history, prompt)) = self.session.agents.finish(&name, outcome.messages)
+                if let Some((history, items)) = self.session.agents.finish(&name, outcome.messages)
                 {
+                    let prompt = absorb_inbox(&sub_session.channels, &name, &items);
                     let n = self.session.agents.next_run(&name);
                     spawn_agent_loop(
                         self.session.agents.clone(),
@@ -583,8 +630,9 @@ impl Tool for SendMessageTool {
             Ok(Delivery::Start {
                 session,
                 history,
-                prompt,
+                items,
             }) => {
+                let prompt = absorb_inbox(&session.channels, &params.agent, &items);
                 let n = registry.next_run(&params.agent);
                 spawn_agent_loop(
                     registry,
@@ -721,6 +769,7 @@ impl Tool for AgentControlTool {
             }
             AgentAction::Delete => {
                 let name = Self::require_agent(&params)?;
+                self.session.channels.remove_member_everywhere(name);
                 match registry.remove(name).map_err(ToolError::failed)? {
                     Some(id) => {
                         ctx.watch.set_state(
@@ -783,6 +832,8 @@ mod tests {
             last_task_reminder_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
+            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            instance: None,
         });
         (session, client)
     }
@@ -814,7 +865,7 @@ mod tests {
     fn sub_session_inherits_model_and_shared_endpoint() {
         let (session, client) = parent_session();
         let tool = AgentTool::new(session.clone(), Vec::new());
-        let sub = tool.build_sub_session(&params("do it"), None).unwrap();
+        let sub = tool.build_sub_session(&params("do it"), None, "sub").unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "parent-model");
         assert_eq!(
             sub.client.current_endpoint(),
@@ -838,7 +889,7 @@ mod tests {
         let mut p = params("do it");
         p.model = Some("sub-model".into());
         p.provider = Some("ds".into());
-        let sub = tool.build_sub_session(&p, None).unwrap();
+        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "sub-model");
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
         assert_eq!(
@@ -855,7 +906,7 @@ mod tests {
         let d = def("reviewer");
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
         // 定义提供 system/model/provider 缺省。
-        let sub = tool.build_sub_session(&params("审查"), Some(&d)).unwrap();
+        let sub = tool.build_sub_session(&params("审查"), Some(&d), "sub").unwrap();
         assert_eq!(sub.system.len(), 1);
         assert_eq!(sub.system[0].text, "你是评审。", "定义正文替换 system");
         assert_eq!(*sub.runtime.model.borrow(), "def-model");
@@ -863,7 +914,7 @@ mod tests {
         // 显式参数优先于定义。
         let mut p = params("审查");
         p.model = Some("explicit".into());
-        let sub = tool.build_sub_session(&p, Some(&d)).unwrap();
+        let sub = tool.build_sub_session(&p, Some(&d), "sub").unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "explicit");
         // resolve_def：未知定义报错并列出可用项。
         let mut p = params("x");
@@ -879,7 +930,7 @@ mod tests {
         let mut p = params("do it");
         p.provider = Some("nope".into());
         assert!(
-            tool.build_sub_session(&p, None).is_err(),
+            tool.build_sub_session(&p, None, "sub").is_err(),
             "未知 provider 报错"
         );
     }

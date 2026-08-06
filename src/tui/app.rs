@@ -329,6 +329,10 @@ fn chrome_rows(chat: &Chat, width: usize, fullscreen: bool) -> Chrome {
     for line in chat.help_lines() {
         rows.push(dim_row(line, &theme));
     }
+    // 底部实体区（agent 实例 + 频道；ctrl+g 聚焦选择）。
+    for line in chat.entity_rows(width) {
+        rows.push(Row::new(line));
+    }
 
     let suggestions = suggestion_rows(
         &chat.slash_suggestions,
@@ -636,6 +640,19 @@ pub async fn run_inline(
             },
         }
 
+        // 实体视图（ctrl+g 选择回车）：交替屏模态接管，返回后经 resize
+        // 通道确定性重画（清屏 + 回灌，不猜交替屏恢复是否可靠）。
+        if let Some(open) = chat.open_entity.take() {
+            crate::tui::entity::run_entity_modal(&mut chat, &mut events, open, false).await?;
+            if let Ok((w, h)) = crossterm::terminal::size() {
+                pending_resize = Some((Size::new(w, h), Instant::now()));
+            } else {
+                chat.force_redraw = true;
+            }
+            chat.dirty = true;
+            dirty = true;
+        }
+
         // resize 风暴静默前不渲染（终端几何已变，旧宽的画面只添乱）；
         // 事件照常处理，静默后一帧补齐。
         if pending_resize.is_some() {
@@ -785,6 +802,14 @@ pub async fn run_fullscreen(
             },
         }
 
+        // 实体视图：已在交替屏内，模态直接接管画布，返回后整屏重画。
+        if let Some(open) = chat.open_entity.take() {
+            crate::tui::entity::run_entity_modal(&mut chat, &mut events, open, true).await?;
+            chat.force_redraw = true;
+            chat.dirty = true;
+            dirty = true;
+        }
+
         if !dirty {
             if chat.exit {
                 break;
@@ -922,6 +947,8 @@ mod tests {
             last_task_reminder_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
+            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            instance: None,
         })
     }
 

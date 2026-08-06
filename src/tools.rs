@@ -49,9 +49,23 @@ pub async fn assemble_tools(
         Box::new(SkillTool::new(skills)),
     ];
     // hub-and-spoke：续话与生命周期管理只在主会话（子代理不管理兄弟）。
+    let channels_on = session.settings.experimental.agent_channels;
     if session.depth == 0 {
         tools.push(Box::new(SendMessageTool::new(session.clone())));
         tools.push(Box::new(AgentControlTool::new(session.clone())));
+        if channels_on {
+            tools.push(Box::new(crate::tool::channel::ChannelTool::new(
+                session.clone(),
+            )));
+            tools.push(Box::new(crate::tool::channel::PostTool::new(
+                session.clone(),
+            )));
+        }
+    } else if channels_on && session.depth == 1 && session.instance.is_some() {
+        // 频道 cohort（实验特性）：直接子代理只拿发言工具。
+        tools.push(Box::new(crate::tool::channel::PostTool::new(
+            session.clone(),
+        )));
     }
     let mcp = {
         let mut mgr = session.runtime.mcp.lock().await;
@@ -75,11 +89,17 @@ mod tests {
     use super::*;
 
     fn session_at_depth(depth: usize) -> Arc<Session> {
+        session_with(depth, false)
+    }
+
+    fn session_with(depth: usize, channels_on: bool) -> Arc<Session> {
+        let mut settings = crate::settings::Settings::default();
+        settings.experimental.agent_channels = channels_on;
         std::sync::Arc::new(Session {
             client: crate::api::client::Client::new("k".into(), "https://example.com".into()),
             runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
             permission_mode: crate::permission::PermissionMode::Default,
-            settings: crate::settings::Settings::default(),
+            settings,
             system: Vec::new(),
             depth,
             home: std::env::temp_dir(),
@@ -93,6 +113,8 @@ mod tests {
             last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
+            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            instance: None,
         })
     }
 
@@ -127,5 +149,35 @@ mod tests {
         for absent in ["SendMessage", "AgentControl"] {
             assert!(!sub.iter().any(|n| n == absent), "{absent} 不应下发: {sub:?}");
         }
+    }
+
+    /// 频道工具（实验特性）：默认不装配；开启后 hub 拿 Channel+Post，
+    /// depth-1 具名实例只拿 Post，更深层没有。
+    #[tokio::test]
+    async fn channel_tools_gated_by_experimental_flag() {
+        let mut warn = |_: String| {};
+        let names = |tools: Vec<Box<dyn Tool>>| -> Vec<String> {
+            tools.iter().map(|t| t.name()).collect()
+        };
+        let off = names(assemble_tools(&session_at_depth(0), &mut warn).await);
+        assert!(!off.iter().any(|n| n == "Channel" || n == "Post"), "{off:?}");
+
+        let hub = names(assemble_tools(&session_with(0, true), &mut warn).await);
+        for expected in ["Channel", "Post"] {
+            assert!(hub.iter().any(|n| n == expected), "missing {expected}: {hub:?}");
+        }
+        let sub_session = std::sync::Arc::new(Session {
+            instance: Some("a".into()),
+            ..(*session_with(1, true)).clone()
+        });
+        let sub = names(assemble_tools(&sub_session, &mut warn).await);
+        assert!(sub.iter().any(|n| n == "Post"), "cohort 成员可发言: {sub:?}");
+        assert!(!sub.iter().any(|n| n == "Channel"), "频道管理仅 hub: {sub:?}");
+        let deep = std::sync::Arc::new(Session {
+            instance: Some("d".into()),
+            ..(*session_with(2, true)).clone()
+        });
+        let deep = names(assemble_tools(&deep, &mut warn).await);
+        assert!(!deep.iter().any(|n| n == "Post"), "深层不入频道: {deep:?}");
     }
 }

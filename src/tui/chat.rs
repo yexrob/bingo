@@ -262,6 +262,8 @@ pub const SLASH_SUGGESTIONS_MAX: usize = 5;
 pub const INPUT_ROWS_MAX: usize = 10;
 /// 排队消息最多显示的行数（更多的折叠为 `… +N more`）。
 pub const QUEUE_ROWS_MAX: usize = 3;
+/// 实体选择器聚焦时最多逐行显示的实体数。
+pub const ENTITY_ROWS_MAX: usize = 6;
 /// 撤销栈深度（ctrl+_）。
 pub const UNDO_MAX: usize = 20;
 /// 两次 Ctrl+C 之间的退出确认窗口。
@@ -742,8 +744,36 @@ pub struct Chat {
     pub model_menu: Option<ModelMenu>,
     /// 任务区展开信号（Task 工具调用 → 展示任务列表）。
     pub tasks_visible: bool,
+    /// 底部实体区快照（agent 实例 + 频道；tick/WatchEvent 时刷新）。
+    pub entities: Vec<EntityRow>,
+    /// 实体选择器焦点（Some(i) = 选择模式：↑↓/Enter/Esc 被捕获）。
+    pub entity_focus: Option<usize>,
+    /// 待打开的实体视图（app 层消费 → 进入全屏模态）。
+    pub open_entity: Option<EntityOpen>,
     /// 中断信号：busy 时 Ctrl+C / Esc → send(true)，回合内流读取立即中止。
     cancel_tx: tokio::sync::watch::Sender<bool>,
+}
+
+/// 底部实体区的一行：子代理实例或频道。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntityRow {
+    Agent {
+        name: String,
+        state: &'static str,
+        description: String,
+    },
+    Channel {
+        name: String,
+        seq: u64,
+        frozen: bool,
+    },
+}
+
+/// 选中回车后要打开的实体视图。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntityOpen {
+    Agent(String),
+    Channel(String),
 }
 
 impl Chat {
@@ -879,6 +909,9 @@ impl Chat {
             slash_selected: 0,
             model_menu: None,
             tasks_visible: false,
+            entities: Vec::new(),
+            entity_focus: None,
+            open_entity: None,
             interrupted: false,
             cancel_tx: tokio::sync::watch::channel(false).0,
         }
@@ -1150,6 +1183,8 @@ impl Chat {
                 payload,
                 signal,
             } => {
+                // agent/频道的生命周期事件顺带刷新底部实体区。
+                self.refresh_entities();
                 let found = self.messages.iter_mut().find_map(|m| {
                     m.activities.iter_mut().find(|a| {
                         matches!(&a.kind, ActivityKind::Watch(w) if w.label == *label)
@@ -1215,6 +1250,15 @@ impl Chat {
                     if !self.interrupted {
                         self.submit_auto();
                     }
+                }
+                // 频道行更新且 hub 空闲有邮件：拉起回合消化（子代理发言时
+                // hub 多半不在回合中——没有这次唤醒，消息会一直睡到用户开口）。
+                if kind == crate::watch::WatchKind::Channel
+                    && !self.interrupted
+                    && self.queued.is_empty()
+                    && self.session.channels.has_hub_mail()
+                {
+                    self.submit_auto();
                 }
             }
             UiEvent::RoundEnd => {
@@ -1301,7 +1345,8 @@ impl Chat {
                 self.output_tokens = 0;
                 // 用户中断后不再因后台任务完成自动拉起新回合；
                 // 有排队消息时先让用户的消息走（下面统一提交）。
-                if self.session.watch.has_wake_notifications()
+                if (self.session.watch.has_wake_notifications()
+                    || self.session.channels.has_hub_mail())
                     && !self.interrupted
                     && self.queued.is_empty()
                 {
@@ -2797,6 +2842,10 @@ impl Chat {
         if self.search.is_some() {
             return self.search_key(code, modifiers);
         }
+        // 实体选择器（ctrl+g / 聚焦时 ↑↓ Enter Esc）先于全局 Esc 语义。
+        if self.entity_key(code, modifiers) {
+            return true;
+        }
         // 中断（busy）与退出（空闲）都挂在 Ctrl+C / Esc 上，先于编辑键判定。
         if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
             return self.ctrl_c(now);
@@ -3371,6 +3420,10 @@ impl Chat {
         if self.has_dynamic_rows() {
             self.dirty = true;
         }
+        // 底部实体区随注册表变化（agent 状态/频道条数）；变化才置 dirty。
+        if self.tick.is_multiple_of(15) {
+            self.refresh_entities();
+        }
         // slash 临时提示超时消失（操作确认类不留永久占位）。
         if let Some(at) = self.slash_at
             && at.elapsed() > SLASH_OUTPUT_TTL
@@ -3635,6 +3688,158 @@ impl Chat {
                 line
             })
             .collect()
+    }
+
+    /// 刷新底部实体区快照（agent 实例 + 频道）。内容变化才置 dirty。
+    pub fn refresh_entities(&mut self) {
+        let mut fresh: Vec<EntityRow> = self
+            .session
+            .agents
+            .list()
+            .into_iter()
+            .map(|s| EntityRow::Agent {
+                name: s.name,
+                state: s.state.label(),
+                description: s.description,
+            })
+            .collect();
+        fresh.extend(self.session.channels.list().into_iter().map(|c| {
+            EntityRow::Channel {
+                name: c.name,
+                seq: c.seq,
+                frozen: c.frozen,
+            }
+        }));
+        if fresh != self.entities {
+            // 选中项随列表收缩钳制。
+            if let Some(i) = self.entity_focus
+                && i >= fresh.len()
+            {
+                self.entity_focus = fresh.len().checked_sub(1);
+            }
+            self.entities = fresh;
+            self.dirty = true;
+        }
+    }
+
+    /// 底部实体区：收起 = 一行摘要（dim）；聚焦 = 逐行列表 + `❯` 选中 +
+    /// 操作提示。没有实体时不占行。
+    pub fn entity_rows(&self, width: usize) -> Vec<Line> {
+        if self.entities.is_empty() {
+            return Vec::new();
+        }
+        let glyph = |e: &EntityRow| match e {
+            EntityRow::Agent { .. } => "◉",
+            EntityRow::Channel { .. } => "◇",
+        };
+        let brief = |e: &EntityRow| match e {
+            EntityRow::Agent { name, state, .. } => format!("◉ {name}({state})"),
+            EntityRow::Channel { name, seq, frozen } => format!(
+                "◇ #{name}({seq}{})",
+                if *frozen { "❄" } else { "" }
+            ),
+        };
+        let Some(selected) = self.entity_focus else {
+            let summary = self
+                .entities
+                .iter()
+                .map(brief)
+                .collect::<Vec<_>>()
+                .join(" · ");
+            return vec![Line::styled(
+                one_line(&format!("  {summary} — ctrl+g 查看"), width),
+                SegStyle::fg(self.theme.inactive),
+            )];
+        };
+        let mut rows = Vec::new();
+        // 选中项保持可见：窗口围绕 selected 滑动。
+        let cap = ENTITY_ROWS_MAX;
+        let start = selected.saturating_sub(cap.saturating_sub(1));
+        for (i, e) in self.entities.iter().enumerate().skip(start).take(cap) {
+            let focused = i == selected;
+            let detail = match e {
+                EntityRow::Agent {
+                    name,
+                    state,
+                    description,
+                } => format!("{} {name} · {state} · {description}", glyph(e)),
+                EntityRow::Channel { name, seq, frozen } => format!(
+                    "{} #{name} · {seq} 条{}",
+                    glyph(e),
+                    if *frozen { " · 已冻结" } else { "" }
+                ),
+            };
+            let style = if focused {
+                SegStyle::fg(self.theme.permission)
+            } else {
+                SegStyle::fg(self.theme.inactive)
+            };
+            let prefix = if focused { "❯ " } else { "  " };
+            rows.push(Line::styled(
+                one_line(&format!("{prefix}{detail}"), width),
+                style,
+            ));
+        }
+        if self.entities.len() > cap {
+            rows.push(Line::styled(
+                format!("  … 共 {} 个", self.entities.len()),
+                SegStyle::fg(self.theme.inactive),
+            ));
+        }
+        rows.push(Line::styled(
+            "  ↑↓ 选择 · enter 打开 · esc 关闭".to_string(),
+            SegStyle::fg(self.theme.inactive),
+        ));
+        rows
+    }
+
+    /// 实体选择器按键：ctrl+g 开关聚焦；聚焦时 ↑↓ 移动、Enter 打开、
+    /// Esc 关闭。返回是否消费。
+    pub fn entity_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+        if code == KeyCode::Char('g') && ctrl {
+            self.refresh_entities();
+            if self.entities.is_empty() {
+                self.notice = Some("没有子代理实例或频道（Agent 工具派生后出现）");
+            } else if self.entity_focus.is_some() {
+                self.entity_focus = None;
+            } else {
+                self.entity_focus = Some(0);
+            }
+            self.dirty = true;
+            return true;
+        }
+        let Some(i) = self.entity_focus else {
+            return false;
+        };
+        match code {
+            KeyCode::Up => {
+                self.entity_focus = Some(i.saturating_sub(1));
+                self.dirty = true;
+                true
+            }
+            KeyCode::Down => {
+                self.entity_focus =
+                    Some((i + 1).min(self.entities.len().saturating_sub(1)));
+                self.dirty = true;
+                true
+            }
+            KeyCode::Enter => {
+                self.open_entity = self.entities.get(i).map(|e| match e {
+                    EntityRow::Agent { name, .. } => EntityOpen::Agent(name.clone()),
+                    EntityRow::Channel { name, .. } => EntityOpen::Channel(name.clone()),
+                });
+                self.entity_focus = None;
+                self.dirty = true;
+                true
+            }
+            KeyCode::Esc => {
+                self.entity_focus = None;
+                self.dirty = true;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// `?` 面板的行（快捷键表单一来源）。行数预算由终端高度决定：
@@ -4201,7 +4406,7 @@ fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<Row> {
 
 /// 单行化 + 截断：摘要/提示类文本可能含换行（多行 bash 命令），
 /// 而每个 Row 必须恰好一行。
-fn one_line(text: &str, width: usize) -> String {
+pub(crate) fn one_line(text: &str, width: usize) -> String {
     let flat = crate::tui::line::sanitize(text);
     crate::tui::markdown::truncate(flat.as_ref(), width.max(1))
 }
@@ -4331,6 +4536,8 @@ mod tests {
             last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
+            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            instance: None,
         });
         Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), None)
     }
@@ -4674,6 +4881,8 @@ mod tests {
             last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
+            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            instance: None,
         });
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
@@ -7459,6 +7668,57 @@ mod tests {
         press(&mut chat, KeyCode::Up);
         assert_eq!(chat.input, "second queued");
         assert_eq!(chat.queued.len(), 1);
+    }
+
+    /// 底部实体区：ctrl+g 聚焦选择，↑↓ 移动、Enter 打开、Esc 关闭；
+    /// 收起态一行摘要，无实体时不占行且 ctrl+g 给提示。
+    #[test]
+    fn entity_selector_picks_agent_and_channel() {
+        let mut chat = test_chat();
+        chat.width = 80;
+        // 无实体：不占行，ctrl+g 提示。
+        assert!(chat.entity_rows(80).is_empty());
+        assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        assert!(chat.notice.is_some(), "空态提示");
+        assert!(chat.entity_focus.is_none());
+        // 造一个 agent 实例 + 一个频道。
+        chat.session
+            .agents
+            .insert("scout", None, "调研".into(), chat.session.clone());
+        chat.session
+            .channels
+            .create("table", vec![], crate::channels::ChannelMode::Serial)
+            .unwrap_or_else(|e| panic!("{e}"));
+        chat.refresh_entities();
+        assert_eq!(chat.entities.len(), 2);
+        // 收起态：一行摘要含两者。
+        let rows = chat.entity_rows(80);
+        assert_eq!(rows.len(), 1);
+        let summary = rows[0].plain_text();
+        assert!(
+            summary.contains("◉ scout(running)") && summary.contains("◇ #table(0)"),
+            "{summary}"
+        );
+        // 聚焦：逐行 + ❯ 选中 + 提示行。
+        assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        assert_eq!(chat.entity_focus, Some(0));
+        let rows = chat.entity_rows(80);
+        let joined: Vec<String> = rows.iter().map(|l| l.plain_text()).collect();
+        assert!(joined[0].starts_with("❯ ◉ scout"), "{joined:?}");
+        assert!(joined.last().unwrap_or(&String::new()).contains("enter 打开"));
+        // ↓ 到频道，Enter 打开。
+        assert!(chat.on_key(KeyCode::Down, KeyModifiers::empty()));
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(
+            chat.open_entity,
+            Some(EntityOpen::Channel("table".into())),
+            "选中频道"
+        );
+        assert!(chat.entity_focus.is_none(), "打开后退出聚焦");
+        // 再次聚焦后 Esc 只关选择器（不触发全局 Esc 语义）。
+        let _ = chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(chat.entity_focus.is_none());
     }
 
     /// 队列超出上限时折叠为一行（行数进 chrome，必须有上界）。
