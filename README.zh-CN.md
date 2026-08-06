@@ -15,6 +15,12 @@ Rust 实现的本地 agent CLI（agent harness）。在终端里驱动大模型�
   AskUserQuestion、Skill、Agent（子代理）与 MCP 工具，全部经同一 Tool trait。
 - **子代理（hub-and-spoke）**：主 agent 派生命名子代理，异步执行、完成通知自动
   注入上下文；SendMessage 续话、AgentControl 管理生命周期。
+- **Agent 团队（项目级）**：`.bingo/team.json` 把一组角色固定到项目，启动自动
+  拉起（成员零 token 待命），`/team` 命令族管理；跨会话记忆按「项目路径 +
+  分支」隔离。
+- **经验库（Experience）**：agent 按项目沉淀可复用的操作经验
+  （trigger/summary/steps/verify），跨会话复利，Propose/Commit/Query/Forget
+  工具维护。
 - **TUI**：ratatui 双模式（默认 inline 嵌入终端 scrollback，`--fullscreen` 备用屏
   canvas），kitty graphics 内联渲染图片，历史反向搜索，slash 命令菜单。
 - **技能（Skills）**：`SKILL.md`（YAML frontmatter + markdown）即插即用，
@@ -86,6 +92,7 @@ bingo --continue            # 恢复最近一次会话
 | `-p, --print` | headless 模式：直接把回复打到 stdout（prompt 取参数或 stdin） |
 | `--fullscreen` | 全屏模式（备用屏 canvas，输入吸底、app 内滚动）；默认 inline（历史在终端 scrollback） |
 | `--model <名>` | 使用指定模型（缺省依次回落 settings `model`、内置 `claude-sonnet-5`） |
+| `--no-team` | 不自动拉起项目团队（覆盖 settings `team.autoStart`） |
 | `--permission-mode <模式>` | 权限模式：`default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions`（默认取 settings） |
 | `--continue` | 恢复最近的会话继续对话 |
 | `prompt` | 非交互提示词（缺省从 stdin 读取；交互模式忽略） |
@@ -126,6 +133,9 @@ bingo --continue            # 恢复最近一次会话
 `/skills`（清单，`/技能名` 直接执行）、`/context`（用量）、`/status`、
 `/compact`（强制压缩）、`/resume [名称]`（恢复历史会话）、`/rename`、
 `/clear`、`/exit`。
+`/team`（项目团队）：`list`（图纸+运行区同屏）、`start`（拉起/幂等复用）、
+`status`、`assign <成员> <任务>`（派活）、`stop`、`validate`、`new`
+（脚手架生成 team.json）、`memory list|gc`。
 
 ### 图片渲染
 
@@ -156,6 +166,7 @@ bingo --continue            # 恢复最近一次会话
 | `disabledMcpServers` | string[] | 禁用的 MCP 服务器名单（`/mcp disable` 写入） |
 | `permissions` | object | `{allow[], deny[], ask[]}`，规则语法见「权限系统」 |
 | `experimental` | object | 实验特性：`agentChannels`、`channelMessageLimit`（默认 500）、`agentMessageLimit`（默认 50） |
+| `team` | object | 团队启动行为：`{"autoStart": true}`（缺省 true = 项目绑定 team 时启动自动拉起；`--no-team` 或 false 关闭） |
 | `hooks` | object | 各事件 hook，见「Hooks」 |
 
 示例：
@@ -192,6 +203,7 @@ bingo --continue            # 恢复最近一次会话
 | `Agent` | 派生命名子代理（异步执行，完成通知注入上下文；`background:false` 可同步等待） |
 | `SendMessage` / `AgentControl` | 子代理续话与生命周期管理（仅主会话装配） |
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | 任务追踪（磁盘存储，TUI 任务区同源，含生命周期 hook） |
+| `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceForget` | 跨会话经验库（见下） |
 | `AskUserQuestion` | 向用户提选择题（TUI 复用权限询问模态） |
 | `Skill` | 技能调用（见下） |
 | `mcp__<server>__<tool>` | MCP 接入的工具（见下） |
@@ -211,6 +223,26 @@ bingo --continue            # 恢复最近一次会话
   自动送达。
 - `AgentControl` 可 `list`/`stop`/`delete`。
 - 默认异步执行：立即返回实例名与 task_id，完成时自动通知注入下一轮上下文。
+
+## Agent 团队（项目级）
+
+团队把一组角色固定到一个项目：声明式编排层，成员引用具名定义（AgentDef）、
+房间复用频道机制、控制面仍是 hub-and-spoke。
+
+- **定义**：`.bingo/team.json`（camelCase，进版本库）——`name` + `channel{mode,
+  messageLimit}` + `members[{name, agent}]`；成员引用 AgentDef，人格单一事实来源
+  仍在 `.bingo/agents/<名>.md`，一人格可入多 team。
+- **启动自动拉起**：`settings.team.autoStart`（缺省 true）时启动即拉起——派生
+  成员 + 建房间，但**不唤醒**（成员 Idle 零 token 待命，等 `/team assign` 或
+  频道消息才开跑）。opt-out：`--no-team` 或 `team.autoStart: false`。
+  幂等：以实例名为键，重复 `/team start` 复用不重派。
+- **命令**：`/team list`（图纸+运行区同屏）、`start`、`status`
+  （●待命 ◐忙碌 ✗异常 ○离线）、`assign`、`stop`、`validate`（与 start 同源
+  校验：validate 能过 start 必成）、`new`（脚手架，产物必过 validate）、
+  `memory list|gc`。
+- **跨会话记忆**：成员历史 + append-only 决策记录存
+  `~/.config/bingo/teams/<项目哈希>/<分支>/<team>/`——按「项目路径 + 分支」隔离，
+  main 与特性 worktree 记忆互不污染；拉起时自动恢复、不唤醒。
 
 ## 频道（实验特性）
 
@@ -233,6 +265,25 @@ bingo --continue            # 恢复最近一次会话
   （`description`/`when_to_use`/`arguments`）+ markdown 正文。
 - 调用：模型经 `SkillTool` 自动调用；用户经 `/技能名 [参数]` 直接执行。
 - 内置 `guide`：bingo 使用与诊断手册（回答"怎么配置/为什么/不工作"时对照）。
+
+## 经验库（Experience）
+
+跨会话沉淀项目内反复出现的操作经验：agent 反复做同一件事时，可提议、提交并
+后续查询可复用的经验——价值跨会话复利。
+
+- **存储**：`~/.config/bingo/experience/<项目键>/entries/<id>.md`
+  （user 全局，绝不触碰项目工作区）；按项目隔离。
+- **条目结构**：`trigger`（关键词）、`summary`、`steps`、`verify`、`evidence`
+  （来源）——frontmatter + 自由正文。
+- **工具**：
+  - `ExperiencePropose`——生成带稳定 id 的候选条目；不写盘。
+  - `ExperienceCommit`——持久化条目（过权限门）；相同内容映射同一 id，重复提交
+    是更新而非重复；`status: stale` 标记失效后不再注入新会话但仍可查询。
+  - `ExperienceQuery`——按任一 trigger 关键词子串匹配（不区分大小写）；
+    active 排在 stale/degraded 之前，再按命中次数。
+  - `ExperienceForget`——删除条目。
+- **状态生命周期**：`active` → `degraded` → `stale`；active 条目注入新会话，
+  stale 仅可查询。
 
 ## MCP
 
@@ -348,7 +399,7 @@ CLI (clap)
 
 核心循环语义：**模型只产出 tool_use 意图；权限、并行、副作用、压缩、记忆与
 UI 由本地 harness 负责**。设计决策见 [`notes/research.md`](notes/research.md)
-（D1–D24）。
+（D1–D31）。
 
 ## 项目结构
 
@@ -363,6 +414,10 @@ src/
   hooks.rs         shell hooks（事件 / matcher / JSON 契约）
   agents.rs        子代理会话与历史、具名定义加载
   tool/agent.rs    Agent / SendMessage / AgentControl 实现
+  team.rs          team 解析/校验/拉起编排 + team 记忆（D31）
+  team_cmd.rs      /team 命令族
+  experience.rs    跨会话经验库
+  tool/experience.rs  ExperiencePropose/Commit/Query/Forget 工具
   channels.rs      频道注册表（实验特性）
   tasks.rs         任务存储（Task 工具族）
   skills.rs        技能加载 / frontmatter / 参数替换
@@ -379,7 +434,7 @@ src/
 tests/
   fixtures/        集成测试夹具
 notes/
-  research.md      技术决策记录（D1–D24）
+  research.md      技术决策记录（D1–D31）
 ```
 
 ## 开发约定

@@ -22,6 +22,13 @@ produces intent; side effects are gated by the harness.
   run asynchronously; completion notifications are injected into context
   automatically. `SendMessage` continues a sub-agent, `AgentControl` manages
   its lifecycle.
+- **Agent teams (project-scoped)**: a `.bingo/team.json` fixes a roster of
+  roles to a project; the team is pulled up automatically at startup (members
+  idle at zero token cost) and managed via `/team`; cross-session memory is
+  scoped by project path + git branch.
+- **Experience library**: agents accumulate reusable operational experience
+  per project (trigger/summary/steps/verify), shared across sessions via
+  Propose/Commit/Query/Forget tools.
 - **TUI**: ratatui dual-mode (default inline, embedded in the terminal
   scrollback; `--fullscreen` uses an alternate-screen canvas), kitty-graphics
   inline image rendering, reverse history search, and a slash-command menu.
@@ -99,6 +106,7 @@ Startup fails with an error if no API key is present.
 | `-p, --print` | headless mode: print the reply to stdout (prompt from argument or stdin) |
 | `--fullscreen` | fullscreen mode (alternate-screen canvas, input docked at bottom, in-app scrolling); default is inline (history in terminal scrollback) |
 | `--model <name>` | use the given model (falls back to the `model` settings key, then `claude-sonnet-5`) |
+| `--no-team` | don't auto-start the project team (overrides settings `team.autoStart`) |
 | `--permission-mode <mode>` | permission mode: `default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions` (default from settings) |
 | `--continue` | resume the most recent session |
 | `prompt` | non-interactive prompt (read from stdin if omitted; ignored in interactive mode) |
@@ -144,6 +152,9 @@ opens the level picker; the choice persists), `/theme`,
 `/skills` (listing; `/skill-name` executes directly), `/context` (usage),
 `/status`, `/compact` (force compaction), `/resume [name]` (resume a past
 session), `/rename`, `/clear`, `/exit`.
+`/team` (project teams): `list` (roster + runtime), `start` (pull up / reuse),
+`status`, `assign <member> <task>`, `stop`, `validate`, `new` (scaffold
+`team.json`), `memory list|gc`.
 
 ### Image rendering
 
@@ -175,6 +186,7 @@ Three layers are shallow-merged; later layers override earlier ones:
 | `disabledMcpServers` | string[] | disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`, rule syntax under Permission system below |
 | `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50) |
+| `team` | object | team startup behavior: `{"autoStart": true}` (default true = auto-pull the project team at startup; `--no-team` or false disables) |
 | `hooks` | object | per-event hooks, see Hooks below |
 
 Example:
@@ -212,6 +224,7 @@ schema from a single source of truth):
 | `Agent` | spawns a named sub-agent (async by default, completion notification injected into context; `background:false` waits synchronously) |
 | `SendMessage` / `AgentControl` | sub-agent continuation and lifecycle management (main session only) |
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | task tracking (disk-backed, same source as the TUI task area, lifecycle hooks) |
+| `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceForget` | cross-session experience library (see below) |
 | `AskUserQuestion` | asks the user multiple-choice questions (reuses the permission prompt modal in the TUI) |
 | `Skill` | skill invocation (see below) |
 | `mcp__<server>__<tool>` | tools exposed via MCP (see below) |
@@ -235,6 +248,32 @@ schema from a single source of truth):
 - `AgentControl` can `list`/`stop`/`delete`.
 - Async by default: returns the instance name and task id immediately;
   completion notification is injected into the next turn's context.
+
+## Agent teams (project-scoped)
+
+A team fixes a roster of roles to a project. It is a declarative layer on top
+of existing primitives: members reference named definitions (AgentDef), the
+room reuses the channel machinery, and control stays on the hub-and-spoke
+surface.
+
+- **Definition**: `.bingo/team.json` (camelCase, committed to the repo):
+  `name` + `channel {mode, messageLimit}` + `members [{name, agent}]` — each
+  member references an AgentDef, so a persona lives in one place
+  (`.bingo/agents/<name>.md`) and can join multiple teams.
+- **Startup pull-up**: with `settings.team.autoStart` (default true) the team
+  is pulled up at startup — spawn members and create the room, but do **not**
+  wake them (members sit idle at zero token cost until `/team assign` or a
+  channel message). Opt out via `--no-team` or `team.autoStart: false`.
+  Idempotent: instance names are the key, repeated `/team start` reuses.
+- **Slash commands**: `/team list` (roster + runtime in one screen),
+  `start`, `status` (● idle / ◐ busy / ✗ error / ○ offline), `assign`,
+  `stop`, `validate` (same checks as start — if validate passes, start
+  succeeds), `new` (interactive scaffold that always produces a valid file),
+  `memory list|gc`.
+- **Cross-session memory**: member history and append-only decision records
+  persist to `~/.config/bingo/teams/<project-hash>/<branch>/<team>/` — scoped
+  by project path + git branch, so main and a feature worktree never share
+  memory. Restored on pull-up without waking the members.
 
 ## Channels (experimental)
 
@@ -263,6 +302,28 @@ With `settings.experimental.agentChannels: true`:
   `/skill-name [args]` directly.
 - Bundled `guide`: bingo usage & troubleshooting manual (consult it when
   answering "how to configure / why / it doesn't work").
+
+## Experience library
+
+A cross-session knowledge base for operations that recur across a project:
+when the agent repeatedly does the same thing, it can propose, commit and
+later query reusable experience — the value compounds over sessions.
+
+- **Storage**: `~/.config/bingo/experience/<project-key>/entries/<id>.md`
+  (user-global, never touches the project workspace); per-project isolation.
+- **Entry shape**: `trigger` (keywords), `summary`, `steps`, `verify`,
+  `evidence` (where it came from) — frontmatter + free-form body.
+- **Tools**:
+  - `ExperiencePropose` — generates a candidate with a stable id; writes nothing.
+  - `ExperienceCommit` — persists an entry (goes through the permission gate);
+    identical content maps to the same id, re-committing updates instead of
+    duplicating; `status: stale` stops injection into new sessions but stays
+    queryable.
+  - `ExperienceQuery` — matches on any trigger keyword (case-insensitive
+    substring); active entries rank above stale/degraded, then by hit count.
+  - `ExperienceForget` — deletes an entry.
+- **Status lifecycle**: `active` → `degraded` → `stale`; active entries are
+  injected into new sessions, stale ones are only queryable.
 
 ## MCP
 
@@ -395,7 +456,7 @@ CLI (clap)
 Core loop semantics: **the model only produces tool_use intent; permissions,
 parallelism, side effects, compaction, memory, and the UI are the local
 harness's job**. Design decisions live in
-[`notes/research.md`](notes/research.md) (D1–D24).
+[`notes/research.md`](notes/research.md) (D1–D31).
 
 ## Project layout
 
@@ -410,6 +471,10 @@ src/
   hooks.rs         shell hooks (events / matcher / JSON contract)
   agents.rs        sub-agent sessions & history, named definition loading
   tool/agent.rs    Agent / SendMessage / AgentControl implementations
+  team.rs          team parsing / validation / spawn + team memory (D31)
+  team_cmd.rs      /team slash-command family
+  experience.rs    cross-session experience library
+  tool/experience.rs  ExperiencePropose/Commit/Query/Forget tools
   channels.rs      channel registry (experimental)
   tasks.rs         task store (Task tool family)
   skills.rs        skill loading / frontmatter / argument substitution
@@ -426,7 +491,7 @@ src/
 tests/
   fixtures/        integration-test fixtures
 notes/
-  research.md      technical decision record (D1–D24)
+  research.md      technical decision record (D1–D31)
 ```
 
 ## Development conventions
