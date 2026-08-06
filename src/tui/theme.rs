@@ -350,9 +350,10 @@ impl Theme {
     pub fn emphasis(&self) -> SegStyle {
         SegStyle::plain().italic()
     }
-    /// 删除线（终端无删除线 → 弱化呈现）。
+    /// 删除线。iocraft 0.8.4 无删除线装饰 → 同时弱化前景色，
+    /// 终端库支持后只需在显示层接上 `SegStyle::strikethrough`。
     pub fn strikethrough(&self) -> SegStyle {
-        SegStyle::fg(self.inactive)
+        SegStyle::fg(self.inactive).strikethrough()
     }
     /// 行内代码。
     pub fn code(&self) -> SegStyle {
@@ -422,14 +423,6 @@ impl Theme {
     pub fn thinking(&self) -> SegStyle {
         SegStyle::fg(self.thinking).italic()
     }
-    /// 主活动点 `⏺`。
-    pub fn activity_dot(&self) -> SegStyle {
-        SegStyle::fg(self.text)
-    }
-    /// 运行中的工具。
-    pub fn tool_running(&self) -> SegStyle {
-        SegStyle::fg(self.tool_running).bold()
-    }
     /// 完成的工具。
     pub fn tool_done(&self) -> SegStyle {
         SegStyle::fg(self.success).bold()
@@ -457,10 +450,6 @@ impl Theme {
     /// Diff 上下文。
     pub fn diff_context(&self) -> SegStyle {
         SegStyle::fg(self.diff_context)
-    }
-    /// `✻` 编辑标记。
-    pub fn diff_edit(&self) -> SegStyle {
-        SegStyle::fg(self.diff_edit).bold()
     }
     /// 权限标题。
     pub fn permission(&self) -> SegStyle {

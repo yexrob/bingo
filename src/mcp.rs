@@ -245,7 +245,7 @@ pub struct McpTool {
     service: Arc<Service>,
 }
 
-/// 描述上限：2048 字符。
+/// 描述上限：2048 字符（字符数，非字节数）。
 const MAX_MCP_DESCRIPTION_LENGTH: usize = 2048;
 
 /// 服务器/工具名规范化：`^[a-zA-Z0-9_-]{1,64}$`，非法字符（点/空格等）→ `_`。
@@ -295,11 +295,10 @@ pub fn mcp_tool_facts(server_name: &str, tool: &McpToolModel) -> McpToolFacts {
         .as_deref()
         .unwrap_or_default()
         .to_string();
-    let description = if description.len() > MAX_MCP_DESCRIPTION_LENGTH {
-        format!(
-            "{}… [truncated]",
-            &description[..MAX_MCP_DESCRIPTION_LENGTH]
-        )
+    // 字节下标切分会在多字节字符中间 panic（中文/emoji 描述）：按字符截断。
+    let description = if description.chars().count() > MAX_MCP_DESCRIPTION_LENGTH {
+        let head: String = description.chars().take(MAX_MCP_DESCRIPTION_LENGTH).collect();
+        format!("{head}… [truncated]")
     } else {
         description
     };
@@ -338,6 +337,8 @@ impl Tool for McpTool {
         self.read_only
     }
 
+    /// 注意：readOnlyHint 是服务器自报的不可信输入，只用于并发调度，
+    /// 不用于权限门（见 permission::can_use_tool 对 mcp__ 工具的处理）。
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
         self.read_only
     }
@@ -608,8 +609,27 @@ mod tests {
         let long = "d".repeat(3000);
         let facts = mcp_tool_facts("srv", &tool_model("t", Some(&long), false));
         assert!(facts.description.ends_with("… [truncated]"));
-        assert!(facts.description.len() < 2048 + 20);
+        assert_eq!(facts.description.chars().count(), MAX_MCP_DESCRIPTION_LENGTH + 13);
         assert!(!facts.read_only);
+    }
+
+    /// 回归：中文/emoji 描述曾在非字符边界按字节切分 → panic。
+    #[test]
+    fn mcp_tool_facts_truncates_multibyte_description_on_char_boundary() {
+        for unit in ["中", "🙂", "é"] {
+            let long = unit.repeat(3000);
+            let facts = mcp_tool_facts("srv", &tool_model("t", Some(&long), false));
+            assert!(facts.description.ends_with("… [truncated]"), "{unit}");
+            assert_eq!(
+                facts.description.chars().count(),
+                MAX_MCP_DESCRIPTION_LENGTH + 13,
+                "{unit}"
+            );
+        }
+        // 恰好等于上限：不截断。
+        let exact = "中".repeat(MAX_MCP_DESCRIPTION_LENGTH);
+        let facts = mcp_tool_facts("srv", &tool_model("t", Some(&exact), false));
+        assert_eq!(facts.description, exact);
     }
 
     #[test]

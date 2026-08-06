@@ -8,6 +8,44 @@ use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 /// Glob 结果上限：防模型一次拿到超长列表（超出截断并注明）。
 const MAX_GLOB_RESULTS: usize = 500;
 
+/// 路径 glob 匹配器（Glob 工具与 Grep 的 glob 过滤共用）。
+///
+/// globset 的 matcher 整串锚定：拿绝对路径去比 `src/**/*.rs` 这类相对
+/// pattern 永远零匹配。规则：
+/// - pattern 以 `/` 开头 → 比绝对路径；
+/// - pattern 不含 `/` → 比文件名（ripgrep `-g` 语义，任意深度生效）；
+/// - 其余 → 比相对 root 的路径。
+pub struct PathGlob {
+    matcher: globset::GlobMatcher,
+    absolute: bool,
+    name_only: bool,
+}
+
+impl PathGlob {
+    pub fn new(pattern: &str) -> Result<Self, globset::Error> {
+        Ok(Self {
+            matcher: globset::Glob::new(pattern)?.compile_matcher(),
+            absolute: pattern.starts_with('/'),
+            name_only: !pattern.contains('/'),
+        })
+    }
+
+    pub fn is_match(&self, root: &Path, path: &Path) -> bool {
+        if self.absolute {
+            return self.matcher.is_match(path);
+        }
+        if self.name_only {
+            return path
+                .file_name()
+                .is_some_and(|name| self.matcher.is_match(Path::new(name)));
+        }
+        match path.strip_prefix(root) {
+            Ok(rel) => self.matcher.is_match(rel),
+            Err(_) => self.matcher.is_match(path),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GlobInput {
     #[schemars(description = "glob pattern, e.g. **/*.rs")]
@@ -26,7 +64,10 @@ impl Tool for GlobTool {
         "Glob".into()
     }
     fn description(&self) -> String {
-        "Find files matching a glob pattern. Returns paths relative to the search root, one per line."
+        "Find files matching a glob pattern. Patterns are matched against paths relative to the \
+         search root; a pattern without a slash matches the file name at any depth. Returns paths \
+         relative to the search root, one per line. Skips .git, target, node_modules and hidden \
+         directories unless the search root is one of them."
             .into()
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -48,20 +89,25 @@ impl Tool for GlobTool {
             .path
             .map(PathBuf::from)
             .unwrap_or_else(|| ctx.cwd.clone());
-        let matcher = globset::Glob::new(&params.pattern)
-            .map_err(|e| ToolError::failed(format!("bad glob pattern: {e}")))?
-            .compile_matcher();
+        let matcher = PathGlob::new(&params.pattern)
+            .map_err(|e| ToolError::failed(format!("bad glob pattern: {e}")))?;
 
-        let mut matches = Vec::new();
-        collect(&root, &root, &matcher, &mut matches, 0)?;
+        // 同步递归遍历放进 spawn_blocking：大仓库下不阻塞运行时线程。
+        let search_root = root.clone();
+        let (mut matches, stopped_early) = tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            let stopped = collect(&search_root, &search_root, &matcher, &mut out, 0);
+            (out, stopped)
+        })
+        .await
+        .map_err(|e| ToolError::failed(format!("glob task failed: {e}")))?;
+
         matches.sort();
-        let total = matches.len();
-        matches.truncate(MAX_GLOB_RESULTS);
+        let shown = matches.len();
         let mut text = matches.join("\n");
-        if total > matches.len() {
+        if stopped_early {
             text.push_str(&format!(
-                "\n…{total} matches, showing first {}",
-                matches.len()
+                "\n…stopped at the {shown} result limit; narrow the pattern or path for more"
             ));
         }
         if text.is_empty() {
@@ -75,33 +121,143 @@ impl Tool for GlobTool {
     }
 }
 
-/// 深度优先收集匹配文件（相对 root 路径）；跳过符号链接目录防循环。
+/// 深度优先收集匹配文件（相对 root 路径）；跳过符号链接目录防循环、
+/// 跳过 .git/target/node_modules/隐藏目录。返回 true 表示达到上限提前终止。
 fn collect(
     root: &Path,
     dir: &Path,
-    matcher: &globset::GlobMatcher,
+    matcher: &PathGlob,
     out: &mut Vec<String>,
     depth: u32,
-) -> Result<(), ToolError> {
-    if depth > 24 {
-        return Ok(());
+) -> bool {
+    if depth > 24 || out.len() >= MAX_GLOB_RESULTS {
+        return out.len() >= MAX_GLOB_RESULTS;
     }
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| ToolError::failed(format!("cannot read dir {}: {e}", dir.display())))?;
-    for entry in entries.flatten() {
+    for entry in super::grep::sorted_entries(dir) {
         let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|e| ToolError::failed(format!("cannot stat {}: {e}", path.display())))?;
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         if file_type.is_dir() && !file_type.is_symlink() {
-            collect(root, &path, matcher, out, depth + 1)?;
-        } else if file_type.is_file() && matcher.is_match(&path) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if super::grep::should_skip_dir(&name) {
+                continue;
+            }
+            if collect(root, &path, matcher, out, depth + 1) {
+                return true;
+            }
+        } else if file_type.is_file() && matcher.is_match(root, &path) {
             let rel = path
                 .strip_prefix(root)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| path.to_string_lossy().into_owned());
             out.push(rel);
+            if out.len() >= MAX_GLOB_RESULTS {
+                return true;
+            }
         }
     }
-    Ok(())
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(cwd: PathBuf) -> ToolContext {
+        ToolContext {
+            cwd,
+            watch: crate::watch::WatchRegistry::new(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+        }
+    }
+
+    fn fixture(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("bingo-glob-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for rel in [
+            "src/main.rs",
+            "src/deep/lib.rs",
+            "notes.md",
+            "target/debug/build.rs",
+            ".git/config",
+            "node_modules/pkg/index.js",
+        ] {
+            let path = root.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, "x").unwrap();
+        }
+        root
+    }
+
+    async fn run(root: &Path, pattern: &str) -> String {
+        GlobTool
+            .call(
+                serde_json::json!({"pattern": pattern}),
+                &ctx(root.to_path_buf()),
+            )
+            .await
+            .unwrap()
+            .content
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// M6 回归：带目录前缀的相对 pattern 曾永远零匹配。
+    #[tokio::test]
+    async fn relative_patterns_match_against_root() {
+        let root = fixture("rel");
+        let text = run(&root, "src/**/*.rs").await;
+        assert!(text.contains("src/main.rs"), "{text}");
+        assert!(text.contains("src/deep/lib.rs"), "{text}");
+        assert!(!text.contains("notes.md"), "{text}");
+        // 无 `/` 的 pattern 按文件名匹配，任意深度生效。
+        let text = run(&root, "*.md").await;
+        assert!(text.contains("notes.md"), "{text}");
+        // `**/` 前缀照常。
+        let text = run(&root, "**/*.rs").await;
+        assert!(text.contains("src/main.rs") && text.contains("src/deep/lib.rs"), "{text}");
+        // 绝对 pattern 比绝对路径。
+        let absolute = format!("{}/src/**/*.rs", root.to_string_lossy());
+        let text = run(&root, &absolute).await;
+        assert!(text.contains("src/main.rs"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// M1 回归：构建产物 / 版本库内部 / 隐藏目录默认不遍历。
+    #[tokio::test]
+    async fn skips_build_and_vcs_directories() {
+        let root = fixture("skip");
+        let text = run(&root, "**/*").await;
+        assert!(text.contains("src/main.rs"), "{text}");
+        assert!(!text.contains("target/"), "{text}");
+        assert!(!text.contains(".git/"), "{text}");
+        assert!(!text.contains("node_modules"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn truncates_at_result_limit() {
+        let root = std::env::temp_dir().join(format!("bingo-glob-{}-cap", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..(MAX_GLOB_RESULTS + 50) {
+            std::fs::write(root.join(format!("f{i:04}.txt")), "x").unwrap();
+        }
+        let text = run(&root, "*.txt").await;
+        assert!(text.contains("stopped at the"), "{}", &text[..200.min(text.len())]);
+        assert_eq!(
+            text.lines().filter(|l| l.ends_with(".txt")).count(),
+            MAX_GLOB_RESULTS
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

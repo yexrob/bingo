@@ -41,7 +41,18 @@ impl Tool for WriteTool {
     ) -> Result<ToolResult, ToolError> {
         let params: WriteInput = parse_input(&input)?;
         let path = std::path::PathBuf::from(&params.file_path);
-        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        // 读旧内容失败曾一律当成空文件：二进制/非 UTF-8/无权限的文件会被
+        // 静默整份覆盖，diff 还显示为全新增。只有"不存在"才是新文件。
+        let old = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return Err(ToolError::failed(format!(
+                    "refusing to overwrite {}: cannot read existing file ({e})",
+                    path.display()
+                )));
+            }
+        };
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
             && let Err(e) = std::fs::create_dir_all(parent)
@@ -62,5 +73,58 @@ impl Tool for WriteTool {
             is_error: false,
             diff: super::diff::unified_diff(&params.file_path, &old, &params.content),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> ToolContext {
+        ToolContext {
+            cwd: std::env::temp_dir(),
+            watch: crate::watch::WatchRegistry::new(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+        }
+    }
+
+    /// L3 回归：非 UTF-8 文件曾被当成空文件静默整份覆盖。
+    #[tokio::test]
+    async fn refuses_to_overwrite_unreadable_file() {
+        let path = std::env::temp_dir().join(format!("bingo-write-binary-{}", std::process::id()));
+        std::fs::write(&path, [0xff_u8, 0xfe, 0x00, 0x01]).unwrap();
+        let err = WriteTool
+            .call(
+                serde_json::json!({"file_path": path.to_string_lossy(), "content": "new"}),
+                &ctx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("refusing to overwrite"), "{err}");
+        // 原文件未被改动。
+        assert_eq!(std::fs::read(&path).unwrap(), vec![0xff, 0xfe, 0x00, 0x01]);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// 不存在的文件照常按新文件写入。
+    #[tokio::test]
+    async fn missing_file_is_treated_as_new() {
+        let path = std::env::temp_dir().join(format!("bingo-write-new-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let result = WriteTool
+            .call(
+                serde_json::json!({"file_path": path.to_string_lossy(), "content": "hello\n"}),
+                &ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello\n");
+        std::fs::remove_file(&path).unwrap();
     }
 }

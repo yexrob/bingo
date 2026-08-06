@@ -12,6 +12,8 @@ use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// 周期命令默认检查间隔（无显式 -n 时）。
 pub const DEFAULT_WATCH_INTERVAL_SECS: u64 = 5;
+/// 命令结束后等 reader 收尾的上限（孙进程仍持有管道时不无限等）。
+const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 需要 TTY 的交互式命令拒绝原因（`!` 命令与 Bash 工具共用）。
 /// bingo 子进程 stdin/stdout 均为管道：全屏 TUI（top/htop/vim）输出乱码，
@@ -26,7 +28,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         tokens.get(i).copied(),
         Some("sudo" | "doas" | "env" | "nohup" | "command" | "exec")
     ) {
-        let wrapper = tokens[i];
+        let wrapper = tokens.get(i).copied()?;
         i += 1;
         if i >= tokens.len() {
             return match wrapper {
@@ -39,13 +41,18 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         }
         if matches!(wrapper, "sudo" | "doas") {
             // sudo 旗标：-i/-s 交互登录；取值旗标连值一起跳过。
-            while tokens[i].starts_with('-') {
-                let flag = tokens[i];
+            // 旗标可能耗尽 tokens（`sudo -v`）：全程 get，末尾无命令时按裸 sudo 处理。
+            let mut non_prompting = false;
+            while let Some(flag) = tokens.get(i).copied().filter(|t| t.starts_with('-')) {
                 i += 1;
                 if matches!(flag, "-i" | "-s") {
                     return Some(format!(
                         "sudo 交互登录 shell（{flag}）需要 TTY，已拒绝"
                     ));
+                }
+                // 这些旗标不会弹口令提示（-n 直接失败，-k/-K 只清时间戳）。
+                if matches!(flag, "-n" | "--non-interactive" | "-k" | "-K" | "-V" | "--version") {
+                    non_prompting = true;
                 }
                 if matches!(
                     flag,
@@ -55,6 +62,10 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
                 {
                     i += 1;
                 }
+            }
+            if i >= tokens.len() {
+                return (!non_prompting)
+                    .then(|| "sudo/doas 需要交互口令（TTY），已拒绝".to_string());
             }
         } else if wrapper == "env" {
             // env 的 VAR=value 赋值不是命令。
@@ -66,7 +77,8 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
             }
         }
     }
-    let base = tokens[i];
+    // 空命令（或只有包装词）无基命令可判：放行给 shell。
+    let base = tokens.get(i).copied()?;
     let name = std::path::Path::new(base)
         .file_name()
         .and_then(|f| f.to_str())
@@ -335,20 +347,24 @@ impl Tool for BashTool {
             return launch_background(&params, ctx, None).await;
         }
 
-        let mut command = tokio::process::Command::new("/bin/zsh");
-        command
-            .arg("-c")
-            .arg(&params.command)
-            .current_dir(&ctx.cwd)
-            // 回合被中断（Esc）时 future drop 会连带杀掉子进程，不留孤儿。
-            .kill_on_drop(true);
+        let mut command = shell_command(&params.command, &ctx.cwd);
+        // 回合被中断（Esc）时 future drop 会连带杀掉子进程，不留孤儿。
+        command.kill_on_drop(true);
+        let child = command
+            .spawn()
+            .map_err(|e| ToolError::failed(format!("failed to run command: {e}")))?;
+        // 进程组 leader = 子 shell 自身：超时时整组清理，孙进程不孤儿化。
+        let pgid = child.id();
 
-        let output = match tokio::time::timeout(timeout, command.output()).await {
+        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => {
                 return Err(ToolError::failed(format!("failed to run command: {e}")));
             }
             Err(_) => {
+                if let Some(pgid) = pgid {
+                    kill_process_group(pgid).await;
+                }
                 return Err(ToolError::failed(format!(
                     "command timed out after {}s",
                     timeout.as_secs()
@@ -377,7 +393,40 @@ impl Tool for BashTool {
     }
 }
 
+/// 子 shell 命令：独立进程组（超时/取消时整组清理）、stdin 断开
+/// （子进程不得抢 TUI 输入）、stdout/stderr 走管道。
+fn shell_command(command: &str, cwd: &std::path::Path) -> tokio::process::Command {
+    use std::os::unix::process::CommandExt;
+    let mut std_command = std::process::Command::new("/bin/zsh");
+    std_command
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // 新进程组：pgid == 子 shell pid，孙进程一并落在组内。
+        .process_group(0);
+    tokio::process::Command::from(std_command)
+}
+
+/// 杀掉整个进程组（孙进程一并清理）。
+/// AGENTS.md 禁 unsafe，killpg(2) 走 `/bin/sh` 内建 kill 的负 pid 语义达成。
+async fn kill_process_group(pgid: u32) {
+    let script = format!("kill -TERM -{pgid} 2>/dev/null; kill -KILL -{pgid} 2>/dev/null");
+    let _ = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+}
+
 /// 周期命令后台执行：注册 watchable（interval 轮询）+ spawn 流式执行。
+/// interval=None（显式 background）也要轮询：否则 notify_on/notify_regex/
+/// 默认 Errors 条件无人驱动，静默失效。
 async fn launch_background(
     params: &BashInput,
     ctx: &ToolContext,
@@ -395,12 +444,17 @@ async fn launch_background(
     }
     let cell = Arc::new(BashCell::new());
     let label = format!("$ {}", params.command);
+    // 周期命令的轮次语义（Idle = 一轮）只对 watch/loop 类命令成立；
+    // 显式 background 只借轮询驱动条件匹配，状态保持 Running。
+    let periodic = interval.is_some();
     let id = ctx
         .watch
         .register_with_conditions(Box::new(BashWatch {
             cell: cell.clone(),
             label: label.clone(),
-            interval,
+            interval: interval
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_WATCH_INTERVAL_SECS)),
+            periodic,
         }), conditions);
     let watch = ctx.watch.clone();
     let command = params.command.clone();
@@ -443,14 +497,11 @@ async fn run_streaming(
     watch: std::sync::Arc<crate::watch::WatchRegistry>,
     id: crate::watch::WatchId,
 ) -> Result<(String, i32), String> {
-    let mut child = tokio::process::Command::new("/bin/zsh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+    let mut child = shell_command(command, cwd)
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("failed to spawn: {e}"))?;
+    let pgid = child.id();
     let buf = Arc::new(Mutex::new(String::new()));
     let mut readers = Vec::new();
     let streams: Vec<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = [
@@ -487,6 +538,9 @@ async fn run_streaming(
             Ok(Err(e)) => return Err(format!("failed to wait: {e}")),
             Err(_) => {
                 let _ = child.kill().await;
+                if let Some(pgid) = pgid {
+                    kill_process_group(pgid).await;
+                }
                 return Err(format!("command timed out after {}s", t.as_secs()));
             }
         },
@@ -495,8 +549,19 @@ async fn run_streaming(
             Err(e) => return Err(format!("failed to wait: {e}")),
         },
     };
-    for reader in readers {
-        let _ = reader.await;
+    // 孙进程可能仍持有 stdout：join 加超时兜底，否则 reader 永挂、
+    // watch 条目永远停在 Running。
+    for mut reader in readers {
+        if tokio::time::timeout(READER_DRAIN_TIMEOUT, &mut reader)
+            .await
+            .is_err()
+        {
+            if let Some(pgid) = pgid {
+                kill_process_group(pgid).await;
+            }
+            let _ = tokio::time::timeout(READER_DRAIN_TIMEOUT, &mut reader).await;
+            reader.abort();
+        }
     }
     let code = status.code().unwrap_or(-1);
     let text = buf.lock().map(|b| b.clone()).unwrap_or_default();
@@ -524,10 +589,10 @@ impl BashCell {
         self.line_delta.fetch_add(1, Ordering::SeqCst);
         self.total_lines.fetch_add(1, Ordering::SeqCst);
     }
-    fn poll(&self) -> crate::watch::WatchPoll {
+    fn poll(&self, periodic: bool) -> crate::watch::WatchPoll {
         let delta = self.line_delta.swap(0, Ordering::SeqCst);
         let total = self.total_lines.load(Ordering::SeqCst);
-        if delta > 0 {
+        if delta > 0 && periodic {
             let rounds = self.rounds.fetch_add(1, Ordering::SeqCst) + 1;
             crate::watch::WatchPoll {
                 state: crate::watch::WatchState::Idle,
@@ -552,7 +617,9 @@ impl BashCell {
 struct BashWatch {
     cell: Arc<BashCell>,
     label: String,
-    interval: Option<Duration>,
+    interval: Duration,
+    /// 周期命令（watch/loop/tail -f）才有轮次语义；显式 background 只借轮询驱动条件。
+    periodic: bool,
 }
 
 impl crate::watch::Watchable for BashWatch {
@@ -560,10 +627,10 @@ impl crate::watch::Watchable for BashWatch {
         self.label.clone()
     }
     fn poll(&self) -> crate::watch::WatchPoll {
-        self.cell.poll()
+        self.cell.poll(self.periodic)
     }
     fn check_interval(&self) -> Option<Duration> {
-        self.interval
+        Some(self.interval)
     }
 }
 
@@ -775,6 +842,114 @@ mod tests {
                 "不应拒绝: {cmd}"
             );
         }
+    }
+
+    /// 回归：旗标耗尽 tokens 时曾越界索引 panic（`sudo -v` / `sudo -k` / 空命令）。
+    #[test]
+    fn flag_only_wrapper_commands_do_not_panic() {
+        // 会弹口令的 sudo 变体：拒绝但不 panic。
+        for cmd in ["sudo -v", "sudo -u root", "sudo -p prompt", "doas -"] {
+            assert!(
+                interactive_command_reason(cmd).is_some(),
+                "应当拒绝且不 panic: {cmd}"
+            );
+        }
+        // 不弹口令 / 无基命令：放行且不 panic。
+        for cmd in ["", "   ", "sudo -k", "sudo -n", "sudo -K", "env", "nohup", "exec"] {
+            assert_eq!(
+                interactive_command_reason(cmd),
+                None,
+                "不应拒绝且不 panic: {cmd:?}"
+            );
+        }
+    }
+
+    /// 超时：整个进程组被清理，孙进程不孤儿化。
+    #[tokio::test]
+    async fn timeout_kills_whole_process_group() {
+        let marker = std::env::temp_dir()
+            .join(format!("bingo-pgroup-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let ctx = ToolContext {
+            cwd: std::env::temp_dir(),
+            watch: crate::watch::WatchRegistry::new(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+        };
+        // 孙进程写下自己的 pid 后长睡；父 shell 也长睡触发超时。
+        let command = format!(
+            "( sleep 30 & echo $! > {} ); sleep 30",
+            marker.to_string_lossy()
+        );
+        let err = BashTool::new()
+            .call(
+                serde_json::json!({"command": command, "timeout": 1}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        // 组清理是异步信号：给内核一点时间。
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let pid = std::fs::read_to_string(&marker)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        assert!(!pid.is_empty(), "孙进程应已写下 pid");
+        let alive = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("kill -0 {pid} 2>/dev/null"))
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let _ = std::fs::remove_file(&marker);
+        assert!(!alive, "孙进程 {pid} 应随进程组一起被清理");
+    }
+
+    /// 回归：background:true（非周期）也要驱动条件匹配，notify_on 不再静默失效。
+    #[tokio::test]
+    async fn explicit_background_conditions_fire() {
+        let watch = crate::watch::WatchRegistry::new();
+        let ctx = ToolContext {
+            cwd: std::env::temp_dir(),
+            watch: watch.clone(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+        };
+        let result = BashTool::new()
+            .call(
+                serde_json::json!({
+                    "command": "echo BOOM_MARKER; sleep 0.2",
+                    "background": true,
+                    "notify_on": ["BOOM_MARKER"],
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(result.content.as_str().unwrap_or_default().contains("async_launched"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut signalled = false;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if watch
+                .consume_notifications()
+                .iter()
+                .any(|n| n.contains("BOOM_MARKER"))
+            {
+                signalled = true;
+                break;
+            }
+        }
+        assert!(signalled, "notify_on 条件应在后台任务上触发信号");
     }
 
     /// 交互式命令在 Bash 工具层被拒绝（模型路径同样生效）。

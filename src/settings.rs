@@ -26,8 +26,8 @@ pub struct Settings {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     /// 思考级别（`thinkingLevel`）：off | low | medium | high。
-    /// 缺省不发 thinking 参数（兼容 DeepSeek 等端点）；映射
-    /// budget_tokens 2048/8192/16384 发给模型。
+    /// 缺省不发 thinking 参数（兼容 DeepSeek 等端点）；low/medium/high
+    /// 一律发 `{"type":"adaptive"}`——Claude 5 家族已移除 budget_tokens。
     #[serde(rename = "thinkingLevel", default)]
     pub thinking_level: Option<String>,
     #[serde(rename = "permissionMode")]
@@ -167,6 +167,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     if let Some(theme) = layer.theme {
         base.theme = Some(theme);
     }
+    if let Some(cache) = layer.cache_control {
+        base.cache_control = Some(cache);
+    }
     if let Some(respond) = layer.respond_to_bash_commands {
         base.respond_to_bash_commands = Some(respond);
     }
@@ -274,6 +277,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// cacheControl 必须逐层合并——漏掉它 prompt caching 永远关闭。
+    #[test]
+    fn merges_cache_control() {
+        let tmp = std::env::temp_dir().join(format!("bingo-settings-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write(&tmp, "user/bingo/settings.json", r#"{"cacheControl":true}"#);
+
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.cache_control, Some(true), "user 层 cacheControl 生效");
+
+        // project 层覆盖 user 层。
+        write(&tmp, ".bingo/settings.json", r#"{"cacheControl":false}"#);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.cache_control, Some(false));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn missing_files_default() {
         let tmp = std::env::temp_dir().join(format!("bingo-settings-empty-{}", std::process::id()));
@@ -291,7 +312,7 @@ mod tests {
         write(&tmp, ".bingo/settings.json", r#"{"apiKey":"sk-project","apiBaseUrl":"https://project.example"}"#);
         write(&tmp, "user/bingo/settings.json", r#"{"apiKey":"sk-user","apiBaseUrl":"https://user.example"}"#);
 
-        // user 层优先（layer 顺序 user → project → local，后者覆盖前者）。
+        // project 层覆盖 user（layer 顺序 user → project → local，后者覆盖前者）。
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.api_key.as_deref(), Some("sk-project"));
         assert_eq!(settings.api_base_url.as_deref(), Some("https://project.example"));

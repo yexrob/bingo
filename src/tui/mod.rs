@@ -8,6 +8,9 @@ pub mod activities;
 pub mod chat;
 pub mod components;
 pub mod gfx;
+pub mod history;
+pub mod input;
+pub mod keys;
 pub mod line;
 pub mod markdown;
 pub mod math;
@@ -171,11 +174,12 @@ pub async fn run_tui_session(
 
     // 全屏 canvas 每帧 diff 重绘无法稳定承载 kitty 图片 → 只有 inline
     // 模式启用真实图片显示（定稿行一次落盘进 scrollback）。
-    let image_cap = if fullscreen {
-        None
+    let image_probe = if fullscreen {
+        gfx::ImageProbe::default()
     } else {
         gfx::detect_image_cap().await
     };
+    let image_cap = image_probe.cap;
     if std::env::var_os("BINGO_DEBUG").is_some() {
         eprintln!(
             "[bingo] image_cap={image_cap:?} TERM={:?} TERM_PROGRAM={:?}",
@@ -190,6 +194,8 @@ pub async fn run_tui_session(
         detected_background: detected_background,
         inline: Some(!fullscreen),
         image_cap: image_cap,
+        // 探测到 kitty 终端但 tmux passthrough 没开等情况：告诉用户怎么开。
+        image_warning: image_probe.warning,
     ));
     if fullscreen {
         root.fullscreen().await?;

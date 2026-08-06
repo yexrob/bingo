@@ -172,16 +172,61 @@ pub fn bundled_skills() -> Vec<Skill> {
     skills
 }
 
+/// 扫描指纹：技能目录与已加载 SKILL.md 的 mtime。
+/// 目录 mtime 捕获增删，文件 mtime 捕获内容改动。
+type Stamps = Vec<(PathBuf, Option<std::time::SystemTime>)>;
+
+fn stamp(path: &Path) -> (PathBuf, Option<std::time::SystemTime>) {
+    (
+        path.to_path_buf(),
+        std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
+    )
+}
+
+struct SkillCache {
+    key: (PathBuf, PathBuf),
+    stamps: Stamps,
+    skills: Vec<Skill>,
+}
+
+/// 进程内缓存：每回合全量重扫技能目录（用户级技能可上百个）是纯浪费。
+static SKILL_CACHE: std::sync::LazyLock<std::sync::Mutex<Option<SkillCache>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+fn scan_dirs(home: &Path, cwd: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![user_skills_dir(home)];
+    dirs.extend(project_skills_dirs(cwd));
+    dirs
+}
+
 /// 加载全部技能：内置（编译期）→ user 层 → 项目层（近 cwd 优先）；
 /// 按名字去重，磁盘技能覆盖同名内置（用户自定义优先）。
+/// 目录/文件 mtime 未变时复用上一次扫描结果。
 pub fn load_skills(home: &Path, cwd: &Path) -> Vec<Skill> {
+    let key = (home.to_path_buf(), cwd.to_path_buf());
+    let dirs = scan_dirs(home, cwd);
+    let dir_stamps: Stamps = dirs.iter().map(|d| stamp(d)).collect();
+
+    let mut cache = SKILL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(cached) = cache.as_ref()
+        && cached.key == key
+        && cached.stamps.len() >= dir_stamps.len()
+        && cached.stamps[..dir_stamps.len()] == dir_stamps[..]
+        && cached.stamps[dir_stamps.len()..]
+            .iter()
+            .all(|(path, at)| stamp(path).1 == *at)
+    {
+        return cached.skills.clone();
+    }
+
     let mut skills = Vec::new();
-    load_dir(&user_skills_dir(home), &mut skills);
-    for dir in project_skills_dirs(cwd) {
-        load_dir(&dir, &mut skills);
+    for dir in &dirs {
+        load_dir(dir, &mut skills);
     }
     let mut seen = HashSet::new();
     skills.retain(|s| seen.insert(realpath_or(&s.base_dir.join("SKILL.md"))));
+    let mut stamps = dir_stamps;
+    stamps.extend(skills.iter().map(|s| stamp(&s.base_dir.join("SKILL.md"))));
     // 内置技能排在磁盘技能之后：同名时磁盘（先入）胜出。
     let names: HashSet<String> = skills.iter().map(|s| s.name.clone()).collect();
     skills.extend(
@@ -189,6 +234,11 @@ pub fn load_skills(home: &Path, cwd: &Path) -> Vec<Skill> {
             .into_iter()
             .filter(|b| !names.contains(&b.name)),
     );
+    *cache = Some(SkillCache {
+        key,
+        stamps,
+        skills: skills.clone(),
+    });
     skills
 }
 
@@ -402,6 +452,52 @@ mod tests {
             let count = skills.iter().filter(|s| s.name == "one").count();
             assert_eq!(count, 1, "同源文件去重");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// L2：缓存命中不改变结果，目录/文件变动后失效重扫。
+    #[test]
+    fn cached_scan_invalidates_on_change() {
+        let root = std::env::temp_dir().join(format!("bingo-skills-{}-cache", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        write(
+            &home.join(".config/bingo/skills/one/SKILL.md"),
+            "---\ndescription: first\n---\nbody\n",
+        );
+        let first = load_skills(&home, &root);
+        // 缓存命中：同样的输入给同样的结果。
+        let cached = load_skills(&home, &root);
+        assert_eq!(
+            first.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+            cached.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+        );
+        let desc = |skills: &[Skill], name: &str| {
+            skills
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.description.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(desc(&cached, "one"), "first");
+
+        // mtime 分辨率兜底：确保改动落在不同的时间戳上。
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // 内容改动（目录 mtime 不变）也要失效。
+        write(
+            &home.join(".config/bingo/skills/one/SKILL.md"),
+            "---\ndescription: second\n---\nbody\n",
+        );
+        assert_eq!(desc(&load_skills(&home, &root), "one"), "second", "内容改动应失效");
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // 新增技能目录也要失效。
+        write(
+            &home.join(".config/bingo/skills/two/SKILL.md"),
+            "---\ndescription: added\n---\nbody\n",
+        );
+        let after = load_skills(&home, &root);
+        assert!(after.iter().any(|s| s.name == "two"), "新增技能应被看到");
         let _ = std::fs::remove_dir_all(&root);
     }
 

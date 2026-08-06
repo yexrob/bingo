@@ -20,6 +20,13 @@ pub async fn assemble_tools(
     session: &Arc<Session>,
     on_warning: &mut (dyn Fn(String) + Send),
 ) -> Vec<Box<dyn Tool>> {
+    // 技能扫描是同步 IO：挪出运行时线程（缓存命中时也只是几次 stat）。
+    let home = session.home.clone();
+    let skills = tokio::task::spawn_blocking(move || {
+        crate::skills::load_skills(&home, &std::env::current_dir().unwrap_or_default())
+    })
+    .await
+    .unwrap_or_default();
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(BashTool::new()),
         Box::new(ReadTool::new()),
@@ -35,10 +42,7 @@ pub async fn assemble_tools(
         Box::new(TaskGetTool),
         Box::new(TaskListTool),
         Box::new(AskUserQuestionTool),
-        Box::new(SkillTool::new(crate::skills::load_skills(
-            &session.home,
-            &std::env::current_dir().unwrap_or_default(),
-        ))),
+        Box::new(SkillTool::new(skills)),
     ];
     let mcp = {
         let mut mgr = session.runtime.mcp.lock().await;

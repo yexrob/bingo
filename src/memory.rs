@@ -4,6 +4,8 @@ use crate::api::types::{Message, Request};
 use crate::query::Session;
 
 const MEMORY_MAX_LINES: usize = 200;
+/// 提取请求的对话正文上限（字符）。
+const MAX_EXTRACT_PROMPT_CHARS: usize = 60_000;
 
 const EXTRACT_PROMPT: &str = "\
 你是记忆提取器。从下面的 agent 对话中提取值得长期记住的项目事实：
@@ -20,13 +22,28 @@ pub fn memdir_dir(home: &Path) -> PathBuf {
     home.join(".config").join("bingo").join("memdir")
 }
 
-/// 本项目对应的记忆文件：<slug>.md。
+/// 完整路径的 FNV-1a 64 摘要（跨进程/跨版本稳定，故不用 DefaultHasher）。
+fn path_hash(path: &Path) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in path.as_os_str().as_encoded_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// 本项目对应的记忆文件：`<目录名>-<完整路径哈希>.md`。
+/// 只用目录名会让同名项目（如多个 `web`）互相串味。
 pub fn memory_file(home: &Path, cwd: &Path) -> PathBuf {
-    let slug = cwd
+    let name = cwd
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "root".to_string());
-    memdir_dir(home).join(format!("{slug}.md"))
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    memdir_dir(home).join(format!("{name}-{}.md", path_hash(cwd)))
 }
 
 /// 读取本项目记忆（不存在则 None）。
@@ -47,7 +64,13 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
         return;
     }
     let mut prompt = String::from(EXTRACT_PROMPT);
+    let mut truncated = false;
     for message in messages {
+        // 尾部截断：长会话的完整转录会撑爆提取请求。
+        if prompt.chars().count() >= MAX_EXTRACT_PROMPT_CHARS {
+            truncated = true;
+            break;
+        }
         let text = message
             .content
             .iter()
@@ -63,6 +86,13 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
         if !text.trim().is_empty() {
             prompt.push_str(&format!("\n---\n{text}"));
         }
+    }
+    if prompt.chars().count() > MAX_EXTRACT_PROMPT_CHARS {
+        prompt = prompt.chars().take(MAX_EXTRACT_PROMPT_CHARS).collect();
+        truncated = true;
+    }
+    if truncated {
+        prompt.push_str("\n---\n[对话过长，已截断]");
     }
 
     let request = Request {
@@ -129,9 +159,25 @@ mod tests {
     fn memory_file_path() {
         let home = Path::new("/tmp/h");
         let cwd = Path::new("/tmp/h/proj");
-        assert_eq!(
-            memory_file(home, cwd),
-            Path::new("/tmp/h/.config/bingo/memdir/proj.md")
+        let path = memory_file(home, cwd);
+        assert!(path.starts_with("/tmp/h/.config/bingo/memdir"));
+        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        assert!(name.starts_with("proj-") && name.ends_with(".md"), "{name}");
+        // 同一路径稳定。
+        assert_eq!(memory_file(home, cwd), path);
+    }
+
+    /// L6 回归：同名目录的不同项目不得共用记忆文件。
+    #[test]
+    fn same_dir_name_different_projects_do_not_collide() {
+        let home = Path::new("/tmp/h");
+        let a = memory_file(home, Path::new("/work/alpha/web"));
+        let b = memory_file(home, Path::new("/work/beta/web"));
+        assert_ne!(a, b, "同名 web 目录应有不同记忆文件");
+        assert!(
+            a.file_name().unwrap_or_default().to_string_lossy().starts_with("web-")
+                && b.file_name().unwrap_or_default().to_string_lossy().starts_with("web-"),
+            "仍保留可读的目录名前缀"
         );
     }
 

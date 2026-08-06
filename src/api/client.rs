@@ -14,6 +14,13 @@ pub const MAX_RETRIES: u32 = 5;
 /// 请求整体超时（连接 + 首字节）：服务器无响应时结束等待而不是无限挂。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// 流式 body 空闲超时：连上之后服务端挂死（既不发事件也不断开）时，
+/// headless 会永久阻塞——超过这个静默时长即判定断流。
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// count_tokens 超时：每轮都可能调用，挂死不该拖住整个回合。
+const COUNT_TOKENS_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// 400 上下文超限时重算输出预算的下限。
 const FLOOR_OUTPUT_TOKENS: u32 = 3_000;
 
@@ -223,6 +230,8 @@ impl Client {
     }
 
     /// 非流式补全：返回回复文本（compact 摘要、记忆提取用）。
+    /// 与 stream 一致的退避重试：429/5xx 与瞬时 transport 错误不该直接
+    /// 判定压缩失败（失败会累进熔断计数）。
     pub async fn complete_text(
         &self,
         request: &Request,
@@ -230,24 +239,37 @@ impl Client {
         let mut request = request.clone();
         request.stream = false;
         let base_url = self.current_endpoint().1;
-        let response = tokio::time::timeout(
-            REQUEST_TIMEOUT,
-            self.http
+        let mut attempt = 0;
+        let response = loop {
+            let builder = self
+                .http
                 .post(format!("{base_url}/v1/messages"))
                 .headers(self.headers()?)
-                .json(&request)
-                .send(),
-        )
-        .await
-        .map_err(|_| ClientError::Timeout)??;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status: status.as_u16(),
-                body,
-            });
-        }
+                .json(&request);
+            match tokio::time::timeout(REQUEST_TIMEOUT, builder.send()).await {
+                Ok(Ok(response)) if response.status().is_success() => break response,
+                Ok(Ok(response)) if retryable(&response.status()) && attempt < MAX_RETRIES => {
+                    let retry_after = response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map(Duration::from_secs);
+                    tokio::time::sleep(retry_after.unwrap_or_else(|| backoff(attempt))).await;
+                }
+                Ok(Ok(response)) => {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(ClientError::Api { status: status.as_u16(), body });
+                }
+                Ok(Err(_transport)) if attempt < MAX_RETRIES => {
+                    tokio::time::sleep(backoff(attempt)).await;
+                }
+                Ok(Err(transport)) => return Err(ClientError::Transport(transport)),
+                Err(_) => return Err(ClientError::Timeout),
+            }
+            attempt += 1;
+        };
         let body: serde_json::Value = response.json().await?;
         let mut text = String::new();
         if let Some(blocks) = body.get("content").and_then(|c| c.as_array()) {
@@ -311,13 +333,16 @@ impl Client {
             "system": system,
             "messages": messages,
         });
-        let response = self
-            .http
-            .post(format!("{}/v1/messages/count_tokens", self.current_endpoint().1))
-            .headers(self.headers()?)
-            .json(&payload)
-            .send()
-            .await?;
+        let response = tokio::time::timeout(
+            COUNT_TOKENS_TIMEOUT,
+            self.http
+                .post(format!("{}/v1/messages/count_tokens", self.current_endpoint().1))
+                .headers(self.headers()?)
+                .json(&payload)
+                .send(),
+        )
+        .await
+        .map_err(|_| ClientError::Timeout)??;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -341,28 +366,52 @@ impl Client {
         let mut body = response.bytes_stream();
         async_stream::stream! {
             loop {
-                match body.next().await {
-                    Some(Ok(chunk)) => {
-                        for frame in parser.feed(&chunk) {
-                            match parse_sse_event(&frame.event, &frame.data) {
-                                Ok(Some(event)) => yield Ok(event),
-                                Ok(None) => {}
-                                Err(message) => {
-                                    yield Err(ClientError::Stream(message));
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    Some(Err(e)) => {
+                let chunk = match next_with_idle(&mut body, STREAM_IDLE_TIMEOUT).await {
+                    Ok(Some(Ok(chunk))) => chunk,
+                    Ok(Some(Err(e))) => {
                         yield Err(ClientError::Transport(e));
                         return;
                     }
-                    None => break,
+                    Ok(None) => break,
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                };
+                let frames = match parser.feed(&chunk) {
+                    Ok(frames) => frames,
+                    Err(message) => {
+                        yield Err(ClientError::Stream(message));
+                        return;
+                    }
+                };
+                for frame in frames {
+                    match parse_sse_event(&frame.event, &frame.data) {
+                        Ok(Some(event)) => yield Ok(event),
+                        Ok(None) => {}
+                        Err(message) => {
+                            yield Err(ClientError::Stream(message));
+                            return;
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+/// `stream.next()` 的空闲超时包装：idle 内一个事件都没有即判定断流，
+/// 免得服务端挂死时 headless 永久阻塞。
+async fn next_with_idle<S, T>(
+    body: &mut S,
+    idle: Duration,
+) -> Result<Option<T>, ClientError>
+where
+    S: futures_util::Stream<Item = T> + Unpin,
+{
+    tokio::time::timeout(idle, body.next())
+        .await
+        .map_err(|_| ClientError::Stream(format!("no stream data for {idle:?}: server stalled")))
 }
 
 /// 指数退避 + jitter：500ms 起，cap 32s。
@@ -385,17 +434,44 @@ fn retryable(status: &reqwest::StatusCode) -> bool {
     status.is_server_error() || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
 
-/// 从 400 错误体解析 (input_tokens, context_window)：取消息尾部 "A + B > C" 的 A 与 C。
+/// 从 400 错误体解析 (input_tokens, context_window)：定位 "A + B > C"
+/// 模式邻近的三个数字，而不是取全文倒数第三个（request-id 等会污染它）。
+/// 单段解析失败（溢出/缺字段）只跳过该候选，不让整体变 None。
 fn parse_context_limit(body: &str) -> Option<(u64, u64)> {
-    let nums: Vec<u64> = body
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.parse().ok())
-        .collect::<Option<Vec<_>>>()?;
     // "input length and max_tokens exceed context limit: 12345 + 64000 > 200000"
-    let input = *nums.get(nums.len().checked_sub(3)?)?;
-    let window = *nums.last()?;
-    (input < window).then_some((input, window))
+    for (idx, _) in body.match_indices('>') {
+        let Some(window) = leading_number(&body[idx + 1..]) else {
+            continue;
+        };
+        let head = body[..idx].trim_end();
+        let Some((_budget, digits)) = trailing_number(head) else {
+            continue;
+        };
+        let Some(head) = head[..head.len() - digits].trim_end().strip_suffix('+') else {
+            continue;
+        };
+        let Some((input, _)) = trailing_number(head.trim_end()) else {
+            continue;
+        };
+        if input < window {
+            return Some((input, window));
+        }
+    }
+    None
+}
+
+/// 跳过前导空白后开头的整数。
+fn leading_number(text: &str) -> Option<u64> {
+    let text = text.trim_start();
+    let digits = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    text.get(..digits)?.parse().ok()
+}
+
+/// 结尾的整数及其字节长度。
+fn trailing_number(text: &str) -> Option<(u64, usize)> {
+    let digits = text.len() - text.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    let value: u64 = text.get(text.len() - digits..)?.parse().ok()?;
+    Some((value, digits))
 }
 
 /// 把一条完整 assistant 回复的流事件累积成回传消息。
@@ -633,6 +709,44 @@ mod tests {
         assert_eq!(parse_context_limit("400: overloaded"), None);
         // A >= C 不可能：保护性拒绝
         assert_eq!(parse_context_limit("900000 + 64000 > 200000"), None);
+    }
+
+    /// request-id 等无关数字与溢出数字都不得污染解析。
+    #[test]
+    fn context_limit_ignores_unrelated_numbers() {
+        let body = concat!(
+            r#"{"request_id":"req_0129384756","error":{"type":"invalid_request_error","#,
+            r#""message":"input length and max_tokens exceed context limit: 150000 + 64000 > 200000"}}"#
+        );
+        assert_eq!(parse_context_limit(body), Some((150000, 200000)));
+
+        // 溢出 u64 的无关数字只跳过该段，不让整体变 None。
+        let overflowing = "trace 99999999999999999999999 \
+             input length and max_tokens exceed context limit: 150000 + 64000 > 200000";
+        assert_eq!(parse_context_limit(overflowing), Some((150000, 200000)));
+    }
+
+    /// 服务端连上后不再发事件：空闲超时判定断流，而不是永久阻塞。
+    #[tokio::test]
+    async fn idle_stream_times_out() {
+        let mut stalled = futures_util::stream::pending::<u8>();
+        let err = next_with_idle(&mut stalled, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, ClientError::Stream(m) if m.contains("server stalled")), "{err}");
+    }
+
+    #[tokio::test]
+    async fn live_stream_passes_items_through() {
+        let mut live = futures_util::stream::iter([1u8, 2]);
+        let idle = Duration::from_secs(30);
+        assert_eq!(next_with_idle(&mut live, idle).await.unwrap(), Some(1));
+        assert_eq!(next_with_idle(&mut live, idle).await.unwrap(), Some(2));
+        assert_eq!(
+            next_with_idle(&mut live, idle).await.unwrap(),
+            None,
+            "流结束返回 None 而不是超时"
+        );
     }
 
     fn ev(event: &str, data: &str) -> StreamEvent {

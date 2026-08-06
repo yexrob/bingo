@@ -74,6 +74,37 @@ pub enum NotifyCondition {
     Errors,
 }
 
+/// 单条信号文本上限：`tail -f` 一个 tick 可产出 MB 级错误日志，
+/// 不设限会直灌模型上下文。
+const MAX_SIGNAL_CHARS: usize = 500;
+/// 一轮内参与条件匹配的最大命中行数（超出只报计数）。
+const MAX_MATCH_HITS: usize = 20;
+/// feed 缓冲上限：无人 drain（如轮询未启动）时丢弃最旧行，不无界增长。
+const MAX_FEED_BUFFER_LINES: usize = 1000;
+/// 保留的终态条目上限：超出后清理最旧的终态条目。
+const MAX_TERMINAL_ENTRIES: usize = 64;
+
+/// 按字符截断（多字节安全）并标注。
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{head}…[truncated]")
+}
+
+/// 命中行聚合：限行数 + 限长度，防单条信号灌爆上下文。
+/// 预留额度给条件前缀与命中计数，使聚合结果整体仍在 MAX_SIGNAL_CHARS 内。
+fn join_hits(hits: &[&str]) -> String {
+    const HITS_BUDGET: usize = MAX_SIGNAL_CHARS - 120;
+    let shown: Vec<&str> = hits.iter().take(MAX_MATCH_HITS).copied().collect();
+    let mut text = truncate_chars(&shown.join(" | "), HITS_BUDGET);
+    if hits.len() > shown.len() {
+        text.push_str(&format!(" …（共 {} 行命中）", hits.len()));
+    }
+    text
+}
+
 /// 条件的轮询状态。
 struct ConditionState {
     cond: NotifyCondition,
@@ -100,7 +131,7 @@ impl ConditionState {
                     Some(format!(
                         "命中条件 {}：{}",
                         patterns.join("/"),
-                        hits.join(" | ")
+                        join_hits(&hits)
                     ))
                 }
             }
@@ -117,7 +148,7 @@ impl ConditionState {
                 if hits.is_empty() {
                     None
                 } else {
-                    Some(format!("命中条件 /{pattern}/：{}", hits.join(" | ")))
+                    Some(format!("命中条件 /{pattern}/：{}", join_hits(&hits)))
                 }
             }
             NotifyCondition::Errors => {
@@ -129,7 +160,7 @@ impl ConditionState {
                 if hits.is_empty() {
                     None
                 } else {
-                    Some(format!("检测到错误行：{}", hits.join(" | ")))
+                    Some(format!("检测到错误行：{}", join_hits(&hits)))
                 }
             }
             NotifyCondition::LinesOver(n) => {
@@ -323,6 +354,11 @@ impl WatchRegistry {
         };
         entry.total_lines += text.lines().count();
         entry.feed_buffer.push(text.to_string());
+        // 无人 drain 时丢弃最旧行：缓冲不无界增长。
+        if entry.feed_buffer.len() > MAX_FEED_BUFFER_LINES {
+            let overflow = entry.feed_buffer.len() - MAX_FEED_BUFFER_LINES;
+            entry.feed_buffer.drain(..overflow);
+        }
     }
 
     /// 匹配本轮喂入内容与通知条件，返回命中信号（增量条件逐条聚合）。
@@ -345,6 +381,8 @@ impl WatchRegistry {
     /// 条件信号：实现者检测到满足的条件（如 log 出现错误）时调用，
     /// 无条件入通知队列 + 广播（不改变状态）。
     pub fn emit_signal(&self, id: WatchId, signal: String, detail: Option<String>) {
+        // 单条信号上限：任何调用方喂来的长文本都在此收口。
+        let signal = truncate_chars(&signal, MAX_SIGNAL_CHARS);
         let (label, state, entry_detail) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = inner.entries.get_mut(&id) else {
@@ -386,13 +424,13 @@ impl WatchRegistry {
         });
     }
 
-    /// 当前是否终态（轮询循环据此停止）。
+    /// 轮询循环是否该停：已入终态，或条目已被回收（回收后再轮询只会空转）。
     pub fn is_terminal(&self, id: WatchId) -> bool {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
             .entries
             .get(&id)
-            .is_some_and(|e| e.state.is_terminal())
+            .is_none_or(|e| e.state.is_terminal())
     }
 
     /// 实现者主动更新状态（无 interval 或轮询之外的即时变化）。
@@ -421,6 +459,11 @@ impl WatchRegistry {
             entry.payload = payload.clone();
             let label = entry.label.clone();
             let notify = state.is_terminal() || state == WatchState::Idle;
+            if state.is_terminal() {
+                // 终态后不再喂内容也不再匹配条件：压缩条目，释放缓冲。
+                entry.feed_buffer = Vec::new();
+                entry.conditions = Vec::new();
+            }
             if notify {
                 inner.notifications.push_back(Notification {
                     id,
@@ -430,6 +473,9 @@ impl WatchRegistry {
                     payload: payload.clone(),
                     signal: None,
                 });
+            }
+            if state.is_terminal() {
+                prune_terminal_entries(&mut inner);
             }
             label
         };
@@ -518,6 +564,25 @@ impl WatchRegistry {
             out.push(format_notification(id, label, count, last));
         }
         out
+    }
+}
+
+/// 终态条目回收：只保留最近 MAX_TERMINAL_ENTRIES 个终态条目
+/// （会话长跑时 entries 不再单调增长；通知已各自持有副本，回收不丢内容）。
+fn prune_terminal_entries(inner: &mut Inner) {
+    let mut terminal: Vec<(WatchId, Instant)> = inner
+        .entries
+        .iter()
+        .filter(|(_, e)| e.state.is_terminal())
+        .map(|(id, e)| (*id, e.born))
+        .collect();
+    if terminal.len() <= MAX_TERMINAL_ENTRIES {
+        return;
+    }
+    terminal.sort_by_key(|(_, born)| *born);
+    let drop_count = terminal.len() - MAX_TERMINAL_ENTRIES;
+    for (id, _) in terminal.into_iter().take(drop_count) {
+        inner.entries.remove(&id);
     }
 }
 
@@ -722,6 +787,100 @@ mod tests {
         assert!(signals[0].contains("boom"), "{}", signals[0]);
         // 缓冲已清：再次 match 无信号
         assert!(reg.match_conditions(id).is_empty(), "buffer drained");
+    }
+
+    fn running_watch(label: &'static str) -> Box<FakeWatch> {
+        Box::new(FakeWatch {
+            label,
+            sequence: vec![WatchPoll {
+                state: WatchState::Running,
+                detail: None,
+                payload: None,
+                signal: None,
+            }],
+            index: AtomicUsize::new(0),
+            interval: None,
+        })
+    }
+
+    /// M3 回归：一个 tick 里 MB 级错误日志不得整串灌进信号。
+    #[test]
+    fn signal_text_is_bounded() {
+        let mut cs = ConditionState::new(NotifyCondition::Errors);
+        let flood: Vec<String> = (0..5000)
+            .map(|i| format!("ERROR line {i} {}", "x".repeat(200)))
+            .collect();
+        let signal = cs.match_buffer(&flood, flood.len()).unwrap_or_default();
+        assert!(
+            signal.chars().count() <= MAX_SIGNAL_CHARS + 32,
+            "信号长度 {} 应受限",
+            signal.chars().count()
+        );
+        assert!(signal.contains("共 5000 行命中"), "标注被截断的总数: {signal}");
+    }
+
+    #[test]
+    fn emit_signal_truncates_long_text() {
+        let reg = watch();
+        let id = reg.register_with_conditions(running_watch("noisy"), Vec::new());
+        reg.emit_signal(id, "巨".repeat(10_000), None);
+        let notes = reg.consume_notifications();
+        assert!(notes.iter().any(|n| n.contains("[truncated]")), "{notes:?}");
+        assert!(
+            notes.iter().all(|n| n.chars().count() < MAX_SIGNAL_CHARS + 200),
+            "通知长度受限"
+        );
+    }
+
+    /// S6 回归：无人 drain 的 feed 缓冲不得无界增长。
+    #[test]
+    fn feed_buffer_is_bounded_without_drain() {
+        let reg = watch();
+        let id = reg.register_with_conditions(running_watch("flood"), vec![NotifyCondition::Errors]);
+        for i in 0..(MAX_FEED_BUFFER_LINES * 3) {
+            reg.feed_content(id, &format!("line {i}\n"));
+        }
+        let buffered = {
+            let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.entries.get(&id).map(|e| e.feed_buffer.len()).unwrap_or(0)
+        };
+        assert!(buffered <= MAX_FEED_BUFFER_LINES, "缓冲 {buffered} 行应受限");
+        // 累计行数仍如实统计（LinesOver 条件的语义）。
+        let total = {
+            let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.entries.get(&id).map(|e| e.total_lines).unwrap_or(0)
+        };
+        assert_eq!(total, MAX_FEED_BUFFER_LINES * 3);
+    }
+
+    /// S6 回归：终态后释放缓冲，且终态条目不无限累积。
+    #[test]
+    fn terminal_entries_are_compacted_and_pruned() {
+        let reg = watch();
+        let id = reg.register_with_conditions(running_watch("done"), vec![NotifyCondition::Errors]);
+        reg.feed_content(id, "some output\n");
+        reg.set_state(id, WatchState::Done, Some("ok".into()), None);
+        {
+            let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = inner.entries.get(&id).unwrap_or_else(|| unreachable!());
+            assert!(entry.feed_buffer.is_empty(), "终态释放缓冲");
+            assert!(entry.conditions.is_empty(), "终态释放条件");
+        }
+        for _ in 0..(MAX_TERMINAL_ENTRIES * 2) {
+            let extra = reg.register_with_conditions(running_watch("x"), Vec::new());
+            reg.set_state(extra, WatchState::Done, Some("ok".into()), None);
+        }
+        {
+            let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                inner.entries.len() <= MAX_TERMINAL_ENTRIES + 1,
+                "终态条目应被回收，当前 {}",
+                inner.entries.len()
+            );
+        }
+        // 被回收的条目必须让轮询循环停下，不能空转。
+        assert!(reg.is_terminal(id), "已回收的条目视为终态");
+        assert!(reg.is_terminal(WatchId(999_999)), "不存在的条目视为终态");
     }
 
     #[tokio::test]

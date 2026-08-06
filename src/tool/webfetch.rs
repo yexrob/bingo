@@ -217,6 +217,29 @@ fn upgrade_https(url: &str) -> String {
     parsed.to_string()
 }
 
+/// 流式读 body 并在读取过程中强制上限：无 Content-Length 的响应
+/// 也不会先读满内存再检查（读超即断）。
+async fn read_body_capped(response: reqwest::Response) -> Result<Vec<u8>, ToolError> {
+    use futures_util::StreamExt;
+    let read = async {
+        let mut stream = response.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| ToolError::failed(format!("fetch body failed: {e}")))?;
+            if buf.len() as u64 + chunk.len() as u64 > MAX_CONTENT_BYTES {
+                return Err(ToolError::failed(format!(
+                    "content too large (exceeded limit {MAX_CONTENT_BYTES} bytes while streaming)"
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(buf)
+    };
+    tokio::time::timeout(FETCH_TIMEOUT, read)
+        .await
+        .map_err(|_| ToolError::failed("fetch body timed out".to_string()))?
+}
+
 /// 重定向检查：协议/端口相同、无凭据、
 /// hostname 去 www 后相同（路径可任意变化）。
 fn is_permitted_redirect(original: &reqwest::Url, redirect: &reqwest::Url) -> bool {
@@ -314,10 +337,13 @@ async fn fetch(
             )));
         }
 
-        let content_length = response.content_length().unwrap_or(u64::MAX);
-        if content_length > MAX_CONTENT_BYTES {
+        // 预检只在服务器给了 Content-Length 时有意义：
+        // chunked 响应没有该头，曾被 unwrap_or(u64::MAX) 当成超大而 100% 失败。
+        if let Some(len) = response.content_length()
+            && len > MAX_CONTENT_BYTES
+        {
             return Err(ToolError::failed(format!(
-                "content too large ({content_length} bytes, limit {MAX_CONTENT_BYTES})"
+                "content too large ({len} bytes, limit {MAX_CONTENT_BYTES})"
             )));
         }
         let content_type = response
@@ -326,17 +352,7 @@ async fn fetch(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
-        let bytes = tokio::time::timeout(FETCH_TIMEOUT, response.bytes())
-            .await
-            .map_err(|_| ToolError::failed("fetch body timed out".to_string()))?
-            .map_err(|e| ToolError::failed(format!("fetch body failed: {e}")))?;
-        let bytes = bytes.to_vec();
-        if bytes.len() as u64 > MAX_CONTENT_BYTES {
-            return Err(ToolError::failed(format!(
-                "content too large ({} bytes, limit {MAX_CONTENT_BYTES})",
-                bytes.len()
-            )));
-        }
+        let bytes = read_body_capped(response).await?;
         let html = String::from_utf8_lossy(&bytes).into_owned();
         let markdown = if content_type.contains("text/html") {
             html2md::parse_html(&html)
@@ -387,6 +403,68 @@ mod tests {
         assert!(!is_permitted_redirect(&a, &other));
         let http = reqwest::Url::parse("http://example.com/x").unwrap();
         assert!(!is_permitted_redirect(&a, &http));
+    }
+
+    /// 最小 HTTP 服务器：返回 chunked（无 Content-Length）响应。
+    /// total_bytes 为要写出的正文总量。
+    async fn chunked_server(total_bytes: usize) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|_| unreachable!());
+        let addr = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut discard = [0u8; 1024];
+            let _ = socket.read(&mut discard).await;
+            let header = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\
+                          Transfer-Encoding: chunked\r\n\r\n";
+            if socket.write_all(header.as_bytes()).await.is_err() {
+                return;
+            }
+            let chunk = vec![b'a'; 64 * 1024];
+            let mut written = 0usize;
+            while written < total_bytes {
+                let size = chunk.len().min(total_bytes - written);
+                if socket
+                    .write_all(format!("{size:x}\r\n").as_bytes())
+                    .await
+                    .is_err()
+                    || socket.write_all(&chunk[..size]).await.is_err()
+                    || socket.write_all(b"\r\n").await.is_err()
+                {
+                    return;
+                }
+                written += size;
+            }
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+            let _ = socket.flush().await;
+        });
+        format!("http://{addr}/")
+    }
+
+    /// M2 回归：无 Content-Length 的 chunked 响应曾被当成超大而 100% 失败。
+    #[tokio::test]
+    async fn chunked_response_without_content_length_succeeds() {
+        let url = chunked_server(4096).await;
+        let (content, bytes, code, _, content_type) =
+            fetch(&reqwest::Client::new(), &url, 0).await.unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(bytes, 4096);
+        assert_eq!(content.len(), 4096);
+        assert!(content_type.contains("text/plain"));
+    }
+
+    /// M2 回归：上限在流式读取过程中强制，不是读完才检查。
+    #[tokio::test]
+    async fn oversized_streamed_body_is_rejected() {
+        let url = chunked_server(MAX_CONTENT_BYTES as usize + 512 * 1024).await;
+        let err = fetch(&reqwest::Client::new(), &url, 0)
+            .await
+            .expect_err("超限应报错");
+        assert!(err.to_string().contains("too large"), "{err}");
     }
 
     #[test]

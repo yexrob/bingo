@@ -111,11 +111,24 @@ impl TaskStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(TaskError::Io(e)),
         };
-        match serde_json::from_str(&raw) {
-            Ok(t) => Ok(Some(t)),
+        // 解析失败曾吞成 Ok(None)：任务在列表里静默消失，用户无从知晓。
+        serde_json::from_str(&raw).map(Some).map_err(|e| TaskError::Parse {
+            path: path.display().to_string(),
+            detail: e.to_string(),
+        })
+    }
+
+    /// 原子写：先写临时文件再 rename，半写文件不会被读到。
+    /// `.json.tmp` 不以 `.json` 结尾，不会被 list_ids 收进任务列表。
+    fn write_file(path: &Path, task: &Task) -> Result<(), TaskError> {
+        let body = serde_json::to_string_pretty(task).map_err(TaskError::Serialize)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, body).map_err(TaskError::Io)?;
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
             Err(e) => {
-                eprintln!("[tasks] failed schema validation for {}: {e}", path.display());
-                Ok(None)
+                let _ = std::fs::remove_file(&tmp);
+                Err(TaskError::Io(e))
             }
         }
     }
@@ -136,8 +149,7 @@ impl TaskStore {
         if path.exists() {
             return Err(TaskError::CreateConflict(id));
         }
-        std::fs::write(&path, serde_json::to_string_pretty(&t).map_err(TaskError::Serialize)?)
-            .map_err(TaskError::Io)?;
+        Self::write_file(&path, &t)?;
         Ok(id)
     }
 
@@ -154,6 +166,9 @@ impl TaskStore {
         let Some(mut t) = Self::read_file(&path)? else {
             return Ok(None);
         };
+        // 旧值必须在 patch 之前克隆：之后再克隆得到的是新值，
+        // statusChange 事件会退化成 from == to。
+        let old = t.clone();
         if let Some(subject) = &patch.subject {
             t.subject = subject.clone();
         }
@@ -178,9 +193,7 @@ impl TaskStore {
                 }
             }
         }
-        let old = t.clone();
-        std::fs::write(&path, serde_json::to_string_pretty(&t).map_err(TaskError::Serialize)?)
-            .map_err(TaskError::Io)?;
+        Self::write_file(&path, &t)?;
         Ok(Some(old))
     }
 
@@ -205,11 +218,7 @@ impl TaskStore {
                     let mut t2 = t;
                     t2.blocks = blocks;
                     t2.blocked_by = blocked_by;
-                    std::fs::write(
-                        &tpath,
-                        serde_json::to_string_pretty(&t2).map_err(TaskError::Serialize)?,
-                    )
-                    .map_err(TaskError::Io)?;
+                    Self::write_file(&tpath, &t2)?;
                 }
             }
         }
@@ -233,10 +242,8 @@ impl TaskStore {
             changed = true;
         }
         if changed {
-            std::fs::write(&pa, serde_json::to_string_pretty(&ta).map_err(TaskError::Serialize)?)
-                .map_err(TaskError::Io)?;
-            std::fs::write(&pb, serde_json::to_string_pretty(&tb).map_err(TaskError::Serialize)?)
-                .map_err(TaskError::Io)?;
+            Self::write_file(&pa, &ta)?;
+            Self::write_file(&pb, &tb)?;
         }
         Ok(changed)
     }
@@ -321,6 +328,8 @@ pub enum TaskError {
     Serialize(serde_json::Error),
     #[error("task {0} already exists")]
     CreateConflict(String),
+    #[error("task file {path} is not valid task JSON: {detail}")]
+    Parse { path: String, detail: String },
 }
 
 #[cfg(test)]
@@ -445,6 +454,63 @@ mod tests {
             let list = store.list().await.unwrap();
             assert_eq!(list.len(), 1);
             assert_eq!(list[0].subject, "visible");
+            let _ = std::fs::remove_dir_all(&tmp);
+        });
+    }
+
+    /// L1 回归：update 返回的旧值曾在 patch 之后克隆 → statusChange from == to。
+    #[test]
+    fn update_returns_pre_patch_snapshot() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let tmp = env::temp_dir().join(format!("bingo-tasks-old-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let store = store_in(&tmp);
+            let id = store.create(&task("first")).await.unwrap();
+            let old = store
+                .update(
+                    &id,
+                    &TaskPatch {
+                        status: Some(TaskStatus::InProgress),
+                        subject: Some("renamed".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(old.status, TaskStatus::Pending, "旧值是 patch 之前的状态");
+            assert_eq!(old.subject, "first", "旧值是 patch 之前的标题");
+            let now = store.get(&id).await.unwrap().unwrap();
+            assert_eq!(now.status, TaskStatus::InProgress);
+            assert_eq!(now.subject, "renamed");
+            let _ = std::fs::remove_dir_all(&tmp);
+        });
+    }
+
+    /// L5 回归：损坏的任务文件报错而非静默消失；写入走 tmp + rename。
+    #[test]
+    fn corrupt_task_file_reports_error_and_writes_are_atomic() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let tmp = env::temp_dir().join(format!("bingo-tasks-corrupt-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let store = store_in(&tmp);
+            let id = store.create(&task("first")).await.unwrap();
+            // 写入不留临时文件残骸。
+            let leftovers = std::fs::read_dir(&store.dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+                .count();
+            assert_eq!(leftovers, 0, "rename 后无 .tmp 残留");
+
+            std::fs::write(store.dir.join(format!("{id}.json")), "{ not json").unwrap();
+            assert!(
+                matches!(store.get(&id).await, Err(TaskError::Parse { .. })),
+                "解析失败必须报错"
+            );
+            assert!(store.list().await.is_err(), "列表也不吞错");
             let _ = std::fs::remove_dir_all(&tmp);
         });
     }

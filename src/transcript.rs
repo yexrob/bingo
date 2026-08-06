@@ -134,12 +134,27 @@ impl Transcript {
     }
 
     /// 读取全部历史消息（--continue 恢复用）。
+    /// 坏行跳过并计数告警：一行截断的 JSONL 不该让整个会话不可恢复。
     pub fn load_messages(&self) -> Result<Vec<Message>, TranscriptError> {
         let content = std::fs::read_to_string(&self.path)?;
-        content
-            .lines()
-            .map(|line| Ok(serde_json::from_str::<Message>(line)?))
-            .collect()
+        let mut messages = Vec::new();
+        let mut skipped = 0usize;
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Message>(line) {
+                Ok(message) => messages.push(message),
+                Err(_) => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            eprintln!(
+                "[bingo] warning: skipped {skipped} unreadable line(s) in {}",
+                self.path.display()
+            );
+        }
+        Ok(messages)
     }
 }
 
@@ -167,6 +182,37 @@ mod tests {
 
         let latest = latest(&home).unwrap().unwrap();
         assert_eq!(latest.load_messages().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 一行坏 JSONL 不得让整个会话不可恢复：跳过坏行，其余照常载入。
+    #[test]
+    fn load_skips_corrupt_lines() {
+        let tmp = std::env::temp_dir().join(format!("bingo-transcript-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let transcript = create(&home, &tmp).unwrap();
+        let good = Message {
+            role: Role::User,
+            content: vec![crate::api::types::ContentBlock::Text { text: "hi".into() }],
+        };
+        transcript.append(&good).unwrap();
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(transcript.path())
+                .unwrap();
+            writeln!(file, "{{\"role\":\"user\",\"content\":[{{\"type\":").unwrap();
+            writeln!(file).unwrap();
+        }
+        transcript.append(&good).unwrap();
+
+        let messages = transcript.load_messages().unwrap();
+        assert_eq!(messages.len(), 2, "坏行跳过，好行全留");
+        assert_eq!(messages[0], good);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -36,10 +36,40 @@ struct HookInput<'a> {
     permission_mode: &'a str,
 }
 
+/// matcher 正则缓存：编译一次，编译失败只告警一次（None = 退回全等比较）。
+static MATCHER_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Option<regex::Regex>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// matcher 语义：整串锚定的正则（`Edit|Write`、`mcp__.*` 等）。
+/// 空 matcher 匹配一切；正则编译失败退回全等比较并告警一次。
+fn matcher_matches(matcher: &str, tool_name: &str) -> bool {
+    if matcher.is_empty() {
+        return true;
+    }
+    let mut cache = MATCHER_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let compiled = cache.entry(matcher.to_string()).or_insert_with(|| {
+        match regex::Regex::new(&format!("^(?:{matcher})$")) {
+            Ok(re) => Some(re),
+            Err(e) => {
+                eprintln!(
+                    "[bingo] warning: hook matcher {matcher:?} is not a valid regex ({e}); \
+                     falling back to exact match"
+                );
+                None
+            }
+        }
+    });
+    match compiled {
+        Some(re) => re.is_match(tool_name),
+        None => matcher == tool_name,
+    }
+}
+
 fn matched<'a>(rules: &'a [HookRule], tool_name: &str) -> Vec<&'a HookRule> {
     rules
         .iter()
-        .filter(|rule| rule.matcher.is_empty() || rule.matcher == tool_name)
+        .filter(|rule| matcher_matches(&rule.matcher, tool_name))
         .collect()
 }
 
@@ -80,24 +110,33 @@ async fn run_hook_with_timeout(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // 超时后 future drop 即杀掉 hook 进程，不留残留。
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| HookError::Failed(format!("spawn failed: {e}")))?;
 
-    let stdin = child
+    let mut stdin = child
         .stdin
         .take()
         .ok_or_else(|| HookError::Failed("no stdin".into()))?;
     let input_text = input.to_string();
-    use tokio::io::AsyncWriteExt;
-    let mut stdin = stdin;
-    if let Err(e) = stdin.write_all(input_text.as_bytes()).await {
-        eprintln!("[bingo] warning: failed to write hook stdin: {e}");
-    }
-    drop(stdin);
 
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|_| HookError::Failed(format!("hook timed out: {command}")))?;
+    // 写 stdin 必须与 wait 同处一个 timeout 且并发：大 tool_input 超过管道
+    // 缓冲、hook 又不读 stdin 时，顺序写入会永久阻塞整个回合。
+    let output = tokio::time::timeout(timeout, async move {
+        use tokio::io::AsyncWriteExt;
+        let write = async {
+            if let Err(e) = stdin.write_all(input_text.as_bytes()).await {
+                eprintln!("[bingo] warning: failed to write hook stdin: {e}");
+            }
+            // 关闭管道，hook 读到 EOF。
+            drop(stdin);
+        };
+        let (_, output) = tokio::join!(write, child.wait_with_output());
+        output
+    })
+    .await
+    .map_err(|_| HookError::Failed(format!("hook timed out: {command}")))?;
     let output = output.map_err(|e| HookError::Failed(format!("wait failed: {e}")))?;
 
     let code = output.status.code().unwrap_or(-1);
@@ -536,6 +575,85 @@ mod tests {
         .unwrap();
         let blocking = run_stop_hooks(&config, "default").await;
         assert_eq!(blocking.as_deref(), Some("review pending"));
+    }
+
+    /// 回归：hook 不读 stdin 且 tool_input 超过管道缓冲（64KB）时曾永久死锁。
+    #[tokio::test]
+    async fn large_stdin_does_not_deadlock_when_hook_ignores_it() {
+        let config = config_with("echo '{}'");
+        let huge = "x".repeat(512 * 1024);
+        let done = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_pre_tool_use(
+                &config,
+                "Bash",
+                &serde_json::json!({"command": huge}),
+                "default",
+            ),
+        )
+        .await;
+        let (behavior, _, _) = done.unwrap_or_else(|_| unreachable!("hook stdin 写入死锁"));
+        assert_eq!(behavior, PermissionBehavior::Allow);
+    }
+
+    /// 超时的 hook 不阻断回合，且进程不残留（kill_on_drop）。
+    #[tokio::test]
+    async fn hook_timeout_is_reported_and_does_not_hang() {
+        let started = std::time::Instant::now();
+        let result = run_hook_with_timeout(
+            "sleep 30",
+            &serde_json::json!({"hook_event_name": "Test"}),
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(matches!(result, Err(HookError::Failed(ref m)) if m.contains("timed out")));
+        assert!(started.elapsed() < Duration::from_secs(5), "超时应立即返回");
+    }
+
+    /// matcher 是整串锚定的正则：`Edit|Write`、`mcp__.*` 生效，不再静默不匹配。
+    #[test]
+    fn matcher_supports_anchored_regex() {
+        assert!(matcher_matches("Edit|Write", "Edit"));
+        assert!(matcher_matches("Edit|Write", "Write"));
+        assert!(!matcher_matches("Edit|Write", "Read"));
+        // 整串锚定：不做子串匹配。
+        assert!(!matcher_matches("Edit", "EditNotebook"));
+        assert!(matcher_matches("mcp__.*", "mcp__files__read"));
+        assert!(!matcher_matches("mcp__.*", "Bash"));
+        assert!(matcher_matches("Bash", "Bash"));
+        // 空 matcher 匹配一切。
+        assert!(matcher_matches("", "Anything"));
+        // 非法正则退回全等。
+        assert!(matcher_matches("Web(Fetch", "Web(Fetch"));
+        assert!(!matcher_matches("Web(Fetch", "WebFetch"));
+    }
+
+    #[tokio::test]
+    async fn regex_matcher_selects_hook_end_to_end() {
+        let config: HooksConfig = serde_json::from_value(serde_json::json!({
+            "PreToolUse": [{
+                "matcher": "Edit|Write",
+                "hooks": [{"type": "command", "command": r#"echo '{"decision":"deny","reason":"nope"}'"#}]
+            }]
+        }))
+        .unwrap();
+        let (behavior, reason, _) = run_pre_tool_use(
+            &config,
+            "Write",
+            &serde_json::json!({"file_path": "x"}),
+            "default",
+        )
+        .await;
+        assert_eq!(behavior, PermissionBehavior::Deny);
+        assert_eq!(reason, "nope");
+        let (behavior, _, _) = run_pre_tool_use(
+            &config,
+            "Read",
+            &serde_json::json!({"file_path": "x"}),
+            "default",
+        )
+        .await;
+        assert_eq!(behavior, PermissionBehavior::Allow);
     }
 
     #[tokio::test]

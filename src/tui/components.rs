@@ -1,21 +1,29 @@
-//! iocraft UI 层：根组件（全屏布局）+ transcript 滚动区。
+//! iocraft UI 层：根组件 + transcript 区。
 //!
-//! 布局：
+//! 布局（自上而下，chrome = transcript 之外的每一行，见 [`Chrome`]）：
 //!
 //! ```text
-//! ┌─ 根 View（height = 终端行数）──────────────────────────┐
-//! │ [sticky header]（滚动离开底部时：`❯ 首条用户消息`）     │
-//! │ [Transcript]（flex_grow=1，行级切片滚动）              │
-//! │   ├ 欢迎卡片（LogoV2 风）                              │
-//! │   ├ 消息流（用户气泡 / ⏺ 正文 / 活动 / 折叠组）        │
-//! │   └ 权限请求块（渲染在 ScrollBox 内）               │
-//! │ [任务列表]（位置：输入框上方）                      │
-//! │ [通知行]（overlay 位置）                           │
-//! │ [输入行] `❯ {input}▋`                                │
-//! │ [边框行] `╰──────╯`（promptBorder 底部边框）         │
-//! │ [footer]（模式徽标 · 快捷键 byline · 右侧模型名）       │
-//! └──────────────────────────────────────────────────────┘
+//! ┌─ 根 View ─────────────────────────────────────────────┐
+//! │ [Transcript] inline：动态尾部；全屏：视口切片 + sticky │
+//! │ [状态行]  `⠋ Working for 3.0s`（busy 时）              │
+//! │ [任务区]  todo · N/M tasks + 条目                      │
+//! │ [通知行]  `⚠ …`                                        │
+//! │ [输入框]  ╭──╮ / `❯ {input}▋` / ╰──╯                   │
+//! │ [建议区]  slash 建议 或 /model 菜单                     │
+//! │ [footer]  模式徽标 · 快捷键 byline · 模型名             │
+//! │ [ask 行]  `Waiting for permission…`                    │
+//! └───────────────────────────────────────────────────────┘
 //! ```
+//!
+//! inline（默认）模式的三条不变量，坏一条就是闪屏/错位/重复：
+//!
+//! 1. **每个 Row 恰占一行**（[`Row::new`] sanitize 保证）。iocraft 按 `\n`
+//!    量文本高度，段里混进换行，canvas 就比行数模型高。
+//! 2. **canvas 高度 < 终端高度**（[`Chrome`] + [`tail_window`] 保证）。
+//!    等于或超过时 iocraft 改用 `Clear(All)+Clear(Purge)`：整屏闪 + 清空
+//!    用户 scrollback。
+//! 3. **只有定稿内容落盘**（`Chat::advance_flushed`）。流式 markdown 会
+//!    全量重解析，未定稿行一旦进 scrollback 就是改不掉的中间态。
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,62 +32,95 @@ use std::task::{Context, Poll};
 use iocraft::prelude::*;
 use tokio::sync::mpsc;
 
-/// 终端尺寸变化检测：轮询 crossterm 实际尺寸，变化时触发整屏清除重绘。
-/// iocraft 的 diff 写入在 canvas 高度变化/内容整体位移时可能残留旧行
-/// （小窗口 resize 场景）；全清重写绕开 diff 路径。
-///
-/// 首帧（`first=true`）不触发：启动时尺寸检测/首帧 FORCE_FULL_REDRAW
-/// （doc 行数 0→N）不应清屏——inline 模式会清掉 shell 残留内容。
-pub trait UseForceRedrawOnResize: private::Sealed {
-    fn use_force_redraw_on_resize(&mut self);
+/// 组件体 → 重绘 hook 的共享格：hook 只能在注册时拿到值，而 canvas 行数
+/// 要等组件体算完；State 也不能当通道——写 State 会无条件唤醒重渲。
+#[derive(Default)]
+struct RedrawSignal {
+    /// 上一帧 canvas 行数（尾部 + chrome）。
+    shape: std::sync::atomic::AtomicUsize,
+    /// 上一帧绘制时的终端宽度（reflow 补偿 + 尺寸变化检测用）。
+    painted_width: std::sync::atomic::AtomicUsize,
+    /// 上一帧绘制时的终端高度。
+    painted_height: std::sync::atomic::AtomicUsize,
+    /// 本帧终端尺寸有变化（组件体检测——body 是唯一的尺寸权威，
+    /// 清屏与 reflow 补偿因此必然同帧、用同一宽度）。
+    size_changed: std::sync::atomic::AtomicBool,
+    /// 请求本帧整屏清除重画。
+    force: std::sync::atomic::AtomicBool,
 }
 
-mod private {
-    pub trait Sealed {}
-    impl Sealed for iocraft::Hooks<'_, '_> {}
+/// Extra physical rows the previously painted canvas occupies after the
+/// terminal rewrapped it at a narrower width. iocraft emits every canvas row
+/// at full width (empty cells become spaces), so on shrink each logical row
+/// wraps to exactly `ceil(prev_w / new_w)` physical rows, uniformly. The
+/// clamp keeps a pathological ratio from requesting an absurd climb (cursor
+/// movement clamps at the viewport top anyway).
+fn shrink_deficit(prev_w: usize, prev_rows: usize, new_w: usize, height: usize) -> usize {
+    if new_w == 0 || prev_w <= new_w || prev_rows == 0 {
+        return 0;
+    }
+    (prev_rows * (prev_w.div_ceil(new_w) - 1)).min(height.saturating_mul(4))
 }
 
-impl UseForceRedrawOnResize for Hooks<'_, '_> {
-    fn use_force_redraw_on_resize(&mut self) {
-        self.use_hook(|| ForceRedrawOnResize {
-            last: None,
-            changed: false,
-            first: true,
-        });
+/// Whether the terminal rewraps existing lines when its width changes.
+/// Reflowing terminals split the old canvas rows across extra physical
+/// lines, so the inline clear must climb further ([`shrink_deficit`]).
+/// Non-reflowing terminals (plain xterm and kin) truncate instead — the
+/// extra climb would erase flushed transcript content there, so only an
+/// allowlist of known-reflowing terminals gets the compensation.
+fn terminal_reflows(term_program: Option<&str>, term: Option<&str>, in_tmux: bool) -> bool {
+    if in_tmux {
+        // tmux rewraps pane content itself regardless of the outer terminal.
+        return true;
+    }
+    match term_program {
+        Some("ghostty") | Some("kitty") | Some("iTerm.app") | Some("WezTerm")
+        | Some("Apple_Terminal") | Some("vscode") => true,
+        _ => term.is_some_and(|t| {
+            t.starts_with("xterm-kitty")
+                || t.starts_with("xterm-ghostty")
+                || t.starts_with("alacritty")
+        }),
     }
 }
 
-struct ForceRedrawOnResize {
-    last: Option<(u16, u16)>,
-    changed: bool,
+fn terminal_reflows_env() -> bool {
+    terminal_reflows(
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var("TERM").ok().as_deref(),
+        std::env::var_os("TMUX").is_some(),
+    )
+}
+
+/// 重绘纪律：只有 (a) 本帧有落盘打印（use_output 自己会先清屏）、
+/// (b) 终端尺寸变化、(c) canvas 行数变化 三种情况整屏清除重画。
+///
+/// 其余同形内容变化交给 iocraft 的行 diff——每个 Row 恒占一行
+/// （[`Row::new`] 保证），行数不变时 diff 的相对定位必然正确。不支持
+/// synchronized update 的终端上，每帧全清重画肉眼可见地闪。
+///
+/// 首帧不清：inline 模式的清除是相对光标回退，会抹掉 shell 里的既有内容。
+struct RedrawGuard {
+    signal: Arc<RedrawSignal>,
     first: bool,
 }
 
-impl Hook for ForceRedrawOnResize {
-    fn poll_change(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-        let size = crossterm::terminal::size().unwrap_or((0, 0));
-        match self.last {
-            // 首次：只记录基准尺寸，不算变化（否则启动即清屏）。
-            None => self.last = Some(size),
-            Some(last) if last != size => {
-                self.last = Some(size);
-                self.changed = true;
-            }
-            _ => {}
-        }
-        if self.changed {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
+impl Hook for RedrawGuard {
+    fn poll_change(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        // Size changes arrive as Resize terminal events (use_terminal_size
+        // wakes the loop); the guard itself has nothing to poll. Detection
+        // lives in the component body so the clear and the reflow
+        // compensation always run in the same frame with the same width.
+        Poll::Pending
     }
 
     fn post_component_update(&mut self, updater: &mut iocraft::ComponentUpdater) {
+        use std::sync::atomic::Ordering::Relaxed;
         let first = self.first;
         self.first = false;
-        let force = crate::tui::chat::FORCE_FULL_REDRAW.swap(false, std::sync::atomic::Ordering::Relaxed);
-        if (self.changed || force) && !first {
-            self.changed = false;
+        let force = self.signal.force.swap(false, Relaxed);
+        let size_changed = self.signal.size_changed.swap(false, Relaxed);
+        if (size_changed || force) && !first {
             updater.clear_terminal_output();
         }
     }
@@ -110,145 +151,124 @@ pub struct BingoProps {
     /// kitty graphics protocol 能力（inline 模式检测；None = 图片显示
     /// `#[image]` 占位）。
     pub image_cap: Option<crate::tui::gfx::ImageCap>,
+    /// 图片能力探测的一次性提示（如 tmux passthrough 未开启）。
+    pub image_warning: Option<String>,
 }
 
-/// inline 模式（非全屏）下的按键 gate：REPL 无滚动区，滚动键交给
-/// 终端 scrollback；空闲 Esc 忽略（切 typing 会让输入失焦）；ctrl+o
-/// 折叠只放行未定稿的最后一条消息（已打印进 scrollback 的不能再折叠）。
-/// 返回 true 表示"空闲 Ctrl+C，请求退出会话"。
-fn inline_gate(chat: &mut Chat, code: KeyCode, modifiers: KeyModifiers) -> bool {
-    match code {
-        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-            if !chat.busy {
-                return true;
-            }
-        }
-        KeyCode::Esc => {
-            // `/model` 菜单打开时 Esc 有明确用途（退出菜单）→ 放行给 on_key。
-            if !chat.busy && chat.model_menu.is_none() {
-                return false;
-            }
-        }
-        KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) && !chat.last_message_dynamic() => {
-            return false;
-        }
-        _ => {}
+/// inline 模式（非全屏）下的按键 gate：REPL 无滚动区，历史滚动交给终端
+/// scrollback；ctrl+o 折叠只放行未落盘的最后一条消息（已打印进 scrollback
+/// 的改不动了）。其余按键（含 Ctrl+C 的中断/清空/退出三态）全部交给
+/// [`Chat::on_key`]——退出由 `chat.exit` 表达，不再由 gate 判定。
+fn inline_gate(chat: &mut Chat, code: KeyCode, modifiers: KeyModifiers) {
+    if code == KeyCode::Char('o')
+        && modifiers.contains(KeyModifiers::CONTROL)
+        && !chat.last_message_dynamic()
+    {
+        return;
     }
     if !chat.ask_key(code) {
         let _ = chat.on_key(code, modifiers);
     }
-    false
 }
 
-/// 落盘钩子：把定稿行打印进 scrollback，并在 canvas 形状变化时全量重写。
-///
-/// 为什么必须在 post_component_update（清屏之后）打印：iocraft 的 inline
-/// diff/clear 全部按"光标在 prev canvas 末行"做相对回退。若在组件渲染中
-/// println（原实现），光标被推下 N 行，iocraft 回退少算 N 行 → canvas 上移
-/// 错位、顶部残留旧行（canvas 越高越明显）。
-///
-/// 时序：write 阶段只把落盘边界写入 chat.flush_up_to → 本帧
-/// post_component_update：updater.clear_terminal_output()（光标仍在 prev
-/// canvas 末行，相对清除正确）→ println 落盘行 → write_canvas 走全量分支
-/// （did_clear → prev=None）从光标处重画 → canvas 恒位于最新内容之后。
-///
-/// 形状变化（canvas 高度/行数变化，如 slash 菜单弹出收起、ask 对话框
-/// 出现）：iocraft 的 diff 用 \r\n 在底部创建新行会触发终端滚动，而 diff
-/// 的"跳过相同行"仍按滚动前的物理位置移动 → 错位残留。形状变化帧强制
-/// 全量重写（光标跟随 canvas，滚动后依然自洽）。
-struct FlushRows {
-    chat: iocraft::hooks::State<Chat>,
-    printed: iocraft::hooks::State<usize>,
-    stdout: iocraft::hooks::StdoutHandle,
-    prev_shape: Option<(usize, usize)>,
+/// canvas 中 transcript 之外的行数——单一来源。viewport、落盘边界、
+/// 形状检测与 children 组装全部用它：任何低估都会让 canvas 高度 ≥ 终端
+/// 高度，iocraft 随即走 `Clear(All)+Clear(Purge)` 兜底，每帧整屏闪烁并
+/// 清空用户 scrollback。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Chrome {
+    /// 运行状态行（`✻ Working… (esc to interrupt · 3s)`）。
+    status: usize,
+    /// 任务区。
+    tasks: usize,
+    /// 警告行。
+    warning: usize,
+    /// `?` 快捷键面板。
+    help: usize,
+    /// 输入框：上边框 + 输入行（多行输入按行计）+ 下边框。
+    prompt: usize,
+    /// ctrl+r 搜索提示行。
+    search: usize,
+    /// 排队消息行。
+    queue: usize,
+    /// slash 建议 / `/model` 菜单（二者互斥）。
+    suggestions: usize,
+    /// 临时提示行（`Press ctrl-c again to exit`）。
+    notice: usize,
+    /// footer。
+    footer: usize,
+    /// `Waiting for permission…` 提示行。
+    ask: usize,
 }
 
-impl Hook for FlushRows {
-    fn poll_change(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-        Poll::Pending
+impl Chrome {
+    fn of(chat: &Chat) -> Self {
+        Self {
+            status: usize::from(chat.running_status().is_some()),
+            tasks: chat.task_lines().len(),
+            warning: usize::from(!chat.warnings.is_empty()),
+            help: chat.help_lines().len(),
+            prompt: 2 + chat.prompt_lines().len(),
+            search: usize::from(chat.search_line().is_some()),
+            queue: chat.queue_lines().len(),
+            suggestions: suggestion_rows(chat),
+            notice: usize::from(chat.notice.is_some()),
+            footer: 1,
+            ask: usize::from(chat.pending_ask.is_some()),
+        }
     }
 
-    fn post_component_update(&mut self, updater: &mut iocraft::ComponentUpdater) {
-        let (rows, flush_to, shape) = {
-            let chat = self.chat.read();
-            let p = *self.printed.read();
-            let flush_to = chat.flush_up_to.min(chat.doc.rows.len());
-            let mut rows: Vec<Row> = Vec::new();
-            if flush_to > p {
-                rows.extend(chat.doc.rows[p..flush_to].iter().cloned());
-            }
-            if chat.replay_pending && p > 0 {
-                let (_, term_h) = crossterm::terminal::size().unwrap_or((0, 0));
-                let chrome = shape_chrome(&chat);
-                let n = p.min((term_h as usize).saturating_sub(chrome));
-                if n > 0 {
-                    // 重播窗口回退到图片块首行（续行不打印，块必须整体重放）。
-                    let mut start = p - n;
-                    while start > 0 {
-                        let cur = chat.doc.rows[start].line.image.as_ref();
-                        let prev = chat.doc.rows[start - 1].line.image.as_ref();
-                        if cur.is_some()
-                            && prev.is_some()
-                            && cur.map(|c| &c.url) == prev.map(|c| &c.url)
-                        {
-                            start -= 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    rows.extend(chat.doc.rows[start..p].iter().cloned());
-                }
-            }
-            let shape = (chat.doc.rows.len(), shape_chrome(&chat));
-            (rows, flush_to, shape)
-        };
-        let shape_changed = self.prev_shape != Some(shape);
-        self.prev_shape = Some(shape);
-        if rows.is_empty() && !shape_changed {
-            return;
-        }
-        // 光标仍在 prev canvas 末行：相对清除正确，随后全量重写。
-        // 形状变化帧同样走全量（防终端滚动导致 diff 错位）。
-        updater.clear_terminal_output();
-        let theme = self.chat.read().theme.clone();
-        for (i, row) in rows.iter().enumerate() {
-            // 图片块：块首行输出 kitty 序列（放置+换行推进光标），
-            // 续行不输出——整块占位行由序列一并消费。
-            if let Some(img) = &row.line.image {
-                if !image_block_head(&rows, i) {
-                    continue;
-                }
-                let meta = {
-                    let chat = self.chat.read();
-                    chat.images.get(&img.url).cloned()
-                };
-                if let Some(meta) = meta {
-                    let seq =
-                        crate::tui::gfx::kitty_image_bytes(&meta.bytes, img.cols, img.rows);
-                    self.stdout.print(String::from_utf8_lossy(&seq));
-                    continue;
-                }
-            }
-            let mut buf = Vec::new();
-            let canvas = row_element(row, theme.text).render(None);
-            let _ = canvas.write_ansi(&mut buf);
-            let rendered = String::from_utf8_lossy(&buf);
-            self.stdout.println(rendered.trim_end_matches(['\n', '\r']));
-        }
-        let mut chat = self.chat.write();
-        let mut p = self.printed.write();
-        *p = (*p).max(flush_to);
-        chat.flush_up_to = 0;
-        chat.replay_pending = false;
+    fn total(self) -> usize {
+        self.status
+            + self.tasks
+            + self.warning
+            + self.help
+            + self.prompt
+            + self.search
+            + self.queue
+            + self.suggestions
+            + self.notice
+            + self.footer
+            + self.ask
     }
 }
 
-/// canvas 形状的 chrome 部分（任务区/警告/状态行/建议/ask 对话框）。
-fn shape_chrome(chat: &Chat) -> usize {
-    let tasks = chat.task_lines();
-    let warn = usize::from(!chat.warnings.is_empty());
-    let status = usize::from(chat.running_status().is_some());
-    tasks.len() + warn + status + 3 + chat.slash_suggestions.len() + usize::from(chat.pending_ask.is_some())
+/// 建议区行数：slash 建议优先，其次 `/model` 菜单（组装处同一规则）。
+fn suggestion_rows(chat: &Chat) -> usize {
+    if !chat.slash_suggestions.is_empty() {
+        return chat.slash_suggestions.len();
+    }
+    chat.model_menu
+        .as_ref()
+        .map(|m| match &m.models {
+            // loading / 空列表都只渲染一行提示。
+            Some(mm) if mm.loading || mm.models.is_empty() => 1,
+            Some(mm) => mm.models.len(),
+            None => m.providers.len(),
+        })
+        .unwrap_or(0)
+        .min(crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5)
+}
+
+/// inline canvas 的尾部窗口：返回 (起始行, 被省略的行数)。
+///
+/// canvas 高度（尾部 + 省略提示 + chrome）恒**严格小于**终端高度：
+/// iocraft 在 `prev_canvas_height >= 终端高度` 时改用 Clear(All)+Purge，
+/// 那会清空用户 scrollback。留 1 行余量即恒走相对擦除路径。
+fn tail_window(chat: &Chat, chrome: usize, height: usize) -> (usize, usize) {
+    let total = chat.doc.rows.len();
+    let start = chat.tail_start.min(total);
+    let budget = height.saturating_sub(chrome).saturating_sub(1);
+    let len = total - start;
+    if budget == 0 {
+        return (total, 0);
+    }
+    if len <= budget {
+        return (start, 0);
+    }
+    // 省略提示自己占一行。
+    let visible = budget - 1;
+    (total - visible, len - visible)
 }
 
 /// bingo 主界面根组件：通道驱动状态 + 布局。
@@ -278,45 +298,41 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
             props.detected_background,
         );
         chat.image_cap = props.image_cap;
+        if let Some(warning) = props.image_warning.clone() {
+            chat.warnings.push(warning);
+        }
         chat
     });
-    // inline 模式：定稿行落盘游标（已打印进 scrollback 的 doc 行数）。
-    let mut printed = hooks.use_state(|| 0usize);
-    // inline 模式：resize 后重绘当前视口标志（清屏 + 重播视口内落盘行）。
-    let mut replay = hooks.use_state(|| false);
     // inline 模式：空闲 Ctrl+C 退出标志（busy 时 Ctrl+C 走 on_key 取消）。
     let mut exit_requested = hooks.use_state(|| false);
-    // inline 模式：真实光标隐藏标志（iocraft 渲染后真实光标不跟随输入）。
-    let mut cursor_hidden = hooks.use_state(|| false);
-    let (stdout_handle, _stderr_handle) = hooks.use_output();
-
-    hooks.use_force_redraw_on_resize();
-    let (width, height) = hooks.use_terminal_size();
-    // inline：定稿行落盘钩子——post_component_update 中先清屏后 println
-    //（光标基准不被 println 破坏），随后全量重写。
-    if inline {
-        hooks.use_hook(|| FlushRows {
-            chat,
-            printed,
-            stdout: stdout_handle.clone(),
-            prev_shape: None,
+    // 重绘信号共享格（组件体写、hook 读）。State 只当存储用——
+    // 只读不写，不会触发重渲。
+    let signal = hooks.use_state(|| Arc::new(RedrawSignal::default()));
+    let signal = signal.read().clone();
+    // 落盘打印必须在**清屏之后**写出：iocraft 的 inline diff/clear 全部按
+    // "光标在上一帧 canvas 末行"做相对回退。use_output 的 hook 自己会先
+    // clear_terminal_output 再写队列，而 hook 按注册顺序执行——重绘 hook
+    // 注册在它之前，于是"清屏 → 落盘打印 → 全量重画"同帧完成。
+    // 组件体里的 println 只是入队，不动光标。
+    {
+        let signal = signal.clone();
+        hooks.use_hook(move || RedrawGuard {
+            signal,
+            first: true,
         });
     }
-    // inline：尺寸变化 → 标记重播（首帧除外——尚无内容可重播）。
-    // last_size 必须无条件更新（否则首帧后每帧都判定"变化"）。
+    let (stdout_handle, _stderr_handle) = hooks.use_output();
+    let (width, height) = hooks.use_terminal_size();
+
+    // Size-change detection (single authority): compare against the size of
+    // the last painted frame. painted_width == 0 means nothing painted yet —
+    // the first frame must not clear (it would erase shell content above).
     {
-        let mut last_size = hooks.use_state(|| (0u16, 0u16));
-        if inline && (width, height) != *last_size.read() {
-            let changed = *last_size.read() != (0, 0);
-            *last_size.write() = (width, height);
-            if changed {
-                // resize 帧强制重建：tick 尚未置位 dirty 时，重播会用到
-                // 旧宽度文档（markdown 折行/欢迎卡宽度都不对）。
-                chat.write().dirty = true;
-                if *printed.read() > 0 {
-                    *replay.write() = true;
-                }
-            }
+        use std::sync::atomic::Ordering::Relaxed;
+        let prev_w = signal.painted_width.load(Relaxed);
+        let prev_h = signal.painted_height.load(Relaxed);
+        if prev_w != 0 && (prev_w != width as usize || prev_h != height as usize) {
+            signal.size_changed.store(true, Relaxed);
         }
     }
 
@@ -327,6 +343,12 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
             let mut tick: u64 = 0;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(TICK_MS)).await;
+                // 空闲（无动画、无待处理事件）时不 write：iocraft 的
+                // State::write() 无条件唤醒重渲，每 33ms 写一次就是
+                // 30fps 空转重建。
+                if !tick_chat.read().needs_tick() {
+                    continue;
+                }
                 let drained = {
                     let mut s = tick_chat.write();
                     s.tick();
@@ -334,14 +356,11 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
                 };
                 if drained {
                     tick = 0;
-                    // 事件处理（TextDelta/ThinkingDelta/ToolStart 等）会改变
-                    // 流式内容——iocraft 行 diff 在"内容增长但行数不变"的帧
-                    // 可能残留旧行（真实终端实测：正文半截覆盖）。全量重写
-                    // 绕开 diff；synchronized update 下同帧原子完成，不闪。
-                    crate::tui::chat::FORCE_FULL_REDRAW
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
                 }
-                if tick.is_multiple_of(TASKS_REFRESH_TICKS) {
+                // 任务区不可见时不查磁盘：快照变化才置 dirty。
+                if tick.is_multiple_of(TASKS_REFRESH_TICKS)
+                    && tick_chat.read().tasks_visible
+                {
                     tick_chat.write().refresh_tasks();
                 }
                 tick = tick.wrapping_add(1);
@@ -382,11 +401,12 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
                     return;
                 }
                 if inline {
-                    if inline_gate(&mut key_chat.write(), code, modifiers) {
-                        *exit_flag.write() = true;
-                    }
+                    inline_gate(&mut key_chat.write(), code, modifiers);
                 } else {
                     key_chat.write().on_key(code, modifiers);
+                }
+                if key_chat.read().exit {
+                    *exit_flag.write() = true;
                 }
             }
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
@@ -409,150 +429,156 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
         });
     }
 
-    // 写入阶段（有守卫）：布局尺寸真正变化或文档待重建时才写。
-    // 无条件 write() 会令每次渲染标记 dirty → 无限重渲。
-    let tail_start: usize = {
-        let (width_needed, viewport) = {
-            let chat_ref = chat.read();
-            let tasks = chat_ref.task_lines();
-            let warn_rows = if chat_ref.warnings.is_empty() { 0 } else { 1 };
-            let status_rows = usize::from(chat_ref.running_status().is_some());
-            let chrome = tasks.len() + warn_rows + status_rows + 3 + chat_ref.slash_suggestions.len();
-            let viewport = (height as usize).saturating_sub(chrome).max(1);
-            (
-                chat_ref.width != width as usize
-                    || chat_ref.viewport_height != viewport
-                    || chat_ref.dirty,
-                viewport,
-            )
-        };
-        if width_needed {
-            let mut s = chat.write();
-            s.width = width as usize;
-            s.viewport_height = viewport;
-            if s.dirty {
-                s.dirty = false;
-                s.reconcile_scroll(viewport);
-                s.build_rows(width as usize);
-            }
-        }
-        if inline {
-            // 隐藏真实终端光标：iocraft 渲染后真实光标停在 canvas 末行
-            //（footer 行尾），不跟随输入——隐藏后以 ▋ 假光标指示输入位置
-            //（退出时 iocraft 自动 Show）。
-            if !*cursor_hidden.read() {
-                *cursor_hidden.write() = true;
-                stdout_handle.print("\x1b[?25l");
-            }
-            // 重建后行数可能收缩（resize 宽度变化重排）——clamp 落盘游标，
-            // 否则 doc.rows 切片越界（live_start 依赖它，须在其前）。
-            // 注意：值未变时不要 write——渲染期间写 state 会唤醒组件
-            // 再渲染（iocraft State 的 DerefMut 无条件标记变更），形成
-            // 渲染风暴、饿死终端事件（打字/退出全部失效）。
-            {
-                let s = chat.read();
-                let mut p = printed.write();
-                let clamped = (*p).min(s.doc.rows.len());
-                if clamped != *p {
-                    *p = clamped;
-                }
-            }
-            // inline：定稿行落盘 + 计算动态尾部起点。
-            // 落盘边界 = 定稿推进与"尾部不超过屏幕"两者取高——canvas
-            // 高度恒 < 终端高度，inline 擦除才不会落到 scrollback 里。
-            let live_start = {
-                let s = chat.read();
-                let tasks = s.task_lines();
-                let warn_rows = if s.warnings.is_empty() { 0 } else { 1 };
-                let status_rows = usize::from(s.running_status().is_some());
-                // 实际 chrome 行数（与下方布局一一对应）：status + tasks +
-                // warn + border×2 + input + footer + suggestions/菜单 +
-                // "Waiting for permission…" 行（border×2+input 即那 3 行）。
-                let menu_rows = s
-                    .model_menu
-                    .as_ref()
-                    .map(|m| match &m.models {
-                        Some(mm) if !mm.loading => mm.models.len(),
-                        _ => m.providers.len(),
-                    })
-                    .unwrap_or(0)
-                    .min(crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5);
-                let slash_rows = s.slash_suggestions.len().max(menu_rows);
-                let chrome_total = tasks.len()
-                    + warn_rows
-                    + status_rows
-                    + 3
-                    + slash_rows
-                    + 1
-                    + usize::from(s.pending_ask.is_some());
-                // canvas = 尾部 + chrome 须严格小于终端高度：iocraft 在
-                // prev_canvas_height ≥ 终端高度时走 Clear(All)+Purge 并移
-                // 光标到 (0,0) 的兜底（inline 擦除不可靠的防御），大输出
-                // 时每帧整屏清除 + 重画 → 屏闪且清空用户 scrollback。留
-                // 1 行余量恒走相对擦除路径（只清 canvas 区域、原地重画）。
-                let max_live = (height as usize)
-                    .saturating_sub(chrome_total)
-                    .saturating_sub(1);
-                (*printed
-                    .read())
-                    .max(s.doc.settled.min(s.doc.rows.len()))
-                    .max(s.doc.rows.len().saturating_sub(max_live))
-            };
-            // 落盘边界写入 chat：FlushRows hook 在 post_component_update
-            // 消费（先清屏后 println，保证 iocraft 相对定位正确）。
-            {
-                let mut s = chat.write();
-                if live_start > *printed.read() {
-                    s.flush_up_to = live_start;
-                }
-                if *replay.read() && *printed.read() > 0 {
-                    s.replay_pending = true;
-                    *replay.write() = false;
-                }
-            }
-            live_start
-        } else {
-            0
-        }
+    // 终端尺寸必须先于 chrome 写进状态：输入行折行与 `?` 面板行数都按它算，
+    // 用上一帧的尺寸算 chrome 会与实际组装的行数对不上（组装处的
+    // debug_assert 会抓到，生产里则是 canvas 高度失准）。
+    // 先算 needs_build 再写，否则"宽度变了"这个信号被自己抹掉。
+    // 无条件 write() 会令每次渲染标记变更 → 无限重渲，故一律有守卫。
+    let needs_build = {
+        let s = chat.read();
+        // 宽度变化必须重建：markdown 折行、欢迎卡宽度全按旧宽度算。
+        s.dirty || s.width != width as usize || s.height != height as usize
     };
+    if needs_build {
+        let mut s = chat.write();
+        s.width = width as usize;
+        s.height = height as usize;
+    }
+
+    // chrome 单一来源：viewport / 落盘预算 / 形状检测 / 组装校验共用。
+    let chrome = Chrome::of(&chat.read());
+    let viewport = (height as usize).saturating_sub(chrome.total()).max(1);
+
+    if needs_build || chat.read().viewport_height != viewport {
+        let mut s = chat.write();
+        s.viewport_height = viewport;
+        if needs_build {
+            s.dirty = false;
+            s.reconcile_scroll(viewport);
+            s.build_rows(width as usize);
+        }
+    }
+
+    // Reflow compensation: on width shrink, reflowing terminals rewrap every
+    // previously painted (full-width) canvas row into ceil(prev_w/new_w)
+    // physical rows, while iocraft's inline clear climbs only one physical
+    // row per logical row — the surplus top rows survive and pile up in
+    // scrollback on every resize step. Queue an extra climb+erase: use_output
+    // writes it right after iocraft's own clear and before the canvas
+    // repaint (queue order also puts it ahead of this frame's flush prints).
+    // The trailing `\x1b[1A` plus println's `\r\n` land the cursor back on
+    // the erased region's first row, column 0.
+    if inline {
+        use std::sync::atomic::Ordering::Relaxed;
+        let prev_w = signal.painted_width.load(Relaxed);
+        let prev_rows = signal.shape.load(Relaxed);
+        let deficit = shrink_deficit(prev_w, prev_rows, width as usize, height as usize);
+        if deficit > 0 && terminal_reflows_env() {
+            stdout_handle.println(format!("\x1b[{deficit}F\x1b[J\x1b[1A"));
+        }
+    }
+
+    // inline：把新定稿的前缀落盘进 scrollback。只落定稿内容——流式
+    // markdown 会全量重解析（表格/代码围栏后置成型），把未定稿行写进
+    // scrollback 就会留下永远改不掉的中间态。
+    if inline {
+        let pending: Vec<Row> = {
+            let s = chat.read();
+            if s.doc.settled > s.tail_start {
+                s.doc.rows[s.tail_start..s.doc.settled].to_vec()
+            } else {
+                Vec::new()
+            }
+        };
+        if !pending.is_empty() {
+            let (theme, images, image_cap) = {
+                let s = chat.read();
+                (s.theme.clone(), s.images.clone(), s.image_cap)
+            };
+            for (i, row) in pending.iter().enumerate() {
+                // 图片块：块首行输出 kitty 序列（放置 + 换行推进光标），
+                // 续行不输出——整块占位行由序列一并消费。
+                if let Some(img) = &row.line.image {
+                    if !image_block_head(&pending, i) {
+                        continue;
+                    }
+                    if let (Some(cap), Some(meta)) = (image_cap, images.get(&img.url)) {
+                        // 传输 + 放置：直发 kitty 序列，或 tmux passthrough
+                        // 包裹 + Unicode 占位符（模式由能力探测决定）。
+                        let seq = crate::tui::gfx::image_print_bytes(
+                            &cap,
+                            &meta.bytes,
+                            img.cols,
+                            img.rows,
+                            crate::tui::gfx::image_id_for(&img.url),
+                        );
+                        stdout_handle.print(String::from_utf8_lossy(&seq));
+                        continue;
+                    }
+                }
+                let mut buf = Vec::new();
+                let canvas = flushed_row_element(row, theme.text, width).render(None);
+                let _ = canvas.write_ansi(&mut buf);
+                let rendered = String::from_utf8_lossy(&buf);
+                stdout_handle.println(rendered.trim_end_matches(['\n', '\r']));
+            }
+            chat.write().advance_flushed();
+        }
+    }
+
+    // 动态尾部：未落盘的行；超出高度预算时只画末尾若干行 + 省略提示。
+    let (tail_start, tail_hidden) = if inline {
+        tail_window(&chat.read(), chrome.total(), height as usize)
+    } else {
+        (0, 0)
+    };
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        if inline {
+            let tail_rows = chat.read().doc.rows.len() - tail_start;
+            let canvas_rows = tail_rows + usize::from(tail_hidden > 0) + chrome.total();
+            if signal.shape.swap(canvas_rows, Relaxed) != canvas_rows {
+                signal.force.store(true, Relaxed);
+            }
+        }
+        // Both modes record the painted size — it doubles as the baseline
+        // for the body-side size-change detection.
+        signal.painted_width.store(width as usize, Relaxed);
+        signal.painted_height.store(height as usize, Relaxed);
+    }
 
     // 只读阶段：文档已就绪，直接读。
-    let (_doc, _sticky, viewport, input, typing, bash_mode, busy, warnings, tasks, mode, model, thinking, has_ask, status, slash_suggestions, slash_selected, model_menu) = {
+    let (prompt_lines, bash_mode, busy, warnings, tasks, mode, model, thinking, has_ask,
+         status, slash_suggestions, slash_selected, model_menu, help, queue, notice, search) = {
         let s = chat.read();
-        let doc = s.doc.clone();
-        let sticky = doc.sticky.clone();
-        let tasks = s.task_lines();
-        let warn_rows = if s.warnings.is_empty() { 0 } else { 1 };
-        let status = s.running_status();
-        let status_rows = usize::from(status.is_some());
-        let menu_rows = s
-            .model_menu
-            .as_ref()
-            .map(|m| match &m.models {
-                Some(mm) if !mm.loading => mm.models.len(),
-                _ => m.providers.len(),
-            })
-            .unwrap_or(0)
-            .min(crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5);
-        let slash_rows = s.slash_suggestions.len().max(menu_rows);
-        let chrome = tasks.len() + warn_rows + status_rows + 3 + slash_rows;
-        let viewport = (height as usize).saturating_sub(chrome).max(1);
-        let input = s.input.clone();
-        let typing = s.typing;
-        let bash_mode = s.bash_mode;
-        let busy = s.busy;
-        let warnings = s.warnings.clone();
-        let mode = s.session.permission_mode;
-        let model = s.session.runtime.model.borrow().clone();
-        let thinking = s.session.runtime.thinking.borrow().clone();
-        let has_ask = s.pending_ask.is_some();
-        let slash_suggestions = s.slash_suggestions.clone();
-        let slash_selected = s.slash_selected;
-        let model_menu = s.model_menu.clone();
-        (doc, sticky, viewport, input, typing, bash_mode, busy, warnings, tasks, mode, model, thinking, has_ask, status, slash_suggestions, slash_selected, model_menu)
+        (
+            s.prompt_lines(),
+            s.bash_mode,
+            s.busy,
+            s.warnings.clone(),
+            s.task_lines(),
+            s.permission_mode,
+            s.session.runtime.model.borrow().clone(),
+            s.session.runtime.thinking.borrow().clone(),
+            s.pending_ask.is_some(),
+            s.running_status(),
+            s.slash_suggestions.clone(),
+            s.slash_selected,
+            s.model_menu.clone(),
+            s.help_lines(),
+            s.queue_lines(),
+            s.notice,
+            s.search_line(),
+        )
     };
 
     let theme = chat.read().theme.clone();
+
+    // ctrl+l：请求整屏清除重画（花屏恢复）。
+    if chat.read().force_redraw {
+        chat.write().force_redraw = false;
+        signal.force.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // 组装布局。
     let mut children: Vec<AnyElement<'static>> = Vec::new();
@@ -560,16 +586,17 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
     children.push(element!(Transcript(
         chat: Some(chat),
         viewport: viewport,
-        tail_start: if inline { Some(tail_start) } else { None }
+        tail_start: if inline { Some(tail_start) } else { None },
+        tail_hidden: tail_hidden,
     ))
     .into_any());
 
     // 运行状态行（ActivityIndicator）：busy 时在输入框上方显示
-    // `⠋ {动词} for {N}s`（工具 summary / thinking 俏皮词 / Working），
-    // 让用户时刻知道 agent 正在运行——独立于 transcript 内容与滚动。
-    if let Some((verb, elapsed)) = status {
+    // `✻ {动词}… (esc to interrupt · {N}s · ↓ {tokens} tokens)`——
+    // 让用户时刻知道 agent 正在运行，独立于 transcript 内容与滚动。
+    if let Some(status) = &status {
         let spinner = crate::tui::activities::spinner(chat.read().tick);
-        children.push(status_row(&verb, elapsed, spinner, &theme));
+        children.push(status_row(status, spinner, &theme));
     }
 
     // 任务列表（输入框上方）。
@@ -590,8 +617,24 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
         }.into_any());
     }
 
+    // `?` 快捷键面板（输入框上方，dim；内容与绑定同源见 tui::keys）。
+    for line in &help {
+        children.push(dim_row(line.clone(), theme.inactive));
+    }
+
     // footer：模式徽标 + 快捷键 byline（左），模型名（右）。
     // bash 模式下左侧提示 `! for shell mode`（CC bashBorder 提示）。
+    // 空闲提示 `? for shortcuts`；busy 时 `esc to interrupt` 由状态行承担，
+    // footer 不重复。
+    let hints = if busy {
+        crate::tui::keys::FOOTER_EXPAND_HINT.to_string()
+    } else {
+        format!(
+            "{} · {}",
+            crate::tui::keys::FOOTER_IDLE_HINT,
+            crate::tui::keys::FOOTER_EXPAND_HINT
+        )
+    };
     let footer = element! {
         View(
             height: 1,
@@ -612,7 +655,7 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
                 }))
                 Text(
                     color: theme.inactive,
-                    content: "esc to interrupt · ctrl+o to expand".to_string(),
+                    content: hints,
                     wrap: TextWrap::NoWrap,
                 )
             }
@@ -624,31 +667,32 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
         }
     };
 
-    // 输入行：`{prefix} {input}{caret}`（busy 时前缀弱化，CC PromptChar）。
-    // bash 模式前缀为 `!`（CC prefix=! 且 bashBorder 色）；▋ 假光标：
-    // inline 模式隐藏真实终端光标（iocraft 渲染后真实光标停在 canvas
-    // 末行，不跟随输入），以 ▋ 指示输入位置。
-    let caret = if typing { '▋' } else { ' ' };
+    // 输入行：`{prefix}{行}`（首行带 `❯ `/`!` 前缀，续行缩进对齐）。
+    // ▋ 假光标画在真实光标处：inline 模式下终端光标停在 canvas 末行，
+    // 不跟随输入。
     let prompt_style = if busy { theme.inactive } else { theme.text };
     let (prefix, prefix_color) = if bash_mode {
-        ("!".to_string(), theme.bash_border)
+        ("! ".to_string(), theme.bash_border)
     } else {
         ("❯ ".to_string(), prompt_style)
     };
-    let input_row = element! {
-        View(height: 1, width: 100pct) {
-            View(flex_direction: FlexDirection::Row) {
-                Text(color: prefix_color, content: prefix, wrap: TextWrap::NoWrap)
-                Text(
-                    color: theme.text,
-                    content: format!("{input}{caret}"),
-                    wrap: TextWrap::NoWrap,
-                )
+    let input_rows: Vec<AnyElement<'static>> = prompt_lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let prefix = if i == 0 { prefix.clone() } else { "  ".to_string() };
+            let body = line_inner(line, theme.text);
+            element! {
+                View(height: 1, width: 100pct, flex_direction: FlexDirection::Row) {
+                    Text(color: prefix_color, content: prefix, wrap: TextWrap::NoWrap)
+                    #(vec![body].into_iter())
+                }
             }
-        }
-    };
+            .into_any()
+        })
+        .collect();
 
-    // 输入框上边框（CC promptBorder 圆角边框上边；bash 模式换 bashBorder）。
+    // 输入框边框（CC promptBorder 圆角；bash 模式换 bashBorder 色）。
     let border_color = if bash_mode {
         theme.bash_border
     } else {
@@ -661,7 +705,6 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
             wrap: TextWrap::NoWrap,
         )
     };
-    // 输入框底部边框行（CC：borderStyle round, borderBottom）。
     let border_bottom = element! {
         Text(
             color: border_color,
@@ -670,126 +713,39 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
         )
     };
 
-    // slash 下拉建议（PromptInputFooterSuggestions）：
-    // `+ /name  description`，选中行 suggestion 色、其余 dim；最多 5 行。
-    // 描述按实际可用宽度截断（iocraft NoWrap 不截断，超宽会撑破 canvas
-    // 导致行 diff 错位残留）。位置：fullscreen 在输入框上方，inline 下方。
-    let menu_rows: Vec<AnyElement<'static>> = if let Some(menu) = &model_menu {
-        // `/model` 二级选择器：一级 `▸ provider`，二级 `▸ model（loading 行）`。
-        // 与 slash 建议同渲染模式（选中高亮），行数参与 chrome 计算。
-        let items: Vec<(String, bool)> = match &menu.models {
-            Some(m) => {
-                if m.loading {
-                    vec![("… 拉取模型列表".to_string(), true)]
-                } else if m.models.is_empty() {
-                    vec![("（该端点未返回模型，Esc 退出）".to_string(), true)]
-                } else {
-                    m.models
-                        .iter()
-                        .enumerate()
-                        .map(|(i, name)| (name.clone(), i == m.selected))
-                        .collect()
-                }
-            }
-            None => menu
-                .providers
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.clone(), i == menu.provider_selected))
-                .collect(),
-        };
-        let menu_rows = items.len().min(crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5);
-        items
-            .into_iter()
-            .take(menu_rows)
-            .map(|(name, selected)| {
-                let color = if selected {
-                    theme.permission
-                } else {
-                    theme.inactive
-                };
-                let line = crate::tui::markdown::truncate(
-                    &format!("+ {}{name}", if selected { "▸ " } else { "  " }),
-                    (width as usize).saturating_sub(2),
-                );
-                element! {
-                    View(height: 1, width: 100pct, padding_left: 2) {
-                        Text(
-                            color: color,
-                            content: line,
-                            wrap: TextWrap::NoWrap,
-                        )
-                    }
-                }
-                .into_any()
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let suggestions_view: Vec<AnyElement<'static>> = if slash_suggestions.is_empty() {
-        menu_rows
-    } else {
-        let name_col = slash_suggestions
-            .iter()
-            .map(|s| s.name.chars().count())
-            .max()
-            .unwrap_or(0)
-            + 2;
-        // 可用描述宽度 = 终端宽 - padding(2) - "+ "(2) - 名称列 - 分隔(2)。
-        // 未计入 padding 会令行宽超终端 → 终端折行 → canvas 行数与 iocraft
-        // 认知不符 → diff 错位残留。
-        let desc_width = (width as usize)
-            .saturating_sub(2 + 2 + name_col + 2)
-            .max(8);
-        slash_suggestions
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let selected = i == slash_selected;
-                let color = if selected {
-                    theme.permission
-                } else {
-                    theme.inactive
-                };
-                let name_text = format!("/{:<width$}", s.name, width = name_col);
-                let desc = crate::tui::markdown::truncate(&s.description, desc_width);
-                // 整行二次截断：name_col 计算与 padding 叠加的实际宽度
-                // 可能仍超内容区（如 CJK 宽度），超宽行会被终端折行、
-                // 破坏 canvas 行数与 iocraft 认知的一致性。
-                let line = crate::tui::markdown::truncate(
-                    &format!("+ {name_text}  {desc}"),
-                    (width as usize).saturating_sub(2),
-                );
-                element! {
-                    View(height: 1, width: 100pct, padding_left: 2) {
-                        Text(
-                            color: color,
-                            content: line,
-                            wrap: TextWrap::NoWrap,
-                        )
-                    }
-                }
-                .into_any()
-            })
-            .collect()
-    };
+    let suggestions_view = suggestion_views(
+        &slash_suggestions,
+        slash_selected,
+        model_menu.as_ref(),
+        &theme,
+        width,
+    );
 
     // 布局：输入框（上边框 + 输入行 + 下边框）在 footer 上方。
     // 建议行按模式定位：fullscreen 上方、inline 下方（对齐 slash 输出）。
-    if inline {
-        children.push(border_top.into_any());
-        children.push(input_row.into_any());
-        children.push(border_bottom.into_any());
-        children.extend(suggestions_view);
-        children.push(footer.into_any());
-    } else {
-        children.extend(suggestions_view);
-        children.push(border_top.into_any());
-        children.push(input_row.into_any());
-        children.push(border_bottom.into_any());
-        children.push(footer.into_any());
+    let mut suggestions_view = suggestions_view;
+    if !inline {
+        children.extend(std::mem::take(&mut suggestions_view));
     }
+    children.push(border_top.into_any());
+    children.extend(input_rows);
+    children.push(border_bottom.into_any());
+    // ctrl+r 搜索提示行（输入框下方）。
+    if let Some(line) = &search {
+        children.push(dim_row(line.clone(), theme.inactive));
+    }
+    // 排队消息（输入框下方 dim `> {text}`）。
+    for line in &queue {
+        children.push(dim_row(line.clone(), theme.inactive));
+    }
+    if inline {
+        children.extend(suggestions_view);
+    }
+    // 临时提示行（`Press ctrl-c again to exit`）。
+    if let Some(text) = notice {
+        children.push(dim_row(text.to_string(), theme.inactive));
+    }
+    children.push(footer.into_any());
 
     // 有权限请求时停用输入提示（CC "Waiting for permission…"）。
     if has_ask {
@@ -803,6 +759,13 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
             }
         }.into_any());
     }
+
+    // chrome 公式与实际组装必须一一对应（children 首项是 Transcript）。
+    debug_assert_eq!(
+        children.len() - 1,
+        chrome.total(),
+        "chrome formula out of sync with assembled rows: {chrome:?}"
+    );
 
     // inline 模式：空闲 Ctrl+C 请求退出会话；/exit 两种模式都退出。
     let mut system = hooks.use_context_mut::<SystemContext>();
@@ -835,21 +798,132 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
     }
 }
 
-/// 运行状态行（ActivityIndicator）：`⠋ {动词} for {N}s`。
-/// 工具动词用 tool_running 色，thinking 词与兜底 Working 用 thinking 色。
-fn status_row(verb: &str, elapsed: f64, spinner: char, theme: &Theme) -> AnyElement<'static> {
-    let color = if verb == "Working" {
-        theme.thinking
-    } else {
-        theme.tool_running
+/// 建议区元素（PromptInputFooterSuggestions）：`  /name  description`，
+/// 选中行整行 permission 色并带 `❯` 前缀，其余 dim（CC Select）。
+/// slash 建议优先，其次 `/model` 菜单。
+///
+/// 与 [`suggestion_rows`] 是同一分支规则的两面——行数必须一致，否则
+/// chrome 低估、canvas 越界。测试对表二者。
+///
+/// 每行都按可用宽度截断：iocraft 的 NoWrap 不截断，超宽行会被终端自己
+/// 折行，canvas 行数与 iocraft 的认知随即不符。
+fn suggestion_views(
+    slash_suggestions: &[crate::tui::chat::SlashSuggestion],
+    slash_selected: usize,
+    model_menu: Option<&crate::tui::chat::ModelMenu>,
+    theme: &Theme,
+    width: u16,
+) -> Vec<AnyElement<'static>> {
+    let row = |line: String, selected: bool| {
+        let color = if selected {
+            theme.permission
+        } else {
+            theme.inactive
+        };
+        // 无额外缩进：`❯` 落在行首，名称列与输入行的文本列对齐（CC Select）。
+        element! {
+            View(height: 1, width: 100pct) {
+                Text(color: color, content: line, wrap: TextWrap::NoWrap)
+            }
+        }
+        .into_any()
     };
+    if slash_suggestions.is_empty() {
+        let Some(menu) = model_menu else {
+            return Vec::new();
+        };
+        // `/model` 二级选择器：一级 `▸ provider`，二级 `▸ model`
+        //（loading / 空列表各占一行提示）。
+        let items: Vec<(String, bool)> = match &menu.models {
+            Some(m) if m.loading => vec![("… 拉取模型列表".to_string(), true)],
+            Some(m) if m.models.is_empty() => {
+                vec![("（该端点未返回模型，Esc 退出）".to_string(), true)]
+            }
+            Some(m) => m
+                .models
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), i == m.selected))
+                .collect(),
+            None => menu
+                .providers
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.clone(), i == menu.provider_selected))
+                .collect(),
+        };
+        return items
+            .into_iter()
+            .take(crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5)
+            .map(|(name, selected)| {
+                let line = crate::tui::markdown::truncate(
+                    &format!("{}{name}", if selected { "❯ " } else { "  " }),
+                    (width as usize).saturating_sub(2),
+                );
+                row(line, selected)
+            })
+            .collect();
+    }
+    let name_col = slash_suggestions
+        .iter()
+        .map(|s| s.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    // 可用描述宽度 = 终端宽 - padding(2) - "❯ "(2) - 名称列 - 分隔(2)。
+    let desc_width = (width as usize).saturating_sub(2 + 2 + name_col + 2).max(8);
+    slash_suggestions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let selected = i == slash_selected;
+            let name_text = format!("/{:<width$}", s.name, width = name_col);
+            let desc = crate::tui::markdown::truncate(&s.description, desc_width);
+            // 整行二次截断：name_col 与 padding 叠加后仍可能超内容区
+            //（CJK 宽度）。
+            let line = crate::tui::markdown::truncate(
+                &format!("{}{name_text}  {desc}", if selected { "❯ " } else { "  " }),
+                (width as usize).saturating_sub(2),
+            );
+            row(line, selected)
+        })
+        .collect()
+}
+
+/// 一行 dim 文本（帮助面板 / 队列 / 提示 / 搜索行共用）。
+fn dim_row(content: String, color: Color) -> AnyElement<'static> {
     element! {
         View(height: 1, width: 100pct, padding_left: 2) {
+            Text(color: color, content: content, wrap: TextWrap::NoWrap)
+        }
+    }
+    .into_any()
+}
+
+/// 运行状态行（ActivityIndicator）：
+/// `✻ {动词}… (esc to interrupt · {N}s · ↓ {tokens} tokens)`。
+/// 动词与星芒 spinner 用主强调色，括号内的 meta 用 inactive。
+fn status_row(
+    status: &crate::tui::chat::RunningStatus,
+    spinner: char,
+    theme: &Theme,
+) -> AnyElement<'static> {
+    let mut meta = format!(
+        "(esc to interrupt · {}s",
+        status.elapsed.round().max(0.0) as u64
+    );
+    if status.tokens > 0 {
+        meta.push_str(&format!(" · ↓ {} tokens", status.tokens));
+    }
+    meta.push(')');
+    element! {
+        View(height: 1, width: 100pct, padding_left: 2, flex_direction: FlexDirection::Row) {
             Text(
-                color: color,
-                content: format!("{spinner} {verb} for {elapsed:.1}s"),
+                color: theme.claude,
+                content: format!("{spinner} {}… ", status.verb),
                 wrap: TextWrap::NoWrap,
             )
+            Text(color: theme.inactive, content: meta, wrap: TextWrap::NoWrap)
         }
     }
     .into_any()
@@ -884,9 +958,11 @@ fn mode_badge(mode: PermissionMode, theme: &Theme) -> Vec<AnyElement<'static>> {
 struct TranscriptProps {
     chat: Option<State<Chat>>,
     viewport: usize,
-    /// inline 模式：渲染 `doc.rows[tail_start..]` 的完整尾部（canvas 高度
-    /// 受落盘边界控制，恒 ≤ 屏幕）；None = 全屏视口模式（切片 + 点击）。
+    /// inline 模式：渲染 `doc.rows[tail_start..]` 的尾部窗口；
+    /// None = 全屏视口模式（切片 + 点击）。
     tail_start: Option<usize>,
+    /// inline 模式：尾部窗口之上被省略的行数（>0 时顶端加提示行）。
+    tail_hidden: usize,
 }
 
 /// transcript 滚动区：全屏模式渲染可见行切片 + 鼠标点击折叠/展开；
@@ -936,6 +1012,19 @@ fn Transcript(mut hooks: Hooks, props: &TranscriptProps) -> impl Into<AnyElement
     };
     let theme = chat_ref.theme.clone();
     drop(chat_ref);
+    // 尾部超出高度预算：顶端一行 `… +N lines`（该行计入高度预算）。
+    let hidden = (props.tail_hidden > 0).then(|| {
+        element! {
+            View(height: 1, width: 100pct, padding_left: 2) {
+                Text(
+                    color: theme.inactive,
+                    content: format!("… +{} lines", props.tail_hidden),
+                    wrap: TextWrap::NoWrap,
+                )
+            }
+        }
+        .into_any()
+    });
     // sticky prompt header（CC StickyPromptHeader）：绝对定位覆盖在滚动区
     // 顶部，不占布局（避免内容整体位移触发 diff 残留）。
     // inline：flex_grow 0（canvas 取内容自然高度，输入行随内容流走，
@@ -947,6 +1036,7 @@ fn Transcript(mut hooks: Hooks, props: &TranscriptProps) -> impl Into<AnyElement
             flex_direction: FlexDirection::Column,
             overflow_y: Overflow::Hidden,
         ) {
+            #(hidden.into_iter())
             #(slice.iter().map(|row| row_element(row, theme.text)))
             #(sticky.into_iter().map(|text| element! {
                 View(
@@ -973,6 +1063,22 @@ fn image_block_head(rows: &[Row], i: usize) -> bool {
     rows.get(i.wrapping_sub(1)).is_none_or(|prev| {
         prev.line.image.as_ref().map(|p| &p.url) != Some(&img.url)
     })
+}
+
+/// 落盘用的一行元素。整行背景（用户气泡）的行外面再包一层显式宽度的
+/// View：`width: 100pct` 在无定宽父级下退化成内容宽，气泡一落盘就从满行
+/// 缩成文字宽——同一条消息前后两个样子。
+fn flushed_row_element(row: &Row, default_color: Color, width: u16) -> AnyElement<'static> {
+    let inner = row_element(row, default_color);
+    if row.bg.is_none() {
+        return inner;
+    }
+    element! {
+        View(width: width) {
+            #(vec![inner].into_iter())
+        }
+    }
+    .into_any()
 }
 
 /// 一行 → iocraft 元素：整行背景（用户气泡）用 View 包裹；
@@ -1076,6 +1182,41 @@ mod tests {
     use iocraft::prelude::KeyCode;
     use iocraft::prelude::TerminalEvent;
     use crate::tui::line::ImageRef;
+
+    #[test]
+    fn shrink_deficit_counts_extra_wrapped_rows() {
+        // Width halved: every canvas row wraps once → one extra row each.
+        assert_eq!(shrink_deficit(200, 10, 100, 50), 10);
+        // ceil(200/67)=3 → two extra physical rows per logical row.
+        assert_eq!(shrink_deficit(200, 10, 67, 50), 20);
+        // Same width or widening never compensates.
+        assert_eq!(shrink_deficit(100, 10, 100, 50), 0);
+        assert_eq!(shrink_deficit(100, 10, 120, 50), 0);
+        // Nothing painted yet / degenerate width → no climb.
+        assert_eq!(shrink_deficit(0, 0, 80, 50), 0);
+        assert_eq!(shrink_deficit(100, 5, 0, 50), 0);
+        // Pathological ratio clamps to 4× viewport height.
+        assert_eq!(shrink_deficit(10_000, 50, 10, 50), 200);
+    }
+
+    #[test]
+    fn terminal_reflows_only_on_allowlist() {
+        // Known reflowing terminals.
+        assert!(terminal_reflows(Some("ghostty"), None, false));
+        assert!(terminal_reflows(Some("kitty"), None, false));
+        assert!(terminal_reflows(Some("iTerm.app"), None, false));
+        assert!(terminal_reflows(Some("WezTerm"), None, false));
+        assert!(terminal_reflows(Some("Apple_Terminal"), None, false));
+        assert!(terminal_reflows(Some("vscode"), None, false));
+        assert!(terminal_reflows(None, Some("xterm-kitty"), false));
+        assert!(terminal_reflows(None, Some("alacritty"), false));
+        // tmux rewraps panes itself, regardless of the outer terminal.
+        assert!(terminal_reflows(None, Some("xterm-256color"), true));
+        // Unknown terminals truncate — compensating would erase flushed
+        // content, so they stay excluded.
+        assert!(!terminal_reflows(None, Some("xterm-256color"), false));
+        assert!(!terminal_reflows(None, None, false));
+    }
 
     #[test]
     fn image_block_head_detects_block_boundaries() {
@@ -1200,35 +1341,32 @@ mod tests {
             ]),
         ));
         let mut stream = Box::pin(stream);
+        // 帧数不再固定：重绘纪律（只在落盘/resize/形状变化时全清）让
+        // 同形帧不再产生输出，且 mock 事件流会在同一次 poll 里派发
+        // Resize + Key，两者可能收敛在同一帧。断言落在最后一帧上。
         let mut actual = Vec::new();
-        for i in 0..3 {
-            let frame =
-                tokio::time::timeout(std::time::Duration::from_secs(3), stream.next()).await;
-            match frame {
+        while actual.len() < 4 {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), stream.next()).await
+            {
                 Ok(Some(c)) => actual.push(c.to_string()),
-                Ok(None) => break,
-                Err(_) => panic!("render loop stalled before {} frames", actual.len()),
+                _ => break,
             }
         }
-
-        let init = &actual[0];
-        let sized = &actual[1];
-        let typed = &actual[2];
+        assert!(!actual.is_empty(), "no frames rendered");
+        let last = actual.last().expect("frame");
         // 欢迎卡片（边框 + 标题）
-        assert!(sized.contains("bingo"), "welcome title: {sized}");
-        assert!(sized.contains("╭"), "welcome box top: {sized}");
-        assert!(sized.contains("╰"), "welcome box bottom: {sized}");
+        assert!(last.contains("bingo"), "welcome title: {last}");
+        assert!(last.contains("╭"), "welcome box top: {last}");
+        assert!(last.contains("╰"), "welcome box bottom: {last}");
         // 输入框底边框（CC promptBorder ╰──╯）
-        assert!(sized.contains('╯'), "input border corner: {sized}");
-        // footer：快捷键 byline + 模型名
-        assert!(
-            sized.contains("esc to interrupt"),
-            "footer hints: {sized}"
-        );
-        assert!(sized.contains("test-model"), "footer model: {sized}");
+        assert!(last.contains('╯'), "input border corner: {last}");
+        // footer：空闲提示（CC `? for shortcuts`）+ 模型名；
+        // `esc to interrupt` 只在 busy 时由状态行承担。
+        assert!(last.contains("? for shortcuts"), "footer hints: {last}");
+        assert!(!last.contains("esc to interrupt"), "空闲不显示中断提示: {last}");
+        assert!(last.contains("test-model"), "footer model: {last}");
         // 键盘 → 输入框
-        assert!(typed.contains("❯ h▋"), "typed input: {typed}");
-        let _ = init;
+        assert!(last.contains("❯ h▋"), "typed input: {last}");
     }
 
     /// Bingo 根的帧内容（真实 app 行为：tick + 事件 + 全布局）。
@@ -1374,26 +1512,40 @@ mod tests {
         // 卡片顶边框必须在用户消息之前
         let card = text.find('╭').expect("card top");
         let user = text.find("❯ Hi").expect("user message");
-        let thinking = text.find("✻").expect("thinking");
+        // 欢迎卡本身带 `✻`，思考块要按整串定位。
+        let thinking = text.find("✻ Thinking").expect("thinking");
         assert!(card < user, "card before user: {text}");
         assert!(user < thinking, "user before thinking: {text}");
         assert_eq!(text.matches('╰').count(), 1, "single card bottom: {text}");
         eprintln!("order ok: card={card} user={user} thinking={thinking}");
     }
 
-    /// 状态行渲染：busy 时输出 `⠋ {动词} for {N}s`。
+    /// 状态行渲染（CC）：`✻ {动词}… (esc to interrupt · {N}s · ↓ {tokens} tokens)`；
+    /// tokens 为 0 时省略该段。
     #[test]
     fn status_row_renders_busy_verb() {
         let theme = Theme::dark();
-        let mut row = status_row("Working", 12.5, '⠋', &theme);
-        let canvas = row.render(Some(60));
-        let text = canvas.to_string();
-        assert!(text.contains("Working for 12.5s"), "{text}");
-        assert!(text.contains('⠋'), "{text}");
-        // 工具动词用 tool_running 色、兜底 Working 用 thinking 色。
-        let mut tool_row = status_row("$ cargo test", 3.2, '⠙', &theme);
-        let tool_canvas = tool_row.render(Some(60));
-        assert!(tool_canvas.to_string().contains("$ cargo test for 3.2s"));
+        let status = crate::tui::chat::RunningStatus {
+            verb: "Working".to_string(),
+            elapsed: 12.5,
+            tokens: 0,
+        };
+        let mut row = status_row(&status, '✻', &theme);
+        let text = row.render(Some(80)).to_string();
+        assert!(text.contains("✻ Working… (esc to interrupt · 13s)"), "{text}");
+        assert!(!text.contains("tokens"), "0 token 省略该段: {text}");
+
+        let status = crate::tui::chat::RunningStatus {
+            verb: "$ cargo test".to_string(),
+            elapsed: 3.2,
+            tokens: 1200,
+        };
+        let mut row = status_row(&status, '✽', &theme);
+        let text = row.render(Some(80)).to_string();
+        assert!(
+            text.contains("✽ $ cargo test… (esc to interrupt · 3s · ↓ 1200 tokens)"),
+            "{text}"
+        );
     }
 
     /// bash 模式 UI：`!` 进入 shell 模式后前缀变 `!`、输入框边框换
@@ -1423,7 +1575,7 @@ mod tests {
             }
         }
         let typed = frames.last().expect("typed frame");
-        assert!(typed.contains("!l▋"), "bash prefix + input: {typed}");
+        assert!(typed.contains("! l▋"), "bash prefix + input: {typed}");
         assert!(
             typed.contains("! for shell mode"),
             "footer hint: {typed}"
@@ -1495,6 +1647,107 @@ mod tests {
             "blank row between a and b: {:?}",
             out
         );
+    }
+
+    /// 目视用：把典型帧（欢迎 + 用户 + 思考 + 工具 + diff + 权限框）
+    /// 的 doc 行打出来（`cargo test dump_homage -- --nocapture`）。
+    #[test]
+    fn dump_homage_frames() {
+        use crate::tui::UiEvent;
+        let session = test_session();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (asks_tx, asks_rx) = mpsc::unbounded_channel();
+        let mut chat = Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), None);
+        chat.messages.push(crate::tui::chat::UiMessage {
+            role: crate::tui::chat::Role::User,
+            text: "把 TUI 对齐一下设计语言".to_string(),
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        for event in [
+            UiEvent::TurnStart,
+            UiEvent::ThinkingDelta("先看看渲染层的结构。".into()),
+            UiEvent::ToolStart { name: "Read".into() },
+            UiEvent::ToolReady {
+                name: "Read".into(),
+                input: serde_json::json!({"file_path": "src/tui/chat.rs"}),
+                standalone: false,
+            },
+            UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "Read".into(),
+                summary: "src/tui/chat.rs".into(),
+                output: "line\nline\nline".into(),
+                is_error: false,
+                diff: None,
+                duration_ms: 120,
+            }),
+            UiEvent::ToolStart { name: "Bash".into() },
+            UiEvent::ToolReady {
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "cargo test"}),
+                standalone: true,
+            },
+            UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "Bash".into(),
+                summary: "cargo test".into(),
+                output: "$ cargo test\n439 passed".into(),
+                is_error: false,
+                diff: None,
+                duration_ms: 4200,
+            }),
+            UiEvent::ToolStart { name: "Edit".into() },
+            UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "Edit".into(),
+                summary: "src/tui/theme.rs".into(),
+                output: String::new(),
+                is_error: false,
+                diff: Some("--- a/src/tui/theme.rs\n+++ b/src/tui/theme.rs\n@@ -1,3 +1,4 @@\n ctx\n-old line\n+new line\n+extra\n".into()),
+                duration_ms: 30,
+            }),
+            UiEvent::TextDelta("改好了：工具行改成双行结构。".into()),
+            UiEvent::TurnEnd,
+        ] {
+            let _ = chat.events.send(event);
+        }
+        chat.drain_all();
+        chat.tasks_visible = true;
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        chat.pending_ask = Some((
+            crate::tui::chat::PermissionRequest::new("允许执行 Bash", "cargo test", vec!["允许".into(), "拒绝".into()]),
+            tx,
+        ));
+        chat.width = 96;
+        chat.build_rows(96);
+        eprintln!("======== transcript ========");
+        for row in &chat.doc.rows {
+            eprintln!("{}", row.line.plain_text());
+        }
+        eprintln!("======== tasks ========");
+        for line in chat.task_lines() {
+            eprintln!("{}", line.plain_text());
+        }
+        eprintln!("======== prompt (multi-line + help) ========");
+        chat.set_input("第一行\n第二行");
+        chat.cursor = "第一行\n第".len();
+        for line in chat.prompt_lines() {
+            eprintln!("|{}|", line.plain_text());
+        }
+        chat.help_visible = true;
+        chat.height = 40;
+        for line in chat.help_lines() {
+            eprintln!("{line}");
+        }
+        eprintln!("======== queue / status ========");
+        chat.queued = vec!["下一条消息".into()];
+        for line in chat.queue_lines() {
+            eprintln!("{line}");
+        }
+        chat.busy = true;
+        if let Some(status) = chat.running_status() {
+            eprintln!("status: ✻ {}… (esc to interrupt · {}s · ↓ {} tokens)", status.verb, status.elapsed.round(), status.tokens);
+        }
     }
 
     /// 视觉检查：真实对话（用户消息 + 思考 + 工具 + 折叠组）渲染。
@@ -1592,54 +1845,278 @@ mod tests {
         let _ = chat_doc;
     }
 
-    async fn root_renders_permission_request() {
-        let session = test_session();
-        let (_expand_tx, expand_rx) = tokio::sync::watch::channel(false);
-        let actual = element!(Bingo(
-            session: Some(session),
-            expand_rx: Some(expand_rx),
-        ))
-        .mock_terminal_render_loop(MockTerminalConfig::with_events(
-            futures_util::stream::iter(vec![TerminalEvent::Resize(80, 24)]),
-        ))
-        .take(2)
-        .map(|c| c.to_string())
-        .collect::<Vec<_>>()
-        .await;
-        // 初始渲染必须成功（不 panic）且含输入框
-        assert!(actual[1].contains("╰"), "layout rendered: {}", actual[1]);
-    }
-
-    /// inline_gate：空闲 Esc 默认拦截（切 typing 会让输入失焦），
-    /// 但 `/model` 菜单打开时必须放行（否则 Esc 退不出菜单）。
-    #[test]
-    fn inline_gate_passes_esc_when_model_menu_open() {
-        let session = test_session();
+    fn chat_for_test() -> Chat {
         let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut chat = Chat::new(
-            session,
+        Chat::new(
+            test_session(),
             events_tx,
             events_rx,
             asks_tx,
             asks_rx,
             Theme::dark(),
             None,
+        )
+    }
+
+    /// inline 模式端到端冒烟：canvas 只画动态尾部 + chrome——欢迎卡在
+    /// 首帧就落盘进 scrollback，不再占 canvas；chrome 公式与组装一致
+    /// （不一致会命中组装处的 debug_assert）。
+    #[tokio::test]
+    async fn inline_canvas_holds_only_tail_and_chrome() {
+        let session = test_session();
+        let (_expand_tx, expand_rx) = tokio::sync::watch::channel(false);
+        let mut root = element!(Bingo(
+            session: Some(session),
+            expand_rx: Some(expand_rx),
+            inline: Some(true),
+        ));
+        let stream = root.mock_terminal_render_loop(MockTerminalConfig::with_events(
+            futures_util::stream::iter(vec![
+                TerminalEvent::Resize(80, 24),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('x'))),
+            ]),
+        ));
+        let mut stream = Box::pin(stream);
+        let mut frames: Vec<String> = Vec::new();
+        while frames.len() < 6 {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), stream.next()).await
+            {
+                Ok(Some(c)) => frames.push(c.to_string()),
+                _ => break,
+            }
+        }
+        let last = frames.last().expect("frame");
+        // chrome 齐全。
+        assert!(last.contains("❯ x▋"), "输入行: {last}");
+        assert!(last.contains("? for shortcuts"), "footer: {last}");
+        assert!(last.contains('╰'), "输入框边框: {last}");
+        // 欢迎卡已落盘 → 不在 canvas 里。
+        assert!(
+            !last.contains("Welcome back"),
+            "欢迎卡不应留在 canvas: {last}"
         );
-        chat.input = "/model".to_string();
+        // canvas 行数严格小于终端高度（否则 iocraft 走 Purge 兜底）。
+        assert!(
+            last.lines().count() < 24,
+            "canvas {} 行 >= 终端 24 行",
+            last.lines().count()
+        );
+    }
+
+    /// 落盘的气泡行按终端宽渲染（canvas 里是满行背景），普通行按内容宽
+    /// （避免 scrollback 里全是行尾空格）。
+    #[test]
+    fn flushed_bubble_row_spans_terminal_width() {
+        let theme = Theme::dark();
+        let mut line = Line::styled("❯ ", crate::tui::line::SegStyle::fg(theme.text));
+        line.push_styled("hi", crate::tui::line::SegStyle::fg(theme.text));
+        let bubble = Row::bubble(line, theme.user_message_bg);
+        let canvas = flushed_row_element(&bubble, theme.text, 40).render(None);
+        let text = canvas.to_string();
+        let first = text.lines().next().expect("row");
+        assert_eq!(first.chars().count(), 40, "气泡满行: {first:?}");
+        // 普通行不补空格。
+        let plain = Row::new(Line::plain("plain row"));
+        let canvas = flushed_row_element(&plain, theme.text, 40).render(None);
+        assert_eq!(canvas.to_string().trim_end_matches('\n'), "plain row");
+    }
+
+    /// chrome 行数公式与实际组装的建议区行数一一对应。二者分家正是
+    /// canvas 越界（→ Clear(All)+Purge 闪屏）的根因。
+    #[test]
+    fn suggestion_rows_matches_rendered_views() {
+        use crate::tui::chat::{ModelMenu, ModelMenuModels, SlashSuggestion};
+        let theme = Theme::dark();
+        let mut chat = chat_for_test();
+        let check = |chat: &Chat| {
+            let views = suggestion_views(
+                &chat.slash_suggestions,
+                chat.slash_selected,
+                chat.model_menu.as_ref(),
+                &theme,
+                80,
+            );
+            assert_eq!(views.len(), suggestion_rows(chat), "行数公式与组装一致");
+        };
+        check(&chat);
+        // 一级：provider 列表。
+        chat.model_menu = Some(ModelMenu {
+            providers: vec!["default".into(), "openrouter".into()],
+            provider_selected: 0,
+            models: None,
+        });
+        check(&chat);
+        assert_eq!(suggestion_rows(&chat), 2);
+        // 二级 loading：只渲染一行提示（旧公式按 models.len()=0 算，
+        // 少算一行 → canvas 高度低估）。
+        chat.model_menu.as_mut().expect("menu").models = Some(ModelMenuModels {
+            provider: "default".into(),
+            models: Vec::new(),
+            loading: true,
+            selected: 0,
+        });
+        check(&chat);
+        assert_eq!(suggestion_rows(&chat), 1, "loading 占一行");
+        // 二级空列表：同样一行提示。
+        chat.model_menu.as_mut().expect("menu").models = Some(ModelMenuModels {
+            provider: "default".into(),
+            models: Vec::new(),
+            loading: false,
+            selected: 0,
+        });
+        check(&chat);
+        assert_eq!(suggestion_rows(&chat), 1, "空列表占一行");
+        // 二级模型列表按 5+5 上限截断。
+        chat.model_menu.as_mut().expect("menu").models = Some(ModelMenuModels {
+            provider: "default".into(),
+            models: (0..30).map(|i| format!("m{i}")).collect(),
+            loading: false,
+            selected: 0,
+        });
+        check(&chat);
+        assert_eq!(suggestion_rows(&chat), crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5);
+        // slash 建议优先于菜单。
+        chat.slash_suggestions = vec![SlashSuggestion {
+            name: "help".into(),
+            description: "显示可用命令".into(),
+        }];
+        check(&chat);
+        assert_eq!(suggestion_rows(&chat), 1);
+    }
+
+    /// chrome total = 各段之和，且与布局一一对应（transcript 之外的每一行）。
+    #[test]
+    fn chrome_total_sums_every_section() {
+        let mut chat = chat_for_test();
+        let chrome = Chrome::of(&chat);
+        // 空闲：输入框 3 行（两条边框 + 一行占位提示）+ footer 1 行。
+        assert_eq!(chrome, Chrome { prompt: 3, footer: 1, ..Chrome::default() });
+        assert_eq!(chrome.total(), 4);
+        // busy → 状态行；warning → 通知行；pending_ask → 等待提示。
+        chat.busy = true;
+        chat.warnings.push("mcp 连接失败".into());
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        chat.pending_ask = Some((
+            crate::tui::chat::PermissionRequest::new("t", "q", vec!["a".into()]),
+            tx,
+        ));
+        let chrome = Chrome::of(&chat);
+        assert_eq!(chrome.status, 1);
+        assert_eq!(chrome.warning, 1);
+        assert_eq!(chrome.ask, 1);
+        assert_eq!(chrome.total(), 3 + 1 + 1 + 1 + 1);
+    }
+
+    /// 新增的输入区行（多行输入 / `?` 面板 / 队列 / 搜索 / 提示行）全部
+    /// 进 chrome 计数——漏一行就是 canvas 越界（→ Purge 闪屏）。
+    #[test]
+    fn chrome_counts_the_new_input_sections() {
+        let mut chat = chat_for_test();
+        chat.width = 100;
+        chat.height = 40;
+        // 多行输入：边框 2 行 + 输入 3 行。
+        chat.set_input("a\nb\nc");
+        assert_eq!(Chrome::of(&chat).prompt, 5);
+        // `?` 面板。
+        chat.help_visible = true;
+        let help = Chrome::of(&chat).help;
+        assert!(help > 0 && help == chat.help_lines().len());
+        // 队列 + 提示行 + 搜索行。
+        chat.queued.push("queued message".into());
+        chat.notice = Some("Press ctrl-c again to exit");
+        chat.search = Some(crate::tui::chat::HistorySearch::default());
+        let chrome = Chrome::of(&chat);
+        assert_eq!(chrome.queue, 1);
+        assert_eq!(chrome.notice, 1);
+        assert_eq!(chrome.search, 1);
+        assert_eq!(
+            chrome.total(),
+            chrome.status
+                + chrome.tasks
+                + chrome.warning
+                + chrome.help
+                + chrome.prompt
+                + chrome.search
+                + chrome.queue
+                + chrome.suggestions
+                + chrome.notice
+                + chrome.footer
+                + chrome.ask
+        );
+    }
+
+    /// `?` 面板经完整渲染路径出现在输入框上方，且 canvas 仍严格低于终端高度
+    /// （组装处的 debug_assert 同时校验 chrome 公式与实际行数一致）。
+    #[tokio::test]
+    async fn help_panel_renders_within_canvas_budget() {
+        let session = test_session();
+        let (_expand_tx, expand_rx) = tokio::sync::watch::channel(false);
+        let mut root = element!(Bingo(
+            session: Some(session),
+            expand_rx: Some(expand_rx),
+            inline: Some(true),
+        ));
+        let stream = root.mock_terminal_render_loop(MockTerminalConfig::with_events(
+            futures_util::stream::iter(vec![
+                TerminalEvent::Resize(100, 30),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('?'))),
+            ]),
+        ));
+        let mut stream = Box::pin(stream);
+        let mut frames: Vec<String> = Vec::new();
+        while frames.len() < 6 {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), stream.next()).await
+            {
+                Ok(Some(c)) => frames.push(c.to_string()),
+                _ => break,
+            }
+        }
+        let last = frames.last().expect("frame");
+        assert!(last.contains("shift+tab"), "面板列出快捷键: {last}");
+        assert!(last.contains("cycle permission mode"), "面板含说明: {last}");
+        assert!(last.lines().count() < 30, "canvas 仍低于终端高度: {}", last.lines().count());
+    }
+
+    /// 尾部窗口：canvas 高度（尾部 + 省略提示 + chrome）恒 < 终端高度。
+    /// 等于终端高度时 iocraft 改用 Clear(All)+Purge——整屏闪 + 清空
+    /// 用户 scrollback。
+    #[test]
+    fn tail_window_keeps_canvas_below_terminal_height() {
+        let mut chat = chat_for_test();
+        chat.doc.rows = (0..100).map(|i| Row::new(Line::plain(format!("r{i}")))).collect();
+        let chrome = 4usize;
+        for height in 6..40usize {
+            let (start, hidden) = tail_window(&chat, chrome, height);
+            let visible = chat.doc.rows.len() - start;
+            let canvas = visible + usize::from(hidden > 0) + chrome;
+            assert!(canvas < height, "height={height} canvas={canvas}");
+            assert_eq!(hidden, chat.doc.rows.len() - visible, "省略数 = 未显示行数");
+        }
+        // 内容装得下时不省略，也不裁剪。
+        chat.doc.rows.truncate(3);
+        assert_eq!(tail_window(&chat, chrome, 40), (0, 0));
+        // 已落盘的前缀不在尾部窗口内。
+        chat.tail_start = 2;
+        assert_eq!(tail_window(&chat, chrome, 40), (2, 0));
+        // chrome 已占满：尾部为空（画不下就一行不画，仍不越界）。
+        assert_eq!(tail_window(&chat, chrome, chrome), (3, 0));
+    }
+
+    /// inline_gate：Esc 一律放行给 on_key（菜单退出、清空输入都在那里），
+    /// 只有「已落盘消息的 ctrl+o」被拦下——那些行改不动了。
+    #[test]
+    fn inline_gate_passes_esc_and_blocks_flushed_ctrl_o() {
+        let mut chat = chat_for_test();
+        chat.set_input("/model");
         chat.submit();
-        assert!(
-            chat.model_menu.is_some(),
-            "菜单已打开"
-        );
-        // 菜单打开：Esc 放行（返回 false = 不请求退出，事件继续给 on_key）。
-        assert!(!inline_gate(&mut chat, KeyCode::Esc, KeyModifiers::empty()));
-        assert!(
-            chat.on_key(KeyCode::Esc, KeyModifiers::empty()),
-            "Esc 被 on_key 消费（退出菜单）"
-        );
-        assert!(chat.model_menu.is_none(), "菜单已退出");
-        // 空闲无菜单：Esc 仍被 gate 拦截（不传给 on_key）。
-        assert!(!inline_gate(&mut chat, KeyCode::Esc, KeyModifiers::empty()));
+        assert!(chat.model_menu.is_some(), "菜单已打开");
+        inline_gate(&mut chat, KeyCode::Esc, KeyModifiers::empty());
+        assert!(chat.model_menu.is_none(), "Esc 经 gate 退出菜单");
+
+        // 无消息（全部落盘）时 ctrl+o 被拦：不会触发折叠。
+        chat.set_input("hi");
+        inline_gate(&mut chat, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert_eq!(chat.input, "hi", "ctrl+o 未插入字符");
     }
 }

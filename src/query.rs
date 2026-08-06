@@ -12,11 +12,11 @@ use crate::api::types::{
     ContentBlock, Message, Request, StreamEvent, SystemBlock, Role, DEFAULT_MAX_TOKENS,
 };
 use crate::budget::MAX_RESULT_CHARS;
-use crate::compact::check_and_compact;
+use crate::compact::{check_and_compact, TokenGate};
 use crate::hooks::{run_post_tool_use, run_pre_tool_use, run_stop_hooks, run_user_prompt_submit};
 use crate::permission::{can_use_tool, PermissionBehavior, PermissionMode};
 use crate::settings::{HooksConfig, Settings};
-use crate::tool::executor::{execute_calls, PendingCall};
+use crate::tool::executor::{cancel_requested, execute_calls, PendingCall};
 use crate::tool::{find_tool, tool_params, Tool, ToolContext, ToolError, ToolResult};
 use crate::transcript::Transcript;
 
@@ -58,13 +58,19 @@ fn task_reminder_turn_distances(messages: &[Message]) -> (u64, u64) {
     let mut reminder_seen = false;
     for message in messages.iter().rev() {
         if message.role == Role::Assistant {
-            since_management += 1;
-            since_reminder += 1;
-            let uses_task_tool = message.content.iter().any(|b| {
-                matches!(b, ContentBlock::ToolUse { name, .. } if name == "TaskCreate" || name == "TaskUpdate")
-            });
-            if uses_task_tool {
-                management_seen = true;
+            // 各自 seen 后停止各自累加：首次会话 reminder 永不存在，
+            // 继续累加会把「距上次 Task 工具」算成全部轮数，刚用过也被提醒。
+            if !management_seen {
+                since_management += 1;
+                let uses_task_tool = message.content.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolUse { name, .. } if name == "TaskCreate" || name == "TaskUpdate")
+                });
+                if uses_task_tool {
+                    management_seen = true;
+                }
+            }
+            if !reminder_seen {
+                since_reminder += 1;
             }
         } else if !reminder_seen {
             let is_reminder = message.content.iter().any(|b| {
@@ -185,7 +191,8 @@ pub struct Session {
     pub watch: Arc<crate::watch::WatchRegistry>,
     /// Task 存储（Task 工具族 + TUI 任务区 + reminder 注入同源）。
     pub tasks: Arc<crate::tasks::TaskStore>,
-    /// 上次 task_reminder 注入的轮号（10 轮阈值）。
+    /// 死字段：轮距实际由 `task_reminder_turn_distances` 从消息历史算出，
+    /// 这里从不读写。构造点散落在 TUI/子代理，删除需跨模块改动。
     pub last_task_reminder_turn: Arc<std::sync::atomic::AtomicU64>,
     /// 任务区展开信号（TUI 自循环订阅）。
     pub expand_tasks: watch::Sender<bool>,
@@ -340,24 +347,26 @@ async fn one_turn(
     };
     // 连接阶段同样可中断（连接挂起/重试时按 Esc 立即放弃，不等输出开始）。
     let mut acc = AssistantAccumulator::new();
-    let mut stream = loop {
-        match &mut cancel {
-            Some(cancel) => {
-                if *cancel.borrow() {
-                    return Ok(Turn {
-                        assistant: acc.message(),
-                        tool_uses: Vec::new(),
-                        stop_reason: None,
-                        aborted: true,
-                    });
-                }
-                tokio::select! {
-                    s = session.client.stream(&request) => break Box::pin(s?),
-                    _ = cancel.changed() => {}
-                }
+    let aborted_turn = |acc: &AssistantAccumulator| Turn {
+        assistant: acc.message(),
+        tool_uses: Vec::new(),
+        stop_reason: None,
+        aborted: true,
+    };
+    let mut stream = match &mut cancel {
+        Some(cancel) => {
+            // 进 select 前清版本并认已置位的信号：否则新 receiver 的
+            // changed() 立刻就绪，select 随机挑分支，约半数回合会 drop
+            // 掉已发出的 HTTP stream future 并重发（重复计费 + 延迟）。
+            if *cancel.borrow_and_update() {
+                return Ok(aborted_turn(&acc));
             }
-            None => break Box::pin(session.client.stream(&request).await?),
+            tokio::select! {
+                stream = session.client.stream(&request) => Box::pin(stream?),
+                _ = cancel_requested(cancel) => return Ok(aborted_turn(&acc)),
+            }
         }
+        None => Box::pin(session.client.stream(&request).await?),
     };
     let mut tool_uses = Vec::new();
     let mut aborted = false;
@@ -365,13 +374,9 @@ async fn one_turn(
         let event = match &mut cancel {
             Some(cancel) => tokio::select! {
                 maybe = stream.next() => maybe,
-                _ = cancel.changed() => {
-                    if *cancel.borrow() {
-                        aborted = true;
-                        None
-                    } else {
-                        continue;
-                    }
+                _ = cancel_requested(cancel) => {
+                    aborted = true;
+                    None
                 }
             },
             None => stream.next().await,
@@ -561,16 +566,28 @@ fn clipped_result(text: String) -> String {
     }
 }
 
+/// 工具用 HTTP 客户端：每回合新建会丢掉连接池（TLS 握手重来一遍），
+/// 进程内复用一个即可（clone 只是共享内部 Arc）。
+static TOOL_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn tool_http() -> Result<reqwest::Client, QueryError> {
+    if let Some(client) = TOOL_HTTP.get() {
+        return Ok(client.clone());
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?;
+    Ok(TOOL_HTTP.get_or_init(|| client).clone())
+}
+
 /// 工具执行上下文（工具池组装与执行共用的 cwd/registry/http 等）。
 fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContext, QueryError> {
     Ok(ToolContext {
         cwd: std::env::current_dir()
             .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
         watch: session.watch.clone(),
-        http: reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
+        http: tool_http()?,
         tasks: session.tasks.clone(),
         hooks: session.settings.hooks.clone(),
         permission_mode: permission_mode_str(session.permission_mode).to_string(),
@@ -587,6 +604,41 @@ fn escape_xml(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// 中断时补给未回填 tool_use 的占位结果。
+const INTERRUPTED_TOOL_RESULT: &str =
+    "<tool_use_error>interrupted by the user before this tool produced a result</tool_use_error>";
+
+/// blocks 里是否已有该 tool_use 的结果。
+fn answered(blocks: &[ContentBlock], tool_use_id: &str) -> bool {
+    blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id: id, .. } if id == tool_use_id))
+}
+
+/// 为每个尚未回填的 tool_use 补一条 is_error 占位结果。
+/// API 要求同一请求内 tool_use 与 tool_result 一一配对——缺一条，
+/// 此后每次带上这段历史的请求都 400。
+fn fill_missing_tool_results(tool_uses: &[ContentBlock], blocks: &mut Vec<ContentBlock>) {
+    for tool_use in tool_uses {
+        let ContentBlock::ToolUse { id, .. } = tool_use else {
+            continue;
+        };
+        if !answered(blocks, id) {
+            blocks.push(tool_result_error(id, INTERRUPTED_TOOL_RESULT));
+        }
+    }
+}
+
+/// 入史 + 落盘 transcript（顺序固定：先落盘再入史，省掉 last().expect）。
+fn record(session: &Session, messages: &mut Vec<Message>, message: Message, ui: &mut UiHooks) {
+    if let Some(t) = session.runtime.transcript.borrow().clone()
+        && let Err(e) = t.append(&message)
+    {
+        (ui.on_warning)(format!("transcript append failed: {e}"));
+    }
+    messages.push(message);
+}
+
 /// queryLoop：多轮 tool loop，直到 end_turn（`run_query` 与 `run_bash_command`
 /// 共用的循环体）。messages 已含本次用户输入与 transcript 落盘。
 /// cancel：Some 时流读取可被 watch 信号中断（TUI Ctrl+C/Esc）。
@@ -600,8 +652,9 @@ async fn query_loop(
 ) -> Result<QueryOutcome, QueryError> {
     let mut recovery_count = 0u32;
     let mut stop_hook_fired = false;
+    let mut gate = TokenGate::new();
     loop {
-        check_and_compact(session, &mut messages).await;
+        check_and_compact(session, &mut messages, &mut gate).await;
         // task_reminder：Task 工具 10 轮未用 + 距上次提醒 10 轮。
         maybe_inject_task_reminder(session, &mut messages).await;
         // 后台任务通知注入（执行中动态感知）：每次推理前把待消费的状态转换
@@ -626,11 +679,9 @@ async fn query_loop(
             println!();
             return Ok(QueryOutcome { messages, aborted: true });
         }
-        if let Some(t) = session.runtime.transcript.borrow().clone()
-            && let Err(e) = t.append(&turn.assistant)
-        {
-            (ui.on_warning)(format!("transcript append failed: {e}"));
-        }
+        // assistant 必须先入史再走各分支：max_tokens 恢复与 Stop hook
+        // 都要让模型看见被截断的内容，正常结束也要让下游拿到本轮结论。
+        record(session, &mut messages, turn.assistant, ui);
         if turn.tool_uses.is_empty() {
             // 输出预算截断恢复：注入"继续"消息重试（上限 3 次）。
             if turn.stop_reason.as_deref() == Some("max_tokens")
@@ -657,7 +708,6 @@ async fn query_loop(
             println!();
             return Ok(QueryOutcome { messages, aborted: false });
         }
-        messages.push(turn.assistant);
 
         // 阶段 1：逐工具走权限门（串行，可能交互；hook 可改写输入）
         let mut pending: Vec<PendingCall> = Vec::new();
@@ -725,61 +775,67 @@ async fn query_loop(
         }
 
         // 阶段 2：队列执行（safe 并行 / 非 safe 串行）。
-        // 中断语义：信号到达立即停止——
-        // 正在执行的工具被取消（future drop），未开始的不再执行；
-        // 已完成的工具仅收口 UI（行不悬空），不回填、不进下一轮。
+        // 中断语义：信号到达立即停止——正在执行的工具被取消（future drop），
+        // 未开始的不再执行；已完成的保留真实结果，未回填的补 is_error 占位，
+        // 保证每个 tool_use 都有配对的 tool_result（否则历史永久 400）。
         let mut stop_after_tools = false;
         let (outcomes, interrupted) = execute_calls(pending, ctx, cancel_rx.as_mut()).await;
-        let mut done_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for outcome in outcomes {
-            done_ids.insert(outcome.tool_use_id.clone());
+            let tool_use = turn
+                .tool_uses
+                .iter()
+                .find(|t| matches!(t, ContentBlock::ToolUse { id, .. } if id == &outcome.tool_use_id));
+            let Some(ContentBlock::ToolUse { name, input, .. }) = tool_use else {
+                continue;
+            };
             match outcome.result {
                 Ok(result) => {
-                    if let Some(ContentBlock::ToolUse { name, input, .. }) = turn
-                        .tool_uses
-                        .iter()
-                        .find(|t| matches!(t, ContentBlock::ToolUse { id, .. } if id == &outcome.tool_use_id))
-                    {
-                        let text = clipped_result(render_result(&result));
-                        (ui.on_tool_done)(&ToolCallDone {
-                            name: name.clone(),
-                            summary: summarize_input(name, input),
-                            output: text,
-                            is_error: result.is_error,
-                            diff: result.diff.clone(),
-                            duration_ms: outcome.duration_ms,
-                        });
-                        if !interrupted {
-                            blocks.push(result_block(&outcome.tool_use_id, &result));
-                            // PostToolUse exit 2 → 阻断继续（hook 的 blocking error 语义）。
-                            stop_after_tools |= run_post_tool_use(
-                                &session.settings.hooks,
-                                name,
-                                input,
-                                &result.content,
-                                permission_mode_str(session.permission_mode),
-                            )
-                            .await;
-                        }
+                    (ui.on_tool_done)(&ToolCallDone {
+                        name: name.clone(),
+                        summary: summarize_input(name, input),
+                        output: clipped_result(render_result(&result)),
+                        is_error: result.is_error,
+                        diff: result.diff.clone(),
+                        duration_ms: outcome.duration_ms,
+                    });
+                    blocks.push(result_block(&outcome.tool_use_id, &result));
+                    if !interrupted {
+                        // PostToolUse exit 2 → 阻断继续（hook 的 blocking error 语义）。
+                        stop_after_tools |= run_post_tool_use(
+                            &session.settings.hooks,
+                            name,
+                            input,
+                            &result.content,
+                            permission_mode_str(session.permission_mode),
+                        )
+                        .await;
                     }
                 }
                 Err(e) => {
-                    if !interrupted {
-                        blocks.push(tool_result_error(
-                            &outcome.tool_use_id,
-                            format!("<tool_use_error>{e}</tool_use_error>"),
-                        ));
-                    }
+                    // 失败也要收口 UI：否则工具行永远旋转，用户看不到失败。
+                    (ui.on_tool_done)(&ToolCallDone {
+                        name: name.clone(),
+                        summary: summarize_input(name, input),
+                        output: e.to_string(),
+                        is_error: true,
+                        diff: None,
+                        duration_ms: outcome.duration_ms,
+                    });
+                    blocks.push(tool_result_error(
+                        &outcome.tool_use_id,
+                        format!("<tool_use_error>{e}</tool_use_error>"),
+                    ));
                 }
             }
         }
+
         if interrupted {
             // 未执行的工具行收口为「已中断」：不悬空旋转、也不误导为完成。
             for tool_use in &turn.tool_uses {
                 let ContentBlock::ToolUse { id, name, input } = tool_use else {
                     continue;
                 };
-                if done_ids.contains(id) {
+                if answered(&blocks, id) {
                     continue;
                 }
                 (ui.on_tool_done)(&ToolCallDone {
@@ -791,18 +847,19 @@ async fn query_loop(
                     duration_ms: 0,
                 });
             }
+        }
+        // 补齐所有未回填的 tool_use：中断路径直接 return 会在 transcript 里
+        // 留下孤儿 tool_use，此后每次从历史恢复都 400，会话永久损坏。
+        fill_missing_tool_results(&turn.tool_uses, &mut blocks);
+        record(
+            session,
+            &mut messages,
+            Message { role: Role::User, content: blocks },
+            ui,
+        );
+        if interrupted {
             println!();
             return Ok(QueryOutcome { messages, aborted: true });
-        }
-
-        messages.push(Message {
-            role: Role::User,
-            content: blocks,
-        });
-        if let Some(t) = session.runtime.transcript.borrow().clone()
-            && let Err(e) = t.append(messages.last().expect("messages 刚 push，非空"))
-        {
-            (ui.on_warning)(format!("transcript append failed: {e}"));
         }
         // 本批工具全部收口：折叠组按批聚合，下一轮模型响应的工具开新组。
         (ui.on_round_end)();
@@ -837,12 +894,7 @@ pub async fn run_query(
     }
 
     let mut messages = initial_messages;
-    messages.push(Message::user_text(user_input));
-    if let Some(t) = session.runtime.transcript.borrow().clone()
-        && let Err(e) = t.append(messages.last().expect("messages 刚 push，非空"))
-    {
-        (ui.on_warning)(format!("transcript append failed: {e}"));
-    }
+    record(session, &mut messages, Message::user_text(user_input), ui);
     query_loop(session, messages, ui, &tools, &ctx, cancel).await
 }
 
@@ -930,10 +982,11 @@ pub async fn run_bash_command(
                         cancel.as_mut(),
                     )
                     .await;
-                    if interrupted {
+                    // 中断或（不该发生的）空结果都按中断收口：`!` 命令的
+                    // tool_use 尚未入史，直接 return 不会留下孤儿。
+                    let Some(outcome) = outcomes.into_iter().next().filter(|_| !interrupted) else {
                         return Ok(QueryOutcome { messages, aborted: true });
-                    }
-                    let outcome = outcomes.into_iter().next().expect("单条调用必有结果");
+                    };
                     match outcome.result {
                         Ok(result) => {
                             let text = clipped_result(render_result(&result));
@@ -1047,6 +1100,129 @@ fn is_cancelled(cancel: &Option<watch::Receiver<bool>>) -> bool {
 mod tests {
     use super::*;
 
+    /// 极简 Anthropic 端点：count_tokens 回固定值，/v1/messages 按序回预置 SSE。
+    async fn spawn_api(responses: Vec<String>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut remaining = responses;
+        remaining.reverse();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 64 * 1024];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..read]).to_string();
+                let (content_type, body) = if head.contains("/v1/messages/count_tokens") {
+                    ("application/json", "{\"input_tokens\":10}".to_string())
+                } else {
+                    ("text/event-stream", remaining.pop().unwrap_or_default())
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn sse(events: &[(&str, String)]) -> String {
+        events
+            .iter()
+            .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+            .collect()
+    }
+
+    fn text_turn(text: &str, stop_reason: &str) -> String {
+        sse(&[
+            ("message_start", r#"{"message":{"id":"m_1","model":"m"}}"#.into()),
+            (
+                "content_block_start",
+                r#"{"index":0,"content_block":{"type":"text","text":""}}"#.into(),
+            ),
+            (
+                "content_block_delta",
+                format!(r#"{{"index":0,"delta":{{"type":"text_delta","text":"{text}"}}}}"#),
+            ),
+            ("content_block_stop", r#"{"index":0}"#.into()),
+            (
+                "message_delta",
+                format!(r#"{{"delta":{{"stop_reason":"{stop_reason}"}},"usage":{{"output_tokens":5}}}}"#),
+            ),
+            ("message_stop", "{}".into()),
+        ])
+    }
+
+    fn bash_tool_turn(id: &str, command: &str) -> String {
+        let input = serde_json::to_string(&serde_json::json!({ "command": command }).to_string())
+            .unwrap_or_default();
+        sse(&[
+            ("message_start", r#"{"message":{"id":"m_1","model":"m"}}"#.into()),
+            (
+                "content_block_start",
+                format!(
+                    r#"{{"index":0,"content_block":{{"type":"tool_use","id":"{id}","name":"Bash","input":{{}}}}}}"#
+                ),
+            ),
+            (
+                "content_block_delta",
+                format!(r#"{{"index":0,"delta":{{"type":"input_json_delta","partial_json":{input}}}}}"#),
+            ),
+            ("content_block_stop", r#"{"index":0}"#.into()),
+            (
+                "message_delta",
+                r#"{"delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}"#.into(),
+            ),
+            ("message_stop", "{}".into()),
+        ])
+    }
+
+    fn test_session(base_url: String, transcript: Option<Transcript>) -> Arc<Session> {
+        Arc::new(Session {
+            client: crate::api::client::Client::new("k".into(), base_url),
+            runtime: Runtime::new("m".into(), transcript, Default::default()),
+            permission_mode: PermissionMode::BypassPermissions,
+            settings: crate::settings::Settings::default(),
+            system: Vec::new(),
+            depth: 0,
+            home: std::env::temp_dir(),
+            quiet: true,
+            compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            watch: crate::watch::WatchRegistry::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+        })
+    }
+
+    fn tool_use_ids(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn tool_result_ids(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn clips_oversized_results() {
         let long = "x".repeat(MAX_RESULT_CHARS + 100);
@@ -1156,6 +1332,174 @@ mod tests {
         assert!(text.contains("<bash-stdout>"), "{text}");
         assert!(text.contains("a&lt;b&amp;c&gt;"), "输出已转义: {text}");
         assert!(!text.contains("a<b&c>"), "原始 < > 不得泄漏: {text}");
+    }
+
+    /// S2：中断发生在工具执行中——历史与 transcript 里每个 tool_use
+    /// 都必须有配对的 tool_result，否则此后每次恢复会话都 400。
+    #[tokio::test]
+    async fn interrupt_backfills_placeholder_tool_results() {
+        let base_url = spawn_api(vec![bash_tool_turn("tu_1", "sleep 5")]).await;
+        let home = std::env::temp_dir().join(format!("bingo-interrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let transcript = crate::transcript::create(&home, &home).unwrap();
+        let session = test_session(base_url, Some(transcript.clone()));
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn({
+            let session = session.clone();
+            async move {
+                let mut ui = headless_hooks();
+                run_query(&session, Vec::new(), "go", &mut ui, Some(rx)).await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tx.send(true).unwrap();
+        let outcome = handle.await.unwrap().unwrap();
+
+        assert!(outcome.aborted, "回合按中断收口");
+        let uses = tool_use_ids(&outcome.messages);
+        assert_eq!(uses, vec!["tu_1"], "本轮发出了一个 tool_use");
+        assert_eq!(
+            tool_result_ids(&outcome.messages),
+            uses,
+            "每个 tool_use 都配对了 tool_result"
+        );
+
+        // transcript 同样不得留下孤儿 tool_use（恢复会话会带上它）。
+        let saved = transcript.load_messages().unwrap();
+        assert_eq!(tool_use_ids(&saved), uses, "transcript 记录了 tool_use");
+        assert_eq!(
+            tool_result_ids(&saved),
+            uses,
+            "transcript 里 tool_use 也已配对，恢复不会 400"
+        );
+        let ContentBlock::ToolResult { is_error, .. } = &saved
+            .last()
+            .unwrap()
+            .content
+            .iter()
+            .find(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            .unwrap()
+        else {
+            panic!("tool result");
+        };
+        assert!(is_error, "占位结果标为 is_error");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// M2：max_tokens 截断恢复时，被截断的 assistant 内容必须已经在
+    /// 请求历史里——否则模型无从续写。
+    #[tokio::test]
+    async fn max_tokens_recovery_keeps_truncated_assistant_in_history() {
+        let base_url = spawn_api(vec![
+            text_turn("partial answer", "max_tokens"),
+            text_turn("done", "end_turn"),
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        let outcome = run_query(&session, Vec::new(), "go", &mut ui, None)
+            .await
+            .unwrap();
+
+        let texts: Vec<(Role, String)> = outcome
+            .messages
+            .iter()
+            .map(|m| {
+                let text = m
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                (m.role, text)
+            })
+            // task_reminder 与本用例无关（首次会话必注入一次）。
+            .filter(|(_, text)| !text.starts_with(TASK_REMINDER_MARKER))
+            .collect();
+
+        assert_eq!(texts.len(), 4, "user / assistant / resume / assistant: {texts:?}");
+        assert_eq!(texts[1], (Role::Assistant, "partial answer".to_string()));
+        assert_eq!(texts[2], (Role::User, MAX_TOKENS_RESUME_PROMPT.to_string()));
+        assert_eq!(
+            texts[3],
+            (Role::Assistant, "done".to_string()),
+            "正常结束的 assistant 也在返回的 messages 里"
+        );
+    }
+
+    /// M1：首次会话（无 reminder、无 Task 工具轮）不得因为扫到头就被提醒；
+    /// 刚用过 Task 工具的会话轮距要小。
+    #[test]
+    fn task_reminder_distances_stop_at_first_hit() {
+        let assistant = |uses_task: bool| Message {
+            role: Role::Assistant,
+            content: if uses_task {
+                vec![ContentBlock::ToolUse {
+                    id: "t".into(),
+                    name: "TaskUpdate".into(),
+                    input: serde_json::json!({}),
+                }]
+            } else {
+                vec![ContentBlock::Text { text: "hi".into() }]
+            },
+        };
+
+        // 最近一轮就用了 Task 工具：轮距 1，不该被提醒。
+        let mut messages: Vec<Message> = (0..20).map(|_| assistant(false)).collect();
+        messages.push(assistant(true));
+        let (since_management, since_reminder) = task_reminder_turn_distances(&messages);
+        assert_eq!(since_management, 1, "距最近一次 Task 工具 1 轮");
+        assert_eq!(
+            since_reminder,
+            TASK_REMINDER_TURNS + 1,
+            "从未提醒过 → 视为超阈值"
+        );
+        assert!(
+            since_management < TASK_REMINDER_TURNS,
+            "刚用过 Task 工具不该再提醒"
+        );
+
+        // 十轮之前用过：轮距 11，应当提醒。
+        let mut messages = vec![assistant(true)];
+        messages.extend((0..11).map(|_| assistant(false)));
+        let (since_management, _) = task_reminder_turn_distances(&messages);
+        assert_eq!(since_management, 12);
+
+        // 从未用过、也从未提醒过：两边都按超阈值处理。
+        let messages: Vec<Message> = (0..30).map(|_| assistant(false)).collect();
+        assert_eq!(
+            task_reminder_turn_distances(&messages),
+            (TASK_REMINDER_TURNS + 1, TASK_REMINDER_TURNS + 1)
+        );
+    }
+
+    /// 孤儿 tool_use 一律补齐；已回填的不重复补（重复 tool_result 同样 400）。
+    #[test]
+    fn missing_tool_results_are_filled_exactly_once() {
+        let tool_uses = vec![
+            ContentBlock::ToolUse {
+                id: "a".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::ToolUse {
+                id: "b".into(),
+                name: "Read".into(),
+                input: serde_json::json!({}),
+            },
+        ];
+        let mut blocks = vec![tool_result_text("a", "done")];
+        fill_missing_tool_results(&tool_uses, &mut blocks);
+        assert_eq!(tool_result_ids(&[Message { role: Role::User, content: blocks.clone() }]), vec!["a", "b"]);
+
+        // 再跑一次不得重复补。
+        fill_missing_tool_results(&tool_uses, &mut blocks);
+        assert_eq!(blocks.len(), 2, "已配对的不重复补");
     }
 
     /// `!top` 等交互式/TTY 命令：不经权限门直接拒绝（respond=false 不查模型）。

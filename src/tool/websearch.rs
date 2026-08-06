@@ -160,7 +160,7 @@ static RESULT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
 fn parse_results(html: &str) -> Vec<SearchHit> {
     let mut hits = Vec::new();
     for cap in RESULT_RE.captures_iter(html) {
-        let url = decode_entity(&cap[1]);
+        let url = unwrap_ddg_redirect(&decode_entity(&cap[1]));
         let title = strip_tags(&decode_entity(&cap[2]));
         let snippet = strip_tags(&decode_entity(&cap[3]));
         hits.push(SearchHit { title, url, snippet });
@@ -168,7 +168,31 @@ fn parse_results(html: &str) -> Vec<SearchHit> {
     hits
 }
 
-/// DDG 结果 URL 是重定向包装（//duckduckgo.com/l/?uddg=...）→ 解出真实 URL。
+/// DDG 结果 URL 是重定向包装（`//duckduckgo.com/l/?uddg=<percent-encoded>`）：
+/// 不解包则 host 解析失败 → allowed_domains 恒过滤为空、blocked_domains 恒失效、
+/// 回填给模型的链接也无法直接访问。协议相对 URL 一并补全为 https。
+fn unwrap_ddg_redirect(url: &str) -> String {
+    let absolute = match url.strip_prefix("//") {
+        Some(rest) => format!("https://{rest}"),
+        None => url.to_string(),
+    };
+    let Ok(parsed) = url::Url::parse(&absolute) else {
+        return absolute;
+    };
+    if !parsed
+        .host_str()
+        .is_some_and(|h| h == "duckduckgo.com" || h.ends_with(".duckduckgo.com"))
+    {
+        return absolute;
+    }
+    parsed
+        .query_pairs()
+        .find(|(key, _)| key == "uddg")
+        .map(|(_, value)| value.into_owned())
+        .unwrap_or(absolute)
+}
+
+/// HTML 实体解码。
 fn decode_entity(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -268,9 +292,65 @@ mod tests {
         let hits = parse_results(html);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].title, "Example & Page Title");
-        assert!(hits[0].url.contains("example.com"));
+        // 重定向包装已解包为真实 URL（而非 percent-encoded 的 uddg 参数串）。
+        assert_eq!(hits[0].url, "https://example.com/page");
         assert_eq!(hits[0].snippet, "First snippet text");
         assert_eq!(hits[1].title, "Other Site");
+        assert_eq!(hits[1].url, "https://other.org/x");
+    }
+
+    /// M5 回归：不解包 uddg 时 host 解析失败，域名过滤全部失效。
+    #[test]
+    fn unwraps_duckduckgo_redirect() {
+        assert_eq!(
+            unwrap_ddg_redirect("//duckduckgo.com/l/?uddg=https%3A%2F%2Frust-lang.org%2Fdocs&rut=1"),
+            "https://rust-lang.org/docs"
+        );
+        assert_eq!(
+            unwrap_ddg_redirect("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fa.example%2Fx%3Fq%3D1"),
+            "https://a.example/x?q=1"
+        );
+        // 非 DDG 链接原样返回；协议相对 URL 补全 https。
+        assert_eq!(unwrap_ddg_redirect("https://other.org/x"), "https://other.org/x");
+        assert_eq!(unwrap_ddg_redirect("//other.org/x"), "https://other.org/x");
+        // DDG 链接但无 uddg 参数：不失真。
+        assert_eq!(
+            unwrap_ddg_redirect("https://duckduckgo.com/about"),
+            "https://duckduckgo.com/about"
+        );
+    }
+
+    /// 解包后 allowed/blocked 域名过滤才真正生效。
+    #[test]
+    fn domain_filters_work_on_unwrapped_urls() {
+        let html = r#"
+            <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.rs%2Fx&amp;rut=1">Docs</a>
+            <div class="result__snippet"><a class="result__snippet" href="...">first</a></div>
+            <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fspam.example%2Fy&amp;rut=2">Spam</a>
+            <div class="result__snippet"><a class="result__snippet" href="...">second</a></div>
+        "#;
+        let hits = parse_results(html);
+        assert_eq!(hits.len(), 2);
+        let allowed = filter_hits(
+            parse_results(html),
+            &WebSearchInput {
+                query: "q".into(),
+                allowed_domains: vec!["docs.rs".into()],
+                blocked_domains: Vec::new(),
+            },
+        );
+        assert_eq!(allowed.len(), 1, "allowed_domains 不再恒过滤为空");
+        assert_eq!(allowed[0].url, "https://docs.rs/x");
+        let unblocked = filter_hits(
+            parse_results(html),
+            &WebSearchInput {
+                query: "q".into(),
+                allowed_domains: Vec::new(),
+                blocked_domains: vec!["spam.example".into()],
+            },
+        );
+        assert_eq!(unblocked.len(), 1, "blocked_domains 不再恒失效");
+        assert_eq!(unblocked[0].url, "https://docs.rs/x");
     }
 
     #[test]

@@ -7,13 +7,24 @@
 use crate::tui::line::Line;
 use crate::tui::theme::Theme;
 
-/// Spinner 帧（braille），宿主 tick 驱动。
-pub const SPINNERS: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+/// Spinner frames: a star that grows and shrinks (`·` → `✻`/`✽` → `·`),
+/// driven by the host tick. The sequence is a there-and-back cycle, so the
+/// glyph never jumps between sizes.
+pub const SPINNERS: [char; 8] = ['·', '✢', '*', '✻', '✽', '✻', '*', '✢'];
 
-/// 给定 tick 的 spinner 帧。
+/// Spinner frame for a given tick.
 pub fn spinner(frame: u64) -> char {
     SPINNERS[(frame as usize) % SPINNERS.len()]
 }
+
+/// Result connector under a tool header (CC `  ⎿  `). Continuation lines line
+/// up with the text after it.
+pub const RESULT_CONNECTOR: &str = "  ⎿  ";
+/// Indentation of the lines that continue a result block.
+pub const RESULT_INDENT: &str = "     ";
+/// Only commands slower than this get a duration on their result line —
+/// a millisecond count on every row is noise.
+pub const SLOW_TOOL_MS: u64 = 2_000;
 
 /// 工具调用生命周期。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +134,7 @@ pub enum TodoStatus {
 }
 
 /// 一个任务项。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoItem {
     /// 任务文本。
     pub text: String,
@@ -314,17 +325,37 @@ impl Activity {
     }
 }
 
+/// Edit/Write header: `⏺ Update(path)` (the `✻` marker stays with thinking).
 fn diff_header(d: &Diff, theme: &Theme) -> Line {
-    let (added, removed) = d.stats();
-    let mut line = Line::styled("✻ Edit · ", theme.diff_edit());
-    line.push_styled(d.path.clone(), theme.text());
-    line.push_styled(format!(" · +{added} −{removed}"), theme.diff_hunk());
+    let mut line = Line::styled("⏺ ", theme.tool_done());
+    line.push_styled(format!("Update({})", d.path), theme.text());
     line
+}
+
+/// Edit/Write result: `  ⎿  Updated path with N additions and M removals`.
+fn diff_result(d: &Diff, theme: &Theme) -> Line {
+    let (added, removed) = d.stats();
+    let plural = |n: usize, word: &str| {
+        if n == 1 {
+            format!("{n} {word}")
+        } else {
+            format!("{n} {word}s")
+        }
+    };
+    Line::styled(
+        format!(
+            "{RESULT_CONNECTOR}Updated {} with {} and {}",
+            d.path,
+            plural(added, "addition"),
+            plural(removed, "removal"),
+        ),
+        theme.dim(),
+    )
 }
 
 /// 思考块头：运行/完成同形 `✻ Thinking`（dim italic）。
 /// 运行词、spinner 与耗时只出现在底部状态行，避免重复。
-fn thinking_header(_t: &Thinking, _spinner: char, theme: &Theme) -> Line {
+fn thinking_header(theme: &Theme) -> Line {
     Line::styled("✻ Thinking", theme.thinking())
 }
 
@@ -338,71 +369,124 @@ pub fn thinking_completion_line(t: &Thinking, theme: &Theme) -> Line {
     )
 }
 
-fn tool_header(t: &ToolCall, spinner: char, theme: &Theme) -> Line {
-    let (glyph, style) = match t.status {
-        ToolStatus::Running => (spinner.to_string(), theme.tool_running()),
-        ToolStatus::Done => ("✓".to_string(), theme.tool_done()),
-        ToolStatus::Error => ("✗".to_string(), theme.tool_error()),
-    };
-    let mut line = Line::styled(format!("{glyph} {} ", t.name), style);
-    line.push_styled(t.summary.clone(), theme.text());
-    if t.status != ToolStatus::Running {
-        line.push_styled(format!(" · {}ms", t.duration_ms), theme.dim());
+/// Status colour of the leading `⏺`: running is muted, done is green,
+/// failure is red.
+fn dot_style(status: ToolStatus, theme: &Theme) -> crate::tui::line::SegStyle {
+    match status {
+        ToolStatus::Running => theme.dim(),
+        ToolStatus::Done => theme.tool_done(),
+        ToolStatus::Error => theme.tool_error(),
     }
-    if let Some(out) = &t.output
-        && t.status != ToolStatus::Running
-    {
-        line.push_styled(format!(" · {out}"), theme.tool_output());
+}
+
+/// Tool header: `⏺ Bash(git status)` — no timing, no output; those belong on
+/// the result line below.
+fn tool_header(t: &ToolCall, theme: &Theme) -> Line {
+    let mut line = Line::styled("⏺ ", dot_style(t.status, theme));
+    if t.summary.is_empty() {
+        line.push_styled(t.name.to_string(), theme.text());
+    } else {
+        line.push_styled(format!("{}({})", t.name, t.summary), theme.text());
     }
     line
 }
 
-/// `⠋ watch -n 2 ls`（轮间 `⏸`）→ `✓ watch -n 2 ls · 12s`。
-fn watch_header(w: &WatchCall, spinner: char, theme: &Theme) -> Line {
-    let (glyph, style) = match w.status {
-        WatchStatus::Running => (spinner.to_string(), theme.tool_running()),
-        WatchStatus::Idle => ("⏸".to_string(), theme.tool_running()),
-        WatchStatus::Done => ("✓".to_string(), theme.tool_done()),
-        WatchStatus::Failed => ("✗".to_string(), theme.tool_error()),
-        WatchStatus::Cancelled => ("×".to_string(), theme.dim()),
+/// Tool result: `  ⎿  Read 173 lines (ctrl+o to expand)`. Running tools get
+/// `Running…` — the spinner itself lives in the bottom status line.
+fn tool_result(t: &ToolCall, act: &Activity, theme: &Theme) -> Line {
+    let mut body = match t.status {
+        ToolStatus::Running => "Running…".to_string(),
+        _ => t
+            .result_summary
+            .clone()
+            .or_else(|| t.output.clone())
+            .unwrap_or_else(|| match t.status {
+                ToolStatus::Error => "Failed".to_string(),
+                _ => "Done".to_string(),
+            }),
     };
-    let mut line = Line::styled(format!("{glyph} {} ", w.label), style);
-    if w.status != WatchStatus::Running {
-        line.push_styled(format!("· {}s", w.duration_ms / 1000), theme.dim());
+    if t.status != ToolStatus::Running && t.duration_ms > SLOW_TOOL_MS {
+        body.push_str(&format!(" · Ran in {:.1}s", t.duration_ms as f64 / 1000.0));
     }
-    if let Some(d) = &w.detail {
-        line.push_styled(format!(" · {d}"), theme.text());
+    let style = if t.status == ToolStatus::Error {
+        theme.tool_error()
+    } else {
+        theme.dim()
+    };
+    let mut line = Line::styled(format!("{RESULT_CONNECTOR}{body}"), style);
+    if let Some(hint) = expand_hint(act) {
+        line.push_styled(format!(" ({hint})"), theme.dim());
     }
     line
 }
 
-fn header_for(h: &Activity, spinner: char, theme: &Theme) -> Line {
+/// `⏺ watch -n 2 ls` — same shape as a tool, driven by the watch lifecycle.
+fn watch_header(w: &WatchCall, theme: &Theme) -> Line {
+    let style = match w.status {
+        WatchStatus::Running | WatchStatus::Idle => theme.dim(),
+        WatchStatus::Done => theme.tool_done(),
+        WatchStatus::Failed => theme.tool_error(),
+        WatchStatus::Cancelled => theme.dim(),
+    };
+    let mut line = Line::styled("⏺ ", style);
+    line.push_styled(w.label.clone(), theme.text());
+    line
+}
+
+fn watch_result(w: &WatchCall, act: &Activity, theme: &Theme) -> Line {
+    let mut body = match (&w.detail, w.status) {
+        (Some(detail), _) => detail.clone(),
+        (None, WatchStatus::Running) => "Running…".to_string(),
+        (None, WatchStatus::Idle) => "Waiting…".to_string(),
+        (None, WatchStatus::Done) => "Done".to_string(),
+        (None, WatchStatus::Failed) => "Failed".to_string(),
+        (None, WatchStatus::Cancelled) => "Cancelled".to_string(),
+    };
+    if w.status != WatchStatus::Running && w.duration_ms > SLOW_TOOL_MS {
+        body.push_str(&format!(" · Ran in {:.1}s", w.duration_ms as f64 / 1000.0));
+    }
+    let style = if w.status == WatchStatus::Failed {
+        theme.tool_error()
+    } else {
+        theme.dim()
+    };
+    let mut line = Line::styled(format!("{RESULT_CONNECTOR}{body}"), style);
+    if let Some(hint) = expand_hint(act) {
+        line.push_styled(format!(" ({hint})"), theme.dim());
+    }
+    line
+}
+
+fn header_for(h: &Activity, theme: &Theme) -> Line {
     match &h.kind {
-        ActivityKind::Thinking(t) => thinking_header(t, spinner, theme),
-        ActivityKind::Tool(t) => tool_header(t, spinner, theme),
+        ActivityKind::Thinking(_) => thinking_header(theme),
+        ActivityKind::Tool(t) => tool_header(t, theme),
         ActivityKind::Diff(d) => diff_header(d, theme),
-        ActivityKind::Watch(w) => watch_header(w, spinner, theme),
+        ActivityKind::Watch(w) => watch_header(w, theme),
     }
 }
 
-/// 折叠态尾部提示（CC `… +N lines (ctrl+o to expand)`）。
+/// The result line of a collapsed activity advertises how to open it.
+fn expand_hint(act: &Activity) -> Option<&str> {
+    if act.expanded || act.content.is_empty() {
+        return None;
+    }
+    act.expand_hint.as_deref()
+}
+
+/// Fold hint for activities that have no result line of their own
+/// (thinking): `… +N lines (ctrl+o to expand)`.
 fn fold_tail(act: &Activity) -> Option<String> {
-    if act.expanded {
+    if act.expanded || act.content.is_empty() {
         return None;
     }
     match &act.kind {
-        ActivityKind::Tool(_) | ActivityKind::Thinking(_) | ActivityKind::Watch(_)
-            if !act.content.is_empty() =>
-        {
+        ActivityKind::Thinking(_) => {
             let mut tail = format!("… +{} lines", act.content.len());
             if let Some(hint) = &act.expand_hint {
                 tail.push_str(&format!(" ({hint})"));
             }
             Some(tail)
-        }
-        ActivityKind::Diff(d) if !d.hunks.is_empty() => {
-            // header 已带 +A −R 统计
-            Some("(click to expand)".to_string())
         }
         _ => None,
     }
@@ -419,59 +503,49 @@ pub struct ActivityRowRange {
     pub path: Vec<usize>,
 }
 
-/// 布局单个活动：头部 + （展开时）内容，返回行与可点击范围。
+/// 布局单个活动：头部 + 结果行 + （展开时）内容，返回行与可点击范围。
+///
+/// 没有 spinner 参数：活动行是静态的，运行中的动画只在底部状态行
+/// （CC 语义），于是已定稿的活动行永远不再变化。
 ///
 /// `render_reply` 渲染 subagent 的 markdown 回复（本模块保持显示无关，
 /// bingo 的 SubAgent 以 Tool 呈现，无需递归——保留参数以对齐原契约）。
-#[allow(clippy::too_many_arguments)]
 pub fn layout_activity(
     act: &Activity,
     path: &[usize],
     base_row: u16,
-    spinner: char,
     theme: &Theme,
     render_reply: &mut dyn FnMut(&str) -> Vec<Line>,
 ) -> (Vec<Line>, Vec<ActivityRowRange>) {
-    let mut header = header_for(act, spinner, theme);
-    // 主级活动点（`⏺ Read(.mcp.json)`）
-    if matches!(
-        act.kind,
-        ActivityKind::Tool(_) | ActivityKind::Diff(_) | ActivityKind::Watch(_)
-    ) {
-        header.prepend_styled("⏺ ", theme.activity_dot());
-    }
+    let mut header = header_for(act, theme);
     if let Some(tail) = fold_tail(act) {
         header.push_styled(format!(" {tail}"), theme.dim());
     }
     let mut rows = vec![header];
-    let mut cursor = base_row + 1;
+    // Result line (CC `  ⎿  …`): tools, edits and watches always carry one —
+    // it is where status, timing and the expand hint live.
+    match &act.kind {
+        ActivityKind::Tool(t) => rows.push(tool_result(t, act, theme)),
+        ActivityKind::Diff(d) => rows.push(diff_result(d, theme)),
+        ActivityKind::Watch(w) => rows.push(watch_result(w, act, theme)),
+        ActivityKind::Thinking(_) => {}
+    }
+    let thinking = matches!(act.kind, ActivityKind::Thinking(_));
     if act.expanded {
-        let mut content_lines = 0;
-        if let ActivityKind::Tool(t) = &act.kind
-            && let Some(summary) = &t.result_summary
-        {
-            rows.push(Line::styled(format!("⎿ {summary}"), theme.tool_output()));
-            content_lines += 1;
-        }
-        if let ActivityKind::Watch(w) = &act.kind
-            && let Some(detail) = &w.detail
-        {
-            rows.push(Line::styled(format!("⎿ {detail}"), theme.tool_output()));
-            content_lines += 1;
-        }
-        for (i, line) in act.content.iter().enumerate() {
-            // 首行内容用 `⎿` 连接（CC result connector），其余缩进
-            let p = if i == 0 && content_lines == 0 {
-                "⎿ "
+        for line in &act.content {
+            let mut styled = Line::styled(RESULT_INDENT, theme.tool_output());
+            // Reasoning text is italic grey (CC), tool output keeps its colours.
+            let body = if thinking {
+                line.clone().styled_all(theme.thinking())
             } else {
-                "  "
+                line.clone()
             };
-            let mut styled = Line::styled(p, theme.tool_output());
-            styled.segs.extend(line.segs.iter().cloned());
+            styled.segs.extend(body.segs);
+            styled.image = line.image.clone();
             rows.push(styled);
         }
-        cursor += content_lines + act.content.len() as u16;
     }
+    let cursor = base_row + rows.len() as u16;
     let _ = render_reply;
     let ranges = vec![ActivityRowRange {
         start: base_row,
@@ -516,9 +590,9 @@ mod tests {
         h
     }
 
-    fn render_lines(h: &Activity, spinner: char) -> Vec<Line> {
+    fn render_lines(h: &Activity) -> Vec<Line> {
         let mut render = |_: &str| Vec::new();
-        let (rows, _) = layout_activity(h, &[0], 0, spinner, &Theme::dark(), &mut render);
+        let (rows, _) = layout_activity(h, &[0], 0, &Theme::dark(), &mut render);
         rows
     }
 
@@ -527,16 +601,20 @@ mod tests {
         // 块头运行/完成同形 `✻ Thinking`；完成行由 thinking_completion_line 单独渲染。
         let mut h = thinking("understand", ThinkingState::Done);
         assert!(h.expandable());
-        let lines = render_lines(&h, '⠋');
+        let lines = render_lines(&h);
         assert_eq!(text(&lines[0]), "✻ Thinking … +1 lines");
         assert_eq!(lines.len(), 1, "collapsed: header only");
 
         h.toggle();
         assert!(h.expanded);
-        let lines = render_lines(&h, '⠋');
+        let lines = render_lines(&h);
         assert_eq!(text(&lines[0]), "✻ Thinking");
         assert_eq!(lines.len(), 2, "expanded: header + content");
         assert!(text(&lines[1]).contains("reasoning line"));
+        // 思考正文 italic + thinking 灰（CC italic gray）。
+        let body = lines[1].segs.last().expect("content seg");
+        assert!(body.style.italic, "italic reasoning");
+        assert_eq!(body.style.fg, Some(Theme::dark().thinking));
 
         h.toggle();
         assert!(!h.expanded);
@@ -546,7 +624,7 @@ mod tests {
     fn running_hint_is_not_expandable() {
         let h = thinking("understand", ThinkingState::Running);
         assert!(!h.expandable());
-        let lines = render_lines(&h, '⠋');
+        let lines = render_lines(&h);
         assert_eq!(text(&lines[0]), "✻ Thinking");
     }
 
@@ -572,30 +650,91 @@ mod tests {
         assert_eq!(text(&line2), "✻ Churning for 40.0s");
     }
 
+    /// CC 双行结构：`⏺ Bash(cmd)` + `  ⎿  {结果} (ctrl+o to expand)`。
     #[test]
     fn tool_collapsed_and_expanded() {
         let mut h = Activity::new(ActivityKind::Tool(ToolCall {
-            name: "bash",
+            name: "Bash",
             status: ToolStatus::Done,
             summary: "cargo test -p core".into(),
             duration_ms: 12,
             output: Some("54 passed".into()),
             result_summary: None,
         }));
+        h.expand_hint = Some("ctrl+o to expand".to_string());
         h.set_content(vec![
             Line::plain("$ cargo test -p core"),
             Line::plain("54 passed; 0 failed"),
         ]);
-        let lines = render_lines(&h, '⠙');
+        let lines = render_lines(&h);
+        assert_eq!(text(&lines[0]), "⏺ Bash(cargo test -p core)");
         assert_eq!(
-            text(&lines[0]),
-            "⏺ ✓ bash cargo test -p core · 12ms · 54 passed … +2 lines"
+            text(&lines[1]),
+            "  ⎿  54 passed (ctrl+o to expand)",
+            "结果行带展开提示，快命令不显示耗时"
         );
+        assert_eq!(lines.len(), 2, "collapsed: header + result");
 
         h.toggle();
-        let lines = render_lines(&h, '⠙');
-        assert!(text(&lines[1]).contains("$ cargo test -p core"));
-        assert!(text(&lines[2]).contains("54 passed; 0 failed"));
+        let lines = render_lines(&h);
+        assert_eq!(text(&lines[1]), "  ⎿  54 passed", "展开后不再提示");
+        assert!(text(&lines[2]).starts_with("     $ cargo test -p core"));
+        assert!(text(&lines[3]).contains("54 passed; 0 failed"));
+    }
+
+    /// 运行中：头行立即出现，结果行 `Running…`（spinner 在底部状态行）。
+    #[test]
+    fn running_tool_shows_running_result_line() {
+        let h = Activity::new(ActivityKind::Tool(ToolCall::running("Read", "src/main.rs")));
+        let lines = render_lines(&h);
+        assert_eq!(text(&lines[0]), "⏺ Read(src/main.rs)");
+        assert_eq!(text(&lines[1]), "  ⎿  Running…");
+        // 运行中的点用弱色，完成后转绿。
+        assert_eq!(lines[0].segs[0].style.fg, Some(Theme::dark().inactive));
+    }
+
+    /// 慢命令（>2s）把耗时并进结果行；错误行用 error 色。
+    #[test]
+    fn slow_and_failed_tools_annotate_the_result_line() {
+        let slow = Activity::new(ActivityKind::Tool(ToolCall {
+            name: "Bash",
+            status: ToolStatus::Done,
+            summary: "cargo build".into(),
+            duration_ms: 2_300,
+            output: Some("Compiling".into()),
+            result_summary: None,
+        }));
+        assert_eq!(
+            text(&render_lines(&slow)[1]),
+            "  ⎿  Compiling · Ran in 2.3s"
+        );
+        let failed = Activity::new(ActivityKind::Tool(ToolCall {
+            name: "Bash",
+            status: ToolStatus::Error,
+            summary: "false".into(),
+            duration_ms: 5,
+            output: None,
+            result_summary: None,
+        }));
+        let lines = render_lines(&failed);
+        assert_eq!(text(&lines[1]), "  ⎿  Failed");
+        assert_eq!(lines[0].segs[0].style.fg, Some(Theme::dark().error));
+        assert_eq!(lines[1].segs[0].style.fg, Some(Theme::dark().error));
+    }
+
+    /// Edit/Write：`⏺ Update(path)` + `  ⎿  Updated path with N additions…`。
+    #[test]
+    fn diff_renders_update_header_and_result() {
+        let diff = Diff::parse_unified(
+            "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n+d\n",
+        );
+        let h = Activity::new(ActivityKind::Diff(diff));
+        let lines = render_lines(&h);
+        assert_eq!(text(&lines[0]), "⏺ Update(f.txt)");
+        assert_eq!(
+            text(&lines[1]),
+            "  ⎿  Updated f.txt with 2 additions and 1 removal"
+        );
     }
 
     #[test]
@@ -603,7 +742,11 @@ mod tests {
         let a = spinner(0);
         let b = spinner(1);
         assert_ne!(a, b);
-        assert_eq!(spinner(10), a, "cycles after full rotation");
+        assert_eq!(spinner(SPINNERS.len() as u64), a, "cycles after full rotation");
+        // 星芒字形（CC）：不再是 braille。
+        assert_eq!(SPINNERS[0], '·');
+        assert!(SPINNERS.contains(&'✻'));
+        assert!(!SPINNERS.contains(&'⠋'));
     }
 
     #[test]
@@ -625,7 +768,8 @@ mod tests {
             duration_ms: 9000,
         };
         let h = Activity::new(ActivityKind::Watch(w));
-        let lines = render_lines(&h, '⠙');
-        assert_eq!(text(&lines[0]), "⏺ ✓ watch -n 2 ls · 9s · 第 2 轮");
+        let lines = render_lines(&h);
+        assert_eq!(text(&lines[0]), "⏺ watch -n 2 ls");
+        assert_eq!(text(&lines[1]), "  ⎿  第 2 轮 · Ran in 9.0s");
     }
 }
