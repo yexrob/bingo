@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use rmcp::model::{CallToolRequestParams, Tool as McpToolModel};
 use rmcp::service::RunningService;
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+};
 use rmcp::transport::TokioChildProcess;
 use async_trait::async_trait;
 use rmcp::{RoleClient, serve_client};
@@ -123,21 +126,48 @@ impl McpManager {
         let Some(config) = self.servers.get(name).cloned() else {
             return Err(format!("未配置的服务器 {name}"));
         };
-        if let Some(kind) = config.kind.as_deref()
-            && kind != "stdio"
-        {
-            return Err(format!(
-                "仅支持 stdio 传输（配置为 {kind}；streamable HTTP / SSE 暂未落地）"
-            ));
-        }
-        let mut command = TokioCommand::new(&config.command);
-        command.args(&config.args);
-        command.envs(&config.env);
-        let transport = TokioChildProcess::new(command)
-            .map_err(|e| format!("spawn {}: {e}", config.command))?;
-        let service = serve_client((), transport)
-            .await
-            .map_err(|e| format!("握手失败: {e}"))?;
+        let service = match config.kind.as_deref().unwrap_or("stdio") {
+            "stdio" => {
+                let Some(command_str) = config.command.as_deref() else {
+                    return Err("stdio 服务器缺少 command".to_string());
+                };
+                let mut command = TokioCommand::new(command_str);
+                command.args(&config.args);
+                command.envs(&config.env);
+                let transport = TokioChildProcess::new(command)
+                    .map_err(|e| format!("spawn {command_str}: {e}"))?;
+                serve_client((), transport)
+                    .await
+                    .map_err(|e| format!("握手失败: {e}"))?
+            }
+            // Streamable HTTP（MCP 现行标准传输；对标 CC type=http）。
+            "http" => {
+                let Some(url) = config.url.as_deref() else {
+                    return Err("http 服务器缺少 url".to_string());
+                };
+                let mut headers = HashMap::new();
+                for (key, value) in &config.headers {
+                    let header_name = http::HeaderName::from_bytes(key.as_bytes())
+                        .map_err(|e| format!("http 头名非法 {key}: {e}"))?;
+                    let header_value = http::HeaderValue::from_str(value)
+                        .map_err(|e| format!("http 头 {key} 值非法: {e}"))?;
+                    headers.insert(header_name, header_value);
+                }
+                let transport =
+                    StreamableHttpClientTransport::from_config(
+                        StreamableHttpClientTransportConfig::with_uri(url)
+                            .custom_headers(headers),
+                    );
+                serve_client((), transport)
+                    .await
+                    .map_err(|e| format!("握手失败: {e}"))?
+            }
+            other => {
+                return Err(format!(
+                    "不支持的传输类型 {other}（支持 stdio / http；sse / ws 未落地）"
+                ));
+            }
+        };
         let listed = service
             .list_all_tools()
             .await
@@ -387,19 +417,23 @@ mod tests {
         servers.insert(
             "files".to_string(),
             McpServerConfig {
-                command: "/bin/echo".to_string(),
+                command: Some("/bin/echo".to_string()),
                 args: Vec::new(),
                 env: HashMap::new(),
                 kind: None,
+                url: None,
+                headers: HashMap::new(),
             },
         );
         servers.insert(
             "web".to_string(),
             McpServerConfig {
-                command: "/bin/false".to_string(),
+                command: Some("/bin/false".to_string()),
                 args: Vec::new(),
                 env: HashMap::new(),
                 kind: None,
+                url: None,
+                headers: HashMap::new(),
             },
         );
         servers
@@ -453,6 +487,75 @@ mod tests {
         // disconnect 清空失败记录 → NotConnected（可被下一次 connect_all 重试）。
         mgr.disconnect("web");
         assert_eq!(mgr.status("web"), McpStatus::NotConnected);
+    }
+
+    #[tokio::test]
+    async fn http_server_requires_url() {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "remote".to_string(),
+            McpServerConfig {
+                kind: Some("http".to_string()),
+                command: None,
+                args: Vec::new(),
+                env: HashMap::new(),
+                url: None,
+                headers: HashMap::new(),
+            },
+        );
+        let mut mgr = McpManager::new(servers, HashSet::new());
+        assert!(matches!(
+            mgr.reconnect("remote").await,
+            Err(McpError::Connect { detail, .. })
+                if detail.contains("缺少 url")
+        ));
+    }
+
+    #[tokio::test]
+    async fn unsupported_transport_kind_reports_available_types() {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "legacy".to_string(),
+            McpServerConfig {
+                kind: Some("sse".to_string()),
+                command: None,
+                args: Vec::new(),
+                env: HashMap::new(),
+                url: Some("http://localhost:8000/sse".to_string()),
+                headers: HashMap::new(),
+            },
+        );
+        let mut mgr = McpManager::new(servers, HashSet::new());
+        assert!(matches!(
+            mgr.reconnect("legacy").await,
+            Err(McpError::Connect { detail, .. })
+                if detail.contains("stdio / http") && detail.contains("sse")
+        ));
+    }
+
+    #[test]
+    fn parses_http_server_config() {
+        let cfg: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "http",
+            "url": "https://mcp.example.com/mcp",
+            "headers": { "Authorization": "Bearer token" },
+        }))
+        .unwrap();
+        assert_eq!(cfg.kind.as_deref(), Some("http"));
+        assert_eq!(cfg.command, None);
+        assert_eq!(cfg.url.as_deref(), Some("https://mcp.example.com/mcp"));
+        assert_eq!(
+            cfg.headers.get("Authorization").map(String::as_str),
+            Some("Bearer token")
+        );
+        // stdio 配置（旧格式）仍可解析：command 非必填字段。
+        let stdio: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "command": "npx",
+            "args": ["-y", "mcp-server"],
+        }))
+        .unwrap();
+        assert_eq!(stdio.kind, None);
+        assert_eq!(stdio.command.as_deref(), Some("npx"));
     }
 
     #[test]

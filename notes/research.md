@@ -68,7 +68,7 @@
 
 ### D3. MCP：rmcp（官方 rust-sdk）
 
-- `modelcontextprotocol/rust-sdk` 官方，3.1.0（2026-07-31），client 能力：**落地仅 stdio**（TokioChildProcess）；streamable HTTP / OAuth 为 SDK 能力未启用。
+- `modelcontextprotocol/rust-sdk` 官方，3.1.0（2026-07-31），client 能力：**stdio**（TokioChildProcess）+ **streamable HTTP**（`transport-streamable-http-client-reqwest`，rmcp 3.1 强制 reqwest 0.13，故 bingo 的 reqwest 升 0.13 统一栈）；OAuth 为 SDK 能力未启用（静态 `headers` 头覆盖常见鉴权）。
 - mcpServers 配置 → 连接 → list_tools → 适配成同一 Tool trait（isMcp + mcpInfo）。
 - 不碰其它 MCP crate（mcp-server / mcplease 无 client 或初级）。
 
@@ -305,7 +305,7 @@
 - **CC 机制**：启动并行连接全部 server（batch，失败不阻塞）；连接状态 connected/failed/needs-auth/pending/disabled 进 AppState；SSE 断线指数退避重连（5 次，1s→30s）；`mcp__{server}__{tool}` 前缀进 ToolRegistry，ToolListChangedNotification 动态刷新；enable/disable 持久化 `disabledMcpServers`/`enabledMcpServers` 名单（project config）；`/mcp` immediate 命令 = MCPSettings 交互 UI（状态徽标 + fork/重连/日志/删除菜单）+ `/mcp enable|disable [name|all]` + `/mcp reconnect <name>` 快速路径。
 - **bingo 现状改造**：原 `connect_servers` 每次回合 spawn 子进程重连（浪费）。新增 **`McpManager`**（挂 `Session.runtime.mcp`）：**懒连接**（首个回合 `connect_all`，之后复用缓存）、失败记录不自动重试（`/mcp reconnect` 手动，对比 CC 仅 SSE 自动重连——stdio 子进程退出即彻底失败，自动重连无意义）、`disconnect`/`set_enabled` 立即生效。
 - **/mcp 命令**（对齐 CC argumentHint `[enable|disable [server-name]]`）：无参数列出（✓ connected · N tools / ✗ failed: 详情 / ○ disabled / · not connected）；`enable|disable [name|all]` 更新名单并**持久化 `.bingo/settings.json` 顶层 `disabledMcpServers`**（CC 同名机制）；`reconnect <name>`（disabled 时拦截提示先启用）。
-- **配置契约**：`McpServerConfig` 增 `type` 字段（对齐 CC TransportSchema）；仅 stdio 落地，sse/http/ws 连接时报错提示（rmcp 3.1 client 仅 stdio，D3）。
+- **配置契约**：`McpServerConfig` 增 `type` 字段（对齐 CC TransportSchema）；**stdio**（`command`/`args`/`env`）与 **http**（`url` + 可选 `headers`，streamable HTTP，对齐 CC type=http）落地；sse/ws 连接时报错提示（rmcp 3.1 无 legacy SSE；OAuth 未做，静态头先覆盖）。`command` 改可选（http 无命令）。
 - **权限**：MCP 工具复用统一权限门（Box<dyn Tool> 已有）；is_concurrency_safe=false（串行，CC 有并发标记但 bingo 保守）。
 - **验证**：244 测试全过（新增 McpManager 状态矩阵/失败不重试/reconnect 清失败 + /mcp 列表/enable-disable 持久化/reconnect 拦截）；tmux 实测（无依赖 Node stdio server）：懒连接 2 tools、badsrv failed + 警告行、disable 断开+持久化跨会话、disabled reconnect 拦截、enable 后下回合自动连接。
 

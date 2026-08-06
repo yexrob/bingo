@@ -42,7 +42,7 @@ when_to_use: >-
 | `theme` | string | `auto`（跟随终端背景）/ `dark` / `light` |
 | `cacheControl` | bool | 发送 prompt caching；非官方端点不稳定时关闭 |
 | `respondToBashCommands` | bool | `!` 命令执行后是否交模型回应（默认 true；false = 纯执行） |
-| `mcpServers` | object | `{name: {type?, command, args, env}}`；仅 `stdio`（缺省）已支持 |
+| `mcpServers` | object | `{name: {type?, command, args, env}}`（stdio，缺省）或 `{name: {type: "http", url, headers?}}`（streamable HTTP） |
 | `disabledMcpServers` | string[] | 禁用的 MCP 服务器名单（/mcp disable 写入） |
 | `permissions` | object | `{allow[], deny[], ask[]}`，规则语法 `Tool(content)`，如 `Bash(git push:*)` |
 | `hooks` | object | PreToolUse/PostToolUse/PreCompact/PostCompact/UserPromptSubmit/Stop/SessionStart/SessionEnd/TaskCreated/TaskCompleted，matcher + command |
@@ -59,7 +59,8 @@ when_to_use: >-
   "thinkingLevel": "medium",
   "permissionMode": "acceptEdits",
   "mcpServers": {
-    "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
+    "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
+    "remote": { "type": "http", "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer xxx" } }
   },
   "permissions": { "deny": ["Bash(git push:*)"] }
 }
@@ -82,8 +83,9 @@ when_to_use: >-
    `/provider <名称>` 切换（settings 的 providers 段）；`/context` 看用量，
    接近上下文窗口时 `/compact`（自动压缩阈值默认 ~窗口 90%）。
 3. **MCP 服务器不工作**：`/mcp` 查看状态——`✗ failed: <详情>` 按详情修
-   （命令不存在/spawn 失败/握手失败）；修好后 `/mcp reconnect <name>`。
-   `type: sse/http/ws` 会报"仅支持 stdio"。禁用/启用：`/mcp disable|enable [name|all]`
+   （命令不存在/spawn 失败/握手失败；http 服务器另查 url 可达性与 headers 鉴权）；
+   修好后 `/mcp reconnect <name>`。`type: sse/ws` 会报"不支持（stdio / http）"。
+   禁用/启用：`/mcp disable|enable [name|all]`
    （禁用名单持久化到 settings.json）。MCP 工具名为 `mcp__<server>__<tool>`，
    权限规则请用全名。
 4. **权限弹窗/拒绝不符合预期**：`/permissions` 列出当前规则；规则语法
@@ -104,6 +106,6 @@ when_to_use: >-
   Agent（子代理）、Task 族（任务追踪）、AskUserQuestion、Skill（技能调用）。
 - **技能**：内置 `guide`（本指南）+ `~/.config/bingo/skills/` 与 `.bingo/skills/`
   目录技能（同名磁盘技能覆盖内置）；模型经 SkillTool 调用，用户经 `/技能名` 执行。
-- **MCP**：stdio 服务器工具接入（见上）。
+- **MCP**：stdio 与 streamable HTTP（`type: "http"`，可带自定义 headers）服务器工具接入（见上）。
 - **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/`）+ 项目 CLAUDE.md。
 - **会话**：transcript 持久化（JSONL），`--continue`/`/resume` 恢复，`/compact` 压缩。

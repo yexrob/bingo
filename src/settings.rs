@@ -72,14 +72,21 @@ pub struct PermissionRules {
 /// MCP server 定义（对标 Claude Code mcpServers）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpServerConfig {
-    /// 传输类型：stdio（缺省）| sse | http | ws。仅 stdio 已落地，其余连接时报错。
+    /// 传输类型：stdio（缺省）| http（streamable HTTP）。
+    /// sse / ws 暂未落地，配置后连接时报错。
     #[serde(rename = "type", default)]
     pub kind: Option<String>,
-    pub command: String,
+    /// stdio 服务器的启动命令（type=stdio 必需）。
+    pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// http 服务器端点（type=http 必需；对齐 CC url）。
+    pub url: Option<String>,
+    /// http 请求自定义头（对齐 CC headers；Authorization 等鉴权头）。
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
