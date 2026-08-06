@@ -96,6 +96,7 @@ mod tests {
     fn ctx() -> ToolContext {
         ToolContext {
             cwd: PathBuf::from("/tmp"),
+            home: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(

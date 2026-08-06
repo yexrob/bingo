@@ -410,6 +410,7 @@ mod tests {
     fn ctx(session: &Arc<Session>) -> ToolContext {
         ToolContext {
             cwd: std::path::PathBuf::from("/tmp"),
+            home: std::env::temp_dir(),
             watch: session.watch.clone(),
             http: reqwest::Client::new(),
             tasks: session.tasks.clone(),

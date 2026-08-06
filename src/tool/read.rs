@@ -126,6 +126,7 @@ mod tests {
     fn ctx() -> ToolContext {
         ToolContext {
             cwd: std::env::temp_dir(),
+            home: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),

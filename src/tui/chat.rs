@@ -5367,8 +5367,10 @@ mod tests {
             crate::api::client::Client::new("sk-main".into(), "https://main.example".into());
         // set_provider 需要 providers 表——通过 from_settings 构造更直接。
         drop(providers);
-        let mut settings = crate::settings::Settings::default();
-        settings.api_key = Some("sk-main".into());
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
         settings.providers.insert(
             "deepseek".to_string(),
             crate::settings::ProviderConfig {

@@ -5,6 +5,9 @@ use crate::tool::agent::{AgentControlTool, AgentTool, SendMessageTool};
 use crate::tool::ask::AskUserQuestionTool;
 use crate::tool::bash::BashTool;
 use crate::tool::edit::EditTool;
+use crate::tool::experience::{
+    ExperienceCommitTool, ExperienceForgetTool, ExperienceProposeTool, ExperienceQueryTool,
+};
 use crate::tool::glob::GlobTool;
 use crate::tool::grep::GrepTool;
 use crate::tool::read::ReadTool;
@@ -47,6 +50,10 @@ pub async fn assemble_tools(
         Box::new(TaskListTool),
         Box::new(AskUserQuestionTool),
         Box::new(SkillTool::new(skills)),
+        Box::new(ExperienceProposeTool),
+        Box::new(ExperienceCommitTool),
+        Box::new(ExperienceQueryTool),
+        Box::new(ExperienceForgetTool),
     ];
     // hub-and-spoke：续话与生命周期管理只在主会话（子代理不管理兄弟）。
     let channels_on = session.settings.experimental.agent_channels;
