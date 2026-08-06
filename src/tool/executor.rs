@@ -231,6 +231,7 @@ mod tests {
 
         let start = Instant::now();
         let (outcomes, _interrupted) = execute_calls(calls, &ToolContext {
+            home: std::env::temp_dir(),
             cwd: Default::default(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
@@ -271,6 +272,7 @@ mod tests {
 
         let start = Instant::now();
         let (outcomes, _interrupted) = execute_calls(calls, &ToolContext {
+            home: std::env::temp_dir(),
             cwd: Default::default(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
@@ -317,6 +319,7 @@ mod tests {
 
         let (outcomes, _interrupted) =
             execute_calls(calls, &ToolContext {
+            home: std::env::temp_dir(),
             cwd: Default::default(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
@@ -334,6 +337,7 @@ mod tests {
     fn test_ctx() -> ToolContext {
         ToolContext {
             cwd: Default::default(),
+            home: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(

@@ -644,6 +644,7 @@ mod tests {
 
         let watch = crate::watch::WatchRegistry::new();
         let ctx = ToolContext {
+            home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
             http: reqwest::Client::new(),
@@ -689,6 +690,7 @@ mod tests {
 
         let watch = crate::watch::WatchRegistry::new();
         let ctx = ToolContext {
+            home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
             http: reqwest::Client::new(),
@@ -871,6 +873,7 @@ mod tests {
             .join(format!("bingo-pgroup-{}.pid", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         let ctx = ToolContext {
+            home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
@@ -915,6 +918,7 @@ mod tests {
     async fn explicit_background_conditions_fire() {
         let watch = crate::watch::WatchRegistry::new();
         let ctx = ToolContext {
+            home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
             http: reqwest::Client::new(),
@@ -956,6 +960,7 @@ mod tests {
     #[tokio::test]
     async fn bash_tool_refuses_interactive_commands() {
         let ctx = ToolContext {
+            home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),

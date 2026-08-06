@@ -14,6 +14,7 @@ pub mod channel;
 pub mod diff;
 pub mod edit;
 pub mod executor;
+pub mod experience;
 pub mod glob;
 pub mod grep;
 pub mod read;
@@ -27,6 +28,8 @@ pub mod write;
 #[derive(Clone)]
 pub struct ToolContext {
     pub cwd: PathBuf,
+    /// 用户主目录（Experience 工具定位用户级经验根目录）。
+    pub home: PathBuf,
     /// Watchable 注册中心（后台任务生命周期与通知）。
     pub watch: std::sync::Arc<crate::watch::WatchRegistry>,
     /// 共享 HTTP 客户端（WebFetch/WebSearch 复用连接池；不跟随重定向）。

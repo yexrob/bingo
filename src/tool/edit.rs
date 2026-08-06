@@ -102,7 +102,9 @@ mod tests {
                     "new_string": "line TWO",
                 }),
                 &ToolContext {
-            cwd: Default::default(), watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new(),
+            cwd: Default::default(),
+            home: std::env::temp_dir(),
+            watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
@@ -129,7 +131,9 @@ mod tests {
                     "content": "hello\nworld\n",
                 }),
                 &ToolContext {
-            cwd: Default::default(), watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new(),
+            cwd: Default::default(),
+            home: std::env::temp_dir(),
+            watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),

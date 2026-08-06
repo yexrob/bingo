@@ -606,6 +606,7 @@ fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContext, QueryErr
     Ok(ToolContext {
         cwd: std::env::current_dir()
             .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
+        home: session.home.clone(),
         watch: session.watch.clone(),
         http: tool_http()?,
         tasks: session.tasks.clone(),
