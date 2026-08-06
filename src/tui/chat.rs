@@ -105,12 +105,29 @@ pub struct Doc {
     pub sticky: Option<String>,
     /// 前置"定稿"行数：不再变化、可一次性打印进终端 scrollback 的行
     /// （REPL 模式的打印边界；全屏模式不用）。
+    /// 生产路径经 `settled_marks` 取检查点；此聚合值保留为测试面的
+    /// 「定稿前缀行数」句柄。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub settled: usize,
-    /// `settled` 覆盖了几个消息段（欢迎卡 1 段 + 每条消息 1 段）：
-    /// 落盘后累加进 [`Chat::flushed_segments`]，下次构建跳过它们。
-    pub settled_segments: usize,
-    /// `settled` 覆盖的提问结果块行数（该块只追加，按行前缀跳过）。
-    pub settled_ask_rows: usize,
+    /// 定稿检查点（欢迎卡 / 每条定稿消息 / 问答块各一个，行号递增）：
+    /// 懒落盘按检查点整段冻结，resize 回灌按检查点整段取回。
+    pub settled_marks: Vec<SettledMark>,
+    /// 文档尾部的瞬态行数（slash 输出，TTL 后消失）：懒落盘的窗口计算
+    /// 必须剔除它们——临时列表把窗口挤小不构成冻结活内容的理由。
+    pub transient_rows: usize,
+}
+
+/// 一个定稿检查点：`row_end` 之前的行全部定稿。`segments`/`ask_rows`
+/// 是构建内累计值，跨多次 [`Chat::advance_flushed_upto`] 的增量由
+/// `Chat::mark_base` 消化。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SettledMark {
+    /// 该检查点覆盖的行数（doc.rows 内的排他终点）。
+    pub row_end: usize,
+    /// 覆盖的消息段数（构建内累计，含欢迎卡）。
+    pub segments: usize,
+    /// 覆盖的问答结果块行数（构建内累计）。
+    pub ask_rows: usize,
 }
 
 /// 一条会话消息（用户或 assistant 文本 + assistant 活动提示）。
@@ -640,6 +657,9 @@ pub struct Chat {
     pub permission_mode: PermissionMode,
     /// ctrl+l 请求整屏重画（渲染层消费后清除）。
     pub force_redraw: bool,
+    /// inline ctrl+o 请求整卷 transcript 重放：全部展开、游标已回卷，
+    /// app 层下一帧把定稿部分一次冻结进 scrollback（消费后清除）。
+    pub dump_transcript: bool,
     /// bash 模式（`!` 前缀）：输入直接执行，不经模型。
     pub bash_mode: bool,
     pub busy: bool,
@@ -711,6 +731,9 @@ pub struct Chat {
     /// inline：当前 doc 中已落盘的行数（canvas 尾部起点）；每次
     /// build_rows 归零——重建后落盘部分已不在文档里。
     pub tail_start: usize,
+    /// 检查点累计值的消化基线：同一次构建内多次推进落盘游标时防止
+    /// 重复累加（build_rows 归零）。
+    mark_base: (usize, usize),
     /// slash 下拉建议（输入 `/` 且无参数时非空；组件层渲染）。
     pub slash_suggestions: Vec<SlashSuggestion>,
     /// 下拉选中索引。
@@ -803,6 +826,7 @@ impl Chat {
             search: None,
             permission_mode,
             force_redraw: false,
+            dump_transcript: false,
             bash_mode: false,
             busy: false,
             stream_msg: None,
@@ -837,8 +861,8 @@ impl Chat {
                 click_ranges: Vec::new(),
                 sticky: None,
                 settled: 0,
-                settled_segments: 0,
-                settled_ask_rows: 0,
+                settled_marks: Vec::new(),
+                transient_rows: 0,
             },
             pending_tools: Vec::new(),
             theme,
@@ -849,6 +873,7 @@ impl Chat {
             flushed_segments: 0,
             flushed_ask_rows: 0,
             tail_start: 0,
+            mark_base: (0, 0),
             slash_suggestions: Vec::new(),
             slash_selected: 0,
             model_menu: None,
@@ -1515,6 +1540,93 @@ impl Chat {
         self.auto_scroll = false;
         self.dirty = true;
         true
+    }
+
+    /// inline ctrl+o 展开方向（CC 非全屏 transcript）：已打印进 scrollback
+    /// 的行改不动（write-once），所以不折叠切换，而是**整卷重放**——全历史
+    /// 所有可折叠项展开、落盘游标回卷，app 层随即把整卷 transcript 一次
+    /// 冻结进 scrollback，用户用终端滚动翻看。scrollback 里已有的折叠
+    /// 旧拷贝收不回，接受重复（与回灌同一取舍）。全部已在屏上且无可
+    /// 展开项时 no-op：重放不会增加任何信息。
+    ///
+    /// 重放帧走 `force_redraw`（清可见屏）：与 resize 同款，先清后写，
+    /// 重放内容从屏幕顶部铺起、chrome 紧随其下——不清屏的话旧画面与
+    /// 重放行的相对位置取决于视口历史，短内容时会出现同屏重复。
+    pub fn expand_transcript(&mut self) -> bool {
+        let mut changed = false;
+        for message in &mut self.messages {
+            for act in &mut message.activities {
+                if !act.expanded && act.expandable() {
+                    act.expanded = true;
+                    changed = true;
+                }
+            }
+            for group in &mut message.groups {
+                if !group.expanded && !group.activities.is_empty() {
+                    group.expanded = true;
+                    changed = true;
+                }
+            }
+        }
+        if !changed && self.flushed_segments == 0 && self.flushed_ask_rows == 0 {
+            return false;
+        }
+        self.reset_flushed();
+        self.dump_transcript = true;
+        self.force_redraw = true;
+        true
+    }
+
+    /// ctrl+o 的切换方向判定：transcript 里存在可折叠项且**全部**处于
+    /// 展开态才为真（下一按走闭合）。无可折叠项时恒为假——此时 ctrl+o
+    /// 退化为纯重放，反复按也只是重印，不会误入闭合分支。
+    pub fn transcript_fully_expanded(&self) -> bool {
+        let mut any = false;
+        for message in &self.messages {
+            for act in &message.activities {
+                if act.expandable() {
+                    if !act.expanded {
+                        return false;
+                    }
+                    any = true;
+                }
+            }
+            for group in &message.groups {
+                if !group.activities.is_empty() {
+                    if !group.expanded {
+                        return false;
+                    }
+                    any = true;
+                }
+            }
+        }
+        any
+    }
+
+    /// inline ctrl+o 闭合方向：全历史折回默认聚合态。只改折叠状态；
+    /// 展示层由调用方走 resize 同款路径收拢（清屏重画 + 回灌），因为
+    /// 屏上的展开重放行同样属于 write-once 的已打印内容，不清屏就会
+    /// 与折叠后的窗口同屏并存。
+    pub fn collapse_transcript(&mut self) -> bool {
+        let mut changed = false;
+        for message in &mut self.messages {
+            for act in &mut message.activities {
+                if act.expanded {
+                    act.expanded = false;
+                    changed = true;
+                }
+            }
+            for group in &mut message.groups {
+                if group.expanded {
+                    group.expanded = false;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.dirty = true;
+        }
+        changed
     }
 
     pub fn submit(&mut self) {
@@ -3601,13 +3713,6 @@ impl Chat {
             && !m.activities.iter().any(|a| a.is_running())
     }
 
-    /// 最后一条消息是否仍在动态区（未落盘）。inline 模式据此决定 ctrl+o
-    /// 折叠是否安全：已打印进 scrollback 的消息改不动了，但**只要还没
-    /// 落盘就能折叠**——定稿只是"内容不再自己变"，不等于已经落盘。
-    pub fn last_message_dynamic(&self) -> bool {
-        !self.messages.is_empty() && self.flushed_segments < self.messages.len() + 1
-    }
-
     /// 构建滚动文档：欢迎卡片 + 消息（text 与活动按插入点交错）+
     /// 权限请求块。`doc.settled` = 前置定稿行数（欢迎卡片 + 全部
     /// 已定稿消息；权限请求块永远不定稿）。
@@ -3629,6 +3734,7 @@ impl Chat {
         // 也不要整屏空白。
         let skip = self.flushed_segments.min(self.messages.len() + 1);
         self.tail_start = 0;
+        self.mark_base = (0, 0);
 
         if skip == 0 {
             rows.extend(welcome_card_rows(
@@ -3641,6 +3747,14 @@ impl Chat {
         }
         let mut settled = rows.len();
         let mut settled_segments = 1usize.saturating_sub(skip);
+        let mut settled_marks: Vec<SettledMark> = Vec::new();
+        if settled_segments > 0 {
+            settled_marks.push(SettledMark {
+                row_end: settled,
+                segments: settled_segments,
+                ask_rows: 0,
+            });
+        }
         // 消息块间距（CC marginTop=1）：欢迎卡片后与每条消息前留一行。
         for i in 0..self.messages.len() {
             if skip >= i + 2 {
@@ -3828,13 +3942,17 @@ impl Chat {
             if self.message_settled(i) {
                 settled = rows.len();
                 settled_segments = (i + 2).saturating_sub(skip);
+                settled_marks.push(SettledMark {
+                    row_end: settled,
+                    segments: settled_segments,
+                    ask_rows: 0,
+                });
             }
         }
 
         // AskUserQuestion 结果块（`● User answered the questions:`）：
         // 只追加，故按行前缀跳过已落盘部分（块的位置随消息增长而后移，
         // 用消息段号定位会重复渲染）。
-        let mut settled_ask_rows = 0usize;
         if let Some(result) = &self.ask_result
             && !result.is_empty()
         {
@@ -3863,7 +3981,11 @@ impl Chat {
                     .is_some_and(|_| self.message_settled(self.messages.len() - 1))
             {
                 settled = rows.len();
-                settled_ask_rows = fresh;
+                settled_marks.push(SettledMark {
+                    row_end: settled,
+                    segments: settled_segments,
+                    ask_rows: fresh,
+                });
             }
         }
 
@@ -3988,8 +4110,8 @@ impl Chat {
             click_ranges,
             sticky,
             settled,
-            settled_segments,
-            settled_ask_rows,
+            settled_marks,
+            transient_rows: self.slash_lines.len(),
         };
         &self.doc
     }
@@ -4000,17 +4122,59 @@ impl Chat {
         self.flushed_segments = 0;
         self.flushed_ask_rows = 0;
         self.tail_start = 0;
+        self.mark_base = (0, 0);
         self.dirty = true;
     }
 
     /// 落盘 `doc.rows[tail_start..settled]` 之后推进游标：下次重建跳过
     /// 这些段，当前 doc 的尾部起点同步前移（重建前 canvas 就不再画它们）。
+    // 生产路径按检查点部分推进（懒落盘）；全量推进保留为测试面原语。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn advance_flushed(&mut self) {
-        self.flushed_segments += self.doc.settled_segments;
-        self.flushed_ask_rows += self.doc.settled_ask_rows;
-        self.doc.settled_segments = 0;
-        self.doc.settled_ask_rows = 0;
-        self.tail_start = self.doc.settled;
+        if let Some(mark) = self.doc.settled_marks.last().copied() {
+            self.advance_flushed_upto(mark);
+        }
+    }
+
+    /// 落盘 `doc.rows[tail_start..mark.row_end]` 之后推进游标到该检查点。
+    /// 同一次构建内可多次调用（`mark_base` 消化检查点里的构建内累计值，
+    /// 防止重复累加）；宽度变化后重排安全——段计数与行号无关。
+    pub fn advance_flushed_upto(&mut self, mark: SettledMark) {
+        self.flushed_segments += mark.segments.saturating_sub(self.mark_base.0);
+        self.flushed_ask_rows += mark.ask_rows.saturating_sub(self.mark_base.1);
+        self.mark_base = (mark.segments, mark.ask_rows);
+        self.tail_start = mark.row_end;
+    }
+
+    /// resize 后窗口容量变大：把最近落盘的内容取回活文档重新渲染填满
+    /// 窗口。scrollback 里的旧拷贝物理上收不回来——接受上滑时看到一份
+    /// 旧宽度的重复（明确认可的取舍，见 research.md D27）。回灌是纯记
+    /// 账（不写终端），以「不超出 `doc_budget` 行」为界，超出即回退，
+    /// 保证不会与懒落盘互相打架（回灌完不存在越过窗口顶的定稿段）。
+    pub fn rehydrate(&mut self, width: usize, doc_budget: usize) {
+        loop {
+            if self.flushed_ask_rows == 0 && self.flushed_segments == 0 {
+                break;
+            }
+            if self.build_rows(width).rows.len() >= doc_budget {
+                break;
+            }
+            if self.flushed_ask_rows > 0 {
+                let saved = self.flushed_ask_rows;
+                self.flushed_ask_rows = 0;
+                if self.build_rows(width).rows.len() > doc_budget {
+                    self.flushed_ask_rows = saved;
+                    break;
+                }
+                continue;
+            }
+            self.flushed_segments -= 1;
+            if self.build_rows(width).rows.len() > doc_budget {
+                self.flushed_segments += 1;
+                break;
+            }
+        }
+        self.dirty = true;
     }
 }
 
@@ -4126,6 +4290,16 @@ mod tests {
     /// 测试用 Chat：独立通道 + 完整 Session。
     pub(super) fn test_chat() -> Chat {
         test_chat_home(std::env::temp_dir())
+    }
+
+    /// 最新定稿检查点覆盖的段数（旧聚合字段的检查点等价读法）。
+    fn settled_segments(chat: &Chat) -> usize {
+        chat.doc.settled_marks.last().map_or(0, |m| m.segments)
+    }
+
+    /// 最新定稿检查点覆盖的问答块行数。
+    fn settled_ask_rows(chat: &Chat) -> usize {
+        chat.doc.settled_marks.last().map_or(0, |m| m.ask_rows)
     }
 
     /// 自建 home 的 Chat（slash 测试用唯一目录，避免与其他测试共享
@@ -6341,7 +6515,7 @@ mod tests {
         chat.build_rows(100);
         assert_eq!(chat.doc.settled, chat.doc.rows.len(), "空闲全部定稿");
         assert_eq!(
-            chat.doc.settled_segments, 3,
+            settled_segments(&chat), 3,
             "欢迎卡 + 2 条消息 = 3 段"
         );
         chat.advance_flushed();
@@ -6367,7 +6541,7 @@ mod tests {
             chat.doc.rows.iter().any(|r| r.line.plain_text().contains("第二条")),
             "新消息进入文档"
         );
-        assert_eq!(chat.doc.settled_segments, 1, "只新增 1 段");
+        assert_eq!(settled_segments(&chat), 1, "只新增 1 段");
     }
 
     /// 流式（未定稿）内容不落盘：markdown 全量重解析会改写早先的行，
@@ -6425,7 +6599,7 @@ mod tests {
             declined: false,
         });
         chat.build_rows(80);
-        assert_eq!(chat.doc.settled_ask_rows, 2, "header + 1 条");
+        assert_eq!(settled_ask_rows(&chat), 2, "header + 1 条");
         chat.advance_flushed();
         assert_eq!(chat.flushed_ask_rows, 2);
 
@@ -6440,7 +6614,7 @@ mod tests {
         assert!(text.contains("问题二"), "新条目渲染");
         assert!(!text.contains("问题一"), "旧条目不重复");
         assert!(!text.contains("User answered"), "header 不重复");
-        assert_eq!(chat.doc.settled_ask_rows, 1);
+        assert_eq!(settled_ask_rows(&chat), 1);
     }
 
     /// 模拟 inline 组件的落盘循环：重建 → 落盘定稿前缀 → 推进游标。
@@ -6500,18 +6674,68 @@ mod tests {
         assert!(chat.doc.rows.is_empty(), "全部落盘后尾部为空");
     }
 
-    /// ctrl+o 折叠门：消息未落盘就能折叠（定稿 ≠ 已落盘）。
+    /// inline ctrl+o 重放：无新信息时 no-op；有已落盘内容或可展开项时
+    /// 展开一切、游标回卷并请求整卷冻结。
     #[test]
-    fn ctrl_o_gate_follows_flush_not_settle() {
+    fn expand_transcript_rewinds_and_expands_everything() {
         let mut chat = test_chat();
-        assert!(!chat.last_message_dynamic(), "无消息不可折叠");
+        // 空会话且全部在屏 → no-op（重放不增加信息）。
+        assert!(!chat.expand_transcript());
+        assert!(!chat.dump_transcript);
+        assert!(!chat.force_redraw);
+
+        // 消息落盘后 → 重放：游标回卷，重建的文档重含全部段；
+        // 先清屏再写（置顶，与 resize 同款）。
         chat.messages.push(msg(Role::Assistant, "回复"));
         chat.build_rows(80);
-        // 已定稿但尚未落盘 → 仍可折叠。
-        assert_eq!(chat.doc.settled, chat.doc.rows.len());
-        assert!(chat.last_message_dynamic(), "未落盘可折叠");
         chat.advance_flushed();
-        assert!(!chat.last_message_dynamic(), "已落盘不可折叠");
+        chat.build_rows(80);
+        assert!(chat.doc.rows.is_empty(), "全部落盘后尾部为空");
+        assert!(chat.expand_transcript());
+        assert!(chat.dump_transcript);
+        assert!(chat.force_redraw, "重放帧先清可见屏");
+        chat.build_rows(80);
+        let text: String = chat
+            .doc
+            .rows
+            .iter()
+            .map(|row| row.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("回复"), "重放文档含已落盘消息: {text}");
+
+        // 有折叠组的历史消息 → 重放前全部展开。
+        chat.dump_transcript = false;
+        start_group(&mut chat);
+        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            name: "Read".into(),
+            summary: "Read a.md".into(),
+            output: "l1\nl2\nl3".into(),
+            is_error: false,
+            duration_ms: 0,
+            diff: None,
+        }));
+        chat.drain_events();
+        assert!(chat.expand_transcript());
+        assert!(chat.dump_transcript);
+        assert!(
+            chat.messages
+                .iter()
+                .flat_map(|m| &m.groups)
+                .all(|g| g.expanded || g.activities.is_empty()),
+            "全部折叠组已展开"
+        );
+
+        // 全展开态 → 第二按走闭合方向：折回聚合态（展示层由 app 层
+        // 走清屏重画 + 回灌收拢）。
+        assert!(chat.transcript_fully_expanded());
+        assert!(chat.collapse_transcript());
+        assert!(
+            chat.messages.iter().flat_map(|m| &m.groups).all(|g| !g.expanded),
+            "折叠组全部闭合"
+        );
+        assert!(!chat.transcript_fully_expanded(), "闭合后回到展开方向");
+        assert!(!chat.collapse_transcript(), "已全闭合，再闭合无变化");
     }
 
     /// 空闲时 tick 不置 dirty（不重建文档）；有动态元素时才置位。
@@ -6897,7 +7121,7 @@ mod tests {
         chat.images_pending.insert(url.clone());
         chat.build_rows(100);
         assert_eq!(
-            chat.doc.settled_segments, 1,
+            settled_segments(&chat), 1,
             "只有欢迎卡定稿，含在途图片的消息不定稿"
         );
 
@@ -6905,7 +7129,7 @@ mod tests {
         let meta = ImageMeta { cols: 4, rows: 2, bytes: tiny_png() };
         chat.handle(UiEvent::ImageReady { url: url.clone(), meta: Some(meta) });
         chat.build_rows(100);
-        assert_eq!(chat.doc.settled_segments, 2, "图片就绪后消息定稿");
+        assert_eq!(settled_segments(&chat), 2, "图片就绪后消息定稿");
         let image_rows: Vec<&Row> = chat
             .doc
             .rows
@@ -6924,13 +7148,13 @@ mod tests {
         chat.messages.push(msg(Role::Assistant, "![图](missing.png)"));
         chat.images_pending.insert("missing.png".to_string());
         chat.build_rows(100);
-        assert_eq!(chat.doc.settled_segments, 1, "在途时不定稿");
+        assert_eq!(settled_segments(&chat), 1, "在途时不定稿");
         chat.handle(UiEvent::ImageReady {
             url: "missing.png".to_string(),
             meta: None,
         });
         chat.build_rows(100);
-        assert_eq!(chat.doc.settled_segments, 2, "失败后照常定稿");
+        assert_eq!(settled_segments(&chat), 2, "失败后照常定稿");
         let text: String = chat
             .doc
             .rows
@@ -6948,7 +7172,7 @@ mod tests {
         chat.messages.push(msg(Role::Assistant, "![图](a.png)"));
         chat.build_rows(100);
         assert!(chat.images_pending.is_empty());
-        assert_eq!(chat.doc.settled_segments, 2, "无能力不等图片");
+        assert_eq!(settled_segments(&chat), 2, "无能力不等图片");
     }
 
     // ---- 交互（CC 手感）：光标编辑 / 历史 / 多行 / 双击语义 / 排队 ----

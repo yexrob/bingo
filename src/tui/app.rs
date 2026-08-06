@@ -30,7 +30,7 @@
 //!    sync with what is drawn.
 
 use std::io::Stdout;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
@@ -42,7 +42,7 @@ use ratatui::layout::{Rect, Size};
 use ratatui::style::Color;
 
 use crate::permission::PermissionMode;
-use crate::tui::chat::{Chat, ModelMenu, Row, SlashSuggestion, model_footer_label};
+use crate::tui::chat::{Chat, ModelMenu, Row, SettledMark, SlashSuggestion, model_footer_label};
 use crate::tui::gfx;
 use crate::tui::line::{Line, SegStyle, text_width};
 use crate::tui::term::{HistoryItem, StdoutTerm};
@@ -55,6 +55,9 @@ const TICK_MS: u64 = 33;
 const TASKS_REFRESH_TICKS: u64 = 15;
 /// Rows scrolled per mouse wheel notch (fullscreen only).
 const WHEEL_ROWS: usize = 3;
+/// 拖拽 resize 是事件风暴：静默这么久才应用新尺寸并重画。风暴中以旧宽
+/// 作画只会往屏上叠更多错宽行（终端 reflow 会把它们折成残片）。
+const RESIZE_QUIET_MS: u64 = 120;
 
 /// 全屏宿主：现成的 ratatui Terminal。
 pub type FullscreenHost = Terminal<CrosstermBackend<Stdout>>;
@@ -73,10 +76,11 @@ pub struct Frame {
 }
 
 /// inline 尾部窗口：返回 (起始行, 被省略的行数)。预算是终端高度减去
-/// chrome 与一行余量——视口恒低于终端高度，宿主永远不必整屏清除。
+/// chrome 与两行余量——视口顶端之上恒有 ≥2 行屏幕，落盘用的 DECSTBM
+/// 滚动区域（要求至少两行）才永远合法（与 term.rs 的视口上限同源）。
 fn tail_window(total: usize, tail_start: usize, chrome: usize, height: usize) -> (usize, usize) {
     let start = tail_start.min(total);
-    let budget = height.saturating_sub(chrome).saturating_sub(1);
+    let budget = height.saturating_sub(chrome).saturating_sub(2);
     let len = total - start;
     if budget == 0 {
         return (total, 0);
@@ -362,7 +366,7 @@ fn chrome_rows(chat: &Chat, width: usize, fullscreen: bool) -> Chrome {
 
 impl Frame {
     /// inline 帧：动态尾部（超预算时只留末尾若干行 + 省略提示）+ chrome。
-    /// 行数即视口高度，故恒 ≤ 终端高度 - 1。
+    /// 行数即视口高度，故恒 ≤ 终端高度 - 2（DECSTBM 区域恒合法）。
     pub fn assemble(chat: &Chat, size: Size) -> Self {
         let width = size.width as usize;
         let height = size.height as usize;
@@ -383,7 +387,9 @@ impl Frame {
 
         // 最后一道保险：chrome 本身也可能超过预算（很矮的终端），
         // 此时丢最上面的行——输入框与 footer 是必须留住的那部分。
-        let budget = height.saturating_sub(1).max(1);
+        // 预算 = 高度 − 2：与 term.rs 的视口上限一致（顶上留两行，
+        // DECSTBM 滚动区域恒合法）。
+        let budget = height.saturating_sub(2).max(1);
         let dropped = rows.len().saturating_sub(budget);
         if dropped > 0 {
             rows.drain(..dropped);
@@ -417,11 +423,12 @@ fn caret_position(
 
 /// 新定稿的行 → scrollback 条目。图片块首行发真实 kitty 字节（传输 +
 /// 放置 + 光标推进），块内续行由该序列一并消费，故跳过。
-fn flush_items(chat: &Chat, width: usize) -> Vec<HistoryItem> {
-    if chat.doc.settled <= chat.tail_start {
+fn flush_items(chat: &Chat, width: usize, end: usize) -> Vec<HistoryItem> {
+    let end = end.min(chat.doc.rows.len());
+    if end <= chat.tail_start {
         return Vec::new();
     }
-    let pending = &chat.doc.rows[chat.tail_start..chat.doc.settled];
+    let pending = &chat.doc.rows[chat.tail_start..end];
     let mut items = Vec::with_capacity(pending.len());
     for (i, row) in pending.iter().enumerate() {
         if let Some(img) = &row.line.image {
@@ -452,6 +459,25 @@ fn flush_items(chat: &Chat, width: usize) -> Vec<HistoryItem> {
     items
 }
 
+/// 懒落盘选择：最远的一个「所属段起始行已越过窗口顶端」的定稿检查点。
+/// 窗口内完整可见的定稿段不冻结（保持可重排/可折叠）；跨越顶端的段
+/// 整段冻结——否则其隐藏部分既不在屏上也不在 scrollback，无处翻看。
+fn pick_flush_mark(
+    marks: &[SettledMark],
+    tail_start: usize,
+    win_start: usize,
+) -> Option<SettledMark> {
+    let mut chosen = None;
+    let mut prev_end = tail_start;
+    for mark in marks {
+        if mark.row_end > tail_start && prev_end.max(tail_start) < win_start {
+            chosen = Some(*mark);
+        }
+        prev_end = mark.row_end;
+    }
+    chosen
+}
+
 /// 该行是否为图片块首行（块内续行返回 false；块边界按 url 识别）。
 fn image_block_head(rows: &[Row], i: usize) -> bool {
     let Some(img) = &rows[i].line.image else {
@@ -461,18 +487,34 @@ fn image_block_head(rows: &[Row], i: usize) -> bool {
         .is_none_or(|prev| prev.line.image.as_ref().map(|p| &p.url) != Some(&img.url))
 }
 
-/// 按键分发。inline 模式下 ctrl+o 只对未落盘的最后一条消息放行——已经
-/// 打印进 scrollback 的行改不动了。其余按键（含 Ctrl+C 的中断/清空/退出
-/// 三态）全部交给 [`Chat`]，退出由 `chat.exit` 表达。
+/// 按键分发。inline 模式下 ctrl+o 是展开/闭合切换（CC 非全屏语义），
+/// 两个方向都不改已打印的 scrollback：展开 = 整卷重放冻结进 scrollback
+/// （终端上滑翻看）；闭合 = 折回聚合态后走 resize 同款收拢（清屏重画 +
+/// 回灌）。其余按键（含 Ctrl+C 的中断/清空/退出三态）全部交给
+/// [`Chat`]，退出由 `chat.exit` 表达。
 fn dispatch_key(chat: &mut Chat, key: KeyEvent, inline: bool) {
     if key.kind == KeyEventKind::Release {
         return;
     }
     if inline {
-        if key.code == KeyCode::Char('o')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-            && !chat.last_message_dynamic()
-        {
+        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if chat.transcript_fully_expanded() {
+                if chat.collapse_transcript() {
+                    // 撤销尚未渲染的重放（连按两次 = 净效果闭合），
+                    // 清可见屏、按折叠后的高度回灌重画——屏上的展开
+                    // 重放行只留在 scrollback。
+                    chat.dump_transcript = false;
+                    chat.force_redraw = true;
+                    let chrome_len = chrome_rows(chat, chat.width, false).rows.len();
+                    let budget = chat
+                        .height
+                        .saturating_sub(2)
+                        .saturating_sub(chrome_len);
+                    chat.rehydrate(chat.width, budget);
+                }
+            } else {
+                chat.expand_transcript();
+            }
             return;
         }
         if chat.ask_key(key.code) {
@@ -520,6 +562,7 @@ pub async fn run_inline(
     let mut ticks: u64 = 0;
     let mut expand_open = true;
     let mut dirty = true;
+    let mut pending_resize: Option<(Size, Instant)> = None;
 
     loop {
         tokio::select! {
@@ -533,11 +576,8 @@ pub async fn run_inline(
                     dirty = true;
                 }
                 Some(Ok(Event::Resize(width, height))) => {
-                    term.resize(Size::new(width, height))?;
-                    chat.width = width as usize;
-                    chat.height = height as usize;
-                    chat.dirty = true;
-                    dirty = true;
+                    // 防抖：连发的 resize 只记录最新值，静默后统一应用。
+                    pending_resize = Some((Size::new(width, height), Instant::now()));
                 }
                 Some(Ok(_)) => {}
                 // Reading events failed (or stdin closed): the session cannot
@@ -545,6 +585,28 @@ pub async fn run_inline(
                 Some(Err(_)) | None => break,
             },
             _ = ticker.tick() => {
+                if let Some((size, at)) = pending_resize
+                    && at.elapsed() >= Duration::from_millis(RESIZE_QUIET_MS)
+                {
+                    pending_resize = None;
+                    term.resize(size)?;
+                    chat.width = size.width as usize;
+                    chat.height = size.height as usize;
+                    // 终端 reflow 发生在 resize 事件到达之前，旧画面折行
+                    // 位移不可知（内容顶到屏底还会整屏上滚）——不猜几何：
+                    // 清可见屏、从头按新宽重画整个窗口（走 Ctrl+L 通道）。
+                    // 回灌把内容拉回填满屏幕，画面无损；旧几何拷贝留在
+                    // scrollback（接受上滑时看到重复）。
+                    chat.force_redraw = true;
+                    let chrome_len =
+                        chrome_rows(&chat, size.width as usize, false).rows.len();
+                    let doc_budget = (size.height as usize)
+                        .saturating_sub(2)
+                        .saturating_sub(chrome_len);
+                    chat.rehydrate(size.width as usize, doc_budget);
+                    chat.dirty = true;
+                    dirty = true;
+                }
                 if chat.needs_tick() {
                     chat.tick();
                     if chat.drain_all() {
@@ -574,6 +636,15 @@ pub async fn run_inline(
             },
         }
 
+        // resize 风暴静默前不渲染（终端几何已变，旧宽的画面只添乱）；
+        // 事件照常处理，静默后一帧补齐。
+        if pending_resize.is_some() {
+            if chat.exit {
+                break;
+            }
+            continue;
+        }
+
         // 退出前仍画完这一帧：最后一屏留在终端里（inline 退出不清屏）。
         if !dirty {
             if chat.exit {
@@ -592,21 +663,48 @@ pub async fn run_inline(
         let size = term.size();
         rebuild(&mut chat, size, false);
 
-        // 落盘先于绘制：新定稿的前缀一次性进 scrollback，视口随即只画
-        // 剩下的尾部。游标按段推进——哪怕这一段只有图片续行（不产出条目），
-        // 也必须推进，否则下一帧会把它当成还没落盘的内容再画一次。
-        if chat.doc.settled > chat.tail_start {
-            let items = flush_items(&chat, size.width as usize);
-            if !items.is_empty() {
-                term.insert_history(items)?;
+        // 懒落盘（与绘制合成 `term.frame` 单批次）：只冻结「起始行已越
+        // 过窗口顶端」的定稿段——窗口内完整可见的定稿段留在活文档里随
+        // 时可重排。视口收缩腾出的行进 gap 银行，冻结行随即写进这些行，
+        // settle 迁移不闪、不留空白带。游标按段推进——哪怕该段只有图片
+        // 续行（不产出条目），也必须推进，否则下一帧会重复画它。
+        let mut items = Vec::new();
+        if std::mem::take(&mut chat.dump_transcript) {
+            // ctrl+o 整卷重放：游标已回卷、文档已从欢迎卡全量重建（全部
+            // 展开），定稿部分一次冻结进 scrollback——用户上滑翻看全貌，
+            // 动态尾部照常留在视口。
+            if let Some(mark) = chat.doc.settled_marks.last().copied() {
+                items = flush_items(&chat, size.width as usize, mark.row_end);
+                chat.advance_flushed_upto(mark);
             }
-            chat.advance_flushed();
+        } else {
+            let chrome_len = chrome_rows(&chat, size.width as usize, false).rows.len();
+            // 窗口按「持久内容」算：瞬态 slash 输出（TTL 后消失）把窗口
+            // 挤小不构成冻结活内容的理由——它只是暂时盖住，不是驱逐。
+            let persistent = chat
+                .doc
+                .rows
+                .len()
+                .saturating_sub(chat.doc.transient_rows);
+            let (win_start, _) = tail_window(
+                persistent,
+                chat.tail_start,
+                chrome_len,
+                size.height as usize,
+            );
+            if let Some(mark) =
+                pick_flush_mark(&chat.doc.settled_marks, chat.tail_start, win_start)
+            {
+                items = flush_items(&chat, size.width as usize, mark.row_end);
+                chat.advance_flushed_upto(mark);
+            }
         }
 
         let frame = Frame::assemble(&chat, size);
         let height = u16::try_from(frame.rows.len()).unwrap_or(u16::MAX).max(1);
         let fg = chat.theme.text;
-        term.draw(
+        term.frame(
+            items,
             height,
             |buf| {
                 let area = buf.area;
@@ -850,7 +948,7 @@ mod tests {
     #[test]
     fn tail_window_keeps_the_frame_below_terminal_height() {
         let total = 100usize;
-        for height in 6..40usize {
+        for height in 7..40usize {
             let chrome = 4usize;
             let (start, hidden) = tail_window(total, 0, chrome, height);
             let visible = total - start;
@@ -858,6 +956,8 @@ mod tests {
             assert!(frame < height, "height={height} frame={frame}");
             assert_eq!(hidden, total - visible, "省略数 = 未显示行数");
         }
+        // 预算为零（chrome + 两行余量占满）：尾部一行不画，省略数不计。
+        assert_eq!(tail_window(100, 0, 4, 6), (100, 0));
         // 内容装得下时不省略，也不裁剪。
         assert_eq!(tail_window(3, 0, 4, 40), (0, 0));
         // 已落盘的前缀不在尾部窗口内。
@@ -889,11 +989,11 @@ mod tests {
     /// 帧仍不越界。
     #[test]
     fn tiny_terminal_keeps_the_prompt_and_footer() {
-        let mut chat = chat_at(60, 5);
+        let mut chat = chat_at(60, 6);
         chat.busy = true;
         chat.warnings.push("mcp 连接失败".into());
-        let frame = Frame::assemble(&chat, size(60, 5));
-        assert_eq!(frame.rows.len(), 4, "height-1 上限");
+        let frame = Frame::assemble(&chat, size(60, 6));
+        assert_eq!(frame.rows.len(), 4, "height-2 上限");
         let text: Vec<String> = frame.rows.iter().map(row_text).collect();
         // 丢的是最上面的行（状态行/警告行），输入框与 footer 留住。
         assert!(text.last().is_some_and(|l| l.contains("ctrl+o to expand")), "{text:?}");
@@ -1118,7 +1218,7 @@ mod tests {
             Row::new(Line::plain("tail")),
         ];
         chat.doc.settled = 2;
-        let items = flush_items(&chat, 40);
+        let items = flush_items(&chat, 40, chat.doc.settled);
         assert_eq!(items.len(), 2, "只落定稿前缀");
         let HistoryItem::Line(first) = &items[0] else {
             panic!("text row");
@@ -1146,7 +1246,7 @@ mod tests {
         ];
         chat.doc.settled = 4;
         // 无能力/无缓存：块首行退回 `#[image]` 占位，续行不出行。
-        let items = flush_items(&chat, 40);
+        let items = flush_items(&chat, 40, chat.doc.settled);
         assert_eq!(items.len(), 3);
         let HistoryItem::Line(head) = &items[0] else {
             panic!("placeholder row");
@@ -1163,7 +1263,7 @@ mod tests {
                 bytes: b"png".to_vec(),
             }),
         );
-        let items = flush_items(&chat, 40);
+        let items = flush_items(&chat, 40, chat.doc.settled);
         assert_eq!(items.len(), 3, "块内续行不重复落盘");
         match &items[0] {
             HistoryItem::Raw { bytes, rows } => {
@@ -1210,7 +1310,7 @@ mod tests {
             .collect();
         assert!(text.iter().any(|l| l.contains("Welcome back")), "首帧含欢迎卡: {text:?}");
 
-        let items = flush_items(&chat, 80);
+        let items = flush_items(&chat, 80, chat.doc.settled);
         assert!(
             items.iter().any(|item| match item {
                 HistoryItem::Line(line) => history_text(line).contains("Welcome back"),
@@ -1246,29 +1346,34 @@ mod tests {
         });
         chat.dirty = true;
         rebuild(&mut chat, size(80, 24), false);
-        let first = flush_items(&chat, 80);
+        let first = flush_items(&chat, 80, chat.doc.settled);
         assert!(!first.is_empty(), "首轮落盘欢迎卡 + 消息");
         chat.advance_flushed();
         // 同宽度再来一轮：没有新定稿内容 → 零条目。
-        assert!(flush_items(&chat, 80).is_empty(), "不重复落盘");
+        assert!(
+            flush_items(&chat, 80, chat.doc.settled).is_empty(),
+            "不重复落盘"
+        );
         // 变窄重建：段游标不变，仍然没有新内容要落盘。
         chat.dirty = true;
         rebuild(&mut chat, size(40, 24), false);
         assert!(
-            flush_items(&chat, 40).is_empty(),
+            flush_items(&chat, 40, chat.doc.settled).is_empty(),
             "宽度变化不会让已落盘的段再打印一次"
         );
     }
 
-    /// inline 的 ctrl+o 门：已落盘的消息改不动，未落盘的照常折叠。
+    /// inline 的 ctrl+o：整卷重放——落盘游标回卷 + 置重放标志，重放帧
+    /// 把全部定稿段冻结进 scrollback，视口只剩动态尾部与 chrome。
     #[test]
-    fn ctrl_o_is_gated_on_unflushed_messages() {
+    fn ctrl_o_replays_the_full_transcript_inline() {
         let mut chat = chat_at(80, 24);
         let key = |code, modifiers| KeyEvent::new(code, modifiers);
-        // 无消息（全部落盘）→ ctrl+o 被拦下，不会当成字符插入。
+        // 空会话且全部在屏 → no-op：不插字符、不重放。
         chat.set_input("hi");
         dispatch_key(&mut chat, key(KeyCode::Char('o'), KeyModifiers::CONTROL), true);
         assert_eq!(chat.input, "hi", "ctrl+o 未插入字符");
+        assert!(!chat.dump_transcript, "屏上已是全貌，无需重放");
 
         // Esc 一律放行（菜单退出在 on_key 里）。
         chat.set_input("/model");
@@ -1277,7 +1382,8 @@ mod tests {
         dispatch_key(&mut chat, key(KeyCode::Esc, KeyModifiers::empty()), true);
         assert!(chat.model_menu.is_none(), "Esc 经 gate 退出菜单");
 
-        // 有未落盘消息时 ctrl+o 放行（toggle_transcript 生效）。
+        // 消息已落盘 → ctrl+o 请求重放；模拟重放帧：重建全量文档、
+        // 整卷冻结到最后一个检查点。
         chat.messages.push(crate::tui::chat::UiMessage {
             role: crate::tui::chat::Role::Assistant,
             text: "reply".into(),
@@ -1286,9 +1392,34 @@ mod tests {
             groups: Vec::new(),
             group_of: Vec::new(),
         });
-        chat.dirty = false;
+        chat.build_rows(80);
+        chat.advance_flushed();
         dispatch_key(&mut chat, key(KeyCode::Char('o'), KeyModifiers::CONTROL), true);
-        assert!(chat.dirty, "折叠切换标脏");
+        assert!(chat.dump_transcript, "已落盘内容 → 重放");
+        assert!(chat.force_redraw, "重放帧先清可见屏（置顶）");
+        assert!(chat.dirty, "重放帧前必然重建");
+        chat.dirty = false;
+        chat.build_rows(80);
+        let mark = chat.doc.settled_marks.last().copied().expect("全量文档有检查点");
+        let items = flush_items(&chat, 80, mark.row_end);
+        let texts: Vec<String> = items
+            .iter()
+            .filter_map(|item| match item {
+                HistoryItem::Line(line) => Some(history_text(line)),
+                HistoryItem::Raw { .. } => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|l| l.contains("Welcome")),
+            "重放从欢迎卡开始: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|l| l.contains("reply")),
+            "重放含已落盘消息: {texts:?}"
+        );
+        chat.advance_flushed_upto(mark);
+        chat.build_rows(80);
+        assert!(chat.doc.rows.is_empty(), "重放后活文档只剩动态尾部");
     }
 
     /// Release 事件不重复触发（终端上报增强键盘时会有）。
@@ -1317,5 +1448,94 @@ mod tests {
         assert!(!chat.auto_scroll);
         assert!(mouse_event(&mut chat, wheel(MouseEventKind::ScrollDown)));
         assert_eq!(chat.scroll, 10);
+    }
+
+    /// 懒落盘：窗口装得下时不冻结；越过窗口顶的段（含跨越顶端的）整段冻结。
+    #[test]
+    fn pick_flush_mark_freezes_only_segments_past_the_window_top() {
+        let marks = vec![
+            SettledMark { row_end: 5, segments: 1, ask_rows: 0 },
+            SettledMark { row_end: 20, segments: 2, ask_rows: 0 },
+        ];
+        // 全部可见（窗口从 0 开始）：什么都不冻结。
+        assert_eq!(pick_flush_mark(&marks, 0, 0), None);
+        // 窗口顶在第 3 行：段 1（0..5）跨越顶端 → 冻结到 5；段 2 从 5 起
+        // 完整可见 → 保持活性。
+        assert_eq!(pick_flush_mark(&marks, 0, 3), Some(marks[0]));
+        // 窗口顶在第 10 行：段 2（5..20）也跨越了 → 一并冻结。
+        assert_eq!(pick_flush_mark(&marks, 0, 10), Some(marks[1]));
+        // 已冻结到 5 之后窗口未再上移：不重复选已消费的检查点。
+        assert_eq!(pick_flush_mark(&marks, 5, 5), None);
+    }
+
+    /// 定稿内容在窗口内保持活性：小文档一帧都不冻结，宽度变化随重建重排。
+    #[test]
+    fn settled_rows_stay_live_while_they_fit() {
+        let mut chat = chat_at(80, 24);
+        chat.dirty = true;
+        rebuild(&mut chat, size(80, 24), false);
+        assert!(!chat.doc.settled_marks.is_empty(), "欢迎卡有定稿检查点");
+        let chrome_len = chrome_rows(&chat, 80, false).rows.len();
+        let (win_start, _) =
+            tail_window(chat.doc.rows.len(), chat.tail_start, chrome_len, 24);
+        assert_eq!(
+            pick_flush_mark(&chat.doc.settled_marks, chat.tail_start, win_start),
+            None,
+            "装得下就不冻结——欢迎卡留在活文档里可重排"
+        );
+    }
+
+    /// 瞬态 slash 输出（/resume 列表等）挤小窗口，不得因此冻结活内容。
+    #[test]
+    fn transient_slash_output_does_not_freeze_live_rows() {
+        let mut chat = chat_at(80, 24);
+        chat.slash_lines = (0..40).map(|i| format!("session-{i}")).collect();
+        chat.dirty = true;
+        rebuild(&mut chat, size(80, 24), false);
+        assert_eq!(chat.doc.transient_rows, 40);
+        let chrome_len = chrome_rows(&chat, 80, false).rows.len();
+        let total = chat.doc.rows.len();
+
+        // 回归防线：按全量文档算窗口，欢迎卡会被误判为越过顶端。
+        let (naive_start, _) = tail_window(total, chat.tail_start, chrome_len, 24);
+        assert!(
+            pick_flush_mark(&chat.doc.settled_marks, chat.tail_start, naive_start).is_some(),
+            "前提成立：瞬态行确实把窗口挤过了欢迎卡"
+        );
+
+        // 生产路径剔除瞬态行：欢迎卡保持活性。
+        let persistent = total - chat.doc.transient_rows;
+        let (win_start, _) = tail_window(persistent, chat.tail_start, chrome_len, 24);
+        assert_eq!(
+            pick_flush_mark(&chat.doc.settled_marks, chat.tail_start, win_start),
+            None,
+            "瞬态列表只是暂时盖住内容，不是驱逐"
+        );
+    }
+
+    /// 回灌：容量变大时取回已落盘的段重新渲染；超出预算即回退。
+    #[test]
+    fn rehydrate_refills_the_window_after_capacity_growth() {
+        let mut chat = chat_at(80, 24);
+        chat.dirty = true;
+        rebuild(&mut chat, size(80, 24), false);
+        let welcome_rows = chat.doc.rows.len();
+        chat.advance_flushed();
+        assert_eq!(chat.flushed_segments, 1, "欢迎卡已落盘");
+        chat.dirty = true;
+        rebuild(&mut chat, size(80, 24), false);
+        assert!(chat.doc.rows.is_empty(), "落盘后活文档为空");
+
+        // 预算充足：取回欢迎卡（scrollback 里的旧拷贝由用户上滑时接受重复）。
+        chat.rehydrate(80, 24);
+        assert_eq!(chat.flushed_segments, 0, "容量够就回灌");
+        chat.dirty = true;
+        rebuild(&mut chat, size(80, 24), false);
+        assert_eq!(chat.doc.rows.len(), welcome_rows, "欢迎卡回到活文档");
+
+        // 预算不足：回灌会超出 → 回退，保持已落盘状态。
+        chat.advance_flushed();
+        chat.rehydrate(80, welcome_rows.saturating_sub(1));
+        assert_eq!(chat.flushed_segments, 1, "装不下就不取回");
     }
 }

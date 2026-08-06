@@ -319,3 +319,34 @@
 - **驱动语义要点**：视口未贴底先 `scroll_region_down` 下推（不耗 scrollback），贴底后对上方区域 `scroll_region_up` 分块入 scrollback；行尾 `Clear(UntilNewLine)` 不填空格（resize 无折行垃圾的关键）；判空用 `Cell::EMPTY` 全等——带背景色的空格是内容（用户气泡尾巴靠此保活）；`HistoryItem::Raw`（kitty 图片字节）按 rows 记账、其行永不清除；视口增高在物理底行写真实换行（唯一全终端保 scrollback 的滚动）。
 - **顺带改进**：bracketed paste 真事件（突发启发式降为兜底）；删除线真实渲染（CROSSED_OUT）；终端硬光标落在 `▋` 位（D20g 的意图，iocraft 无光标 API 的约束消失）；极矮终端从顶部丢行保住输入框 + footer（旧行为触发 Purge）；D25 遗留的 tick 饿死随渲染循环消亡（tokio interval 无唤醒竞态）。
 - **验证**：468 测试全绿（chat.rs 115 个既有测试零改动通过；驱动 23 个 TestBackend 场景测试，含「50 行历史 + 缩窄 resize 后无任何重复行」回归；app/view 移植 25 个策略测试——tail window、chrome 完整性、flush 跨宽度不双打、ctrl+o 门控、建议行数同源）；`cargo clippy -- -D warnings` 干净。真机烟囱测试（Ghostty 长回复 + 拖拽 resize、tmux+Ghostty 图片、Terminal.app、BCE 终端的 EL 清行）待实测。
+- **首轮真机回修**（2026-08-06 Ghostty 实测反馈四项）：
+  1. 回合后大片空白——settle 顺序错了：先把定稿行滚进 scrollback（视口还高），再收缩视口，收缩腾出的行成了永久空白带（高度=刚才回复行数）。改为驱动 `gap_above` 银行 + `frame()` 单批次：先收缩（腾出的行记账入银行）、定稿行直接写进这些行、再 diff 视口——settle 零空白且常态零滚动（测试断言 `scrolled_up` 为空）；银行未耗尽的部分由下一次增高回收（grow 先收银行再滚动）。
+  2. MCP stderr 写穿 TUI——scrollback 永不重绘后，stdio 子进程日志一旦落屏就固定（旧架构被每帧全量重画掩盖）。spawn 时 stderr 重定向 `~/.local/share/bingo/logs/mcp-<名>.log`（每次连接截断重写；开不了文件则丢弃，绝不继承终端）。
+  3. tmux 图片从未显示过的真因——raw mode 下 `placeholder_rows` 每行以裸 `\n` 结尾：LF 只下移不回车，占位符第二行起从上一行末列开始，网格整体斜切，kitty 按占位单元格放像素自然全乱（iocraft 时代同病，故「一直没显示过」）。`kitty_image_bytes` 尾部推进同改 `\r\n`。
+  4. 拖拽 resize 边框残影——chrome 的满宽行（边框/气泡）被终端 reflow 折行、逃出视口清理区。加 120ms 防抖：风暴中只记录最新尺寸、不作画（旧宽作画只会叠更多错宽行），静默后一次应用+重画——残留从每步一组降到每次拖拽至多一组（Ctrl+L 可清）。彻底解法见 D27。
+  验证：473 测试全绿（驱动 +4：settle 零滚动、银行分块滚动、grow 回收、resize/clear 重置银行），clippy 干净。
+
+### D27. 懒落盘 + resize 回灌：大活视口
+
+- **需求**（用户明确提出）：视口范围内的内容不要冻结进终端——窗口内一律保持可重排；容量变大（拉高窗口、缩小字体）时，连**已经落盘**的内容也要取回重新渲染填满屏幕，「我可以接受这种情况上滑的时候有重复」。
+- **策略**：
+  1. **懒落盘**：定稿段只要仍完整落在可见窗口（终端高 − 1 − chrome）内就留在活文档里，每帧参与 diff 重画（宽度变化随 `build_rows` 重排、ctrl+o 折叠照常可用）。段的起始行越过窗口顶端才冻结，且**整段冻结**——半冻结会让隐藏部分既不在屏上也不在 scrollback，无处翻看；整段冻结时其可见尾部从视口绘制转为 scrollback，逐像素不动（gap 银行吸收，见 D26 回修 1）。
+  2. **回灌（rehydrate）**：resize 防抖静默后，若窗口容量大于活文档行数，按检查点从最近落盘的段往回取（先问答块行、再消息段），`build_rows` 试渲染，超出预算即回退——保证回灌完不存在越过窗口顶的定稿段，与懒落盘互不打架。回灌是**纯记账**（flushed 游标回退，不写终端）；scrollback 里的旧拷贝物理上收不回，上滑会看到一份旧几何的重复——用户明确认可的取舍。
+- **机制**：`Doc.settled_marks: Vec<SettledMark{row_end, segments, ask_rows}>`——build_rows 在每个定稿点（欢迎卡/每条定稿消息/问答块）记检查点（构建内累计值，`Chat::mark_base` 消化跨次推进的增量）；app 层 `pick_flush_mark` 选「所属段起始行 < 窗口顶」的最远检查点，`advance_flushed_upto` 部分推进。旧聚合字段 `settled_segments/settled_ask_rows` 删除（检查点的纯重复）。
+- **副作用剖析**：resize 后首帧视口大幅增高会把屏上旧几何残留推进 scrollback（append_lines），新渲染的拷贝随后填满屏幕——正是「接受重复」的语义；图片块回灌后再冻结会重发 kitty 传输，U=1 同 id 更新既有放置、Direct 无 id 累积新实例但旧放置像素不动，均无害。
+- **验证**：476 测试全绿（新增：pick_flush_mark 策略矩阵、装得下不冻结、回灌填满/超预算回退；9 处既有断言改读检查点）；clippy -D warnings 干净。
+- **真机回修二（/resume 大列表触发逐行重复 + 拼接行）**：三个叠加成因，一并根治——
+  1. **DECSTBM 单行区域非法**（元凶）：懒落盘后视口高达 H−1、`vp.top==1` 成常态，make_room 逐行发 `CSI 1;1r`+`CSI S`——DECSTBM 要求区域 ≥2 行，非法参数被终端忽略、区域退回**全屏**，每写一行全屏滚一次，视口内容与写入交错上移 → 逐行相邻重复 + 新行盖旧行的拼接尾巴（TestBackend 对单行区域语义正确，故 27 个驱动测试全绿而真机全错）。修复：视口上限统一改 **H−2**（driver clamp / Frame 预算 / tail_window 三处同源），`vp.top ≥ 2` 恒成立、区域恒合法。
+  2. **`CSI S` 不进 scrollback**（kitty/Ghostty 明确语义：SU 滚出的行进 bit bucket）：落盘滚动换成 codex 同款原语——`RawWrite::scroll_into_scrollback`：DECSTBM 顶锚区域 + 光标停区域底行 + n 个 LF + 复位（LF 是唯一全终端进 scrollback 的滚动）；测试端 Recorder 映射回 `scroll_region_up` 保持 TestBackend 语义等价，27 个驱动测试零改动。
+  3. **瞬态 slash 输出驱逐活内容**（策略错误）：/resume 无参列表是文档尾部的 TTL 瞬态行，把窗口挤小导致活对话被误冻结（且 2s 后窗口空半截）。`Doc.transient_rows` 标记瞬态行数，懒落盘的窗口计算剔除之——临时列表只是暂时盖住，不是驱逐。
+  验证：477 测试全绿（新增瞬态不冻结回归测试；3 个 H−1 期望值随上限改 H−2），clippy 干净。
+- **真机回修三（resize 后视口跳底、旧画面成多宽度残骸堆叠）**：`term.resize()` 原本无条件把视口重锚到屏幕底部——内容未占满屏时（如仅欢迎卡在屏幕上部），每次宽度拖拽都把视口甩到底部重画，旧位置的画面留在上方永不清除，一次拖拽堆出一摞不同宽度的卡片。改为**内容锚定**（CC 同款行为，用户点名）：resize 保持视口原行、仅在新屏装不下时上移到恰好容纳；清除从视口原位到屏末，把终端 reflow 从旧视口折出的碎片一并抹掉。视口从内容起点开始渲染，与刚启动的会话一致。477 测试全绿（`resize_taller_keeps_the_viewport_content_anchored` 取代旧的跳底断言）。
+- **真机回修四（缩宽后视口原点之上仍残留一行折行碎片）**：宽度缩小时终端 reflow 先于 resize 事件发生，旧满宽行折行使内容整体下移、顶到屏底还会整屏上滚——我们记录的视口原点与物理现实的位移**协议上不可知**，「从原点向下清」必然漏掉被推到原点之上的碎片。终极策略=不猜几何：resize 静默后走 Ctrl+L 通道（`force_redraw` → `clear_visible`）清掉整个可见屏、按新宽从头重画窗口；回灌已把内容拉回填满屏幕，画面无损，旧几何拷贝只留在 scrollback（用户接受的取舍）。自此 resize 的屏上表现完全确定性，不依赖任何终端 reflow 行为。
+- **真机回修五（Ctrl+C 后整屏错位重影 + MCP stderr 仍写穿）**：两个独立成因——
+  1. **reclaim 增长清空 diff buffer**（重影元凶）：回合结束 status 行消失 → 视口收缩 1 行（底锚，origin 下移、顶行清空进银行）；Ctrl+C notice 行出现 → 增长走 reclaim 路径，该路径把两个 buffer 清空「强制全量重画」——但物理屏只有银行那几行是空白，其余仍是旧帧。prev buffer 谎报全空后，diff 认定屏幕已空：新帧的**空行**不清底下的旧字（`❯ Hi`/回复相邻重复、卡片底边框碎片存活）、**变短的行**不清行尾（notice 文本右侧残留输入框边框 `────`）。修复：reclaim 不清 buffer，`retarget_buffers` 加带符号 offset（收缩 +shift 底锚、下扩/滚动增长 0 顶锚、reclaim 增长 −reclaimed 底锚下移、顶部补空行——恰好镜像物理上真空白的银行行），**prev buffer 任何时刻如实镜像物理屏**成为驱动不变量（resize/clear_visible 清 buffer 是因为它们同时物理清屏，不破此律）。回归测试 `grow_after_shrink_repaints_over_every_stale_row` 在旧实现下精确复现截图 artifact（`["eeee","bbbb","ffff","ggdd"]`）。触发面不止 Ctrl+C：任何「收缩→增长」序列（每个回合结束后再发消息/开 help/出建议）都踩中。
+  2. **rmcp builder 覆盖 stderr**（上次回修一的重定向从未生效）：rmcp 3.1.0 `TokioChildProcess::new` 内部走 builder，builder 默认 `stderr: Stdio::inherit()` 且 `spawn()` 无条件 `.stderr(self.stderr)` **覆盖** Command 上已设置的值——我们在 Command 上设的日志文件 sink 被静默丢弃。修复：显式走 `TokioChildProcess::builder(command).stderr(stderr_sink(name)).spawn()`。触发时机与「发消息后稳定出现」吻合：MCP 懒连接在首条消息的 assemble_tools 时 spawn，banner 恰好打在光标（输入框）处。
+  验证：478 测试全绿，clippy 干净。
+- **inline ctrl+o = 展开/闭合切换，展开即整卷 transcript 重放**（CC 非全屏 ctrl+o，用户点名）：scrollback write-once 决定了 inline 下不存在「原地展开」——旧方案只对未落盘的最后一条消息放行折叠切换（`last_message_dynamic` 门），已落盘内容按不动。改为 CC 语义，两个方向：
+  - **展开**（存在折叠项或已落盘内容）：`Chat::expand_transcript` 把**全历史**所有可折叠项（活动 + 折叠组）展开、`reset_flushed` 回卷落盘游标、置 `dump_transcript` + `force_redraw`；app 层重放帧**先清可见屏**（与 resize 同款——不清屏的话旧画面与重放行的相对位置取决于视口历史，短内容会同屏重复），再从欢迎卡全量重建文档，取**最后一个**定稿检查点一次 `flush_items` + `advance_flushed_upto` 整卷冻结进 scrollback：重放内容从屏幕顶部铺起、chrome 紧随其下，超屏部分自然滚入 scrollback，用户上滑翻看全貌。动态尾部（流式消息/权限对话/瞬态 slash 行，均在检查点之外）照常留在视口。屏上已是全貌且无可展开项时 no-op。
+  - **闭合**（`transcript_fully_expanded`：存在可折叠项且全部展开）：`Chat::collapse_transcript` 全历史折回聚合态，随后走 **resize 同款收拢**——撤销未渲染的重放、`force_redraw` 清可见屏、`rehydrate` 按折叠后的高度回灌填满窗口。屏上的展开重放行只留在 scrollback（write-once，不清屏就会与折叠窗口同屏并存）。无可折叠项时判定恒为假，ctrl+o 退化为纯重放。
+  折叠旧拷贝留在 scrollback 上方，接受重复（与回灌同一取舍）。零新驱动原语：回卷（/clear、/resume 同款）+ 全量冻结（懒落盘同款）+ 清屏回灌（resize 同款）的组合。`last_message_dynamic` 门随之删除；fullscreen 的 ctrl+o 仍是就地折叠切换（那里可以重绘）。478 测试全绿（重写 2 个门测试为重放/闭合语义）。

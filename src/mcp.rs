@@ -134,7 +134,13 @@ impl McpManager {
                 let mut command = TokioCommand::new(command_str);
                 command.args(&config.args);
                 command.envs(&config.env);
-                let transport = TokioChildProcess::new(command)
+                // 子进程 stderr 若继承终端会直接写穿 TUI（scrollback 永不
+                // 重绘，一条日志就永久留在屏上）——重定向到日志文件。
+                // 必须走 builder：TokioChildProcess::new 在 spawn 时用默认
+                // Stdio::inherit 覆盖 Command 上已设置的 stderr。
+                let (transport, _stderr) = TokioChildProcess::builder(command)
+                    .stderr(stderr_sink(name))
+                    .spawn()
                     .map_err(|e| format!("spawn {command_str}: {e}"))?;
                 serve_client((), transport)
                     .await
@@ -260,6 +266,43 @@ pub fn normalize_mcp_name(name: &str) -> String {
         }
     }
     out
+}
+
+/// stdio 服务器的 stderr 去向：`~/.local/share/bingo/logs/mcp-<名>.log`
+/// （每次连接截断重写）；开不了文件就丢弃，绝不继承终端。
+fn stderr_sink(name: &str) -> std::process::Stdio {
+    stderr_log_file(name).map_or_else(std::process::Stdio::null, std::process::Stdio::from)
+}
+
+fn stderr_log_file(name: &str) -> Option<std::fs::File> {
+    let home = std::env::var_os("HOME")?;
+    let path = mcp_log_path(std::path::Path::new(&home), name);
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    std::fs::File::create(path).ok()
+}
+
+/// 日志文件路径（纯函数，便于测试）。文件名经 [`normalize_mcp_name`]，
+/// 与工具名前缀同一套规范。
+fn mcp_log_path(home: &std::path::Path, name: &str) -> std::path::PathBuf {
+    home.join(".local")
+        .join("share")
+        .join("bingo")
+        .join("logs")
+        .join(format!("mcp-{}.log", normalize_mcp_name(name)))
+}
+
+#[cfg(test)]
+mod stderr_log_tests {
+    use super::*;
+
+    #[test]
+    fn stderr_log_path_is_per_server_and_sanitized() {
+        let path = mcp_log_path(std::path::Path::new("/home/u"), "files v2");
+        assert_eq!(
+            path,
+            std::path::Path::new("/home/u/.local/share/bingo/logs/mcp-files_v2.log")
+        );
+    }
 }
 
 /// 从服务器工具描述派生的展示事实（纯函数，测试友好）。

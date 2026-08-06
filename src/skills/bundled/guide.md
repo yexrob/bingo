@@ -27,7 +27,8 @@ when_to_use: >-
   空输入连按两次退出 · ↑↓ 历史回溯（多行输入内先移光标；busy 空输入 ↑ 取回排队消息）·
   Ctrl+R 历史反向搜索 · Ctrl+A/E 行首尾 · Alt+B/F 按词移动 · Ctrl+W/U/K 删词/删到
   行首/行尾 · Ctrl+Y 粘回删除 · Ctrl+S 暂存/恢复输入 · Ctrl+_ 撤销 · ctrl+o
-  展开/折叠工具输出 · Ctrl+T 显隐任务区 · Ctrl+L 清屏重画 · Shift+Tab 循环权限
+  展开/闭合切换（展开 = 重放完整 transcript 供终端上滑翻看；再按闭合折回
+  聚合态并清屏收拢）· Ctrl+T 显隐任务区 · Ctrl+L 清屏重画 · Shift+Tab 循环权限
   模式（default → acceptEdits → plan）· Alt+T 思考开关 · busy 时回车把消息排队，
   回合结束自动发送。
 - 大段粘贴自动折叠为 `[Pasted text #N +M lines]` 占位，发送时展开真实内容
@@ -95,7 +96,8 @@ when_to_use: >-
    count_tokens 接口时自动改用本地估算（字符数/4），首次回退告警一次。
 3. **MCP 服务器不工作**：`/mcp` 查看状态——`✗ failed: <详情>` 按详情修
    （命令不存在/spawn 失败/握手失败；http 服务器另查 url 可达性与 headers 鉴权）；
-   修好后 `/mcp reconnect <name>`。`type: sse/ws` 会报"不支持（stdio / http）"。
+   stdio 服务器自身的报错输出在 `~/.local/share/bingo/logs/mcp-<名>.log`
+   （每次连接重写，不会打进界面）；修好后 `/mcp reconnect <name>`。`type: sse/ws` 会报"不支持（stdio / http）"。
    禁用/启用：`/mcp disable|enable [name|all]`
    （禁用名单持久化到 settings.json）。MCP 工具名为 `mcp__<server>__<tool>`，
    权限规则请用全名。
@@ -115,7 +117,9 @@ when_to_use: >-
    `!` 前缀非空输入时是普通字符；Tab 从本会话 `!` 历史前缀补全。
 7. **找不到历史会话**：transcript 存 `~/.local/share/bingo/transcripts`（`--continue`
    续上次，`/resume` 列出/切换）。
-8. **工具输出被折叠**：ctrl+o 展开/折叠；长输出显示 `+N lines`。
+8. **工具输出被折叠**：ctrl+o 展开全部折叠项并把完整 transcript 重放到
+   终端（上滑滚动翻看；已打印的折叠旧拷贝留在更上方，属正常）；全展开
+   态再按 ctrl+o 闭合——折回聚合态并清屏收拢；长输出显示 `+N lines`。
 9. **slash 下拉没出现想要的命令**：输入前缀过滤（如 `/m` 匹配 mcp/model/meye）；
    Esc 关闭菜单；技能在 `/skills` 清单，`/技能名` 执行。
 10. **Grep/Glob 搜不到东西**：默认跳过 `.git`/`target`/`node_modules` 与 `.`

@@ -37,11 +37,40 @@ const SYNC_END: &[u8] = b"\x1b[?2026l";
 pub trait RawWrite: Backend {
     /// Write `bytes` to the terminal verbatim, without interpretation.
     fn write_raw(&mut self, bytes: &[u8]) -> Result<(), Self::Error>;
+
+    /// Scroll rows `[0, top)` up by `n`, pushing the rows that leave the top
+    /// of the screen into the terminal's scrollback.
+    ///
+    /// kitty-family terminals (kitty, Ghostty) send `CSI S` scrolls to the
+    /// bit bucket, never to scrollback; line feeds at the bottom of a
+    /// top-anchored DECSTBM region are the only portable scrollback push, so
+    /// the real backend must emit that form instead of
+    /// [`Backend::scroll_region_up`].
+    fn scroll_into_scrollback(&mut self, top: u16, n: u16) -> Result<(), Self::Error>;
 }
 
 impl<W: IoWrite> RawWrite for CrosstermBackend<W> {
     fn write_raw(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.write_all(bytes)
+    }
+
+    fn scroll_into_scrollback(&mut self, top: u16, n: u16) -> std::io::Result<()> {
+        // DECSTBM ignores regions of fewer than two rows (top must be < bottom
+        // in 1-based terms), and a subsequent scroll would then hit the whole
+        // screen. `top < 2` only happens on terminals of one or two rows —
+        // dropping the scroll there beats corrupting the viewport.
+        if top < 2 || n == 0 {
+            return Ok(());
+        }
+        // DECSTBM is 1-based inclusive: the region covers screen rows
+        // [1, top]. Park the cursor on the region's bottom row and let `n`
+        // line feeds scroll the region up. DECSTBM homes the cursor; the
+        // driver marks `cursor_synced = false` at every call site and
+        // repositions before the next write.
+        let mut seq = format!("\x1b[1;{top}r\x1b[{top};1H").into_bytes();
+        seq.resize(seq.len() + usize::from(n), b'\n');
+        seq.extend_from_slice(b"\x1b[r");
+        self.write_all(&seq)
     }
 }
 
@@ -96,6 +125,11 @@ pub struct InlineTerm<B: Backend + RawWrite> {
     cursor_synced: bool,
     /// Last requested cursor visibility (`None` = never set).
     cursor_shown: Option<bool>,
+    /// Rows immediately above the viewport that a viewport shrink already
+    /// cleared. They are blank on screen; the next insert or grow consumes
+    /// them instead of scrolling, so a settle transition (tail rows leaving
+    /// the viewport for scrollback) nets zero blank rows.
+    gap_above: u16,
 }
 
 /// The driver used by the TUI host: ratatui's crossterm backend over stdout.
@@ -137,6 +171,7 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
             parked: Position::new(0, row),
             cursor_synced: true,
             cursor_shown: None,
+            gap_above: 0,
         })
     }
 
@@ -147,14 +182,23 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
 
     /// Accept a new terminal size.
     ///
-    /// The viewport height is clamped to the new screen, the viewport is re-anchored to the bottom
-    /// of the screen, the back buffer is dropped (forcing a full repaint on the next
-    /// [`Self::draw`]) and everything from the new viewport origin to the end of the screen is
-    /// cleared. Scrollback is never purged.
+    /// The viewport height is clamped to the new screen and the viewport stays
+    /// content-anchored: it keeps its row unless the new screen is too short,
+    /// in which case it moves up just enough to fit. (Re-anchoring to the
+    /// bottom here would abandon the previously painted rows above the new
+    /// origin as permanent garbage on every width drag — the viewport starts
+    /// where the content starts, exactly like a freshly launched session.)
+    /// The back buffer is dropped (forcing a full repaint on the next
+    /// [`Self::draw`]) and everything from the viewport origin to the end of
+    /// the screen is cleared, which also wipes whatever the terminal's reflow
+    /// wrapped out of the old viewport. Scrollback is never purged.
     pub fn resize(&mut self, size: Size) -> Result<(), B::Error> {
         self.size = sanitize(size);
+        // The terminal reflowed the screen; banked blank rows are gone.
+        self.gap_above = 0;
         let height = self.viewport.height.clamp(1, self.max_viewport_height());
-        let origin = Position::new(0, self.size.height.saturating_sub(height));
+        let max_y = self.size.height.saturating_sub(height);
+        let origin = Position::new(0, self.viewport.y.min(max_y));
         self.viewport = Rect::new(0, origin.y, self.size.width, height);
         let area = Rect::new(0, 0, self.size.width, height);
         self.buffers = [Buffer::empty(area), Buffer::empty(area)];
@@ -169,7 +213,7 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
 
     /// Draw one frame at the requested viewport height.
     ///
-    /// `height` is clamped to `size().height - 1` (minimum 1) so the viewport never fills the
+    /// `height` is clamped to `size().height - 2` (minimum 1) so the viewport never fills the
     /// screen. Height changes are absorbed first: growing while the viewport is not yet at the
     /// physical bottom extends it downward, growing while it is at the bottom writes real
     /// newlines on the last screen row (the only universally scrollback-preserving scroll) and
@@ -180,8 +224,29 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
     ///
     /// `cursor` is a viewport-relative position to show the terminal cursor at (the input caret),
     /// or `None` to hide it. All output goes out as one synchronized-update batch.
+    // The production host drives everything through `frame`; the two narrower
+    // operations stay as the driver's documented primitives and test surface.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn draw(
         &mut self,
+        height: u16,
+        render: impl FnOnce(&mut Buffer),
+        cursor: Option<(u16, u16)>,
+    ) -> Result<(), B::Error> {
+        self.frame(Vec::new(), height, render, cursor)
+    }
+
+    /// One combined step: adjust the viewport height, insert `items` into
+    /// scrollback, draw the frame — all inside a single synchronized-update
+    /// batch.
+    ///
+    /// The order matters: shrinking first banks the rows the tail vacated
+    /// (`gap_above`), and the insert then writes the settled rows straight
+    /// into them — a settle transition neither flashes nor leaves a blank
+    /// band behind.
+    pub fn frame(
+        &mut self,
+        items: Vec<HistoryItem>,
         height: u16,
         render: impl FnOnce(&mut Buffer),
         cursor: Option<(u16, u16)>,
@@ -189,6 +254,7 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
         let target = height.clamp(1, self.max_viewport_height());
         self.batch(|this| {
             this.set_viewport_height(target)?;
+            this.insert_items(items)?;
             let index = this.current;
             render(&mut this.buffers[index]);
             this.flush_viewport()?;
@@ -209,44 +275,57 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
     /// clear-to-end-of-line after the last non-blank cell. [`HistoryItem::Raw`] payloads are
     /// written verbatim at column 0 of their row and the rows they occupy are reserved but never
     /// cleared. The cursor is restored to its parked position afterwards.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn insert_history(&mut self, items: Vec<HistoryItem>) -> Result<(), B::Error> {
         if items.is_empty() {
             return Ok(());
         }
         self.batch(|this| {
-            if this.viewport.top() == 0 && this.viewport.bottom() >= this.size.height {
-                return this.insert_history_borrowing_top_row(items);
-            }
-            // Rows `[gap, viewport.top())` are vacated and writable.
-            let mut gap = this.viewport.top();
-            let mut remaining = items
-                .iter()
-                .map(HistoryItem::rows)
-                .fold(0u16, u16::saturating_add);
-            for item in items {
-                let rows = item.rows();
-                let row = if rows == 0 {
-                    // A payload that occupies no rows prints nothing, so it needs no vacated row
-                    // of its own; it only needs a defined cursor row above the viewport.
-                    gap.min(this.viewport.top().saturating_sub(1))
-                } else {
-                    gap = this.make_room(gap, rows, remaining)?;
-                    remaining = remaining.saturating_sub(rows);
-                    if gap >= this.viewport.top() {
-                        // No room could be made; dropping output is better than painting over the
-                        // viewport. Unreachable while the viewport cannot fill the screen.
-                        continue;
-                    }
-                    gap
-                };
-                match item {
-                    HistoryItem::Line(line) => this.write_history_line(row, line)?,
-                    HistoryItem::Raw { bytes, .. } => this.write_history_raw(row, &bytes)?,
-                }
-                gap = gap.saturating_add(rows);
-            }
+            this.insert_items(items)?;
             this.restore_cursor()
         })
+    }
+
+    /// Body of [`Self::insert_history`], usable inside an already-open batch.
+    fn insert_items(&mut self, items: Vec<HistoryItem>) -> Result<(), B::Error> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        if self.viewport.top() == 0 && self.viewport.bottom() >= self.size.height {
+            return self.insert_history_borrowing_top_row(items);
+        }
+        // Rows `[gap, viewport.top())` are vacated and writable; rows banked
+        // by a previous viewport shrink are already blank and count first.
+        let mut gap = self.viewport.top().saturating_sub(self.gap_above);
+        let mut remaining = items
+            .iter()
+            .map(HistoryItem::rows)
+            .fold(0u16, u16::saturating_add);
+        for item in items {
+            let rows = item.rows();
+            let row = if rows == 0 {
+                // A payload that occupies no rows prints nothing, so it needs no vacated row
+                // of its own; it only needs a defined cursor row above the viewport.
+                gap.min(self.viewport.top().saturating_sub(1))
+            } else {
+                gap = self.make_room(gap, rows, remaining)?;
+                remaining = remaining.saturating_sub(rows);
+                if gap >= self.viewport.top() {
+                    // No room could be made; dropping output is better than painting over the
+                    // viewport. Unreachable while the viewport cannot fill the screen.
+                    continue;
+                }
+                gap
+            };
+            match item {
+                HistoryItem::Line(line) => self.write_history_line(row, line)?,
+                HistoryItem::Raw { bytes, .. } => self.write_history_raw(row, &bytes)?,
+            }
+            gap = gap.saturating_add(rows);
+        }
+        // Whatever the batch did not fill stays banked for the next round.
+        self.gap_above = self.viewport.top().saturating_sub(gap);
+        Ok(())
     }
 
     /// Clear the visible screen, re-anchor the viewport at the top and force a full repaint on the
@@ -255,6 +334,7 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
     /// This is the Ctrl+L path. Scrollback is preserved: the erase covers the visible screen only.
     pub fn clear_visible(&mut self) -> Result<(), B::Error> {
         let height = self.viewport.height.clamp(0, self.max_viewport_height());
+        self.gap_above = 0;
         self.viewport = Rect::new(0, 0, self.size.width, height);
         let area = Rect::new(0, 0, self.size.width, height);
         self.buffers = [Buffer::empty(area), Buffer::empty(area)];
@@ -288,9 +368,16 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
         Ok(self.backend)
     }
 
-    /// Largest viewport height that still leaves one row of the screen to the terminal.
+    /// Largest viewport height that still leaves two rows of the screen above
+    /// the viewport.
+    ///
+    /// Two rows, not one: the scrollback push uses a DECSTBM region covering
+    /// rows `[1, viewport_top]` (1-based inclusive), and DECSTBM silently
+    /// ignores regions of fewer than two rows — the following scroll would
+    /// then hit the whole screen, viewport included. `viewport.top >= 2`
+    /// keeps the region unconditionally valid.
     fn max_viewport_height(&self) -> u16 {
-        self.size.height.saturating_sub(1).max(1)
+        self.size.height.saturating_sub(2).max(1)
     }
 
     /// Wrap `body` in one synchronized-update batch followed by a single flush.
@@ -310,9 +397,33 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
 
     /// Move the viewport to `height` rows, scrolling or clearing the screen as required.
     fn set_viewport_height(&mut self, height: u16) -> Result<(), B::Error> {
-        let old = self.viewport;
+        let mut old = self.viewport;
         if height == old.height && old.width == self.size.width {
             return Ok(());
+        }
+        if height > old.height && self.gap_above > 0 {
+            // Grow upward into rows a previous shrink already cleared: no
+            // scroll and no clear, just reclaim them. Only those rows are
+            // blank — the rest of the screen still shows the old frame, so
+            // the back buffer keeps mirroring it (shifted down, blank top);
+            // emptying it here made the diff treat the screen as blank, and
+            // blank rows in the new frame then never erased the stale glyphs
+            // underneath them.
+            let reclaimed = (height - old.height).min(self.gap_above).min(old.y);
+            if reclaimed > 0 {
+                self.gap_above -= reclaimed;
+                self.viewport =
+                    Rect::new(0, old.y - reclaimed, self.size.width, old.height + reclaimed);
+                self.retarget_buffers(
+                    old.height,
+                    self.viewport.height,
+                    -i32::from(reclaimed),
+                );
+                old = self.viewport;
+                if height == old.height && old.width == self.size.width {
+                    return Ok(());
+                }
+            }
         }
         let vacated = if height > old.height {
             let delta = height - old.height;
@@ -341,22 +452,39 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
             self.backend.clear_region(ClearType::UntilNewLine)?;
             self.cursor_synced = false;
         }
-        self.retarget_buffers(old.height, height);
+        if height < old.height {
+            // Bank the rows just cleared above the new top; the next insert
+            // or grow consumes them, so no blank band is left behind.
+            self.gap_above = self
+                .gap_above
+                .saturating_add(old.height - height)
+                .min(self.viewport.y);
+        }
+        self.retarget_buffers(
+            old.height,
+            height,
+            i32::from(old.height.saturating_sub(height)),
+        );
         Ok(())
     }
 
     /// Re-shape both diff buffers for the new viewport height.
     ///
-    /// Buffers are viewport-relative, so a grow keeps rows `[0, old_height)` in place and a shrink
-    /// keeps the bottom `height` rows: the viewport bottom is what stays anchored on screen.
-    fn retarget_buffers(&mut self, old_height: u16, height: u16) {
+    /// Buffers are viewport-relative; new row `y` keeps the content of old row `y + offset`, so
+    /// the back buffer keeps mirroring the physical rows it now covers. A shrink keeps the bottom
+    /// rows (`offset > 0`: the viewport bottom stays anchored on screen), a downward or scrolled
+    /// grow keeps the top rows (`offset == 0`), and a reclaim-grow extends the top upward
+    /// (`offset < 0`: old content shifts down, the fresh top rows stay blank — exactly the
+    /// physically blank rows the viewport grew into).
+    fn retarget_buffers(&mut self, old_height: u16, height: u16, offset: i32) {
         let area = Rect::new(0, 0, self.size.width, height);
-        let shift = old_height.saturating_sub(height);
         let previous = 1 - self.current;
         let old = std::mem::replace(&mut self.buffers[previous], Buffer::empty(area));
         let mut kept = Buffer::empty(area);
         for y in 0..height {
-            let source = y.saturating_add(shift);
+            let Ok(source) = u16::try_from(i32::from(y) + offset) else {
+                continue;
+            };
             if source >= old_height {
                 break;
             }
@@ -508,7 +636,7 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
                 return Ok(gap);
             }
             let step = missing.min(top);
-            self.backend.scroll_region_up(0..top, step)?;
+            self.backend.scroll_into_scrollback(top, step)?;
             gap = gap.saturating_sub(step);
             self.cursor_synced = false;
         }
@@ -570,7 +698,7 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
                 HistoryItem::Raw { bytes, .. } => self.write_history_raw(0, &bytes)?,
             }
             for _ in 0..rows {
-                self.backend.scroll_region_up(0..1, 1)?;
+                self.backend.scroll_into_scrollback(1, 1)?;
                 self.cursor_synced = false;
             }
         }
@@ -826,6 +954,15 @@ mod tests {
         fn write_raw(&mut self, bytes: &[u8]) -> Result<(), Infallible> {
             self.raw.extend_from_slice(bytes);
             Ok(())
+        }
+
+        // Semantically a top-anchored region scroll whose evicted rows land
+        // in scrollback — exactly what TestBackend models for
+        // `scroll_region_up`, so the driver tests keep asserting real
+        // semantics while the production backend emits the LF form.
+        fn scroll_into_scrollback(&mut self, top: u16, n: u16) -> Result<(), Infallible> {
+            self.scrolled_up.push((0..top, n));
+            self.inner.scroll_region_up(0..top, n)
         }
     }
 
@@ -1177,26 +1314,30 @@ mod tests {
 
         assert_eq!(
             term.viewport(),
-            Rect::new(0, 1, 6, 3),
-            "height clamped to screen height - 1 and re-anchored to the bottom"
+            Rect::new(0, 2, 6, 2),
+            "height clamped to screen height - 2 and re-anchored to the bottom"
         );
         term.draw(6, paint(&["a", "b", "c", "d", "e", "f"]), None)
             .unwrap();
-        assert_eq!(term.viewport().height, 3);
+        assert_eq!(term.viewport().height, 2);
     }
 
     #[test]
-    fn resize_larger_reanchors_to_the_new_bottom() {
+    fn resize_taller_keeps_the_viewport_content_anchored() {
         let mut term = term(6, 6, 5);
         term.draw(2, paint(&["a", "b"]), None).unwrap();
+        assert_eq!(term.viewport(), Rect::new(0, 4, 6, 2));
 
         term.backend_mut().inner.resize(6, 10);
         term.resize(Size::new(6, 10)).unwrap();
 
-        assert_eq!(term.viewport(), Rect::new(0, 8, 6, 2));
+        // Content-anchored: a taller screen does not fling the viewport to
+        // the new bottom — it stays where the content is, so nothing painted
+        // earlier is left stranded above the origin as garbage.
+        assert_eq!(term.viewport(), Rect::new(0, 4, 6, 2));
         term.draw(2, paint(&["a", "b"]), None).unwrap();
-        assert_eq!(term.backend().screen()[8], "a");
-        assert_eq!(term.backend().screen()[9], "b");
+        assert_eq!(term.backend().screen()[4], "a");
+        assert_eq!(term.backend().screen()[5], "b");
     }
 
     #[test]
@@ -1341,5 +1482,130 @@ mod tests {
             scrollback.iter().all(|row| !after.contains(&row.as_str())),
             "chrome must never reach scrollback"
         );
+    }
+
+    #[test]
+    fn frame_settles_tail_into_banked_rows_without_scrolling() {
+        let mut term = term(10, 12, 0);
+        // A tall frame: 6 tail rows + 2 chrome rows.
+        term.draw(8, paint(&["t0", "t1", "t2", "t3", "t4", "t5", "c0", "c1"]), None)
+            .unwrap();
+        term.backend_mut().reset_counters();
+
+        // The tail settles: the same 6 rows leave the viewport for scrollback
+        // and the chrome redraws in the shrunken viewport.
+        let settled: Vec<String> = (0..6).map(|i| format!("t{i}")).collect();
+        term.frame(lines(&settled), 2, paint(&["c0", "c1"]), None)
+            .unwrap();
+
+        assert_eq!(term.viewport(), Rect::new(0, 6, 10, 2));
+        assert!(
+            term.backend().scrolled_up.is_empty(),
+            "the bank absorbed the whole settle"
+        );
+        assert_eq!(term.backend().appended, 0);
+        term.backend().inner.assert_scrollback_empty();
+        assert_eq!(
+            term.backend().screen(),
+            vec!["t0", "t1", "t2", "t3", "t4", "t5", "c0", "c1", "", "", "", ""],
+            "settled rows sit exactly where the viewport freed them — no blank band"
+        );
+        assert_eq!(term.gap_above, 0);
+    }
+
+    #[test]
+    fn frame_scrolls_only_the_rows_the_bank_cannot_cover() {
+        let mut term = term(10, 8, 7);
+        term.draw(6, paint(&["t0", "t1", "t2", "t3", "c0", "c1"]), None)
+            .unwrap();
+        term.backend_mut().reset_counters();
+
+        // 6 settled rows, but shrinking 6 -> 2 banks only 4.
+        let settled: Vec<String> = (0..6).map(|i| format!("s{i}")).collect();
+        term.frame(lines(&settled), 2, paint(&["c0", "c1"]), None)
+            .unwrap();
+
+        assert_eq!(
+            term.backend().scrolled_up,
+            vec![(0u16..6, 2u16)],
+            "only the two uncovered rows scroll"
+        );
+        let screen = term.backend().screen();
+        assert_eq!(&screen[0..6], &["s0", "s1", "s2", "s3", "s4", "s5"]);
+        assert_eq!(&screen[6..8], &["c0", "c1"]);
+        assert_eq!(term.gap_above, 0);
+    }
+
+    #[test]
+    fn grow_reclaims_banked_rows_without_scrolling() {
+        let mut term = term(10, 12, 0);
+        term.draw(8, paint(&["t0", "t1", "t2", "t3", "t4", "t5", "c0", "c1"]), None)
+            .unwrap();
+        // Settle only 3 of the 6 freed rows: 3 stay banked as blanks.
+        let settled: Vec<String> = (0..3).map(|i| format!("t{i}")).collect();
+        term.frame(lines(&settled), 2, paint(&["c0", "c1"]), None)
+            .unwrap();
+        assert_eq!(term.gap_above, 3);
+        term.backend_mut().reset_counters();
+
+        // The next turn grows the viewport again: it reclaims the blanks
+        // instead of scrolling anything into scrollback.
+        term.draw(5, paint(&["u0", "u1", "u2", "c0", "c1"]), None)
+            .unwrap();
+
+        assert_eq!(term.gap_above, 0);
+        assert_eq!(term.viewport(), Rect::new(0, 3, 10, 5));
+        assert_eq!(term.backend().appended, 0);
+        assert!(term.backend().scrolled_up.is_empty());
+        term.backend().inner.assert_scrollback_empty();
+        let screen = term.backend().screen();
+        assert_eq!(&screen[0..3], &["t0", "t1", "t2"]);
+        assert_eq!(&screen[3..8], &["u0", "u1", "u2", "c0", "c1"]);
+    }
+
+    /// 回归（真机回修五）：收缩把顶行清空进银行后再增长（reclaim 路径），
+    /// prev buffer 必须继续镜像物理屏——曾被整个清空成「全空白」，diff 便
+    /// 认定屏幕已空：新帧的空行不清底下的旧字、变短的行不清行尾。真机上
+    /// 回合结束（status 行消失 → 收缩）后按 Ctrl+C（notice 行出现 → 增长）
+    /// 稳定触发整屏错位重影。
+    #[test]
+    fn grow_after_shrink_repaints_over_every_stale_row() {
+        let mut term = term(10, 12, 0);
+        term.draw(4, paint(&["aaaa", "bbbb", "cccc", "dddd"]), None)
+            .unwrap();
+        // 收缩 1 行：视口底锚（y=1），顶行清空进银行。
+        term.draw(3, paint(&["bbbb", "cccc", "dddd"]), None).unwrap();
+        assert_eq!(term.gap_above, 1);
+        assert_eq!(term.viewport(), Rect::new(0, 1, 10, 3));
+
+        // 增长回 4 行走 reclaim：新帧在旧字位置对出一个空行和一个短行。
+        term.draw(4, paint(&["eeee", "", "ffff", "gg"]), None).unwrap();
+
+        assert_eq!(term.viewport(), Rect::new(0, 0, 10, 4));
+        assert!(term.backend().scrolled_up.is_empty());
+        assert_eq!(term.backend().appended, 0);
+        let screen = term.backend().screen();
+        assert_eq!(
+            &screen[0..4],
+            &["eeee", "", "ffff", "gg"],
+            "空行清掉旧字、短行清掉行尾——diff 面向物理屏，不是空 buffer"
+        );
+    }
+
+    #[test]
+    fn resize_and_clear_visible_reset_the_bank() {
+        let mut term = term(10, 12, 0);
+        term.draw(8, paint(&["x"; 8]), None).unwrap();
+        term.frame(Vec::new(), 2, paint(&["c0", "c1"]), None).unwrap();
+        assert_eq!(term.gap_above, 6, "an empty flush keeps the bank");
+
+        term.resize(Size::new(10, 12)).unwrap();
+        assert_eq!(term.gap_above, 0);
+
+        term.draw(8, paint(&["x"; 8]), None).unwrap();
+        term.frame(Vec::new(), 2, paint(&["c0", "c1"]), None).unwrap();
+        assert_eq!(term.gap_above, 6);
+        term.clear_visible().unwrap();
+        assert_eq!(term.gap_above, 0);
     }
 }

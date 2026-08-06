@@ -292,12 +292,14 @@ fn kitty_chunks(png: &[u8], first_header: &str) -> Vec<Vec<u8>> {
 }
 
 /// 构建 kitty 传输+放置序列：首块控制数据为 `a=T` 传输并显示、PNG、
-/// 静默 OK 应答、不移动光标。末尾追加 `rows` 个换行推进光标
-/// （`C=1` 放置不移动光标，换行负责把光标移到图片块之后）。
+/// 静默 OK 应答、不移动光标。末尾追加 `rows` 个 `\r\n` 推进光标
+/// （`C=1` 放置不移动光标；raw mode 下裸 `\n` 只下移不回车，必须带 CR）。
 pub fn kitty_image_bytes(png: &[u8], cols: usize, rows: usize) -> Vec<u8> {
     let header = format!("a=T,f=100,q=1,c={cols},r={rows},C=1");
     let mut out: Vec<u8> = kitty_chunks(png, &header).concat();
-    out.resize(out.len() + rows, b'\n');
+    for _ in 0..rows {
+        out.extend_from_slice(b"\r\n");
+    }
     out
 }
 
@@ -364,8 +366,10 @@ fn normalize_image_id(id: u32) -> u32 {
 
 /// `rows` lines of `cols` placeholder cells, each cell being the placeholder
 /// character plus its row and column diacritic, with the image id carried in
-/// the 24-bit foreground colour. Each line ends with a foreground reset and a
-/// newline, so printing the block advances the cursor by `rows` lines.
+/// the 24-bit foreground colour. Each line ends with a foreground reset and
+/// `\r\n`, so printing the block advances the cursor by `rows` lines and every
+/// row starts at column 0 — with a bare `\n` under raw mode each row would
+/// start where the previous one ended, shearing the placeholder grid.
 ///
 /// `cols`/`rows` are clamped to the diacritic table, which covers the display
 /// box ([`MAX_COLS`] × [`MAX_ROWS`]).
@@ -387,7 +391,7 @@ fn placeholder_rows(cols: usize, rows: usize, id: u32) -> String {
             out.push(row_mark);
             out.push(col_mark);
         }
-        out.push_str("\x1b[39m\n");
+        out.push_str("\x1b[39m\r\n");
     }
     out
 }
@@ -630,11 +634,11 @@ mod tests {
 
     #[test]
     fn kitty_sequence_single_chunk() {
-        // 小 payload：单块 m=0，含完整控制数据，末尾 rows 个换行。
+        // 小 payload：单块 m=0，含完整控制数据，末尾 rows 个 \r\n。
         let out = kitty_image_bytes(b"abc", 12, 4);
         let s = String::from_utf8(out).unwrap();
         assert!(s.starts_with("\x1b_Ga=T,f=100,q=1,c=12,r=4,C=1,m=0;"));
-        assert!(s.ends_with("\n\n\n\n"));
+        assert!(s.ends_with("\r\n\r\n\r\n\r\n"));
         assert!(s.contains("\x1b\\"));
         assert_eq!(s.matches("\x1b\\").count(), 1);
     }
@@ -735,7 +739,11 @@ mod tests {
         // Diacritics are row-first then column, 0-based into kitty's table.
         assert!(lines[0].starts_with(&format!("\x1b[38;2;10;11;12m{PLACEHOLDER}\u{305}\u{305}")));
         assert!(lines[1].ends_with(&format!("{PLACEHOLDER}\u{30d}\u{30e}\x1b[39m")));
-        assert_eq!(out.matches('\n').count(), 2, "cursor advances rows lines");
+        assert_eq!(
+            out.matches("\r\n").count(),
+            2,
+            "each row returns to column 0 and advances (raw mode)"
+        );
     }
 
     #[test]
@@ -775,7 +783,7 @@ mod tests {
         assert!(s.starts_with("\x1bPtmux;"), "transmit first");
         assert!(s.contains("i=7,c=4,r=2"));
         assert!(s.contains(&format!("m{PLACEHOLDER}")), "placement follows");
-        assert_eq!(s.matches('\n').count(), 2, "cursor advances rows lines");
+        assert_eq!(s.matches("\r\n").count(), 2, "cursor advances rows lines");
     }
 
     #[test]
