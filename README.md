@@ -1,159 +1,180 @@
 # bingo
 
-Rust 实现的本地 agent CLI（agent harness）。在终端里驱动大模型完成编程与系统任务：
-工具调用、权限审批、子代理编排、任务追踪、上下文压缩、记忆与 MCP 扩展，
-全部在本地运行，模型只产出意图，副作用由 harness 统一把关。
+> **中文版**：[README.zh-CN.md](README.zh-CN.md) — 中文文档见这里。
 
-## 特性一览
+bingo is a local agent CLI (agent harness) written in Rust. It drives large
+language models from your terminal to complete coding and system tasks: tool
+calls, permission approval, sub-agent orchestration, task tracking, context
+compaction, memory, and MCP extensions — all running locally. The model only
+produces intent; side effects are gated by the harness.
 
-- **流式主循环**：Messages API 流式响应，工具调用 → 权限门 → 执行 → 结果回填，
-  单轮可并发执行多个安全工具。
-- **统一权限门**：五种权限模式 × 规则表（allow/deny/ask）→ 放行 / 拒绝 / 询问。
-- **工具集**：Bash、Read/Glob/Grep、Edit/Write、WebFetch/WebSearch、Task 族、
-  AskUserQuestion、Skill、Agent（子代理）与 MCP 工具，全部经同一 Tool trait。
-- **子代理（hub-and-spoke）**：主 agent 派生命名子代理，异步执行、完成通知自动
-  注入上下文；SendMessage 续话、AgentControl 管理生命周期。
-- **TUI**：ratatui 双模式（默认 inline 嵌入终端 scrollback，`--fullscreen` 备用屏
-  canvas），kitty graphics 内联渲染图片，历史反向搜索，slash 命令菜单。
-- **技能（Skills）**：`SKILL.md`（YAML frontmatter + markdown）即插即用，
-  内置 `guide` 技能 + 用户/项目目录技能。
-- **MCP**：stdio 与 streamable HTTP 服务器接入，自动适配为同构工具。
-- **上下文管理**：token 预算监控、自动压缩（保留最近消息 + 结构化摘要）、
-  手动 `/compact`、压缩失败熔断。
-- **会话与记忆**：transcript JSONL 持久化（`--continue`/`/resume` 恢复），
-  memdir 自动记忆 + CLAUDE.md/AGENTS.md 项目记忆。
-- **Hooks 扩展点**：工具前后、会话起止、压缩、Stop、任务生命周期等事件的
-  shell hook（stdin 喂 JSON、stdout 回传决策）。
+## Highlights
 
-## 构建与安装
+- **Streaming main loop**: streaming Messages API responses; tool calls go
+  through the permission gate, execute, and feed results back. Multiple
+  concurrency-safe tools run in parallel within a single turn.
+- **Unified permission gate**: five permission modes × rule tables
+  (allow/deny/ask) → allow / deny / ask.
+- **Tool set**: Bash, Read/Glob/Grep, Edit/Write, WebFetch/WebSearch, the Task
+  family, AskUserQuestion, Skill, Agent (sub-agents), and MCP tools — all
+  behind the same `Tool` trait.
+- **Sub-agents (hub-and-spoke)**: the main agent spawns named sub-agents that
+  run asynchronously; completion notifications are injected into context
+  automatically. `SendMessage` continues a sub-agent, `AgentControl` manages
+  its lifecycle.
+- **TUI**: ratatui dual-mode (default inline, embedded in the terminal
+  scrollback; `--fullscreen` uses an alternate-screen canvas), kitty-graphics
+  inline image rendering, reverse history search, and a slash-command menu.
+- **Skills**: drop-in `SKILL.md` (YAML frontmatter + markdown); bundled `guide`
+  skill plus user/project skill directories.
+- **MCP**: stdio and streamable HTTP servers, adapted to the same Tool trait.
+- **Context management**: token budget monitoring, automatic compaction
+  (summary of old messages + keep recent), manual `/compact`, and a fuse after
+  repeated compaction failures.
+- **Sessions & memory**: JSONL transcript persistence (`--continue`/`/resume`
+  recovery), memdir auto-memory, plus CLAUDE.md/AGENTS.md project memory.
+- **Hooks extension points**: shell hooks for pre/post-tool, session
+  start/end, compaction, Stop, and task lifecycle events (JSON on stdin,
+  decisions returned on stdout).
 
-要求：Rust 2024 edition（稳定版工具链，`rustup` 安装即可）。
+## Building & installing
 
-### 直接从 GitHub 安装（cargo install）
+Requirements: Rust 2024 edition (stable toolchain, e.g. via `rustup`).
+
+### Install directly from GitHub (cargo install)
 
 ```bash
 cargo install --git https://github.com/yexrob/bingo --locked
 ```
 
-- 安装到 `~/.cargo/bin/bingo`（确保 `~/.cargo/bin` 在 `PATH` 中）。
-- `--locked` 使用仓库已提交的 `Cargo.lock`，保证依赖版本可复现。
-- 依赖 `rsmarkdown-core` 同为 git 依赖，cargo 会自动一并拉取。
+- Installs to `~/.cargo/bin/bingo` (make sure `~/.cargo/bin` is on your `PATH`).
+- `--locked` uses the committed `Cargo.lock` so dependency versions are
+  reproducible.
+- `rsmarkdown-core` is a git dependency; cargo fetches it automatically.
 
-更新到最新版：
+Update to the latest version:
 
 ```bash
 cargo install --git https://github.com/yexrob/bingo --locked --force
 ```
 
-### 从源码构建
+### Build from source
 
 ```bash
-cargo build --release          # 构建二进制：target/release/bingo
-cargo install --path .         # 或安装到 ~/.cargo/bin
+cargo build --release          # binary at target/release/bingo
+cargo install --path .         # or install to ~/.cargo/bin
 ```
 
-验证：
+Verify:
 
 ```bash
-cargo test          # 单元测试
-cargo clippy -- -D warnings   # lint 必须零告警
+cargo test          # unit tests
+cargo clippy -- -D warnings   # lint must pass with zero warnings
 ```
 
-## 快速开始
+## Quick start
 
-1. **配置 API key**（二选一）：
-   - 环境变量：`export ANTHROPIC_API_KEY=sk-ant-...`（或 DeepSeek：`DEEPSEEK_API_KEY`）；
-   - settings 文件：`~/.config/bingo/settings.json` 写 `{"apiKey": "..."}`
-     （settings 优先于环境变量）。
-   - 自定义端点用 `ANTHROPIC_BASE_URL` 或 settings 的 `apiBaseUrl`/`providers`。
-2. **启动**：
+1. **Configure an API key** (either):
+   - Environment variable: `export ANTHROPIC_API_KEY=sk-ant-...`
+     (or DeepSeek: `DEEPSEEK_API_KEY`);
+   - Settings file: `~/.config/bingo/settings.json` with `{"apiKey": "..."}`
+     (settings take precedence over environment variables).
+   - Custom endpoints via `ANTHROPIC_BASE_URL` or the `apiBaseUrl`/`providers`
+     settings.
+2. **Run**:
 
 ```bash
-bingo                       # 交互式 TUI（默认 inline 模式）
-bingo -p "修复这个 bug"       # headless：prompt 参数，结果打到 stdout
-bingo -p < prompt.txt       # headless：从 stdin 读 prompt
-bingo --continue            # 恢复最近一次会话
+bingo                       # interactive TUI (inline mode by default)
+bingo -p "fix this bug"      # headless: prompt argument, reply to stdout
+bingo -p < prompt.txt       # headless: read the prompt from stdin
+bingo --continue            # resume the most recent session
 ```
 
-启动时缺 API key 会直接报错。
+Startup fails with an error if no API key is present.
 
-## 命令行参数
+## Command-line options
 
-| 参数 | 说明 |
+| Option | Description |
 |---|---|
-| `-p, --print` | headless 模式：直接把回复打到 stdout（prompt 取参数或 stdin） |
-| `--fullscreen` | 全屏模式（备用屏 canvas，输入吸底、app 内滚动）；默认 inline（历史在终端 scrollback） |
-| `--model <名>` | 使用指定模型（默认 `claude-sonnet-5`） |
-| `--permission-mode <模式>` | 权限模式：`default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions`（默认取 settings） |
-| `--continue` | 恢复最近的会话继续对话 |
-| `prompt` | 非交互提示词（缺省从 stdin 读取；交互模式忽略） |
+| `-p, --print` | headless mode: print the reply to stdout (prompt from argument or stdin) |
+| `--fullscreen` | fullscreen mode (alternate-screen canvas, input docked at bottom, in-app scrolling); default is inline (history in terminal scrollback) |
+| `--model <name>` | use the given model (default `claude-sonnet-5`) |
+| `--permission-mode <mode>` | permission mode: `default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions` (default from settings) |
+| `--continue` | resume the most recent session |
+| `prompt` | non-interactive prompt (read from stdin if omitted; ignored in interactive mode) |
 
-## 使用界面
+## Interface
 
-### 输入
+### Input
 
-- `Enter` 发送；`\`+Enter 或 Ctrl+J 换行（多行输入）。
-- 输入 `!` 进入 bash 模式：命令直接执行、不经模型（`!echo hello`）；
-  前缀粘性保留；空输入 Esc/退格/Ctrl+U 退出。交互式/TTY 命令
-  （top/vim/ssh/fzf 等）会被拒绝，请用批处理等价物（`top -b -n 1`）。
-- 大段粘贴自动折叠为 `[Pasted text #N +M lines]` 占位，发送时展开真实内容。
-- `Ctrl+R` 历史反向搜索；`↑↓` 历史回溯（多行输入内先移光标）。
-- `Ctrl+S` 暂存/恢复输入、`Ctrl+Y` 粘回删除、`Ctrl+_` 撤销。
+- `Enter` sends; `\`+Enter or Ctrl+J inserts a newline (multi-line input).
+- Typing `!` enters bash mode: commands execute directly, bypassing the model
+  (`!echo hello`); the prefix sticks; an empty input exits with Esc/Backspace/
+  Ctrl+U. Interactive/TTY commands (top/vim/ssh/fzf, etc.) are rejected — use
+  batch equivalents (`top -b -n 1`).
+- Large pastes collapse into a `[Pasted text #N +M lines]` placeholder and
+  expand to real content on send.
+- `Ctrl+R` reverse history search; `↑↓` history recall (move the cursor first
+  inside multi-line input).
+- `Ctrl+S` stash/restore the input, `Ctrl+Y` paste back deleted text,
+  `Ctrl+_` undo.
 
-### 快捷键（空输入按 `?` 看全表）
+### Key bindings (press `?` on an empty input for the full table)
 
-| 键 | 功能 |
+| Key | Action |
 |---|---|
-| `Esc` | busy 时中断 / 关闭下拉与面板 / 双击清空输入 |
-| `Ctrl+C` | busy 中断 / 有文本清空 / 空输入连按两次退出 |
-| `Ctrl+T` | 显隐任务区 |
-| `Ctrl+O` | 展开/闭合切换：展开 = 重放完整 transcript 供上滑翻看 |
-| `Ctrl+G` | agent / 频道选择器（agent 视图看实例完整对话，频道视图微信式群聊房间） |
-| `Ctrl+L` | 清屏重画 |
-| `Shift+Tab` | 循环权限模式（default → acceptEdits → plan） |
-| `Alt+T` | 思考开关 |
-| busy 时回车 | 消息排队，回合结束自动发送 |
+| `Esc` | interrupt while busy / close dropdowns and panels / clear input on double-press |
+| `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
+| `Ctrl+T` | toggle the task area |
+| `Ctrl+O` | expand/collapse: expanded replays the full transcript for scrolling up |
+| `Ctrl+G` | agent/channel picker (agent view shows full instance conversation; channel view is a WeChat-style room) |
+| `Ctrl+L` | clear and redraw |
+| `Shift+Tab` | cycle permission modes (default → acceptEdits → plan) |
+| `Alt+T` | toggle thinking |
+| Enter while busy | queue the message; auto-sends when the turn ends |
 
-### Slash 命令（`/help` 全量清单）
+### Slash commands (full list via `/help`)
 
-`/model [名]`、`/provider [名称]`（列出/切换多 provider）、
-`/think [off|low|medium|high]`、`/theme`、`/permissions [allow|deny|ask] [规则]`、
-`/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
-`/skills`（清单，`/技能名` 直接执行）、`/context`（用量）、`/status`、
-`/compact`（强制压缩）、`/resume [名称]`（恢复历史会话）、`/rename`、
-`/clear`、`/exit`。
+`/model [name]`, `/provider [name]` (list/switch among multiple providers),
+`/think [off|low|medium|high]`, `/theme`,
+`/permissions [allow|deny|ask] [rule]`,
+`/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
+`/skills` (listing; `/skill-name` executes directly), `/context` (usage),
+`/status`, `/compact` (force compaction), `/resume [name]` (resume a past
+session), `/rename`, `/clear`, `/exit`.
 
-### 图片渲染
+### Image rendering
 
-模型回复中的 markdown 图片（`![alt](路径)`，支持相对路径 / data: / http(s)）在
-支持 kitty graphics 的终端（Ghostty/kitty/WezTerm 等）内联渲染，其余终端显示
-`#[image]` 占位。tmux 内需外层终端支持且 `tmux set -g allow-passthrough on`。
+Markdown images in model replies (`![alt](path)`, supporting relative paths /
+data: / http(s)) render inline on kitty-graphics terminals (Ghostty/kitty/
+WezTerm, etc.); other terminals show a `#[image]` placeholder. Inside tmux,
+the outer terminal must support it and `tmux set -g allow-passthrough on`.
 
-## 配置（settings.json）
+## Configuration (settings.json)
 
-三层配置浅层合并，后者覆盖前者：
+Three layers are shallow-merged; later layers override earlier ones:
 
-1. **user**：`~/.config/bingo/settings.json`（`XDG_CONFIG_HOME` 优先）
-2. **project**：`.bingo/settings.json`（入库，注意别提交密钥）
-3. **local**：`.bingo/local.json`（个人覆盖，不入库）
+1. **user**: `~/.config/bingo/settings.json` (`XDG_CONFIG_HOME` takes precedence)
+2. **project**: `.bingo/settings.json` (committed to the repo — keep secrets out)
+3. **local**: `.bingo/local.json` (personal overrides, not committed)
 
-| 配置项 | 类型 | 说明 |
+| Key | Type | Description |
 |---|---|---|
-| `apiKey` | string | API key（settings 优先于 `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`） |
-| `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
-| `providers` | object | 命名 provider（Anthropic 协议）：`{名: {apiKey, apiBaseUrl}}`，`/provider <名>` 切换 |
-| `thinkingLevel` | string | `off` 不发 thinking 参数（兼容 DeepSeek，缺省）；`low`/`medium`/`high` 发自适应 thinking |
+| `apiKey` | string | API key (settings take precedence over `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`) |
+| `apiBaseUrl` | string | API endpoint (settings take precedence over `ANTHROPIC_BASE_URL`; default is the official one) |
+| `providers` | object | named providers (Anthropic protocol): `{name: {apiKey, apiBaseUrl}}`, switch with `/provider <name>` |
+| `thinkingLevel` | string | `off` omits thinking params (DeepSeek-compatible, default); `low`/`medium`/`high` send adaptive thinking |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
-| `theme` | string | `auto`（跟随终端背景）/ `dark` / `light` |
-| `cacheControl` | bool | 发送 prompt caching（默认关：非官方端点不稳定） |
-| `respondToBashCommands` | bool | `!` 命令执行后是否交模型回应（默认 true） |
-| `mcpServers` | object | 见下「MCP」 |
-| `disabledMcpServers` | string[] | 禁用的 MCP 服务器名单（`/mcp disable` 写入） |
-| `permissions` | object | `{allow[], deny[], ask[]}`，规则语法见「权限系统」 |
-| `experimental` | object | 实验特性：`agentChannels`、`channelMessageLimit`（默认 500）、`agentMessageLimit`（默认 50） |
-| `hooks` | object | 各事件 hook，见「Hooks」 |
+| `theme` | string | `auto` (follow terminal background) / `dark` / `light` |
+| `cacheControl` | bool | enable prompt caching (default off: unreliable on non-official endpoints) |
+| `respondToBashCommands` | bool | whether `!` commands are handed back to the model after running (default true) |
+| `mcpServers` | object | see MCP below |
+| `disabledMcpServers` | string[] | disabled MCP servers (written by `/mcp disable`) |
+| `permissions` | object | `{allow[], deny[], ask[]}`, rule syntax under Permission system below |
+| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50) |
+| `hooks` | object | per-event hooks, see Hooks below |
 
-示例：
+Example:
 
 ```json
 {
@@ -173,65 +194,76 @@ bingo --continue            # 恢复最近一次会话
 }
 ```
 
-## 工具集
+## Tool set
 
-全部经统一 Tool trait（serde/schemars 生成 schema，单一来源）：
+All tools go through the unified `Tool` trait (serde/schemars generates the
+schema from a single source of truth):
 
-| 工具 | 说明 |
+| Tool | Description |
 |---|---|
-| `Bash` | 在独立进程组执行 shell 命令；超时/取消整组终止，不留孤儿进程；非交互命令 |
-| `Read` / `Glob` / `Grep` | 只读检索；默认跳过 `.git`/`target`/`node_modules` 与隐藏目录 |
-| `Edit` / `Write` | 文件编辑（产生 unified diff 供 UI 预览） |
-| `WebFetch` / `WebSearch` | 网页抓取与搜索（共享 HTTP 连接池；预批准域名自动放行） |
-| `Agent` | 派生命名子代理（异步执行，完成通知注入上下文；`background:false` 可同步等待） |
-| `SendMessage` / `AgentControl` | 子代理续话与生命周期管理（仅主会话装配） |
-| `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | 任务追踪（磁盘存储，TUI 任务区同源，含生命周期 hook） |
-| `AskUserQuestion` | 向用户提选择题（TUI 复用权限询问模态） |
-| `Skill` | 技能调用（见下） |
-| `mcp__<server>__<tool>` | MCP 接入的工具（见下） |
-| `Channel` / `Post` | 实验：agent 频道互发（见下） |
+| `Bash` | runs shell commands in a separate process group; timeout/cancel kills the whole group, no orphan processes; non-interactive commands |
+| `Read` / `Glob` / `Grep` | read-only search; skips `.git`/`target`/`node_modules` and hidden dirs by default |
+| `Edit` / `Write` | file editing (produces a unified diff preview for the UI) |
+| `WebFetch` / `WebSearch` | web fetching and search (shared HTTP connection pool; pre-approved domains auto-allowed) |
+| `Agent` | spawns a named sub-agent (async by default, completion notification injected into context; `background:false` waits synchronously) |
+| `SendMessage` / `AgentControl` | sub-agent continuation and lifecycle management (main session only) |
+| `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | task tracking (disk-backed, same source as the TUI task area, lifecycle hooks) |
+| `AskUserQuestion` | asks the user multiple-choice questions (reuses the permission prompt modal in the TUI) |
+| `Skill` | skill invocation (see below) |
+| `mcp__<server>__<tool>` | tools exposed via MCP (see below) |
+| `Channel` / `Post` | experimental: agent channel messaging (see below) |
 
-## 子代理
+## Sub-agents
 
-- 主 agent（depth 0）装配 `Agent`/`SendMessage`/`AgentControl`；子代理（depth ≥ 1）
-  只保留 `Agent`（可再派生），无法管理兄弟——hub-and-spoke 拓扑。
-- **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`
-  （从 cwd 向上逐层查找，同名项目层优先）；frontmatter
-  `name/description/model/provider`，正文 = 子代理 system prompt；
-  Agent 工具的 `agent` 参数引用定义。
-- 派生实例有名字（`name` 参数，缺省取定义名/`agent`，重名自动 `-2`/`-3`），
-  transcript 显示为 `◉ 名字 · 任务`；完成后历史保留。
-- `SendMessage` 向实例发后续指令（上下文保留）；实例忙时排队，当前回合结束
-  自动送达。
-- `AgentControl` 可 `list`/`stop`/`delete`。
-- 默认异步执行：立即返回实例名与 task_id，完成时自动通知注入下一轮上下文。
+- The main agent (depth 0) has `Agent`/`SendMessage`/`AgentControl`; sub-agents
+  (depth ≥ 1) keep only `Agent` (they can spawn further) and cannot manage
+  siblings — hub-and-spoke topology.
+- **Named definitions**: `~/.config/bingo/agents/*.md` and `.bingo/agents/*.md`
+  (walked upward from cwd; project-level wins on name clash); frontmatter
+  `name/description/model/provider`, body = sub-agent system prompt; referenced
+  via the Agent tool's `agent` parameter.
+- Instances have names (`name` parameter, defaults to the definition name/
+  `agent`, auto `-2`/`-3` on collisions); the transcript shows `◉ name · task`;
+  history is kept after completion.
+- `SendMessage` sends follow-up instructions to an instance (context
+  preserved); queued while busy, delivered automatically at the end of the
+  current turn.
+- `AgentControl` can `list`/`stop`/`delete`.
+- Async by default: returns the instance name and task id immediately;
+  completion notification is injected into the next turn's context.
 
-## 频道（实验特性）
+## Channels (experimental)
 
-`settings.experimental.agentChannels: true` 开启后：
+With `settings.experimental.agentChannels: true`:
 
-- 主 agent 获得 `Channel`/`Post` 工具：建频道、进出成员（成员限直接子代理，
-  主 agent 名 `main` 自动入席）；成员用 `Post` 发言，消息进全体成员上下文（同序）。
-- `serial` 频道落后发言被弹回并附新增消息（agent 阅读后自行改口，报数式顺序
-  由此涌现）；`free` 频道允许交叉。
-- 超限自动冻结频道并通知主 agent（`channelMessageLimit`/`agentMessageLimit` 预算闸）。
-- 频道在 transcript 显示为 `◇ #名字` 行；Ctrl+G 可打开全屏群聊房间直接以
-  user 身份发言。
+- The main agent gets `Channel`/`Post`: create channels, add/remove members
+  (members are direct sub-agents; the main agent joins as `main`); members
+  post via `Post`, and messages enter every member's context (same order).
+- In a `serial` channel, stale posts are bounced back with the new messages
+  attached (agents read and adjust — sequential coordination emerges); `free`
+  channels allow interleaving.
+- Budget overflows freeze the channel and notify the main agent
+  (`channelMessageLimit`/`agentMessageLimit` gates).
+- Channels appear as `◇ #name` rows in the transcript; Ctrl+G opens a fullscreen
+  room where you can post as the user.
 
-## 技能（Skills）
+## Skills
 
-- 加载顺序（优先级从高到低）：用户层 `~/.config/bingo/skills/` → 项目层
-  `.bingo/skills/`（从 cwd 向上逐层，近者优先）→ 内置 `guide`（编译进二进制，
-  仅作兜底）；同名磁盘技能覆盖内置。
-- 每个技能一个目录：`<name>/SKILL.md`，YAML frontmatter
-  （`description`/`when_to_use`/`arguments`）+ markdown 正文。
-- 调用：模型经 `SkillTool` 自动调用；用户经 `/技能名 [参数]` 直接执行。
-- 内置 `guide`：bingo 使用与诊断手册（回答"怎么配置/为什么/不工作"时对照）。
+- Load order (highest priority first): user `~/.config/bingo/skills/` →
+  project `.bingo/skills/` (walked upward from cwd, nearest first) → bundled
+  `guide` (compiled into the binary, fallback only); same-name disk skills
+  override the bundled one.
+- One directory per skill: `<name>/SKILL.md` with YAML frontmatter
+  (`description`/`when_to_use`/`arguments`) + markdown body.
+- Invocation: the model calls via `SkillTool` automatically; the user runs
+  `/skill-name [args]` directly.
+- Bundled `guide`: bingo usage & troubleshooting manual (consult it when
+  answering "how to configure / why / it doesn't work").
 
 ## MCP
 
-`mcpServers` 配置，`rmcp` 官方 Rust SDK 驱动，连接后自动列出工具并适配为
-bingo 的 Tool trait：
+`mcpServers` config, driven by the official `rmcp` Rust SDK; tools are listed
+on connect and adapted to bingo's Tool trait:
 
 ```json
 "mcpServers": {
@@ -240,42 +272,50 @@ bingo 的 Tool trait：
 }
 ```
 
-- 传输：stdio（缺省 `command`/`args`/`env`）与 streamable HTTP（`type: "http"`，
-  可带自定义 headers 鉴权）。`sse`/`ws` 暂未落地，配置后连接时报错。
-- 工具名：`mcp__<server>__<tool>`；权限规则用全名（如 `mcp__server` 前缀或
-  完整工具名）。
-- 诊断：`/mcp` 查看状态；stdio 服务器自身输出在
-  `~/.local/share/bingo/logs/mcp-<name>.log`；修好后 `/mcp reconnect <name>`。
-- 禁用/启用：`/mcp disable|enable [name|all]`（持久化到 settings.json）。
+- Transports: stdio (default `command`/`args`/`env`) and streamable HTTP
+  (`type: "http"`, optional custom headers for auth). `sse`/`ws` are not
+  implemented yet; configuring them errors on connect.
+- Tool naming: `mcp__<server>__<tool>`; use full names in permission rules
+  (e.g. the `mcp__server` prefix or the full tool name).
+- Diagnostics: `/mcp` shows status; stdio server output goes to
+  `~/.local/share/bingo/logs/mcp-<name>.log`; after fixing, run
+  `/mcp reconnect <name>`.
+- Disable/enable: `/mcp disable|enable [name|all]` (persisted to settings.json).
 
-## 权限系统
+## Permission system
 
-### 权限模式（`--permission-mode` 或 settings 的 `permissionMode`）
+### Permission modes (`--permission-mode` or settings `permissionMode`)
 
-| 模式 | 行为 |
+| Mode | Behavior |
 |---|---|
-| `default` | 只读工具直接放行；其余询问（可带规则表免问） |
-| `acceptEdits` | 编辑类工具（Edit/Write 等）自动允许 |
-| `plan` | 只读 + 任务列表管理；其余拒绝（计划模式） |
-| `dontAsk` | 非只读一律拒绝（不询问） |
-| `bypassPermissions` | 全放行（但 deny/ask 规则与敏感路径检查仍然生效） |
+| `default` | read-only tools allowed; everything else asks (rule tables can auto-allow) |
+| `acceptEdits` | edit tools (Edit/Write, etc.) allowed automatically |
+| `plan` | read-only + task list management; everything else denied (planning mode) |
+| `dontAsk` | all non-read-only tools denied (no prompting) |
+| `bypassPermissions` | allow everything (but deny/ask rules and sensitive-path checks still apply) |
 
-### 规则语法（settings `permissions` 段）
+### Rule syntax (settings `permissions` section)
 
-- 形式：`Tool(content)`；`:*` 为前缀通配（如 `Bash(git push:*)`）；`*` 匹配一切。
-- **Bash**：按 shell 操作符（`&&` `;` `|` `$()` 等）切成子命令逐段匹配——
-  deny/ask 任一子命令命中即生效；allow 需单条规则覆盖**全部**子命令才免询问；
-  含未闭合引号的命令一律不自动放行。
-- **文件类**（Read/Edit/Write/Grep/Glob）：路径归一化后前缀匹配
-  （`~` 展开、相对路径按 cwd 展开、消解 `..`），`Read(src/)` 也匹配绝对路径。
-- **WebFetch**：支持 `domain:` 规则与 URL 前缀；预批准域名自动放行。
-- **Skill**：`Skill(name)` 精确、`Skill(name:*)` 前缀。
-- **MCP**：不因服务器自报只读而免询问，需显式 allow。
-- 顺序：deny → ask →（只读/预批准）→ 敏感路径检查 → bypass → acceptEdits →
-  allow 规则 → 询问。deny/ask 规则在 bypass 模式下仍生效；
-  写 `.git`/`.claude`/`.vscode`/`.idea` 等敏感目录的破坏性操作必须提示。
+- Form: `Tool(content)`; `:*` is a prefix wildcard (e.g. `Bash(git push:*)`);
+  `*` matches everything.
+- **Bash**: split on shell operators (`&&` `;` `|` `$()`, etc.) into
+  sub-commands; deny/ask matches if any sub-command hits; allow requires a
+  single rule covering **every** sub-command; commands with unterminated quotes
+  are never auto-allowed.
+- **File tools** (Read/Edit/Write/Grep/Glob): path prefix match after
+  normalization (`~` expansion, relative paths resolved against cwd, `..`
+  resolved), so `Read(src/)` also matches absolute paths.
+- **WebFetch**: supports `domain:` rules and URL prefixes; pre-approved domains
+  auto-allow.
+- **Skill**: `Skill(name)` exact, `Skill(name:*)` prefix.
+- **MCP**: not exempted by the server's self-reported read-only hint; explicit
+  allow required.
+- Order: deny → ask → (read-only/pre-approved) → sensitive-path check → bypass
+  → acceptEdits → allow rules → ask. deny/ask rules still apply in bypass mode;
+  destructive writes into sensitive dirs (`.git`/`.claude`/`.vscode`/`.idea`)
+  always prompt.
 
-示例：
+Example:
 
 ```json
 "permissions": {
@@ -287,20 +327,23 @@ bingo 的 Tool trait：
 
 ## Hooks
 
-`hooks` 配置的事件：`PreToolUse` / `PostToolUse` / `PreCompact` / `PostCompact` /
-`UserPromptSubmit` / `Stop` / `SessionStart` / `SessionEnd` / `TaskCreated` /
-`TaskCompleted`。每个事件一组 `{matcher, hooks:[{type:"command", command}]}`：
+Events in the `hooks` config: `PreToolUse` / `PostToolUse` / `PreCompact` /
+`PostCompact` / `UserPromptSubmit` / `Stop` / `SessionStart` / `SessionEnd` /
+`TaskCreated` / `TaskCompleted`. Each event is a list of
+`{matcher, hooks:[{type:"command", command}]}`:
 
-- matcher 为整串锚定正则（`Edit\|Write`、`mcp__.*`），空 = 匹配一切；
-  编译失败退回全等比较并告警。
-- hook 以 `/bin/zsh -c` 执行，stdin 喂事件 JSON（`hook_event_name`、
-  `tool_name`、`tool_input`、`permission_mode` 等），stdout 回传 JSON。
-- 退出码语义：0 = 成功；2 = blocking（stderr 注入模型 / 阻断本轮）；
-  其他非零 = 仅用户可见、不阻断。
-- `PreToolUse` 支持 `{"decision":"deny|ask","reason","updatedInput"}` 改写输入。
-- 普通 hook 超时 60s（SessionEnd 1.5s 快速收尾），超时 kill 不留残留。
+- matcher is an anchored regex (`Edit\|Write`, `mcp__.*`); empty matches
+  everything; on compile failure it falls back to exact match with a warning.
+- Hooks run via `/bin/zsh -c`, event JSON on stdin (`hook_event_name`,
+  `tool_name`, `tool_input`, `permission_mode`, etc.), JSON on stdout.
+- Exit-code semantics: 0 = success; 2 = blocking (stderr injected into the
+  model / blocks the turn); other non-zero = user-visible only, non-blocking.
+- `PreToolUse` supports `{"decision":"deny|ask","reason","updatedInput"}` to
+  rewrite input.
+- Normal hooks time out after 60s (SessionEnd: 1.5s fast shutdown); timeouts
+  kill the process, leaving no residue.
 
-示例（PreToolUse 拒绝 Bash）：
+Example (PreToolUse denies Bash):
 
 ```json
 "hooks": {
@@ -311,77 +354,86 @@ bingo 的 Tool trait：
 }
 ```
 
-## 会话、压缩与记忆
+## Sessions, compaction & memory
 
-- **Transcript**：`~/.local/share/bingo/transcripts/<项目>-<ts>.jsonl`，
-  每行一条 Message；坏行跳过不阻塞恢复。`--continue` 续最近会话，
-  `/resume [名]` 列出/切换，`/rename` 重命名。
-- **上下文预算**：窗口 200k，输出预算 64k，有效输入窗口 = 窗口 − 输出预算；
-  自动压缩阈值 = 有效窗口的 90%（≈122k），提前 20k 提醒（`/context`）。
-  压缩 = 摘要旧消息 + 保留最近 8 条；压缩切点安全推进到 tool_result 边界之外，
-  避免孤儿 tool_result 导致 400。连续压缩失败 3 次熔断（`/compact` 手动触发）。
-  非 Anthropic 端点（无 count_tokens）自动改用本地估算（字符数/4）。
-- **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/<项目名>-<路径哈希>.md`，
-  完整路径哈希避免同名项目串味）+ 项目 CLAUDE.md 与 AGENTS.md 作为 system 记忆。
+- **Transcript**: `~/.local/share/bingo/transcripts/<project>-<ts>.jsonl`, one
+  Message per line; corrupt lines are skipped without blocking recovery.
+  `--continue` resumes the latest session, `/resume [name]` lists/switches,
+  `/rename` renames.
+- **Context budget**: 200k window, 64k output budget, effective input window =
+  window − output budget; auto-compaction threshold = 90% of the effective
+  window (≈122k), with a 20k headroom warning (`/context`). Compaction
+  summarizes old messages and keeps the most recent 8; the split point advances
+  safely past tool_result boundaries to avoid orphaned tool_result 400s.
+  Fuse after 3 consecutive failures (`/compact` forces manually). Non-Anthropic
+  endpoints (no count_tokens) fall back to local estimation (chars/4).
+- **Memory**: memdir auto-memory
+  (`~/.config/bingo/memdir/<project>-<path-hash>.md`, full-path hash avoids
+  collisions between same-named projects) + project CLAUDE.md and AGENTS.md as
+  system memory.
 
-## 架构
+## Architecture
 
 ```text
 CLI (clap)
-  → settings 三层合并 (user/project/local)
-  → Messages API 客户端 (reqwest + SSE 流式)
-  → query loop: 工具调用 → 权限门 → 并发执行 → 结果回填
+  → settings, three layers merged (user/project/local)
+  → Messages API client (reqwest + SSE streaming)
+  → query loop: tool calls → permission gate → concurrent execution → results fed back
   → TUI (ratatui inline/fullscreen + crossterm) | headless --print
        ├─ Tool Registry (trait + schemars schema)
-       ├─ MCP 适配层 (rmcp: stdio / streamable HTTP)
-       ├─ 子代理 (hub-and-spoke, 异步 + 通知)
-       ├─ Hooks (shell, JSON 契约)
-       ├─ Task 存储 / 频道 / 技能 / 记忆 / transcript
-       └─ 预算监控与压缩
+       ├─ MCP adapter layer (rmcp: stdio / streamable HTTP)
+       ├─ sub-agents (hub-and-spoke, async + notifications)
+       ├─ Hooks (shell, JSON contract)
+       ├─ Task store / channels / skills / memory / transcript
+       └─ budget monitoring & compaction
 ```
 
-核心循环语义：**模型只产出 tool_use 意图；权限、并行、副作用、压缩、记忆与
-UI 由本地 harness 负责**。设计决策见 [`notes/research.md`](notes/research.md)
-（D1–D24）。
+Core loop semantics: **the model only produces tool_use intent; permissions,
+parallelism, side effects, compaction, memory, and the UI are the local
+harness's job**. Design decisions live in
+[`notes/research.md`](notes/research.md) (D1–D24).
 
-## 项目结构
+## Project layout
 
 ```text
 src/
-  main.rs          CLI 入口（clap）、会话启动链
-  api/             Messages API 客户端（client / SSE / types）
-  query.rs         主循环（queryLoop）、slash 可变运行时
-  tools.rs         工具装配（按 depth/实验开关分发）
-  tool/            各工具实现 + Tool trait 契约
-  permission.rs    统一权限门（模式 × 规则表）
-  hooks.rs         shell hooks（事件 / matcher / JSON 契约）
-  agents.rs        子代理会话与历史、具名定义加载
-  tool/agent.rs    Agent / SendMessage / AgentControl 实现
-  channels.rs      频道注册表（实验特性）
-  tasks.rs         任务存储（Task 工具族）
-  skills.rs        技能加载 / frontmatter / 参数替换
-  mcp.rs           MCP 管理器（stdio / streamable HTTP）
-  settings.rs      三层配置加载与合并
-  transcript.rs    会话持久化（JSONL）
-  compact.rs       自动/手动压缩
-  budget.rs        token 预算常量
-  memory.rs        memdir 记忆提取与加载
-  watch.rs         后台任务注册与通知
-  tui/             ratatui 界面（chat / view / input / markdown / gfx …）
-  ui.rs            headless hooks 与共享渲染
-  system.rs        system prompt 拼装（记忆 + 项目记忆 + 技能清单）
+  main.rs          CLI entry (clap), session bootstrap
+  api/             Messages API client (client / SSE / types)
+  query.rs         main loop (queryLoop), slash-mutable runtime
+  tools.rs         tool assembly (by depth / experimental flags)
+  tool/            tool implementations + the Tool trait contract
+  permission.rs    unified permission gate (modes × rule tables)
+  hooks.rs         shell hooks (events / matcher / JSON contract)
+  agents.rs        sub-agent sessions & history, named definition loading
+  tool/agent.rs    Agent / SendMessage / AgentControl implementations
+  channels.rs      channel registry (experimental)
+  tasks.rs         task store (Task tool family)
+  skills.rs        skill loading / frontmatter / argument substitution
+  mcp.rs           MCP manager (stdio / streamable HTTP)
+  settings.rs      three-layer config loading and merging
+  transcript.rs    session persistence (JSONL)
+  compact.rs       automatic / manual compaction
+  budget.rs        token budget constants
+  memory.rs        memdir memory extraction and loading
+  watch.rs         background task registry & notifications
+  tui/             ratatui UI (chat / view / input / markdown / gfx …)
+  ui.rs            headless hooks and shared rendering
+  system.rs        system prompt assembly (memory + project memory + skills listing)
 tests/
-  fixtures/        集成测试夹具
+  fixtures/        integration-test fixtures
 notes/
-  research.md      技术决策记录（D1–D24）
+  research.md      technical decision record (D1–D24)
 ```
 
-## 开发约定
+## Development conventions
 
-- Rust 2024 edition；错误处理用 thiserror，生产代码不 unwrap/expect。
-- 代码写成周围代码的样子；无注释优先，注释只解释"为什么"。
-- 不加不需要的依赖；造轮子前先看 crates.io。
-- 改动涉及用户可见行为（配置项 / slash 命令 / 工具 / 错误信息 / 能力地图）时，
-  同步更新内置技能 `src/skills/bundled/guide.md`（AGENTS.md 的同步规则）。
-- 改动架构前先对表 `notes/research.md` 的决策记录。
-- 每次改动跑 `cargo build` 与 `cargo clippy -- -D warnings`，相关逻辑必带测试。
+- Rust 2024 edition; errors via thiserror; no unwrap/expect in production code.
+- Write code the way the surrounding code does; prefer no comments — comments
+  explain only "why".
+- No unnecessary dependencies; check crates.io before reinventing a wheel.
+- Changes touching user-visible behavior (config keys / slash commands / tools /
+  error messages / capability map) must update the bundled skill
+  `src/skills/bundled/guide.md` in the same batch (AGENTS.md sync rule).
+- Consult `notes/research.md` decision records before changing architecture.
+- Every change runs `cargo build` and `cargo clippy -- -D warnings`; relevant
+  logic ships with tests.
