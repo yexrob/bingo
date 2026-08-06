@@ -17,6 +17,12 @@ Rust 实现的 agent CLI（本地 agent harness）。
 - 默认做减法：能删的代码、依赖、特性，删。加东西需要理由。
 - 边界被独立消费时（公共 API、跨进程协议、持久化格式）先定契约（trait/serde schema），各实现共同对表；内部重构不立契约。
 
+## 内置技能同步
+
+- 改动涉及 bingo 用户可见行为（配置项 / slash 命令 / 工具 / 错误信息 / 能力地图）时，
+  检查 `src/skills/bundled/` 内置技能是否描述了该行为；涉及则同批更新
+  （当前为 guide.md：配置表、示例、命令速查、诊断指南、能力地图）。
+
 ## 验证
 
 - 每次改动跑 `cargo build` 与 `cargo clippy -- -D warnings`；相关逻辑必带测试（`cargo test`）。
