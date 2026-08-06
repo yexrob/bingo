@@ -9,6 +9,7 @@ Rust 实现的 agent CLI（本地 agent harness）。
 - 用 Rust 2024 edition；错误处理用 thiserror，避免 unwrap/expect（测试与不可达处除外）。
 - 代码写成周围代码的样子；无注释优先，命名自明，注释只解释"为什么"。
 - 不加不需要的依赖；造轮子前先看 crates.io 是否已有成熟轮子。
+- Using english to write code and comments
 
 ## 架构规则
 

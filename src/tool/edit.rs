@@ -103,10 +103,11 @@ mod tests {
                 }),
                 &ToolContext {
             cwd: Default::default(), watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), &std::env::temp_dir())),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
         },
             )
             .await
@@ -129,10 +130,11 @@ mod tests {
                 }),
                 &ToolContext {
             cwd: Default::default(), watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), &std::env::temp_dir())),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
         },
             )
             .await

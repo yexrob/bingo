@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use crate::query::Session;
 use crate::tool::agent::AgentTool;
+use crate::tool::ask::AskUserQuestionTool;
 use crate::tool::bash::BashTool;
 use crate::tool::edit::EditTool;
 use crate::tool::glob::GlobTool;
 use crate::tool::grep::GrepTool;
 use crate::tool::read::ReadTool;
+use crate::tool::skill::SkillTool;
 use crate::tool::task::{TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool};
 use crate::tool::webfetch::WebFetchTool;
 use crate::tool::websearch::WebSearchTool;
@@ -32,16 +34,26 @@ pub async fn assemble_tools(
         Box::new(TaskUpdateTool),
         Box::new(TaskGetTool),
         Box::new(TaskListTool),
+        Box::new(AskUserQuestionTool),
+        Box::new(SkillTool::new(crate::skills::load_skills(
+            &session.home,
+            &std::env::current_dir().unwrap_or_default(),
+        ))),
     ];
-    match crate::mcp::connect_servers(&session.settings.mcp_servers).await {
-        Ok(mcp_tools) => {
-            if !session.quiet && !mcp_tools.is_empty() {
-                eprintln!("[bingo] connected {} MCP tools", mcp_tools.len());
+    let mcp = {
+        let mut mgr = session.runtime.mcp.lock().await;
+        let results = mgr.connect_all().await;
+        for (name, result) in results {
+            if let Err(detail) = result {
+                on_warning(format!("MCP {name}: {detail}"));
             }
-            tools.extend(mcp_tools);
         }
-        Err(e) => on_warning(format!("MCP: {e}")),
+        mgr.tools()
+    };
+    if !session.quiet && !mcp.is_empty() {
+        eprintln!("[bingo] connected {} MCP tools", mcp.len());
     }
+    tools.extend(mcp);
     tools
 }
 
@@ -53,11 +65,10 @@ mod tests {
     async fn assembles_task_tools() {
         let session = std::sync::Arc::new(Session {
             client: crate::api::client::Client::new("k".into(), "https://example.com".into()),
-            model: "m".into(),
+            runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
             permission_mode: crate::permission::PermissionMode::Default,
             settings: crate::settings::Settings::default(),
             system: Vec::new(),
-            transcript: None,
             depth: 0,
             home: std::env::temp_dir(),
             quiet: true,
@@ -65,7 +76,7 @@ mod tests {
             watch: crate::watch::WatchRegistry::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
                 &std::env::temp_dir(),
-                &std::env::temp_dir(),
+                "test",
             )),
             last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,

@@ -94,7 +94,9 @@ pub enum ThinkingState {
     Done,
 }
 
-/// 一个思考块：`⠋ understand… (1.4s)` → `✻ understand for 1.4s`。
+/// 一个思考块：`✻ Thinking`（运行/完成同头；运行词与耗时只在底部状态行）。
+/// 完成行的 `✻ Churned for 1.4s` 由 [`thinking_completion_line`] 在消息末尾渲染
+/// （对标 CC SystemTextMessage）。
 #[derive(Debug, Clone)]
 pub struct Thinking {
     /// 运行/完成。
@@ -103,6 +105,9 @@ pub struct Thinking {
     pub duration_ms: u64,
     /// 区分连续推理阶段（运行/完成更新替换正确的块）。
     pub stage: &'static str,
+    /// 完成态随机词（对标 CC TURN_COMPLETION_VERBS：`✻ Churned for 40s`）；
+    /// None 回落 stage。
+    pub done_verb: Option<&'static str>,
     /// 宿主 tick（块级独立计时起点）。
     pub start_tick: u64,
 }
@@ -297,6 +302,17 @@ impl Activity {
     pub fn set_content(&mut self, content: Vec<Line>) {
         self.content = content;
     }
+
+    /// 活动是否仍在变化（行内容随 tick/事件更新）：运行中的思考块、
+    /// 运行中的工具、运行中的 watch。REPL 模式以此判定消息可否定稿。
+    pub fn is_running(&self) -> bool {
+        match &self.kind {
+            ActivityKind::Thinking(t) => t.state == ThinkingState::Running,
+            ActivityKind::Tool(t) => t.status == ToolStatus::Running,
+            ActivityKind::Watch(w) => w.status == WatchStatus::Running,
+            ActivityKind::Diff(_) => false,
+        }
+    }
 }
 
 fn diff_header(d: &Diff, theme: &Theme) -> Line {
@@ -307,24 +323,20 @@ fn diff_header(d: &Diff, theme: &Theme) -> Line {
     line
 }
 
-fn thinking_header(t: &Thinking, spinner: char, theme: &Theme) -> Line {
-    match t.state {
-        // 运行态：`✻ {spinner} {stage}… (2.3s · thinking)`
-        ThinkingState::Running => {
-            let mut line = Line::styled(
-                format!("✻ {spinner} {}…", t.stage),
-                theme.thinking(),
-            );
-            let stats = format!("{:.1}s · thinking", t.duration_ms as f64 / 1000.0);
-            line.push_styled(format!(" ({stats})"), theme.dim());
-            line
-        }
-        // 完成态：`✻ {stage} for 2.3s`
-        ThinkingState::Done => Line::styled(
-            format!("✻ {} for {:.1}s", t.stage, t.duration_ms as f64 / 1000.0),
-            theme.thinking(),
-        ),
-    }
+/// 思考块头：运行/完成同形 `✻ Thinking`（dim italic，对标 CC AssistantThinking
+/// 的 `∴ Thinking`）。运行词、spinner 与耗时只出现在底部状态行，避免重复。
+fn thinking_header(_t: &Thinking, _spinner: char, theme: &Theme) -> Line {
+    Line::styled("✻ Thinking", theme.thinking())
+}
+
+/// 思考完成行（对标 CC SystemTextMessage）：`✻ {done_verb} for 40.0s`，
+/// 渲染在消息末尾（正文与全部工具之后）。
+pub fn thinking_completion_line(t: &Thinking, theme: &Theme) -> Line {
+    let verb = t.done_verb.unwrap_or(t.stage);
+    Line::styled(
+        format!("✻ {verb} for {:.1}s", t.duration_ms as f64 / 1000.0),
+        theme.thinking(),
+    )
 }
 
 fn tool_header(t: &ToolCall, spinner: char, theme: &Theme) -> Line {
@@ -496,6 +508,7 @@ mod tests {
             state,
             duration_ms: 2300,
             stage,
+            done_verb: None,
             start_tick: 0,
         }));
         if state == ThinkingState::Done {
@@ -512,16 +525,17 @@ mod tests {
 
     #[test]
     fn thinking_collapsed_and_expanded() {
+        // 块头运行/完成同形 `✻ Thinking`；完成行由 thinking_completion_line 单独渲染。
         let mut h = thinking("understand", ThinkingState::Done);
         assert!(h.expandable());
         let lines = render_lines(&h, '⠋');
-        assert_eq!(text(&lines[0]), "✻ understand for 2.3s … +1 lines");
+        assert_eq!(text(&lines[0]), "✻ Thinking … +1 lines");
         assert_eq!(lines.len(), 1, "collapsed: header only");
 
         h.toggle();
         assert!(h.expanded);
         let lines = render_lines(&h, '⠋');
-        assert_eq!(text(&lines[0]), "✻ understand for 2.3s");
+        assert_eq!(text(&lines[0]), "✻ Thinking");
         assert_eq!(lines.len(), 2, "expanded: header + content");
         assert!(text(&lines[1]).contains("reasoning line"));
 
@@ -534,7 +548,29 @@ mod tests {
         let h = thinking("understand", ThinkingState::Running);
         assert!(!h.expandable());
         let lines = render_lines(&h, '⠋');
-        assert_eq!(text(&lines[0]), "✻ ⠋ understand… (2.3s · thinking)");
+        assert_eq!(text(&lines[0]), "✻ Thinking");
+    }
+
+    #[test]
+    fn completion_line_uses_random_verb_and_duration() {
+        // 对标 CC SystemTextMessage：`✻ Churned for 40.0s`（随机过去式动词）。
+        let t = Thinking {
+            state: ThinkingState::Done,
+            duration_ms: 40_000,
+            stage: "Churning",
+            done_verb: Some("Churned"),
+            start_tick: 0,
+        };
+        let line = thinking_completion_line(&t, &Theme::dark());
+        assert_eq!(text(&line), "✻ Churned for 40.0s");
+        // None 回落 stage。
+        let t2 = Thinking {
+            stage: "Churning",
+            done_verb: None,
+            ..t
+        };
+        let line2 = thinking_completion_line(&t2, &Theme::dark());
+        assert_eq!(text(&line2), "✻ Churning for 40.0s");
     }
 
     #[test]

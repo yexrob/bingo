@@ -8,6 +8,7 @@ use crate::settings::HooksConfig;
 use crate::tasks::TaskStore;
 
 pub mod agent;
+pub mod ask;
 pub mod bash;
 pub mod diff;
 pub mod edit;
@@ -15,6 +16,7 @@ pub mod executor;
 pub mod glob;
 pub mod grep;
 pub mod read;
+pub mod skill;
 pub mod task;
 pub mod webfetch;
 pub mod websearch;
@@ -36,6 +38,9 @@ pub struct ToolContext {
     pub permission_mode: String,
     /// 任务区展开信号（对标 CC set_expanded_view: tasks；headless 无订阅者）。
     pub expand_tasks: tokio::sync::watch::Sender<bool>,
+    /// 问用户选择题（AskUserQuestion 工具）：标题 + 问题 + 选项 → 选项索引
+    /// （None = 用户跳过/Esc）。TUI 复用权限询问模态。
+    pub ask_question: std::sync::Arc<crate::query::AskQuestionFn>,
 }
 
 impl ToolContext {
@@ -102,10 +107,23 @@ pub fn parse_input<T: for<'a> Deserialize<'a>>(
 
 /// 由 input 结构体生成 inputSchema（schemars，单一来源，D2）。
 /// 去掉 `$schema` 键：工具 schema 随 tool_params 发给模型，保持既有形状。
+/// 嵌套类型产生的 `#/definitions/...` 引用必须随根 schema 一起带上，
+/// 否则模型的 $ref 悬空（AskUserQuestion 的 questions/options 属此）。
 pub fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     let mut generator = schemars::r#gen::SchemaGenerator::default();
-    serde_json::to_value(T::json_schema(&mut generator))
-        .unwrap_or_else(|_| serde_json::json!({ "type": "object" }))
+    let mut value = serde_json::to_value(T::json_schema(&mut generator))
+        .unwrap_or_else(|_| serde_json::json!({ "type": "object" }));
+    // 嵌套类型产生的 `#/definitions/...` 引用必须随根 schema 一起带上，
+    // 否则模型的 $ref 悬空（AskUserQuestion 的 questions/options 属此）。
+    if !generator.definitions().is_empty()
+        && let Some(obj) = value.as_object_mut()
+    {
+        obj.insert(
+            "definitions".to_string(),
+            serde_json::to_value(generator.definitions()).unwrap_or_default(),
+        );
+    }
+    value
 }
 
 /// 注册表里按名字找工具。

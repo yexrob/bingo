@@ -217,41 +217,50 @@ impl Theme {
     /// 相对亮度判断：> 0.5 为浅色。
     /// 必须在 raw mode 下读：OSC 回复不带换行，规范模式行缓冲会吞掉；
     /// 查询期间临时进 raw mode（约 200ms，其间按键可能被消费，可接受）。
+    ///
+    /// 不能用 tokio::fs 读：timeout 后 blocking 线程的 read() 无法取消，
+    /// 会一直卡着吞掉之后的第一个输入，且 tokio 关停时 join 该线程导致
+    /// 进程退不出。这里用 O_NONBLOCK + 轮询，任何时刻都不阻塞。
     pub async fn detect_system_theme() -> Option<bool> {
         use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use std::io::{Read, Write};
+        use std::os::unix::fs::OpenOptionsExt;
 
-        let mut tty = tokio::fs::OpenOptions::new()
+        let mut tty = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
+            .custom_flags(libc::O_NONBLOCK)
             .open("/dev/tty")
-            .await
             .ok()?;
         enable_raw_mode().ok()?;
+        let mut buf: Vec<u8> = Vec::new();
         let result = async {
-            tty.write_all(b"\x1b]11;?\x1b\\").await.ok()?;
-            let mut buf: Vec<u8> = Vec::new();
+            tty.write_all(b"\x1b]11;?\x1b\\").ok()?;
             let mut chunk = [0u8; 64];
-            tokio::time::timeout(
-                std::time::Duration::from_millis(200),
-                async {
-                    loop {
-                        let n = tty.read(&mut chunk).await.ok()?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+            loop {
+                match tty.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
                         buf.extend_from_slice(&chunk[..n]);
                         if buf.windows(2).any(|w| w == b"\x1b\\") {
                             return Some(());
                         }
                     }
-                },
-            )
-            .await
-            .ok()
-            .flatten()?;
-            theme_from_osc(&buf)
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => break,
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Some(())
         }
         .await;
         disable_raw_mode().ok();
-        result
+        result?;
+        theme_from_osc(&buf)
     }
 
     /// 当前终端的主题：按设置解析（auto 优先 OSC 11 实测背景色，

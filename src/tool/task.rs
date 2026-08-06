@@ -122,6 +122,8 @@ All tasks are created with status `pending`.
 ## Tips
 
 - Create tasks with clear, specific subjects that describe the outcome
+- The task list is your live plan: keep it current as the session progresses —
+  if the direction changes, update or delete stale tasks promptly with TaskUpdate
 - After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed
 - Check TaskList first to avoid creating duplicate tasks"#;
 
@@ -269,6 +271,18 @@ const TASK_UPDATE_PROMPT: &str = r#"Use this tool to update a task in the task l
 **Update task details:**
 - When requirements change or become clearer
 - When establishing dependencies between tasks
+
+## Keep the List Current
+
+The task list is your live plan of record. Whenever the direction of the session
+changes — requirements shift, an approach is abandoned, scope grows or shrinks —
+update the list promptly instead of leaving it stale:
+
+- Reword tasks whose scope changed (subject/description)
+- Mark superseded or abandoned items as `completed` or `deleted`
+- Add tasks for newly discovered work
+- Do not keep outdated tasks around "for later": a stale list misleads both you
+  and the user about what is actually being done
 
 ## Fields You Can Update
 

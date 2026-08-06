@@ -13,6 +13,218 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// 周期命令默认检查间隔（无显式 -n 时）。
 pub const DEFAULT_WATCH_INTERVAL_SECS: u64 = 5;
 
+/// 需要 TTY 的交互式命令拒绝原因（`!` 命令与 Bash 工具共用）。
+/// bingo 子进程 stdin/stdout 均为管道：全屏 TUI（top/htop/vim）输出乱码，
+/// ssh/fzf/sudo 等会直连 /dev/tty 抢占终端（raw mode 下画面被撕毁），
+/// 裸 shell/REPL 无输入即退出（无意义）。命中返回拒绝原因与可用替代。
+/// 对标 CC 文档："Interactive terminal apps can't be driven by an agent's bash tool"。
+pub fn interactive_command_reason(command: &str) -> Option<String> {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let mut i = 0;
+    // 解包常见包装命令（sudo/env/nohup/command/exec/doas）。
+    while matches!(
+        tokens.get(i).copied(),
+        Some("sudo" | "doas" | "env" | "nohup" | "command" | "exec")
+    ) {
+        let wrapper = tokens[i];
+        i += 1;
+        if i >= tokens.len() {
+            return match wrapper {
+                // 裸 sudo/doas 会占 /dev/tty 问口令。
+                "sudo" | "doas" => {
+                    Some("sudo/doas 需要交互口令（TTY），已拒绝".to_string())
+                }
+                _ => None,
+            };
+        }
+        if matches!(wrapper, "sudo" | "doas") {
+            // sudo 旗标：-i/-s 交互登录；取值旗标连值一起跳过。
+            while tokens[i].starts_with('-') {
+                let flag = tokens[i];
+                i += 1;
+                if matches!(flag, "-i" | "-s") {
+                    return Some(format!(
+                        "sudo 交互登录 shell（{flag}）需要 TTY，已拒绝"
+                    ));
+                }
+                if matches!(
+                    flag,
+                    "-u" | "-g" | "-C" | "-p" | "-D" | "-R" | "-T" | "-r" | "-t" | "-U"
+                        | "-S" | "-P" | "-h"
+                ) && i < tokens.len()
+                {
+                    i += 1;
+                }
+            }
+        } else if wrapper == "env" {
+            // env 的 VAR=value 赋值不是命令。
+            while tokens.get(i).is_some_and(|t| t.contains('=')) {
+                i += 1;
+            }
+            if i >= tokens.len() {
+                return None;
+            }
+        }
+    }
+    let base = tokens[i];
+    let name = std::path::Path::new(base)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(base);
+    let rest = &tokens[i + 1..];
+
+    // 全屏系统监控：允许 -b/--batch（一次性快照，非交互）。
+    const MONITORS: &[&str] = &[
+        "top", "htop", "btop", "bpytop", "bashtop", "btm", "nmon", "glances", "s-tui",
+        "gtop", "vtop", "ktop", "ctop", "ytop",
+    ];
+    if MONITORS.contains(&name) {
+        let batch = rest
+            .iter()
+            .any(|a| matches!(*a, "-b" | "-batch" | "--batch"));
+        if !batch {
+            return Some(format!(
+                "{name} 是全屏交互监控程序（需要 TTY），已拒绝。一次性快照可用 `{name} -b -n 1`"
+            ));
+        }
+    }
+    const EDITORS: &[&str] = &[
+        "vim", "vi", "nvim", "nano", "emacs", "micro", "pico", "mg", "ed", "ex", "kak",
+        "kakoune", "helix", "hx", "ne", "zile", "joe",
+    ];
+    const FILE_MANAGERS: &[&str] = &[
+        "ranger", "lf", "yazi", "joshuto", "mc", "midnight-commander",
+    ];
+    const TUI_TOOLS: &[&str] = &[
+        "lazygit", "tig", "lazydocker", "k9s", "kdash", "screen", "fzf",
+    ];
+    if EDITORS.contains(&name) {
+        return Some(format!("{name} 是交互式编辑器（需要 TTY），已拒绝"));
+    }
+    if FILE_MANAGERS.contains(&name) {
+        return Some(format!("{name} 是交互式文件管理器（需要 TTY），已拒绝"));
+    }
+    if TUI_TOOLS.contains(&name) {
+        return Some(format!("{name} 是交互式 TUI 程序（需要 TTY），已拒绝"));
+    }
+    // gdb：无 -batch 即交互调试器。
+    if name == "gdb"
+        && !rest.iter().any(|a| matches!(*a, "-batch" | "--batch"))
+    {
+        return Some("gdb 调试器需要 TTY，已拒绝。批处理可用 `gdb -batch -ex ...`".to_string());
+    }
+    // 裸 shell/REPL：无输入立即退出（无意义）；带参数（bash -c / python x.py）放行。
+    // DB 客户端另有规则：只有连接参数而无执行旗标/脚本/SQL 位置参数 = REPL。
+    const REPLS: &[&str] = &[
+        "bash", "sh", "zsh", "fish", "ksh", "dash", "elvish", "xonsh", "python", "python2",
+        "python3", "ipython", "pypy", "node", "deno", "bun", "ruby", "irb", "perl", "php",
+        "lua", "luajit", "bc", "dc", "sbcl", "ghci",
+    ];
+    if REPLS.contains(&name) && rest.is_empty() {
+        return Some(format!(
+            "{name} 是交互式 shell/REPL（需要 TTY），已拒绝。带参数执行（如 `{name} -c '...'`）可以"
+        ));
+    }
+    // DB 交互客户端：无执行旗标（-c/-e/-f/--eval…）、无 stdin 重定向、
+    // 无 SQL/脚本位置参数 → 会进入交互提示符。
+    const DB_REPLS: &[&str] = &["sqlite3", "psql", "mysql", "mongosh", "redis-cli"];
+    if DB_REPLS.contains(&name) {
+        let flags = |exec: &[&str]| rest.iter().any(|a| exec.contains(a));
+        let has_stdin = rest.contains(&"<");
+        let positional: Vec<&&str> = rest.iter().filter(|a| !a.starts_with('-')).collect();
+        let interactive = match name {
+            "sqlite3" | "psql" => {
+                !flags(&["-c", "-f", "-l", "--command", "--file", "--list", "--version", "--help"])
+                    && !has_stdin
+                    && positional.len() <= 1
+            }
+            "mysql" => {
+                !flags(&["-e", "--execute", "-f", "--force", "--version", "--help"])
+                    && !has_stdin
+            }
+            "mongosh" => {
+                !flags(&["--eval", "--version", "--help"])
+                    && !has_stdin
+                    && !positional.iter().any(|a| a.ends_with(".js"))
+            }
+            // redis-cli：无位置参数即交互提示符。
+            _ => {
+                !flags(&["--version", "--help"]) && positional.is_empty() && !has_stdin
+            }
+        };
+        if interactive {
+            return Some(format!(
+                "{name} 是交互式客户端（需要 TTY），已拒绝。传执行旗标或脚本（如 `{name} -c '...'`）可以"
+            ));
+        }
+    }
+    // ssh：-t 强制分配 TTY；或只有主机没有远程命令 = 交互会话（口令/远程 shell）。
+    if name == "ssh" {
+        let tty = rest.iter().any(|a| matches!(*a, "-t" | "-tt"));
+        let mut has_host = false;
+        let mut has_cmd = false;
+        let mut no_cmd_ok = false;
+        let mut j = 0;
+        while j < rest.len() {
+            let a = rest[j];
+            if matches!(
+                a,
+                "-p" | "-l" | "-i" | "-o" | "-F" | "-J" | "-L" | "-R" | "-D" | "-W" | "-m"
+                    | "-c" | "-e" | "-b" | "-K" | "-I" | "-O" | "-Q" | "-S" | "-w" | "-E"
+                    | "-G" | "-g"
+            ) {
+                j += 2;
+                continue;
+            }
+            if matches!(a, "-N" | "-f") {
+                no_cmd_ok = true;
+            } else if !a.starts_with('-') {
+                if has_host {
+                    has_cmd = true;
+                } else {
+                    has_host = true;
+                }
+            }
+            j += 1;
+        }
+        if tty || (has_host && !has_cmd && !no_cmd_ok) {
+            return Some(
+                "ssh 交互会话（占用 /dev/tty 问口令或进入远程 shell），已拒绝。传远程命令（`ssh host 'cmd'`）可以"
+                    .to_string(),
+            );
+        }
+    }
+    // 容器 exec/run -it / attach：交互 shell。
+    if matches!(name, "docker" | "nerdctl" | "podman" | "kubectl" | "docker-compose") {
+        let sub = rest.first().copied().unwrap_or("");
+        if sub == "attach" {
+            return Some(format!(
+                "{name} attach 是交互会话（需要 TTY），已拒绝"
+            ));
+        }
+        if matches!(sub, "exec" | "run") {
+            let interactive = rest.iter().any(|a| matches!(*a, "-it" | "-ti" | "--interactive"))
+                || (rest.contains(&"-i") && rest.contains(&"-t"));
+            if interactive {
+                return Some(format!(
+                    "{name} {sub} -it 是交互会话（需要 TTY），已拒绝"
+                ));
+            }
+        }
+    }
+    // tmux attach / 前台 new（无 -d）：需要 TTY；send-keys/capture-pane 等脚本用法放行。
+    if name == "tmux" {
+        let sub = rest.first().copied().unwrap_or("");
+        if matches!(sub, "attach" | "a" | "attach-session") {
+            return Some("tmux attach 需要 TTY，已拒绝。`tmux new -d` 脱离会话可以".to_string());
+        }
+        if rest.is_empty() || (matches!(sub, "new" | "new-session") && !rest.contains(&"-d")) {
+            return Some("tmux 前台会话需要 TTY，已拒绝。`tmux new -d` 脱离会话可以".to_string());
+        }
+    }
+    None
+}
+
 /// 周期命令检查间隔识别：`watch -n N cmd` → N 秒；`watch cmd` /
 /// while/until/for 循环 / `tail -f` → 默认间隔。其余返回 None。
 pub fn periodic_bash_interval(command: &str) -> Option<std::time::Duration> {
@@ -84,7 +296,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> String {
-        "在本地 shell 中执行命令，返回 stdout/stderr 与退出码。长时间运行的任务（如 cargo build、npm install、大测试）优先 background:true 异步执行——即使后续需要结果：立即返回 async_launched 并告知用户任务在后台运行，完成通知到达后再继续。周期命令（watch/while/until/for/tail -f）自动转为后台任务，可配 notify_on/notify_regex 条件，输出命中即通知（无需等待命令结束）。"
+        "在本地 shell 中执行命令，返回 stdout/stderr 与退出码。长时间运行的任务（如 cargo build、npm install、大测试）优先 background:true 异步执行——即使后续需要结果：立即返回 async_launched 并告知用户任务在后台运行，完成通知到达后再继续。周期命令（watch/while/until/for/tail -f）自动转为后台任务，可配 notify_on/notify_regex 条件，输出命中即通知（无需等待命令结束）。需要 TTY 的交互式命令（top/htop/vim/ssh 裸连接等全屏或会话程序）会被拒绝。"
             .to_string()
     }
 
@@ -106,6 +318,10 @@ impl Tool for BashTool {
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: BashInput = parse_input(&input)?;
+        // 交互式/TTY 命令（top/htop/vim/ssh 等）：先拒绝，避免乱码与终端抢占。
+        if let Some(reason) = interactive_command_reason(&params.command) {
+            return Err(ToolError::failed(reason));
+        }
         let timeout = Duration::from_secs(params.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS));
 
         // 周期命令（watch/while/until/for/tail -f）自动后台化：
@@ -123,7 +339,9 @@ impl Tool for BashTool {
         command
             .arg("-c")
             .arg(&params.command)
-            .current_dir(&ctx.cwd);
+            .current_dir(&ctx.cwd)
+            // 回合被中断（Esc）时 future drop 会连带杀掉子进程，不留孤儿。
+            .kill_on_drop(true);
 
         let output = match tokio::time::timeout(timeout, command.output()).await {
             Ok(Ok(output)) => output,
@@ -362,10 +580,11 @@ mod tests {
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
             http: reqwest::Client::new(),
-                        tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), &std::env::temp_dir())),
+                        tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
         };
         let tool = BashTool::new();
         let result = tool
@@ -406,10 +625,11 @@ mod tests {
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
             http: reqwest::Client::new(),
-                        tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), &std::env::temp_dir())),
+                        tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
         };
         let tool = BashTool::new();
         let result = tool
@@ -462,5 +682,122 @@ mod tests {
         );
         assert_eq!(periodic_bash_interval("cargo test"), None);
         assert_eq!(periodic_bash_interval("git status"), None);
+    }
+
+    /// 交互式/TTY 命令拒绝：全屏 TUI、编辑器、裸 shell/REPL、无命令 ssh、
+    /// 容器 -it、tmux 前台一律拒绝；批量快照/带参数/脚本用法放行。
+    #[test]
+    fn rejects_interactive_tty_commands() {
+        let rejected = [
+            "top",
+            "htop",
+            "btop -d 2",
+            "vim README.md",
+            "nano file.txt",
+            "nvim -p a b",
+            "emacs",
+            "fzf",
+            "lazygit",
+            "ranger",
+            "screen",
+            "python3",
+            "node",
+            "irb",
+            "sqlite3 data.db",
+            "psql mydb",
+            "bc",
+            "ssh example.com",
+            "ssh -p 2222 user@example.com",
+            "ssh -t example.com 'ls'",
+            "sudo -i",
+            "sudo -s",
+            "sudo htop",
+            "sudo",
+            "docker exec -it app bash",
+            "docker exec -i -t app bash",
+            "kubectl exec -it pod -- bash",
+            "docker attach app",
+            "tmux",
+            "tmux new",
+            "tmux attach",
+            "gdb ./prog",
+        ];
+        for cmd in rejected {
+            assert!(
+                interactive_command_reason(cmd).is_some(),
+                "应当拒绝: {cmd}"
+            );
+        }
+
+        let allowed = [
+            "ls -la",
+            "echo hello",
+            "git log --oneline",
+            "top -b -n 1",
+            "top -b",
+            "gdb -batch -ex 'run' ./prog",
+            "python3 test.py",
+            "python3 -c 'print(1)'",
+            "bash -c 'echo hi'",
+            "node app.js",
+            "ssh example.com 'ls -la'",
+            "ssh -N -L 8080:localhost:80 example.com",
+            "ssh -f -N example.com",
+            "env A=1 echo hi",
+            "env A=1 python3 script.py",
+            "sudo rm -rf /tmp/x",
+            "sudo -u root ls",
+            "docker run -d nginx",
+            "docker build -t app .",
+            "kubectl logs pod",
+            "tmux new -d -s app",
+            "tmux send-keys -t app 'x' Enter",
+            "tmux capture-pane -t app",
+            "kubectl exec pod -- ls",
+            "sqlite3 data.db \"SELECT 1\"",
+            "sqlite3 data.db < dump.sql",
+            "sqlite3 --version",
+            "psql -d mydb -c 'SELECT 1'",
+            "psql mydb < dump.sql",
+            "psql --version",
+            "psql -l",
+            "mysql -e 'SHOW TABLES'",
+            "mysql db < dump.sql",
+            "mongosh --eval 'db.runCommand({ping:1})'",
+            "mongosh mongo.js",
+            "redis-cli GET key",
+            "redis-cli --version",
+        ];
+        for cmd in allowed {
+            assert_eq!(
+                interactive_command_reason(cmd),
+                None,
+                "不应拒绝: {cmd}"
+            );
+        }
+    }
+
+    /// 交互式命令在 Bash 工具层被拒绝（模型路径同样生效）。
+    #[tokio::test]
+    async fn bash_tool_refuses_interactive_commands() {
+        let ctx = ToolContext {
+            cwd: std::env::temp_dir(),
+            watch: crate::watch::WatchRegistry::new(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+        };
+        let tool = BashTool::new();
+        let err = tool
+            .call(serde_json::json!({"command": "htop"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("TTY"),
+            "拒绝原因说明 TTY: {err}"
+        );
     }
 }

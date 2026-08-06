@@ -66,12 +66,13 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
     }
 
     let request = Request {
-        model: session.model.clone(),
+        model: session.runtime.model.borrow().clone(),
         max_tokens: 512,
         system: Vec::new(),
         messages: vec![Message::user_text(prompt)],
         tools: Vec::new(),
         stream: false,
+        thinking: None,
     };
     let facts = match session.client.complete_text(&request).await {
         Ok(f) => f,

@@ -145,6 +145,7 @@ dependencies = [
  "globset",
  "html2md",
  "iocraft",
+ "libc",
  "regex",
  "reqwest",
  "rmcp",

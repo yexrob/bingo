@@ -63,27 +63,33 @@ pub struct TaskStore {
     lock: Mutex<()>,
 }
 
-fn list_id_from_env_or(cwd: &Path) -> String {
-    if let Ok(id) = std::env::var("BINGO_TASK_LIST_ID")
-        && !id.is_empty()
-    {
-        return id;
-    }
-    // 项目级稳定列表：同一工作目录跨会话共享任务（对齐 CC 磁盘语义）。
+/// 项目级列表键（旧行为：同一工作目录跨会话共享任务；会话键的回落）。
+pub fn project_task_key(cwd: &Path) -> String {
     cwd.canonicalize()
         .unwrap_or_else(|_| cwd.to_path_buf())
         .to_string_lossy()
         .replace(['/', '\\'], "_")
 }
 
+fn list_id_from_env_or(key: &str) -> String {
+    if let Ok(id) = std::env::var("BINGO_TASK_LIST_ID")
+        && !id.is_empty()
+    {
+        return id;
+    }
+    // 会话级列表：每个 session 独立 todo（key = transcript 文件 stem，
+    // --continue 恢复同一会话）。进程内同一 key 即同一列表。
+    key.to_string()
+}
+
 impl TaskStore {
-    pub fn new(home: &Path, cwd: &Path) -> Self {
+    pub fn new(home: &Path, key: &str) -> Self {
         let dir = home
             .join(".local")
             .join("share")
             .join("bingo")
             .join("tasks")
-            .join(list_id_from_env_or(cwd));
+            .join(list_id_from_env_or(key));
         Self {
             dir,
             lock: Mutex::new(()),
@@ -323,7 +329,7 @@ mod tests {
     use std::env;
 
     fn store_in(tmp: &Path) -> TaskStore {
-        TaskStore::new(&tmp.join("home"), &tmp.join("proj"))
+        TaskStore::new(&tmp.join("home"), "test-session")
     }
 
     fn task(subject: &str) -> Task {
@@ -338,6 +344,27 @@ mod tests {
             blocked_by: Vec::new(),
             metadata: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn sessions_are_isolated_by_key() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let tmp = env::temp_dir().join(format!("bingo-tasks-session-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let s1 = TaskStore::new(&tmp.join("home"), "proj-1700000000");
+            let s2 = TaskStore::new(&tmp.join("home"), "proj-1700000001");
+            s1.create(&task("first")).await.unwrap();
+            assert_eq!(s1.list().await.unwrap().len(), 1);
+            assert!(
+                s2.list().await.unwrap().is_empty(),
+                "新会话列表独立，不继承上一会话 todo"
+            );
+            // --continue 同一会话：同 key 恢复同一列表。
+            let s1b = TaskStore::new(&tmp.join("home"), "proj-1700000000");
+            assert_eq!(s1b.list().await.unwrap().len(), 1, "同会话恢复同 todo");
+            let _ = std::fs::remove_dir_all(&tmp);
+        });
     }
 
     #[test]

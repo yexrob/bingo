@@ -27,6 +27,15 @@ pub struct AgentInput {
     #[allow(dead_code)]
     #[schemars(description = "任务简述（可选）")]
     description: Option<String>,
+    /// 子代理模型（可选）：缺省继承父会话模型。
+    #[serde(default)]
+    #[schemars(description = "子代理使用的模型（可选，缺省继承父会话）")]
+    model: Option<String>,
+    /// 子代理 provider（可选，settings.json 的 providers 段）：指定后子代理
+    /// 使用该 provider 的端点与 key（独立于父会话的当前 provider）。
+    #[serde(default)]
+    #[schemars(description = "子代理使用的 provider（可选，settings 的 providers 段；缺省跟随父会话）")]
+    provider: Option<String>,
 }
 
 /// 子代理工具（对标 Claude Code Task，D14）：递归 queryLoop，
@@ -62,11 +71,15 @@ fn subagent_hooks(
                 watch.feed_content(id, text);
             }
         }),
-        on_tool_ready: Box::new(|_name, _input| {}),
+        on_tool_ready: Box::new(|_name, _input, _standalone| {}),
         on_tool_done: Box::new(|_| {}),
         on_round_end: Box::new(|| {}),
         on_warning: Box::new(|_| {}),
-        ask: Box::new(move |_tool_name, _reason| Box::pin(async move { bypass })),
+        ask: std::sync::Arc::new(move |_tool_name, _reason| Box::pin(async move { bypass })),
+        // 子代理无 UI 可问：AskUserQuestion 视为未回答（模型应避免在子代理中询问）。
+        ask_question: std::sync::Arc::new(|_title, _question, _options| {
+            Box::pin(async { None })
+        }),
     }
 }
 
@@ -95,7 +108,7 @@ impl AgentTool {
                 }),
                 conditions,
             );
-        let sub_session = self.build_sub_session();
+        let sub_session = self.build_sub_session(params)?;
         let prompt = params.prompt.clone();
         let watch = ctx.watch.clone();
         let permission_mode = sub_session.permission_mode;
@@ -139,14 +152,42 @@ impl AgentTool {
         })
     }
 
-    fn build_sub_session(&self) -> Arc<Session> {
-        Arc::new(Session {
-            client: self.session.client.clone(),
-            model: self.session.model.clone(),
+    /// 构造子代理会话：`model`/`provider` 参数可覆盖继承值（provider 指定时
+    /// fork 独立端点 Client，互不影响父会话的当前 provider）。
+    fn build_sub_session(&self, params: &AgentInput) -> Result<Arc<Session>, ToolError> {
+        let model = params
+            .model
+            .clone()
+            .unwrap_or_else(|| self.session.runtime.model.borrow().clone());
+        let client = match &params.provider {
+            Some(name) => self
+                .session
+                .client
+                .with_provider(name)
+                .map_err(ToolError::failed)?,
+            None => self.session.client.clone(),
+        };
+        let provider_name = params
+            .provider
+            .clone()
+            .unwrap_or_else(|| self.session.runtime.provider.borrow().clone());
+        let runtime = crate::query::Runtime::new(
+            model,
+            None,
+            self.session
+                .runtime
+                .permissions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        );
+        let _ = runtime.provider_tx.send(provider_name);
+        Ok(Arc::new(Session {
+            client,
+            runtime,
             permission_mode: self.session.permission_mode,
             settings: self.session.settings.clone(),
             system: self.session.system.clone(),
-            transcript: None,
             depth: self.session.depth + 1,
             home: self.session.home.clone(),
             quiet: self.session.quiet,
@@ -155,7 +196,7 @@ impl AgentTool {
             tasks: self.session.tasks.clone(),
             last_task_reminder_turn: self.session.last_task_reminder_turn.clone(),
             expand_tasks: self.session.expand_tasks.clone(),
-        })
+        }))
     }
 }
 
@@ -244,7 +285,7 @@ impl Tool for AgentTool {
             return self.launch_background(&params, ctx);
         }
 
-        let sub_session = self.build_sub_session();
+        let sub_session = self.build_sub_session(&params)?;
 
         // 前台子 agent 同样可 watch：Running（产出字符量）→ Done/Failed。
         let cell = Arc::new(AgentCell::new());
@@ -316,4 +357,125 @@ fn agent_label(params: &AgentInput) -> String {
             .clone()
             .unwrap_or_else(|| params.prompt.chars().take(40).collect())
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::{Runtime, Session};
+
+    fn parent_session() -> (Arc<Session>, Arc<crate::api::client::Client>) {
+        let mut settings = crate::settings::Settings::default();
+        settings.api_key = Some("sk-parent".into());
+        settings.api_base_url = Some("https://parent.example".into());
+        settings.providers.insert(
+            "ds".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: "sk-ds".into(),
+                api_base_url: "https://api.deepseek.com".into(),
+            },
+        );
+        let client = Arc::new(crate::api::client::Client::from_settings(&settings).unwrap());
+        let mut runtime = Runtime::new("parent-model".into(), None, Default::default());
+        runtime.mcp = Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
+            Default::default(),
+            Default::default(),
+        )));
+        let session = Arc::new(Session {
+            client: (*client).clone(),
+            runtime,
+            permission_mode: crate::permission::PermissionMode::Default,
+            settings,
+            system: Vec::new(),
+            depth: 0,
+            home: std::env::temp_dir(),
+            quiet: true,
+            compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            watch: crate::watch::WatchRegistry::new(),
+            tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            last_task_reminder_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+        });
+        (session, client)
+    }
+
+    fn params(prompt: &str) -> AgentInput {
+        AgentInput {
+            prompt: prompt.into(),
+            background: None,
+            notify_on: None,
+            description: None,
+            model: None,
+            provider: None,
+        }
+    }
+
+    #[test]
+    fn sub_session_inherits_model_and_shared_endpoint() {
+        let (session, client) = parent_session();
+        let tool = AgentTool::new(session.clone());
+        let sub = tool.build_sub_session(&params("do it")).unwrap();
+        assert_eq!(*sub.runtime.model.borrow(), "parent-model");
+        assert_eq!(
+            sub.client.current_endpoint(),
+            ("sk-parent".to_string(), "https://parent.example".to_string())
+        );
+        // 不指定 provider：共享父端点（切换父 provider 子跟随）。
+        client.set_provider("ds").unwrap();
+        assert_eq!(
+            sub.client.current_endpoint().0,
+            "sk-ds",
+            "共享端点跟随父会话切换"
+        );
+    }
+
+    #[test]
+    fn sub_session_overrides_model_and_provider() {
+        let (session, _client) = parent_session();
+        let tool = AgentTool::new(session.clone());
+        let mut p = params("do it");
+        p.model = Some("sub-model".into());
+        p.provider = Some("ds".into());
+        let sub = tool.build_sub_session(&p).unwrap();
+        assert_eq!(*sub.runtime.model.borrow(), "sub-model");
+        assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
+        assert_eq!(
+            sub.client.current_endpoint(),
+            ("sk-ds".to_string(), "https://api.deepseek.com".to_string())
+        );
+        // fork 独立端点：父会话不受影响。
+        assert_eq!(session.client.current_endpoint().0, "sk-parent");
+    }
+
+    #[test]
+    fn sub_session_unknown_provider_errors() {
+        let (session, _client) = parent_session();
+        let tool = AgentTool::new(session);
+        let mut p = params("do it");
+        p.provider = Some("nope".into());
+        assert!(tool.build_sub_session(&p).is_err(), "未知 provider 报错");
+    }
+
+    #[test]
+    fn schema_exposes_model_and_provider() {
+        let tool = AgentTool::new(Arc::new(Session {
+            client: crate::api::client::Client::new("k".into(), "http://x".into()),
+            runtime: Runtime::new("m".into(), None, Default::default()),
+            permission_mode: crate::permission::PermissionMode::Default,
+            settings: crate::settings::Settings::default(),
+            system: Vec::new(),
+            depth: 0,
+            home: std::env::temp_dir(),
+            quiet: true,
+            compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            watch: crate::watch::WatchRegistry::new(),
+            tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "t")),
+            last_task_reminder_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+        }));
+        let schema = tool.input_schema();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("model"), "schema 含 model");
+        assert!(props.contains_key("provider"), "schema 含 provider");
+    }
 }

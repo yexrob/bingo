@@ -90,6 +90,25 @@ pub struct Request {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<serde_json::Value>,
     pub stream: bool,
+    /// 思考配置：`{"type":"enabled","budget_tokens":N}`（None = 不发参数）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<serde_json::Value>,
+}
+
+/// 思考级别 → budget_tokens（/think 与 settings.thinkingLevel）。
+pub fn thinking_budget(level: &str) -> Option<u32> {
+    match level {
+        "low" => Some(2048),
+        "medium" => Some(8192),
+        "high" => Some(16384),
+        _ => None,
+    }
+}
+
+/// 思考级别 → 请求 thinking 参数。
+pub fn thinking_param(level: Option<&str>) -> Option<serde_json::Value> {
+    let budget = thinking_budget(level?)?;
+    Some(serde_json::json!({ "type": "enabled", "budget_tokens": budget }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,6 +300,41 @@ pub fn parse_sse_event(event: &str, data: &str) -> Result<Option<StreamEvent>, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thinking_budget_maps_levels() {
+        assert_eq!(thinking_budget("low"), Some(2048));
+        assert_eq!(thinking_budget("medium"), Some(8192));
+        assert_eq!(thinking_budget("high"), Some(16384));
+        assert_eq!(thinking_budget("off"), None);
+        assert_eq!(thinking_budget("bogus"), None);
+    }
+
+    #[test]
+    fn thinking_param_shapes() {
+        assert_eq!(thinking_param(None), None, "未配置不发参数");
+        let low = thinking_param(Some("low")).unwrap();
+        assert_eq!(low["type"], "enabled");
+        assert_eq!(low["budget_tokens"], 2048);
+    }
+
+    #[test]
+    fn request_serializes_thinking_only_when_set() {
+        let mut req = Request {
+            model: "m".into(),
+            max_tokens: 100,
+            system: Vec::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            stream: true,
+            thinking: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("thinking").is_none(), "无 thinking 不序列化");
+        req.thinking = thinking_param(Some("high"));
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["thinking"]["budget_tokens"], 16384);
+    }
 
     #[test]
     fn parses_text_delta() {

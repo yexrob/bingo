@@ -56,12 +56,13 @@ pub async fn maybe_compact(
     }
 
     let request = Request {
-        model: session.model.clone(),
+        model: session.runtime.model.borrow().clone(),
         max_tokens: 1024,
         system: Vec::new(),
         messages: vec![Message::user_text(prompt_text)],
         tools: Vec::new(),
         stream: false,
+        thinking: None,
     };
     let summary = match session.client.complete_text(&request).await {
         Ok(s) => {
@@ -90,9 +91,10 @@ pub async fn maybe_compact(
 
 /// 每轮请求前调用：token 超阈值即压缩；熔断后跳过并提醒。
 pub async fn check_and_compact(session: &Session, messages: &mut Vec<Message>) {
+    let model = session.runtime.model.borrow().clone();
     let Ok(tokens) = session
         .client
-        .count_tokens(&session.model, &session.system, messages)
+        .count_tokens(&model, &session.system, messages)
         .await
     else {
         return;

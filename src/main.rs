@@ -23,6 +23,7 @@ mod permission;
 mod preapproved;
 mod query;
 mod settings;
+mod skills;
 mod system;
 mod tasks;
 mod tool;
@@ -37,6 +38,11 @@ struct Cli {
     /// headless 模式：直接把回复打到 stdout
     #[arg(short, long)]
     print: bool,
+
+    /// 全屏模式（iocraft canvas，输入吸底、app 内滚动）；默认 inline：
+    /// 像普通终端一样输出，历史在终端 scrollback
+    #[arg(long)]
+    fullscreen: bool,
 
     /// 使用的模型
     #[arg(long, default_value = DEFAULT_MODEL)]
@@ -80,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "default".to_string())
         .parse()?;
 
-    let client = Client::from_env()?;
+    let client = Client::from_settings(&settings)?;
     let system = build_system(
         &load_memory(&home, &project_dir),
         load_project_memory(&home, &project_dir),
@@ -116,19 +122,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let (expand_tx, expand_rx) = tokio::sync::watch::channel(false);
+    // 任务列表按会话隔离：key = transcript 文件 stem（--continue 恢复同一会话
+    // 的 todo；新会话另开列表）。transcript 创建失败时回落项目级共享列表。
+    let task_list_key = transcript
+        .as_ref()
+        .and_then(|t| t.path().file_stem())
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::tasks::project_task_key(&project_dir));
+    let mut runtime = crate::query::Runtime::new(
+        cli.model,
+        transcript,
+        settings.permissions.clone(),
+    );
+    runtime.mcp = Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
+        settings.mcp_servers.clone(),
+        settings.disabled_mcp_servers.iter().cloned().collect(),
+    )));
+    let _ = runtime.thinking_tx.send(settings.thinking_level.clone());
     let session = Arc::new(Session {
         client,
-        model: cli.model,
+        runtime,
         permission_mode,
         settings,
         system,
-        transcript,
         depth: 0,
         home: home.clone(),
         quiet: !cli.print,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         watch: crate::watch::WatchRegistry::new(),
-        tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, &project_dir)),
+        tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, &task_list_key)),
         last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         expand_tasks: expand_tx,
     });
@@ -154,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             extract_memory(&session, &outcome.messages, &home, &project_dir).await;
         } else {
             drop(initial_messages); // 交互模式下 --continue 历史由后续轮次复用
-            tui::run_tui_session(session.clone(), expand_rx).await?;
+            tui::run_tui_session(session.clone(), expand_rx, cli.fullscreen).await?;
         }
         Ok::<(), Box<dyn std::error::Error>>(())
     }

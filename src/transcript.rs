@@ -50,29 +50,75 @@ pub fn create(home: &Path, cwd: &Path) -> Result<Transcript, TranscriptError> {
     Ok(Transcript { path })
 }
 
-/// 恢复最新会话（--continue）。
-pub fn latest(home: &Path) -> Result<Option<Transcript>, TranscriptError> {
+/// 全部会话（/resume 列表），按修改时间新→旧。
+pub fn list(home: &Path) -> Result<Vec<Transcript>, TranscriptError> {
     let dir = transcripts_dir(home);
     if !dir.exists() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)?
+    let mut entries: Vec<(SystemTime, Transcript)> = std::fs::read_dir(&dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+        .map(|p| {
+            let modified = std::fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .ok()
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            (modified, Transcript { path: p })
+        })
         .collect();
-    entries.sort_by_key(|p| {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .ok()
-            .unwrap_or(SystemTime::UNIX_EPOCH)
-    });
-    Ok(entries.last().cloned().map(|path| Transcript { path }))
+    entries.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    Ok(entries.into_iter().map(|(_, t)| t).collect())
+}
+
+/// 恢复最新会话（--continue）。
+pub fn latest(home: &Path) -> Result<Option<Transcript>, TranscriptError> {
+    Ok(list(home)?.into_iter().next())
 }
 
 impl Transcript {
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 会话展示名：文件 stem（`{slug}-{ts}` / `{slug}-{ts}-{name}`）。
+    pub fn name(&self) -> String {
+        self.path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
+
+    /// 重命名会话（/rename）：`{slug}-{ts}` → `{slug}-{ts}-{name}.jsonl`。
+    /// 返回指向新路径的 Transcript。
+    pub fn rename(&self, name: &str) -> Result<Transcript, TranscriptError> {
+        let slug = slugify(name);
+        if slug.is_empty() || slug == "root" {
+            return Err(TranscriptError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "empty session name",
+            )));
+        }
+        let stem = self
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let new_path = self.path.with_file_name(format!("{stem}-{slug}.jsonl"));
+        std::fs::rename(&self.path, &new_path)?;
+        Ok(Transcript { path: new_path })
+    }
+
+    /// 整文件重写（/compact 手动压缩后落盘）。
+    pub fn replace_messages(&self, messages: &[Message]) -> Result<(), TranscriptError> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&self.path)?;
+        for message in messages {
+            let line = serde_json::to_string(message)?;
+            writeln!(file, "{line}")?;
+        }
+        Ok(())
     }
 
     /// 追加一条消息。

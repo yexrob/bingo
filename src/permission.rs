@@ -56,8 +56,21 @@ fn ask(reason: impl Into<String>) -> PermissionResult {
 
 /// 规则内容匹配：`Tool(content)` 的 content 对当前调用是否成立。
 /// Bash 匹配命令前缀；文件类工具匹配路径前缀；WebFetch 支持 `domain:` 与 URL 前缀；
-/// `*` 匹配一切；`prefix:` 前缀忽略。
+/// Skill 精确/`name:*` 前缀匹配；`*` 匹配一切；`prefix:` 前缀忽略。
 fn content_matches(tool_name: &str, input: &serde_json::Value, content: &str) -> bool {
+    // Skill 规则：`Skill(name)` 精确；`Skill(name:*)` 前缀（对标 CC SkillTool
+    // checkPermissions 的 ruleMatches）；`*` 匹配一切。
+    if tool_name == "Skill" {
+        let name = input.get("skill").and_then(|v| v.as_str());
+        return match content {
+            "*" => true,
+            c if c.ends_with(":*") => {
+                let prefix = &c[..c.len() - 2];
+                name.is_some_and(|n| n.starts_with(prefix))
+            }
+            c => name.is_some_and(|n| n == c),
+        };
+    }
     let content = content
         .strip_prefix("prefix:")
         .unwrap_or(content)
@@ -264,6 +277,31 @@ mod tests {
         });
         // safetyCheck 优先于 acceptEdits（bypass 免疫）
         let result = decide(&tool as &dyn Tool, input, PermissionMode::AcceptEdits, &[]);
+        assert_eq!(result.behavior, PermissionBehavior::Ask);
+    }
+
+    #[test]
+    fn skill_rules_match_exact_and_prefix() {
+        let tool = crate::tool::skill::SkillTool::new(vec![]);
+        let input = || serde_json::json!({"skill": "review-pr"});
+        let allow = |rules: &[&str]| {
+            let all: Vec<String> = rules.iter().map(|s| s.to_string()).collect();
+            can_use_tool(&tool as &dyn Tool, &input(), PermissionMode::Default, &[], &[], &all)
+        };
+        // 无规则 → 询问（技能执行非只读）
+        let result = allow(&[]);
+        assert_eq!(result.behavior, PermissionBehavior::Ask);
+        // 精确匹配
+        let result = allow(&["Skill(review-pr)"]);
+        assert_eq!(result.behavior, PermissionBehavior::Allow);
+        // 前缀匹配（CC `review:*` 语义）
+        let result = allow(&["Skill(review:*)"]);
+        assert_eq!(result.behavior, PermissionBehavior::Allow);
+        // 通配
+        let result = allow(&["Skill(*)"]);
+        assert_eq!(result.behavior, PermissionBehavior::Allow);
+        // 不匹配的精确规则不放过
+        let result = allow(&["Skill(commit)"]);
         assert_eq!(result.behavior, PermissionBehavior::Ask);
     }
 

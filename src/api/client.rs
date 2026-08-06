@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+use std::sync::Arc;
 use thiserror::Error;
 
 use super::sse::SseParser;
@@ -33,37 +34,115 @@ pub enum ClientError {
     Timeout,
 }
 
+/// 当前生效的端点（/provider 切换时更新）。
 #[derive(Debug, Clone)]
-pub struct Client {
-    http: reqwest::Client,
+struct Endpoint {
     api_key: String,
     base_url: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct Client {
+    http: reqwest::Client,
+    endpoint: Arc<std::sync::RwLock<Endpoint>>,
+    /// 命名 provider 表（settings.providers；default 不在表内）。
+    providers: std::collections::HashMap<String, Endpoint>,
+}
+
 impl Client {
-    pub fn from_env() -> Result<Self, ClientError> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .or_else(|_| std::env::var("DEEPSEEK_API_KEY"))
-            .map_err(|_| ClientError::MissingApiKey)?;
-        Ok(Self::new(
-            api_key,
-            std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| API_BASE.to_string()),
-        ))
+    /// settings 优先，回落环境变量（ANTHROPIC_API_KEY/DEEPSEEK_API_KEY、
+    /// ANTHROPIC_BASE_URL）。settings 与 env 都无 key 时报 MissingApiKey。
+    pub fn from_settings(settings: &crate::settings::Settings) -> Result<Self, ClientError> {
+        Self::from_settings_with(settings, |name| std::env::var(name))
     }
 
+    /// from_settings 的可注入版（测试用假 env，避免改真实环境变量）。
+    fn from_settings_with(
+        settings: &crate::settings::Settings,
+        env: impl Fn(&str) -> std::result::Result<String, std::env::VarError>,
+    ) -> Result<Self, ClientError> {
+        let api_key = settings
+            .api_key
+            .clone()
+            .or_else(|| env("ANTHROPIC_API_KEY").ok())
+            .or_else(|| env("DEEPSEEK_API_KEY").ok())
+            .ok_or(ClientError::MissingApiKey)?;
+        let base_url = settings.api_base_url.clone().unwrap_or_else(|| {
+            env("ANTHROPIC_BASE_URL").unwrap_or_else(|_| API_BASE.to_string())
+        });
+        let providers = settings
+            .providers
+            .iter()
+            .map(|(name, cfg)| {
+                (
+                    name.clone(),
+                    Endpoint {
+                        api_key: cfg.api_key.clone(),
+                        base_url: cfg.api_base_url.clone(),
+                    },
+                )
+            })
+            .collect();
+        Ok(Self {
+            http: reqwest::Client::new(),
+            endpoint: Arc::new(std::sync::RwLock::new(Endpoint { api_key, base_url })),
+            providers,
+        })
+    }
+
+    #[cfg(test)]
     pub fn new(api_key: String, base_url: String) -> Self {
         Self {
             http: reqwest::Client::new(),
-            api_key,
-            base_url,
+            endpoint: Arc::new(std::sync::RwLock::new(Endpoint { api_key, base_url })),
+            providers: std::collections::HashMap::new(),
         }
     }
 
+    /// 命名 provider 列表（不含 default；/provider 列出用）。
+    pub fn provider_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.providers.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// 当前生效的 provider 端点（key/url 引用）。
+    pub fn current_endpoint(&self) -> (String, String) {
+        let e = self.endpoint.read().unwrap_or_else(|p| p.into_inner());
+        (e.api_key.clone(), e.base_url.clone())
+    }
+
+    /// 切换到命名 provider；未知名字报错（default 永远可切回）。
+    pub fn set_provider(&self, name: &str) -> Result<(), String> {
+        let Some(endpoint) = self.providers.get(name).cloned() else {
+            return Err(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
+        };
+        *self.endpoint.write().unwrap_or_else(|p| p.into_inner()) = endpoint;
+        Ok(())
+    }
+
+    /// 派生一个端点独立的 Client（子代理指定 provider 用）：新 Client
+    /// 锁定该 provider 端点，providers 表共享（名字表一致）。不指定时
+    /// 应直接 clone（共享端点，跟随父会话切换）。
+    pub fn with_provider(&self, name: &str) -> Result<Client, String> {
+        let endpoint = self
+            .providers
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("未找到 provider \"{name}\"（/provider 查看列表）"))?;
+        Ok(Client {
+            http: self.http.clone(),
+            endpoint: Arc::new(std::sync::RwLock::new(endpoint)),
+            providers: self.providers.clone(),
+        })
+    }
+
     fn headers(&self) -> Result<HeaderMap, ClientError> {
+        let endpoint = self.endpoint.read().unwrap_or_else(|p| p.into_inner());
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-api-key",
-            HeaderValue::from_str(&self.api_key)
+            HeaderValue::from_str(&endpoint.api_key)
                 .map_err(|e| ClientError::InvalidApiKey(e.to_string()))?,
         );
         headers.insert(
@@ -83,10 +162,11 @@ impl Client {
         // 400 上下文超限重算需要修改 max_tokens → 克隆一份可变请求。
         let mut request = request.clone();
         let mut attempt = 0;
+        let base_url = self.current_endpoint().1;
         loop {
             let builder = self
                 .http
-                .post(format!("{}/v1/messages", self.base_url))
+                .post(format!("{base_url}/v1/messages"))
                 .headers(self.headers()?)
                 .json(&request);
             match tokio::time::timeout(REQUEST_TIMEOUT, builder.send()).await {
@@ -149,10 +229,11 @@ impl Client {
     ) -> Result<String, ClientError> {
         let mut request = request.clone();
         request.stream = false;
+        let base_url = self.current_endpoint().1;
         let response = tokio::time::timeout(
             REQUEST_TIMEOUT,
             self.http
-                .post(format!("{}/v1/messages", self.base_url))
+                .post(format!("{base_url}/v1/messages"))
                 .headers(self.headers()?)
                 .json(&request)
                 .send(),
@@ -183,6 +264,41 @@ impl Client {
         Ok(text)
     }
 
+    /// 列出当前端点支持的模型（`GET {base}/v1/models`，Anthropic/DeepSeek 通用）：
+    /// 返回 `data[].id`。`/model` 二级选择器异步拉取用。
+    pub async fn list_models(&self) -> Result<Vec<String>, ClientError> {
+        let base_url = self.current_endpoint().1;
+        let response = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            self.http
+                .get(format!("{base_url}/v1/models"))
+                .headers(self.headers()?)
+                .send(),
+        )
+        .await
+        .map_err(|_| ClientError::Timeout)??;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ClientError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let body: serde_json::Value = response.json().await?;
+        let mut models: Vec<String> = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        models.sort();
+        Ok(models)
+    }
+
     /// 输入 token 计数（D12：预算显示走官方 count_tokens API）。
     pub async fn count_tokens(
         &self,
@@ -197,7 +313,7 @@ impl Client {
         });
         let response = self
             .http
-            .post(format!("{}/v1/messages/count_tokens", self.base_url))
+            .post(format!("{}/v1/messages/count_tokens", self.current_endpoint().1))
             .headers(self.headers()?)
             .json(&payload)
             .send()
@@ -419,6 +535,96 @@ mod tests {
     fn parses_context_limit_error() {
         let body = "400: input length and max_tokens exceed context limit: 12345 + 64000 > 200000";
         assert_eq!(parse_context_limit(body), Some((12345, 200000)));
+    }
+
+    #[test]
+    fn from_settings_prefers_settings_over_env() {
+        let mut settings = crate::settings::Settings::default();
+        settings.api_key = Some("sk-settings".into());
+        settings.api_base_url = Some("https://settings.example".into());
+        let env = |name: &str| -> Result<String, std::env::VarError> {
+            match name {
+                "ANTHROPIC_API_KEY" => Ok("sk-env".into()),
+                "ANTHROPIC_BASE_URL" => Ok("https://env.example".into()),
+                _ => Err(std::env::VarError::NotPresent),
+            }
+        };
+        let client = Client::from_settings_with(&settings, env).unwrap();
+        assert_eq!(client.current_endpoint().0, "sk-settings");
+        assert_eq!(client.current_endpoint().1, "https://settings.example");
+    }
+
+    #[test]
+    fn from_settings_falls_back_to_env() {
+        let settings = crate::settings::Settings::default();
+        let env = |name: &str| -> Result<String, std::env::VarError> {
+            match name {
+                "DEEPSEEK_API_KEY" => Ok("sk-deepseek".into()),
+                "ANTHROPIC_BASE_URL" => Ok("https://deepseek.example".into()),
+                _ => Err(std::env::VarError::NotPresent),
+            }
+        };
+        let client = Client::from_settings_with(&settings, env).unwrap();
+        assert_eq!(client.current_endpoint().0, "sk-deepseek");
+        assert_eq!(client.current_endpoint().1, "https://deepseek.example");
+    }
+
+    #[test]
+    fn from_settings_missing_key_errors() {
+        let settings = crate::settings::Settings::default();
+        let env = |_name: &str| Err(std::env::VarError::NotPresent);
+        assert!(matches!(
+            Client::from_settings_with(&settings, env),
+            Err(ClientError::MissingApiKey)
+        ));
+    }
+
+    #[test]
+    fn from_settings_defaults_base_url() {
+        let mut settings = crate::settings::Settings::default();
+        settings.api_key = Some("sk".into());
+        let env = |_name: &str| Err(std::env::VarError::NotPresent);
+        let client = Client::from_settings_with(&settings, env).unwrap();
+        assert_eq!(client.current_endpoint().1, API_BASE);
+    }
+
+    #[test]
+    fn provider_switch_changes_endpoint() {
+        let mut settings = crate::settings::Settings::default();
+        settings.api_key = Some("sk-main".into());
+        settings.providers.insert(
+            "deepseek".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: "sk-ds".into(),
+                api_base_url: "https://api.deepseek.com".into(),
+            },
+        );
+        settings.providers.insert(
+            "local".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: "sk-local".into(),
+                api_base_url: "http://127.0.0.1:11434".into(),
+            },
+        );
+        let env = |_name: &str| Err(std::env::VarError::NotPresent);
+        let client = Client::from_settings_with(&settings, env).unwrap();
+        assert_eq!(client.current_endpoint().0, "sk-main");
+        assert_eq!(client.provider_names(), vec!["deepseek", "local"]);
+
+        client.set_provider("deepseek").unwrap();
+        assert_eq!(client.current_endpoint().0, "sk-ds");
+        assert_eq!(client.current_endpoint().1, "https://api.deepseek.com");
+
+        // 切换后 headers 用新 key。
+        let headers = client.headers().unwrap();
+        assert_eq!(
+            headers.get("x-api-key").unwrap().to_str().unwrap(),
+            "sk-ds"
+        );
+
+        assert!(client.set_provider("nope").is_err(), "未知 provider 报错");
+        // 未知 provider 不影响当前端点。
+        assert_eq!(client.current_endpoint().0, "sk-ds");
     }
 
     #[test]

@@ -23,5 +23,6 @@ schemars = { version = "0.8", features = ["derive"] }
 iocraft = "0.8.4"
 unicode-width = "0.1"
 crossterm = "0.29"
+libc = "0.2"
 
 [dev-dependencies]
