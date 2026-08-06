@@ -355,4 +355,15 @@
 
 - **问题**（用户点名「太丑」）：所有活动行统一 `⏺`，MCP 工具裸露全名 `mcp__server__tool(...)`，Skill 显示 k=v 兜底 `args="doc.md"`——类别不可辨、噪声重。
 - **词汇表**：`⏺` 内建工具（CC 锚点不动，组行/回复点/Update 同族）· `◆` MCP（外接件，显示名 `server:tool`，权限规则仍用 `mcp__` 全名）· `✦` Skill（与 ✢✻✽ 星芒 spinner 同族，摘要改 `技能名 参数`）· `◉` 子代理 Watch 行（环中有核=会话套会话；Agent 是隐藏工具，唯一可见行是 watch）。颜色继续只表状态（dim 运行/绿成/红败），一职一色。
-- **实现**：`activities.rs tool_glyph`/`display_tool_name` + `watch_header` label 前缀判定；`summarize_input` 加 Skill 臂。全部显示层，零行为变化。四个字形均为 unicode_width 单宽（◆/◉ EA=Ambiguous，与既有 ○/◇ 同类已被接受）。480 测试全绿。
+- **实现**：`activities.rs tool_glyph`/`display_tool_name` + `watch_header` label 前缀判定；`summarize_input` 加 Skill 臂。全部显示层，零行为变化。四个字形均为 unicode_width 单宽（◆/◉ EA=Ambiguous，与既有 ○/◇ 同类已被接受）。480 测试全绿。（label 前缀判定随 D29 换成 WatchKind 契约字段。）
+
+### D29. 具名 agent + 实例续话（第一刀：hub-and-spoke）
+
+三轮设计讨论（用户逐轮删概念）收敛出的多 agent 路线图：第一步 = 本条（非实验）；第二步 = 频道互发（实验开关，见下方设计冻结）。
+
+- **具名定义**（`src/agents.rs`）：`~/.config/bingo/agents/*.md` + `.bingo/agents/*.md` 平铺文件（近 cwd 项目层同名覆盖用户层），frontmatter `name/description/model/provider`、正文 = 子代理 system prompt（替换父 system，空则继承）；优先级 显式参数 > 定义 > 继承。frontmatter 解析泛化为 `skills::parse_frontmatter_pairs`（任意键 + 折叠/字面标量），技能与 agent 定义共用。定义个位数，不做 mtime 缓存。
+- **实例注册表**（`AgentRegistry`，Session 级共享）：每次 Agent 派生登记一个具名实例（`name` 参数缺省取定义名/agent，重名自动 -2/-3），状态机 Running/Idle/Stopped。回合完成把 **run_query 返回的完整消息历史**存进条目——续话 = 旧历史 + 新指令再进 run_query，上下文零丢失。
+- **续话与生命周期**（仅 depth==0 装配，hub-and-spoke）：`SendMessage(agent, message)` 忙碌排队（回合结束由同一后台任务链自动续跑下一回合）、空闲带历史唤醒（新 spawn）；`AgentControl(list|stop|delete)` 列表/停止（abort 当前回合 + watch 行置 Cancelled，历史保留）/删除（移除条目，名字释放）。多条排队指令按序并成一个提示。子代理仍可继续派生（深度上限 3）但不管理兄弟。
+- **展示**：`WatchKind` 贯穿 Watchable → WatchEvent → UiEvent → WatchCall（契约字段，替代 D28 的 label 前缀判定），子代理 watch 行 `◉ 名字 · 任务`，续跑回合 `◉ 名字 #N · 指令摘要`（每回合独立行，label 唯一避免 TUI 按 label 撞行）。
+- **遗留**：同步（background:false）子代理若整回合被用户中断，条目可能停留 Running（无驱动方）——AgentControl stop/delete 可清理；与旧版 watch 行孤儿同类，未新增失败面。
+- **第二步设计冻结（频道互发，实验开关后启动）**：能力普遍（人人可听可说）、选择自主（沉默是 agent 醒后的决定）；频道 = 成员名单（可见性 + 全序投递进信箱）；serial|free 提交校验（serial 弹回自适应 = 乐观锁，运行时只判陈旧、语义冲突由模型自判）；唤醒跟随投递、批次合并、无过滤；发件人 runtime 盖戳不可伪造；预算闸（沉默是吸收态，只需盯真实发言）+ 一切等待有超时。引擎零游戏/场景知识，点名纪律等全在提示词。范围：同父平面 cohort；观战 UI：transcript 内嵌 dim 行 + ctrl+T。

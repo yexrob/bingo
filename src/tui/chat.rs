@@ -771,6 +771,7 @@ impl Chat {
                     if watch_events
                         .send(UiEvent::WatchEvent {
                             label: ev.label,
+                            kind: ev.kind,
                             status: match ev.state {
                                 crate::watch::WatchState::Running => WatchStatus::Running,
                                 crate::watch::WatchState::Idle => WatchStatus::Idle,
@@ -1142,6 +1143,7 @@ impl Chat {
             }
             UiEvent::WatchEvent {
                 label,
+                kind,
                 status,
                 detail,
                 duration_ms,
@@ -1183,6 +1185,7 @@ impl Chat {
                     };
                     let mut hint = Activity::new(ActivityKind::Watch(WatchCall {
                         label: label.clone(),
+                        kind,
                         status,
                         detail: detail.clone(),
                         duration_ms,
@@ -4327,6 +4330,7 @@ mod tests {
             )),
             last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
+            agents: crate::agents::AgentRegistry::new(),
         });
         Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), None)
     }
@@ -4545,14 +4549,15 @@ mod tests {
         chat.messages[0].activities.clear();
         chat.messages[0].activities.push(Activity::new(ActivityKind::Watch(
             WatchCall {
-                label: "Agent: 列出桌面目录内容".into(),
+                label: "scout · 列出桌面目录内容".into(),
+                kind: crate::watch::WatchKind::Agent,
                 status: WatchStatus::Running,
                 detail: Some("已产出 43 字符".into()),
                 duration_ms: 0,
             },
         )));
         let verb = chat.running_status().expect("busy status").verb;
-        assert_eq!(verb, "Agent: 列出桌面目录内容", "Watch Running 动词 = label");
+        assert_eq!(verb, "scout · 列出桌面目录内容", "Watch Running 动词 = label");
 
         // Done 的 Watch 不再占用动词（落到 thinking/Working）。
         if let ActivityKind::Watch(w) = &mut chat.messages[0].activities[0].kind {
@@ -4668,6 +4673,7 @@ mod tests {
             )),
             last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
+            agents: crate::agents::AgentRegistry::new(),
         });
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
@@ -5938,6 +5944,7 @@ mod tests {
         // Watch 活动行正常创建（唯一 Agent 显示）。
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 列出桌面目录内容".into(),
+            kind: crate::watch::WatchKind::Agent,
             status: WatchStatus::Running,
             detail: Some("已产出 0 字符".into()),
             duration_ms: 0,
@@ -5955,6 +5962,7 @@ mod tests {
         // 同 label 后续事件原地更新，不新建行。
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 列出桌面目录内容".into(),
+            kind: crate::watch::WatchKind::Agent,
             status: WatchStatus::Running,
             detail: Some("已产出 43 字符".into()),
             duration_ms: 0,
@@ -5985,6 +5993,7 @@ mod tests {
         chat.stream_msg = Some(0);
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 长任务".into(),
+            kind: crate::watch::WatchKind::Agent,
             status: WatchStatus::Running,
             detail: None,
             duration_ms: 0,
@@ -5995,6 +6004,7 @@ mod tests {
         assert!(!chat.busy);
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 长任务".into(),
+            kind: crate::watch::WatchKind::Agent,
             status: WatchStatus::Done,
             detail: Some("完成".into()),
             duration_ms: 30000,
@@ -6016,6 +6026,7 @@ mod tests {
         chat.stream_msg = Some(0);
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "tail -f app.log".into(),
+            kind: crate::watch::WatchKind::Command,
             status: WatchStatus::Running,
             detail: None,
             duration_ms: 0,
@@ -6025,6 +6036,7 @@ mod tests {
         chat.drain_events();
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "tail -f app.log".into(),
+            kind: crate::watch::WatchKind::Command,
             status: WatchStatus::Running,
             detail: Some("发现 1 个错误".into()),
             duration_ms: 12000,
@@ -6098,6 +6110,7 @@ mod tests {
         chat.drain_events();
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 核查".into(),
+            kind: crate::watch::WatchKind::Agent,
             status: WatchStatus::Running,
             detail: Some("已产出 100 字符".into()),
             duration_ms: 5000,
@@ -6120,6 +6133,7 @@ mod tests {
         chat.drain_events();
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 核查".into(),
+            kind: crate::watch::WatchKind::Agent,
             status: WatchStatus::Done,
             detail: Some("完成".into()),
             duration_ms: 30000,
@@ -6138,6 +6152,7 @@ mod tests {
         chat.stream_msg = Some(0);
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 探索".into(),
+            kind: crate::watch::WatchKind::Agent,
             status: WatchStatus::Running,
             detail: None,
             duration_ms: 0,
@@ -6152,6 +6167,7 @@ mod tests {
         chat.messages.push(msg(Role::Assistant, ""));
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 探索".into(),
+            kind: crate::watch::WatchKind::Agent,
             status: WatchStatus::Done,
             detail: Some("完成".into()),
             duration_ms: 40000,
@@ -6175,6 +6191,7 @@ mod tests {
         chat.stream_msg = Some(0);
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "watch ls".into(),
+            kind: crate::watch::WatchKind::Command,
             status: WatchStatus::Idle,
             detail: Some("第 1 轮".into()),
             duration_ms: 5000,
@@ -6193,6 +6210,7 @@ mod tests {
         chat.stream_msg = Some(0);
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "watch -n 2 ls".into(),
+            kind: crate::watch::WatchKind::Command,
             status: WatchStatus::Running,
             detail: None,
             duration_ms: 0,
@@ -6203,6 +6221,7 @@ mod tests {
         assert_eq!(chat.messages[0].activities.len(), 1);
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "watch -n 2 ls".into(),
+            kind: crate::watch::WatchKind::Command,
             status: WatchStatus::Idle,
             detail: Some("第 2 轮".into()),
             duration_ms: 4000,
@@ -6211,6 +6230,7 @@ mod tests {
         });
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "watch -n 2 ls".into(),
+            kind: crate::watch::WatchKind::Command,
             status: WatchStatus::Done,
             detail: None,
             duration_ms: 9000,

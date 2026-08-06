@@ -133,7 +133,14 @@ when_to_use: >-
 ## 能力地图（问"bingo 能做什么"时对照）
 
 - **内置工具**：Bash（经权限门）、Read/Glob/Grep、Edit/Write、WebFetch/WebSearch、
-  Agent（子代理）、Task 族（任务追踪）、AskUserQuestion、Skill（技能调用）。
+  Agent（子代理）、SendMessage/AgentControl（子代理续话与生命周期，仅主会话）、
+  Task 族（任务追踪）、AskUserQuestion、Skill（技能调用）。
+- **子代理**：Agent 派生的实例有名字（`name` 参数，缺省取定义名/agent，重名
+  自动 -2/-3），transcript 显示为 `◉ 名字 · 任务`；完成后历史保留，主 agent 可
+  SendMessage 续话（忙碌排队、空闲唤醒）、AgentControl list/stop/delete 管理。
+  **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`（同名项目层
+  优先）；frontmatter `name/description/model/provider`，正文 = 子代理 system
+  prompt；Agent 工具的 `agent` 参数引用。
 - **技能**：内置 `guide`（本指南）+ `~/.config/bingo/skills/` 与 `.bingo/skills/`
   目录技能（同名磁盘技能覆盖内置）；模型经 SkillTool 调用，用户经 `/技能名` 执行。
 - **图片**：模型回复中的 markdown 图片（`![alt](路径)`，支持相对路径/data/http(s)）

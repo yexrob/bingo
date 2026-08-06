@@ -29,6 +29,15 @@ impl WatchState {
     }
 }
 
+/// Watchable 类别：展示层据此选图标（⏺ 命令 / ◉ 子代理），
+/// 不影响状态机与通知语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WatchKind {
+    #[default]
+    Command,
+    Agent,
+}
+
 /// 会话内唯一的 watchable 标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WatchId(pub u64);
@@ -57,6 +66,10 @@ pub trait Watchable: Send + Sync {
     fn poll(&self) -> WatchPoll;
     /// 周期轮询间隔；None = 不轮询（由实现者主动 set_state）。
     fn check_interval(&self) -> Option<Duration>;
+    /// 类别（展示层图标）；缺省命令。
+    fn kind(&self) -> WatchKind {
+        WatchKind::Command
+    }
 }
 
 /// 通知条件：对 watchable 喂入的内容增量（feed_content）做匹配，
@@ -191,6 +204,7 @@ pub struct WatchEvent {
     #[allow(dead_code)]
     pub id: WatchId,
     pub label: String,
+    pub kind: WatchKind,
     pub state: WatchState,
     pub detail: Option<String>,
     pub payload: Option<serde_json::Value>,
@@ -224,6 +238,7 @@ struct Notification {
 
 struct Entry {
     label: String,
+    kind: WatchKind,
     state: WatchState,
     detail: Option<String>,
     payload: Option<serde_json::Value>,
@@ -268,6 +283,7 @@ impl WatchRegistry {
     ) -> WatchId {
         let poll = watchable.poll();
         let label = watchable.label();
+        let kind = watchable.kind();
         let id = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let id = WatchId(inner.next_id);
@@ -276,6 +292,7 @@ impl WatchRegistry {
                 id,
                 Entry {
                     label: label.clone(),
+                    kind,
                     state: poll.state,
                     detail: poll.detail.clone(),
                     payload: poll.payload.clone(),
@@ -308,6 +325,7 @@ impl WatchRegistry {
         let _ = self.tx.send(WatchEvent {
             id,
             label,
+            kind,
             state: poll.state,
             detail: poll.detail.clone(),
             payload: poll.payload.clone(),
@@ -383,12 +401,13 @@ impl WatchRegistry {
     pub fn emit_signal(&self, id: WatchId, signal: String, detail: Option<String>) {
         // 单条信号上限：任何调用方喂来的长文本都在此收口。
         let signal = truncate_chars(&signal, MAX_SIGNAL_CHARS);
-        let (label, state, entry_detail) = {
+        let (label, kind, state, entry_detail) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return;
             };
             let label = entry.label.clone();
+            let kind = entry.kind;
             let state = entry.state;
             if let Some(d) = &detail {
                 entry.detail = Some(d.clone());
@@ -402,7 +421,7 @@ impl WatchRegistry {
                 payload: None,
                 signal: Some(signal.clone()),
             });
-            (label, state, entry_detail)
+            (label, kind, state, entry_detail)
         };
         let elapsed_ms = {
             let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -416,6 +435,7 @@ impl WatchRegistry {
         let _ = self.tx.send(WatchEvent {
             id,
             label,
+            kind,
             state,
             detail: entry_detail,
             payload: None,
@@ -442,7 +462,7 @@ impl WatchRegistry {
         detail: Option<String>,
         payload: Option<serde_json::Value>,
     ) {
-        let label = {
+        let (label, kind) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return;
@@ -458,6 +478,7 @@ impl WatchRegistry {
             entry.detail = detail.clone();
             entry.payload = payload.clone();
             let label = entry.label.clone();
+            let kind = entry.kind;
             let notify = state.is_terminal() || state == WatchState::Idle;
             if state.is_terminal() {
                 // 终态后不再喂内容也不再匹配条件：压缩条目，释放缓冲。
@@ -477,7 +498,7 @@ impl WatchRegistry {
             if state.is_terminal() {
                 prune_terminal_entries(&mut inner);
             }
-            label
+            (label, kind)
         };
         let elapsed_ms = {
             let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -490,6 +511,7 @@ impl WatchRegistry {
         let _ = self.tx.send(WatchEvent {
             id,
             label,
+            kind,
             state,
             detail,
             payload,

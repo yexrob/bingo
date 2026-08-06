@@ -921,6 +921,7 @@ mod tests {
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             last_task_reminder_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
+            agents: crate::agents::AgentRegistry::new(),
         })
     }
 

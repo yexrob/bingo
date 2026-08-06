@@ -86,8 +86,10 @@ pub enum WatchStatus {
 /// 一个被 watch 的实体（命令/agent）：header + 轮次 detail + 可展开内容。
 #[derive(Debug, Clone)]
 pub struct WatchCall {
-    /// 描述（如 `watch -n 2 ls`）。
+    /// 描述（如 `watch -n 2 ls`、`reviewer · 审查提交`）。
     pub label: String,
+    /// 类别（图标：⏺ 命令 / ◉ 子代理）。
+    pub kind: crate::watch::WatchKind,
     /// 生命周期状态。
     pub status: WatchStatus,
     /// 当前轮次/进度描述。
@@ -442,8 +444,7 @@ fn tool_result(t: &ToolCall, act: &Activity, theme: &Theme) -> Line {
 }
 
 /// `⏺ watch -n 2 ls` — same shape as a tool, driven by the watch lifecycle.
-/// 子代理的 Watch 行（label `Agent: …`，见 agent_label）用 `◉`：环中有核，
-/// 会话中套会话。
+/// 子代理的 Watch 行（WatchKind::Agent）用 `◉`：环中有核，会话中套会话。
 fn watch_header(w: &WatchCall, theme: &Theme) -> Line {
     let style = match w.status {
         WatchStatus::Running | WatchStatus::Idle => theme.dim(),
@@ -451,10 +452,9 @@ fn watch_header(w: &WatchCall, theme: &Theme) -> Line {
         WatchStatus::Failed => theme.tool_error(),
         WatchStatus::Cancelled => theme.dim(),
     };
-    let glyph = if w.label.starts_with("Agent: ") {
-        "◉ "
-    } else {
-        "⏺ "
+    let glyph = match w.kind {
+        crate::watch::WatchKind::Agent => "◉ ",
+        crate::watch::WatchKind::Command => "⏺ ",
     };
     let mut line = Line::styled(glyph, style);
     line.push_styled(w.label.clone(), theme.text());
@@ -821,18 +821,20 @@ mod tests {
         assert_eq!(text(&render_lines(&skill)[0]), "✦ Skill(review doc.md)");
 
         let agent_watch = Activity::new(ActivityKind::Watch(WatchCall {
-            label: "Agent: 整理笔记".into(),
+            label: "reviewer · 整理笔记".into(),
+            kind: crate::watch::WatchKind::Agent,
             status: WatchStatus::Running,
             detail: None,
             duration_ms: 0,
         }));
-        assert_eq!(text(&render_lines(&agent_watch)[0]), "◉ Agent: 整理笔记");
+        assert_eq!(text(&render_lines(&agent_watch)[0]), "◉ reviewer · 整理笔记");
     }
 
     #[test]
     fn watch_header_states() {
         let w = WatchCall {
             label: "watch -n 2 ls".into(),
+            kind: crate::watch::WatchKind::Command,
             status: WatchStatus::Done,
             detail: Some("第 2 轮".into()),
             duration_ms: 9000,

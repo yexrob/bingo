@@ -76,6 +76,7 @@ pub enum UiEvent {
     /// Watchable 状态事件（命令/agent 生命周期，转发自 registry）。
     WatchEvent {
         label: String,
+        kind: crate::watch::WatchKind,
         status: WatchStatus,
         detail: Option<String>,
         duration_ms: u64,

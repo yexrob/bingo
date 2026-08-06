@@ -196,6 +196,8 @@ pub struct Session {
     pub last_task_reminder_turn: Arc<std::sync::atomic::AtomicU64>,
     /// 任务区展开信号（TUI 自循环订阅）。
     pub expand_tasks: watch::Sender<bool>,
+    /// 子代理实例注册表（续话/生命周期；子会话共享同一表）。
+    pub agents: Arc<crate::agents::AgentRegistry>,
 }
 
 /// 单个工具完成事件。
@@ -1211,6 +1213,7 @@ mod tests {
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
+            agents: crate::agents::AgentRegistry::new(),
         })
     }
 
@@ -1316,6 +1319,7 @@ mod tests {
             )),
             last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
+            agents: crate::agents::AgentRegistry::new(),
         });
         let mut ui = headless_hooks();
         let outcome = run_bash_command(
@@ -1549,6 +1553,7 @@ mod tests {
             )),
             last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
+            agents: crate::agents::AgentRegistry::new(),
         });
         let mut ui = headless_hooks();
         let outcome = run_bash_command(&session, "htop", Vec::new(), &mut ui, None)

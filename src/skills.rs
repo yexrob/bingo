@@ -24,16 +24,18 @@ pub struct Frontmatter {
     pub argument_names: Vec<String>,
 }
 
-/// 解析 `---\nkey: value\n---` 前置块；无 frontmatter 时返回默认值 + 原文。
-/// 支持 YAML 折叠/字面标量（`>-` / `|` 等）：后续缩进行并入值。
-pub fn parse_frontmatter(content: &str) -> (Frontmatter, &str) {
+/// 解析 `---\nkey: value\n---` 前置块为键值对 + 正文；无 frontmatter 时
+/// 返回空对 + 原文。任何键都支持 YAML 折叠/字面标量（`>-` / `|` 等）：
+/// 后续缩进行并入值（`|` 系保留换行，`>` 系折叠为空格）。
+/// 技能与 agent 定义共用（各自再解释键的语义）。
+pub fn parse_frontmatter_pairs(content: &str) -> (Vec<(String, String)>, &str) {
     let Some(rest) = content.strip_prefix("---\n") else {
-        return (Frontmatter::default(), content);
+        return (Vec::new(), content);
     };
     let Some(end) = rest.find("\n---") else {
-        return (Frontmatter::default(), content);
+        return (Vec::new(), content);
     };
-    let mut fm = Frontmatter::default();
+    let mut pairs = Vec::new();
     let fm_lines: Vec<&str> = rest[..end].lines().collect();
     let mut i = 0;
     while i < fm_lines.len() {
@@ -43,11 +45,7 @@ pub fn parse_frontmatter(content: &str) -> (Frontmatter, &str) {
             continue;
         };
         let (key, value) = (key.trim(), value.trim());
-        // 折叠/字面块：`description: >-` 后跟缩进行；`|-` 保留换行，
-        // `>-`/`>` 折叠为空格连接。
-        if (key == "description" || key == "when_to_use")
-            && matches!(value, ">" | ">-" | "|" | "|-")
-        {
+        if matches!(value, ">" | ">-" | "|" | "|-") {
             let mut parts: Vec<&str> = Vec::new();
             i += 1;
             while i < fm_lines.len() {
@@ -66,19 +64,29 @@ pub fn parse_frontmatter(content: &str) -> (Frontmatter, &str) {
             };
             let joined = joined.trim();
             if !joined.is_empty() {
-                match key {
-                    "description" => fm.description = Some(joined.to_string()),
-                    "when_to_use" => fm.when_to_use = Some(joined.to_string()),
-                    _ => {}
-                }
+                pairs.push((key.to_string(), joined.to_string()));
             }
             continue;
         }
-        match key {
-            "description" if !value.is_empty() => fm.description = Some(value.to_string()),
-            "when_to_use" if !value.is_empty() => fm.when_to_use = Some(value.to_string()),
+        if !value.is_empty() {
+            pairs.push((key.to_string(), value.to_string()));
+        }
+        i += 1;
+    }
+    let body = rest[end + 4..].trim_start();
+    (pairs, body)
+}
+
+/// 技能视角的 frontmatter：description / when_to_use / arguments。
+pub fn parse_frontmatter(content: &str) -> (Frontmatter, &str) {
+    let (pairs, body) = parse_frontmatter_pairs(content);
+    let mut fm = Frontmatter::default();
+    for (key, value) in pairs {
+        match key.as_str() {
+            "description" => fm.description = Some(value),
+            "when_to_use" => fm.when_to_use = Some(value),
             // CC 支持空格分隔或数组；此处统一逗号/空格分隔。
-            "arguments" if !value.is_empty() => {
+            "arguments" => {
                 fm.argument_names = value
                     .split([',', ' '])
                     .map(str::trim)
@@ -88,9 +96,7 @@ pub fn parse_frontmatter(content: &str) -> (Frontmatter, &str) {
             }
             _ => {}
         }
-        i += 1;
     }
-    let body = rest[end + 4..].trim_start();
     (fm, body)
 }
 

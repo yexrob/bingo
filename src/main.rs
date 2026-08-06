@@ -13,6 +13,7 @@ use crate::settings::load_settings;
 use crate::system::{build_system, load_memory};
 use crate::transcript::{create as create_transcript, latest as latest_transcript, Transcript};
 
+mod agents;
 mod api;
 mod budget;
 mod compact;
@@ -155,6 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, &task_list_key)),
         last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         expand_tasks: expand_tx,
+        agents: crate::agents::AgentRegistry::new(),
     });
 
     let mode_str = session.permission_mode_str();
