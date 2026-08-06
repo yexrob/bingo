@@ -5885,20 +5885,19 @@ mod tests {
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Skill".into(),
-            input: json!({"name": "pdf", "arguments": "doc.md"}),
+            input: json!({"skill": "pdf", "args": "doc.md"}),
             standalone: false,
         });
         chat.drain_events();
         let joined = visible(&mut chat, 120, 30);
-        let flat = joined.replace(' ', "");
         assert!(
-            flat.contains("arguments=\"doc.md\""),
+            joined.contains("pdf doc.md"),
             "running header shows input summary: {joined}"
         );
         // 完成后 duration 用真实值
         let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
             name: "Skill".into(),
-            summary: "arguments=\"doc.md\"".into(),
+            summary: "pdf doc.md".into(),
             output: "line".into(),
             is_error: false,
             diff: None,
@@ -5907,7 +5906,8 @@ mod tests {
         chat.drain_events();
         let joined = visible(&mut chat, 120, 30);
         // CC 双行：耗时并入结果行，且只有慢命令（>2s）才显示。
-        assert!(joined.contains("⏺ Skill(arguments=\"doc.md\")"), "头行: {joined}");
+        // Skill 用 ✦ 图标（类别图标：⏺ 内建 / ◆ MCP / ✦ Skill）。
+        assert!(joined.contains("✦ Skill(pdf doc.md)"), "头行: {joined}");
         assert!(joined.contains("Ran in 3.2s"), "结果行带耗时: {joined}");
         assert!(!joined.contains("3210ms"), "毫秒不再进头行: {joined}");
     }

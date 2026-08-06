@@ -369,7 +369,7 @@ pub fn thinking_completion_line(t: &Thinking, theme: &Theme) -> Line {
     )
 }
 
-/// Status colour of the leading `⏺`: running is muted, done is green,
+/// Status colour of the leading marker: running is muted, done is green,
 /// failure is red.
 fn dot_style(status: ToolStatus, theme: &Theme) -> crate::tui::line::SegStyle {
     match status {
@@ -379,14 +379,35 @@ fn dot_style(status: ToolStatus, theme: &Theme) -> crate::tui::line::SegStyle {
     }
 }
 
+/// 工具类别图标：内建 `⏺` / MCP `◆` / Skill `✦`。形状表类别、颜色表状态
+/// （dot_style 不变）；Agent 无工具行，其 Watch 行图标见 [`watch_header`]。
+pub fn tool_glyph(name: &str) -> &'static str {
+    if name.starts_with("mcp__") {
+        "◆ "
+    } else if name == "Skill" {
+        "✦ "
+    } else {
+        "⏺ "
+    }
+}
+
+/// MCP 全名 `mcp__server__tool` 显示为 `server:tool`；权限规则仍用全名。
+pub fn display_tool_name(name: &str) -> String {
+    match name.strip_prefix("mcp__") {
+        Some(rest) => rest.replacen("__", ":", 1),
+        None => name.to_string(),
+    }
+}
+
 /// Tool header: `⏺ Bash(git status)` — no timing, no output; those belong on
 /// the result line below.
 fn tool_header(t: &ToolCall, theme: &Theme) -> Line {
-    let mut line = Line::styled("⏺ ", dot_style(t.status, theme));
+    let mut line = Line::styled(tool_glyph(t.name), dot_style(t.status, theme));
+    let shown = display_tool_name(t.name);
     if t.summary.is_empty() {
-        line.push_styled(t.name.to_string(), theme.text());
+        line.push_styled(shown, theme.text());
     } else {
-        line.push_styled(format!("{}({})", t.name, t.summary), theme.text());
+        line.push_styled(format!("{shown}({})", t.summary), theme.text());
     }
     line
 }
@@ -421,6 +442,8 @@ fn tool_result(t: &ToolCall, act: &Activity, theme: &Theme) -> Line {
 }
 
 /// `⏺ watch -n 2 ls` — same shape as a tool, driven by the watch lifecycle.
+/// 子代理的 Watch 行（label `Agent: …`，见 agent_label）用 `◉`：环中有核，
+/// 会话中套会话。
 fn watch_header(w: &WatchCall, theme: &Theme) -> Line {
     let style = match w.status {
         WatchStatus::Running | WatchStatus::Idle => theme.dim(),
@@ -428,7 +451,12 @@ fn watch_header(w: &WatchCall, theme: &Theme) -> Line {
         WatchStatus::Failed => theme.tool_error(),
         WatchStatus::Cancelled => theme.dim(),
     };
-    let mut line = Line::styled("⏺ ", style);
+    let glyph = if w.label.starts_with("Agent: ") {
+        "◉ "
+    } else {
+        "⏺ "
+    };
+    let mut line = Line::styled(glyph, style);
     line.push_styled(w.label.clone(), theme.text());
     line
 }
@@ -757,6 +785,48 @@ mod tests {
         let (added, removed) = d.stats();
         assert_eq!(added, 1);
         assert_eq!(removed, 1);
+    }
+
+    /// 类别图标：⏺ 内建 / ◆ MCP（显示名 server:tool）/ ✦ Skill / ◉ Agent watch。
+    /// 形状表类别，颜色继续表状态。
+    #[test]
+    fn category_icons_and_mcp_display_name() {
+        let mcp = Activity::new(ActivityKind::Tool(ToolCall {
+            name: "mcp__dokploy__application-deploy",
+            status: ToolStatus::Done,
+            summary: "applicationId=\"x\"".into(),
+            duration_ms: 5,
+            output: None,
+            result_summary: None,
+        }));
+        assert_eq!(
+            text(&render_lines(&mcp)[0]),
+            "◆ dokploy:application-deploy(applicationId=\"x\")",
+            "MCP 全名显示为 server:tool"
+        );
+        // 状态色仍在图标上：Done 转绿。
+        assert_eq!(
+            render_lines(&mcp)[0].segs[0].style.fg,
+            Some(Theme::dark().success)
+        );
+
+        let skill = Activity::new(ActivityKind::Tool(ToolCall {
+            name: "Skill",
+            status: ToolStatus::Running,
+            summary: "review doc.md".into(),
+            duration_ms: 0,
+            output: None,
+            result_summary: None,
+        }));
+        assert_eq!(text(&render_lines(&skill)[0]), "✦ Skill(review doc.md)");
+
+        let agent_watch = Activity::new(ActivityKind::Watch(WatchCall {
+            label: "Agent: 整理笔记".into(),
+            status: WatchStatus::Running,
+            detail: None,
+            duration_ms: 0,
+        }));
+        assert_eq!(text(&render_lines(&agent_watch)[0]), "◉ Agent: 整理笔记");
     }
 
     #[test]

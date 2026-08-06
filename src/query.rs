@@ -536,6 +536,19 @@ pub(crate) fn summarize_input(tool_name: &str, input: &serde_json::Value) -> Str
                 String::new()
             }
         }
+        // Skill 摘要显示技能名与参数（`Skill(review doc.md)`），
+        // 不走 k=v 兜底（`args="…"` 噪声太重）。
+        ("Skill", serde_json::Value::Object(map)) => {
+            let skill = map.get("skill").and_then(|s| s.as_str()).unwrap_or("");
+            let args = map.get("args").and_then(|a| a.as_str()).unwrap_or("");
+            if skill.is_empty() {
+                String::new()
+            } else if args.is_empty() {
+                skill.to_string()
+            } else {
+                format!("{skill} {args}")
+            }
+        }
         // AskUserQuestion 摘要显示问题文本（工具行可读）。
         ("AskUserQuestion", serde_json::Value::Object(map)) => map
             .get("questions")
@@ -1250,6 +1263,17 @@ mod tests {
         let sc = summarize_input("Agent", &c);
         assert!(sc.starts_with("prompt=\""), "{sc}");
         assert!(sc.len() < 60, "prompt truncated: {sc}");
+    }
+
+    #[test]
+    fn skill_summary_shows_name_and_args() {
+        let both = serde_json::json!({"skill": "review", "args": "doc.md"});
+        assert_eq!(summarize_input("Skill", &both), "review doc.md");
+        let bare = serde_json::json!({"skill": "review"});
+        assert_eq!(summarize_input("Skill", &bare), "review");
+        // 缺 skill 名（畸形调用）：空摘要 → 头行只显示工具名。
+        let missing = serde_json::json!({"args": "doc.md"});
+        assert_eq!(summarize_input("Skill", &missing), "");
     }
 
     #[test]

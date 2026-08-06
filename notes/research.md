@@ -350,3 +350,9 @@
   - **展开**（存在折叠项或已落盘内容）：`Chat::expand_transcript` 把**全历史**所有可折叠项（活动 + 折叠组）展开、`reset_flushed` 回卷落盘游标、置 `dump_transcript` + `force_redraw`；app 层重放帧**先清可见屏**（与 resize 同款——不清屏的话旧画面与重放行的相对位置取决于视口历史，短内容会同屏重复），再从欢迎卡全量重建文档，取**最后一个**定稿检查点一次 `flush_items` + `advance_flushed_upto` 整卷冻结进 scrollback：重放内容从屏幕顶部铺起、chrome 紧随其下，超屏部分自然滚入 scrollback，用户上滑翻看全貌。动态尾部（流式消息/权限对话/瞬态 slash 行，均在检查点之外）照常留在视口。屏上已是全貌且无可展开项时 no-op。
   - **闭合**（`transcript_fully_expanded`：存在可折叠项且全部展开）：`Chat::collapse_transcript` 全历史折回聚合态，随后走 **resize 同款收拢**——撤销未渲染的重放、`force_redraw` 清可见屏、`rehydrate` 按折叠后的高度回灌填满窗口。屏上的展开重放行只留在 scrollback（write-once，不清屏就会与折叠窗口同屏并存）。无可折叠项时判定恒为假，ctrl+o 退化为纯重放。
   折叠旧拷贝留在 scrollback 上方，接受重复（与回灌同一取舍）。零新驱动原语：回卷（/clear、/resume 同款）+ 全量冻结（懒落盘同款）+ 清屏回灌（resize 同款）的组合。`last_message_dynamic` 门随之删除；fullscreen 的 ctrl+o 仍是就地折叠切换（那里可以重绘）。478 测试全绿（重写 2 个门测试为重放/闭合语义）。
+
+### D28. 活动行图标词汇表：形状表类别，颜色表状态
+
+- **问题**（用户点名「太丑」）：所有活动行统一 `⏺`，MCP 工具裸露全名 `mcp__server__tool(...)`，Skill 显示 k=v 兜底 `args="doc.md"`——类别不可辨、噪声重。
+- **词汇表**：`⏺` 内建工具（CC 锚点不动，组行/回复点/Update 同族）· `◆` MCP（外接件，显示名 `server:tool`，权限规则仍用 `mcp__` 全名）· `✦` Skill（与 ✢✻✽ 星芒 spinner 同族，摘要改 `技能名 参数`）· `◉` 子代理 Watch 行（环中有核=会话套会话；Agent 是隐藏工具，唯一可见行是 watch）。颜色继续只表状态（dim 运行/绿成/红败），一职一色。
+- **实现**：`activities.rs tool_glyph`/`display_tool_name` + `watch_header` label 前缀判定；`summarize_input` 加 Skill 臂。全部显示层，零行为变化。四个字形均为 unicode_width 单宽（◆/◉ EA=Ambiguous，与既有 ○/◇ 同类已被接受）。480 测试全绿。
