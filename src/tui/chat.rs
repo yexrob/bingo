@@ -6,7 +6,7 @@
 //! 事件从通道（`UiEvent` / `AskRequest`）流入，键盘/鼠标经
 //! [`Chat::on_key`] / [`Chat::doc_click`] 流入。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use iocraft::prelude::{Color, KeyCode, KeyModifiers};
@@ -20,6 +20,7 @@ use crate::tui::activities::{
     Thinking, ThinkingState, TodoItem, TodoStatus, ToolCall, ToolStatus, WatchCall,
     WatchStatus,
 };
+use crate::tui::gfx::{self, ImageCap, ImageMeta};
 use crate::tui::line::{text_width, Line, SegStyle};
 use crate::tui::markdown::MarkdownRenderer;
 use crate::tui::theme::{Theme, ThemeSetting};
@@ -597,6 +598,14 @@ pub struct Chat {
     processor: MarkdownProcessor,
     renderer: MarkdownRenderer,
     reply_cache: HashMap<String, Vec<Line>>,
+    /// 终端图片能力（kitty 协议；inline 模式检测，fullscreen 为 None）。
+    pub image_cap: Option<ImageCap>,
+    /// 已加载图片缓存（url → PNG 字节 + 单元格尺寸）。
+    pub images: HashMap<String, Arc<ImageMeta>>,
+    /// 拉取中的图片 url（防重复加载）。
+    images_pending: HashSet<String>,
+    /// 图片缓存版本（加载完成递增 → 渲染缓存失效）。
+    images_version: u64,
     /// 文档是否待重建（事件/tick/展开等写入后置位；布局层消费后清除）。
     pub dirty: bool,
     /// 上次 tick 时的文档行数（行号位移检测）。
@@ -712,6 +721,10 @@ impl Chat {
             processor: MarkdownProcessor::default(),
             renderer: MarkdownRenderer::with_theme(80, theme.clone()),
             reply_cache: HashMap::new(),
+            image_cap: None,
+            images: HashMap::new(),
+            images_pending: HashSet::new(),
+            images_version: 1,
             dirty: true,
             prev_doc_len: 0,
             prev_build_width: 0,
@@ -788,6 +801,25 @@ impl Chat {
                     m.loading = false;
                     m.selected = m.selected.min(m.models.len().saturating_sub(1));
                 }
+            }
+            UiEvent::ImageReady { url, meta } => {
+                self.images_pending.remove(&url);
+                match meta {
+                    Some(meta) => {
+                        self.images.insert(url.clone(), Arc::new(meta));
+                    }
+                    None => {
+                        self.images.remove(&url);
+                        let warning = format!("图片加载失败: {url}");
+                        if !self.warnings.iter().any(|w| w == &warning) {
+                            self.warnings.push(warning);
+                        }
+                    }
+                }
+                // 缓存版本递增：渲染器逐块缓存与 reply_cache 一并失效。
+                self.images_version = self.images_version.wrapping_add(1);
+                self.reply_cache.clear();
+                self.dirty = true;
             }
             UiEvent::TurnStart => {
                 self.thinking_buf.clear();
@@ -1184,6 +1216,9 @@ impl Chat {
                             hint.expanded = false;
                         }
                     }
+                    // 文本已定稿 → 异步加载其中的图片（完成后回发 ImageReady）。
+                    let text = self.messages[i].text.clone();
+                    self.load_message_images(&text);
                 }
                 self.stream_msg = None;
             }
@@ -1220,6 +1255,30 @@ impl Chat {
     #[cfg(test)]
     fn apply_event(&mut self, event: UiEvent) {
         self.handle(event);
+    }
+
+    /// 扫描消息文本中的 markdown 图片引用，异步加载未缓存/未在途的
+    /// url（data:/http(s)/本地路径），完成后回发 `ImageReady`。
+    fn load_message_images(&mut self, text: &str) {
+        let Some(cap) = self.image_cap else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let urls = gfx::extract_image_urls(text);
+        for url in urls {
+            if self.images.contains_key(&url) || self.images_pending.contains(&url) {
+                continue;
+            }
+            self.images_pending.insert(url.clone());
+            let events = self.events.clone();
+            let cwd = self.cwd.clone();
+            handle.spawn(async move {
+                let meta = gfx::load_image(&url, std::path::Path::new(&cwd), &cap).await;
+                let _ = events.send(UiEvent::ImageReady { url, meta });
+            });
+        }
     }
 
     fn pending_tools_clear(&mut self) {
@@ -2765,6 +2824,9 @@ impl Chat {
                         let processor = &mut self.processor;
                         let renderer = &mut self.renderer;
                         let cache = &mut self.reply_cache;
+                        let images = &self.images;
+                        let image_cap = self.image_cap;
+                        let images_version = self.images_version;
                         move |reply: &str| -> Vec<Line> {
                             if reply.is_empty() {
                                 return Vec::new();
@@ -2773,6 +2835,10 @@ impl Chat {
                                 return lines.clone();
                             }
                             renderer.set_width(width);
+                            // 图片缓存版本变化 → 同步渲染器（清逐块缓存）。
+                            if renderer.images_version() != images_version {
+                                renderer.set_images(image_cap, images, images_version);
+                            }
                             let doc = processor.process_streaming(reply);
                             renderer.render(&doc);
                             let lines = renderer.lines().to_vec();
@@ -3105,6 +3171,7 @@ fn push_text(theme: &Theme, rows: &mut Vec<Row>, reply: Vec<Line>) {
     for (j, line) in reply.into_iter().enumerate() {
         if j == 0 {
             let mut styled = Line::styled("⏺ ", SegStyle::fg(claude));
+            styled.image = line.image.clone();
             styled.segs.extend(line.segs);
             rows.push(Row::new(styled));
         } else {
@@ -3280,6 +3347,7 @@ fn welcome_card_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use serde_json::json;
 
     /// 测试用 Chat：独立通道 + 完整 Session。
@@ -5657,6 +5725,88 @@ mod tests {
             !*cancel_rx.borrow(),
             "receiver 全 drop 后 send_replace 仍复位（send 则失效）"
         );
-        drop(cancel_rx);
+    }
+
+    #[test]
+    fn image_ready_updates_cache_and_invalidates_render_cache() {
+        let mut chat = test_chat();
+        chat.reply_cache.insert("x".to_string(), vec![Line::plain("old")]);
+        let meta = ImageMeta {
+            cols: 5,
+            rows: 3,
+            bytes: vec![1, 2, 3],
+        };
+        chat.handle(UiEvent::ImageReady {
+            url: "a.png".to_string(),
+            meta: Some(meta.clone()),
+        });
+        assert!(chat.images.contains_key("a.png"), "加载成功写入缓存");
+        assert_eq!(chat.images["a.png"].cols, 5);
+        assert_eq!(chat.images_version, 2, "版本递增（初始 1）");
+        assert!(chat.reply_cache.is_empty(), "reply_cache 失效");
+
+        chat.handle(UiEvent::ImageReady {
+            url: "a.png".to_string(),
+            meta: None,
+        });
+        assert!(!chat.images.contains_key("a.png"), "失败移除缓存");
+        assert!(chat.warnings.iter().any(|w| w.contains("a.png")), "警告提示");
+    }
+
+    #[test]
+    fn turn_end_without_capability_skips_image_loading() {
+        let mut chat = test_chat();
+        chat.apply_turn_start();
+        chat.handle(UiEvent::TextDelta(
+            "![图](https://example.com/i.png)".to_string(),
+        ));
+        chat.handle(UiEvent::TurnEnd);
+        assert!(chat.images.is_empty(), "无能力不加载");
+        assert!(chat.images_pending.is_empty());
+    }
+
+    /// TurnEnd → 异步加载 data URL 图片 → ImageReady 回传 → 文档出现图片块。
+    #[tokio::test]
+    async fn turn_end_loads_images_and_renders_image_block() {
+        let mut chat = test_chat();
+        chat.image_cap = Some(ImageCap::default_cells());
+        let png = tiny_png();
+        let url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        chat.apply_turn_start();
+        chat.handle(UiEvent::TextDelta(format!("![图]({url})")));
+        chat.handle(UiEvent::TurnEnd);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        while !chat.images.contains_key(&url) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "image load timed out"
+            );
+            chat.drain_all();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(chat.images_pending.is_empty(), "在途集合已清空");
+        chat.build_rows(100);
+        let image_rows = chat
+            .doc
+            .rows
+            .iter()
+            .filter(|r| r.line.image.is_some())
+            .count();
+        assert!(image_rows > 0, "文档出现图片块行");
+        let meta = &chat.images[&url];
+        assert_eq!(image_rows, meta.rows, "块行数 = meta.rows");
+    }
+
+    /// 4×2 纯色 PNG（测试用）。
+    fn tiny_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(4, 2, image::Rgba([255u8, 0, 0, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
     }
 }

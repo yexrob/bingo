@@ -212,16 +212,14 @@ impl Theme {
         Some(bg <= 6 || bg == 8)
     }
 
-    /// 通过 OSC 11 查询终端真实背景色（对标 CC systemThemeWatcher）。
-    /// 发送 `ESC ] 11 ; ? ESC \`，读回 `rgb:RRRR/GGGG/BBBB`，按 BT.709
-    /// 相对亮度判断：> 0.5 为浅色。
-    /// 必须在 raw mode 下读：OSC 回复不带换行，规范模式行缓冲会吞掉；
-    /// 查询期间临时进 raw mode（约 200ms，其间按键可能被消费，可接受）。
+    /// 终端查询：临时 raw mode 下向 /dev/tty 写入查询序列并读回响应。
     ///
-    /// 不能用 tokio::fs 读：timeout 后 blocking 线程的 read() 无法取消，
-    /// 会一直卡着吞掉之后的第一个输入，且 tokio 关停时 join 该线程导致
-    /// 进程退不出。这里用 O_NONBLOCK + 轮询，任何时刻都不阻塞。
-    pub async fn detect_system_theme() -> Option<bool> {
+    /// 用 O_NONBLOCK + 轮询，任何时刻都不阻塞；查询期间按键可能被消费
+    /// （约 deadline 时长，可接受）。无 tty（管道/测试）时返回 None。
+    pub(crate) async fn query_terminal(
+        queries: &[&[u8]],
+        deadline: std::time::Duration,
+    ) -> Option<Vec<u8>> {
         use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
         use std::io::{Read, Write};
         use std::os::unix::fs::OpenOptionsExt;
@@ -235,18 +233,15 @@ impl Theme {
         enable_raw_mode().ok()?;
         let mut buf: Vec<u8> = Vec::new();
         let result = async {
-            tty.write_all(b"\x1b]11;?\x1b\\").ok()?;
+            for q in queries {
+                tty.write_all(q).ok()?;
+            }
             let mut chunk = [0u8; 64];
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+            let deadline = std::time::Instant::now() + deadline;
             loop {
                 match tty.read(&mut chunk) {
                     Ok(0) => break,
-                    Ok(n) => {
-                        buf.extend_from_slice(&chunk[..n]);
-                        if buf.windows(2).any(|w| w == b"\x1b\\") {
-                            return Some(());
-                        }
-                    }
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(_) => break,
                 }
@@ -260,6 +255,18 @@ impl Theme {
         .await;
         disable_raw_mode().ok();
         result?;
+        Some(buf)
+    }
+
+    /// 通过 OSC 11 查询终端真实背景色（对标 CC systemThemeWatcher）。
+    /// 发送 `ESC ] 11 ; ? ESC \`，读回 `rgb:RRRR/GGGG/BBBB`，按 BT.709
+    /// 相对亮度判断：> 0.5 为浅色。
+    pub async fn detect_system_theme() -> Option<bool> {
+        let buf = Self::query_terminal(
+            &[b"\x1b]11;?\x1b\\"],
+            std::time::Duration::from_millis(200),
+        )
+        .await?;
         theme_from_osc(&buf)
     }
 
@@ -504,7 +511,8 @@ fn theme_from_osc(data: &[u8]) -> Option<bool> {
             Some(u16::from_str_radix(hex, 16).ok()? as f64 / (16f64.powi(n as i32) - 1.0))
         };
         (comp(parts.next())?, comp(parts.next())?, comp(parts.next())?)
-    } else if let Some(rest) = payload.strip_prefix('#') {
+    } else {
+        let rest = payload.strip_prefix('#')?;
         let n = rest.len() / 3;
         if !(1..=4).contains(&n) || rest.len() % 3 != 0 {
             return None;
@@ -517,8 +525,6 @@ fn theme_from_osc(data: &[u8]) -> Option<bool> {
             comp(&rest[n..2 * n])?,
             comp(&rest[2 * n..])?,
         )
-    } else {
-        return None;
     };
     let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     Some(luminance <= 0.5)

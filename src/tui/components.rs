@@ -108,6 +108,9 @@ pub struct BingoProps {
     /// inline 模式（默认，对标 CC 非全屏）：定稿行经 use_output 打印进
     /// 终端 scrollback，canvas 只画动态尾部；None/false = 全屏视口模式。
     pub inline: Option<bool>,
+    /// kitty graphics protocol 能力（inline 模式检测；None = 图片显示
+    /// `#[image]` 占位）。
+    pub image_cap: Option<crate::tui::gfx::ImageCap>,
 }
 
 /// inline 模式（CC 非全屏）下的按键 gate：REPL 无滚动区，滚动键交给
@@ -180,7 +183,21 @@ impl Hook for FlushRows {
                 let chrome = shape_chrome(&chat);
                 let n = p.min((term_h as usize).saturating_sub(chrome));
                 if n > 0 {
-                    rows.extend(chat.doc.rows[p - n..p].iter().cloned());
+                    // 重播窗口回退到图片块首行（续行不打印，块必须整体重放）。
+                    let mut start = p - n;
+                    while start > 0 {
+                        let cur = chat.doc.rows[start].line.image.as_ref();
+                        let prev = chat.doc.rows[start - 1].line.image.as_ref();
+                        if cur.is_some()
+                            && prev.is_some()
+                            && cur.map(|c| &c.url) == prev.map(|c| &c.url)
+                        {
+                            start -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    rows.extend(chat.doc.rows[start..p].iter().cloned());
                 }
             }
             let shape = (chat.doc.rows.len(), shape_chrome(&chat));
@@ -195,9 +212,26 @@ impl Hook for FlushRows {
         // 形状变化帧同样走全量（防终端滚动导致 diff 错位）。
         updater.clear_terminal_output();
         let theme = self.chat.read().theme.clone();
-        for row in rows {
+        for (i, row) in rows.iter().enumerate() {
+            // 图片块：块首行输出 kitty 序列（放置+换行推进光标），
+            // 续行不输出——整块占位行由序列一并消费。
+            if let Some(img) = &row.line.image {
+                if !image_block_head(&rows, i) {
+                    continue;
+                }
+                let meta = {
+                    let chat = self.chat.read();
+                    chat.images.get(&img.url).cloned()
+                };
+                if let Some(meta) = meta {
+                    let seq =
+                        crate::tui::gfx::kitty_image_bytes(&meta.bytes, img.cols, img.rows);
+                    self.stdout.print(String::from_utf8_lossy(&seq));
+                    continue;
+                }
+            }
             let mut buf = Vec::new();
-            let canvas = row_element(&row, theme.text).render(None);
+            let canvas = row_element(row, theme.text).render(None);
             let _ = canvas.write_ansi(&mut buf);
             let rendered = String::from_utf8_lossy(&buf);
             self.stdout.println(rendered.trim_end_matches(['\n', '\r']));
@@ -232,7 +266,7 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (asks_tx, asks_rx) = mpsc::unbounded_channel();
     let mut chat = hooks.use_state(move || {
-        Chat::new(
+        let mut chat = Chat::new(
             session.clone(),
             events_tx,
             events_rx,
@@ -243,7 +277,9 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
                 props.detected_background,
             ),
             props.detected_background,
-        )
+        );
+        chat.image_cap = props.image_cap;
+        chat
     });
     // inline 模式：定稿行落盘游标（已打印进 scrollback 的 doc 行数）。
     let mut printed = hooks.use_state(|| 0usize);
@@ -886,7 +922,7 @@ fn Transcript(mut hooks: Hooks, props: &TranscriptProps) -> impl Into<AnyElement
     // 不钉屏幕底）；全屏：grow 填满视口。
     element! {
         View(
-            flex_grow: if props.tail_start.is_some() { 0.0 } else { 1.0 },
+            flex_grow: if props.tail_start.is_some() { 0.0_f32 } else { 1.0_f32 },
             width: 100pct,
             flex_direction: FlexDirection::Column,
             overflow_y: Overflow::Hidden,
@@ -907,6 +943,16 @@ fn Transcript(mut hooks: Hooks, props: &TranscriptProps) -> impl Into<AnyElement
             }))
         }
     }
+}
+
+/// 该行是否为图片块首行（块内续行返回 false；块边界按 url 识别）。
+fn image_block_head(rows: &[Row], i: usize) -> bool {
+    let Some(img) = &rows[i].line.image else {
+        return false;
+    };
+    rows.get(i.wrapping_sub(1)).is_none_or(|prev| {
+        prev.line.image.as_ref().map(|p| &p.url) != Some(&img.url)
+    })
 }
 
 /// 一行 → iocraft 元素：整行背景（用户气泡）用 View 包裹；
@@ -932,6 +978,15 @@ fn row_element(row: &Row, default_color: Color) -> AnyElement<'static> {
 }
 
 fn line_inner(line: &Line, default_color: Color) -> AnyElement<'static> {
+    // 图片块行：canvas 期显示占位（落盘时 FlushRows 输出真实图片序列）。
+    if line.image.is_some() {
+        return element!(Text(
+            color: default_color,
+            content: "#[image]".to_string(),
+            wrap: TextWrap::NoWrap,
+        ))
+        .into_any();
+    }
     if line.is_empty() {
         return element!(View(height: 1)).into_any();
     }
@@ -1000,6 +1055,35 @@ mod tests {
     use iocraft::prelude::KeyEventKind;
     use iocraft::prelude::KeyCode;
     use iocraft::prelude::TerminalEvent;
+    use crate::tui::line::ImageRef;
+
+    #[test]
+    fn image_block_head_detects_block_boundaries() {
+        let img = |url: &str| Line {
+            segs: Vec::new(),
+            image: Some(ImageRef {
+                url: url.to_string(),
+                cols: 10,
+                rows: 3,
+            }),
+        };
+        let plain = || Row::new(Line::plain("x"));
+        // [a0, a1, a2, text, b0, b1]：a0/b0 是块首，其余续行。
+        let rows = vec![
+            Row::new(img("a.png")),
+            Row::new(img("a.png")),
+            Row::new(img("a.png")),
+            plain(),
+            Row::new(img("b.png")),
+            Row::new(img("b.png")),
+        ];
+        assert!(image_block_head(&rows, 0), "块首");
+        assert!(!image_block_head(&rows, 1), "续行");
+        assert!(!image_block_head(&rows, 2), "续行");
+        assert!(!image_block_head(&rows, 3), "普通行");
+        assert!(image_block_head(&rows, 4), "新块首");
+        assert!(!image_block_head(&rows, 5), "新块续行");
+    }
 
     /// 渲染任意 Chat 的文档行（测试/视觉检查用）：种子事件初始化 + 受守卫的
     /// 文档重建（与 Bingo 相同的 dirty 收敛语义，无 tick）。

@@ -7,6 +7,7 @@
 pub mod activities;
 pub mod chat;
 pub mod components;
+pub mod gfx;
 pub mod line;
 pub mod markdown;
 pub mod math;
@@ -53,6 +54,11 @@ pub enum UiEvent {
     ModelsLoaded {
         provider: String,
         models: Vec<String>,
+    },
+    /// 消息定稿后图片异步加载完成（meta=None = 加载失败，显示占位）。
+    ImageReady {
+        url: String,
+        meta: Option<crate::tui::gfx::ImageMeta>,
     },
     TurnEnd,
     /// 非致命警告（如 MCP 连接失败），显示在输入框上方。
@@ -163,11 +169,20 @@ pub async fn run_tui_session(
     // fullscreen（raw mode）之前查一次终端背景色，供 auto 主题解析。
     let detected_background = theme::Theme::detect_system_theme().await;
 
+    // 全屏 canvas 每帧 diff 重绘无法稳定承载 kitty 图片 → 只有 inline
+    // 模式启用真实图片显示（定稿行一次落盘进 scrollback）。
+    let image_cap = if fullscreen {
+        None
+    } else {
+        gfx::detect_image_cap().await
+    };
+
     let mut root = element!(components::Bingo(
         session: Some(session),
         expand_rx: Some(expand_rx),
         detected_background: detected_background,
         inline: Some(!fullscreen),
+        image_cap: image_cap,
     ));
     if fullscreen {
         root.fullscreen().await?;

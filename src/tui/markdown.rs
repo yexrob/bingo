@@ -3,11 +3,15 @@
 //! 解析走 `rsmarkdown-core`（与显示无关），本模块把 block AST 渲染成
 //! [`Line`]（CJK 感知换行，宽度固定后按块缓存——只有源文本变化的块重渲）。
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use unicode_width::UnicodeWidthStr;
 
 use rsmarkdown_core::{Alignment, Ast, Block, Document, Inline, ListItem, Renderer};
 
-use crate::tui::line::{char_width, SegStyle, Line};
+use crate::tui::gfx::{ImageCap, ImageMeta};
+use crate::tui::line::{char_width, ImageRef, SegStyle, Line};
 use crate::tui::theme::Theme;
 
 /// 一个显示适配器：markdown AST → 样式化行。
@@ -19,6 +23,12 @@ pub struct MarkdownRenderer {
     /// 逐块缓存：(块源文本, 渲染行)。
     cached: Vec<Option<(String, Vec<Line>)>>,
     lines: Vec<Line>,
+    /// 终端图片能力（kitty 协议）；None = 只显示 `#[image]` 占位。
+    image_cap: Option<ImageCap>,
+    /// 已加载图片（url → 元数据）。
+    images: HashMap<String, Arc<ImageMeta>>,
+    /// 图片缓存版本（Chat 递增；变化时清逐块缓存）。
+    images_version: u64,
 }
 
 impl Default for MarkdownRenderer {
@@ -40,6 +50,9 @@ impl MarkdownRenderer {
             theme,
             cached: Vec::new(),
             lines: Vec::new(),
+            image_cap: None,
+            images: HashMap::new(),
+            images_version: 0,
         }
     }
 
@@ -49,6 +62,26 @@ impl MarkdownRenderer {
             self.width = width;
             self.cached.clear();
         }
+    }
+
+    /// 图片缓存版本（`set_images` 生效后递增）。
+    pub fn images_version(&self) -> u64 {
+        self.images_version
+    }
+
+    /// 更新图片能力与已加载图片；版本变化时清逐块缓存（图片从占位
+    /// 变为块渲染）。
+    pub fn set_images(
+        &mut self,
+        cap: Option<ImageCap>,
+        images: &HashMap<String, Arc<ImageMeta>>,
+        version: u64,
+    ) {
+        self.image_cap = cap;
+        self.images_version = version;
+        self.images.clear();
+        self.images.extend(images.iter().map(|(k, v)| (k.clone(), v.clone())));
+        self.cached.clear();
     }
 
     /// 最近一次 `render` 的输出行。
@@ -66,7 +99,17 @@ impl Renderer for MarkdownRenderer {
             let rendered = match cached {
                 Some((src, lines)) if src == &block.content => lines.clone(),
                 _ => {
-                    let lines = render_block(&block.ast, self.width, &self.theme);
+                    // 段落尾部为图片的块 → 块级图片渲染（对齐 rsmarkdown-tui
+                    // image_paragraph）；未加载时回落普通段落（行内 #[image]）。
+                    let lines = match block
+                        .ast
+                        .as_ref()
+                        .and_then(|a| a.children.iter().find_map(image_paragraph))
+                        .and_then(|url| self.images.get(url).map(|m| (url, m)))
+                    {
+                        Some((url, meta)) => image_block_lines(url, meta, self.theme.clone()),
+                        None => render_block(&block.ast, self.width, &self.theme),
+                    };
                     *cached = Some((block.content.clone(), lines.clone()));
                     lines
                 }
@@ -78,6 +121,36 @@ impl Renderer for MarkdownRenderer {
         }
         self.lines = out;
     }
+}
+
+/// 段落尾部为图片时返回图片 url（块级图片判定）。
+fn image_paragraph(block: &Block) -> Option<&str> {
+    let Block::Paragraph(inlines) = block else {
+        return None;
+    };
+    if let Some(Inline::Image { url, .. }) = inlines.last() {
+        return Some(url);
+    }
+    None
+}
+
+/// 图片块 → `rows` 行：首行占位文本（canvas 期显示 `#[image]`），
+/// 全部行携带 [`ImageRef`]（落盘时首行输出 kitty 序列、续行跳过）。
+fn image_block_lines(url: &str, meta: &ImageMeta, theme: Theme) -> Vec<Line> {
+    let img = ImageRef {
+        url: url.to_string(),
+        cols: meta.cols,
+        rows: meta.rows,
+    };
+    let mut out = Vec::with_capacity(meta.rows);
+    let mut first = Line::empty();
+    first.push_styled("#[image]", theme.dim());
+    first.image = Some(img.clone());
+    out.push(first);
+    for _ in 1..meta.rows {
+        out.push(Line { segs: Vec::new(), image: Some(img.clone()) });
+    }
+    out
 }
 
 /// 渲染一个块的 AST 为样式化行。
@@ -373,7 +446,17 @@ struct Seg {
 }
 
 fn collect_inlines(inlines: &[Inline], style: SegStyle, theme: &Theme, out: &mut Vec<Seg>) {
-    for inline in inlines {
+    let mut i = 0usize;
+    while i < inlines.len() {
+        let inline = &inlines[i];
+        // `![alt](url)` 的 alt 由解析器作为图片前紧邻的 Text 输出：与
+        // 图片同现的紧邻 Text 是 alt 本身，跳过（只留 `#[image]`）。
+        if matches!(inline, Inline::Text(_))
+            && matches!(inlines.get(i + 1), Some(Inline::Image { .. }))
+        {
+            i += 1;
+            continue;
+        }
         match inline {
             Inline::Text(t) => out.push(Seg { text: t.clone(), style }),
             Inline::SoftBreak => out.push(Seg { text: " ".to_string(), style }),
@@ -395,10 +478,10 @@ fn collect_inlines(inlines: &[Inline], style: SegStyle, theme: &Theme, out: &mut
                     style: style.patch(theme.dim()),
                 });
             }
-            Inline::Image { alt, .. } => {
+            Inline::Image { .. } => {
                 out.push(Seg {
-                    text: format!("[image: {alt}]"),
-                    style: style.patch(theme.link()),
+                    text: "#[image]".to_string(),
+                    style: style.patch(theme.dim()),
                 });
             }
             Inline::Math(m, _display) => {
@@ -419,6 +502,7 @@ fn collect_inlines(inlines: &[Inline], style: SegStyle, theme: &Theme, out: &mut
                 });
             }
         }
+        i += 1;
     }
 }
 
@@ -474,6 +558,7 @@ fn push_line(lines: &mut Vec<Line>, current: &mut Vec<Seg>) {
                 .into_iter()
                 .map(|s| crate::tui::line::Seg { text: s.text, style: s.style })
                 .collect(),
+            image: None,
         });
     }
 }
@@ -579,5 +664,78 @@ mod tests {
         assert_eq!(truncate("hello", 3), "he…");
         assert_eq!(truncate("hi", 3), "hi");
         assert_eq!(truncate("中文", 3), "中…");
+    }
+
+    #[test]
+    fn image_placeholder_without_capability() {
+        let lines = render_to_plain("![alt](a.png)", 40);
+        assert_eq!(lines[0], "#[image]");
+    }
+
+    #[test]
+    fn image_inline_placeholder_mid_paragraph() {
+        let lines = render_to_plain("前 ![a](a.png) 后", 40);
+        assert_eq!(lines[0], "前 #[image] 后");
+    }
+
+    #[test]
+    fn loaded_image_renders_block_rows() {
+        let mut processor = MarkdownProcessor::default();
+        let mut renderer = MarkdownRenderer::with_theme(40, Theme::dark());
+        let meta = Arc::new(ImageMeta {
+            cols: 10,
+            rows: 4,
+            bytes: vec![1, 2, 3],
+        });
+        let mut images = HashMap::new();
+        images.insert("a.png".to_string(), meta);
+        renderer.set_images(Some(ImageCap::default_cells()), &images, 1);
+        let doc = processor.process_static("![alt](a.png)");
+        renderer.render(&doc);
+        let lines = renderer.lines().to_vec();
+        assert_eq!(lines.len(), 4, "块占 4 行");
+        assert_eq!(lines[0].plain_text(), "#[image]");
+        assert_eq!(
+            lines[0].image,
+            Some(ImageRef {
+                url: "a.png".into(),
+                cols: 10,
+                rows: 4
+            })
+        );
+        assert_eq!(lines[3].image, lines[0].image, "续行携带相同引用");
+        assert_eq!(lines[3].plain_text(), "");
+    }
+
+    #[test]
+    fn image_not_loaded_falls_back_to_paragraph() {
+        let mut processor = MarkdownProcessor::default();
+        let mut renderer = MarkdownRenderer::with_theme(40, Theme::dark());
+        renderer.set_images(Some(ImageCap::default_cells()), &HashMap::new(), 1);
+        let doc = processor.process_static("![alt](a.png)");
+        renderer.render(&doc);
+        assert_eq!(renderer.lines()[0].plain_text(), "#[image]");
+        assert!(renderer.lines()[0].image.is_none());
+    }
+
+    #[test]
+    fn image_block_invalidated_on_version_bump() {
+        let mut processor = MarkdownProcessor::default();
+        let mut renderer = MarkdownRenderer::with_theme(40, Theme::dark());
+        renderer.set_images(Some(ImageCap::default_cells()), &HashMap::new(), 1);
+        let doc = processor.process_static("![alt](a.png)");
+        renderer.render(&doc);
+        assert!(renderer.lines()[0].image.is_none(), "未加载 → 占位行");
+
+        let meta = Arc::new(ImageMeta {
+            cols: 10,
+            rows: 4,
+            bytes: vec![1, 2, 3],
+        });
+        let mut images = HashMap::new();
+        images.insert("a.png".to_string(), meta);
+        renderer.set_images(Some(ImageCap::default_cells()), &images, 2);
+        renderer.render(&doc);
+        assert!(renderer.lines()[0].image.is_some(), "版本变化后重建为图片块");
     }
 }

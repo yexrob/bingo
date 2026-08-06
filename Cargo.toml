@@ -12,7 +12,7 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 futures-util = "0.3"
 async-stream = "0.3"
-rsmarkdown-core = { path = "/Users/yexrob/Episodes/Projects/rsmarkdown-tui/crates/core" }
+rsmarkdown-core = { git = "https://github.com/yexrob/rsmarkdown-tui" }
 async-trait = "0.1.91"
 rmcp = { version = "3.1", features = ["client", "transport-child-process"] }
 globset = "0.4.20"
@@ -24,5 +24,7 @@ iocraft = "0.8.4"
 unicode-width = "0.1"
 crossterm = "0.29"
 libc = "0.2"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 
 [dev-dependencies]

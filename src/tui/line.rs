@@ -71,6 +71,17 @@ impl SegStyle {
 pub struct Line {
     /// 按顺序排布的段。
     pub segs: Vec<Seg>,
+    /// 图片块引用：块内每一行都携带（首行 + 后续空行），显示层按 url
+    /// 识别块边界：块首行输出 kitty 序列，续行跳过。
+    pub image: Option<ImageRef>,
+}
+
+/// 图片块引用（指向 [`crate::tui::gfx::ImageMeta`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRef {
+    pub url: String,
+    pub cols: usize,
+    pub rows: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,17 +94,19 @@ impl Line {
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
             segs: vec![Seg { text: text.into(), style: SegStyle::plain() }],
+            image: None,
         }
     }
 
     pub fn styled(text: impl Into<String>, style: SegStyle) -> Self {
         Self {
             segs: vec![Seg { text: text.into(), style }],
+            image: None,
         }
     }
 
     pub fn empty() -> Self {
-        Self { segs: Vec::new() }
+        Self { segs: Vec::new(), image: None }
     }
 
     pub fn is_empty(&self) -> bool {
