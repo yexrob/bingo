@@ -2964,7 +2964,12 @@ impl Chat {
                     // 思考完成行（CC SystemTextMessage `✻ Churned for 40s`）：
                     // 渲染在消息末尾（正文与全部工具之后），取最后一个已完成的
                     // 真实思考块（空占位块不产生完成行）。
-                    if let Some(line) = self.messages[i].activities.iter().rev().find_map(
+                    // 只在回合结束后渲染：进行中展示会让 `✻ Baked for 0.4s` 在
+                    // 工具还在跑时就出现，与底部运行状态行互相矛盾。
+                    let show_done_line = i == self.messages.len() - 1 && self.stream_msg.is_none()
+                        || self.message_settled(i);
+                    if show_done_line
+                        && let Some(line) = self.messages[i].activities.iter().rev().find_map(
                         |a| match &a.kind {
                             ActivityKind::Thinking(t)
                                 if t.state == ThinkingState::Done && !a.content.is_empty() =>
@@ -3805,6 +3810,7 @@ mod tests {
         }
         chat.messages[0].activities[0] = done;
         chat.messages[0].text = "你好！".to_string();
+        chat.apply_event(UiEvent::TurnEnd);
         chat.build_rows(100);
         let joined: Vec<String> = chat
             .doc
@@ -3839,6 +3845,7 @@ mod tests {
             t.duration_ms = 400;
         }
         chat2.messages[0].activities[0] = ph;
+        chat2.apply_event(UiEvent::TurnEnd);
         chat2.build_rows(100);
         let joined2: String = chat2
             .doc
@@ -3848,6 +3855,39 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!joined2.contains("for 0.4s"), "空占位无完成行: {joined2}");
+    }
+
+    /// 完成行只在回合结束后出现：thinking 已 Done 但工具仍在运行时
+    /// 不渲染 `✻ Baked for 0.4s`，避免与底部运行状态行互相矛盾。
+    #[test]
+    fn thinking_completion_line_waits_for_turn_end() {
+        let mut chat = test_chat();
+        chat.apply_turn_start();
+        chat.apply_event(UiEvent::ThinkingDelta("plan".into()));
+        chat.apply_event(UiEvent::ToolStart { name: "Bash".into() });
+        chat.build_rows(100);
+        let rows: Vec<String> = chat
+            .doc
+            .rows
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect();
+        assert!(
+            !rows.iter().any(|l| l.starts_with("✻ ") && l.contains(" for ")),
+            "回合进行中不得有完成行: {rows:?}"
+        );
+        chat.apply_event(UiEvent::TurnEnd);
+        chat.build_rows(100);
+        let rows: Vec<String> = chat
+            .doc
+            .rows
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect();
+        assert!(
+            rows.iter().any(|l| l.starts_with("✻ ") && l.contains(" for ")),
+            "回合结束后应有完成行: {rows:?}"
+        );
     }
 
     /// 单轮内连续 delta 续写同一块。
