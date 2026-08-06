@@ -42,7 +42,9 @@ use ratatui::layout::{Rect, Size};
 use ratatui::style::Color;
 
 use crate::permission::PermissionMode;
-use crate::tui::chat::{Chat, ModelMenu, Row, SettledMark, SlashSuggestion, model_footer_label};
+use crate::tui::chat::{
+    Chat, ModelMenu, Row, SettledMark, SlashSuggestion, ThinkMenu, model_footer_label,
+};
 use crate::tui::gfx;
 use crate::tui::line::{Line, SegStyle, text_width};
 use crate::tui::term::{HistoryItem, StdoutTerm};
@@ -175,12 +177,13 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     Row::new(line)
 }
 
-/// 建议区：slash 建议优先，其次 `/model` 菜单。行数与内容同源——
-/// 二者曾经分家，chrome 因此低估、canvas 越界。
+/// 建议区：slash 建议优先，其次 `/model` 菜单，再次 `/think` 菜单。
+/// 行数与内容同源——二者曾经分家，chrome 因此低估、canvas 越界。
 fn suggestion_rows(
     slash: &[SlashSuggestion],
     slash_selected: usize,
     menu: Option<&ModelMenu>,
+    think: Option<&ThinkMenu>,
     theme: &Theme,
     width: usize,
 ) -> Vec<Row> {
@@ -194,7 +197,30 @@ fn suggestion_rows(
     };
     if slash.is_empty() {
         let Some(menu) = menu else {
-            return Vec::new();
+            // `/think` 等级选择器（模型菜单未激活时）。
+            let Some(think) = think else {
+                return Vec::new();
+            };
+            let name_col = crate::tui::chat::THINK_LEVELS
+                .iter()
+                .map(|(name, _)| name.chars().count())
+                .max()
+                .unwrap_or(0);
+            return crate::tui::chat::THINK_LEVELS
+                .iter()
+                .enumerate()
+                .map(|(i, (name, desc))| {
+                    let selected = i == think.selected;
+                    let line = crate::tui::markdown::truncate(
+                        &format!(
+                            "{}{name:<name_col$}  {desc}",
+                            if selected { "❯ " } else { "  " }
+                        ),
+                        width.saturating_sub(2),
+                    );
+                    row(line, selected)
+                })
+                .collect();
         };
         // `/model` 二级选择器：一级 `provider`，二级 `model`
         //（loading / 空列表各占一行提示）。
@@ -338,6 +364,7 @@ fn chrome_rows(chat: &Chat, width: usize, fullscreen: bool) -> Chrome {
         &chat.slash_suggestions,
         chat.slash_selected,
         chat.model_menu.as_ref(),
+        chat.think_menu.as_ref(),
         &theme,
         width,
     );
@@ -1077,6 +1104,7 @@ mod tests {
                     &chat.slash_suggestions,
                     chat.slash_selected,
                     chat.model_menu.as_ref(),
+                    chat.think_menu.as_ref(),
                     &chat.theme,
                     100
                 )
@@ -1091,15 +1119,15 @@ mod tests {
     /// canvas 因此越界）。
     #[test]
     fn suggestion_rows_cover_every_menu_state() {
-        use crate::tui::chat::{ModelMenuModels, SlashSuggestion};
+        use crate::tui::chat::{ModelMenuModels, SlashSuggestion, THINK_LEVELS, ThinkMenu};
         let theme = Theme::dark();
         let mut menu = ModelMenu {
             providers: vec!["default".into(), "openrouter".into()],
             provider_selected: 0,
             models: None,
         };
-        assert_eq!(suggestion_rows(&[], 0, None, &theme, 80).len(), 0);
-        assert_eq!(suggestion_rows(&[], 0, Some(&menu), &theme, 80).len(), 2);
+        assert_eq!(suggestion_rows(&[], 0, None, None, &theme, 80).len(), 0);
+        assert_eq!(suggestion_rows(&[], 0, Some(&menu), None, &theme, 80).len(), 2);
         // loading / 空列表各占一行提示。
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
@@ -1107,14 +1135,14 @@ mod tests {
             loading: true,
             selected: 0,
         });
-        assert_eq!(suggestion_rows(&[], 0, Some(&menu), &theme, 80).len(), 1);
+        assert_eq!(suggestion_rows(&[], 0, Some(&menu), None, &theme, 80).len(), 1);
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
             models: Vec::new(),
             loading: false,
             selected: 0,
         });
-        assert_eq!(suggestion_rows(&[], 0, Some(&menu), &theme, 80).len(), 1);
+        assert_eq!(suggestion_rows(&[], 0, Some(&menu), None, &theme, 80).len(), 1);
         // 二级模型列表按 5+5 上限截断。
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
@@ -1123,20 +1151,37 @@ mod tests {
             selected: 0,
         });
         assert_eq!(
-            suggestion_rows(&[], 0, Some(&menu), &theme, 80).len(),
+            suggestion_rows(&[], 0, Some(&menu), None, &theme, 80).len(),
             crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5
+        );
+        // `/think` 菜单：每档一行，选中行带 ❯ 标记；模型菜单优先。
+        let think = ThinkMenu { selected: 1 };
+        let think_rows = suggestion_rows(&[], 0, None, Some(&think), &theme, 80);
+        assert_eq!(think_rows.len(), THINK_LEVELS.len());
+        assert!(
+            row_text(&think_rows[1]).starts_with("❯ low"),
+            "{}",
+            row_text(&think_rows[1])
+        );
+        assert_eq!(
+            suggestion_rows(&[], 0, Some(&menu), Some(&think), &theme, 80).len(),
+            crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5,
+            "模型菜单优先于 think 菜单"
         );
         // slash 建议优先于菜单。
         let slash = vec![SlashSuggestion {
             name: "help".into(),
             description: "显示可用命令".into(),
         }];
-        let rows = suggestion_rows(&slash, 0, Some(&menu), &theme, 80);
+        let rows = suggestion_rows(&slash, 0, Some(&menu), None, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(row_text(&rows[0]).starts_with("❯ /help"), "{}", row_text(&rows[0]));
         // 每行都按宽度截断（超宽行会被终端折行，帧高度随即失真）。
         for width in 10..80usize {
-            for row in suggestion_rows(&slash, 0, Some(&menu), &theme, width) {
+            for row in suggestion_rows(&slash, 0, Some(&menu), None, &theme, width) {
+                assert!(text_width(&row_text(&row)) <= width, "width={width}");
+            }
+            for row in suggestion_rows(&[], 0, None, Some(&think), &theme, width) {
                 assert!(text_width(&row_text(&row)) <= width, "width={width}");
             }
         }

@@ -103,6 +103,7 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
         tools: Vec::new(),
         stream: false,
         thinking: None,
+        output_config: None,
     };
     let facts = match session.client.complete_text(&request).await {
         Ok(f) => f,

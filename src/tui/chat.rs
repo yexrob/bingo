@@ -214,7 +214,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("theme", "切换主题（/theme [dark|light|auto]）"),
     ("mcp", "管理 MCP 服务器（/mcp [enable|disable|reconnect]）"),
     ("provider", "列出/切换 API provider（/provider [名称]）"),
-    ("think", "设置思考级别（/think [off|low|medium|high]）"),
+    ("think", "设置思考级别（/think [off|low|medium|high|xhigh|max]）"),
     ("skills", "列出可用技能"),
     ("tasks", "列出后台任务"),
     ("exit", "退出会话"),
@@ -254,6 +254,23 @@ pub struct ModelMenuModels {
     pub loading: bool,
     pub selected: usize,
 }
+
+/// `/think` 单级选择器状态（等级表 = off + [`crate::api::types::THINKING_LEVELS`]）。
+#[derive(Clone)]
+pub struct ThinkMenu {
+    pub selected: usize,
+}
+
+/// `/think` 选择器条目：等级名 + 说明（off 之外与 THINKING_LEVELS 一一对应，
+/// 顺序一致；一致性由测试保证）。
+pub const THINK_LEVELS: &[(&str, &str)] = &[
+    ("off", "不发 thinking 参数（兼容 DeepSeek 等端点）"),
+    ("low", "adaptive thinking · effort low"),
+    ("medium", "adaptive thinking · effort medium"),
+    ("high", "adaptive thinking · effort high（默认档位）"),
+    ("xhigh", "adaptive thinking · effort xhigh（编码/agentic 推荐）"),
+    ("max", "adaptive thinking · effort max（最深推理）"),
+];
 
 /// 下拉最大可见行数（OVERLAY_MAX_ITEMS = 5）。
 pub const SLASH_SUGGESTIONS_MAX: usize = 5;
@@ -742,6 +759,8 @@ pub struct Chat {
     pub slash_selected: usize,
     /// `/model` 二级选择器（一级 endpoint → 二级模型列表；None = 未激活）。
     pub model_menu: Option<ModelMenu>,
+    /// `/think` 等级选择器（None = 未激活）。
+    pub think_menu: Option<ThinkMenu>,
     /// 任务区展开信号（Task 工具调用 → 展示任务列表）。
     pub tasks_visible: bool,
     /// 底部实体区快照（agent 实例 + 频道；tick/WatchEvent 时刷新）。
@@ -908,6 +927,7 @@ impl Chat {
             slash_suggestions: Vec::new(),
             slash_selected: 0,
             model_menu: None,
+            think_menu: None,
             tasks_visible: false,
             entities: Vec::new(),
             entity_focus: None,
@@ -2426,32 +2446,77 @@ impl Chat {
     }
 
     fn slash_think(&mut self, arg: &str) {
-        let session = self.session.clone();
-        let cwd = std::path::PathBuf::from(&self.cwd);
         if arg.is_empty() {
-            let current = session.runtime.thinking.borrow().clone();
-            let shown = current.as_deref().unwrap_or("off");
-            self.push_slash_output(format!(
-                "当前思考级别: {shown}\n用法: /think [off|low|medium|high]\n\
-                 low=2048 · medium=8192 · high=16384 budget tokens"
-            ));
+            self.open_think_menu();
             return;
         }
-        let level = match arg {
-            "off" => None,
-            "low" | "medium" | "high" => Some(arg.to_string()),
-            _ => {
-                self.push_slash_output("用法: /think [off|low|medium|high]".to_string());
-                return;
-            }
+        self.set_think_level(arg);
+    }
+
+    /// 设置思考级别（运行时 + 持久化）。等级表 = off + THINKING_LEVELS：
+    /// off 不发参数，其余发 adaptive thinking + output_config.effort。
+    fn set_think_level(&mut self, arg: &str) {
+        let level = if arg == "off" {
+            None
+        } else if crate::api::types::THINKING_LEVELS.contains(&arg) {
+            Some(arg.to_string())
+        } else {
+            self.push_slash_output(
+                "用法: /think [off|low|medium|high|xhigh|max]".to_string(),
+            );
+            return;
         };
-        let _ = session.runtime.thinking_tx.send(level.clone());
+        let _ = self.session.runtime.thinking_tx.send(level.clone());
         let saved = level.as_deref().unwrap_or("off");
+        let cwd = std::path::PathBuf::from(&self.cwd);
         let _ = crate::settings::upsert_project_settings(
             &cwd,
             &serde_json::json!({ "thinkingLevel": saved }),
         );
         self.push_slash_output(format!("✓ 思考级别已设置: {saved}"));
+    }
+
+    /// 进入 `/think` 等级选择器：预选当前等级（未设置 = off）。
+    fn open_think_menu(&mut self) {
+        let current = self.session.runtime.thinking.borrow().clone();
+        let current = current.as_deref().unwrap_or("off");
+        let selected = THINK_LEVELS
+            .iter()
+            .position(|(name, _)| *name == current)
+            .unwrap_or(0);
+        self.think_menu = Some(ThinkMenu { selected });
+        self.slash_suggestions.clear();
+    }
+
+    /// 思考等级菜单键盘：↑↓ 移动（循环）、Enter 确认、Esc 退出。返回已消费。
+    fn think_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let Some(menu) = &mut self.think_menu else {
+            return false;
+        };
+        match code {
+            KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
+                menu.selected = (menu.selected + 1) % THINK_LEVELS.len();
+                true
+            }
+            KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
+                menu.selected = menu
+                    .selected
+                    .checked_sub(1)
+                    .unwrap_or(THINK_LEVELS.len() - 1);
+                true
+            }
+            KeyCode::Enter => {
+                let selected = menu.selected.min(THINK_LEVELS.len() - 1);
+                self.think_menu = None;
+                self.set_think_level(THINK_LEVELS[selected].0);
+                true
+            }
+            KeyCode::Esc => {
+                self.think_menu = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     fn slash_skills(&mut self) {
@@ -2851,8 +2916,11 @@ impl Chat {
         if self.ask_key(code) {
             return true;
         }
-        // `/model` 二级选择器优先于输入（↑↓/Enter/Esc 全消费）。
+        // `/model` `/think` 选择器优先于输入（↑↓/Enter/Esc 全消费）。
         if self.model_menu_key(code, modifiers) {
+            return true;
+        }
+        if self.think_menu_key(code, modifiers) {
             return true;
         }
         if self.search.is_some() {
@@ -5436,24 +5504,28 @@ mod tests {
         let mut chat = test_chat_home(tmp.join("home"));
         chat.cwd = tmp.display().to_string();
 
+        // 无参进入等级选择器（预选 off = 首项）。
         chat.input = "/think".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
-        assert!(out.contains("当前思考级别: off"), "{out}");
+        let menu = chat.think_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THINK_LEVELS[menu.selected].0, "off", "未设置时预选 off");
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(chat.think_menu.is_none(), "Esc 退出菜单");
 
-        chat.input = "/think high".to_string();
+        // 新档位 xhigh：运行时生效 + 持久化。
+        chat.input = "/think xhigh".to_string();
         chat.submit();
         let out = chat.slash_lines.join("\n");
-        assert!(out.contains("✓ 思考级别已设置: high"), "{out}");
+        assert!(out.contains("✓ 思考级别已设置: xhigh"), "{out}");
         assert_eq!(
             chat.session.runtime.thinking.borrow().as_deref(),
-            Some("high")
+            Some("xhigh")
         );
         let saved: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(saved["thinkingLevel"], "high");
+        assert_eq!(saved["thinkingLevel"], "xhigh");
 
         chat.input = "/think off".to_string();
         chat.submit();
@@ -5465,6 +5537,11 @@ mod tests {
         chat.submit();
         let out = chat.slash_lines.join("\n");
         assert!(out.contains("用法: /think"), "{out}");
+        assert_eq!(
+            chat.session.runtime.thinking.borrow().as_deref(),
+            None,
+            "无效参数不改状态"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -5808,6 +5885,54 @@ mod tests {
             chat.slash_lines.join("\n").contains("模型已切换"),
             "确认提示"
         );
+    }
+
+    /// /think 无参进入等级选择器：预选当前档位，↑↓ 移动，Enter 确认，Esc 退出。
+    #[test]
+    fn think_menu_navigates_and_confirms() {
+        let home =
+            std::env::temp_dir().join(format!("bingo-think-menu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let mut chat = test_chat_home(home.clone());
+        let _ = chat.session.runtime.thinking_tx.send(Some("high".into()));
+        chat.input = "/think".to_string();
+        chat.submit();
+        let menu = chat.think_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THINK_LEVELS[menu.selected].0, "high", "预选当前档位");
+        // ↑ 到 medium，Enter 确认：运行时生效 + 持久化 + 关闭菜单。
+        assert!(chat.on_key(KeyCode::Up, KeyModifiers::empty()));
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(chat.think_menu.is_none(), "确认后关闭菜单");
+        assert_eq!(
+            chat.session.runtime.thinking.borrow().as_deref(),
+            Some("medium")
+        );
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".bingo/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["thinkingLevel"], "medium", "选择持久化");
+        // 再开菜单：Esc 直接退出；off 清空等级。
+        chat.input = "/think".to_string();
+        chat.submit();
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(chat.think_menu.is_none(), "Esc 退出");
+        chat.input = "/think off".to_string();
+        chat.submit();
+        assert_eq!(
+            chat.session.runtime.thinking.borrow().as_deref(),
+            None,
+            "off 清空等级"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// THINK_LEVELS（选择器）与 API 层 THINKING_LEVELS 一致：off + 全档位，顺序一致。
+    #[test]
+    fn think_levels_match_api_levels() {
+        assert_eq!(THINK_LEVELS[0].0, "off");
+        let menu: Vec<&str> = THINK_LEVELS[1..].iter().map(|(n, _)| *n).collect();
+        assert_eq!(menu, crate::api::types::THINKING_LEVELS.to_vec());
     }
 
     /// footer 徽标：带思考等级时显示 `模型 · think 等级`，off 只显示模型名。

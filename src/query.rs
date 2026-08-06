@@ -350,6 +350,7 @@ async fn one_turn(
         tools: tool_params(tools),
         stream: true,
         thinking: crate::api::types::thinking_param(thinking.as_deref()),
+        output_config: crate::api::types::effort_param(thinking.as_deref()),
     };
     // 连接阶段同样可中断（连接挂起/重试时按 Esc 立即放弃，不等输出开始）。
     let mut acc = AssistantAccumulator::new();
