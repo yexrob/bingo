@@ -1,4 +1,4 @@
-//! Claude Code 风格的 agent 活动（thinking / tool / diff / watch）。
+//! agent 活动（thinking / tool / diff / watch）。
 //!
 //! 移植自 rsmarkdown-tui `activities.rs`：活动是一个可折叠面板——折叠
 //! 时一行头部，展开时头部 + 内容。这里只保留 bingo 用到的种类
@@ -95,8 +95,7 @@ pub enum ThinkingState {
 }
 
 /// 一个思考块：`✻ Thinking`（运行/完成同头；运行词与耗时只在底部状态行）。
-/// 完成行的 `✻ Churned for 1.4s` 由 [`thinking_completion_line`] 在消息末尾渲染
-/// （对标 CC SystemTextMessage）。
+/// 完成行的 `✻ Churned for 1.4s` 由 [`thinking_completion_line`] 在消息末尾渲染。
 #[derive(Debug, Clone)]
 pub struct Thinking {
     /// 运行/完成。
@@ -105,7 +104,7 @@ pub struct Thinking {
     pub duration_ms: u64,
     /// 区分连续推理阶段（运行/完成更新替换正确的块）。
     pub stage: &'static str,
-    /// 完成态随机词（对标 CC TURN_COMPLETION_VERBS：`✻ Churned for 40s`）；
+    /// 完成态随机词（`✻ Churned for 40s`）；
     /// None 回落 stage。
     pub done_verb: Option<&'static str>,
     /// 宿主 tick（块级独立计时起点）。
@@ -323,13 +322,13 @@ fn diff_header(d: &Diff, theme: &Theme) -> Line {
     line
 }
 
-/// 思考块头：运行/完成同形 `✻ Thinking`（dim italic，对标 CC AssistantThinking
-/// 的 `∴ Thinking`）。运行词、spinner 与耗时只出现在底部状态行，避免重复。
+/// 思考块头：运行/完成同形 `✻ Thinking`（dim italic）。
+/// 运行词、spinner 与耗时只出现在底部状态行，避免重复。
 fn thinking_header(_t: &Thinking, _spinner: char, theme: &Theme) -> Line {
     Line::styled("✻ Thinking", theme.thinking())
 }
 
-/// 思考完成行（对标 CC SystemTextMessage）：`✻ {done_verb} for 40.0s`，
+/// 思考完成行：`✻ {done_verb} for 40.0s`，
 /// 渲染在消息末尾（正文与全部工具之后）。
 pub fn thinking_completion_line(t: &Thinking, theme: &Theme) -> Line {
     let verb = t.done_verb.unwrap_or(t.stage);
@@ -434,7 +433,7 @@ pub fn layout_activity(
     render_reply: &mut dyn FnMut(&str) -> Vec<Line>,
 ) -> (Vec<Line>, Vec<ActivityRowRange>) {
     let mut header = header_for(act, spinner, theme);
-    // 主级活动点（CC：`⏺ Read(.mcp.json)`）
+    // 主级活动点（`⏺ Read(.mcp.json)`）
     if matches!(
         act.kind,
         ActivityKind::Tool(_) | ActivityKind::Diff(_) | ActivityKind::Watch(_)
@@ -553,7 +552,7 @@ mod tests {
 
     #[test]
     fn completion_line_uses_random_verb_and_duration() {
-        // 对标 CC SystemTextMessage：`✻ Churned for 40.0s`（随机过去式动词）。
+        // `✻ Churned for 40.0s`（随机过去式动词）。
         let t = Thinking {
             state: ThinkingState::Done,
             duration_ms: 40_000,

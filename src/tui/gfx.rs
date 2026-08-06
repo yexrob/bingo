@@ -188,8 +188,21 @@ pub async fn load_image(url: &str, cwd: &Path, cap: &ImageCap) -> Option<ImageMe
 
 /// 按 url 类型取原始字节。
 async fn fetch_bytes(url: &str, cwd: &Path) -> Option<Vec<u8>> {
+    // CommonMark 角括号包裹的 URL（`![alt](<path with spaces>)`）剥壳，
+    // 与渲染层的 key 保持一致。
+    let url = url
+        .strip_prefix('<')
+        .and_then(|u| u.strip_suffix('>'))
+        .unwrap_or(url);
     if let Some(head) = url.strip_prefix("data:") {
         return decode_data_url(head);
+    }
+    if let Some(rest) = url.strip_prefix("file://") {
+        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+        let path = percent_encoding::percent_decode_str(rest)
+            .decode_utf8()
+            .ok()?;
+        return std::fs::read(path.as_ref()).ok();
     }
     if url.starts_with("http://") || url.starts_with("https://") {
         let client = reqwest::Client::new();
@@ -222,11 +235,19 @@ fn decode_data_url(head: &str) -> Option<Vec<u8>> {
 
 /// 从 markdown 文本提取图片 url（`![alt](url)`，url 不含空白）。
 pub fn extract_image_urls(text: &str) -> Vec<String> {
+    // 捕获后剥 `<>`（CommonMark 角括号包裹）：渲染层（rsmarkdown）同样
+    // 剥壳，保持同一 key，否则加载缓存与渲染对不上。
     let Ok(re) = regex::Regex::new(r"!\[[^\]]*\]\(([^)\s]+)\)") else {
         return Vec::new();
     };
     re.captures_iter(text)
         .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .map(|url| {
+            url.strip_prefix('<')
+                .and_then(|u| u.strip_suffix('>'))
+                .map(str::to_string)
+                .unwrap_or(url)
+        })
         .collect()
 }
 
@@ -321,6 +342,11 @@ mod tests {
             extract_image_urls("看 ![图](a.png) 和 ![b](https://x.com/i.png) 完"),
             vec!["a.png".to_string(), "https://x.com/i.png".to_string()]
         );
+        // 角括号包裹的 URL（CommonMark `<...>`）剥壳，与渲染层 key 一致。
+        assert_eq!(
+            extract_image_urls("![图](</Users/x/Untitled-1.png>)"),
+            vec!["/Users/x/Untitled-1.png".to_string()]
+        );
         assert_eq!(extract_image_urls("无图片"), Vec::<String>::new());
         assert_eq!(extract_image_urls("![alt](has space.png)"), Vec::<String>::new());
     }
@@ -334,6 +360,29 @@ mod tests {
         let meta = meta.expect("data url png loads");
         assert!(meta.cols >= 1 && meta.rows >= 1);
         assert!(meta.bytes.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn fetch_bytes_decodes_file_urls() {
+        let tmp = std::env::temp_dir().join(format!("bingo-gfx-fileurl-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("Weixin Image.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").unwrap();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        // file:// + 百分号编码（模型常把含空格路径写成 %20）。
+        let url = format!("file://{}", path.display());
+        let encoded = url.replace(' ', "%20");
+        let bytes = runtime.block_on(fetch_bytes(&encoded, Path::new("/nonexistent")));
+        assert_eq!(bytes, Some(b"\x89PNG\r\n\x1a\n".to_vec()), "file url decodes");
+        // 相对 file 路径按 cwd 解析。
+        let rel = runtime.block_on(fetch_bytes("sub/img.png", &tmp));
+        assert_eq!(rel, None, "相对路径缺失时失败");
+        std::fs::create_dir_all(tmp.join("sub")).unwrap();
+        std::fs::write(tmp.join("sub/img.png"), b"x").unwrap();
+        let rel = runtime.block_on(fetch_bytes("sub/img.png", &tmp));
+        assert_eq!(rel, Some(b"x".to_vec()), "相对路径按 cwd 解析");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

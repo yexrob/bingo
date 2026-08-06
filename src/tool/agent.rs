@@ -38,7 +38,7 @@ pub struct AgentInput {
     provider: Option<String>,
 }
 
-/// 子代理工具（对标 Claude Code Task，D14）：递归 queryLoop，
+/// 子代理工具（D14）：递归 queryLoop，
 /// 独立消息历史，结果文本回填父模型。
 pub struct AgentTool {
     session: Arc<Session>,

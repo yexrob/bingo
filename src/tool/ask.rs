@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-/// 单条问题（对标 CC AskUserQuestionInput.questions[]）：
+/// 单条问题：
 /// options 2-4 个、label 唯一；header 为短标签（≤12 字符）。
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -41,7 +41,7 @@ const MAX_QUESTIONS: usize = 4;
 const MIN_OPTIONS: usize = 2;
 const MAX_OPTIONS: usize = 4;
 
-/// 问用户选择题（对标 CC AskUserQuestion）：暂停回合，用户以数字键回答，
+/// 问用户选择题：暂停回合，用户以数字键回答，
 /// Esc 跳过。答案回填模型（`The user answered: "q"="a"`）；全部未答 →
 /// `The user did not answer the questions.`
 pub struct AskUserQuestionTool;
@@ -122,7 +122,7 @@ impl Tool for AskUserQuestionTool {
     }
 }
 
-/// 输入约束（对标 CC schema：questions 1-4、options 2-4、问题与选项各自唯一）。
+/// 输入约束：questions 1-4、options 2-4、问题与选项各自唯一。
 fn validate(params: &AskUserQuestionInput) -> Result<(), ToolError> {
     let n = params.questions.len();
     if !(1..=MAX_QUESTIONS).contains(&n) {

@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// 一个技能：`<name>/SKILL.md`（YAML frontmatter + markdown 正文）。
-/// 对标 Claude Code 的 skills 目录格式（loadSkillsDir.ts）。
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
@@ -16,7 +15,7 @@ pub struct Skill {
     pub content: String,
 }
 
-/// frontmatter 解析结果（行解析，对齐 CC frontmatterParser 的简单形状；
+/// frontmatter 解析结果（行解析的简单形状；
 /// 仅支持 `key: value` 单行，不做完整 YAML）。
 #[derive(Debug, Default, PartialEq)]
 pub struct Frontmatter {
@@ -95,7 +94,7 @@ pub fn parse_frontmatter(content: &str) -> (Frontmatter, &str) {
     (fm, body)
 }
 
-/// description 缺失时的回落：正文第一个非空行（对齐 CC extractDescriptionFromMarkdown）。
+/// description 缺失时的回落：正文第一个非空行。
 pub fn first_line(markdown: &str) -> String {
     markdown
         .lines()
@@ -113,7 +112,7 @@ fn user_skills_dir(home: &Path) -> PathBuf {
     config.join("bingo").join("skills")
 }
 
-/// 从 cwd 向上逐层找 `.bingo/skills`（对标 CC getProjectDirsUpToHome('skills')）。
+/// 从 cwd 向上逐层找 `.bingo/skills`。
 fn project_skills_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut dir = Some(cwd);
@@ -153,7 +152,7 @@ fn load_dir(dir: &Path, out: &mut Vec<Skill>) {
     }
 }
 
-/// 内置技能清单（编译进二进制，对标 CC registerBundledSkill）：
+/// 内置技能清单（编译进二进制）：
 /// 每个技能的内容内嵌在 `bundled/*.md`，base_dir 为空（无文件基准）。
 pub fn bundled_skills() -> Vec<Skill> {
     let mut skills = Vec::new();
@@ -197,7 +196,7 @@ fn realpath_or(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// 按参数名/位置替换占位符（对标 CC substituteArguments 的最小面）：
+/// 按参数名/位置替换占位符：
 /// `$ARGUMENTS` → 完整参数串；`$ARGUMENTS[N]`/`$N` → 第 N 个参数；
 /// `$name` → 按声明顺序的第 N 个参数（后不跟 `[` 或单词字符）。
 /// args 为空串时占位符替换为空；无占位符且 args 非空时追加 `ARGUMENTS:`。
@@ -249,7 +248,7 @@ fn replace_word_boundary(haystack: &str, needle: &str, value: &str) -> String {
 }
 
 /// 技能展开：`Base directory for this skill: {dir}` 头（内置技能无文件基准时省略）
-/// + 参数替换 + `${CLAUDE_SKILL_DIR}`（对标 CC createSkillCommand.getPromptForCommand）。
+/// + 参数替换 + `${CLAUDE_SKILL_DIR}`。
 pub fn expand_skill(skill: &Skill, args: &str) -> String {
     let mut content = skill.content.clone();
     if !skill.base_dir.as_os_str().is_empty() {
@@ -263,9 +262,9 @@ pub fn expand_skill(skill: &Skill, args: &str) -> String {
     content.replace("${CLAUDE_SKILL_DIR}", &skill.base_dir.display().to_string())
 }
 
-/// 清单条目截断长度（对标 CC MAX_LISTING_DESC_CHARS）。
+/// 清单条目截断长度。
 pub const MAX_LISTING_DESC_CHARS: usize = 250;
-/// 清单默认字符预算（对标 CC DEFAULT_CHAR_BUDGET = 上下文 1%）。
+/// 清单默认字符预算（上下文 1%）。
 pub const DEFAULT_CHAR_BUDGET: usize = 8000;
 
 fn listing_entry(skill: &Skill) -> String {
@@ -281,7 +280,7 @@ fn listing_entry(skill: &Skill) -> String {
     format!("- {}: {desc}", skill.name)
 }
 
-/// 预算内按序生成清单；超预算即停（对标 CC formatCommandsWithinBudget 的简化版）。
+/// 预算内按序生成清单；超预算即停。
 pub fn format_listing(skills: &[Skill], budget: usize) -> String {
     let mut out = String::new();
     for skill in skills {
@@ -434,13 +433,13 @@ mod tests {
     }
 
     #[test]
-    fn substitutes_arguments_like_cc() {
+    fn substitutes_arguments_like_reference() {
         let content = "Do $ARGUMENTS[0] on $1 then $ARGUMENTS with $msg";
         let out = substitute_arguments(content, "fix bug", &["msg".to_string()]);
         assert_eq!(
             out,
             "Do fix on bug then fix bug with fix",
-            "named 映射首个位置，$1 与 $ARGUMENTS 按 CC 语义"
+            "named 映射首个位置，$1 与 $ARGUMENTS 按同一语义"
         );
 
         let no_placeholder = substitute_arguments("plain", "a b", &[]);

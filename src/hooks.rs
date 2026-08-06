@@ -8,7 +8,7 @@ use crate::settings::{HookRule, HooksConfig};
 
 /// 普通 hook 超时。
 const HOOK_TIMEOUT: Duration = Duration::from_secs(60);
-/// SessionEnd 快速收尾超时（对标 Claude Code SESSION_END_HOOK_TIMEOUT_MS_DEFAULT 1.5s）。
+/// SessionEnd 快速收尾超时（1.5s）。
 const SESSION_END_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Error)]
@@ -17,7 +17,7 @@ pub enum HookError {
     Failed(String),
 }
 
-/// PreToolUse hook 输出（对标 Claude Code hook 输出契约）。
+/// PreToolUse hook 输出。
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct PreToolUseOutput {
@@ -27,7 +27,7 @@ pub struct PreToolUseOutput {
     pub updated_input: Option<serde_json::Value>,
 }
 
-/// 发送给 hook 的输入（对标 Claude Code hook 输入契约的最小面）。
+/// 发送给 hook 的输入（hook 输入契约的最小面）。
 #[derive(Debug, Serialize)]
 struct HookInput<'a> {
     hook_event_name: &'a str,
@@ -67,7 +67,7 @@ fn commands_for<'a>(config: &'a HooksConfig, event: &'a str, tool_name: &str) ->
 }
 
 /// 执行一条 hook：stdin 喂 JSON，stdout 解析 JSON。
-/// 返回 (退出码, stdout JSON, stderr)。退出码语义对标 Claude Code：
+/// 返回 (退出码, stdout JSON, stderr)。退出码语义：
 /// 0 = 成功；2 = blocking（stderr 注入模型）；其他非零 = 仅用户可见。
 async fn run_hook_with_timeout(
     command: &str,
@@ -156,7 +156,7 @@ pub async fn run_pre_tool_use(
                 }
             };
         if code == 2 {
-            // blocking：stderr 注入模型（对标 Claude Code exit 2）。
+            // blocking：stderr 注入模型。
             let reason = if stderr.is_empty() {
                 "blocked by PreToolUse hook".to_string()
             } else {
@@ -221,7 +221,7 @@ pub async fn run_post_compact(config: &HooksConfig, permission_mode: &str) {
     }
 }
 
-/// PostToolUse：执行匹配 hook。返回 true = exit 2（阻断继续，对标 Claude Code blocking error）。
+/// PostToolUse：执行匹配 hook。返回 true = exit 2（阻断继续）。
 pub async fn run_post_tool_use(
     config: &HooksConfig,
     tool_name: &str,
@@ -338,7 +338,7 @@ pub async fn run_session_start(config: &HooksConfig, permission_mode: &str) {
     }
 }
 
-/// SessionEnd：会话结束时执行。快速超时（1.5s，对标 Claude Code）。
+/// SessionEnd：会话结束时执行。快速超时（1.5s）。
 pub async fn run_session_end(config: &HooksConfig, permission_mode: &str) {
     let commands = commands_for(config, "SessionEnd", "");
     for command in commands {
@@ -353,7 +353,7 @@ pub async fn run_session_end(config: &HooksConfig, permission_mode: &str) {
 }
 
 /// Task 生命周期 hook 公共执行：exit 2 的 stderr 作为 blockingError 收集返回
-/// （对标 CC TaskCreated/TaskCompleted blockingError 聚合；调用方决定后果）。
+/// （调用方决定后果）。
 async fn run_task_lifecycle_hooks(
     config: &HooksConfig,
     event: &str,

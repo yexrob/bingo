@@ -17,7 +17,7 @@ pub const DEFAULT_WATCH_INTERVAL_SECS: u64 = 5;
 /// bingo 子进程 stdin/stdout 均为管道：全屏 TUI（top/htop/vim）输出乱码，
 /// ssh/fzf/sudo 等会直连 /dev/tty 抢占终端（raw mode 下画面被撕毁），
 /// 裸 shell/REPL 无输入即退出（无意义）。命中返回拒绝原因与可用替代。
-/// 对标 CC 文档："Interactive terminal apps can't be driven by an agent's bash tool"。
+/// 交互式终端应用无法被 agent 的 bash 工具驱动。
 pub fn interactive_command_reason(command: &str) -> Option<String> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     let mut i = 0;

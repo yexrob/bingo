@@ -1,6 +1,6 @@
 use crate::tool::Tool;
 
-/// 权限模式（对标 Claude Code：default/acceptEdits/auto/bypassPermissions/dontAsk/plan）。
+/// 权限模式：default/acceptEdits/auto/bypassPermissions/dontAsk/plan。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
     Default,
@@ -58,8 +58,7 @@ fn ask(reason: impl Into<String>) -> PermissionResult {
 /// Bash 匹配命令前缀；文件类工具匹配路径前缀；WebFetch 支持 `domain:` 与 URL 前缀；
 /// Skill 精确/`name:*` 前缀匹配；`*` 匹配一切；`prefix:` 前缀忽略。
 fn content_matches(tool_name: &str, input: &serde_json::Value, content: &str) -> bool {
-    // Skill 规则：`Skill(name)` 精确；`Skill(name:*)` 前缀（对标 CC SkillTool
-    // checkPermissions 的 ruleMatches）；`*` 匹配一切。
+    // Skill 规则：`Skill(name)` 精确；`Skill(name:*)` 前缀；`*` 匹配一切。
     if tool_name == "Skill" {
         let name = input.get("skill").and_then(|v| v.as_str());
         return match content {
@@ -91,7 +90,7 @@ fn content_matches(tool_name: &str, input: &serde_json::Value, content: &str) ->
                 && let Ok(parsed) = url::Url::parse(url)
                 && let Some(host) = parsed.host_str()
             {
-                // domain: 规则按 hostname 匹配（对标 Claude Code WebFetchTool）。
+                // domain: 规则按 hostname 匹配。
                 return host == domain.trim_end_matches('*');
             }
             url
@@ -127,7 +126,7 @@ fn rule_hits(rules: &[String], tool_name: &str, input: &serde_json::Value) -> bo
     rules.iter().any(|r| rule_matches(r, tool_name, input))
 }
 
-/// safetyCheck 敏感目录（对标 Claude Code）：写工具目标落在这些目录内 → 必须提示（bypass 免疫）。
+/// safetyCheck 敏感目录：写工具目标落在这些目录内 → 必须提示（bypass 免疫）。
 const SENSITIVE_DIRS: &[&str] = &[".git", ".claude", ".vscode", ".idea"];
 
 fn safety_check(tool: &dyn Tool, input: &serde_json::Value) -> Option<String> {
@@ -144,7 +143,7 @@ fn safety_check(tool: &dyn Tool, input: &serde_json::Value) -> Option<String> {
     sensitive.then(|| format!("writing into a sensitive path: {target}"))
 }
 
-/// 统一权限门：模式 × 规则表 × 工具属性 → allow/deny/ask（对标 Claude Code 判定顺序）。
+/// 统一权限门：模式 × 规则表 × 工具属性 → allow/deny/ask。
 pub fn can_use_tool(
     tool: &dyn Tool,
     input: &serde_json::Value,
@@ -158,11 +157,11 @@ pub fn can_use_tool(
     if rule_hits(rules, &name, input) {
         return deny(format!("denied by permission rule: {name}"));
     }
-    // 2. ask 规则：bypass 模式也尊重（对标 Claude Code 内容 ask 例外）
+    // 2. ask 规则：bypass 模式也尊重（内容 ask 例外）
     if rule_hits(ask_rules, &name, input) {
         return ask(format!("permission rule requires confirmation: {name}"));
     }
-    // 2b. WebFetch 预批准域名自动放行（对标 Claude Code isPreapprovedHost）。
+    // 2b. WebFetch 预批准域名自动放行。
     //     注意：无 url 字段的畸形调用不命中，继续走后续检查。
     if name == "WebFetch"
         && let Some(url) = input.get("url").and_then(|v| v.as_str())
@@ -173,7 +172,7 @@ pub fn can_use_tool(
             reason: "preapproved host".into(),
         };
     }
-    // 3. 只读工具直接放行（WebFetch 例外：非预批准域名仍需用户批准，对标 Claude Code）
+    // 3. 只读工具直接放行（WebFetch 例外：非预批准域名仍需用户批准）
     if tool.is_read_only(input) && name != "WebFetch" {
         return PermissionResult {
             behavior: PermissionBehavior::Allow,
@@ -191,7 +190,7 @@ pub fn can_use_tool(
             reason: "bypassPermissions mode".into(),
         };
     }
-    // 6. acceptEdits：编辑类工具自动允许（对标 Claude Code）
+    // 6. acceptEdits：编辑类工具自动允许
     if mode == PermissionMode::AcceptEdits && tool.is_edit_tool(input) {
         return PermissionResult {
             behavior: PermissionBehavior::Allow,
@@ -207,7 +206,7 @@ pub fn can_use_tool(
     }
     match mode {
         PermissionMode::DontAsk => deny("dontAsk mode denies non-read-only tools"),
-        // Task 工具族豁免（对标 CC plan mode 提示 "create a task list to track the work"）：
+        // Task 工具族豁免（plan 模式提示 "create a task list to track the work"）：
         // plan 模式允许建/改任务列表，其余非只读工具照常 deny。
         PermissionMode::Plan if name.starts_with("Task") => PermissionResult {
             behavior: PermissionBehavior::Allow,

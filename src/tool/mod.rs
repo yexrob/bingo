@@ -36,7 +36,7 @@ pub struct ToolContext {
     pub hooks: HooksConfig,
     /// 权限模式字符串（hook 输入契约）。
     pub permission_mode: String,
-    /// 任务区展开信号（对标 CC set_expanded_view: tasks；headless 无订阅者）。
+    /// 任务区展开信号（headless 无订阅者）。
     pub expand_tasks: tokio::sync::watch::Sender<bool>,
     /// 问用户选择题（AskUserQuestion 工具）：标题 + 问题 + 选项 → 选项索引
     /// （None = 用户跳过/Esc）。TUI 复用权限询问模态。
@@ -44,7 +44,7 @@ pub struct ToolContext {
 }
 
 impl ToolContext {
-    /// 工具调用时通知 TUI 展开任务区（对标 Claude Code set_expanded_view: tasks）。
+    /// 工具调用时通知 TUI 展开任务区。
     pub fn set_expanded_view_tasks(&self) {
         let _ = self.expand_tasks.send(true);
     }
@@ -71,7 +71,7 @@ impl ToolError {
     }
 }
 
-/// Tool 契约（对标 Claude Code Tool.ts，D2）。
+/// Tool 契约（D2）。
 /// 默认 fail-closed：非并发安全、非只读、允许（权限交给统一门）。
 #[async_trait]
 pub trait Tool: Send + Sync {

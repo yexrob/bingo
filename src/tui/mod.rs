@@ -1,4 +1,4 @@
-//! 交互层：iocraft 全屏 TUI（布局对标 Claude Code 2.1.88）。
+//! 交互层：iocraft 全屏 TUI。
 //!
 //! - [`tui_hooks`]：把 query 的 [`UiHooks`] 接到事件通道上（原样保留）。
 //! - [`run_tui_session`]：全屏 render loop 宿主。
@@ -156,7 +156,7 @@ pub fn tui_hooks(
 }
 
 /// 启动 TUI 会话。`fullscreen=false`（默认）：inline 模式——定稿内容
-/// 打印进终端 scrollback、canvas 只画动态尾部（对标 CC 非全屏）；
+/// 打印进终端 scrollback、canvas 只画动态尾部（非全屏）；
 /// `fullscreen=true`：iocraft 全屏 canvas（app 内滚动 + 鼠标交互）。
 /// iocraft 的 render loop 自带 raw mode / 事件流，退出或 panic 时恢复终端。
 pub async fn run_tui_session(
@@ -176,6 +176,13 @@ pub async fn run_tui_session(
     } else {
         gfx::detect_image_cap().await
     };
+    if std::env::var_os("BINGO_DEBUG").is_some() {
+        eprintln!(
+            "[bingo] image_cap={image_cap:?} TERM={:?} TERM_PROGRAM={:?}",
+            std::env::var("TERM").ok(),
+            std::env::var("TERM_PROGRAM").ok(),
+        );
+    }
 
     let mut root = element!(components::Bingo(
         session: Some(session),

@@ -12,7 +12,7 @@ fn store(ctx: &ToolContext) -> &std::sync::Arc<TaskStore> {
     &ctx.tasks
 }
 
-/// 修复层：模型常见近似字段名 → 规范字段（对标 Claude Code TaskCreate coerceInput）。
+/// 修复层：模型常见近似字段名 → 规范字段。
 /// 返回 (修复后的输入, 本次修复的动作列表；无修复返回原值)。
 fn coerce_create(input: serde_json::Value) -> (serde_json::Value, Vec<&'static str>) {
     let mut value = input;
@@ -54,7 +54,7 @@ fn coerce_create(input: serde_json::Value) -> (serde_json::Value, Vec<&'static s
     {
         return (value, fixed);
     }
-    // 缺失 subject/description 时互相 backfill（对标 CC backfill_*）
+    // 缺失 subject/description 时互相 backfill
     let has_subject = map.get("subject").is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()));
     let has_description =
         map.get("description").is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()));
@@ -84,7 +84,7 @@ pub struct TaskCreateInput {
 
 pub struct TaskCreateTool;
 
-/// TaskCreate 工具 prompt（对标 Claude Code TaskCreateTool prompt，去 swarm/owner 面）。
+/// TaskCreate 工具 prompt（去 swarm/owner 面）。
 const TASK_CREATE_PROMPT: &str = r#"Use this tool to create a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
 It also helps the user understand the progress of the task and overall progress of their requests.
 
@@ -172,7 +172,7 @@ impl Tool for TaskCreateTool {
             .await
             .map_err(|e| ToolError::failed(format!("[Tasks] {e}")))?;
 
-        // TaskCreated hooks：blocking → 撤掉刚建的任务并报错（对标 CC）。
+        // TaskCreated hooks：blocking → 撤掉刚建的任务并报错。
         let blocking = crate::hooks::run_task_created(
             &ctx.hooks,
             &id,
@@ -214,7 +214,7 @@ pub struct TaskUpdateInput {
     pub metadata: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-/// 修复层：TaskUpdate 近似的 status 键（state/status 均收）与 id 别名（对标 CC 输入修复）。
+/// 修复层：TaskUpdate 近似的 status 键（state/status 均收）与 id 别名。
 fn coerce_update(input: serde_json::Value) -> serde_json::Value {
     let mut value = input;
     let Some(map) = value.as_object_mut() else {
@@ -244,7 +244,7 @@ fn coerce_update(input: serde_json::Value) -> serde_json::Value {
 
 pub struct TaskUpdateTool;
 
-/// TaskUpdate 工具 prompt（对标 Claude Code TaskUpdateTool prompt，去 swarm/owner 分配段）。
+/// TaskUpdate 工具 prompt（去 swarm/owner 分配段）。
 const TASK_UPDATE_PROMPT: &str = r#"Use this tool to update a task in the task list.
 
 ## When to Use This Tool
@@ -374,7 +374,7 @@ impl Tool for TaskUpdateTool {
         };
         let mut updated_fields: Vec<String> = Vec::new();
 
-        // deleted：永久删除（对标 CC status: deleted）
+        // deleted：永久删除
         if args.status.as_deref() == Some("deleted") {
             let ok = store
                 .delete(&args.task_id)
@@ -402,7 +402,7 @@ impl Tool for TaskUpdateTool {
             None => None,
         };
 
-        // completed：TaskCompleted hooks（blockingError 拒绝 completed，对标 CC）。
+        // completed：TaskCompleted hooks（blockingError 拒绝 completed）。
         if status == Some(TaskStatus::Completed) && task.status != TaskStatus::Completed {
             let blocking = crate::hooks::run_task_completed(
                 &ctx.hooks,
@@ -507,7 +507,7 @@ pub struct TaskGetInput {
 
 pub struct TaskGetTool;
 
-/// TaskGet 工具 prompt（对标 Claude Code TaskGetTool prompt）。
+/// TaskGet 工具 prompt。
 const TASK_GET_PROMPT: &str = r#"Use this tool to retrieve a task by its ID from the task list.
 
 ## When to Use This Tool
@@ -592,7 +592,7 @@ impl Tool for TaskGetTool {
 
 pub struct TaskListTool;
 
-/// TaskList 工具 prompt（对标 Claude Code TaskListTool prompt，去 teammate 段）。
+/// TaskList 工具 prompt（去 teammate 段）。
 const TASK_LIST_PROMPT: &str = r#"Use this tool to list all tasks in the task list.
 
 ## When to Use This Tool
@@ -657,7 +657,7 @@ impl Tool for TaskListTool {
             .list()
             .await
             .map_err(|e| ToolError::failed(format!("[Tasks] {e}")))?;
-        // 已完成的任务不算阻塞（对标 CC TaskList call）。
+        // 已完成的任务不算阻塞
         let completed: std::collections::HashSet<String> = tasks
             .iter()
             .filter(|t| t.status == TaskStatus::Completed)
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn task_update_parses_canonical_and_aliased_ids() {
-        // schema 键是 taskId（camelCase，对标 CC）；模型按 schema 传 taskId。
+        // schema 键是 taskId（camelCase）；模型按 schema 传 taskId。
         let canonical: TaskUpdateInput =
             parse_input(&json!({"taskId": "3", "status": "in_progress"})).unwrap();
         assert_eq!(canonical.task_id, "3");

@@ -10,7 +10,7 @@ pub struct WriteInput {
     pub content: String,
 }
 
-/// Write：覆盖写文件（自动创建父目录；对标 Claude Code FileWriteTool）。
+/// Write：覆盖写文件（自动创建父目录）。
 pub struct WriteTool;
 
 #[async_trait]

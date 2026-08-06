@@ -1,9 +1,7 @@
-//! WebFetch 预批准域名（对标 Claude Code preapproved.ts，代码类公开文档域名）。
+//! WebFetch 预批准域名（代码类公开文档域名）。
 //! 仅影响 WebFetch 权限判定（GET 请求），不涉及网络沙箱。
 
 const PREAPPROVED: &[&str] = &[
-    "platform.claude.com",
-    "code.claude.com",
     "modelcontextprotocol.io",
     "github.com/anthropics",
     "agentskills.io",
@@ -147,7 +145,7 @@ mod tests {
 
     #[test]
     fn path_prefix_entries_require_segment_boundary() {
-        assert!(is_preapproved_url("https://github.com/anthropics/claude-code"));
+        assert!(is_preapproved_url("https://github.com/anthropics/anthropic-sdk-python"));
         assert!(!is_preapproved_url("https://github.com/anthropics-evil/repo"));
         assert!(!is_preapproved_url("https://github.com/other/repo"));
     }

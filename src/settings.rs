@@ -37,17 +37,17 @@ pub struct Settings {
     /// 发送 cache_control（prompt caching）。默认关闭：非官方端点处理不稳定。
     #[serde(rename = "cacheControl")]
     pub cache_control: Option<bool>,
-    /// `!` 命令（bash 模式）执行后是否把输出交给模型回应（对标 CC
-    /// `respondToBashCommands`，默认 true；false = 纯执行不查模型）。
+    /// `!` 命令（bash 模式）执行后是否把输出交给模型回应
+    /// （`respondToBashCommands`，默认 true；false = 纯执行不查模型）。
     #[serde(rename = "respondToBashCommands")]
     pub respond_to_bash_commands: Option<bool>,
     pub hooks: HooksConfig,
     #[serde(rename = "mcpServers")]
     pub mcp_servers: HashMap<String, McpServerConfig>,
-    /// 禁用的 MCP 服务器名单（对标 Claude Code disabledMcpServers）。
+    /// 禁用的 MCP 服务器名单。
     #[serde(rename = "disabledMcpServers", default)]
     pub disabled_mcp_servers: Vec<String>,
-    /// 权限规则表（对标 Claude Code permissions.allow/deny/ask，规则语法 `Tool(content)`）。
+    /// 权限规则表（allow/deny/ask，规则语法 `Tool(content)`）。
     pub permissions: PermissionRules,
 }
 
@@ -60,7 +60,7 @@ pub struct ProviderConfig {
     pub api_base_url: String,
 }
 
-/// 权限规则（对标 Claude Code settings permissions 段）。
+/// 权限规则（settings permissions 段）。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PermissionRules {
@@ -69,7 +69,7 @@ pub struct PermissionRules {
     pub ask: Vec<String>,
 }
 
-/// MCP server 定义（对标 Claude Code mcpServers）。
+/// MCP server 定义。
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpServerConfig {
     /// 传输类型：stdio（缺省）| http（streamable HTTP）。
@@ -82,9 +82,9 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
-    /// http 服务器端点（type=http 必需；对齐 CC url）。
+    /// http 服务器端点（type=http 必需）。
     pub url: Option<String>,
-    /// http 请求自定义头（对齐 CC headers；Authorization 等鉴权头）。
+    /// http 请求自定义头（Authorization 等鉴权头）。
     #[serde(default)]
     pub headers: HashMap<String, String>,
 }
@@ -128,7 +128,7 @@ pub struct Hook {
     pub command: String,
 }
 
-/// 配置分层（对标 Claude Code，D9）：user / project / local 浅层合并，后者覆盖前者。
+/// 配置分层（D9）：user / project / local 浅层合并，后者覆盖前者。
 pub fn load_settings(
     user_dir: &std::path::Path,
     project_dir: &std::path::Path,

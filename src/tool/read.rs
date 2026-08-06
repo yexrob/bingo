@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-/// 单次读取的最大字符数，超出截断（Claude Code 同款策略）。
+/// 单次读取的最大字符数，超出截断。
 const MAX_READ_CHARS: usize = 20_000;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

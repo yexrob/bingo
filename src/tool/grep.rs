@@ -23,7 +23,7 @@ pub struct GrepInput {
     pub glob: Option<String>,
 }
 
-/// Grep：正则递归搜索文件内容（对标 Claude Code GrepTool，ripgrep 语义）。
+/// Grep：正则递归搜索文件内容（ripgrep 语义）。
 pub struct GrepTool;
 
 #[async_trait]

@@ -17,7 +17,7 @@ pub struct GlobInput {
     pub path: Option<String>,
 }
 
-/// Glob：按 pattern 递归列文件（对标 Claude Code GlobTool）。
+/// Glob：按 pattern 递归列文件。
 pub struct GlobTool;
 
 #[async_trait]

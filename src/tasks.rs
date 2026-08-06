@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use tokio::sync::Mutex;
 
-/// Task 状态机（对标 Claude Code v2 Task 工具：pending → in_progress → completed，deleted 为删除）。
+/// Task 状态机：pending → in_progress → completed，deleted 为删除。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -26,7 +26,7 @@ impl fmt::Display for TaskStatus {
     }
 }
 
-/// 单个任务（磁盘每任务一 JSON 文件，字段对齐 Claude Code 2.1.221 Task schema）。
+/// 单个任务（磁盘每任务一 JSON 文件）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -48,7 +48,7 @@ pub struct Task {
 }
 
 impl Task {
-    /// 内部任务标记：TaskList 隐藏（对标 Claude Code metadata._internal）。
+    /// 内部任务标记：TaskList 隐藏（metadata._internal）。
     pub fn is_internal(&self) -> bool {
         self.metadata
             .get("_internal")
@@ -57,7 +57,7 @@ impl Task {
 }
 
 /// 任务存储：`~/.local/share/bingo/tasks/<list_id>/<id>.json`。
-/// 磁盘持久化 + 进程内互斥（bingo 单进程；Claude Code 的文件锁是为多进程共享目录）。
+/// 磁盘持久化 + 进程内互斥（bingo 单进程，无跨进程并发）。
 pub struct TaskStore {
     dir: PathBuf,
     lock: Mutex<()>,
@@ -147,7 +147,7 @@ impl TaskStore {
         Self::read_file(&path)
     }
 
-    /// patch 更新：仅写给出的字段（对标 CC 增量语义）。返回旧值。
+    /// patch 更新：仅写给出的字段（增量语义）。返回旧值。
     pub async fn update(&self, id: &str, patch: &TaskPatch) -> Result<Option<Task>, TaskError> {
         let _guard = self.lock.lock().await;
         let path = self.task_path(id)?;
@@ -184,7 +184,7 @@ impl TaskStore {
         Ok(Some(old))
     }
 
-    /// 删除 + 清理其他任务的 blocks/blockedBy 引用（对标 CC y1o）。
+    /// 删除 + 清理其他任务的 blocks/blockedBy 引用。
     pub async fn delete(&self, id: &str) -> Result<bool, TaskError> {
         let _guard = self.lock.lock().await;
         let path = self.task_path(id)?;
@@ -257,7 +257,7 @@ impl TaskStore {
         Ok(ids)
     }
 
-    /// 全量列表：数字 id 排序；隐藏 _internal（对标 CC TaskList call）。
+    /// 全量列表：数字 id 排序；隐藏 _internal。
     pub async fn list(&self) -> Result<Vec<Task>, TaskError> {
         let _guard = self.lock.lock().await;
         let mut tasks = Vec::new();
@@ -300,7 +300,7 @@ impl TaskStore {
     }
 }
 
-/// 增量 patch（对标 CC TaskUpdate 可选字段）。
+/// 增量 patch（可选字段）。
 #[derive(Debug, Default)]
 pub struct TaskPatch {
     pub subject: Option<String>,

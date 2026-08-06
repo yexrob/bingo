@@ -72,7 +72,7 @@ impl PermissionRequest {
     }
 }
 
-/// AskUserQuestion 回答结果块（CC `User answered Claude's questions` 消息）。
+/// AskUserQuestion 回答结果块（`User answered the questions` 消息）。
 #[derive(Debug, Clone, Default)]
 pub struct AskResult {
     /// (问题, 答案) 已答条目。
@@ -175,7 +175,7 @@ pub struct CollapseGroup {
     pub last_hint: Option<String>,
 }
 
-/// 工具的可折叠分类（Claude Code isSearchOrReadCommand）。
+/// 工具的可折叠分类（isSearchOrReadCommand）。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum CollapseKind {
     Search,
@@ -192,7 +192,7 @@ pub enum Role {
     Assistant,
 }
 
-/// 不在 transcript 展示的工具调用（对标 CC renderToolUseMessage = null）：
+/// 不在 transcript 展示的工具调用（renderToolUseMessage = null）：
 /// Task 工具族（任务区面板即展示）、AskUserQuestion（对话框即展示）。
 pub fn is_hidden_tool(name: &str) -> bool {
     matches!(
@@ -202,13 +202,13 @@ pub fn is_hidden_tool(name: &str) -> bool {
             | "TaskGet"
             | "TaskList"
             | "AskUserQuestion"
-            // Agent 对齐 CC Task renderToolUseMessage=null：不渲染工具行，
+            // Agent 对齐 Task renderToolUseMessage=null：不渲染工具行，
             // 进度由 Watch 活动行（`Agent: 描述 · 已产出 N 字符`）一处承载。
             | "Agent"
     )
 }
 
-/// 内置 slash 命令表（/help 与下拉建议共用单一来源，对齐 CC 命令注册表）。
+/// 内置 slash 命令表（/help 与下拉建议共用单一来源）。
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("help", "显示可用命令"),
     ("clear", "清空对话，开始新会话（别名 /reset /new）"),
@@ -228,7 +228,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("exit", "退出会话"),
 ];
 
-/// slash 下拉建议项（对齐 CC SuggestionItem：/name + 描述）。
+/// slash 下拉建议项（/name + 描述）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlashSuggestion {
     pub name: String,
@@ -263,7 +263,7 @@ pub struct ModelMenuModels {
     pub selected: usize,
 }
 
-/// 下拉最大可见行数（对齐 CC OVERLAY_MAX_ITEMS = 5）。
+/// 下拉最大可见行数（OVERLAY_MAX_ITEMS = 5）。
 pub const SLASH_SUGGESTIONS_MAX: usize = 5;
 
 /// slash 临时提示存活时长：超时后从输入框上方消失（不落盘）。
@@ -504,7 +504,7 @@ pub fn result_summary(name: &str, output: &str) -> Option<String> {
 }
 
 /// Bash 工具结果预览：去掉 `$ cmd` 回显与 `[Exited with code N]` 尾注，
-/// 只留命令输出（对齐 CC BashModeProgress 的裸输出展示）。
+/// 只留命令输出（BashModeProgress 的裸输出展示）。
 fn bash_output_preview(lines: &[String]) -> Vec<String> {
     let mut out: Vec<String> = lines.to_vec();
     if out.first().is_some_and(|l| l.starts_with("$ ")) {
@@ -516,7 +516,7 @@ fn bash_output_preview(lines: &[String]) -> Vec<String> {
     out
 }
 
-/// Claude Code 风格的思考阶段俏皮词。
+/// 思考阶段俏皮词。
 const THINKING_WORDS: [&str; 12] = [
     "Bootstrapping",
     "Razzle-dazzling",
@@ -532,7 +532,7 @@ const THINKING_WORDS: [&str; 12] = [
     "Weaving",
 ];
 
-/// 思考完成态随机词（对标 CC `TURN_COMPLETION_VERBS`，均适配 `for Xs`）。
+/// 思考完成态随机词（`TURN_COMPLETION_VERBS`，均适配 `for Xs`）。
 const COMPLETION_WORDS: [&str; 8] = [
     "Baked",
     "Brewed",
@@ -566,12 +566,12 @@ pub struct Chat {
     asks_rx: mpsc::UnboundedReceiver<AskRequest>,
     pub messages: Vec<UiMessage>,
     pub input: String,
-    /// bash 模式（对标 CC `!` 前缀）：输入直接执行，不经模型。
+    /// bash 模式（`!` 前缀）：输入直接执行，不经模型。
     pub bash_mode: bool,
     pub typing: bool,
     pub busy: bool,
     /// Esc/Ctrl+C 中断过当前回合：后台任务完成通知不再自动拉起新回合
-    /// （对齐 CC interrupt：等待用户主动提交才继续），start_turn 时复位。
+    /// （interrupt 语义：等待用户主动提交才继续），start_turn 时复位。
     pub interrupted: bool,
     /// 当前 assistant 消息索引。
     pub stream_msg: Option<usize>,
@@ -591,7 +591,7 @@ pub struct Chat {
     ask_focus: usize,
     /// Other 自由输入缓冲。
     ask_other: String,
-    /// AskUserQuestion 已答结果块（CC 结果消息；跨请求累积）。
+    /// AskUserQuestion 已答结果块（结果消息；跨请求累积）。
     pub ask_result: Option<AskResult>,
     /// 任务列表磁盘快照缓存（tick 周期刷新）。
     tasks_cache: Vec<TodoItem>,
@@ -1134,7 +1134,7 @@ impl Chat {
                         } else {
                             // 独立 Bash（`!` 命令）：预览 = 输出本身（去掉
                             // `$ cmd` 回显与 `[Exited with code N]` 尾注），
-                            // 默认展开（对标 CC BashModeProgress 直接展示输出）。
+                            // 默认展开（BashModeProgress 直接展示输出）。
                             let lines: Vec<String> = done
                                 .output
                                 .lines()
@@ -1409,7 +1409,7 @@ impl Chat {
         }
         if let Some(cmd) = text.strip_prefix('/') {
             // Enter 时输入是部分前缀且有下拉建议：应用选中项并执行
-            //（对齐 CC handleEnter：suggestions 存在时 Enter = 补全 + 执行）。
+            //（handleEnter：suggestions 存在时 Enter = 补全 + 执行）。
             if !self.slash_suggestions.is_empty()
                 && !self
                     .slash_suggestions
@@ -1440,7 +1440,7 @@ impl Chat {
         self.dirty = true;
     }
 
-    /// slash 命令分发（对齐 Claude Code 常用命令）。返回 true = 已消费。
+    /// slash 命令分发。返回 true = 已消费。
     fn run_slash(&mut self, line: &str) -> bool {
         // 任何 slash 执行都关闭下拉建议（完整输入 Enter 时不走 submit 的清菜单分支，
         // 否则 `+ /model …` 建议行永久残留在输入框下方）。
@@ -1467,7 +1467,7 @@ impl Chat {
             "skills" => self.slash_skills(),
             "tasks" => self.slash_tasks(),
             other => {
-                // 技能名：展开为提示词并作为用户消息提交（对齐 CC prompt Command：
+                // 技能名：展开为提示词并作为用户消息提交（prompt Command：
                 // 技能与内置命令同注册表，输入 /技能名 即执行）。
                 let skills = crate::skills::load_skills(
                     &self.session.home,
@@ -1487,7 +1487,7 @@ impl Chat {
     }
 
     fn slash_help(&mut self) {
-        let mut lines = vec!["可用命令（对齐 Claude Code）：".to_string()];
+        let mut lines = vec!["可用命令：".to_string()];
         for (name, description) in SLASH_COMMANDS {
             lines.push(format!("  /{name:<12} — {description}"));
         }
@@ -1633,7 +1633,7 @@ impl Chat {
                 true
             }
             KeyCode::Esc => {
-                // 二级 → 回一级；一级 → 整体退出（对齐 CC 逐级返回）。
+                // 二级 → 回一级；一级 → 整体退出（逐级返回）。
                 if self
                     .model_menu
                     .as_mut()
@@ -2115,7 +2115,7 @@ impl Chat {
 
     /// 重建 slash 下拉建议（输入变化时调用）：
     /// `/` 开头且无参数时显示；空 query 列全部（内置命令 + 技能），
-    /// 否则前缀/包含匹配（对齐 CC generateCommandSuggestions 的简化版）。
+    /// 否则前缀/包含匹配（generateCommandSuggestions 的简化版）。
     fn update_slash_suggestions(&mut self) {
         self.slash_suggestions.clear();
         let input = self.input.trim_end();
@@ -2132,9 +2132,9 @@ impl Chat {
                 description: (*desc).to_string(),
             })
             .collect();
-        // 技能并入（对齐 CC：/ 菜单含 skills）。描述截断：
+        // 技能并入（/ 菜单含 skills）。描述截断：
         // NoWrap 超长行会把 canvas 撑出终端宽（iocraft 不截断），
-        // 行 diff 错位 → 帧残留；上限对齐 CC MAX_LISTING_DESC_CHARS。
+        // 行 diff 错位 → 帧残留；上限 MAX_LISTING_DESC_CHARS。
         let home = self.session.home.clone();
         let cwd = std::path::PathBuf::from(&self.cwd);
         for skill in crate::skills::load_skills(&home, &cwd) {
@@ -2199,7 +2199,7 @@ impl Chat {
         }
     }
 
-    /// 应用选中建议（对齐 CC applyCommandSuggestion）：`/name ` 回填输入。
+    /// 应用选中建议（applyCommandSuggestion）：`/name ` 回填输入。
     fn apply_slash_suggestion(&mut self) {
         if let Some(s) = self.slash_suggestions.get(self.slash_selected) {
             self.input = format!("/{} ", s.name);
@@ -2294,7 +2294,7 @@ impl Chat {
         });
     }
 
-    /// bash 模式回合（对标 CC processBashCommand）：`!` 命令直接执行，
+    /// bash 模式回合（processBashCommand）：`!` 命令直接执行，
     /// 输出展示为工具活动；respondToBashCommands 开启时模型随后回应。
     fn start_bash_turn(&mut self, command: String) {
         self.messages.push(UiMessage {
@@ -2335,7 +2335,7 @@ impl Chat {
         });
     }
 
-    /// 对话框键盘输入（对标 CC Select）：
+    /// 对话框键盘输入（Select 语义）：
     /// 数字/Enter 确认、↑/↓ 移动焦点、Esc 取消；焦点在 Other 时直接打字。
     /// 返回是否消费。
     pub fn ask_key(&mut self, code: KeyCode) -> bool {
@@ -2477,7 +2477,7 @@ impl Chat {
             if !self.bash_mode && self.slash_menu_key(code, modifiers) {
                 return true;
             }
-            // bash 模式切换（对标 CC）：输入为空时按 `!` 进入 shell 模式
+            // bash 模式切换：输入为空时按 `!` 进入 shell 模式
             //（`!` 本身不插入输入）；bash 模式下空输入按退格退出。
             if !self.bash_mode
                 && self.input.is_empty()
@@ -2707,7 +2707,7 @@ impl Chat {
         }
     }
 
-    /// 运行状态行（对标 CC ActivityIndicator）：busy 时返回
+    /// 运行状态行（ActivityIndicator）：busy 时返回
     /// `(动词, 已耗时秒)`——优先运行中的工具（summary/名字）、
     /// 其次运行中的 thinking（俏皮词）、兜底 "Working"。
     /// 空闲返回 None（状态行隐藏）。
@@ -2729,7 +2729,7 @@ impl Chat {
                             t.summary.clone()
                         })
                     }
-                    // 运行中的后台任务/子代理（对齐 CC ActivityIndicator 显示
+                    // 运行中的后台任务/子代理（ActivityIndicator 显示
                     // agent activeForm）：label 即 `Agent: 描述`。
                     ActivityKind::Watch(w) if w.status == WatchStatus::Running => {
                         Some(w.label.clone())
@@ -2992,7 +2992,7 @@ impl Chat {
             }
         }
 
-        // AskUserQuestion 结果块（CC `● User answered Claude's questions:`）：
+        // AskUserQuestion 结果块（`● User answered the questions:`）：
         // 对话框答毕后定稿；无待答对话框时随最后一条消息一起定稿。
         if let Some(result) = &self.ask_result
             && !result.is_empty()
@@ -3001,7 +3001,7 @@ impl Chat {
             if result.declined && result.answered.is_empty() {
                 header.push_styled("User declined to answer questions", theme.text());
             } else {
-                header.push_styled("User answered Claude's questions:", theme.text());
+                header.push_styled("User answered the questions:", theme.text());
             }
             rows.push(Row::new(header));
             for (question, answer) in &result.answered {
@@ -3020,8 +3020,8 @@ impl Chat {
             }
         }
 
-        // 权限/提问块（对标 CC PermissionDialog / AskUserQuestion）：
-        // 标题（permission bold）+ 说明（dim）+ 编号选项（CC Select：
+        // 权限/提问块（PermissionDialog / AskUserQuestion）：
+        // 标题（permission bold）+ 说明（dim）+ 编号选项（Select：
         // `❯ n. label` 焦点指示、desc 副行 dim、Other 自由输入）+ 快捷键提示。
         if let Some((request, _)) = &self.pending_ask {
             let mut title = Line::styled("⏺ ", SegStyle::fg(theme.text));
@@ -3468,7 +3468,7 @@ mod tests {
     }
 
     /// Task 工具族 / AskUserQuestion 的调用不在 transcript 展示
-    /// （对标 CC renderToolUseMessage = null；任务区面板 / 对话框即展示）。
+    /// （renderToolUseMessage = null；任务区面板 / 对话框即展示）。
     #[test]
     fn hidden_tools_produce_no_activities() {
         let mut chat = test_chat();
@@ -3577,7 +3577,7 @@ mod tests {
         assert!(!chat.doc_click(999), "no range -> no toggle");
     }
 
-    /// 运行状态行数据（对标 CC ActivityIndicator）：空闲 None；
+    /// 运行状态行数据（ActivityIndicator）：空闲 None；
     /// busy 时优先运行中工具 summary、其次 thinking 俏皮词、兜底 Working。
     #[test]
     fn running_status_verb_priority() {
@@ -3632,7 +3632,7 @@ mod tests {
         assert_eq!(verb, stage, "thinking 俏皮词");
     }
 
-    /// bash 模式切换（对标 CC）：空输入按 `!` 进入、`!` 不插入输入、
+    /// bash 模式切换：空输入按 `!` 进入、`!` 不插入输入、
     /// 输入非空时 `!` 正常插入、空输入退格退出。
     #[test]
     fn bang_toggles_bash_mode() {
@@ -4157,7 +4157,7 @@ mod tests {
         assert!(chat.slash_at.is_none());
     }
 
-    /// 内置/磁盘技能经 `/技能名` 展开为提示词提交（对齐 CC prompt Command）。
+    /// 内置/磁盘技能经 `/技能名` 展开为提示词提交（prompt Command）。
     #[tokio::test]
     async fn slash_skill_expands_and_submits() {
         let mut chat = test_chat();
@@ -4428,7 +4428,7 @@ mod tests {
         assert_eq!(
             chat.slash_suggestions.len(),
             SLASH_SUGGESTIONS_MAX.min(SLASH_COMMANDS.len()),
-            "下拉最多 5 行（对齐 CC OVERLAY_MAX_ITEMS）"
+            "下拉最多 5 行（OVERLAY_MAX_ITEMS）"
         );
         assert!(chat.slash_suggestions.iter().any(|s| s.name == "model"));
 
@@ -4468,7 +4468,7 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["model"], "前缀过滤: {names:?}");
 
-        // 超长描述截断（对齐 CC MAX_LISTING_DESC_CHARS）：
+        // 超长描述截断（MAX_LISTING_DESC_CHARS）：
         // NoWrap 超长行会把 canvas 撑出终端宽 → 行 diff 错位残留。
         let long = "x".repeat(400);
         std::fs::write(
@@ -4611,14 +4611,14 @@ mod tests {
         chat.submit();
         chat.on_key(KeyCode::Enter, KeyModifiers::empty());
         if let Some(m) = &mut chat.model_menu.as_mut().unwrap().models {
-            m.models = vec!["claude-sonnet-5".to_string(), "claude-opus-4".to_string()];
+            m.models = vec!["deepseek-v4".to_string(), "deepseek-r1".to_string()];
             m.loading = false;
             m.selected = 1;
         }
         assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
         assert_eq!(
             *chat.session.runtime.model.borrow(),
-            "claude-opus-4",
+            "deepseek-r1",
             "选中的模型生效"
         );
         assert!(chat.model_menu.is_none(), "确认后关闭菜单");
@@ -4632,13 +4632,13 @@ mod tests {
     #[test]
     fn footer_model_label_shows_thinking_level() {
         assert_eq!(
-            model_footer_label("claude-sonnet-5", Some("high")),
-            "claude-sonnet-5 · think high"
+            model_footer_label("deepseek-v4", Some("high")),
+            "deepseek-v4 · think high"
         );
-        assert_eq!(model_footer_label("claude-sonnet-5", None), "claude-sonnet-5");
+        assert_eq!(model_footer_label("deepseek-v4", None), "deepseek-v4");
         assert_eq!(
-            model_footer_label("claude-sonnet-5", Some("off")),
-            "claude-sonnet-5"
+            model_footer_label("deepseek-v4", Some("off")),
+            "deepseek-v4"
         );
     }
 
@@ -4971,7 +4971,7 @@ mod tests {
         assert!(joined.contains("3210ms"), "real duration: {joined}");
     }
 
-    /// Agent 对齐 CC Task renderToolUseMessage=null：ToolStart 不创建工具活动行，
+    /// Agent 对齐 Task renderToolUseMessage=null：ToolStart 不创建工具活动行，
     /// 消息区只由 Watch 进度行承载（唯一显示，原地更新）。
     #[test]
     fn agent_tool_start_creates_no_tool_activity() {
@@ -5653,7 +5653,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            joined.contains("User answered Claude's questions:"),
+            joined.contains("User answered the questions:"),
             "result header: {joined}"
         );
         assert!(

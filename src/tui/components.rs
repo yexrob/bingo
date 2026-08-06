@@ -1,7 +1,6 @@
 //! iocraft UI 层：根组件（全屏布局）+ transcript 滚动区。
 //!
-//! 布局 1:1 对标 Claude Code 2.1.88（`screens/REPL.tsx` +
-//! `components/FullscreenLayout.tsx`）：
+//! 布局：
 //!
 //! ```text
 //! ┌─ 根 View（height = 终端行数）──────────────────────────┐
@@ -9,11 +8,11 @@
 //! │ [Transcript]（flex_grow=1，行级切片滚动）              │
 //! │   ├ 欢迎卡片（LogoV2 风）                              │
 //! │   ├ 消息流（用户气泡 / ⏺ 正文 / 活动 / 折叠组）        │
-//! │   └ 权限请求块（CC 渲染在 ScrollBox 内）               │
-//! │ [任务列表]（TaskListV2 位置：输入框上方）              │
-//! │ [通知行]（CC Notifications overlay 位置）             │
+//! │   └ 权限请求块（渲染在 ScrollBox 内）               │
+//! │ [任务列表]（位置：输入框上方）                      │
+//! │ [通知行]（overlay 位置）                           │
 //! │ [输入行] `❯ {input}▋`                                │
-//! │ [边框行] `╰──────╯`（CC promptBorder 底部边框）        │
+//! │ [边框行] `╰──────╯`（promptBorder 底部边框）         │
 //! │ [footer]（模式徽标 · 快捷键 byline · 右侧模型名）       │
 //! └──────────────────────────────────────────────────────┘
 //! ```
@@ -105,7 +104,7 @@ pub struct BingoProps {
     pub expand_rx: Option<tokio::sync::watch::Receiver<bool>>,
     /// OSC 11 实测的终端背景色（None = 未检测到，由 Theme 回落）。
     pub detected_background: Option<bool>,
-    /// inline 模式（默认，对标 CC 非全屏）：定稿行经 use_output 打印进
+    /// inline 模式（默认，非全屏）：定稿行经 use_output 打印进
     /// 终端 scrollback，canvas 只画动态尾部；None/false = 全屏视口模式。
     pub inline: Option<bool>,
     /// kitty graphics protocol 能力（inline 模式检测；None = 图片显示
@@ -113,7 +112,7 @@ pub struct BingoProps {
     pub image_cap: Option<crate::tui::gfx::ImageCap>,
 }
 
-/// inline 模式（CC 非全屏）下的按键 gate：REPL 无滚动区，滚动键交给
+/// inline 模式（非全屏）下的按键 gate：REPL 无滚动区，滚动键交给
 /// 终端 scrollback；空闲 Esc 忽略（切 typing 会让输入失焦）；ctrl+o
 /// 折叠只放行未定稿的最后一条消息（已打印进 scrollback 的不能再折叠）。
 /// 返回 true 表示"空闲 Ctrl+C，请求退出会话"。
@@ -254,7 +253,7 @@ fn shape_chrome(chat: &Chat) -> usize {
 
 /// bingo 主界面根组件：通道驱动状态 + 布局。
 /// 全屏模式：视口切片 + app 内滚动；inline 模式（默认）：定稿行落盘
-/// scrollback + canvas 只画动态尾部（对标 CC 非全屏）。
+/// scrollback + canvas 只画动态尾部（非全屏）。
 #[component]
 pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'static>> {
     let session = props.session.clone().expect("Bingo requires a session");
@@ -565,7 +564,7 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
     ))
     .into_any());
 
-    // 运行状态行（对标 CC ActivityIndicator）：busy 时在输入框上方显示
+    // 运行状态行（ActivityIndicator）：busy 时在输入框上方显示
     // `⠋ {动词} for {N}s`（工具 summary / thinking 俏皮词 / Working），
     // 让用户时刻知道 agent 正在运行——独立于 transcript 内容与滚动。
     if let Some((verb, elapsed)) = status {
@@ -573,12 +572,12 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
         children.push(status_row(&verb, elapsed, spinner, &theme));
     }
 
-    // 任务列表（CC TaskListV2：输入框上方）。
+    // 任务列表（输入框上方）。
     for line in &tasks {
         children.push(row_element(&Row::new(line.clone()), theme.text));
     }
 
-    // 通知行（CC Notifications overlay 位置：输入框上方一行）。
+    // 通知行（overlay 位置：输入框上方一行）。
     if let Some(warning) = warnings.first() {
         children.push(element! {
             View(height: 1, width: 100pct, padding_left: 2) {
@@ -671,7 +670,7 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
         )
     };
 
-    // slash 下拉建议（对齐 CC PromptInputFooterSuggestions）：
+    // slash 下拉建议（PromptInputFooterSuggestions）：
     // `+ /name  description`，选中行 suggestion 色、其余 dim；最多 5 行。
     // 描述按实际可用宽度截断（iocraft NoWrap 不截断，超宽会撑破 canvas
     // 导致行 diff 错位残留）。位置：fullscreen 在输入框上方，inline 下方。
@@ -776,7 +775,7 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
             .collect()
     };
 
-    // CC 布局：输入框（上边框 + 输入行 + 下边框）在 footer 上方。
+    // 布局：输入框（上边框 + 输入行 + 下边框）在 footer 上方。
     // 建议行按模式定位：fullscreen 上方、inline 下方（对齐 slash 输出）。
     if inline {
         children.push(border_top.into_any());
@@ -815,7 +814,7 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
     }
 
     // inline：根 View 不固定高度——canvas 只占内容自然高度（尾部 +
-    // chrome），输入行随内容流走，不会钉在屏幕底部（对标 CC 非全屏）；
+    // chrome），输入行随内容流走，不会钉在屏幕底部（非全屏）；
     // 全屏：固定终端高度，canvas 占满屏幕。
     if inline {
         element! {
@@ -836,7 +835,7 @@ pub fn Bingo(mut hooks: Hooks, props: &BingoProps) -> impl Into<AnyElement<'stat
     }
 }
 
-/// 运行状态行（对标 CC ActivityIndicator）：`⠋ {动词} for {N}s`。
+/// 运行状态行（ActivityIndicator）：`⠋ {动词} for {N}s`。
 /// 工具动词用 tool_running 色，thinking 词与兜底 Working 用 thinking 色。
 fn status_row(verb: &str, elapsed: f64, spinner: char, theme: &Theme) -> AnyElement<'static> {
     let color = if verb == "Working" {
@@ -1187,7 +1186,7 @@ mod tests {
     /// 冒烟：mock 终端渲染根组件——欢迎卡片、输入行、边框、footer 齐全，
     /// 键盘事件流入输入框。
     #[tokio::test]
-    async fn root_renders_cc_layout_and_accepts_keys() {
+    async fn root_renders_layout_and_accepts_keys() {
         let session = test_session();
         let (_expand_tx, expand_rx) = tokio::sync::watch::channel(false);
         let mut root = element!(Bingo(
@@ -1382,7 +1381,7 @@ mod tests {
         eprintln!("order ok: card={card} user={user} thinking={thinking}");
     }
 
-    /// 状态行渲染：busy 时输出 `⠋ {动词} for {N}s`（对标 CC ActivityIndicator）。
+    /// 状态行渲染：busy 时输出 `⠋ {动词} for {N}s`。
     #[test]
     fn status_row_renders_busy_verb() {
         let theme = Theme::dark();

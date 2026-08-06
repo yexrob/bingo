@@ -14,7 +14,7 @@ pub const MAX_RETRIES: u32 = 5;
 /// 请求整体超时（连接 + 首字节）：服务器无响应时结束等待而不是无限挂。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// 400 上下文超限时重算输出预算的下限（对标 Claude Code FLOOR_OUTPUT_TOKENS）。
+/// 400 上下文超限时重算输出预算的下限。
 const FLOOR_OUTPUT_TOKENS: u32 = 3_000;
 
 #[derive(Debug, Error)]
@@ -192,7 +192,7 @@ impl Client {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
                     // 400 输出预算超限：按 "input length and max_tokens exceed context limit: A + B > C"
-                    // 重算 max_tokens = max(3000, C − A − 1000) 重试一次（对标 Claude Code）。
+                    // 重算 max_tokens = max(3000, C − A − 1000) 重试一次。
                     if status.as_u16() == 400
                         && attempt == 0
                         && body.contains("exceed context limit")
@@ -365,7 +365,7 @@ impl Client {
     }
 }
 
-/// 指数退避 + jitter：500ms 起，cap 32s（对标 Claude Code 32_000ms 上限）。
+/// 指数退避 + jitter：500ms 起，cap 32s。
 fn backoff(attempt: u32) -> Duration {
     let base_ms = (500u64 << attempt.min(6)).min(32_000);
     let jitter = rand_jitter(base_ms);

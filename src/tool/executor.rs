@@ -19,7 +19,7 @@ pub struct ExecOutcome {
     pub duration_ms: u64,
 }
 
-/// 执行队列（对标 StreamingToolExecutor / toolOrchestration，D7）：
+/// 执行队列（D7）：
 /// 连续 concurrency-safe 的工具一批并行（上限 MAX_CONCURRENCY），
 /// 非 safe 工具单独串行；结果保持入队顺序。
 /// cancel：Some 时每批与中断信号竞争——信号到达立即停止（正在执行的

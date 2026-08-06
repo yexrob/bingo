@@ -7,18 +7,18 @@ use serde::Deserialize;
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-/// 请求超时（对标 Claude Code FETCH_TIMEOUT_MS 60s）。
+/// 请求超时：60s。
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
-/// 内容大小上限（对标 MAX_HTTP_CONTENT_LENGTH 10MB）。
+/// 内容大小上限：10MB。
 const MAX_CONTENT_BYTES: u64 = 10 * 1024 * 1024;
-/// 抓取结果回填上限（对标 MAX_MARKDOWN_LENGTH 100k）。
+/// 抓取结果回填上限：100k 字符。
 const MAX_FETCH_CHARS: usize = 100_000;
-/// URL 长度上限（对标 MAX_URL_LENGTH 2000）。
+/// URL 长度上限：2000 字符。
 const MAX_URL_LENGTH: usize = 2000;
-/// 重定向上限（对标 MAX_REDIRECTS 10）。
+/// 重定向上限：10 次。
 const MAX_REDIRECTS: u32 = 10;
 
-/// 缓存：URL 键、15 分钟 TTL、50MB 总量（对标 Claude Code URL_CACHE）。
+/// 缓存：URL 键、15 分钟 TTL、50MB 总量。
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const CACHE_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -103,9 +103,8 @@ pub struct WebFetchInput {
     pub prompt: Option<String>,
 }
 
-/// WebFetch：抓取 URL → HTML 转 Markdown → 返回（对标 Claude Code WebFetchTool）。
-/// 简化：不引入次模型总结（CC 用 Haiku 按 prompt 处理内容），返回原文；
-/// prompt 字段接受但忽略。二进制内容不落盘。
+/// WebFetch：抓取 URL → HTML 转 Markdown → 返回。
+/// 简化：不引入次模型总结，返回原文；prompt 字段接受但忽略。二进制内容不落盘。
 pub struct WebFetchTool;
 
 #[async_trait]
@@ -138,7 +137,7 @@ impl Tool for WebFetchTool {
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: WebFetchInput = parse_input(&input)?;
-        // prompt 语义对标 CC 的次模型总结；bingo 无次模型，接受但忽略。
+        // prompt 语义是次模型总结；bingo 无次模型，接受但忽略。
         let _ = &params.prompt;
         validate_url(&params.url)?;
         let upgraded = upgrade_https(&params.url);
@@ -186,7 +185,7 @@ impl Tool for WebFetchTool {
     }
 }
 
-/// URL 校验（对标 Claude Code validateURL）：长度、无凭据、hostname 至少两段。
+/// URL 校验：长度、无凭据、hostname 至少两段。
 fn validate_url(url: &str) -> Result<(), ToolError> {
     if url.len() > MAX_URL_LENGTH {
         return Err(ToolError::failed(format!(
@@ -206,7 +205,7 @@ fn validate_url(url: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// http → https 升级（对标 Claude Code）。
+/// http → https 升级。
 fn upgrade_https(url: &str) -> String {
     let mut parsed = match url.parse::<reqwest::Url>() {
         Ok(p) => p,
@@ -218,7 +217,7 @@ fn upgrade_https(url: &str) -> String {
     parsed.to_string()
 }
 
-/// 重定向检查（对标 Claude Code isPermittedRedirect）：协议/端口相同、无凭据、
+/// 重定向检查：协议/端口相同、无凭据、
 /// hostname 去 www 后相同（路径可任意变化）。
 fn is_permitted_redirect(original: &reqwest::Url, redirect: &reqwest::Url) -> bool {
     if redirect.scheme() != original.scheme() || redirect.port() != original.port() {

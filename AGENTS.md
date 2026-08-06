@@ -2,7 +2,7 @@
 
 Rust 实现的 agent CLI（本地 agent harness）。
 
-> 架构与选型决策见 [`notes/research.md`](./notes/research.md)（D1-D14，含分层对标 Claude Code 的实现顺序）；改动架构前先对表。
+> 架构与选型决策见 [`notes/research.md`](./notes/research.md)（D1-D24 决策记录）；改动架构前先对表。
 
 ## 语言与风格
 

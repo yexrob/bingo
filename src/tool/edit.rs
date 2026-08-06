@@ -16,7 +16,7 @@ pub struct EditInput {
     pub replace_all: bool,
 }
 
-/// Edit：old_string → new_string 精确替换（对标 Claude Code FileEditTool）。
+/// Edit：old_string → new_string 精确替换。
 pub struct EditTool;
 
 #[async_trait]

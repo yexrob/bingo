@@ -29,7 +29,7 @@ pub struct ServerConnection {
     tools: Vec<McpToolModel>,
 }
 
-/// MCP 服务器管理器（对标 Claude Code McpHub）：session 级连接缓存，
+/// MCP 服务器管理器：session 级连接缓存，
 /// 懒连接 + 复用，失败记录（不自动重试，/mcp reconnect 手动），
 /// 禁用名单（enable/disable 立即生效）。
 pub struct McpManager {
@@ -140,7 +140,7 @@ impl McpManager {
                     .await
                     .map_err(|e| format!("握手失败: {e}"))?
             }
-            // Streamable HTTP（MCP 现行标准传输；对标 CC type=http）。
+            // Streamable HTTP（MCP 现行标准传输）
             "http" => {
                 let Some(url) = config.url.as_deref() else {
                     return Err("http 服务器缺少 url".to_string());
@@ -234,7 +234,7 @@ impl McpManager {
 
 /// MCP 工具适配器：与内置工具共用同一 Tool trait。
 pub struct McpTool {
-    /// 模型可见名：mcp__{server}__{tool}（名称规范化，对齐 CC normalizeNameForMCP）
+    /// 模型可见名：mcp__{server}__{tool}（名称规范化）
     name: String,
     /// 原始服务器名（resource 块来源前缀用）。
     server_name: String,
@@ -245,10 +245,10 @@ pub struct McpTool {
     service: Arc<Service>,
 }
 
-/// 描述上限（对齐 CC MAX_MCP_DESCRIPTION_LENGTH = 2048）。
+/// 描述上限：2048 字符。
 const MAX_MCP_DESCRIPTION_LENGTH: usize = 2048;
 
-/// 服务器/工具名规范化：对齐 CC `^[a-zA-Z0-9_-]{1,64}$`，非法字符（点/空格等）→ `_`。
+/// 服务器/工具名规范化：`^[a-zA-Z0-9_-]{1,64}$`，非法字符（点/空格等）→ `_`。
 /// 否则含点或空格的服务器名会破坏 `__` 分隔符与权限规则匹配。
 pub fn normalize_mcp_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
@@ -286,7 +286,7 @@ impl McpTool {
     }
 }
 
-/// 工具展示事实派生（对齐 CC buildMcpToolName / normalizeNameForMCP /
+/// 工具展示事实派生（buildMcpToolName / normalizeNameForMCP /
 /// MAX_MCP_DESCRIPTION_LENGTH / readOnlyHint 并发标记）。
 pub fn mcp_tool_facts(server_name: &str, tool: &McpToolModel) -> McpToolFacts {
     let tool_name = tool.name.to_string();
@@ -334,7 +334,7 @@ impl Tool for McpTool {
     }
 
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
-        // 对齐 CC：readOnlyHint 标记的工具并发安全。
+        // readOnlyHint 标记的工具并发安全。
         self.read_only
     }
 
@@ -368,7 +368,7 @@ impl Tool for McpTool {
             } else if let Some(image) = block.as_image() {
                 text.push_str(&format!("[image: {} bytes]", image.data.len()));
             } else if let Some(resource) = block.as_resource() {
-                // 对齐 CC transformResultContent：resource 块带来源前缀。
+                // resource 块带来源前缀。
                 match &resource.resource {
                     rmcp::model::ResourceContents::TextResourceContents {
                         uri,
@@ -568,10 +568,10 @@ mod tests {
 
     #[test]
     fn normalize_mcp_name_maps_invalid_chars() {
-        assert_eq!(normalize_mcp_name("claude.ai"), "claude_ai");
+        assert_eq!(normalize_mcp_name("my.server"), "my_server");
         assert_eq!(normalize_mcp_name("my-server_1"), "my-server_1");
         assert_eq!(normalize_mcp_name("a b.c"), "a_b_c");
-        // 64 字符上限（对齐 CC ^[a-zA-Z0-9_-]{1,64}$）。
+        // 64 字符上限。
         assert_eq!(
             normalize_mcp_name(&"x".repeat(80)).len(),
             64

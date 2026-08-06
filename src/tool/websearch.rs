@@ -29,9 +29,8 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-/// WebSearch：搜索网络（对标 Claude Code WebSearchTool）。
-/// CC 依赖 Anthropic API 的服务器端 web_search 工具；bingo 自实现后端
-/// （无 key 的 DuckDuckGo HTML 端点），回填格式对齐 CC：
+/// WebSearch：搜索网络。
+/// bingo 自实现后端（无 key 的 DuckDuckGo HTML 端点），回填格式：
 /// "Web search results for query ... Links: [...] REMINDER: 必须附来源"。
 pub struct WebSearchTool;
 
@@ -226,7 +225,7 @@ fn strip_tags(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// allowed/blocked 域名过滤（对标 CC input schema 语义）。
+/// allowed/blocked 域名过滤。
 fn filter_hits(hits: Vec<SearchHit>, params: &WebSearchInput) -> Vec<SearchHit> {
     hits.into_iter()
         .filter(|h| {

@@ -2,13 +2,18 @@ use std::path::Path;
 
 use crate::api::types::SystemBlock;
 
-/// 静态基准提示词（多段，对齐 Claude Code system prompt 的精简版）。
+/// 静态基准提示词（多段精简版）。
 const BASE_PROMPT: &str = "\
 You are bingo, an agent CLI running on the user's machine.
 
 # System
 - All text you output outside of tool use is displayed to the user. Use
   GitHub-flavored markdown; it renders in a monospace font.
+- You can display images to the user by emitting a markdown image block,
+  e.g. `![alt](chart.png)`. Relative paths resolve against the working
+  directory; data: and http(s) URLs work too. The terminal renders images
+  inline when it supports the kitty graphics protocol; otherwise a
+  `#[image]` placeholder is shown in place of the image.
 - Tools run under a permission mode: calls the user has not allowed trigger
   an approval prompt. If the user denies a tool call, do not retry the exact
   same call — adjust your approach.
@@ -84,7 +89,7 @@ fn read_opt(path: &Path) -> Option<String> {
     }
 }
 
-/// 加载记忆层（对标 Claude Code 层级：user → project）。
+/// 加载记忆层（层级：user → project）。
 /// 项目级记忆源（按序读取，全部合并）：CLAUDE.md（Anthropic 惯例）+
 /// AGENTS.md（通用 agent 惯例，如 bingo 项目自身的规则）。
 const PROJECT_MEMORY_FILES: [&str; 4] = [
@@ -109,7 +114,7 @@ pub fn load_memory(home: &Path, cwd: &Path) -> Memory {
 
 /// 拼装 system prompt：base 段始终在前；记忆段随文件存在与否增减。
 /// `cache_control` 控制是否发送 cache_control（默认关闭，非官方端点不稳定）。
-/// 环境信息动态段（对齐 CC computeEnvInfo：OS/日期/架构）。
+/// 环境信息动态段（OS/日期/架构）。
 fn env_info_block() -> String {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -166,7 +171,7 @@ mod tests {
 
     #[test]
     fn base_prompt_covers_all_sections() {
-        // 对齐 CC 的分段结构：System/Doing tasks/Actions/Tools/Tone 齐备。
+        // 分段结构：System/Doing tasks/Actions/Tools/Tone 齐备。
         for section in [
             "# System",
             "# Doing tasks",

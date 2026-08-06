@@ -5,7 +5,7 @@ use crate::skills::{expand_skill, format_listing, Skill, DEFAULT_CHAR_BUDGET};
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-/// Skill 工具输入（对标 Claude Code SkillTool）。
+/// Skill 工具输入。
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SkillInput {
     #[schemars(description = "The skill name (e.g. \"commit\", \"review-pr\")")]
@@ -15,9 +15,9 @@ pub struct SkillInput {
     pub args: Option<String>,
 }
 
-/// Skill：在技能注册表中按名执行（对标 Claude Code SkillTool）。
+/// Skill：在技能注册表中按名执行。
 /// 调用展开 SKILL.md（Base directory 头 + 参数替换）作为 tool_result 注入，
-/// 模型读到技能指令后继续主对话（inline 语义，对标 CC newMessages 注入）。
+/// 模型读到技能指令后继续主对话（inline 语义）。
 pub struct SkillTool {
     skills: Vec<Skill>,
 }

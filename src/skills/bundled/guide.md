@@ -27,7 +27,7 @@ when_to_use: >-
 
 ## 配置指南（settings.json）
 
-三层配置浅层合并，后者覆盖前者（对齐 Claude Code）：
+三层配置浅层合并，后者覆盖前者：
 1. **user**：`~/.config/bingo/settings.json`（`XDG_CONFIG_HOME` 优先）
 2. **project**：`.bingo/settings.json`
 3. **local**：`.bingo/local.json`（个人覆盖，不入库）
@@ -106,6 +106,9 @@ when_to_use: >-
   Agent（子代理）、Task 族（任务追踪）、AskUserQuestion、Skill（技能调用）。
 - **技能**：内置 `guide`（本指南）+ `~/.config/bingo/skills/` 与 `.bingo/skills/`
   目录技能（同名磁盘技能覆盖内置）；模型经 SkillTool 调用，用户经 `/技能名` 执行。
+- **图片**：模型回复中的 markdown 图片（`![alt](路径)`，支持相对路径/data/http(s)）
+  在支持 kitty graphics 的终端（Ghostty/kitty/WezTerm 等）内联渲染，其余终端显示
+  `#[image]` 占位；图片随消息自动加载，不需要额外命令。
 - **MCP**：stdio 与 streamable HTTP（`type: "http"`，可带自定义 headers）服务器工具接入（见上）。
-- **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/`）+ 项目 CLAUDE.md。
+- **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/`）+ 项目 CLAUDE.md（Anthropic 惯例）。
 - **会话**：transcript 持久化（JSONL），`--continue`/`/resume` 恢复，`/compact` 压缩。

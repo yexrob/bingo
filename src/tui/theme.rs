@@ -1,4 +1,4 @@
-//! 语义色板（1:1 对标 Claude Code 2.1.88 `utils/theme.ts` 的 dark 令牌），
+//! 语义色板（dark 令牌），
 //! 附 bingo 自有的语义令牌（diff/code/thinking 等）。所有渲染走这一个
 //! [`Theme`]，样式方法返回 [`SegStyle`]。
 
@@ -9,31 +9,31 @@ use crate::tui::line::SegStyle;
 /// 语义颜色令牌集合。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
-    /// 正文（CC `text` = rgb(255,255,255)）。
+    /// 正文（rgb(255,255,255)）。
     pub text: Color,
-    /// 弱化文本（CC `inactive` = rgb(153,153,153)，即 ink dimColor）。
+    /// 弱化文本（rgb(153,153,153)，即 ink dimColor）。
     pub inactive: Color,
-    /// 极弱文本（CC `subtle`，sticky header 的 ❯ 用）。
+    /// 极弱文本（sticky header 的 ❯ 用）。
     pub subtle: Color,
-    /// 主强调色（CC `claude` = rgb(215,119,87)）。
+    /// 主强调色（rgb(215,119,87)）。
     pub claude: Color,
-    /// 权限对话框强调色（CC `permission` = rgb(177,185,249)）。
+    /// 权限对话框强调色（rgb(177,185,249)）。
     pub permission: Color,
-    /// 成功（CC `success` = rgb(78,186,101)）。
+    /// 成功（rgb(78,186,101)）。
     pub success: Color,
-    /// 错误（CC `error` = rgb(255,107,128)）。
+    /// 错误（rgb(255,107,128)）。
     pub error: Color,
-    /// 警告（CC `warning` = rgb(255,193,7)）。
+    /// 警告（rgb(255,193,7)）。
     pub warning: Color,
-    /// plan 模式（CC `planMode` = rgb(72,150,140)）。
+    /// plan 模式（rgb(72,150,140)）。
     pub plan_mode: Color,
-    /// accept edits 模式（CC `autoAccept` = rgb(175,135,255)）。
+    /// accept edits 模式（rgb(175,135,255)）。
     pub accept_edits: Color,
-    /// 输入框下边框（CC `promptBorder` = rgb(136,136,136)）。
+    /// 输入框下边框（rgb(136,136,136)）。
     pub prompt_border: Color,
-    /// bash 模式强调（CC `bashBorder` = rgb(253,93,177)）。
+    /// bash 模式强调（rgb(253,93,177)）。
     pub bash_border: Color,
-    /// 用户消息气泡背景（CC `userMessageBackground` = rgb(55,55,55)）。
+    /// 用户消息气泡背景（rgb(55,55,55)）。
     pub user_message_bg: Color,
     /// 行内代码。
     pub code_fg: Color,
@@ -80,7 +80,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// 深色预设（默认；令牌值对标 CC dark）。
+    /// 深色预设（默认）。
     pub fn dark() -> Self {
         Self {
             text: Color::Rgb { r: 255, g: 255, b: 255 },
@@ -125,7 +125,7 @@ impl Theme {
         }
     }
 
-    /// 浅色预设（对齐 CC `lightTheme` token：正文黑、claude 橙保持橙）。
+    /// 浅色预设（正文黑、主强调橙保持橙）。
     pub fn light() -> Self {
         Self {
             text: Color::Rgb { r: 0, g: 0, b: 0 },
@@ -171,7 +171,7 @@ impl Theme {
     }
 }
 
-/// 主题设置（对标 CC `ThemeSetting`）：auto 跟随终端背景亮度。
+/// 主题设置：auto 跟随终端背景亮度。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeSetting {
     Auto,
@@ -258,7 +258,7 @@ impl Theme {
         Some(buf)
     }
 
-    /// 通过 OSC 11 查询终端真实背景色（对标 CC systemThemeWatcher）。
+    /// 通过 OSC 11 查询终端真实背景色。
     /// 发送 `ESC ] 11 ; ? ESC \`，读回 `rgb:RRRR/GGGG/BBBB`，按 BT.709
     /// 相对亮度判断：> 0.5 为浅色。
     pub async fn detect_system_theme() -> Option<bool> {
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn light_differs() {
-        // CC light 主题正文黑、背景浅；claude 橙两主题相同。
+        // light 主题正文黑、背景浅；主强调橙两主题相同。
         assert_eq!(Theme::dark().claude, Theme::light().claude);
         assert_ne!(Theme::dark().text, Theme::light().text);
         assert_ne!(
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn rgb_downgrades_to_ansi256() {
-        // claude 橙 → 256 色
+        // 主强调橙 → 256 色
         let downgraded = Theme::dark().downgrade_to_256();
         assert_eq!(downgraded.claude, Color::AnsiValue(173));
         assert_eq!(downgraded.permission, Color::AnsiValue(147));
