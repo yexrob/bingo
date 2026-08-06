@@ -93,22 +93,37 @@ pub struct Request {
     /// 思考配置：`{"type":"adaptive"}`（None = 不发参数）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<serde_json::Value>,
+    /// 输出配置：`{"effort": <level>}`（None = 不发参数）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<serde_json::Value>,
 }
 
-/// Thinking levels accepted by `/think` and `settings.thinkingLevel`.
-const THINKING_LEVELS: [&str; 3] = ["low", "medium", "high"];
+/// Thinking levels accepted by `/think` and `settings.thinkingLevel`
+/// (`off` 之外的档位；与 Claude Code 的 /effort 档位对齐)。
+pub const THINKING_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// Thinking level → request `thinking` parameter.
 ///
 /// The Claude 5 family (including the default `claude-sonnet-5`) rejects
 /// `{"type":"enabled","budget_tokens":N}` with a 400 — `adaptive` is the only
-/// on-mode. Depth would map to `output_config.effort`, which `Request` does not
-/// carry, so every enabled level currently sends the same adaptive shape;
-/// off/unset sends no parameter at all (keeps DeepSeek/ollama endpoints happy).
+/// on-mode, so every enabled level sends the same adaptive shape; depth goes
+/// through [`effort_param`] instead. off/unset sends no parameter at all
+/// (keeps DeepSeek/ollama endpoints happy).
 pub fn thinking_param(level: Option<&str>) -> Option<serde_json::Value> {
     THINKING_LEVELS
         .contains(&level?)
         .then(|| serde_json::json!({ "type": "adaptive" }))
+}
+
+/// Thinking level → request `output_config` parameter (`{"effort": <level>}`)。
+///
+/// 与 [`thinking_param`] 同门控：off/unset 不发参数，等级即 effort 档位
+/// （Claude 5 家族 GA 参数，低于 high 省 token，xhigh/max 更深推理）。
+pub fn effort_param(level: Option<&str>) -> Option<serde_json::Value> {
+    let level = level?;
+    THINKING_LEVELS
+        .contains(&level)
+        .then(|| serde_json::json!({ "effort": level }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,7 +319,7 @@ mod tests {
     /// Claude 5 家族只接受 adaptive；budget_tokens 形态一律 400。
     #[test]
     fn thinking_param_is_adaptive_for_every_enabled_level() {
-        for level in ["low", "medium", "high"] {
+        for level in THINKING_LEVELS {
             let param = thinking_param(Some(level)).unwrap();
             assert_eq!(param, serde_json::json!({ "type": "adaptive" }), "{level}");
             assert!(param.get("budget_tokens").is_none(), "{level} 不得带 budget");
@@ -318,6 +333,21 @@ mod tests {
         assert_eq!(thinking_param(Some("bogus")), None);
     }
 
+    /// 等级映射 effort 档位；off/未知等级与 thinking 同步不发。
+    #[test]
+    fn effort_param_follows_thinking_gate() {
+        for level in THINKING_LEVELS {
+            assert_eq!(
+                effort_param(Some(level)),
+                Some(serde_json::json!({ "effort": level })),
+                "{level}"
+            );
+        }
+        assert_eq!(effort_param(None), None);
+        assert_eq!(effort_param(Some("off")), None);
+        assert_eq!(effort_param(Some("bogus")), None);
+    }
+
     #[test]
     fn request_serializes_thinking_only_when_set() {
         let mut req = Request {
@@ -328,12 +358,16 @@ mod tests {
             tools: Vec::new(),
             stream: true,
             thinking: None,
+            output_config: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("thinking").is_none(), "无 thinking 不序列化");
-        req.thinking = thinking_param(Some("high"));
+        assert!(json.get("output_config").is_none(), "无 output_config 不序列化");
+        req.thinking = thinking_param(Some("xhigh"));
+        req.output_config = effort_param(Some("xhigh"));
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["thinking"], serde_json::json!({ "type": "adaptive" }));
+        assert_eq!(json["output_config"], serde_json::json!({ "effort": "xhigh" }));
     }
 
     #[test]

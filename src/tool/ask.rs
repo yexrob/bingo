@@ -214,6 +214,7 @@ mod tests {
     #[tokio::test]
     async fn asks_and_returns_answer() {
         let ctx = ToolContext {
+            home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
@@ -260,6 +261,7 @@ mod tests {
     #[tokio::test]
     async fn other_text_answer_backfills_raw_text() {
         let ctx = ToolContext {
+            home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
@@ -293,6 +295,7 @@ mod tests {
     #[tokio::test]
     async fn skipped_returns_did_not_answer() {
         let ctx = ToolContext {
+            home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
@@ -324,6 +327,7 @@ mod tests {
     #[tokio::test]
     async fn multi_select_rejected() {
         let ctx = ToolContext {
+            home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
@@ -355,6 +359,7 @@ mod tests {
     #[tokio::test]
     async fn ask_question_is_not_concurrency_safe() {
         let ctx = ToolContext {
+            home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),

@@ -118,8 +118,10 @@ bingo --continue            # 恢复最近一次会话
 
 ### Slash 命令（`/help` 全量清单）
 
-`/model [名]`、`/provider [名称]`（列出/切换多 provider）、
-`/think [off|low|medium|high]`、`/theme`、`/permissions [allow|deny|ask] [规则]`、
+`/model [名]`（无参进入 provider → 模型两级选择器，选择写回
+`.bingo/settings.json`）、`/provider [名称]`（列出/切换多 provider）、
+`/think [off|low|medium|high|xhigh|max]`（无参进入等级选择器，选择持久化）、
+`/theme`、`/permissions [allow|deny|ask] [规则]`、
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
 `/skills`（清单，`/技能名` 直接执行）、`/context`（用量）、`/status`、
 `/compact`（强制压缩）、`/resume [名称]`（恢复历史会话）、`/rename`、
@@ -145,7 +147,7 @@ bingo --continue            # 恢复最近一次会话
 | `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
 | `providers` | object | 命名 provider（Anthropic 协议）：`{名: {apiKey, apiBaseUrl}}`，`/provider <名>` 切换 |
 | `model` | string | 默认模型（`/model` 选择写入）；优先级 `--model` > settings > 内置 `claude-sonnet-5` |
-| `thinkingLevel` | string | `off` 不发 thinking 参数（兼容 DeepSeek，缺省）；`low`/`medium`/`high` 发自适应 thinking |
+| `thinkingLevel` | string | `off` 不发 thinking 参数（兼容 DeepSeek，缺省）；`low`/`medium`/`high`/`xhigh`/`max` 发自适应 thinking + 对应档位的 `output_config.effort` |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto`（跟随终端背景）/ `dark` / `light` |
 | `cacheControl` | bool | 发送 prompt caching（默认关：非官方端点不稳定） |

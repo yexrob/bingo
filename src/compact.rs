@@ -89,6 +89,7 @@ pub async fn maybe_compact(
         tools: Vec::new(),
         stream: false,
         thinking: None,
+        output_config: None,
     };
     let summary = match session.client.complete_text(&request).await {
         Ok(summary) if !summary.trim().is_empty() => {

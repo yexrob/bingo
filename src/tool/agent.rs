@@ -807,9 +807,11 @@ mod tests {
     use crate::query::{Runtime, Session};
 
     fn parent_session() -> (Arc<Session>, Arc<crate::api::client::Client>) {
-        let mut settings = crate::settings::Settings::default();
-        settings.api_key = Some("sk-parent".into());
-        settings.api_base_url = Some("https://parent.example".into());
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-parent".into()),
+            api_base_url: Some("https://parent.example".into()),
+            ..Default::default()
+        };
         settings.providers.insert(
             "ds".to_string(),
             crate::settings::ProviderConfig {
@@ -978,6 +980,7 @@ mod tests {
             .insert("scout", None, "调研".into(), session.clone());
         let ctl = AgentControlTool::new(session.clone());
         let ctx = crate::tool::ToolContext {
+            home: std::env::temp_dir(),
             cwd: std::path::PathBuf::from("/tmp"),
             watch: session.watch.clone(),
             http: reqwest::Client::new(),
@@ -1035,6 +1038,7 @@ mod tests {
             .insert("worker", None, "干活".into(), session.clone());
         let send = SendMessageTool::new(session.clone());
         let ctx = crate::tool::ToolContext {
+            home: std::env::temp_dir(),
             cwd: std::path::PathBuf::from("/tmp"),
             watch: session.watch.clone(),
             http: reqwest::Client::new(),

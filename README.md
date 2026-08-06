@@ -135,8 +135,10 @@ Startup fails with an error if no API key is present.
 
 ### Slash commands (full list via `/help`)
 
-`/model [name]`, `/provider [name]` (list/switch among multiple providers),
-`/think [off|low|medium|high]`, `/theme`,
+`/model [name]` (no argument opens the provider → model picker; the choice
+persists to `.bingo/settings.json`), `/provider [name]` (list/switch among
+multiple providers), `/think [off|low|medium|high|xhigh|max]` (no argument
+opens the level picker; the choice persists), `/theme`,
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` executes directly), `/context` (usage),
@@ -164,7 +166,7 @@ Three layers are shallow-merged; later layers override earlier ones:
 | `apiBaseUrl` | string | API endpoint (settings take precedence over `ANTHROPIC_BASE_URL`; default is the official one) |
 | `providers` | object | named providers (Anthropic protocol): `{name: {apiKey, apiBaseUrl}}`, switch with `/provider <name>` |
 | `model` | string | default model (written by `/model`); precedence: `--model` > settings > built-in `claude-sonnet-5` |
-| `thinkingLevel` | string | `off` omits thinking params (DeepSeek-compatible, default); `low`/`medium`/`high` send adaptive thinking |
+| `thinkingLevel` | string | `off` omits thinking params (DeepSeek-compatible, default); `low`/`medium`/`high`/`xhigh`/`max` send adaptive thinking + `output_config.effort` at that level |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto` (follow terminal background) / `dark` / `light` |
 | `cacheControl` | bool | enable prompt caching (default off: unreliable on non-official endpoints) |

@@ -18,6 +18,7 @@ mod api;
 mod budget;
 mod channels;
 mod compact;
+mod experience;
 mod hooks;
 mod mcp;
 mod memory;
@@ -96,11 +97,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
 
     let client = Client::from_settings(&settings)?;
-    let system = build_system(
+    let mut system = build_system(
         &load_memory(&home, &project_dir),
         load_project_memory(&home, &project_dir),
         settings.cache_control.unwrap_or(false),
     );
+    // 会话开始注入本项目经验索引（仅命中>0 时；≤10 行一行一条，全文按需 Query）。
+    let experience_index = crate::tool::experience::session_index(&home, &project_dir);
+    if !experience_index.is_empty() {
+        system.push(crate::api::types::SystemBlock {
+            text: format!("Project experience (reusable patterns from past sessions):\n{experience_index}\n(Query full details with ExperienceQuery; propose new ones with ExperiencePropose)"),
+            cache: settings.cache_control.unwrap_or(false),
+        });
+    }
 
     let (transcript, initial_messages): (Option<Transcript>, Vec<Message>) = if cli.continue_ {
         match latest_transcript(&home)? {

@@ -141,7 +141,16 @@ when_to_use: >-
 
 - **内置工具**：Bash（经权限门）、Read/Glob/Grep、Edit/Write、WebFetch/WebSearch、
   Agent（子代理）、SendMessage/AgentControl（子代理续话与生命周期，仅主会话）、
-  Task 族（任务追踪）、AskUserQuestion、Skill（技能调用）。
+  Task 族（任务追踪）、AskUserQuestion、Skill（技能调用）、
+  ExperiencePropose/Commit/Query/Forget（项目经验沉淀与检索）。
+- **经验（Experience）**：跨会话复用可重跑的工作流。会话开始时注入本项目
+  active 经验索引（≤10 条一行一条，空则不注入），全文用 ExperienceQuery 按
+  trigger 词元检索（大小写不敏感、共享前缀容错，active 优先、按采用次数排序）；
+  ExperiencePropose 生成候选（不落盘），用户确认后 ExperienceCommit 落盘
+  （同内容稳定 id，重提交更新而非重复、采用计数 +1，status: stale 标记失效
+  退出注入但仍可查）；ExperienceForget 淘汰（须用户确认）。存储于
+  `~/.config/bingo/experience/<project-key>/entries/`（用户级、不进项目仓库），
+  项目键取 git remote URL（归一化）→ git 根 → 规范化绝对路径，跨目录/机器稳定。
 - **子代理**：Agent 派生的实例有名字（`name` 参数，缺省取定义名/agent，重名
   自动 -2/-3），transcript 显示为 `◉ 名字 · 任务`；完成后历史保留，主 agent 可
   SendMessage 续话（忙碌排队、空闲唤醒）、AgentControl list/stop/delete 管理。

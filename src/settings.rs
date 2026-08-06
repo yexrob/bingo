@@ -28,9 +28,10 @@ pub struct Settings {
     /// 默认模型（`model`）：`/model` 选择持久化于此。
     /// 优先级 `--model` > settings（user < project < local）> 内置默认。
     pub model: Option<String>,
-    /// 思考级别（`thinkingLevel`）：off | low | medium | high。
-    /// 缺省不发 thinking 参数（兼容 DeepSeek 等端点）；low/medium/high
-    /// 一律发 `{"type":"adaptive"}`——Claude 5 家族已移除 budget_tokens。
+    /// 思考级别（`thinkingLevel`）：off | low | medium | high | xhigh | max。
+    /// 缺省不发 thinking 参数（兼容 DeepSeek 等端点）；其余档位发
+    /// `{"type":"adaptive"}` + `output_config.effort`——Claude 5 家族已移除
+    /// budget_tokens，深度由 effort 承担。
     #[serde(rename = "thinkingLevel", default)]
     pub thinking_level: Option<String>,
     #[serde(rename = "permissionMode")]

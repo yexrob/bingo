@@ -615,9 +615,11 @@ mod tests {
 
     #[test]
     fn from_settings_prefers_settings_over_env() {
-        let mut settings = crate::settings::Settings::default();
-        settings.api_key = Some("sk-settings".into());
-        settings.api_base_url = Some("https://settings.example".into());
+        let settings = crate::settings::Settings {
+            api_key: Some("sk-settings".into()),
+            api_base_url: Some("https://settings.example".into()),
+            ..Default::default()
+        };
         let env = |name: &str| -> Result<String, std::env::VarError> {
             match name {
                 "ANTHROPIC_API_KEY" => Ok("sk-env".into()),
@@ -657,8 +659,10 @@ mod tests {
 
     #[test]
     fn from_settings_defaults_base_url() {
-        let mut settings = crate::settings::Settings::default();
-        settings.api_key = Some("sk".into());
+        let settings = crate::settings::Settings {
+            api_key: Some("sk".into()),
+            ..Default::default()
+        };
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
         let client = Client::from_settings_with(&settings, env).unwrap();
         assert_eq!(client.current_endpoint().1, API_BASE);
@@ -666,8 +670,10 @@ mod tests {
 
     #[test]
     fn provider_switch_changes_endpoint() {
-        let mut settings = crate::settings::Settings::default();
-        settings.api_key = Some("sk-main".into());
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
         settings.providers.insert(
             "deepseek".to_string(),
             crate::settings::ProviderConfig {
