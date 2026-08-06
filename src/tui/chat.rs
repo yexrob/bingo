@@ -217,6 +217,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("think", "设置思考级别（/think [off|low|medium|high]）"),
     ("skills", "列出可用技能"),
     ("tasks", "列出后台任务"),
+    ("team", "管理项目团队（/team start|status|assign|stop|list）"),
     ("exit", "退出会话"),
 ];
 
@@ -1820,6 +1821,7 @@ impl Chat {
             "think" => self.slash_think(arg),
             "skills" => self.slash_skills(),
             "tasks" => self.slash_tasks(),
+            "team" => self.slash_team(arg),
             other => {
                 // 技能名：展开为提示词并作为用户消息提交（prompt Command：
                 // 技能与内置命令同注册表，输入 /技能名 即执行）。
@@ -2483,6 +2485,12 @@ impl Chat {
         }
         let text: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
         self.push_slash_output(text.join("\n"));
+    }
+
+    /// `/team <子命令>`（D31 项目级编队）：分发到 team_cmd，输出多行一次入队。
+    fn slash_team(&mut self, arg: &str) {
+        let lines = crate::team_cmd::run(&self.session, &std::path::PathBuf::from(&self.cwd), arg);
+        self.push_slash_output(lines.join("\n"));
     }
 
     /// 重建 slash 下拉建议（输入变化时调用）：

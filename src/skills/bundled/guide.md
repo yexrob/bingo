@@ -58,6 +58,7 @@ when_to_use: >-
 | `disabledMcpServers` | string[] | 禁用的 MCP 服务器名单（/mcp disable 写入） |
 | `permissions` | object | `{allow[], deny[], ask[]}`，规则语法 `Tool(content)`，`:*` 为前缀通配（如 `Bash(git push:*)`）；Bash 规则按子命令逐段匹配，路径规则匹配前归一化（详见诊断 4） |
 | `experimental` | object | 实验特性：`{"agentChannels": true}` 开启 agent 频道互发（主会话得 Channel/Post 工具，直接子代理得 Post）；`channelMessageLimit`（默认 500，超限冻结频道）/ `agentMessageLimit`（默认 50）为预算闸 |
+| `team` | object | agent team 启动行为：`{"autoStart": true}`（缺省 true = 项目绑定 team 且存在时启动自动拉起，成员 Idle 待命零 token；`--no-team` 或 false 关闭） |
 | `hooks` | object | PreToolUse/PostToolUse/PreCompact/PostCompact/UserPromptSubmit/Stop/SessionStart/SessionEnd/TaskCreated/TaskCompleted，matcher + command；matcher 为整串锚定正则（`Edit\|Write`、`mcp__.*`），非法正则退回全等匹配 |
 
 示例（.bingo/settings.json）：
@@ -87,6 +88,9 @@ when_to_use: >-
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
 `/skills`（清单，`/技能名` 直接执行）· `/context`（用量）· `/status` ·
 `/compact`（强制压缩）· `/resume [名称]`（恢复历史会话）· `/rename` · `/clear` · `/exit`。
+`/team`（项目级编队）：`list`（图纸+运行区同屏）· `start`（拉起/幂等复用）· `status` ·
+`assign <成员> <任务>`（派活）· `stop` · `validate` · `new`（脚手架生成 team.json）·
+`memory list|gc`（跨会话记忆管理）。
 
 ## 诊断指南（常见问题 → 排查路径）
 
@@ -154,6 +158,12 @@ when_to_use: >-
   （↑↓/Enter），agent 打开全屏对话视图（历史 + 流式活尾，只读），频道打开
   全屏微信式房间——他人靠左带名签、你（user）靠右，底部输入 Enter 直接发言
   （与 Post 同一投递路径，正常唤醒成员；渲染即已读，serial 不会弹你），Esc 返回。
+- **agent team**（项目级编队）：`.bingo/team.json`（camelCase：`name`/`channel{mode,messageLimit}`/
+  `members[{name,agent}]`，成员引用 AgentDef）把多名角色固定到一个项目；启动默认拉起
+  （`settings.team.autoStart`，`--no-team` 关闭；拉起 ≠ 唤醒——成员 Idle 待命零 token，
+  等 `/team assign` 或频道消息才开跑；幂等键 = 实例名，重复 start 复用）。`/team` 命令族
+  管理；team 记忆按「项目路径哈希 + 分支」存 `~/.config/bingo/teams/`（完整历史跨会话恢复 +
+  append-only 决策记录，`/team memory list|gc` 管理）。
 - **技能**：内置 `guide`（本指南）+ `~/.config/bingo/skills/` 与 `.bingo/skills/`
   目录技能（同名磁盘技能覆盖内置）；模型经 SkillTool 调用，用户经 `/技能名` 执行。
 - **图片**：模型回复中的 markdown 图片（`![alt](路径)`，支持相对路径/data/http(s)）

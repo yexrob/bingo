@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -28,6 +28,8 @@ mod settings;
 mod skills;
 mod system;
 mod tasks;
+mod team;
+mod team_cmd;
 mod tool;
 mod tools;
 mod transcript;
@@ -50,6 +52,10 @@ struct Cli {
     /// 使用的模型（缺省依次回落 settings `model`、内置默认）
     #[arg(long)]
     model: Option<String>,
+
+    /// 不自动拉起项目 team（覆盖 settings `team.autoStart`；D31）
+    #[arg(long)]
+    no_team: bool,
 
     /// 权限模式（默认从 settings 读取）
     #[arg(long)]
@@ -171,6 +177,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode_str = session.permission_mode_str();
     crate::hooks::run_session_start(&session.settings.hooks, mode_str).await;
 
+    // D31 启动默认加载：项目绑定 team 且 autoStart（缺省 true）→ 拉起。
+    // 双 opt-out：settings `team.autoStart:false` + `--no-team`。
+    if !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
+        let branch = crate::team::current_branch(&project_dir);
+        let defs = crate::agents::load_agent_defs(&home, &project_dir);
+        match crate::team::load_team_file(&project_dir) {
+            Ok(Some(team)) => match crate::team::spawn_team(
+                &session, &team, &defs, &home, &project_dir, &branch,
+            ) {
+                Ok(summary) => {
+                    let total =
+                        summary.spawned.len() + summary.reused.len() + summary.failed.len();
+                    let ready = total - summary.failed.len();
+                    if summary.failed.is_empty() {
+                        eprintln!(
+                            "[team] {} 就绪 · {ready}/{total} 待命（/team status · /team stop）",
+                            team.name
+                        );
+                    } else {
+                        eprintln!(
+                            "[team] {} 部分拉起 · {ready}/{total}（失败 {}，/team status 查看）",
+                            team.name,
+                            summary.failed.len()
+                        );
+                    }
+                }
+                Err(e) => eprintln!(
+                    "[team] {} 校验失败：{e}（修复后 /team start 拉起）",
+                    team.name
+                ),
+            },
+            Ok(None) => {}
+            Err(e) => eprintln!("[team] {} 读取失败：{e}", crate::team::TEAM_FILE),
+        }
+    }
+
     let result = async {
         if cli.print {
             let prompt = if !cli.prompt.is_empty() {
@@ -195,6 +237,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     .await;
 
+    // D31 会话结束落盘：team 成员最新历史（跨会话恢复用；失败静默）。
+    if !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
+        persist_team_memory(&session, &home, &project_dir);
+    }
     crate::hooks::run_session_end(&session.settings.hooks, mode_str).await;
     result
+}
+
+/// 落盘全部 team 成员的最新消息历史（仅保存有内容的成员；失败静默——
+/// 记忆是增强不是契约）。
+fn persist_team_memory(session: &Arc<Session>, home: &Path, project_dir: &std::path::Path) {
+    let Ok(Some(team)) = crate::team::load_team_file(project_dir) else {
+        return;
+    };
+    let branch = crate::team::current_branch(project_dir);
+    for m in &team.members {
+        if let Some((history, _, _)) = session.agents.view_of(&m.name)
+            && !history.is_empty()
+        {
+            crate::team::save_member_history(
+                home, project_dir, &branch, &team.name, &m.name, &history,
+            );
+        }
+    }
 }

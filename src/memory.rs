@@ -23,7 +23,8 @@ pub fn memdir_dir(home: &Path) -> PathBuf {
 }
 
 /// 完整路径的 FNV-1a 64 摘要（跨进程/跨版本稳定，故不用 DefaultHasher）。
-fn path_hash(path: &Path) -> String {
+/// D31 team 记忆的 project_hash 复用同一摘要（与项目记忆同键族）。
+pub(crate) fn path_hash(path: &Path) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in path.as_os_str().as_encoded_bytes() {
         hash ^= *byte as u64;

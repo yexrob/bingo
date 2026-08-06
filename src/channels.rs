@@ -120,6 +120,9 @@ struct Channel {
     /// 每成员发言计数（per_agent 预算）。
     sent: HashMap<String, u64>,
     frozen: bool,
+    /// 频道级消息总上限覆盖（D31 team.json channel.messageLimit；
+    /// None = 用 registry 级 ChannelLimits.channel_total）。
+    message_limit: Option<u64>,
     /// 展示行（◇ #名字）的 watch 条目。
     watch_id: Option<crate::watch::WatchId>,
 }
@@ -186,9 +189,23 @@ impl ChannelRegistry {
                 seen: HashMap::new(),
                 sent: HashMap::new(),
                 frozen: false,
+                message_limit: None,
                 watch_id: None,
             },
         );
+        Ok(())
+    }
+
+    /// 频道级消息总上限覆盖（D31 team.json channel.messageLimit）。
+    pub fn set_message_limit(&self, name: &str, limit: u64) -> Result<(), String> {
+        if limit == 0 {
+            return Err("messageLimit 必须为正整数".to_string());
+        }
+        let mut inner = self.lock();
+        let Some(ch) = inner.channels.get_mut(name) else {
+            return Err(format!("没有频道 #{name}"));
+        };
+        ch.message_limit = Some(limit);
         Ok(())
     }
 
@@ -251,10 +268,11 @@ impl ChannelRegistry {
             if !ch.members.iter().any(|m| m == from) {
                 return Err(format!("{from} 不是 #{name} 的成员"));
             }
+            // 频道级上限：team 覆盖优先，否则 registry 级。
+            let channel_total = ch.message_limit.unwrap_or(limits.channel_total);
             if ch.frozen {
                 return Err(format!(
-                    "#{name} 已冻结（达消息总上限 {}），不再接收发言",
-                    limits.channel_total
+                    "#{name} 已冻结（达消息总上限 {channel_total}），不再接收发言"
                 ));
             }
             // serial 提交校验：落后即弹回 + 增量（弹回内容进上下文，视为已读）。
@@ -274,15 +292,13 @@ impl ChannelRegistry {
                     limits.per_agent
                 ));
             }
-            if ch.seq >= limits.channel_total {
+            if ch.seq >= channel_total {
                 ch.frozen = true;
                 inner.hub_mail.push(format!(
-                    "⚠ 频道 #{name} 已达消息总上限 {}，已冻结（后续发言将被拒绝）",
-                    limits.channel_total
+                    "⚠ 频道 #{name} 已达消息总上限 {channel_total}，已冻结（后续发言将被拒绝）",
                 ));
                 return Err(format!(
-                    "#{name} 达消息总上限 {}，频道已冻结",
-                    limits.channel_total
+                    "#{name} 达消息总上限 {channel_total}，频道已冻结"
                 ));
             }
             ch.seq += 1;
@@ -519,6 +535,25 @@ mod tests {
         // 迟入者 seen=入场时的头：无 backlog 弹回，直接可发言。
         let (seq, _) = sent(reg.post("late", "t", "我来了").unwrap_or_else(|e| panic!("{e}")));
         assert_eq!(seq, 2);
+    }
+
+    #[test]
+    fn per_channel_message_limit_overrides_registry() {
+        let reg = ChannelRegistry::new(ChannelLimits {
+            channel_total: 100,
+            per_agent: 100,
+        });
+        reg.create("t", vec!["a".into()], ChannelMode::Free)
+            .unwrap_or_else(|e| panic!("{e}"));
+        // 频道级覆盖为 1：第二条就冻结。
+        reg.set_message_limit("t", 1).unwrap_or_else(|e| panic!("{e}"));
+        let _ = sent(reg.post("a", "t", "1").unwrap_or_else(|e| panic!("{e}")));
+        let err = reg.post("a", "t", "2").unwrap_err();
+        assert!(err.contains("冻结"), "{err}");
+        assert!(reg.list()[0].frozen);
+        // 0 拒绝；未知频道报错。
+        assert!(reg.set_message_limit("t", 0).is_err());
+        assert!(reg.set_message_limit("nope", 5).is_err());
     }
 
     #[test]

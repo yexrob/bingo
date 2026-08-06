@@ -12,6 +12,15 @@ use std::sync::{Arc, Mutex};
 use crate::api::types::Message;
 use crate::query::Session;
 
+/// 定义来源层（D31 `/team list` 徽标；同名跨层 first-wins 取项目层）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentDefSource {
+    Project,
+    User,
+    /// 旧数据/旧配置无 source 时的显式缺省（不猜）。
+    Unknown,
+}
+
 /// 一个具名 agent 定义：`<name>.md`（YAML frontmatter + 正文 system prompt）。
 #[derive(Debug, Clone)]
 pub struct AgentDef {
@@ -24,6 +33,8 @@ pub struct AgentDef {
     pub provider: Option<String>,
     /// 正文 = 子代理的 system prompt（替换父会话 system；空则继承）。
     pub system: String,
+    /// 第一出处（first-wins 去重前的加载层）。
+    pub source: AgentDefSource,
 }
 
 /// 用户级定义目录：`$XDG_CONFIG_HOME/bingo/agents`（镜像 skills 约定）。
@@ -45,7 +56,7 @@ fn project_agents_dirs(cwd: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-fn load_dir(dir: &Path, out: &mut Vec<AgentDef>) {
+fn load_dir(dir: &Path, source: AgentDefSource, out: &mut Vec<AgentDef>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -70,6 +81,7 @@ fn load_dir(dir: &Path, out: &mut Vec<AgentDef>) {
             model: None,
             provider: None,
             system: body.trim_end().to_string(),
+            source,
         };
         for (key, value) in pairs {
             match key.as_str() {
@@ -94,9 +106,9 @@ fn load_dir(dir: &Path, out: &mut Vec<AgentDef>) {
 pub fn load_agent_defs(home: &Path, cwd: &Path) -> Vec<AgentDef> {
     let mut defs = Vec::new();
     for dir in project_agents_dirs(cwd) {
-        load_dir(&dir, &mut defs);
+        load_dir(&dir, AgentDefSource::Project, &mut defs);
     }
-    load_dir(&user_agents_dir(home), &mut defs);
+    load_dir(&user_agents_dir(home), AgentDefSource::User, &mut defs);
     let mut seen = std::collections::HashSet::new();
     defs.retain(|d| seen.insert(d.name.clone()));
     defs
@@ -236,8 +248,7 @@ impl AgentRegistry {
         def: Option<String>,
         description: String,
         session: Arc<Session>,
-    ) {
-        self.lock().insert(
+    ) {        self.lock().insert(
             name.to_string(),
             Entry {
                 def,
@@ -252,6 +263,13 @@ impl AgentRegistry {
                 live: None,
             },
         );
+    }
+
+    /// 注入实例的初始/恢复历史（D31 team 记忆恢复：不唤醒，仅预载续话上下文）。
+    pub fn set_history(&self, name: &str, history: Vec<Message>) {
+        if let Some(entry) = self.lock().get_mut(name) {
+            entry.history = history;
+        }
     }
 
     /// 当前回合的流式产出缓冲（回合开始挂上，结束摘下）。
@@ -494,8 +512,27 @@ mod tests {
         assert_eq!(reviewer.description, "project reviewer");
         assert!(reviewer.system.contains("项目评审"));
         assert!(reviewer.model.is_none(), "被覆盖的 user 定义不渗透");
+        assert_eq!(reviewer.source, AgentDefSource::Project, "跨层同名覆盖 source 取项目层");
         // 无 frontmatter：名字取文件名，描述回落正文首行。
         assert_eq!(defs[1].description, "调研专用。");
+        assert_eq!(defs[1].source, AgentDefSource::Project);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 仅 user 层有定义时 source=User（D31 徽标数据）。
+    #[test]
+    fn source_is_user_when_only_user_layer_has_def() {
+        let root = std::env::temp_dir().join(format!("bingo-agents-{}-src", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        write(
+            &home.join(".config/bingo/agents/only-user.md"),
+            "user 层专用。\n",
+        );
+        let defs = load_agent_defs(&home, &root);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "only-user");
+        assert_eq!(defs[0].source, AgentDefSource::User);
         let _ = std::fs::remove_dir_all(&root);
     }
 

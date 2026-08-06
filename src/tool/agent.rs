@@ -342,62 +342,71 @@ impl AgentTool {
         def: Option<&AgentDef>,
         instance: &str,
     ) -> Result<Arc<Session>, ToolError> {
-        let model = params
-            .model
-            .clone()
-            .or_else(|| def.and_then(|d| d.model.clone()))
-            .unwrap_or_else(|| self.session.runtime.model.borrow().clone());
-        let provider = params
-            .provider
-            .clone()
-            .or_else(|| def.and_then(|d| d.provider.clone()));
-        let client = match &provider {
-            Some(name) => self
-                .session
-                .client
-                .with_provider(name)
-                .map_err(ToolError::failed)?,
-            None => self.session.client.clone(),
-        };
-        let provider_name = provider
-            .unwrap_or_else(|| self.session.runtime.provider.borrow().clone());
-        let system = match def {
-            Some(d) if !d.system.trim().is_empty() => vec![SystemBlock {
-                text: d.system.clone(),
-                cache: self.session.settings.cache_control.unwrap_or(false),
-            }],
-            _ => self.session.system.clone(),
-        };
-        let runtime = crate::query::Runtime::new(
-            model,
-            None,
-            self.session
-                .runtime
-                .permissions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-        );
-        let _ = runtime.provider_tx.send(provider_name);
-        Ok(Arc::new(Session {
-            client,
-            runtime,
-            permission_mode: self.session.permission_mode,
-            settings: self.session.settings.clone(),
-            system,
-            depth: self.session.depth + 1,
-            home: self.session.home.clone(),
-            quiet: self.session.quiet,
-            compact_failures: self.session.compact_failures.clone(),
-            watch: self.session.watch.clone(),
-            tasks: self.session.tasks.clone(),
-            last_task_reminder_turn: self.session.last_task_reminder_turn.clone(),
-            expand_tasks: self.session.expand_tasks.clone(),
-            agents: self.session.agents.clone(),
-            channels: self.session.channels.clone(),
-            instance: Some(instance.to_string()),
-        }))
+        build_sub_session(
+            &self.session,
+            params.model.clone(),
+            params.provider.clone(),
+            def,
+            instance,
+        )
     }
+}
+
+/// 构造子代理会话（AgentTool 与 team spawn 共用，D31）：
+/// 具名定义提供 system prompt 与缺省模型/provider，显式参数优先于定义、
+/// 定义优先于继承（provider 指定时 fork 独立端点 Client，互不影响父会话）。
+pub(crate) fn build_sub_session(
+    parent: &Arc<Session>,
+    model: Option<String>,
+    provider: Option<String>,
+    def: Option<&AgentDef>,
+    instance: &str,
+) -> Result<Arc<Session>, ToolError> {
+    let model = model
+        .or_else(|| def.and_then(|d| d.model.clone()))
+        .unwrap_or_else(|| parent.runtime.model.borrow().clone());
+    let provider = provider.or_else(|| def.and_then(|d| d.provider.clone()));
+    let client = match &provider {
+        Some(name) => parent.client.with_provider(name).map_err(ToolError::failed)?,
+        None => parent.client.clone(),
+    };
+    let provider_name = provider.unwrap_or_else(|| parent.runtime.provider.borrow().clone());
+    let system = match def {
+        Some(d) if !d.system.trim().is_empty() => vec![SystemBlock {
+            text: d.system.clone(),
+            cache: parent.settings.cache_control.unwrap_or(false),
+        }],
+        _ => parent.system.clone(),
+    };
+    let runtime = crate::query::Runtime::new(
+        model,
+        None,
+        parent
+            .runtime
+            .permissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
+    );
+    let _ = runtime.provider_tx.send(provider_name);
+    Ok(Arc::new(Session {
+        client,
+        runtime,
+        permission_mode: parent.permission_mode,
+        settings: parent.settings.clone(),
+        system,
+        depth: parent.depth + 1,
+        home: parent.home.clone(),
+        quiet: parent.quiet,
+        compact_failures: parent.compact_failures.clone(),
+        watch: parent.watch.clone(),
+        tasks: parent.tasks.clone(),
+        last_task_reminder_turn: parent.last_task_reminder_turn.clone(),
+        expand_tasks: parent.expand_tasks.clone(),
+        agents: parent.agents.clone(),
+        channels: parent.channels.clone(),
+        instance: Some(instance.to_string()),
+    }))
 }
 
 /// 后台 agent 进度：已产出字符数（interval poll 用）。
@@ -858,6 +867,7 @@ mod tests {
             model: Some("def-model".into()),
             provider: Some("ds".into()),
             system: "你是评审。".into(),
+            source: crate::agents::AgentDefSource::Unknown,
         }
     }
 

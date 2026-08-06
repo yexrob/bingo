@@ -55,6 +55,18 @@ pub struct Settings {
     /// 实验特性开关（`experimental`）。
     #[serde(default)]
     pub experimental: ExperimentalSettings,
+    /// team 设置（`team`）：D31 项目级编队。
+    #[serde(default)]
+    pub team: TeamSettings,
+}
+
+/// team 设置（D31）。职责：管「要不要拉起」；team 文件（.bingo/team.json）管「拉起什么」。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TeamSettings {
+    /// 项目启动时自动拉起 team（`team.autoStart`）。缺省 true（需求字面
+    /// 「启动默认读取」）；双 opt-out：本开关 + `--no-team` CLI。
+    #[serde(rename = "autoStart", default)]
+    pub auto_start: Option<bool>,
 }
 
 /// 实验特性（默认全关）。
@@ -232,6 +244,10 @@ fn merge(base: &mut Settings, layer: Settings) {
     if let Some(v) = layer.experimental.agent_message_limit {
         base.experimental.agent_message_limit = Some(v);
     }
+    // team：autoStart 后层覆盖前层（user → project → local）。
+    if let Some(v) = layer.team.auto_start {
+        base.team.auto_start = Some(v);
+    }
     for (base_hooks, layer_hooks) in [
         (&mut base.hooks.user_prompt_submit, &layer.hooks.user_prompt_submit),
         (&mut base.hooks.stop, &layer.hooks.stop),
@@ -392,6 +408,34 @@ mod tests {
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.model.as_deref(), Some("deepseek-v4"), "local 覆盖 project");
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn merges_team_auto_start_across_layers() {
+        let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-team", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // 缺省：None（运行时回落 true，见 D31）。
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.team.auto_start, None);
+        // user 层设 true。
+        write(
+            &tmp,
+            "user/bingo/settings.json",
+            r#"{"team":{"autoStart":true}}"#,
+        );
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.team.auto_start, Some(true));
+        // project 层未设 → 保持 user 层值；local 层 false 覆盖。
+        write(&tmp, ".bingo/settings.json", r#"{"permissionMode":"plan"}"#);
+        write(&tmp, ".bingo/local.json", r#"{"team":{"autoStart":false}}"#);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.team.auto_start, Some(false), "local 覆盖 user");
+        // 未知字段（旧版本无 team 段）应忽略不报错：清掉 local 的覆盖再看。
+        write(&tmp, ".bingo/local.json", r#"{"permissionMode":"plan"}"#);
+        write(&tmp, ".bingo/settings.json", r#"{"team":{"autoStart":true,"futureField":1}}"#);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.team.auto_start, Some(true), "未知字段忽略");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

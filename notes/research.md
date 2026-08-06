@@ -382,3 +382,22 @@
 - **agent 对话视图**：注册表历史（❯ 指令 subtle / 正文纯文本折行 / `⏺ 工具(摘要)` dim；tool_result 与 thinking 不进视图）+ **流式活尾**——`AgentRegistry.live` 持每回合与 subagent_hooks 共享的输出 Arc（回合始挂终摘），运行中打开能看到正在生成的文本 + `✻ 生成中…`。
 - **频道房间**：`user` 成为第三个保留成员（与 main 同样自动入席、不可移出、预算豁免、claim_name 保留）；气泡布局——他人靠左（名签 + code_block_bg，连续同发件人合并名签），user 靠右（user_message_bg，右对齐 pad；SegStyle 分段 bg，不用整行 Row.bg）；底部输入行 Enter 经 `deliver_post`（Post 工具同一投递/唤醒路径）以 user 身份发言；**渲染即已读**（每帧 mark_seen 到日志尾，serial 校验对着屏幕的人恒为最新，不弹回）。
 - 506 测试全绿（气泡布局/agent 视图/选择器状态机纯函数测试；模态循环与宿主接线为薄覆盖，与 fullscreen 同层）。
+
+### D31. agent team：项目级编队 + 跨会话记忆（键 = 项目路径 + 分支）
+
+需求（用户点名）：① team 固定到项目（可入库），项目启动默认读取并拉起；② team 保留记忆，记忆与「当前项目路径 + 当前分支」绑定。`#dev-room` 全员两轮头脑风暴收敛（dev-ex/ui-ux/dev/qa，28 条）。
+
+- **心智模型**：team 是图纸（持久定义），room 是工地（易失运行态）。team = 声明式编队层，复用一切既有原语，跑完回到 hub-and-spoke 控制面。
+- **配置** `.bingo/team.json`（camelCase、进版本库、与 settings.json 同层）：`name` + `channel{ mode: serial|free, messageLimit: 正整数 }` + `members[{ name, agent }]`。成员引用 AgentDef 而非内联人格——人格单一事实来源仍在 `.bingo/agents/<名>.md`，一人格可入多 team。职责分离：settings 管「要不要拉起」（`team.autoStart`），team 文件管「拉起什么」。
+- **启动默认加载**：`autoStart` 缺省 true（用户需求字面「默认读取」），双 opt-out：settings 关 + `--no-team` CLI。**拉起 ≠ 唤醒**：只派生成员 + 建房间，走现有 Idle 待命态（零 token、零回合），等 SendMessage/频道消息才开跑；验收断言「未收任务前 token=0、无回合日志」。拉起完成一行提示 `[team] dev-room 就绪 · 3/3 待命（/team status · /team stop）`，异常升级警示。
+- **实现为三块薄层，不引入新运行时**：team.json 解析（校验函数 validate 与 start 同源：validate 能过 start 必成）→ `spawn_team` 编排（现有 Agent spawn + `ChannelRegistry` create-if-not-exists + 成员去重）→ `/team` 命令族。幂等键 = 实例名：重复 start 复用（事件措辞 `spawned ×3` vs `reused ×3`，同 `[team]` 前缀不同动词）。
+- **命令一条线**：`/team list`（定义区/运行区两屏）→ `start` → `status`（待命/忙碌/异常/离线四态，字符+颜色双编码 ●绿 ◐黄 ✗红 ○灰）→ `assign`（= SendMessage）→ `stop`；`/team new` 交互脚手架（产物必过 validate，选成员时对引用不到的 AgentDef 即时拦截）→ `/team validate`。
+- **AgentDef 加 `source: AgentDefSource`**（Project/User/Unknown）：`load_agent_defs` 加载时记第一出处（项目层先加载、first-wins 去重 → 跨层同名覆盖 source=项目层）；无 source 的旧数据缺省 `Unknown` 不报错，UI 静默省略徽标。AgentDef 当前无序列化路径，加字段零破坏。
+- **边界（qa 定稿）**：缺失 AgentDef 报「缺失名 + 查找路径 + 字段路径」三段式；配置内成员重名=拒绝；空成员=配置错误、单成员合法；成员级失败隔离（继续拉起其余，失败者标异常可单独 re-spawn）；半启动态保留可辨认（`部分拉起 · 2/3`），不自动回滚；三层 settings 合并加 autoStart 的覆盖顺序测试；未知字段忽略（旧版本兼容）。
+- **记忆持久化**（第二轮收敛）：
+  - **键 = 项目路径（project_hash）+ 分支**：worktree 场景天然成立（主仓库 main 与 `.bingo/worktrees/agent-team` 路径+分支不同，记忆互不污染）；避免嵌入绝对路径，project_hash 校验断言防拷贝到异机误挂。
+  - **内容分层**：完整历史落盘（恢复保真）+ 决策记录（append-only、零模型成本，`sources` 管道分隔字段复用 `parse_frontmatter_pairs`，`type` 下沉条目级）。
+  - **存储**：user 层按项目+分支分目录（默认不进版本库）；协作导出 `export` 零转换（frontmatter 即 schema 字段）；`project_hash` 含于导出文件头。
+  - **碎片清理**：`/team memory list|show|gc|merge|export` 命令族，gc 带 TTL；损坏/孤儿文件与配置错误同一视觉语言（不另造样式）。
+  - **恢复时机**：启动拉起时自动恢复，一行摘要不打扰；恢复与拉起同走 spawn_team，缺文件静默回落空历史。
+- **验收断言链**：脚手架产物 → validate 通过 → start 不因配置失败；记忆 roundtrip（存→重启→恢复等值）；source 跨层覆盖；无 team 段旧项目行为完全不变。
