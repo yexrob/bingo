@@ -2,14 +2,15 @@
 //!
 //! 移植自旧 `tui.rs` 的 `BingoChat`（ratatui 版）：事件处理语义、
 //! 折叠判定、展开切换原样保留；`draw` 换成 [`Chat::build_rows`]，
-//! 产出显示无关的样式化行文档，由 UI 层映射为 iocraft 元素。
+//! 产出显示无关的样式化行文档，由 [`crate::tui::view`] 映射为终端行。
 //! 事件从通道（`UiEvent` / `AskRequest`）流入，键盘/鼠标经
 //! [`Chat::on_key`] / [`Chat::doc_click`] 流入。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use iocraft::prelude::{Color, KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers};
+use ratatui::style::Color;
 use rsmarkdown_core::{MarkdownProcessor, Renderer};
 use tokio::sync::{mpsc, oneshot};
 
@@ -24,48 +25,7 @@ use crate::tui::gfx::{self, ImageCap, ImageMeta};
 use crate::tui::line::{text_width, wrap_words, Line, SegStyle};
 use crate::tui::markdown::MarkdownRenderer;
 use crate::tui::theme::{Theme, ThemeSetting};
-use crate::tui::UiEvent;
-
-/// 权限询问：请求 + 结果回执。
-pub type AskRequest = (PermissionRequest, oneshot::Sender<DialogAction>);
-
-/// 权限对话框结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DialogAction {
-    /// 选项 `index`（0 起）被确认。
-    Confirm(usize),
-    /// AskUserQuestion 的 Other 自由输入被提交。
-    Answer(String),
-    /// 对话框被 Esc 取消。
-    Cancel,
-}
-
-/// 要展示的权限/提问块。
-#[derive(Debug, Clone)]
-pub struct PermissionRequest {
-    /// 标题，如 `允许执行 Bash` 或 AskUserQuestion 的 header。
-    pub title: String,
-    /// 标题下的说明。
-    pub question: String,
-    /// 编号选项（数字自动添加）。
-    pub options: Vec<String>,
-    /// options[i] 的说明（CC Select 副行，dim 渲染）。
-    pub descriptions: Vec<Option<String>>,
-    /// AskUserQuestion：末尾自动附加 "Other" 自由输入（CC 行为）。
-    pub free_text: bool,
-}
-
-impl PermissionRequest {
-    pub fn new(title: impl Into<String>, question: impl Into<String>, options: Vec<String>) -> Self {
-        Self {
-            title: title.into(),
-            question: question.into(),
-            options,
-            descriptions: Vec::new(),
-            free_text: false,
-        }
-    }
-}
+use crate::ui::{AskRequest, DialogAction, PermissionRequest, UiEvent};
 
 /// AskUserQuestion 回答结果块（`User answered the questions` 消息）。
 #[derive(Debug, Clone, Default)]
@@ -293,15 +253,13 @@ pub const CTRL_C_WINDOW: std::time::Duration = std::time::Duration::from_secs(3)
 pub const ESC_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 /// 粘贴突发判定：按键间隔短于此值即视为同一批输入。
 ///
-/// 局限（写在这里，因为它决定了体验的边界）：iocraft 0.8.4 丢弃
-/// `Event::Paste`（终端事件流只透传 Key/Mouse/Resize），bracketed paste
-/// 因此拿不到，只能靠按键间隔猜。于是：
+/// 支持 bracketed paste 的终端走 [`Chat::on_paste`]（真实 `Event::Paste`），
+/// 这套启发式只是不支持的终端上的兜底。它的局限（写在这里，因为它决定了
+/// 那些终端上的体验边界）：
 /// - 打字极快的人（<10ms/键，连续 [`PASTE_BURST_KEYS`] 次以上）会被误判为
 ///   粘贴，此时 Enter 变成换行而不是发送——按 Esc 或停顿一下即恢复；
 /// - 逐字符重放的自动化输入（tmux send-keys、expect）同样会被误判；
 /// - 反过来，慢速粘贴（SSH 抖动）会被当作打字，此时 Enter 直接发送。
-///
-/// 终端上报 bracketed paste 后应当整段替换这套启发式。
 pub const PASTE_BURST_GAP: std::time::Duration = std::time::Duration::from_millis(10);
 /// 连续多少个"快"按键之后才认定是粘贴（低于此值是正常快打）。
 pub const PASTE_BURST_KEYS: usize = 4;
@@ -1621,6 +1579,31 @@ impl Chat {
         self.cursor = self.input.len();
     }
 
+    /// Bracketed paste (`Event::Paste`): insert the payload at the cursor as a
+    /// single undo step, then fold it away when it is large enough to swamp
+    /// the prompt. Terminals send bare CR for the line breaks inside a paste,
+    /// so they are normalised first — the fold threshold counts lines.
+    ///
+    /// The burst heuristic ([`PASTE_BURST_GAP`]) stays as the fallback for
+    /// terminals that do not report bracketed paste.
+    pub fn on_paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let text = if text.contains('\r') {
+            text.replace("\r\n", "\n").replace('\r', "\n")
+        } else {
+            text.to_string()
+        };
+        self.snapshot(EditKind::Bulk);
+        crate::tui::input::insert(&mut self.input, &mut self.cursor, &text);
+        self.after_edit();
+        if text.lines().count() >= PASTE_COLLAPSE_LINES {
+            self.collapse_paste();
+        }
+        self.dirty = true;
+    }
+
     /// 把占位符换回真实内容（提交时）。
     fn expand_pastes(&self, text: &str) -> String {
         let mut out = text.to_string();
@@ -2346,8 +2329,8 @@ impl Chat {
             })
             .collect();
         // 技能并入（/ 菜单含 skills）。描述截断：
-        // NoWrap 超长行会把 canvas 撑出终端宽（iocraft 不截断），
-        // 行 diff 错位 → 帧残留；上限 MAX_LISTING_DESC_CHARS。
+        // 超长行不折行，会被终端自己折成两行、把帧高度算错；
+        // 上限 MAX_LISTING_DESC_CHARS。
         let home = self.session.home.clone();
         let cwd = std::path::PathBuf::from(&self.cwd);
         for skill in crate::skills::load_skills(&home, &cwd) {
@@ -2505,7 +2488,7 @@ impl Chat {
         self.cancel_tx.send_replace(false);
         tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
-            let mut ui = crate::tui::tui_hooks(events.clone(), asks);
+            let mut ui = crate::ui::tui_hooks(events.clone(), asks);
             let history = Self::load_history(&session, &mut ui.on_warning);
             let result = run_query(&session, history, &text, &mut ui, Some(cancel_rx)).await;
             match result {
@@ -2539,7 +2522,7 @@ impl Chat {
         self.cancel_tx.send_replace(false);
         tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
-            let mut ui = crate::tui::tui_hooks(events.clone(), asks);
+            let mut ui = crate::ui::tui_hooks(events.clone(), asks);
             let history = Self::load_history(&session, &mut ui.on_warning);
             let result = crate::query::run_bash_command(
                 &session,
@@ -3267,7 +3250,7 @@ impl Chat {
     /// tick：spinner 帧与运行态 thinking 独立计时。
     ///
     /// 只有存在随 tick 变化的行时才置 dirty：空闲时无条件重建整个文档
-    /// 等于 30fps 全量重排，既费 CPU 又让 iocraft 每帧比对一遍 canvas。
+    /// 等于 30fps 全量重排，既费 CPU 又让宿主每帧重画一次视口。
     pub fn tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
         if self.has_dynamic_rows() {
@@ -3310,8 +3293,8 @@ impl Chat {
                     .any(|t| t.status == TodoStatus::InProgress))
     }
 
-    /// 宿主 tick 循环是否需要唤醒组件。空闲时返回 false：iocraft 的
-    /// `State::write()` 无条件唤醒重渲，每 33ms 写一次即是 30fps 空转。
+    /// 宿主 tick 循环是否需要做事。空闲时返回 false，宿主据此整帧跳过——
+    /// 无动画、无待处理事件时一个字节都不写。
     pub fn needs_tick(&self) -> bool {
         self.has_dynamic_rows()
             || self.slash_at.is_some()
@@ -3397,7 +3380,7 @@ impl Chat {
             ));
         }
         for &idx in done_indices.iter().skip(hidden_done) {
-            // `☒` + 划掉的文本（终端无删除线 → dim，见 SegStyle::strikethrough）。
+            // `☒` + 划掉的文本（真实删除线 + dim，见 Theme::strikethrough）。
             let mut line = Line::styled("☒ ", theme.task_done());
             line.push_styled(t[idx].text.clone(), theme.strikethrough());
             out.push(line);
@@ -3540,7 +3523,7 @@ impl Chat {
     }
 
     /// `?` 面板的行（快捷键表单一来源）。行数预算由终端高度决定：
-    /// 面板不能把 canvas 顶到终端高度以上（那会触发 iocraft 的 Purge 兜底）。
+    /// 面板不能把视口顶到终端高度以上。
     pub fn help_lines(&self) -> Vec<String> {
         if !self.help_visible {
             return Vec::new();
@@ -6281,9 +6264,8 @@ mod tests {
         assert_eq!(row.unwrap().bg, Some(chat.theme.user_message_bg));
     }
 
-    /// 含换行的用户消息（粘贴多行）必须拆成多个单行 Row：整条塞进
-    /// 一个 height=1 的 View 会裁掉换行之后的内容，而无 bg 的行会被
-    /// iocraft 量成多行，canvas 高度与行数模型脱节。
+    /// 含换行的用户消息（粘贴多行）必须拆成多个单行 Row：一个 Row 恒占
+    /// 一行，混进换行就会让行数模型与实际视口高度脱节。
     #[test]
     fn multiline_user_message_wraps_into_single_line_rows() {
         let mut chat = test_chat();
@@ -7360,6 +7342,50 @@ mod tests {
         chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now);
         assert_eq!(chat.input, "", "Enter 提交而不是换行");
         assert_eq!(chat.queued, vec!["hi".to_string()]);
+    }
+
+    /// bracketed paste：整段插到光标处、只占一步撤销；≥10 行折叠为占位符，
+    /// 提交时展开真实内容。CR 换行（终端粘贴用的就是 CR）先归一。
+    #[test]
+    fn bracketed_paste_inserts_and_collapses() {
+        let mut chat = chat_with_history("paste-real");
+        chat.set_input("ab");
+        chat.cursor = 1;
+        chat.on_paste("X");
+        assert_eq!(chat.input, "aXb", "插在光标处");
+        assert_eq!(chat.cursor, 2);
+        chat.undo_edit();
+        assert_eq!(chat.input, "ab", "一次粘贴 = 一步撤销");
+
+        // 短段不折叠（阈值以下）。
+        let mut chat = chat_with_history("paste-short");
+        chat.on_paste("line1\nline2");
+        assert_eq!(chat.input, "line1\nline2");
+        assert!(chat.pastes.is_empty(), "未到阈值不折叠");
+
+        // ≥ PASTE_COLLAPSE_LINES 行折叠；CR 与 CRLF 都算换行。
+        let mut chat = chat_with_history("paste-fold");
+        let body: String = (0..PASTE_COLLAPSE_LINES)
+            .map(|i| format!("line{i}\r"))
+            .collect();
+        chat.on_paste(&body);
+        assert!(
+            chat.input.starts_with("[Pasted text #1 +"),
+            "占位符: {}",
+            chat.input
+        );
+        assert_eq!(chat.cursor, chat.input.len());
+        assert!(
+            chat.expand_pastes(&chat.input).contains("line9"),
+            "提交时展开真实内容"
+        );
+        assert!(!chat.expand_pastes(&chat.input).contains('\r'), "CR 已归一");
+
+        // 空粘贴什么也不做（不写撤销栈）。
+        let mut chat = chat_with_history("paste-empty");
+        chat.on_paste("");
+        assert!(chat.input.is_empty());
+        assert!(chat.undo.is_empty());
     }
 
     /// ctrl+r 反向搜索：过滤命中、再按取更旧、Tab 采纳继续编辑、

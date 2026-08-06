@@ -27,11 +27,12 @@ when_to_use: >-
   空输入连按两次退出 · ↑↓ 历史回溯（多行输入内先移光标；busy 空输入 ↑ 取回排队消息）·
   Ctrl+R 历史反向搜索 · Ctrl+A/E 行首尾 · Alt+B/F 按词移动 · Ctrl+W/U/K 删词/删到
   行首/行尾 · Ctrl+Y 粘回删除 · Ctrl+S 暂存/恢复输入 · Ctrl+_ 撤销 · ctrl+o
-  展开/折叠工具输出 · Ctrl+T 显隐任务区 · Ctrl+L 整屏重画 · Shift+Tab 循环权限
+  展开/折叠工具输出 · Ctrl+T 显隐任务区 · Ctrl+L 清屏重画 · Shift+Tab 循环权限
   模式（default → acceptEdits → plan）· Alt+T 思考开关 · busy 时回车把消息排队，
   回合结束自动发送。
 - 大段粘贴自动折叠为 `[Pasted text #N +M lines]` 占位，发送时展开真实内容
-  （按键突发启发式识别粘贴，极快连打可能误判为粘贴，停顿即恢复）。
+  （经终端 bracketed paste 事件精确识别；不支持该特性的终端退回按键突发
+  启发式，极快连打可能误判，停顿即恢复）。
 
 ## 配置指南（settings.json）
 

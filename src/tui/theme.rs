@@ -2,7 +2,7 @@
 //! 附 bingo 自有的语义令牌（diff/code/thinking 等）。所有渲染走这一个
 //! [`Theme`]，样式方法返回 [`SegStyle`]。
 
-use iocraft::prelude::Color;
+use ratatui::style::Color;
 
 use crate::tui::line::SegStyle;
 
@@ -83,44 +83,44 @@ impl Theme {
     /// 深色预设（默认）。
     pub fn dark() -> Self {
         Self {
-            text: Color::Rgb { r: 255, g: 255, b: 255 },
-            inactive: Color::Rgb { r: 153, g: 153, b: 153 },
-            subtle: Color::Rgb { r: 80, g: 80, b: 80 },
-            claude: Color::Rgb { r: 215, g: 119, b: 87 },
-            permission: Color::Rgb { r: 177, g: 185, b: 249 },
-            success: Color::Rgb { r: 78, g: 186, b: 101 },
-            error: Color::Rgb { r: 255, g: 107, b: 128 },
-            warning: Color::Rgb { r: 255, g: 193, b: 7 },
-            plan_mode: Color::Rgb { r: 72, g: 150, b: 140 },
-            accept_edits: Color::Rgb { r: 175, g: 135, b: 255 },
-            prompt_border: Color::Rgb { r: 136, g: 136, b: 136 },
-            bash_border: Color::Rgb { r: 253, g: 93, b: 177 },
-            user_message_bg: Color::Rgb { r: 55, g: 55, b: 55 },
+            text: Color::Rgb(255, 255, 255),
+            inactive: Color::Rgb(153, 153, 153),
+            subtle: Color::Rgb(80, 80, 80),
+            claude: Color::Rgb(215, 119, 87),
+            permission: Color::Rgb(177, 185, 249),
+            success: Color::Rgb(78, 186, 101),
+            error: Color::Rgb(255, 107, 128),
+            warning: Color::Rgb(255, 193, 7),
+            plan_mode: Color::Rgb(72, 150, 140),
+            accept_edits: Color::Rgb(175, 135, 255),
+            prompt_border: Color::Rgb(136, 136, 136),
+            bash_border: Color::Rgb(253, 93, 177),
+            user_message_bg: Color::Rgb(55, 55, 55),
             code_fg: Color::Yellow,
-            code_block_fg: Color::Rgb { r: 170, g: 170, b: 170 },
-            code_block_bg: Color::Rgb { r: 24, g: 24, b: 24 },
+            code_block_fg: Color::Rgb(170, 170, 170),
+            code_block_bg: Color::Rgb(24, 24, 24),
             link: Color::Blue,
             math: Color::Magenta,
             headings: vec![
                 Color::White,
                 Color::Cyan,
                 Color::Blue,
-                Color::DarkGrey,
+                Color::DarkGray,
             ],
-            quote: Color::Grey,
+            quote: Color::Gray,
             quote_bar: Color::Blue,
             task_done: Color::Green,
-            task_open: Color::DarkGrey,
+            task_open: Color::DarkGray,
             list_marker: Color::Cyan,
-            table_border: Color::DarkGrey,
+            table_border: Color::DarkGray,
             table_header: Color::Reset,
-            hr: Color::DarkGrey,
-            footnote: Color::DarkGrey,
-            thinking: Color::DarkGrey,
+            hr: Color::DarkGray,
+            footnote: Color::DarkGray,
+            thinking: Color::DarkGray,
             tool_running: Color::Cyan,
-            tool_output: Color::DarkGrey,
+            tool_output: Color::DarkGray,
             diff_hunk: Color::Cyan,
-            diff_context: Color::Grey,
+            diff_context: Color::Gray,
             diff_edit: Color::Yellow,
         }
     }
@@ -128,45 +128,45 @@ impl Theme {
     /// 浅色预设（正文黑、主强调橙保持橙）。
     pub fn light() -> Self {
         Self {
-            text: Color::Rgb { r: 0, g: 0, b: 0 },
-            inactive: Color::Rgb { r: 102, g: 102, b: 102 },
-            subtle: Color::Rgb { r: 175, g: 175, b: 175 },
-            claude: Color::Rgb { r: 215, g: 119, b: 87 },
-            permission: Color::Rgb { r: 87, g: 105, b: 247 },
-            success: Color::Rgb { r: 44, g: 122, b: 57 },
-            error: Color::Rgb { r: 171, g: 43, b: 63 },
-            warning: Color::Rgb { r: 150, g: 108, b: 30 },
-            plan_mode: Color::Rgb { r: 0, g: 102, b: 102 },
-            accept_edits: Color::Rgb { r: 135, g: 0, b: 255 },
-            prompt_border: Color::Rgb { r: 153, g: 153, b: 153 },
-            bash_border: Color::Rgb { r: 255, g: 0, b: 135 },
-            user_message_bg: Color::Rgb { r: 240, g: 240, b: 240 },
-            code_fg: Color::Rgb { r: 150, g: 108, b: 30 },
-            code_block_fg: Color::Rgb { r: 60, g: 60, b: 60 },
-            code_block_bg: Color::Rgb { r: 245, g: 245, b: 245 },
-            link: Color::Rgb { r: 0, g: 90, b: 180 },
-            math: Color::Rgb { r: 130, g: 0, b: 130 },
+            text: Color::Rgb(0, 0, 0),
+            inactive: Color::Rgb(102, 102, 102),
+            subtle: Color::Rgb(175, 175, 175),
+            claude: Color::Rgb(215, 119, 87),
+            permission: Color::Rgb(87, 105, 247),
+            success: Color::Rgb(44, 122, 57),
+            error: Color::Rgb(171, 43, 63),
+            warning: Color::Rgb(150, 108, 30),
+            plan_mode: Color::Rgb(0, 102, 102),
+            accept_edits: Color::Rgb(135, 0, 255),
+            prompt_border: Color::Rgb(153, 153, 153),
+            bash_border: Color::Rgb(255, 0, 135),
+            user_message_bg: Color::Rgb(240, 240, 240),
+            code_fg: Color::Rgb(150, 108, 30),
+            code_block_fg: Color::Rgb(60, 60, 60),
+            code_block_bg: Color::Rgb(245, 245, 245),
+            link: Color::Rgb(0, 90, 180),
+            math: Color::Rgb(130, 0, 130),
             headings: vec![
-                Color::Rgb { r: 30, g: 30, b: 30 },
-                Color::Rgb { r: 0, g: 102, b: 102 },
-                Color::Rgb { r: 0, g: 90, b: 180 },
-                Color::Rgb { r: 120, g: 120, b: 120 },
+                Color::Rgb(30, 30, 30),
+                Color::Rgb(0, 102, 102),
+                Color::Rgb(0, 90, 180),
+                Color::Rgb(120, 120, 120),
             ],
-            quote: Color::Rgb { r: 90, g: 90, b: 90 },
-            quote_bar: Color::Rgb { r: 0, g: 90, b: 180 },
-            task_done: Color::Rgb { r: 44, g: 122, b: 57 },
-            task_open: Color::Rgb { r: 153, g: 153, b: 153 },
-            list_marker: Color::Rgb { r: 0, g: 102, b: 102 },
-            table_border: Color::Rgb { r: 153, g: 153, b: 153 },
-            table_header: Color::Rgb { r: 30, g: 30, b: 30 },
-            hr: Color::Rgb { r: 153, g: 153, b: 153 },
-            footnote: Color::Rgb { r: 120, g: 120, b: 120 },
-            thinking: Color::Rgb { r: 102, g: 102, b: 102 },
-            tool_running: Color::Rgb { r: 0, g: 102, b: 102 },
-            tool_output: Color::Rgb { r: 90, g: 90, b: 90 },
-            diff_hunk: Color::Rgb { r: 0, g: 102, b: 102 },
-            diff_context: Color::Rgb { r: 90, g: 90, b: 90 },
-            diff_edit: Color::Rgb { r: 150, g: 108, b: 30 },
+            quote: Color::Rgb(90, 90, 90),
+            quote_bar: Color::Rgb(0, 90, 180),
+            task_done: Color::Rgb(44, 122, 57),
+            task_open: Color::Rgb(153, 153, 153),
+            list_marker: Color::Rgb(0, 102, 102),
+            table_border: Color::Rgb(153, 153, 153),
+            table_header: Color::Rgb(30, 30, 30),
+            hr: Color::Rgb(153, 153, 153),
+            footnote: Color::Rgb(120, 120, 120),
+            thinking: Color::Rgb(102, 102, 102),
+            tool_running: Color::Rgb(0, 102, 102),
+            tool_output: Color::Rgb(90, 90, 90),
+            diff_hunk: Color::Rgb(0, 102, 102),
+            diff_context: Color::Rgb(90, 90, 90),
+            diff_edit: Color::Rgb(150, 108, 30),
         }
     }
 }
@@ -291,10 +291,10 @@ impl Theme {
         }
     }
 
-    /// 把所有 RGB 颜色映射为 256 色（AnsiValue）近似。
+    /// 把所有 RGB 颜色映射为 256 色（Indexed）近似。
     fn downgrade_to_256(mut self) -> Self {
         let f = |c: Color| match c {
-            Color::Rgb { r, g, b } => Color::AnsiValue(rgb_to_ansi256(r, g, b)),
+            Color::Rgb(r, g, b) => Color::Indexed(rgb_to_ansi256(r, g, b)),
             c => c,
         };
         self.text = f(self.text);
@@ -350,8 +350,7 @@ impl Theme {
     pub fn emphasis(&self) -> SegStyle {
         SegStyle::plain().italic()
     }
-    /// 删除线。iocraft 0.8.4 无删除线装饰 → 同时弱化前景色，
-    /// 终端库支持后只需在显示层接上 `SegStyle::strikethrough`。
+    /// 删除线（真实 `CROSSED_OUT`，前景弱化以保持 CC 的完成态观感）。
     pub fn strikethrough(&self) -> SegStyle {
         SegStyle::fg(self.inactive).strikethrough()
     }
@@ -457,7 +456,7 @@ impl Theme {
     }
 }
 
-/// RGB → 256 色（AnsiValue）近似：6×6×6 cube + 灰阶。
+/// RGB → 256 色（Indexed）近似：6×6×6 cube + 灰阶。
 fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
     // 灰阶：r==g==b 且不在 cube 节点附近
     if r == g && g == b {
@@ -526,14 +525,14 @@ mod tests {
     #[test]
     fn dark_matches_claude_code_tokens() {
         let t = Theme::dark();
-        assert_eq!(t.claude, Color::Rgb { r: 215, g: 119, b: 87 });
+        assert_eq!(t.claude, Color::Rgb(215, 119, 87));
         assert_eq!(
             t.permission,
-            Color::Rgb { r: 177, g: 185, b: 249 }
+            Color::Rgb(177, 185, 249)
         );
         assert_eq!(
             t.user_message_bg,
-            Color::Rgb { r: 55, g: 55, b: 55 }
+            Color::Rgb(55, 55, 55)
         );
     }
 
@@ -552,9 +551,9 @@ mod tests {
     fn rgb_downgrades_to_ansi256() {
         // 主强调橙 → 256 色
         let downgraded = Theme::dark().downgrade_to_256();
-        assert_eq!(downgraded.claude, Color::AnsiValue(173));
-        assert_eq!(downgraded.permission, Color::AnsiValue(147));
-        assert_eq!(downgraded.user_message_bg, Color::AnsiValue(237));
+        assert_eq!(downgraded.claude, Color::Indexed(173));
+        assert_eq!(downgraded.permission, Color::Indexed(147));
+        assert_eq!(downgraded.user_message_bg, Color::Indexed(237));
         // 非 RGB 保持
         assert_eq!(downgraded.code_fg, Theme::dark().code_fg);
     }
@@ -574,7 +573,7 @@ mod tests {
     fn heading_falls_back_for_deep_levels() {
         let t = Theme::dark();
         assert_eq!(t.heading(1).fg, Some(Color::White));
-        assert_eq!(t.heading(9).fg, Some(Color::DarkGrey));
+        assert_eq!(t.heading(9).fg, Some(Color::DarkGray));
         assert_eq!(t.heading(0).fg, Some(t.text), "level 0 = plain text color");
     }
 
@@ -593,18 +592,18 @@ mod tests {
         // 显式主题不依赖终端检测。
         let dark = Theme::for_terminal(ThemeSetting::Dark, None);
         let light = Theme::for_terminal(ThemeSetting::Light, None);
-        assert_eq!(dark.text, Color::Rgb { r: 255, g: 255, b: 255 });
-        assert_eq!(light.text, Color::Rgb { r: 0, g: 0, b: 0 });
+        assert_eq!(dark.text, Color::Rgb(255, 255, 255));
+        assert_eq!(light.text, Color::Rgb(0, 0, 0));
     }
 
     #[test]
     fn auto_uses_detected_background() {
         // Some(true) = 深色背景。
         let dark = Theme::for_terminal(ThemeSetting::Auto, Some(true));
-        assert_eq!(dark.text, Color::Rgb { r: 255, g: 255, b: 255 });
+        assert_eq!(dark.text, Color::Rgb(255, 255, 255));
         // Some(false) = 浅色背景。
         let light = Theme::for_terminal(ThemeSetting::Auto, Some(false));
-        assert_eq!(light.text, Color::Rgb { r: 0, g: 0, b: 0 });
+        assert_eq!(light.text, Color::Rgb(0, 0, 0));
     }
 
     #[test]

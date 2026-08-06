@@ -308,4 +308,14 @@
   6. **spinner tips**：运行 >30s 提示 `/btw`、>30min 提示 `/clear`；有任务时 `Next: {subject}`。
 - **bingo 实现**：`Chat::running_status()`（busy 时返回 `(动词, 耗时)`——运行中工具 summary > thinking 俏皮词 > "Working"；`turn_started` Instant 由 TurnStart/TurnEnd 设置）+ `status_row` 渲染在输入框上方（chrome 一行，inline/全屏均可见；任务区与警告行之间）。动词优先工具 summary（`$ sleep 2`），与 activeForm 语义一致。
 - **验证**：198 测试全过（新增 `running_status` 动词优先级、状态行渲染断言）；PTY 实测 `!sleep 2`：`⠼ $ sleep 2 for 0.2s → … → 2.0s` 逐帧跳动，回合结束消失。
-- **遗留（上游 iocraft 问题，非本改动引入）**：API 完全挂起（无任何事件）时，tick 驱动的渲染链会在 ~1s 内饿死——spinner/计时冻结在提交瞬间（基线同现；探针时序可复现/可绕过）。事件流正常时（含真实 API 的流式往返）无此问题。状态行至少在冻结前给出"Working"可见提示；彻底修复需在 iocraft 渲染循环的唤醒链上动手（`select(root.wait(), term.wait())` 对自驱动动画的唤醒竞态）。
+- **遗留（上游 iocraft 问题，非本改动引入）**：API 完全挂起（无任何事件）时，tick 驱动的渲染链会在 ~1s 内饿死——spinner/计时冻结在提交瞬间（基线同现；探针时序可复现/可绕过）。事件流正常时（含真实 API 的流式往返）无此问题。状态行至少在冻结前给出"Working"可见提示；彻底修复需在 iocraft 渲染循环的唤醒链上动手（`select(root.wait(), term.wait())` 对自驱动动画的唤醒竞态）。（已随 D26 重写消亡）
+
+### D26. TUI 渲染层重写：iocraft → ratatui 0.30 + 自研 inline 驱动
+
+- **动因**：iocraft inline 模式每帧重画整个 canvas（含永不变化的内容）、每行空格补齐到满终端宽、光标相对 diff 在终端 resize reflow 下失同步、canvas ≥ 终端高触发 `Clear(All)+Purge` 清空 scrollback。多轮补偿（chrome 记账、shrink_deficit、reflow 白名单）治标不治本——resize 楼梯残骸的根源是「重画已定稿内容」这个前提本身。
+- **新架构**（codex-rs / Claude Code 同款）：定稿行经滚动区域**一次性写入终端 scrollback，永不重绘**；只有底部视口（未定稿尾部 + chrome）被重画。resize 时旧内容由终端自然 rewrap（与普通 shell 输出一致），残骸从结构上不可能累积。
+- **分层**：`src/ui.rs` 渲染无关契约（UiEvent/AskRequest/PermissionRequest/DialogAction/tui_hooks，零渲染依赖——未来 GUI 对同一契约实现另一 `run_*_session`）；`tui/term.rs` 全 crate 唯一碰终端的模块（视口双缓冲 diff + insert_history + CSI ?2026 同步更新包裹，镜像 ratatui `insert_before` scrolling-regions 路径与 codex `custom_terminal`）；`tui/app.rs` 显式 `select!` 事件循环 + Frame 组装（帧高 = 实测行数，无第二套 chrome 公式可漂移）；`tui/view.rs` 纯转换（crate `Line` → ratatui text）。
+- **迁移面**：chat.rs 4,100 行逻辑 + 3,300 行测试仅换 import 全量存活（iocraft 的 KeyCode/KeyModifiers 本就是 crossterm 再导出）；line/theme 换 Color 类型；components.rs（2,122 行）整体删除；iocraft 依赖移除，新增仅 ratatui（`scrolling-regions` feature 需显式开启，0.30.2 非默认；crossterm 加 `event-stream`）。
+- **驱动语义要点**：视口未贴底先 `scroll_region_down` 下推（不耗 scrollback），贴底后对上方区域 `scroll_region_up` 分块入 scrollback；行尾 `Clear(UntilNewLine)` 不填空格（resize 无折行垃圾的关键）；判空用 `Cell::EMPTY` 全等——带背景色的空格是内容（用户气泡尾巴靠此保活）；`HistoryItem::Raw`（kitty 图片字节）按 rows 记账、其行永不清除；视口增高在物理底行写真实换行（唯一全终端保 scrollback 的滚动）。
+- **顺带改进**：bracketed paste 真事件（突发启发式降为兜底）；删除线真实渲染（CROSSED_OUT）；终端硬光标落在 `▋` 位（D20g 的意图，iocraft 无光标 API 的约束消失）；极矮终端从顶部丢行保住输入框 + footer（旧行为触发 Purge）；D25 遗留的 tick 饿死随渲染循环消亡（tokio interval 无唤醒竞态）。
+- **验证**：468 测试全绿（chat.rs 115 个既有测试零改动通过；驱动 23 个 TestBackend 场景测试，含「50 行历史 + 缩窄 resize 后无任何重复行」回归；app/view 移植 25 个策略测试——tail window、chrome 完整性、flush 跨宽度不双打、ctrl+o 门控、建议行数同源）；`cargo clippy -- -D warnings` 干净。真机烟囱测试（Ghostty 长回复 + 拖拽 resize、tmux+Ghostty 图片、Terminal.app、BCE 终端的 EL 清行）待实测。

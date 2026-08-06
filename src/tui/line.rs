@@ -1,9 +1,9 @@
 //! 显示层的样式化行模型：markdown 渲染与 activities 布局都产出
-//! [`Line`]，再由 UI 层映射为 iocraft 元素。与显示库解耦。
+//! [`Line`]，再由 [`crate::tui::view`] 映射为终端行。与显示库解耦。
 
 use std::borrow::Cow;
 
-use iocraft::prelude::Color;
+use ratatui::style::Color;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
@@ -20,9 +20,7 @@ pub struct SegStyle {
     pub italic: bool,
     /// 下划线。
     pub underline: bool,
-    /// 删除线。iocraft 0.8.4 的 `TextDecoration` 只有 None/Underline，
-    /// 显示层因此把它退化为 dim（[`crate::tui::theme::Theme::strikethrough`]），
-    /// 语义仍保留在模型里：终端库支持后只需改显示层。
+    /// 删除线（渲染为 `Modifier::CROSSED_OUT`）。
     pub strikethrough: bool,
 }
 
@@ -161,16 +159,14 @@ impl Line {
     }
 }
 
-/// A [`Line`] must occupy exactly one terminal row. iocraft derives a text
-/// node's height by counting `\n`, so an embedded newline silently makes the
-/// canvas taller than the row model believes: the inline diff then moves the
-/// cursor by the wrong amount and the canvas-height budget under-counts, which
-/// is what makes iocraft fall back to `Clear(All)+Purge`.
+/// A [`Line`] must occupy exactly one terminal row: the viewport height is the
+/// row count, and scrollback rows are written one per line, so an embedded
+/// newline would desync both.
 ///
 /// Newlines and tabs fold to a single space (tabs also break column
 /// accounting, since their display width is not their advance). Remaining C0
-/// controls are dropped. ESC is kept so iocraft's own ANSI stripping still
-/// sees complete escape sequences.
+/// controls are dropped. ESC is kept so a segment that already carries a
+/// complete escape sequence stays intact.
 pub fn sanitize(text: &str) -> Cow<'_, str> {
     if !text.chars().any(|c| c.is_control() && c != '\x1b') {
         return Cow::Borrowed(text);
@@ -275,7 +271,7 @@ mod tests {
         assert_eq!(sanitize("a\nb\r\nc"), "a b  c");
         assert_eq!(sanitize("a\tb"), "a b");
         assert_eq!(sanitize("a\u{7}b"), "ab");
-        // ESC 保留：iocraft 的 strip_ansi 需要看到完整转义序列。
+        // ESC kept: a segment carrying a complete escape sequence stays intact.
         assert_eq!(sanitize("a\x1b[0mb"), "a\x1b[0mb");
     }
 

@@ -30,6 +30,7 @@ mod tool;
 mod tools;
 mod transcript;
 mod tui;
+mod ui;
 mod watch;
 
 #[derive(Debug, Parser)]
@@ -39,7 +40,7 @@ struct Cli {
     #[arg(short, long)]
     print: bool,
 
-    /// 全屏模式（iocraft canvas，输入吸底、app 内滚动）；默认 inline：
+    /// 全屏模式（备用屏 canvas，输入吸底、app 内滚动）；默认 inline：
     /// 像普通终端一样输出，历史在终端 scrollback
     #[arg(long)]
     fullscreen: bool,
