@@ -98,7 +98,7 @@ Startup fails with an error if no API key is present.
 |---|---|
 | `-p, --print` | headless mode: print the reply to stdout (prompt from argument or stdin) |
 | `--fullscreen` | fullscreen mode (alternate-screen canvas, input docked at bottom, in-app scrolling); default is inline (history in terminal scrollback) |
-| `--model <name>` | use the given model (default `claude-sonnet-5`) |
+| `--model <name>` | use the given model (falls back to the `model` settings key, then `claude-sonnet-5`) |
 | `--permission-mode <mode>` | permission mode: `default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions` (default from settings) |
 | `--continue` | resume the most recent session |
 | `prompt` | non-interactive prompt (read from stdin if omitted; ignored in interactive mode) |
@@ -163,6 +163,7 @@ Three layers are shallow-merged; later layers override earlier ones:
 | `apiKey` | string | API key (settings take precedence over `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`) |
 | `apiBaseUrl` | string | API endpoint (settings take precedence over `ANTHROPIC_BASE_URL`; default is the official one) |
 | `providers` | object | named providers (Anthropic protocol): `{name: {apiKey, apiBaseUrl}}`, switch with `/provider <name>` |
+| `model` | string | default model (written by `/model`); precedence: `--model` > settings > built-in `claude-sonnet-5` |
 | `thinkingLevel` | string | `off` omits thinking params (DeepSeek-compatible, default); `low`/`medium`/`high` send adaptive thinking |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto` (follow terminal background) / `dark` / `light` |
@@ -184,6 +185,7 @@ Example:
     "deepseek": { "apiKey": "sk-ds", "apiBaseUrl": "https://api.deepseek.com" },
     "local": { "apiKey": "sk-any", "apiBaseUrl": "http://127.0.0.1:11434/v1" }
   },
+  "model": "claude-sonnet-5",
   "thinkingLevel": "medium",
   "permissionMode": "acceptEdits",
   "mcpServers": {

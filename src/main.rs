@@ -47,9 +47,9 @@ struct Cli {
     #[arg(long)]
     fullscreen: bool,
 
-    /// 使用的模型
-    #[arg(long, default_value = DEFAULT_MODEL)]
-    model: String,
+    /// 使用的模型（缺省依次回落 settings `model`、内置默认）
+    #[arg(long)]
+    model: Option<String>,
 
     /// 权限模式（默认从 settings 读取）
     #[arg(long)]
@@ -133,8 +133,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| s.to_string_lossy().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| crate::tasks::project_task_key(&project_dir));
+    // 模型优先级：--model > settings（user < project < local 合并结果）> 内置默认。
+    let model = cli
+        .model
+        .or_else(|| settings.model.clone())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let mut runtime = crate::query::Runtime::new(
-        cli.model,
+        model,
         transcript,
         settings.permissions.clone(),
     );

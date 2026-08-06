@@ -25,6 +25,9 @@ pub struct Settings {
     /// 顶层 apiKey/apiBaseUrl（或 env）构成默认 provider "default"。
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
+    /// 默认模型（`model`）：`/model` 选择持久化于此。
+    /// 优先级 `--model` > settings（user < project < local）> 内置默认。
+    pub model: Option<String>,
     /// 思考级别（`thinkingLevel`）：off | low | medium | high。
     /// 缺省不发 thinking 参数（兼容 DeepSeek 等端点）；low/medium/high
     /// 一律发 `{"type":"adaptive"}`——Claude 5 家族已移除 budget_tokens。
@@ -175,6 +178,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     }
     if !layer.providers.is_empty() {
         base.providers.extend(layer.providers);
+    }
+    if let Some(model) = layer.model {
+        base.model = Some(model);
     }
     if let Some(level) = layer.thinking_level {
         base.thinking_level = Some(level);
@@ -366,6 +372,26 @@ mod tests {
         let limits = crate::channels::ChannelLimits::from_settings(&settings);
         assert_eq!(limits.channel_total, 100);
         assert_eq!(limits.per_agent, 10);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// model 逐层覆盖：后层（local > project > user）胜出，缺省 None。
+    #[test]
+    fn merges_model() {
+        let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-model", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.model, None, "缺省不配置模型");
+
+        write(&tmp, "user/bingo/settings.json", r#"{"model":"claude-sonnet-5"}"#);
+        write(&tmp, ".bingo/settings.json", r#"{"model":"claude-opus-5"}"#);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.model.as_deref(), Some("claude-opus-5"), "project 覆盖 user");
+
+        write(&tmp, ".bingo/local.json", r#"{"model":"deepseek-v4"}"#);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.model.as_deref(), Some("deepseek-v4"), "local 覆盖 project");
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

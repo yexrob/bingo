@@ -1867,8 +1867,23 @@ impl Chat {
             self.open_model_menu();
             return;
         }
-        let _ = self.session.runtime.model_tx.send(arg.to_string());
-        self.push_slash_output(format!("✓ 模型已切换: {arg}"));
+        self.set_model(arg.to_string());
+    }
+
+    /// 切换运行时模型并持久化为默认（与 /theme /think 同路径：写 project 层）。
+    fn set_model(&mut self, model: String) {
+        let _ = self.session.runtime.model_tx.send(model.clone());
+        self.persist_model(&model);
+        self.push_slash_output(format!("✓ 模型已切换: {model}"));
+    }
+
+    /// 模型选择写回 `.bingo/settings.json`（下次启动作为默认；--model 仍可覆盖）。
+    fn persist_model(&self, model: &str) {
+        let cwd = std::path::PathBuf::from(&self.cwd);
+        let _ = crate::settings::upsert_project_settings(
+            &cwd,
+            &serde_json::json!({ "model": model }),
+        );
     }
 
     /// 进入 `/model` 二级选择器：一级 = 当前 endpoint + 配置 providers。
@@ -1984,6 +1999,7 @@ impl Chat {
                 }
                 let _ = self.session.runtime.model_tx.send(model.clone());
                 let _ = self.session.runtime.provider_tx.send(provider.clone());
+                self.persist_model(&model);
                 self.push_slash_output(format!("✓ 模型已切换: {provider} · {model}"));
                 true
             }
@@ -4511,7 +4527,8 @@ mod tests {
     }
 
     /// 自建 home 的 Chat（slash 测试用唯一目录，避免与其他测试共享
-    /// transcript/task 存储）。
+    /// transcript/task 存储）。cwd 同指 home：/model /think /theme 等
+    /// 持久化路径写 `{cwd}/.bingo`，不得污染仓库真实配置。
     fn test_chat_home(home: std::path::PathBuf) -> Chat {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
@@ -4539,7 +4556,10 @@ mod tests {
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
         });
-        Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), None)
+        let mut chat =
+            Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), None);
+        chat.cwd = home.display().to_string();
+        chat
     }
 
     fn tool_activity() -> Activity {
@@ -5103,16 +5123,25 @@ mod tests {
         );
     }
 
-    /// /model：无参显示当前模型；带参切换运行时模型（下一轮生效）。
+    /// /model：带参切换运行时模型（下一轮生效）并持久化默认；无参进入选择器。
     #[test]
     fn slash_model_switches_runtime_model() {
-        let mut chat = test_chat();
+        let home = std::env::temp_dir().join(format!("bingo-model-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let mut chat = test_chat_home(home.clone());
         chat.input = "/model deepseek-v4".to_string();
         chat.submit();
         assert_eq!(*chat.session.runtime.model.borrow(), "deepseek-v4");
+        assert!(chat.slash_lines.join("\n").contains("deepseek-v4"));
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".bingo/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["model"], "deepseek-v4", "选择写回 project settings");
         chat.input = "/model".to_string();
         chat.submit();
-        assert!(chat.slash_lines.join("\n").contains("deepseek-v4"));
+        assert!(chat.model_menu.is_some(), "无参进入选择器");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// /exit 置退出标志（组件层消费 → system.exit）。

@@ -85,7 +85,7 @@ bingo --continue            # 恢复最近一次会话
 |---|---|
 | `-p, --print` | headless 模式：直接把回复打到 stdout（prompt 取参数或 stdin） |
 | `--fullscreen` | 全屏模式（备用屏 canvas，输入吸底、app 内滚动）；默认 inline（历史在终端 scrollback） |
-| `--model <名>` | 使用指定模型（默认 `claude-sonnet-5`） |
+| `--model <名>` | 使用指定模型（缺省依次回落 settings `model`、内置 `claude-sonnet-5`） |
 | `--permission-mode <模式>` | 权限模式：`default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions`（默认取 settings） |
 | `--continue` | 恢复最近的会话继续对话 |
 | `prompt` | 非交互提示词（缺省从 stdin 读取；交互模式忽略） |
@@ -144,6 +144,7 @@ bingo --continue            # 恢复最近一次会话
 | `apiKey` | string | API key（settings 优先于 `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`） |
 | `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
 | `providers` | object | 命名 provider（Anthropic 协议）：`{名: {apiKey, apiBaseUrl}}`，`/provider <名>` 切换 |
+| `model` | string | 默认模型（`/model` 选择写入）；优先级 `--model` > settings > 内置 `claude-sonnet-5` |
 | `thinkingLevel` | string | `off` 不发 thinking 参数（兼容 DeepSeek，缺省）；`low`/`medium`/`high` 发自适应 thinking |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto`（跟随终端背景）/ `dark` / `light` |
@@ -165,6 +166,7 @@ bingo --continue            # 恢复最近一次会话
     "deepseek": { "apiKey": "sk-ds", "apiBaseUrl": "https://api.deepseek.com" },
     "local": { "apiKey": "sk-any", "apiBaseUrl": "http://127.0.0.1:11434/v1" }
   },
+  "model": "claude-sonnet-5",
   "thinkingLevel": "medium",
   "permissionMode": "acceptEdits",
   "mcpServers": {
