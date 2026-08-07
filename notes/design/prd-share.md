@@ -1,9 +1,10 @@
 # PRD: `bingo share` 子命令（HTML 会话分享页）
 
-> 状态：v1.1 修订稿（验收锚点 + 范围边界；正文视图集/数据源由 dev 定案版更新，本版由 pm 收口）
-> **v1.1 修订（pm，2025-08-07）**：① 视图集与数据源已按用户指令定案（四视图 = 对话 / Team 名册 / 私聊 / 频道，ShareStore 增量持久化，事实源 share-page-design.md v2.0 §9 / 模板 MD5 c4a781c5）；② 界面语言按 uiux-share 决策（#team-share #8）跟模板走英文：lang="en"、UI 标签英文、数据内容原样；③ 视觉验收锚点 = share-page-template.html（唯一事实源），机械评审方法见 share-page-design.md §10.1（19 项断言，uiux 已实测：当前实现 12 FAIL / 7 PASS，与差距清单吻合）；④ 图片内嵌 data: URI 为必验收项（B2）。
-> 关联：worktree `feat/share`；数据源现状见 [research.md](../../research.md) D11（transcript JSONL）
-> 视觉实现：dev 按 [share-page-design.md](./share-page-design.md)（HTML 生成契约）+ `share-page-template.html`（唯一事实源，MD5 c4a781c5）输出，本文只定义验收与范围
+> 状态：v1.2 修订稿（验收锚点 + 范围边界；正文视图集/数据源由 dev 定案版更新，本版由 pm 收口）
+> **v1.2 修订（pm，2025-08-07）**：main 裁决 **share 页 v3.1 纳入合并**（用户明确要求三视图聊天记录样式 + 完全复刻 opencode）——验收锚点切换为 **v3.1 模板（MD5 e79b37aa，评审断言 51 项）**；V 组由 uiux 按 51 项断言评审，A/C/E/F/G 数据层验收逻辑复用（纯视觉/交互换代，数据源契约不变）；产物断言按 design.md v3.1 §3 结构更新（data-component/data-slot/part-root 部件语言，Team=线程列表、私聊/频道=part 消息流）；v2.2 锚点的既有验收结论由 v3.1 回归结果替代。
+> **v1.1 修订（pm，2025-08-07）**：① 视图集与数据源已按用户指令定案（四视图 = 对话 / Team 名册 / 私聊 / 频道，ShareStore 增量持久化，事实源 share-page-design.md v2.0 §9 / 模板 MD5 c4a781c5）；② 界面语言按 uiux-share 决策（#team-share #8）跟模板走英文：lang="en"、UI 标签英文、数据内容原样；③ 视觉验收锚点 = share-page-template.html（唯一事实源），机械评审方法见 share-page-design.md §10.1；④ 图片内嵌 data: URI 为必验收项（B2）。
+> 关联：`bingo share` 已合入 dev（e689af5）；v3.1 集成在 dev 分支进行
+> 视觉实现：dev 按 [share-page-design.md](./share-page-design.md)（HTML 生成契约）+ `share-page-template.html`（唯一事实源，MD5 e79b37aa）输出，本文只定义验收与范围
 
 ## 1. 目标与用户场景
 
@@ -56,9 +57,9 @@ bingo share [会话名] [--output <路径>] [--open]
 | **私聊视图** | 每实例完整私聊历史（SendMessage 续话即该实例的 history） | ShareDoc `agents[].history` | 会话运行时记录；无则空态 |
 | **频道视图** | 频道元数据（模式/成员）+ 消息流（serial 顺序） | ShareDoc `channels[]`（create/invite/kick/post 事件同步） | 会话运行时记录；无则空态 |
 
-**视图定义以 `share-page-design.md` v2.0 / `share-page-template.html` 为唯一事实源**（用户指令已定案：四视图 = 对话 / Team 名册 / 私聊 / 频道，取代早前草案的子代理活动+任务方案；交互为 tab 方案 role=tablist + hash 直达，JS 只切显示不碰数据，无 JS 时默认对话面板）。PRD 只验收不定义视觉。
+**视图定义以 `share-page-design.md` v3.1 / `share-page-template.html` 为唯一事实源**（main 裁决 v3.1 纳入：完全复刻 opencode share，data-component/data-slot/part-root 部件语言；Team = 线程列表、私聊 = 每代理 part 块、频道 = 每频道 part 消息流——全部聊天记录形态；交互为 tab 方案 + hash + 1-4 快捷键，JS 只切显示不碰数据，无 JS 时默认对话面板）。PRD 只验收不定义视觉。
 
-**界面语言**：跟模板走英文（uiux-share #team-share #8 决策）——`lang="en"`，UI 标签（Conversation/Team/DM/Channels/Thinking/Show result/Print）与空态（`No …`）英文；数据内容（会话文本、工具输入/输出）原样不动。
+**界面语言**：跟模板走英文——`lang="en"`，UI 标签（Conversation/Team/DM/Channels/Thinking/Show result/Print 等）与空态（`No …`）英文；数据内容（会话文本、工具输入/输出）原样不动。
 
 ## 5. 验收标准（每项可验证）
 
@@ -69,17 +70,17 @@ bingo share [会话名] [--output <路径>] [--open]
 - A4. 工具调用的输入 JSON 与结果**原样呈现**（转义后），不截断不丢失（与 TUI 折叠「+N lines」的截断不同——导出页是完整事实记录）。
 
 ### B. 四视图内容
-- B1. 对话视图含 thinking 折叠块与工具调用折叠块，默认收起、可展开（`<details>`）。
-- B2. 含图片块的消息按模板契约以 `figure.img-block` + `<img src="data:{media_type};base64,{data}" alt="">` 内嵌渲染，离线可见（uiux 确认模板要求 data: URI 内嵌，media_type 校验 `image/*`、data 转义）。
-- B3. Team 名册视图：含子代理的会话显示实例（name/def/state/历史条数）；无任何子代理活动的会话显示空态文案（非报错）。
-- B4. 私聊视图：每个有 history 的实例呈现完整对话历史；无 history 显示占位（「No messages」类文案）；无实例显示空态。
-- B5. 频道视图：含频道消息的会话按序呈现频道名、模式、成员与消息流；无频道活动显示空态。
+- B1. 对话视图含 thinking 折叠块与工具调用折叠块，默认收起、可展开（opencode `[data-component="tool"]` 部件）。
+- B2. 含图片块的消息按模板契约内嵌渲染：`data-type="image"` 部件 + `<img src="data:{media_type};base64,{data}" alt="">`（media_type 校验 `image/*`、data 转义，仅 data: URI，离线可见）。
+- B3. Team 视图（线程列表形态）：含子代理的会话显示每成员 thread-row（成员色圆点 + 大写名/状态/def + 最近消息预览 + `data-jump` 直达私聊锚点）；无子代理显示空态（非报错）。
+- B4. 私聊视图：每个有 history 的实例呈现完整对话历史（part 块 + dm-thread 消息流，user 靠右）；无 history 显示占位；无实例显示空态。
+- B5. 频道视图：含频道消息的会话按序呈现（step-start 头 `◇ #name` + mode chip + 成员 chips；每条消息 part 流含发送者/四位 seq，user 右对齐）；无频道活动显示空态。
 - B6. 空态不破坏页面结构（四面板恒存在，无数据时显示英文 `No …` 占位；tab 交互下无 JS 时默认对话面板、其余 hidden）。
 
-### V. 视觉与结构（模板对齐，v1.1 新增）
-- V1. 产物结构/class/CSS 令牌与 `share-page-template.html`（唯一事实源，MD5 c4a781c5）一致：浅色文档底令牌（--bg:#FAFAF7 / --accent:#B05227 / --accent-border:#E7C4B2 等，design.md §2 全表）、消息 `.dec(.anchor+.line)+.content(.w-sm/md/lg)`、助手 `.card` 细边框卡（1px+4px+0.5rem）、用户无框、工具两段式 `.tool-title` + `details.tool-result.w-sm`（Show result 展开 input/result 全文）、元信息 `.meta` 小号大写、`id="msg-N"` 锚点 + 复制链接（JS 渐进增强不碰数据）。
-- V2. 保留类 `.roster/.dm-*/.ch-*/.tabs/data-view/.empty` 结构不动只换样式；打印/空态/reduced-motion 段落存在。
-- V3. 以 design.md §10.1 的 19 项断言为机械评审方法（uiux 执行对照评审，任一 FAIL 打回附差异行），评审通过为 V 组验收通过的证据。
+### V. 视觉与结构（模板对齐，v1.2 更新）
+- V1. 产物结构与 `share-page-template.html`（唯一事实源，MD5 e79b37aa）一致：opencode 部件语言（`data-component`/`data-slot`/part-root 模块类）、CSS 原样移植（starlight + custom 覆盖 + share/part/content/copy 模块，命名空间化）、浅色默认 + prefers-color-scheme 深色、令牌全走 `--sl-color-*`（成员色保留 `--hue-N`）、消息 decoration 列（锚点三态 SVG + 3px 竖线）+ 内容限宽（sm/md/lg）。
+- V2. 部件全集在产物中可用：user 无框 / assistant 蓝框卡 / thinking / step-start 大写 / tool 两段式（tool-title + tool-result 展开）/ error 红标 pre / bash 终端窗 / markdown 3 行折叠 / 代码块纯 pre / copy-button / scroll-button；四视图全部聊天记录形态。
+- V3. 以 design.md v3.1 的评审脚本 `share-review.js`（51 项断言）为机械评审方法（uiux 执行对照评审，任一 FAIL 打回附差异行），评审通过为 V 组验收通过的证据。
 
 ### C. 转义安全
 - C1. 所有动态文本（用户输入、模型输出、工具输入/输出、会话名、频道名、成员名、实例名/描述）经 HTML 转义；构造含 `<script>`、`<img onerror=...>`、`&"<>'` 的测试会话，导出 HTML 中数据部分**无未转义注入**（grep 断言无 `<script>` 标签、无 `onerror=` 出自数据）。
