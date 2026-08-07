@@ -59,6 +59,7 @@ Three config layers, shallow-merged; the later one overrides:
 | `thinkingLevel` | string | Thinking level: `off` sends no thinking param (DeepSeek-compatible, default); `low`/`medium`/`high` always send `{"type":"adaptive"}` adaptive thinking (the Claude 5 family removed budget_tokens; the level doesn't affect depth for now) |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto` (follows the terminal background) / `dark` / `light` |
+| `motion` | string | TUI motion: `auto` (default) / `off`——动效（如欢迎卡更新提示呼吸）静止为基色，提示本身保留；env `BINGO_NO_MOTION=1` 等价 |
 | `cacheControl` | bool | Send prompt caching; turn off if a non-official endpoint is unstable |
 | `respondToBashCommands` | bool | Whether `!` commands are handed to the model for a response after execution (default true; false = pure execution) |
 | `shell` | string | Shell program for the Bash tool and hooks; default per platform: macOS `/bin/zsh`, other Unix `/bin/bash`, Windows `powershell.exe`. PowerShell-family shells run with `-Command`; other configured shells (e.g. Git Bash `bash.exe`) with `-c` |
@@ -268,3 +269,12 @@ Example (.bingo/settings.json):
   上传失败自动回退本地文件。会话内 `/share [--open]` 导出当前会话（默认上传
   打印公网链接；`/share --local` 本地文件模式）。会话 key 与 `/resume` 同语义（transcript stem 或可匹配片段，缺省最近会话），
   生成的 HTML 含完整对话与工具输出，分享前自行审阅敏感信息。
+  **更新**：`bingo update` 从 GitHub Releases（yexrob/bingo）拉取最新版并原子替换当前
+  可执行文件——平台资产（`bingo-<triple>.tar.gz` / `.zip`）+ `checksums.txt` SHA-256
+  校验，解压后同目录 tmp + rename 替换（Unix 保留可执行位）；`--check` 只检测不下载。
+  输出：已是最新 / 发现新版本（`--check`）/ 更新成功（新版本号 + 安装位置）；
+  失败给出原因（网络 / 校验失败 / 无权限——提示 sudo 或手动安装）。
+  启动时 TUI 后台异步检测新版本（`~/.local/share/bingo/update-check.json` 24h TTL 缓存，
+  失败静默、不阻塞启动；`--print` headless 不触发），检测到新版本时欢迎卡显示
+  「New version vX.Y.Z available — run bingo update」提示行（版本号与命令两段呼吸
+  9s 后静止常驻，按键可提前静止；`motion: "off"` 或 `BINGO_NO_MOTION=1` 静态显示）。
