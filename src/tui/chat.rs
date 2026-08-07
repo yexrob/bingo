@@ -314,6 +314,47 @@ pub const PASTE_BURST_KEYS: usize = 4;
 /// 粘贴超过这么多行时折叠为占位符。
 pub const PASTE_COLLAPSE_LINES: usize = 10;
 
+/// 图片占位引用（`#[image N]` → 附件表第 N 张，1 起）。
+static IMAGE_MARKER_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"#\[image (\d+)\]").expect("static regex"));
+
+/// 图片占位符文本：`#[image N]`。
+fn image_marker(id: usize) -> String {
+    format!("#[image {id}]")
+}
+
+/// 展开 `~` 前缀为 home 目录（无 home 时原样返回）。
+fn expand_home(path: &str) -> String {
+    if let (Some(rest), Ok(home)) = (path.strip_prefix("~/"), std::env::var("HOME")) {
+        return format!("{home}/{rest}");
+    }
+    path.to_string()
+}
+
+/// 独立成行的图片路径：路径特征（`~` 开头或含 `/`）+ 图片扩展名。
+fn standalone_image_path(s: &str) -> Option<String> {
+    if !(s.starts_with('~') || s.contains('/')) {
+        return None;
+    }
+    let ext = std::path::Path::new(s)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)?;
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp")
+        .then(|| s.to_string())
+}
+
+/// `![alt](path)` 整行的路径（path 无空格；`<path>` 包裹解包）。
+fn markdown_image_path(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("![")?;
+    let close = rest.find("](")?;
+    let rest = &rest[close + 2..];
+    let end = rest.find(')')?;
+    let p = &rest[..end];
+    let p = p.strip_prefix('<').and_then(|p| p.strip_suffix('>')).unwrap_or(p);
+    (!p.is_empty() && !p.contains(' ')).then(|| p.to_string())
+}
+
 /// 单张图片的加载上限（超时按加载失败处理）。
 pub const IMAGE_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -679,6 +720,8 @@ pub struct Chat {
     burst_keys: usize,
     /// 折叠的粘贴块：占位符 `[Pasted text #N +M lines]` → 真实内容。
     pastes: Vec<(String, String)>,
+    /// 消息框挂载的图片附件（`#[image N]` 占位 → N 对应此表下标+1）。
+    attachments: Vec<crate::api::types::ImageAttachment>,
     /// 本会话执行过的 `!` 命令（bash 模式 Tab 前缀补全）。
     bash_history: Vec<String>,
     /// ctrl+r 反向搜索态（None = 未激活）。
@@ -895,6 +938,7 @@ impl Chat {
             last_key_at: None,
             burst_keys: 0,
             pastes: Vec::new(),
+            attachments: Vec::new(),
             bash_history: Vec::new(),
             search: None,
             permission_mode,
@@ -1805,11 +1849,14 @@ impl Chat {
         }
         // 回合进行中：入队，TurnEnd 后逐条提交（CC 消息排队）。
         if self.busy {
-            self.queued.push(self.expand_pastes(&text));
+            let text = self.expand_pastes(&text);
+            let text = self.expand_image_paths(&text);
+            self.queued.push(text);
             self.update_slash_suggestions();
             return;
         }
         let text = self.expand_pastes(&text);
+        let text = self.expand_image_paths(&text);
         self.record_history(&text);
         if self.bash_mode {
             let command = text.trim().to_string();
@@ -1862,9 +1909,18 @@ impl Chat {
     /// the prompt. Terminals send bare CR for the line breaks inside a paste,
     /// so they are normalised first — the fold threshold counts lines.
     ///
+    /// 剪贴板含图片（macOS）时优先挂载图片：`#[image N]` 占位插到光标处，
+    /// 文本 payload 忽略（终端对纯图片剪贴板的 paste 事件没有文本内容）。
     /// The burst heuristic ([`PASTE_BURST_GAP`]) stays as the fallback for
     /// terminals that do not report bracketed paste.
     pub fn on_paste(&mut self, text: &str) {
+        if let Some(id) = self.paste_clipboard_image() {
+            self.snapshot(EditKind::Bulk);
+            crate::tui::input::insert(&mut self.input, &mut self.cursor, &image_marker(id));
+            self.after_edit();
+            self.dirty = true;
+            return;
+        }
         if text.is_empty() {
             return;
         }
@@ -1882,6 +1938,12 @@ impl Chat {
         self.dirty = true;
     }
 
+    /// 剪贴板含图片（macOS）：osascript 读 PNG → 压缩 → 注册附件 → 占位 id。
+    fn paste_clipboard_image(&mut self) -> Option<usize> {
+        let bytes = crate::tui::gfx::clipboard_image_png()?;
+        self.register_image(&bytes)
+    }
+
     /// 把占位符换回真实内容（提交时）。
     fn expand_pastes(&self, text: &str) -> String {
         let mut out = text.to_string();
@@ -1889,6 +1951,63 @@ impl Chat {
             out = out.replace(token.as_str(), body);
         }
         out
+    }
+
+    /// 输入中的图片路径（独立成行的路径，或 `![alt](path)` 整行）→ 读文件
+    /// → 压缩注册 → 替换为 `#[image N]` 占位。无法识别/读取的行原样保留。
+    fn expand_image_paths(&mut self, text: &str) -> String {
+        let cwd = self.cwd.clone();
+        let mut out: Vec<String> = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            let path = markdown_image_path(trimmed).or_else(|| standalone_image_path(trimmed));
+            if let Some(p) = path {
+                let expanded = expand_home(&p);
+                let path_buf = if std::path::Path::new(&expanded).is_absolute() {
+                    std::path::PathBuf::from(&expanded)
+                } else {
+                    std::path::PathBuf::from(&cwd).join(&expanded)
+                };
+                if let Some(id) = self.register_image_file(&path_buf) {
+                    out.push(image_marker(id));
+                    continue;
+                }
+            }
+            out.push(line.to_string());
+        }
+        out.join("\n")
+    }
+
+    /// 解析文本中的 `#[image N]` 引用 → 附件（去重保序）；未知 id 忽略。
+    fn resolve_images(&self, text: &str) -> Vec<crate::api::types::ImageAttachment> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for cap in IMAGE_MARKER_RE.captures_iter(text) {
+            if let Ok(n) = cap[1].parse::<usize>()
+                && n >= 1
+                && n <= self.attachments.len()
+                && seen.insert(n)
+            {
+                out.push(self.attachments[n - 1].clone());
+            }
+        }
+        out
+    }
+
+    /// 原始图片字节 → 压缩（API 上限内）→ 注册附件 → 占位 id。
+    fn register_image(&mut self, bytes: &[u8]) -> Option<usize> {
+        let prepared = crate::api::image::prepare_image(bytes)?;
+        self.attachments.push(crate::api::types::ImageAttachment {
+            media_type: prepared.media_type,
+            data: prepared.data,
+        });
+        Some(self.attachments.len())
+    }
+
+    /// 图片文件 → 注册附件（读失败/非图片 → None）。
+    fn register_image_file(&mut self, path: &std::path::Path) -> Option<usize> {
+        let bytes = std::fs::read(path).ok()?;
+        self.register_image(&bytes)
     }
 
     /// 本回合生效的 Session：`Session` 在 `Arc` 里不可变，而 shift+tab 要
@@ -2859,6 +2978,7 @@ impl Chat {
         let session = self.session_for_turn();
         let events = self.events.clone();
         let asks = self.asks.clone();
+        let images = self.resolve_images(&text);
         // 先订阅再复位：tokio watch 的 send 在无 receiver 时不更新值——
         // 上一轮 spawn 结束后 receiver 已全部 drop，若先 send(false) 会静默
         // 失效（值保持 true），新回合会在连接阶段被误判为中断。
@@ -2868,7 +2988,7 @@ impl Chat {
             let _ = events.send(UiEvent::TurnStart);
             let mut ui = crate::ui::tui_hooks(events.clone(), asks);
             let history = Self::load_history(&session, &mut ui.on_warning);
-            let result = run_query(&session, history, &text, &mut ui, Some(cancel_rx)).await;
+            let result = run_query(&session, history, &text, &images, &mut ui, Some(cancel_rx)).await;
             match result {
                 Ok(outcome) => {
                     Self::finish_turn(&events, &session, &outcome).await;
@@ -5793,8 +5913,8 @@ mod tests {
             crate::settings::ProviderConfig {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
-            },
-        )]);
+                supports_images: None,
+            })]);
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::new("sk-main".into(), "https://main.example".into());
         // set_provider 需要 providers 表——通过 from_settings 构造更直接。
@@ -5808,6 +5928,7 @@ mod tests {
             crate::settings::ProviderConfig {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
+                supports_images: None,
             },
         );
         Arc::get_mut(&mut chat.session).unwrap().client =
@@ -8421,6 +8542,76 @@ mod tests {
         chat.on_paste("");
         assert!(chat.input.is_empty());
         assert!(chat.undo.is_empty());
+    }
+
+    /// 生成一张测试 PNG，返回路径。
+    fn test_png_path(dir: &std::path::Path, name: &str, w: u32, h: u32) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([255u8, 0, 0, 255]));
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::fs::File::create(&path).unwrap(),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        path
+    }
+
+    /// 提交时独立成行的图片路径 → 注册附件 + `#[image N]` 占位（文本保留）。
+    #[test]
+    fn image_path_line_becomes_marker_on_submit() {
+        let mut chat = chat_with_history("img-path");
+        let dir = std::env::temp_dir().join(format!("bingo-img-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = test_png_path(&dir, "a.png", 8, 8);
+        chat.set_input(&format!("看一下这张图\n{}", png.display()));
+        chat.busy = true; // 走排队路径：不需要 tokio runtime
+        chat.submit();
+        assert_eq!(chat.queued.len(), 1);
+        assert_eq!(
+            chat.queued[0],
+            format!("看一下这张图\n#[image 1]"),
+            "路径行替换为占位：{}",
+            chat.queued[0]
+        );
+        assert_eq!(chat.attachments.len(), 1);
+        assert_eq!(chat.attachments[0].media_type, "image/png");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `![alt](path)` 整行同样识别；非图片路径/不存在的文件原样保留。
+    #[test]
+    fn markdown_image_syntax_and_non_image_lines() {
+        let mut chat = chat_with_history("img-md");
+        let dir = std::env::temp_dir().join(format!("bingo-img-md-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = test_png_path(&dir, "b.png", 4, 4);
+        let txt = dir.join("note.txt");
+        std::fs::write(&txt, "hi").unwrap();
+        chat.set_input(&format!("![图]({})\n{}", png.display(), txt.display()));
+        chat.busy = true;
+        chat.submit();
+        assert_eq!(chat.queued[0], format!("#[image 1]\n{}", txt.display()));
+        assert_eq!(chat.attachments.len(), 1, "txt 不注册");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// resolve_images：按占位序号取附件（去重、越界忽略）。
+    #[test]
+    fn resolve_images_extracts_attachments_in_order() {
+        let mut chat = chat_with_history("img-resolve");
+        let dir = std::env::temp_dir().join(format!("bingo-img-rs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = test_png_path(&dir, "a.png", 4, 4);
+        let b = test_png_path(&dir, "b.png", 6, 6);
+        let id1 = chat.register_image_file(&a).unwrap();
+        let id2 = chat.register_image_file(&b).unwrap();
+        let text = format!("看 #[image {id1}] 和 #[image {id2}] 再看 #[image {id1}] 和 #[image 99]");
+        let imgs = chat.resolve_images(&text);
+        assert_eq!(imgs.len(), 2, "去重 + 越界忽略");
+        assert_eq!(imgs[0].data, chat.attachments[id1 - 1].data);
+        assert_eq!(imgs[1].data, chat.attachments[id2 - 1].data);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ctrl+r 反向搜索：过滤命中、再按取更旧、Tab 采纳继续编辑、

@@ -38,6 +38,10 @@ pub struct Settings {
     /// 默认模型（`model`）：`/model` 选择持久化于此。
     /// 优先级 `--model` > settings（user < project < local）> 内置默认。
     pub model: Option<String>,
+    /// 默认（default）provider 是否把图片附件发给模型（`sendImages`）。
+    /// 命名 provider 用各自的 `supportsImages`；None = 不发送。
+    #[serde(rename = "sendImages", default)]
+    pub send_images: Option<bool>,
     /// 思考级别（`thinkingLevel`）：off | low | medium | high | xhigh | max。
     /// 缺省不发 thinking 参数（兼容 DeepSeek 等端点）；其余档位发
     /// `{"type":"adaptive"}` + `output_config.effort`——Claude 5 家族已移除
@@ -102,6 +106,10 @@ pub struct ProviderConfig {
     pub api_key: String,
     #[serde(rename = "apiBaseUrl")]
     pub api_base_url: String,
+    /// 该 provider 的模型是否接受图片内容（`supportsImages`；
+    /// None/缺省 = 不发送图片）。
+    #[serde(rename = "supportsImages", default)]
+    pub supports_images: Option<bool>,
 }
 
 /// 权限规则（settings permissions 段）。
@@ -204,6 +212,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     }
     if let Some(model) = layer.model {
         base.model = Some(model);
+    }
+    if let Some(v) = layer.send_images {
+        base.send_images = Some(v);
     }
     if let Some(level) = layer.thinking_level {
         base.thinking_level = Some(level);
@@ -476,6 +487,32 @@ mod tests {
         assert_eq!(settings.thinking_level.as_deref(), Some("high"), "project 覆盖 user");
         assert!(settings.providers.contains_key("deepseek"));
         assert!(settings.providers.contains_key("custom"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// supportsImages/sendImages：缺省 None（不发送），逐层合并。
+    #[test]
+    fn parses_image_support_flags() {
+        let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-img", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write(
+            &tmp,
+            ".bingo/settings.json",
+            r#"{"sendImages":true,"providers":{"road":{"apiKey":"k","apiBaseUrl":"https://road.example","supportsImages":true},"ds":{"apiKey":"k","apiBaseUrl":"https://ds.example"}}}"#,
+        );
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.send_images, Some(true));
+        assert_eq!(settings.providers["road"].supports_images, Some(true));
+        assert_eq!(settings.providers["ds"].supports_images, None, "缺省不发图片");
+
+        // 层间覆盖：project 层 sendImages 覆盖 user 层（后层胜出）。
+        write(&tmp, "user/bingo/settings.json", r#"{"sendImages":false}"#);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.send_images, Some(true), "project 覆盖 user");
+        // 只有 user 层时其值生效。
+        write(&tmp, ".bingo/settings.json", r#"{"model":"m"}"#);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.send_images, Some(false));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

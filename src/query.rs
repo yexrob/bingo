@@ -915,10 +915,13 @@ async fn query_loop(
 
 /// 一次查询（多轮 tool loop）：UserPromptSubmit hook + 用户输入入史 + 循环体。
 /// cancel：Some 时流读取可被 watch 信号中断（TUI Ctrl+C/Esc）。
+/// images：消息框挂载的图片附件；当前 provider 支持（`supportsImages`）时
+/// 作为 image content block 附加在文本块之后，否则只发文本（占位留在正文）。
 pub async fn run_query(
     session: &Arc<Session>,
     initial_messages: Vec<Message>,
     user_input: &str,
+    images: &[crate::api::types::ImageAttachment],
     ui: &mut UiHooks,
     cancel: Option<watch::Receiver<bool>>,
 ) -> Result<QueryOutcome, QueryError> {
@@ -935,8 +938,30 @@ pub async fn run_query(
     }
 
     let mut messages = initial_messages;
-    record(session, &mut messages, Message::user_text(user_input), ui);
+    record(
+        session,
+        &mut messages,
+        user_message_with_images(user_input, images, session.client.supports_images()),
+        ui,
+    );
     query_loop(session, messages, ui, &tools, &ctx, cancel).await
+}
+
+/// 用户输入 → 消息：文本块在前，图片块在后（provider 支持时）。
+/// 文本保留 `#[image N]` 占位，模型通过占位感知图片存在。
+fn user_message_with_images(
+    text: &str,
+    images: &[crate::api::types::ImageAttachment],
+    send_images: bool,
+) -> Message {
+    use crate::api::types::{ContentBlock, ImageSource, Role};
+    let mut content = vec![ContentBlock::Text { text: text.to_string() }];
+    if send_images {
+        content.extend(images.iter().map(|img| ContentBlock::Image {
+            source: ImageSource::base64(&img.media_type, &img.data),
+        }));
+    }
+    Message { role: Role::User, content }
 }
 
 /// 本地命令运行前注入的 caveat：`!` 命令的输出会留在
@@ -1140,6 +1165,24 @@ fn is_cancelled(cancel: &Option<watch::Receiver<bool>>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 图片附件：provider 支持时文本块 + 图片块；不支持时只发文本。
+    #[test]
+    fn user_message_with_images_respects_support_flag() {
+        use crate::api::types::{ContentBlock, ImageAttachment};
+        let imgs = vec![ImageAttachment {
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+        }];
+        let msg = user_message_with_images("看图 #[image 1]", &imgs, true);
+        assert_eq!(msg.content.len(), 2);
+        assert!(matches!(msg.content[0], ContentBlock::Text { ref text } if text == "看图 #[image 1]"));
+        assert!(matches!(&msg.content[1], ContentBlock::Image { source } if source.data == "aGVsbG8="));
+
+        let msg = user_message_with_images("看图 #[image 1]", &imgs, false);
+        assert_eq!(msg.content.len(), 1, "不支持时图片块不发送");
+        assert!(matches!(msg.content[0], ContentBlock::Text { .. }));
+    }
 
     /// 极简 Anthropic 端点：count_tokens 回固定值，/v1/messages 按序回预置 SSE。
     async fn spawn_api(responses: Vec<String>) -> String {
@@ -1408,7 +1451,7 @@ mod tests {
             let session = session.clone();
             async move {
                 let mut ui = headless_hooks();
-                run_query(&session, Vec::new(), "go", &mut ui, Some(rx)).await
+                run_query(&session, Vec::new(), "go", &[], &mut ui, Some(rx)).await
             }
         });
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -1457,7 +1500,7 @@ mod tests {
         .await;
         let session = test_session(base_url, None);
         let mut ui = headless_hooks();
-        let outcome = run_query(&session, Vec::new(), "go", &mut ui, None)
+        let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
             .await
             .unwrap();
 

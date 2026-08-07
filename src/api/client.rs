@@ -132,6 +132,8 @@ pub(crate) fn transport_offline_code() -> &'static str {
 struct Endpoint {
     api_key: String,
     base_url: String,
+    /// 该端点是否接受图片内容块（default 读顶层 sendImages，命名 provider 读 supportsImages）。
+    supports_images: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -172,13 +174,18 @@ impl Client {
                     Endpoint {
                         api_key: cfg.api_key.clone(),
                         base_url: cfg.api_base_url.clone(),
+                        supports_images: cfg.supports_images.unwrap_or(false),
                     },
                 )
             })
             .collect();
         Ok(Self {
             http: reqwest::Client::new(),
-            endpoint: Arc::new(std::sync::RwLock::new(Endpoint { api_key, base_url })),
+            endpoint: Arc::new(std::sync::RwLock::new(Endpoint {
+                api_key,
+                base_url,
+                supports_images: settings.send_images.unwrap_or(false),
+            })),
             providers,
         })
     }
@@ -187,7 +194,11 @@ impl Client {
     pub fn new(api_key: String, base_url: String) -> Self {
         Self {
             http: reqwest::Client::new(),
-            endpoint: Arc::new(std::sync::RwLock::new(Endpoint { api_key, base_url })),
+            endpoint: Arc::new(std::sync::RwLock::new(Endpoint {
+                api_key,
+                base_url,
+                supports_images: false,
+            })),
             providers: std::collections::HashMap::new(),
         }
     }
@@ -203,6 +214,11 @@ impl Client {
     pub fn current_endpoint(&self) -> (String, String) {
         let e = self.endpoint.read().unwrap_or_else(|p| p.into_inner());
         (e.api_key.clone(), e.base_url.clone())
+    }
+
+    /// 当前端点是否接受图片内容块（`supportsImages`/`sendImages` 配置）。
+    pub fn supports_images(&self) -> bool {
+        self.endpoint.read().unwrap_or_else(|p| p.into_inner()).supports_images
     }
 
     /// 切换到命名 provider；未知名字报错（default 永远可切回）。
@@ -833,6 +849,7 @@ mod tests {
             crate::settings::ProviderConfig {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
+                supports_images: None,
             },
         );
         settings.providers.insert(
@@ -840,6 +857,7 @@ mod tests {
             crate::settings::ProviderConfig {
                 api_key: "sk-local".into(),
                 api_base_url: "http://127.0.0.1:11434".into(),
+                supports_images: None,
             },
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
@@ -861,6 +879,41 @@ mod tests {
         assert!(client.set_provider("nope").is_err(), "未知 provider 报错");
         // 未知 provider 不影响当前端点。
         assert_eq!(client.current_endpoint().0, "sk-ds");
+    }
+
+    /// supports_images：default 读顶层 sendImages；命名 provider 读各自
+    /// supportsImages；切换端点时跟随。
+    #[test]
+    fn supports_images_follows_endpoint_switch() {
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            send_images: Some(true),
+            ..Default::default()
+        };
+        settings.providers.insert(
+            "vision".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: "sk-v".into(),
+                api_base_url: "https://vision.example".into(),
+                supports_images: Some(true),
+            },
+        );
+        settings.providers.insert(
+            "text-only".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: "sk-t".into(),
+                api_base_url: "https://text.example".into(),
+                supports_images: Some(false),
+            },
+        );
+        let env = |_name: &str| Err(std::env::VarError::NotPresent);
+        let client = Client::from_settings_with(&settings, env).unwrap();
+        assert!(client.supports_images(), "default 读顶层 sendImages");
+
+        client.set_provider("text-only").unwrap();
+        assert!(!client.supports_images(), "显式 false 覆盖");
+        client.set_provider("vision").unwrap();
+        assert!(client.supports_images(), "supportsImages=true 生效");
     }
 
     #[test]

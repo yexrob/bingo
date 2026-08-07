@@ -248,7 +248,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
             let mut ui = headless_hooks();
-            let outcome = run_query(&session, initial_messages, &prompt, &mut ui, None).await?;
+            let outcome = run_query(&session, initial_messages, &prompt, &[], &mut ui, None).await?;
             extract_memory(&session, &outcome.messages, &home, &project_dir).await;
         } else {
             drop(initial_messages); // 交互模式下 --continue 历史由后续轮次复用

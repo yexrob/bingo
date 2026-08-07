@@ -35,6 +35,41 @@ pub enum ContentBlock {
         thinking: String,
         signature: String,
     },
+    /// 图片内容块（Anthropic Messages 协议 base64 格式：
+    /// `{"type":"image","source":{"type":"base64","media_type":...,"data":...}}`）。
+    Image {
+        source: ImageSource,
+    },
+}
+
+/// 图片块的数据源（协议固定 `type: "base64"`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageSource {
+    #[serde(rename = "type", default = "base64_source_type")]
+    pub source_type: String,
+    pub media_type: String,
+    pub data: String,
+}
+
+fn base64_source_type() -> String {
+    "base64".into()
+}
+
+impl ImageSource {
+    pub fn base64(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self {
+            source_type: "base64".into(),
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
+}
+
+/// 输入框挂载的图片附件（base64 data；发送时才构造 ContentBlock::Image）。
+#[derive(Debug, Clone)]
+pub struct ImageAttachment {
+    pub media_type: String,
+    pub data: String,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -368,6 +403,38 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["thinking"], serde_json::json!({ "type": "adaptive" }));
         assert_eq!(json["output_config"], serde_json::json!({ "effort": "xhigh" }));
+    }
+
+    /// 图片块序列化为 Anthropic base64 格式；缺省 source_type 回落 base64。
+    #[test]
+    fn image_block_serializes_anthropic_format() {
+        let block = ContentBlock::Image {
+            source: ImageSource::base64("image/png", "aGVsbG8="),
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "aGVsbG8=",
+                }
+            })
+        );
+        // 反序列化 round-trip；source.type 缺失时回落 base64。
+        let round: ContentBlock = serde_json::from_value(json).unwrap();
+        assert_eq!(round, block);
+        let no_type: ContentBlock = serde_json::from_value(serde_json::json!({
+            "type": "image",
+            "source": { "media_type": "image/jpeg", "data": "eA==" }
+        }))
+        .unwrap();
+        assert_eq!(
+            no_type,
+            ContentBlock::Image { source: ImageSource::base64("image/jpeg", "eA==") }
+        );
     }
 
     #[test]

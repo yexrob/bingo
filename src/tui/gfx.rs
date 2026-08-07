@@ -435,8 +435,7 @@ pub fn image_print_bytes(
 /// - 其他 — 本地路径（相对 cwd）
 ///
 /// 解码 → 缩放（fit_cells）→ 编码 PNG。任何一步失败返回 None。
-pub async fn load_image(url: &str, cwd: &Path, cap: &ImageCap) -> Option<ImageMeta> {
-    let bytes = fetch_bytes(url, cwd).await?;
+pub async fn load_image(url: &str, cwd: &Path, cap: &ImageCap) -> Option<ImageMeta> {    let bytes = fetch_bytes(url, cwd).await?;
     if bytes.len() > MAX_BYTES {
         return None;
     }
@@ -531,6 +530,41 @@ pub fn extract_image_urls(text: &str) -> Vec<String> {
                 .unwrap_or(url)
         })
         .collect()
+}
+
+/// macOS：剪贴板含图片时读出 PNG 字节（osascript `«class PNGf»`；
+/// 非 macOS / 剪贴板无图片 / 任一步失败返回 None）。
+pub fn clipboard_image_png() -> Option<Vec<u8>> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let tmp = "/tmp/bingo_clipboard_image.png";
+    let _ = std::fs::remove_file(tmp);
+    let check = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg("the clipboard as «class PNGf»")
+        .output()
+        .ok()?;
+    if !check.status.success() {
+        return None;
+    }
+    let script = format!(
+        "set png_data to (the clipboard as «class PNGf»)\n\
+         set fp to open for access POSIX file \"{tmp}\" with write permission\n\
+         write png_data to fp\n\
+         close access fp"
+    );
+    let save = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .ok()?;
+    if !save.status.success() {
+        return None;
+    }
+    let bytes = std::fs::read(tmp).ok()?;
+    let _ = std::fs::remove_file(tmp);
+    (!bytes.is_empty()).then_some(bytes)
 }
 
 #[cfg(test)]
