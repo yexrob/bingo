@@ -93,7 +93,7 @@ pub struct ClickRange {
     pub target: ClickTarget,
 }
 
-/// 滚动文档：全部行 + 点击范围 + sticky 提示。
+/// 滚动文档：全部行 + 点击范围。
 ///
 /// inline 模式下文档只覆盖"尚未落盘"的部分（[`Chat::flushed_segments`]
 /// 之后的消息），行号因此不是全局的——点击定位与滚动只在全屏模式用。
@@ -101,8 +101,6 @@ pub struct ClickRange {
 pub struct Doc {
     pub rows: Vec<Row>,
     pub click_ranges: Vec<ClickRange>,
-    /// 滚动离开底部时 sticky 提示文本（CC StickyPromptHeader）。
-    pub sticky: Option<String>,
     /// 前置"定稿"行数：不再变化、可一次性打印进终端 scrollback 的行
     /// （REPL 模式的打印边界；全屏模式不用）。
     /// 生产路径经 `settled_marks` 取检查点；此聚合值保留为测试面的
@@ -751,7 +749,7 @@ pub struct Chat {
     pub height: usize,
     pub scroll: usize,
     pub auto_scroll: bool,
-    /// 上次 build_rows 的文档（点击定位 + sticky）。
+    /// 上次 build_rows 的文档（点击定位）。
     pub doc: Doc,
     /// 等待 ToolReady（完整 input）归类的工具活动索引（FIFO）。
     pending_tools: Vec<usize>,
@@ -937,7 +935,6 @@ impl Chat {
             doc: Doc {
                 rows: Vec::new(),
                 click_ranges: Vec::new(),
-                sticky: None,
                 settled: 0,
                 settled_marks: Vec::new(),
                 transient_rows: 0,
@@ -4583,21 +4580,9 @@ impl Chat {
             }
         }
 
-        // sticky：滚动离开底部且存在用户消息时，显示首条用户消息文本。
-        let sticky = if self.scroll > 0 {
-            self.messages
-                .iter()
-                .find(|m| m.role == Role::User && !m.text.trim().is_empty())
-                .map(|m| m.text.split_whitespace().collect::<Vec<_>>().join(" "))
-        } else {
-            None
-        };
-        let sticky = sticky.map(|s| crate::tui::markdown::truncate(&s, width));
-
         self.doc = Doc {
             rows,
             click_ranges,
-            sticky,
             settled,
             settled_marks,
             transient_rows: self.slash_lines.len(),
@@ -7752,23 +7737,6 @@ mod tests {
             chat.ask_result.as_ref().unwrap().answered,
             vec![("用哪个库？".to_string(), "B".to_string())]
         );
-    }
-
-    #[test]
-    fn sticky_appears_when_scrolled() {
-        let mut chat = test_chat();
-        chat.messages.push(msg(Role::User, "first question"));
-        chat.messages.push(msg(Role::Assistant, "answer"));
-        // 把内容撑高到需要滚动
-        chat.messages[1].text = "answer\n".repeat(60);
-        chat.build_rows(100);
-        chat.scroll = 10;
-        chat.build_rows(100);
-        let sticky = chat.doc.sticky.as_deref().expect("sticky when scrolled");
-        assert!(sticky.contains("first"), "sticky shows user text: {sticky}");
-        chat.scroll = 0;
-        chat.build_rows(100);
-        assert!(chat.doc.sticky.is_none(), "no sticky at top");
     }
 
     /// Esc（busy 时）置中断标志：后台任务完成通知不再自动拉起新回合；

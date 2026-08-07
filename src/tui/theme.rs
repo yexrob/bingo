@@ -13,7 +13,7 @@ pub struct Theme {
     pub text: Color,
     /// 弱化文本（rgb(153,153,153)，即 ink dimColor）。
     pub inactive: Color,
-    /// 极弱文本（sticky header 的 ❯ 用）。
+    /// 极弱文本（实体选择器计数等）。
     pub subtle: Color,
     /// 主强调色（rgb(215,119,87)）。
     pub claude: Color,
