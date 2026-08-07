@@ -34,6 +34,7 @@ jobs:
       # (e.g. dev) is a preflight build → published as a pre-release.
       - name: Classify release (main = official, else preflight)
         id: release_kind
+        shell: bash
         run: |
           git fetch origin main --depth=1
           if git merge-base --is-ancestor HEAD origin/main; then
