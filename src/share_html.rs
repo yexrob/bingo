@@ -338,7 +338,7 @@ fn thinking_part(id: &str, thinking: &str) -> String {
     part(id, "reasoning", "assistant", None, ICON_THINKING, &inner)
 }
 
-/// bash 终端窗（content-bash：三点头 Shell 头 + command + output）。
+/// bash 终端窗（content-bash：三点头 Shell 头 + command + output，opencode 原样）。
 fn bash_terminal(command: &str, output: &str) -> String {
     let mut content = String::new();
     if !command.is_empty() {
@@ -350,6 +350,35 @@ fn bash_terminal(command: &str, output: &str) -> String {
     format!(
         "<div class=\"cb-root\" data-component=\"content-bash\" data-expanded><div data-slot=\"body\"><div data-slot=\"header\"><span>Shell</span></div><div data-slot=\"content\">{content}</div></div>{COPY_BUTTON}</div>"
     )
+}
+
+/// Bash 非 command 字段 → tool-args 网格（A4 契约，uiux e79b37aa）：
+/// flat 值直出、嵌套值 JSON 序列化，word-break 不截断；command 不进网格。
+fn bash_extra_args(input: &serde_json::Value) -> String {
+    let Some(obj) = input.as_object() else {
+        return String::new();
+    };
+    let extras: Vec<(&String, &serde_json::Value)> = obj
+        .iter()
+        .filter(|(k, _)| k.as_str() != "command")
+        .collect();
+    if extras.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("<div data-component=\"tool-args\">");
+    for (key, value) in extras {
+        let text = match value {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        out.push_str(&format!(
+            "<div></div><div>{}</div><div>{}</div>",
+            escape(key),
+            escape(&text)
+        ));
+    }
+    out.push_str("</div>");
+    out
 }
 
 /// 代码结果块（content-code：纯 pre + copy）。
@@ -381,13 +410,14 @@ fn tool_title(name: &str, target: &str) -> String {
     )
 }
 
-/// 工具参数网格（tool-args：分隔条/键/值，值 ≤60 字符，未知工具 fallback）。
+/// 工具参数网格（tool-args：分隔条/键/值，未知工具 fallback 摘要；
+/// 完整 input JSON 仍在 tool-result 块呈现——A4 不丢失）。
 fn tool_args(input: &serde_json::Value) -> String {
     let Some(map) = input.as_object() else {
         return String::new();
     };
     let mut out = String::from("<div data-component=\"tool-args\">");
-    for (key, value) in map.iter().take(4) {
+    for (key, value) in map {
         let value = value.as_str().map(clip).unwrap_or_default();
         out.push_str(&format!(
             "<div></div><div>{}</div><div>{}</div>",
@@ -420,9 +450,12 @@ fn tool_use_part(id: &str, name: &str, input: &serde_json::Value) -> String {
     let icon = tool_icon(name);
     let target = tool_target(name, input);
     let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
-    let args = if matches!(
+    let args = if name == "Bash" {
+        // A4（uiux e79b37aa 契约）：非 command 字段走 opencode tool-args 网格。
+        bash_extra_args(input)
+    } else if matches!(
         name,
-        "Bash" | "Read" | "Write" | "Edit" | "Grep" | "Glob" | "WebFetch" | "WebSearch"
+        "Read" | "Write" | "Edit" | "Grep" | "Glob" | "WebFetch" | "WebSearch"
     ) {
         String::new()
     } else {
@@ -1260,6 +1293,48 @@ mod tests {
         assert!(html.contains("class=\"ce-root\""));
         assert!(html.contains("<span data-color=\"red\" data-marker=\"label\" data-separator>Error</span>"));
         assert!(html.contains("boom"));
+    }
+
+    #[test]
+    fn bash_input_extra_fields_are_not_lost() {
+        // A4 回归（pm #27 + uiux e79b37aa 契约）：Bash input 多字段时
+        // 其余字段以 tool-args 网格呈现（flat 直出/嵌套 JSON 序列化），
+        // 注入串实体化不丢失。
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tu_1".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": "ls <unsafe> & echo \"x\"",
+                    "background": true,
+                    "timeout": 1,
+                    "evil": "<img src=x onerror=alert(3)>",
+                    "nested": {"a": 1}
+                }),
+            }],
+        }];
+        let html = render(&doc(), &msgs);
+        assert!(html.contains("<pre>ls &lt;unsafe&gt; &amp; echo &quot;x&quot;</pre>"), "command 在 Shell 窗");
+        // tool-args 网格：非 command 字段逐键呈现，command 不进网格。
+        assert!(html.contains("<div data-component=\"tool-args\">"), "多余字段走 tool-args 网格");
+        assert!(html.contains(">background</div><div>true</div>"), "flat 值直出");
+        assert!(html.contains(">timeout</div><div>1</div>"));
+        assert!(html.contains(">evil</div><div>&lt;img src=x onerror=alert(3)&gt;</div>"), "注入串实体化");
+        assert!(html.contains(">nested</div><div>"), "嵌套值序列化");
+        assert!(!html.contains("<img src=x onerror"), "无未转义标签");
+        // 仅 command 时无冗余网格。
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tu_1".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            }],
+        }];
+        let html = render(&doc(), &msgs);
+        assert_eq!(html.matches("<pre>ls</pre>").count(), 1, "仅 command 一个 pre");
+        assert!(!html.contains("<div data-component=\"tool-args\">"), "无额外字段省略网格");
     }
 
     #[test]
