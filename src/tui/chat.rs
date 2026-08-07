@@ -1417,6 +1417,15 @@ impl Chat {
                             // 独立 Bash（`!` 命令）：预览 = 输出本身（去掉
                             // `$ cmd` 回显与 `[Exited with code N]` 尾注），
                             // 默认展开（BashModeProgress 直接展示输出）。
+                            // Skill：结果行显示 `Launching skill: X` 单行摘要。
+                            if done.name == "Skill" {
+                                call.result_summary = done
+                                    .output
+                                    .lines()
+                                    .next()
+                                    .filter(|l| !l.trim().is_empty())
+                                    .map(str::to_string);
+                            }
                             let lines: Vec<String> = done
                                 .output
                                 .lines()
@@ -6453,7 +6462,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
             name: "Skill".into(),
             summary: "pdf doc.md".into(),
-            output: "line".into(),
+            output: "Launching skill: pdf\n\nRead the full skill instructions at /tmp/skills/SKILL.md".into(),
             is_error: false,
             diff: None,
             duration_ms: 3210,
@@ -6463,6 +6472,7 @@ mod tests {
         // CC 双行：耗时并入结果行，且只有慢命令（>2s）才显示。
         // Skill 用 ✦ 图标（类别图标：⏺ 内建 / ◆ MCP / ✦ Skill）。
         assert!(joined.contains("✦ Skill(pdf doc.md)"), "头行: {joined}");
+        assert!(joined.contains("Launching skill: pdf"), "结果行单行摘要: {joined}");
         assert!(joined.contains("Ran in 3.2s"), "结果行带耗时: {joined}");
         assert!(!joined.contains("3210ms"), "毫秒不再进头行: {joined}");
     }
