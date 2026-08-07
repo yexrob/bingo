@@ -30,18 +30,6 @@ jobs:
             artifact: bingo-x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
-      # Release semantics: a tag on main is the official package; a tag elsewhere
-      # (e.g. dev) is a preflight build → published as a pre-release.
-      - name: Classify release (main = official, else preflight)
-        id: release_kind
-        shell: bash
-        run: |
-          git fetch origin main --depth=1
-          if git merge-base --is-ancestor HEAD origin/main; then
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -57,23 +45,47 @@ jobs:
           mkdir -p dist
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp target/${{ matrix.target }}/release/bingo.exe dist/bingo.exe
-            # Zip lives next to the tarballs (repo root) so the checksum glob below matches.
+            # Zip lives next to the tarballs (repo root) so the artifact glob below matches.
             powershell -NoProfile -Command "Compress-Archive -Path dist/bingo.exe -DestinationPath ${{ matrix.artifact }}.zip -Force"
           else
             cp target/${{ matrix.target }}/release/bingo dist/bingo
             tar -czf ${{ matrix.artifact }}.tar.gz -C dist bingo
           fi
-          # SHA-256 checksums: sha256sum on Linux/Git Bash, shasum on macOS.
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum ${{ matrix.artifact }}.* > dist/checksums.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Release semantics: a tag on main is the official package; a tag elsewhere
+      # (e.g. dev) is a preflight build → published as a pre-release.
+      # Single upload job: concurrent softprops uploads to one release race each other.
+      - name: Classify release (main = official, else preflight)
+        id: release_kind
+        run: |
+          git fetch origin main --depth=1
+          if git merge-base --is-ancestor HEAD origin/main; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else
-            shasum -a 256 ${{ matrix.artifact }}.* > dist/checksums.txt
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
           fi
-          cat dist/checksums.txt
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Generate SHA-256 checksums
+        run: |
+          cd assets
+          sha256sum * > checksums.txt
+          cat checksums.txt
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           prerelease: ${{ steps.release_kind.outputs.prerelease }}
-          files: |
-            ${{ matrix.artifact }}.*
-            dist/checksums.txt
+          files: assets/*
