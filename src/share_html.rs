@@ -248,6 +248,8 @@ fn render_block_extra(block: &ContentBlock) -> String {
             render_markdown(thinking)
         ),
         ContentBlock::ToolUse { name, input, .. } => {
+            // input 经 serde_json 重序列化（键序可能与原文不同，内容语义等价；
+            // A4「原样呈现」按内容等价验收）。
             let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
             format!(
                 "<div class=\"tool\"><div class=\"tool-title\"><span class=\"t-ico\">⏺</span><span class=\"t-name\">{}</span><span class=\"t-args\">{}</span></div><details class=\"tool-result w-sm\"><summary>Show result</summary><div class=\"t-body\"><div class=\"t-code\"><span class=\"t-label\">input</span><pre>{}</pre></div></div></details></div>",
@@ -951,14 +953,22 @@ mod tests {
             escape("<script>alert('xss')</script> & \"quoted\""),
             "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt; &amp; &quot;quoted&quot;"
         );
-        // 注入内容经 render 全链路不出现可执行脚本。
+        // 注入内容经 render 全链路不出现可执行脚本/未转义标签（C1 全字符集）。
         let doc = doc();
         let html = render(
             &doc,
-            &[text_msg(Role::User, "<script>alert(1)</script>")],
+            &[text_msg(
+                Role::User,
+                "<script>alert(1)</script><img src=x onerror=alert(2)>&\"'",
+            )],
         );
         assert!(!html.contains("<script>alert(1)"), "注入脚本不得原样出现");
-        assert!(html.contains("&lt;script&gt;"), "{html}");
+        assert!(!html.contains("<img src=x onerror"), "注入 img 标签不得原样出现");
+        assert!(html.contains("&lt;script&gt;alert(1)"));
+        assert!(html.contains("&lt;img src=x onerror"));
+        assert!(html.contains("&amp;"));
+        assert!(html.contains("&quot;"));
+        assert!(html.contains("&#39;"));
     }
 
     #[test]
