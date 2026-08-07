@@ -1929,7 +1929,11 @@ impl Chat {
     /// The burst heuristic ([`PASTE_BURST_GAP`]) stays as the fallback for
     /// terminals that do not report bracketed paste.
     pub fn on_paste(&mut self, text: &str) {
-        if let Some(id) = self.paste_clipboard_image() {
+        // 测试环境不读系统剪贴板：剪贴板里的图片会把文本粘贴误判为图片占位符
+        // （bracketed_paste 测试曾因本机剪贴板有图片而 flaky）。
+        if !cfg!(test)
+            && let Some(id) = self.paste_clipboard_image()
+        {
             self.snapshot(EditKind::Bulk);
             crate::tui::input::insert(&mut self.input, &mut self.cursor, &image_marker(id));
             self.after_edit();
