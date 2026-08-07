@@ -160,10 +160,13 @@ fn normalize_path(path: &str) -> String {
         }
     }
     let normalized = out.to_string_lossy().into_owned();
-    // Normalization eats the trailing slash; directory rules (`Read(/etc/)`) need the
-    // boundary semantics preserved.
-    if path.ends_with('/') && !normalized.ends_with('/') {
-        format!("{normalized}/")
+    // Normalization eats the trailing separator; directory rules (`Read(/etc/)`) need the
+    // boundary semantics preserved. The separator is platform-dependent: Windows rules
+    // like `Read(C:\etc\)` must end with `\`, not `/`.
+    if (path.ends_with('/') || path.ends_with('\\'))
+        && !normalized.ends_with(std::path::MAIN_SEPARATOR)
+    {
+        format!("{normalized}{}", std::path::MAIN_SEPARATOR)
     } else {
         normalized
     }
