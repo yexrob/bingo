@@ -57,7 +57,8 @@ jobs:
           mkdir -p dist
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp target/${{ matrix.target }}/release/bingo.exe dist/bingo.exe
-            (cd dist && powershell -NoProfile -Command "Compress-Archive -Path bingo.exe -DestinationPath ${{ matrix.artifact }}.zip -Force")
+            # Zip lives next to the tarballs (repo root) so the checksum glob below matches.
+            powershell -NoProfile -Command "Compress-Archive -Path dist/bingo.exe -DestinationPath ${{ matrix.artifact }}.zip -Force"
           else
             cp target/${{ matrix.target }}/release/bingo dist/bingo
             tar -czf ${{ matrix.artifact }}.tar.gz -C dist bingo
