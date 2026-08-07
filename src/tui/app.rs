@@ -1177,7 +1177,7 @@ mod tests {
         ));
         chat.set_input("a\nb\nc");
         chat.help_visible = true;
-        chat.queued.push("queued message".into());
+        chat.queued.push(crate::tui::chat::QueuedInput { text: "queued message".into(), is_slash: false });
         chat.notice = Some("Press ctrl-c again to exit");
         chat.search = Some(crate::tui::chat::HistorySearch::default());
         let rows = chrome_rows(&chat, 100, false).rows;

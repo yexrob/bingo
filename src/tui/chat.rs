@@ -225,6 +225,24 @@ fn parse_share_arg(arg: &str, flag: &str) -> bool {
     arg.split_whitespace().any(|t| t == flag)
 }
 
+/// One queued input, submitted after TurnEnd: a slash command (dispatched through
+/// `run_slash`) or a plain message (`start_turn`). The marker keeps the two apart —
+/// a queued slash must never reach the model as literal text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedInput {
+    pub text: String,
+    pub is_slash: bool,
+}
+
+/// Slash commands that run immediately while a turn is in progress: settings knobs
+/// that must apply before the next turn (`think`/`model`/`provider`/`theme`) and
+/// read-only status commands (`status`/`context`/`tasks`/`help`/`skills`). Everything
+/// else queues and runs after TurnEnd (CC semantics: "queues and runs after the
+/// current turn finishes; some commands run immediately").
+pub const INSTANT_SLASH_COMMANDS: &[&str] = &[
+    "think", "model", "provider", "theme", "status", "context", "tasks", "help", "skills",
+];
+
 /// Slash dropdown suggestion item (/name + hint + description).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlashSuggestion {
@@ -708,7 +726,7 @@ pub struct Chat {
     /// Whether the history file is writable (after one failure, never retry — avoid hitting the same error on every submit).
     history_writable: bool,
     /// Messages queued while busy (submitted one by one after TurnEnd).
-    pub queued: Vec<String>,
+    pub queued: Vec<QueuedInput>,
     /// Whether the `?` shortcut panel is expanded.
     pub help_visible: bool,
     /// Bottom transient notice (`Press ctrl-c again to exit` etc.).
@@ -1878,7 +1896,20 @@ impl Chat {
         if self.busy {
             let text = self.expand_pastes(&text);
             let text = self.expand_image_paths(&text);
-            self.queued.push(text);
+            // Instant commands bypass the queue (CC semantics: settings knobs apply
+            // before the next turn; read-only status commands run mid-turn). This is a
+            // side-channel dispatch — it must not reset `busy`. run_slash's contract is
+            // the line WITHOUT the leading slash, so strip it here.
+            if let Some(rest) = text.strip_prefix('/') {
+                let name = rest.split_whitespace().next().unwrap_or("");
+                if INSTANT_SLASH_COMMANDS.contains(&name) {
+                    self.run_slash(rest);
+                    self.update_slash_suggestions();
+                    return;
+                }
+            }
+            let is_slash = text.starts_with('/');
+            self.queued.push(QueuedInput { text, is_slash });
             self.update_slash_suggestions();
             return;
         }
@@ -3141,7 +3172,8 @@ impl Chat {
         self.slash_suggestions.clear();
     }
 
-    /// Submits the next queued message after a turn (one at a time: the next turn continues).
+    /// Submits the next queued item after a turn (one at a time: a plain message starts
+    /// the next turn; queued slash commands drain synchronously until one does).
     fn submit_queued(&mut self) {
         if self.busy || self.queued.is_empty() {
             return;
@@ -3149,8 +3181,23 @@ impl Chat {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        let text = self.queued.remove(0);
-        self.start_turn(text, true);
+        // Drain queued slash commands synchronously; stop at the first plain message
+        // (it starts a turn, which re-triggers submit_queued on TurnEnd).
+        loop {
+            let Some(first) = self.queued.first() else {
+                return;
+            };
+            if !first.is_slash {
+                break;
+            }
+            let item = self.queued.remove(0);
+            self.run_slash(item.text.strip_prefix('/').unwrap_or(&item.text));
+            if self.busy {
+                return; // a skill command started a turn; the rest waits for TurnEnd
+            }
+        }
+        let item = self.queued.remove(0);
+        self.start_turn(item.text, true);
     }
 
     /// System-triggered turn: a watchable signal/terminal notification wakes the main agent.
@@ -3818,8 +3865,8 @@ impl Chat {
     fn vertical(&mut self, down: bool) -> bool {
         // Pulling back a queued message only happens on empty input: what is being typed should not be clobbered.
         if !down && self.busy && self.input.is_empty() && !self.queued.is_empty() {
-            if let Some(text) = self.queued.pop() {
-                self.set_input(text);
+            if let Some(item) = self.queued.pop() {
+                self.set_input(item.text);
             }
             return true;
         }
@@ -4523,7 +4570,7 @@ impl Chat {
             .queued
             .iter()
             .take(QUEUE_ROWS_MAX)
-            .map(|text| format!("> {}", one_line(text, self.width.saturating_sub(4))))
+            .map(|item| format!("> {}", one_line(&item.text, self.width.saturating_sub(4))))
             .collect();
         if self.queued.len() > QUEUE_ROWS_MAX {
             out.push(format!("… +{} more queued", self.queued.len() - QUEUE_ROWS_MAX));
@@ -9071,7 +9118,10 @@ mod tests {
         chat.busy = true;
         chat.set_input("first queued");
         chat.submit();
-        assert_eq!(chat.queued, vec!["first queued".to_string()]);
+        assert_eq!(
+            chat.queued,
+            vec![QueuedInput { text: "first queued".into(), is_slash: false }]
+        );
         assert_eq!(chat.input, "", "入队后输入清空");
         chat.set_input("second queued");
         chat.submit();
@@ -9083,6 +9133,82 @@ mod tests {
         press(&mut chat, KeyCode::Up);
         assert_eq!(chat.input, "second queued");
         assert_eq!(chat.queued.len(), 1);
+    }
+
+
+
+
+
+    /// Busy dispatch (契约 §4.2): instant commands run immediately and never reset
+    /// `busy`; other slash commands queue with the slash marker; plain messages queue.
+    #[test]
+    fn busy_dispatch_runs_instant_and_queues_the_rest() {
+        let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-busy", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut chat = test_chat_home(tmp.join("home"));
+        chat.cwd = tmp.display().to_string();
+        chat.busy = true;
+
+        // Instant: /think xhigh applies now, not queued; busy stays true.
+        chat.set_input("/think xhigh");
+        chat.submit();
+        assert_eq!(
+            chat.session.runtime.thinking.borrow().as_deref(),
+            Some("xhigh"),
+            "忙时白名单命令立即生效"
+        );
+        assert!(chat.busy, "白名单路径不重置 busy");
+        assert!(chat.queued.is_empty(), "白名单命令不入队");
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("✓ 思考级别已设置: xhigh"), "{out}");
+
+        // Non-instant slash: queued with the slash marker (never sent as a prompt).
+        chat.set_input("/clear");
+        chat.submit();
+        assert_eq!(
+            chat.queued,
+            vec![QueuedInput { text: "/clear".into(), is_slash: true }],
+            "非白名单 slash 命令带标记入队"
+        );
+
+        // Plain message: queued without the marker.
+        chat.set_input("hello");
+        chat.submit();
+        assert_eq!(chat.queued.len(), 2);
+        assert!(!chat.queued[1].is_slash);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// After TurnEnd, queued slash commands drain through `run_slash` (not `start_turn`),
+    /// in order, until a plain message starts the next turn.
+    #[tokio::test]
+    async fn queued_slashes_drain_through_run_slash() {
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-slash-{}-drain", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut chat = test_chat_home(tmp.join("home"));
+        chat.cwd = tmp.display().to_string();
+        chat.queued = vec![
+            QueuedInput { text: "/think low".into(), is_slash: true },
+            QueuedInput { text: "/nope".into(), is_slash: true },
+            QueuedInput { text: "the message".into(), is_slash: false },
+        ];
+        chat.submit_queued();
+        // Both slash commands ran (think applied + unknown guidance), then the message started a turn.
+        assert_eq!(
+            chat.session.runtime.thinking.borrow().as_deref(),
+            Some("low"),
+            "队列中的 slash 命令按命令执行"
+        );
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("未知命令: /nope"), "未知命令走指导而非发模型: {out}");
+        assert!(chat.busy, "最后一条普通消息开新回合");
+        assert_eq!(chat.messages.last().map(|m| m.role), Some(Role::User));
+        assert!(
+            chat.messages.last().is_some_and(|m| m.text == "the message"),
+            "普通消息经 start_turn 发给模型"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Bottom entity area: ctrl+g focuses the selector, ↑↓ move, Enter opens, Esc closes;
@@ -9140,7 +9266,9 @@ mod tests {
     #[test]
     fn queue_lines_are_capped() {
         let mut chat = chat_with_history("queuecap");
-        chat.queued = (0..10).map(|i| format!("m{i}")).collect();
+        chat.queued = (0..10)
+            .map(|i| QueuedInput { text: format!("m{i}"), is_slash: false })
+            .collect();
         assert_eq!(chat.queue_lines().len(), QUEUE_ROWS_MAX + 1);
         assert!(chat.queue_lines().last().is_some_and(|l| l.contains("more queued")));
     }
@@ -9260,7 +9388,10 @@ mod tests {
         now += slow;
         chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now);
         assert_eq!(chat.input, "", "Enter 提交而不是换行");
-        assert_eq!(chat.queued, vec!["hi".to_string()]);
+        assert_eq!(
+            chat.queued,
+            vec![QueuedInput { text: "hi".into(), is_slash: false }]
+        );
     }
 
     /// Bracketed paste: the whole chunk inserts at the caret as one undo step; ≥10 lines fold into a placeholder,
@@ -9332,10 +9463,10 @@ mod tests {
         chat.submit();
         assert_eq!(chat.queued.len(), 1);
         assert_eq!(
-            chat.queued[0],
+            chat.queued[0].text,
             format!("看一下这张图\n#[image 1]"),
             "路径行替换为占位：{}",
-            chat.queued[0]
+            chat.queued[0].text
         );
         assert_eq!(chat.attachments.len(), 1);
         assert_eq!(chat.attachments[0].media_type, "image/png");
@@ -9354,7 +9485,7 @@ mod tests {
         chat.set_input(format!("![图]({})\n{}", png.display(), txt.display()));
         chat.busy = true;
         chat.submit();
-        assert_eq!(chat.queued[0], format!("#[image 1]\n{}", txt.display()));
+        assert_eq!(chat.queued[0].text, format!("#[image 1]\n{}", txt.display()));
         assert_eq!(chat.attachments.len(), 1, "txt 不注册");
         let _ = std::fs::remove_dir_all(&dir);
     }
