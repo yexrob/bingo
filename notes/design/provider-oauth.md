@@ -391,11 +391,11 @@ Recorded at P1 verification time (with a real api.openai.com key):
 - opencode `packages/opencode/src/auth/index.ts` (auth.json format), `packages/opencode/src/provider/auth.ts` (auth methods)
 - Codex CLI OAuth implementation (openai/codex, `codex-rs/login/src/`)
 
-## 12. Decision record draft (D33 — to merge into notes/research.md on confirmation)
+## 12. Decision record (D33 — merged into notes/research.md with P0+P1)
 
 ### D33. Provider protocol layer + OAuth access
 
-**Status: draft — pending main's confirmation of this design document (2026-08).**
+**Status: confirmed by main (2026-08) — merged into notes/research.md alongside the P0+P1 commits.**
 
 **Problem**: bingo speaks only the Anthropic Messages protocol; each `providers` entry implicitly assumes it. Adding ChatGPT (Codex) subscription access and opencode-go requires (a) a protocol abstraction so a provider can speak the OpenAI Responses protocol, and (b) an OAuth path so subscriptions work without an API key.
 

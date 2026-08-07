@@ -597,3 +597,17 @@ Requirement (named by the user): ① teams are fixed to a project (committable),
 - **行为变化**：Linux 上 shell 从 zsh 变为 bash（确定性优先）；`interactive_command_reason` REPLS 名单加 `powershell/pwsh/cmd`。
 - **CI/Release**：`.github/workflows/ci.yml` 三平台 matrix（ubuntu/macos/windows-latest，check+clippy+test，无需 API key）；`release.yml` 标签触发，四目标（linux x64 / win x64 / mac arm64 / mac x64 交叉编译），ZIP/tar.gz + `checksums.txt` SHA-256。
 - **验证局限**：macOS 本机 628 测试全绿 + clippy 零告警；Windows 源码交叉检查被 `aws-lc-sys`（C 依赖需 windows.h）阻断，Windows 侧由 CI 原生 runner 验证。
+
+### D33. Provider 协议层 + OAuth 接入（多 provider 协议抽象）
+
+需求（用户点名）：bingo 支持多 AI provider OAuth 接入（Codex/ChatGPT 订阅、opencode go 订阅等）+ 协议抽象层（Anthropic 为一个实现，另支持 OpenAI Responses 协议）。`#provider-oauth` 全员对齐 + main 裁决（设计稿 notes/design/provider-oauth.md §10）。
+
+- **契约先行三件套**（AGENTS.md 公共边界规则）：① settings v2——`ProviderConfig` 加可选 `protocol`（值域 anthropic|openai，缺省 anthropic，存量配置零迁移）、`apiBaseUrl` 可缺省（空 → 协议默认端点）、`oauth`/`capabilities` 留待 P2；② `api::contract` 中立类型（NeutralRequest/SystemBlock/StreamEvent/ThinkingLevel/Capabilities）+ `ProviderClient` trait（stream→BoxStream / complete_text / list_models / count_tokens / auth_status）——消费者永远不见 wire JSON；③ auth.json 格式（P2）。
+- **Client 门面化**：provider 表改为 `Arc<dyn ProviderClient>` + 展示信息（key/url），`set_provider`/`with_provider`/`provider_endpoint`/`supports_images`（读当前 adapter capabilities）API 不变；错误类型 `ClientError` 移入 contract，新增 `Unsupported`（如 openai 无 count_tokens 端点 → 本地估算降级，D6 精神）与 `Config`（未知 protocol → 启动即 CONFIG_INVALID）。
+- **Anthropic 收编 = 吸收不改写**：client.rs 内部平移为 `api::providers::anthropic`，重试/退避/超时/400 溢出重算/SSE/错误映射 byte-identical（基线 636 全绿 → 平移后 639 全绿才动新代码）。
+- **OpenAI Responses adapter**（`api::providers::openai`，POST `{base}/v1/responses`，默认 base api.openai.com，`Authorization: Bearer`）：system→instructions（join）、messages→input items（text/image/function_call/function_call_output；thinking 不回放、tool_result 错误标志编码进 output 字符串）、tools→function tools（input_schema→parameters）、thinking→`reasoning.effort`（xhigh/max 收敛 high）+ `include:["reasoning.summary_text"]`、max_tokens→max_output_tokens。SSE 映射：output_item.added（message/reasoning/function_call）→ Text/Thinking/ToolUseStart、output_text.delta→TextDelta、reasoning_summary_text.delta→ThinkingDelta、function_call_arguments.delta→InputJsonDelta（output_item.done 权威 arguments 兜底空参数）、completed/incomplete（max_output_tokens→max_tokens，queryLoop 延续语义）→StopReason、failed/error→ApiError；**双层 index（output_item+content part）压平成单 block index**（忽略型 item 不占槽）。
+- **注册表 `build_provider`** 按 `protocol` 分发，唯一知道「配置 → adapter」的地方；默认 provider 仍走顶层 apiKey/apiBaseUrl/env（anthropic）。
+- **OAuth（P2，main 裁决强制项）**：唯一硬需求 = Codex/ChatGPT（device flow + loopback PKCE 双实现，client_id `app_EMoamEEZ73f0CkXaXp7hrann`、issuer auth.openai.com，端点/refresh/revoke 已源码核实，见 notes/research-oauth-cli.md）；token 存 `~/.local/share/bingo/auth.json`（0600、opencode 兼容 shape）绝不进项目 settings（根治 apiKey 进被提交配置）；懒刷新+401 触发+单飞锁，永久失效清登录提示重登；**P2 起手 0.5 天 spike**：订阅 bearer 打公开 /v1/responses（Path 1，复用 P1 adapter）还是私有 chatgpt.com/backend-api codex 协议（Path 2，第三 adapter）。
+- **opencode-go 订阅修正确认**（调研修正）：实为 API-key 订阅非 OAuth → 落地 = 命名 provider + protocol openai + apiKey，零 OAuth 代码；端点 P3 时核实。
+- **能力协商 v1 静态声明**（协议默认 + config 覆盖，无运行时协商）；`cacheControl` 为 anthropic-only（openai 侧 v1 不接缓存）；reasoning 摘要映射 thinking UI、不回放 verbatim。
+- **验证**：cargo build + clippy -D warnings + test --bin bingo 全绿（P0 639 / P1 650）；mock server 双协议同回合 fixture 断言同一 StreamEvent 序列（§9 契约测试）；提交两枚只进 feat/provider-oauth（♻️ refactor + ✨ feat），不碰 dev/main。
