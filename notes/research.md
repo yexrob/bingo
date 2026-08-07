@@ -151,6 +151,7 @@
 
 - goose（aaif-goose/goose，纯 Rust agent，permission 门 + execution + agents 结构）
 - iocraft README（组件 API、渲染循环、hooks 语义）
+- [`notes/design/feedback-states.md`](./design/feedback-states.md)（反馈状态规范：用户可见反馈态的统一设计约定，含 GUI/CLI 两侧与错误码契约）
 
 ## 已定决策（续）
 

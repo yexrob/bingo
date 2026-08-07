@@ -5,6 +5,8 @@ use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use std::sync::Arc;
 use thiserror::Error;
 
+use crate::error::ErrorCode;
+
 use super::sse::SseParser;
 use super::types::{parse_sse_event, Request, StreamEvent, API_BASE, API_VERSION};
 use super::types::{ContentBlock, DEFAULT_MAX_TOKENS, Role, SystemBlock};
@@ -12,17 +14,72 @@ use super::types::{ContentBlock, DEFAULT_MAX_TOKENS, Role, SystemBlock};
 pub const MAX_RETRIES: u32 = 5;
 
 /// 请求整体超时（连接 + 首字节）：服务器无响应时结束等待而不是无限挂。
+/// 用于 **agent 长回合**（流式）——不套用反馈层 10s/15s（回合中已有持续
+/// 进度反馈），由本传输层超时 + 用户中断兜底（AC-53）。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// 流式 body 空闲超时：连上之后服务端挂死（既不发事件也不断开）时，
 /// headless 会永久阻塞——超过这个静默时长即判定断流。
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// count_tokens 超时：每轮都可能调用，挂死不该拖住整个回合。
-const COUNT_TOKENS_TIMEOUT: Duration = Duration::from_secs(30);
+/// 短同步 **读** 操作反馈层超时（AC-12/14）：list_models / count_tokens 等。
+/// 到点 drop future（底层 reqwest 连接随之取消）→ `TIMEOUT`，首要动作 = 重试。
+const SHORT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 短同步 **写** 操作反馈层超时（AC-13/14）：complete_text（非流式补全）等。
+/// 到点 drop future → `TIMEOUT`。写路径 drop 对「服务端已应用写」是
+/// best-effort，重试仍建议动作级幂等兜底（AC-15）。
+const SHORT_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 400 上下文超限时重算输出预算的下限。
 const FLOOR_OUTPUT_TOKENS: u32 = 3_000;
+
+/// cfg(test) 测试钩子（#14 R3b 方案 A）：短同步操作反馈层超时的挂起注入，
+/// 服务于 AC-12/13/14 到点行为 + AC-15 写幂等断言。默认 0 = 不挂起，
+/// 无关测试不受影响；测试置 `set_hang` 后，三个短同步入口在 HTTP 发送前
+/// 挂起对应时长，fake-timers（`start_paused`）下 advance 到超时点即触发
+/// `timeout` → `TIMEOUT`。生产构建下 `maybe_hang` 直通，零开销。
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    /// 挂起时长 ms（0 = 直通）。
+    static HANG_MS: AtomicU64 = AtomicU64::new(0);
+
+    /// RAII guard：Drop 时清零挂起（panic 也不残留，防跨测试污染）。
+    pub(crate) struct HangGuard;
+
+    impl Drop for HangGuard {
+        fn drop(&mut self) {
+            HANG_MS.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// 设置挂起并返回 guard。
+    pub(crate) fn hang_guard(ms: u64) -> HangGuard {
+        HANG_MS.store(ms, Ordering::Relaxed);
+        HangGuard
+    }
+
+    pub(crate) fn hang() -> Duration {
+        Duration::from_millis(HANG_MS.load(Ordering::Relaxed))
+    }
+}
+
+/// 短同步入口的挂起包装：测试构建下先挂起（模拟慢网络/慢服务端），
+/// 生产构建下直通。
+#[cfg(test)]
+async fn maybe_hang<F: std::future::Future>(inner: F) -> F::Output {
+    tokio::time::sleep(test_hooks::hang()).await;
+    inner.await
+}
+
+#[cfg(not(test))]
+#[inline]
+async fn maybe_hang<F: std::future::Future>(inner: F) -> F::Output {
+    inner.await
+}
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -39,6 +96,35 @@ pub enum ClientError {
     /// 服务器在 REQUEST_TIMEOUT 内无响应。
     #[error("request timed out after {REQUEST_TIMEOUT:?}")]
     Timeout,
+}
+
+impl ErrorCode for ClientError {
+    /// 出口映射（见 `src/error.rs` 码表）：每个 variant 显式返回稳定码，
+    /// match 穷尽无 `_` 臂——新增 variant 未处理即编译报错。
+    fn error_code(&self) -> &'static str {
+        match self {
+            ClientError::MissingApiKey | ClientError::InvalidApiKey(_) => "AUTH_REQUIRED",
+            ClientError::Api { status: 401, .. } => "AUTH_REQUIRED",
+            ClientError::Api { status: 403, .. } => "PERMISSION_DENIED",
+            ClientError::Api { status: 429, .. } => "RATE_LIMITED",
+            // 其余非成功响应（4xx 非上述 / 5xx）：服务端交互异常，动作「稍后重试」。
+            ClientError::Api { .. } => "SERVER_ERROR",
+            ClientError::Stream(_) => "SERVER_ERROR",
+            ClientError::Transport(_) => transport_offline_code(),
+            ClientError::Timeout => "TIMEOUT",
+        }
+    }
+}
+
+/// Transport 臂映射锁定函数（`#[doc(hidden)]`，仅供防漂移单测断言）。
+///
+/// 为何需要：`reqwest::Error` 无公开构造（0.13.x 的 `new`/`builder` 等
+/// 全为 `pub(crate)`），`ClientError::Transport` 变体无法在测试中运行时构造，
+/// 防漂移单测不能直接枚举该变体——由此函数把「transport → OFFLINE」映射锁死。
+#[doc(hidden)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn transport_offline_code() -> &'static str {
+    "OFFLINE"
 }
 
 /// 当前生效的端点（/provider 切换时更新）。
@@ -232,7 +318,20 @@ impl Client {
     /// 非流式补全：返回回复文本（compact 摘要、记忆提取用）。
     /// 与 stream 一致的退避重试：429/5xx 与瞬时 transport 错误不该直接
     /// 判定压缩失败（失败会累进熔断计数）。
+    /// 短同步写操作：整个操作（含重试）套反馈层 15s（AC-13/14），
+    /// 到点 drop future → `TIMEOUT`。
     pub async fn complete_text(
+        &self,
+        request: &Request,
+    ) -> Result<String, ClientError> {
+        tokio::time::timeout(SHORT_WRITE_TIMEOUT, maybe_hang(self.complete_text_inner(request)))
+            .await
+            .map_err(|_| ClientError::Timeout)?
+    }
+
+    /// complete_text 的内层实现（重试 + 响应解析）。由外层反馈层超时兜底，
+    /// 单次网络发送不再单独套超时（外层 15s 是最强护栏）。
+    async fn complete_text_inner(
         &self,
         request: &Request,
     ) -> Result<String, ClientError> {
@@ -246,9 +345,9 @@ impl Client {
                 .post(format!("{base_url}/v1/messages"))
                 .headers(self.headers()?)
                 .json(&request);
-            match tokio::time::timeout(REQUEST_TIMEOUT, builder.send()).await {
-                Ok(Ok(response)) if response.status().is_success() => break response,
-                Ok(Ok(response)) if retryable(&response.status()) && attempt < MAX_RETRIES => {
+            match builder.send().await {
+                Ok(response) if response.status().is_success() => break response,
+                Ok(response) if retryable(&response.status()) && attempt < MAX_RETRIES => {
                     let retry_after = response
                         .headers()
                         .get("retry-after")
@@ -257,16 +356,15 @@ impl Client {
                         .map(Duration::from_secs);
                     tokio::time::sleep(retry_after.unwrap_or_else(|| backoff(attempt))).await;
                 }
-                Ok(Ok(response)) => {
+                Ok(response) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
                     return Err(ClientError::Api { status: status.as_u16(), body });
                 }
-                Ok(Err(_transport)) if attempt < MAX_RETRIES => {
+                Err(_transport) if attempt < MAX_RETRIES => {
                     tokio::time::sleep(backoff(attempt)).await;
                 }
-                Ok(Err(transport)) => return Err(ClientError::Transport(transport)),
-                Err(_) => return Err(ClientError::Timeout),
+                Err(transport) => return Err(ClientError::Transport(transport)),
             }
             attempt += 1;
         };
@@ -288,14 +386,17 @@ impl Client {
 
     /// 列出当前端点支持的模型（`GET {base}/v1/models`，Anthropic/DeepSeek 通用）：
     /// 返回 `data[].id`。`/model` 二级选择器异步拉取用。
+    /// 短同步读操作：反馈层 10s（AC-12/14），到点 drop → `TIMEOUT`。
     pub async fn list_models(&self) -> Result<Vec<String>, ClientError> {
         let base_url = self.current_endpoint().1;
         let response = tokio::time::timeout(
-            REQUEST_TIMEOUT,
-            self.http
-                .get(format!("{base_url}/v1/models"))
-                .headers(self.headers()?)
-                .send(),
+            SHORT_READ_TIMEOUT,
+            maybe_hang(
+                self.http
+                    .get(format!("{base_url}/v1/models"))
+                    .headers(self.headers()?)
+                    .send(),
+            ),
         )
         .await
         .map_err(|_| ClientError::Timeout)??;
@@ -322,6 +423,7 @@ impl Client {
     }
 
     /// 输入 token 计数（D12：预算显示走官方 count_tokens API）。
+    /// 短同步读操作：反馈层 10s（AC-12/14），到点 drop → `TIMEOUT`。
     pub async fn count_tokens(
         &self,
         model: &str,
@@ -334,12 +436,14 @@ impl Client {
             "messages": messages,
         });
         let response = tokio::time::timeout(
-            COUNT_TOKENS_TIMEOUT,
-            self.http
-                .post(format!("{}/v1/messages/count_tokens", self.current_endpoint().1))
-                .headers(self.headers()?)
-                .json(&payload)
-                .send(),
+            SHORT_READ_TIMEOUT,
+            maybe_hang(
+                self.http
+                    .post(format!("{}/v1/messages/count_tokens", self.current_endpoint().1))
+                    .headers(self.headers()?)
+                    .json(&payload)
+                    .send(),
+            ),
         )
         .await
         .map_err(|_| ClientError::Timeout)??;
@@ -606,6 +710,56 @@ mod tests {
     use super::*;
     use crate::api::types::parse_sse_event;
     use crate::api::types::StreamEvent;
+
+    /// AC-12/13/14：短同步操作反馈层超时分档——读 10s / 写 15s 两档不混淆
+    /// （读在 11s 前必报、写在 14s 前不报由常量值保证；list_models/count_tokens
+    /// 用读档、complete_text 用写档见实现，stream 长回合不套反馈层见 AC-53）。
+    #[test]
+    fn feedback_timeout_tiers_are_read_10s_write_15s() {
+        assert_eq!(SHORT_READ_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(SHORT_WRITE_TIMEOUT, Duration::from_secs(15));
+        // 长回合传输层护栏保持 120s/60s（不套 10s/15s）。
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(120));
+        assert_eq!(STREAM_IDLE_TIMEOUT, Duration::from_secs(60));
+    }
+
+    /// AC-12 到点行为（方案 A + fake-timers）：短同步读操作 10s 到点落 `TIMEOUT`。
+    #[tokio::test(start_paused = true)]
+    async fn read_times_out_at_10s() {
+        let _guard = test_hooks::hang_guard(60_000); // 挂起 60s，> 10s 读档
+        let client = Client::new("k".into(), "https://example.com".into());
+        let handle = tokio::spawn(async move { client.list_models().await });
+        tokio::time::advance(Duration::from_secs(11)).await;
+        let res = handle.await.unwrap();
+        assert!(matches!(res, Err(ClientError::Timeout)), "读超时应落 TIMEOUT");
+    }
+
+    /// AC-13/14 到点行为 + 分档不混淆：写操作 14s 前必不报、15s 到点落 `TIMEOUT`。
+    #[tokio::test(start_paused = true)]
+    async fn write_times_out_at_15s_not_before_14s() {
+        let _guard = test_hooks::hang_guard(60_000); // 挂起 60s，> 15s 写档
+        let client = Client::new("k".into(), "https://example.com".into());
+        let handle = tokio::spawn(async move {
+            let req = crate::api::types::Request {
+                model: "test".into(),
+                max_tokens: 100,
+                system: vec![],
+                messages: vec![],
+                tools: vec![],
+                stream: false,
+                thinking: None,
+                output_config: None,
+            };
+            client.complete_text(&req).await
+        });
+        // AC-14：写在 14s 前不报（读档 10s 已过也不误伤写档）。
+        tokio::time::advance(Duration::from_secs(14)).await;
+        assert!(!handle.is_finished(), "写操作 14s 前不应超时");
+        // 到 16s 触发写档。
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let res = handle.await.unwrap();
+        assert!(matches!(res, Err(ClientError::Timeout)), "写超时应落 TIMEOUT");
+    }
 
     #[test]
     fn parses_context_limit_error() {

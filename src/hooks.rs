@@ -3,6 +3,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::error::ErrorCode;
 use crate::permission::PermissionBehavior;
 use crate::settings::{HookRule, HooksConfig};
 
@@ -15,6 +16,14 @@ const SESSION_END_TIMEOUT: Duration = Duration::from_millis(1500);
 pub enum HookError {
     #[error("hook failed: {0}")]
     Failed(String),
+}
+
+impl ErrorCode for HookError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            HookError::Failed(_) => "HOOK_FAILED",
+        }
+    }
 }
 
 /// PreToolUse hook 输出。

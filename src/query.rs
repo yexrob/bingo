@@ -13,6 +13,7 @@ use crate::api::types::{
 };
 use crate::budget::MAX_RESULT_CHARS;
 use crate::compact::{check_and_compact, TokenGate};
+use crate::error::ErrorCode;
 use crate::hooks::{run_post_tool_use, run_pre_tool_use, run_stop_hooks, run_user_prompt_submit};
 use crate::permission::{can_use_tool, PermissionBehavior, PermissionMode};
 use crate::settings::{HooksConfig, Settings};
@@ -28,6 +29,16 @@ pub enum QueryError {
     Protocol(String),
     #[error("tool execution error: {0}")]
     Tool(#[from] ToolError),
+}
+
+impl ErrorCode for QueryError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            QueryError::Client(e) => e.error_code(),
+            QueryError::Protocol(_) => "SERVER_ERROR",
+            QueryError::Tool(e) => e.error_code(),
+        }
+    }
 }
 
 /// 一次查询的结果。

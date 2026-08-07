@@ -3,12 +3,22 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::error::ErrorCode;
+
 #[derive(Debug, Error)]
 pub enum SettingsError {
     #[error("failed to read settings: {0}")]
     Io(#[from] std::io::Error),
     #[error("failed to parse settings: {0}")]
     Parse(#[from] serde_json::Error),
+}
+
+impl ErrorCode for SettingsError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            SettingsError::Io(_) | SettingsError::Parse(_) => "CONFIG_INVALID",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

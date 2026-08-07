@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::error::ErrorCode;
 use crate::skills::parse_frontmatter_pairs;
 
 /// 经验条目状态：active（活跃）/ degraded（降级）/ stale（失效）。
@@ -188,6 +189,14 @@ impl ExperienceEntry {
 pub enum ExperienceError {
     #[error("experience io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl ErrorCode for ExperienceError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            ExperienceError::Io(_) => "STORAGE_ERROR",
+        }
+    }
 }
 
 /// 经验根目录：`$XDG_CONFIG_HOME/bingo/experience`（镜像 skills 配置约定）。

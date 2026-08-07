@@ -98,7 +98,17 @@ pub enum UiEvent {
     Warning(String),
     /// slash 命令异步结果（/compact /status /context）：渲染在消息之后。
     SlashOutput(String),
-    Error(String),
+    /// 回合级错误（结构化）：`code` 为稳定错误码（SCREAMING_SNAKE，
+    /// 经 `crate::error::map_error` 统一出口映射），`msg` 为人话文案，
+    /// `level` 为呈现级别（渲染端按级别分支：页面级/字段级 → 错误行高亮，
+    /// 全流程级 → 整屏错误态），`context` 为触发上下文——两者均由**生产者
+    /// 发射时显式携带**（非渲染层推导），级别与上下文由 §4.4 口径保证一致。
+    Error {
+        code: &'static str,
+        msg: String,
+        level: crate::error::ErrorLevel,
+        context: crate::error::ErrorContext,
+    },
 }
 
 /// 把 query 的 UiHooks 接到 TUI 通道上。

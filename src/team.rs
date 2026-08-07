@@ -18,6 +18,7 @@ use thiserror::Error;
 
 use crate::agents::{AgentDef, AgentDefSource};
 use crate::channels::ChannelMode;
+use crate::error::ErrorCode;
 use crate::query::Session;
 
 /// team 配置文件（项目层 `.bingo/team.json`，进版本库）。
@@ -33,6 +34,14 @@ pub enum TeamError {
     Parse(#[from] serde_json::Error),
     #[error("{0}")]
     Invalid(String),
+}
+
+impl ErrorCode for TeamError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            TeamError::Io(_) | TeamError::Parse(_) | TeamError::Invalid(_) => "CONFIG_INVALID",
+        }
+    }
 }
 
 impl TeamError {

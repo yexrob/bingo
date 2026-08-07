@@ -130,6 +130,19 @@ pub struct SettledMark {
     pub ask_rows: usize,
 }
 
+/// 当前错误态（#18 呈现层）：`code`/`msg`/`level`/`context` 来自结构化
+/// `UiEvent::Error`，级别由触发上下文决定（短同步=页面级，长回合=全流程级）。
+#[derive(Debug, Clone)]
+pub struct ErrorState {
+    pub code: &'static str,
+    pub msg: String,
+    pub level: crate::error::ErrorLevel,
+    /// 触发上下文（契约字段：事件链「生产者→事件→状态」上下文存活，
+    /// 供审计与未来短操作接入；渲染分支用 `level`）。
+    #[allow(dead_code)]
+    pub context: crate::error::ErrorContext,
+}
+
 /// 一条会话消息（用户或 assistant 文本 + assistant 活动提示）。
 #[derive(Debug, Clone)]
 pub struct UiMessage {
@@ -696,6 +709,12 @@ pub struct Chat {
     /// TurnStart 的真实时钟（状态行耗时基准；TurnEnd 清空）。
     turn_started: Option<std::time::Instant>,
     pub warnings: Vec<String>,
+    /// 当前错误态（#18 呈现层）：驱动错误行高亮与全流程级整屏态。
+    /// `UiEvent::Error` 到达时记录；复位动作（AC-03 复位四项）清除。
+    /// 渲染端按 `level` 分支：Field/Page → 错误行高亮，Full → 整屏错误态。
+    pub last_error: Option<ErrorState>,
+    /// 最近一次模型回合提交的输入（#18 整屏错误态 Enter=重试时重跑）。
+    pub last_prompt: String,
     pub cwd: String,
     /// 权限询问：请求 + 结果回执。
     pub pending_ask: Option<(PermissionRequest, oneshot::Sender<DialogAction>)>,
@@ -887,6 +906,8 @@ impl Chat {
             turn_start_tick: 0,
             turn_started: None,
             warnings: Vec::new(),
+            last_error: None,
+            last_prompt: String::new(),
             cwd,
             pending_ask: None,
             ask_focus: 0,
@@ -1005,6 +1026,9 @@ impl Chat {
                 self.dirty = true;
             }
             UiEvent::TurnStart => {
+                // 新回合开始 = 错误态复位（AC-03）：页面级错误行随新回合消失
+                // （整屏级 Full 在 error_screen_key 已 dismiss，此处兜底）。
+                self.last_error = None;
                 self.thinking_buf.clear();
                 self.pending_tools_clear();
                 self.turn_started = Some(std::time::Instant::now());
@@ -1436,19 +1460,18 @@ impl Chat {
             UiEvent::SlashOutput(message) => {
                 self.push_slash_output(message);
             }
-            UiEvent::Error(message) => {
+            UiEvent::Error { code, msg, level, context } => {
                 self.busy = false;
                 self.stream_msg = None;
-                if let Some(msg) = self.messages.pop() {
-                    self.messages.push(UiMessage {
-                        role: Role::Assistant,
-                        text: format!("[error] {message}"),
-                        activities: msg.activities,
-                        insert_points: msg.insert_points,
-                        groups: msg.groups,
-                        group_of: msg.group_of,
-                    });
-                }
+                // #18：错误态结构化记录（code/msg/level/context），渲染端据此
+                // 生成错误行（Page/Field）或整屏态（Full）——不依赖消息文本
+                // 替换与 doc 重建时机，无双显。
+                self.last_error = Some(ErrorState {
+                    code,
+                    msg: msg.clone(),
+                    level,
+                    context,
+                });
             }
         }
     }
@@ -1742,6 +1765,7 @@ impl Chat {
                 return;
             }
         }
+        self.last_prompt = text.clone();
         self.start_turn(text, true);
     }
 
@@ -1937,7 +1961,20 @@ impl Chat {
                 // default：直接克隆当前端点。
                 Err(_) => session.client.clone(),
             };
-            let models = client.list_models().await.unwrap_or_default();
+            let models = match client.list_models().await {
+                Ok(m) => m,
+                Err(e) => {
+                    // #18/main #91：短操作失败可见（页面级错误行，error 色），
+                    // 行为降级不变（菜单仍显示空/已知模型）——「降级 + 可见」。
+                    let _ = events.send(UiEvent::Error {
+                        code: crate::error::map_error(&e),
+                        msg: e.to_string(),
+                        level: crate::error::ErrorLevel::Page,
+                        context: crate::error::ErrorContext::ShortSync,
+                    });
+                    Vec::new()
+                }
+            };
             let _ = events.send(UiEvent::ModelsLoaded { provider: provider_for_spawn, models });
         });
         // 菜单已由 Enter 分支 take 出来——这里重建二级状态。
@@ -2184,11 +2221,24 @@ impl Chat {
             let msgs = transcript
                 .map(|t| t.load_messages().unwrap_or_default())
                 .unwrap_or_default();
-            let tokens = session
+            let tokens = match session
                 .client
                 .count_tokens(&model, &session.system, &msgs)
                 .await
-                .unwrap_or(0);
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    // #18/main #91：短操作失败可见（页面级错误行），
+                    // 行为降级不变（预算仍显示 0）。
+                    let _ = events.send(UiEvent::Error {
+                        code: crate::error::map_error(&e),
+                        msg: e.to_string(),
+                        level: crate::error::ErrorLevel::Page,
+                        context: crate::error::ErrorContext::ShortSync,
+                    });
+                    0
+                }
+            };
             let _ = events.send(UiEvent::SlashOutput(format(msgs.len(), tokens)));
         });
     }
@@ -2745,7 +2795,13 @@ impl Chat {
                     Self::finish_turn(&events, &session, &outcome).await;
                 }
                 Err(e) => {
-                    let _ = events.send(UiEvent::Error(e.to_string()));
+                    let _ = events.send(UiEvent::Error {
+                        code: crate::error::map_error(&e),
+                        msg: e.to_string(),
+                        // 回合级错误 = 长回合失败 → 全流程级整屏态（AC-53）。
+                        level: crate::error::ErrorLevel::Full,
+                        context: crate::error::ErrorContext::LongTurn,
+                    });
                 }
             }
         });
@@ -2786,7 +2842,13 @@ impl Chat {
                     Self::finish_turn(&events, &session, &outcome).await;
                 }
                 Err(e) => {
-                    let _ = events.send(UiEvent::Error(e.to_string()));
+                    let _ = events.send(UiEvent::Error {
+                        code: crate::error::map_error(&e),
+                        msg: e.to_string(),
+                        // 回合级错误 = 长回合失败 → 全流程级整屏态（AC-53）。
+                        level: crate::error::ErrorLevel::Full,
+                        context: crate::error::ErrorContext::LongTurn,
+                    });
                 }
             }
         });
@@ -2910,6 +2972,36 @@ impl Chat {
         self.on_key_at(code, modifiers, std::time::Instant::now())
     }
 
+    /// 复位错误态（AC-03 复位四项之一：错误行/整屏错误态清除）。
+    fn dismiss_error(&mut self) {
+        self.last_error = None;
+    }
+
+    /// #18 全流程级整屏错误态按键（AC-26/53：返回路径非死路）：
+    /// Enter = 重试（重跑最近输入）、Esc = 返回、Ctrl+C = 退出，其余忽略。
+    fn error_screen_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        now: std::time::Instant,
+    ) -> bool {
+        match code {
+            KeyCode::Enter => {
+                self.dismiss_error();
+                if !self.last_prompt.is_empty() {
+                    self.start_turn(self.last_prompt.clone(), true);
+                }
+                true
+            }
+            KeyCode::Esc => {
+                self.dismiss_error();
+                true
+            }
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => self.ctrl_c(now),
+            _ => true,
+        }
+    }
+
     /// 键盘事件（`now` 可注入：Ctrl+C 双击窗口与粘贴突发检测都依赖时钟）。
     ///
     /// 优先级自上而下：对话框 → `/model` 菜单 → 历史搜索 → 中断/退出语义
@@ -2921,6 +3013,12 @@ impl Chat {
         now: std::time::Instant,
     ) -> bool {
         let pasting = self.track_burst(now);
+        // #18 全流程级整屏错误态：首要动作 Enter=重试 / Esc=返回，其余忽略。
+        if let Some(err) = &self.last_error
+            && err.level == crate::error::ErrorLevel::Full
+        {
+            return self.error_screen_key(code, modifiers, now);
+        }
         if self.ask_key(code) {
             return true;
         }
@@ -8159,5 +8257,290 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .unwrap();
         out
+    }
+
+    // ---- #18 呈现层最小实现：错误行高亮 + 整屏态 + 重试/返回 ----
+
+    /// #18 全流程级整屏错误态：注入 Full 级 fixture → `last_error` 记录 →
+    /// `Frame::assemble` 出整屏错误行（标题/稳定码/动作）→ Esc 返回清错误态
+    /// （AC-26/53 返回路径非死路）。
+    #[test]
+    fn full_error_shows_full_screen_and_esc_returns() {
+        use crate::error::ErrorLevel;
+        use crate::tui::app::Frame;
+        use crate::tui::test_util::error_fixtures;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use ratatui::layout::Size;
+        let mut chat = test_chat();
+        let fx = error_fixtures()
+            .into_iter()
+            .find(|f| f.code == "AUTH_REQUIRED")
+            .expect("FX-04 在清单中");
+        fx.inject(&chat.events);
+        chat.drain_events();
+        let err = chat.last_error.as_ref().expect("错误态已记录");
+        assert_eq!(err.code, "AUTH_REQUIRED");
+        assert_eq!(err.level, ErrorLevel::Full);
+        let frame = Frame::assemble(&chat, Size::new(80, 24));
+        let joined: String = frame
+            .rows
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("出错了"), "整屏错误态标题: {joined}");
+        assert!(joined.contains("code=AUTH_REQUIRED"), "稳定码可见: {joined}");
+        assert!(joined.contains("重试"), "首要动作提示: {joined}");
+        assert!(frame.cursor.is_none(), "整屏态输入光标隐藏");
+        // Esc 返回：非死路。
+        chat.on_key(KeyCode::Esc, KeyModifiers::empty());
+        assert!(chat.last_error.is_none(), "Esc 返回清除错误态");
+    }
+
+    /// #18 页面级错误行高亮：注入 Page 级 fixture → `[error]` 行叠加 error 色
+    /// （A 区，theme.error = (255,107,128) 样色基线）。
+    #[test]
+    fn page_error_row_is_highlighted_with_error_color() {
+        use crate::error::ErrorLevel;
+        use crate::tui::app::Frame;
+        use crate::tui::test_util::{error_fixtures, ErrorContext};
+        use ratatui::layout::Size;
+        use ratatui::style::Color;
+        let mut chat = test_chat();
+        let fx = error_fixtures()
+            .into_iter()
+            .find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::ShortSync)
+            .expect("FX-01 在清单中");
+        fx.inject(&chat.events);
+        chat.drain_events();
+        assert_eq!(
+            chat.last_error.as_ref().unwrap().level,
+            ErrorLevel::Page
+        );
+        let frame = Frame::assemble(&chat, Size::new(80, 24));
+        let error_row = frame
+            .rows
+            .iter()
+            .find(|r| r.line.plain_text().starts_with("[error]"))
+            .expect("错误行存在");
+        assert!(
+            error_row
+                .line
+                .segs
+                .iter()
+                .any(|s| s.style.fg == Some(Color::Rgb(255, 107, 128))),
+            "错误行高亮用 error 色 (255,107,128): {:?}",
+            error_row.line.segs
+        );
+    }
+
+    /// #18 整屏态 Enter 重试最近输入（AC-15/53 重试路径骨架）。
+    #[tokio::test]
+    async fn full_error_enter_retries_last_prompt() {
+        use crate::error::ErrorLevel;
+        use crate::tui::test_util::error_fixtures;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut chat = test_chat();
+        chat.last_prompt = "为什么天是蓝的".into();
+        let fx = error_fixtures()
+            .into_iter()
+            .find(|f| f.code == "PERMISSION_DENIED")
+            .expect("FX-05 在清单中");
+        fx.inject(&chat.events);
+        chat.drain_events();
+        assert_eq!(
+            chat.last_error.as_ref().unwrap().level,
+            ErrorLevel::Full
+        );
+        chat.on_key(KeyCode::Enter, KeyModifiers::empty());
+        assert!(chat.last_error.is_none(), "Enter 清除错误态");
+        assert!(chat.busy, "Enter 重试启动新回合");
+    }
+
+    // ---- qa 断言侧（交付 3/3）：AC-53 / AC-29 / 呈现层样式 ----
+
+    /// AC-53 长回合失败升级：FX-11（TIMEOUT + LongTurn）→ 全流程级整屏态，
+    /// 与 FX-01（TIMEOUT + ShortSync，页面级）**同码不同级**，由 context 区分。
+    /// 整屏态含稳定码 + 重试/返回路径（AC-53 F3），光标隐藏。
+    #[test]
+    fn qa_ac53_long_turn_timeout_escalates_to_full_screen() {
+        use crate::error::ErrorContext;
+        use crate::error::ErrorLevel;
+        use crate::tui::app::Frame;
+        use crate::tui::test_util::error_fixtures;
+        use ratatui::layout::Size;
+        // 长回合传输层超时 → 全流程级。
+        let mut chat = test_chat();
+        let fx = error_fixtures()
+            .into_iter()
+            .find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::LongTurn)
+            .expect("FX-11 在清单中");
+        fx.inject(&chat.events);
+        chat.drain_events();
+        let err = chat.last_error.as_ref().expect("错误态已记录");
+        assert_eq!(err.code, "TIMEOUT");
+        assert_eq!(err.level, ErrorLevel::Full, "长回合 TIMEOUT 升级全流程级（AC-53）");
+        let frame = Frame::assemble(&chat, Size::new(80, 24));
+        let joined: String = frame
+            .rows
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("code=TIMEOUT"), "整屏态含稳定码: {joined}");
+        assert!(
+            joined.contains("重试") || joined.contains("返回"),
+            "AC-53 含「可重试或返回」路径: {joined}"
+        );
+        assert!(frame.cursor.is_none(), "整屏态输入光标隐藏");
+        // 同码短同步（FX-01）→ 页面级错误行，非整屏态——TIMEOUT 双级别由上下文区分。
+        let mut short = test_chat();
+        let fx_short = error_fixtures()
+            .into_iter()
+            .find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::ShortSync)
+            .expect("FX-01 在清单中");
+        fx_short.inject(&short.events);
+        short.drain_events();
+        let frame_short = Frame::assemble(&short, Size::new(80, 24));
+        let joined_short: String = frame_short
+            .rows
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined_short.contains("[error] code=TIMEOUT"),
+            "短同步 TIMEOUT = 页面级错误行: {joined_short}"
+        );
+        assert!(!joined_short.contains("出错了"), "短同步不整屏: {joined_short}");
+    }
+
+    /// AC-29 逐码矩阵：error_fixtures() 全部 11 个 fixture 注入，断言
+    /// 「级别由生产者显式携带 + 渲染形态与 level 匹配」——Full → 整屏态，
+    /// Page/Field → 错误行。断言锚 = 稳定码，不匹配 msg 文案。
+    #[test]
+    fn qa_ac29_fixture_matrix_renders_by_level() {
+        use crate::error::ErrorLevel;
+        use crate::tui::app::Frame;
+        use crate::tui::test_util::error_fixtures;
+        use ratatui::layout::Size;
+        for fx in error_fixtures() {
+            let mut chat = test_chat();
+            fx.inject(&chat.events);
+            chat.drain_events();
+            let err = chat.last_error.as_ref().expect("错误态已记录");
+            assert_eq!(err.code, fx.code, "错误码已记录: {}", fx.code);
+            assert_eq!(
+                err.level, fx.level,
+                "级别由生产者显式携带（不复制映射表）: {}",
+                fx.code
+            );
+            let frame = Frame::assemble(&chat, Size::new(80, 24));
+            let joined: String = frame
+                .rows
+                .iter()
+                .map(|r| r.line.plain_text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            match fx.level {
+                ErrorLevel::Full => {
+                    assert!(joined.contains("出错了"), "全流程级整屏态标题: {} / {joined}", fx.code);
+                    assert!(
+                        joined.contains(&format!("code={}", fx.code)),
+                        "整屏态含稳定码: {} / {joined}",
+                        fx.code
+                    );
+                    assert!(frame.cursor.is_none(), "整屏态光标隐藏: {}", fx.code);
+                }
+                ErrorLevel::Page | ErrorLevel::Field => {
+                    assert!(
+                        joined.contains(&format!("[error] code={}", fx.code)),
+                        "页面/字段级错误行含稳定码: {} / {joined}",
+                        fx.code
+                    );
+                    assert!(!joined.contains("出错了"), "页面/字段级不整屏: {} / {joined}", fx.code);
+                }
+            }
+        }
+    }
+
+    /// 呈现层样式（A 区）：页面级错误行经 `render_rows` 渲染到 Buffer 后，
+    /// **真实 cell 用 error 色 (255,107,128)**（非仅 SegStyle 层）——断言
+    /// 「用户看到的高亮」落在最终画面，样式与文本双锚。
+    #[test]
+    fn qa_page_error_row_paints_error_color_in_buffer() {
+        use crate::error::ErrorContext;
+        use crate::tui::app::Frame;
+        use crate::tui::test_util::error_fixtures;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::{Rect, Size};
+        use ratatui::style::Color;
+        let mut chat = test_chat();
+        let fx = error_fixtures()
+            .into_iter()
+            .find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::ShortSync)
+            .expect("FX-01 在清单中");
+        fx.inject(&chat.events);
+        chat.drain_events();
+        let frame = Frame::assemble(&chat, Size::new(80, 24));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+        let area = buf.area;
+        crate::tui::view::render_rows(&frame.rows, Color::White, &mut buf, area);
+        let err_color = Color::Rgb(255, 107, 128);
+        let has_err_color = (0..buf.area.height).any(|y| {
+            (0..buf.area.width).any(|x| buf[(x, y)].fg == err_color)
+        });
+        assert!(has_err_color, "错误行真实渲染 error 色 (255,107,128) 到 cell");
+        // 文本锚（断言只锚 code）。
+        let joined: String = frame
+            .rows
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("[error] code=TIMEOUT"),
+            "错误行文本含稳定码: {joined}"
+        );
+    }
+
+    /// FX-01 **真实路径**断言（main #91 / dev #92 邀请）：`/model` 二级菜单
+    /// 拉取（`open_model_models` 生产发射源）在 list_models 读超时（10s）时
+    /// 发射 `UiEvent::Error { level: Page, context: ShortSync }`——不经 fixture
+    /// 注入，验证**生产触发源**接线（AC-12/13/14 页面级契约有真实落点）。
+    /// 降级行为保留：错误行可见、非整屏态、不阻断。
+    #[tokio::test(start_paused = true)]
+    async fn qa_fx01_real_path_model_menu_failure_emits_page_error() {
+        use crate::api::client::test_hooks;
+        use crate::error::ErrorContext;
+        use crate::error::ErrorLevel;
+        use crate::tui::app::Frame;
+        use ratatui::layout::Size;
+        let _guard = test_hooks::hang_guard(60_000); // list_models 挂起 60s，> 读档 10s
+        let mut chat = test_chat();
+        chat.open_model_models("test".into()); // 触发真实生产拉取路径（fork provider）
+        // 先让 spawn 任务启动并注册超时 timer（start_paused 下需 poll 才推进）。
+        tokio::task::yield_now().await;
+        // 读档 10s 超时到点 → 发射 UiEvent::Error（页面级）。
+        tokio::time::advance(std::time::Duration::from_secs(11)).await;
+        tokio::task::yield_now().await; // 让 spawn 任务完成事件发送
+        chat.drain_events();
+        let err = chat.last_error.as_ref().expect("生产发射源已记录错误态");
+        assert_eq!(err.code, "TIMEOUT", "list_models 读超时落 TIMEOUT");
+        assert_eq!(err.level, ErrorLevel::Page, "短同步=页面级（真实路径）");
+        assert_eq!(err.context, ErrorContext::ShortSync, "上下文=短同步");
+        // 渲染：页面级错误行可见，非整屏态（降级行为保留）。
+        let frame = Frame::assemble(&chat, Size::new(80, 24));
+        let joined: String = frame
+            .rows
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("[error] code=TIMEOUT"),
+            "真实路径错误行可见: {joined}"
+        );
+        assert!(!joined.contains("出错了"), "页面级不整屏: {joined}");
     }
 }

@@ -18,6 +18,7 @@ mod api;
 mod budget;
 mod channels;
 mod compact;
+mod error;
 mod experience;
 mod hooks;
 mod mcp;
@@ -70,8 +71,19 @@ struct Cli {
     prompt: Vec<String>,
 }
 
+/// 顶层出口（C 出口映射）：所有 `?` 传播到顶层的错误统一经
+/// [`report_error`] 格式化——非 TTY（headless/管道/CI）走稳定契约
+/// `[error] code=... msg=...`（AC-30/31/32），TTY 下保持原样。
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    if let Err(e) = run().await {
+        report_error(&*e);
+        std::process::exit(1);
+    }
+}
+
+/// 实际主流程（原 `main` 主体）。错误一律向上传播，由 [`main`] 统一出口。
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     let home = match std::env::var("HOME") {
@@ -252,6 +264,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     crate::hooks::run_session_end(&session.settings.hooks, mode_str).await;
     result
+}
+
+/// 顶层错误出口（C 出口映射）：`Box<dyn Error>` 沿 cause 链取稳定码
+/// （[`crate::error::error_code_boxed`]），msg 经转义/截断。
+/// 非 TTY 输出 `[error] code=<SCREAMING_SNAKE> msg=<单行 ≤200>`（AC-30/31/32）；
+/// TTY 下打印原样（交互环境错误在界面内呈现）。
+fn report_error(err: &(dyn std::error::Error + 'static)) {
+    use std::io::IsTerminal;
+    if std::io::stderr().is_terminal() {
+        eprintln!("Error: {err}");
+        return;
+    }
+    let code = crate::error::error_code_boxed(err);
+    let msg = crate::error::sanitize_msg(&err.to_string());
+    eprintln!("[error] code={code} msg={msg}");
 }
 
 /// 落盘全部 team 成员的最新消息历史（仅保存有内容的成员；失败静默——

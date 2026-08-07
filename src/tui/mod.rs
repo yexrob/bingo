@@ -20,6 +20,8 @@ pub mod line;
 pub mod markdown;
 pub mod math;
 pub(crate) mod term;
+#[cfg(test)]
+mod test_util;
 pub mod theme;
 mod view;
 

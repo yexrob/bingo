@@ -7,6 +7,8 @@ use thiserror::Error;
 use crate::settings::HooksConfig;
 use crate::tasks::TaskStore;
 
+use crate::error::ErrorCode;
+
 pub mod agent;
 pub mod ask;
 pub mod bash;
@@ -67,6 +69,14 @@ pub struct ToolResult {
 pub enum ToolError {
     #[error("{0}")]
     Failed(String),
+}
+
+impl ErrorCode for ToolError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            ToolError::Failed(_) => "TOOL_FAILED",
+        }
+    }
 }
 
 impl ToolError {

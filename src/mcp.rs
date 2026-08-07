@@ -12,6 +12,7 @@ use rmcp::{RoleClient, serve_client};
 use thiserror::Error;
 use tokio::process::Command as TokioCommand;
 
+use crate::error::ErrorCode;
 use crate::settings::McpServerConfig;
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
@@ -19,6 +20,14 @@ use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 pub enum McpError {
     #[error("MCP server {server}: {detail}")]
     Connect { server: String, detail: String },
+}
+
+impl ErrorCode for McpError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            McpError::Connect { .. } => "SERVER_ERROR",
+        }
+    }
 }
 
 type Service = RunningService<RoleClient, ()>;

@@ -395,10 +395,42 @@ fn chrome_rows(chat: &Chat, width: usize, fullscreen: bool) -> Chrome {
     Chrome { rows, prompt_row }
 }
 
+/// #18 全流程级整屏错误态骨架（AC-26/53，ui/ux #68 规格）：错误标题 +
+/// 稳定码 + 说明（发生了什么+能做什么）+ 首要动作（重试/返回）+ 退出提示。
+/// 动作绑定在按键层（chat.rs：整屏态 Enter=重试、Esc=返回），本函数只画。
+fn error_screen_rows(err: &crate::tui::chat::ErrorState, theme: &Theme) -> Vec<Row> {
+    let mut rows = Vec::new();
+    rows.push(Row::new(Line::styled(
+        "⚠ 出错了",
+        SegStyle::fg(theme.error).bold(),
+    )));
+    rows.push(Row::new(Line::styled(
+        format!("[error] code={}", err.code),
+        SegStyle::fg(theme.error),
+    )));
+    rows.push(Row::new(Line::plain(err.msg.clone())));
+    rows.push(Row::new(Line::plain("")));
+    rows.push(Row::new(Line::styled(
+        "Enter 重试 · Esc 返回",
+        SegStyle::fg(theme.inactive),
+    )));
+    rows
+}
+
 impl Frame {
     /// inline 帧：动态尾部（超预算时只留末尾若干行 + 省略提示）+ chrome。
     /// 行数即视口高度，故恒 ≤ 终端高度 - 2（DECSTBM 区域恒合法）。
+    /// #18：全流程级错误态（`last_error.level == Full`）覆盖内容区为整屏错误，
+    /// 输入光标隐藏（用户处于错误屏，首要动作由按键层处理）。
     pub fn assemble(chat: &Chat, size: Size) -> Self {
+        if let Some(err) = &chat.last_error
+            && err.level == crate::error::ErrorLevel::Full
+        {
+            return Self {
+                rows: error_screen_rows(err, &chat.theme),
+                cursor: None,
+            };
+        }
         let width = size.width as usize;
         let height = size.height as usize;
         let chrome = chrome_rows(chat, width, false);
@@ -414,6 +446,16 @@ impl Frame {
         }
         rows.extend(chat.doc.rows[tail_start..].iter().cloned());
         let tail_len = rows.len();
+        // #18 错误行（Page/Field 级别）：从结构化 `last_error` 生成，error 色
+        // 高亮（A 区），追加在内容区末尾——不依赖 doc 重建、无双显。
+        if let Some(err) = &chat.last_error
+            && err.level != crate::error::ErrorLevel::Full
+        {
+            rows.push(Row::new(Line::styled(
+                format!("[error] code={} msg={}", err.code, err.msg),
+                SegStyle::fg(chat.theme.error),
+            )));
+        }
         rows.extend(chrome.rows);
 
         // 最后一道保险：chrome 本身也可能超过预算（很矮的终端），

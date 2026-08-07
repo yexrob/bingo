@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::api::types::Message;
+use crate::error::ErrorCode;
 
 #[derive(Debug, Error)]
 pub enum TranscriptError {
@@ -11,6 +12,14 @@ pub enum TranscriptError {
     Io(#[from] std::io::Error),
     #[error("failed to parse transcript line: {0}")]
     Parse(#[from] serde_json::Error),
+}
+
+impl ErrorCode for TranscriptError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            TranscriptError::Io(_) | TranscriptError::Parse(_) => "STORAGE_ERROR",
+        }
+    }
 }
 
 /// 会话 transcript：JSONL 逐行一条 Message（D11）。

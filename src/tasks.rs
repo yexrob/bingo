@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use tokio::sync::Mutex;
 
+use crate::error::ErrorCode;
+
 /// Task 状态机：pending → in_progress → completed，deleted 为删除。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -330,6 +332,18 @@ pub enum TaskError {
     CreateConflict(String),
     #[error("task file {path} is not valid task JSON: {detail}")]
     Parse { path: String, detail: String },
+}
+
+impl ErrorCode for TaskError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            TaskError::Io(_)
+            | TaskError::InvalidId(_)
+            | TaskError::Serialize(_)
+            | TaskError::CreateConflict(_)
+            | TaskError::Parse { .. } => "STORAGE_ERROR",
+        }
+    }
 }
 
 #[cfg(test)]

@@ -22,6 +22,9 @@ Rust 实现的 agent CLI（本地 agent harness）。
 - 改动涉及 bingo 用户可见行为（配置项 / slash 命令 / 工具 / 错误信息 / 能力地图）时，
   检查 `src/skills/bundled/` 内置技能是否描述了该行为；涉及则同批更新
   （当前为 guide.md：配置表、示例、命令速查、诊断指南、能力地图）。
+- 改动涉及用户可见反馈态（loading / 错误提示 / toast 等行为与输出格式）时，
+  对照 [`notes/design/feedback-states.md`](./notes/design/feedback-states.md)（反馈状态规范），
+  保持一致并回填该文档的变更记录。
 
 ## 验证
 
