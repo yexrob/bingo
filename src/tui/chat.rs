@@ -786,6 +786,8 @@ pub struct Chat {
     pub think_menu: Option<ThinkMenu>,
     /// 任务区展开信号（Task 工具调用 → 展示任务列表）。
     pub tasks_visible: bool,
+    /// 任务区是否由 TaskCreate 自动打开（非 ctrl+t 手动）：全部完成后自动隐藏。
+    pub tasks_auto: bool,
     /// 底部实体区快照（agent 实例 + 频道；tick/WatchEvent 时刷新）。
     pub entities: Vec<EntityRow>,
     /// 实体选择器焦点（Some(i) = 选择模式：↑↓/Enter/Esc 被捕获）。
@@ -955,6 +957,7 @@ impl Chat {
             model_menu: None,
             think_menu: None,
             tasks_visible: false,
+            tasks_auto: false,
             entities: Vec::new(),
             entity_focus: None,
             open_entity: None,
@@ -3379,6 +3382,8 @@ impl Chat {
             't' => {
                 self.tasks_visible = !self.tasks_visible;
                 if self.tasks_visible {
+                    // 手动打开：全部完成也保留面板（用户显式要看的态）。
+                    self.tasks_auto = false;
                     self.refresh_tasks();
                 }
                 self.dirty = true;
@@ -3747,6 +3752,18 @@ impl Chat {
             self.tasks_cache = next;
             self.dirty = true;
         }
+        // 自动打开的任务区：全部完成即隐藏（工作结束，面板离场），
+        // 推一行 2s 瞬态提示给闭合感 + 找回路径；手动打开的保留。
+        if self.tasks_auto
+            && self.tasks_visible
+            && !self.tasks_cache.is_empty()
+            && self.tasks_cache.iter().all(|t| t.status == TodoStatus::Done)
+        {
+            self.tasks_visible = false;
+            self.tasks_auto = false;
+            let total = self.tasks_cache.len();
+            self.push_slash_output(format!("✓ {total}/{total} tasks 完成 · ctrl+t 查看"));
+        }
     }
 
     /// 已完成项最多保留尾部几条，更老的折叠进 `… N done`。
@@ -3755,7 +3772,8 @@ impl Chat {
     const TODO_SHOWN: usize = 5;
 
     /// 任务区行（CC TaskListV2 位置：输入框上方）。
-    /// 有展开信号且存在任务时显示；完成后自动隐藏。
+    /// 有展开信号且存在任务时显示；自动打开的列表全部完成即隐藏
+    /// （`refresh_tasks` 收口），手动打开的保留。
     pub fn task_lines(&self) -> Vec<Line> {
         if !self.tasks_visible {
             return Vec::new();
@@ -4943,6 +4961,132 @@ mod tests {
         store.delete(&id).await.unwrap();
         chat.refresh_tasks();
         assert!(chat.tasks_cache.is_empty());
+    }
+
+    /// 建任务并返回 id（写入临时 store）。
+    async fn create_task(chat: &Chat, subject: &str) -> String {
+        chat.session
+            .tasks
+            .create(&crate::tasks::Task {
+                id: String::new(),
+                subject: subject.into(),
+                description: String::new(),
+                active_form: None,
+                status: crate::tasks::TaskStatus::Pending,
+                owner: None,
+                blocks: Vec::new(),
+                blocked_by: Vec::new(),
+                metadata: Default::default(),
+            })
+            .await
+            .unwrap()
+    }
+
+    /// 自动打开的任务区（TaskCreate 信号语义）：全部完成 → 隐藏 + 瞬态行；
+    /// 再建任务 → 重现；再全完成 → 再隐藏；隐藏后空闲零写入。
+    #[tokio::test]
+    async fn auto_todo_hides_when_all_done() {
+        let mut chat = chat_with_history("todo-auto");
+        let store = chat.session.tasks.clone();
+        let id = create_task(&chat, "t1").await;
+        chat.tasks_visible = true;
+        chat.tasks_auto = true;
+        chat.refresh_tasks();
+        assert!(chat.tasks_visible, "有活动项时自动面板显示");
+        assert!(!chat.task_lines().is_empty());
+
+        store
+            .update(
+                &id,
+                &crate::tasks::TaskPatch {
+                    status: Some(crate::tasks::TaskStatus::Completed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        chat.refresh_tasks();
+        assert!(!chat.tasks_visible, "自动面板全部完成后隐藏");
+        assert!(!chat.tasks_auto);
+        assert!(chat.task_lines().is_empty());
+        assert!(
+            chat.slash_lines.iter().any(|l| l.contains("✓ 1/1 tasks 完成")),
+            "隐藏瞬间推瞬态行: {:?}",
+            chat.slash_lines
+        );
+        assert!(!chat.has_dynamic_rows(), "隐藏后任务区不驱动 tick");
+
+        // 再建任务（expand 信号重开面板）→ 重现；再全完成 → 再隐藏。
+        let id2 = create_task(&chat, "t2").await;
+        chat.tasks_visible = true;
+        chat.tasks_auto = true;
+        chat.refresh_tasks();
+        assert!(chat.tasks_visible, "新任务后自动面板重现");
+        store
+            .update(
+                &id2,
+                &crate::tasks::TaskPatch {
+                    status: Some(crate::tasks::TaskStatus::Completed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        chat.refresh_tasks();
+        assert!(!chat.tasks_visible, "再次全完成再次隐藏");
+    }
+
+    /// ctrl+t 手动打开的面板：全部完成也保留（用户显式要看的态），且不推瞬态行。
+    #[tokio::test]
+    async fn manual_todo_stays_when_all_done() {
+        let mut chat = chat_with_history("todo-manual");
+        let id = create_task(&chat, "t1").await;
+        chat.session
+            .tasks
+            .update(
+                &id,
+                &crate::tasks::TaskPatch {
+                    status: Some(crate::tasks::TaskStatus::Completed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        ctrl(&mut chat, 't');
+        assert!(chat.tasks_visible, "手动打开显示");
+        assert!(!chat.tasks_auto, "手动打开非自动");
+        chat.refresh_tasks();
+        let lines = chat.task_lines();
+        let joined: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
+        assert!(joined[0].contains("todo · 1/1 tasks"), "{joined:?}");
+        assert!(joined.iter().any(|l| l.starts_with("☒ ")), "{joined:?}");
+        assert!(
+            chat.slash_lines.is_empty(),
+            "手动面板常驻即反馈，不推瞬态行: {:?}",
+            chat.slash_lines
+        );
+    }
+
+    /// `/tasks` 显式请求：全部完成也输出 ☒ 列表，不误报「没有后台任务」。
+    #[tokio::test]
+    async fn slash_tasks_shows_done_list() {
+        let mut chat = chat_with_history("todo-slash");
+        let id = create_task(&chat, "t1").await;
+        chat.session
+            .tasks
+            .update(
+                &id,
+                &crate::tasks::TaskPatch {
+                    status: Some(crate::tasks::TaskStatus::Completed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        chat.slash_tasks();
+        let joined = chat.slash_lines.join("\n");
+        assert!(joined.contains("☒ t1"), "{joined:?}");
+        assert!(!joined.contains("当前没有后台任务"), "{joined:?}");
     }
 
     #[test]
