@@ -216,9 +216,9 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("exit", "退出会话"),
 ];
 
-/// `/share` 参数解析：是否请求 --open（浏览器打开）。
-fn parse_share_args(arg: &str) -> bool {
-    arg.split_whitespace().any(|t| t == "--open")
+/// `/share` 参数解析：是否包含指定 flag（--local / --open）。
+fn parse_share_arg(arg: &str, flag: &str) -> bool {
+    arg.split_whitespace().any(|t| t == flag)
 }
 
 /// Slash dropdown suggestion item (/name + description).
@@ -2407,9 +2407,11 @@ impl Chat {
         ));
     }
 
-    /// `/share`：导出当前会话为自包含 HTML 分享页（/share [--open]）。
-    /// 数据 = 当前 transcript + ShareStore 快照；输出 = 当前目录 `<stem>.html`。
+    /// `/share`：导出当前会话分享页。默认上传官网分享服务（与 `bingo share`
+    /// 子命令一致）并显示公网链接；`/share --local` 本地文件模式（保留）。
     fn slash_share(&mut self, arg: &str) {
+        let local = parse_share_arg(arg, "--local");
+        let open = parse_share_arg(arg, "--open");
         let Some(transcript) = self.session.runtime.transcript.borrow().clone() else {
             self.push_slash_output("尚无会话可导出（新会话未落盘，先发一条消息）。".to_string());
             return;
@@ -2440,26 +2442,84 @@ impl Chat {
         };
         let html = crate::share_html::render(&doc, &messages);
         let out = std::path::PathBuf::from(&self.cwd).join(format!("{stem}.html"));
-        let overwritten = out.exists();
-        if let Err(e) = crate::share::write_html_atomic(&out, &html) {
-            self.push_slash_output(format!("写入失败: {e}"));
+
+        // 本地模式：写文件（覆盖提示 + 隐私警告），可选打开。
+        if local {
+            let overwritten = out.exists();
+            if let Err(e) = crate::share::write_html_atomic(&out, &html) {
+                self.push_slash_output(format!("写入失败: {e}"));
+                return;
+            }
+            let mut lines = vec![format!(
+                "✓ 已导出: {}{}",
+                out.display(),
+                if overwritten { "（覆盖）" } else { "" }
+            )];
+            if open {
+                match crate::share::open_in_browser(&out.display().to_string()) {
+                    Ok(_) => lines.push("已在浏览器中打开。".to_string()),
+                    Err(e) => lines.push(format!("无法打开浏览器: {e}")),
+                }
+            }
+            lines.push(
+                "注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。"
+                    .to_string(),
+            );
+            self.push_slash_output(lines.join("\n"));
             return;
         }
-        let mut lines = vec![format!(
-            "✓ 已导出: {}{}",
-            out.display(),
-            if overwritten { "（覆盖）" } else { "" }
-        )];
-        if parse_share_args(arg) {
-            match crate::share::open_in_browser(&out.display().to_string()) {
-                Ok(_) => lines.push("已在浏览器中打开。".to_string()),
-                Err(e) => lines.push(format!("无法打开浏览器: {e}")),
+
+        // 上传模式：settings.share.baseUrl（缺省官网基址；服务公开无 token）。
+        let user_dir = std::env::var("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| self.session.home.join(".config"));
+        let settings =
+            crate::settings::load_settings(&user_dir, &std::path::PathBuf::from(&self.cwd))
+                .unwrap_or_default();
+        let base = settings
+            .share
+            .base_url
+            .unwrap_or_else(|| crate::share::DEFAULT_SHARE_BASE.to_string());
+        let id = crate::share::share_id(&stem);
+        match crate::share::upload_share_blocking(&base, &id, &html) {
+            Ok(url) => {
+                let mut lines = vec![format!("✓ 已发布: {url}")];
+                if open {
+                    match crate::share::open_in_browser(&url) {
+                        Ok(_) => lines.push("已在浏览器中打开。".to_string()),
+                        Err(e) => lines.push(format!("无法打开浏览器: {e}")),
+                    }
+                }
+                lines.push(
+                    "注意：任何人可公开访问此链接；分享页含完整对话与工具输出（可能含敏感信息），传播前请自行审阅。"
+                        .to_string(),
+                );
+                self.push_slash_output(lines.join("\n"));
+            }
+            Err(e) => {
+                // 上传失败回退本地文件 + 提示（与 bingo share 子命令一致）。
+                let mut lines = vec![format!("上传失败（{e}）；回退本地文件。")];
+                let overwritten = out.exists();
+                match crate::share::write_html_atomic(&out, &html) {
+                    Ok(()) => lines.push(format!(
+                        "✓ 已导出: {}{}",
+                        out.display(),
+                        if overwritten { "（覆盖）" } else { "" }
+                    )),
+                    Err(write_err) => lines.push(format!("写入失败: {write_err}")),
+                }
+                if open
+                    && crate::share::open_in_browser(&out.display().to_string()).is_ok()
+                {
+                    lines.push("已在浏览器中打开。".to_string());
+                }
+                lines.push(
+                    "注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。"
+                        .to_string(),
+                );
+                self.push_slash_output(lines.join("\n"));
             }
         }
-        lines.push(
-            "注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。".to_string(),
-        );
-        self.push_slash_output(lines.join("\n"));
     }
 
     fn slash_compact(&mut self) {
@@ -5853,7 +5913,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// /share：导出当前会话 HTML 分享页（文件存在、路径输出、覆盖提示）。
+    /// /share --local：导出当前会话 HTML 分享页（文件存在、路径输出、覆盖提示）。
     #[test]
     fn slash_share_exports_current_session() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-share", std::process::id()));
@@ -5863,7 +5923,7 @@ mod tests {
         let _ = t.append(&crate::api::types::Message::user_text("hi"));
         let mut chat = test_chat_home(home.clone());
         let _ = chat.session.runtime.transcript_tx.send(Some(t));
-        chat.input = "/share".to_string();
+        chat.input = "/share --local".to_string();
         chat.submit();
         let stem = chat.session.runtime.transcript.borrow().clone().unwrap().name();
         let joined = chat.slash_lines.join("\n");
@@ -5877,7 +5937,7 @@ mod tests {
         assert!(html.contains("hi"), "产物含消息文本");
         assert!(html.contains("data-view=\"conv\""), "产物为 share 页");
         // 二次导出 → 覆盖提示。
-        chat.input = "/share".to_string();
+        chat.input = "/share --local".to_string();
         chat.submit();
         assert!(
             chat.slash_lines.join("\n").contains("覆盖"),
@@ -5903,13 +5963,91 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// /share --open 参数解析（纯逻辑，不触发浏览器）。
+    /// /share 参数解析（纯逻辑，不触发浏览器/上传）。
     #[test]
-    fn parse_share_args_flags() {
-        assert!(parse_share_args("--open"));
-        assert!(parse_share_args("  --open  "));
-        assert!(!parse_share_args(""));
-        assert!(!parse_share_args("--output x"));
+    fn parse_share_arg_flags() {
+        assert!(parse_share_arg("--open", "--open"));
+        assert!(parse_share_arg("--local --open", "--open"));
+        assert!(parse_share_arg("  --local  ", "--local"));
+        assert!(!parse_share_arg("", "--open"));
+        assert!(!parse_share_arg("--local", "--open"));
+        assert!(!parse_share_arg("--output x", "--local"));
+    }
+
+    /// /share 默认上传模式：mock 服务器接收 POST，输出公网链接 + 公开提示。
+    #[test]
+    fn slash_share_uploads_by_default() {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if line.to_ascii_lowercase().starts_with("content-length:") {
+                    content_length = line
+                        .split_once(':')
+                        .map(|(_, v)| v.trim().parse().unwrap_or(0))
+                        .unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).unwrap();
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            (request_line, String::from_utf8(body).unwrap())
+        });
+        let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-upshare", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        // settings.share.baseUrl → 本地 mock 服务器。
+        std::fs::create_dir_all(home.join(".config/bingo")).unwrap();
+        std::fs::write(
+            home.join(".config/bingo/settings.json"),
+            format!("{{\"share\": {{\"baseUrl\": \"http://{addr}\"}}}}"),
+        )
+        .unwrap();
+        let t = crate::transcript::create(&home, &tmp).unwrap_or_else(|e| panic!("{e}"));
+        let _ = t.append(&crate::api::types::Message::user_text("hi"));
+        let mut chat = test_chat_home(home.clone());
+        let _ = chat.session.runtime.transcript_tx.send(Some(t));
+        chat.input = "/share".to_string();
+        chat.submit();
+        let joined = chat.slash_lines.join("\n");
+        assert!(joined.contains("已发布"), "{joined}");
+        assert!(joined.contains(&format!("http://{addr}/share/u/")), "{joined}");
+        assert!(joined.contains("任何人可公开访问此链接"), "{joined}");
+        let (request_line, body) = handle.join().unwrap();
+        assert!(request_line.starts_with("POST /share/u/"), "{request_line}");
+        assert!(body.contains("hi"), "上传 body 为完整 HTML");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// /share --local：保留本地文件模式（不触发上传）。
+    #[test]
+    fn slash_share_local_keeps_file() {
+        let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-locshare", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        let t = crate::transcript::create(&home, &tmp).unwrap_or_else(|e| panic!("{e}"));
+        let _ = t.append(&crate::api::types::Message::user_text("hi"));
+        let mut chat = test_chat_home(home.clone());
+        let _ = chat.session.runtime.transcript_tx.send(Some(t));
+        chat.input = "/share --local".to_string();
+        chat.submit();
+        let joined = chat.slash_lines.join("\n");
+        assert!(joined.contains("已导出"), "{joined}");
+        assert!(!joined.contains("已发布"), "本地模式不上传");
+        let stem = chat.session.runtime.transcript.borrow().clone().unwrap().name();
+        assert!(home.join(format!("{stem}.html")).exists(), "本地文件存在");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// /permissions: lists rules; adding a rule → runtime table + settings.json persistence.
