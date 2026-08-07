@@ -350,6 +350,13 @@ fn run_share(
             crate::share::ShareDoc::new(stem.clone())
         }
     };
+    // 旧会话回退：share 文档无 agents/channels（进程启动于 share 合入前）时，
+    // 从主 transcript 推导 Team/DM/频道数据。
+    let doc = if doc.agents.is_empty() && doc.channels.is_empty() {
+        crate::share::derive_share_doc(&stem, &messages)
+    } else {
+        doc
+    };
 
     let html = crate::share_html::render(&doc, &messages);
     let out = output.unwrap_or_else(|| PathBuf::from(format!("{stem}.html")));

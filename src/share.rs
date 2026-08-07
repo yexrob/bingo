@@ -4,6 +4,7 @@
 //! 原子写：tmp + rename），`bingo share` 读取该文档 + transcript 生成
 //! 自包含 HTML 页面。share 是增强不是契约：存储失败只告警，不阻塞会话。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::agents::AgentState;
-use crate::api::types::Message;
+use crate::api::types::{ContentBlock, Message};
 use crate::channels::{ChannelMessage, ChannelMode};
 use crate::error::ErrorCode;
 use crate::transcript::Transcript;
@@ -242,6 +243,154 @@ pub fn open_in_browser(path: &Path) -> Result<(), ShareError> {
     Ok(())
 }
 
+/// 从主 transcript 消息推导 agents/channels（旧会话回退：进程启动于 share
+/// 功能合入前、无 share 文档时，导出仍含 Team/DM/频道视图，而非空态）。
+///
+/// 推导规则（尽力而为，发送者身份从 transcript 不可精确还原）：
+/// - `Agent` tool_use → AgentShare 条目（name=实例名或 agent 定义名，
+///   description 取 description 或 prompt 摘要，state=idle，history 空）
+/// - `SendMessage` → 向该 agent 的 history 追加 user 消息
+/// - `AgentControl stop/delete` → state=stopped
+/// - `Channel create` → ChannelShare 元数据（members 含 main/user）
+/// - `Post` → 频道消息（from=main，seq 递增）
+pub fn derive_share_doc(session: &str, messages: &[Message]) -> ShareDoc {
+    let mut doc = ShareDoc::new(session.to_string());
+    let mut agent_index: HashMap<String, usize> = HashMap::new();
+    let mut channel_index: HashMap<String, usize> = HashMap::new();
+    let mut next_agent = 1usize;
+    for msg in messages {
+        for block in &msg.content {
+            let ContentBlock::ToolUse { name, input, .. } = block else {
+                continue;
+            };
+            match name.as_str() {
+                "Agent" => {
+                    let instance = input
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| input.get("agent").and_then(|v| v.as_str()))
+                        .map(str::to_string)
+                        .unwrap_or_else(|| {
+                            let n = next_agent;
+                            next_agent += 1;
+                            format!("agent-{n}")
+                        });
+                    if agent_index.contains_key(&instance) {
+                        continue;
+                    }
+                    let def = input
+                        .get("agent")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let description = input
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| {
+                            input
+                                .get("prompt")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.chars().take(40).collect::<String>())
+                                .unwrap_or_default()
+                        });
+                    agent_index.insert(instance.clone(), doc.agents.len());
+                    doc.agents.push(AgentShare {
+                        name: instance,
+                        def,
+                        description,
+                        state: "idle".to_string(),
+                        history: Vec::new(),
+                    });
+                }
+                "SendMessage" => {
+                    let (Some(agent), Some(message)) = (
+                        input.get("agent").and_then(|v| v.as_str()),
+                        input.get("message").and_then(|v| v.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    if let Some(&idx) = agent_index.get(agent) {
+                        doc.agents[idx].history.push(Message::user_text(message));
+                    }
+                }
+                "AgentControl" => {
+                    let (Some(action), Some(agent)) = (
+                        input.get("action").and_then(|v| v.as_str()),
+                        input.get("agent").and_then(|v| v.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    if matches!(action, "stop" | "delete")
+                        && let Some(&idx) = agent_index.get(agent)
+                    {
+                        doc.agents[idx].state = "stopped".to_string();
+                    }
+                }
+                "Channel" => {
+                    let Some(channel) = input
+                        .get("channel")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim_start_matches('#').to_string())
+                    else {
+                        continue;
+                    };
+                    if input.get("action").and_then(|v| v.as_str()) != Some("create")
+                        || channel.is_empty()
+                        || channel_index.contains_key(&channel)
+                    {
+                        continue;
+                    }
+                    let mode = input
+                        .get("mode")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("serial")
+                        .to_string();
+                    let mut members = vec!["main".to_string(), "user".to_string()];
+                    if let Some(list) = input.get("members").and_then(|v| v.as_array()) {
+                        for m in list {
+                            if let Some(m) = m.as_str()
+                                && m != "main"
+                                && m != "user"
+                                && !members.iter().any(|x| x == m)
+                            {
+                                members.push(m.to_string());
+                            }
+                        }
+                    }
+                    channel_index.insert(channel.clone(), doc.channels.len());
+                    doc.channels.push(ChannelShare {
+                        name: channel,
+                        mode,
+                        members,
+                        messages: Vec::new(),
+                    });
+                }
+                "Post" => {
+                    let (Some(channel), Some(text)) = (
+                        input
+                            .get("channel")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.trim_start_matches('#').to_string()),
+                        input.get("message").and_then(|v| v.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    if let Some(&idx) = channel_index.get(&channel) {
+                        let seq = doc.channels[idx].messages.len() as u64 + 1;
+                        doc.channels[idx].messages.push(ChannelMessage {
+                            seq,
+                            from: "main".to_string(),
+                            text: text.to_string(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    doc
+}
+
 /// 按会话 key 解析 transcript（/resume 语义：子串匹配，最新优先）；
 /// 无 key 取最新会话。未命中时错误信息附可用会话列表（前 5 个，防刷屏）。
 pub fn resolve_transcript(home: &Path, key: Option<&str>) -> Result<Transcript, ShareError> {
@@ -398,6 +547,126 @@ mod tests {
         let parsed: ShareDoc = serde_json::from_str(&content).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(parsed.agents.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn derive_share_doc_from_transcript_tools() {
+        // 构造含 Agent/SendMessage/AgentControl/Channel/Post 的 transcript，
+        // 断言旧会话回退推导出 Team/DM/频道数据。
+        let msgs = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "Agent".into(),
+                        input: serde_json::json!({
+                            "name": "scout",
+                            "agent": "scout",
+                            "description": "调研",
+                            "prompt": "去调研一下"
+                        }),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".into(),
+                        name: "SendMessage".into(),
+                        input: serde_json::json!({"agent": "scout", "message": "再看 B"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t3".into(),
+                        name: "Channel".into(),
+                        input: serde_json::json!({
+                            "action": "create",
+                            "channel": "table",
+                            "members": ["scout"],
+                            "mode": "free"
+                        }),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t4".into(),
+                        name: "Post".into(),
+                        input: serde_json::json!({"channel": "table", "message": "大家好"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t5".into(),
+                        name: "AgentControl".into(),
+                        input: serde_json::json!({"action": "stop", "agent": "scout"}),
+                    },
+                ],
+            },
+        ];
+        let doc = derive_share_doc("proj-1700000000", &msgs);
+        assert_eq!(doc.session, "proj-1700000000");
+        // Agent 条目：name/def/description/state。
+        assert_eq!(doc.agents.len(), 1);
+        assert_eq!(doc.agents[0].name, "scout");
+        assert_eq!(doc.agents[0].def.as_deref(), Some("scout"));
+        assert_eq!(doc.agents[0].description, "调研");
+        // SendMessage → history 追加 user 消息。
+        assert_eq!(doc.agents[0].history.len(), 1);
+        assert!(matches!(
+            &doc.agents[0].history[0],
+            Message { role: Role::User, .. }
+        ));
+        // AgentControl stop → stopped（send 之后）。
+        assert_eq!(doc.agents[0].state, "stopped");
+        // Channel create → 元数据（main/user 自动入席）。
+        assert_eq!(doc.channels.len(), 1);
+        assert_eq!(doc.channels[0].name, "table");
+        assert_eq!(doc.channels[0].mode, "free");
+        assert_eq!(doc.channels[0].members, vec!["main", "user", "scout"]);
+        // Post → 频道消息（from=main，seq 递增）。
+        assert_eq!(doc.channels[0].messages.len(), 1);
+        assert_eq!(doc.channels[0].messages[0].seq, 1);
+        assert_eq!(doc.channels[0].messages[0].from, "main");
+        assert_eq!(doc.channels[0].messages[0].text, "大家好");
+    }
+
+    #[test]
+    fn derive_share_doc_handles_duplicates_and_unknowns() {
+        // 重复 Agent 派生不重复建条目；Post 到未知频道/未知 agent 静默。
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "Agent".into(),
+                    input: serde_json::json!({"name": "w", "prompt": "干活"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "t2".into(),
+                    name: "Agent".into(),
+                    input: serde_json::json!({"name": "w", "prompt": "再干"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "t3".into(),
+                    name: "SendMessage".into(),
+                    input: serde_json::json!({"agent": "ghost", "message": "x"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "t4".into(),
+                    name: "Post".into(),
+                    input: serde_json::json!({"channel": "nope", "message": "y"}),
+                },
+            ],
+        }];
+        let doc = derive_share_doc("s", &msgs);
+        assert_eq!(doc.agents.len(), 1, "重名派生不重复");
+        assert_eq!(doc.agents[0].name, "w");
+        assert_eq!(doc.agents[0].description, "干活", "description 回落 prompt 摘要");
+        assert!(doc.agents[0].history.is_empty(), "未知 agent 的 SendMessage 静默");
+        assert!(doc.channels.is_empty(), "未知频道的 Post 静默");
+        // 无 name/agent 的派生 → 自动编号 agent-1。
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "Agent".into(),
+                input: serde_json::json!({"prompt": "p"}),
+            }],
+        }];
+        let doc = derive_share_doc("s", &msgs);
+        assert_eq!(doc.agents[0].name, "agent-1");
     }
 
     #[test]

@@ -2431,6 +2431,12 @@ impl Chat {
                 crate::share::ShareDoc::new(stem.clone())
             }
         };
+        // 旧会话回退：无 share 文档时从主 transcript 推导 Team/DM/频道数据。
+        let doc = if doc.agents.is_empty() && doc.channels.is_empty() {
+            crate::share::derive_share_doc(&stem, &messages)
+        } else {
+            doc
+        };
         let html = crate::share_html::render(&doc, &messages);
         let out = std::path::PathBuf::from(&self.cwd).join(format!("{stem}.html"));
         let overwritten = out.exists();
