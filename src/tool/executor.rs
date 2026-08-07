@@ -380,10 +380,10 @@ mod tests {
             let (outcomes, aborted) = execute_calls(calls, &test_ctx(), Some(&mut rx)).await;
             (outcomes.len(), aborted)
         });
-        // Wait for the first call to start (not finish: this test cancels mid-flight):
-        // a fixed sleep is racy on slow CI (2-core runners), so poll the running counter.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while running.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+        // Wait for the first call to start (not finish: this test cancels mid-flight).
+        // No deadline: on overloaded CI (2-core runners, hundreds of parallel test
+        // threads) the 50ms call can take seconds to even begin.
+        while running.load(Ordering::SeqCst) == 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         tx.send(true).unwrap();
@@ -417,7 +417,12 @@ mod tests {
             let (outcomes, aborted) = execute_calls(calls, &test_ctx(), Some(&mut rx)).await;
             (outcomes, aborted)
         });
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Wait for the first 50ms call to finish before cancelling (its result must be
+        // kept). No deadline: on overloaded CI (2-core runners, hundreds of parallel
+        // test threads) a 50ms delay can take far longer than 5s of wall time.
+        while counter.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         tx.send(true).unwrap();
         let (outcomes, aborted) = handle.await.unwrap();
         assert!(aborted);
