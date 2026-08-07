@@ -1,6 +1,7 @@
 # PRD: 版本检测 + 欢迎卡片提示 + `bingo update` 命令
 
-> 状态：v1.1（pm 对齐稿，2026-08-09）
+> 状态：v1.2（pm 定稿稿，2026-08-09）
+> **v1.2 修订（pm，2026-08-09）**：main 裁决差异 2-6 全部接受实现（#team-update 第 10 条）——① D2 输出契约改为实现的中文输出（人类可读优先，错误路径已有 `[error] code=` 契约兜底）；② B2 失败限频取消：失败不写缓存、每次启动后台重试一次（异步静默）；③ 欢迎卡提示为缓存数据源模型：本次启动读缓存渲染、后台预热写缓存供下次启动（提示延迟一次启动，接受）；④ 错误码采用实际码表（复用通用码 OFFLINE/SERVER_ERROR/STORAGE_ERROR + 短码，无 UPDATE_* 前缀）；⑤ F10 updateCheck 开关维持 P1 未实现。差异项全部闭环。
 > **v1.1 修订（pm，2026-08-09）**：uiux 视觉规格 `update-banner.md` v1.1 已定稿（commit 607c353）——C 组视觉锚点整体切换为以该规格为唯一事实源（PRD C 组只验收不定义）：文案改 `New version {v} available — run bingo update`（无 ✦ 前缀/命令引号）；动效范围 = **版本号与 `bingo update` 两段同相位正弦呼吸**（C3 同步）；降级链补充 `motion: off` / `BINGO_NO_MOTION` 主动关停；新增截断链（50/43/15）与特效范围断言（欢迎卡其余行任意两帧一致）；身份行硬编码修正（E3 保留）。
 > 现状锚点：bingo v0.2.1（Cargo.toml）；GitHub Releases `yexrob/bingo`，资产 = `bingo-<target-triple>.tar.gz/.zip` × 4 平台 + `checksums.txt`，latest 指向最新 tag。
 > 欢迎卡片实现位置：`src/tui/chat.rs:4998` `welcome_rows`（注意：版本行硬编码 `bingo v0.1.0`，本次应改用编译期版本 `CARGO_PKG_VERSION`，与检测对比同源）。
@@ -15,7 +16,7 @@
 **用户场景**：
 
 1. **发现**：用户日常启动 TUI，欢迎卡片上出现一行克制的提示 `✦ v0.3.0 available — run 'bingo update'`（版本号着色、轻微闪动），不影响任何操作。
-2. **主动检查**：`bingo update --check` 输出当前版本 vs latest，脚本可 grep（`[update] ...` 单行格式）。
+2. **主动检查**：`bingo update --check` 输出当前版本 vs latest（`发现新版本 v0.3.0：运行 bingo update 安装` / `bingo 已是最新版本 v0.2.1`，中文人类可读；错误路径走 `[error] code=...` 契约）。
 3. **更新**：`bingo update` 自动完成 下载 → sha256 校验 → 原子替换 → 提示重启生效。
 4. **失败/离线**：断网或 GitHub 不可达 → 检测静默跳过（有 TTL，不反复重试）；`bingo update` 失败 → 明确错误码 + 手动下载指引。
 
@@ -40,15 +41,15 @@
 | # | 功能 | 描述 | 优先级 |
 |---|---|---|---|
 | F1 | 启动异步版本检测 | TUI 启动后异步请求 `releases/latest`，不阻塞首帧渲染与任何输入 | P0 |
-| F2 | 检测结果 TTL 缓存 | `~/.local/share/bingo/update-check.json`：成功 TTL 24h、失败 TTL 1h，期内不再发请求 | P0 |
-| F3 | 检测失败静默 | 超时（5s）/连接失败/解析失败 → 不提示、不报错、不阻塞；写失败时间戳防重试风暴 | P0 |
+| F2 | 检测结果 TTL 缓存 | `~/.local/share/bingo/update-check.json`：成功 TTL 24h 内不再发请求；失败不写缓存 | P0 |
+| F3 | 检测失败静默 | 超时/连接失败/解析失败 → 不提示、不报错、不阻塞；失败不写缓存，下次启动后台重试一次 | P0 |
 | F4 | 欢迎卡片提示行 | 有新版时欢迎卡片新增提示行（文案/样式/位置以 `update-banner.md` v1.1 为准） | P0 |
 | F5 | 提示行动效 | 版本号与 `bingo update` 两段同相位正弦呼吸（类 Claude Code thinking，随 TUI tick 驱动；视觉规格见 `update-banner.md` §2） | P0 |
 | F6 | 动效降级 | `motion: off` / `BINGO_NO_MOTION` → 静态 rest；无 truecolor → 离散两步；`NO_COLOR` → 静态 bold（提示保留不消失） | P0 |
 | F7 | `bingo update` 命令 | 下载当前平台资产 → checksum 校验 → 解压 → 原子替换 → 提示重启 | P0 |
 | F8 | `bingo update --check` | 只检查打印结果，不下载不替换；headless 可用 | P0 |
-| F9 | 错误码契约 | `UPDATE_*` 错误码登记 `src/error.rs` + 防漂移测试 | P0 |
-| F10 | settings 开关 `updateCheck` | 总开关（默认 true），敏感/离线环境可关闭检测 | P1 |
+| F9 | 错误码契约 | 复用通用码（OFFLINE/SERVER_ERROR/STORAGE_ERROR）+ 短码（CHECKSUMS_UNAVAILABLE/CHECKSUM_MISMATCH/ARCHIVE_INVALID/UNSUPPORTED_PLATFORM）登记 `src/error.rs` + 防漂移测试 | P0 |
+| F10 | settings 开关 `updateCheck` | 总开关（默认 true），敏感/离线环境可关闭检测。**v1.2 定案：维持 P1 未实现** | P1 |
 | F11 | 内置技能同步 | guide.md 命令速查 + 诊断指南更新 | P0 |
 
 ## 4. 方案要点
@@ -58,8 +59,8 @@
 - **时机**：TUI 启动后 spawn 异步任务（Tokio `spawn`），结果经 channel 送达 UI；`--print`/headless 与 `share` 等子命令快路径**不检测**（脚本场景不被打扰）。
 - **数据源**：`GET https://api.github.com/repos/yexrob/bingo/releases/latest`（须带 User-Agent），取 `tag_name`。API 限频 60/h 无认证——TTL 24h 已充分保护；实现可备选「跟 302 到 /releases/latest 从 Location 取 tag」的无 API 方案。
 - **版本对比**：semver 比较（tag 去 `v` 前缀；解析失败视为无新版，静默）。`0.2.1 < 0.2.10`、`0.2.1 < 0.3.0`、预发布 tag（`-rc`/`-beta`）不与正式版混排，解析不出合法 semver 一律忽略。
-- **缓存**：`update-check.json` = `{ checked_at: epoch_secs, latest: Option<String>, ok: bool }`。启动时读缓存，TTL 内直接用缓存结果（有新版仍提示，但不再发请求）；TTL 过期才异步重检。失败写 `ok:false` + 时间戳，1h 内不重试。
-- **接入点**：检测结果（或失败）到达前欢迎卡片按无提示渲染；结果到达后插入提示行/更新该行（结果最迟在首轮渲染完成前到达的典型路径；实现以「不重绘已 flush 的 scrollback」为约束，见 C4）。
+- **缓存**：`update-check.json` = `{ checked_at: epoch_secs, latest_tag }`。启动时读缓存，TTL（24h）内直接用缓存结果（有新版仍提示，但不再发请求）；TTL 过期才异步重检。失败不写缓存——下次启动后台重试一次（异步静默，启动 N 次 = N 次请求，GitHub 60/h 限频下日常使用无风险）。
+- **接入点（v1.2 定案：缓存数据源模型）**：欢迎卡渲染时读缓存（`latest_cached`），本次启动内检测结果**不实时插入**（避免重绘已渲染欢迎卡/触碰 scrollback 不变量）；后台预热（`spawn_background_check`）写缓存供**下次启动**显示——首次启动（无缓存）无提示、第二次启动显示，延迟一次启动为预期行为。
 
 ### 4.2 欢迎卡片提示
 
@@ -85,7 +86,7 @@ bingo update [--check]
 
 **流程**（`bingo update`，无 `--check`）：
 
-1. 请求 latest tag；若当前已是最新 → 输出 `[update] up-to-date v0.2.1`，exit 0，不发下载请求。
+1. 请求 latest tag；若当前已是最新 → 输出 `bingo 已是最新版本 v0.2.1`，exit 0，不发下载请求。
 2. 平台资产映射（`std::env::consts` 探测）：
 
    | 平台 | 资产 |
@@ -94,21 +95,22 @@ bingo update [--check]
    | `x86_64-apple-darwin`（Intel Mac） | `bingo-x86_64-apple-darwin.tar.gz` |
    | `x86_64-pc-windows-msvc` | `bingo-x86_64-pc-windows-msvc.zip` |
    | `x86_64-unknown-linux-gnu` | `bingo-x86_64-unknown-linux-gnu.tar.gz` |
-   | 其他 | 明确报错 `UPDATE_UNSUPPORTED_PLATFORM` |
+   | 其他 | 明确报错 `UNSUPPORTED_PLATFORM` |
 
-3. 下载资产 + `checksums.txt` 到 `~/.local/share/bingo/update/` 临时区；sha256 与 `checksums.txt` 中对应文件名行比对，**不匹配 → 拒绝安装**、清理临时文件、非零退出（`UPDATE_CHECKSUM_MISMATCH`）。`checksums.txt` 缺失或行缺失同样拒绝（安全优先）。
-4. 解压（新增 `tar` + `flate2` / `zip` 依赖），取二进制（`bingo` / `bingo.exe`）。
-5. **原子替换**：目标 = `std::env::current_exe()`。POSIX：临时区二进制落盘为同目录新文件后原子 `rename` 覆盖（必要时先 `rename` 旧文件为 `.old` 再换入——两段式保证任一步失败旧版本仍可用，成功后清理 `.old`）。替换成功 → 输出 `[update] updated to v0.3.0 — restart bingo to apply`，exit 0。
-6. **权限失败**：`current_exe` 目录不可写（如 `/usr/local/bin`）→ 不静默降级，报 `UPDATE_PERMISSION` + 安装路径 + 指引（`sudo bingo update` 或手动下载 URL）。
-7. **解压失败/资产损坏** → 报错、清理临时文件、非零退出。
+3. 下载资产 + `checksums.txt`；sha256 与 `checksums.txt` 中对应文件名行比对（两列序/`*`/`./` 前缀容错解析），**不匹配 → 拒绝安装**、非零退出（`CHECKSUM_MISMATCH`）。`checksums.txt` 缺失或行缺失同样拒绝（安全优先，`CHECKSUMS_UNAVAILABLE`）。
+4. 解压（`tar` + `flate2` / `zip`），取二进制（`bingo` / `bingo.exe`）。
+5. **原子替换**：目标 = `std::env::current_exe()`。写同目录 tmp（同文件系统）+ rename 原子替换（Unix 显式置 0o755；Windows 先删旧，非原子由用户承担窗口期）。替换成功 → 输出 `bingo 已更新到 v0.3.0` + `安装位置：<path>（新版本在下次启动时生效）`，exit 0。
+6. **权限失败**：文件操作失败（如 `/usr/local/bin` 只读）→ 报 `STORAGE_ERROR`，msg 含安装路径 + 指引（`sudo bingo update` 或手动安装）。
+7. **解压失败/资产损坏** → 报错（`ARCHIVE_INVALID`）、非零退出。
 8. Windows 上运行中 exe 无法原位替换 → 报错 + 手动替换指引（v1 不做安装器）。
 
-**输出契约**（headless 可 grep，复用现有单行风格）：
-- `[update] latest v0.3.0 (current v0.2.1)` — `--check` 有新版
-- `[update] up-to-date v0.2.1` — 已最新
-- `[error] code=UPDATE_* msg=...` — 失败，非零退出（走统一错误码出口）
+**输出契约**（v1.2 定案：中文人类可读，main 裁决；错误路径仍走统一契约）：
+- `bingo 已是最新版本 v0.2.1` — 已最新（exit 0）
+- `发现新版本 v0.3.0：运行 bingo update 安装` — `--check` 有新版（exit 0）
+- `bingo 已更新到 v0.3.0` + `安装位置：…（新版本在下次启动时生效）` — 更新成功（exit 0）
+- `[error] code=... msg=...` — 失败，非零退出（统一错误码出口；成功路径不强制单行可 grep）
 
-**错误码**（登记 `src/error.rs`，SCREAMING_SNAKE、只增不改）：`UPDATE_CHECK_FAILED`（网络/API）、`UPDATE_CHECKSUM_MISMATCH`、`UPDATE_DOWNLOAD_FAILED`、`UPDATE_EXTRACT_FAILED`、`UPDATE_PERMISSION`、`UPDATE_UNSUPPORTED_PLATFORM`、`UPDATE_INSTALL_FAILED`（替换阶段）。
+**错误码**（v1.2 定案：复用通用码 + 短码，main 裁决；登记 `src/error.rs`，SCREAMING_SNAKE、只增不改）：`OFFLINE`（网络/HTTP 非 2xx）、`SERVER_ERROR`（release 响应异常）、`CHECKSUMS_UNAVAILABLE`、`CHECKSUM_MISMATCH`、`ARCHIVE_INVALID`（解压失败/缺二进制）、`UNSUPPORTED_PLATFORM`、`STORAGE_ERROR`（文件操作/权限，msg 含 sudo 指引）。
 
 **macOS 风险提示**：非公证二进制经下载会带 quarantine 属性，Gatekeeper 可能拦截首次运行——更新成功提示语后追加一行指引（`xattr -d com.apple.quarantine <path>`），v1 不自动清除（安全考虑，留给用户判断）。
 
@@ -121,9 +123,9 @@ bingo update [--check]
 
 ### B. 缓存与异步
 - B1. TTL 生效：首次检查写缓存后，24h 内再启动不发网络请求（注入时钟/缓存路径可测；mock 服务器计数断言请求数=1）。
-- B2. 失败限频：网络失败写 `ok:false` 时间戳，1h 内不重试。
-- B3. 首帧不阻塞：mock 网络延迟（如 3s 超时前）下 TUI 首帧照常渲染，无等待；检测结果到达后提示行出现/更新。
-- B4. `--print` / 子命令快路径（`share` 等）：不触发检测、不输出任何 update 相关行。
+- B2. 失败不写缓存：网络失败 → 无缓存写入、不提示不报错；下次启动后台重试一次（v1.2 定案：取消 1h 失败限频，接受实现）。
+- B3. 首帧不阻塞：mock 网络延迟下 TUI 首帧照常渲染，无等待（欢迎卡渲染只读缓存，不触网）。
+- B4. `--print` / 子命令快路径（`share`/`update` 等）：不触发检测、不输出任何 update 相关行。
 
 ### C. 欢迎卡片提示（视觉以 `update-banner.md` v1.1 为唯一事实源，锚点 1-11 条为完整断言；本组为 PRD 层合并项）
 - C1. 有新版（缓存或实时检测结果）→ 欢迎卡片出现提示行，文案 = `New version {v} available — run bingo update`（三段样式：静态段 inactive、版本号与 `bingo update` 呼吸色且命令 bold）；无新版 → 欢迎卡布局与现状逐行一致（回归）。
@@ -138,27 +140,27 @@ bingo update [--check]
 - C10. 无 ANSI 闪烁：输出不含 `\e[5m`（grep 断言）。
 
 ### D. `bingo update`
-- D1. 平台资产映射：四平台探测各自命中正确文件名（单测：`aarch64-apple-darwin` → `.tar.gz` 等）；未知平台 → `UPDATE_UNSUPPORTED_PLATFORM`。
-- D2. `--check` 输出契约：有新版 `[update] latest v0.3.0 (current v0.2.1)` exit 0；已最新 `[update] up-to-date v0.2.1` exit 0；网络失败 `[error] code=UPDATE_CHECK_FAILED ...` 非零退出。
-- D3. 已最新时执行 `bingo update`：不下载任何资产，输出 up-to-date，exit 0。
-- D4. 更新成功：mock 服务器验证「下载 → sha256 匹配 → 解压 → 替换」全链路，替换后 `current_exe` 为新版二进制（测试用伪造二进制 + 临时安装目录），输出含新版本号与重启提示，exit 0。
-- D5. checksum 不匹配：拒绝安装、临时文件已清理、非零退出 + `UPDATE_CHECKSUM_MISMATCH`（mock 服务器返回篡改资产）。
-- D6. `checksums.txt` 缺失 / 无对应资产行：同样拒绝安装（安全优先），明确报错。
-- D7. 权限不足（安装目录只读）：报 `UPDATE_PERMISSION` + 安装路径 + sudo/手动指引，不产生半更新状态。
-- D8. 解压失败 / 资产损坏：报错、临时文件清理、非零退出。
-- D9. 替换失败（如模拟 rename 失败）：旧二进制保持可用（两段式回退），报 `UPDATE_INSTALL_FAILED`，非零退出。
-- D10. 所有 `UPDATE_*` 错误走统一错误码出口（TUI/CLI 双出口一致），exit=1 + `[error] code=...` 单行格式。
+- D1. 平台资产映射：四平台探测各自命中正确文件名（单测：`aarch64-apple-darwin` → `.tar.gz` 等）；未知平台 → `UNSUPPORTED_PLATFORM`。
+- D2. 输出契约（v1.2 定案）：`--check` 有新版 `发现新版本 v0.3.0：运行 bingo update 安装` exit 0；已最新 `bingo 已是最新版本 v0.2.1` exit 0；网络失败 `[error] code=OFFLINE ...` 非零退出。
+- D3. 已最新时执行 `bingo update`：不下载任何资产，输出已是最新，exit 0。
+- D4. 更新成功：mock 服务器验证「下载 → sha256 匹配 → 解压 → 替换」全链路，替换后 `current_exe` 为新版二进制（测试用伪造二进制 + 临时安装目录），输出含新版本号与安装位置，exit 0。
+- D5. checksum 不匹配：拒绝安装、现有二进制不被触碰、非零退出 + `CHECKSUM_MISMATCH`（mock 服务器返回篡改资产）。
+- D6. `checksums.txt` 缺失 / 无对应资产行：同样拒绝安装（安全优先，`CHECKSUMS_UNAVAILABLE`），明确报错。
+- D7. 权限不足（安装目录只读）：报 `STORAGE_ERROR`，msg 含安装路径 + sudo/手动指引，现有二进制不被触碰。
+- D8. 解压失败 / 资产损坏 / 包内缺二进制：报 `ARCHIVE_INVALID`，非零退出。
+- D9. 替换失败（如模拟 rename 失败）：tmp 残留可清理、旧二进制保持可用，报 `STORAGE_ERROR`，非零退出。
+- D10. 所有更新错误走统一错误码出口（TUI/CLI 双出口一致），exit=1 + `[error] code=...` 单行格式。
 
 ### E. 质量与契约
 - E1. `cargo build`、`cargo clippy -- -D warnings`、`cargo test` 全绿；检测/缓存/映射/校验逻辑带内联单测。
-- E2. `src/error.rs` 登记全部 `UPDATE_*` 码 + 防漂移单测（枚举每个 variant）。
+- E2. `src/error.rs` 登记实际码表（OFFLINE/SERVER_ERROR/CHECKSUMS_UNAVAILABLE/CHECKSUM_MISMATCH/ARCHIVE_INVALID/UNSUPPORTED_PLATFORM/STORAGE_ERROR）+ 防漂移单测（枚举每个 variant）。
 - E3. 欢迎卡版本行改用编译期版本（`CARGO_PKG_VERSION`），与检测对比同源（顺手修正 v0.1.0 硬编码）。
-- E4. 内置技能 `src/skills/bundled/guide.md` 同步：`bingo update [--check]` 命令速查、updateCheck 配置表、诊断指南（网络失败/权限/checksum 场景）。
+- E4. 内置技能 `src/skills/bundled/guide.md` 同步：`bingo update [--check]` 命令速查、`motion` 配置表（auto/off + BINGO_NO_MOTION）、能力地图「更新」条目（检测/提示/更新全流程）。
 - E5. 新增依赖仅 `tar`/`flate2`/`zip` 三件（解压用），不加其他。
 
 ## 6. 验收顺序建议（依赖关系）
 
-1. 检测核心（semver 对比 + TTL 缓存 + 失败限频，纯函数可先测）→ 2. 异步接线（spawn + 不阻塞首帧）→ 3. 欢迎卡片提示行（静态 → 动效/降级，按 `update-banner.md` §5 锚点）→ 4. `bingo update`（映射/下载/校验/替换/权限）→ 5. 错误码 + 文档（guide.md）收口。
+1. 检测核心（semver 对比 + TTL 缓存，纯函数可先测）→ 2. 异步接线（spawn + 不阻塞首帧）→ 3. 欢迎卡片提示行（静态 → 动效/降级，按 `update-banner.md` §5 锚点）→ 4. `bingo update`（映射/下载/校验/替换/权限）→ 5. 错误码 + 文档（guide.md）收口。
 
 ## 7. 风险与未决项
 
