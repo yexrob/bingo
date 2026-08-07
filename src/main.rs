@@ -338,6 +338,7 @@ fn run_share(
 
     let html = crate::share_html::render(&doc, &messages);
     let out = output.unwrap_or_else(|| PathBuf::from(format!("{stem}.html")));
+    let overwritten = out.exists();
     if let Some(parent) = out.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -346,7 +347,11 @@ fn run_share(
     let tmp = out.with_extension("html.tmp");
     std::fs::write(&tmp, &html)?;
     std::fs::rename(&tmp, &out)?;
-    println!("[share] wrote {}", out.display());
+    println!(
+        "[share] wrote {}{}",
+        out.display(),
+        if overwritten { " (overwritten)" } else { "" }
+    );
     eprintln!("[share] 注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。");
     if open {
         open_in_browser(&out).map_err(crate::share::ShareError::Io)?;
