@@ -275,7 +275,7 @@ fn render_block_extra(block: &ContentBlock) -> String {
             let media = escape(&source.media_type);
             let alt = format!("image ({media})");
             format!(
-                "<div class=\"img-block\"><img src=\"data:{media};base64,{}\" alt=\"{alt}\"></div>",
+                "<figure class=\"img-block\"><img src=\"data:{media};base64,{}\" alt=\"{alt}\"></figure>",
                 escape(&source.data)
             )
         }
@@ -435,7 +435,7 @@ fn render_channels(channels: &[ChannelShare]) -> String {
             stream.push_str("</div>");
         }
         out.push_str(&format!(
-            "<div class=\"ch-block\"><div class=\"ch-head\"><span class=\"ch-name\">#{}</span><span class=\"ch-mode {}\">{}</span><span class=\"ch-members\">{}</span></div>{}</div>",
+            "<div class=\"ch-block\"><div class=\"ch-head\"><span class=\"ch-name\">◇ #{}</span><span class=\"ch-mode {}\">{}</span><span class=\"ch-members\">{}</span></div>{}</div>",
             escape(&c.name),
             escape(&c.mode),
             escape(&c.mode),
@@ -453,7 +453,7 @@ pub fn render(doc: &ShareDoc, messages: &[Message]) -> String {
     let mut out = String::new();
     out.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
     out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
-    out.push_str("<meta name=\"color-scheme\" content=\"light dark\">\n");
+    out.push_str("<meta name=\"color-scheme\" content=\"light\">\n");
     out.push_str("<meta name=\"generator\" content=\"bingo share\">\n");
     out.push_str(&format!("<title>bingo · {session}</title>\n"));
     out.push_str("<style>\n");
@@ -1062,7 +1062,7 @@ mod tests {
         assert!(html.contains("<strong>结论</strong>"));
         assert!(html.contains("查一下"));
         // 频道视图。
-        assert!(html.contains("<span class=\"ch-name\">#table</span>"));
+        assert!(html.contains("<span class=\"ch-name\">◇ #table</span>"), "频道头 ◇ 前缀（规格 §4.4）");
         assert!(html.contains("class=\"ch-mode free\""));
         assert!(html.contains(">main</span>") && html.contains(">user</span>") && html.contains(">scout</span>"));
         assert!(html.contains("<span class=\"ch-seq\">1</span>"));
@@ -1120,9 +1120,10 @@ mod tests {
             }],
         };
         let html = render(&doc(), &[m]);
-        assert!(html.contains("class=\"img-block\""), "{html}");
+        assert!(html.contains("<figure class=\"img-block\">"), "{html}");
         assert!(html.contains("src=\"data:image/png;base64,aGVsbG8=\""));
         assert!(html.contains("alt=\"image (image/png)\""));
+        assert!(html.contains("</figure>"));
         // 仅 data: URI，不透传外部 URL。
         assert!(!html.contains("http://") && !html.contains("https://"));
     }
