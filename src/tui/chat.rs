@@ -195,25 +195,29 @@ pub fn is_hidden_tool(name: &str) -> bool {
 }
 
 /// Built-in slash command table (single source shared by /help and the dropdown suggestions).
-pub const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("help", "显示可用命令"),
-    ("clear", "清空对话，开始新会话（别名 /reset /new）"),
-    ("compact", "压缩上下文（旧消息 → 摘要）"),
-    ("model", "显示/切换模型（/model [名称]）"),
-    ("resume", "恢复历史会话（/resume [名称或关键词]）"),
-    ("rename", "重命名当前会话（/rename [名称]）"),
-    ("share", "导出当前会话为 HTML 分享页（/share [--open]）"),
-    ("context", "显示上下文用量"),
-    ("status", "显示会话状态（模型/权限/会话/上下文）"),
-    ("permissions", "列出/添加权限规则"),
-    ("theme", "切换主题（/theme [dark|light|auto]）"),
-    ("mcp", "管理 MCP 服务器（/mcp [enable|disable|reconnect]）"),
-    ("provider", "列出/切换 API provider（/provider [名称]）"),
-    ("think", "设置思考级别（/think [off|low|medium|high|xhigh|max]）"),
-    ("skills", "列出可用技能"),
-    ("tasks", "列出后台任务"),
-    ("team", "管理项目团队（/team start|status|assign|stop|list）"),
-    ("exit", "退出会话"),
+/// Slash commands single source: (name, argument hint, description).
+/// `hint` is the parameter shape shown in the `/` dropdown and `/help`
+/// (`[名称]` = optional, `start|status|…` = choices; empty = no arguments).
+/// Skills share the registry at runtime (no hint).
+pub const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
+    ("help", "", "显示可用命令"),
+    ("clear", "", "清空对话，开始新会话（别名 /reset /new）"),
+    ("compact", "", "压缩上下文（旧消息 → 摘要）"),
+    ("model", "[名称]", "显示/切换模型"),
+    ("resume", "[名称或关键词]", "恢复历史会话"),
+    ("rename", "[名称]", "重命名当前会话"),
+    ("share", "[--open]", "导出当前会话为 HTML 分享页"),
+    ("context", "", "显示上下文用量"),
+    ("status", "", "显示会话状态（模型/权限/会话/上下文）"),
+    ("permissions", "[allow|deny|ask] [规则]", "列出/添加权限规则"),
+    ("theme", "[dark|light|auto]", "切换主题"),
+    ("mcp", "[enable|disable|reconnect]", "管理 MCP 服务器"),
+    ("provider", "[名称]", "列出/切换 API provider"),
+    ("think", "[off|low|medium|high|xhigh|max]", "设置思考级别"),
+    ("skills", "", "列出可用技能"),
+    ("tasks", "", "列出后台任务"),
+    ("team", "start|status|assign|stop|list", "管理项目团队"),
+    ("exit", "", "退出会话"),
 ];
 
 /// `/share` 参数解析：是否包含指定 flag（--local / --open）。
@@ -221,10 +225,11 @@ fn parse_share_arg(arg: &str, flag: &str) -> bool {
     arg.split_whitespace().any(|t| t == flag)
 }
 
-/// Slash dropdown suggestion item (/name + description).
+/// Slash dropdown suggestion item (/name + hint + description).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlashSuggestion {
     pub name: String,
+    pub hint: String,
     pub description: String,
 }
 
@@ -2111,8 +2116,20 @@ impl Chat {
 
     fn slash_help(&mut self) {
         let mut lines = vec!["可用命令：".to_string()];
-        for (name, description) in SLASH_COMMANDS {
-            lines.push(format!("  /{name:<12} — {description}"));
+        let cmd_col = SLASH_COMMANDS
+            .iter()
+            .map(|(name, hint, _)| {
+                name.chars().count() + usize::from(!hint.is_empty()) + hint.chars().count()
+            })
+            .max()
+            .unwrap_or(0);
+        for (name, hint, description) in SLASH_COMMANDS {
+            let cmd = if hint.is_empty() {
+                format!("/{name}")
+            } else {
+                format!("/{name} {hint}")
+            };
+            lines.push(format!("  {cmd:<cmd_col$} — {description}"));
         }
         self.push_slash_output(lines.join("\n"));
     }
@@ -3012,8 +3029,9 @@ impl Chat {
         }
         let mut items: Vec<SlashSuggestion> = SLASH_COMMANDS
             .iter()
-            .map(|(name, desc)| SlashSuggestion {
+            .map(|(name, hint, desc)| SlashSuggestion {
                 name: (*name).to_string(),
+                hint: (*hint).to_string(),
                 description: (*desc).to_string(),
             })
             .collect();
@@ -3033,6 +3051,7 @@ impl Chat {
             }
             items.push(SlashSuggestion {
                 name: skill.name,
+                hint: String::new(),
                 description,
             });
         }
@@ -6489,6 +6508,68 @@ mod tests {
         chat.input = "hi".to_string();
         chat.update_slash_suggestions();
         assert!(chat.slash_suggestions.is_empty(), "非 / 开头不显示");
+    }
+
+    /// Dispatch completeness: every SLASH_COMMANDS entry has a `run_slash` arm, and every
+    /// dispatch arm's primary name lives in the table (aliases normalize to a primary).
+    /// The mirror list below must stay in sync with `run_slash`'s match arms — this test is the gate.
+    #[test]
+    fn slash_dispatch_covers_every_table_entry() {
+        use std::collections::HashSet;
+        // run_slash match arms as (arm, primary); aliases share the primary's handler.
+        let dispatch: &[(&str, &str)] = &[
+            ("help", "help"),
+            ("?", "help"),
+            ("exit", "exit"),
+            ("quit", "exit"),
+            ("clear", "clear"),
+            ("reset", "clear"),
+            ("new", "clear"),
+            ("model", "model"),
+            ("theme", "theme"),
+            ("rename", "rename"),
+            ("resume", "resume"),
+            ("share", "share"),
+            ("compact", "compact"),
+            ("status", "status"),
+            ("context", "context"),
+            ("permissions", "permissions"),
+            ("mcp", "mcp"),
+            ("provider", "provider"),
+            ("think", "think"),
+            ("skills", "skills"),
+            ("tasks", "tasks"),
+            ("team", "team"),
+        ];
+        let table: HashSet<&str> = SLASH_COMMANDS.iter().map(|(n, _, _)| *n).collect();
+        let arms: HashSet<&str> = dispatch.iter().map(|(a, _)| *a).collect();
+        let primaries: HashSet<&str> = dispatch.iter().map(|(_, p)| *p).collect();
+        for name in &table {
+            assert!(arms.contains(name), "表内命令 /{name} 缺少 run_slash 分派臂");
+        }
+        for p in &primaries {
+            assert!(table.contains(p), "分派臂主名 /{p} 不在 SLASH_COMMANDS 表内");
+        }
+    }
+
+    /// `/help` renders every SLASH_COMMANDS entry (title + one line each) with its hint,
+    /// straight from the same table — the single source stays the only source.
+    #[test]
+    fn slash_help_lists_every_command_with_hint() {
+        let mut chat = test_chat();
+        chat.run_slash("help");
+        let lines: Vec<&str> = chat.slash_lines.iter().map(String::as_str).collect();
+        assert_eq!(lines.len(), SLASH_COMMANDS.len() + 1, "标题 + 每命令一行");
+        assert_eq!(lines[0], "可用命令：");
+        for ((name, hint, desc), line) in SLASH_COMMANDS.iter().zip(&lines[1..]) {
+            let cmd = if hint.is_empty() {
+                format!("/{name}")
+            } else {
+                format!("/{name} {hint}")
+            };
+            assert!(line.contains(&cmd), "行包含命令与参数提示: {line}");
+            assert!(line.ends_with(desc), "行尾为描述: {line}");
+        }
     }
 
     /// Prefix filtering + skills merged in (project-level skills directory).

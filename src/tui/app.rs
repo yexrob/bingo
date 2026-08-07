@@ -267,7 +267,11 @@ fn suggestion_rows(
     }
     let name_col = slash
         .iter()
-        .map(|s| s.name.chars().count())
+        .map(|s| {
+            s.name.chars().count()
+                + usize::from(!s.hint.is_empty())
+                + s.hint.chars().count()
+        })
         .max()
         .unwrap_or(0)
         + 2;
@@ -278,7 +282,12 @@ fn suggestion_rows(
         .enumerate()
         .map(|(i, s)| {
             let selected = i == slash_selected;
-            let name_text = format!("/{:<width$}", s.name, width = name_col);
+            let cmd = if s.hint.is_empty() {
+                format!("/{}", s.name)
+            } else {
+                format!("/{} {}", s.name, s.hint)
+            };
+            let name_text = format!("{cmd:<name_col$}");
             let desc = crate::tui::markdown::truncate(&s.description, desc_width);
             let line = crate::tui::markdown::truncate(
                 &format!("{}{name_text}  {desc}", if selected { "❯ " } else { "  " }),
@@ -1207,11 +1216,25 @@ mod tests {
         // Slash suggestions take priority over menus.
         let slash = vec![SlashSuggestion {
             name: "help".into(),
+            hint: String::new(),
             description: "显示可用命令".into(),
         }];
         let rows = suggestion_rows(&slash, 0, Some(&menu), None, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(row_text(&rows[0]).starts_with("❯ /help"), "{}", row_text(&rows[0]));
+        // A command with an argument hint renders name + hint in the name column.
+        let with_hint = vec![SlashSuggestion {
+            name: "think".into(),
+            hint: "[off|low|medium|high|xhigh|max]".into(),
+            description: "设置思考级别".into(),
+        }];
+        let rows = suggestion_rows(&with_hint, 0, None, None, &theme, 80);
+        assert_eq!(rows.len(), 1);
+        assert!(
+            row_text(&rows[0]).contains("/think [off|low|medium|high|xhigh|max]"),
+            "{}",
+            row_text(&rows[0])
+        );
         // Every row truncates by width (overwide rows would be wrapped by the terminal, skewing the frame height).
         for width in 10..80usize {
             for row in suggestion_rows(&slash, 0, Some(&menu), None, &theme, width) {
