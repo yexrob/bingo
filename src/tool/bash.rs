@@ -925,7 +925,7 @@ mod tests {
             "$p = Start-Process cmd -ArgumentList '/c','ping -n 30 127.0.0.1 > nul' -PassThru -WindowStyle Hidden; $p.Id | Out-File -FilePath '{}' -Encoding ascii; Start-Sleep 30",
             marker.to_string_lossy()
         );
-        let child = tokio::process::Command::new("powershell.exe")
+        let mut child = tokio::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
