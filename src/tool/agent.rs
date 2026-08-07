@@ -32,16 +32,16 @@ pub struct AgentInput {
     description: Option<String>,
     /// Sub-agent model (optional): defaults to the named definition or parent session model.
     #[serde(default)]
-    #[schemars(description = "Model for the subagent (optional; inherits the named definition / parent session by default)")]
+    #[schemars(description = "Model for the subagent (optional; inherits the named definition / parent session by default); required when crossing providers — the parent model is not inherited")]
     model: Option<String>,
     /// Sub-agent provider (optional, from the `providers` section of settings.json): when set, the sub-agent
     /// uses that provider's endpoint and key (independent of the parent session's current provider).
     #[serde(default)]
-    #[schemars(description = "Provider for the subagent (optional; the providers section of settings; inherits the named definition / parent session by default)")]
+    #[schemars(description = "Provider for the subagent (optional; the providers section of settings; \"default\" or omitted = shared parent endpoint; specify model when crossing providers)")]
     provider: Option<String>,
     /// Sub-agent thinking level (optional): off | low | medium | high | xhigh | max.
     #[serde(default)]
-    #[schemars(description = "Thinking level for the subagent (optional): off/low/medium/high/xhigh/max; inherits the named definition / parent session's current level by default")]
+    #[schemars(description = "Thinking level for the subagent (optional): off/low/medium/high/xhigh/max; invalid values are rejected; defaults to off when crossing providers, otherwise inherits the named definition / parent session's current level")]
     thinking: Option<String>,
     /// Instance name (optional): address used by SendMessage/AgentControl.
     #[serde(default)]
@@ -360,10 +360,28 @@ impl AgentTool {
     }
 }
 
+/// Normalize a thinking level (explicit parameter / named definition entry): `off` → `None`
+/// (no thinking parameter); valid levels pass through; anything else is an error — silently
+/// degrading an invalid value to off would let the user believe thinking is on when it isn't,
+/// so sub-agent spawn must surface it immediately. Inherited values skip this check
+/// (consistent with the main session after `/think`, see [`build_sub_session`]).
+fn normalize_thinking(level: &str) -> Result<Option<String>, String> {
+    if level == "off" {
+        return Ok(None);
+    }
+    if crate::api::types::THINKING_LEVELS.contains(&level) {
+        return Ok(Some(level.to_string()));
+    }
+    Err(format!(
+        "无效思考级别 \"{level}\"（可用：off/low/medium/high/xhigh/max）"
+    ))
+}
+
 /// Build a sub-agent session (shared by AgentTool and team spawn, D31):
 /// the named definition provides the system prompt and default model/provider; explicit parameters
-/// take precedence over the definition, which takes precedence over inheritance (when a provider is
-/// set, fork an independent-endpoint client so the parent session is unaffected).
+/// take precedence over the definition, which takes precedence over inheritance. A named provider
+/// forks an independent-endpoint client so the parent session is unaffected; "default" or no
+/// provider shares the parent endpoint and follows the parent session's switches.
 pub(crate) fn build_sub_session(
     parent: &Arc<Session>,
     model: Option<String>,
@@ -372,18 +390,47 @@ pub(crate) fn build_sub_session(
     def: Option<&AgentDef>,
     instance: &str,
 ) -> Result<Arc<Session>, ToolError> {
-    let model = model
-        .or_else(|| def.and_then(|d| d.model.clone()))
-        .unwrap_or_else(|| parent.runtime.model.borrow().clone());
-    let provider = provider.or_else(|| def.and_then(|d| d.provider.clone()));
-    let thinking = thinking
-        .or_else(|| def.and_then(|d| d.thinking.clone()))
-        .or_else(|| parent.runtime.thinking.borrow().clone());
-    let client = match &provider {
+    let model = model.or_else(|| def.and_then(|d| d.model.clone()));
+    // provider："default" 与未指定等价（共享父端点，跟随父切换）；
+    // 仅命名 provider fork 独立端点。未知名字在此报错（即时反馈）。
+    let named_provider = provider
+        .or_else(|| def.and_then(|d| d.provider.clone()))
+        .filter(|p| p != "default");
+    let client = match &named_provider {
         Some(name) => parent.client.with_provider(name).map_err(ToolError::failed)?,
         None => parent.client.clone(),
     };
-    let provider_name = provider.unwrap_or_else(|| parent.runtime.provider.borrow().clone());
+    let provider_name = named_provider
+        .clone()
+        .unwrap_or_else(|| parent.runtime.provider.borrow().clone());
+    // 跨 provider 判定：fork 到与父当前 provider 不同的端点才跨（未指定
+    // provider = 共享父端点，恒同 provider）。跨 provider 时父会话的模型与
+    // 思考级别都不可用——模型名会发到错误端点（如 claude-sonnet-5 发到
+    // DeepSeek 必然 "model not found"），thinking 参数则可能被端点拒绝。
+    let cross_provider = match &named_provider {
+        Some(name) => name != parent.runtime.provider.borrow().as_str(),
+        None => false,
+    };
+    let model = match model {
+        Some(m) => m,
+        None if cross_provider => {
+            let parent_provider = parent.runtime.provider.borrow().clone();
+            return Err(ToolError::failed(format!(
+                "provider \"{}\" 需要 model：跨 provider 不继承父会话模型 \
+                 （当前父 provider = \"{parent_provider}\"），请显式指定 model 或去掉 provider",
+                named_provider.as_deref().unwrap_or("")
+            )));
+        }
+        None => parent.runtime.model.borrow().clone(),
+    };
+    // 思考级别：显式参数/定义校验（off→不发参数，非法值报错而非静默失效）；
+    // 两者皆无时：跨 provider 缺省 off（不带 thinking 参数，兼容 ds/ollama 端点），
+    // 同 provider 继承父会话当前级别快照（与主会话一致的宽松语义）。
+    let thinking = match thinking.or_else(|| def.and_then(|d| d.thinking.clone())) {
+        Some(level) => normalize_thinking(&level).map_err(ToolError::failed)?,
+        None if cross_provider => None,
+        None => parent.runtime.thinking.borrow().clone(),
+    };
     let system = match def {
         Some(d) if !d.system.trim().is_empty() => vec![SystemBlock {
             text: d.system.clone(),
@@ -892,6 +939,14 @@ mod tests {
         }
     }
 
+    /// 提取 build_sub_session 错误文本（Arc<Session> 无 Debug，unwrap_err 不可用）。
+    fn sub_err(r: Result<Arc<Session>, ToolError>) -> String {
+        match r {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected build_sub_session error"),
+        }
+    }
+
     #[test]
     fn sub_session_inherits_model_and_shared_endpoint() {
         let (session, client) = parent_session();
@@ -967,8 +1022,8 @@ mod tests {
         assert_eq!(*sub.runtime.model.borrow(), "explicit");
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
-            Some("off"),
-            "显式思考级别覆盖定义"
+            None,
+            "显式 off 归一化为不发参数"
         );
         // resolve_def: an unknown definition errors out and lists the available ones.
         let mut p = params("x");
@@ -987,6 +1042,128 @@ mod tests {
             tool.build_sub_session(&p, None, "sub").is_err(),
             "未知 provider 报错"
         );
+    }
+
+    #[test]
+    fn sub_session_cross_provider_requires_model() {
+        // 父 provider = "default"（parent_session 缺省）。
+        let (session, _client) = parent_session();
+        // 仅指定 provider、无 model → 早失败：不继承父模型（避免 claude-sonnet-5
+        // 发到 DeepSeek 端点 "model not found"）。
+        let tool = AgentTool::new(session.clone(), Vec::new());
+        let mut p = params("do it");
+        p.provider = Some("ds".into());
+        let err = sub_err(tool.build_sub_session(&p, None, "sub"));
+        assert!(
+            err.contains("需要 model") && err.contains("ds"),
+            "跨 provider 需要显式 model：{err}"
+        );
+        // 定义提供 provider 但无 model → 同样报错。
+        let mut d = def("reviewer");
+        d.model = None;
+        let tool = AgentTool::new(session.clone(), vec![d.clone()]);
+        let err = sub_err(tool.build_sub_session(&params("审查"), Some(&d), "sub"));
+        assert!(err.contains("需要 model"), "定义侧跨 provider 同样报错：{err}");
+        // 同 provider（父当前就是 ds）→ 继承模型，不报错。
+        let _ = session.runtime.provider_tx.send("ds".into());
+        let tool = AgentTool::new(session.clone(), Vec::new());
+        let mut p = params("do it");
+        p.provider = Some("ds".into());
+        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        assert_eq!(
+            *sub.runtime.model.borrow(),
+            "parent-model",
+            "同 provider 继承父模型"
+        );
+    }
+
+    #[test]
+    fn sub_session_cross_provider_defaults_thinking_off() {
+        let (session, _client) = parent_session();
+        let _ = session.runtime.thinking_tx.send(Some("xhigh".into()));
+        let tool = AgentTool::new(session.clone(), Vec::new());
+        // 跨 provider 且无显式/定义 thinking → 缺省 off（不带 thinking 参数，
+        // 兼容 DeepSeek/Ollama 端点）。
+        let mut p = params("do it");
+        p.provider = Some("ds".into());
+        p.model = Some("ds-model".into());
+        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        assert_eq!(
+            sub.runtime.thinking.borrow().as_deref(),
+            None,
+            "跨 provider 缺省 off"
+        );
+        // 跨 provider 显式 thinking 仍生效。
+        let mut p = params("do it");
+        p.provider = Some("ds".into());
+        p.model = Some("ds-model".into());
+        p.thinking = Some("high".into());
+        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        assert_eq!(sub.runtime.thinking.borrow().as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn sub_session_same_provider_inherits_thinking() {
+        let (session, _client) = parent_session();
+        let _ = session.runtime.thinking_tx.send(Some("xhigh".into()));
+        let _ = session.runtime.provider_tx.send("ds".into());
+        let tool = AgentTool::new(session.clone(), Vec::new());
+        let mut p = params("do it");
+        p.provider = Some("ds".into());
+        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        assert_eq!(
+            sub.runtime.thinking.borrow().as_deref(),
+            Some("xhigh"),
+            "同 provider 维持继承快照"
+        );
+    }
+
+    #[test]
+    fn sub_session_default_provider_aliases_parent_endpoint() {
+        let (session, client) = parent_session();
+        let tool = AgentTool::new(session.clone(), Vec::new());
+        // 显式 "default"：共享父端点，不 fork、不报错。
+        let mut p = params("do it");
+        p.provider = Some("default".into());
+        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        assert_eq!(sub.runtime.provider.borrow().as_str(), "default");
+        assert_eq!(
+            sub.client.current_endpoint(),
+            ("sk-parent".to_string(), "https://parent.example".to_string())
+        );
+        // 共享端点跟随父切换（"default" 与未指定等价）。
+        client.set_provider("ds").unwrap();
+        let _ = session.runtime.provider_tx.send("ds".into());
+        assert_eq!(sub.client.current_endpoint().0, "sk-ds");
+        // AgentDef frontmatter provider: default 同路径（跟随父当前 provider 名）。
+        let mut d = def("reviewer");
+        d.provider = Some("default".into());
+        let tool = AgentTool::new(session.clone(), vec![d.clone()]);
+        let sub = tool
+            .build_sub_session(&params("审查"), Some(&d), "sub")
+            .unwrap();
+        assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
+    }
+
+    #[test]
+    fn sub_session_rejects_invalid_thinking() {
+        let (session, _client) = parent_session();
+        let tool = AgentTool::new(session.clone(), Vec::new());
+        for bad in ["auto", "super", "HIGH"] {
+            let mut p = params("do it");
+            p.thinking = Some(bad.into());
+            let err = sub_err(tool.build_sub_session(&p, None, "sub"));
+            assert!(
+                err.contains("无效思考级别"),
+                "非法档位 {bad:?} 报错：{err}"
+            );
+        }
+        // 定义侧非法值同样报错。
+        let mut d = def("reviewer");
+        d.thinking = Some("bogus".into());
+        let tool = AgentTool::new(session.clone(), vec![d.clone()]);
+        let err = sub_err(tool.build_sub_session(&params("审查"), Some(&d), "sub"));
+        assert!(err.contains("无效思考级别"), "定义侧非法值报错：{err}");
     }
 
     #[test]

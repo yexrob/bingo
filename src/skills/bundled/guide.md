@@ -170,7 +170,12 @@ Example (.bingo/settings.json):
   **Per-instance model/thinking**: the Agent tool's `model`/`provider`/`thinking` args give a single
   subagent a model, provider (the settings `providers` section; cross-endpoint/cross-key), and thinking level
   (`off/low/medium/high/xhigh/max`); precedence: explicit args > named definition > inherit the parent session's
-  current values (model/provider/thinking are independent and don't affect the parent session).
+  current values (model/provider/thinking are independent and don't affect the parent session). **Cross-provider
+  boundary**: when forking to a provider different from the parent session's current one, the parent model and
+  thinking level are NOT inherited — `model` must be explicit (early failure "provider X requires a model"),
+  `thinking` defaults to off (no parameter sent, compatible with DeepSeek/Ollama endpoints); `provider` `"default"`
+  or omitted = shared parent endpoint (follows parent switches, same as the /model menu); same provider keeps
+  inheriting. Invalid `thinking` values are rejected with the allowed list.
   **Channel messaging** (experimental, `experimental.agentChannels`): the main agent uses the Channel tool
   to create channels and manage members (members limited to direct subagents; the main agent is auto-seated as `main`), members speak
   via Post — messages enter every member's context (same order), the sender is stamped by the runtime; in serial channels, a stale
@@ -199,3 +204,54 @@ Example (.bingo/settings.json):
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
 - **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts.
+||||||| 0bc4c6c
+- **内置工具**：Bash（经权限门）、Read/Glob/Grep、Edit/Write、WebFetch/WebSearch、
+  Agent（子代理）、SendMessage/AgentControl（子代理续话与生命周期，仅主会话）、
+  Task 族（任务追踪）、AskUserQuestion、Skill（技能调用）、
+  ExperiencePropose/Commit/Query/Forget（项目经验沉淀与检索）。
+- **经验（Experience）**：跨会话复用可重跑的工作流。会话开始时注入本项目
+  active 经验索引（≤10 条一行一条，空则不注入），全文用 ExperienceQuery 按
+  trigger 词元检索（大小写不敏感、共享前缀容错，active 优先、按采用次数排序）；
+  ExperiencePropose 生成候选（不落盘），用户确认后 ExperienceCommit 落盘
+  （同内容稳定 id，重提交更新而非重复、采用计数 +1，status: stale 标记失效
+  退出注入但仍可查）；ExperienceForget 淘汰（须用户确认）。存储于
+  `~/.config/bingo/experience/<project-key>/entries/`（用户级、不进项目仓库），
+  项目键取 git remote URL（归一化）→ git 根 → 规范化绝对路径，跨目录/机器稳定。
+- **子代理**：Agent 派生的实例有名字（`name` 参数，缺省取定义名/agent，重名
+  自动 -2/-3），transcript 显示为 `◉ 名字 · 任务`；完成后历史保留，主 agent 可
+  SendMessage 续话（忙碌排队、空闲唤醒）、AgentControl list/stop/delete 管理。
+  **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`（同名项目层
+  优先）；frontmatter `name/description/model/provider/thinking`，正文 = 子代理
+  system prompt；Agent 工具的 `agent` 参数引用。
+  **逐实例模型/思考**：Agent 工具的 `model`/`provider`/`thinking` 参数可给单个
+  子代理指定模型、provider（settings 的 providers 段，跨端点/跨 key）与思考级别
+  （`off/low/medium/high/xhigh/max`）；优先级 显式参数 > 具名定义 > 继承父会话
+  当前值（模型/provider/思考各自独立，互不影响父会话）。
+  **频道互发**（实验，`experimental.agentChannels`）：主 agent 用 Channel 工具
+  建频道/进出成员（成员限直接子代理，主 agent 名 `main` 自动入席），成员用 Post
+  发言——消息进全体成员上下文（同序），发件人由运行时盖戳；serial 频道落后
+  发言会被弹回并附新增消息（agent 阅读后自行改口/放弃，报数式顺序由此涌现），
+  free 频道允许交叉。频道在 transcript 显示为 `◇ #名字` 行（可展开看完整群聊）；
+  预算超限自动冻结频道并通知主 agent。
+  **底部实体区**：有实例/频道时输入框上方显示一行摘要，Ctrl+G 进入选择
+  （↑↓/Enter），agent 打开全屏对话视图（历史 + 流式活尾，只读），频道打开
+  全屏微信式房间——他人靠左带名签、你（user）靠右，底部输入 Enter 直接发言
+  （与 Post 同一投递路径，正常唤醒成员；渲染即已读，serial 不会弹你），Esc 返回。
+- **agent team**（项目级编队）：`.bingo/team.json`（camelCase：`name`/`channel{mode,messageLimit}`/
+  `members[{name,agent}]`，成员引用 AgentDef）把多名角色固定到一个项目；启动默认拉起
+  （`settings.team.autoStart`，`--no-team` 关闭；拉起 ≠ 唤醒——成员 Idle 待命零 token，
+  等 `/team assign` 或频道消息才开跑；幂等键 = 实例名，重复 start 复用）。`/team` 命令族
+  管理；team 记忆按「项目路径哈希 + 分支」存 `~/.config/bingo/teams/`（完整历史跨会话恢复 +
+  append-only 决策记录，`/team memory list|gc` 管理）。
+- **技能**：内置 `guide`（本指南）+ `~/.config/bingo/skills/` 与 `.bingo/skills/`
+  目录技能（同名磁盘技能覆盖内置）；模型经 SkillTool 调用，用户经 `/技能名` 执行。
+- **图片**：模型回复中的 markdown 图片（`![alt](路径)`，支持相对路径/data/http(s)）
+  在支持 kitty graphics 的终端（Ghostty/kitty/WezTerm 等）内联渲染，其余终端显示
+  `#[image]` 占位。tmux 内：外层终端为 Ghostty/kitty 且 `tmux set -g
+  allow-passthrough on` 时经 Unicode 占位符（U=1）渲染，图片随文本正常滚动；
+  passthrough 未开会收到一次性提示；外层为 WezTerm/Konsole（不支持 U=1）或
+  screen 走占位。图片随消息自动加载并在消息定稿落盘时渲染，不需要额外命令。
+- **MCP**：stdio 与 streamable HTTP（`type: "http"`，可带自定义 headers）服务器工具接入（见上）。
+- **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/`，文件名
+  `<项目名>-<路径哈希>.md`，同名目录不串味）+ 项目 CLAUDE.md（Anthropic 惯例）。
+- **会话**：transcript 持久化（JSONL），`--continue`/`/resume` 恢复，`/compact` 压缩。
