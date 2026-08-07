@@ -36,8 +36,12 @@ pub struct Settings {
     /// Top-level apiKey/apiBaseUrl (or env) form the default provider "default".
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
-    /// Default model (`model`): `/model` selection persists here.
-    /// Precedence `--model` > settings (user < project < local) > built-in default.
+    /// Current provider (`provider`, default "default"): persisted here by the
+    /// `/provider` and `/model` menu switches; restored at startup (an invalid
+    /// name falls back to default with a warning).
+    pub provider: Option<String>,
+    /// 默认模型（`model`）：`/model` 选择持久化于此。
+    /// 优先级 `--model` > settings（user < project < local）> 内置默认。
     pub model: Option<String>,
     /// Whether the default provider sends image attachments to the model (`sendImages`).
     /// Named providers use their own `supportsImages`; None = don't send.
@@ -214,6 +218,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     }
     if !layer.providers.is_empty() {
         base.providers.extend(layer.providers);
+    }
+    if let Some(p) = layer.provider {
+        base.provider = Some(p);
     }
     if let Some(model) = layer.model {
         base.model = Some(model);
@@ -438,6 +445,22 @@ mod tests {
         write(&tmp, ".bingo/local.json", r#"{"model":"deepseek-v4"}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.model.as_deref(), Some("deepseek-v4"), "local 覆盖 project");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// provider 逐层合并：后层胜出，缺省 None（运行时回落 "default"）。
+    #[test]
+    fn merges_provider() {
+        let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-provsel", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.provider, None, "缺省不配置 provider");
+
+        write(&tmp, "user/bingo/settings.json", r#"{"provider":"deepseek"}"#);
+        write(&tmp, ".bingo/settings.json", r#"{"provider":"local"}"#);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.provider.as_deref(), Some("local"), "project 覆盖 user");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

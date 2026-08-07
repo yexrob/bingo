@@ -51,9 +51,10 @@ Three config layers, shallow-merged; the later one overrides:
 
 | Setting | Type | Description |
 |---|---|---|
-| `apiKey` | string | API key (settings take precedence over `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`); put it in the user layer — the project layer gets committed |
-| `apiBaseUrl` | string | API endpoint (settings take precedence over `ANTHROPIC_BASE_URL`; default is the official one) |
+| `apiKey` | string | API key（settings 优先于 `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`）；建议放 user 层，项目层会入库 |
+| `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
 | `providers` | object | Named providers (Anthropic protocol): `{name: {apiKey, apiBaseUrl}}`, switch via `/provider <name>`; optional `supportsImages: true` means that endpoint's model accepts images |
+| `provider` | string | Current provider (persisted by `/provider` and the /model menu; default `"default"` = top-level `apiKey`/`apiBaseUrl`); restored at startup, an invalid name falls back to default with a warning |
 | `sendImages` | bool | Whether the default endpoint sends message-box image attachments to the model (named providers use their own `supportsImages`; by default none are sent) |
 | `thinkingLevel` | string | Thinking level: `off` sends no thinking param (DeepSeek-compatible, default); `low`/`medium`/`high` always send `{"type":"adaptive"}` adaptive thinking (the Claude 5 family removed budget_tokens; the level doesn't affect depth for now) |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
@@ -76,6 +77,7 @@ Example (.bingo/settings.json):
     "deepseek": { "apiKey": "sk-ds", "apiBaseUrl": "https://api.deepseek.com" },
     "local": { "apiKey": "sk-any", "apiBaseUrl": "http://127.0.0.1:11434/v1" }
   },
+  "provider": "deepseek",
   "thinkingLevel": "medium",
   "permissionMode": "acceptEdits",
   "mcpServers": {
@@ -88,15 +90,16 @@ Example (.bingo/settings.json):
 
 ## Slash command quick reference
 
-`/help` for the full list. Common ones: `/model [name]`, `/provider [name]` (list/switch multiple providers),
-`/think [off|low|medium|high]` (thinking level, persisted to settings), `/theme`,
-`/permissions [allow|deny|ask] [rule]`,
-`/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
-`/skills` (list; `/skill-name` executes) · `/context` (usage) · `/status` ·
-`/compact` (force compaction) · `/resume [name]` (resume a historical session) · `/rename` · `/clear` · `/exit`.
-`/team` (project-scoped team): `list` (blueprint + runtime area on one screen) · `start` (start/idempotent reuse) · `status` ·
-`assign <member> <task>` (delegate) · `stop` · `validate` · `new` (scaffold a team.json) ·
-`memory list|gc` (cross-session memory management).
+`/help` for the full list. Common ones: `/model [name]` (no args: two-level picker — level 1 providers → level 2 model list; with a name: switch directly, validated against the known list when available),
+`/provider [name]` (lists each endpoint's URL / current marker, or switches; switching persists to settings),
+`/think [off|low|medium|high]`（思考级别，持久化 settings）、`/theme`、
+`/permissions [allow|deny|ask] [规则]`、
+`/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
+`/skills`（清单，`/技能名` 直接执行）· `/context`（用量）· `/status` ·
+`/compact`（强制压缩）· `/resume [名称]`（恢复历史会话）· `/rename` · `/clear` · `/exit`。
+`/team`（项目级编队）：`list`（图纸+运行区同屏）· `start`（拉起/幂等复用）· `status` ·
+`assign <成员> <任务>`（派活）· `stop` · `validate` · `new`（脚手架生成 team.json）·
+`memory list|gc`（跨会话记忆管理）。
 
 ## Diagnostic guide (common problems → troubleshooting paths)
 
