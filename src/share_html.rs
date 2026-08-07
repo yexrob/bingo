@@ -1,12 +1,18 @@
-//! share 页面的 HTML 渲染（`bingo share` 输出）。
+//! share 页面的 HTML 渲染（`bingo share` 输出 · v3.0 opencode 完全复刻）。
 //!
-//! 产物是自包含单文件：CSS/JS 内嵌、零外部依赖、离线可用。结构与样式
-//! 对齐 `notes/design/share-page-template.html` v2.0（ui-ux 唯一事实源：
-//! 浅色文档底、消息左装饰列 + 限宽内容、工具两段式、锚点复制链接）。
-//! 所有动态文本在 Rust 侧先经 [`escape`]（`& < > " '` 全量转义）再拼进
-//! HTML；JS 只做渐进增强（tab/复制/打印），不拼接任何数据——无注入面。
-//! 文本块走最小 markdown→HTML（标题/粗体/行内代码/代码块/列表），不做
-//! 完整 md 引擎。
+//! 产物是自包含单文件：CSS/JS 内嵌、零外部依赖、离线可用。CSS 原样移植
+//! sst/opencode share 组件（starlight-props + custom 覆盖 + share/part/
+//! content-*/copy-button 模块，命名空间化），结构与 opencode TSX 输出一致
+//! （`data-component`/`data-slot` 属性）。事实源 = `share-page-template.html`
+//! v3.0（MD5 09e59e72）；四视图（对话/Team/私聊/频道）数据语义保留 bingo，
+//! 视觉走 opencode 令牌。
+//!
+//! 数据由 Rust 服务端渲染：所有动态文本先经 [`escape`]（`& < > " '` 全量转义）
+//! 再拼进 HTML；JS 只做渐进增强（tab/锚点复制/展开/回到顶部/打印），不拼接
+//! 任何数据——无脚本注入面。文本块走最小 markdown→HTML（标题/粗体/行内
+//! 代码/代码块/列表），不做完整 md 引擎（高亮 P2，纯 `<pre>`）。
+
+use std::collections::HashMap;
 
 use crate::api::types::{ContentBlock, Message, Role};
 use crate::share::{AgentShare, ChannelShare, ShareDoc};
@@ -104,8 +110,8 @@ fn list_item(line: &str) -> Option<(bool, &str)> {
     None
 }
 
-/// 最小 markdown → HTML。逐行渲染（换行即保留），代码块原样并带
-/// `.code-block` 容器（模板样式依赖）。
+/// 最小 markdown → HTML（design.md v3.0 §3.3 安全子集）。逐行渲染，
+/// 代码块为纯 `<pre><code>`（cm-root CSS 已内置观感，无 shiki 高亮）。
 pub fn render_markdown(text: &str) -> String {
     let mut out = String::new();
     let mut lines = text.lines().peekable();
@@ -113,17 +119,13 @@ pub fn render_markdown(text: &str) -> String {
     let mut code_lang = String::new();
     let mut code_buf = String::new();
     let close_fence = |lang: &str, buf: &str, out: &mut String| {
-        out.push_str("<figure class=\"code-block\">");
-        if !lang.is_empty() {
-            out.push_str(&format!("<figcaption>{}</figcaption>", escape(lang)));
-        }
         out.push_str("<pre><code");
         if !lang.is_empty() {
             out.push_str(&format!(" class=\"language-{}\"", escape(lang)));
         }
         out.push('>');
         out.push_str(&escape(buf.trim_end()));
-        out.push_str("</code></pre></figure>");
+        out.push_str("</code></pre>");
     };
     while let Some(line) = lines.next() {
         if let Some(lang) = line.strip_prefix("```") {
@@ -180,38 +182,348 @@ fn tool_result_text(content: &serde_json::Value) -> String {
     }
 }
 
-/// 工具目标参数摘要（标题行 t-args）：命令/文件路径/pattern 等首值，≤60 字符。
-/// 完整 input 仍在结果块 `<pre>` 原样呈现（A4 不截断）。
-fn tool_args(input: &serde_json::Value) -> String {
-    const KEYS: [&str; 8] = [
-        "command", "file_path", "pattern", "query", "subject", "prompt", "path", "skill",
-    ];
-    let picked = KEYS
-        .iter()
-        .find_map(|k| input.get(*k).and_then(|v| v.as_str()))
-        .map(str::to_string)
-        .or_else(|| {
-            if let serde_json::Value::Object(map) = input {
-                map.values().find_map(|v| v.as_str()).map(str::to_string)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
-    let cut: String = picked.chars().take(60).collect();
-    if cut.chars().count() < picked.chars().count() {
+/// 截断到 60 字符（超长加省略号；t-args/目标摘要用）。
+fn clip(text: &str) -> String {
+    let cut: String = text.chars().take(60).collect();
+    if cut.chars().count() < text.chars().count() {
         format!("{cut}…")
     } else {
         cut
     }
 }
 
-/// 成员取色：main/assistant 恒 accent，user 恒 text，其余按名字 FNV 哈希取
-/// hue-0..5（与模板 .m-chip/.dm-row/.ch-row 的 --chip/--from 令牌对应）。
+/// 工具目标参数摘要（tool-title 的 target）：命令/文件路径/pattern 等首值。
+fn tool_target(name: &str, input: &serde_json::Value) -> String {
+    let picked = match name {
+        "Bash" => input.get("command"),
+        "Read" | "Write" | "Edit" => input.get("file_path"),
+        "Glob" | "Grep" => input.get("pattern"),
+        "WebFetch" => input.get("url"),
+        "WebSearch" => input.get("query"),
+        "Agent" => input.get("prompt").or_else(|| input.get("description")),
+        "SendMessage" => input.get("agent"),
+        "TaskCreate" => input.get("subject"),
+        "TaskUpdate" | "TaskGet" => input.get("task_id"),
+        _ => None,
+    };
+    match picked {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => clip(s),
+        _ => {
+            if let serde_json::Value::Object(map) = input {
+                map.values()
+                    .find_map(|v| v.as_str())
+                    .map(clip)
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        }
+    }
+}
+
+/// tool_use_id → (工具名, 目标摘要)，供 ToolResult 部件还原工具语义
+/// （bash 结果走终端窗、read 结果走代码卡、error 走红标）。
+fn build_tool_map(messages: &[Message]) -> HashMap<String, (String, String)> {
+    let mut map = HashMap::new();
+    for msg in messages {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { id, name, input } = block {
+                map.insert(id.clone(), (name.clone(), tool_target(name, input)));
+            }
+        }
+    }
+    map
+}
+
+// ── 锚点三态 SVG（角色图标 → hover 变 # → 复制后 ✓；part.tsx/common.tsx）──
+
+const ICON_USER: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="7" r="3.2"/><path d="M3.8 14.8a5.2 5.2 0 0 1 10.4 0"/></svg>"#;
+const ICON_SPARKLE: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M9 3l1.6 3.9 3.9 1.6-3.9 1.6L9 14 7.4 10.1 3.5 8.5l3.9-1.6z"/></svg>"#;
+const ICON_THINKING: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M9 4v10M4 9h10M5.5 5.5l7 7M12.5 5.5l-7 7"/></svg>"#;
+const ICON_TERMINAL: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 5l4 4-4 4M10 13h4"/></svg>"#;
+const ICON_DOC: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 2.5h6l3 3V15.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><path d="M11 2.5V6h3.5"/></svg>"#;
+const ICON_WRITE: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 2.5h6l3 3V15.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><path d="M11 2.5V6h3.5"/><path d="M9 8v4M7 10h4"/></svg>"#;
+const ICON_EDIT: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12.5 2.5 15.5 5.5 6 15H3v-3z"/><path d="M11 4l3 3"/></svg>"#;
+const ICON_GREP: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 2.5h6l3 3V15.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><circle cx="8.5" cy="10" r="1.8"/><path d="M8.5 11.8 7 13.5"/></svg>"#;
+const ICON_GLOB: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7.5" cy="7.5" r="4"/><path d="M10.5 10.5 14 14"/></svg>"#;
+const ICON_LIST: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="3.5" y="3.5" width="11" height="11" rx="1.5"/><path d="M6.5 7h5M6.5 10h5"/></svg>"#;
+const ICON_GLOBE: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="6"/><path d="M3 9h12M9 3a8.5 8.5 0 0 1 0 12M9 3a8.5 8.5 0 0 0 0 12"/></svg>"#;
+const ICON_ERROR: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="4.5" y="7" width="9" height="7" rx="1.5"/><circle cx="7.5" cy="10.5" r=".8"/><circle cx="10.5" cy="10.5" r=".8"/><path d="M9 4.5V7M9 4.5l-2-1.5M9 4.5l2-1.5"/></svg>"#;
+const ICON_IMAGE: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="3.5" width="12" height="11" rx="1.5"/><circle cx="7" cy="7.5" r="1.2"/><path d="M3.5 12.5l3.5-3 3 3 2.5-2.5 2 2"/></svg>"#;
+const ICON_HASHTAG: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6.5 3.5 5 14.5M13 3.5 11.5 14.5M3.5 7h11M3.5 11h11"/></svg>"#;
+const ICON_CHECK: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="6.5"/><path d="M6 9.2l2 2 4-4.4"/></svg>"#;
+
+/// 工具名 → 锚点首图标。
+fn tool_icon(name: &str) -> &'static str {
+    match name {
+        "Bash" => ICON_TERMINAL,
+        "Read" => ICON_DOC,
+        "Write" => ICON_WRITE,
+        "Edit" => ICON_EDIT,
+        "Grep" => ICON_GREP,
+        "Glob" => ICON_GLOB,
+        "List" => ICON_LIST,
+        "WebFetch" | "WebSearch" => ICON_GLOBE,
+        _ => ICON_SPARKLE,
+    }
+}
+
+/// 消息锚点（opencode data-slot="anchor"：首图标 + # + ✓ + Copied tooltip）。
+fn anchor(id: &str, icon: &str) -> String {
+    format!(
+        "<div data-slot=\"anchor\" title=\"Copy link to this message\"><a href=\"#{id}\">{icon}{ICON_HASHTAG}{ICON_CHECK}</a><span data-slot=\"tooltip\">Copied</span></div>"
+    )
+}
+
+/// 复制按钮（copy-button.tsx：hover 显现，点击复制 2s ✓）。
+const COPY_BUTTON: &str = r#"<div data-component="copy-button" class="copy-root"><button type="button" aria-label="Copy" title="Copy"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="5" y="4" width="8" height="11.5" rx="1.5"/><path d="M7.5 2.5h3v2.5h-3z"/></svg></button></div>"#;
+
+/// 展开/收起按钮（opencode ResultsButton：data-more + 图标）。
+fn expand_button(label: &str) -> String {
+    format!(
+        "<button type=\"button\" data-component=\"button-text\" data-more aria-expanded=\"true\"><span>{label}</span><span data-slot=\"icon\"><svg width=\"11\" height=\"11\" viewBox=\"0 0 18 18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\"><path d=\"M4.5 7 9 11.5 13.5 7\"/></svg></span></button>"
+    )
+}
+
+/// part 骨架：装饰列（锚点 + 3px 竖线）+ 内容列。
+fn part(id: &str, data_type: &str, role: &str, tool: Option<&str>, icon: &str, inner: &str) -> String {
+    let tool_attr = tool.map(|t| format!(" data-tool=\"{t}\"")).unwrap_or_default();
+    format!(
+        "<div class=\"part-root\" data-component=\"part\" data-type=\"{data_type}\" data-role=\"{role}\"{tool_attr} id=\"{id}\"><div data-component=\"decoration\">{}</div><div data-component=\"content\">{inner}</div></div>",
+        anchor(id, icon)
+    )
+}
+
+/// 文本部件：user 无框（content-text），assistant 蓝框卡（content-markdown）。
+fn text_part(id: &str, role: Role, text: &str) -> String {
+    match role {
+        Role::User => part(
+            id,
+            "text",
+            "user",
+            None,
+            ICON_USER,
+            &format!(
+                "<div data-component=\"user-text\"><div class=\"ct-root\" data-component=\"content-text\"><pre data-slot=\"text\">{}</pre>{COPY_BUTTON}</div></div>",
+                escape(text)
+            ),
+        ),
+        Role::Assistant => part(
+            id,
+            "text",
+            "assistant",
+            None,
+            ICON_SPARKLE,
+            &format!(
+                "<div data-component=\"assistant-text\"><div data-component=\"assistant-text-markdown\"><div class=\"cm-root\" data-component=\"content-markdown\" data-expanded><div data-slot=\"markdown\">{}</div>{COPY_BUTTON}</div></div></div>",
+                render_markdown(text)
+            ),
+        ),
+    }
+}
+
+/// thinking 部件：tool-title（Thinking）+ assistant-reasoning（蓝框小卡）。
+fn thinking_part(id: &str, thinking: &str) -> String {
+    let markdown = format!(
+        "<div data-component=\"assistant-reasoning-markdown\"><div class=\"cm-root\" data-component=\"content-markdown\" data-expanded><div data-slot=\"markdown\">{}</div></div></div>",
+        render_markdown(thinking)
+    );
+    let reasoning = format!(
+        "<div data-component=\"assistant-reasoning\">{}{markdown}</div>",
+        expand_button("Hide details")
+    );
+    let inner = format!(
+        "<div data-component=\"tool\"><div data-component=\"tool-title\"><span data-slot=\"name\">Thinking</span></div>{reasoning}</div>"
+    );
+    part(id, "reasoning", "assistant", None, ICON_THINKING, &inner)
+}
+
+/// bash 终端窗（content-bash：三点头 Shell 头 + command + output）。
+fn bash_terminal(command: &str, output: &str) -> String {
+    let mut content = String::new();
+    if !command.is_empty() {
+        content.push_str(&format!("<pre>{}</pre>", escape(command)));
+    }
+    if !output.is_empty() {
+        content.push_str(&format!("<div data-slot=\"output\"><pre>{}</pre></div>", escape(output)));
+    }
+    format!(
+        "<div class=\"cb-root\" data-component=\"content-bash\" data-expanded><div data-slot=\"body\"><div data-slot=\"header\"><span>Shell</span></div><div data-slot=\"content\">{content}</div></div>{COPY_BUTTON}</div>"
+    )
+}
+
+/// 代码结果块（content-code：纯 pre + copy）。
+fn code_result(pre: &str) -> String {
+    format!(
+        "<div class=\"cc-root\" data-component=\"content-code\"><pre>{}</pre>{COPY_BUTTON}</div>",
+        escape(pre)
+    )
+}
+
+/// 文本结果块（content-text compact：3 行折叠 + copy）。
+fn text_result(pre: &str) -> String {
+    format!(
+        "<div class=\"ct-root\" data-component=\"content-text\" data-compact data-expanded><pre data-slot=\"text\">{}</pre>{COPY_BUTTON}</div>",
+        escape(pre)
+    )
+}
+
+/// 工具标题行（tool-title：name + target）。
+fn tool_title(name: &str, target: &str) -> String {
+    let target = if target.is_empty() {
+        String::new()
+    } else {
+        format!("<span data-slot=\"target\" title=\"{}\">{}</span>", escape(target), escape(target))
+    };
+    format!(
+        "<div data-component=\"tool-title\"><span data-slot=\"name\">{}</span>{target}</div>",
+        escape(name)
+    )
+}
+
+/// 工具参数网格（tool-args：分隔条/键/值，值 ≤60 字符，未知工具 fallback）。
+fn tool_args(input: &serde_json::Value) -> String {
+    let Some(map) = input.as_object() else {
+        return String::new();
+    };
+    let mut out = String::from("<div data-component=\"tool-args\">");
+    for (key, value) in map.iter().take(4) {
+        let value = value.as_str().map(clip).unwrap_or_default();
+        out.push_str(&format!(
+            "<div></div><div>{}</div><div>{}</div>",
+            escape(key),
+            escape(&value)
+        ));
+    }
+    out.push_str("</div>");
+    out
+}
+
+/// 工具部件（opencode tool 两段式）。kind = "use"（有 input）| "result"（有 output）。
+fn tool_part(
+    id: &str,
+    tool: &str,
+    icon: &str,
+    title: String,
+    args: String,
+    result: String,
+) -> String {
+    let body = format!(
+        "<div data-component=\"tool\" data-tool=\"{}\">{title}{args}{result}</div>",
+        escape(tool)
+    );
+    part(id, "tool", "assistant", Some(tool), icon, &body)
+}
+
+/// tool_use 部件：输入侧（bash → 终端窗 command；read/write 等 → 代码卡 input）。
+fn tool_use_part(id: &str, name: &str, input: &serde_json::Value) -> String {
+    let icon = tool_icon(name);
+    let target = tool_target(name, input);
+    let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
+    let args = if matches!(
+        name,
+        "Bash" | "Read" | "Write" | "Edit" | "Grep" | "Glob" | "WebFetch" | "WebSearch"
+    ) {
+        String::new()
+    } else {
+        tool_args(input)
+    };
+    let result = if name == "Bash" {
+        let command = target.clone();
+        bash_terminal(&command, "")
+    } else if args.is_empty() {
+        format!(
+            "<div data-component=\"tool-result\">{}{}</div>",
+            expand_button("Hide input"),
+            code_result(&pretty)
+        )
+    } else {
+        format!(
+            "<div data-component=\"tool-result\">{}{}</div>",
+            expand_button("Hide input"),
+            text_result(&pretty)
+        )
+    };
+    tool_part(id, name, icon, tool_title(name, &target), args, result)
+}
+
+/// tool_result 部件：输出侧（经 tool_use_id 还原工具名；error → 红标）。
+fn tool_result_part(id: &str, tool_use_id: &str, content: &serde_json::Value, is_error: bool, map: &HashMap<String, (String, String)>) -> String {
+    let text = tool_result_text(content);
+    if is_error {
+        let inner = format!(
+            "<div data-component=\"tool\" data-tool=\"error\"><div class=\"ce-root\" data-component=\"content-error\" data-expanded><div data-section=\"content\"><pre><span data-color=\"red\" data-marker=\"label\" data-separator>Error</span><span>{}</span></pre></div></div></div>",
+            escape(&text)
+        );
+        return part(id, "tool", "user", Some("error"), ICON_ERROR, &inner);
+    }
+    let (name, target) = map.get(tool_use_id).cloned().unwrap_or_else(|| ("result".to_string(), String::new()));
+    let icon = tool_icon(&name);
+    let result = if name == "Bash" {
+        bash_terminal(&target, &text)
+    } else if matches!(name.as_str(), "Read" | "Write" | "Edit" | "WebFetch" | "WebSearch") {
+        format!(
+            "<div data-component=\"tool-result\">{}{}</div>",
+            expand_button("Hide result"),
+            code_result(&text)
+        )
+    } else {
+        format!(
+            "<div data-component=\"tool-result\">{}{}</div>",
+            expand_button("Hide result"),
+            text_result(&text)
+        )
+    };
+    tool_part(id, &name, icon, tool_title(&name, &target), String::new(), result)
+}
+
+/// 消息内容块集合 → parts（每块一个 part；id 全局递增）。
+fn render_parts(
+    messages: &[Message],
+    map: &HashMap<String, (String, String)>,
+) -> String {
+    let mut out = String::new();
+    let mut n = 0usize;
+    for msg in messages {
+        for block in &msg.content {
+            n += 1;
+            let id = format!("msg-{n}");
+            let part_html = match block {
+                ContentBlock::Text { text } => match msg.role {
+                    Role::User => text_part(&id, Role::User, text),
+                    Role::Assistant => text_part(&id, Role::Assistant, text),
+                },
+                ContentBlock::Thinking { thinking, .. } => thinking_part(&id, thinking),
+                ContentBlock::ToolUse { name, input, .. } => tool_use_part(&id, name, input),
+                ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                    tool_result_part(&id, tool_use_id, content, *is_error, map)
+                }
+                ContentBlock::Image { source } => {
+                    let media = escape(&source.media_type);
+                    let alt = format!("image ({media})");
+                    part(
+                        &id,
+                        "image",
+                        if msg.role == Role::User { "user" } else { "assistant" },
+                        None,
+                        ICON_IMAGE,
+                        &format!(
+                            "<div style=\"max-width:var(--md-tool-width)\"><img src=\"data:{media};base64,{}\" alt=\"{alt}\"></div>",
+                            escape(&source.data)
+                        ),
+                    )
+                }
+            };
+            out.push_str(&part_html);
+        }
+    }
+    out
+}
+
+/// 成员取色（v3.0）：main/user 恒 text-strong，其余按名字 FNV 哈希取 hue-0..5。
 fn member_color(name: &str) -> &'static str {
     match name {
-        "main" | "assistant" => "var(--accent)",
-        "user" => "var(--text)",
+        "main" | "assistant" | "user" => "var(--color-text-strong)",
         _ => {
             let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
             for b in name.bytes() {
@@ -231,181 +543,153 @@ fn member_color(name: &str) -> &'static str {
     }
 }
 
-/// 消息锚点 SVG（链环图标；hover 变色，点击复制 URL#id——JS 增强）。
-const ANCHOR_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M6.05 9.95a3 3 0 0 0 4.24 0l2.83-2.83a3 3 0 0 0-4.24-4.24L7.5 4.26" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M9.95 6.05a3 3 0 0 0-4.24 0l-2.83 2.83a3 3 0 0 0 4.24 4.24l1.38-1.38" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>"#;
-
-fn anchor(id: &str) -> String {
-    format!(
-        "<a class=\"anchor\" href=\"#{id}\" aria-label=\"Copy link to this message\">{ANCHOR_SVG}</a><span class=\"line\" aria-hidden=\"true\"></span>"
-    )
-}
-
-/// 非文本块（thinking / tool_use / tool_result / image）→ 折叠卡或工具两段式。
-fn render_block_extra(block: &ContentBlock) -> String {
-    match block {
-        ContentBlock::Thinking { thinking, .. } => format!(
-            "<details class=\"think\"><summary>Thinking</summary><div class=\"think-body\">{}</div></details>",
-            render_markdown(thinking)
-        ),
-        ContentBlock::ToolUse { name, input, .. } => {
-            // input 经 serde_json 重序列化（键序可能与原文不同，内容语义等价；
-            // A4「原样呈现」按内容等价验收）。
-            let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
-            format!(
-                "<div class=\"tool\"><div class=\"tool-title\"><span class=\"t-ico\">⏺</span><span class=\"t-name\">{}</span><span class=\"t-args\">{}</span></div><details class=\"tool-result w-sm\"><summary>Show result</summary><div class=\"t-body\"><div class=\"t-code\"><span class=\"t-label\">input</span><pre>{}</pre></div></div></details></div>",
-                escape(name),
-                escape(&tool_args(input)),
-                escape(&pretty)
-            )
-        }
-        ContentBlock::ToolResult { content, is_error, .. } => {
-            let (status_cls, status, label, err_cls) = if *is_error {
-                ("err", "✗", "result (err)", " err")
-            } else {
-                ("ok", "✓", "result", "")
-            };
-            format!(
-                "<div class=\"tool\"><div class=\"tool-title\"><span class=\"t-ico\">⏺</span><span class=\"t-name\">tool_result</span><span class=\"t-status {status_cls}\">{status}</span></div><details class=\"tool-result w-sm\"><summary>Show result</summary><div class=\"t-body\"><div class=\"t-code output{err_cls}\"><span class=\"t-label\">{label}</span><pre>{}</pre></div></div></details></div>",
-                escape(&tool_result_text(content))
-            )
-        }
-        ContentBlock::Image { source } => {
-            // 图片仅允许 data: URI（transcript 的 base64 块直接内嵌，离线可见；
-            // 不透传任何外部 URL，PRD C3）。
-            let media = escape(&source.media_type);
-            let alt = format!("image ({media})");
-            format!(
-                "<figure class=\"img-block\"><img src=\"data:{media};base64,{}\" alt=\"{alt}\"></figure>",
-                escape(&source.data)
-            )
-        }
-        ContentBlock::Text { .. } => String::new(),
+/// 状态字形：idle ● / running ◐ / stopped ✗。
+fn state_glyph(state: &str) -> &'static str {
+    match state {
+        "running" => "◐",
+        "stopped" => "✗",
+        _ => "●",
     }
 }
 
-/// 单条主对话消息：左装饰列（锚点 + 贯穿竖线）+ 限宽内容列。
-/// user 无框纯文本；assistant 文本进 `.card` 细框卡，thinking/tool 为兄弟块。
-fn render_message(msg: &Message, index: usize) -> String {
-    let id = format!("msg-{index}");
-    let (role_cls, meta_cls, label) = match msg.role {
-        Role::User => ("msg-user", "role-user", "User"),
-        Role::Assistant => ("msg-assistant", "role-assistant", "Assistant"),
-    };
-    let mut texts = String::new();
-    let mut extra = String::new();
-    for block in &msg.content {
-        match block {
-            ContentBlock::Text { text } => texts.push_str(&render_markdown(text)),
-            other => extra.push_str(&render_block_extra(other)),
-        }
-    }
-    let content = if msg.role == Role::Assistant {
-        let card = if texts.trim().is_empty() {
-            String::new()
-        } else {
-            format!("<div class=\"card\">{texts}</div>")
-        };
-        format!("{card}{extra}")
+/// HTML id 安全化（team/dm/channel 锚点用；实例名已接近 slug，兜底替换）。
+fn id_slug(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    if cleaned.is_empty() {
+        "agent".to_string()
     } else {
-        format!("<div class=\"body\">{texts}{extra}</div>")
-    };
+        cleaned
+    }
+}
+
+/// 彩色圆点锚点图标（Team 线程/DM/频道行首；style 注入成员色）。
+fn dot_icon(color: &str) -> String {
     format!(
-        "<article class=\"msg {role_cls}\" id=\"{id}\"><div class=\"dec\">{}</div><div class=\"content w-md\"><div class=\"meta\"><span class=\"{meta_cls}\">{label}</span></div>{content}</div></article>",
-        anchor(&id)
+        "<svg width=\"18\" height=\"18\" viewBox=\"0 0 18 18\" style=\"color:{color}\"><circle cx=\"9\" cy=\"9\" r=\"5.5\" fill=\"currentColor\"/></svg>"
     )
 }
 
-fn render_messages(messages: &[Message]) -> String {
-    if messages.is_empty() {
-        return "<div class=\"empty\">— No messages —</div>".to_string();
+/// 消息首段文本（Team 线程预览 / DM 行文本用）。
+fn first_text(messages: &[Message]) -> String {
+    for m in messages.iter().rev() {
+        for block in &m.content {
+            if let ContentBlock::Text { text } = block
+                && !text.trim().is_empty()
+            {
+                return text.clone();
+            }
+        }
     }
-    let mut out = String::from("<div class=\"conv\">");
-    for (i, m) in messages.iter().enumerate() {
-        out.push_str(&render_message(m, i + 1));
-    }
-    out.push_str("</div>");
-    out
+    String::new()
 }
 
+/// Team 视图：线程列表（聊天应用会话列表心智，点击/锚点直达私聊 #dm-<agent>）。
 fn render_team(agents: &[AgentShare]) -> String {
     if agents.is_empty() {
-        return "<div class=\"empty\">— No agents —</div>".to_string();
+        return "<div class=\"view-empty\">— No agents —</div>".to_string();
     }
-    let mut out = String::from("<div class=\"roster\">");
+    let mut rows = String::new();
     for a in agents {
-        let def = a.def.as_deref().map(escape).unwrap_or_else(|| "—".to_string());
-        out.push_str(&format!(
-            "<div class=\"r-row\"><span class=\"r-state {}\">● {}</span><span class=\"r-name\">{}</span><span class=\"r-meta\">{} · {} messages</span><span class=\"r-desc\">{}</span></div>",
-            escape(&a.state),
-            escape(&a.state),
+        let slug = id_slug(&a.name);
+        let color = member_color(&a.name);
+        let def = a.def.as_deref().map(escape).unwrap_or_default();
+        let preview = first_text(&a.history);
+        let preview_html = if preview.is_empty() {
+            "<p class=\"view-empty\">(no history yet)</p>".to_string()
+        } else {
+            format!(
+                "<div class=\"ct-root\" data-component=\"content-text\" data-compact><pre data-slot=\"text\">{}</pre></div>",
+                escape(&preview)
+            )
+        };
+        rows.push_str(&format!(
+            "<div class=\"part-root thread-row\" data-component=\"part\" data-type=\"thread\" data-agent=\"{}\" id=\"team-{}\" data-jump=\"#dm-{}\" tabindex=\"0\" role=\"link\" aria-label=\"Open {} thread\"><div data-component=\"decoration\"><div data-slot=\"anchor\" title=\"Copy link to this message\"><a href=\"#dm-{}\">{}{}{}</a><span data-slot=\"tooltip\">Copied</span></div><div data-slot=\"bar\"></div></div><div data-component=\"content\"><div data-component=\"step-start\"><div data-slot=\"provider\" style=\"color:{}\">{}</div><div data-slot=\"model\">{} {} · {} · {} messages</div></div>{preview_html}<div data-component=\"content-footer\">last message · {} messages</div></div></div>",
             escape(&a.name),
+            slug,
+            slug,
+            escape(&a.name),
+            slug,
+            dot_icon(color),
+            ICON_HASHTAG,
+            ICON_CHECK,
+            color,
+            escape(&a.name),
+            state_glyph(&a.state),
+            escape(&a.state),
             def,
             a.history.len(),
-            escape(&a.description)
+            a.history.len()
         ));
     }
-    out.push_str("</div>");
-    out
+    format!("<div class=\"thread-list\">{rows}</div>")
 }
 
-/// 私聊视图：每个子代理一段完整历史（SendMessage 续话即该实例的 history）。
+/// 私聊视图：每子代理一个 thread part，历史为 dm-msg 聊天流（user 靠右）。
 fn render_private(agents: &[AgentShare]) -> String {
     if agents.is_empty() {
-        return "<div class=\"empty\">— No agents —</div>".to_string();
+        return "<div class=\"view-empty\">— No agents —</div>".to_string();
     }
-    let mut out = String::from("<div class=\"dm-list\">");
+    let mut out = String::from("<div class=\"view-block\">");
     for a in agents {
+        let slug = id_slug(&a.name);
+        let color = member_color(&a.name);
+        let def = a.def.as_deref().map(escape).unwrap_or_default();
         let mut thread = String::new();
         if a.history.is_empty() {
-            thread.push_str("<div class=\"dm-thread\"><p class=\"empty\">(no history yet)</p></div>");
+            thread.push_str("<div class=\"dm-thread\"><p class=\"view-empty\">(no history yet)</p></div>");
         } else {
             thread.push_str("<div class=\"dm-thread\">");
             for m in &a.history {
                 let (from, user_cls, from_color) = match m.role {
-                    Role::User => ("user", " dm-user", "var(--text)"),
+                    Role::User => ("user", " dm-user", "var(--color-text-strong)"),
                     Role::Assistant => (a.name.as_str(), "", ""),
                 };
                 let from_color = if from_color.is_empty() {
-                    member_color(&a.name)
+                    color
                 } else {
                     from_color
                 };
-                let mut texts = String::new();
-                let mut extra = String::new();
-                for block in &m.content {
-                    match block {
-                        ContentBlock::Text { text } => texts.push_str(&render_markdown(text)),
-                        other => extra.push_str(&render_block_extra(other)),
-                    }
+                let text = first_text(std::slice::from_ref(m));
+                if text.is_empty() {
+                    continue;
                 }
                 thread.push_str(&format!(
-                    "<div class=\"dm-row{user_cls}\"><span class=\"dm-from\" style=\"--from:{from_color}\">{}</span><span class=\"dm-text\">{}{}</span><span class=\"dm-time\"></span></div>",
+                    "<div class=\"dm-msg{user_cls}\"><div data-component=\"tool-title\"><span data-slot=\"name\" style=\"color:{from_color}\">{}</span></div><div class=\"ct-root\" data-component=\"content-text\" data-expanded><pre data-slot=\"text\">{}</pre></div></div>",
                     escape(from),
-                    texts,
-                    extra
+                    escape(&text)
                 ));
             }
             thread.push_str("</div>");
         }
         out.push_str(&format!(
-            "<details class=\"dm-agent\"><summary><span class=\"a-dot\" style=\"--dot:{}\"></span><span class=\"a-name\">{}</span><span class=\"a-state\">{}</span><span class=\"a-count\">{} messages</span></summary>{}</details>",
-            member_color(&a.name),
+            "<div class=\"part-root\" data-component=\"part\" data-type=\"thread\" data-role=\"assistant\" data-agent=\"{}\" id=\"dm-{}\"><div data-component=\"decoration\"><div data-slot=\"anchor\" title=\"Copy link to this message\"><a href=\"#dm-{}\">{}{}{}</a><span data-slot=\"tooltip\">Copied</span></div><div data-slot=\"bar\"></div></div><div data-component=\"content\"><div data-component=\"step-start\"><div data-slot=\"provider\" style=\"color:{}\">{}</div><div data-slot=\"model\">{} {} · {def}</div></div>{thread}</div></div>",
             escape(&a.name),
-            escape(&a.state),
-            a.history.len(),
-            thread
+            slug,
+            slug,
+            dot_icon(color),
+            ICON_HASHTAG,
+            ICON_CHECK,
+            color,
+            escape(&a.name),
+            state_glyph(&a.state),
+            escape(&a.state)
         ));
     }
     out.push_str("</div>");
     out
 }
 
+/// 频道视图：每频道一个聊天记录流（part 消息，seq/成员徽标保留）。
 fn render_channels(channels: &[ChannelShare]) -> String {
     if channels.is_empty() {
-        return "<div class=\"empty\">— No channels —</div>".to_string();
+        return "<div class=\"view-empty\">— No channels —</div>".to_string();
     }
-    let mut out = String::from("<div class=\"ch-list\">");
+    let mut out = String::from("<div class=\"view-block\">");
     for c in channels {
+        let slug = id_slug(&c.name);
         let chips: String = c
             .members
             .iter()
@@ -419,344 +703,152 @@ fn render_channels(channels: &[ChannelShare]) -> String {
             .collect();
         let mut stream = String::new();
         if c.messages.is_empty() {
-            stream.push_str("<p class=\"empty\">(no messages yet)</p>");
+            stream.push_str("<p class=\"view-empty\">(no messages yet)</p>");
         } else {
             stream.push_str("<div class=\"ch-stream\">");
+            let mut n = 0usize;
             for m in &c.messages {
-                let user_cls = if m.from == "user" { " ch-user" } else { "" };
+                n += 1;
+                let color = member_color(&m.from);
+                let user_cls = if m.from == "user" { " dm-user" } else { "" };
                 stream.push_str(&format!(
-                    "<div class=\"ch-row{user_cls}\"><span class=\"ch-seq\">{}</span><span class=\"ch-from\" style=\"--from:{}\">{}</span><span class=\"ch-text\">{}</span></div>",
-                    m.seq,
-                    member_color(&m.from),
+                    "<div class=\"part-root{user_cls}\" data-component=\"part\" data-type=\"text\" data-role=\"assistant\" data-from=\"{}\" id=\"ch-{}\"><div data-component=\"decoration\"><div data-slot=\"anchor\" title=\"Copy link to this message\"><a href=\"#ch-{}\">{}{}{}</a><span data-slot=\"tooltip\">Copied</span></div><div data-slot=\"bar\"></div></div><div data-component=\"content\"><div data-component=\"tool-title\"><span data-slot=\"name\" style=\"color:{}\">{}</span><span data-slot=\"target\" class=\"ch-row-seq\">#{:04}</span></div><div class=\"ct-root\" data-component=\"content-text\" data-expanded><pre data-slot=\"text\">{}</pre></div></div></div>",
                     escape(&m.from),
-                    render_markdown(&m.text)
+                    n,
+                    n,
+                    dot_icon(color),
+                    ICON_HASHTAG,
+                    ICON_CHECK,
+                    color,
+                    escape(&m.from),
+                    m.seq,
+                    escape(&m.text)
                 ));
             }
             stream.push_str("</div>");
         }
         out.push_str(&format!(
-            "<div class=\"ch-block\"><div class=\"ch-head\"><span class=\"ch-name\">◇ #{}</span><span class=\"ch-mode {}\">{}</span><span class=\"ch-members\">{}</span></div>{}</div>",
+            "<section class=\"ch-block\" data-component=\"channel\" id=\"channel-{slug}\"><header class=\"ch-head\" data-component=\"step-start\"><div data-slot=\"provider\">◇ #{}</div><div data-slot=\"model\"><span class=\"ch-mode {}\">{}</span><span class=\"ch-members\">{chips}</span></div></header>{stream}</section>",
             escape(&c.name),
             escape(&c.mode),
-            escape(&c.mode),
-            chips,
-            stream
+            escape(&c.mode)
         ));
     }
     out.push_str("</div>");
     out
 }
 
+/// epoch 秒 → "Mon D, YYYY HH:MM UTC"（无 chrono 依赖，civil-from-days 算法）。
+fn format_epoch(secs: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = (secs / 86_400) as i64;
+    let secs_of_day = secs % 86_400;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    let h = secs_of_day / 3600;
+    let min = (secs_of_day % 3600) / 60;
+    format!("{} {}, {} {:02}:{:02} UTC", MONTHS[(m - 1) as usize], d, y, h, min)
+}
+
 /// 生成自包含 HTML 文档（conversation 来自主 transcript，其余来自 ShareDoc）。
 pub fn render(doc: &ShareDoc, messages: &[Message]) -> String {
     let session = escape(&doc.session);
+    let created = format_epoch(doc.created_at);
+    let tool_map = build_tool_map(messages);
+    let parts = render_parts(messages, &tool_map);
+
     let mut out = String::new();
     out.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
     out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
-    out.push_str("<meta name=\"color-scheme\" content=\"light\">\n");
     out.push_str("<meta name=\"generator\" content=\"bingo share\">\n");
+    out.push_str("<meta name=\"color-scheme\" content=\"light dark\">\n");
     out.push_str(&format!("<title>bingo · {session}</title>\n"));
     out.push_str("<style>\n");
     out.push_str(CSS);
     out.push_str("</style>\n</head>\n<body>\n");
-    out.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>\n");
-    out.push_str("<header class=\"topbar\"><div class=\"topbar-inner\"><div class=\"brand\">");
-    out.push_str("<span class=\"mark\">▸</span><span class=\"name\">bingo</span>");
-    out.push_str(&format!("<span class=\"session\">{session}</span>"));
+    out.push_str("<div class=\"share-root\" data-component=\"share\">\n");
+    // 头部：header-title + header-stats + header-time。
+    out.push_str("<header data-component=\"header\">");
+    out.push_str(&format!("<h1 data-component=\"header-title\">{session}</h1>"));
+    out.push_str("<div data-component=\"header-details\"><ul data-component=\"header-stats\">");
     out.push_str(&format!(
-        "<div class=\"meta-line\"><span id=\"meta-time\" data-ts=\"{}\"></span>",
-        doc.created_at
+        "<li data-slot=\"item\"><span data-slot=\"icon\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 18 18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\"><rect x=\"3.5\" y=\"4.5\" width=\"11\" height=\"10\" rx=\"1.5\"/><path d=\"M3.5 7.5h11M6.5 2.5v3M11.5 2.5v3\"/></svg></span><span data-placeholder>started</span><span>{created}</span></li>"
     ));
-    out.push_str("<button type=\"button\" class=\"print-btn\" id=\"print-btn\" aria-label=\"Print this page\">⎙ Print</button></div>");
-    out.push_str("</div><nav class=\"tabs\" role=\"tablist\" aria-label=\"Views\">");
-    out.push_str("<button role=\"tab\" data-tab=\"conv\" aria-selected=\"true\"><span class=\"kbd\">[1]</span>Conversation</button>");
+    out.push_str("<li data-slot=\"item\"><span data-slot=\"icon\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 18 18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\"><path d=\"M3 5.5a1 1 0 0 1 1-1h3.2l1.6 2H14a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z\"/></svg></span><span>bingo</span></li>");
+    out.push_str("</ul><div data-component=\"header-time\">");
+    out.push_str(&created);
+    out.push_str("</div></div></header>\n");
+    // 四视图 tab 导航。
+    out.push_str("<nav data-component=\"tabs\" role=\"tablist\" aria-label=\"Views\">");
+    out.push_str("<button role=\"tab\" data-tab=\"conv\" aria-selected=\"true\">Conversation</button>");
+    out.push_str(&format!("<button role=\"tab\" data-tab=\"team\" aria-selected=\"false\">Team <span class=\"tab-count\">{}</span></button>", doc.agents.len()));
+    out.push_str(&format!("<button role=\"tab\" data-tab=\"dm\" aria-selected=\"false\">DM <span class=\"tab-count\">{}</span></button>", doc.agents.len()));
+    out.push_str(&format!("<button role=\"tab\" data-tab=\"channel\" aria-selected=\"false\">Channels <span class=\"tab-count\">{}</span></button>", doc.channels.len()));
+    out.push_str("</nav>\n");
+    // ① 对话：opencode parts 流（追加 view class 修正模板 tab 切换对 conv 的显隐）。
+    let conv_inner = if parts.is_empty() {
+        "<div class=\"view-empty\">— No messages —</div>".to_string()
+    } else {
+        parts
+    };
     out.push_str(&format!(
-        "<button role=\"tab\" data-tab=\"team\" aria-selected=\"false\"><span class=\"kbd\">[2]</span>Team <span class=\"count\">{}</span></button>",
-        doc.agents.len()
+        "<div class=\"parts view\" data-view=\"conv\" data-component=\"parts\">{conv_inner}</div>\n"
     ));
+    // ② Team 名册。
     out.push_str(&format!(
-        "<button role=\"tab\" data-tab=\"dm\" aria-selected=\"false\"><span class=\"kbd\">[3]</span>DM <span class=\"count\">{}</span></button>",
-        doc.agents.len()
-    ));
-    out.push_str(&format!(
-        "<button role=\"tab\" data-tab=\"channel\" aria-selected=\"false\"><span class=\"kbd\">[4]</span>Channels <span class=\"count\">{}</span></button>",
-        doc.channels.len()
-    ));
-    out.push_str("</nav></div></header>\n<main id=\"main\">\n");
-    out.push_str(&format!(
-        "<section class=\"view\" data-view=\"conv\" role=\"tabpanel\" id=\"view-conv\" aria-label=\"Conversation\"><h2>Conversation <span class=\"n\">· {} messages</span></h2>{}</section>\n",
-        messages.len(),
-        render_messages(messages)
-    ));
-    out.push_str(&format!(
-        "<section class=\"view\" data-view=\"team\" role=\"tabpanel\" id=\"view-team\" aria-label=\"Team roster\" hidden><h2>Team <span class=\"n\">· {} agents</span></h2>{}</section>\n",
+        "<section class=\"view\" data-view=\"team\" hidden aria-label=\"Team\"><h2 data-component=\"view-title\">Team <span class=\"view-count\">· {} instances</span></h2>{}</section>\n",
         doc.agents.len(),
         render_team(&doc.agents)
     ));
+    // ③ DM 私聊。
     out.push_str(&format!(
-        "<section class=\"view\" data-view=\"dm\" role=\"tabpanel\" id=\"view-dm\" aria-label=\"Direct messages\" hidden><h2>DM <span class=\"n\">· one thread per agent</span></h2>{}</section>\n",
+        "<section class=\"view\" data-view=\"dm\" hidden aria-label=\"Direct messages\"><h2 data-component=\"view-title\">Direct Messages <span class=\"view-count\">· {} agents</span></h2>{}</section>\n",
+        doc.agents.len(),
         render_private(&doc.agents)
     ));
+    // ④ 频道。
     out.push_str(&format!(
-        "<section class=\"view\" data-view=\"channel\" role=\"tabpanel\" id=\"view-channel\" aria-label=\"Channels\" hidden><h2>Channels <span class=\"n\">· {} rooms</span></h2>{}</section>\n",
+        "<section class=\"view\" data-view=\"channel\" hidden aria-label=\"Channels\"><h2 data-component=\"view-title\">Channels <span class=\"view-count\">· {} rooms</span></h2>{}</section>\n",
         doc.channels.len(),
         render_channels(&doc.channels)
     ));
-    out.push_str("</main>\n<footer><div class=\"foot-inner\"><span><span class=\"mark\">▸</span> bingo · Rust agent CLI</span><span>generated <span id=\"foot-gen\" data-ts=\"\"></span> by bingo share</span><span class=\"foot-warn\">contains full conversation &amp; tool output — review before sharing</span></div></footer>\n");
-    out.push_str("<noscript><div style=\"padding:24px;text-align:center;color:var(--faint)\">This page works without JavaScript; only tab switching, copy links and print expansion are enhanced.</div></noscript>\n");
+    out.push_str("</div>\n");
+    // 回到顶部 + noscript + JS。
+    out.push_str("<button type=\"button\" class=\"scroll-button\" data-component=\"scroll\" data-hidden=\"true\" aria-label=\"Scroll to top\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 18 18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\"><path d=\"M4.5 11.5 9 7l4.5 4.5\"/></svg></button>\n");
+    out.push_str("<noscript><div style=\"padding:1.5rem;text-align:center;color:var(--sl-color-text-dimmed)\">This page is fully readable without JavaScript; only copy links, copy buttons and tab switching are enhanced.</div></noscript>\n");
     out.push_str("<script>\n");
     out.push_str(JS);
     out.push_str("</script>\n</body>\n</html>\n");
     out
 }
 
-/// 内嵌样式：与 notes/design/share-page-template.html v2.0 同源（ui-ux 唯一事实源）。
-const CSS: &str = r#"
-:root{
-  --bg:#FAFAF7; --bg-card:#FFFFFF; --bg-subtle:#F3F2EF;
-  --hairline:#E5E4DF; --hairline-strong:#D8D7D1;
-  --text:#1F2328; --secondary:#57606A; --dimmed:#646D76; --faint:#8A929B;
-  --accent:#B05227; --accent-soft:#D77757; --accent-border:#E7C4B2;
-  --green:#1A7F37; --red:#CF222E; --gold:#9A6700; --info:#146C7A;
-  --hue-0:#0F766E; --hue-1:#4A58C8; --hue-2:#6E40C9;
-  --hue-3:#8A6418; --hue-4:#B03A8B; --hue-5:#2F7D32;
-  --font-mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,"Liberation Mono","DejaVu Sans Mono",monospace;
-  --font-sans:-apple-system,"SF Pro Text","Segoe UI","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
-  --fs:0.875rem; --fs-sm:0.8125rem; --fs-xs:0.75rem; --lh:1.6;
-  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px; --s7:48px;
-  --radius:4px;
-  --maxw:880px;
-  --w-sm:480px; --w-md:640px; --w-lg:760px;
-}
-*,*::before,*::after{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%}
-body{margin:0;background:var(--bg);color:var(--text);
-  font-family:var(--font-sans);font-size:var(--fs);line-height:var(--lh);
-  -webkit-font-smoothing:antialiased}
-[hidden]{display:none!important}
-::selection{background:var(--accent-soft);color:#fff}
-a{color:var(--accent)}
-a:hover{text-decoration-thickness:2px}
-:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
-code,kbd,pre,.mono{font-family:var(--font-mono)}
-.skip{position:absolute;left:var(--s4);top:var(--s4);z-index:50;padding:var(--s2) var(--s3);
-  background:var(--accent);color:#fff;text-decoration:none;border-radius:var(--radius);
-  transform:translateY(-300%);transition:transform .12s}
-.skip:focus{transform:none}
-.topbar{position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--hairline)}
-.topbar-inner{max-width:var(--maxw);margin:0 auto;padding:0 var(--s4)}
-.brand{display:flex;align-items:baseline;gap:var(--s2);padding:var(--s3) 0 var(--s2)}
-.brand .mark{color:var(--accent);font-weight:700}
-.brand .name{font-weight:700;letter-spacing:.02em;font-family:var(--font-mono)}
-.brand .session{color:var(--secondary);font-size:var(--fs-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.brand .session::before{content:"· ";color:var(--faint)}
-.meta-line{display:flex;align-items:center;gap:var(--s3);margin-left:auto;color:var(--faint);
-  font-size:var(--fs-xs);white-space:nowrap;overflow:hidden}
-.print-btn{appearance:none;border:1px solid var(--hairline-strong);background:var(--bg-card);color:var(--secondary);
-  font:inherit;font-size:var(--fs-xs);padding:2px 8px;border-radius:var(--radius);cursor:pointer}
-.print-btn:hover{color:var(--accent);border-color:var(--accent)}
-.tabs{display:flex;gap:0;border-top:1px solid var(--hairline)}
-.tabs button{appearance:none;background:transparent;border:0;border-bottom:2px solid transparent;
-  color:var(--dimmed);font:inherit;font-size:var(--fs-sm);padding:var(--s2) var(--s4) calc(var(--s2) + 1px);
-  cursor:pointer;position:relative;top:-1px}
-.tabs button:hover{color:var(--text)}
-.tabs button[aria-selected="true"]{color:var(--text);border-bottom-color:var(--accent)}
-.tabs .count{color:var(--faint);font-size:var(--fs-xs);margin-left:2px}
-.tabs button[aria-selected="true"] .count{color:var(--accent)}
-.tabs .kbd{color:var(--faint);margin-right:var(--s1)}
-main{max-width:var(--maxw);margin:0 auto;padding:var(--s6) var(--s4) var(--s7)}
-.view[data-view]{animation:view-in .12s ease-out}
-@keyframes view-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
-.view h2{display:flex;align-items:baseline;gap:var(--s2);margin:0 0 var(--s4);
-  font-size:var(--fs);font-weight:700;color:var(--text);font-family:var(--font-mono)}
-.view h2 .n{color:var(--faint);font-weight:400}
-.empty{color:var(--faint);padding:var(--s7) 0;text-align:center}
-.conv{display:flex;flex-direction:column}
-.msg{display:grid;grid-template-columns:22px minmax(0,1fr);column-gap:14px;margin-bottom:1.25rem}
-.dec{display:flex;flex-direction:column;align-items:center}
-.dec .anchor{width:18px;height:18px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;
-  color:var(--faint);border-radius:var(--radius);text-decoration:none}
-.dec .anchor:hover{color:var(--accent);background:var(--bg-subtle)}
-.dec .anchor svg{width:12px;height:12px;fill:currentColor}
-.dec .anchor::after{content:"";position:absolute;transform:translateY(20px);white-space:nowrap;
-  font-size:var(--fs-xs);color:#fff;background:var(--text);padding:2px 8px;border-radius:var(--radius);
-  opacity:0;pointer-events:none;transition:opacity .12s;z-index:5}
-.dec .anchor.copied::after{content:"Copied ✓";opacity:1}
-.dec .line{width:3px;flex:1;border-radius:1px;background:var(--hairline-strong);margin-top:6px}
-.content{min-width:0}
-.content .w-sm{max-width:var(--w-sm)}
-.content.w-sm{max-width:var(--w-sm)}
-.content.w-md{max-width:var(--w-md)}
-.content.w-lg{max-width:var(--w-lg)}
-.meta{font-size:var(--fs-xs);color:var(--secondary);text-transform:uppercase;
-  letter-spacing:.05em;margin-bottom:var(--s2);display:flex;align-items:baseline;gap:var(--s2)}
-.meta time{color:var(--faint);letter-spacing:0;text-transform:none}
-.meta .role-user{color:var(--secondary)}
-.meta .role-assistant{color:var(--accent)}
-.body p{margin:0 0 var(--s2)}
-.body p:last-child{margin-bottom:0}
-.card{border:1px solid var(--accent-border);background:var(--bg-card);
-  border-radius:var(--radius);padding:0.5rem;margin-bottom:var(--s3)}
-.card>:first-child{margin-top:0}
-.card>:last-child{margin-bottom:0}
-.card h1,.card h2,.card h3,.card h4{margin:var(--s4) 0 var(--s2);line-height:1.4;font-family:var(--font-mono)}
-.card h1{font-size:1.2em;border-bottom:1px solid var(--hairline);padding-bottom:var(--s1)}
-.card h2{font-size:1.1em}.card h3{font-size:1em}
-.card p{margin:var(--s2) 0}
-.card ul,.card ol{margin:var(--s2) 0;padding-left:var(--s5)}
-.card li{margin:2px 0}
-.card code{background:var(--bg-subtle);border:1px solid var(--hairline);border-radius:3px;
-  padding:0 4px;font-size:.92em;color:var(--info)}
-.card pre code{background:none;border:0;padding:0;color:inherit;font-size:inherit}
-.card blockquote{margin:var(--s3) 0;padding-left:var(--s4);border-left:3px solid var(--hairline-strong);color:var(--dimmed)}
-.card hr{border:0;border-top:1px solid var(--hairline);margin:var(--s4) 0}
-.card table{border-collapse:collapse;margin:var(--s3) 0;font-size:var(--fs-sm);width:100%}
-.card th,.card td{border:1px solid var(--hairline);padding:4px var(--s3);text-align:left}
-.card th{background:var(--bg-subtle);font-weight:600}
-.card del{color:var(--faint)}
-.code-block{margin:var(--s3) 0;background:var(--bg-subtle);border:1px solid var(--hairline);
-  border-radius:var(--radius);position:relative}
-.code-block figcaption{position:absolute;top:6px;right:34px;color:var(--faint);font-size:var(--fs-xs)}
-.code-block pre{margin:0;padding:var(--s3) var(--s4);overflow-x:auto;
-  font-family:var(--font-mono);font-size:var(--fs-sm);line-height:1.6;color:var(--text)}
-.copy-btn{position:absolute;top:4px;right:6px;appearance:none;border:1px solid var(--hairline);
-  background:var(--bg-card);color:var(--secondary);font:inherit;font-size:var(--fs-xs);padding:2px 8px;
-  border-radius:3px;cursor:pointer;opacity:0;transition:opacity .12s}
-.code-block:hover .copy-btn,.copy-btn:focus-visible,.t-code:hover .copy-btn{opacity:1}
-.copy-btn:hover{color:var(--accent);border-color:var(--accent)}
-.img-block{margin:var(--s3) 0;border:1px solid var(--hairline);border-radius:var(--radius);
-  background:var(--bg-card);padding:var(--s2);text-align:center}
-.img-block img{max-width:100%;height:auto;display:block;margin:0 auto}
-details.think{border:1px solid var(--accent-border);background:var(--bg-card);
-  border-radius:var(--radius);padding:0.5rem;margin-bottom:var(--s3)}
-details.think summary{cursor:pointer;color:var(--secondary);font-size:var(--fs-xs);
-  text-transform:uppercase;letter-spacing:.05em;list-style:none;display:flex;align-items:center;gap:var(--s2)}
-details.think summary::-webkit-details-marker{display:none}
-details.think summary::before{content:"∴";color:var(--accent-soft);font-size:1em;text-transform:none}
-details.think summary:hover{color:var(--text)}
-details.think[open] summary{margin-bottom:var(--s2)}
-.think-body{color:var(--dimmed);font-size:var(--fs-sm);white-space:pre-wrap;line-height:1.7}
-.tool{margin-bottom:var(--s3)}
-.tool-title{display:flex;align-items:baseline;gap:var(--s2);font-size:var(--fs-sm);
-  font-family:var(--font-mono);color:var(--secondary);line-height:18px}
-.tool-title .t-ico{color:var(--info);font-size:.9em}
-.tool-title .t-name{font-weight:700}
-.tool-title .t-args{color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tool-title .t-status{margin-left:auto;font-weight:700;white-space:nowrap}
-.tool-title .t-status.ok{color:var(--green)}
-.tool-title .t-status.err{color:var(--red)}
-details.tool-result{margin-top:var(--s1)}
-details.tool-result summary{cursor:pointer;color:var(--secondary);font-size:var(--fs-xs);
-  text-transform:uppercase;letter-spacing:.05em;list-style:none;display:inline-flex;align-items:center;gap:var(--s1)}
-details.tool-result summary::-webkit-details-marker{display:none}
-details.tool-result summary::before{content:"▸";color:var(--accent);transition:transform .12s}
-details.tool-result[open] summary::before{transform:rotate(90deg)}
-details.tool-result summary:hover{color:var(--accent)}
-details.tool-result .t-body{margin-top:var(--s2);display:grid;gap:var(--s2)}
-.t-code{background:var(--bg-subtle);border:1px solid var(--hairline);border-radius:var(--radius)}
-.t-code .t-label{display:block;padding:4px var(--s3);color:var(--faint);font-size:var(--fs-xs);
-  border-bottom:1px solid var(--hairline);text-transform:uppercase;letter-spacing:.05em}
-.t-code pre{margin:0;padding:var(--s2) var(--s3);overflow-x:auto;
-  font-family:var(--font-mono);font-size:var(--fs-sm);line-height:1.6;color:var(--text);
-  white-space:pre-wrap;word-break:break-word}
-.t-code.output pre{color:var(--dimmed)}
-.t-code.output.err{border-color:#E5B4B8}
-.t-code.output.err .t-label{color:var(--red)}
-.roster{border:1px solid var(--hairline);border-radius:var(--radius);background:var(--bg-card)}
-.r-row{display:grid;grid-template-columns:92px 120px 1fr;gap:var(--s2) var(--s4);
-  padding:var(--s3) var(--s4);align-items:baseline}
-.r-row+.r-row{border-top:1px solid var(--hairline)}
-.r-row:hover{background:var(--bg-subtle)}
-.r-state{font-size:var(--fs-sm);white-space:nowrap;color:var(--faint)}
-.r-state.idle{color:var(--faint)}
-.r-state.running{color:var(--info)}
-.r-state.stopped{color:var(--red)}
-.r-name{font-family:var(--font-mono);font-weight:700;color:var(--accent);
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.r-meta{color:var(--secondary);font-size:var(--fs-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.r-desc{color:var(--dimmed);font-size:var(--fs-sm);grid-column:2 / -1;margin-top:-4px}
-.dm-list{display:grid;gap:var(--s3)}
-.dm-agent{border:1px solid var(--hairline);border-radius:var(--radius);background:var(--bg-card)}
-.dm-agent summary{cursor:pointer;padding:var(--s2) var(--s4);list-style:none;display:flex;align-items:center;gap:var(--s3)}
-.dm-agent summary::-webkit-details-marker{display:none}
-.dm-agent summary .a-dot{width:8px;height:8px;border-radius:50%;background:var(--dot,var(--faint))}
-.dm-agent summary .a-name{font-family:var(--font-mono);font-weight:700}
-.dm-agent summary .a-state{color:var(--faint);font-size:var(--fs-xs)}
-.dm-agent summary .a-count{margin-left:auto;color:var(--faint);font-size:var(--fs-xs)}
-.dm-agent summary:hover{background:var(--bg-subtle)}
-.dm-agent[open] summary{border-bottom:1px solid var(--hairline)}
-.dm-thread{padding:var(--s2) 0}
-.dm-row{display:grid;grid-template-columns:80px 1fr auto;gap:var(--s3);padding:var(--s1) var(--s4);align-items:baseline}
-.dm-row .dm-from{font-family:var(--font-mono);font-weight:700;color:var(--from,var(--accent));
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dm-row .dm-text{color:var(--text);white-space:pre-wrap;word-break:break-word;font-size:var(--fs-sm)}
-.dm-row .dm-time{color:var(--faint);font-size:var(--fs-xs);white-space:nowrap}
-.dm-row.dm-user .dm-text{text-align:right;color:var(--dimmed)}
-.dm-row.dm-user{grid-template-columns:1fr 80px auto}
-.ch-list{display:grid;gap:var(--s4)}
-.ch-block{border:1px solid var(--hairline);border-radius:var(--radius);background:var(--bg-card)}
-.ch-head{display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;padding:var(--s3) var(--s4);border-bottom:1px solid var(--hairline)}
-.ch-head .ch-name{margin:0;font-size:var(--fs);font-weight:700;font-family:var(--font-mono);color:var(--accent)}
-.ch-mode{font-size:var(--fs-xs);padding:1px 8px;border:1px solid;border-radius:999px;text-transform:uppercase;letter-spacing:.04em}
-.ch-mode.serial{color:var(--info);border-color:rgba(20,108,122,.4);background:rgba(20,108,122,.06)}
-.ch-mode.free{color:var(--hue-1);border-color:rgba(74,88,200,.4);background:rgba(74,88,200,.06)}
-.ch-members{margin-left:auto;display:flex;gap:var(--s1);flex-wrap:wrap}
-.m-chip{font-size:var(--fs-xs);color:var(--dimmed);display:inline-flex;align-items:center;gap:4px}
-.m-chip::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--chip,var(--faint))}
-.ch-stream{padding:var(--s2) 0}
-.ch-row{display:grid;grid-template-columns:48px 90px 1fr;gap:var(--s3);padding:var(--s1) var(--s4);align-items:baseline}
-.ch-row .ch-seq{color:var(--faint);font-size:var(--fs-xs);text-align:right;font-family:var(--font-mono)}
-.ch-row .ch-from{font-family:var(--font-mono);font-weight:700;color:var(--from,var(--accent));
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ch-row .ch-text{color:var(--text);white-space:pre-wrap;word-break:break-word}
-.ch-row.ch-user{grid-template-columns:1fr 90px 48px}
-.ch-row.ch-user .ch-text{order:1;text-align:right;color:var(--dimmed)}
-.ch-row.ch-user .ch-from{order:2}
-.ch-row.ch-user .ch-seq{order:3}
-.ch-row+.ch-row{border-top:1px dashed var(--hairline)}
-footer{border-top:1px solid var(--hairline);color:var(--faint);font-size:var(--fs-xs)}
-.foot-inner{max-width:var(--maxw);margin:0 auto;padding:var(--s3) var(--s4);display:flex;gap:var(--s3);flex-wrap:wrap}
-.foot-inner .mark{color:var(--accent)}
-.foot-warn{color:var(--gold)}
-@media (max-width:640px){
-  .meta-line{display:none}
-  .r-row{grid-template-columns:80px 1fr;grid-template-areas:"state name" "state meta" "desc desc"}
-  .r-state{grid-area:state}.r-name{grid-area:name}.r-meta{grid-area:meta}.r-desc{grid-area:desc;margin-top:0}
-  .dm-row{grid-template-columns:64px 1fr}
-  .dm-row .dm-time{display:none}
-  .dm-row.dm-user{grid-template-columns:1fr 64px}
-  .ch-row{grid-template-columns:40px 68px 1fr}
-  .ch-row.ch-user{grid-template-columns:1fr 68px 40px}
-  .brand .session{max-width:40vw}
-  .content.w-sm,.content.w-md,.content.w-lg{max-width:100%}
-}
-@media print{
-  :root{--bg:#FFFFFF;--bg-subtle:#F5F5F3}
-  .topbar{position:static}
-  .tabs,.copy-btn,.print-btn,.skip,.dec .anchor{display:none!important}
-  .dec .line{background:var(--hairline)}
-  body{font-size:12px}
-  .msg{break-inside:avoid}
-  pre,details summary,figcaption{break-inside:avoid}
-  a{text-decoration:underline}
-}
-@media (prefers-reduced-motion:reduce){
-  *{transition:none!important;animation:none!important}
-}
-"#;
+/// 内嵌样式：与 share-page-template.html v3.0（MD5 09e59e72）原样一致。
+/// opencode share 组件移植（starlight-props + custom 覆盖 + share/part/
+/// content-*/copy-button，命名空间化 .root → .share-root/.part-root/…）。
+const CSS: &str = include_str!("../notes/design/share-page-template.css");
 
-/// 渐进增强 JS（与模板同源）：tab 切换、消息锚点复制、代码复制、打印展开。
-/// 不拼接任何会话数据（防注入）。
+/// 渐进增强 JS（与模板同源）：四视图 tab、锚点复制、复制按钮、展开/收起、
+/// 回到顶部、打印展开。不拼接任何会话数据（防注入）。
 const JS: &str = r#"
 (function(){
   'use strict';
 
   function activateTab(name){
-    var panels = document.querySelectorAll('.view');
-    for (var i = 0; i < panels.length; i++){
-      panels[i].hidden = panels[i].getAttribute('data-view') !== name;
+    var views = document.querySelectorAll('.view[data-view]');
+    for (var i = 0; i < views.length; i++){
+      views[i].hidden = views[i].getAttribute('data-view') !== name;
     }
-    var tabs = document.querySelectorAll('.tabs button');
+    var tabs = document.querySelectorAll('[data-component="tabs"] button[data-tab]');
     for (var j = 0; j < tabs.length; j++){
       var on = tabs[j].getAttribute('data-tab') === name;
       tabs[j].setAttribute('aria-selected', on ? 'true' : 'false');
@@ -765,18 +857,15 @@ const JS: &str = r#"
     if (history.replaceState) history.replaceState(null, '', '#' + name);
   }
   function bindTabs(){
-    var tabs = Array.prototype.slice.call(document.querySelectorAll('.tabs button'));
+    var tabs = Array.prototype.slice.call(document.querySelectorAll('[data-component="tabs"] button[data-tab]'));
     tabs.forEach(function(btn){
       btn.addEventListener('click', function(){ activateTab(btn.getAttribute('data-tab')); });
       btn.addEventListener('keydown', function(e){
-        var idx = tabs.indexOf(btn);
-        var next;
+        var idx = tabs.indexOf(btn), next;
         if (e.key === 'ArrowRight' || e.key === 'ArrowDown'){
-          e.preventDefault();
-          next = tabs[(idx + 1) % tabs.length];
+          e.preventDefault(); next = tabs[(idx + 1) % tabs.length];
         } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp'){
-          e.preventDefault();
-          next = tabs[(idx - 1 + tabs.length) % tabs.length];
+          e.preventDefault(); next = tabs[(idx - 1 + tabs.length) % tabs.length];
         } else { return; }
         next.focus();
         activateTab(next.getAttribute('data-tab'));
@@ -792,100 +881,157 @@ const JS: &str = r#"
   }
 
   function bindAnchors(){
-    var anchors = document.querySelectorAll('.dec .anchor');
-    for (var i = 0; i < anchors.length; i++){
-      anchors[i].addEventListener('click', function(e){
-        e.preventDefault();
-        var target = this.getAttribute('href');
-        var url = location.href.split('#')[0] + target;
-        var done = function(ok){
-          this.classList.add('copied');
-          setTimeout(function(){ this.classList.remove('copied'); }.bind(this), 1600);
-        }.bind(this);
-        var fallback = function(){
-          var ta = document.createElement('textarea');
-          ta.value = url;
-          ta.style.position = 'fixed';
-          ta.style.opacity = '0';
-          document.body.appendChild(ta);
-          ta.select();
-          var ok = false;
-          try { ok = document.execCommand('copy'); } catch (e) {}
-          document.body.removeChild(ta);
-          done(ok);
-        };
-        if (navigator.clipboard && navigator.clipboard.writeText){
-          navigator.clipboard.writeText(url).then(function(){ done(true); }, function(){ fallback(); });
-        } else { fallback(); }
-      });
-    }
+    document.addEventListener('click', function(e){
+      var anchor = e.target && e.target.closest ? e.target.closest('[data-slot="anchor"] a') : null;
+      if (!anchor) return;
+      e.preventDefault();
+      var hash = anchor.getAttribute('href') || '';
+      var url = location.href.split('#')[0] + hash;
+      function fallback(){
+        var ta = document.createElement('textarea');
+        ta.value = url;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (err) {}
+        document.body.removeChild(ta);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(url).catch(function(){ fallback(); });
+      } else { fallback(); }
+      var slot = anchor.parentElement;
+      slot.setAttribute('data-status', 'copied');
+      setTimeout(function(){ slot.removeAttribute('data-status'); }, 3000);
+    });
   }
 
-  function addCopyButtons(){
-    var targets = document.querySelectorAll('.code-block, .t-code');
-    for (var i = 0; i < targets.length; i++){
-      (function(t){
-        var pre = t.querySelector('pre');
-        if (!pre || t.querySelector('.copy-btn')) return;
-        var btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'copy-btn';
-        btn.textContent = 'Copy';
-        btn.setAttribute('aria-label', 'Copy code');
-        btn.addEventListener('click', function(){
-          var text = pre.textContent;
-          function done(ok){
-            btn.textContent = ok ? 'Copied ✓' : 'Copy failed';
-            setTimeout(function(){ btn.textContent = 'Copy'; }, 1600);
-          }
-          function fallback(){
-            var ta = document.createElement('textarea');
-            ta.value = text;
-            ta.style.position = 'fixed';
-            ta.style.opacity = '0';
-            document.body.appendChild(ta);
-            ta.select();
-            var ok = false;
-            try { ok = document.execCommand('copy'); } catch (e) {}
-            document.body.removeChild(ta);
-            done(ok);
-          }
-          if (navigator.clipboard && navigator.clipboard.writeText){
-            navigator.clipboard.writeText(text).then(function(){ done(true); }, function(){ fallback(); });
-          } else { fallback(); }
-        });
-        t.appendChild(btn);
-      })(targets[i]);
-    }
+  function bindCopyButtons(){
+    document.addEventListener('click', function(e){
+      var btn = e.target && e.target.closest ? e.target.closest('.copy-root button') : null;
+      if (!btn) return;
+      var root = btn.closest('.copy-root');
+      var container = root && root.parentElement;
+      var pre = container ? container.querySelector('pre') : null;
+      var text = pre ? pre.textContent : '';
+      if (!text) return;
+      function fallback(){
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (err) {}
+        document.body.removeChild(ta);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(text).catch(function(){ fallback(); });
+      } else { fallback(); }
+      btn.setAttribute('data-copied', 'true');
+      btn.setAttribute('aria-label', 'Copied');
+      btn.setAttribute('title', 'Copied');
+      btn.innerHTML = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="6.5"/><path d="M6 9.2l2 2 4-4.4"/></svg>';
+      setTimeout(function(){
+        btn.removeAttribute('data-copied');
+        btn.setAttribute('aria-label', 'Copy');
+        btn.setAttribute('title', 'Copy');
+        btn.innerHTML = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="5" y="4" width="8" height="11.5" rx="1.5"/><path d="M7.5 2.5h3v2.5h-3z"/></svg>';
+      }, 2000);
+    });
+  }
+
+  function bindToggles(){
+    document.addEventListener('click', function(e){
+      var btn = e.target && e.target.closest ? e.target.closest('[data-component="button-text"][data-more]') : null;
+      if (!btn) return;
+      e.preventDefault();
+      var expanded = btn.getAttribute('aria-expanded') === 'true';
+      btn.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+      var label = btn.querySelector('span');
+      var root = btn.parentElement;
+      var was = expanded;
+      if (label) {
+        var name = label.textContent || '';
+        label.textContent = was ? (name.replace(/^Hide /, 'Show ')) : (name.replace(/^Show /, 'Hide '));
+      }
+      var targets = root.querySelectorAll('[data-component="tool-result"] > :not(button), [data-component="assistant-reasoning"] > [data-component="assistant-reasoning-markdown"]');
+      for (var i = 0; i < targets.length; i++){
+        if (targets[i].hasAttribute('data-expanded')) {
+          targets[i].setAttribute('data-expanded', was ? 'false' : 'true');
+        } else {
+          targets[i].hidden = was;
+        }
+      }
+      var icon = btn.querySelector('[data-slot="icon"] svg');
+      if (icon) {
+        icon.setAttribute('d', was
+          ? 'M4.5 7 9 11.5 13.5 7'
+          : 'M7 4.5 11.5 9 7 13.5');
+      }
+    });
+  }
+
+  function bindScrollButton(){
+    var btn = document.querySelector('[data-component="scroll"]');
+    if (!btn) return;
+    window.addEventListener('scroll', function(){
+      var top = window.scrollY || document.documentElement.scrollTop;
+      btn.setAttribute('data-hidden', top < 200 ? 'true' : 'false');
+    }, { passive: true });
+    btn.addEventListener('click', function(){
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
   }
 
   function bindPrint(){
-    var printBtn = document.getElementById('print-btn');
-    if (printBtn) printBtn.addEventListener('click', function(){ window.print(); });
     var saved = [];
     window.addEventListener('beforeprint', function(){
       saved = [];
       var ds = document.querySelectorAll('details');
-      for (var i = 0; i < ds.length; i++){
-        saved.push(ds[i].open);
-        ds[i].open = true;
-      }
+      for (var i = 0; i < ds.length; i++){ saved.push(ds[i].open); ds[i].open = true; }
+      var views = document.querySelectorAll('.view[data-view]');
+      for (var j = 0; j < views.length; j++){ views[j].hidden = false; }
     });
     window.addEventListener('afterprint', function(){
       var ds = document.querySelectorAll('details');
-      for (var i = 0; i < ds.length; i++){
-        if (saved[i] !== undefined) ds[i].open = saved[i];
+      for (var k = 0; k < ds.length; k++){
+        if (saved[k] !== undefined) ds[k].open = saved[k];
       }
+      var name = (location.hash || '').replace('#', '');
+      if (['conv', 'team', 'dm', 'channel'].indexOf(name) >= 0) activateTab(name);
+      else activateTab('conv');
     });
   }
 
-  var time = document.getElementById('meta-time');
-  if (time && Number(time.dataset.ts) > 0) {
-    time.textContent = new Date(Number(time.dataset.ts) * 1000).toLocaleString();
+  /* ---------- Team 线程行：点击直达私聊（data-jump；锚点内点击交给 bindAnchors） ---------- */
+  function bindThreadRows(){
+    document.addEventListener('click', function(e){
+      var row = e.target && e.target.closest ? e.target.closest('.thread-row[data-jump]') : null;
+      if (!row) return;
+      if (e.target.closest('[data-slot="anchor"]')) return;
+      e.preventDefault();
+      var target = row.getAttribute('data-jump') || '';
+      var view = target.indexOf('dm') > -1 ? 'dm' : 'conv';
+      activateTab(view);
+      setTimeout(function(){
+        var el = document.querySelector(target);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 50);
+    });
+    document.addEventListener('keydown', function(e){
+      if (e.key !== 'Enter') return;
+      var row = e.target && e.target.closest ? e.target.closest('.thread-row[data-jump]') : null;
+      if (row){ e.preventDefault(); row.click(); }
+    });
   }
+
   bindTabs();
   bindAnchors();
-  addCopyButtons();
+  bindCopyButtons();
+  bindToggles();
+  bindThreadRows();
+  bindScrollButton();
   bindPrint();
 })();
 "#;
@@ -902,22 +1048,34 @@ mod tests {
         }
     }
 
-    fn tool_message() -> Message {
-        Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::ToolUse {
-                    id: "tu_1".into(),
-                    name: "Bash".into(),
-                    input: serde_json::json!({"command": "ls <unsafe> & echo \"x\""}),
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "tu_1".into(),
-                    content: serde_json::Value::String("src/ share.rs".into()),
-                    is_error: false,
-                },
-            ],
-        }
+    /// 富消息：thinking + tool_use(bash) + tool_result(错误) + text。
+    fn rich_messages() -> Vec<Message> {
+        vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "你好".into() }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "深入思考一下".into(),
+                        signature: "sig".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tu_1".into(),
+                        name: "Bash".into(),
+                        input: serde_json::json!({"command": "ls <unsafe> & echo \"x\""}),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tu_1".into(),
+                        content: serde_json::Value::String("src/ share.rs".into()),
+                        is_error: false,
+                    },
+                    ContentBlock::Text { text: "**完成**了，`OK`".into() },
+                ],
+            },
+        ]
     }
 
     fn doc() -> ShareDoc {
@@ -928,7 +1086,7 @@ mod tests {
                 name: "scout".into(),
                 def: Some("scout".into()),
                 description: "调研".into(),
-                state: "idle".into(),
+                state: "running".into(),
                 history: vec![
                     text_msg(Role::User, "查一下"),
                     text_msg(Role::Assistant, "**结论**：`ok`"),
@@ -954,9 +1112,8 @@ mod tests {
             "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt; &amp; &quot;quoted&quot;"
         );
         // 注入内容经 render 全链路不出现可执行脚本/未转义标签（C1 全字符集）。
-        let doc = doc();
         let html = render(
-            &doc,
+            &doc(),
             &[text_msg(
                 Role::User,
                 "<script>alert(1)</script><img src=x onerror=alert(2)>&\"'",
@@ -982,9 +1139,7 @@ mod tests {
         assert!(html.contains("<code>code</code>"));
         assert!(html.contains("<ul><li>a</li><li>b</li></ul>"));
         assert!(html.contains("<ol><li>一</li><li>二</li></ol>"));
-        assert!(html.contains("<figure class=\"code-block\">"), "代码块容器");
-        assert!(html.contains("<figcaption>rust</figcaption>"), "语言标注");
-        assert!(html.contains("class=\"language-rust\""));
+        assert!(html.contains("<pre><code class=\"language-rust\">"), "代码块纯 pre");
         assert!(html.contains("&lt;hi&gt;"), "代码块内容转义");
         assert!(html.contains("println"));
     }
@@ -999,18 +1154,15 @@ mod tests {
     #[test]
     fn markdown_unclosed_fence_renders_safely() {
         let html = render_markdown("```\nno close\n");
-        assert!(html.contains("<figure class=\"code-block\">"), "{html}");
-        assert!(html.contains("<pre><code>no close</code></pre>"));
+        assert!(html.contains("<pre><code>no close</code></pre>"), "{html}");
     }
 
     #[test]
     fn member_colors_are_stable_and_consistent() {
-        assert_eq!(member_color("main"), "var(--accent)");
-        assert_eq!(member_color("assistant"), "var(--accent)");
-        assert_eq!(member_color("user"), "var(--text)");
+        assert_eq!(member_color("main"), "var(--color-text-strong)");
+        assert_eq!(member_color("user"), "var(--color-text-strong)");
         assert_eq!(member_color("scout"), member_color("scout"));
         assert!(member_color("scout").starts_with("var(--hue-"));
-        // 名字不同大概率不同色（散列）。
         let colors: std::collections::HashSet<&str> =
             ["dev", "qa", "ui-ux", "main", "scout", "worker"]
                 .into_iter()
@@ -1020,133 +1172,152 @@ mod tests {
     }
 
     #[test]
-    fn tool_args_extracts_first_meaningful_value() {
-        assert_eq!(tool_args(&serde_json::json!({"command": "git status --short"})), "git status --short");
-        assert_eq!(tool_args(&serde_json::json!({"file_path": "src/main.rs"})), "src/main.rs");
-        assert_eq!(tool_args(&serde_json::json!({"pattern": "*.rs"})), "*.rs");
-        assert_eq!(tool_args(&serde_json::json!({"query": "rust clap"})), "rust clap");
-        // 超 60 字符截断加省略号。
-        let long = "x".repeat(80);
-        let args = tool_args(&serde_json::json!({"command": long}));
-        assert!(args.ends_with('…'));
-        assert_eq!(args.chars().count(), 61);
-        // 无已知键：取对象首个字符串值；无字符串值 → 空。
-        assert_eq!(tool_args(&serde_json::json!({"a": "b", "c": "d"})), "b");
-        assert_eq!(tool_args(&serde_json::json!({"a": 1})), "");
-    }
-
-    #[test]
-    fn renders_all_four_views() {
-        let html = render(&doc(), &[text_msg(Role::User, "你好"), text_msg(Role::Assistant, "嗨")]);
-        for view in ["view-conv", "view-team", "view-dm", "view-channel"] {
-            assert!(html.contains(&format!("id=\"{view}\"")), "缺视图 {view}");
+    fn renders_all_four_views_with_opencode_structure() {
+        let html = render(&doc(), &rich_messages());
+        // 四视图 data-view + share-root 骨架。
+        for view in ["data-view=\"conv\"", "data-view=\"team\"", "data-view=\"dm\"", "data-view=\"channel\""] {
+            assert!(html.contains(view), "缺视图 {view}");
         }
-        // 对话视图：装饰列 + 消息 id + 角色 meta + 无框 body / 卡。
-        assert!(html.contains("你好") && html.contains("嗨"));
-        assert!(html.contains("class=\"msg msg-user\"") && html.contains("class=\"msg msg-assistant\""));
-        assert!(html.contains("id=\"msg-1\"") && html.contains("id=\"msg-2\""));
-        assert!(html.contains("class=\"anchor\" href=\"#msg-1\""));
-        // a11y：dec 容器不藏锚点，竖线承载 aria-hidden（模板 v2.2 契约）。
-        assert!(html.contains("<div class=\"dec\">"));
-        assert!(!html.contains("<div class=\"dec\" aria-hidden=\"true\">"));
-        assert!(html.contains("<span class=\"line\" aria-hidden=\"true\"></span>"));
-        assert!(html.contains("<span class=\"role-user\">User</span>"));
-        assert!(html.contains("<span class=\"role-assistant\">Assistant</span>"));
-        assert!(html.contains("<div class=\"card\">"), "assistant 文本进细框卡");
-        assert!(html.contains("<div class=\"content w-md\">"));
-        // Team 视图：名册行。
-        assert!(html.contains("<span class=\"r-name\">scout</span>"));
-        assert!(html.contains("调研"));
-        assert!(html.contains("class=\"r-state idle\""));
+        assert!(html.contains("data-component=\"share\""));
+        assert!(html.contains("data-component=\"header\""));
+        assert!(html.contains("data-component=\"header-title\""));
+        assert!(html.contains("data-component=\"header-stats\""));
+        assert!(html.contains("data-component=\"tabs\""));
+        // part 骨架：装饰列 + 内容列 + 锚点三态。
+        assert!(html.contains("class=\"part-root\""));
+        assert!(html.contains("data-component=\"decoration\""));
+        assert!(html.contains("data-slot=\"anchor\""));
+        assert!(html.contains("data-slot=\"bar\""));
+        assert!(html.contains("data-slot=\"tooltip\""));
+        assert!(html.contains("data-component=\"content\""));
+        assert!(html.contains("id=\"msg-1\""));
+        // user 无框 content-text / assistant 蓝框 content-markdown。
+        assert!(html.contains("data-component=\"user-text\""));
+        assert!(html.contains("data-component=\"assistant-text\""));
+        assert!(html.contains("data-component=\"assistant-text-markdown\""));
+        assert!(html.contains("data-slot=\"markdown\""));
+        assert!(html.contains("class=\"cm-root\"") && html.contains("class=\"ct-root\""));
+        // Team 线程列表（thread-row + data-jump 直达私聊）。
+        assert!(html.contains("class=\"thread-list\""));
+        assert!(html.contains("class=\"part-root thread-row\""));
+        assert!(html.contains("data-jump=\"#dm-scout\""));
+        assert!(html.contains("href=\"#dm-scout\""));
+        assert!(html.contains("id=\"team-scout\""));
+        assert!(html.contains("data-slot=\"provider\""));
         assert!(html.contains("2 messages"));
-        // 私聊视图：agent 线程。
-        assert!(html.contains("<span class=\"a-name\">scout</span>"));
-        assert!(html.contains("<strong>结论</strong>"));
-        assert!(html.contains("查一下"));
-        // 频道视图。
-        assert!(html.contains("<span class=\"ch-name\">◇ #table</span>"), "频道头 ◇ 前缀（规格 §4.4）");
+        // DM 私聊（dm-msg 聊天流 + user 靠右；文本为纯 pre 不渲染 markdown）。
+        assert!(html.contains("data-type=\"thread\""));
+        assert!(html.contains("id=\"dm-scout\""));
+        assert!(html.contains("class=\"dm-msg\""));
+        assert!(html.contains("class=\"dm-msg dm-user\""));
+        assert!(!html.contains("<strong>结论</strong>"), "dm 文本为纯 pre（不做 markdown）");
+        // 频道（part 消息流 + seq/成员徽标）。
+        assert!(html.contains("class=\"ch-block\"") && html.contains("data-component=\"channel\""));
+        assert!(html.contains("<div data-slot=\"provider\">◇ #table</div>"));
         assert!(html.contains("class=\"ch-mode free\""));
-        assert!(html.contains(">main</span>") && html.contains(">user</span>") && html.contains(">scout</span>"));
-        assert!(html.contains("<span class=\"ch-seq\">1</span>"));
+        assert!(html.contains("class=\"ch-row-seq\">#0001</span>"));
+        assert!(html.contains("class=\"m-chip\""));
         assert!(html.contains("大家好"));
     }
 
     #[test]
-    fn tool_blocks_are_two_stage_and_escaped() {
-        let html = render(&doc(), &[tool_message()]);
-        // 两段式：tool-title（⏺ 名 + t-args 摘要）+ details.tool-result。
-        assert!(html.contains("<div class=\"tool\">"), "工具两段式");
-        assert!(html.contains("<span class=\"t-name\">Bash</span>"));
-        assert!(html.contains("<span class=\"t-args\">ls &lt;unsafe&gt; &amp; echo &quot;x&quot;</span>"), "t-args 摘要转义");
-        assert!(html.contains("<details class=\"tool-result w-sm\">"));
-        assert!(html.contains("<summary>Show result</summary>"));
-        assert!(html.contains("<span class=\"t-label\">input</span>"));
-        assert!(html.contains("ls &lt;unsafe&gt;"), "tool_use 输入转义");
-        assert!(html.contains("&amp; echo"), "输入内 & 转义");
-        assert!(html.contains("src/ share.rs"));
-        assert!(html.contains("<span class=\"t-status ok\">✓</span>"));
-        // 错误结果有错误样式。
-        let mut m = tool_message();
-        m.content.push(ContentBlock::ToolResult {
-            tool_use_id: "tu_2".into(),
-            content: serde_json::Value::String("boom".into()),
-            is_error: true,
-        });
-        let html = render(&doc(), &[m]);
-        assert!(html.contains("class=\"t-code output err\""));
-        assert!(html.contains("<span class=\"t-status err\">✗</span>"));
-        assert!(html.contains("result (err)"));
-    }
-
-    #[test]
-    fn thinking_is_expandable() {
-        let m = Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::Thinking {
-                thinking: "深入思考一下".into(),
-                signature: "sig".into(),
-            }],
-        };
-        let html = render(&doc(), &[m]);
-        assert!(html.contains("<details class=\"think\">"));
-        assert!(html.contains("<summary>Thinking</summary>"));
+    fn thinking_and_tools_use_opencode_components() {
+        let html = render(&doc(), &rich_messages());
+        // thinking：tool-title Thinking + assistant-reasoning。
+        assert!(html.contains("data-type=\"reasoning\""));
+        assert!(html.contains("<span data-slot=\"name\">Thinking</span>"));
+        assert!(html.contains("data-component=\"assistant-reasoning\""));
+        assert!(html.contains("data-component=\"assistant-reasoning-markdown\""));
         assert!(html.contains("深入思考一下"));
+        // bash：终端窗 Shell 头。
+        assert!(html.contains("data-tool=\"bash\""));
+        assert!(html.contains("data-slot=\"header\"><span>Shell</span>"));
+        assert!(html.contains("class=\"cb-root\""));
+        assert!(html.contains("ls &lt;unsafe&gt; &amp; echo &quot;x&quot;"));
+        // tool_result：还原 bash 语义 → 终端窗含输出。
+        assert!(html.contains("<div data-slot=\"output\"><pre>src/ share.rs</pre></div>"));
+        // 工具两段式：tool-title + tool-result + 展开按钮。
+        assert!(html.contains("data-component=\"tool-title\""));
+        assert!(html.contains("data-component=\"tool-result\""));
+        assert!(html.contains("data-component=\"button-text\" data-more"));
+        // 复制按钮。
+        assert!(html.contains("data-component=\"copy-button\""));
+        assert!(html.contains("class=\"copy-root\""));
     }
 
     #[test]
-    fn image_blocks_inline_as_data_uri() {
-        let m = Message {
+    fn tool_error_uses_red_label() {
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tu_x".into(),
+                content: serde_json::Value::String("boom".into()),
+                is_error: true,
+            }],
+        }];
+        let html = render(&doc(), &msgs);
+        assert!(html.contains("data-tool=\"error\""));
+        assert!(html.contains("class=\"ce-root\""));
+        assert!(html.contains("<span data-color=\"red\" data-marker=\"label\" data-separator>Error</span>"));
+        assert!(html.contains("boom"));
+    }
+
+    #[test]
+    fn unknown_tool_gets_tool_args_grid() {
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tu_1".into(),
+                name: "Agent".into(),
+                input: serde_json::json!({"name": "dev", "description": "Implement share"}),
+            }],
+        }];
+        let html = render(&doc(), &msgs);
+        assert!(html.contains("data-component=\"tool-args\""));
+        assert!(html.contains(">name</div><div>dev</div>"));
+        assert!(html.contains(">description</div><div>Implement share</div>"));
+    }
+
+    #[test]
+    fn image_inlines_as_data_uri() {
+        let msgs = vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Image {
                 source: crate::api::types::ImageSource::base64("image/png", "aGVsbG8="),
             }],
-        };
-        let html = render(&doc(), &[m]);
-        assert!(html.contains("<figure class=\"img-block\">"), "{html}");
+        }];
+        let html = render(&doc(), &msgs);
+        assert!(html.contains("data-type=\"image\""));
         assert!(html.contains("src=\"data:image/png;base64,aGVsbG8=\""));
         assert!(html.contains("alt=\"image (image/png)\""));
-        assert!(html.contains("</figure>"));
-        // 仅 data: URI，不透传外部 URL。
-        assert!(!html.contains("http://") && !html.contains("https://"));
+        assert!(!html.contains("http://") && !html.contains("https://"), "仅 data: URI");
     }
 
     #[test]
     fn empty_views_show_hints() {
         let html = render(&ShareDoc::new("s".into()), &[]);
-        // 四个视图各自的空态文案。
         let empty_count = html.matches("— No ").count();
         assert_eq!(empty_count, 4, "四视图空态：{html}");
-        // 页脚隐私警示恒存在。
-        assert!(html.contains("review before sharing"));
+        assert!(html.contains("class=\"view-empty\""));
     }
 
     #[test]
     fn no_external_dependencies() {
-        let html = render(&doc(), &[]);
+        let html = render(&doc(), &rich_messages());
         assert!(!html.contains("http://") && !html.contains("https://"), "无外链");
         assert!(!html.contains("<link"), "无外部样式表");
-        assert!(!html.contains("src=\""), "无外部脚本/图片");
+        assert!(!html.contains("src=\""), "无外部脚本/图片（data: URI 除外）");
         assert!(!html.contains("@import"), "无 CSS import");
         assert!(!html.contains("<iframe"), "无 iframe");
+        assert!(html.contains("@media print"));
+        assert!(html.contains("prefers-reduced-motion"));
+        assert!(html.contains("lang=\"en\""));
+        assert!(html.contains("<noscript>"));
+    }
+
+    #[test]
+    fn epoch_format_is_stable() {
+        assert_eq!(format_epoch(0), "Jan 1, 1970 00:00 UTC");
+        assert_eq!(format_epoch(1_700_000_000), "Nov 14, 2023 22:13 UTC");
     }
 }
