@@ -266,24 +266,13 @@ pub fn share_id(stem: &str) -> String {
     format!("{ts}{suffix}")
 }
 
-/// 上传 HTML 到官网分享服务：POST `{base}/share/u/{id}`，
-/// body = HTML，X-Share-Token 头（token 有则带）。
-pub async fn upload_share(
-    base: &str,
-    id: &str,
-    html: &str,
-    token: Option<&str>,
-) -> Result<String, ShareError> {
+/// 上传 HTML 到官网分享服务（公开，无需 token）：
+/// POST `{base}/share/u/{id}`，body = HTML。
+pub async fn upload_share(base: &str, id: &str, html: &str) -> Result<String, ShareError> {
     let url = format!("{base}/share/u/{id}");
-    let mut req = reqwest::Client::new()
+    let resp = reqwest::Client::new()
         .post(&url)
-        .header("Content-Type", "text/html; charset=utf-8");
-    if let Some(token) = token
-        && !token.is_empty()
-    {
-        req = req.header("X-Share-Token", token);
-    }
-    let resp = req
+        .header("Content-Type", "text/html; charset=utf-8")
         .body(html.to_string())
         .send()
         .await
@@ -755,9 +744,10 @@ mod tests {
         assert_ne!(share_id("proj-1786092819"), share_id("proj-1786092819"));
     }
 
-    /// mock 上传：本地 TCP 服务器接收 POST，断言请求行/头/body 与返回的链接。
+    /// mock 上传：本地 TCP 服务器接收 POST，断言请求行/body/无 token 头
+    /// 与返回的链接（服务公开）。
     #[tokio::test]
-    async fn upload_share_posts_html_with_token() {
+    async fn upload_share_posts_html_without_token() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
@@ -789,7 +779,7 @@ mod tests {
             (request_line, headers, String::from_utf8(body).unwrap())
         });
         let base = format!("http://{addr}");
-        let url = upload_share(&base, "abc123", "<html>hi</html>", Some("tok-1"))
+        let url = upload_share(&base, "abc123", "<html>hi</html>")
             .await
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(url, format!("{base}/share/u/abc123"));
@@ -799,10 +789,10 @@ mod tests {
             "{request_line}"
         );
         assert!(
-            headers
+            !headers
                 .iter()
-                .any(|h| h.eq_ignore_ascii_case("X-Share-Token: tok-1")),
-            "token 头: {headers:?}"
+                .any(|h| h.to_ascii_lowercase().starts_with("x-share-token")),
+            "公开服务无 token 头: {headers:?}"
         );
         assert!(body.contains("<html>hi</html>"), "{body}");
     }
@@ -821,7 +811,7 @@ mod tests {
             let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
         });
         let base = format!("http://{addr}");
-        let err = upload_share(&base, "abc123", "x", None).await.unwrap_err();
+        let err = upload_share(&base, "abc123", "x").await.unwrap_err();
         assert!(err.to_string().contains("500"), "{err}");
         handle.join().unwrap();
     }

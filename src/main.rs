@@ -386,7 +386,7 @@ async fn run_share(
         return Ok(());
     }
 
-    // 上传模式：settings.share（baseUrl/uploadToken）+ env BINGO_SHARE_TOKEN。
+    // 上传模式：settings.share.baseUrl（缺省官网基址；服务公开，无需 token）。
     let project_dir = std::env::current_dir()?;
     let user_dir = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -396,15 +396,12 @@ async fn run_share(
         .share
         .base_url
         .unwrap_or_else(|| crate::share::DEFAULT_SHARE_BASE.to_string());
-    let token = std::env::var("BINGO_SHARE_TOKEN")
-        .ok()
-        .or(settings.share.upload_token);
     let id = crate::share::share_id(&stem);
-    match crate::share::upload_share(&base, &id, &html, token.as_deref()).await {
+    match crate::share::upload_share(&base, &id, &html).await {
         Ok(url) => {
             println!("[share] published {url}");
             eprintln!(
-                "[share] 注意：分享页含完整对话与工具输出（可能含敏感信息），链接传播前请自行审阅。"
+                "[share] 任何人可公开访问此链接；分享页含完整对话与工具输出（可能含敏感信息），传播前请自行审阅。"
             );
             if open {
                 crate::share::open_in_browser(&url)?;

@@ -87,11 +87,8 @@ pub struct Settings {
 /// Share upload settings (`share`): `bingo share` 默认上传到官网分享服务。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ShareSettings {
-    /// 上传 token（`uploadToken`）：POST 的 X-Share-Token 头；
-    /// env `BINGO_SHARE_TOKEN` 优先于 settings。
-    #[serde(rename = "uploadToken", default)]
-    pub upload_token: Option<String>,
     /// 官网上传基址（`baseUrl`，缺省 `https://bingo.ruobin.dev`）。
+    /// 上传服务公开，无需 token。
     #[serde(rename = "baseUrl", default)]
     pub base_url: Option<String>,
 }
@@ -298,10 +295,7 @@ fn merge(base: &mut Settings, layer: Settings) {
     if let Some(v) = layer.team.auto_start {
         base.team.auto_start = Some(v);
     }
-    // share: uploadToken/baseUrl overridden by later layers.
-    if let Some(v) = layer.share.upload_token {
-        base.share.upload_token = Some(v);
-    }
+    // share: baseUrl overridden by later layers.
     if let Some(v) = layer.share.base_url {
         base.share.base_url = Some(v);
     }

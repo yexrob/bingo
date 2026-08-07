@@ -261,10 +261,9 @@ Example (.bingo/settings.json):
   `<项目名>-<路径哈希>.md`，同名目录不串味）+ 项目 CLAUDE.md（Anthropic 惯例）。
 - **会话**：transcript 持久化（JSONL），`--continue`/`/resume` 恢复，`/compact` 压缩。
   **分享**：`bingo share [会话]` 默认生成 HTML 并上传官网分享服务，打印链接
-  （`https://bingo.ruobin.dev/share/u/<id>`）；`--local` 保留本地文件模式（`--output` 指定路径）；
-  `--open` 打开链接/文件。上传 token：env `BINGO_SHARE_TOKEN` 或
-  settings `share.uploadToken`；服务基址 settings `share.baseUrl`
-  （缺省 `https://bingo.ruobin.dev`）；上传失败自动回退本地文件。
-  会话内 `/share [--open]` 导出当前会话（本地模式）。会话 key 与 `/resume` 同语义
-  （transcript stem 或可匹配片段，缺省最近会话），生成的 HTML 含完整对话与工具
-  输出，分享前自行审阅敏感信息。
+  （`https://bingo.ruobin.dev/share/u/<id>`，**任何人可公开访问**）；`--local` 保留
+  本地文件模式（`--output` 指定路径）；`--open` 打开链接/文件。服务基址
+  settings `share.baseUrl`（缺省 `https://bingo.ruobin.dev`），上传公开无需 token；
+  上传失败自动回退本地文件。会话内 `/share [--open]` 导出当前会话（本地模式）。
+  会话 key 与 `/resume` 同语义（transcript stem 或可匹配片段，缺省最近会话），
+  生成的 HTML 含完整对话与工具输出，分享前自行审阅敏感信息。
