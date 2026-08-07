@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::agents::{AgentDef, AgentRegistry, Delivery, InboxItem};
-use crate::api::types::{Message, SystemBlock};
+use crate::api::contract::SystemBlock;
+use crate::api::types::Message;
 use crate::channels::ChannelRegistry;
 use crate::permission::PermissionMode;
 use crate::query::{Session, UiHooks};
@@ -79,7 +80,7 @@ fn subagent_hooks(
     let bypass = permission_mode == PermissionMode::BypassPermissions;
     UiHooks {
         on_event: Box::new(move |event| {
-            if let crate::api::types::StreamEvent::TextDelta { text, .. } = event
+            if let crate::api::contract::StreamEvent::TextDelta { text, .. } = event
                 && let Ok(mut output) = output.lock()
             {
                 output.push_str(text);
@@ -369,7 +370,7 @@ fn normalize_thinking(level: &str) -> Result<Option<String>, String> {
     if level == "off" {
         return Ok(None);
     }
-    if crate::api::types::THINKING_LEVELS.contains(&level) {
+    if crate::api::contract::THINKING_LEVELS.contains(&level) {
         return Ok(Some(level.to_string()));
     }
     Err(format!(

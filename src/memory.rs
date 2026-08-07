@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::api::types::{Message, Request};
+use crate::api::contract::NeutralRequest;
+use crate::api::types::Message;
 use crate::query::Session;
 
 const MEMORY_MAX_LINES: usize = 200;
@@ -101,7 +102,7 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
         prompt.push_str("\n---\n[conversation too long, truncated]");
     }
 
-    let request = Request {
+    let request = NeutralRequest {
         model: session.runtime.model.borrow().clone(),
         max_tokens: 512,
         system: Vec::new(),
@@ -109,7 +110,6 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
         tools: Vec::new(),
         stream: false,
         thinking: None,
-        output_config: None,
     };
     let facts = match session.client.complete_text(&request).await {
         Ok(f) => f,

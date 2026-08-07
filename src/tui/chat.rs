@@ -256,7 +256,7 @@ pub struct ModelMenuModels {
     pub selected: usize,
 }
 
-/// `/think` single-level selector state (level table = off + [`crate::api::types::THINKING_LEVELS`]).
+/// `/think` single-level selector state (level table = off + [`crate::api::contract::THINKING_LEVELS`]).
 #[derive(Clone)]
 pub struct ThinkMenu {
     pub selected: usize,
@@ -2900,7 +2900,7 @@ impl Chat {
     fn set_think_level(&mut self, arg: &str) {
         let level = if arg == "off" {
             None
-        } else if crate::api::types::THINKING_LEVELS.contains(&arg) {
+        } else if crate::api::contract::THINKING_LEVELS.contains(&arg) {
             Some(arg.to_string())
         } else {
             self.push_slash_output(
@@ -6896,7 +6896,7 @@ mod tests {
     fn think_levels_match_api_levels() {
         assert_eq!(THINK_LEVELS[0].0, "off");
         let menu: Vec<&str> = THINK_LEVELS[1..].iter().map(|(n, _)| *n).collect();
-        assert_eq!(menu, crate::api::types::THINKING_LEVELS.to_vec());
+        assert_eq!(menu, crate::api::contract::THINKING_LEVELS.to_vec());
     }
 
     /// Footer badge: shows `model · think level` when a level is set; off shows only the model name.

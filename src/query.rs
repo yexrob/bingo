@@ -8,9 +8,8 @@ use thiserror::Error;
 use tokio::sync::watch;
 
 use crate::api::client::{AssistantAccumulator, Client, ClientError};
-use crate::api::types::{
-    ContentBlock, Message, Request, StreamEvent, SystemBlock, Role, DEFAULT_MAX_TOKENS,
-};
+use crate::api::contract::{NeutralRequest, StreamEvent, SystemBlock, ThinkingLevel};
+use crate::api::types::{ContentBlock, Message, Role, DEFAULT_MAX_TOKENS};
 use crate::budget::MAX_RESULT_CHARS;
 use crate::compact::{check_and_compact, TokenGate};
 use crate::error::ErrorCode;
@@ -359,15 +358,14 @@ async fn one_turn(
 ) -> Result<Turn, QueryError> {
     let model = session.runtime.model.borrow().clone();
     let thinking = session.runtime.thinking.borrow().clone();
-    let request = Request {
+    let request = NeutralRequest {
         model,
         max_tokens: DEFAULT_MAX_TOKENS,
         system: session.system.clone(),
         messages: messages.to_vec(),
         tools: tool_params(tools),
         stream: true,
-        thinking: crate::api::types::thinking_param(thinking.as_deref()),
-        output_config: crate::api::types::effort_param(thinking.as_deref()),
+        thinking: ThinkingLevel::parse(thinking.as_deref()),
     };
     // The connect phase is also interruptible (Esc gives up immediately on a hanging/
     // retrying connection, without waiting for output to start).
@@ -388,11 +386,11 @@ async fn one_turn(
                 return Ok(aborted_turn(&acc));
             }
             tokio::select! {
-                stream = session.client.stream(&request) => Box::pin(stream?),
+                stream = session.client.stream(&request) => stream?,
                 _ = cancel_requested(cancel) => return Ok(aborted_turn(&acc)),
             }
         }
-        None => Box::pin(session.client.stream(&request).await?),
+        None => session.client.stream(&request).await?,
     };
     let mut tool_uses = Vec::new();
     let mut aborted = false;

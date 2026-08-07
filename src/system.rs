@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::api::types::SystemBlock;
+use crate::api::contract::SystemBlock;
 
 /// Static base prompt (multi-section condensed version).
 const BASE_PROMPT: &str = "\
