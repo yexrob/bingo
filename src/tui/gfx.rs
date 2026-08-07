@@ -956,25 +956,4 @@ mod tests {
             .unwrap();
         out
     }
-
-    /// End-to-end probe: prints what `detect_image_cap` decides in the
-    /// CURRENT environment. Ignored by default — it performs live terminal
-    /// I/O (raw mode + passthrough query) that can hang in headless/harness
-    /// contexts; run on demand inside a focused tmux pane:
-    /// `cargo test debug_detect_in_current_env -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn debug_detect_in_current_env() {
-        let probe = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(detect_image_cap());
-        eprintln!(
-            "DEBUG image_cap={:?} warning={:?} TERM={:?} TERM_PROGRAM={:?} TMUX={:?}",
-            probe.cap,
-            probe.warning,
-            std::env::var("TERM").ok(),
-            std::env::var("TERM_PROGRAM").ok(),
-            std::env::var_os("TMUX"),
-        );
-    }
 }
