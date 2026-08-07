@@ -130,10 +130,14 @@ fn project_skills_dirs(cwd: &Path) -> Vec<PathBuf> {
 }
 
 fn load_dir(dir: &Path, out: &mut Vec<Skill>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(mut entries) = std::fs::read_dir(dir)
+        .map(|rd| rd.flatten().collect::<Vec<_>>())
+    else {
         return;
     };
-    for entry in entries.flatten() {
+    // readdir 顺序不保证（APFS 任意序）：按名排序，让清单可预期。
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
         if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
@@ -336,20 +340,61 @@ fn listing_entry(skill: &Skill) -> String {
     format!("- {}: {desc}", skill.name)
 }
 
-/// 预算内按序生成清单；超预算即停。
+/// 预算内按序生成清单；预算不足时完整条目放不下的技能
+/// 退化为 `- name` 纯名单行——技能名必须全量可见，
+/// 否则模型会误判技能不存在（如上百个技能时 meye 被截掉）。
+/// 名字的占用先预留，完整条目只吃剩余预算；预算小到名字
+/// 都放不下时才尽力截断（硬预算）。
 pub fn format_listing(skills: &[Skill], budget: usize) -> String {
     let mut out = String::new();
+    // 全部名字的纯名单行占用（`- name\n`）。
+    let names_min = skills
+        .iter()
+        .map(|s| s.name.len() + 3)
+        .sum::<usize>()
+        .saturating_sub(1);
+    if names_min > budget {
+        for skill in skills {
+            let entry = format!("- {}", skill.name);
+            if !fits_in(&out, &entry, budget) {
+                break;
+            }
+            push_line(&mut out, &entry);
+        }
+        return out;
+    }
+    let desc_cap = budget - names_min;
+    let mut listed: Vec<&str> = Vec::new();
     for skill in skills {
         let entry = listing_entry(skill);
-        if !out.is_empty() && out.len() + entry.len() + 1 > budget {
+        if fits_in(&out, &entry, desc_cap) {
+            listed.push(skill.name.as_str());
+            push_line(&mut out, &entry);
+        }
+    }
+    for skill in skills {
+        if listed.contains(&skill.name.as_str()) {
+            continue;
+        }
+        let entry = format!("- {}", skill.name);
+        if !fits_in(&out, &entry, budget) {
             break;
         }
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&entry);
+        push_line(&mut out, &entry);
     }
     out
+}
+
+/// 条目能否放入预算；清单为空时首条必放（首条超预算不截断）。
+fn fits_in(out: &str, entry: &str, budget: usize) -> bool {
+    out.is_empty() || out.len() + entry.len() < budget
+}
+
+fn push_line(out: &mut String, entry: &str) {
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(entry);
 }
 
 #[cfg(test)]
@@ -581,6 +626,54 @@ mod tests {
         assert!(listing.contains("…"), "单条超 250 字符截断");
 
         let short = format_listing(&[skill("a", "aa"), skill("b", "bb")], 10);
-        assert_eq!(short, "- a: aa", "超预算即停");
+        assert_eq!(short, "- a: aa", "超预算即停（名字也放不下时）");
+    }
+
+    /// 预算不足时完整条目放不下的技能退化为纯名单行：
+    /// 每个技能名必须出现，否则模型会误判技能不存在。
+    #[test]
+    fn listing_never_drops_skill_names() {
+        let skill = |name: &str, desc: &str| Skill {
+            name: name.into(),
+            description: desc.into(),
+            when_to_use: None,
+            argument_names: vec![],
+            base_dir: PathBuf::new(),
+            content: String::new(),
+        };
+        // 40 个长描述技能：完整条目约 10KB，远超 8000 预算。
+        let skills: Vec<Skill> = (0..40)
+            .map(|i| skill(&format!("skill-{i:02}"), &"d".repeat(300)))
+            .collect();
+        let listing = format_listing(&skills, 8000);
+        for s in &skills {
+            assert!(
+                listing.contains(&format!("- {}", s.name)),
+                "预算不足也不能丢技能名: {}",
+                s.name
+            );
+        }
+        assert!(listing.len() <= 8000, "硬预算仍生效: {}", listing.len());
+        // 完整描述条目在前，纯名单兜底在后。
+        let head = listing.lines().next().unwrap();
+        assert!(head.starts_with("- skill-00: "), "完整条目在前: {head}");
+    }
+
+    /// 同目录技能按名排序：readdir 顺序不保证，清单必须确定性。
+    #[test]
+    fn load_dir_sorts_by_name() {
+        let root = std::env::temp_dir().join(format!("bingo-skills-{}-sort", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        for name in ["zeta", "alpha", "meye"] {
+            write(
+                &home.join(format!(".config/bingo/skills/{name}/SKILL.md")),
+                &format!("---\ndescription: {name} desc\n---\nbody\n"),
+            );
+        }
+        let skills = load_skills(&home, &root);
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "meye", "zeta", "guide"], "按名排序");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
