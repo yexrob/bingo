@@ -376,6 +376,9 @@ pub const IMAGE_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 /// Lifetime of slash transient hints: they disappear from above the input after the timeout (never flushed).
 pub const SLASH_OUTPUT_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+/// Error/usage slash rows live at least this long (G12 floor; they also clear on the
+/// next input, so the user keeps a chance to act).
+pub const SLASH_OUTPUT_ERROR_TTL: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// User message text entering the message flow when AskUserQuestion is declined
 /// (Esc / empty Other submit) — an ordinary message, persistent with the flow.
@@ -823,6 +826,13 @@ pub struct Chat {
     pub slash_lines: Vec<String>,
     /// When the slash output appeared (auto-dismissed by tick timeout).
     pub slash_at: Option<std::time::Instant>,
+    /// Error/usage slash rows (G12/G13): longer TTL, clear on the next input, error color.
+    pub slash_error_lines: Vec<String>,
+    /// When the last error batch was pushed (longer TTL expiry base).
+    pub slash_error_at: Option<std::time::Instant>,
+    /// `/zzz` no-match flag (G9): the dropdown is empty but the input is a bare
+    /// `/`-query — the suggestion area shows one dim hint row instead of a gap.
+    pub slash_no_match: bool,
     /// /exit requested quitting (component layer consumes → system.exit).
     pub exit: bool,
     /// inline: segments of the document prefix already flushed to scrollback — 0 = none, 1 = welcome card,
@@ -1029,6 +1039,9 @@ impl Chat {
             detected_background,
             slash_lines: Vec::new(),
             slash_at: None,
+            slash_error_lines: Vec::new(),
+            slash_error_at: None,
+            slash_no_match: false,
             exit: false,
             flushed_segments: 0,
             tail_start: 0,
@@ -1932,7 +1945,7 @@ impl Chat {
                     .any(|s| s.name == cmd.trim_end())
             {
                 let selected = self.slash_suggestions.get(self.slash_selected).cloned();
-                self.slash_suggestions.clear();
+                self.clear_slash_suggestions();
                 if let Some(s) = selected
                     && self.run_slash(&s.name)
                 {
@@ -2094,11 +2107,28 @@ impl Chat {
         self.dirty = true;
     }
 
+    /// Queues slash error/usage rows (G12): they live longer than success hints
+    /// ([`SLASH_OUTPUT_ERROR_TTL`] floor) and clear on the next input — the user needs
+    /// time to read "what happened + what you can do" (feedback-states §3).
+    fn push_slash_error(&mut self, text: String) {
+        for line in text.lines() {
+            self.slash_error_lines.push(line.to_string());
+        }
+        self.slash_error_at = Some(std::time::Instant::now());
+        self.dirty = true;
+    }
+
+    /// Clears the slash dropdown and its no-match flag together (single lifecycle).
+    fn clear_slash_suggestions(&mut self) {
+        self.slash_suggestions.clear();
+        self.slash_no_match = false;
+    }
+
     /// Slash command dispatch. Returns true = consumed.
     fn run_slash(&mut self, line: &str) -> bool {
         // Any slash run closes the dropdown (Enter on a full input skips submit's clear-menu branch,
         // otherwise suggestion rows like `+ /model …` would linger below the input forever).
-        self.slash_suggestions.clear();
+        self.clear_slash_suggestions();
         let (cmd, arg) = match line.split_once(char::is_whitespace) {
             Some((c, a)) => (c, a.trim()),
             None => (line, ""),
@@ -2140,8 +2170,9 @@ impl Chat {
                     self.start_turn(marker, true);
                     return true;
                 }
-                self.push_slash_output(format!(
-                    "未知命令: /{other}。输入 /help 查看可用命令。"
+                self.push_slash_error(format!(
+                    "[error] code={} msg=未知命令: /{other}。输入 /help 查看可用命令。",
+                    crate::error::SLASH_ERROR_UNKNOWN_COMMAND
                 ))
             }
         }
@@ -2232,7 +2263,7 @@ impl Chat {
             provider_selected: selected,
             models: None,
         });
-        self.slash_suggestions.clear();
+        self.clear_slash_suggestions();
     }
 
     /// Level-one Enter: asynchronously fetches the model list from that provider endpoint (forks the
@@ -2955,9 +2986,10 @@ impl Chat {
         } else if crate::api::types::THINKING_LEVELS.contains(&arg) {
             Some(arg.to_string())
         } else {
-            self.push_slash_output(
-                "用法: /think [off|low|medium|high|xhigh|max]".to_string(),
-            );
+            self.push_slash_error(format!(
+                "[error] code={} msg=用法: /think [off|low|medium|high|xhigh|max]",
+                crate::error::SLASH_ERROR_BAD_ARGUMENT
+            ));
             return;
         };
         let _ = self.session.runtime.thinking_tx.send(level.clone());
@@ -2986,7 +3018,7 @@ impl Chat {
             selected: current,
             current,
         });
-        self.slash_suggestions.clear();
+        self.clear_slash_suggestions();
     }
 
     /// Think level menu keys: ↑↓/1-6 move (wraps), Enter confirms + persists, s = session-only
@@ -3080,7 +3112,7 @@ impl Chat {
     /// shown when the input starts with `/` and has no args; an empty query lists everything (built-ins + skills),
     /// otherwise prefix/substring matching (a simplified generateCommandSuggestions).
     fn update_slash_suggestions(&mut self) {
-        self.slash_suggestions.clear();
+        self.clear_slash_suggestions();
         let input = self.input.trim_end();
         let Some(query) = input.strip_prefix('/') else {
             return;
@@ -3131,6 +3163,8 @@ impl Chat {
         }
         self.slash_suggestions = items.into_iter().take(SLASH_SUGGESTIONS_MAX).collect();
         self.slash_selected = self.slash_selected.min(self.slash_suggestions.len().saturating_sub(1));
+        // G9: a bare `/`-query with zero matches shows one dim hint row, not an empty gap.
+        self.slash_no_match = !q.is_empty() && self.slash_suggestions.is_empty();
     }
 
     /// Dropdown key handling: ↑↓ move the selection, Tab completes (without running), Esc closes.
@@ -3157,7 +3191,7 @@ impl Chat {
                 true
             }
             KeyCode::Esc => {
-                self.slash_suggestions.clear();
+                self.clear_slash_suggestions();
                 true
             }
             _ => false,
@@ -3169,7 +3203,7 @@ impl Chat {
         if let Some(s) = self.slash_suggestions.get(self.slash_selected) {
             self.input = format!("/{} ", s.name);
         }
-        self.slash_suggestions.clear();
+        self.clear_slash_suggestions();
     }
 
     /// Submits the next queued item after a turn (one at a time: a plain message starts
@@ -3710,7 +3744,7 @@ impl Chat {
             return true;
         }
         if !self.slash_suggestions.is_empty() {
-            self.slash_suggestions.clear();
+            self.clear_slash_suggestions();
             return true;
         }
         if self.help_visible {
@@ -3926,6 +3960,12 @@ impl Chat {
     fn after_edit(&mut self) {
         self.history.detach();
         self.update_slash_suggestions();
+        // G12: error/usage rows clear on the next input — the user has acted on them.
+        if !self.slash_error_lines.is_empty() {
+            self.slash_error_lines.clear();
+            self.slash_error_at = None;
+            self.dirty = true;
+        }
     }
 
     /// Records and persists a prompt. A write failure only degrades to in-session history (once,
@@ -4043,7 +4083,7 @@ impl Chat {
             search.hit = Some(hit);
         }
         self.search = Some(search);
-        self.slash_suggestions.clear();
+        self.clear_slash_suggestions();
     }
 
     /// Search-mode keys: typing filters, Ctrl+R takes an older hit, Tab/Esc adopt and keep editing,
@@ -4119,12 +4159,20 @@ impl Chat {
         if self.tick.is_multiple_of(15) {
             self.refresh_entities();
         }
-        // Slash transient hints expire (operation confirmations leave no permanent placeholder).
+        // Slash transient hints expire (operation confirmations leave no permanent placeholder);
+        // error/usage rows live longer (G12) — they additionally clear on the next input.
         if let Some(at) = self.slash_at
             && at.elapsed() > SLASH_OUTPUT_TTL
         {
             self.slash_lines.clear();
             self.slash_at = None;
+            self.dirty = true;
+        }
+        if let Some(at) = self.slash_error_at
+            && at.elapsed() > SLASH_OUTPUT_ERROR_TTL
+        {
+            self.slash_error_lines.clear();
+            self.slash_error_at = None;
             self.dirty = true;
         }
         for msg in &mut self.messages {
@@ -4986,13 +5034,22 @@ impl Chat {
                 )));
             }
         }
+        // Error/usage rows (G12/G13): longer TTL, error color, clear on the next input.
+        if !self.slash_error_lines.is_empty() {
+            for line in &self.slash_error_lines {
+                rows.push(Row::new(Line::styled(
+                    one_line(line, width),
+                    SegStyle::fg(theme.error),
+                )));
+            }
+        }
 
         self.doc = Doc {
             rows,
             click_ranges,
             settled,
             settled_marks,
-            transient_rows: self.slash_lines.len(),
+            transient_rows: self.slash_lines.len() + self.slash_error_lines.len(),
         };
         &self.doc
     }
@@ -5160,6 +5217,16 @@ mod tests {
     /// Test Chat: independent channels + a full Session.
     pub(super) fn test_chat() -> Chat {
         test_chat_home(std::env::temp_dir())
+    }
+
+    /// Joined text of both slash output buckets (success hints + error/usage rows).
+    fn all_slash_text(chat: &Chat) -> String {
+        chat.slash_lines
+            .iter()
+            .chain(&chat.slash_error_lines)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Segments covered by the latest settled checkpoint (checkpoint-equivalent read of the old aggregate field).
@@ -5905,8 +5972,9 @@ mod tests {
         chat.input = "/nope".to_string();
         chat.submit();
         assert!(
-            chat.slash_lines.iter().any(|l| l.contains("未知命令")),
-            "{joined}"
+            chat.slash_error_lines.iter().any(|l| l.contains("未知命令")),
+            "未知命令进错误行: {:?}",
+            chat.slash_error_lines
         );
     }
 
@@ -6304,9 +6372,71 @@ mod tests {
         let mut chat = test_chat();
         chat.input = "/nope-skill".to_string();
         chat.submit();
-        let joined = chat.slash_lines.join("\n");
-        assert!(joined.contains("未知命令: /nope-skill"), "{joined}");
+        let joined = all_slash_text(&chat);
+        assert!(
+            joined.contains("未知命令: /nope-skill"),
+            "未知命令指导保留: {joined}"
+        );
+        assert!(
+            joined.contains("code=UNKNOWN_COMMAND"),
+            "G13 稳定错误码: {joined}"
+        );
         assert!(chat.messages.is_empty(), "未知命令不启动回合");
+    }
+
+
+    /// G12 TTL grading: success hints expire after SLASH_OUTPUT_TTL, error/usage rows
+    /// after SLASH_OUTPUT_ERROR_TTL, and error rows clear on the next input.
+    #[test]
+    fn slash_error_rows_have_longer_ttl_and_clear_on_input() {
+        let mut chat = test_chat();
+        chat.push_slash_output("✓ 完成".to_string());
+        chat.push_slash_error("[error] code=BAD_ARGUMENT msg=用法: /think [...]".to_string());
+        assert_eq!(chat.slash_lines.len(), 1);
+        assert_eq!(chat.slash_error_lines.len(), 1);
+
+        // Past the success TTL but inside the error TTL: only the success hint expires.
+        chat.slash_at = Some(std::time::Instant::now() - SLASH_OUTPUT_TTL - std::time::Duration::from_millis(1));
+        chat.tick();
+        assert!(chat.slash_lines.is_empty(), "成功行 2s 过期");
+        assert_eq!(chat.slash_error_lines.len(), 1, "错误行未到期");
+
+        // Past the error TTL: both gone.
+        chat.slash_error_at = Some(std::time::Instant::now() - SLASH_OUTPUT_ERROR_TTL - std::time::Duration::from_millis(1));
+        chat.tick();
+        assert!(chat.slash_error_lines.is_empty(), "错误行 8s 过期");
+
+        // A fresh error clears on the next real input edit (after_edit path).
+        chat.push_slash_error("用法: /think [...]".to_string());
+        assert!(chat.on_key(KeyCode::Char('a'), KeyModifiers::empty()));
+        assert!(chat.slash_error_lines.is_empty(), "下次输入清除错误行");
+    }
+
+    /// G9 no-match hint: a bare `/`-query with zero matches flags the hint; any further
+    /// keystroke (re-filter) or closing clears it.
+    #[test]
+    fn slash_no_match_flags_hint_row() {
+        let mut chat = test_chat();
+        chat.input = "/zzz".to_string();
+        chat.update_slash_suggestions();
+        assert!(chat.slash_suggestions.is_empty());
+        assert!(chat.slash_no_match, "/zzz 无匹配显示提示");
+        // Typing further re-filters: still no match, hint stays.
+        chat.input = "/zzzx".to_string();
+        chat.update_slash_suggestions();
+        assert!(chat.slash_no_match);
+        // A matching prefix clears it.
+        chat.input = "/th".to_string();
+        chat.update_slash_suggestions();
+        assert!(!chat.slash_suggestions.is_empty());
+        assert!(!chat.slash_no_match, "有匹配不显示提示");
+        // Clearing the input (any path that re-runs the filter) removes the hint.
+        chat.input = "/zzz".to_string();
+        chat.update_slash_suggestions();
+        assert!(chat.slash_no_match);
+        chat.input = String::new();
+        chat.update_slash_suggestions();
+        assert!(!chat.slash_no_match, "空输入不显示提示");
     }
 
     /// P1-E：/provider 列表 key 脱敏——短 key（≤4 字符）不追加省略号。
@@ -6422,8 +6552,11 @@ mod tests {
 
         chat.input = "/think bogus".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
-        assert!(out.contains("用法: /think"), "{out}");
+        let out = chat.slash_error_lines.join("\n");
+        assert!(
+            out.contains("用法: /think") && out.contains("code=BAD_ARGUMENT"),
+            "用法行带稳定错误码: {out}"
+        );
         assert_eq!(
             chat.session.runtime.thinking.borrow().as_deref(),
             None,
@@ -9200,8 +9333,11 @@ mod tests {
             Some("low"),
             "队列中的 slash 命令按命令执行"
         );
-        let out = chat.slash_lines.join("\n");
-        assert!(out.contains("未知命令: /nope"), "未知命令走指导而非发模型: {out}");
+        let out = all_slash_text(&chat);
+        assert!(
+            out.contains("未知命令: /nope") && out.contains("code=UNKNOWN_COMMAND"),
+            "未知命令走指导而非发模型: {out}"
+        );
         assert!(chat.busy, "最后一条普通消息开新回合");
         assert_eq!(chat.messages.last().map(|m| m.role), Some(Role::User));
         assert!(

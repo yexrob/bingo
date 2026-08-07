@@ -13,6 +13,14 @@
 /// degrade to generic).
 pub const GENERIC: &str = "GENERIC";
 
+/// Stable UI-level codes (not Rust error types): slash command errors embed
+/// `[error] code=<CODE> msg=…` in the transient row (design contract §4.5);
+/// qa asserts on `code=` only — copy stays changeable.
+/// Unknown slash command (falls to the guidance line).
+pub const SLASH_ERROR_UNKNOWN_COMMAND: &str = "UNKNOWN_COMMAND";
+/// Invalid slash argument (usage line shown, state unchanged).
+pub const SLASH_ERROR_BAD_ARGUMENT: &str = "BAD_ARGUMENT";
+
 /// Stable error code: `SCREAMING_SNAKE` (e.g. `CONFIG_INVALID`).
 pub trait ErrorCode {
     fn error_code(&self) -> &'static str;
