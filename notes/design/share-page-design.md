@@ -1,83 +1,80 @@
-# bingo share 页面设计（v3.0 · opencode 完全复刻）
+# bingo share 页面设计（v4.0 · Claude Code app 风格）
 
-> 版本：v3.0 · 状态：定稿（**唯一事实源 = `share-page-template.html` v3.0**，本文件为摘要与契约说明）
-> 定位：`bingo share` 子命令导出的自包含 HTML 分享页。**完全复刻 sst/opencode share 页面**（不再只是"参考风格"）：CSS 原样移植、结构用 opencode 同款 `data-component`/`data-slot` 属性、零外部依赖、离线可用、打印友好。
-> 参考源：`opencode-source/`（share.module.css / part.module.css / content-*.module.css / copy-button.module.css / starlight-props.css / part.tsx / content-*.tsx / common.tsx / custom.css 覆盖）。
+> 版本：v4.0 · 状态：定稿（**唯一事实源 = `share-page-template.html` v4.0**，本文件为摘要与契约说明）
+> 定位：`bingo share` 子命令导出的自包含 HTML 分享页。**展现形式参考 Claude Code app（claude.ai/code 桌面应用）**（用户指定方向，替代 v3.x 的 opencode 复刻）。
+> 参考：GitHub issues #48158/#51069 界面描述 + Claude 设计语言 + bingo 既有品牌语义（`--accent:#D77757` 陶土橙同源）。
 
-## 0. 原则
+## 0. 设计原则
 
-1. **复刻 = 移植**：CSS 规则原样保留（仅做模块命名空间化），DOM 结构与 opencode TSX 输出逐一对齐——dev 的 Rust 生成器按模板的结构契约输出，浏览器看到的就是 opencode 的 share 页面。
-2. **零依赖落地**：opencode 用 shiki/marked 做高亮与 markdown——bingo 不引入外部库：代码块输出**纯 `<pre>`**（CSS 已保证观感），markdown 由 Rust 端输出安全 HTML 子集（结构见 §3.3），语法高亮作为 P2（未来可用服务端生成着色 span）。
-3. **渐进增强**：锚点复制链接、复制按钮、结果展开、回到顶部、tab 切换均为 JS 增强；无 JS 时页面完整可读（折叠内容默认展开、锚点跳转原生可用、`.copy-root` hover 显现）。
-4. **四视图保持（三视图为聊天记录形态）**：对话视图 = opencode 消息部件流；**Team = 线程列表**（会话列表心智）、**私聊 = 每代理聊天记录流**、**频道 = 消息流**——三个视图全部是聊天形态，无一表格/名册；bingo 数据语义（成员色/状态/seq/徽标）保留。
+1. **聊天应用观感**：暗色近黑底、消息流居中限宽（800px）、用户右侧暖灰气泡、助手左侧 markdown 流——像一份 Claude Code app 的会话快照，而非终端截图或文档页。
+2. **品牌克制**：陶土橙 `#D77757` 只用于品牌时刻（字标前缀、链接、工具图标、hover、选区）；状态语义用绿/红/橙徽标，不喧宾夺主。
+3. **事实完整**：工具输入 JSON 与结果原样呈现、不截断（PRD A4）；bash 非 command 字段走 `tool-args` 网格。
+4. **无 JS 核心**：数据由 Rust 服务端渲染（全量转义），JS 仅做渐进增强（tab/锚点复制/复制按钮/线程跳转/打印展开）；无 JS 时页面完整可读（折叠内容默认收起但 `<details>` 原生可开）。
+5. **四视图统一**：对话 / Team 线程列表 / 私聊聊天流 / 频道消息流，全部此风格；Team 保持线程列表形态（成员最近消息预览 + 直达私聊）。
 
-## 1. 复刻要点（模板实现对照）
+## 1. 视觉锚点
 
-| 层 | 复刻内容 | 模板实现 |
-|---|---|---|
-| 令牌 | Starlight `--sl-color-*`（浅/深两套）+ opencode custom.css 覆盖（`--color-background/weak/strong`、`--color-text/weak/weaker/strong`、`--color-border/weak`、`--color-icon`）+ share 组件专属（`--sl-color-bg-surface`、`--sl-color-divider`、`--sm/md/lg-tool-width`、`--term-icon`） | `:root` 浅色默认 + `@media (prefers-color-scheme: dark)` 深色（对齐 custom.css body 覆盖）；补 `--sl-color-text-secondary/dimmed`、`--sl-color-border` 别名 |
-| 布局 | 头部（header-title 2.75rem 大标题 + header-stats 统计列表 + header-time）+ 消息流（parts 纵向 0.625rem 间距） | `[data-component="header"]` / `[data-component="parts"]` |
-| 消息行 | 装饰列（18px 锚点：角色图标→hover 变 # 号→复制后变 ✓ + tooltip「Copied」；3px 贯穿竖线 `--sl-color-hairline`）+ 内容列（限宽） | `[data-component="decoration"]`（`[data-slot="anchor"]` 内 3 个 SVG + `[data-slot="tooltip"]`）+ `[data-slot="bar"]` + `[data-component="content"]` |
-| 部件 | user 无框（`user-text` + content-text bg-surface 块）/ assistant 蓝框卡（`assistant-text > assistant-text-markdown` 1px `--sl-color-blue-high` + 4px 圆角 + 0.5rem）/ thinking（tool-title「Thinking」+ `assistant-reasoning` 同款蓝框小卡）/ step-start（provider 大写 + model）/ tool 两段式（`tool-title` 大写名 + 等宽目标 + `tool-args` 网格 + `tool-result` 可展开）/ 错误（`content-error` 红 label + dimmed `[line:col]`）/ bash（`content-bash` 终端窗：三点头「Shell」+ command + output 限 10 行）/ markdown（`content-markdown` 3 行折叠）/ 代码块（`content-code`）/ todos（`data-slot="item"` 状态点） | 全部部件 data-component/data-slot 与 opencode 一致；模块根类 `.part-root/.cm-root/.ct-root/.cc-root/.ce-root/.cb-root/.copy-root` |
-| 复制按钮 | hover 显现、点击复制、2s 变绿 ✓（copy-button.tsx） | `.copy-root` + `*:hover > .copy-root` 显现规则 |
-| 回到顶部 | 固定右下 2.5rem 按钮（scroll-button） | `.scroll-button`，滚动 >200px 显现 |
-| 四视图适配（**全部聊天记录形态**） | **Team** = 线程列表（每成员 part 行：成员色圆点装饰列 + step-start 大写名/状态/def + 最近消息预览 + footer；整行 `data-jump` 直达私聊，锚点复制 `#dm-<agent>`）——选型理由：会话列表 + 详情两级导航是聊天应用标准心智，且完整保留名册语义（def/description/state/消息数）；聚合全员流会丢失名册信息并与对话视图混淆，故不选。**私聊** = 每代理一个 part 块（装饰列 + step-start 头 + `dm-thread` 消息流：`dm-msg` 内 tool-title 风格发送者大写成员色 + content-text，user 靠右，工具调用折叠同对话部件）。**频道** = 每频道 part 流（step-start 头：`◇ #name` + mode chip + 成员 chips；每条消息 = part：装饰列 + tool-title 发送者大写成员色 + `ch-row-seq` 目标位 + content-text，user 右对齐） | 全部复用 opencode 部件语言（part-root/decoration/anchor/bar/step-start/tool-title/content-text），令牌全走 `--sl-color-*`；成员色 `--hue-N` 保留 |
-| 成员色 | bingo 语义保留：`--hue-0..5`（浅色深档 / 暗色浅档两套），main=text-strong、user=text-strong，其余 hash 取色 | `--from/--chip/--dot` 变量注入 |
-
-## 2. 模板文件信息
-
-- **路径**：`notes/design/share-page-template.html`（worktree feat/share）
-- **MD5**：`c626cdfb6844c58aabcd5415f30fd4d6`（v3.1 定稿；v3.0 `09e59e72` / v2.2 `c4a781c5` 已被取代）
-- **规模**：~84KB / ~1500 行（CSS ~1100 行原样移植 + 样例 ~300 行 + JS ~150 行渐进增强）
-- **验证**：headless Chrome 实测（10 parts、12 锚点、7 复制按钮、4 视图、bash Shell 头、screenshot 161KB）；`share-review.js` v3.0 = **47/47 PASS**；零外部引用
-
-## 3. dev 集成契约（Rust 端生成规则）
-
-### 3.1 结构与转义
-
-- 输出 `<html lang="en">` + 本模板 `<style>` 原样内联（CSS 是唯一需要整段搬移的部分）；JS 段可整体内联（渐进增强，不拼接任何数据）。
-- **所有动态文本全量转义**（`& < > " '`）；代码/输出放 `<pre>` 内；图片仅 `data:` URI（media_type 校验 `image/*`）。
-- 数据由 Rust 服务端渲染，JS 不接触数据——无脚本注入面（PRD C 组）。
-
-### 3.2 消息部件映射（对话视图）
-
-| bingo 内容块 | 输出结构（模板照抄） |
+| 锚点 | 决策 |
 |---|---|
-| user 文本 | `<div class="part-root" data-component="part" data-type="text" data-role="user" id="msg-N">` → `[data-component="decoration"]`(anchor 3 SVG + tooltip + bar) → `[data-component="content"]` → `[data-component="user-text"]` → `div.ct-root[data-component="content-text"]` > `pre[data-slot="text"]` + copy-button |
-| assistant 文本 | 同上 data-role="assistant" → `[data-component="assistant-text"]` > `[data-component="assistant-text-markdown"]` > `div.cm-root[data-component="content-markdown"]` > `[data-slot="markdown"]`（Rust markdown→HTML 子集）+ copy-button；末尾可选 `[data-component="content-footer"]`（时间） |
-| thinking | `data-type="reasoning"` → `[data-component="tool"]` > `[data-component="tool-title"]`（name=Thinking）+ `[data-component="assistant-reasoning"]`（button-text data-more + `[data-component="assistant-reasoning-markdown"]` > cm-root） |
-| step-start（可选，会话头） | `data-type="step-start"` → `[data-component="step-start"]` > `[data-slot="provider"]`（大写 provider）+ `[data-slot="model"]` |
-| tool bash | `data-type="tool" data-tool="bash"` → `div.cb-root[data-component="content-bash"]` > `[data-slot="body"]`（`[data-slot="header"]`=Shell + `[data-slot="content"]`：command `pre` + `[data-slot="output"]` div>pre）+ copy-button；**A4 契约**：bash input 中**非 command 字段**（background/timeout 等）渲染为 `[data-component="tool-args"]` 网格（键/值完整呈现，flat 值直出、嵌套 JSON 序列化，不截断）——无额外字段时省略该块（对齐 opencode 常见形态） |
-| tool read/write/fetch | `data-tool="read|write|webfetch"` → `[data-component="tool-title"]`（name 大写 + `[data-slot="target"]` 路径/URL）+ `[data-component="tool-result"]`（button-text data-more + `div.cc-root[data-component="content-code"]` > pre + copy-button） |
-| tool grep/glob/list | 同上，结果用 `ct-root`（data-compact）+ button |
-| 未知工具 fallback | `data-tool="<name>"` → `[data-component="tool-title"]` + `[data-component="tool-args"]`（每参数 3 格：分隔条/键/值，值超 60 字符截断）+ `[data-component="tool-result"]` |
-| tool 错误 | `data-tool="error"` → `div.ce-root[data-component="content-error"]` > `[data-section="content"]` > `pre`：`<span data-color="red" data-marker="label">Error</span>` + 可选 `<span data-color="dimmed">[line:col]</span>` + 消息 |
-| 图片 | `data-type="image"` 可选：`<img src="data:{media_type};base64,{data}">`（alt 必填） |
+| 底色 | 近黑 `#0D0D0F`；表面 `#151518`（工具卡）；代码块 `#1B1B20`；用户气泡暖灰 `#3A3731` |
+| 消息流 | 居中限宽 `--maxw: 800px`；用户气泡 `--bubble-max: 72%` |
+| 用户消息 | **右侧气泡**：暖灰底、圆角 14px（内角 4px）、`You · 时间` 元信息右对齐 |
+| 助手消息 | **左侧 markdown 流**：无气泡，正文/代码块对比清晰（行内代码橙 tint `#E8B08F`） |
+| 工具调用 | **折叠卡**：图标 + 工具名 + 参数摘要 + **状态徽标**（`✓ done` 绿 / `✗ error` 红 / `◐ running` 橙 + 时长），展开看完整 input/output |
+| thinking | 折叠块：灰色斜体摘要（`∴ Thinking · 88 tokens`），正文灰斜体 |
+| 顶栏 | sticky：品牌 `▸ bingo` + 会话标题 + 元信息（项目/模型/时间/模式）+ 四视图 tabs |
+| 字体 | 正文系统无衬线；代码/工具名/seq/元信息等宽 |
+| 品牌 | 陶土橙 `#D77757` 克制使用；状态绿 `#4EBA65` / 红 `#FF6B80` / 进行中橙 `#F0A05A` |
 
-### 3.3 markdown 输出规范（`[data-slot="markdown"]` 内）
+## 2. 令牌（摘要，完整见模板 `:root`）
 
-Rust 端输出安全 HTML 子集，样式已内置：`p / ul,ol,li / h1-h6 / strong / code（行内加反引号装饰）/ pre（代码块）/ table,th,td / blockquote / hr / a`。链接仅 http/https/mailto 放行并 `target="_blank"`。不做高亮（纯 pre），不做外部字体。
+```css
+:root {
+  --bg:#0D0D0F; --surface:#151518; --surface-2:#1B1B20;
+  --bubble:#3A3731; --bubble-text:#F2F0EC;
+  --hairline:#26262B; --hairline-strong:#36363D;
+  --text:#EDEBE7; --dim:#A8A39B; --faint:#77726A; --ink:#0D0D0F;
+  --accent:#D77757; --green:#4EBA65; --red:#FF6B80; --gold:#FFC107; --running:#F0A05A;
+  --hue-0..5（暗色档成员色）;
+  --maxw:800px; --bubble-max:72%;
+}
+```
+对比度：正文 15.9:1、dim 7.2:1、accent 6.2:1、语义色全 ≥4.5:1（打印模式另行换算）。
 
-### 3.4 四视图（非对话 · 聊天记录形态）
+## 3. 四视图（全部聊天形态）
 
-- 视图容器：`<section class="view" data-view="team|dm|channel" hidden>` + `h2[data-component="view-title"]`；空态 = `<div class="view-empty">— No … —</div>`。
-- **Team**：`div.thread-list > div.part-root.thread-row[data-agent][data-jump="#dm-<agent>"][tabindex][role="link"]`：装饰列锚点（首 SVG = 成员色圆点 `fill="currentColor"` + `style="color:var(--hue-N)"`，href 指向私聊锚点）+ `[data-component="step-start"]`（`[data-slot="provider"]` 大写成员名 + `[data-slot="model"]` 状态 · def · 消息数）+ `ct-root[data-compact]` 最近消息预览 + `[data-component="content-footer"]`。整行点击/Enter 经 JS `data-jump` 直达对应私聊（锚点内点击交给复制逻辑）。
-- **DM**：`div.part-root[data-type="thread"][data-agent][id="dm-<agent>"]`：装饰列 + `[data-component="step-start"]`（provider 大写成员名 / model 状态 · def）+ `div.dm-thread > div.dm-msg`：`[data-component="tool-title"]`（`[data-slot="name"]` 大写成员色发送者）+ `ct-root` 消息体（`dm-user` 类右对齐）；线程内工具调用复用 `[data-component="tool"]`（bash/read 等折叠部件）。
-- **Channels**：`section.ch-block[data-component="channel"][id="channel-<name>"]`：`header.ch-head[data-component="step-start"]`（provider = `◇ #name` / model = mode chip + 成员 chips）+ `div.ch-stream > div.part-root[data-from][id="ch-N"]`：装饰列 + `[data-component="tool-title"]`（`[data-slot="name"]` 大写成员色发送者 + `[data-slot="target"].ch-row-seq` 四位 seq）+ `ct-root` 消息体（`ch-user` 类右对齐）。
+| 视图 | 形态 |
+|---|---|
+| **Conversation** | 消息流：用户右气泡（`.msg-user > .bubble`）/ 助手左 markdown（`.msg-assistant > .content > .md`）+ thinking 折叠 + 工具折叠卡 |
+| **Team** | 线程列表（`.thread-list > .thread`）：圆形头像（成员色）+ 名 + 状态（●◐✗）+ 消息数 + 最近消息预览 + footer（时间 · def）；整行 `data-jump` 直达私聊 |
+| **DM** | 每代理一个聊天流（`.dm-block`）：头部（头像 + 名 + 状态 + def）+ `.dm-flow` 消息流（代理左 / 用户右气泡，发送者成员色） |
+| **Channels** | 每频道消息流（`.ch-block`）：头部（`◇ #name` + mode chip + 成员 chips）+ `.ch-flow` 消息行（seq + 发送者成员色 + 文本，user 右对齐） |
 
-## 4. 评审方法（qa / uiux 引用）
+空态：`— No … —`（`.view-empty`），四视图恒存在。
 
-- **脚本**：`notes/design/share-review.js` v3.0——**47 项断言**（令牌/结构/部件/四视图/语言/转义/自包含/a11y/打印/交互契约），模板自检 **47/47 PASS**；全过退出码 0。
-- **渲染复核**：headless Chrome dump-dom 断言（parts/anchors/copy-buttons/views 计数）+ screenshot 目检。
-- 对照基准 = `share-page-template.html` v3.1（MD5 `c626cdfb…`）。
+## 4. 交互（渐进增强）
 
-## 5. 变更记录
+tab 切换（hash + 1-4 键）、消息锚点复制 `URL#msg-N`（hover 显现 `#`，点击复制变 ✓）、复制按钮（JS 创建于 .code-block/.t-code）、线程行直达私聊、打印展开全部 + 全视图、reduced-motion 全关。
+
+## 5. dev 集成契约（Rust 端生成规则）
+
+- 输出 `<html lang="en">` + 模板 `<style>` 整段内联 + `<script>` 整段内联（JS 不拼接数据）。
+- 全量转义（`& < > " '`）；代码放 `<pre>`；图片仅 `data:` URI。
+- **消息部件映射**：
+  - user：`<article class="msg msg-user" id="msg-N">` > `.msg-meta`（`who=You` + time + anchor `#`）+ `.bubble`（纯文本）
+  - assistant：`.msg-assistant` > `.msg-meta`（who=Assistant + model + time + anchor）+ `.content`：`.md`（markdown HTML 子集）+ `details.think`（summary=Thinking · N tokens）+ `details.tool`（summary：`.t-icon` svg + `.t-name` + `.t-args` 摘要 + `.t-status.ok|.err|.running` 徽标；body：`.t-code`（input/result pre））
+  - bash A4：非 command 字段 → `[data-component="tool-args"]` 网格（或 v4 用 `.t-args` 摘要 + 完整 input pre 保留——**以模板最终实现为准**，input pre 始终含完整 JSON）
+  - Team/DM/Channels 结构见 §3 与模板样例。
+- markdown 子集：p/ul,ol/h1-h6/strong/em/code/pre/table/blockquote/hr/a——样式内置。
+
+## 6. 评审方法
+
+`share-review.js` v4.0：**43 项断言**（令牌/结构/部件/四视图/语言/转义/自包含/a11y/打印/布局契约），模板自检 **43/43 PASS**；headless Chrome DOM 复核（复制按钮数 = .code-block + .t-code 数、气泡/工具卡/线程/消息计数、tab 行为）。
+
+## 7. 变更记录
 
 | 日期 | 版本 | 说明 |
 |---|---|---|
-| 2026-08-07 | v3.1.1 | A4 数据完整性契约补充：bash 非 command 字段 → `tool-args` 网格完整呈现（pm #27 回归发现，模板样例已落地；模板 MD5 `e79b37aa`） |
-| 2026-08-07 | v3.1 | 补充要求并入：Team/私聊/频道三视图全部改为**聊天记录形态**——Team = 线程列表（会话列表心智，data-jump 直达私聊）、私聊 = 每代理 part 聊天流（dm-msg，user 靠右，工具折叠）、频道 = part 消息流（seq/成员徽标保留，user 右对齐）；旧 roster/dm-agent/ch-row 列表样式移除；评审脚本升级 51 项；模板 MD5 `c626cdfb` |
-| 2026-08-07 | v3.0 | **opencode share 完全复刻**：CSS 原样移植（starlight + custom 覆盖 + share/part/content/copy 模块，命名空间化）+ data-component/data-slot 结构 + 部件全集 + 四视图适配 + 渐进增强 JS；评审脚本 47 项；模板定稿 MD5 `09e59e72` |
-| 2026-08-07 | v2.3 | 模板定稿 MD5 c4a781c5；评审记录 D1/D3/D4（已被 v3.0 取代） |
-| 2026-08-07 | v2.2 | a11y 修正：aria-hidden 移至 .line（已被 v3.0 取代） |
-| 2026-08-07 | v2.0 | opencode 参考风格改版（浅色文档底，已被 v3.0 取代） |
+| 2026-08-07 | v4.0 | **Claude Code app 风格**（用户指定，替代 opencode 复刻）：暗色近黑底 + 居中 800px 消息流 + 用户右暖灰气泡 + 助手左 markdown + 工具折叠卡状态徽标 + thinking 灰斜体 + sticky 顶栏 + 四视图聊天形态（Team 线程列表保持）；评审脚本 43 项；模板 MD5 `8c29a17b` |
+| 2026-08-07 | v3.1.1 | opencode 复刻 + A4 契约（已被 v4.0 取代） |
+| 2026-08-07 | v3.1/v3.0 | opencode 完全复刻 + 三视图聊天记录形态（已被 v4.0 取代） |
