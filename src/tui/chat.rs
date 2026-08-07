@@ -752,7 +752,9 @@ pub struct Chat {
     turn_start_tick: u64,
     /// TurnStart 的真实时钟（状态行耗时基准；TurnEnd 清空）。
     turn_started: Option<std::time::Instant>,
-    pub warnings: Vec<String>,
+    /// 非致命警告（时间戳 + 文案）：超过 WARNING_TTL 自动过期，
+    /// 渲染只显示有效条目（push 时顺带清理）。
+    pub warnings: Vec<(std::time::Instant, String)>,
     /// 当前错误态（#18 呈现层）：驱动错误行高亮与全流程级整屏态。
     /// `UiEvent::Error` 到达时记录；复位动作（AC-03 复位四项）清除。
     /// 渲染端按 `level` 分支：Field/Page → 错误行高亮，Full → 整屏错误态。
@@ -862,6 +864,24 @@ pub enum EntityOpen {
 }
 
 impl Chat {
+    /// 非致命警告的展示时限：过期条目不再渲染（push 时顺带清理）。
+    const WARNING_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// 记录一条非致命警告（去重 + 清理过期）。
+    pub(crate) fn push_warning(&mut self, message: String) {
+        self.warnings.retain(|(t, _)| t.elapsed() < Self::WARNING_TTL);
+        if !self.warnings.iter().any(|(_, w)| w == &message) {
+            self.warnings.push((std::time::Instant::now(), message));
+        }
+    }
+
+    /// 当前应显示的警告（无过期条目时 None）。
+    pub fn visible_warning(&self) -> Option<&str> {
+        self.warnings
+            .iter()
+            .find(|(t, _)| t.elapsed() < Self::WARNING_TTL)
+            .map(|(_, w)| w.as_str())
+    }
     pub fn new(
         session: Arc<Session>,
         events: mpsc::UnboundedSender<UiEvent>,
@@ -1062,10 +1082,7 @@ impl Chat {
                     }
                     None => {
                         self.images.remove(&url);
-                        let warning = format!("图片加载失败: {url}");
-                        if !self.warnings.iter().any(|w| w == &warning) {
-                            self.warnings.push(warning);
-                        }
+                        self.push_warning(format!("图片加载失败: {url}"));
                     }
                 }
                 // 缓存版本递增：渲染器逐块缓存与 reply_cache 一并失效。
@@ -1570,9 +1587,7 @@ impl Chat {
                 self.submit_queued();
             }
             UiEvent::Warning(message) => {
-                if !self.warnings.iter().any(|w| w == &message) {
-                    self.warnings.push(message);
-                }
+                self.push_warning(message);
             }
             UiEvent::SlashOutput(message) => {
                 self.push_slash_output(message);
@@ -7937,7 +7952,7 @@ mod tests {
             meta: None,
         });
         assert!(!chat.images.contains_key("a.png"), "失败移除缓存");
-        assert!(chat.warnings.iter().any(|w| w.contains("a.png")), "警告提示");
+        assert!(chat.warnings.iter().any(|(_, w)| w.contains("a.png")), "警告提示");
     }
 
     #[test]

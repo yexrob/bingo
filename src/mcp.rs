@@ -38,6 +38,10 @@ pub struct ServerConnection {
     tools: Vec<McpToolModel>,
 }
 
+/// 单个服务器连接超时：坏服务器（握手挂起）最多占后台任务几秒，
+/// 绝不阻塞回合输入。超时按失败记录，/mcp reconnect 手动重试。
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// MCP 服务器管理器：session 级连接缓存，
 /// 懒连接 + 复用，失败记录（不自动重试，/mcp reconnect 手动），
 /// 禁用名单（enable/disable 立即生效）。
@@ -46,6 +50,12 @@ pub struct McpManager {
     disabled: HashSet<String>,
     connections: HashMap<String, ServerConnection>,
     failures: HashMap<String, String>,
+    /// 后台连接进行中（防并发回合重复 spawn；不挡执行者本身）。
+    connecting: HashSet<String>,
+    /// 已向 UI 报告过的失败（后台连接失败延迟到下一回合报告，每服务器一次）。
+    reported: HashSet<String>,
+    /// 单个服务器连接超时（默认 5s；测试可缩短）。
+    connect_timeout: std::time::Duration,
 }
 
 /// 单个服务器的展示状态。
@@ -67,6 +77,9 @@ impl McpManager {
             disabled,
             connections: HashMap::new(),
             failures: HashMap::new(),
+            connecting: HashSet::new(),
+            reported: HashSet::new(),
+            connect_timeout: CONNECT_TIMEOUT,
         }
     }
 
@@ -105,6 +118,7 @@ impl McpManager {
     }
 
     /// 懒连接：连接全部未连接、未失败、未禁用的服务器。
+    /// connecting 标记只防重复 spawn，不挡执行——调用者即唯一执行者。
     /// 失败记录进 failures（本轮不再重试），返回逐个结果。
     pub async fn connect_all(&mut self) -> Vec<(String, Result<(), String>)> {
         let mut results = Vec::new();
@@ -124,11 +138,59 @@ impl McpManager {
     }
 
     async fn connect_one(&mut self, name: &str) -> Result<(), String> {
-        let result = self.connect_one_inner(name).await;
+        let result = match tokio::time::timeout(self.connect_timeout, self.connect_one_inner(name)).await {
+            Ok(result) => result,
+            Err(_) => Err(format!("连接超时（{}s）", self.connect_timeout.as_secs())),
+        };
         if let Err(detail) = &result {
             self.failures.insert(name.to_string(), detail.clone());
         }
         result
+    }
+
+    /// 待后台连接的服务器名单（未连接、未失败、未禁用、未在进行中）。
+    pub fn needs_connect(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for name in self.configured() {
+            if self.connections.contains_key(&name)
+                || self.disabled.contains(&name)
+                || self.failures.contains_key(&name)
+                || self.connecting.contains(&name)
+            {
+                continue;
+            }
+            names.push(name);
+        }
+        names
+    }
+
+    /// 标记进行中（assemble_tools spawn 前调用；防并发回合重复连接）。
+    pub fn mark_connecting(&mut self, names: &[String]) {
+        for name in names {
+            self.connecting.insert(name.clone());
+        }
+    }
+
+    /// 后台连接结束（成败均已记入 connections/failures），清除进行中标记。
+    pub fn finish_connecting(&mut self, names: &[String]) {
+        for name in names {
+            self.connecting.remove(name);
+        }
+    }
+
+    /// 未报告过的失败 → 展示文案并标记（每服务器一次，直到 disconnect）。
+    pub fn drain_unreported_failures(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        for name in self.configured() {
+            if self.reported.contains(&name) {
+                continue;
+            }
+            if let Some(detail) = self.failures.get(&name) {
+                self.reported.insert(name.clone());
+                out.push(format!("MCP {name}: {detail}"));
+            }
+        }
+        out
     }
 
     async fn connect_one_inner(&mut self, name: &str) -> Result<(), String> {
@@ -209,10 +271,13 @@ impl McpManager {
             })
     }
 
-    /// 断开连接（disable 立即生效；连接缓存与失败记录一并清除）。
+    /// 断开连接（disable 立即生效；连接缓存、失败记录与报告标记一并清除，
+    /// 故 reconnect/disable 后的新失败会再次报告）。
     pub fn disconnect(&mut self, name: &str) {
         self.connections.remove(name);
         self.failures.remove(name);
+        self.connecting.remove(name);
+        self.reported.remove(name);
     }
 
     /// 启用/禁用（禁用立即断开；启用后下一次 connect_all 懒连接生效）。
@@ -617,6 +682,67 @@ mod tests {
         mgr.failures.insert("web".to_string(), "boom".to_string());
         mgr.disconnect("web");
         assert_eq!(mgr.status("web"), McpStatus::NotConnected);
+    }
+
+    /// 待连接名单排除已连接/失败/禁用/进行中的服务器（防重复 spawn）。
+    #[test]
+    fn needs_connect_excludes_done_failed_disabled_inflight() {
+        let mut mgr = McpManager::new(config(), HashSet::new());
+        assert_eq!(mgr.needs_connect(), vec!["files", "web"]);
+
+        mgr.set_enabled("files", false);
+        assert_eq!(mgr.needs_connect(), vec!["web"]);
+
+        mgr.failures.insert("web".to_string(), "boom".to_string());
+        assert!(mgr.needs_connect().is_empty());
+
+        mgr.disconnect("web");
+        mgr.mark_connecting(&["web".to_string()]);
+        assert!(mgr.needs_connect().is_empty(), "进行中不重复派发");
+        mgr.finish_connecting(&["web".to_string()]);
+        assert_eq!(mgr.needs_connect(), vec!["web"]);
+    }
+
+    /// 后台连接失败延迟报告：每服务器只报一次，disconnect 后重置。
+    #[test]
+    fn unreported_failures_drain_once_until_disconnect() {
+        let mut mgr = McpManager::new(config(), HashSet::new());
+        mgr.failures.insert("files".to_string(), "boom".to_string());
+        mgr.failures.insert("web".to_string(), "nope".to_string());
+
+        let first = mgr.drain_unreported_failures();
+        assert_eq!(first.len(), 2, "两条失败都报告");
+        assert!(first.iter().any(|w| w.contains("files") && w.contains("boom")));
+        assert!(mgr.drain_unreported_failures().is_empty(), "只报一次");
+
+        // disconnect 重置报告标记：reconnect 再次失败后可再报告。
+        mgr.disconnect("files");
+        mgr.failures.insert("files".to_string(), "boom".to_string());
+        let again = mgr.drain_unreported_failures();
+        assert_eq!(again.len(), 1, "disconnect 后新失败可再报告");
+        assert!(again[0].contains("files"));
+    }
+
+    /// 握手挂起的服务器：超时按失败记录，不无限阻塞。
+    #[tokio::test]
+    async fn hung_server_times_out_and_records_failure() {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "hung".to_string(),
+            McpServerConfig {
+                command: Some("/bin/sleep".to_string()),
+                args: vec!["10".to_string()],
+                env: HashMap::new(),
+                kind: None,
+                url: None,
+                headers: HashMap::new(),
+            },
+        );
+        let mut mgr = McpManager::new(servers, HashSet::new());
+        mgr.connect_timeout = std::time::Duration::from_millis(200);
+        let results = mgr.connect_all().await;
+        assert!(matches!(results.as_slice(), [(name, Err(detail))] if name == "hung" && detail.contains("连接超时")));
+        assert!(matches!(mgr.status("hung"), McpStatus::Failed { .. }));
     }
 
     #[test]

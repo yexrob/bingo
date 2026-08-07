@@ -114,6 +114,8 @@ when_to_use: >-
    禁用/启用：`/mcp disable|enable [name|all]`
    （禁用名单持久化到 settings.json）。MCP 工具名为 `mcp__<server>__<tool>`，
    权限规则请用全名（transcript 工具行显示为 `◆ server:tool`，仅是显示别名）。
+   连接在后台进行，不阻塞回合输入；连接失败的提示在输入框上方显示约 10 秒后自动消失，
+   详情以 `/mcp` 状态为准。
 4. **权限弹窗/拒绝不符合预期**：`/permissions` 列出当前规则；规则语法
    `Tool(内容)`，`:*` 为前缀通配（如 `Bash(git push:*)`）。Bash 规则按
    shell 操作符（`&&` `;` `|` 等）切成子命令逐段匹配：deny/ask 任一子命令

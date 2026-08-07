@@ -75,18 +75,36 @@ pub async fn assemble_tools(
         )));
     }
     let mcp = {
-        let mut mgr = session.runtime.mcp.lock().await;
-        let results = mgr.connect_all().await;
-        for (name, result) in results {
-            if let Err(detail) = result {
-                on_warning(format!("MCP {name}: {detail}"));
-            }
+        let mgr = session.runtime.mcp.clone();
+        let (tools, warnings, pending) = {
+            let mut guard = mgr.lock().await;
+            let warnings = guard.drain_unreported_failures();
+            let pending = guard.needs_connect();
+            guard.mark_connecting(&pending);
+            let tools = guard.tools();
+            (tools, warnings, pending)
+        };
+        for warning in warnings {
+            on_warning(warning);
         }
-        mgr.tools()
+        if !pending.is_empty() {
+            // 后台连接：回合不等待握手（坏服务器超时后记失败，
+            // 下一回合 assemble 时经 drain_unreported_failures 报告一次）。
+            let quiet = session.quiet;
+            tokio::spawn(async move {
+                let mut guard = mgr.lock().await;
+                let _ = guard.connect_all().await;
+                guard.finish_connecting(&pending);
+                if !quiet {
+                    let count = guard.tools().len();
+                    if count > 0 {
+                        eprintln!("[bingo] connected {count} MCP tools");
+                    }
+                }
+            });
+        }
+        tools
     };
-    if !session.quiet && !mcp.is_empty() {
-        eprintln!("[bingo] connected {} MCP tools", mcp.len());
-    }
     tools.extend(mcp);
     tools
 }
@@ -186,5 +204,91 @@ mod tests {
         });
         let deep = names(assemble_tools(&deep, &mut warn).await);
         assert!(!deep.iter().any(|n| n == "Post"), "深层不入频道: {deep:?}");
+    }
+
+    /// MCP 连接在后台执行：回合不等待握手，失败延迟一回合报告一次。
+    #[tokio::test]
+    async fn mcp_connects_in_background_and_warns_once() {
+        use crate::mcp::McpStatus;
+        use crate::settings::McpServerConfig;
+        let mut session = (*session_with(0, false)).clone();
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "files".to_string(),
+            McpServerConfig {
+                command: Some("/bin/echo".to_string()),
+                args: Vec::new(),
+                env: std::collections::HashMap::new(),
+                kind: None,
+                url: None,
+                headers: std::collections::HashMap::new(),
+            },
+        );
+        session.runtime.mcp = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::mcp::McpManager::new(servers, Default::default()),
+        ));
+        let session = std::sync::Arc::new(session);
+
+        // 第一回合：不等待握手，立即返回（无 MCP 工具），也无警告。
+        let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let snapshot = |warnings: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| {
+            warnings.lock().map(|v| v.clone()).unwrap_or_default()
+        };
+        let mut collect = {
+            let warnings = warnings.clone();
+            move |msg: String| {
+                if let Ok(mut v) = warnings.lock() {
+                    v.push(msg);
+                }
+            }
+        };
+        let first = assemble_tools(&session, &mut collect).await;
+        assert!(!first.iter().any(|t| t.name().starts_with("mcp__")));
+        assert!(snapshot(&warnings).is_empty(), "失败尚未发生");
+
+        // 等后台连接失败落定。
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let failed = {
+                let mgr = session.runtime.mcp.lock().await;
+                matches!(mgr.status("files"), McpStatus::Failed { .. })
+            };
+            if failed {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "后台连接未在期限内完成"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // 第二回合：报告一次失败。
+        let mut collect = {
+            let warnings = warnings.clone();
+            move |msg: String| {
+                if let Ok(mut v) = warnings.lock() {
+                    v.push(msg);
+                }
+            }
+        };
+        let second = assemble_tools(&session, &mut collect).await;
+        assert!(!second.iter().any(|t| t.name().starts_with("mcp__")));
+        let reported = snapshot(&warnings);
+        assert_eq!(reported.len(), 1, "只报一次: {reported:?}");
+        assert!(reported[0].contains("files"), "{}", reported[0]);
+
+        // 第三回合：不再重复。
+        let mut collect = {
+            let warnings = warnings.clone();
+            move |msg: String| {
+                if let Ok(mut v) = warnings.lock() {
+                    v.push(msg);
+                }
+            }
+        };
+        let third = assemble_tools(&session, &mut collect).await;
+        assert!(snapshot(&warnings).len() == 1, "不再重复");
+        assert!(!third.iter().any(|t| t.name().starts_with("mcp__")));
     }
 }

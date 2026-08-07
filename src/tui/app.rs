@@ -346,7 +346,7 @@ fn chrome_rows(chat: &Chat, width: usize, fullscreen: bool) -> Chrome {
     for line in chat.task_lines() {
         rows.push(Row::new(line));
     }
-    if let Some(warning) = chat.warnings.first() {
+    if let Some(warning) = chat.visible_warning() {
         rows.push(Row::new(Line::styled(
             format!("  ⚠ {warning}"),
             SegStyle::fg(theme.warning),
@@ -1071,7 +1071,7 @@ mod tests {
     fn tiny_terminal_keeps_the_prompt_and_footer() {
         let mut chat = chat_at(60, 6);
         chat.busy = true;
-        chat.warnings.push("mcp 连接失败".into());
+        chat.push_warning("mcp 连接失败".to_string());
         let frame = Frame::assemble(&chat, size(60, 6));
         assert_eq!(frame.rows.len(), 4, "height-2 上限");
         let text: Vec<String> = frame.rows.iter().map(row_text).collect();
@@ -1091,7 +1091,7 @@ mod tests {
         assert_eq!(base, 4);
 
         chat.busy = true;
-        chat.warnings.push("mcp 连接失败".into());
+        chat.push_warning("mcp 连接失败".to_string());
         let (tx, _rx) = tokio::sync::oneshot::channel();
         chat.pending_ask = Some((
             crate::ui::PermissionRequest::new("t", "q", vec!["a".into()]),

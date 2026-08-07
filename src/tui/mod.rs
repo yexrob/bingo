@@ -89,7 +89,7 @@ pub async fn run_tui_session(
     chat.image_cap = image_cap;
     // 探测到 kitty 终端但 tmux passthrough 没开等情况：告诉用户怎么开。
     if let Some(warning) = image_probe.warning {
-        chat.warnings.push(warning);
+        chat.push_warning(warning);
     }
 
     enable_raw_mode()?;

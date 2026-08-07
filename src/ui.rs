@@ -94,7 +94,8 @@ pub enum UiEvent {
         meta: Option<crate::tui::gfx::ImageMeta>,
     },
     TurnEnd,
-    /// 非致命警告（如 MCP 连接失败），显示在输入框上方。
+    /// 非致命警告（如 MCP 连接失败），显示在输入框上方，
+    /// 超过 WARNING_TTL（10s）自动过期（渲染端过滤）。
     Warning(String),
     /// slash 命令异步结果（/compact /status /context）：渲染在消息之后。
     SlashOutput(String),
