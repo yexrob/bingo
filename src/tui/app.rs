@@ -159,7 +159,20 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     left.push((hints, theme.inactive));
     let model_name = chat.session.runtime.model.borrow().clone();
     let thinking = chat.session.runtime.thinking.borrow().clone();
-    let model = model_footer_label(&model_name, thinking.as_deref());
+    // `/think` picker preview: while the menu is open the badge shows the browsed
+    // level with a `▸` suffix (would-be state) in the accent colour; committed
+    // badge has no suffix and stays dim.
+    let (model, model_color) = if let Some(menu) = &chat.think_menu {
+        let level = crate::tui::chat::THINK_LEVELS
+            [menu.selected.min(crate::tui::chat::THINK_LEVELS.len() - 1)]
+            .0;
+        (
+            format!("{model_name} · think {level} ▸"),
+            theme.claude,
+        )
+    } else {
+        (model_footer_label(&model_name, thinking.as_deref()), theme.inactive)
+    };
     let provider = chat.session.runtime.provider.borrow().clone();
     let model = if provider == "default" {
         model
@@ -182,7 +195,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
         .saturating_sub(used + text_width(&model) + 2)
         .max(1);
     line.push_styled(" ".repeat(gap), SegStyle::fg(theme.inactive));
-    line.push_styled(model, SegStyle::fg(theme.inactive));
+    line.push_styled(model, SegStyle::fg(model_color));
     Row::new(line)
 }
 
@@ -215,21 +228,66 @@ fn suggestion_rows(
                 .map(|(name, _)| name.chars().count())
                 .max()
                 .unwrap_or(0);
-            return crate::tui::chat::THINK_LEVELS
-                .iter()
-                .enumerate()
-                .map(|(i, (name, desc))| {
-                    let selected = i == think.selected;
-                    let line = crate::tui::markdown::truncate(
-                        &format!(
-                            "{}{name:<name_col$}  {desc}",
-                            if selected { "❯ " } else { "  " }
-                        ),
-                        width.saturating_sub(2),
+            let mut rows = Vec::with_capacity(crate::tui::chat::THINK_LEVELS.len() + 1);
+            for (i, (name, desc)) in crate::tui::chat::THINK_LEVELS.iter().enumerate() {
+                let selected = i == think.selected;
+                let current = i == think.current;
+                let mut line = Line::empty();
+                // Fixed 2-char indent + mark column: ❯ = browse selection (moves),
+                // ● = level in effect (fixed). On overlap ❯ keeps the prefix slot
+                // and ● stays in front of the name.
+                line.push_styled("  ", SegStyle::fg(theme.inactive));
+                if selected {
+                    line.push_styled("❯ ", SegStyle::fg(theme.permission));
+                    line.push_styled(
+                        if current { "● " } else { "  " },
+                        SegStyle::fg(theme.claude),
                     );
-                    row(line, selected)
-                })
-                .collect();
+                } else {
+                    line.push_styled("  ", SegStyle::fg(theme.inactive));
+                    line.push_styled(
+                        if current { "● " } else { "  " },
+                        SegStyle::fg(theme.claude),
+                    );
+                }
+                let name_style = if selected {
+                    theme.permission
+                } else if current {
+                    theme.claude
+                } else {
+                    theme.inactive
+                };
+                // Fixed chrome: 2 indent + mark (≤4 on the overlap row) + 2 separator.
+                let avail = width.saturating_sub(2 + 4 + 2);
+                let name_text = format!("{name:<name_col$}");
+                if avail >= name_text.chars().count() + 2 {
+                    // Normal widths: name and description keep their own styles.
+                    let desc_budget = avail - name_text.chars().count() - 2;
+                    line.push_styled(name_text, SegStyle::fg(name_style));
+                    line.push_styled("  ", SegStyle::fg(theme.inactive));
+                    line.push_styled(
+                        crate::tui::markdown::truncate(desc, desc_budget),
+                        SegStyle::fg(theme.inactive),
+                    );
+                } else {
+                    // Narrow terminals: truncate the whole name+description portion.
+                    line.push_styled(
+                        crate::tui::markdown::truncate(&format!("{name_text}  {desc}"), avail),
+                        SegStyle::fg(name_style),
+                    );
+                }
+                rows.push(Row::new(line));
+            }
+            // G3 hint row (dim affordance, one row; truncated on narrow terminals).
+            let hint = crate::tui::markdown::truncate(
+                "↑↓ 选择 · Enter 确认并保存 · s 仅本次会话 · 1-6 直达 · Esc 取消",
+                width.saturating_sub(2),
+            );
+            rows.push(Row::new(Line::styled(
+                format!("  {hint}"),
+                SegStyle::fg(theme.inactive),
+            )));
+            return rows;
         };
         // `/model` two-level selector: level one `provider`, level two `model`
         // (loading / empty list each take one hint row).
@@ -1199,15 +1257,37 @@ mod tests {
             suggestion_rows(&[], 0, Some(&menu), None, &theme, 80).len(),
             crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5
         );
-        // `/think` menu: one row per level, the selected row carries ❯; the model menu takes priority.
-        let think = ThinkMenu { selected: 1 };
+        // `/think` menu: one row per level + one hint row; `●` marks the in-effect
+        // level, `❯` the browse selection (two separate marks); the model menu takes priority.
+        let think = ThinkMenu { selected: 1, current: 0 };
         let think_rows = suggestion_rows(&[], 0, None, Some(&think), &theme, 80);
-        assert_eq!(think_rows.len(), THINK_LEVELS.len());
+        assert_eq!(think_rows.len(), THINK_LEVELS.len() + 1, "6 档 + 提示行");
         assert!(
-            row_text(&think_rows[1]).starts_with("❯ low"),
-            "{}",
+            row_text(&think_rows[0]).contains("● off"),
+            "● 标当前生效档: {}",
+            row_text(&think_rows[0])
+        );
+        assert!(
+            row_text(&think_rows[1]).starts_with("  ❯"),
+            "❯ 标浏览选中: {}",
             row_text(&think_rows[1])
         );
+        assert!(
+            row_text(&think_rows[1]).contains("low"),
+            "选中行名: {}",
+            row_text(&think_rows[1])
+        );
+        // Overlap: ❯ keeps the prefix slot, ● stays in front of the name.
+        let overlap = ThinkMenu { selected: 3, current: 3 };
+        let rows = suggestion_rows(&[], 0, None, Some(&overlap), &theme, 80);
+        assert!(
+            row_text(&rows[3]).contains("❯ ● high"),
+            "重叠行双标记: {}",
+            row_text(&rows[3])
+        );
+        // Hint row (last, dim).
+        let hint = row_text(think_rows.last().unwrap());
+        assert!(hint.contains("Esc 取消"), "提示行: {hint}");
         assert_eq!(
             suggestion_rows(&[], 0, Some(&menu), Some(&think), &theme, 80).len(),
             crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5,
@@ -1293,6 +1373,39 @@ mod tests {
         let text = row_text(&footer_row(&chat, 80));
         assert!(text.contains("⏸ plan mode on ·"), "{text}");
         assert!(text.contains("! for shell mode"), "{text}");
+    }
+
+    /// Footer `/think` picker preview: while the menu is open the badge shows the
+    /// browsed level with `▸`; committed badge has no suffix (Esc reverts via the
+    /// same branch — the menu is gone).
+    #[test]
+    fn footer_previews_browsed_think_level() {
+        let mut chat = chat_at(80, 24);
+        let _ = chat
+            .session
+            .runtime
+            .thinking_tx
+            .send(Some("high".to_string()));
+        let text = row_text(&footer_row(&chat, 80));
+        assert!(text.contains("test-model · think high"), "{text}");
+        assert!(!text.contains('▸'), "提交态无预览后缀: {text}");
+
+        // Open the picker (preselects high); browse to xhigh → preview shows xhigh ▸.
+        chat.input = "/think".to_string();
+        chat.submit();
+        let text = row_text(&footer_row(&chat, 80));
+        assert!(text.contains("test-model · think high ▸"), "{text}");
+        chat.on_key(ratatui::crossterm::event::KeyCode::Down, ratatui::crossterm::event::KeyModifiers::empty());
+        let text = row_text(&footer_row(&chat, 80));
+        assert!(
+            text.contains("test-model · think xhigh ▸"),
+            "预览跟随浏览: {text}"
+        );
+        // Esc reverts to the committed badge (no suffix).
+        chat.on_key(ratatui::crossterm::event::KeyCode::Esc, ratatui::crossterm::event::KeyModifiers::empty());
+        let text = row_text(&footer_row(&chat, 80));
+        assert!(text.contains("test-model · think high"), "{text}");
+        assert!(!text.contains('▸'), "Esc 后还原: {text}");
     }
 
     /// Input box: prefix + `▋` fake caret; the real caret lands on the same cell.

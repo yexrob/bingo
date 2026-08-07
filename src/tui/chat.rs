@@ -264,7 +264,10 @@ pub struct ModelMenuModels {
 /// `/think` single-level selector state (level table = off + [`crate::api::types::THINKING_LEVELS`]).
 #[derive(Clone)]
 pub struct ThinkMenu {
+    /// Browsed index (❯): moves with ↑↓/1-6, applied only on Enter/s.
     pub selected: usize,
+    /// In-effect index at open time (●): fixed while browsing; the ● marker reads it.
+    pub current: usize,
 }
 
 /// `/think` selector entries: level name + description (everything past off corresponds one-to-one with
@@ -2909,12 +2912,13 @@ impl Chat {
             self.open_think_menu();
             return;
         }
-        self.set_think_level(arg);
+        self.set_think_level(arg, true);
     }
 
-    /// Sets the thinking level (runtime + persisted). Level table = off + THINKING_LEVELS:
-    /// off sends no parameter; the rest send adaptive thinking + output_config.effort.
-    fn set_think_level(&mut self, arg: &str) {
+    /// Sets the thinking level. Level table = off + THINKING_LEVELS: off sends no
+    /// parameter; the rest send adaptive thinking + output_config.effort.
+    /// `persist = false` applies to the current session only (no settings write).
+    fn set_think_level(&mut self, arg: &str, persist: bool) {
         let level = if arg == "off" {
             None
         } else if crate::api::types::THINKING_LEVELS.contains(&arg) {
@@ -2927,27 +2931,35 @@ impl Chat {
         };
         let _ = self.session.runtime.thinking_tx.send(level.clone());
         let saved = level.as_deref().unwrap_or("off");
-        let cwd = std::path::PathBuf::from(&self.cwd);
-        let _ = crate::settings::upsert_project_settings(
-            &cwd,
-            &serde_json::json!({ "thinkingLevel": saved }),
-        );
-        self.push_slash_output(format!("✓ 思考级别已设置: {saved}"));
+        if persist {
+            let cwd = std::path::PathBuf::from(&self.cwd);
+            let _ = crate::settings::upsert_project_settings(
+                &cwd,
+                &serde_json::json!({ "thinkingLevel": saved }),
+            );
+            self.push_slash_output(format!("✓ 思考级别已设置: {saved}"));
+        } else {
+            self.push_slash_output(format!("✓ 思考级别已设置: {saved}（仅本次会话）"));
+        }
     }
 
     /// Enters the `/think` level selector: preselects the current level (off when unset).
     fn open_think_menu(&mut self) {
         let current = self.session.runtime.thinking.borrow().clone();
         let current = current.as_deref().unwrap_or("off");
-        let selected = THINK_LEVELS
+        let current = THINK_LEVELS
             .iter()
             .position(|(name, _)| *name == current)
             .unwrap_or(0);
-        self.think_menu = Some(ThinkMenu { selected });
+        self.think_menu = Some(ThinkMenu {
+            selected: current,
+            current,
+        });
         self.slash_suggestions.clear();
     }
 
-    /// Think level menu keys: ↑↓ move (wraps), Enter confirms, Esc exits. Returns whether consumed.
+    /// Think level menu keys: ↑↓/1-6 move (wraps), Enter confirms + persists, s = session-only
+    /// (no settings write), Esc exits. Returns whether consumed.
     fn think_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let Some(menu) = &mut self.think_menu else {
             return false;
@@ -2964,10 +2976,28 @@ impl Chat {
                     .unwrap_or(THINK_LEVELS.len() - 1);
                 true
             }
+            // Direct jump: 1 = off … 6 = max (fixed 6-item table, §G10).
+            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(n) = c.to_digit(10)
+                    && n >= 1
+                    && n as usize <= THINK_LEVELS.len()
+                {
+                    menu.selected = n as usize - 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Char('s') if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let selected = menu.selected.min(THINK_LEVELS.len() - 1);
+                self.think_menu = None;
+                self.set_think_level(THINK_LEVELS[selected].0, false);
+                true
+            }
             KeyCode::Enter => {
                 let selected = menu.selected.min(THINK_LEVELS.len() - 1);
                 self.think_menu = None;
-                self.set_think_level(THINK_LEVELS[selected].0);
+                self.set_think_level(THINK_LEVELS[selected].0, true);
                 true
             }
             KeyCode::Esc => {
@@ -6978,6 +7008,54 @@ mod tests {
         assert_eq!(THINK_LEVELS[0].0, "off");
         let menu: Vec<&str> = THINK_LEVELS[1..].iter().map(|(n, _)| *n).collect();
         assert_eq!(menu, crate::api::types::THINKING_LEVELS.to_vec());
+    }
+
+    /// 1..6 direct jump selects the right row and the digits never reach the input;
+    /// `s` applies session-only (runtime changes, settings.json not written).
+    #[test]
+    fn think_menu_direct_jump_and_session_only() {
+        let home = std::env::temp_dir().join(format!("bingo-think-menu-s-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let mut chat = test_chat_home(home.clone());
+        let _ = chat.session.runtime.thinking_tx.send(Some("off".into()));
+        chat.input = "/think".to_string();
+        chat.submit();
+        let menu = chat.think_menu.as_ref().expect("菜单已打开");
+        assert_eq!(menu.current, 0, "● 记录打开时的生效档");
+        // '3' jumps to medium (off=1, low=2, medium=3); digits are consumed, not typed.
+        assert!(chat.on_key(KeyCode::Char('3'), KeyModifiers::empty()));
+        let menu = chat.think_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THINK_LEVELS[menu.selected].0, "medium", "3 直达 medium");
+        assert_eq!(chat.input, "", "数字键被菜单消费，不进输入框");
+        // '6' wraps-jumps to max; Enter persists.
+        assert!(chat.on_key(KeyCode::Char('6'), KeyModifiers::empty()));
+        let menu = chat.think_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THINK_LEVELS[menu.selected].0, "max", "6 直达 max");
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert_eq!(
+            chat.session.runtime.thinking.borrow().as_deref(),
+            Some("off"),
+            "Esc 不改状态"
+        );
+
+        // `s`: session-only — runtime switches, no settings write.
+        chat.input = "/think".to_string();
+        chat.submit();
+        assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
+        assert!(chat.on_key(KeyCode::Char('s'), KeyModifiers::empty()));
+        assert!(chat.think_menu.is_none(), "s 确认后关闭菜单");
+        assert_eq!(
+            chat.session.runtime.thinking.borrow().as_deref(),
+            Some("low"),
+            "s 切换 runtime"
+        );
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("（仅本次会话）"), "s 输出标注仅本次会话: {out}");
+        assert!(
+            !home.join(".bingo/settings.json").exists(),
+            "s 不写 settings.json"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// Footer badge: shows `model · think level` when a level is set; off shows only the model name.
