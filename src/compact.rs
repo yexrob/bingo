@@ -138,6 +138,8 @@ fn estimate_tokens(system: &[SystemBlock], messages: &[Message]) -> u64 {
                     name.chars().count() + input.to_string().chars().count()
                 }
                 ContentBlock::ToolResult { content, .. } => content.to_string().chars().count(),
+                // 图片块按 base64 长度估算（真实占位大头）。
+                ContentBlock::Image { source } => source.data.chars().count(),
             };
         }
     }

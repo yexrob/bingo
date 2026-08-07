@@ -209,7 +209,7 @@ pub(crate) fn spawn_agent_loop(
                 watch.clone(),
                 run.0,
             );
-            match crate::query::run_query(&session, history, &prompt, &mut ui, None).await {
+            match crate::query::run_query(&session, history, &prompt, &[], &mut ui, None).await {
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     loop_registry.set_live(&name, None);
@@ -542,7 +542,7 @@ impl Tool for AgentTool {
             id,
         );
         let sync_run =
-            crate::query::run_query(&sub_session, Vec::new(), &params.prompt, &mut ui, None)
+            crate::query::run_query(&sub_session, Vec::new(), &params.prompt, &[], &mut ui, None)
                 .await;
         self.session.agents.set_live(&name, None);
         match sync_run {
@@ -827,6 +827,7 @@ mod tests {
             crate::settings::ProviderConfig {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
+                supports_images: None,
             },
         );
         let client = Arc::new(crate::api::client::Client::from_settings(&settings).unwrap());

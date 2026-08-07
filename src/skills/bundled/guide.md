@@ -36,6 +36,11 @@ when_to_use: >-
 - 大段粘贴自动折叠为 `[Pasted text #N +M lines]` 占位，发送时展开真实内容
   （经终端 bracketed paste 事件精确识别；不支持该特性的终端退回按键突发
   启发式，极快连打可能误判，停顿即恢复）。
+- **图片发送**：macOS 下复制图片（截图等）后粘贴（Cmd+V）即挂载为附件，
+  输入框显示 `#[image N]` 占位；拖拽/粘贴图片文件路径（独立成行或
+  `![alt](路径)`）提交时同样挂载。消息历史保留占位文本；当前端点配置
+  `supportsImages`/`sendImages` 时图片以 base64 内容块随文本发给模型
+  （自动压缩到 2000px / ~3.75MB 内），否则只发文本、图片留在本地。
 
 ## 配置指南（settings.json）
 
@@ -48,7 +53,8 @@ when_to_use: >-
 |---|---|---|
 | `apiKey` | string | API key（settings 优先于 `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`）；建议放 user 层，项目层会入库 |
 | `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
-| `providers` | object | 命名 provider（Anthropic 协议）：`{名: {apiKey, apiBaseUrl}}`，`/provider <名>` 切换 |
+| `providers` | object | 命名 provider（Anthropic 协议）：`{名: {apiKey, apiBaseUrl}}`，`/provider <名>` 切换；可选 `supportsImages: true` 表示该端点模型接受图片 |
+| `sendImages` | bool | 默认（default）端点是否把消息框图片附件发给模型（命名 provider 用各自的 `supportsImages`；缺省都不发） |
 | `thinkingLevel` | string | 思考级别：`off` 不发 thinking 参数（兼容 DeepSeek，缺省）；`low`/`medium`/`high` 一律发 `{"type":"adaptive"}` 自适应思考（Claude 5 家族已移除 budget_tokens，级别暂不影响深度） |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto`（跟随终端背景）/ `dark` / `light` |
