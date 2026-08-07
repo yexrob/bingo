@@ -87,10 +87,13 @@ enum Command {
     Share {
         /// Session key: transcript stem (`{slug}-{ts}`) or a matching fragment; defaults to the latest session (/resume semantics)
         session: Option<String>,
-        /// Output file path (default `<session>.html` in the current directory)
+        /// Local mode: keep the file locally, do not upload to the share service
+        #[arg(long)]
+        local: bool,
+        /// Output file path (default `<session>.html` in the current directory; --local only)
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Open the generated page in the system default browser
+        /// Open the generated page in the system default browser (link in upload mode, file in local mode)
         #[arg(long)]
         open: bool,
     },
@@ -121,8 +124,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     // 子命令快路径：share 只需 home（transcript/shares 目录），不碰 settings/API。
-    if let Some(Command::Share { session, output, open }) = cli.command {
-        run_share(&home, session.as_deref(), output, open)?;
+    if let Some(Command::Share { session, local, output, open }) = cli.command {
+        run_share(&home, session.as_deref(), output, local, open).await?;
         return Ok(());
     }
     let project_dir = std::env::current_dir()?;
@@ -333,10 +336,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 /// `bingo share`: resolve the session with /resume semantics → read transcript + share doc →
 /// generate self-contained HTML → print the output path → (optionally) open the browser.
-fn run_share(
+/// `bingo share`: resolve session (/resume semantics) → read transcript + share doc →
+/// generate HTML → upload to the share service by default (link out), or keep local with `--local`.
+/// Upload failure falls back to a local file with a hint.
+async fn run_share(
     home: &Path,
     key: Option<&str>,
     output: Option<PathBuf>,
+    local: bool,
     open: bool,
 ) -> Result<(), crate::share::ShareError> {
     let transcript = crate::share::resolve_transcript(home, key)?;
@@ -352,46 +359,75 @@ fn run_share(
             crate::share::ShareDoc::new(stem.clone())
         }
     };
+    // 旧会话回退：share 文档无 agents/channels（进程启动于 share 合入前）时，
+    // 从主 transcript 推导 Team/DM/频道数据。
+    let doc = if doc.agents.is_empty() && doc.channels.is_empty() {
+        crate::share::derive_share_doc(&stem, &messages)
+    } else {
+        doc
+    };
 
     let html = crate::share_html::render(&doc, &messages);
-    let out = output.unwrap_or_else(|| PathBuf::from(format!("{stem}.html")));
-    let overwritten = out.exists();
-    if let Some(parent) = out.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = out.with_extension("html.tmp");
-    std::fs::write(&tmp, &html)?;
-    std::fs::rename(&tmp, &out)?;
-    println!(
-        "[share] wrote {}{}",
-        out.display(),
-        if overwritten { " (overwritten)" } else { "" }
-    );
-    eprintln!("[share] 注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。");
-    if open {
-        open_in_browser(&out).map_err(crate::share::ShareError::Io)?;
-    }
-    Ok(())
-}
 
-/// Open a file with the system default browser (macOS open / Linux xdg-open / Windows cmd start).
-fn open_in_browser(path: &Path) -> Result<(), std::io::Error> {
-    let mut cmd = if cfg!(target_os = "macos") {
-        let mut c = std::process::Command::new("open");
-        c.arg(path);
-        c
-    } else if cfg!(target_os = "linux") {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(path);
-        c
-    } else {
-        let mut c = std::process::Command::new("cmd");
-        c.arg("/c").arg("start").arg("").arg(path);
-        c
-    };
-    cmd.spawn()?;
+    // 本地模式：写文件（--output 或缺省 <stem>.html），可选打开。
+    if local {
+        let out = output.unwrap_or_else(|| PathBuf::from(format!("{stem}.html")));
+        let overwritten = out.exists();
+        crate::share::write_html_atomic(&out, &html)?;
+        println!(
+            "[share] wrote {}{}",
+            out.display(),
+            if overwritten { " (overwritten)" } else { "" }
+        );
+        eprintln!(
+            "[share] 注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。"
+        );
+        if open {
+            crate::share::open_in_browser(&out.display().to_string())?;
+        }
+        return Ok(());
+    }
+
+    // 上传模式：settings.share.baseUrl（缺省官网基址；服务公开，无需 token）。
+    let project_dir = std::env::current_dir()?;
+    let user_dir = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".config"));
+    let settings = crate::settings::load_settings(&user_dir, &project_dir).unwrap_or_default();
+    let base = settings
+        .share
+        .base_url
+        .unwrap_or_else(|| crate::share::DEFAULT_SHARE_BASE.to_string());
+    let id = crate::share::share_id(&stem);
+    match crate::share::upload_share(&base, &id, &html).await {
+        Ok(url) => {
+            println!("[share] published {url}");
+            eprintln!(
+                "[share] 任何人可公开访问此链接；分享页含完整对话与工具输出（可能含敏感信息），传播前请自行审阅。"
+            );
+            if open {
+                crate::share::open_in_browser(&url)?;
+            }
+        }
+        Err(e) => {
+            // 上传失败回退本地文件 + 提示。
+            eprintln!("[bingo] warning: 上传失败（{e}）；回退本地文件。");
+            let out = output.unwrap_or_else(|| PathBuf::from(format!("{stem}.html")));
+            let overwritten = out.exists();
+            crate::share::write_html_atomic(&out, &html)?;
+            println!(
+                "[share] wrote {}{}",
+                out.display(),
+                if overwritten { " (overwritten)" } else { "" }
+            );
+            eprintln!(
+                "[share] 注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。"
+            );
+            if open {
+                crate::share::open_in_browser(&out.display().to_string())?;
+            }
+        }
+    }
     Ok(())
 }
 

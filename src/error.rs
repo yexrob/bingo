@@ -268,7 +268,7 @@ mod tests {
         use crate::transcript::TranscriptError;
         assert_eq!(TranscriptError::Io(std::io::Error::other("x")).error_code(), "STORAGE_ERROR");
         assert_eq!(TranscriptError::Parse(serde_json::from_str::<()>("x").unwrap_err()).error_code(), "STORAGE_ERROR");
-        // ShareError 全部 5 个 variant 显式枚举（AC-40）。
+        // ShareError 全部 6 个 variant 显式枚举（AC-40）。
         use crate::share::ShareError;
         let share_variants = vec![
             ShareError::Io(std::io::Error::other("x")),
@@ -276,6 +276,7 @@ mod tests {
             ShareError::Transcript(TranscriptError::Io(std::io::Error::other("x"))),
             ShareError::NoSessions,
             ShareError::SessionNotFound("x".into()),
+            ShareError::Upload("boom".into()),
         ];
         assert_stable_codes("share::ShareError", &share_variants);
         for v in &share_variants {

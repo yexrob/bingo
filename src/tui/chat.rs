@@ -202,6 +202,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("model", "显示/切换模型（/model [名称]）"),
     ("resume", "恢复历史会话（/resume [名称或关键词]）"),
     ("rename", "重命名当前会话（/rename [名称]）"),
+    ("share", "导出当前会话为 HTML 分享页（/share [--open]）"),
     ("context", "显示上下文用量"),
     ("status", "显示会话状态（模型/权限/会话/上下文）"),
     ("permissions", "列出/添加权限规则"),
@@ -214,6 +215,11 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("team", "管理项目团队（/team start|status|assign|stop|list）"),
     ("exit", "退出会话"),
 ];
+
+/// `/share` 参数解析：是否请求 --open（浏览器打开）。
+fn parse_share_args(arg: &str) -> bool {
+    arg.split_whitespace().any(|t| t == "--open")
+}
 
 /// Slash dropdown suggestion item (/name + description).
 #[derive(Debug, Clone, PartialEq)]
@@ -2066,6 +2072,7 @@ impl Chat {
             "theme" => self.slash_theme(arg),
             "rename" => self.slash_rename(arg),
             "resume" => self.slash_resume(arg),
+            "share" => self.slash_share(arg),
             "compact" => self.slash_compact(),
             "status" => self.slash_status(),
             "context" => self.slash_context(),
@@ -2398,6 +2405,61 @@ impl Chat {
             "✓ 已切换到会话 {}（{count} 条消息），下一轮回复使用其历史。",
             found.name()
         ));
+    }
+
+    /// `/share`：导出当前会话为自包含 HTML 分享页（/share [--open]）。
+    /// 数据 = 当前 transcript + ShareStore 快照；输出 = 当前目录 `<stem>.html`。
+    fn slash_share(&mut self, arg: &str) {
+        let Some(transcript) = self.session.runtime.transcript.borrow().clone() else {
+            self.push_slash_output("尚无会话可导出（新会话未落盘，先发一条消息）。".to_string());
+            return;
+        };
+        let messages = match transcript.load_messages() {
+            Ok(m) => m,
+            Err(e) => {
+                self.push_slash_output(format!("读取会话失败: {e}"));
+                return;
+            }
+        };
+        let stem = transcript.name();
+        let share_path = crate::share::shares_dir(&self.session.home).join(format!("{stem}.json"));
+        let doc = match crate::share::ShareStore::load_or_create(&share_path) {
+            Ok(store) => store.snapshot(),
+            Err(e) => {
+                self.push_slash_output(format!(
+                    "无法读取 share 文档（{e}）；仅导出对话视图。"
+                ));
+                crate::share::ShareDoc::new(stem.clone())
+            }
+        };
+        // 旧会话回退：无 share 文档时从主 transcript 推导 Team/DM/频道数据。
+        let doc = if doc.agents.is_empty() && doc.channels.is_empty() {
+            crate::share::derive_share_doc(&stem, &messages)
+        } else {
+            doc
+        };
+        let html = crate::share_html::render(&doc, &messages);
+        let out = std::path::PathBuf::from(&self.cwd).join(format!("{stem}.html"));
+        let overwritten = out.exists();
+        if let Err(e) = crate::share::write_html_atomic(&out, &html) {
+            self.push_slash_output(format!("写入失败: {e}"));
+            return;
+        }
+        let mut lines = vec![format!(
+            "✓ 已导出: {}{}",
+            out.display(),
+            if overwritten { "（覆盖）" } else { "" }
+        )];
+        if parse_share_args(arg) {
+            match crate::share::open_in_browser(&out.display().to_string()) {
+                Ok(_) => lines.push("已在浏览器中打开。".to_string()),
+                Err(e) => lines.push(format!("无法打开浏览器: {e}")),
+            }
+        }
+        lines.push(
+            "注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。".to_string(),
+        );
+        self.push_slash_output(lines.join("\n"));
     }
 
     fn slash_compact(&mut self) {
@@ -5789,6 +5851,65 @@ mod tests {
         let current = chat.session.runtime.transcript.borrow().clone().unwrap();
         assert_eq!(current.name(), name_b, "切换到目标会话");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// /share：导出当前会话 HTML 分享页（文件存在、路径输出、覆盖提示）。
+    #[test]
+    fn slash_share_exports_current_session() {
+        let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-share", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        let t = crate::transcript::create(&home, &tmp).unwrap_or_else(|e| panic!("{e}"));
+        let _ = t.append(&crate::api::types::Message::user_text("hi"));
+        let mut chat = test_chat_home(home.clone());
+        let _ = chat.session.runtime.transcript_tx.send(Some(t));
+        chat.input = "/share".to_string();
+        chat.submit();
+        let stem = chat.session.runtime.transcript.borrow().clone().unwrap().name();
+        let joined = chat.slash_lines.join("\n");
+        assert!(joined.contains("已导出"), "{joined}");
+        assert!(joined.contains(&stem), "路径含 stem: {joined}");
+        assert!(joined.contains("注意：此文件包含完整对话"), "隐私警告");
+        // 输出目录 = chat.cwd（test_chat_home 设为 home）。
+        let out = home.join(format!("{stem}.html"));
+        assert!(out.exists(), "产物存在: {}", out.display());
+        let html = std::fs::read_to_string(&out).unwrap_or_else(|e| panic!("{e}"));
+        assert!(html.contains("hi"), "产物含消息文本");
+        assert!(html.contains("data-view=\"conv\""), "产物为 share 页");
+        // 二次导出 → 覆盖提示。
+        chat.input = "/share".to_string();
+        chat.submit();
+        assert!(
+            chat.slash_lines.join("\n").contains("覆盖"),
+            "覆盖提示: {}",
+            chat.slash_lines.join("\n")
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// /share：无 transcript（新会话未落盘）时提示不可导出。
+    #[test]
+    fn slash_share_without_transcript_hints() {
+        let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-noshare", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut chat = test_chat_home(tmp.join("home"));
+        chat.input = "/share".to_string();
+        chat.submit();
+        assert!(
+            chat.slash_lines.join("\n").contains("尚无会话可导出"),
+            "{}",
+            chat.slash_lines.join("\n")
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// /share --open 参数解析（纯逻辑，不触发浏览器）。
+    #[test]
+    fn parse_share_args_flags() {
+        assert!(parse_share_args("--open"));
+        assert!(parse_share_args("  --open  "));
+        assert!(!parse_share_args(""));
+        assert!(!parse_share_args("--output x"));
     }
 
     /// /permissions: lists rules; adding a rule → runtime table + settings.json persistence.

@@ -4,6 +4,7 @@
 //! 原子写：tmp + rename），`bingo share` 读取该文档 + transcript 生成
 //! 自包含 HTML 页面。share 是增强不是契约：存储失败只告警，不阻塞会话。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::agents::AgentState;
-use crate::api::types::Message;
+use crate::api::types::{ContentBlock, Message};
 use crate::channels::{ChannelMessage, ChannelMode};
 use crate::error::ErrorCode;
 use crate::transcript::Transcript;
@@ -29,6 +30,8 @@ pub enum ShareError {
     NoSessions,
     #[error("no transcript matches '{0}'")]
     SessionNotFound(String),
+    #[error("share upload failed: {0}")]
+    Upload(String),
 }
 
 impl ErrorCode for ShareError {
@@ -38,7 +41,8 @@ impl ErrorCode for ShareError {
             | ShareError::Json(_)
             | ShareError::Transcript(_)
             | ShareError::NoSessions
-            | ShareError::SessionNotFound(_) => "STORAGE_ERROR",
+            | ShareError::SessionNotFound(_)
+            | ShareError::Upload(_) => "STORAGE_ERROR",
         }
     }
 }
@@ -210,6 +214,242 @@ impl ShareStore {
     }
 }
 
+/// 原子写文件（tmp + rename；share 输出统一入口，CLI 与 /share 共用）。
+pub fn write_html_atomic(path: &Path, content: &str) -> Result<(), ShareError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("html.tmp");
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// 官网上传服务缺省基址（settings.share.baseUrl 可覆盖）。
+pub const DEFAULT_SHARE_BASE: &str = "https://bingo.ruobin.dev";
+
+/// 分享 id：会话 stem 的 ts 部分 + 6 位随机 [a-z0-9]（无 rand 依赖，
+/// splitmix64 混合时间与计数器）。
+pub fn share_id(stem: &str) -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let ts = stem
+        .rsplit('-')
+        .next()
+        .unwrap_or("0")
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .take(10)
+        .collect::<String>();
+    let ts = if ts.is_empty() { "0".to_string() } else { ts };
+    let mix = |mut z: u64| {
+        z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let n = COUNTER
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .wrapping_add(now);
+    let mut z = mix(n);
+    let mut suffix = String::with_capacity(6);
+    for _ in 0..6 {
+        suffix.push(ALPHABET[(z % 36) as usize] as char);
+        z /= 36;
+    }
+    format!("{ts}{suffix}")
+}
+
+/// 上传 HTML 到官网分享服务（公开，无需 token）：
+/// POST `{base}/share/u/{id}`，body = HTML。
+pub async fn upload_share(base: &str, id: &str, html: &str) -> Result<String, ShareError> {
+    let url = format!("{base}/share/u/{id}");
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .header("Content-Type", "text/html; charset=utf-8")
+        .body(html.to_string())
+        .send()
+        .await
+        .map_err(|e| ShareError::Upload(format!("{e}")))?;
+    if !resp.status().is_success() {
+        return Err(ShareError::Upload(format!("HTTP {}", resp.status())));
+    }
+    Ok(url)
+}
+
+/// 用系统默认浏览器打开目标（文件路径或 URL；macOS open / Linux xdg-open / Windows cmd start）。
+pub fn open_in_browser(target: &str) -> Result<(), ShareError> {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(target);
+        c
+    } else if cfg!(target_os = "linux") {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(target);
+        c
+    } else {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/c").arg("start").arg("").arg(target);
+        c
+    };
+    cmd.spawn()?;
+    Ok(())
+}
+
+/// 从主 transcript 消息推导 agents/channels（旧会话回退：进程启动于 share
+/// 功能合入前、无 share 文档时，导出仍含 Team/DM/频道视图，而非空态）。
+///
+/// 推导规则（尽力而为，发送者身份从 transcript 不可精确还原）：
+/// - `Agent` tool_use → AgentShare 条目（name=实例名或 agent 定义名，
+///   description 取 description 或 prompt 摘要，state=idle，history 空）
+/// - `SendMessage` → 向该 agent 的 history 追加 user 消息
+/// - `AgentControl stop/delete` → state=stopped
+/// - `Channel create` → ChannelShare 元数据（members 含 main/user）
+/// - `Post` → 频道消息（from=main，seq 递增）
+pub fn derive_share_doc(session: &str, messages: &[Message]) -> ShareDoc {
+    let mut doc = ShareDoc::new(session.to_string());
+    let mut agent_index: HashMap<String, usize> = HashMap::new();
+    let mut channel_index: HashMap<String, usize> = HashMap::new();
+    let mut next_agent = 1usize;
+    for msg in messages {
+        for block in &msg.content {
+            let ContentBlock::ToolUse { name, input, .. } = block else {
+                continue;
+            };
+            match name.as_str() {
+                "Agent" => {
+                    let instance = input
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| input.get("agent").and_then(|v| v.as_str()))
+                        .map(str::to_string)
+                        .unwrap_or_else(|| {
+                            let n = next_agent;
+                            next_agent += 1;
+                            format!("agent-{n}")
+                        });
+                    if agent_index.contains_key(&instance) {
+                        continue;
+                    }
+                    let def = input
+                        .get("agent")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let description = input
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| {
+                            input
+                                .get("prompt")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.chars().take(40).collect::<String>())
+                                .unwrap_or_default()
+                        });
+                    agent_index.insert(instance.clone(), doc.agents.len());
+                    doc.agents.push(AgentShare {
+                        name: instance,
+                        def,
+                        description,
+                        state: "idle".to_string(),
+                        history: Vec::new(),
+                    });
+                }
+                "SendMessage" => {
+                    let (Some(agent), Some(message)) = (
+                        input.get("agent").and_then(|v| v.as_str()),
+                        input.get("message").and_then(|v| v.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    if let Some(&idx) = agent_index.get(agent) {
+                        doc.agents[idx].history.push(Message::user_text(message));
+                    }
+                }
+                "AgentControl" => {
+                    let (Some(action), Some(agent)) = (
+                        input.get("action").and_then(|v| v.as_str()),
+                        input.get("agent").and_then(|v| v.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    if matches!(action, "stop" | "delete")
+                        && let Some(&idx) = agent_index.get(agent)
+                    {
+                        doc.agents[idx].state = "stopped".to_string();
+                    }
+                }
+                "Channel" => {
+                    let Some(channel) = input
+                        .get("channel")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim_start_matches('#').to_string())
+                    else {
+                        continue;
+                    };
+                    if input.get("action").and_then(|v| v.as_str()) != Some("create")
+                        || channel.is_empty()
+                        || channel_index.contains_key(&channel)
+                    {
+                        continue;
+                    }
+                    let mode = input
+                        .get("mode")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("serial")
+                        .to_string();
+                    let mut members = vec!["main".to_string(), "user".to_string()];
+                    if let Some(list) = input.get("members").and_then(|v| v.as_array()) {
+                        for m in list {
+                            if let Some(m) = m.as_str()
+                                && m != "main"
+                                && m != "user"
+                                && !members.iter().any(|x| x == m)
+                            {
+                                members.push(m.to_string());
+                            }
+                        }
+                    }
+                    channel_index.insert(channel.clone(), doc.channels.len());
+                    doc.channels.push(ChannelShare {
+                        name: channel,
+                        mode,
+                        members,
+                        messages: Vec::new(),
+                    });
+                }
+                "Post" => {
+                    let (Some(channel), Some(text)) = (
+                        input
+                            .get("channel")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.trim_start_matches('#').to_string()),
+                        input.get("message").and_then(|v| v.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    if let Some(&idx) = channel_index.get(&channel) {
+                        let seq = doc.channels[idx].messages.len() as u64 + 1;
+                        doc.channels[idx].messages.push(ChannelMessage {
+                            seq,
+                            from: "main".to_string(),
+                            text: text.to_string(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    doc
+}
+
 /// 按会话 key 解析 transcript（/resume 语义：子串匹配，最新优先）；
 /// 无 key 取最新会话。未命中时错误信息附可用会话列表（前 5 个，防刷屏）。
 pub fn resolve_transcript(home: &Path, key: Option<&str>) -> Result<Transcript, ShareError> {
@@ -366,6 +606,214 @@ mod tests {
         let parsed: ShareDoc = serde_json::from_str(&content).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(parsed.agents.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn derive_share_doc_from_transcript_tools() {
+        // 构造含 Agent/SendMessage/AgentControl/Channel/Post 的 transcript，
+        // 断言旧会话回退推导出 Team/DM/频道数据。
+        let msgs = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "Agent".into(),
+                        input: serde_json::json!({
+                            "name": "scout",
+                            "agent": "scout",
+                            "description": "调研",
+                            "prompt": "去调研一下"
+                        }),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".into(),
+                        name: "SendMessage".into(),
+                        input: serde_json::json!({"agent": "scout", "message": "再看 B"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t3".into(),
+                        name: "Channel".into(),
+                        input: serde_json::json!({
+                            "action": "create",
+                            "channel": "table",
+                            "members": ["scout"],
+                            "mode": "free"
+                        }),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t4".into(),
+                        name: "Post".into(),
+                        input: serde_json::json!({"channel": "table", "message": "大家好"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t5".into(),
+                        name: "AgentControl".into(),
+                        input: serde_json::json!({"action": "stop", "agent": "scout"}),
+                    },
+                ],
+            },
+        ];
+        let doc = derive_share_doc("proj-1700000000", &msgs);
+        assert_eq!(doc.session, "proj-1700000000");
+        // Agent 条目：name/def/description/state。
+        assert_eq!(doc.agents.len(), 1);
+        assert_eq!(doc.agents[0].name, "scout");
+        assert_eq!(doc.agents[0].def.as_deref(), Some("scout"));
+        assert_eq!(doc.agents[0].description, "调研");
+        // SendMessage → history 追加 user 消息。
+        assert_eq!(doc.agents[0].history.len(), 1);
+        assert!(matches!(
+            &doc.agents[0].history[0],
+            Message { role: Role::User, .. }
+        ));
+        // AgentControl stop → stopped（send 之后）。
+        assert_eq!(doc.agents[0].state, "stopped");
+        // Channel create → 元数据（main/user 自动入席）。
+        assert_eq!(doc.channels.len(), 1);
+        assert_eq!(doc.channels[0].name, "table");
+        assert_eq!(doc.channels[0].mode, "free");
+        assert_eq!(doc.channels[0].members, vec!["main", "user", "scout"]);
+        // Post → 频道消息（from=main，seq 递增）。
+        assert_eq!(doc.channels[0].messages.len(), 1);
+        assert_eq!(doc.channels[0].messages[0].seq, 1);
+        assert_eq!(doc.channels[0].messages[0].from, "main");
+        assert_eq!(doc.channels[0].messages[0].text, "大家好");
+    }
+
+    #[test]
+    fn derive_share_doc_handles_duplicates_and_unknowns() {
+        // 重复 Agent 派生不重复建条目；Post 到未知频道/未知 agent 静默。
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "Agent".into(),
+                    input: serde_json::json!({"name": "w", "prompt": "干活"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "t2".into(),
+                    name: "Agent".into(),
+                    input: serde_json::json!({"name": "w", "prompt": "再干"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "t3".into(),
+                    name: "SendMessage".into(),
+                    input: serde_json::json!({"agent": "ghost", "message": "x"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "t4".into(),
+                    name: "Post".into(),
+                    input: serde_json::json!({"channel": "nope", "message": "y"}),
+                },
+            ],
+        }];
+        let doc = derive_share_doc("s", &msgs);
+        assert_eq!(doc.agents.len(), 1, "重名派生不重复");
+        assert_eq!(doc.agents[0].name, "w");
+        assert_eq!(doc.agents[0].description, "干活", "description 回落 prompt 摘要");
+        assert!(doc.agents[0].history.is_empty(), "未知 agent 的 SendMessage 静默");
+        assert!(doc.channels.is_empty(), "未知频道的 Post 静默");
+        // 无 name/agent 的派生 → 自动编号 agent-1。
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "Agent".into(),
+                input: serde_json::json!({"prompt": "p"}),
+            }],
+        }];
+        let doc = derive_share_doc("s", &msgs);
+        assert_eq!(doc.agents[0].name, "agent-1");
+    }
+
+    #[test]
+    fn share_id_format_has_ts_and_random_suffix() {
+        let id = share_id("proj-1786092819");
+        assert!(id.starts_with("1786092819"), "{id}");
+        let suffix = &id[10..];
+        assert_eq!(suffix.len(), 6, "{id}");
+        assert!(
+            suffix
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "后缀 [a-z0-9]: {id}"
+        );
+        // 同 stem 两次生成不同（计数器混合）。
+        assert_ne!(share_id("proj-1786092819"), share_id("proj-1786092819"));
+    }
+
+    /// mock 上传：本地 TCP 服务器接收 POST，断言请求行/body/无 token 头
+    /// 与返回的链接（服务公开）。
+    #[tokio::test]
+    async fn upload_share_posts_html_without_token() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let mut headers = Vec::new();
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                let trimmed = line.trim().to_string();
+                if trimmed.to_ascii_lowercase().starts_with("content-length:") {
+                    content_length = trimmed
+                        .split_once(':')
+                        .map(|(_, v)| v.trim().parse().unwrap_or(0))
+                        .unwrap_or(0);
+                }
+                headers.push(trimmed);
+            }
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).unwrap();
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            (request_line, headers, String::from_utf8(body).unwrap())
+        });
+        let base = format!("http://{addr}");
+        let url = upload_share(&base, "abc123", "<html>hi</html>")
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(url, format!("{base}/share/u/abc123"));
+        let (request_line, headers, body) = handle.join().unwrap();
+        assert!(
+            request_line.starts_with("POST /share/u/abc123 "),
+            "{request_line}"
+        );
+        assert!(
+            !headers
+                .iter()
+                .any(|h| h.to_ascii_lowercase().starts_with("x-share-token")),
+            "公开服务无 token 头: {headers:?}"
+        );
+        assert!(body.contains("<html>hi</html>"), "{body}");
+    }
+
+    /// 上传失败（HTTP 500）→ Err。
+    #[tokio::test]
+    async fn upload_share_reports_server_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+        });
+        let base = format!("http://{addr}");
+        let err = upload_share(&base, "abc123", "x").await.unwrap_err();
+        assert!(err.to_string().contains("500"), "{err}");
+        handle.join().unwrap();
     }
 
     #[test]
