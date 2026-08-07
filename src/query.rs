@@ -901,7 +901,8 @@ async fn query_loop(
             println!();
             return Ok(QueryOutcome { messages, aborted: true });
         }
-        // 本批工具全部收口：折叠组按批聚合，下一轮模型响应的工具开新组。
+        // 本批工具全部收口：RoundEnd 只标记批次边界（图片预热等），
+        // 折叠组以正文为边界——跨轮次的工具仍在同一折叠组内。
         (ui.on_round_end)();
         if stop_after_tools || is_cancelled(&cancel_rx) {
             return Ok(QueryOutcome {

@@ -702,6 +702,9 @@ pub struct Chat {
     /// 当前 assistant 消息索引。
     pub stream_msg: Option<usize>,
     thinking_buf: String,
+    /// 当前 thinking 段是否开放续写：ToolStart/TextDelta（段边界）后关闭，
+    /// 同一段内的 delta 续写不加段落分隔；新段（工具后的新推理）\n\n 聚合。
+    thinking_seg_open: bool,
     output_tokens: u64,
     pub tick: u64,
     /// TurnStart 时的 tick：运行态 thinking 的相对计时基准。
@@ -901,6 +904,7 @@ impl Chat {
             busy: false,
             stream_msg: None,
             thinking_buf: String::new(),
+            thinking_seg_open: false,
             output_tokens: 0,
             tick: 0,
             turn_start_tick: 0,
@@ -1030,6 +1034,7 @@ impl Chat {
                 // （整屏级 Full 在 error_screen_key 已 dismiss，此处兜底）。
                 self.last_error = None;
                 self.thinking_buf.clear();
+                self.thinking_seg_open = false;
                 self.pending_tools_clear();
                 self.turn_started = Some(std::time::Instant::now());
                 self.messages.push(UiMessage {
@@ -1051,6 +1056,7 @@ impl Chat {
                     stage: thinking_stage(self.messages.len()),
                     done_verb: Some(thinking_done_verb()),
                     start_tick: self.tick,
+                    segments: 1,
                 }));
                 hint.expand_hint = Some("ctrl+o to expand".to_string());
                 if let Some(i) = self.stream_msg {
@@ -1066,6 +1072,21 @@ impl Chat {
                     self.messages[i].text.push_str(&text);
                     if let Some(g) = self.messages[i].groups.last_mut() {
                         g.active = false;
+                    }
+                    // 正文是阶段边界：正文后的 thinking 新开块（不再聚合），
+                    // 运行中的思考块随之收尾（同 ToolStart 的收尾语义）。
+                    self.thinking_buf.clear();
+                    self.thinking_seg_open = false;
+                    for hint in &mut self.messages[i].activities {
+                        if let ActivityKind::Thinking(t) = &mut hint.kind
+                            && t.state == ThinkingState::Running
+                        {
+                            t.state = ThinkingState::Done;
+                            t.duration_ms = self
+                                .tick
+                                .saturating_sub(t.start_tick)
+                                .saturating_mul(33);
+                        }
                     }
                 }
             }
@@ -1103,6 +1124,40 @@ impl Chat {
                         if dup {
                             return;
                         }
+                        // 聚合：正文未打断时（thinking_buf 仍持有本阶段文本），
+                        // 新推理并入最后一个 thinking 块。同段续写（段未关）
+                        // 直接追加；新段（工具/正文之后）空行分隔并计数。
+                        if !self.thinking_buf.is_empty() {
+                            let was_open = self.thinking_seg_open;
+                            if was_open {
+                                self.thinking_buf.push_str(&thinking);
+                            } else {
+                                self.thinking_buf.push_str("\n\n");
+                                self.thinking_buf.push_str(&thinking);
+                            }
+                            self.thinking_seg_open = true;
+                            let buf = self.thinking_buf.clone();
+                            let content = self.render_thinking(&buf);
+                            let merged = self.messages[i]
+                                .activities
+                                .iter_mut()
+                                .rev()
+                                .find(|a| matches!(a.kind, ActivityKind::Thinking(_)));
+                            if let Some(hint) = merged {
+                                if let ActivityKind::Thinking(t) = &mut hint.kind {
+                                    t.state = ThinkingState::Running;
+                                    if !was_open {
+                                        t.segments += 1;
+                                    }
+                                    t.duration_ms = self
+                                        .tick
+                                        .saturating_sub(t.start_tick)
+                                        .saturating_mul(33);
+                                }
+                                hint.set_content(content);
+                            }
+                            return;
+                        }
                         self.thinking_buf = thinking.clone();
                         self.messages[i].activities.retain(|a| {
                             !(matches!(a.kind, ActivityKind::Thinking(_))
@@ -1116,6 +1171,7 @@ impl Chat {
                             stage: thinking_stage(self.messages.len()),
                             done_verb: Some(thinking_done_verb()),
                             start_tick: self.tick,
+                            segments: 1,
                         }));
                         hint.set_content(content);
                         hint.expand_hint = Some("ctrl+o to expand".to_string());
@@ -1146,6 +1202,8 @@ impl Chat {
                         }
                     }
                 }
+                // 工具开始 = 推理段边界：后续 delta 聚合为新段。
+                self.thinking_seg_open = false;
                 let name: &'static str = Box::leak(name.into_boxed_str());
                 let mut hint = Activity::new(ActivityKind::Tool(ToolCall::running(
                     name, "",
@@ -1308,9 +1366,8 @@ impl Chat {
             }
             UiEvent::RoundEnd => {
                 if let Some(i) = self.stream_msg {
-                    if let Some(g) = self.messages[i].groups.last_mut() {
-                        g.active = false;
-                    }
+                    // 折叠组以正文为边界：模型轮次（round）不拆组，thinking
+                    // 也不拆组——正文（TextDelta）与非折叠工具才关组。
                     // Warm the image cache a round early: by TurnEnd the message
                     // settles and flushes, and an image that only starts loading
                     // then would miss the flush (see `message_settled`).
@@ -1388,6 +1445,7 @@ impl Chat {
                 self.busy = false;
                 self.turn_started = None;
                 self.output_tokens = 0;
+                self.thinking_seg_open = false;
                 // 用户中断后不再因后台任务完成自动拉起新回合；
                 // 有排队消息时先让用户的消息走（下面统一提交）。
                 if (self.session.watch.has_wake_notifications()
@@ -5126,9 +5184,10 @@ mod tests {
             .to_string()
     }
 
-    /// 多轮 thinking：工具轮后的 delta 必须开新块，后续 delta 续写到新块。
+    /// 正文未打断时工具轮之间的 thinking 聚合到同一块（段间空行分隔），
+    /// 后续 delta 续写到聚合块。
     #[test]
-    fn tool_turn_thinking_blocks_stay_separate() {
+    fn tool_turn_thinking_blocks_merge_until_text() {
         let mut chat = test_chat();
         chat.apply_turn_start();
         chat.apply_event(UiEvent::ThinkingDelta("plan the fetch".into()));
@@ -5137,13 +5196,32 @@ mod tests {
         chat.apply_event(UiEvent::ThinkingDelta(", summarizing".into()));
 
         let acts = &chat.messages[0].activities;
-        assert_eq!(acts.len(), 3, "thinking + tool + new thinking");
-        let (first, tool, second) = (&acts[0], &acts[1], &acts[2]);
-        assert!(matches!(&first.kind, ActivityKind::Thinking(t) if t.state == ThinkingState::Done));
+        assert_eq!(acts.len(), 2, "thinking merged + tool");
+        let (first, tool) = (&acts[0], &acts[1]);
+        assert!(matches!(&first.kind, ActivityKind::Thinking(t)
+            if t.state == ThinkingState::Running && t.segments == 2));
         assert!(matches!(tool.kind, ActivityKind::Tool(_)));
-        assert_eq!(thinking_text(first), "plan the fetch");
-        assert_eq!(thinking_text(second), "got it, summarizing");
-        assert!(matches!(&second.kind, ActivityKind::Thinking(t) if t.state == ThinkingState::Running));
+        let text = thinking_text(first);
+        assert!(text.contains("plan the fetch"), "first segment: {text}");
+        assert!(text.contains("got it, summarizing"), "merged segment: {text}");
+    }
+
+    /// 正文打断后 thinking 新开块，不再聚合。
+    #[test]
+    fn thinking_after_text_opens_new_block() {
+        let mut chat = test_chat();
+        chat.apply_turn_start();
+        chat.apply_event(UiEvent::ThinkingDelta("plan".into()));
+        chat.apply_event(UiEvent::TextDelta("正文…".into()));
+        chat.apply_event(UiEvent::ThinkingDelta("reflect".into()));
+
+        let acts = &chat.messages[0].activities;
+        assert_eq!(acts.len(), 2, "two thinking blocks");
+        let (first, second) = (&acts[0], &acts[1]);
+        assert!(matches!(&first.kind, ActivityKind::Thinking(t) if t.segments == 1));
+        assert!(matches!(&second.kind, ActivityKind::Thinking(t) if t.segments == 1));
+        assert_eq!(thinking_text(first), "plan");
+        assert_eq!(thinking_text(second), "reflect");
     }
 
     /// 思考完成行（CC SystemTextMessage `✻ Churned for 40s`）渲染在消息末尾：
@@ -6798,8 +6876,10 @@ mod tests {
         assert!(!joined.contains("⎿"), "hint hidden when group done: {joined}");
     }
 
+    /// 折叠组以正文为边界：RoundEnd（模型轮次）与 thinking 都不拆组，
+    /// 跨轮次的工具并入同一组；正文（TextDelta）才开新组。
     #[test]
-    fn round_end_starts_new_group_next_round() {
+    fn group_survives_rounds_and_thinking_until_text() {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
@@ -6824,9 +6904,9 @@ mod tests {
             standalone: false,
         });
         chat.drain_events();
-        assert_eq!(chat.messages[0].groups.len(), 2, "round 2 opens new group");
+        assert_eq!(chat.messages[0].groups.len(), 1, "round 2 joins same group");
         let idx = chat.messages[0].activities.len() - 1;
-        assert_eq!(chat.messages[0].group_of[idx], Some(1));
+        assert_eq!(chat.messages[0].group_of[idx], Some(0));
         let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
@@ -6835,7 +6915,19 @@ mod tests {
             standalone: false,
         });
         chat.drain_events();
-        assert_eq!(chat.messages[0].groups.len(), 2, "same-round Read joins group 2");
+        assert_eq!(chat.messages[0].groups.len(), 1, "same-group Read joins group");
+        // 正文出现：组关闭，后续工具开新组。
+        let _ = chat.events.send(UiEvent::TextDelta("结论…".into()));
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolStart { name: "Grep".into() });
+        chat.drain_events();
+        let _ = chat.events.send(UiEvent::ToolReady {
+            name: "Grep".into(),
+            input: json!({"pattern": "post-text"}),
+            standalone: false,
+        });
+        chat.drain_events();
+        assert_eq!(chat.messages[0].groups.len(), 2, "text opens new group");
         let idx = chat.messages[0].activities.len() - 1;
         assert_eq!(chat.messages[0].group_of[idx], Some(1));
     }

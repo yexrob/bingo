@@ -122,6 +122,9 @@ pub struct Thinking {
     pub done_verb: Option<&'static str>,
     /// 宿主 tick（块级独立计时起点）。
     pub start_tick: u64,
+    /// 聚合的推理段数（正文之间的多个 thinking 段并成一块；
+    /// 折叠行显示 `✻ Thinking · N 段`）。
+    pub segments: usize,
 }
 
 /// 任务生命周期（pending → in_progress → completed）。
@@ -504,14 +507,19 @@ fn expand_hint(act: &Activity) -> Option<&str> {
 }
 
 /// Fold hint for activities that have no result line of their own
-/// (thinking): `… +N lines (ctrl+o to expand)`.
+/// (thinking): `… +N lines (ctrl+o to expand)`; aggregated blocks show
+/// `· N 段 (ctrl+o to expand)`.
 fn fold_tail(act: &Activity) -> Option<String> {
     if act.expanded || act.content.is_empty() {
         return None;
     }
     match &act.kind {
-        ActivityKind::Thinking(_) => {
-            let mut tail = format!("… +{} lines", act.content.len());
+        ActivityKind::Thinking(t) => {
+            let mut tail = if t.segments > 1 {
+                format!("· {} 段", t.segments)
+            } else {
+                format!("… +{} lines", act.content.len())
+            };
             if let Some(hint) = &act.expand_hint {
                 tail.push_str(&format!(" ({hint})"));
             }
@@ -612,6 +620,7 @@ mod tests {
             stage,
             done_verb: None,
             start_tick: 0,
+            segments: 1,
         }));
         if state == ThinkingState::Done {
             h.set_content(vec![Line::plain("reasoning line")]);
@@ -658,6 +667,20 @@ mod tests {
     }
 
     #[test]
+    fn aggregated_thinking_shows_segment_count() {
+        // 聚合块折叠行显示段数；单段保持行数提示。
+        let mut h = thinking("understand", ThinkingState::Done);
+        if let ActivityKind::Thinking(t) = &mut h.kind {
+            t.segments = 3;
+        }
+        let lines = render_lines(&h);
+        assert_eq!(text(&lines[0]), "✻ Thinking · 3 段");
+        let single = thinking("understand", ThinkingState::Done);
+        let lines = render_lines(&single);
+        assert_eq!(text(&lines[0]), "✻ Thinking … +1 lines");
+    }
+
+    #[test]
     fn completion_line_uses_random_verb_and_duration() {
         // `✻ Churned for 40.0s`（随机过去式动词）。
         let t = Thinking {
@@ -666,6 +689,7 @@ mod tests {
             stage: "Churning",
             done_verb: Some("Churned"),
             start_tick: 0,
+            segments: 1,
         };
         let line = thinking_completion_line(&t, &Theme::dark());
         assert_eq!(text(&line), "✻ Churned for 40.0s");
