@@ -39,6 +39,10 @@ pub struct AgentInput {
     #[serde(default)]
     #[schemars(description = "子代理使用的 provider（可选，settings 的 providers 段；缺省继承具名定义/父会话）")]
     provider: Option<String>,
+    /// 子代理思考级别（可选）：off | low | medium | high | xhigh | max。
+    #[serde(default)]
+    #[schemars(description = "子代理思考级别（可选）：off/low/medium/high/xhigh/max；缺省继承具名定义/父会话当前级别")]
+    thinking: Option<String>,
     /// 实例名（可选）：SendMessage/AgentControl 的地址。
     #[serde(default)]
     #[schemars(description = "实例名（可选）：后续 SendMessage/AgentControl 用它寻址；缺省取具名定义名或 agent，重名自动加 -2/-3 后缀")]
@@ -346,6 +350,7 @@ impl AgentTool {
             &self.session,
             params.model.clone(),
             params.provider.clone(),
+            params.thinking.clone(),
             def,
             instance,
         )
@@ -359,6 +364,7 @@ pub(crate) fn build_sub_session(
     parent: &Arc<Session>,
     model: Option<String>,
     provider: Option<String>,
+    thinking: Option<String>,
     def: Option<&AgentDef>,
     instance: &str,
 ) -> Result<Arc<Session>, ToolError> {
@@ -366,6 +372,9 @@ pub(crate) fn build_sub_session(
         .or_else(|| def.and_then(|d| d.model.clone()))
         .unwrap_or_else(|| parent.runtime.model.borrow().clone());
     let provider = provider.or_else(|| def.and_then(|d| d.provider.clone()));
+    let thinking = thinking
+        .or_else(|| def.and_then(|d| d.thinking.clone()))
+        .or_else(|| parent.runtime.thinking.borrow().clone());
     let client = match &provider {
         Some(name) => parent.client.with_provider(name).map_err(ToolError::failed)?,
         None => parent.client.clone(),
@@ -389,6 +398,7 @@ pub(crate) fn build_sub_session(
             .clone(),
     );
     let _ = runtime.provider_tx.send(provider_name);
+    let _ = runtime.thinking_tx.send(thinking);
     Ok(Arc::new(Session {
         client,
         runtime,
@@ -465,7 +475,7 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> String {
-        let mut desc = "派生子代理执行独立任务（深度受限）。默认异步执行：立即返回实例名与任务 id，主 agent 不等待，子代理完成时自动通知；background:false 可同步等待结果；notify_on 条件命中子代理产出内容时也会通知。实例名可寻址：SendMessage 发后续指令（上下文保留），AgentControl 管理（list/stop/delete）。`agent` 参数使用具名定义（预设 system prompt 与模型）。"
+        let mut desc = "派生子代理执行独立任务（深度受限）。默认异步执行：立即返回实例名与任务 id，主 agent 不等待，子代理完成时自动通知；background:false 可同步等待结果；notify_on 条件命中子代理产出内容时也会通知。实例名可寻址：SendMessage 发后续指令（上下文保留），AgentControl 管理（list/stop/delete）。`agent` 参数使用具名定义（预设 system prompt 与模型）；model/provider/thinking 参数可逐实例指定（缺省继承具名定义或父会话）。"
             .to_string();
         if !self.defs.is_empty() {
             desc.push_str("\n\n可用具名定义：");
@@ -857,6 +867,7 @@ mod tests {
             description: None,
             model: None,
             provider: None,
+            thinking: None,
             name: None,
             agent: None,
         }
@@ -868,6 +879,7 @@ mod tests {
             description: format!("{name} 描述"),
             model: Some("def-model".into()),
             provider: Some("ds".into()),
+            thinking: Some("high".into()),
             system: "你是评审。".into(),
             source: crate::agents::AgentDefSource::Unknown,
         }
@@ -876,6 +888,7 @@ mod tests {
     #[test]
     fn sub_session_inherits_model_and_shared_endpoint() {
         let (session, client) = parent_session();
+        let _ = session.runtime.thinking_tx.send(Some("medium".into()));
         let tool = AgentTool::new(session.clone(), Vec::new());
         let sub = tool.build_sub_session(&params("do it"), None, "sub").unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "parent-model");
@@ -885,6 +898,11 @@ mod tests {
         );
         assert_eq!(sub.system.len(), 1, "无定义时继承父 system");
         assert_eq!(sub.system[0].text, "父 system");
+        assert_eq!(
+            sub.runtime.thinking.borrow().as_deref(),
+            Some("medium"),
+            "无显式/定义时继承父会话当前思考级别"
+        );
         // 不指定 provider：共享父端点（切换父 provider 子跟随）。
         client.set_provider("ds").unwrap();
         assert_eq!(
@@ -901,12 +919,18 @@ mod tests {
         let mut p = params("do it");
         p.model = Some("sub-model".into());
         p.provider = Some("ds".into());
+        p.thinking = Some("xhigh".into());
         let sub = tool.build_sub_session(&p, None, "sub").unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "sub-model");
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
         assert_eq!(
             sub.client.current_endpoint(),
             ("sk-ds".to_string(), "https://api.deepseek.com".to_string())
+        );
+        assert_eq!(
+            sub.runtime.thinking.borrow().as_deref(),
+            Some("xhigh"),
+            "显式思考级别生效"
         );
         // fork 独立端点：父会话不受影响。
         assert_eq!(session.client.current_endpoint().0, "sk-parent");
@@ -917,17 +941,28 @@ mod tests {
         let (session, _client) = parent_session();
         let d = def("reviewer");
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
-        // 定义提供 system/model/provider 缺省。
+        // 定义提供 system/model/provider/thinking 缺省。
         let sub = tool.build_sub_session(&params("审查"), Some(&d), "sub").unwrap();
         assert_eq!(sub.system.len(), 1);
         assert_eq!(sub.system[0].text, "你是评审。", "定义正文替换 system");
         assert_eq!(*sub.runtime.model.borrow(), "def-model");
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
+        assert_eq!(
+            sub.runtime.thinking.borrow().as_deref(),
+            Some("high"),
+            "定义提供思考级别缺省"
+        );
         // 显式参数优先于定义。
         let mut p = params("审查");
         p.model = Some("explicit".into());
+        p.thinking = Some("off".into());
         let sub = tool.build_sub_session(&p, Some(&d), "sub").unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "explicit");
+        assert_eq!(
+            sub.runtime.thinking.borrow().as_deref(),
+            Some("off"),
+            "显式思考级别覆盖定义"
+        );
         // resolve_def：未知定义报错并列出可用项。
         let mut p = params("x");
         p.agent = Some("nope".into());
@@ -953,7 +988,7 @@ mod tests {
         let tool = AgentTool::new(session, vec![def("reviewer")]);
         let schema = tool.input_schema();
         let props = schema["properties"].as_object().unwrap();
-        for key in ["model", "provider", "name", "agent"] {
+        for key in ["model", "provider", "thinking", "name", "agent"] {
             assert!(props.contains_key(key), "schema 含 {key}");
         }
         assert!(

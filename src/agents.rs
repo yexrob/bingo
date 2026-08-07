@@ -31,6 +31,8 @@ pub struct AgentDef {
     pub model: Option<String>,
     /// 缺省 provider（同上优先级）。
     pub provider: Option<String>,
+    /// 缺省思考级别（同上优先级；None = 继承父会话当前级别）。
+    pub thinking: Option<String>,
     /// 正文 = 子代理的 system prompt（替换父会话 system；空则继承）。
     pub system: String,
     /// 第一出处（first-wins 去重前的加载层）。
@@ -80,6 +82,7 @@ fn load_dir(dir: &Path, source: AgentDefSource, out: &mut Vec<AgentDef>) {
             description: String::new(),
             model: None,
             provider: None,
+            thinking: None,
             system: body.trim_end().to_string(),
             source,
         };
@@ -89,6 +92,7 @@ fn load_dir(dir: &Path, source: AgentDefSource, out: &mut Vec<AgentDef>) {
                 "description" => def.description = value,
                 "model" => def.model = Some(value),
                 "provider" => def.provider = Some(value),
+                "thinking" => def.thinking = Some(value),
                 _ => {}
             }
         }
@@ -543,7 +547,7 @@ mod tests {
         let home = root.join("home");
         write(
             &home.join(".config/bingo/agents/x.md"),
-            "---\nname: 深潜\ndescription: >-\n  多行\n  描述\nmodel: sub-model\nprovider: ds\n---\nsystem 正文\n",
+            "---\nname: 深潜\ndescription: >-\n  多行\n  描述\nmodel: sub-model\nprovider: ds\nthinking: xhigh\n---\nsystem 正文\n",
         );
         let defs = load_agent_defs(&home, &root);
         assert_eq!(defs.len(), 1);
@@ -551,6 +555,7 @@ mod tests {
         assert_eq!(defs[0].description, "多行 描述", "折叠标量");
         assert_eq!(defs[0].model.as_deref(), Some("sub-model"));
         assert_eq!(defs[0].provider.as_deref(), Some("ds"));
+        assert_eq!(defs[0].thinking.as_deref(), Some("xhigh"));
         assert_eq!(defs[0].system, "system 正文");
         let _ = std::fs::remove_dir_all(&root);
     }

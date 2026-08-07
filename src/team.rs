@@ -355,6 +355,7 @@ pub fn spawn_team(
             session,
             None,
             None,
+            None,
             Some(agent_def),
             &name,
         ) {
@@ -534,6 +535,7 @@ mod tests {
             description: "d".into(),
             model: None,
             provider: None,
+            thinking: None,
             system: "s".into(),
             source: AgentDefSource::Project,
         };
@@ -578,6 +580,7 @@ mod tests {
             description: format!("{name} 描述"),
             model: None,
             provider: None,
+            thinking: None,
             system: format!("你是 {name}。"),
             source: AgentDefSource::Project,
         }
