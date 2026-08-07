@@ -8,13 +8,13 @@ const MEMORY_MAX_LINES: usize = 200;
 const MAX_EXTRACT_PROMPT_CHARS: usize = 60_000;
 
 const EXTRACT_PROMPT: &str = "\
-你是记忆提取器。从下面的 agent 对话中提取值得长期记住的项目事实：
-- 项目结构约定、关键文件路径
-- 架构决策与理由
-- 构建/测试命令与约定
-- 用户偏好与约束
-只输出事实列表，每行一条，不要编号，不要客套话。没有值得记住的事实就输出空。
-对话：
+You are a memory extractor. Extract project facts worth remembering long-term from the agent conversation below:
+- Project structure conventions and key file paths
+- Architecture decisions and their rationale
+- Build/test commands and conventions
+- User preferences and constraints
+Output only a fact list, one per line: no numbering, no pleasantries. Output nothing when no fact is worth remembering.
+Conversation:
 ";
 
 /// memdir directory: ~/.config/bingo/memdir/.
@@ -98,7 +98,7 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
         truncated = true;
     }
     if truncated {
-        prompt.push_str("\n---\n[对话过长，已截断]");
+        prompt.push_str("\n---\n[conversation too long, truncated]");
     }
 
     let request = Request {

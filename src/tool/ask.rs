@@ -10,11 +10,11 @@ use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 struct AskQuestion {
-    #[schemars(description = "要问用户的完整问题，应清晰具体并以问号结尾")]
+    #[schemars(description = "The full question for the user; be clear and specific, end with a question mark")]
     question: String,
-    #[schemars(description = "短标签（≤12 字符），如「认证方式」「技术选型」")]
+    #[schemars(description = "Short label (≤12 chars), e.g. \"Auth method\", \"Tech stack\"")]
     header: Option<String>,
-    #[schemars(description = "可选答案（2-4 个），label 需互不相同", length(min = 2, max = 4))]
+    #[schemars(description = "Possible answers (2-4); labels must be unique", length(min = 2, max = 4))]
     options: Vec<AskOption>,
     #[serde(rename = "multiSelect", default)]
     #[schemars(rename = "multiSelect", description = "多选（暂不支持，传 true 会报错）")]
@@ -24,16 +24,16 @@ struct AskQuestion {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 struct AskOption {
-    #[schemars(description = "选项文本（1-5 词，清楚描述该选择；不要提供 \"Other\" 选项，会自动添加）")]
+    #[schemars(description = "Option text (1-5 words, clearly describing the choice; do not provide an \"Other\" option — it is added automatically)")]
     label: String,
-    #[schemars(description = "选项说明：该选项的含义或选择后的结果（可选）")]
+    #[schemars(description = "Option description: what this option means or what choosing it leads to (optional)")]
     description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 struct AskUserQuestionInput {
-    #[schemars(description = "要问的问题（1-4 个；逐个询问）", length(min = 1, max = 4))]
+    #[schemars(description = "Questions to ask (1-4; asked one by one)", length(min = 1, max = 4))]
     questions: Vec<AskQuestion>,
 }
 
@@ -53,12 +53,12 @@ impl Tool for AskUserQuestionTool {
     }
 
     fn description(&self) -> String {
-        "向用户提出选择题以收集信息、澄清歧义、了解偏好或提供选项供决策。\
-         仅当答案会改变你接下来的做法时才使用——有常规默认值或能从代码库自行核实的事实不要问，\
-         直接选明显的那项并在回复中说明即可。推荐项放第一个并在 label 末尾加 \"(Recommended)\"。\
-         问题 1-4 个、每题选项 2-4 个（模型请求超限会被拒绝，自行拆分）。\
-         不要提供 \"Other\" 选项，用户总是可以选 Other 自定义输入文本。\
-         用户总是可以用 Esc 跳过问题（返回未回答），不要为此反复重问。"
+        "Ask the user multiple-choice questions to gather information, clarify ambiguity, learn preferences, or offer options for a decision.\
+         Use it only when the answer would change what you do next — don't ask when there is a sensible default or a fact you can verify from the codebase yourself;\
+         pick the obvious option and state it in your reply. Put the recommended option first and append \"(Recommended)\" to its label.\
+         1-4 questions, 2-4 options each (the model request is rejected over the limit; split them yourself).\
+         Do not provide an \"Other\" option — the user can always type custom input via Other.\
+         The user can always skip a question with Esc (it returns unanswered); don't re-ask repeatedly for it."
             .to_string()
     }
 

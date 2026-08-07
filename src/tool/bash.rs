@@ -269,26 +269,26 @@ pub fn periodic_bash_interval(command: &str) -> Option<std::time::Duration> {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 struct BashInput {
-    #[schemars(description = "要执行的 shell 命令")]
+    #[schemars(description = "Shell command to execute")]
     command: String,
     #[serde(default)]
-    #[schemars(description = "超时秒数，默认 120")]
+    #[schemars(description = "Timeout in seconds, default 120")]
     timeout: Option<u64>,
     /// Background monitor notification conditions: any of these strings appearing in the output
     /// triggers a notification (e.g. ["ERROR", "panic"]). When unset, common error lines are
     /// detected by default.
     #[serde(default)]
-    #[schemars(description = "后台监控通知条件：任一字样命中输出即通知（不设则默认检测错误行）")]
+    #[schemars(description = "Background notify condition: notify when any of these strings appears in the output (default: detect error lines)")]
     notify_on: Option<Vec<String>>,
     /// Background monitor regex notification condition: a matching output line triggers a notification.
     #[serde(default)]
-    #[schemars(description = "后台监控正则通知条件：输出行匹配即通知")]
+    #[schemars(description = "Background notify regex condition: notify when an output line matches")]
     notify_regex: Option<String>,
     /// Background mode: returns async_launched immediately and notifies when done. Use for
     /// non-dependent/long-running commands (when the result is not needed right away);
     /// defaults to waiting for output synchronously.
     #[serde(default)]
-    #[schemars(description = "后台执行（默认 false）：立即返回任务 id，完成时通知；对结果不立即需要的命令使用")]
+    #[schemars(description = "Run in background (default false): returns a task id immediately and notifies on completion; use for commands whose result is not needed immediately")]
     background: Option<bool>,
 }
 
@@ -313,7 +313,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> String {
-        "在本地 shell 中执行命令，返回 stdout/stderr 与退出码。长时间运行的任务（如 cargo build、npm install、大测试）优先 background:true 异步执行——即使后续需要结果：立即返回 async_launched 并告知用户任务在后台运行，完成通知到达后再继续。周期命令（watch/while/until/for/tail -f）自动转为后台任务，可配 notify_on/notify_regex 条件，输出命中即通知（无需等待命令结束）。需要 TTY 的交互式命令（top/htop/vim/ssh 裸连接等全屏或会话程序）会被拒绝。"
+        "Execute a command in the local shell, returning stdout/stderr and the exit code. Prefer background:true for long-running tasks (e.g. cargo build, npm install, big test suites) — even when you need the result later: it returns async_launched immediately and tells the user the task runs in the background; continue when the completion notification arrives. Periodic commands (watch/while/until/for/tail -f) become background tasks automatically and can be given notify_on/notify_regex conditions — a hit in the output notifies (no need to wait for the command to finish). Interactive commands that need a TTY (top/htop/vim/bare ssh etc. — full-screen or session programs) are rejected."
             .to_string()
     }
 

@@ -16,40 +16,40 @@ const MAX_AGENT_DEPTH: usize = 3;
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AgentInput {
-    #[schemars(description = "子代理的独立任务指令")]
+    #[schemars(description = "Independent task instructions for the subagent")]
     prompt: String,
     /// Background mode: returns async_launched immediately and notifies the main agent when done.
     #[serde(default)]
-    #[schemars(description = "异步执行（默认 true）：立即返回实例名，主 agent 不等待；设 false 则同步等待结果")]
+    #[schemars(description = "Async execution (default true): returns the instance name immediately without waiting; set false to wait synchronously for the result")]
     background: Option<bool>,
     /// Notification condition: notify the main agent when the sub-agent output contains any of these strings.
     #[serde(default)]
-    #[schemars(description = "通知条件：子 agent 产出内容命中任一字样即通知")]
+    #[schemars(description = "Notify condition: notify when the subagent's output contains any of these strings")]
     notify_on: Option<Vec<String>>,
     /// Short task description (optional), shown in the header.
     #[serde(default)]
-    #[schemars(description = "任务简述（可选）")]
+    #[schemars(description = "Short task description (optional)")]
     description: Option<String>,
     /// Sub-agent model (optional): defaults to the named definition or parent session model.
     #[serde(default)]
-    #[schemars(description = "子代理使用的模型（可选，缺省继承具名定义/父会话）")]
+    #[schemars(description = "Model for the subagent (optional; inherits the named definition / parent session by default)")]
     model: Option<String>,
     /// Sub-agent provider (optional, from the `providers` section of settings.json): when set, the sub-agent
     /// uses that provider's endpoint and key (independent of the parent session's current provider).
     #[serde(default)]
-    #[schemars(description = "子代理使用的 provider（可选，settings 的 providers 段；缺省继承具名定义/父会话）")]
+    #[schemars(description = "Provider for the subagent (optional; the providers section of settings; inherits the named definition / parent session by default)")]
     provider: Option<String>,
     /// Sub-agent thinking level (optional): off | low | medium | high | xhigh | max.
     #[serde(default)]
-    #[schemars(description = "子代理思考级别（可选）：off/low/medium/high/xhigh/max；缺省继承具名定义/父会话当前级别")]
+    #[schemars(description = "Thinking level for the subagent (optional): off/low/medium/high/xhigh/max; inherits the named definition / parent session's current level by default")]
     thinking: Option<String>,
     /// Instance name (optional): address used by SendMessage/AgentControl.
     #[serde(default)]
-    #[schemars(description = "实例名（可选）：后续 SendMessage/AgentControl 用它寻址；缺省取具名定义名或 agent，重名自动加 -2/-3 后缀")]
+    #[schemars(description = "Instance name (optional): used to address it later via SendMessage/AgentControl; defaults to the named definition name or agent, with -2/-3 suffixes on name collisions")]
     name: Option<String>,
     /// Named definition (optional): `.bingo/agents/<name>.md` or `~/.config/bingo/agents/<name>.md`.
     #[serde(default)]
-    #[schemars(description = "具名 agent 定义（可选）：使用该定义的 system prompt 与缺省模型/provider")]
+    #[schemars(description = "Named agent definition (optional): uses that definition's system prompt and default model/provider")]
     agent: Option<String>,
 }
 
@@ -479,10 +479,10 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> String {
-        let mut desc = "派生子代理执行独立任务（深度受限）。默认异步执行：立即返回实例名与任务 id，主 agent 不等待，子代理完成时自动通知；background:false 可同步等待结果；notify_on 条件命中子代理产出内容时也会通知。实例名可寻址：SendMessage 发后续指令（上下文保留），AgentControl 管理（list/stop/delete）。`agent` 参数使用具名定义（预设 system prompt 与模型）；model/provider/thinking 参数可逐实例指定（缺省继承具名定义或父会话）。"
+        let mut desc = "Spawn a subagent for an independent task (depth-limited). Async by default: returns the instance name and task id immediately without waiting; a completion notification is injected when the subagent finishes; background:false waits synchronously for the result; notify_on also notifies when the subagent's output matches. The instance name is addressable: SendMessage sends follow-up instructions (context preserved), AgentControl manages (list/stop/delete). The `agent` argument uses a named definition (preset system prompt and model); model/provider/thinking can be set per instance (defaulting to the named definition or parent session)."
             .to_string();
         if !self.defs.is_empty() {
-            desc.push_str("\n\n可用具名定义：");
+            desc.push_str("\n\nAvailable named definitions:");
             for def in &self.defs {
                 desc.push_str(&format!("\n- {}: {}", def.name, def.description));
             }
@@ -600,9 +600,9 @@ impl Tool for AgentTool {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct SendMessageInput {
-    #[schemars(description = "目标子代理实例名（Agent 工具返回的 name；AgentControl list 可查）")]
+    #[schemars(description = "Target subagent instance name (the name returned by the Agent tool; see AgentControl list)")]
     agent: String,
-    #[schemars(description = "要发送的后续指令/消息")]
+    #[schemars(description = "Follow-up instruction/message to send")]
     message: String,
 }
 
@@ -625,7 +625,7 @@ impl Tool for SendMessageTool {
         "SendMessage".to_string()
     }
     fn description(&self) -> String {
-        "向已派生的子代理实例发送后续指令（上下文保留的续话）。实例空闲：立即唤醒续跑并在完成时通知；实例忙碌：排队，当前回合结束自动送达。实例名来自 Agent 工具返回值或 AgentControl list。".to_string()
+        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Idle instance: wakes and resumes immediately, notifying on completion; busy instance: queued and delivered automatically when its current turn ends. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<SendMessageInput>()
@@ -697,10 +697,10 @@ pub enum AgentAction {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AgentControlInput {
-    #[schemars(description = "操作：list 列出全部实例 / stop 停止 / delete 停止并移除")]
+    #[schemars(description = "Action: list all instances / stop one / delete one")]
     action: AgentAction,
     #[serde(default)]
-    #[schemars(description = "目标实例名（stop/delete 必填）")]
+    #[schemars(description = "Target instance name (required for stop/delete)")]
     agent: Option<String>,
 }
 
@@ -729,7 +729,7 @@ impl Tool for AgentControlTool {
         "AgentControl".to_string()
     }
     fn description(&self) -> String {
-        "管理子代理实例：list 列出全部（名字/定义/状态/排队指令数），stop 停止（中止当前运行、不再接收，历史保留），delete 停止并移除（名字释放）。".to_string()
+        "Manage subagent instances: list all (name/definition/status/queued-instruction count), stop one (aborts the current run, stops accepting instructions; history kept), delete one (stops and removes it; the name is released).".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<AgentControlInput>()

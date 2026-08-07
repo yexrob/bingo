@@ -15,7 +15,7 @@ const MAX_READ_BYTES: u64 = MAX_READ_CHARS as u64 * 4 + 4;
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ReadInput {
-    #[schemars(description = "要读取的文件路径（绝对或相对）")]
+    #[schemars(description = "File path to read (absolute or relative)")]
     file_path: String,
 }
 
@@ -40,7 +40,7 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> String {
-        "读取文件内容，支持绝对路径与相对路径。".to_string()
+        "Read file content; accepts absolute and relative paths.".to_string()
     }
 
     fn input_schema(&self) -> serde_json::Value {

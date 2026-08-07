@@ -121,9 +121,9 @@ pub(crate) fn deliver_post(
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PostInput {
-    #[schemars(description = "频道名（不带 #）")]
+    #[schemars(description = "Channel name (without #)")]
     channel: String,
-    #[schemars(description = "发言内容")]
+    #[schemars(description = "Message content")]
     message: String,
 }
 
@@ -146,10 +146,9 @@ impl Tool for PostTool {
     fn description(&self) -> String {
         let who = sender_of(&self.session);
         format!(
-            "向 agent 频道发言。你在频道中的名字是 {who}（发件人由运行时盖戳，不可伪造）。\
-频道消息会进入全体成员的上下文（同一顺序）；serial 频道里若你落后于最新消息，\
-发送会被退回并附上新增内容——阅读后重新决定照发/修改/放弃。\
-不需要发言时不调用本工具即可（沉默无成本，也不会唤醒他人）。"
+            "Speak in an agent channel. Your name in the channel is {who} (the sender is stamped by the runtime and cannot be forged).\
+Channel messages enter every member's context (in the same order); in a serial channel, if you are behind the latest message the send bounces back with the new content attached — read it, then decide to resend, amend, or drop.\
+When you have nothing to say, simply don't call this tool (silence costs nothing and wakes nobody)."
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -214,16 +213,16 @@ pub enum ChannelAction {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ChannelInput {
-    #[schemars(description = "操作：create 建频道 / invite 拉人 / kick 移出 / list 列出")]
+    #[schemars(description = "Action: create a channel / invite a member / kick a member / list channels")]
     action: ChannelAction,
     #[serde(default)]
-    #[schemars(description = "频道名（create/invite/kick 必填，不带 #）")]
+    #[schemars(description = "Channel name (required for create/invite/kick; without #)")]
     channel: Option<String>,
     #[serde(default)]
-    #[schemars(description = "成员实例名：create 为初始名单，invite/kick 为目标（单个）")]
+    #[schemars(description = "Member instance names: initial roster for create; target (single) for invite/kick")]
     members: Option<Vec<String>>,
     #[serde(default)]
-    #[schemars(description = "发言模式（create 用）：serial（开口前必须见过最新，落后弹回）/ free（允许交叉）；缺省 serial")]
+    #[schemars(description = "Posting mode (for create): serial (must have seen the latest before speaking; laggards bounce back) / free (interleaving allowed); default serial")]
     mode: Option<String>,
 }
 
@@ -269,7 +268,7 @@ impl Tool for ChannelTool {
         "Channel".to_string()
     }
     fn description(&self) -> String {
-        "管理 agent 频道：create 建频道（members 为子代理实例名单，你自动入席为 main；mode 缺省 serial）、invite/kick 成员进出、list 清单。频道消息进全体成员上下文（同序）；成员发言用 Post。".to_string()
+        "Manage agent channels: create one (members is the subagent instance roster; you join automatically as main; mode defaults to serial), invite/kick members, list channels. Channel messages enter all members' contexts (in the same order); members speak via Post.".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<ChannelInput>()

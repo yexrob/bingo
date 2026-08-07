@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(schema["required"], json!(["file_path"]));
         assert_eq!(schema["additionalProperties"], json!(false));
         assert_eq!(schema["properties"]["file_path"]["type"], "string");
-        assert_eq!(schema["properties"]["file_path"]["description"], "要读取的文件路径（绝对或相对）");
+        assert_eq!(schema["properties"]["file_path"]["description"], "File path to read (absolute or relative)");
     }
 
     #[test]

@@ -21,11 +21,11 @@ const COUNT_TOKENS_GROWTH: u64 = 20_000;
 static COUNT_TOKENS_WARNED: AtomicBool = AtomicBool::new(false);
 
 const COMPACT_PROMPT: &str = "\
-你是对话压缩器。把下面的 agent 对话压缩成一段结构化摘要，要求：
-- 保留关键决策、文件路径、执行的命令及其结果、结论
-- 保留尚未完成的待办与约束
-- 输出纯文本，300 字以内
-对话内容：
+You are a conversation compactor. Compress the agent conversation below into one structured summary:
+- Keep key decisions, file paths, executed commands and their results, and conclusions
+- Keep unfinished todos and constraints
+- Output plain text within 300 characters
+Conversation content:
 ";
 
 /// Compaction split point: advance from split to the first message boundary that
@@ -121,7 +121,7 @@ pub async fn maybe_compact(
     messages.splice(
         ..split,
         [Message::user_text(format!(
-            "（此前对话的摘要，来自自动压缩）\n{summary}"
+            "(summary of the earlier conversation, from automatic compaction)\n{summary}"
         ))],
     );
 
