@@ -32,7 +32,7 @@ commands, and verification steps in conclusions. Never speculate about features 
   aggregates and clear/consolidate) · Ctrl+T toggle the task area · Ctrl+G agent/channel selector (↑↓ to select,
   Enter opens a fullscreen view, Esc closes; the agent view shows that instance's full conversation and streaming output; the channel view
   is a WeChat-style group room where you can speak directly as user) · Ctrl+L clear and redraw · Shift+Tab cycles permission
-  modes (default → acceptEdits → plan) · Alt+T thinking toggle · while busy, Enter queues the message, sent automatically at turn end.
+  modes (default → acceptEdits → plan) · Alt+T thinking toggle (off ↔ the last non-off level, default medium) · while busy, Enter queues the message (sent automatically at turn end; /think /model /provider /theme /status /context /tasks /help /skills run immediately) ·
 - Large pastes auto-collapse to a `[Pasted text #N +M lines]` placeholder; the real content expands on send
   (precisely detected via terminal bracketed-paste events; terminals without that feature fall back to a
   key-burst heuristic — extremely fast typing may misdetect, and pausing recovers).
@@ -56,7 +56,7 @@ Three config layers, shallow-merged; the later one overrides:
 | `providers` | object | Named providers (Anthropic protocol): `{name: {apiKey, apiBaseUrl}}`, switch via `/provider <name>`; optional `supportsImages: true` means that endpoint's model accepts images |
 | `provider` | string | Current provider (persisted by `/provider` and the /model menu; default `"default"` = top-level `apiKey`/`apiBaseUrl`); restored at startup, an invalid name falls back to default with a warning |
 | `sendImages` | bool | Whether the default endpoint sends message-box image attachments to the model (named providers use their own `supportsImages`; by default none are sent) |
-| `thinkingLevel` | string | Thinking level: `off` sends no thinking param (DeepSeek-compatible, default); `low`/`medium`/`high` always send `{"type":"adaptive"}` adaptive thinking (the Claude 5 family removed budget_tokens; the level doesn't affect depth for now) |
+| `thinkingLevel` | string | Thinking level: `off` sends no thinking param (DeepSeek-compatible, default); `low`/`medium`/`high`/`xhigh`/`max` send `{"type":"adaptive"}` adaptive thinking plus `output_config.effort` (the Claude 5 family removed budget_tokens; below `high` saves tokens, `xhigh`/`max` think deeper) |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto` (follows the terminal background) / `dark` / `light` |
 | `cacheControl` | bool | Send prompt caching; turn off if a non-official endpoint is unstable |
@@ -93,7 +93,7 @@ Example (.bingo/settings.json):
 
 `/help` for the full list. Common ones: `/model [name]` (no args: two-level picker — level 1 providers → level 2 model list; with a name: switch directly, validated against the known list when available),
 `/provider [name]` (lists each endpoint's URL / current marker, or switches; switching persists to settings),
-`/think [off|low|medium|high]`（思考级别，持久化 settings）、`/theme`、
+`/think [off|low|medium|high|xhigh|max]`（思考级别，持久化 settings；无参打开档位选择器：●=当前生效、↑↓/1-6 浏览、Enter 确认、Esc 取消）、`/theme`、
 `/permissions [allow|deny|ask] [规则]`、
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
 `/skills`（清单，`/技能名` 直接执行）· `/context`（用量）· `/status` ·

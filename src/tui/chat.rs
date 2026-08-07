@@ -294,7 +294,7 @@ pub const THINK_LEVELS: &[(&str, &str)] = &[
     ("off", "不发 thinking 参数（兼容 DeepSeek 等端点）"),
     ("low", "adaptive thinking · effort low"),
     ("medium", "adaptive thinking · effort medium"),
-    ("high", "adaptive thinking · effort high（默认档位）"),
+    ("high", "adaptive thinking · effort high（推荐档位）"),
     ("xhigh", "adaptive thinking · effort xhigh（编码/agentic 推荐）"),
     ("max", "adaptive thinking · effort max（最深推理）"),
 ];
