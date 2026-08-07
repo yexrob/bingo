@@ -54,6 +54,7 @@ when_to_use: >-
 | `apiKey` | string | API key（settings 优先于 `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`）；建议放 user 层，项目层会入库 |
 | `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
 | `providers` | object | 命名 provider（Anthropic 协议）：`{名: {apiKey, apiBaseUrl}}`，`/provider <名>` 切换；可选 `supportsImages: true` 表示该端点模型接受图片 |
+| `provider` | string | 当前 provider（`/provider` 与 `/model` 菜单切换时持久化，缺省 `"default"` = 顶层 `apiKey`/`apiBaseUrl`）；启动时恢复，名字无效则回落 default 并告警 |
 | `sendImages` | bool | 默认（default）端点是否把消息框图片附件发给模型（命名 provider 用各自的 `supportsImages`；缺省都不发） |
 | `thinkingLevel` | string | 思考级别：`off` 不发 thinking 参数（兼容 DeepSeek，缺省）；`low`/`medium`/`high` 一律发 `{"type":"adaptive"}` 自适应思考（Claude 5 家族已移除 budget_tokens，级别暂不影响深度） |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
@@ -76,6 +77,7 @@ when_to_use: >-
     "deepseek": { "apiKey": "sk-ds", "apiBaseUrl": "https://api.deepseek.com" },
     "local": { "apiKey": "sk-any", "apiBaseUrl": "http://127.0.0.1:11434/v1" }
   },
+  "provider": "deepseek",
   "thinkingLevel": "medium",
   "permissionMode": "acceptEdits",
   "mcpServers": {
@@ -88,7 +90,8 @@ when_to_use: >-
 
 ## slash 命令速查
 
-`/help` 全量清单。常用：`/model [名]`、`/provider [名称]`（列出/切换多 provider）、
+`/help` 全量清单。常用：`/model [名]`（无参进入二级选择器：一级 provider → 二级模型列表；带名直接切换并校验已知列表）、
+`/provider [名称]`（列出各端点 URL/当前标记或切换，切换持久化 settings）、
 `/think [off|low|medium|high]`（思考级别，持久化 settings）、`/theme`、
 `/permissions [allow|deny|ask] [规则]`、
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、

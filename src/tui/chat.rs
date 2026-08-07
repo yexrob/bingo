@@ -827,6 +827,10 @@ pub struct Chat {
     pub model_menu: Option<ModelMenu>,
     /// `/think` 等级选择器（None = 未激活）。
     pub think_menu: Option<ThinkMenu>,
+    /// 菜单级模型列表缓存（provider → 最近一次 `/v1/models` 结果）：
+    /// `/model <名>` 直接设置时做已知列表校验；重复进二级不再重复拉取
+    /// （P2-G 缓存，会话内有效）。
+    pub models_cache: std::collections::HashMap<String, Vec<String>>,
     /// 任务区展开信号（Task 工具调用 → 展示任务列表）。
     pub tasks_visible: bool,
     /// 任务区是否由 TaskCreate 自动打开（非 ctrl+t 手动）：全部完成后自动隐藏。
@@ -1017,6 +1021,7 @@ impl Chat {
             slash_selected: 0,
             model_menu: None,
             think_menu: None,
+            models_cache: HashMap::new(),
             tasks_visible: false,
             tasks_auto: false,
             entities: Vec::new(),
@@ -1063,6 +1068,8 @@ impl Chat {
     fn handle(&mut self, event: UiEvent) {
         match event {
             UiEvent::ModelsLoaded { provider, models } => {
+                // 缓存本次结果（/model <名> 校验 + 重复进二级免重拉）。
+                self.models_cache.insert(provider.clone(), models.clone());
                 // 二级菜单补充异步拉取结果；列表仍空说明拉取失败（保留 loading
                 // 不阻塞：用户可直接输入模型名或 Esc 退出）。
                 if let Some(menu) = &mut self.model_menu
@@ -1071,7 +1078,18 @@ impl Chat {
                 {
                     m.models = models;
                     m.loading = false;
-                    m.selected = m.selected.min(m.models.len().saturating_sub(1));
+                    // P1-F：当前 provider 且当前模型在列表中时预选它——
+                    // 与 /think 菜单预选当前档位对等，避免浏览即误切。
+                    let current_provider = self.session.runtime.provider.borrow().clone();
+                    let current_model = self.session.runtime.model.borrow().clone();
+                    let selected = if m.provider == current_provider {
+                        m.models.iter().position(|name| *name == current_model)
+                    } else {
+                        None
+                    };
+                    m.selected = selected
+                        .unwrap_or(0)
+                        .min(m.models.len().saturating_sub(1));
                 }
             }
             UiEvent::ImageReady { url, meta } => {
@@ -2131,9 +2149,22 @@ impl Chat {
 
     /// 切换运行时模型并持久化为默认（与 /theme /think 同路径：写 project 层）。
     fn set_model(&mut self, model: String) {
+        // P1-E：已知列表校验——当前 provider 有缓存且未命中时附一句提示
+        // （advisory 不阻塞；端点可能刚发布新模型/缓存未拉过，直接输入仍是
+        // 合法路径）。与成功提示合并为单行，避免「⚠ 与 ✓ 并存」观感矛盾。
+        let provider = self.session.runtime.provider.borrow().clone();
+        let unknown = self
+            .models_cache
+            .get(&provider)
+            .is_some_and(|known| !known.is_empty() && !known.contains(&model));
         let _ = self.session.runtime.model_tx.send(model.clone());
         self.persist_model(&model);
-        self.push_slash_output(format!("✓ 模型已切换: {model}"));
+        let out = if unknown {
+            format!("✓ 模型已切换: {model}（⚠ 不在 {provider} 已知列表，若请求失败用 /model 核对）")
+        } else {
+            format!("✓ 模型已切换: {model}")
+        };
+        self.push_slash_output(out);
     }
 
     /// 模型选择写回 `.bingo/settings.json`（下次启动作为默认；--model 仍可覆盖）。
@@ -2163,8 +2194,14 @@ impl Chat {
     }
 
     /// 一级 Enter：以该 provider 端点异步拉取模型列表（fork 端点，不切换当前），
-    /// 拉取完成经 ModelsLoaded 事件补充进菜单。
-    fn open_model_models(&mut self, provider: String) {
+    /// 拉取完成经 ModelsLoaded 事件补充进菜单。一级列表（providers +
+    /// provider_selected）原样保留：二级 Esc 回一级时不丢失。
+    fn open_model_models(
+        &mut self,
+        provider: String,
+        providers: Vec<String>,
+        provider_selected: usize,
+    ) {
         let session = self.session.clone();
         let events = self.events.clone();
         let provider_for_spawn = provider.clone();
@@ -2190,10 +2227,10 @@ impl Chat {
             };
             let _ = events.send(UiEvent::ModelsLoaded { provider: provider_for_spawn, models });
         });
-        // 菜单已由 Enter 分支 take 出来——这里重建二级状态。
+        // 菜单已由 Enter 分支 take 出来——这里重建二级状态（一级列表保留）。
         self.model_menu = Some(ModelMenu {
-            providers: vec![provider.clone()],
-            provider_selected: 0,
+            providers,
+            provider_selected,
             models: Some(ModelMenuModels {
                 provider,
                 models: Vec::new(),
@@ -2238,13 +2275,13 @@ impl Chat {
                     return true;
                 };
                 let Some(m) = menu.models else {
-                    // 一级：进入二级并异步拉取模型列表。
+                    // 一级：进入二级并异步拉取模型列表（一级列表原样保留）。
                     let provider = menu
                         .providers
                         .get(menu.provider_selected)
                         .cloned()
                         .unwrap_or_default();
-                    self.open_model_models(provider);
+                    self.open_model_models(provider, menu.providers, menu.provider_selected);
                     return true;
                 };
                 // 二级：确认选中的模型。列表为空（拉取失败/未返回）时保留菜单。
@@ -2271,7 +2308,16 @@ impl Chat {
                 }
                 let _ = self.session.runtime.model_tx.send(model.clone());
                 let _ = self.session.runtime.provider_tx.send(provider.clone());
-                self.persist_model(&model);
+                // 模型 + provider 一并持久化（P0-A）：下次启动恢复同一端点
+                // 上的模型，避免「default 端点 + deepseek 模型」错配。
+                let cwd = std::path::PathBuf::from(&self.cwd);
+                let _ = crate::settings::upsert_project_settings(
+                    &cwd,
+                    &serde_json::json!({
+                        "model": model.clone(),
+                        "provider": provider.clone(),
+                    }),
+                );
                 self.push_slash_output(format!("✓ 模型已切换: {provider} · {model}"));
                 true
             }
@@ -2459,6 +2505,9 @@ impl Chat {
     fn slash_status(&mut self) {
         let session = self.session.clone();
         let model = session.runtime.model.borrow().clone();
+        let provider = session.runtime.provider.borrow().clone();
+        let thinking = session.runtime.thinking.borrow().clone();
+        let thinking_shown = thinking.unwrap_or_else(|| "off".to_string());
         let transcript = session.runtime.transcript.borrow().clone();
         let transcript_name = transcript
             .as_ref()
@@ -2467,7 +2516,7 @@ impl Chat {
         let mode = session.permission_mode_str().to_string();
         self.slash_stats_async(move |msg_count, tokens| {
             format!(
-                "模型: {model}\n权限模式: {mode}\n会话: {transcript_name}\n消息数: {msg_count}\n上下文: {tokens} tokens / {}（{}%）",
+                "模型: {model}\nProvider: {provider}\n思考级别: {thinking_shown}\n权限模式: {mode}\n会话: {transcript_name}\n消息数: {msg_count}\n上下文: {tokens} tokens / {}（{}%）",
                 crate::budget::CONTEXT_WINDOW,
                 tokens * 100 / crate::budget::CONTEXT_WINDOW
             )
@@ -2688,12 +2737,23 @@ impl Chat {
         let session = self.session.clone();
         if arg.is_empty() {
             let current = session.runtime.provider.borrow().clone();
-            let (key, url) = session.client.current_endpoint();
-            let mut lines = vec![format!(
-                "当前 provider: {current}\n  {key} @ {url}",
-            )];
-            for name in session.client.provider_names() {
-                lines.push(format!("  {name}"));
+            // 列表：default 打头（顶层端点），其后命名 provider 各带 URL
+            // （/provider 信息量不足修复：一眼看清每个端点的去向）。
+            let mut lines = vec![format!("当前 provider: {current}")];
+            let mut names = vec!["default".to_string()];
+            names.extend(session.client.provider_names());
+            for name in names {
+                let (key, url) = session
+                    .client
+                    .provider_endpoint(&name)
+                    .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
+                // key 脱敏：仅显示前 4 字符；短 key（≤4）不加省略号。
+                let mut key_shown: String = key.chars().take(4).collect();
+                if key.chars().count() > 4 {
+                    key_shown.push('…');
+                }
+                let mark = if name == current { "●" } else { " " };
+                lines.push(format!("{mark} {name} @ {url}（key {key_shown}）"));
             }
             lines.push("用法: /provider <名称>（settings.json 的 providers 段）".into());
             self.push_slash_output(lines.join("\n"));
@@ -2704,6 +2764,12 @@ impl Chat {
             Ok(()) => {
                 let (_, url) = session.client.current_endpoint();
                 let _ = session.runtime.provider_tx.send(name.clone());
+                // 与 /model /think 同路径持久化：重启恢复当前 provider。
+                let cwd = std::path::PathBuf::from(&self.cwd);
+                let _ = crate::settings::upsert_project_settings(
+                    &cwd,
+                    &serde_json::json!({ "provider": name }),
+                );
                 self.push_slash_output(format!("✓ provider 已切换: {name}（{url}）"));
             }
             Err(e) => self.push_slash_output(e),
@@ -5914,6 +5980,24 @@ mod tests {
         assert!(chat.messages.is_empty(), "未知命令不启动回合");
     }
 
+    /// P1-E：/provider 列表 key 脱敏——短 key（≤4 字符）不追加省略号。
+    #[test]
+    fn slash_provider_list_masks_short_keys() {
+        let mut chat = test_chat();
+        let settings = crate::settings::Settings {
+            api_key: Some("main".into()),
+            ..Default::default()
+        };
+        Arc::get_mut(&mut chat.session).unwrap().client =
+            crate::api::client::Client::from_settings(&settings).unwrap();
+        chat.input = "/provider".to_string();
+        chat.submit();
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("default @ https://api.anthropic.com"), "{out}");
+        assert!(out.contains("（key main）"), "短 key 无省略号: {out}");
+        assert!(!out.contains("main…"), "{out}");
+    }
+
     #[test]
     fn slash_provider_lists_and_switches() {
         let mut chat = test_chat();
@@ -5929,7 +6013,8 @@ mod tests {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
-            })]);
+            },
+        )]);
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::new("sk-main".into(), "https://main.example".into());
         // set_provider 需要 providers 表——通过 from_settings 构造更直接。
@@ -6358,6 +6443,179 @@ mod tests {
             chat.slash_lines.join("\n").contains("模型已切换"),
             "确认提示"
         );
+    }
+
+    /// 多 provider 时二级 Esc 回一级：一级 provider 列表与选中必须保留
+    /// （回归：open_model_models 曾把 providers 重建为单元素，Esc 后列表丢失）。
+    #[tokio::test]
+    async fn model_menu_esc_back_keeps_provider_list() {
+        let home =
+            std::env::temp_dir().join(format!("bingo-model-esc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let mut chat = test_chat_home(home.clone());
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        for (name, key, url) in [
+            ("deepseek", "sk-ds", "https://api.deepseek.com"),
+            ("local", "sk-local", "http://127.0.0.1:11434"),
+        ] {
+            settings.providers.insert(
+                name.to_string(),
+                crate::settings::ProviderConfig {
+                    api_key: key.into(),
+                    api_base_url: url.into(),
+                    supports_images: None,
+                },
+            );
+        }
+        Arc::get_mut(&mut chat.session).unwrap().client =
+            crate::api::client::Client::from_settings(&settings).unwrap();
+
+        chat.input = "/model".to_string();
+        chat.submit();
+        let providers = chat.model_menu.as_ref().unwrap().providers.clone();
+        assert_eq!(providers, vec!["default", "deepseek", "local"]);
+        assert_eq!(chat.model_menu.as_ref().unwrap().provider_selected, 0);
+
+        // ↓ 两次选中 local → Enter 进二级（loading）→ Esc 回一级。
+        chat.on_key(KeyCode::Down, KeyModifiers::empty());
+        chat.on_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(chat.model_menu.as_ref().unwrap().provider_selected, 2);
+        chat.on_key(KeyCode::Enter, KeyModifiers::empty());
+        assert!(chat.model_menu.as_ref().unwrap().models.is_some(), "进入二级");
+        chat.on_key(KeyCode::Esc, KeyModifiers::empty());
+        let menu = chat.model_menu.as_ref().expect("一级仍在");
+        assert_eq!(menu.providers, vec!["default", "deepseek", "local"], "列表保留");
+        assert_eq!(menu.provider_selected, 2, "选中保留");
+        assert!(menu.models.is_none(), "回到一级");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// P0-A：/provider <名> 持久化 provider；/model 菜单确认时
+    /// provider + model 一并写入 `.bingo/settings.json`（重启恢复同端点模型）。
+    #[tokio::test]
+    async fn provider_switch_persists_provider_and_model_menu_persists_both() {
+        let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-provpersist", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut chat = test_chat_home(tmp.join("home"));
+        chat.cwd = tmp.display().to_string();
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        settings.providers.insert(
+            "deepseek".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: "sk-ds".into(),
+                api_base_url: "https://api.deepseek.com".into(),
+                supports_images: None,
+            },
+        );
+        Arc::get_mut(&mut chat.session).unwrap().client =
+            crate::api::client::Client::from_settings(&settings).unwrap();
+
+        // /provider deepseek：切换 + 持久化。
+        chat.input = "/provider deepseek".to_string();
+        chat.submit();
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["provider"], "deepseek", "provider 持久化");
+        assert_eq!(*chat.session.runtime.provider.borrow(), "deepseek");
+
+        // /model 菜单：当前 provider=deepseek（预选）→ 二级确认模型
+        // → provider + model 一并持久化。
+        chat.input = "/model".to_string();
+        chat.submit();
+        assert_eq!(
+            chat.model_menu.as_ref().unwrap().provider_selected,
+            1,
+            "一级预选当前 provider"
+        );
+        chat.on_key(KeyCode::Enter, KeyModifiers::empty());
+        if let Some(m) = &mut chat.model_menu.as_mut().unwrap().models {
+            m.models = vec!["deepseek-v4".to_string()];
+            m.loading = false;
+        }
+        chat.on_key(KeyCode::Enter, KeyModifiers::empty());
+        assert!(chat.model_menu.is_none(), "确认后关闭菜单");
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["model"], "deepseek-v4", "模型持久化");
+        assert_eq!(saved["provider"], "deepseek", "provider 随模型一并持久化");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// P1-E：/model <名> 直接设置——有缓存且未命中 → 提示不阻塞；
+    /// 无缓存/未拉过 → 直接切换不提示。
+    #[test]
+    fn slash_model_validates_against_cached_list() {
+        let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-modelval", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut chat = test_chat_home(tmp.clone());
+
+        // 无缓存：直接切换，无校验提示。
+        chat.input = "/model custom-new".to_string();
+        chat.submit();
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("✓ 模型已切换: custom-new"), "{out}");
+        assert!(!out.contains("不在"), "{out}");
+
+        // 当前 provider 有缓存且模型不在其中：成功提示内附一句 ⚠ 提示，
+        // 单行输出（advisory 不阻塞，仍切换）。
+        chat.slash_lines.clear();
+        chat.models_cache.insert(
+            "default".to_string(),
+            vec!["claude-sonnet-5".to_string(), "deepseek-v4".to_string()],
+        );
+        chat.input = "/model unknown-xyz".to_string();
+        chat.submit();
+        let out = chat.slash_lines.join("\n");
+        assert!(
+            out.contains("✓ 模型已切换: unknown-xyz（⚠ 不在 default 已知列表"),
+            "{out}"
+        );
+        assert_eq!(out.lines().count(), 1, "单行输出，⚠ 与 ✓ 不并存");
+        assert_eq!(*chat.session.runtime.model.borrow(), "unknown-xyz");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// P1-F：ModelsLoaded 后当前 provider 的当前模型被预选（与 /think 菜单
+    /// 预选当前档位对等），避免浏览即误切；当前模型不在列表时回 0；结果
+    /// 写入 models_cache（/model <名> 校验用）。
+    #[tokio::test]
+    async fn models_loaded_preselects_current_model_and_caches() {
+        let mut chat = test_chat();
+        chat.input = "/model".to_string();
+        chat.submit();
+        chat.on_key(KeyCode::Enter, KeyModifiers::empty());
+        // 当前 provider=default，当前模型=test-model（test_chat 初始值）。
+        chat.handle(UiEvent::ModelsLoaded {
+            provider: "default".into(),
+            models: vec!["m0".into(), "test-model".into(), "m2".into()],
+        });
+        let m = chat.model_menu.as_ref().unwrap().models.as_ref().unwrap();
+        assert_eq!(m.selected, 1, "预选当前模型");
+        assert_eq!(m.models[m.selected], "test-model");
+        assert_eq!(
+            chat.models_cache.get("default").map(Vec::as_slice),
+            Some(&["m0".to_string(), "test-model".to_string(), "m2".to_string()][..]),
+            "加载结果入缓存"
+        );
+
+        // 当前模型不在列表中：选中回 0。
+        chat.handle(UiEvent::ModelsLoaded {
+            provider: "default".into(),
+            models: vec!["m0".into(), "m1".into()],
+        });
+        let m = chat.model_menu.as_ref().unwrap().models.as_ref().unwrap();
+        assert_eq!(m.selected, 0, "未命中回 0");
     }
 
     /// /think 无参进入等级选择器：预选当前档位，↑↓ 移动，Enter 确认，Esc 退出。
@@ -8579,7 +8837,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bingo-img-dir-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let png = test_png_path(&dir, "a.png", 8, 8);
-        chat.set_input(&format!("看一下这张图\n{}", png.display()));
+        chat.set_input(format!("看一下这张图\n{}", png.display()));
         chat.busy = true; // 走排队路径：不需要 tokio runtime
         chat.submit();
         assert_eq!(chat.queued.len(), 1);
@@ -8603,7 +8861,7 @@ mod tests {
         let png = test_png_path(&dir, "b.png", 4, 4);
         let txt = dir.join("note.txt");
         std::fs::write(&txt, "hi").unwrap();
-        chat.set_input(&format!("![图]({})\n{}", png.display(), txt.display()));
+        chat.set_input(format!("![图]({})\n{}", png.display(), txt.display()));
         chat.busy = true;
         chat.submit();
         assert_eq!(chat.queued[0], format!("#[image 1]\n{}", txt.display()));
@@ -8993,7 +9251,7 @@ mod tests {
         use ratatui::layout::Size;
         let _guard = test_hooks::hang_guard(60_000); // list_models 挂起 60s，> 读档 10s
         let mut chat = test_chat();
-        chat.open_model_models("test".into()); // 触发真实生产拉取路径（fork provider）
+        chat.open_model_models("test".into(), vec!["test".into()], 0); // 触发真实生产拉取路径（fork provider）
         // 先让 spawn 任务启动并注册超时 timer（start_paused 下需 poll 才推进）。
         tokio::task::yield_now().await;
         // 读档 10s 超时到点 → 发射 UiEvent::Error（页面级）。

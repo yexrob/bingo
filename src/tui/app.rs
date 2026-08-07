@@ -137,7 +137,10 @@ fn mode_badge(mode: PermissionMode, theme: &Theme) -> Vec<(String, Color)> {
     ]
 }
 
-/// footer：模式徽标 + 快捷键 byline（左），模型名（右）。
+/// footer：模式徽标 + 快捷键 byline（左），模型徽标（右）。
+///
+/// 模型徽标：`{provider} · {model} · think {level}`——provider 为
+/// default 时省略前缀（保持简洁）；think off 省略等级（P1-D）。
 fn footer_row(chat: &Chat, width: usize) -> Row {
     let theme = &chat.theme;
     let hints = if chat.busy {
@@ -157,6 +160,12 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     let model_name = chat.session.runtime.model.borrow().clone();
     let thinking = chat.session.runtime.thinking.borrow().clone();
     let model = model_footer_label(&model_name, thinking.as_deref());
+    let provider = chat.session.runtime.provider.borrow().clone();
+    let model = if provider == "default" {
+        model
+    } else {
+        format!("{provider} · {model}")
+    };
 
     let mut line = Line::styled("  ", SegStyle::fg(theme.text));
     let mut used = 2usize;
@@ -225,7 +234,9 @@ fn suggestion_rows(
         // `/model` 二级选择器：一级 `provider`，二级 `model`
         //（loading / 空列表各占一行提示）。
         let items: Vec<(String, bool)> = match &menu.models {
-            Some(m) if m.loading => vec![("… 拉取模型列表".to_string(), true)],
+            Some(m) if m.loading => {
+                vec![(format!("… 正在拉取 {} 的模型列表", m.provider), true)]
+            }
             Some(m) if m.models.is_empty() => {
                 vec![("（该端点未返回模型，Esc 退出）".to_string(), true)]
             }

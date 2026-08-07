@@ -175,6 +175,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         settings.disabled_mcp_servers.iter().cloned().collect(),
     )));
     let _ = runtime.thinking_tx.send(settings.thinking_level.clone());
+    // provider 恢复：settings.provider（/provider 与 /model 菜单持久化）
+    // 存在且有效则切换；无效名回落 default + warning（不阻断启动）。
+    if let Some(name) = settings.provider.as_deref() {
+        match client.set_provider(name) {
+            Ok(()) => {
+                let _ = runtime.provider_tx.send(name.to_string());
+            }
+            Err(e) => eprintln!(
+                "[bingo] warning: provider \"{name}\" 已失效，回落 default: {e}"
+            ),
+        }
+    }
     let channel_limits = crate::channels::ChannelLimits::from_settings(&settings);
     let session = Arc::new(Session {
         client,

@@ -165,7 +165,7 @@ impl Client {
         let base_url = settings.api_base_url.clone().unwrap_or_else(|| {
             env("ANTHROPIC_BASE_URL").unwrap_or_else(|_| API_BASE.to_string())
         });
-        let providers = settings
+        let mut providers = settings
             .providers
             .iter()
             .map(|(name, cfg)| {
@@ -178,14 +178,20 @@ impl Client {
                     },
                 )
             })
-            .collect();
+            .collect::<std::collections::HashMap<String, Endpoint>>();
+        // default 端点也入 providers 表（key "default"）：set_provider /
+        // with_provider("default") 走通（含「切回 default」），/model 二级
+        // 对 default 拉列表用顶层端点、标签与内容一致（P0-C）。default 为
+        // 保留名：顶层配置优先（后插入覆盖用户同名的 providers 定义）。
+        let default_endpoint = Endpoint {
+            api_key,
+            base_url,
+            supports_images: settings.send_images.unwrap_or(false),
+        };
+        providers.insert("default".to_string(), default_endpoint.clone());
         Ok(Self {
             http: reqwest::Client::new(),
-            endpoint: Arc::new(std::sync::RwLock::new(Endpoint {
-                api_key,
-                base_url,
-                supports_images: settings.send_images.unwrap_or(false),
-            })),
+            endpoint: Arc::new(std::sync::RwLock::new(default_endpoint)),
             providers,
         })
     }
@@ -203,11 +209,22 @@ impl Client {
         }
     }
 
-    /// 命名 provider 列表（不含 default；/provider 列出用）。
+    /// 命名 provider 列表（不含 default；/provider 列出用，default 由
+    /// 调用方显式补出——/model 菜单与 /provider 输出都以 "default" 打头）。
     pub fn provider_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.providers.keys().cloned().collect();
+        let mut names: Vec<String> = self
+            .providers
+            .keys()
+            .filter(|n| n.as_str() != "default")
+            .cloned()
+            .collect();
         names.sort();
         names
+    }
+
+    /// 指定 provider 的端点（key/url；default = 顶层配置）。未知名字返回 None。
+    pub fn provider_endpoint(&self, name: &str) -> Option<(String, String)> {
+        self.providers.get(name).map(|e| (e.api_key.clone(), e.base_url.clone()))
     }
 
     /// 当前生效的 provider 端点（key/url 引用）。
@@ -221,7 +238,7 @@ impl Client {
         self.endpoint.read().unwrap_or_else(|p| p.into_inner()).supports_images
     }
 
-    /// 切换到命名 provider；未知名字报错（default 永远可切回）。
+    /// 切换到命名 provider；未知名字报错（default = 顶层端点，永远可切回）。
     pub fn set_provider(&self, name: &str) -> Result<(), String> {
         let Some(endpoint) = self.providers.get(name).cloned() else {
             return Err(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
@@ -879,6 +896,48 @@ mod tests {
         assert!(client.set_provider("nope").is_err(), "未知 provider 报错");
         // 未知 provider 不影响当前端点。
         assert_eq!(client.current_endpoint().0, "sk-ds");
+    }
+
+    /// P0-C：default 端点入 providers 表——provider_names 不含 default，
+    /// set_provider/with_provider("default") 走通（切回顶层端点），
+    /// provider_endpoint 可取 URL（/provider 列表展示用）。
+    #[test]
+    fn default_provider_is_switchable_and_listed_as_endpoint() {
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            api_base_url: Some("https://main.example".into()),
+            ..Default::default()
+        };
+        settings.providers.insert(
+            "deepseek".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: "sk-ds".into(),
+                api_base_url: "https://api.deepseek.com".into(),
+                supports_images: None,
+            },
+        );
+        let env = |_name: &str| Err(std::env::VarError::NotPresent);
+        let client = Client::from_settings_with(&settings, env).unwrap();
+        // default 不出现在命名列表（调用方显式补出）。
+        assert_eq!(client.provider_names(), vec!["deepseek"]);
+        assert_eq!(
+            client.provider_endpoint("default"),
+            Some(("sk-main".to_string(), "https://main.example".to_string()))
+        );
+        assert_eq!(client.provider_endpoint("deepseek").unwrap().1, "https://api.deepseek.com");
+        assert_eq!(client.provider_endpoint("nope"), None);
+
+        // 切到 deepseek 再切回 default：顶层端点恢复（含 supports_images）。
+        client.set_provider("deepseek").unwrap();
+        assert_eq!(client.current_endpoint().0, "sk-ds");
+        client.set_provider("default").unwrap();
+        assert_eq!(client.current_endpoint().0, "sk-main");
+        assert_eq!(client.current_endpoint().1, "https://main.example");
+
+        // with_provider("default") fork 出顶层端点（/model 二级对 default
+        // 拉列表用，标签与内容一致）。
+        let fork = client.with_provider("default").unwrap();
+        assert_eq!(fork.current_endpoint().0, "sk-main");
     }
 
     /// supports_images：default 读顶层 sendImages；命名 provider 读各自
