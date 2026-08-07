@@ -393,11 +393,6 @@ fn open_in_browser(path: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-/// 顶层错误出口（C 出口映射）：`Box<dyn Error>` 沿 cause 链取稳定码
-/// （[`crate::error::error_code_boxed`]），msg 经转义/截断。
-/// 非 TTY 输出 `[error] code=<SCREAMING_SNAKE> msg=<单行 ≤200>`（AC-30/31/32）；
-/// TTY 下打印原样（交互环境错误在界面内呈现）。
-
 /// Top-level error exit (C exit mapping): `Box<dyn Error>` walks the cause chain for a stable
 /// code ([`crate::error::error_code_boxed`]); msg is escaped/truncated.
 /// Non-TTY prints `[error] code=<SCREAMING_SNAKE> msg=<single line ≤200>` (AC-30/31/32);
