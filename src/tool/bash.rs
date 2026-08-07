@@ -133,7 +133,8 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
     const REPLS: &[&str] = &[
         "bash", "sh", "zsh", "fish", "ksh", "dash", "elvish", "xonsh", "python", "python2",
         "python3", "ipython", "pypy", "node", "deno", "bun", "ruby", "irb", "perl", "php",
-        "lua", "luajit", "bc", "dc", "sbcl", "ghci",
+        "lua", "luajit", "bc", "dc", "sbcl", "ghci", "powershell", "pwsh", "cmd", "cmd.exe",
+        "powershell.exe",
     ];
     if REPLS.contains(&name) && rest.is_empty() {
         return Some(format!(
@@ -360,9 +361,9 @@ impl Tool for BashTool {
         let child = command
             .spawn()
             .map_err(|e| ToolError::failed(format!("failed to run command: {e}")))?;
-        // Process group leader = the child shell itself: on timeout the whole group is cleaned
+        // Process-tree root = the child shell itself: on timeout the whole tree is cleaned
         // up; grandchild processes are not orphaned.
-        let pgid = child.id();
+        let child_pid = child.id();
 
         let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(Ok(output)) => output,
@@ -370,8 +371,8 @@ impl Tool for BashTool {
                 return Err(ToolError::failed(format!("failed to run command: {e}")));
             }
             Err(_) => {
-                if let Some(pgid) = pgid {
-                    kill_process_group(pgid).await;
+                if let Some(child_pid) = child_pid {
+                    crate::platform::kill_process_tree(child_pid).await;
                 }
                 return Err(ToolError::failed(format!(
                     "command timed out after {}s",
@@ -401,36 +402,14 @@ impl Tool for BashTool {
     }
 }
 
-/// Child shell command: its own process group (whole group cleaned up on timeout/cancel),
+/// Child shell command: its own process tree (whole tree cleaned up on timeout/cancel),
 /// stdin disconnected (child must not steal TUI input), stdout/stderr through pipes.
 fn shell_command(command: &str, cwd: &std::path::Path) -> tokio::process::Command {
-    use std::os::unix::process::CommandExt;
-    let mut std_command = std::process::Command::new("/bin/zsh");
-    std_command
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
+    let mut cmd = crate::platform::shell_command(command, cwd);
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        // New process group: pgid == child shell pid; grandchild processes land in the same group.
-        .process_group(0);
-    tokio::process::Command::from(std_command)
-}
-
-/// Kill the whole process group (grandchild processes cleaned up as well).
-/// AGENTS.md forbids unsafe, so killpg(2) is achieved via `/bin/sh`'s built-in kill
-/// with a negative pid.
-async fn kill_process_group(pgid: u32) {
-    let script = format!("kill -TERM -{pgid} 2>/dev/null; kill -KILL -{pgid} 2>/dev/null");
-    let _ = tokio::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(script)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
+        .stderr(std::process::Stdio::piped());
+    cmd
 }
 
 /// Run a periodic command in the background: register a watchable (interval polling) +
@@ -511,7 +490,7 @@ async fn run_streaming(
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("failed to spawn: {e}"))?;
-    let pgid = child.id();
+    let child_pid = child.id();
     let buf = Arc::new(Mutex::new(String::new()));
     let mut readers = Vec::new();
     let streams: Vec<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = [
@@ -547,10 +526,12 @@ async fn run_streaming(
             Ok(Ok(status)) => status,
             Ok(Err(e)) => return Err(format!("failed to wait: {e}")),
             Err(_) => {
-                let _ = child.kill().await;
-                if let Some(pgid) = pgid {
-                    kill_process_group(pgid).await;
+                // Tree first: Windows taskkill needs the root alive to walk the tree;
+                // child.kill() afterwards is a harmless no-op on both platforms.
+                if let Some(child_pid) = child_pid {
+                    crate::platform::kill_process_tree(child_pid).await;
                 }
+                let _ = child.kill().await;
                 return Err(format!("command timed out after {}s", t.as_secs()));
             }
         },
@@ -566,8 +547,8 @@ async fn run_streaming(
             .await
             .is_err()
         {
-            if let Some(pgid) = pgid {
-                kill_process_group(pgid).await;
+            if let Some(child_pid) = child_pid {
+                crate::platform::kill_process_tree(child_pid).await;
             }
             let _ = tokio::time::timeout(READER_DRAIN_TIMEOUT, &mut reader).await;
             reader.abort();
@@ -712,11 +693,12 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
         };
         let tool = BashTool::new();
+        #[cfg(unix)]
+        let command = "for i in 1 2 3; do echo tick; sleep 0.1; done";
+        #[cfg(windows)]
+        let command = "for ($i=0; $i -lt 3; $i++) { echo tick; Start-Sleep -Milliseconds 100 }";
         let result = tool
-            .call(
-                serde_json::json!({"command": "for i in 1 2 3; do echo tick; sleep 0.1; done"}),
-                &ctx,
-            )
+            .call(serde_json::json!({"command": command}), &ctx)
             .await
             .unwrap();
         let text = result.content.as_str().unwrap();
@@ -879,7 +861,9 @@ mod tests {
         }
     }
 
-    /// Timeout: the whole process group is cleaned up; grandchild processes are not orphaned.
+    /// Timeout: the whole process tree is cleaned up; grandchild processes are not orphaned.
+    /// Unix variant: shell job syntax + `/bin/sh kill -0` liveness check.
+    #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_whole_process_group() {
         let marker = std::env::temp_dir()
@@ -924,6 +908,54 @@ mod tests {
             .unwrap_or(false);
         let _ = std::fs::remove_file(&marker);
         assert!(!alive, "孙进程 {pid} 应随进程组一起被清理");
+    }
+
+    /// Windows variant: PowerShell spawns a hidden cmd grandchild; timeout must leave
+    /// no processes behind (taskkill /T removes the whole tree).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn timeout_kills_whole_process_tree() {
+        let marker = std::env::temp_dir()
+            .join(format!("bingo-ptree-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let ctx = ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch: crate::watch::WatchRegistry::new(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+        };
+        // The grandchild writes its pid then pings (stays alive); the parent also sleeps
+        // to trigger the timeout.
+        let command = format!(
+            "$p = Start-Process cmd -ArgumentList '/c','ping -n 30 127.0.0.1 > nul' -PassThru -WindowStyle Hidden; $p.Id | Out-File -FilePath '{}' -Encoding ascii; Start-Sleep 30",
+            marker.to_string_lossy()
+        );
+        let err = BashTool::new()
+            .call(
+                serde_json::json!({"command": command, "timeout": 1}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let pid = std::fs::read_to_string(&marker)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        assert!(!pid.is_empty(), "孙进程应已写下 pid");
+        let alive = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid))
+            .unwrap_or(false);
+        let _ = std::fs::remove_file(&marker);
+        assert!(!alive, "孙进程 {pid} 应随进程树一起被清理");
     }
 
     /// Regression: background:true (non-periodic) must also drive condition matching;

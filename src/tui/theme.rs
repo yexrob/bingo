@@ -229,14 +229,8 @@ impl Theme {
     ) -> Option<Vec<u8>> {
         use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
         use std::io::{Read, Write};
-        use std::os::unix::fs::OpenOptionsExt;
 
-        let mut tty = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open("/dev/tty")
-            .ok()?;
+        let mut tty = crate::platform::open_tty()?;
         enable_raw_mode().ok()?;
         let mut buf: Vec<u8> = Vec::new();
         let result = async {

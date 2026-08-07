@@ -116,9 +116,8 @@ async fn run_hook_with_timeout(
     input: &serde_json::Value,
     timeout: Duration,
 ) -> Result<(i32, serde_json::Value, String), HookError> {
-    let mut child = tokio::process::Command::new("/bin/zsh")
-        .arg("-c")
-        .arg(command)
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut child = crate::platform::shell_command(command, &cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

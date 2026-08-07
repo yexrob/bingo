@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: bingo-x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: bingo-x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: bingo-aarch64-apple-darwin
+          # Intel Macs: cross-compiled from the arm64 runner (no extra toolchain needed).
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: bingo-x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/${{ matrix.target }}/release/bingo.exe dist/bingo.exe
+            (cd dist && powershell -NoProfile -Command "Compress-Archive -Path bingo.exe -DestinationPath ${{ matrix.artifact }}.zip -Force")
+          else
+            cp target/${{ matrix.target }}/release/bingo dist/bingo
+            tar -czf ${{ matrix.artifact }}.tar.gz -C dist bingo
+          fi
+          # SHA-256 checksums: sha256sum on Linux/Git Bash, shasum on macOS.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum ${{ matrix.artifact }}.* > dist/checksums.txt
+          else
+            shasum -a 256 ${{ matrix.artifact }}.* > dist/checksums.txt
+          fi
+          cat dist/checksums.txt
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ matrix.artifact }}.*
+            dist/checksums.txt
