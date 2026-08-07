@@ -1,7 +1,8 @@
-//! Watchable 通知机制：命令、agent 等一切可被 watch 的实体。
+//! Watchable notification mechanism: any entity that can be watched — commands, agents, etc.
 //!
-//! 每个 watchable 有状态机（Running → Idle → Done/Failed/Cancelled），
-//! 状态转换广播给 TUI，终态通知排队注入主 agent 上下文。
+//! Every watchable has a state machine (Running → Idle → Done/Failed/Cancelled);
+//! state transitions are broadcast to the TUI, and terminal notifications are queued
+//! for injection into the main agent's context.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -9,28 +10,28 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 
-/// Watchable 生命周期状态。
+/// Watchable lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchState {
     Running,
-    /// 一轮完成（周期命令的轮次边界）；终态前可反复出现。
+    /// One round completed (round boundary of periodic commands); may repeat before terminal.
     Idle,
     Done,
     Failed,
-    /// 取消终态（kill 入口落地后使用）。
+    /// Cancel terminal state (used once the kill entry lands).
     #[allow(dead_code)]
     Cancelled,
 }
 
 impl WatchState {
-    /// 终态：轮询停止、快照定格。
+    /// Terminal: polling stops, the snapshot freezes.
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Done | Self::Failed | Self::Cancelled)
     }
 }
 
-/// Watchable 类别：展示层据此选图标（⏺ 命令 / ◉ 子代理 / ◇ 频道），
-/// 不影响状态机与通知语义。
+/// Watchable category: the display layer picks the icon (⏺ command / ◉ subagent / ◇ channel);
+/// doesn't affect the state machine or notification semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WatchKind {
     #[default]
@@ -39,7 +40,7 @@ pub enum WatchKind {
     Channel,
 }
 
-/// 会话内唯一的 watchable 标识。
+/// Unique watchable identifier within a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WatchId(pub u64);
 
@@ -49,56 +50,57 @@ impl std::fmt::Display for WatchId {
     }
 }
 
-/// poll 返回的状态快照。
+/// State snapshot returned by poll.
 #[derive(Debug, Clone)]
 pub struct WatchPoll {
     pub state: WatchState,
-    /// 人类可读的当前活动（如"第 3 轮 · 输出 12 行"）。
+    /// Human-readable current activity (e.g. "round 3 · 12 lines of output").
     pub detail: Option<String>,
-    /// 结构化数据（如完成的 final message）。
+    /// Structured data (e.g. the completed final message).
     pub payload: Option<serde_json::Value>,
-    /// 条件信号：检测到满足的条件（如 log 出现错误）时携带文本，无条件通知。
+    /// Condition signal: carries text when a condition is met (e.g. an error in the log);
+    /// notifies unconditionally.
     pub signal: Option<String>,
 }
 
-/// 可被 watch 的实体：声明自己的检查间隔与轮次语义。
+/// A watchable entity: declares its own check interval and round semantics.
 pub trait Watchable: Send + Sync {
     fn label(&self) -> String;
     fn poll(&self) -> WatchPoll;
-    /// 周期轮询间隔；None = 不轮询（由实现者主动 set_state）。
+    /// Periodic polling interval; None = no polling (the implementer calls set_state itself).
     fn check_interval(&self) -> Option<Duration>;
-    /// 类别（展示层图标）；缺省命令。
+    /// Category (display icon); defaults to command.
     fn kind(&self) -> WatchKind {
         WatchKind::Command
     }
 }
 
-/// 通知条件：对 watchable 喂入的内容增量（feed_content）做匹配，
-/// 命中即在轮询 tick 时触发信号（无条件通知）。
+/// Notification condition: matches the incremental content fed to the watchable
+/// (feed_content); a hit triggers a signal on the polling tick (unconditional notification).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotifyCondition {
-    /// 内容出现任一字样（子串匹配）。
+    /// Content contains any of the words (substring match).
     Contains(Vec<String>),
-    /// 内容出现正则匹配。
+    /// Content matches a regex.
     Regex(String),
-    /// 累计行数超过阈值（突破时通知一次）。
-    #[allow(dead_code)] // 行数条件入口（如 notify_lines）落地后使用
+    /// Cumulative line count exceeds a threshold (notifies once on breakthrough).
+    #[allow(dead_code)] // used once the line-count condition entry (e.g. notify_lines) lands
     LinesOver(usize),
-    /// 默认错误行模式（常见错误关键字）。
+    /// Default error-line pattern (common error keywords).
     Errors,
 }
 
-/// 单条信号文本上限：`tail -f` 一个 tick 可产出 MB 级错误日志，
-/// 不设限会直灌模型上下文。
+/// Cap on a single signal text: `tail -f` can produce MBs of error logs in one tick;
+/// without a limit this would flood the model context.
 const MAX_SIGNAL_CHARS: usize = 500;
-/// 一轮内参与条件匹配的最大命中行数（超出只报计数）。
+/// Max hit lines participating in condition matching per round (beyond that, only a count is reported).
 const MAX_MATCH_HITS: usize = 20;
-/// feed 缓冲上限：无人 drain（如轮询未启动）时丢弃最旧行，不无界增长。
+/// Feed buffer cap: when nobody drains (e.g. polling not started), the oldest lines are dropped — no unbounded growth.
 const MAX_FEED_BUFFER_LINES: usize = 1000;
-/// 保留的终态条目上限：超出后清理最旧的终态条目。
+/// Cap on retained terminal entries: beyond this, the oldest terminal entries are pruned.
 const MAX_TERMINAL_ENTRIES: usize = 64;
 
-/// 按字符截断（多字节安全）并标注。
+/// Truncate by chars (multibyte-safe) and annotate.
 fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -107,8 +109,9 @@ fn truncate_chars(text: &str, max: usize) -> String {
     format!("{head}…[truncated]")
 }
 
-/// 命中行聚合：限行数 + 限长度，防单条信号灌爆上下文。
-/// 预留额度给条件前缀与命中计数，使聚合结果整体仍在 MAX_SIGNAL_CHARS 内。
+/// Hit-line aggregation: line cap + length cap, so a single signal can't blow up the context.
+/// Reserves headroom for the condition prefix and the hit count so the aggregate stays
+/// within MAX_SIGNAL_CHARS overall.
 fn join_hits(hits: &[&str]) -> String {
     const HITS_BUDGET: usize = MAX_SIGNAL_CHARS - 120;
     let shown: Vec<&str> = hits.iter().take(MAX_MATCH_HITS).copied().collect();
@@ -119,10 +122,10 @@ fn join_hits(hits: &[&str]) -> String {
     text
 }
 
-/// 条件的轮询状态。
+/// Polling state of a condition.
 struct ConditionState {
     cond: NotifyCondition,
-    /// LinesOver 突破后不再重复通知。
+    /// After a LinesOver breakthrough, no repeat notifications.
     fired: bool,
 }
 
@@ -130,7 +133,8 @@ impl ConditionState {
     fn new(cond: NotifyCondition) -> Self {
         Self { cond, fired: false }
     }
-    /// 对一轮内容缓冲匹配，返回信号文本（增量条件逐条匹配、聚合输出）。
+    /// Match against one round of content buffer; returns the signal text (incremental
+    /// conditions matched one by one, aggregated output).
     fn match_buffer(&mut self, buffer: &[String], total_lines: usize) -> Option<String> {
         match &self.cond {
             NotifyCondition::Contains(patterns) => {
@@ -189,7 +193,7 @@ impl ConditionState {
     }
 }
 
-/// 常见错误行模式（默认 Errors 条件的信号源）。
+/// Common error-line patterns (signal source for the default Errors condition).
 fn is_error_line(line: &str) -> bool {
     const PATTERNS: &[&str] = &[
         "error", "ERROR", "Error", "Traceback", "panic", "PANIC", "FATAL", "fatal",
@@ -198,10 +202,10 @@ fn is_error_line(line: &str) -> bool {
     PATTERNS.iter().any(|p| line.contains(p))
 }
 
-/// 广播给订阅者（TUI）的事件。
+/// Event broadcast to subscribers (TUI).
 #[derive(Debug, Clone)]
 pub struct WatchEvent {
-    /// 事件来源标识（TUI 按 label 定位，id 供程序化订阅方使用）。
+    /// Event source identifier (TUI locates by label; id is for programmatic subscribers).
     #[allow(dead_code)]
     pub id: WatchId,
     pub label: String,
@@ -209,13 +213,14 @@ pub struct WatchEvent {
     pub state: WatchState,
     pub detail: Option<String>,
     pub payload: Option<serde_json::Value>,
-    /// 条件信号文本（检测到满足条件时携带）。
+    /// Condition signal text (present when a condition is met).
     pub signal: Option<String>,
-    /// watchable 已运行毫秒（注册时刻起算）。
+    /// Milliseconds the watchable has been running (since registration).
     pub elapsed_ms: u64,
 }
 
-/// 快照：供 TUI 初始渲染 / 状态查询（当前展示层按 label 驱动，API 预留）。
+/// Snapshot: for TUI initial render / state queries (the current display layer is driven
+/// by label; the API is reserved).
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct WatchSnapshot {
@@ -226,7 +231,8 @@ pub struct WatchSnapshot {
     pub payload: Option<serde_json::Value>,
 }
 
-/// 待注入模型的终态通知（consume 时合并同 id 相邻 Idle）。
+/// Terminal notification pending injection into the model (adjacent Idle entries with the
+/// same id are merged on consume).
 #[derive(Debug, Clone)]
 struct Notification {
     id: WatchId,
@@ -245,9 +251,9 @@ struct Entry {
     payload: Option<serde_json::Value>,
     born: Instant,
     conditions: Vec<ConditionState>,
-    /// 本轮（两次 tick 之间）喂入的内容。
+    /// Content fed in this round (between two ticks).
     feed_buffer: Vec<String>,
-    /// 累计喂入行数（LinesOver 条件用）。
+    /// Cumulative fed line count (for the LinesOver condition).
     total_lines: usize,
 }
 
@@ -257,7 +263,7 @@ struct Inner {
     notifications: VecDeque<Notification>,
 }
 
-/// 会话级 watch 注册中心（Session 持有 Arc）。
+/// Session-level watch registry (Session holds the Arc).
 pub struct WatchRegistry {
     inner: Mutex<Inner>,
     tx: broadcast::Sender<WatchEvent>,
@@ -276,7 +282,8 @@ impl WatchRegistry {
         })
     }
 
-    /// 注册并配置通知条件（内容增量 feed_content 按条件匹配 → 信号）。
+    /// Register and configure notification conditions (content increments fed via
+    /// feed_content are matched against the conditions → signals).
     pub fn register_with_conditions(
         self: &Arc<Self>,
         watchable: Box<dyn Watchable>,
@@ -308,7 +315,7 @@ impl WatchRegistry {
             );
             id
         };
-        // 初始状态强制广播（set_state 幂等会吞掉与 entry 相同的状态）。
+        // Initial state is force-broadcast (set_state's idempotency would swallow a state equal to the entry's).
         if poll.state.is_terminal() || poll.state == WatchState::Idle {
             self.inner
                 .lock()
@@ -341,7 +348,7 @@ impl WatchRegistry {
                 let mut ticker = tokio::time::interval(interval);
                 loop {
                     ticker.tick().await;
-                    // 外部已置终态（如子 agent 完成）：停止轮询，不再覆盖。
+                    // Externally set to terminal (e.g. subagent done): stop polling, don't overwrite.
                     if registry.is_terminal(id) {
                         break;
                     }
@@ -349,7 +356,7 @@ impl WatchRegistry {
                     if let Some(sig) = p.signal.clone() {
                         registry.emit_signal(id, sig, p.detail.clone());
                     }
-                    // 条件匹配：本轮喂入内容按通知条件命中 → 信号。
+                    // Condition matching: this round's fed content hits a notification condition → signal.
                     for sig in registry.match_conditions(id) {
                         registry.emit_signal(id, sig, p.detail.clone());
                     }
@@ -364,8 +371,9 @@ impl WatchRegistry {
         id
     }
 
-    /// 实现者喂入内容增量（一行或一个文本块）：条件引擎按通知条件匹配，
-    /// 命中由轮询 tick 聚合触发信号。
+    /// The implementer feeds content increments (a line or a text block): the condition
+    /// engine matches against the notification conditions; hits are aggregated into a
+    /// signal triggered by the polling tick.
     pub fn feed_content(&self, id: WatchId, text: &str) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = inner.entries.get_mut(&id) else {
@@ -373,14 +381,15 @@ impl WatchRegistry {
         };
         entry.total_lines += text.lines().count();
         entry.feed_buffer.push(text.to_string());
-        // 无人 drain 时丢弃最旧行：缓冲不无界增长。
+        // Drop the oldest lines when nobody drains: the buffer doesn't grow unboundedly.
         if entry.feed_buffer.len() > MAX_FEED_BUFFER_LINES {
             let overflow = entry.feed_buffer.len() - MAX_FEED_BUFFER_LINES;
             entry.feed_buffer.drain(..overflow);
         }
     }
 
-    /// 匹配本轮喂入内容与通知条件，返回命中信号（增量条件逐条聚合）。
+    /// Match this round's fed content against the notification conditions; returns the
+    /// hit signals (incremental conditions matched one by one, aggregated).
     pub fn match_conditions(&self, id: WatchId) -> Vec<String> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = inner.entries.get_mut(&id) else {
@@ -397,10 +406,11 @@ impl WatchRegistry {
         signals
     }
 
-    /// 条件信号：实现者检测到满足的条件（如 log 出现错误）时调用，
-    /// 无条件入通知队列 + 广播（不改变状态）。
+    /// Condition signal: the implementer calls this when a condition is met (e.g. an
+    /// error in the log); goes into the notification queue + broadcast unconditionally
+    /// (doesn't change state).
     pub fn emit_signal(&self, id: WatchId, signal: String, detail: Option<String>) {
-        // 单条信号上限：任何调用方喂来的长文本都在此收口。
+        // Single-signal cap: any long text fed by callers is cut off here.
         let signal = truncate_chars(&signal, MAX_SIGNAL_CHARS);
         let (label, kind, state, entry_detail) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -432,7 +442,8 @@ impl WatchRegistry {
                 .map(|e| e.born.elapsed().as_millis() as u64)
                 .unwrap_or(0)
         };
-        // 广播真实状态与 detail（曾固定 Running/None，TUI 显示与状态不一致）。
+        // Broadcast the real state and detail (used to be hardcoded Running/None, which
+        // made the TUI display inconsistent with the state).
         let _ = self.tx.send(WatchEvent {
             id,
             label,
@@ -445,7 +456,8 @@ impl WatchRegistry {
         });
     }
 
-    /// 轮询循环是否该停：已入终态，或条目已被回收（回收后再轮询只会空转）。
+    /// Whether the polling loop should stop: already terminal, or the entry was reaped
+    /// (polling after reaping would only spin idly).
     pub fn is_terminal(&self, id: WatchId) -> bool {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
@@ -454,8 +466,8 @@ impl WatchRegistry {
             .is_none_or(|e| e.state.is_terminal())
     }
 
-    /// 实现者主动更新状态（无 interval 或轮询之外的即时变化）。
-    /// 状态转换才广播：同状态同 detail 幂等跳过。
+    /// The implementer updates state proactively (no interval, or immediate changes outside polling).
+    /// Only broadcasts on state transitions: same state + same detail is idempotently skipped.
     pub fn set_state(
         &self,
         id: WatchId,
@@ -468,7 +480,8 @@ impl WatchRegistry {
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return;
             };
-            // 终态定格：Done/Failed 后的非终态更新（如轮询的 Running）不再覆盖。
+            // Terminal freeze: non-terminal updates after Done/Failed (e.g. a polling
+            // Running) no longer overwrite.
             if entry.state.is_terminal() && !state.is_terminal() {
                 return;
             }
@@ -482,7 +495,8 @@ impl WatchRegistry {
             let kind = entry.kind;
             let notify = state.is_terminal() || state == WatchState::Idle;
             if state.is_terminal() {
-                // 终态后不再喂内容也不再匹配条件：压缩条目，释放缓冲。
+                // After terminal, no more content feeding or condition matching: compact
+                // the entry and free the buffers.
                 entry.feed_buffer = Vec::new();
                 entry.conditions = Vec::new();
             }
@@ -525,7 +539,7 @@ impl WatchRegistry {
         self.tx.subscribe()
     }
 
-    /// 当前全部 watchable 快照（TUI 初始渲染 / 状态查询）。
+    /// Snapshot of all current watchables (TUI initial render / state queries).
     #[allow(dead_code)]
     pub fn snapshot(&self) -> Vec<WatchSnapshot> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -542,7 +556,8 @@ impl WatchRegistry {
             .collect()
     }
 
-    /// 是否有未消费的唤醒通知（终态或信号）——回合结束后据此补触发自动回合。
+    /// Whether there are unconsumed wake notifications (terminal or signal) — used to
+    /// trigger an extra automatic turn after a turn ends.
     pub fn has_wake_notifications(&self) -> bool {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.notifications.iter().any(|n| {
@@ -550,11 +565,12 @@ impl WatchRegistry {
         })
     }
 
-    /// 取出待注入模型的通知（合并同 id 相邻 Idle 为一条轮次汇总）。
+    /// Take out the notifications pending injection into the model (merges adjacent Idle
+    /// entries with the same id into one round summary).
     pub fn consume_notifications(&self) -> Vec<String> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut out: Vec<String> = Vec::new();
-        // (id, label, 轮次计数, 最近 detail)
+        // (id, label, round count, latest detail)
         let mut pending: Option<(WatchId, String, u32, String)> = None;
         while let Some(n) = inner.notifications.pop_front() {
             if let Some(sig) = n.signal {
@@ -590,8 +606,9 @@ impl WatchRegistry {
     }
 }
 
-/// 终态条目回收：只保留最近 MAX_TERMINAL_ENTRIES 个终态条目
-/// （会话长跑时 entries 不再单调增长；通知已各自持有副本，回收不丢内容）。
+/// Terminal entry reaping: keep only the most recent MAX_TERMINAL_ENTRIES terminal entries
+/// (entries don't grow monotonically in long sessions; notifications hold their own copies,
+/// so reaping loses no content).
 fn prune_terminal_entries(inner: &mut Inner) {
     let mut terminal: Vec<(WatchId, Instant)> = inner
         .entries
@@ -609,7 +626,7 @@ fn prune_terminal_entries(inner: &mut Inner) {
     }
 }
 
-/// 通知正文：detail + payload（截断防上下文膨胀）。
+/// Notification body: detail + payload (truncated to prevent context bloat).
 fn notification_body(detail: &Option<String>, payload: &Option<serde_json::Value>) -> String {
     const MAX_PAYLOAD_CHARS: usize = 4000;
     let mut body = detail.clone().unwrap_or_default();
@@ -736,7 +753,7 @@ mod tests {
 
     #[test]
     fn terminal_state_is_frozen_against_poll_override() {
-        // 回归：子 agent 完成（Done）后，interval 轮询的 Running 不得覆盖。
+        // Regression: after the subagent finishes (Done), a polling Running must not overwrite.
         let reg = watch();
         let id = reg.register_with_conditions(Box::new(FakeWatch {
             label: "agent",
@@ -756,7 +773,7 @@ mod tests {
 
     #[test]
     fn condition_engine_matches_all_condition_kinds() {
-        // Contains：任一字样命中聚合输出
+        // Contains: any word hit is aggregated into the output
         let mut cs = ConditionState::new(NotifyCondition::Contains(vec![
             "DEPLOYED".into(),
             "FAILED".into(),
@@ -767,7 +784,7 @@ mod tests {
             "contains fires on pattern"
         );
         assert!(cs.match_buffer(&["INFO x".into()], 3).is_none(), "no hit");
-        // Errors：默认错误行
+        // Errors: default error lines
         let mut cs = ConditionState::new(NotifyCondition::Errors);
         assert!(
             cs.match_buffer(&["ERROR: boom".into()], 1)
@@ -778,7 +795,7 @@ mod tests {
         // Regex
         let mut cs = ConditionState::new(NotifyCondition::Regex(r"\d{4}-\d{2}".into()));
         assert!(cs.match_buffer(&["time 2026-08-05".into()], 1).is_some(), "regex fires");
-        // LinesOver：突破时一次
+        // LinesOver: fires once on breakthrough
         let mut cs = ConditionState::new(NotifyCondition::LinesOver(3));
         assert!(cs.match_buffer(&[], 4).is_some(), "threshold crossed");
         assert!(cs.match_buffer(&[], 9).is_none(), "fires once");
@@ -786,7 +803,7 @@ mod tests {
 
     #[test]
     fn feed_content_drives_condition_signals() {
-        // 端到端：feed_content → match_conditions（轮询 tick 的路径）。
+        // End to end: feed_content → match_conditions (the polling-tick path).
         let reg = watch();
         let id = reg.register_with_conditions(
             Box::new(FakeWatch {
@@ -808,7 +825,7 @@ mod tests {
         let signals = reg.match_conditions(id);
         assert_eq!(signals.len(), 1, "{signals:?}");
         assert!(signals[0].contains("boom"), "{}", signals[0]);
-        // 缓冲已清：再次 match 无信号
+        // Buffer cleared: another match yields no signal
         assert!(reg.match_conditions(id).is_empty(), "buffer drained");
     }
 
@@ -826,7 +843,7 @@ mod tests {
         })
     }
 
-    /// M3 回归：一个 tick 里 MB 级错误日志不得整串灌进信号。
+    /// M3 regression: MBs of error logs in one tick must not be stuffed into a signal whole.
     #[test]
     fn signal_text_is_bounded() {
         let mut cs = ConditionState::new(NotifyCondition::Errors);
@@ -855,7 +872,7 @@ mod tests {
         );
     }
 
-    /// S6 回归：无人 drain 的 feed 缓冲不得无界增长。
+    /// S6 regression: an undrained feed buffer must not grow unboundedly.
     #[test]
     fn feed_buffer_is_bounded_without_drain() {
         let reg = watch();
@@ -868,7 +885,7 @@ mod tests {
             inner.entries.get(&id).map(|e| e.feed_buffer.len()).unwrap_or(0)
         };
         assert!(buffered <= MAX_FEED_BUFFER_LINES, "缓冲 {buffered} 行应受限");
-        // 累计行数仍如实统计（LinesOver 条件的语义）。
+        // The cumulative line count is still tracked faithfully (the LinesOver semantics).
         let total = {
             let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.entries.get(&id).map(|e| e.total_lines).unwrap_or(0)
@@ -876,7 +893,7 @@ mod tests {
         assert_eq!(total, MAX_FEED_BUFFER_LINES * 3);
     }
 
-    /// S6 回归：终态后释放缓冲，且终态条目不无限累积。
+    /// S6 regression: buffers are freed after terminal, and terminal entries don't accumulate unboundedly.
     #[test]
     fn terminal_entries_are_compacted_and_pruned() {
         let reg = watch();
@@ -901,7 +918,7 @@ mod tests {
                 inner.entries.len()
             );
         }
-        // 被回收的条目必须让轮询循环停下，不能空转。
+        // A reaped entry must stop the polling loop — no idle spinning.
         assert!(reg.is_terminal(id), "已回收的条目视为终态");
         assert!(reg.is_terminal(WatchId(999_999)), "不存在的条目视为终态");
     }
@@ -954,7 +971,7 @@ mod tests {
             index: AtomicUsize::new(0),
             interval: Some(Duration::from_millis(5)),
         }), Vec::new());
-        // 初始事件 + 轮询事件：至少出现 Running → Idle → Done。
+        // Initial event + polling events: at least Running → Idle → Done appears.
         let mut seen: Vec<WatchState> = Vec::new();
         for _ in 0..6 {
             let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv())

@@ -1,8 +1,9 @@
-//! agent 活动（thinking / tool / diff / watch）。
+//! Agent activities (thinking / tool / diff / watch).
 //!
-//! 移植自 rsmarkdown-tui `activities.rs`：活动是一个可折叠面板——折叠
-//! 时一行头部，展开时头部 + 内容。这里只保留 bingo 用到的种类
-//! （Thinking / Tool / Diff / Watch），SubAgent 由 bingo 以 Tool 呈现。
+//! Ported from rsmarkdown-tui `activities.rs`: an activity is a collapsible
+//! panel — one header row when collapsed, header + content when expanded.
+//! Only the kinds bingo uses are kept (Thinking / Tool / Diff / Watch);
+//! SubAgent is presented by bingo as a Tool.
 
 use crate::tui::line::Line;
 use crate::tui::theme::Theme;
@@ -26,36 +27,37 @@ pub const RESULT_INDENT: &str = "     ";
 /// a millisecond count on every row is noise.
 pub const SLOW_TOOL_MS: u64 = 2_000;
 
-/// 工具调用生命周期。
+/// Tool-call lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
-    /// 执行中。
+    /// Running.
     Running,
-    /// 成功完成。
+    /// Finished successfully.
     Done,
-    /// 失败。
+    /// Failed.
     Error,
 }
 
-/// 一次工具调用：`✓ bash · cargo test · 12ms`。
+/// One tool call: `✓ bash · cargo test · 12ms`.
 #[derive(Debug, Clone)]
 pub struct ToolCall {
-    /// 工具名（如 `bash`、`Edit`）。
+    /// Tool name (e.g. `bash`, `Edit`).
     pub name: &'static str,
-    /// 生命周期状态。
+    /// Lifecycle status.
     pub status: ToolStatus,
-    /// 命令/参数摘要。
+    /// Command/argument summary.
     pub summary: String,
-    /// 已运行毫秒。
+    /// Milliseconds elapsed.
     pub duration_ms: u64,
-    /// 头部单行输出预览。
+    /// Single-line output preview for the header.
     pub output: Option<String>,
-    /// 展开态显示的结果摘要（CC `⎿ Read 173 lines`），渲染在 content 前。
+    /// Result summary shown when expanded (CC `⎿ Read 173 lines`), rendered
+    /// before the content.
     pub result_summary: Option<String>,
 }
 
 impl ToolCall {
-    /// 创建一个执行中的工具调用。
+    /// Create a tool call that is still running.
     pub fn running(name: &'static str, summary: impl Into<String>) -> Self {
         Self {
             name,
@@ -68,116 +70,121 @@ impl ToolCall {
     }
 }
 
-/// Watchable 生命周期状态。
+/// Watchable lifecycle status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchStatus {
-    /// 执行中。
+    /// Running.
     Running,
-    /// 一轮完成（周期命令轮次边界）。
+    /// One round finished (round boundary of a periodic command).
     Idle,
-    /// 成功终态。
+    /// Successful terminal state.
     Done,
-    /// 失败终态。
+    /// Failed terminal state.
     Failed,
-    /// 取消终态。
+    /// Cancelled terminal state.
     Cancelled,
 }
 
-/// 一个被 watch 的实体（命令/agent）：header + 轮次 detail + 可展开内容。
+/// A watched entity (command/agent): header + round detail + expandable
+/// content.
 #[derive(Debug, Clone)]
 pub struct WatchCall {
-    /// 描述（如 `watch -n 2 ls`、`reviewer · 审查提交`）。
+    /// Description (e.g. `watch -n 2 ls`, `reviewer · review commits`).
     pub label: String,
-    /// 类别（图标：⏺ 命令 / ◉ 子代理）。
+    /// Category (icon: ⏺ command / ◉ subagent).
     pub kind: crate::watch::WatchKind,
-    /// 生命周期状态。
+    /// Lifecycle status.
     pub status: WatchStatus,
-    /// 当前轮次/进度描述。
+    /// Current round/progress description.
     pub detail: Option<String>,
-    /// 已运行毫秒。
+    /// Milliseconds elapsed.
     pub duration_ms: u64,
 }
 
-/// 思考块是否仍在运行。
+/// Whether a thinking block is still running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingState {
-    /// 仍在推理。
+    /// Still reasoning.
     Running,
-    /// 推理完成。
+    /// Reasoning finished.
     Done,
 }
 
-/// 一个思考块：`✻ Thinking`（运行/完成同头；运行词与耗时只在底部状态行）。
-/// 完成行的 `✻ Churned for 1.4s` 由 [`thinking_completion_line`] 在消息末尾渲染。
+/// A thinking block: `✻ Thinking` (running/done share the header; the running
+/// verb and the elapsed time live only in the bottom status line).
+/// The completion line `✻ Churned for 1.4s` is rendered by
+/// [`thinking_completion_line`] at the end of the message.
 #[derive(Debug, Clone)]
 pub struct Thinking {
-    /// 运行/完成。
+    /// Running/done.
     pub state: ThinkingState,
-    /// 已运行毫秒。
+    /// Milliseconds elapsed.
     pub duration_ms: u64,
-    /// 区分连续推理阶段（运行/完成更新替换正确的块）。
+    /// Distinguishes consecutive reasoning phases (running/done updates
+    /// replace the correct block).
     pub stage: &'static str,
-    /// 完成态随机词（`✻ Churned for 40s`）；
-    /// None 回落 stage。
+    /// Random verb for the done state (`✻ Churned for 40s`);
+    /// `None` falls back to `stage`.
     pub done_verb: Option<&'static str>,
-    /// 宿主 tick（块级独立计时起点）。
+    /// Host tick (per-block independent timing start).
     pub start_tick: u64,
-    /// 聚合的推理段数（正文之间的多个 thinking 段并成一块；
-    /// 折叠行显示 `✻ Thinking · N 段`）。
+    /// Number of aggregated reasoning segments (several thinking segments
+    /// between body text merge into one block; the folded row shows
+    /// `✻ Thinking · N segments`).
     pub segments: usize,
 }
 
-/// 任务生命周期（pending → in_progress → completed）。
+/// Task lifecycle (pending → in_progress → completed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TodoStatus {
-    /// 未开始。
+    /// Not started.
     Pending,
-    /// 进行中。
+    /// In progress.
     InProgress,
-    /// 已完成。
+    /// Completed.
     Done,
 }
 
-/// 一个任务项。
+/// A task item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoItem {
-    /// 任务文本。
+    /// Task text.
     pub text: String,
-    /// 生命周期状态。
+    /// Lifecycle status.
     pub status: TodoStatus,
 }
 
-/// unified diff 的一行。
+/// One line of a unified diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffLine {
-    /// 未变上下文行。
+    /// Unchanged context line.
     Context(String),
-    /// 删除行（`-`）。
+    /// Removed line (`-`).
     Removed(String),
-    /// 新增行（`+`）。
+    /// Added line (`+`).
     Added(String),
 }
 
-/// unified diff 的一个 hunk。
+/// One hunk of a unified diff.
 #[derive(Debug, Clone)]
 pub struct Hunk {
     /// `@@ -a,b +c,d @@`
     pub header: String,
-    /// 上下文 / 删除 / 新增行。
+    /// Context / removed / added lines.
     pub lines: Vec<DiffLine>,
 }
 
-/// 一次文件编辑，呈现为 git 风格 unified diff。
+/// One file edit, presented as a git-style unified diff.
 #[derive(Debug, Clone)]
 pub struct Diff {
-    /// 文件路径。
+    /// File path.
     pub path: String,
-    /// 按序 hunks。
+    /// Hunks in order.
     pub hunks: Vec<Hunk>,
 }
 
 impl Diff {
-    /// 统计所有 hunk 的新增/删除行数。
+    /// Count added/removed lines across all hunks.
     pub fn stats(&self) -> (usize, usize) {
         let mut added = 0;
         let mut removed = 0;
@@ -193,7 +200,7 @@ impl Diff {
         (added, removed)
     }
 
-    /// 解析 unified diff（git 格式：`---` / `+++` / `@@` / `-` `+` ` `）。
+    /// Parse a unified diff (git format: `---` / `+++` / `@@` / `-` `+` ` `).
     pub fn parse_unified(text: &str) -> Self {
         let mut path = String::new();
         let mut hunks: Vec<Hunk> = Vec::new();
@@ -241,7 +248,7 @@ impl Diff {
     }
 }
 
-/// 渲染 diff 为样式化行：`@@` hunk 头、`-` 红、`+` 绿。
+/// Render a diff as styled lines: `@@` hunk headers, `-` red, `+` green.
 pub fn diff_lines(d: &Diff, theme: &Theme) -> Vec<Line> {
     let mut out = Vec::new();
     for hunk in &d.hunks {
@@ -261,37 +268,38 @@ pub fn diff_lines(d: &Diff, theme: &Theme) -> Vec<Line> {
     out
 }
 
-/// 活动种类。
+/// Activity kind.
 #[derive(Debug, Clone)]
 pub enum ActivityKind {
-    /// 思考块。
+    /// Thinking block.
     Thinking(Thinking),
-    /// 工具调用。
+    /// Tool call.
     Tool(ToolCall),
-    /// 文件编辑（unified diff）。
+    /// File edit (unified diff).
     Diff(Diff),
-    /// 被 watch 的实体。
+    /// A watched entity.
     Watch(WatchCall),
 }
 
-/// 可折叠的活动：头部一行 + 可选展开内容。所有种类共享
-/// 展开/折叠能力，只有呈现不同。
+/// A collapsible activity: one header row + optional expandable content. All
+/// kinds share the expand/collapse capability; only the presentation differs.
 #[derive(Debug, Clone)]
 pub struct Activity {
-    /// 活动种类。
+    /// Activity kind.
     pub kind: ActivityKind,
-    /// 折叠（false）或展开（true）。
+    /// Collapsed (false) or expanded (true).
     pub expanded: bool,
-    /// 展开时显示的内容（reasoning 文本 / 工具 I/O）。
+    /// Content shown when expanded (reasoning text / tool I/O).
     pub content: Vec<Line>,
-    /// 是否来自自动展开规则（活动仍活跃）而非用户点击。
+    /// Whether this came from an auto-expand rule (activity still active)
+    /// rather than a user click.
     pub auto_expanded: bool,
-    /// 展开提示文本（如 `"ctrl+o to expand"`）。
+    /// Expand hint text (e.g. `"ctrl+o to expand"`).
     pub expand_hint: Option<String>,
 }
 
 impl Activity {
-    /// 创建一个折叠的活动。
+    /// Create a collapsed activity.
     pub fn new(kind: ActivityKind) -> Self {
         Self {
             kind,
@@ -302,24 +310,26 @@ impl Activity {
         }
     }
 
-    /// 展开或折叠（手动切换接管自动展开规则）。
+    /// Expand or collapse (a manual toggle takes over the auto-expand rule).
     pub fn toggle(&mut self) {
         self.expanded = !self.expanded;
         self.auto_expanded = false;
     }
 
-    /// 展开是否揭示任何内容。
+    /// Whether expanding reveals any content.
     pub fn expandable(&self) -> bool {
         !self.content.is_empty()
     }
 
-    /// 设置展开内容。
+    /// Set the expandable content.
     pub fn set_content(&mut self, content: Vec<Line>) {
         self.content = content;
     }
 
-    /// 活动是否仍在变化（行内容随 tick/事件更新）：运行中的思考块、
-    /// 运行中的工具、运行中的 watch。REPL 模式以此判定消息可否定稿。
+    /// Whether the activity is still changing (row content updates with
+    /// ticks/events): a running thinking block, a running tool, a running
+    /// watch. REPL mode uses this to decide whether a message can be
+    /// finalized.
     pub fn is_running(&self) -> bool {
         match &self.kind {
             ActivityKind::Thinking(t) => t.state == ThinkingState::Running,
@@ -358,14 +368,15 @@ fn diff_result(d: &Diff, theme: &Theme) -> Line {
     )
 }
 
-/// 思考块头：运行/完成同形 `✻ Thinking`（dim italic）。
-/// 运行词、spinner 与耗时只出现在底部状态行，避免重复。
+/// Thinking-block header: running/done share the shape `✻ Thinking` (dim
+/// italic). The running verb, spinner and elapsed time appear only in the
+/// bottom status line, to avoid repetition.
 fn thinking_header(theme: &Theme) -> Line {
     Line::styled("✻ Thinking", theme.thinking())
 }
 
-/// 思考完成行：`✻ {done_verb} for 40.0s`，
-/// 渲染在消息末尾（正文与全部工具之后）。
+/// Thinking completion line: `✻ {done_verb} for 40.0s`, rendered at the end
+/// of the message (after the body and all tools).
 pub fn thinking_completion_line(t: &Thinking, theme: &Theme) -> Line {
     let verb = t.done_verb.unwrap_or(t.stage);
     Line::styled(
@@ -384,8 +395,9 @@ fn dot_style(status: ToolStatus, theme: &Theme) -> crate::tui::line::SegStyle {
     }
 }
 
-/// 工具类别图标：内建 `⏺` / MCP `◆` / Skill `✦`。形状表类别、颜色表状态
-/// （dot_style 不变）；Agent 无工具行，其 Watch 行图标见 [`watch_header`]。
+/// Tool-category icon: built-in `⏺` / MCP `◆` / Skill `✦`. Shape encodes
+/// category, colour encodes status (dot_style unchanged); agents have no tool
+/// row, their watch-row icon lives in [`watch_header`].
 pub fn tool_glyph(name: &str) -> &'static str {
     if name.starts_with("mcp__") {
         "◆ "
@@ -396,7 +408,8 @@ pub fn tool_glyph(name: &str) -> &'static str {
     }
 }
 
-/// MCP 全名 `mcp__server__tool` 显示为 `server:tool`；权限规则仍用全名。
+/// The MCP full name `mcp__server__tool` displays as `server:tool`;
+/// permission rules still use the full name.
 pub fn display_tool_name(name: &str) -> String {
     match name.strip_prefix("mcp__") {
         Some(rest) => rest.replacen("__", ":", 1),
@@ -447,7 +460,8 @@ fn tool_result(t: &ToolCall, act: &Activity, theme: &Theme) -> Line {
 }
 
 /// `⏺ watch -n 2 ls` — same shape as a tool, driven by the watch lifecycle.
-/// 子代理的 Watch 行（WatchKind::Agent）用 `◉`：环中有核，会话中套会话。
+/// A subagent's watch row (`WatchKind::Agent`) uses `◉`: a core inside a
+/// ring, a session inside a session.
 fn watch_header(w: &WatchCall, theme: &Theme) -> Line {
     let style = match w.status {
         WatchStatus::Running | WatchStatus::Idle => theme.dim(),
@@ -508,7 +522,7 @@ fn expand_hint(act: &Activity) -> Option<&str> {
 
 /// Fold hint for activities that have no result line of their own
 /// (thinking): `… +N lines (ctrl+o to expand)`; aggregated blocks show
-/// `· N 段 (ctrl+o to expand)`.
+/// `· N segments (ctrl+o to expand)`.
 fn fold_tail(act: &Activity) -> Option<String> {
     if act.expanded || act.content.is_empty() {
         return None;
@@ -529,24 +543,28 @@ fn fold_tail(act: &Activity) -> Option<String> {
     }
 }
 
-/// 一个活动的可点击行范围（文档坐标）。
+/// The clickable row range of one activity (document coordinates).
 #[derive(Debug, Clone)]
 pub struct ActivityRowRange {
-    /// 首行（含）。
+    /// First row (inclusive).
     pub start: u16,
-    /// 尾行（不含）。
+    /// Last row (exclusive).
     pub end: u16,
-    /// 活动路径（`[i]` 消息级活动；无嵌套 subagent 时恒为单元素）。
+    /// Activity path (`[i]` message-level activity; always a single element
+    /// without nested subagents).
     pub path: Vec<usize>,
 }
 
-/// 布局单个活动：头部 + 结果行 + （展开时）内容，返回行与可点击范围。
+/// Lay out a single activity: header + result line + (when expanded) content,
+/// returning the rows and the clickable range.
 ///
-/// 没有 spinner 参数：活动行是静态的，运行中的动画只在底部状态行
-/// （CC 语义），于是已定稿的活动行永远不再变化。
+/// No spinner parameter: activity rows are static — the running animation
+/// lives only in the bottom status line (CC semantics), so a finalized
+/// activity row never changes again.
 ///
-/// `render_reply` 渲染 subagent 的 markdown 回复（本模块保持显示无关，
-/// bingo 的 SubAgent 以 Tool 呈现，无需递归——保留参数以对齐原契约）。
+/// `render_reply` renders a subagent's markdown reply (this module stays
+/// display-independent; bingo presents SubAgent as a Tool, so no recursion is
+/// needed — the parameter is kept to match the original contract).
 pub fn layout_activity(
     act: &Activity,
     path: &[usize],
@@ -592,7 +610,8 @@ pub fn layout_activity(
     (rows, ranges)
 }
 
-/// 沿路径（可含嵌套 subagent）定位活动，可变引用。
+/// Locate an activity along a path (which may contain nested subagents),
+/// mutably.
 pub fn activities_path_get_mut<'a>(
     acts: &'a mut [Activity],
     path: &[usize],
@@ -636,7 +655,8 @@ mod tests {
 
     #[test]
     fn thinking_collapsed_and_expanded() {
-        // 块头运行/完成同形 `✻ Thinking`；完成行由 thinking_completion_line 单独渲染。
+        // Running/done share the `✻ Thinking` header; the completion line is
+        // rendered separately by thinking_completion_line.
         let mut h = thinking("understand", ThinkingState::Done);
         assert!(h.expandable());
         let lines = render_lines(&h);
@@ -649,7 +669,7 @@ mod tests {
         assert_eq!(text(&lines[0]), "✻ Thinking");
         assert_eq!(lines.len(), 2, "expanded: header + content");
         assert!(text(&lines[1]).contains("reasoning line"));
-        // 思考正文 italic + thinking 灰（CC italic gray）。
+        // Reasoning body is italic grey (CC italic gray).
         let body = lines[1].segs.last().expect("content seg");
         assert!(body.style.italic, "italic reasoning");
         assert_eq!(body.style.fg, Some(Theme::dark().thinking));
@@ -668,7 +688,8 @@ mod tests {
 
     #[test]
     fn aggregated_thinking_shows_segment_count() {
-        // 聚合块折叠行显示段数；单段保持行数提示。
+        // Aggregated blocks show the segment count on the folded row; single
+        // segments keep the line-count hint.
         let mut h = thinking("understand", ThinkingState::Done);
         if let ActivityKind::Thinking(t) = &mut h.kind {
             t.segments = 3;
@@ -682,7 +703,7 @@ mod tests {
 
     #[test]
     fn completion_line_uses_random_verb_and_duration() {
-        // `✻ Churned for 40.0s`（随机过去式动词）。
+        // `✻ Churned for 40.0s` (random past-tense verb).
         let t = Thinking {
             state: ThinkingState::Done,
             duration_ms: 40_000,
@@ -693,7 +714,7 @@ mod tests {
         };
         let line = thinking_completion_line(&t, &Theme::dark());
         assert_eq!(text(&line), "✻ Churned for 40.0s");
-        // None 回落 stage。
+        // None falls back to stage.
         let t2 = Thinking {
             stage: "Churning",
             done_verb: None,
@@ -703,7 +724,8 @@ mod tests {
         assert_eq!(text(&line2), "✻ Churning for 40.0s");
     }
 
-    /// CC 双行结构：`⏺ Bash(cmd)` + `  ⎿  {结果} (ctrl+o to expand)`。
+    /// CC two-line structure: `⏺ Bash(cmd)` + `  ⎿  {result}
+    /// (ctrl+o to expand)`.
     #[test]
     fn tool_collapsed_and_expanded() {
         let mut h = Activity::new(ActivityKind::Tool(ToolCall {
@@ -735,18 +757,20 @@ mod tests {
         assert!(text(&lines[3]).contains("54 passed; 0 failed"));
     }
 
-    /// 运行中：头行立即出现，结果行 `Running…`（spinner 在底部状态行）。
+    /// Running: the header row appears immediately, the result row reads
+    /// `Running…` (the spinner lives in the bottom status line).
     #[test]
     fn running_tool_shows_running_result_line() {
         let h = Activity::new(ActivityKind::Tool(ToolCall::running("Read", "src/main.rs")));
         let lines = render_lines(&h);
         assert_eq!(text(&lines[0]), "⏺ Read(src/main.rs)");
         assert_eq!(text(&lines[1]), "  ⎿  Running…");
-        // 运行中的点用弱色，完成后转绿。
+        // The running dot uses the weak colour and turns green when done.
         assert_eq!(lines[0].segs[0].style.fg, Some(Theme::dark().inactive));
     }
 
-    /// 慢命令（>2s）把耗时并进结果行；错误行用 error 色。
+    /// Slow commands (>2s) fold the duration into the result line; error
+    /// lines use the error colour.
     #[test]
     fn slow_and_failed_tools_annotate_the_result_line() {
         let slow = Activity::new(ActivityKind::Tool(ToolCall {
@@ -796,7 +820,7 @@ mod tests {
         let b = spinner(1);
         assert_ne!(a, b);
         assert_eq!(spinner(SPINNERS.len() as u64), a, "cycles after full rotation");
-        // 星芒字形（CC）：不再是 braille。
+        // Starburst glyph (CC): no longer braille.
         assert_eq!(SPINNERS[0], '·');
         assert!(SPINNERS.contains(&'✻'));
         assert!(!SPINNERS.contains(&'⠋'));
@@ -812,8 +836,9 @@ mod tests {
         assert_eq!(removed, 1);
     }
 
-    /// 类别图标：⏺ 内建 / ◆ MCP（显示名 server:tool）/ ✦ Skill / ◉ Agent watch。
-    /// 形状表类别，颜色继续表状态。
+    /// Category icons: ⏺ built-in / ◆ MCP (displayed as server:tool) /
+    /// ✦ Skill / ◉ Agent watch. Shape encodes category, colour keeps
+    /// encoding status.
     #[test]
     fn category_icons_and_mcp_display_name() {
         let mcp = Activity::new(ActivityKind::Tool(ToolCall {
@@ -829,7 +854,7 @@ mod tests {
             "◆ dokploy:application-deploy(applicationId=\"x\")",
             "MCP 全名显示为 server:tool"
         );
-        // 状态色仍在图标上：Done 转绿。
+        // The status colour stays on the icon: Done turns green.
         assert_eq!(
             render_lines(&mcp)[0].segs[0].style.fg,
             Some(Theme::dark().success)

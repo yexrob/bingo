@@ -1,11 +1,12 @@
-//! WebFetch 预批准域名（代码类公开文档域名）。
-//! 仅影响 WebFetch 权限判定（GET 请求），不涉及网络沙箱。
+//! WebFetch preapproved domains (code-related public documentation domains).
+//! Only affects WebFetch permission decisions (GET requests); no network sandbox
+//! involvement.
 
 const PREAPPROVED: &[&str] = &[
     "modelcontextprotocol.io",
     "github.com/anthropics",
     "agentskills.io",
-    // 编程语言文档
+    // Programming language docs
     "docs.python.org",
     "en.cppreference.com",
     "docs.oracle.com",
@@ -19,7 +20,7 @@ const PREAPPROVED: &[&str] = &[
     "ruby-doc.org",
     "doc.rust-lang.org",
     "www.typescriptlang.org",
-    // Web 与 JS 框架
+    // Web & JS frameworks
     "react.dev",
     "angular.io",
     "vuejs.org",
@@ -36,7 +37,7 @@ const PREAPPROVED: &[&str] = &[
     "webpack.js.org",
     "jestjs.io",
     "reactrouter.com",
-    // Python 生态
+    // Python ecosystem
     "docs.djangoproject.com",
     "flask.palletsprojects.com",
     "fastapi.tiangolo.com",
@@ -63,17 +64,17 @@ const PREAPPROVED: &[&str] = &[
     "dotnet.microsoft.com",
     "nuget.org",
     "blazor.net",
-    // 移动
+    // Mobile
     "reactnative.dev",
     "docs.flutter.dev",
     "developer.apple.com",
     "developer.android.com",
-    // 数据与 ML
+    // Data & ML
     "keras.io",
     "spark.apache.org",
     "huggingface.co",
     "www.kaggle.com",
-    // 数据库
+    // Databases
     "www.mongodb.com",
     "redis.io",
     "www.postgresql.org",
@@ -81,7 +82,7 @@ const PREAPPROVED: &[&str] = &[
     "www.sqlite.org",
     "graphql.org",
     "prisma.io",
-    // 云与 DevOps
+    // Cloud & DevOps
     "docs.aws.amazon.com",
     "cloud.google.com",
     "kubernetes.io",
@@ -91,20 +92,20 @@ const PREAPPROVED: &[&str] = &[
     "vercel.com/docs",
     "docs.netlify.com",
     "devcenter.heroku.com",
-    // 测试与监控
+    // Testing & monitoring
     "cypress.io",
     "selenium.dev",
-    // 游戏
+    // Gaming
     "docs.unity.com",
     "docs.unrealengine.com",
-    // 其他
+    // Other
     "git-scm.com",
     "nginx.org",
     "httpd.apache.org",
 ];
 
-/// URL 是否落在预批准列表。路径前缀条目要求段边界匹配
-///（"/anthropics" 不匹配 "/anthropics-evil"）。
+/// Whether a URL falls on the preapproved list. Path-prefix entries require segment
+/// boundary matching ("/anthropics" doesn't match "/anthropics-evil").
 pub fn is_preapproved_url(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
@@ -123,7 +124,8 @@ pub fn is_preapproved_url(url: &str) -> bool {
         }
         let matched = match prefix {
             None => true,
-            // entry 的路径段（"github.com/anthropics"）在 split 后无前导斜杠，比对时补上。
+            // The entry's path segment ("github.com/anthropics") has no leading slash
+            // after the split; add it back when comparing.
             Some(p) => pathname == format!("/{p}") || pathname.starts_with(&format!("/{p}/")),
         };
         if matched {

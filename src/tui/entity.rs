@@ -1,14 +1,18 @@
-//! 实体全屏视图（ctrl+g 选择器打开）：
+//! Full-screen entity views (opened from the ctrl+g picker):
 //!
-//! - **agent 对话视图**：该实例的完整消息历史（❯ 指令 / 正文 / ⏺ 工具行）
-//!   + 运行中的流式活尾，只读，↑↓ 滚动。
-//! - **频道房间**：微信式群聊——他人靠左（名签 + 气泡），`user`（你）
-//!   靠右；底部输入行，Enter 以 `user` 身份发言（与 Post 工具同一投递
-//!   路径，照常唤醒成员）。渲染即已读：你看着屏幕，serial 校验不会弹你。
+//! - **agent conversation view**: the instance's full message history (❯
+//!   prompts / body / ⏺ tool lines) plus the running streaming tail, read-only
+//!   with ↑↓ scrolling.
+//! - **channel room**: WeChat-style group chat — others on the left (name tag
+//!   + bubble), `user` (you) on the right; input line at the bottom, Enter
+//!     speaks as `user` (the same delivery path as the Post tool, waking
+//!     members as usual). Rendering counts as read: while you watch the
+//!     screen, serial validation won't bounce you.
 //!
-//! 两个视图都跑在交替屏（alternate screen）里：inline 的 write-once
-//! scrollback 决定了不存在"就地换内容"，交替屏是可自由重绘的画布，
-//! Esc 返回后主屏原样恢复（app 层再走一次确定性重画兜底）。
+//! Both views run on the alternate screen: inline's write-once scrollback
+//! rules out "swapping content in place", and the alternate screen is a canvas
+//! that can be redrawn freely; Esc restores the main screen as it was (the app
+//! layer re-draws deterministically once more as a safety net).
 
 use std::io::stdout;
 use std::sync::Arc;
@@ -28,12 +32,14 @@ use crate::tui::line::{text_width, wrap_words, Line, SegStyle};
 use crate::tui::theme::Theme;
 use crate::tui::view;
 
-/// 房间气泡的最大内容宽（终端宽的 3/5，微信比例）。
+/// Maximum content width of a room bubble (3/5 of the terminal width, the
+/// WeChat ratio).
 fn bubble_width(width: usize) -> usize {
     (width * 3 / 5).clamp(12, width.saturating_sub(6))
 }
 
-/// agent 对话视图内容行：历史 Message + 流式活尾。
+/// Content rows of the agent conversation view: history `Message`s plus the
+/// streaming live tail.
 pub fn agent_view_rows(
     history: &[Message],
     live: Option<&str>,
@@ -96,7 +102,8 @@ pub fn agent_view_rows(
                         SegStyle::fg(theme.inactive),
                     )));
                 }
-                // 工具结果与思考不进视图（噪声；要细看用主 transcript 的展开）。
+                // Tool results and thinking stay out of the view (noise; use
+                // the main transcript's expand for detail).
                 _ => {}
             }
         }
@@ -124,8 +131,10 @@ pub fn agent_view_rows(
     rows
 }
 
-/// 频道房间内容行：微信式气泡。`user`（你）靠右、user_message_bg；
-/// 其他成员靠左、名签 + code_block_bg 气泡；同发件人连续消息合并名签。
+/// Content rows of a channel room: WeChat-style bubbles. `user` (you) sits
+/// right-aligned with `user_message_bg`; other members sit left-aligned with
+/// a name tag + `code_block_bg` bubble; consecutive messages from the same
+/// sender merge their name tags.
 pub fn room_rows(log: &[ChannelMessage], width: usize, theme: &Theme) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     if log.is_empty() {
@@ -180,7 +189,7 @@ pub fn room_rows(log: &[ChannelMessage], width: usize, theme: &Theme) -> Vec<Row
     rows
 }
 
-/// 视图头部（title + 分隔线）。
+/// View header (title + separator line).
 fn header_rows(title: String, width: usize, theme: &Theme) -> Vec<Row> {
     vec![
         Row::new(Line::styled(
@@ -194,8 +203,10 @@ fn header_rows(title: String, width: usize, theme: &Theme) -> Vec<Row> {
     ]
 }
 
-/// 全屏实体模态：交替屏内自绘循环，Esc/ctrl+c 返回。
-/// `already_alt`：fullscreen 宿主本就在交替屏内，不再嵌套进出。
+/// Full-screen entity modal: a self-drawing loop on the alternate screen,
+/// Esc/ctrl+c returns.
+/// `already_alt`: the fullscreen host is already on the alternate screen, so
+/// there is no nested enter/leave.
 pub async fn run_entity_modal(
     chat: &mut Chat,
     events: &mut EventStream,
@@ -221,7 +232,7 @@ async fn modal_loop(
     terminal.clear()?;
     let mut ticker = tokio::time::interval(Duration::from_millis(33));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // 距底部的滚动偏移（0 = 贴底跟随最新）。
+    // Scroll offset from the bottom (0 = pinned to the latest).
     let mut scroll_up: usize = 0;
     let mut input = String::new();
     let mut flash: Option<String> = None;
@@ -271,8 +282,9 @@ async fn modal_loop(
                 Some(Err(_)) | None => break,
             },
             _ = ticker.tick() => {
-                // 后台 agent 的事件照常消化（通知/watch 行进 chat 状态），
-                // 模态退出后主视图是最新的。
+                // Background agent events keep being drained (notices/watch
+                // still advance chat state), so the main view is up to date
+                // once the modal exits.
                 chat.tick();
                 let _ = chat.drain_all();
             }
@@ -305,7 +317,8 @@ async fn modal_loop(
                 }
                 EntityOpen::Channel(name) => {
                     let log = session.channels.log_of(name);
-                    // 渲染即已读：serial 校验以屏幕为准，你永远"见过最新"。
+                    // Rendering counts as read: serial validation goes by
+                    // what's on screen, so you've always "seen the latest".
                     if let Some(last) = log.last() {
                         session.channels.mark_seen(USER_NAME, name, last.seq);
                     }
@@ -346,7 +359,8 @@ async fn modal_loop(
                 .saturating_sub(header.len())
                 .saturating_sub(footer.len())
                 .max(1);
-            // 贴底 + 向上滚动偏移（clamp 不越顶）。
+            // Bottom-anchored + scroll offset (clamped so it can't run past
+            // the top).
             let max_up = content.len().saturating_sub(viewport);
             let up = scroll_up.min(max_up);
             let start = content.len().saturating_sub(viewport + up);
@@ -386,7 +400,8 @@ async fn modal_loop(
                     ),
                 );
             }
-            // 频道输入行光标（footer 倒数第二行是输入行）。
+            // Cursor on the channel input line (the second-to-last footer row
+            // is the input).
             if let Some(col) = cursor_col {
                 let input_y = height.saturating_sub(2);
                 if let (Ok(x), Ok(y)) = (u16::try_from(col), u16::try_from(input_y)) {
@@ -398,8 +413,8 @@ async fn modal_loop(
     Ok(())
 }
 
-/// 以 `user` 身份发言（与 Post 工具同一条投递/唤醒路径）。
-/// 返回 None = 成功；Some = 提示文本（弹回/错误）。
+/// Speak as `user` (the same delivery/wake path as the Post tool).
+/// Returns `None` = success; `Some` = notice text (bounce-back/error).
 fn post_as_user(
     session: &Arc<crate::query::Session>,
     channel: &str,
@@ -413,7 +428,8 @@ fn post_as_user(
         text,
     ) {
         Ok(crate::tool::channel::PostDelivery::Sent { .. }) => None,
-        // 渲染即已读之下几乎不会弹回；万一撞上（同帧竞争），提示重发。
+        // With render-as-read this rarely bounces; if it does (same-frame
+        // race), prompt the user to resend.
         Ok(crate::tool::channel::PostDelivery::Stale { .. }) => {
             Some("频道刚有新消息，请看完后重发".to_string())
         }
@@ -433,8 +449,9 @@ mod tests {
         }
     }
 
-    /// 微信式布局：user 靠右（行前大段空白），他人靠左带名签，
-    /// 同发件人连续消息不重复名签。
+    /// WeChat-style layout: `user` right-aligned (large leading blank), others
+    /// left-aligned with a name tag; consecutive messages from the same sender
+    /// don't repeat the tag.
     #[test]
     fn room_rows_align_user_right_and_others_left() {
         let theme = Theme::dark();
@@ -446,18 +463,20 @@ mod tests {
         ];
         let rows = room_rows(&log, 80, &theme);
         let texts: Vec<String> = rows.iter().map(|r| r.line.plain_text()).collect();
-        // 名签：法官出现一次（连续消息合并），scout 一次。
+        // Name tags: the judge appears once (consecutive messages merged),
+        // scout once.
         assert_eq!(
             texts.iter().filter(|t| t.trim() == "法官").count(),
             1,
             "{texts:?}"
         );
         assert!(texts.iter().any(|t| t.trim() == "scout"));
-        // 他人靠左：气泡行以两格缩进开头。
+        // Others sit left: bubble rows start with a two-space indent.
         assert!(texts.iter().any(|t| t.starts_with("   3号请发言")
             || t.starts_with("   补充")
             || t.starts_with("  ") && t.contains("3号请发言")));
-        // user 靠右：行前空白把内容推到右侧（起始列 > 半宽）。
+        // user sits right: leading whitespace pushes the content to the right
+        // (start column > half width).
         let mine = rows
             .iter()
             .find(|r| r.line.plain_text().contains("都停一下"))
@@ -465,7 +484,7 @@ mod tests {
         let text = mine.line.plain_text();
         let lead = text.len() - text.trim_start().len();
         assert!(lead > 40, "右对齐（前导空白 {lead}）: {text:?}");
-        // user 气泡用 user_message_bg，他人用 code_block_bg。
+        // user bubbles use user_message_bg, others use code_block_bg.
         assert!(mine
             .line
             .segs
@@ -480,14 +499,15 @@ mod tests {
             .segs
             .iter()
             .any(|s| s.style.bg == Some(theme.code_block_bg)));
-        // 空日志：占位提示。
+        // Empty log: placeholder notice.
         assert!(room_rows(&[], 80, &theme)[0]
             .line
             .plain_text()
             .contains("还没有消息"));
     }
 
-    /// agent 对话视图：❯ 指令、正文、⏺ 工具行、活尾与空态。
+    /// Agent conversation view: ❯ prompts, body, ⏺ tool lines, the live tail
+    /// and the empty state.
     #[test]
     fn agent_view_renders_history_and_live_tail() {
         let theme = Theme::dark();
@@ -514,7 +534,7 @@ mod tests {
         assert!(joined.iter().any(|t| t.contains("结论：懒落盘正确。")));
         assert!(joined.iter().any(|t| t.contains("正在写第二段")));
         assert!(joined.iter().any(|t| t.contains("生成中")));
-        // 空历史：占位。
+        // Empty history: placeholder.
         let empty = agent_view_rows(&[], None, 80, &theme);
         assert!(empty[0].line.plain_text().contains("还没有完成的回合"));
     }

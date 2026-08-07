@@ -7,9 +7,9 @@ use crate::error::ErrorCode;
 use crate::permission::PermissionBehavior;
 use crate::settings::{HookRule, HooksConfig};
 
-/// 普通 hook 超时。
+/// Ordinary hook timeout.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(60);
-/// SessionEnd 快速收尾超时（1.5s）。
+/// SessionEnd fast-teardown timeout (1.5s).
 const SESSION_END_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Error)]
@@ -26,7 +26,7 @@ impl ErrorCode for HookError {
     }
 }
 
-/// PreToolUse hook 输出。
+/// PreToolUse hook output.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct PreToolUseOutput {
@@ -36,7 +36,7 @@ pub struct PreToolUseOutput {
     pub updated_input: Option<serde_json::Value>,
 }
 
-/// 发送给 hook 的输入（hook 输入契约的最小面）。
+/// Input sent to hooks (minimal face of the hook input contract).
 #[derive(Debug, Serialize)]
 struct HookInput<'a> {
     hook_event_name: &'a str,
@@ -45,13 +45,15 @@ struct HookInput<'a> {
     permission_mode: &'a str,
 }
 
-/// matcher 正则缓存：编译一次，编译失败只告警一次（None = 退回全等比较）。
+/// matcher regex cache: compiled once; a compile failure warns once (None = fall back
+/// to exact comparison).
 static MATCHER_CACHE: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, Option<regex::Regex>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-/// matcher 语义：整串锚定的正则（`Edit|Write`、`mcp__.*` 等）。
-/// 空 matcher 匹配一切；正则编译失败退回全等比较并告警一次。
+/// matcher semantics: whole-string-anchored regex (`Edit|Write`, `mcp__.*` etc.).
+/// Empty matcher matches everything; a regex compile failure falls back to exact
+/// comparison with one warning.
 fn matcher_matches(matcher: &str, tool_name: &str) -> bool {
     if matcher.is_empty() {
         return true;
@@ -82,7 +84,7 @@ fn matched<'a>(rules: &'a [HookRule], tool_name: &str) -> Vec<&'a HookRule> {
         .collect()
 }
 
-/// 匹配到的 hook 命令列表。tool_name 为 None 表示事件不针对工具。
+/// Matched hook command list. A None tool_name means the event isn't tool-targeted.
 fn commands_for<'a>(config: &'a HooksConfig, event: &'a str, tool_name: &str) -> Vec<&'a str> {
     let rules = match event {
         "PreToolUse" => matched(&config.pre_tool_use, tool_name),
@@ -105,9 +107,10 @@ fn commands_for<'a>(config: &'a HooksConfig, event: &'a str, tool_name: &str) ->
         .collect()
 }
 
-/// 执行一条 hook：stdin 喂 JSON，stdout 解析 JSON。
-/// 返回 (退出码, stdout JSON, stderr)。退出码语义：
-/// 0 = 成功；2 = blocking（stderr 注入模型）；其他非零 = 仅用户可见。
+/// Run one hook: feed JSON on stdin, parse JSON from stdout.
+/// Returns (exit code, stdout JSON, stderr). Exit-code semantics:
+/// 0 = success; 2 = blocking (stderr injected into the model); other non-zero =
+/// user-visible only.
 async fn run_hook_with_timeout(
     command: &str,
     input: &serde_json::Value,
@@ -119,7 +122,7 @@ async fn run_hook_with_timeout(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        // 超时后 future drop 即杀掉 hook 进程，不留残留。
+        // Dropping the future after timeout kills the hook process, no leftovers.
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| HookError::Failed(format!("spawn failed: {e}")))?;
@@ -130,15 +133,16 @@ async fn run_hook_with_timeout(
         .ok_or_else(|| HookError::Failed("no stdin".into()))?;
     let input_text = input.to_string();
 
-    // 写 stdin 必须与 wait 同处一个 timeout 且并发：大 tool_input 超过管道
-    // 缓冲、hook 又不读 stdin 时，顺序写入会永久阻塞整个回合。
+    // Writing stdin must share one timeout with wait and run concurrently: with a
+    // tool_input larger than the pipe buffer and a hook that doesn't read stdin,
+    // sequential writing would block the whole turn forever.
     let output = tokio::time::timeout(timeout, async move {
         use tokio::io::AsyncWriteExt;
         let write = async {
             if let Err(e) = stdin.write_all(input_text.as_bytes()).await {
                 eprintln!("[bingo] warning: failed to write hook stdin: {e}");
             }
-            // 关闭管道，hook 读到 EOF。
+            // Close the pipe; the hook sees EOF.
             drop(stdin);
         };
         let (_, output) = tokio::join!(write, child.wait_with_output());
@@ -171,8 +175,9 @@ async fn run_hook(
     run_hook_with_timeout(command, input, HOOK_TIMEOUT).await
 }
 
-/// PreToolUse：按顺序执行所有匹配 hook；任一返回 deny/ask 即生效，
-/// updatedInput 累积覆盖输入。exit 2 → 阻塞（stderr 作为原因）；其他失败不阻断。
+/// PreToolUse: run all matching hooks in order; any deny/ask takes effect,
+/// updatedInput accumulates over the input. exit 2 → blocking (stderr as the reason);
+/// other failures don't block.
 pub async fn run_pre_tool_use(
     config: &HooksConfig,
     tool_name: &str,
@@ -204,7 +209,7 @@ pub async fn run_pre_tool_use(
                 }
             };
         if code == 2 {
-            // blocking：stderr 注入模型。
+            // blocking: stderr injected into the model.
             let reason = if stderr.is_empty() {
                 "blocked by PreToolUse hook".to_string()
             } else {
@@ -241,7 +246,7 @@ pub async fn run_pre_tool_use(
     (PermissionBehavior::Allow, String::new(), input)
 }
 
-/// PreCompact：执行匹配 hook（无工具名）。失败不阻断。
+/// PreCompact: run matching hooks (no tool name). Failures don't block.
 pub async fn run_pre_compact(config: &HooksConfig, permission_mode: &str) {
     let commands = commands_for(config, "PreCompact", "");
     for command in commands {
@@ -255,7 +260,7 @@ pub async fn run_pre_compact(config: &HooksConfig, permission_mode: &str) {
     }
 }
 
-/// PostCompact：执行匹配 hook。失败不阻断。
+/// PostCompact: run matching hooks. Failures don't block.
 pub async fn run_post_compact(config: &HooksConfig, permission_mode: &str) {
     let commands = commands_for(config, "PostCompact", "");
     for command in commands {
@@ -269,7 +274,7 @@ pub async fn run_post_compact(config: &HooksConfig, permission_mode: &str) {
     }
 }
 
-/// PostToolUse：执行匹配 hook。返回 true = exit 2（阻断继续）。
+/// PostToolUse: run matching hooks. Returns true = exit 2 (block continuation).
 pub async fn run_post_tool_use(
     config: &HooksConfig,
     tool_name: &str,
@@ -304,7 +309,8 @@ pub async fn run_post_tool_use(
     blocked
 }
 
-/// UserPromptSubmit：用户提交消息时执行。exit 2 / JSON decision=block → 阻止本次提交。
+/// UserPromptSubmit: run when the user submits a message. exit 2 / JSON
+/// decision=block → block this submission.
 pub async fn run_user_prompt_submit(
     config: &HooksConfig,
     prompt: &str,
@@ -344,7 +350,8 @@ pub async fn run_user_prompt_submit(
     false
 }
 
-/// Stop：回合正常结束时执行。exit 2 → 返回 blocking stderr（调用方注入模型并重试）。
+/// Stop: run when a turn ends normally. exit 2 → return blocking stderr (caller
+/// injects it into the model and retries).
 pub async fn run_stop_hooks(
     config: &HooksConfig,
     permission_mode: &str,
@@ -372,7 +379,7 @@ pub async fn run_stop_hooks(
     None
 }
 
-/// SessionStart：会话开始时执行（无决策语义，失败不阻断）。
+/// SessionStart: run when the session starts (no decision semantics, failures don't block).
 pub async fn run_session_start(config: &HooksConfig, permission_mode: &str) {
     let commands = commands_for(config, "SessionStart", "");
     for command in commands {
@@ -386,7 +393,7 @@ pub async fn run_session_start(config: &HooksConfig, permission_mode: &str) {
     }
 }
 
-/// SessionEnd：会话结束时执行。快速超时（1.5s）。
+/// SessionEnd: run when the session ends. Fast timeout (1.5s).
 pub async fn run_session_end(config: &HooksConfig, permission_mode: &str) {
     let commands = commands_for(config, "SessionEnd", "");
     for command in commands {
@@ -400,8 +407,8 @@ pub async fn run_session_end(config: &HooksConfig, permission_mode: &str) {
     }
 }
 
-/// Task 生命周期 hook 公共执行：exit 2 的 stderr 作为 blockingError 收集返回
-/// （调用方决定后果）。
+/// Task lifecycle hook common execution: exit-2 stderr collected and returned as
+/// blockingError (the caller decides the consequence).
 async fn run_task_lifecycle_hooks(
     config: &HooksConfig,
     event: &str,
@@ -440,7 +447,8 @@ async fn run_task_lifecycle_hooks(
     blocking
 }
 
-/// TaskCreated：新任务创建后执行。blockingError → 任务被撤销（调用方处理）。
+/// TaskCreated: run after a new task is created. blockingError → the task is revoked
+/// (handled by the caller).
 pub async fn run_task_created(
     config: &HooksConfig,
     task_id: &str,
@@ -450,7 +458,8 @@ pub async fn run_task_created(
     run_task_lifecycle_hooks(config, "TaskCreated", task_id, subject, permission_mode).await
 }
 
-/// TaskCompleted：任务标记 completed 前执行。blockingError → 拒绝 completed（调用方处理）。
+/// TaskCompleted: run before a task is marked completed. blockingError → reject
+/// completed (handled by the caller).
 pub async fn run_task_completed(
     config: &HooksConfig,
     task_id: &str,
@@ -586,7 +595,8 @@ mod tests {
         assert_eq!(blocking.as_deref(), Some("review pending"));
     }
 
-    /// 回归：hook 不读 stdin 且 tool_input 超过管道缓冲（64KB）时曾永久死锁。
+    /// Regression: a hook that doesn't read stdin with a tool_input beyond the pipe
+    /// buffer (64KB) used to deadlock forever.
     #[tokio::test]
     async fn large_stdin_does_not_deadlock_when_hook_ignores_it() {
         let config = config_with("echo '{}'");
@@ -605,7 +615,8 @@ mod tests {
         assert_eq!(behavior, PermissionBehavior::Allow);
     }
 
-    /// 超时的 hook 不阻断回合，且进程不残留（kill_on_drop）。
+    /// A timed-out hook doesn't block the turn, and no process is left behind
+    /// (kill_on_drop).
     #[tokio::test]
     async fn hook_timeout_is_reported_and_does_not_hang() {
         let started = std::time::Instant::now();
@@ -619,20 +630,21 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5), "超时应立即返回");
     }
 
-    /// matcher 是整串锚定的正则：`Edit|Write`、`mcp__.*` 生效，不再静默不匹配。
+    /// matcher is a whole-string-anchored regex: `Edit|Write`, `mcp__.*` work instead
+    /// of silently not matching.
     #[test]
     fn matcher_supports_anchored_regex() {
         assert!(matcher_matches("Edit|Write", "Edit"));
         assert!(matcher_matches("Edit|Write", "Write"));
         assert!(!matcher_matches("Edit|Write", "Read"));
-        // 整串锚定：不做子串匹配。
+        // Whole-string anchored: no substring matching.
         assert!(!matcher_matches("Edit", "EditNotebook"));
         assert!(matcher_matches("mcp__.*", "mcp__files__read"));
         assert!(!matcher_matches("mcp__.*", "Bash"));
         assert!(matcher_matches("Bash", "Bash"));
-        // 空 matcher 匹配一切。
+        // Empty matcher matches everything.
         assert!(matcher_matches("", "Anything"));
-        // 非法正则退回全等。
+        // Invalid regex falls back to exact match.
         assert!(matcher_matches("Web(Fetch", "Web(Fetch"));
         assert!(!matcher_matches("Web(Fetch", "WebFetch"));
     }

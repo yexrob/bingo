@@ -26,38 +26,39 @@ pub mod webfetch;
 pub mod websearch;
 pub mod write;
 
-/// 工具执行上下文：随 queryLoop 一轮共享。
+/// Tool execution context: shared across one queryLoop turn.
 #[derive(Clone)]
 pub struct ToolContext {
     pub cwd: PathBuf,
-    /// 用户主目录（Experience 工具定位用户级经验根目录）。
+    /// User home directory (the Experience tools locate the user-level experience root here).
     pub home: PathBuf,
-    /// Watchable 注册中心（后台任务生命周期与通知）。
+    /// Watchable registry (background task lifecycle and notifications).
     pub watch: std::sync::Arc<crate::watch::WatchRegistry>,
-    /// 共享 HTTP 客户端（WebFetch/WebSearch 复用连接池；不跟随重定向）。
+    /// Shared HTTP client (WebFetch/WebSearch reuse the connection pool; does not follow redirects).
     pub http: reqwest::Client,
-    /// Task 存储（Task 工具族；TUI 任务区同源）。
+    /// Task store (Task tool family; shared with the TUI task panel).
     pub tasks: std::sync::Arc<TaskStore>,
-    /// Hooks 配置（TaskCreated/TaskCompleted 事件）。
+    /// Hooks configuration (TaskCreated/TaskCompleted events).
     pub hooks: HooksConfig,
-    /// 权限模式字符串（hook 输入契约）。
+    /// Permission mode string (hook input contract).
     pub permission_mode: String,
-    /// 任务区展开信号（headless 无订阅者）。
+    /// Task panel expand signal (no subscribers in headless mode).
     pub expand_tasks: tokio::sync::watch::Sender<bool>,
-    /// 问用户选择题（AskUserQuestion 工具）：标题 + 问题 + 选项 → 选项索引
-    /// （None = 用户跳过/Esc）。TUI 复用权限询问模态。
+    /// Ask the user multiple-choice questions (AskUserQuestion tool): title + question + options
+    /// → option index (None = user skipped/Esc). The TUI reuses the permission prompt modal.
     pub ask_question: std::sync::Arc<crate::query::AskQuestionFn>,
 }
 
 impl ToolContext {
-    /// 工具调用时通知 TUI 展开任务区。
+    /// Notify the TUI to expand the task panel on a tool call.
     pub fn set_expanded_view_tasks(&self) {
         let _ = self.expand_tasks.send(true);
     }
 }
 
-/// 工具执行结果：content 即回填给模型的 tool_result content。
-/// diff 为可选 unified diff 文本（Edit/Write 等编辑工具的 UI 预览，不回填模型）。
+/// Tool execution result: content is fed back to the model as tool_result content.
+/// diff is optional unified diff text (UI preview for edit tools like Edit/Write;
+/// not fed back to the model).
 #[derive(Debug, Default)]
 pub struct ToolResult {
     pub content: serde_json::Value,
@@ -85,8 +86,9 @@ impl ToolError {
     }
 }
 
-/// Tool 契约（D2）。
-/// 默认 fail-closed：非并发安全、非只读、允许（权限交给统一门）。
+/// Tool contract (D2).
+/// Defaults are fail-closed: not concurrency-safe, not read-only, allowed (permissions
+/// are left to the unified gate).
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> String;
@@ -101,7 +103,8 @@ pub trait Tool: Send + Sync {
     fn is_destructive(&self, _input: &serde_json::Value) -> bool {
         false
     }
-    /// 编辑类工具（Edit/Write 等）：acceptEdits 模式下自动允许，其他模式照常询问。
+    /// Edit-type tools (Edit/Write etc.): automatically allowed in acceptEdits mode,
+    /// asked as usual otherwise.
     fn is_edit_tool(&self, _input: &serde_json::Value) -> bool {
         false
     }
@@ -112,23 +115,25 @@ pub trait Tool: Send + Sync {
     ) -> Result<ToolResult, ToolError>;
 }
 
-/// 模型回传参数 → 目标类型。失败信息给模型可见（is_error 回填）。
+/// Model-returned parameters → target type. Failure info is visible to the model (fed back via is_error).
 pub fn parse_input<T: for<'a> Deserialize<'a>>(
     input: &serde_json::Value,
 ) -> Result<T, ToolError> {
     serde_json::from_value(input.clone()).map_err(|e| ToolError::failed(format!("bad input: {e}")))
 }
 
-/// 由 input 结构体生成 inputSchema（schemars，单一来源，D2）。
-/// 去掉 `$schema` 键：工具 schema 随 tool_params 发给模型，保持既有形状。
-/// 嵌套类型产生的 `#/definitions/...` 引用必须随根 schema 一起带上，
-/// 否则模型的 $ref 悬空（AskUserQuestion 的 questions/options 属此）。
+/// Generate inputSchema from the input struct (schemars, single source of truth, D2).
+/// Strip the `$schema` key: the tool schema is sent to the model with tool_params, keeping
+/// its established shape. `#/definitions/...` references produced by nested types must be
+/// carried along with the root schema, otherwise the model's $ref dangles (as with
+/// AskUserQuestion's questions/options).
 pub fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     let mut generator = schemars::r#gen::SchemaGenerator::default();
     let mut value = serde_json::to_value(T::json_schema(&mut generator))
         .unwrap_or_else(|_| serde_json::json!({ "type": "object" }));
-    // 嵌套类型产生的 `#/definitions/...` 引用必须随根 schema 一起带上，
-    // 否则模型的 $ref 悬空（AskUserQuestion 的 questions/options 属此）。
+    // `#/definitions/...` references produced by nested types must be carried along with
+    // the root schema, otherwise the model's $ref dangles (as with AskUserQuestion's
+    // questions/options).
     if !generator.definitions().is_empty()
         && let Some(obj) = value.as_object_mut()
     {
@@ -140,12 +145,12 @@ pub fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     value
 }
 
-/// 注册表里按名字找工具。
+/// Find a tool by name in the registry.
 pub fn find_tool<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> Option<&'a dyn Tool> {
     tools.iter().map(|t| t.as_ref()).find(|t| t.name() == name)
 }
 
-/// 组装发送给 API 的 tools 参数。
+/// Assemble the tools parameter sent to the API.
 pub fn tool_params(tools: &[Box<dyn Tool>]) -> Vec<serde_json::Value> {
     tools
         .iter()
@@ -169,7 +174,8 @@ mod tests {
 
     #[test]
     fn agent_schema_matches_input_struct() {
-        // 回归：schema 与 input 结构体单一来源（D2）。曾漂移——结构体缺 description。
+        // Regression: schema and input struct share a single source (D2). It once drifted —
+        // the struct was missing description.
         let schema = schema_for::<agent::AgentInput>();
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["required"], json!(["prompt"]));
@@ -192,7 +198,7 @@ mod tests {
     fn bash_schema_optional_timeout() {
         let schema = BashTool::new().input_schema();
         assert_eq!(schema["required"], json!(["command"]));
-        // Option 字段不入 required
+        // Option fields do not go into required
         assert!(!schema["required"].as_array().unwrap().contains(&json!("timeout")));
     }
 

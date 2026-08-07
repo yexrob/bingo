@@ -1,11 +1,13 @@
-//! 频道工具（实验特性 `experimental.agentChannels`）。
+//! Channel tools (experimental feature `experimental.agentChannels`).
 //!
-//! `Post`：任何成员（hub + depth-1 子代理）向频道发言——发件人由会话
-//! 实例名盖戳（模型无法伪造）；serial 频道落后即弹回附增量（工具结果，
-//! 非错误——模型在同回合内阅读增量后自判照发/改发/放弃）。
-//! `Channel`：hub 专用的房间管理（create/invite/kick/list）。
-//! 投递唤醒：消息进全体成员信箱；空闲成员立即唤醒，忙碌成员回合边界
-//! 批量注入；hub 走 hub_mail 在下一轮推理前注入。沉默 = 不调用 Post。
+//! `Post`: any member (hub + depth-1 sub-agents) posts to a channel — the sender is stamped
+//! by the session instance name (the model cannot forge it); on a serial channel, lagging
+//! posts are bounced back with the increments attached (as a tool result, not an error —
+//! the model reads the increments in the same turn and decides whether to resend, amend,
+//! or drop). `Channel`: hub-only room management (create/invite/kick/list).
+//! Delivery wake-up: messages land in every member's inbox; idle members are woken
+//! immediately, busy members get batched injection at turn boundaries; the hub is injected
+//! via hub_mail before the next round of reasoning. Silence = not calling Post.
 
 use std::sync::Arc;
 
@@ -19,7 +21,7 @@ use crate::tool::agent::{absorb_inbox, excerpt, spawn_agent_loop};
 use crate::tool::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 use crate::watch::{WatchKind, WatchState};
 
-/// 频道展示行（◇ #名字 · N 条 · 最近……）：无轮询，post 时主动更新。
+/// Channel display row (◇ #name · N messages · latest…): no polling; updated proactively on post.
 struct ChannelWatch {
     label: String,
 }
@@ -44,7 +46,7 @@ impl crate::watch::Watchable for ChannelWatch {
     }
 }
 
-/// post 后刷新频道展示行（detail = 条数与最近发言，payload = 日志尾部）。
+/// Refresh the channel display row after a post (detail = message count and latest post, payload = log tail).
 fn refresh_channel_row(session: &Arc<Session>, name: &str) {
     if let Some((Some(id), detail, payload)) = session.channels.row_snapshot(name) {
         session.watch.set_state(
@@ -56,7 +58,7 @@ fn refresh_channel_row(session: &Arc<Session>, name: &str) {
     }
 }
 
-/// 本会话在频道中的成员名：子代理 = 实例名，主会话 = main。
+/// This session's member name in a channel: sub-agents = instance name, main session = main.
 fn sender_of(session: &Arc<Session>) -> String {
     session
         .instance
@@ -64,14 +66,14 @@ fn sender_of(session: &Arc<Session>) -> String {
         .unwrap_or_else(|| HUB_NAME.to_string())
 }
 
-/// 发言结果（deliver_post 的两种出口）。
+/// Post outcome (the two exit paths of deliver_post).
 pub(crate) enum PostDelivery {
     Sent { seq: u64 },
     Stale { missed: Vec<crate::channels::ChannelMessage> },
 }
 
-/// 发言 + 投递唤醒 + 展示行刷新——Post 工具与 TUI 频道房间共用同一条
-/// 路径（用户在房间里以 `user` 身份发言走的也是这里）。
+/// Post + delivery wake-up + display row refresh — the Post tool and the TUI channel room
+/// share the same path (the user's posts as `user` in the room go through here too).
 pub(crate) fn deliver_post(
     session: &Arc<Session>,
     watch: &Arc<crate::watch::WatchRegistry>,
@@ -82,7 +84,7 @@ pub(crate) fn deliver_post(
     match session.channels.post(from, channel, text)? {
         PostOutcome::Sent { seq, deliveries } => {
             refresh_channel_row(session, channel);
-            // 投递唤醒：空闲成员立即开回合；忙碌成员信箱累积。
+            // Delivery wake-up: idle members start a run immediately; busy members accumulate in their inbox.
             for (member, msg) in deliveries {
                 let item = crate::agents::InboxItem::Channel {
                     channel: channel.to_string(),
@@ -125,7 +127,7 @@ pub struct PostInput {
     message: String,
 }
 
-/// 向频道发言（发件人 = 本会话实例名，runtime 盖戳）。
+/// Post to a channel (sender = this session's instance name, stamped by the runtime).
 pub struct PostTool {
     session: Arc<Session>,
 }
@@ -199,13 +201,13 @@ impl Tool for PostTool {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ChannelAction {
-    /// 建频道（hub 自动入席）。
+    /// Create a channel (hub joins automatically).
     Create,
-    /// 拉成员入频道（从当前消息头开始听，无 backlog）。
+    /// Invite a member into the channel (starts listening from the current head, no backlog).
     Invite,
-    /// 移出成员。
+    /// Kick a member out.
     Kick,
-    /// 列出全部频道。
+    /// List all channels.
     List,
 }
 
@@ -225,7 +227,7 @@ pub struct ChannelInput {
     mode: Option<String>,
 }
 
-/// 频道管理（hub 专用）：建房、成员进出、清单。
+/// Channel management (hub only): create, invite/kick members, list.
 pub struct ChannelTool {
     session: Arc<Session>,
 }
@@ -244,7 +246,7 @@ impl ChannelTool {
             .ok_or_else(|| ToolError::failed("需要 channel 参数（频道名）"))
     }
 
-    /// cohort 校验：成员必须是已存在的直接子代理（depth==1）。
+    /// Cohort validation: members must be existing direct sub-agents (depth==1).
     fn validate_member(&self, member: &str) -> Result<(), ToolError> {
         if member == HUB_NAME {
             return Ok(());
@@ -398,7 +400,7 @@ mod tests {
         })
     }
 
-    /// 同一注册表/频道表下的 depth-1 子会话（实例名盖戳）。
+    /// A depth-1 sub-session under the same registry/channel table (instance name stamped).
     fn sub_session(hub: &Arc<Session>, instance: &str) -> Arc<Session> {
         Arc::new(Session {
             depth: 1,
@@ -425,7 +427,7 @@ mod tests {
     async fn create_validates_cohort_and_registers_row() {
         let hub = hub_session();
         let tool = ChannelTool::new(hub.clone());
-        // 未知成员拒绝。
+        // Unknown members are rejected.
         let err = tool
             .call(
                 serde_json::json!({"action": "create", "channel": "t", "members": ["ghost"]}),
@@ -434,7 +436,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("ghost"), "{err}");
-        // depth-1 成员通过；hub 自动入席。
+        // depth-1 members pass; the hub joins automatically.
         hub.agents
             .insert("a", None, "a".into(), sub_session(&hub, "a"));
         let out = tool
@@ -446,7 +448,7 @@ mod tests {
             .unwrap();
         let text = out.content.as_str().unwrap();
         assert!(text.contains("#t") && text.contains("serial"), "{text}");
-        // 深层实例拒绝入频道。
+        // Deeper instances are refused entry to the channel.
         let deep = Arc::new(Session {
             depth: 2,
             ..(*sub_session(&hub, "deep")).clone()
@@ -460,7 +462,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("直接子代理"), "{err}");
-        // list 输出成员与模式。
+        // list outputs members and mode.
         let out = tool
             .call(serde_json::json!({"action": "list"}), &ctx(&hub))
             .await
@@ -484,7 +486,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // a（Running 状态）视角发言：盖戳 a；b 在 Running → 信箱累积。
+        // Post from a's (Running) perspective: stamped a; b is Running → accumulates in its inbox.
         let post_a = PostTool::new(sub_session(&hub, "a"));
         let out = post_a
             .call(
@@ -503,7 +505,7 @@ mod tests {
                 if from == "a" && text == "大家好"),
             "盖戳为 a"
         );
-        // hub 发言：盖戳 main；hub_mail 只收别人的。
+        // Hub posts: stamped main; hub_mail only receives others' posts.
         let post_hub = PostTool::new(hub.clone());
         let _ = post_hub
             .call(
@@ -515,7 +517,7 @@ mod tests {
         let mail = hub.channels.drain_hub_mail();
         assert_eq!(mail.len(), 1, "{mail:?}");
         assert!(mail[0].contains("a: 大家好"));
-        // 非成员发言报错。
+        // Non-member posts error out.
         let post_c = PostTool::new(sub_session(&hub, "c"));
         let err = post_c
             .call(serde_json::json!({"channel": "t", "message": "x"}), &ctx(&hub))
@@ -545,7 +547,7 @@ mod tests {
             .call(serde_json::json!({"channel": "count", "message": "1"}), &ctx(&hub))
             .await
             .unwrap();
-        // b 落后 → 弹回（工具结果，非错误），附增量。
+        // b lags → bounced back (tool result, not an error) with increments attached.
         let out = post_b
             .call(serde_json::json!({"channel": "count", "message": "1"}), &ctx(&hub))
             .await
@@ -553,7 +555,7 @@ mod tests {
         let text = out.content.as_str().unwrap();
         assert!(!out.is_error);
         assert!(text.contains("未送出") && text.contains("a: 1"), "{text}");
-        // 重发落地（模型改口）。
+        // Resend lands (the model changed its message).
         let out = post_b
             .call(serde_json::json!({"channel": "count", "message": "2"}), &ctx(&hub))
             .await

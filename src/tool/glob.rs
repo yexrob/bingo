@@ -5,16 +5,16 @@ use serde::Deserialize;
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-/// Glob 结果上限：防模型一次拿到超长列表（超出截断并注明）。
+/// Glob result cap: prevents the model from receiving an overly long list (truncated with a note when exceeded).
 const MAX_GLOB_RESULTS: usize = 500;
 
-/// 路径 glob 匹配器（Glob 工具与 Grep 的 glob 过滤共用）。
+/// Path glob matcher (shared by the Glob tool and Grep's glob filter).
 ///
-/// globset 的 matcher 整串锚定：拿绝对路径去比 `src/**/*.rs` 这类相对
-/// pattern 永远零匹配。规则：
-/// - pattern 以 `/` 开头 → 比绝对路径；
-/// - pattern 不含 `/` → 比文件名（ripgrep `-g` 语义，任意深度生效）；
-/// - 其余 → 比相对 root 的路径。
+/// globset's matcher anchors the whole string: matching an absolute path against a relative
+/// pattern like `src/**/*.rs` always yields zero matches. Rules:
+/// - pattern starting with `/` → match against the absolute path;
+/// - pattern without `/` → match against the file name (ripgrep `-g` semantics, applies at any depth);
+/// - otherwise → match against the path relative to root.
 pub struct PathGlob {
     matcher: globset::GlobMatcher,
     absolute: bool,
@@ -55,7 +55,7 @@ pub struct GlobInput {
     pub path: Option<String>,
 }
 
-/// Glob：按 pattern 递归列文件。
+/// Glob: recursively list files matching a pattern.
 pub struct GlobTool;
 
 #[async_trait]
@@ -92,7 +92,8 @@ impl Tool for GlobTool {
         let matcher = PathGlob::new(&params.pattern)
             .map_err(|e| ToolError::failed(format!("bad glob pattern: {e}")))?;
 
-        // 同步递归遍历放进 spawn_blocking：大仓库下不阻塞运行时线程。
+        // The synchronous recursive walk goes into spawn_blocking: it must not block runtime
+        // threads on large repos.
         let search_root = root.clone();
         let (mut matches, stopped_early) = tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
@@ -121,8 +122,9 @@ impl Tool for GlobTool {
     }
 }
 
-/// 深度优先收集匹配文件（相对 root 路径）；跳过符号链接目录防循环、
-/// 跳过 .git/target/node_modules/隐藏目录。返回 true 表示达到上限提前终止。
+/// Depth-first collection of matching files (paths relative to root); skips symlinked dirs to
+/// prevent cycles, and skips .git/target/node_modules/hidden directories. Returns true when the
+/// cap is reached and traversal stops early.
 fn collect(
     root: &Path,
     dir: &Path,
@@ -212,7 +214,7 @@ mod tests {
             .to_string()
     }
 
-    /// M6 回归：带目录前缀的相对 pattern 曾永远零匹配。
+    /// M6 regression: relative patterns with a directory prefix once always matched zero.
     #[tokio::test]
     async fn relative_patterns_match_against_root() {
         let root = fixture("rel");
@@ -220,20 +222,20 @@ mod tests {
         assert!(text.contains("src/main.rs"), "{text}");
         assert!(text.contains("src/deep/lib.rs"), "{text}");
         assert!(!text.contains("notes.md"), "{text}");
-        // 无 `/` 的 pattern 按文件名匹配，任意深度生效。
+        // A pattern without `/` matches by file name, effective at any depth.
         let text = run(&root, "*.md").await;
         assert!(text.contains("notes.md"), "{text}");
-        // `**/` 前缀照常。
+        // `**/` prefixes work as usual.
         let text = run(&root, "**/*.rs").await;
         assert!(text.contains("src/main.rs") && text.contains("src/deep/lib.rs"), "{text}");
-        // 绝对 pattern 比绝对路径。
+        // Absolute patterns match against the absolute path.
         let absolute = format!("{}/src/**/*.rs", root.to_string_lossy());
         let text = run(&root, &absolute).await;
         assert!(text.contains("src/main.rs"), "{text}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// M1 回归：构建产物 / 版本库内部 / 隐藏目录默认不遍历。
+    /// M1 regression: build artifacts / VCS internals / hidden directories are not traversed by default.
     #[tokio::test]
     async fn skips_build_and_vcs_directories() {
         let root = fixture("skip");

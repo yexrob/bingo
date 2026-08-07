@@ -1,22 +1,22 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// 一个技能：`<name>/SKILL.md`（YAML frontmatter + markdown 正文）。
+/// A skill: `<name>/SKILL.md` (YAML frontmatter + markdown body).
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
     pub description: String,
     pub when_to_use: Option<String>,
-    /// frontmatter `arguments:` 声明的参数名（`$name` 按位置替换）。
+    /// Argument names declared in frontmatter `arguments:` (`$name` substituted by position).
     pub argument_names: Vec<String>,
-    /// SKILL.md 所在目录（`${CLAUDE_SKILL_DIR}` 与相对引用基准）。
+    /// Directory containing SKILL.md (base for `${CLAUDE_SKILL_DIR}` and relative references).
     pub base_dir: PathBuf,
-    /// frontmatter 剥离后的正文。
+    /// Body after stripping the frontmatter.
     pub content: String,
 }
 
-/// frontmatter 解析结果（行解析的简单形状；
-/// 仅支持 `key: value` 单行，不做完整 YAML）。
+/// Frontmatter parse result (a simple shape from line parsing;
+/// only single-line `key: value` is supported, not full YAML).
 #[derive(Debug, Default, PartialEq)]
 pub struct Frontmatter {
     pub description: Option<String>,
@@ -24,10 +24,11 @@ pub struct Frontmatter {
     pub argument_names: Vec<String>,
 }
 
-/// 解析 `---\nkey: value\n---` 前置块为键值对 + 正文；无 frontmatter 时
-/// 返回空对 + 原文。任何键都支持 YAML 折叠/字面标量（`>-` / `|` 等）：
-/// 后续缩进行并入值（`|` 系保留换行，`>` 系折叠为空格）。
-/// 技能与 agent 定义共用（各自再解释键的语义）。
+/// Parse a `---\nkey: value\n---` preamble into key-value pairs + body; with no
+/// frontmatter, returns empty pairs + the original text. Every key supports YAML
+/// folded/literal scalars (`>-` / `|` etc.): following indented lines merge into the
+/// value (`|` family keeps newlines, `>` family folds into spaces).
+/// Shared by skills and agent definitions (each interprets key semantics itself).
 pub fn parse_frontmatter_pairs(content: &str) -> (Vec<(String, String)>, &str) {
     let Some(rest) = content.strip_prefix("---\n") else {
         return (Vec::new(), content);
@@ -77,7 +78,7 @@ pub fn parse_frontmatter_pairs(content: &str) -> (Vec<(String, String)>, &str) {
     (pairs, body)
 }
 
-/// 技能视角的 frontmatter：description / when_to_use / arguments。
+/// Skill-view frontmatter: description / when_to_use / arguments.
 pub fn parse_frontmatter(content: &str) -> (Frontmatter, &str) {
     let (pairs, body) = parse_frontmatter_pairs(content);
     let mut fm = Frontmatter::default();
@@ -85,7 +86,7 @@ pub fn parse_frontmatter(content: &str) -> (Frontmatter, &str) {
         match key.as_str() {
             "description" => fm.description = Some(value),
             "when_to_use" => fm.when_to_use = Some(value),
-            // CC 支持空格分隔或数组；此处统一逗号/空格分隔。
+            // CC supports space-separated or array forms; here we unify on comma/space separation.
             "arguments" => {
                 fm.argument_names = value
                     .split([',', ' '])
@@ -100,7 +101,7 @@ pub fn parse_frontmatter(content: &str) -> (Frontmatter, &str) {
     (fm, body)
 }
 
-/// description 缺失时的回落：正文第一个非空行。
+/// Fallback when description is missing: the first non-empty line of the body.
 pub fn first_line(markdown: &str) -> String {
     markdown
         .lines()
@@ -110,7 +111,7 @@ pub fn first_line(markdown: &str) -> String {
         .to_string()
 }
 
-/// 用户级技能目录：`$XDG_CONFIG_HOME/bingo/skills`（镜像 main.rs 的配置约定）。
+/// User-level skills directory: `$XDG_CONFIG_HOME/bingo/skills` (mirrors the config convention in main.rs).
 fn user_skills_dir(home: &Path) -> PathBuf {
     let config = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -118,7 +119,7 @@ fn user_skills_dir(home: &Path) -> PathBuf {
     config.join("bingo").join("skills")
 }
 
-/// 从 cwd 向上逐层找 `.bingo/skills`。
+/// Walk up from cwd, looking for `.bingo/skills` at each level.
 fn project_skills_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut dir = Some(cwd);
@@ -135,7 +136,7 @@ fn load_dir(dir: &Path, out: &mut Vec<Skill>) {
     else {
         return;
     };
-    // readdir 顺序不保证（APFS 任意序）：按名排序，让清单可预期。
+    // readdir order isn't guaranteed (arbitrary on APFS): sort by name so the listing is predictable.
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         if !entry.file_type().is_ok_and(|t| t.is_dir()) {
@@ -162,8 +163,8 @@ fn load_dir(dir: &Path, out: &mut Vec<Skill>) {
     }
 }
 
-/// 内置技能清单（编译进二进制）：
-/// 每个技能的内容内嵌在 `bundled/*.md`，base_dir 为空（无文件基准）。
+/// Built-in skill list (compiled into the binary):
+/// each skill's content is embedded in `bundled/*.md`; base_dir is empty (no file base).
 pub fn bundled_skills() -> Vec<Skill> {
     let mut skills = Vec::new();
     let (name, raw) = ("guide", include_str!("skills/bundled/guide.md"));
@@ -182,8 +183,8 @@ pub fn bundled_skills() -> Vec<Skill> {
     skills
 }
 
-/// 扫描指纹：技能目录与已加载 SKILL.md 的 mtime。
-/// 目录 mtime 捕获增删，文件 mtime 捕获内容改动。
+/// Scan fingerprint: mtimes of the skill directories and loaded SKILL.md files.
+/// Directory mtime captures additions/removals; file mtime captures content changes.
 type Stamps = Vec<(PathBuf, Option<std::time::SystemTime>)>;
 
 fn stamp(path: &Path) -> (PathBuf, Option<std::time::SystemTime>) {
@@ -199,7 +200,8 @@ struct SkillCache {
     skills: Vec<Skill>,
 }
 
-/// 进程内缓存：每回合全量重扫技能目录（用户级技能可上百个）是纯浪费。
+/// In-process cache: rescanning all skill directories every turn (user-level skills can
+/// number in the hundreds) would be pure waste.
 static SKILL_CACHE: std::sync::LazyLock<std::sync::Mutex<Option<SkillCache>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
@@ -209,9 +211,9 @@ fn scan_dirs(home: &Path, cwd: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// 加载全部技能：内置（编译期）→ user 层 → 项目层（近 cwd 优先）；
-/// 按名字去重，磁盘技能覆盖同名内置（用户自定义优先）。
-/// 目录/文件 mtime 未变时复用上一次扫描结果。
+/// Load all skills: built-in (compile time) → user layer → project layers (nearest cwd
+/// first); dedup by name, on-disk skills override same-name built-ins (user custom wins).
+/// Reuses the previous scan result when dir/file mtimes are unchanged.
 pub fn load_skills(home: &Path, cwd: &Path) -> Vec<Skill> {
     let key = (home.to_path_buf(), cwd.to_path_buf());
     let dirs = scan_dirs(home, cwd);
@@ -237,7 +239,7 @@ pub fn load_skills(home: &Path, cwd: &Path) -> Vec<Skill> {
     skills.retain(|s| seen.insert(realpath_or(&s.base_dir.join("SKILL.md"))));
     let mut stamps = dir_stamps;
     stamps.extend(skills.iter().map(|s| stamp(&s.base_dir.join("SKILL.md"))));
-    // 内置技能排在磁盘技能之后：同名时磁盘（先入）胜出。
+    // Built-ins come after disk skills: on same name, the disk one (first in) wins.
     let names: HashSet<String> = skills.iter().map(|s| s.name.clone()).collect();
     skills.extend(
         bundled_skills()
@@ -256,10 +258,11 @@ fn realpath_or(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// 按参数名/位置替换占位符：
-/// `$ARGUMENTS` → 完整参数串；`$ARGUMENTS[N]`/`$N` → 第 N 个参数；
-/// `$name` → 按声明顺序的第 N 个参数（后不跟 `[` 或单词字符）。
-/// args 为空串时占位符替换为空；无占位符且 args 非空时追加 `ARGUMENTS:`。
+/// Substitute placeholders by argument name/position:
+/// `$ARGUMENTS` → the full argument string; `$ARGUMENTS[N]`/`$N` → the Nth argument;
+/// `$name` → the Nth argument in declared order (not followed by `[` or a word char).
+/// With an empty args string placeholders become empty; with no placeholders and
+/// non-empty args, `ARGUMENTS:` is appended.
 pub fn substitute_arguments(content: &str, args: &str, argument_names: &[String]) -> String {
     let parsed: Vec<&str> = args.split_whitespace().collect();
     let mut out = content.to_string();
@@ -275,7 +278,8 @@ pub fn substitute_arguments(content: &str, args: &str, argument_names: &[String]
     for (needle, value) in &indexed {
         out = out.replace(needle, value);
     }
-    // $N 简写：从大到小替换避免 "$10" 被 "$1" 截胡；后不跟单词字符/`[`。
+    // $N shorthand: replace largest-first so "$10" isn't intercepted by "$1"; not
+    // followed by a word char or `[`.
     for (i, value) in parsed.iter().enumerate().rev() {
         let needle = format!("${i}");
         out = replace_word_boundary(&out, &needle, value);
@@ -307,8 +311,8 @@ fn replace_word_boundary(haystack: &str, needle: &str, value: &str) -> String {
     out
 }
 
-/// 技能展开：`Base directory for this skill: {dir}` 头（内置技能无文件基准时省略）
-/// + 参数替换 + `${CLAUDE_SKILL_DIR}`。
+/// Skill expansion: `Base directory for this skill: {dir}` header (omitted for built-ins
+/// with no file base) + argument substitution + `${CLAUDE_SKILL_DIR}`.
 pub fn expand_skill(skill: &Skill, args: &str) -> String {
     let mut content = skill.content.clone();
     if !skill.base_dir.as_os_str().is_empty() {
@@ -322,9 +326,9 @@ pub fn expand_skill(skill: &Skill, args: &str) -> String {
     content.replace("${CLAUDE_SKILL_DIR}", &skill.base_dir.display().to_string())
 }
 
-/// 清单条目截断长度。
+/// Truncation length for listing entries.
 pub const MAX_LISTING_DESC_CHARS: usize = 250;
-/// 清单默认字符预算（上下文 1%）。
+/// Default char budget for the listing (1% of context).
 pub const DEFAULT_CHAR_BUDGET: usize = 8000;
 
 fn listing_entry(skill: &Skill) -> String {
@@ -340,14 +344,15 @@ fn listing_entry(skill: &Skill) -> String {
     format!("- {}: {desc}", skill.name)
 }
 
-/// 预算内按序生成清单；预算不足时完整条目放不下的技能
-/// 退化为 `- name` 纯名单行——技能名必须全量可见，
-/// 否则模型会误判技能不存在（如上百个技能时 meye 被截掉）。
-/// 名字的占用先预留，完整条目只吃剩余预算；预算小到名字
-/// 都放不下时才尽力截断（硬预算）。
+/// Generate the listing in order within budget; when the budget is tight, skills that
+/// can't fit a full entry degrade to a bare `- name` line — skill names must always be
+/// fully visible, otherwise the model would conclude a skill doesn't exist (e.g. meye
+/// truncated away among hundreds of skills).
+/// Name occupancy is reserved first; full entries only eat the remaining budget; only
+/// when the budget is too small even for names do we truncate as much as possible (hard budget).
 pub fn format_listing(skills: &[Skill], budget: usize) -> String {
     let mut out = String::new();
-    // 全部名字的纯名单行占用（`- name\n`）。
+    // Occupancy of bare-name lines for all names (`- name\n`).
     let names_min = skills
         .iter()
         .map(|s| s.name.len() + 3)
@@ -385,7 +390,8 @@ pub fn format_listing(skills: &[Skill], budget: usize) -> String {
     out
 }
 
-/// 条目能否放入预算；清单为空时首条必放（首条超预算不截断）。
+/// Whether an entry fits in the budget; the first entry always fits when the listing is
+/// empty (an over-budget first entry isn't truncated).
 fn fits_in(out: &str, entry: &str, budget: usize) -> bool {
     out.is_empty() || out.len() + entry.len() < budget
 }
@@ -426,7 +432,7 @@ mod tests {
 
     #[test]
     fn parses_folded_and_literal_scalars() {
-        // `>-` 折叠：后续缩进行以空格连接。
+        // `>-` folded: following indented lines joined with spaces.
         let (fm, body) = parse_frontmatter(
             "---\ndescription: >-\n  Entry point for the\n  Meye screen-capture app.\n---\n# Body\n",
         );
@@ -435,10 +441,10 @@ mod tests {
             Some("Entry point for the Meye screen-capture app.")
         );
         assert!(body.starts_with("# Body"));
-        // `|-` 字面：保留换行。
+        // `|-` literal: newlines preserved.
         let (fm, _) = parse_frontmatter("---\ndescription: |-\n  line one\n  line two\n---\n");
         assert_eq!(fm.description.as_deref(), Some("line one\nline two"));
-        // 折叠块结束于 `---` 前，正文完整。
+        // Folded block ends before `---`; body intact.
         let (fm, body) = parse_frontmatter("---\nwhen_to_use: >\n  after a PR\n---\nrest\n");
         assert_eq!(fm.when_to_use.as_deref(), Some("after a PR"));
         assert!(body.starts_with("rest"));
@@ -490,7 +496,8 @@ mod tests {
             "磁盘技能优先 + 内置技能兜底"
         );
 
-        // 同源文件（SKILL.md 经符号链接指向 user 层）按 realpath 去重 first-wins。
+        // Same-source files (SKILL.md symlinked into the project layer from the user
+        // layer) dedup by realpath, first-wins.
         #[cfg(unix)]
         {
             std::fs::create_dir_all(project.join(".bingo/skills/one")).unwrap();
@@ -506,7 +513,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// L2：缓存命中不改变结果，目录/文件变动后失效重扫。
+    /// L2: a cache hit doesn't change the result; dir/file changes invalidate and rescan.
     #[test]
     fn cached_scan_invalidates_on_change() {
         let root = std::env::temp_dir().join(format!("bingo-skills-{}-cache", std::process::id()));
@@ -517,7 +524,7 @@ mod tests {
             "---\ndescription: first\n---\nbody\n",
         );
         let first = load_skills(&home, &root);
-        // 缓存命中：同样的输入给同样的结果。
+        // Cache hit: same input gives the same result.
         let cached = load_skills(&home, &root);
         assert_eq!(
             first.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
@@ -532,9 +539,9 @@ mod tests {
         };
         assert_eq!(desc(&cached, "one"), "first");
 
-        // mtime 分辨率兜底：确保改动落在不同的时间戳上。
+        // mtime resolution fallback: make sure changes land on distinct timestamps.
         std::thread::sleep(std::time::Duration::from_millis(50));
-        // 内容改动（目录 mtime 不变）也要失效。
+        // Content changes (dir mtime unchanged) must also invalidate.
         write(
             &home.join(".config/bingo/skills/one/SKILL.md"),
             "---\ndescription: second\n---\nbody\n",
@@ -542,7 +549,7 @@ mod tests {
         assert_eq!(desc(&load_skills(&home, &root), "one"), "second", "内容改动应失效");
 
         std::thread::sleep(std::time::Duration::from_millis(50));
-        // 新增技能目录也要失效。
+        // A newly added skill directory must also invalidate.
         write(
             &home.join(".config/bingo/skills/two/SKILL.md"),
             "---\ndescription: added\n---\nbody\n",
@@ -576,7 +583,7 @@ mod tests {
             .unwrap();
         let out = expand_skill(&skill, "");
         assert!(!out.starts_with("Base directory for this skill:"), "{out}");
-        assert!(out.contains("诊断指南"), "内置内容完整");
+        assert!(out.contains("Diagnostic guide"), "内置内容完整");
     }
 
     #[test]
@@ -629,8 +636,8 @@ mod tests {
         assert_eq!(short, "- a: aa", "超预算即停（名字也放不下时）");
     }
 
-    /// 预算不足时完整条目放不下的技能退化为纯名单行：
-    /// 每个技能名必须出现，否则模型会误判技能不存在。
+    /// Budget too small for full entries: skills degrade to bare-name lines;
+    /// every skill name must appear, otherwise the model would think it doesn't exist.
     #[test]
     fn listing_never_drops_skill_names() {
         let skill = |name: &str, desc: &str| Skill {
@@ -641,7 +648,7 @@ mod tests {
             base_dir: PathBuf::new(),
             content: String::new(),
         };
-        // 40 个长描述技能：完整条目约 10KB，远超 8000 预算。
+        // 40 long-description skills: full entries ~10KB, far over the 8000 budget.
         let skills: Vec<Skill> = (0..40)
             .map(|i| skill(&format!("skill-{i:02}"), &"d".repeat(300)))
             .collect();
@@ -654,12 +661,12 @@ mod tests {
             );
         }
         assert!(listing.len() <= 8000, "硬预算仍生效: {}", listing.len());
-        // 完整描述条目在前，纯名单兜底在后。
+        // Full-description entries come first, bare-name fallback after.
         let head = listing.lines().next().unwrap();
         assert!(head.starts_with("- skill-00: "), "完整条目在前: {head}");
     }
 
-    /// 同目录技能按名排序：readdir 顺序不保证，清单必须确定性。
+    /// Same-dir skills sort by name: readdir order isn't guaranteed, the listing must be deterministic.
     #[test]
     fn load_dir_sorts_by_name() {
         let root = std::env::temp_dir().join(format!("bingo-skills-{}-sort", std::process::id()));

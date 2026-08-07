@@ -1,6 +1,6 @@
-//! `/team` 命令族实现（D31）：list/start/status/assign/stop/validate/new + memory。
-//! 纯函数式：输入 Session + cwd + 参数，返回输出行（chat.rs 分发后 push）。
-//! 错误三段式（文件路径+字段路径+期望）与 spawn/validate 同源。
+//! `/team` command family implementation (D31): list/start/status/assign/stop/validate/new + memory.
+//! Purely functional: takes Session + cwd + args, returns output lines (chat.rs pushes after dispatch).
+//! The three-part error format (file path + field path + expectation) is shared with spawn/validate.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::agents::AgentState;
 use crate::query::Session;
 
-/// 主入口：`/team <子命令>`，返回要展示的行。未知子命令给用法。
+/// Main entry: `/team <subcommand>`, returns the lines to display. Unknown subcommands get usage.
 pub fn run(session: &Arc<Session>, cwd: &Path, arg: &str) -> Vec<String> {
     let mut parts = arg.split_whitespace();
     let sub = parts.next().unwrap_or("");
@@ -44,7 +44,8 @@ fn usage() -> Vec<String> {
     ]
 }
 
-/// 加载 team 定义 + 定义清单。解析错误（JSON 非法等）→ Err（不静默吞）。
+/// Load the team definition + the definition list. Parse errors (invalid JSON, etc.)
+/// → Err (not silently swallowed).
 fn load(
     session: &Arc<Session>,
     cwd: &Path,
@@ -55,7 +56,7 @@ fn load(
         .map_err(|e| e.to_string())
 }
 
-/// 便捷：Ok(None)/Err 都转成"没有 team 文件"的输出（读类命令共同措辞）。
+/// Convenience: both Ok(None) and Err become a "no team file" output (shared wording across read commands).
 fn load_or_no_team(
     session: &Arc<Session>,
     cwd: &Path,
@@ -72,7 +73,7 @@ fn branch(_session: &Arc<Session>, cwd: &Path) -> String {
     crate::team::current_branch(cwd)
 }
 
-/// 定义区：team 名 + 频道模式 + 成员（角色 + 来源徽标）。
+/// Definitions section: team name + channel mode + members (role + source badge).
 fn def_zone(def: &crate::team::TeamDef, defs: &[crate::agents::AgentDef]) -> Vec<String> {
     let view = crate::team::view(def, defs);
     let mode = crate::team::channel_mode(def).label();
@@ -103,7 +104,7 @@ fn list(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     };
     let mut out = def_zone(&def, &defs);
     out.push(String::new());
-    // 运行区：成员实例状态（未拉起 = 离线 ○）。
+    // Runtime section: member instance states (not spawned = offline ○).
     let instances = session.agents.list();
     let running: Vec<&crate::agents::AgentStatus> = instances
         .iter()
@@ -222,7 +223,7 @@ fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
     }
     match session.agents.deliver(member, message) {
         Ok(_) => {
-            // 派发审计：append-only 决策记录（零模型成本）。
+            // Dispatch audit: append-only decision record (zero model cost).
             crate::team::append_decision(
                 &session.home,
                 cwd,
@@ -287,8 +288,9 @@ fn validate(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     }
 }
 
-/// 脚手架：`/team new [名字]`——生成 .bingo/team.json，成员 = 当前全部 AgentDef
-/// （引用都存在 → 产物天然通过 validate）。已存在文件拒绝覆盖。
+/// Scaffolding: `/team new [name]` — generates .bingo/team.json with members = all
+/// current AgentDefs (all references exist → the output naturally passes validate).
+/// Refuses to overwrite an existing file.
 fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
     let path = cwd.join(crate::team::TEAM_FILE);
     if path.exists() {
@@ -341,7 +343,7 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
     }
 }
 
-/// 记忆子命令：list 查看该 team 在本项目+分支下的记忆；gc 按 TTL 清理。
+/// Memory subcommand: list shows this team's memory under the project + branch; gc cleans by TTL.
 fn memory(session: &Arc<Session>, cwd: &Path, sub: &str) -> Vec<String> {
     let (def, _defs) = match load_or_no_team(
         session,
@@ -442,23 +444,24 @@ mod tests {
         (s, project)
     }
 
-    /// 脚手架产物 → validate 通过 → start 不因配置失败（验收断言链三步一次走完）。
+    /// Scaffold output → validate passes → start doesn't fail on config (a three-step
+    /// acceptance assertion chain run in one go).
     #[test]
     fn scaffold_validate_start_chain() {
         let (s, project) = session("scaffold");
         std::fs::write(project.join(".bingo/agents/qa.md"), "你是 QA。\n").unwrap();
         std::fs::write(project.join(".bingo/agents/dev.md"), "你是 Dev。\n").unwrap();
 
-        // 1. /team new：生成产物。
+        // 1. /team new: generates the artifact.
         let out = new_team(&s, &project, "");
         assert!(out[0].contains("已生成"), "{out:?}");
         assert!(project.join(crate::team::TEAM_FILE).exists());
 
-        // 2. validate 通过。
+        // 2. validate passes.
         let out = validate(&s, &project);
         assert!(out[0].contains("通过校验"), "{out:?}");
 
-        // 3. start 不因配置失败；成员待命 + 频道建成。
+        // 3. start doesn't fail on config; members standby + channel built.
         let out = start(&s, &project);
         assert!(!out.iter().any(|l| l.contains("失败")), "{out:?}");
         let instances = s.agents.list();
@@ -468,7 +471,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(project.parent().unwrap());
     }
 
-    /// status 离线标记；assign 非成员报错。
+    /// status shows offline marks; assign errors on non-members.
     #[test]
     fn status_and_assign() {
         let (s, project) = session("status");
@@ -483,7 +486,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(project.parent().unwrap());
     }
 
-    /// 解析错误不静默吞：坏 JSON 显示错误行。
+    /// Parse errors are not silently swallowed: broken JSON surfaces an error line.
     #[test]
     fn broken_team_file_reports_error() {
         let (s, project) = session("broken");

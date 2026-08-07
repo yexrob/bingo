@@ -22,7 +22,7 @@ impl ErrorCode for TranscriptError {
     }
 }
 
-/// 会话 transcript：JSONL 逐行一条 Message（D11）。
+/// Session transcript: JSONL, one Message per line (D11).
 #[derive(Debug, Clone)]
 pub struct Transcript {
     path: PathBuf,
@@ -40,12 +40,12 @@ fn slugify(name: &str) -> String {
     }
 }
 
-/// transcripts 目录：~/.local/share/bingo/transcripts。
+/// transcripts dir: ~/.local/share/bingo/transcripts.
 pub fn transcripts_dir(home: &Path) -> PathBuf {
     home.join(".local").join("share").join("bingo").join("transcripts")
 }
 
-/// 新建会话文件：<project-slug>-<unix-ts>.jsonl。
+/// New session file: <project-slug>-<unix-ts>.jsonl.
 pub fn create(home: &Path, cwd: &Path) -> Result<Transcript, TranscriptError> {
     let dir = transcripts_dir(home);
     std::fs::create_dir_all(&dir)?;
@@ -59,7 +59,7 @@ pub fn create(home: &Path, cwd: &Path) -> Result<Transcript, TranscriptError> {
     Ok(Transcript { path })
 }
 
-/// 全部会话（/resume 列表），按修改时间新→旧。
+/// All sessions (/resume list), most recently modified first.
 pub fn list(home: &Path) -> Result<Vec<Transcript>, TranscriptError> {
     let dir = transcripts_dir(home);
     if !dir.exists() {
@@ -81,7 +81,7 @@ pub fn list(home: &Path) -> Result<Vec<Transcript>, TranscriptError> {
     Ok(entries.into_iter().map(|(_, t)| t).collect())
 }
 
-/// 恢复最新会话（--continue）。
+/// Resume the latest session (--continue).
 pub fn latest(home: &Path) -> Result<Option<Transcript>, TranscriptError> {
     Ok(list(home)?.into_iter().next())
 }
@@ -91,7 +91,7 @@ impl Transcript {
         &self.path
     }
 
-    /// 会话展示名：文件 stem（`{slug}-{ts}` / `{slug}-{ts}-{name}`）。
+    /// Session display name: file stem (`{slug}-{ts}` / `{slug}-{ts}-{name}`).
     pub fn name(&self) -> String {
         self.path
             .file_stem()
@@ -99,8 +99,8 @@ impl Transcript {
             .unwrap_or_default()
     }
 
-    /// 重命名会话（/rename）：`{slug}-{ts}` → `{slug}-{ts}-{name}.jsonl`。
-    /// 返回指向新路径的 Transcript。
+    /// Rename session (/rename): `{slug}-{ts}` → `{slug}-{ts}-{name}.jsonl`.
+    /// Returns a Transcript pointing at the new path.
     pub fn rename(&self, name: &str) -> Result<Transcript, TranscriptError> {
         let slug = slugify(name);
         if slug.is_empty() || slug == "root" {
@@ -119,7 +119,7 @@ impl Transcript {
         Ok(Transcript { path: new_path })
     }
 
-    /// 整文件重写（/compact 手动压缩后落盘）。
+    /// Full-file rewrite (persisted after a manual /compact).
     pub fn replace_messages(&self, messages: &[Message]) -> Result<(), TranscriptError> {
         use std::io::Write;
         let mut file = std::fs::File::create(&self.path)?;
@@ -130,7 +130,7 @@ impl Transcript {
         Ok(())
     }
 
-    /// 追加一条消息。
+    /// Append one message.
     pub fn append(&self, message: &Message) -> Result<(), TranscriptError> {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
@@ -142,8 +142,9 @@ impl Transcript {
         Ok(())
     }
 
-    /// 读取全部历史消息（--continue 恢复用）。
-    /// 坏行跳过并计数告警：一行截断的 JSONL 不该让整个会话不可恢复。
+    /// Load all history messages (for --continue resume).
+    /// Bad lines are skipped and counted with a warning: one truncated JSONL line must
+    /// not make the whole session unrecoverable.
     pub fn load_messages(&self) -> Result<Vec<Message>, TranscriptError> {
         let content = std::fs::read_to_string(&self.path)?;
         let mut messages = Vec::new();
@@ -194,7 +195,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// 一行坏 JSONL 不得让整个会话不可恢复：跳过坏行，其余照常载入。
+    /// One bad JSONL line must not make the whole session unrecoverable: skip the bad
+    /// line, load the rest as usual.
     #[test]
     fn load_skips_corrupt_lines() {
         let tmp = std::env::temp_dir().join(format!("bingo-transcript-bad-{}", std::process::id()));

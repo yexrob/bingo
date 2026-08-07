@@ -87,8 +87,9 @@ pub fn help_lines(width: usize, max_rows: usize) -> Vec<String> {
             }
             line.push_str(&cell(binding));
         }
-        // 必须截断：NoWrap 不裁剪，超宽行会被终端自己折行，canvas 行数
-        // 与 chrome 的认知随即脱节。
+        // Must truncate: NoWrap never clips, so an over-wide line would be
+        // wrapped by the terminal itself and the canvas row count would
+        // immediately diverge from what the chrome expects.
         out.push(crate::tui::markdown::truncate(line.trim_end(), width));
     }
     if truncated {

@@ -4,7 +4,7 @@ use crate::api::types::{Message, Request};
 use crate::query::Session;
 
 const MEMORY_MAX_LINES: usize = 200;
-/// 提取请求的对话正文上限（字符）。
+/// Char cap for the extraction request's conversation body.
 const MAX_EXTRACT_PROMPT_CHARS: usize = 60_000;
 
 const EXTRACT_PROMPT: &str = "\
@@ -17,13 +17,15 @@ const EXTRACT_PROMPT: &str = "\
 对话：
 ";
 
-/// memdir 目录：~/.config/bingo/memdir/。
+/// memdir directory: ~/.config/bingo/memdir/.
 pub fn memdir_dir(home: &Path) -> PathBuf {
     home.join(".config").join("bingo").join("memdir")
 }
 
-/// 完整路径的 FNV-1a 64 摘要（跨进程/跨版本稳定，故不用 DefaultHasher）。
-/// D31 team 记忆的 project_hash 复用同一摘要（与项目记忆同键族）。
+/// FNV-1a 64 digest of the full path (stable across processes/versions, hence not
+/// DefaultHasher).
+/// D31 team memory's project_hash reuses the same digest (same key family as project
+/// memory).
 pub(crate) fn path_hash(path: &Path) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in path.as_os_str().as_encoded_bytes() {
@@ -33,8 +35,9 @@ pub(crate) fn path_hash(path: &Path) -> String {
     format!("{hash:016x}")
 }
 
-/// 本项目对应的记忆文件：`<目录名>-<完整路径哈希>.md`。
-/// 只用目录名会让同名项目（如多个 `web`）互相串味。
+/// This project's memory file: `<dirname>-<full-path-hash>.md`.
+/// Using only the dirname would make same-named projects (e.g. several `web`)
+/// contaminate each other.
 pub fn memory_file(home: &Path, cwd: &Path) -> PathBuf {
     let name = cwd
         .file_name()
@@ -47,7 +50,7 @@ pub fn memory_file(home: &Path, cwd: &Path) -> PathBuf {
     memdir_dir(home).join(format!("{name}-{}.md", path_hash(cwd)))
 }
 
-/// 读取本项目记忆（不存在则 None）。
+/// Read this project's memory (None if missing).
 pub fn load_project_memory(home: &Path, cwd: &Path) -> Option<String> {
     let path = memory_file(home, cwd);
     let content = std::fs::read_to_string(&path).ok()?;
@@ -59,7 +62,8 @@ pub fn load_project_memory(home: &Path, cwd: &Path) -> Option<String> {
     }
 }
 
-/// 会话结束后：从对话提取事实追加到记忆文件（失败静默）。
+/// After a session ends: extract facts from the conversation and append them to the
+/// memory file (failures are silent).
 pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path, cwd: &Path) {
     if messages.len() < 2 {
         return;
@@ -67,7 +71,8 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
     let mut prompt = String::from(EXTRACT_PROMPT);
     let mut truncated = false;
     for message in messages {
-        // 尾部截断：长会话的完整转录会撑爆提取请求。
+        // Tail truncation: a long session's full transcript would blow up the
+        // extraction request.
         if prompt.chars().count() >= MAX_EXTRACT_PROMPT_CHARS {
             truncated = true;
             break;
@@ -139,7 +144,7 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
         added += 1;
     }
     if added > 0 {
-        // 截断超长记忆
+        // Truncate over-long memory
         let lines: Vec<&str> = existing.lines().take(MEMORY_MAX_LINES).collect();
         if let Err(e) = std::fs::write(&path, lines.join("\n") + "\n") {
             if !session.quiet {
@@ -165,11 +170,11 @@ mod tests {
         assert!(path.starts_with("/tmp/h/.config/bingo/memdir"));
         let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         assert!(name.starts_with("proj-") && name.ends_with(".md"), "{name}");
-        // 同一路径稳定。
+        // Same path is stable.
         assert_eq!(memory_file(home, cwd), path);
     }
 
-    /// L6 回归：同名目录的不同项目不得共用记忆文件。
+    /// L6 regression: same-named dirs of different projects must not share a memory file.
     #[test]
     fn same_dir_name_different_projects_do_not_collide() {
         let home = Path::new("/tmp/h");

@@ -1,12 +1,12 @@
-//! 行级 unified diff（git 格式）生成，Edit/Write 结果预览用。
-//! 与 rsmarkdown-tui 的 `Diff::parse_unified` 契约对应（---/+++/@@/-/+/空格）。
+//! Line-level unified diff (git format) generation, used to preview Edit/Write results.
+//! Corresponds to rsmarkdown-tui's `Diff::parse_unified` contract (---/+++/@@/-/+/space).
 
-/// hunk 上下文行数。
+/// Number of context lines per hunk.
 const CONTEXT_LINES: usize = 3;
-/// 行级 diff 上限：超过直接全量替换（避免 O(n·m) LCS 内存爆炸）。
+/// Line-level diff cap: beyond this, fall back to a full replace (avoids O(n·m) LCS memory blow-up).
 const MAX_LCS_LINES: usize = 2_000;
 
-/// 两个文本的行级 unified diff（`--- a/` / `+++ b/` 头）。无变更时返回 None。
+/// Line-level unified diff of two texts (`--- a/` / `+++ b/` headers). Returns None when unchanged.
 pub fn unified_diff(path: &str, old: &str, new: &str) -> Option<String> {
     let a: Vec<&str> = old.lines().collect();
     let b: Vec<&str> = new.lines().collect();
@@ -29,7 +29,8 @@ pub fn unified_diff(path: &str, old: &str, new: &str) -> Option<String> {
         return Some(out);
     }
     let matches = lcs_path(&a, &b);
-    // 变化段：匹配对之间的 a[..] 删除区与 b[..] 添加区（段起点/终点均为开区间）。
+    // Changed segments: the a[..] deletion region and b[..] addition region between matching
+    // pairs (segment start/end are both open intervals).
     let mut segments: Vec<(usize, usize, usize, usize)> = Vec::new();
     let (mut pi, mut pj) = (0usize, 0usize);
     for &(i, j) in &matches {
@@ -45,7 +46,8 @@ pub fn unified_diff(path: &str, old: &str, new: &str) -> Option<String> {
     if segments.is_empty() {
         return None;
     }
-    // 组 hunk：段 ± CONTEXT 行；相邻段间隔 ≤ 2×CONTEXT 时合并（近似合并，行号取并集）。
+    // Group hunks: segment ± CONTEXT lines; merge adjacent segments when the gap is ≤ 2×CONTEXT
+    // (approximate merge; line numbers take the union).
     let mut hunks: Vec<(usize, usize, usize, usize)> = Vec::new();
     for (s0, s1, s2, s3) in segments {
         let os = s0.saturating_sub(CONTEXT_LINES);
@@ -74,7 +76,7 @@ pub fn unified_diff(path: &str, old: &str, new: &str) -> Option<String> {
     Some(out)
 }
 
-/// hunk 内按 LCS 匹配对输出 context / removed / added 行。
+/// Emit context / removed / added lines within a hunk according to the LCS matching pairs.
 struct Hunk<'a> {
     out: &'a mut String,
     a: &'a [&'a str],
@@ -99,7 +101,7 @@ impl Hunk<'_> {
                 self.line("-", self.a[i]);
                 i += 1;
             } else {
-                // 下一个匹配对在更远处：a[i] 先删除，b[j] 后添加（交错输出）。
+                // The next matching pair is farther away: delete a[i] first, then add b[j] (interleaved output).
                 self.line("-", self.a[i]);
                 i += 1;
             }
@@ -121,7 +123,7 @@ impl Hunk<'_> {
     }
 }
 
-/// LCS 匹配对序列（a 索引, b 索引），用于 hunk 内区分 context / 变更。
+/// LCS matching pair sequence (a index, b index), used to distinguish context / changes within a hunk.
 fn lcs_path(a: &[&str], b: &[&str]) -> Vec<(usize, usize)> {
     let (n, m) = (a.len(), b.len());
     let mut dp = vec![vec![0u32; m + 1]; n + 1];

@@ -5,9 +5,9 @@ use serde::Deserialize;
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-/// 单文件上限：超过视为二进制/大文件跳过（对标 ripgrep 行为）。
+/// Per-file cap: larger files are treated as binary/too big and skipped (mirrors ripgrep behavior).
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
-/// Grep 结果上限（行数）。
+/// Grep result cap (in lines).
 const MAX_GREP_LINES: usize = 200;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -17,13 +17,13 @@ pub struct GrepInput {
     #[serde(default)]
     #[schemars(description = "directory to search (default: cwd)")]
     pub path: Option<String>,
-    /// 仅搜索匹配该 glob 的文件（如 "*.rs"）。
+    /// Only search files matching this glob (e.g. "*.rs").
     #[serde(default)]
     #[schemars(description = "only search files matching this glob")]
     pub glob: Option<String>,
 }
 
-/// Grep：正则递归搜索文件内容（ripgrep 语义）。
+/// Grep: recursively search file contents with a regex (ripgrep semantics).
 pub struct GrepTool;
 
 #[async_trait]
@@ -64,8 +64,9 @@ impl Tool for GrepTool {
             .transpose()
             .map_err(|e| ToolError::failed(format!("bad glob: {e}")))?;
 
-        // 遍历 + 读文件是同步 IO：放进 spawn_blocking，否则运行时线程被
-        // 大仓库（target/ 几十万文件）卡死，TUI 冻结、取消失效。
+        // Traversal + file reads are synchronous IO: run in spawn_blocking, otherwise runtime
+        // threads get stuck on large repos (hundreds of thousands of files in target/), freezing
+        // the TUI and breaking cancel.
         let search_root = root.clone();
         let (lines, stopped_early) = tokio::task::spawn_blocking(move || {
             let mut lines = Vec::new();
@@ -97,15 +98,17 @@ impl Tool for GrepTool {
     }
 }
 
-/// 默认跳过的目录名：版本库内部、构建产物、依赖树。
+/// Directory names skipped by default: VCS internals, build artifacts, dependency trees.
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules"];
 
-/// 遍历时是否跳过该子目录（根目录本身被显式指向时不经过这里）。
+/// Whether to skip this subdirectory during traversal (not consulted when the root itself
+/// is explicitly pointed at).
 pub fn should_skip_dir(name: &str) -> bool {
     SKIP_DIRS.contains(&name) || name.starts_with('.')
 }
 
-/// 目录内条目排序读取：read_dir 顺序不定，排序后截断结果才稳定。
+/// Read directory entries in sorted order: read_dir order is unspecified; sorting makes
+/// truncated results stable.
 pub fn sorted_entries(dir: &std::path::Path) -> Vec<std::fs::DirEntry> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -115,7 +118,7 @@ pub fn sorted_entries(dir: &std::path::Path) -> Vec<std::fs::DirEntry> {
     entries
 }
 
-/// 返回 true 表示达到上限提前终止（不再遍历）。
+/// Returns true when the cap is reached and traversal stops early (no further traversal).
 fn search_dir(
     root: &std::path::Path,
     dir: &std::path::Path,
@@ -150,7 +153,7 @@ fn search_dir(
     false
 }
 
-/// 返回 true 表示已达结果上限。
+/// Returns true when the result cap is reached.
 fn search_file(path: &std::path::Path, re: &regex::Regex, out: &mut Vec<String>) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
@@ -161,7 +164,7 @@ fn search_file(path: &std::path::Path, re: &regex::Regex, out: &mut Vec<String>)
     let Ok(bytes) = std::fs::read(path) else {
         return false;
     };
-    // 二进制检测：NUL 字节 → 跳过。
+    // Binary detection: NUL byte → skip.
     if bytes.contains(&0) {
         return false;
     }
@@ -215,7 +218,7 @@ mod tests {
         root
     }
 
-    /// M1 回归：target/.git/node_modules/隐藏目录默认不遍历。
+    /// M1 regression: target/.git/node_modules/hidden directories are not traversed by default.
     #[tokio::test]
     async fn skips_build_and_vcs_directories() {
         let root = fixture("skip");
@@ -229,7 +232,7 @@ mod tests {
         assert!(!text.contains("target/"), "target 应跳过: {text}");
         assert!(!text.contains(".git/"), ".git 应跳过: {text}");
         assert!(!text.contains("node_modules"), "node_modules 应跳过: {text}");
-        // 根目录被显式指向时照常搜索。
+        // Searching works as usual when the root is explicitly pointed at.
         let result = GrepTool
             .call(
                 serde_json::json!({
@@ -247,7 +250,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// M6 回归：带目录前缀的相对 glob 曾因整串锚定比对绝对路径而永远零匹配。
+    /// M6 regression: relative globs with a directory prefix once always matched zero because
+    /// the whole-string anchored match compared against the absolute path.
     #[tokio::test]
     async fn glob_filter_matches_relative_paths() {
         let root = fixture("glob");
@@ -271,14 +275,14 @@ mod tests {
         let text = matched("src/**/*.rs").await;
         assert!(text.contains("main.rs"), "src/**/*.rs 应命中: {text}");
         assert!(!text.contains("notes.md"), "{text}");
-        // 无 `/` 的 pattern 按文件名匹配（ripgrep -g 语义），任意深度生效。
+        // A pattern without `/` matches by file name (ripgrep -g semantics), effective at any depth.
         let text = matched("*.rs").await;
         assert!(text.contains("main.rs") && text.contains("lib.rs"), "{text}");
         assert!(!text.contains("notes.md"), "{text}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 结果上限：达到即停止遍历并注明。
+    /// Result cap: stop traversal on reaching it and note it.
     #[tokio::test]
     async fn truncates_at_line_limit() {
         let root = std::env::temp_dir().join(format!("bingo-grep-{}-cap", std::process::id()));

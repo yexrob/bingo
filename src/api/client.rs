@@ -13,41 +13,52 @@ use super::types::{ContentBlock, DEFAULT_MAX_TOKENS, Role, SystemBlock};
 
 pub const MAX_RETRIES: u32 = 5;
 
-/// 请求整体超时（连接 + 首字节）：服务器无响应时结束等待而不是无限挂。
-/// 用于 **agent 长回合**（流式）——不套用反馈层 10s/15s（回合中已有持续
-/// 进度反馈），由本传输层超时 + 用户中断兜底（AC-53）。
+/// Overall request timeout (connection + first byte): ends the wait when the
+/// server is silent instead of hanging forever. Used for **agent long turns**
+/// (streaming) — the feedback-layer 10s/15s does not apply (a turn already
+/// has continuous progress feedback); this transport-layer timeout plus user
+/// interruption is the backstop (AC-53).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// 流式 body 空闲超时：连上之后服务端挂死（既不发事件也不断开）时，
-/// headless 会永久阻塞——超过这个静默时长即判定断流。
+/// Streaming-body idle timeout: when the server hangs after connecting
+/// (sends no events and does not disconnect), headless would block forever —
+/// past this silence the stream is judged dead.
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// 短同步 **读** 操作反馈层超时（AC-12/14）：list_models / count_tokens 等。
-/// 到点 drop future（底层 reqwest 连接随之取消）→ `TIMEOUT`，首要动作 = 重试。
+/// Short-sync **read** operation feedback-layer timeout (AC-12/14):
+/// list_models / count_tokens, etc. At the deadline the future is dropped
+/// (cancelling the underlying reqwest connection) → `TIMEOUT`, primary
+/// action = retry.
 const SHORT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// 短同步 **写** 操作反馈层超时（AC-13/14）：complete_text（非流式补全）等。
-/// 到点 drop future → `TIMEOUT`。写路径 drop 对「服务端已应用写」是
-/// best-effort，重试仍建议动作级幂等兜底（AC-15）。
+/// Short-sync **write** operation feedback-layer timeout (AC-13/14):
+/// complete_text (non-streaming completion), etc. At the deadline the future
+/// is dropped → `TIMEOUT`. Dropping a write is best-effort about "the server
+/// already applied the write", so retries still want action-level idempotency
+/// as a backstop (AC-15).
 const SHORT_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 400 上下文超限时重算输出预算的下限。
+/// Floor for recomputing the output budget on a 400 context overflow.
 const FLOOR_OUTPUT_TOKENS: u32 = 3_000;
 
-/// cfg(test) 测试钩子（#14 R3b 方案 A）：短同步操作反馈层超时的挂起注入，
-/// 服务于 AC-12/13/14 到点行为 + AC-15 写幂等断言。默认 0 = 不挂起，
-/// 无关测试不受影响；测试置 `set_hang` 后，三个短同步入口在 HTTP 发送前
-/// 挂起对应时长，fake-timers（`start_paused`）下 advance 到超时点即触发
-/// `timeout` → `TIMEOUT`。生产构建下 `maybe_hang` 直通，零开销。
+/// cfg(test) test hook (#14 R3b plan A): hang injection for the short-sync
+/// feedback-layer timeouts, serving the AC-12/13/14 deadline behaviour plus
+/// the AC-15 write-idempotency assertions. Default 0 = no hang, unrelated
+/// tests are unaffected; after a test sets `set_hang`, the three short-sync
+/// entry points hang for that duration before sending HTTP, and under
+/// fake-timers (`start_paused`) advancing to the deadline triggers
+/// `timeout` → `TIMEOUT`. In production builds `maybe_hang` passes through,
+/// zero overhead.
 #[cfg(test)]
 pub(crate) mod test_hooks {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
-    /// 挂起时长 ms（0 = 直通）。
+    /// Hang duration in ms (0 = pass through).
     static HANG_MS: AtomicU64 = AtomicU64::new(0);
 
-    /// RAII guard：Drop 时清零挂起（panic 也不残留，防跨测试污染）。
+    /// RAII guard: clears the hang on Drop (does not survive a panic, so it
+    /// cannot pollute other tests).
     pub(crate) struct HangGuard;
 
     impl Drop for HangGuard {
@@ -56,7 +67,7 @@ pub(crate) mod test_hooks {
         }
     }
 
-    /// 设置挂起并返回 guard。
+    /// Set the hang and return a guard.
     pub(crate) fn hang_guard(ms: u64) -> HangGuard {
         HANG_MS.store(ms, Ordering::Relaxed);
         HangGuard
@@ -67,8 +78,8 @@ pub(crate) mod test_hooks {
     }
 }
 
-/// 短同步入口的挂起包装：测试构建下先挂起（模拟慢网络/慢服务端），
-/// 生产构建下直通。
+/// Hang wrapper for the short-sync entry points: hangs first in test builds
+/// (simulating a slow network / slow server), passes through in production.
 #[cfg(test)]
 async fn maybe_hang<F: std::future::Future>(inner: F) -> F::Output {
     tokio::time::sleep(test_hooks::hang()).await;
@@ -93,21 +104,23 @@ pub enum ClientError {
     Stream(String),
     #[error("transport error: {0}")]
     Transport(#[from] reqwest::Error),
-    /// 服务器在 REQUEST_TIMEOUT 内无响应。
+    /// The server gave no response within REQUEST_TIMEOUT.
     #[error("request timed out after {REQUEST_TIMEOUT:?}")]
     Timeout,
 }
 
 impl ErrorCode for ClientError {
-    /// 出口映射（见 `src/error.rs` 码表）：每个 variant 显式返回稳定码，
-    /// match 穷尽无 `_` 臂——新增 variant 未处理即编译报错。
+    /// Outbound mapping (see the `src/error.rs` code table): every variant
+    /// explicitly returns a stable code, and the match is exhaustive with no
+    /// `_` arm — a new variant that is not handled fails to compile.
     fn error_code(&self) -> &'static str {
         match self {
             ClientError::MissingApiKey | ClientError::InvalidApiKey(_) => "AUTH_REQUIRED",
             ClientError::Api { status: 401, .. } => "AUTH_REQUIRED",
             ClientError::Api { status: 403, .. } => "PERMISSION_DENIED",
             ClientError::Api { status: 429, .. } => "RATE_LIMITED",
-            // 其余非成功响应（4xx 非上述 / 5xx）：服务端交互异常，动作「稍后重试」。
+            // Remaining non-success responses (4xx outside the above / 5xx):
+            // server-interaction anomaly, action = "retry later".
             ClientError::Api { .. } => "SERVER_ERROR",
             ClientError::Stream(_) => "SERVER_ERROR",
             ClientError::Transport(_) => transport_offline_code(),
@@ -116,23 +129,27 @@ impl ErrorCode for ClientError {
     }
 }
 
-/// Transport 臂映射锁定函数（`#[doc(hidden)]`，仅供防漂移单测断言）。
+/// Locks in the Transport-arm mapping (`#[doc(hidden)]`, only for the
+/// drift-guard unit test to assert).
 ///
-/// 为何需要：`reqwest::Error` 无公开构造（0.13.x 的 `new`/`builder` 等
-/// 全为 `pub(crate)`），`ClientError::Transport` 变体无法在测试中运行时构造，
-/// 防漂移单测不能直接枚举该变体——由此函数把「transport → OFFLINE」映射锁死。
+/// Why it exists: `reqwest::Error` has no public constructor (its 0.13.x
+/// `new`/`builder` are all `pub(crate)`), so the `ClientError::Transport`
+/// variant cannot be constructed at runtime in tests, and the drift-guard
+/// unit test cannot enumerate that variant directly — this function locks
+/// the "transport → OFFLINE" mapping instead.
 #[doc(hidden)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn transport_offline_code() -> &'static str {
     "OFFLINE"
 }
 
-/// 当前生效的端点（/provider 切换时更新）。
+/// The currently active endpoint (updated on /provider switch).
 #[derive(Debug, Clone)]
 struct Endpoint {
     api_key: String,
     base_url: String,
-    /// 该端点是否接受图片内容块（default 读顶层 sendImages，命名 provider 读 supportsImages）。
+    /// Whether this endpoint accepts image content blocks (default reads the
+    /// top-level sendImages; named providers read supportsImages).
     supports_images: bool,
 }
 
@@ -140,18 +157,21 @@ struct Endpoint {
 pub struct Client {
     http: reqwest::Client,
     endpoint: Arc<std::sync::RwLock<Endpoint>>,
-    /// 命名 provider 表（settings.providers；default 不在表内）。
+    /// Named-provider table (settings.providers; default is not in the
+    /// table).
     providers: std::collections::HashMap<String, Endpoint>,
 }
 
 impl Client {
-    /// settings 优先，回落环境变量（ANTHROPIC_API_KEY/DEEPSEEK_API_KEY、
-    /// ANTHROPIC_BASE_URL）。settings 与 env 都无 key 时报 MissingApiKey。
+    /// Settings first, falling back to environment variables
+    /// (ANTHROPIC_API_KEY/DEEPSEEK_API_KEY, ANTHROPIC_BASE_URL). Reports
+    /// MissingApiKey when neither settings nor env has a key.
     pub fn from_settings(settings: &crate::settings::Settings) -> Result<Self, ClientError> {
         Self::from_settings_with(settings, |name| std::env::var(name))
     }
 
-    /// from_settings 的可注入版（测试用假 env，避免改真实环境变量）。
+    /// Injectable variant of from_settings (tests use a fake env, avoiding
+    /// real environment variables).
     fn from_settings_with(
         settings: &crate::settings::Settings,
         env: impl Fn(&str) -> std::result::Result<String, std::env::VarError>,
@@ -203,25 +223,27 @@ impl Client {
         }
     }
 
-    /// 命名 provider 列表（不含 default；/provider 列出用）。
+    /// Named-provider list (default excluded; for the /provider listing).
     pub fn provider_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.providers.keys().cloned().collect();
         names.sort();
         names
     }
 
-    /// 当前生效的 provider 端点（key/url 引用）。
+    /// The currently active provider endpoint (key/url references).
     pub fn current_endpoint(&self) -> (String, String) {
         let e = self.endpoint.read().unwrap_or_else(|p| p.into_inner());
         (e.api_key.clone(), e.base_url.clone())
     }
 
-    /// 当前端点是否接受图片内容块（`supportsImages`/`sendImages` 配置）。
+    /// Whether the current endpoint accepts image content blocks
+    /// (`supportsImages`/`sendImages` config).
     pub fn supports_images(&self) -> bool {
         self.endpoint.read().unwrap_or_else(|p| p.into_inner()).supports_images
     }
 
-    /// 切换到命名 provider；未知名字报错（default 永远可切回）。
+    /// Switch to a named provider; unknown names error out (default can
+    /// always be switched back to).
     pub fn set_provider(&self, name: &str) -> Result<(), String> {
         let Some(endpoint) = self.providers.get(name).cloned() else {
             return Err(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
@@ -230,9 +252,11 @@ impl Client {
         Ok(())
     }
 
-    /// 派生一个端点独立的 Client（子代理指定 provider 用）：新 Client
-    /// 锁定该 provider 端点，providers 表共享（名字表一致）。不指定时
-    /// 应直接 clone（共享端点，跟随父会话切换）。
+    /// Derive an endpoint-independent Client (for sub-agents that pin a
+    /// provider): the new Client locks that provider's endpoint, and the
+    /// providers table is shared (same name table). Without a provider you
+    /// should just clone (shared endpoint, follows the parent session's
+    /// switches).
     pub fn with_provider(&self, name: &str) -> Result<Client, String> {
         let endpoint = self
             .providers
@@ -262,13 +286,14 @@ impl Client {
         Ok(headers)
     }
 
-    /// 发起流式请求，返回归一化事件流。
+    /// Start a streaming request, returning a normalized event stream.
     pub async fn stream(
         &self,
         request: &Request,
     ) -> Result<impl futures_util::Stream<Item = Result<StreamEvent, ClientError>>, ClientError>
     {
-        // 400 上下文超限重算需要修改 max_tokens → 克隆一份可变请求。
+        // The 400 context-overflow recompute needs to mutate max_tokens →
+        // clone a mutable request.
         let mut request = request.clone();
         let mut attempt = 0;
         let base_url = self.current_endpoint().1;
@@ -300,8 +325,8 @@ impl Client {
                 Ok(Ok(response)) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
-                    // 400 输出预算超限：按 "input length and max_tokens exceed context limit: A + B > C"
-                    // 重算 max_tokens = max(3000, C − A − 1000) 重试一次。
+                    // 400 output-budget overflow: per "input length and max_tokens exceed context limit: A + B > C"
+                    // recompute max_tokens = max(3000, C − A − 1000) and retry once.
                     if status.as_u16() == 400
                         && attempt == 0
                         && body.contains("exceed context limit")
@@ -331,11 +356,13 @@ impl Client {
         }
     }
 
-    /// 非流式补全：返回回复文本（compact 摘要、记忆提取用）。
-    /// 与 stream 一致的退避重试：429/5xx 与瞬时 transport 错误不该直接
-    /// 判定压缩失败（失败会累进熔断计数）。
-    /// 短同步写操作：整个操作（含重试）套反馈层 15s（AC-13/14），
-    /// 到点 drop future → `TIMEOUT`。
+    /// Non-streaming completion: returns the reply text (for compact
+    /// summaries, memory extraction). Backoff retries consistent with
+    /// `stream`: 429/5xx and transient transport errors must not directly
+    /// count as a compression failure (failures accumulate into the circuit
+    /// breaker). Short-sync write operation: the whole operation (including
+    /// retries) is under the feedback-layer 15s (AC-13/14); at the deadline
+    /// the future is dropped → `TIMEOUT`.
     pub async fn complete_text(
         &self,
         request: &Request,
@@ -345,8 +372,9 @@ impl Client {
             .map_err(|_| ClientError::Timeout)?
     }
 
-    /// complete_text 的内层实现（重试 + 响应解析）。由外层反馈层超时兜底，
-    /// 单次网络发送不再单独套超时（外层 15s 是最强护栏）。
+    /// complete_text's inner implementation (retries + response parsing).
+    /// Backed by the outer feedback-layer timeout; a single network send is
+    /// not separately timed (the outer 15s is the strongest guard).
     async fn complete_text_inner(
         &self,
         request: &Request,
@@ -400,9 +428,11 @@ impl Client {
         Ok(text)
     }
 
-    /// 列出当前端点支持的模型（`GET {base}/v1/models`，Anthropic/DeepSeek 通用）：
-    /// 返回 `data[].id`。`/model` 二级选择器异步拉取用。
-    /// 短同步读操作：反馈层 10s（AC-12/14），到点 drop → `TIMEOUT`。
+    /// List the models the current endpoint supports
+    /// (`GET {base}/v1/models`, common to Anthropic/DeepSeek): returns
+    /// `data[].id`. Used by the `/model` secondary selector's async fetch.
+    /// Short-sync read operation: feedback-layer 10s (AC-12/14), drop at the
+    /// deadline → `TIMEOUT`.
     pub async fn list_models(&self) -> Result<Vec<String>, ClientError> {
         let base_url = self.current_endpoint().1;
         let response = tokio::time::timeout(
@@ -438,8 +468,9 @@ impl Client {
         Ok(models)
     }
 
-    /// 输入 token 计数（D12：预算显示走官方 count_tokens API）。
-    /// 短同步读操作：反馈层 10s（AC-12/14），到点 drop → `TIMEOUT`。
+    /// Input token count (D12: the budget display goes through the official
+    /// count_tokens API). Short-sync read operation: feedback-layer 10s
+    /// (AC-12/14), drop at the deadline → `TIMEOUT`.
     pub async fn count_tokens(
         &self,
         model: &str,
@@ -520,8 +551,9 @@ impl Client {
     }
 }
 
-/// `stream.next()` 的空闲超时包装：idle 内一个事件都没有即判定断流，
-/// 免得服务端挂死时 headless 永久阻塞。
+/// Idle-timeout wrapper for `stream.next()`: if not a single event arrives
+/// within the idle period, the stream is judged dead — so headless does not
+/// block forever when the server hangs.
 async fn next_with_idle<S, T>(
     body: &mut S,
     idle: Duration,
@@ -534,7 +566,7 @@ where
         .map_err(|_| ClientError::Stream(format!("no stream data for {idle:?}: server stalled")))
 }
 
-/// 指数退避 + jitter：500ms 起，cap 32s。
+/// Exponential backoff + jitter: from 500ms, capped at 32s.
 fn backoff(attempt: u32) -> Duration {
     let base_ms = (500u64 << attempt.min(6)).min(32_000);
     let jitter = rand_jitter(base_ms);
@@ -554,9 +586,11 @@ fn retryable(status: &reqwest::StatusCode) -> bool {
     status.is_server_error() || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
 
-/// 从 400 错误体解析 (input_tokens, context_window)：定位 "A + B > C"
-/// 模式邻近的三个数字，而不是取全文倒数第三个（request-id 等会污染它）。
-/// 单段解析失败（溢出/缺字段）只跳过该候选，不让整体变 None。
+/// Parse (input_tokens, context_window) from a 400 error body: locates the
+/// three numbers adjacent to the "A + B > C" pattern, instead of taking the
+/// full text's third-from-last number (request-id etc. would pollute it). A
+/// segment that fails to parse (overflow / missing field) only skips that
+/// candidate, never turns the whole result into None.
 fn parse_context_limit(body: &str) -> Option<(u64, u64)> {
     // "input length and max_tokens exceed context limit: 12345 + 64000 > 200000"
     for (idx, _) in body.match_indices('>') {
@@ -580,21 +614,22 @@ fn parse_context_limit(body: &str) -> Option<(u64, u64)> {
     None
 }
 
-/// 跳过前导空白后开头的整数。
+/// The integer starting the text after skipping leading whitespace.
 fn leading_number(text: &str) -> Option<u64> {
     let text = text.trim_start();
     let digits = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     text.get(..digits)?.parse().ok()
 }
 
-/// 结尾的整数及其字节长度。
+/// The trailing integer and its byte length.
 fn trailing_number(text: &str) -> Option<(u64, usize)> {
     let digits = text.len() - text.trim_end_matches(|c: char| c.is_ascii_digit()).len();
     let value: u64 = text.get(text.len() - digits..)?.parse().ok()?;
     Some((value, digits))
 }
 
-/// 把一条完整 assistant 回复的流事件累积成回传消息。
+/// Accumulates a complete assistant reply's stream events into a returnable
+/// message.
 #[derive(Debug, Default)]
 pub struct AssistantAccumulator {
     pub content: Vec<ContentBlock>,
@@ -727,22 +762,26 @@ mod tests {
     use crate::api::types::parse_sse_event;
     use crate::api::types::StreamEvent;
 
-    /// AC-12/13/14：短同步操作反馈层超时分档——读 10s / 写 15s 两档不混淆
-    /// （读在 11s 前必报、写在 14s 前不报由常量值保证；list_models/count_tokens
-    /// 用读档、complete_text 用写档见实现，stream 长回合不套反馈层见 AC-53）。
+    /// AC-12/13/14: short-sync feedback-layer timeouts are tiered — read
+    /// 10s / write 15s, never confused (read must fire before 11s and write
+    /// must not fire before 14s, guaranteed by the constant values;
+    /// list_models/count_tokens use the read tier, complete_text the write
+    /// tier — see the implementations; stream long turns do not use the
+    /// feedback layer — see AC-53).
     #[test]
     fn feedback_timeout_tiers_are_read_10s_write_15s() {
         assert_eq!(SHORT_READ_TIMEOUT, Duration::from_secs(10));
         assert_eq!(SHORT_WRITE_TIMEOUT, Duration::from_secs(15));
-        // 长回合传输层护栏保持 120s/60s（不套 10s/15s）。
+        // Long-turn transport guards stay 120s/60s (no 10s/15s).
         assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(120));
         assert_eq!(STREAM_IDLE_TIMEOUT, Duration::from_secs(60));
     }
 
-    /// AC-12 到点行为（方案 A + fake-timers）：短同步读操作 10s 到点落 `TIMEOUT`。
+    /// AC-12 deadline behaviour (plan A + fake-timers): a short-sync read
+    /// lands on `TIMEOUT` at 10s.
     #[tokio::test(start_paused = true)]
     async fn read_times_out_at_10s() {
-        let _guard = test_hooks::hang_guard(60_000); // 挂起 60s，> 10s 读档
+        let _guard = test_hooks::hang_guard(60_000); // hang 60s, > 10s read tier
         let client = Client::new("k".into(), "https://example.com".into());
         let handle = tokio::spawn(async move { client.list_models().await });
         tokio::time::advance(Duration::from_secs(11)).await;
@@ -750,10 +789,11 @@ mod tests {
         assert!(matches!(res, Err(ClientError::Timeout)), "读超时应落 TIMEOUT");
     }
 
-    /// AC-13/14 到点行为 + 分档不混淆：写操作 14s 前必不报、15s 到点落 `TIMEOUT`。
+    /// AC-13/14 deadline behaviour + tiering not confused: a write must not
+    /// fire before 14s and lands on `TIMEOUT` at 15s.
     #[tokio::test(start_paused = true)]
     async fn write_times_out_at_15s_not_before_14s() {
-        let _guard = test_hooks::hang_guard(60_000); // 挂起 60s，> 15s 写档
+        let _guard = test_hooks::hang_guard(60_000); // hang 60s, > 15s write tier
         let client = Client::new("k".into(), "https://example.com".into());
         let handle = tokio::spawn(async move {
             let req = crate::api::types::Request {
@@ -768,10 +808,11 @@ mod tests {
             };
             client.complete_text(&req).await
         });
-        // AC-14：写在 14s 前不报（读档 10s 已过也不误伤写档）。
+        // AC-14: a write does not fire before 14s (the read tier's 10s
+        // already passed and must not trip the write tier).
         tokio::time::advance(Duration::from_secs(14)).await;
         assert!(!handle.is_finished(), "写操作 14s 前不应超时");
-        // 到 16s 触发写档。
+        // At 16s the write tier fires.
         tokio::time::advance(Duration::from_secs(2)).await;
         let res = handle.await.unwrap();
         assert!(matches!(res, Err(ClientError::Timeout)), "写超时应落 TIMEOUT");
@@ -869,7 +910,7 @@ mod tests {
         assert_eq!(client.current_endpoint().0, "sk-ds");
         assert_eq!(client.current_endpoint().1, "https://api.deepseek.com");
 
-        // 切换后 headers 用新 key。
+        // After the switch, headers use the new key.
         let headers = client.headers().unwrap();
         assert_eq!(
             headers.get("x-api-key").unwrap().to_str().unwrap(),
@@ -877,12 +918,12 @@ mod tests {
         );
 
         assert!(client.set_provider("nope").is_err(), "未知 provider 报错");
-        // 未知 provider 不影响当前端点。
+        // An unknown provider does not affect the current endpoint.
         assert_eq!(client.current_endpoint().0, "sk-ds");
     }
 
-    /// supports_images：default 读顶层 sendImages；命名 provider 读各自
-    /// supportsImages；切换端点时跟随。
+    /// supports_images: default reads the top-level sendImages; named
+    /// providers read their own supportsImages; follows endpoint switches.
     #[test]
     fn supports_images_follows_endpoint_switch() {
         let mut settings = crate::settings::Settings {
@@ -920,11 +961,12 @@ mod tests {
     fn rejects_malformed_context_limit() {
         assert_eq!(parse_context_limit("boom 42"), None);
         assert_eq!(parse_context_limit("400: overloaded"), None);
-        // A >= C 不可能：保护性拒绝
+        // A >= C is impossible: protective rejection
         assert_eq!(parse_context_limit("900000 + 64000 > 200000"), None);
     }
 
-    /// request-id 等无关数字与溢出数字都不得污染解析。
+    /// Unrelated numbers (request-id etc.) and overflowing numbers must not
+    /// pollute the parse.
     #[test]
     fn context_limit_ignores_unrelated_numbers() {
         let body = concat!(
@@ -933,13 +975,15 @@ mod tests {
         );
         assert_eq!(parse_context_limit(body), Some((150000, 200000)));
 
-        // 溢出 u64 的无关数字只跳过该段，不让整体变 None。
+        // An unrelated u64-overflowing number only skips that segment, never
+        // turns the whole result into None.
         let overflowing = "trace 99999999999999999999999 \
              input length and max_tokens exceed context limit: 150000 + 64000 > 200000";
         assert_eq!(parse_context_limit(overflowing), Some((150000, 200000)));
     }
 
-    /// 服务端连上后不再发事件：空闲超时判定断流，而不是永久阻塞。
+    /// Once connected, the server sends no more events: the idle timeout
+    /// declares the stream dead instead of blocking forever.
     #[tokio::test]
     async fn idle_stream_times_out() {
         let mut stalled = futures_util::stream::pending::<u8>();

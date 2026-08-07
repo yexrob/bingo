@@ -35,14 +35,14 @@ pub enum ContentBlock {
         thinking: String,
         signature: String,
     },
-    /// 图片内容块（Anthropic Messages 协议 base64 格式：
-    /// `{"type":"image","source":{"type":"base64","media_type":...,"data":...}}`）。
+    /// Image content block (Anthropic Messages protocol base64 form:
+    /// `{"type":"image","source":{"type":"base64","media_type":...,"data":...}}`).
     Image {
         source: ImageSource,
     },
 }
 
-/// 图片块的数据源（协议固定 `type: "base64"`）。
+/// Image-block data source (the protocol fixes `type: "base64"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageSource {
     #[serde(rename = "type", default = "base64_source_type")]
@@ -65,7 +65,8 @@ impl ImageSource {
     }
 }
 
-/// 输入框挂载的图片附件（base64 data；发送时才构造 ContentBlock::Image）。
+/// Image attachment mounted on the input box (base64 data; only built into a
+/// `ContentBlock::Image` when sending).
 #[derive(Debug, Clone)]
 pub struct ImageAttachment {
     pub media_type: String,
@@ -91,11 +92,11 @@ impl Message {
     }
 }
 
-/// system prompt 单段（可携带 cache_control）。
+/// A single system-prompt block (may carry cache_control).
 #[derive(Debug, Clone)]
 pub struct SystemBlock {
     pub text: String,
-    /// 在 API 请求中携带 cache_control: ephemeral。
+    /// Carry `cache_control: ephemeral` on the API request.
     pub cache: bool,
 }
 
@@ -125,16 +126,16 @@ pub struct Request {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<serde_json::Value>,
     pub stream: bool,
-    /// 思考配置：`{"type":"adaptive"}`（None = 不发参数）。
+    /// Thinking config: `{"type":"adaptive"}` (None = send no parameter).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<serde_json::Value>,
-    /// 输出配置：`{"effort": <level>}`（None = 不发参数）。
+    /// Output config: `{"effort": <level>}` (None = send no parameter).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<serde_json::Value>,
 }
 
 /// Thinking levels accepted by `/think` and `settings.thinkingLevel`
-/// (`off` 之外的档位；与 Claude Code 的 /effort 档位对齐)。
+/// (levels besides `off`; aligned with Claude Code's /effort levels).
 pub const THINKING_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// Thinking level → request `thinking` parameter.
@@ -152,8 +153,9 @@ pub fn thinking_param(level: Option<&str>) -> Option<serde_json::Value> {
 
 /// Thinking level → request `output_config` parameter (`{"effort": <level>}`)。
 ///
-/// 与 [`thinking_param`] 同门控：off/unset 不发参数，等级即 effort 档位
-/// （Claude 5 家族 GA 参数，低于 high 省 token，xhigh/max 更深推理）。
+/// Same gating as [`thinking_param`]: off/unset sends no parameter; the level
+/// is the effort level (a GA parameter of the Claude 5 family — below `high`
+/// saves tokens, xhigh/max think deeper).
 pub fn effort_param(level: Option<&str>) -> Option<serde_json::Value> {
     let level = level?;
     THINKING_LEVELS
@@ -230,7 +232,7 @@ struct ErrorInner {
     message: String,
 }
 
-/// 归一化后的流式事件，供 queryLoop 消费。
+/// Normalized streaming event, consumed by queryLoop.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
     MessageStart { id: String, model: String },
@@ -284,7 +286,7 @@ fn parse_content_block_start(data: &str) -> Result<Option<StreamEvent>, String> 
     }))
 }
 
-/// 把一条 SSE event/data 对解析成 StreamEvent。
+/// Parse one SSE event/data pair into a `StreamEvent`.
 pub fn parse_sse_event(event: &str, data: &str) -> Result<Option<StreamEvent>, String> {
     match event {
         "message_start" => {
@@ -343,7 +345,7 @@ pub fn parse_sse_event(event: &str, data: &str) -> Result<Option<StreamEvent>, S
                 message: format!("{}: {}", p.error.kind, p.error.message),
             }))
         }
-        _other => Ok(None), // 未知事件类型：忽略，向前兼容
+        _other => Ok(None), // unknown event type: ignore, stay forward-compatible
     }
 }
 
@@ -351,7 +353,8 @@ pub fn parse_sse_event(event: &str, data: &str) -> Result<Option<StreamEvent>, S
 mod tests {
     use super::*;
 
-    /// Claude 5 家族只接受 adaptive；budget_tokens 形态一律 400。
+    /// The Claude 5 family only accepts `adaptive`; the budget_tokens shape
+    /// is a 400 everywhere.
     #[test]
     fn thinking_param_is_adaptive_for_every_enabled_level() {
         for level in THINKING_LEVELS {
@@ -368,7 +371,8 @@ mod tests {
         assert_eq!(thinking_param(Some("bogus")), None);
     }
 
-    /// 等级映射 effort 档位；off/未知等级与 thinking 同步不发。
+    /// Levels map to effort levels; off/unknown levels are suppressed
+    /// together with thinking.
     #[test]
     fn effort_param_follows_thinking_gate() {
         for level in THINKING_LEVELS {
@@ -405,7 +409,8 @@ mod tests {
         assert_eq!(json["output_config"], serde_json::json!({ "effort": "xhigh" }));
     }
 
-    /// 图片块序列化为 Anthropic base64 格式；缺省 source_type 回落 base64。
+    /// Image blocks serialize in Anthropic base64 form; a missing
+    /// source_type falls back to base64.
     #[test]
     fn image_block_serializes_anthropic_format() {
         let block = ContentBlock::Image {
@@ -423,7 +428,8 @@ mod tests {
                 }
             })
         );
-        // 反序列化 round-trip；source.type 缺失时回落 base64。
+        // Deserialization round-trip; falls back to base64 when source.type
+        // is missing.
         let round: ContentBlock = serde_json::from_value(json).unwrap();
         assert_eq!(round, block);
         let no_type: ContentBlock = serde_json::from_value(serde_json::json!({

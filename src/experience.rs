@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::error::ErrorCode;
 use crate::skills::parse_frontmatter_pairs;
 
-/// 经验条目状态：active（活跃）/ degraded（降级）/ stale（失效）。
+/// Experience entry status: active / degraded / stale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExperienceStatus {
     Active,
@@ -31,33 +31,35 @@ impl ExperienceStatus {
     }
 }
 
-/// 一条沉淀的操作经验（frontmatter + 自由正文的 Markdown 条目）。
-/// 存储于 `~/.config/bingo/experience/<project-key>/entries/<id>.md`；
-/// 索引不落盘，每次从 entries/ 扫描构建（entries/ 是唯一事实源）。
+/// A distilled operational experience (Markdown entry: frontmatter + free-form body).
+/// Stored at `~/.config/bingo/experience/<project-key>/entries/<id>.md`;
+/// no on-disk index — rebuilt from scanning entries/ each time (entries/ is the single
+/// source of truth).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExperienceEntry {
     pub id: String,
     pub project_key: String,
     pub status: ExperienceStatus,
-    /// 触发关键词：命中时想起这条经验。
+    /// Trigger keywords: recall this experience when hit.
     pub trigger: Vec<String>,
-    /// 一句话总结（呈现给用户）。
+    /// One-sentence summary (shown to the user).
     pub summary: String,
-    /// 执行步骤（可重跑的命令序列）。
+    /// Steps (re-runnable command sequence).
     pub steps: Vec<String>,
     pub verify: Option<String>,
     pub evidence: Option<String>,
     pub verified_at: Option<String>,
-    /// 被采用次数（Commit 更新已有条目时 +1）。
+    /// Adoption count (+1 when Commit updates an existing entry).
     pub hits: u64,
     pub created_at: String,
-    /// frontmatter 之后的自由正文（手写说明，读写保留）。
+    /// Free-form body after the frontmatter (hand-written notes, preserved verbatim).
     pub notes: String,
 }
 
 impl ExperienceEntry {
-    /// 由提交字段生成条目：id 按内容摘要计算（不含 status/hits 等易变字段，
-    /// 标记失效或计数时 id 保持稳定）。
+    /// Build an entry from the submitted fields: id is computed from a content digest
+    /// (excluding volatile fields like status/hits, so the id stays stable when marking
+    /// stale or counting).
     pub fn new(
         project_key: &str,
         trigger: Vec<String>,
@@ -84,7 +86,7 @@ impl ExperienceEntry {
         entry
     }
 
-    /// 内容摘要：project_key + trigger + summary + steps（FNV-1a 64，12 hex）。
+    /// Content digest: project_key + trigger + summary + steps (FNV-1a 64, 12 hex).
     fn content_hash(&self) -> String {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         for part in [
@@ -135,7 +137,7 @@ impl ExperienceEntry {
         fm
     }
 
-    /// 从条目文件内容解析；frontmatter 缺失或 id 缺失返回 None。
+    /// Parse from entry file content; returns None if frontmatter or id is missing.
     fn parse(content: &str) -> Option<Self> {
         let (pairs, body) = parse_frontmatter_pairs(content);
         let get = |key: &str| {
@@ -199,7 +201,7 @@ impl ErrorCode for ExperienceError {
     }
 }
 
-/// 经验根目录：`$XDG_CONFIG_HOME/bingo/experience`（镜像 skills 配置约定）。
+/// Experience root: `$XDG_CONFIG_HOME/bingo/experience` (mirrors the skills config convention).
 fn experience_root(home: &Path) -> PathBuf {
     let config = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -207,13 +209,14 @@ fn experience_root(home: &Path) -> PathBuf {
     config.join("bingo").join("experience")
 }
 
-/// 本项目经验目录：`<root>/<project-key>/entries/`。
+/// This project's experience dir: `<root>/<project-key>/entries/`.
 fn entries_dir(home: &Path, project_key: &str) -> PathBuf {
     experience_root(home).join(project_key).join("entries")
 }
 
-/// 项目键：git remote URL（归一化）→ git 根 → 规范化绝对路径。
-/// 跨移动稳定：换目录、换机器经验不消失（Dev-ex 硬约束）。
+/// Project key: git remote URL (normalized) → git root → canonical absolute path.
+/// Stable across moves: experience survives directory changes and machine switches
+/// (Dev-ex hard constraint).
 pub fn project_key(cwd: &Path) -> String {
     if let Some(url) = git_remote(cwd)
         && !normalize_remote(&url).is_empty()
@@ -256,8 +259,9 @@ fn git_root(cwd: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// remote URL 归一化：去 scheme / 用户名 / .git 后缀 / 尾斜杠，小写（scheme 大小写不敏感）。
-/// scp-like（`git@github.com:owner/repo`）的冒号转 `/`。
+/// Remote URL normalization: strip scheme / username / .git suffix / trailing slash,
+/// lowercase (scheme is case-insensitive).
+/// scp-like (`git@github.com:owner/repo`) colon becomes `/`.
 fn normalize_remote(url: &str) -> String {
     let lower = url.trim().to_lowercase();
     let scp_style = lower.starts_with("git@");
@@ -290,7 +294,7 @@ fn normalize_remote(url: &str) -> String {
         .to_string()
 }
 
-/// 目录名安全化：非字母数字与 `-_.` 换成 `-`。
+/// Dirname sanitization: non-alphanumeric and non-`-_.` chars become `-`.
 fn sanitize_dirname(name: &str) -> String {
     name.chars()
         .map(|c| {
@@ -303,7 +307,8 @@ fn sanitize_dirname(name: &str) -> String {
         .collect()
 }
 
-/// 加载本项目全部条目（跳过损坏文件——entries/ 是事实源，容错优先）。
+/// Load all entries for this project (skip corrupted files — entries/ is the source of
+/// truth; fault tolerance first).
 pub fn load_entries(home: &Path, project_key: &str) -> Vec<ExperienceEntry> {
     let Ok(entries) = std::fs::read_dir(entries_dir(home, project_key)) else {
         return Vec::new();
@@ -323,7 +328,7 @@ pub fn load_entries(home: &Path, project_key: &str) -> Vec<ExperienceEntry> {
     out
 }
 
-/// 原子写条目：同目录 tmp + rename。
+/// Atomic entry write: tmp + rename in the same directory.
 pub fn save_entry(
     home: &Path,
     project_key: &str,
@@ -343,7 +348,7 @@ pub fn save_entry(
     }
 }
 
-/// 删除条目；不存在视为成功。
+/// Delete an entry; a missing one counts as success.
 pub fn delete_entry(home: &Path, project_key: &str, id: &str) -> Result<(), ExperienceError> {
     let path = entries_dir(home, project_key).join(format!("{id}.md"));
     match std::fs::remove_file(&path) {
@@ -353,14 +358,15 @@ pub fn delete_entry(home: &Path, project_key: &str, id: &str) -> Result<(), Expe
     }
 }
 
-/// 两个小写词元共享的前缀长度（逐字符）。
+/// Shared prefix length of two lowercase tokens (char by char).
 fn shared_prefix_len(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
-/// 词元匹配：query 小写后包含任一 trigger 关键词，或 query 中某词元（≥3 字符）
-/// 与 trigger 共享 ≥4 字符前缀（"migrate now" 命中 trigger "migration"）。
-/// 结果按 hits 降序、active 优先。
+/// Token matching: lowercased query contains any trigger keyword, or some query token
+/// (≥3 chars) shares a ≥4-char prefix with a trigger ("migrate now" hits trigger
+/// "migration").
+/// Results sort by hits desc, active first.
 pub fn query<'a>(
     entries: &'a [ExperienceEntry],
     text: &str,
@@ -396,7 +402,8 @@ pub fn query<'a>(
     matched
 }
 
-/// 常驻注入索引：active 条目一行一条（≤10 条）+ 溢出提示；空则返回空串。
+/// Resident injection index: active entries one per line (≤10) + overflow hint; empty
+/// string when none.
 pub fn format_index(entries: &[ExperienceEntry]) -> String {
     const MAX_INDEX: usize = 10;
     let active: Vec<&ExperienceEntry> = entries
@@ -430,14 +437,14 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// unix 秒 → `YYYY-MM-DD`（公历，无日期依赖）。
+/// unix seconds → `YYYY-MM-DD` (Gregorian, no date dependency).
 fn unix_to_date(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let (y, m, d) = civil_from_days(days);
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Howard Hinnant 的 days↔civil 逆变换。
+/// Howard Hinnant's days↔civil inverse transform.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
@@ -605,7 +612,7 @@ mod tests {
         assert_eq!(summaries, vec!["hot", "cold", "stale one"], "active 优先于 hits");
         let limited = query(&entries, "migration", 2);
         assert_eq!(limited.len(), 2);
-        // 不匹配的词元 → 空
+        // Non-matching tokens → empty
         assert!(query(&entries, "nothing-here", 10).is_empty());
     }
 
@@ -618,7 +625,7 @@ mod tests {
         let lines: Vec<&str> = index.lines().collect();
         assert_eq!(lines.len(), 11, "10 条 + 1 行溢出提示");
         assert!(lines[10].contains("2 more"));
-        // stale 不参与索引
+        // stale doesn't participate in the index
         let mut entries = entries;
         entries[0].status = ExperienceStatus::Stale;
         let index = format_index(&entries);
@@ -628,7 +635,7 @@ mod tests {
 
     #[test]
     fn project_key_prefers_remote_over_path() {
-        // 非 git 目录：规范化绝对路径，稳定可复现。
+        // Not a git directory: canonical absolute path, stable and reproducible.
         let root = tmp_root("key");
         let key1 = project_key(&root);
         let key2 = project_key(&root);
@@ -663,7 +670,8 @@ mod tests {
     #[test]
     fn dirname_sanitization() {
         assert_eq!(sanitize_dirname("/a b/c"), "-a-b-c");
-        // `/` 压平为 `-`：project_key 保持单层目录名（防 `..` 片段穿越 experience 根）。
+        // `/` flattens to `-`: project_key stays a single-level dirname (prevents `..`
+        // segments escaping the experience root).
         assert_eq!(sanitize_dirname("github.com/owner/repo"), "github.com-owner-repo");
     }
 }

@@ -10,7 +10,7 @@ pub struct WriteInput {
     pub content: String,
 }
 
-/// Write：覆盖写文件（自动创建父目录）。
+/// Write: overwrite a file (creating parent directories automatically).
 pub struct WriteTool;
 
 #[async_trait]
@@ -41,8 +41,9 @@ impl Tool for WriteTool {
     ) -> Result<ToolResult, ToolError> {
         let params: WriteInput = parse_input(&input)?;
         let path = std::path::PathBuf::from(&params.file_path);
-        // 读旧内容失败曾一律当成空文件：二进制/非 UTF-8/无权限的文件会被
-        // 静默整份覆盖，diff 还显示为全新增。只有"不存在"才是新文件。
+        // Failed reads of the old content were once treated as an empty file: binary/
+        // non-UTF-8/permission-denied files would be silently overwritten and the diff would
+        // show everything as added. Only "not found" means a new file.
         let old = match std::fs::read_to_string(&path) {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -94,7 +95,7 @@ mod tests {
         }
     }
 
-    /// L3 回归：非 UTF-8 文件曾被当成空文件静默整份覆盖。
+    /// L3 regression: non-UTF-8 files were once treated as empty and silently overwritten.
     #[tokio::test]
     async fn refuses_to_overwrite_unreadable_file() {
         let path = std::env::temp_dir().join(format!("bingo-write-binary-{}", std::process::id()));
@@ -107,12 +108,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("refusing to overwrite"), "{err}");
-        // 原文件未被改动。
+        // The original file is untouched.
         assert_eq!(std::fs::read(&path).unwrap(), vec![0xff, 0xfe, 0x00, 0x01]);
         std::fs::remove_file(&path).unwrap();
     }
 
-    /// 不存在的文件照常按新文件写入。
+    /// Missing files are written as new files as usual.
     #[tokio::test]
     async fn missing_file_is_treated_as_new() {
         let path = std::env::temp_dir().join(format!("bingo-write-new-{}", std::process::id()));

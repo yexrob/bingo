@@ -15,7 +15,7 @@ fn home(ctx: &ToolContext) -> &PathBuf {
     &ctx.home
 }
 
-/// 提交字段校验：trigger/summary/steps 非空，status 合法。
+/// Commit field validation: trigger/summary/steps must be non-empty, status must be valid.
 fn validate(trigger: &[String], summary: &str, steps: &[String], status: Option<&str>) -> Result<Option<ExperienceStatus>, ToolError> {
     if trigger.is_empty() {
         return Err(ToolError::failed("ExperienceCommit: trigger is required (at least one keyword)"));
@@ -38,11 +38,11 @@ fn validate(trigger: &[String], summary: &str, steps: &[String], status: Option<
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExperienceProposeInput {
-    /// 触发关键词：之后场景命中时想起这条经验（至少一个）。
+    /// Trigger keywords: recall this experience when a later scenario matches (at least one).
     pub trigger: Vec<String>,
-    /// 一句话总结（呈现给用户）。
+    /// One-sentence summary (shown to the user).
     pub summary: String,
-    /// 执行步骤（可重跑的命令序列）。
+    /// Execution steps (a re-runnable command sequence).
     pub steps: Vec<String>,
     #[serde(default)]
     pub verify: Option<String>,
@@ -52,7 +52,7 @@ pub struct ExperienceProposeInput {
 
 pub struct ExperienceProposeTool;
 
-/// ExperiencePropose 工具 prompt：生成候选，不落盘。
+/// ExperiencePropose tool prompt: generate a candidate, does not persist.
 const EXPERIENCE_PROPOSE_PROMPT: &str = r#"Use this tool to propose a reusable experience entry for the current project.
 
 ## When to Use This Tool
@@ -132,24 +132,24 @@ impl Tool for ExperienceProposeTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExperienceCommitInput {
-    /// 触发关键词（至少一个）。
+    /// Trigger keywords (at least one).
     pub trigger: Vec<String>,
-    /// 一句话总结。
+    /// One-sentence summary.
     pub summary: String,
-    /// 执行步骤。
+    /// Execution steps.
     pub steps: Vec<String>,
     #[serde(default)]
     pub verify: Option<String>,
     #[serde(default)]
     pub evidence: Option<String>,
-    /// 状态：active（默认）/ degraded / stale（失败现场标记失效）。
+    /// Status: active (default) / degraded / stale (marks the entry as failed).
     #[serde(default)]
     pub status: Option<String>,
 }
 
 pub struct ExperienceCommitTool;
 
-/// ExperienceCommit 工具 prompt：落盘（过权限门）。
+/// ExperienceCommit tool prompt: persist (passes the permission gate).
 const EXPERIENCE_COMMIT_PROMPT: &str = r#"Use this tool to commit (persist) an experience entry into the current project's experience store. Passes the permission gate — the user confirms the write.
 
 ## When to Use This Tool
@@ -202,7 +202,8 @@ impl Tool for ExperienceCommitTool {
             args.verify,
             args.evidence,
         );
-        // 同 id 已存在 → 更新：保留 created_at/verified_at，采用计数 +1（写 stale 不计）。
+        // Same id already exists → update: keep created_at/verified_at, bump the hit count
+        // (+1; writing stale does not count).
         let existing = load_entries(home(ctx), &key);
         let prior = existing.iter().find(|e| e.id == entry.id);
         if let Some(prior) = prior {
@@ -235,16 +236,16 @@ impl Tool for ExperienceCommitTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExperienceQueryInput {
-    /// 检索文本：与 trigger 关键词做词元匹配（大小写不敏感）。
+    /// Search text: token-matched against trigger keywords (case-insensitive).
     pub query: String,
-    /// 返回条数上限（默认 5）。
+    /// Maximum number of results (default 5).
     #[serde(default)]
     pub limit: Option<usize>,
 }
 
 pub struct ExperienceQueryTool;
 
-/// ExperienceQuery 工具 prompt：按需取全文。
+/// ExperienceQuery tool prompt: fetch full entries on demand.
 const EXPERIENCE_QUERY_PROMPT: &str = r#"Use this tool to search the current project's committed experiences by trigger keyword.
 
 ## When to Use This Tool
@@ -318,13 +319,13 @@ impl Tool for ExperienceQueryTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExperienceForgetInput {
-    /// 条目 id（ExperienceQuery 返回的 full_id）。
+    /// Entry id (the full_id returned by ExperienceQuery).
     pub id: String,
 }
 
 pub struct ExperienceForgetTool;
 
-/// ExperienceForget 工具 prompt：淘汰（须用户确认）。
+/// ExperienceForget tool prompt: evict (requires user confirmation).
 const EXPERIENCE_FORGET_PROMPT: &str = r#"Use this tool to permanently delete an experience entry (eviction). Passes the permission gate — the user confirms deletion.
 
 ## When to Use This Tool
@@ -391,7 +392,8 @@ fn map_io(e: ExperienceError) -> ToolError {
     ToolError::failed(format!("[Experience] {e}"))
 }
 
-/// 会话开始注入的项目经验索引（仅 active 条目，≤10 行；空返回空串）。
+/// Project experience index injected at session start (active entries only, ≤10 lines;
+/// empty string if none).
 pub fn session_index(home: &Path, cwd: &std::path::Path) -> String {
     let key = project_key(cwd);
     let entries = load_entries(home, &key);
@@ -458,7 +460,7 @@ mod tests {
         let path = first.content["path"].as_str().unwrap().to_string();
         assert!(path.contains("experience"), "{path}");
 
-        // 同内容再提交 → 更新而非重复：hits 1。
+        // Re-committing the same content → update, not duplicate: hits 1.
         let second = tool.call(propose_input(), &ctx).await.unwrap();
         assert_eq!(second.content["id"].as_str().unwrap(), id);
         assert_eq!(second.content["hits"], 1);
@@ -501,7 +503,7 @@ mod tests {
         let ctx = ctx_at(&home, &cwd);
         let commit = ExperienceCommitTool;
         commit.call(propose_input(), &ctx).await.unwrap();
-        // 标记失效：hits 不增。
+        // Mark stale: hits do not increase.
         let stale = json!({
             "trigger": ["migration"],
             "summary": "迁移数据库三步",
@@ -512,10 +514,10 @@ mod tests {
         assert_eq!(result.content["status"], "stale");
         assert_eq!(result.content["hits"], 0, "写 stale 不采用计数");
 
-        // 索引不含 stale。
+        // The index excludes stale entries.
         assert!(session_index(&home, &cwd).is_empty(), "stale 不入注入索引");
 
-        // Query 仍可查到（供现场复核）。
+        // Query can still find it (for on-site review).
         let query_tool = ExperienceQueryTool;
         let q = query_tool
             .call(json!({"query": "migration"}), &ctx)
@@ -539,7 +541,7 @@ mod tests {
             .unwrap();
         assert!(out.content["deleted"].as_bool().unwrap());
         assert!(load_entries(&home, &project_key(&cwd)).is_empty());
-        // 再删：不存在但成功。
+        // Delete again: not found but succeeds.
         let out = forget.call(json!({"id": id}), &ctx).await.unwrap();
         assert!(!out.content["deleted"].as_bool().unwrap());
         let err = forget.call(json!({"id": "  "}), &ctx).await.unwrap_err();

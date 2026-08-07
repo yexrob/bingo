@@ -1,11 +1,15 @@
-//! TUI 测试共用基建：可断言渲染输出的测试 backend。
+//! Shared TUI test infrastructure: a test backend with assertable render
+//! output.
 //!
-//! [`Recorder`] 封装 ratatui `TestBackend`，记录 draw/clear/scroll/raw 事件，
-//! 提供 `screen()`/`scrollback()` 行级文本断言与 `buffer()` 样式访问。
+//! [`Recorder`] wraps ratatui's `TestBackend`, recording draw/clear/scroll/raw
+//! events and providing `screen()`/`scrollback()` line-level text assertions
+//! plus `buffer()` style access.
 //!
-//! 服务对象：TUI 各模块测试 + 呈现层回归（AC 表 B/D 区滚动可见/重试可达、
-//! A 区错误行高亮样式断言）。与「状态注入」（UiEvent 注入 / 测试钩子）正交——
-//! 本模块只负责「渲染后可断言什么」，不负责「状态怎么来」。
+//! Serves: TUI module tests + presentation-layer regression (AC table B/D
+//! area scroll visibility / retry reachability, A-area error-line highlight
+//! style assertions). It is orthogonal to "state injection" (UiEvent
+//! injection / test hooks) — this module only defines "what can be asserted
+//! after rendering", not "how the state got there".
 
 use std::convert::Infallible;
 use std::ops::Range;
@@ -19,8 +23,9 @@ use crate::tui::term::RawWrite;
 
 /// TestBackend plus the raw-byte sink and command counters the driver needs asserting on.
 ///
-/// 字段全部 `pub`（测试 helper 惯例）：TUI 各模块测试直接读计数器/原始字节
-/// 断言，`screen()`/`scrollback()` 提供行级文本快照，`buffer()` 提供样式断言。
+/// All fields are `pub` (test-helper convention): TUI module tests read the
+/// counters/raw bytes directly to assert, `screen()`/`scrollback()` provide
+/// line-level text snapshots, `buffer()` provides style assertions.
 pub struct Recorder {
     pub inner: TestBackend,
     pub raw: Vec<u8>,
@@ -53,27 +58,31 @@ impl Recorder {
         self.appended = 0;
     }
 
-    /// 行级文本快照（去尾部空白）：断言「屏幕这一行显示了什么」。
+    /// Line-level text snapshot (trailing whitespace stripped): asserts "what
+    /// this screen row shows".
     pub fn screen(&self) -> Vec<String> {
         rows_of(self.inner.buffer())
     }
 
-    /// 行级文本快照（scrollback 区）。
+    /// Line-level text snapshot (scrollback region).
     pub fn scrollback(&self) -> Vec<String> {
         rows_of(self.inner.scrollback())
     }
 
-    /// 底层 buffer 访问：样式断言（错误行高亮 fg/bg、spinner 图标位等）用。
-    /// 单元格符号用 `buffer[(x, y)].symbol()`，样式用 `buffer[(x, y)].style`。
+    /// Underlying buffer access, for style assertions (error-line highlight
+    /// fg/bg, spinner icon positions, etc.). Cell symbols come from
+    /// `buffer[(x, y)].symbol()`, styles from `buffer[(x, y)].style`.
     pub fn buffer(&self) -> &Buffer {
         self.inner.buffer()
     }
 
-    /// 样式感知断言（qa R2 需求）：断言第 `y` 行**同时满足**——存在一个
-    /// 前景/背景色匹配指定色的单元格，且行文本包含 `contains`。
-    /// 只比较 fg/bg 维度（不关心粗体/下划线等修饰），降低测试与实现耦合；
-    /// `fg`/`bg` 传 `None` 表示该维度不限。用于「错误行高亮」断言
-    /// （error 色 `(255,107,128)` vs 正常色可辨）。
+    /// Style-aware assertion (qa R2 requirement): asserts row `y` satisfies
+    /// **both** — a cell whose fg/bg matches the given colours, and row text
+    /// containing `contains`. Only the fg/bg dimensions are compared (bold/
+    /// underline etc. are ignored) to keep the test decoupled from the
+    /// implementation; passing `None` for `fg`/`bg` leaves that dimension
+    /// unrestricted. Used for "error-line highlight" assertions (the error
+    /// colour `(255,107,128)` is distinguishable from the normal colour).
     pub fn assert_row_styled(
         &self,
         y: u16,
@@ -110,9 +119,11 @@ impl Recorder {
         );
     }
 
-    /// 视口行定位（B 区「滚动到可见区」断言）：返回第一个包含 `needle`
-    /// 的视口行索引（`None` = 不在可见区）。区别于 `scrollback()`——
-    /// 只查视口，查 scrollback 用 [`Self::scrollback`]。
+    /// Viewport row lookup (B-area "scrolled into the visible region"
+    /// assertion): returns the index of the first viewport row containing
+    /// `needle` (`None` = not in the visible region). Unlike
+    /// `scrollback()` — this only checks the viewport; use
+    /// [`Self::scrollback`] for the scrollback.
     pub fn visible_row_containing(&self, needle: &str) -> Option<usize> {
         self.screen()
             .iter()
@@ -228,34 +239,42 @@ impl RawWrite for Recorder {
 }
 
 // ---------------------------------------------------------------------------
-// 错误态 fixture（#14 R1 层1：qa 断言 + 呈现层验收 + dev 本地预览共用载体）
+// Error-state fixtures (#14 R1 layer 1: shared vehicle for qa assertions +
+// presentation acceptance + dev local preview)
 // ---------------------------------------------------------------------------
 
-/// 触发上下文（生产契约，`src/error.rs`）：呈现级别由它决定，不单由 code 推断。
+/// Trigger context (production contract, `src/error.rs`): the presentation
+/// level is decided by it, not by the code alone.
 pub use crate::error::ErrorContext;
 
-/// 呈现级别（生产契约，`src/error.rs`）：渲染端按级别分支。
+/// Presentation level (production contract, `src/error.rs`): the render side
+/// branches on it.
 pub use crate::error::ErrorLevel;
 
-/// 错误态 fixture：单一数据载体（qa 断言 / ui/ux 验收 / dev 预览共用）。
-/// 字段对齐 presentation v1.5 FX 清单（10 个可注入稳定码 + FX-11 长回合）。
+/// Error-state fixture: a single data carrier (shared by qa assertions /
+/// ui/ux acceptance / dev preview). Fields align with the presentation v1.5
+/// FX checklist (10 injectable stable codes + FX-11 long turn).
 #[derive(Debug, Clone, Copy)]
 pub struct ErrorFixture {
     pub code: &'static str,
-    /// 人话文案（AC-28：发生了什么 + 能做什么）。qa 断言只锚 code，msg 永不断言。
+    /// Human-readable message (AC-28: what happened + what you can do). qa
+    /// assertions anchor only on `code`; `msg` is never asserted.
     pub msg: &'static str,
     pub context: ErrorContext,
     pub level: ErrorLevel,
-    /// 用户动作（重试 / 返回 / 检查网络…），D 区重试/返回可达性的动作锚。
+    /// User action (retry / go back / check network…), the action anchor for
+    /// D-area retry/back reachability.
     pub action: &'static str,
-    /// 期望错误色 RGB（样色基线 error (255,107,128)，A 区样式断言锚）。
+    /// Expected error colour RGB (swatch baseline error (255,107,128), the
+    /// A-area style assertion anchor).
     pub expect_style: (u8, u8, u8),
 }
 
 impl ErrorFixture {
-    /// 注入：转结构化 `UiEvent::Error` 发到 test_chat 的 events 通道。
-    /// 零生产改动——`UiEvent::Error` 已是结构化事件，chat 消费端按
-    /// `level` 记录错误态、渲染端按级别分支。
+    /// Inject: send a structured `UiEvent::Error` into the test_chat events
+    /// channel. Zero production changes — `UiEvent::Error` is already a
+    /// structured event; the chat consumer records the error state by
+    /// `level`, the render side branches on it.
     pub fn inject(&self, events: &tokio::sync::mpsc::UnboundedSender<crate::ui::UiEvent>) {
         let _ = events.send(crate::ui::UiEvent::Error {
             code: self.code,
@@ -266,39 +285,45 @@ impl ErrorFixture {
     }
 }
 
-/// §4.4 全部 10 个可注入稳定码（FX-01…11）。`GENERIC` 不进 fixture（无实际
-/// 返回点，护栏归 error.rs 单测）；FX-12 混合态 / FX-13 折叠详情不在注入集合。
+/// All 10 injectable stable codes of §4.4 (FX-01…11). `GENERIC` stays out of
+/// the fixtures (no real return point; its guard belongs to error.rs unit
+/// tests); FX-12 mixed state / FX-13 collapsed detail are not in the
+/// injection set.
 ///
-/// 注意：**仅 TIMEOUT 类由 context 决定级别**（短同步=页面级、长回合=全流程级，
-/// FX-01/FX-11 同码分档）；其余码级别固有（AUTH_REQUIRED/PERMISSION_DENIED=
-/// 全流程级、CONFIG_INVALID=字段级、其余=页面级），其 context 字段仅为信息性
-/// 记录（生产发射时已知），不参与级别推导。
+/// Note: **only the TIMEOUT class derives its level from the context**
+/// (short sync = page level, long turn = full-flow level, FX-01/FX-11 share
+/// the code and are graded by context); every other code has an intrinsic
+/// level (AUTH_REQUIRED/PERMISSION_DENIED = full-flow, CONFIG_INVALID =
+/// field, the rest = page), and its context field is only recorded
+/// informationally (known at production emission time), never used for level
+/// derivation.
 pub fn error_fixtures() -> Vec<ErrorFixture> {
     use ErrorContext::{LongTurn, ShortSync};
     use ErrorLevel::{Field, Full, Page};
-    const ERR: (u8, u8, u8) = (255, 107, 128); // 样色基线
+    const ERR: (u8, u8, u8) = (255, 107, 128); // swatch baseline
     vec![
-        // FX-01 短同步读超时 → 页面级
+        // FX-01 short-sync read timeout → page level
         ErrorFixture { code: "TIMEOUT", msg: "请求超时，可重试", context: ShortSync, level: Page, action: "重试", expect_style: ERR },
-        // FX-02 服务端错误 → 页面级
+        // FX-02 server error → page level
         ErrorFixture { code: "SERVER_ERROR", msg: "服务端错误，稍后重试", context: ShortSync, level: Page, action: "稍后重试", expect_style: ERR },
-        // FX-03 无网络 → 页面级
+        // FX-03 no network → page level
         ErrorFixture { code: "OFFLINE", msg: "无网络连接，请检查网络后重试", context: ShortSync, level: Page, action: "检查网络后重试", expect_style: ERR },
-        // FX-04 登录过期/缺 key → 全流程级
+        // FX-04 login expired / missing key → full-flow level
         ErrorFixture { code: "AUTH_REQUIRED", msg: "登录已过期或缺少 API key，请重新登录或配置 key", context: ShortSync, level: Full, action: "重新登录", expect_style: ERR },
-        // FX-05 无权限 → 全流程级
+        // FX-05 no permission → full-flow level
         ErrorFixture { code: "PERMISSION_DENIED", msg: "无权限执行此操作，请返回或申请权限", context: ShortSync, level: Full, action: "返回/申请权限", expect_style: ERR },
-        // FX-06 配置校验失败 → 字段级（仅标错误对象）
+        // FX-06 config validation failed → field level (marks only the error object)
         ErrorFixture { code: "CONFIG_INVALID", msg: "配置校验失败，请修正配置", context: ShortSync, level: Field, action: "修正配置", expect_style: ERR },
-        // FX-07 限流/429 → 页面级
+        // FX-07 rate limited / 429 → page level
         ErrorFixture { code: "RATE_LIMITED", msg: "请求过于频繁，请稍后重试", context: ShortSync, level: Page, action: "稍后重试", expect_style: ERR },
-        // FX-08 工具执行失败 → 页面级
+        // FX-08 tool execution failed → page level
         ErrorFixture { code: "TOOL_FAILED", msg: "工具执行失败，请查看输出后重试", context: ShortSync, level: Page, action: "查看输出后重试", expect_style: ERR },
-        // FX-09 hook 执行失败 → 页面级
+        // FX-09 hook execution failed → page level
         ErrorFixture { code: "HOOK_FAILED", msg: "hook 执行失败，请检查 hook 配置", context: ShortSync, level: Page, action: "检查 hook 配置", expect_style: ERR },
-        // FX-10 本地存储失败 → 页面级
+        // FX-10 local storage failed → page level
         ErrorFixture { code: "STORAGE_ERROR", msg: "本地存储失败，请检查磁盘或权限", context: ShortSync, level: Page, action: "检查磁盘/权限", expect_style: ERR },
-        // FX-11 长回合传输层超时 → 全流程级（AC-53，与 FX-01 共用 TIMEOUT 码、级别由上下文区分）
+        // FX-11 long-turn transport timeout → full-flow level (AC-53, shares
+        // the TIMEOUT code with FX-01, level told apart by context)
         ErrorFixture { code: "TIMEOUT", msg: "长回合中断，可重试或返回", context: LongTurn, level: Full, action: "可重试或返回", expect_style: ERR },
     ]
 }
@@ -310,8 +335,9 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Style;
 
-    /// helper 自测（qa 依赖这些 API，先证明它正确）：
-    /// error 色 `(255,107,128)` 与正常行可辨，视口定位准确。
+    /// Helper self-test (qa depends on these APIs, so prove them correct
+    /// first): the error colour `(255,107,128)` is distinguishable from a
+    /// normal row, and viewport lookup is accurate.
     #[test]
     fn styled_row_assertion_distinguishes_error_color() {
         let mut r = Recorder::new(20, 5);
@@ -329,19 +355,21 @@ mod tests {
             (x, y, c)
         });
         Backend::draw(&mut r, cells).unwrap();
-        // 样式 + 文本双条件命中。
+        // Both style and text conditions hit.
         r.assert_row_styled(2, Some(Color::Rgb(255, 107, 128)), None, "boom");
-        // 视口定位：可见行命中 / 未命中。
+        // Viewport lookup: visible rows hit / miss.
         assert_eq!(r.visible_row_containing("boom"), Some(2));
         assert_eq!(r.visible_row_containing("normal"), Some(3));
         assert_eq!(r.visible_row_containing("missing"), None);
-        // 不限样式维度时，普通行也可断言（文本命中即可）。
+        // With both style dimensions unrestricted, a plain row can be
+        // asserted too (text match is enough).
         r.assert_row_styled(3, None, None, "normal");
     }
 
-    /// fixture 清单完整性（qa 断言 / ui/ux 验收 / dev 预览的单一数据源）：
-    /// 覆盖 §4.4 全部 10 个可注入稳定码；`TIMEOUT` 双级别（短同步/长回合）
-    /// 由 context 区分；不含 `GENERIC`。
+    /// Fixture-list completeness (the single data source for qa assertions /
+    /// ui/ux acceptance / dev preview): covers all 10 injectable stable codes
+    /// of §4.4; `TIMEOUT` has two levels (short sync / long turn) told apart
+    /// by context; `GENERIC` is absent.
     #[test]
     fn fixtures_cover_all_injectable_codes() {
         let fxs = error_fixtures();
@@ -374,15 +402,17 @@ mod tests {
                 f.code
             );
         }
-        // FX-01 与 FX-11 共用 TIMEOUT，级别由 context 区分。
+        // FX-01 and FX-11 share TIMEOUT; the level is told apart by context.
         let short = fxs.iter().find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::ShortSync);
         let long = fxs.iter().find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::LongTurn);
         assert_eq!(short.map(|f| f.level), Some(ErrorLevel::Page), "短同步 TIMEOUT = 页面级");
         assert_eq!(long.map(|f| f.level), Some(ErrorLevel::Full), "长回合 TIMEOUT = 全流程级");
     }
 
-    /// dev 本地预览（fixture 数据 dump）：`cargo test -- --nocapture` 可见
-    /// 各错误级的定义载体。真实渲染预览等 #18 呈现层实现后升级（注入→渲染→dump）。
+    /// Dev local preview (fixture data dump): visible via
+    /// `cargo test -- --nocapture`, showing the defining carrier of each
+    /// error level. The real render preview upgrades once the #18
+    /// presentation layer lands (inject → render → dump).
     #[test]
     fn preview_error_fixtures() {
         for (i, f) in error_fixtures().iter().enumerate() {

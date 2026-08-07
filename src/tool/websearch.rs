@@ -6,9 +6,9 @@ use serde::Deserialize;
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-/// 搜索请求超时。
+/// Search request timeout.
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
-/// 单次搜索最多回填的结果数。
+/// Max results fed back per search.
 const MAX_RESULTS: usize = 8;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -29,9 +29,9 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-/// WebSearch：搜索网络。
-/// bingo 自实现后端（无 key 的 DuckDuckGo HTML 端点），回填格式：
-/// "Web search results for query ... Links: [...] REMINDER: 必须附来源"。
+/// WebSearch: search the web.
+/// bingo implements its own backend (the keyless DuckDuckGo HTML endpoint); backfill format:
+/// "Web search results for query ... Links: [...] REMINDER: must cite sources".
 pub struct WebSearchTool;
 
 #[async_trait]
@@ -117,7 +117,7 @@ fn current_year() -> u32 {
     (secs / 31_556_952 + 1970) as u32
 }
 
-/// DuckDuckGo HTML 端点搜索（无 key）。返回原始命中（未过滤）。
+/// Search via the DuckDuckGo HTML endpoint (no key). Returns raw hits (unfiltered).
 async fn search(client: &reqwest::Client, params: &WebSearchInput) -> Result<Vec<SearchHit>, ToolError> {
     let response = tokio::time::timeout(SEARCH_TIMEOUT, async {
         client
@@ -147,8 +147,8 @@ async fn search(client: &reqwest::Client, params: &WebSearchInput) -> Result<Vec
     Ok(parse_results(&html))
 }
 
-/// DDG 结果块正则：`result__a`（标题/URL）与 `result__snippet`（摘要）。
-/// (?s)：a 标签与 snippet div 之间可能有换行。
+/// DDG result block regex: `result__a` (title/URL) and `result__snippet` (snippet).
+/// (?s): there may be newlines between the a tag and the snippet div.
 static RESULT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
         r#"(?s)class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</a>"#,
@@ -156,7 +156,7 @@ static RESULT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     .expect("静态结果正则必须可编译")
 });
 
-/// 解析 DDG HTML 结果块。
+/// Parse DDG HTML result blocks.
 fn parse_results(html: &str) -> Vec<SearchHit> {
     let mut hits = Vec::new();
     for cap in RESULT_RE.captures_iter(html) {
@@ -168,9 +168,10 @@ fn parse_results(html: &str) -> Vec<SearchHit> {
     hits
 }
 
-/// DDG 结果 URL 是重定向包装（`//duckduckgo.com/l/?uddg=<percent-encoded>`）：
-/// 不解包则 host 解析失败 → allowed_domains 恒过滤为空、blocked_domains 恒失效、
-/// 回填给模型的链接也无法直接访问。协议相对 URL 一并补全为 https。
+/// DDG result URLs are redirect wrappers (`//duckduckgo.com/l/?uddg=<percent-encoded>`):
+/// without unwrapping, host parsing fails → allowed_domains always filters everything out,
+/// blocked_domains never takes effect, and links fed back to the model are not directly
+/// accessible. Protocol-relative URLs are also completed to https.
 fn unwrap_ddg_redirect(url: &str) -> String {
     let absolute = match url.strip_prefix("//") {
         Some(rest) => format!("https://{rest}"),
@@ -192,7 +193,7 @@ fn unwrap_ddg_redirect(url: &str) -> String {
         .unwrap_or(absolute)
 }
 
-/// HTML 实体解码。
+/// HTML entity decoding.
 fn decode_entity(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -205,7 +206,7 @@ fn decode_entity(s: &str) -> String {
                 .and_then(|hex| hex.split(';').next())
                 .and_then(|hex| u32::from_str_radix(hex, 16).ok())
                 .and_then(char::from_u32)
-                // parse 失败（不是合法的 &#x 实体）→ 只消费 "&" 本身。
+                // Parse failure (not a valid &#x entity) → consume only the "&" itself.
                 .map(|c| (c.to_string(), hex_len(entity)))
                 .unwrap_or(("&".into(), 1))
         } else if entity.starts_with("&amp;") {
@@ -224,7 +225,7 @@ fn decode_entity(s: &str) -> String {
             ("&".into(), 1)
         };
         out.push_str(&repl);
-        // entity 从 & 起，实体长度 len 直接按 entity 切（rest 可能更长）。
+        // The entity starts at &; slice by the entity length len directly (rest may be longer).
         rest = &entity[len..];
     }
     out.push_str(rest);
@@ -249,7 +250,7 @@ fn strip_tags(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// allowed/blocked 域名过滤。
+/// allowed/blocked domain filtering.
 fn filter_hits(hits: Vec<SearchHit>, params: &WebSearchInput) -> Vec<SearchHit> {
     hits.into_iter()
         .filter(|h| {
@@ -292,14 +293,15 @@ mod tests {
         let hits = parse_results(html);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].title, "Example & Page Title");
-        // 重定向包装已解包为真实 URL（而非 percent-encoded 的 uddg 参数串）。
+        // The redirect wrapper is unwrapped to the real URL (not the percent-encoded uddg parameter string).
         assert_eq!(hits[0].url, "https://example.com/page");
         assert_eq!(hits[0].snippet, "First snippet text");
         assert_eq!(hits[1].title, "Other Site");
         assert_eq!(hits[1].url, "https://other.org/x");
     }
 
-    /// M5 回归：不解包 uddg 时 host 解析失败，域名过滤全部失效。
+    /// M5 regression: without unwrapping uddg, host parsing fails and domain filtering
+    /// is completely ineffective.
     #[test]
     fn unwraps_duckduckgo_redirect() {
         assert_eq!(
@@ -310,17 +312,17 @@ mod tests {
             unwrap_ddg_redirect("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fa.example%2Fx%3Fq%3D1"),
             "https://a.example/x?q=1"
         );
-        // 非 DDG 链接原样返回；协议相对 URL 补全 https。
+        // Non-DDG links are returned as-is; protocol-relative URLs get https prepended.
         assert_eq!(unwrap_ddg_redirect("https://other.org/x"), "https://other.org/x");
         assert_eq!(unwrap_ddg_redirect("//other.org/x"), "https://other.org/x");
-        // DDG 链接但无 uddg 参数：不失真。
+        // A DDG link without the uddg parameter: left intact.
         assert_eq!(
             unwrap_ddg_redirect("https://duckduckgo.com/about"),
             "https://duckduckgo.com/about"
         );
     }
 
-    /// 解包后 allowed/blocked 域名过滤才真正生效。
+    /// Domain filtering actually works only after unwrapping.
     #[test]
     fn domain_filters_work_on_unwrapped_urls() {
         let html = r#"

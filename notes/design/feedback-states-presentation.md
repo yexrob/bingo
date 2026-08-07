@@ -1,186 +1,186 @@
-# 反馈状态规范 · TUI 呈现层验收清单（Presentation Acceptance）
+# Feedback States Specification · TUI Presentation Acceptance Checklist
 
-> 版本：v1.8 · 交付：ui/ux（2026-08-07）· 对应：`notes/design/feedback-states.md` v1.16 §5 + §7
-> 用途：#14 TUI 组件级回归中 ui/ux 负责的**呈现层验收**；qa 负责断言侧（AC-15/26/53 状态机行为 + 测试基建）。
-> 视角：**用户看到什么、怎么操作、反馈是否及时**。验收项均为「可观测、可判定」的通过标准，不依赖实现内部。
+> Version: v1.8 · Deliverable: ui/ux (2026-08-07) · Corresponds to: `notes/design/feedback-states.md` v1.16 §5 + §7
+> Purpose: the **presentation-layer acceptance** ui/ux owns in the #14 TUI component-level regression; qa owns the assertion side (AC-15/26/53 state-machine behavior + test infrastructure).
+> Lens: **what the user sees, how they operate, whether feedback is timely**. Every acceptance item is an "observable, decidable" pass criterion, independent of implementation internals.
 
-## 对照关系
+## Cross-reference
 
-| 验收区 | 对应 AC | TUI 映射（§5） |
+| Acceptance area | Corresponding AC | TUI mapping (§5) |
 |---|---|---|
-| A. 错误行高亮 | AC-26 字段/页面级呈现 | `aria-invalid` 红框 → 错误行高亮样式 |
-| B. 滚动可见 + 高亮 | AC-26/53 | 焦点转移 → 错误行渲染后滚动到可见区 + 高亮 |
-| C. 状态区更新 | AC-03/26 | `aria-live` 写空串 → 状态区内容更新（非删行） |
-| D. 重试动作可达性 | AC-15/26/53 | 焦点落到首要动作项 → 重试项可达/被选中 |
-| E. spinner 降频保留 | AC-47/49 | reduced-motion → spinner 频率可降、指示不删 |
-| F. 全流程级整屏态 | AC-26/53 | 页面级错误 → 整屏状态 + 返回路径 |
-| G. 重试幂等交互 | AC-15 | 动作级防重 → 重试不重复落库、不闪烁 |
-| H. 错误码高级详情 | AC-48 | 折叠区 → TUI 按键切换展开/折叠 |
-| I. 错误文案 | AC-28 | 「发生了什么 + 能做什么」可读性 |
+| A. Error-line highlight | AC-26 field/page-level presentation | `aria-invalid` red outline → error-line highlight styling |
+| B. Scroll-into-view + highlight | AC-26/53 | focus transfer → after the error line renders, scroll into view + highlight |
+| C. Status-area update | AC-03/26 | `aria-live` write-empty-string → status-area content update (not row deletion) |
+| D. Retry action reachability | AC-15/26/53 | focus lands on the primary action item → retry item reachable/selected |
+| E. Spinner rate reduction, indicator kept | AC-47/49 | reduced-motion → spinner rate may drop, indicator never removed |
+| F. Flow-level full-screen state | AC-26/53 | page-level error → full-screen state + a way back |
+| G. Retry idempotent interaction | AC-15 | action-level de-dup → retry doesn't re-persist, no flicker |
+| H. Error-code advanced details | AC-48 | collapsible region → TUI key toggles expand/collapse |
+| I. Error copy | AC-28 | "what happened + what you can do" readability |
 
-## A. 错误行高亮
+## A. Error-line highlight
 
-| # | 验收项 | 通过标准（可观测） |
+| # | Acceptance item | Pass criterion (observable) |
 |---|---|---|
-| A1 | 错误行可辨识 | 错误行与普通内容行有明显视觉区分（高亮样式：颜色/反转/符号前缀之一，需在正常终端配色下可辨） |
-| A2 | 高亮仅标错误对象 | 字段级错误只高亮对应输入行，不高亮整个界面（对应「红色描边仅标错误字段」） |
-| A3 | 错误行内容 | 含具体原因 + 稳定码（`[error] code=...`），用户可感知到「出了什么问题」 |
+| A1 | Error line distinguishable | The error line is clearly visually distinct from normal content lines (highlight styling: color/inversion/symbol prefix, one of these, distinguishable under a normal terminal color scheme) |
+| A2 | Highlight marks only the erroneous object | Field-level errors highlight only the corresponding input line, not the whole interface (corresponding to "red outline marks only the erroneous field") |
+| A3 | Error-line content | Contains the specific reason + stable code (`[error] code=...`); the user can perceive "what went wrong" |
 
-## B. 滚动可见 + 高亮
+## B. Scroll-into-view + highlight
 
-| # | 验收项 | 通过标准 |
+| # | Acceptance item | Pass criterion |
 |---|---|---|
-| B1 | 错误出现时可见 | 错误行渲染后自动滚动到可见区（用户无需手动滚动才能看到错误） |
-| B2 | 高亮引导 | 滚动后错误行处于高亮状态，视线自然落点 |
-| B3 | 不跳帧 | 滚动发生在渲染后、一次到位（无用户可感知的二次跳动）；帧循环天然满足，验收确认无异常 |
+| B1 | Error visible when it appears | After the error line renders, it auto-scrolls into view (the user doesn't need to scroll manually to see the error) |
+| B2 | Highlight guides attention | After scrolling, the error line is in a highlighted state, a natural visual landing point |
+| B3 | No frame skip | Scrolling happens after render, in one step (no user-perceivable second jump); the frame loop naturally satisfies this; acceptance confirms no anomaly |
 
-## C. 状态区更新
+## C. Status-area update
 
-| # | 验收项 | 通过标准 |
+| # | Acceptance item | Pass criterion |
 |---|---|---|
-| C1 | 内容更新非删行 | 状态区通过**内容更新**反映状态变化（loading→idle 时更新为正常状态文本，不是删掉再补） |
-| C2 | 无残留错误样式 | 复位后状态区/错误行高亮清除，无「上一轮错误样式残留」 |
+| C1 | Content update, not row deletion | The status area reflects state changes via **content updates** (loading→idle updates to normal status text, not delete-then-re-add) |
+| C2 | No leftover error styling | After reset, the status area/error-line highlight is cleared; no "previous round's error styling lingering" |
 
-## D. 重试动作可达性
+## D. Retry action reachability
 
-| # | 验收项 | 通过标准 |
+| # | Acceptance item | Pass criterion |
 |---|---|---|
-| D1 | 重试项可选中 | 错误态下重试项可通过键盘/快捷键选中（TUI 的「焦点」语义） |
-| D2 | 首要动作默认指向 | 全流程级错误态出现时，选中态默认落在首要动作（重试/返回之一），用户可直接回车触发 |
-| D3 | 返回路径非死路 | 全流程级错误态提供返回动作（退出/返回上一级），不出现「卡死在错误屏」 |
+| D1 | Retry item selectable | In the error state, the retry item can be selected via keyboard/shortcut (the TUI's "focus" semantics) |
+| D2 | Primary action default target | When the flow-level error state appears, the selection defaults to the primary action (retry/return); the user can trigger it directly with Enter |
+| D3 | Return path not a dead end | The flow-level error state offers a return action (exit/back one level); no "stuck on the error screen" |
 
-## E. spinner 降频保留
+## E. Spinner rate reduction, indicator kept
 
-| # | 验收项 | 通过标准 |
+| # | Acceptance item | Pass criterion |
 |---|---|---|
-| E1 | 指示保留 | 任何加载态下 loading 指示（spinner/状态行标识）存在，不因降频而消失 |
-| E2 | 降频可感知 | 动画频率可降低（如慢速旋转）但状态行文字明确在「工作中」 |
+| E1 | Indicator kept | In any loading state, the loading indicator (spinner/status-line mark) exists and doesn't disappear due to rate reduction |
+| E2 | Rate reduction perceivable | The animation rate can drop (e.g. slower rotation) but the status-line text clearly says "working" |
 
-## F. 全流程级整屏态
+## F. Flow-level full-screen state
 
-| # | 验收项 | 通过标准（AC-26/53） |
+| # | Acceptance item | Pass criterion (AC-26/53) |
 |---|---|---|
-| F1 | 整屏状态 | agent 长回合失败（传输层超时/中断）时呈现**整屏错误状态**，不是局部小提示 |
-| F2 | 错误级别正确 | 长回合失败 → 全流程级；短同步操作超时 → 页面级（两档不混淆，可区分） |
-| F3 | 内容完整 | 整屏态含：错误说明 + 可重试或返回路径（AC-53），不是只有「操作失败」 |
+| F1 | Full-screen state | A failed long agent turn (transport timeout/interruption) presents a **full-screen error state**, not a small local hint |
+| F2 | Error level correct | Long-turn failure → flow-level; short-sync operation timeout → page-level (the two tiers don't mix, distinguishable) |
+| F3 | Content complete | The full-screen state includes: error explanation + a retry-or-return path (AC-53), not just "operation failed" |
 
-## G. 重试幂等交互
+## G. Retry idempotent interaction
 
-| # | 验收项 | 通过标准（AC-15） |
+| # | Acceptance item | Pass criterion (AC-15) |
 |---|---|---|
-| G1 | 重试可触发 | 超时错误态下重试动作可用（D1 基础上实际触发重试） |
-| G2 | 无重复落库表现 | 写操作超时→重试后，用户侧不出现重复结果/重复状态（动作级幂等，drop 是 best-effort） |
-| G3 | 状态机复位 | 重试成功 → 回到 idle（loading 清除、无错误残留），用户可继续操作（AC-02/03 呈现侧） |
+| G1 | Retry triggerable | In the timeout error state, the retry action works (actually triggering a retry on top of D1) |
+| G2 | No duplicate-persistence appearance | After a timed-out write → retry, the user side shows no duplicate result/duplicate state (action-level idempotency; drop is best-effort) |
+| G3 | State-machine reset | Successful retry → back to idle (loading cleared, no error residue); the user can continue (AC-02/03 presentation side) |
 
-## H. 错误码高级详情
+## H. Error-code advanced details
 
-| # | 验收项 | 通过标准 |
+| # | Acceptance item | Pass criterion |
 |---|---|---|
-| H1 | 折叠默认隐藏 | 默认只见人话文案，不打扰普通用户 |
-| H2 | 按键可展开 | 有明确按键切换展开/折叠，展开后显示稳定码，可再次收起 |
+| H1 | Collapsed by default | By default only human-readable copy is shown; ordinary users aren't disturbed |
+| H2 | Expandable by key | A clear key toggles expand/collapse; expanding shows the stable code, collapsible again |
 
-## I. 错误文案
+## I. Error copy
 
-| # | 验收项 | 通过标准 |
+| # | Acceptance item | Pass criterion |
 |---|---|---|
-| I1 | 公式成立 | 文案含「发生了什么 + 用户能做什么」（如「请求超时，可重试」而非「操作失败」） |
-| I2 | 终端宽度适配 | 文案不因终端宽度截断成不可读的半句话（超长时换行/缩进合理） |
+| I1 | Formula holds | Copy contains "what happened + what the user can do" (e.g. "request timed out, retry" rather than "operation failed") |
+| I2 | Terminal-width fit | Copy isn't truncated into an unreadable half-sentence by terminal width (wraps/indents sensibly when long) |
 
-## 基建依赖标注（对照 dev #59 摸底）
+## Infrastructure dependency notes (against dev #59 assessment)
 
-> **#14 基建已落地（dev #86，561 tests 全过 / clippy 零警告）**：R1 fixture（`ErrorFixture` 6 字段 + `inject()`）、R2 Recorder 提升共用 + `assert_row_styled` + `visible_row_containing`、R3b fake-timers + 方案 A（client.rs `maybe_hang` 挂起钩子）、#18 呈现层最小实现（`last_error` 驱动：Full=整屏态 / Page/Field=错误行高亮）全部就绪。下方标注为立项时历史依据，保留供追溯。
+> **#14 infrastructure is landed (dev #86, 561 tests all passing / clippy zero warnings)**: R1 fixtures (`ErrorFixture` 6 fields + `inject()`), R2 Recorder promoted to shared + `assert_row_styled` + `visible_row_containing`, R3b fake-timers + option A (client.rs `maybe_hang` hang hook), #18 presentation-layer minimal implementation (`last_error`-driven: Full=full-screen state / Page/Field=error-line highlight) all ready. The notes below are the historical basis from project kickoff, kept for traceability.
 >
-> 依据 dev 摸底：已有 = 无 runtime 纯逻辑测试 / `TermDriver`+`Recorder` 渲染断言 / UiEvent 通道注入；缺口 = tokio fake-timers（0 使用）/ 可注入延迟失败钩子（AC-50）。
+> Per dev's assessment: existing = no-runtime pure-logic tests / `TermDriver`+`Recorder` render assertions / UiEvent channel injection; gaps = tokio fake-timers (0 uses) / injectable delayed-failure hooks (AC-50).
 
-| 区 | 现有基建可断言 | 需基建补（#14） |
+| Area | Assertable with existing infra | Needs infra additions (#14) |
 |---|---|---|
-| A 错误行高亮 | ✅ `Recorder` 行级渲染断言（高亮/颜色/符号） | — |
-| B 滚动可见+高亮 | ⚠️ `TermDriver` scroll 计数器已有；`Recorder` 需提升为共用 helper 才能跨模块断言 | Recorder 提升共用 |
-| C 状态区更新 | ✅ 渲染断言可覆盖（更新非删行、无残留） | — |
-| D 重试可达性 | ⚠️ 选中态渲染可断言，依赖 Recorder 提升共用 | Recorder 提升共用 |
-| E spinner 降频 | ⚠️ 指示存在可渲染断言；降频动画频率需人工 | 人工项 |
-| F 全流程级整屏态 | ⚠️ `TermDriver.screen()` 整屏断言可覆盖；但长回合失败需**注入失败**触发 | 测试钩子（缺口 5）+ fixture |
-| G 重试幂等 | ⚠️ 超时态触发走**参数化 now 注入**（轻，dev #61：chat.rs 计时是 `now: Instant` 注入模式），无需真等 10s；重试注入需测试钩子 | 测试钩子/fixture（G 区不再依赖 fake-timers） |
-| H 错误码高级详情 | ⚠️ 按键切换可经 UiEvent 注入；展开态渲染可断言 | 钩子/fixture（可选） |
-| I 错误文案 | ⚠️ 内容可渲染断言；终端宽度适配需人工 | 人工项 |
+| A Error-line highlight | ✅ `Recorder` row-level render assertions (highlight/color/symbol) | — |
+| B Scroll-into-view + highlight | ⚠️ `TermDriver` scroll counter exists; `Recorder` needs promotion to a shared helper to assert across modules | Recorder promoted to shared |
+| C Status-area update | ✅ Render assertions can cover (update not row deletion, no residue) | — |
+| D Retry reachability | ⚠️ Selection-state rendering is assertable; depends on Recorder promotion | Recorder promoted to shared |
+| E Spinner rate reduction | ⚠️ Indicator existence is render-assertable; the rate-reduction animation needs manual verification | Manual item |
+| F Flow-level full-screen state | ⚠️ `TermDriver.screen()` full-screen assertions can cover; but long-turn failure needs **injected failure** to trigger | Test hooks (gap 5) + fixture |
+| G Retry idempotency | ⚠️ Timeout-state triggering goes through **parameterized `now` injection** (light; dev #61: chat.rs timing is a `now: Instant` injection pattern), no need to actually wait 10s; retry injection needs test hooks | Test hooks/fixtures (area G no longer depends on fake-timers) |
+| H Error-code advanced details | ⚠️ Key toggling is injectable via UiEvent; expanded-state rendering is assertable | Hooks/fixtures (optional) |
+| I Error copy | ⚠️ Content is render-assertable; terminal-width fit needs manual verification | Manual item |
 
-**时序基建分级（dev #61 预研，对齐）**：
-- **TUI 逻辑时序（轻）**：loading 200ms / toast 触发等走 chat.rs **参数化 `now: Instant` 注入**（`on_key_at`/`track_burst`/`ctrl_c` 已有模式），**不需要 tokio fake-timers**，纯逻辑兼容现有无 runtime 测试
-- **client 超时时序（重）**：`tokio::time::timeout` 到点行为（AC-12/13/14 的 10s/15s、AC-54 drop future 取消机制）需 `tokio::time::pause` + runtime——由 qa 按 AC 口径定是否覆盖，两套均零新依赖
-- **边界**：toast 功能当前**未落地**，AC-16/18/19/20/21（toast 3s 时序/暂停/去重）呈现验收**不属于 #14 当前范围**，待 toast 功能实现后另行排期
+**Timing infrastructure tiers (dev #61 pre-study, aligned)**:
+- **TUI logic timing (light)**: loading 200ms / toast triggering etc. go through chat.rs's **parameterized `now: Instant` injection** (`on_key_at`/`track_burst`/`ctrl_c` patterns already exist), **no tokio fake-timers needed**; pure logic, compatible with existing no-runtime tests
+- **client timeout timing (heavy)**: `tokio::time::timeout` deadline behavior (AC-12/13/14's 10s/15s, AC-54's drop-future cancellation) needs `tokio::time::pause` + runtime — qa decides coverage per the AC stance; both are zero new dependencies
+- **Boundary**: toast functionality is **not landed yet**; AC-16/18/19/20/21 (toast 3s timing/pause/de-dup) presentation acceptance is **not in #14's current scope**; schedule separately once toast lands
 
-**建议**：采纳 devex fixture 建议——**fixture = 错误态定义（code+msg+级别）→ 注入 → 渲染断言**，与缺口 5（测试钩子）合并为同一机制；qa 断言与呈现层验收共用，并可作 dev 的「错误态本地预览」。
+**Recommendation**: adopt devex's fixture suggestion — **fixture = error-state definition (code+msg+level) → inject → render assertion**, merged with gap 5 (test hooks) into one mechanism; shared by qa assertions and presentation-layer acceptance, and usable as dev's "error-state local preview".
 
-## 验收方法与边界
+## Acceptance method and boundaries
 
-- **方法**：TUI 组件级（渲染断言能力就绪后）+ 人工视觉验收（真实终端配色下逐项核对通过标准）。
-- **与 qa 断言侧分工**：本清单验「呈现效果」（用户看到什么）；qa 验「行为正确性」（状态机转移、幂等、超时机制）。两者对同一 AC 互补：例如 AC-26 由 qa 断言「错误进入全流程级状态」+ 本清单 F1/F2 验「整屏呈现正确」。
-- **基建依赖**：B1（滚动可见）与 D1（选中态）需要组件测试能断言渲染输出的选中/滚动属性；qa 的基建需求清单落地后本清单即可执行。
-- **触发场景**：A/B/C/I 可用短同步操作错误触发；F 需长回合失败（传输层超时/中断）注入；G 需超时后重试注入。
+- **Method**: TUI component-level (once render-assertion capability is ready) + manual visual acceptance (checking each pass criterion under a real terminal color scheme).
+- **Division of labor with the qa assertion side**: this checklist verifies "presentation effect" (what the user sees); qa verifies "behavioral correctness" (state-machine transitions, idempotency, timeout mechanics). Both complement each other on the same AC: e.g. AC-26 is qa-asserted as "error enters the flow-level state" + this checklist's F1/F2 verifies "full-screen presentation is correct".
+- **Infrastructure dependency**: B1 (scroll into view) and D1 (selection state) need component tests that can assert the selected/scrolled attributes of rendered output; once qa's infrastructure requirement list lands, this checklist can execute.
+- **Trigger scenarios**: A/B/C/I can be triggered with short-sync operation errors; F needs injected long-turn failure (transport timeout/interruption); G needs a post-timeout retry injection.
 
-## Fixture 错误码覆盖清单（与 qa #63 对齐）
+## Fixture error-code coverage list (aligned with qa #63)
 
-> 供 dev 落 fixture 与 dev 本地预览；qa 断言与呈现层验收共用同一载体。对照 §4.4 完整码表（v1.15）**覆盖全部 10 个可注入稳定码**——`GENERIC` 除外（main 拍板：无实际返回点，正常用户路径不可见，护栏由 error.rs 单测覆盖，不进 fixture）；#14 范围外的标注除外。**呈现级别由触发上下文决定，不单由 code 推断**（qa #69 / main #71 增量 2）：fixture 需带上下文字段（短同步 vs 长回合），`TIMEOUT` 即双级别码。
+> For dev to land fixtures and for dev's local preview; qa assertions and presentation-layer acceptance share the same carrier. Against the complete §4.4 code table (v1.15) **covering all 10 injectable stable codes** — `GENERIC` excluded (main's decision: no actual return point, invisible on normal user paths; the guardrails are covered by error.rs unit tests, not fixtures); items outside #14 scope are marked. **The presented level is decided by the trigger context, not inferred from the code alone** (qa #69 / main #71 increment 2): fixtures must carry a context field (short-sync vs long turn); `TIMEOUT` is a dual-level code.
 
-| FX | code | 级别 | 场景 | 用户动作 | 呈现期望 |
+| FX | code | Level | Scenario | User action | Presentation expectation |
 |---|---|---|---|---|---|
-| FX-01 | `TIMEOUT` | 页面级（上下文=短同步） | 短操作读超时 | 重试 | 错误行高亮 + 重试可达（AC-15/29） |
-| FX-02 | `SERVER_ERROR` | 页面级 | 服务端错误 | 稍后重试 | 错误行高亮 |
-| FX-03 | `OFFLINE` | 页面级 | 无网络 | 检查网络后重试 | 错误行高亮 |
-| FX-04 | `AUTH_REQUIRED` | 全流程级 | 登录过期/缺 key | 重新登录 | 整屏态 + 首要动作（AC-29） |
-| FX-05 | `PERMISSION_DENIED` | 全流程级 | 无权限 | 返回/申请权限 | 整屏态 + 返回路径 |
-| FX-06 | `CONFIG_INVALID` | 字段级 | 配置校验失败 | 修正配置 | 字段级高亮（仅标对象，A2） |
-| FX-07 | `RATE_LIMITED` | 页面级 | 限流/429 | 稍后重试 | 错误行高亮 |
-| FX-08 | `TOOL_FAILED` | 页面级 | 工具执行失败 | 查看输出后重试 | 错误行高亮 |
-| FX-09 | `HOOK_FAILED` | 页面级 | hook 执行失败 | 检查 hook 配置 | 错误行高亮 |
-| FX-10 | `STORAGE_ERROR` | 页面级 | 本地存储失败 | 检查磁盘/权限 | 错误行高亮 |
-| FX-11 | `TIMEOUT`（传输层） | 全流程级（上下文=长回合） | agent 长回合失败 | 可重试或返回 | 整屏态（AC-53） |
-| FX-12 | 混合态（AC-27） | — | 批量部分失败 | — | **#14 不覆盖**，待混合态功能落地 |
-| FX-13 | 错误码高级详情 | 折叠态 | H1/H2 | 按键展开/收起 | 默认隐藏、可展开见稳定码 |
+| FX-01 | `TIMEOUT` | page-level (context=short-sync) | short-op read timeout | retry | error-line highlight + retry reachable (AC-15/29) |
+| FX-02 | `SERVER_ERROR` | page-level | server error | retry later | error-line highlight |
+| FX-03 | `OFFLINE` | page-level | no network | check network and retry | error-line highlight |
+| FX-04 | `AUTH_REQUIRED` | flow-level | login expired/key missing | log in again | full-screen state + primary action (AC-29) |
+| FX-05 | `PERMISSION_DENIED` | flow-level | no permission | go back / request permission | full-screen state + return path |
+| FX-06 | `CONFIG_INVALID` | field-level | config validation failure | fix the config | field-level highlight (marks only the object, A2) |
+| FX-07 | `RATE_LIMITED` | page-level | rate limited / 429 | retry later | error-line highlight |
+| FX-08 | `TOOL_FAILED` | page-level | tool execution failure | check output and retry | error-line highlight |
+| FX-09 | `HOOK_FAILED` | page-level | hook execution failure | check the hook config | error-line highlight |
+| FX-10 | `STORAGE_ERROR` | page-level | local storage failure | check disk/permissions | error-line highlight |
+| FX-11 | `TIMEOUT` (transport) | flow-level (context=long turn) | long agent turn failed | retry or return | full-screen state (AC-53) |
+| FX-12 | mixed state (AC-27) | — | batch partial failure | — | **not covered by #14**, pending the mixed-state feature |
+| FX-13 | error-code advanced details | collapsed state | H1/H2 | key expand/collapse | hidden by default, expandable to the stable code |
 
-**样色基线**：error 色 `(255,107,128)`，正常色对比可辨（R2 样式断言验收基线）。
-**优先级**：FX-01/04/05/06/11 为 AC-15/26/53/29 核心；FX-02/03/07/08/09/10 为码表全覆盖（§4.4 十码逐码，AC-29）；FX-13 验证 H 区。FX-01 与 FX-11 共用 `TIMEOUT` 码、级别由上下文区分。
+**Sample color baseline**: error color `(255,107,128)`, contrast-distinguishable from normal colors (R2 style-assertion acceptance baseline).
+**Priority**: FX-01/04/05/06/11 are the AC-15/26/53/29 core; FX-02/03/07/08/09/10 give full code-table coverage (§4.4 ten codes one by one, AC-29); FX-13 verifies area H. FX-01 and FX-11 share the `TIMEOUT` code; the level is distinguished by context.
 
-## 验收记录（#20，2026-08-07）
+## Acceptance record (#20, 2026-08-07)
 
-> 基线：**564 tests 全过 / 0 失败**（dev 561 + qa 断言 3）+ 测试目标编译干净（clippy 确认中）。fixture 载体 = `error_fixtures()`（10 码 + FX-11），qa 断言与呈现层验收共用。
+> Baseline: **564 tests all passing / 0 failures** (dev 561 + qa assertions 3) + test targets compile clean (clippy being confirmed). Fixture carrier = `error_fixtures()` (10 codes + FX-11), shared by qa assertions and presentation-layer acceptance.
 
-**自动化验证通过（fixture 注入 → `last_error` → Frame::assemble → 断言）**：
+**Automated verification passed (fixture inject → `last_error` → Frame::assemble → assertion)**:
 
-| 验收区 | 结论 | 断言依据 |
+| Acceptance area | Verdict | Assertion basis |
 |---|---|---|
-| A1 错误行可辨识 | ✅ | SegStyle error 色 + **真实 cell** error 色 `(255,107,128)`（`qa_page_error_row_paints_error_color_in_buffer`）|
-| A2 字段级仅标对象 | ✅ 基础 | AC-29 矩阵：Field 走错误行分支、非整屏；「对应输入行」锚定为追加行（近似），注记 |
-| A3 错误行含稳定码 | ✅ | 矩阵断言 `[error] code=...` |
-| B1 错误可见 | ✅ 主路径 | 错误行追加内容区末尾，提交后尾随可见；上翻场景未自动滚动，注记 |
-| C2 无残留 | ✅ | `dismiss_error` 清除（Esc/Enter/重试后 last_error=None）|
-| D2 首要动作 | ✅ | 整屏态 Enter=重试 |
-| D3 返回非死路 | ✅ | Esc=返回（`full_error_shows_full_screen_and_esc_returns`）|
-| F1 整屏态 | ✅ | 整屏测试 + AC-29 矩阵 Full 分支 |
-| F2 两档不混淆 | ✅ | `qa_ac53_long_turn_timeout_escalates_to_full_screen`：FX-11 整屏 **vs** FX-01 错误行对比断言 |
-| F3 内容完整 | ✅ | 标题 + 稳定码 + 说明 + 「Enter 重试 · Esc 返回」|
-| G1 重试可达 | ✅ | `full_error_enter_retries_last_prompt`（Enter 重试最近输入、清错误态、启动新回合）|
-| G3 状态机复位 | ✅ | Enter/Esc 清除 + busy 复位 |
-| E1/E2 spinner 保留 | ⏳ 人工 | 真实终端视觉确认（指示保留 / 降频可感知）|
-| H 折叠详情 | ⚠️ 未覆盖 | AC-48 P1，FX-13 不在注入集合（已知范围外）|
-| I1 文案公式 | ✅ fixture | fixture msg 均「发生了什么+能做什么」；生产 `e.to_string()` 文案待人工抽查 |
-| I2 宽度适配 | ⏳ 人工 | — |
+| A1 Error line distinguishable | ✅ | SegStyle error color + **real cell** error color `(255,107,128)` (`qa_page_error_row_paints_error_color_in_buffer`) |
+| A2 Field-level marks only the object | ✅ baseline | AC-29 matrix: Field goes the error-line branch, not full-screen; "the corresponding input line" anchors as an appended line (approximation), noted |
+| A3 Error line contains the stable code | ✅ | Matrix asserts `[error] code=...` |
+| B1 Error visible | ✅ main path | The error line appends at the end of the content area, visible after submission; the scroll-up scenario doesn't auto-scroll, noted |
+| C2 No residue | ✅ | `dismiss_error` clears (Esc/Enter/retry → last_error=None) |
+| D2 Primary action | ✅ | Full-screen state Enter=retry |
+| D3 Return not a dead end | ✅ | Esc=return (`full_error_shows_full_screen_and_esc_returns`) |
+| F1 Full-screen state | ✅ | Full-screen test + AC-29 matrix Full branch |
+| F2 Two tiers don't mix | ✅ | `qa_ac53_long_turn_timeout_escalates_to_full_screen`: FX-11 full-screen **vs** FX-01 error-line comparison assertion |
+| F3 Content complete | ✅ | title + stable code + explanation + "Enter retry · Esc return" |
+| G1 Retry reachable | ✅ | `full_error_enter_retries_last_prompt` (Enter retries the last input, clears the error state, starts a new turn) |
+| G3 State-machine reset | ✅ | Enter/Esc clears + busy reset |
+| E1/E2 Spinner kept | ⏳ manual | real-terminal visual confirmation (indicator kept / rate reduction perceivable) |
+| H Collapsed details | ⚠️ not covered | AC-48 P1; FX-13 not in the injection set (known out-of-scope) |
+| I1 Copy formula | ✅ fixtures | fixture msgs all "what happened + what you can do"; production `e.to_string()` copy pending manual spot-check |
+| I2 Width fit | ⏳ manual | — |
 
-**记录项（非阻塞）**：
-1. ~~生产 ShortSync/Field/Page 无发射路径~~ → **已解决（dev #92）**：main #91 拍板方向①、dev 落地——`list_models`/`count_tokens` 失败补发 `UiEvent::Error { level: Page, context: ShortSync }`（chat.rs:1972/2236），降级行为保留（菜单空/预算 0 仍可用）+ 错误行可见；TurnStart 复位错误态（chat.rs:1031）。生产 `ErrorLevel::Page`/`ErrorContext::ShortSync` 从 dead_code 转真实发射源。**FX-01 现可经真实路径验证**（qa 可加 /model 失败→页面级错误行断言）。Field 级按 main #88 维持不补（对话式 CLI 无表单字段）。
-2. H 区折叠详情（AC-48 P1）与 FX-13、FX-12 混合态：不在 #14 范围，待后续排期。
-3. 人工项（E/I2/真实终端配色下 A1 视觉）补人工视觉验收。
+**Recorded items (non-blocking)**:
+1. ~~No production emission path for ShortSync/Field/Page~~ → **resolved (dev #92)**: main #91 decided option ①, dev landed it — `list_models`/`count_tokens` failures now emit `UiEvent::Error { level: Page, context: ShortSync }` (chat.rs:1972/2236), degradation behavior kept (empty menu / budget 0 still usable) + error line visible; TurnStart resets the error state (chat.rs:1031). Production `ErrorLevel::Page`/`ErrorContext::ShortSync` move from dead_code to real emission sources. **FX-01 is now verifiable through the real path** (qa can add a /model-failure → page-level error-line assertion). Field-level stays un-added per main #88 (a conversational CLI has no form fields).
+2. Area H collapsed details (AC-48 P1), FX-13, and the FX-12 mixed state: not in #14 scope; schedule later.
+3. Manual items (E/I2/A1 visuals under a real terminal color scheme) await manual visual acceptance.
 
-**结论**：**呈现层验收通过**——FX-01…11 注入→渲染链路全部验证（A/C/D/F/G 核心 + B 主路径自动化覆盖），三方口径一致（fixture 载体同源）。
+**Conclusion**: **presentation-layer acceptance passed** — the FX-01…11 inject → render chain is fully verified (A/C/D/F/G core + B main path automated coverage); the three parties' stances are consistent (fixture carrier from one source).
 
-## 变更记录
+## Changelog
 
-- v1.0（2026-08-07）：基于反馈状态规范 v1.14 §5 TUI 映射表 + AC-15/26/53 产出 9 区验收清单；与 qa 断言侧分工对齐（main 第 57 条排期启动）。
-- v1.1（2026-08-07）：对照 dev 第 59 条基建摸底，补「基建依赖标注」——逐区标注现有基建可断言（Recorder 行级断言、TermDriver 滚动/screen、UiEvent 注入）与 #14 需补（fake-timers、测试钩子、Recorder 提升共用、人工项）；建议采纳 fixture 机制（fixture=错误态定义→注入→渲染断言，与缺口 5 合并）。
-- v1.2（2026-08-07）：对照 dev 第 61 条时序分级预研——G 区降级为「参数化 now 注入」触发超时态（无需 fake-timers）；补「时序基建分级」：TUI 逻辑时序走轻量 now 注入、client 超时时序才需 tokio fake-timers（由 qa 定覆盖范围）；注明 toast 功能未落地、AC-16/18/19/20/21 呈现验收不在 #14 范围。
-- v1.3（2026-08-07）：对照 qa #63 基建需求清单——补「**fixture 错误码覆盖清单**」（FX-01…13，对照 §4.4 完整码表；含样色基线 error `(255,107,128)`；标注混合态 FX-12 不在 #14 范围）；fixture 载体与 qa 断言、dev 本地预览共用。
-- v1.4（2026-08-07）：对照 §4.4 v1.14 码表自查——补齐 FX-14 `GENERIC`（此前清单漏掉，qa R1 有、§4.4 亦为已发布稳定码，须可渲染可断言）；清单现覆盖 §4.4 全部 11 个稳定码。
-- v1.5（2026-08-07）：main 拍板三条落地（qa #69 / main #71）——**撤 FX-14 `GENERIC`**（无实际返回点、正常路径不可见，护栏由 error.rs 单测覆盖，不进 fixture；§4.4 码表含但 fixture 不含）；**FX-01/FX-11 补上下文字段**（`TIMEOUT` 双级别：短同步=页面级、长回合=全流程级，级别由上下文决定不单由 code 推断）；清单覆盖 §4.4 全部 10 个可注入稳定码，对应 AC 表 v1.9/v1.9.1 C 节同口径（qa #76 实测核验通过）。
-- v1.6（2026-08-07）：#14 基建 + 呈现层最小实现落地（dev #86）——本清单执行前置全部就绪：R1 fixture 6 字段（`{ code, msg, context, level, action, expect_style }`，level/context 用生产契约 `error::ErrorLevel`/`error::ErrorContext`，FX-05 全流程档）、`inject()` → `UiEvent::Error { code, msg, level, context }` → `last_error` 驱动渲染（Full=整屏态 / Page/Field=错误行高亮）；对应文档 §5「级别由生产者携带」+ §3.1「典型级别可覆盖」同步（feedback-states.md v1.16）。呈现层验收（#20）可执行。
-- v1.7（2026-08-07）：**#20 呈现层验收记录**——564 tests 全过 / 0 失败；A/C/D/F/G 核心 + B 主路径自动化验证通过（qa AC-29 矩阵 + AC-53 双档对比 + 真实 cell 样式断言）；记录项 3 条（生产 ShortSync 无发射路径 / H 区折叠详情 P1 / 人工项）。结论：呈现层验收通过。
-- v1.8（2026-08-07）：记录项 1 更新——dev #92 已落地生产 Page+ShortSync 发射源（list_models/count_tokens + TurnStart 复位，main #91 拍板方向①），**FX-01 可经真实路径验证**；文档同步完成（feedback-states.md v1.16 含 §4.4「短操作降级可见」口径）。剩余记录项：H 区折叠详情 P1 + 人工项。
+- v1.0 (2026-08-07): produced a 9-area acceptance checklist from the feedback-states spec v1.14 §5 TUI mapping table + AC-15/26/53; aligned the division of labor with the qa assertion side (main item 57 scheduled the start).
+- v1.1 (2026-08-07): against dev item 59's infrastructure assessment, added "infrastructure dependency notes" — marking per area what existing infra can assert (Recorder row-level assertions, TermDriver scroll/screen, UiEvent injection) and what #14 needs (fake-timers, test hooks, Recorder promotion to shared, manual items); recommended adopting the fixture mechanism (fixture = error-state definition → inject → render assertion, merged with gap 5).
+- v1.2 (2026-08-07): against dev item 61's timing-tier pre-study — area G downgraded to "parameterized `now` injection" for triggering the timeout state (no fake-timers needed); added "timing infrastructure tiers": TUI logic timing goes through lightweight now-injection, only client timeout timing needs tokio fake-timers (qa decides coverage); noted toast functionality not landed and AC-16/18/19/20/21 presentation acceptance out of #14 scope.
+- v1.3 (2026-08-07): against qa #63's infrastructure requirement list — added the "**fixture error-code coverage list**" (FX-01…13, against the complete §4.4 code table; including the sample color baseline error `(255,107,128)`; marking mixed-state FX-12 out of #14 scope); the fixture carrier is shared by qa assertions and dev's local preview.
+- v1.4 (2026-08-07): self-check against the §4.4 v1.14 code table — added FX-14 `GENERIC` (missed in the previous list; qa R1 has it, §4.4 lists it as a published stable code, so it must be renderable and assertable); the list now covers all 11 stable codes in §4.4.
+- v1.5 (2026-08-07): main decided three items (qa #69 / main #71) — **withdrew FX-14 `GENERIC`** (no actual return point, invisible on normal paths; guardrails covered by error.rs unit tests, not fixtures; the §4.4 table includes it but fixtures don't); **FX-01/FX-11 gain context fields** (`TIMEOUT` dual level: short-sync = page-level, long turn = flow-level; level decided by context, not inferred from the code alone); the list covers all 10 injectable stable codes in §4.4, consistent with AC table v1.9/v1.9.1 section C (verified consistent in practice by qa #76).
+- v1.6 (2026-08-07): #14 infrastructure + presentation-layer minimal implementation landed (dev #86) — all prerequisites for executing this checklist ready: R1 fixtures with 6 fields (`{ code, msg, context, level, action, expect_style }`, level/context use the production contracts `error::ErrorLevel`/`error::ErrorContext`, FX-05 at flow-level slot), `inject()` → `UiEvent::Error { code, msg, level, context }` → `last_error`-driven rendering (Full=full-screen state / Page/Field=error-line highlight); doc §5 "level carried by the producer" + §3.1 "typical level overridable" synced (feedback-states.md v1.16). Presentation-layer acceptance (#20) executable.
+- v1.7 (2026-08-07): **#20 presentation-layer acceptance record** — 564 tests all passing / 0 failures; A/C/D/F/G core + B main path automated verification passed (qa AC-29 matrix + AC-53 dual-tier comparison + real-cell style assertions); 3 recorded items (no production ShortSync emission path / area H collapsed details P1 / manual items). Conclusion: presentation-layer acceptance passed.
+- v1.8 (2026-08-07): recorded item 1 updated — dev #92 landed production Page+ShortSync emission sources (list_models/count_tokens + TurnStart reset; main #91 decided option ①), **FX-01 is verifiable through the real path**; doc sync complete (feedback-states.md v1.16 including §4.4's "short-op degrade-visibly" stance). Remaining recorded items: area H collapsed details P1 + manual items.

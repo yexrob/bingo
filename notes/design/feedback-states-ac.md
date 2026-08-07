@@ -1,270 +1,270 @@
-# 反馈状态规范 · 验收断言表（AC）
+# Feedback States Specification · Acceptance Assertion Table (AC)
 
-> 版本：v1.9（qa 交付 + devex 契约对齐）· 对应设计文档：`notes/design/feedback-states.md` **v1.15**（§3.1/§4.4 契约对齐落定）
-> 用途：dev 按 AC 表实现，qa 按 AC 表回归。**断言一律锚错误码（`[error] code=...`），永不断言 msg 文案**。
-> 优先级：P0 = 发布门禁必须过；P1 = 应过，可排期后补。
-> 断言方法：单元（fake timers / tokio `pause`+`advance`，ms 级确定性）｜集成（spawn 真实 CLI，非 TTY）｜组件/E2E（TUI，仅冒烟不断言时序）｜SR 审计（手动读屏，仅 Web 前端适用）。
+> Version: v1.9 (qa deliverable + devex contract alignment) · Corresponding design doc: `notes/design/feedback-states.md` **v1.15** (§3.1/§4.4 contract alignment finalized)
+> Purpose: dev implements against the AC table; qa regresses against the AC table. **Assertions always anchor on the error code (`[error] code=...`), never on msg copy**.
+> Priority: P0 = must pass the release gate; P1 = should pass, schedulable as follow-up.
+> Assertion methods: unit (fake timers / tokio `pause`+`advance`, ms-level determinism) ｜ integration (spawn a real CLI, non-TTY) ｜ component/E2E (TUI, smoke-only, no timing assertions) ｜ SR audit (manual screen reader, web frontend only).
 
-## dev 实现核对（2026-08-07，对应文档 v1.12）
+## dev implementation cross-check (2026-08-07, doc v1.12)
 
-以下断言已由 dev 实现落地，qa 回归时可直接验证（断言锚点不变）：
+The following assertions are landed in the dev implementation; qa can verify them directly during regression (assertion anchors unchanged):
 
-- **AC-30/31/32**：CLI 顶层出口已接线——`main` 捕获顶层 `Box<dyn Error>`，非 TTY（`stderr().is_terminal()` 判否）输出 `[error] code=<SCREAMING_SNAKE> msg=<单行 ≤200>`；msg 经 `src/error.rs::sanitize_msg` 归一化换行/制表符 + 截断 200 字符。实测 `[error] code=AUTH_REQUIRED msg=missing API key...`。
-- **AC-36 双出口一致性**：GUI（TUI `UiEvent::Error { code, msg }`）与 CLI（`report_error` → `error_code_boxed`）共用 `src/error.rs` 的码表；TUI 生产端经 `map_error`，CLI 经 `error_code_boxed`（cause 链 downcast 到具体类型再取码），两侧同源。
-- **AC-38/40/41/43/44**：10 个模块错误 enum 全部实现 `ErrorCode`（match 穷尽无 `_` 臂，新增 variant 编译报错）；防漂移单测枚举每模块每 variant 断言非 `GENERIC`；`GENERIC_ALLOWLIST` 当前为空（全 variant 已登记稳定码）；契约集中于 `src/error.rs`。
-- **AC-45**：`TIMEOUT`/`AUTH_REQUIRED`/`PERMISSION_DENIED`/`SERVER_ERROR`/`OFFLINE`/`CONFIG_INVALID` 全部按 §4.4 实现；新增登记 `RATE_LIMITED`（429）、`STORAGE_ERROR`、`TOOL_FAILED`、`HOOK_FAILED`（见文档 v1.12 §4.4）。
-- **AC-12/13/14/53/54**：反馈层超时分档落地——`SHORT_READ_TIMEOUT=10s`（list_models/count_tokens）、`SHORT_WRITE_TIMEOUT=15s`（complete_text，包裹整个含重试操作）、长回合 stream 保持传输层 120s/60s；反馈层 `tokio::time::timeout` 到点 drop future 即取消底层请求。client.rs 有 `feedback_timeout_tiers_are_read_10s_write_15s` 常量断言。
-- **AC-52**：`UiEvent::Error { code, msg }` 结构化完成（原 `Error(String)`），chat.rs 消费端渲染 `[error] code=... msg=...`，生产端经 `map_error` 取码——非 `to_string()` 拼接。
-- **AC-50**：时序测试用 `tokio::time::pause/advance` 的基建沿用 chat.rs 现有无 runtime 纯逻辑测试模式；具体 fake-timers 用例由 qa 按本表补充。
-- **AC-33 暂不适用**：`detail=` 输出通道（JSON 转义多行堆栈）**仅 `--verbose` 触发**，当前无 `--verbose` 即无触发点，故暂不实现；`sanitize_msg` 已保证主 msg 单行（AC-31/32 已测），码表侧无缺口。**实现 `--verbose` 时补本断言**（msg 保持单行 + `detail=<JSON 转义>`，详见 §F）。
+- **AC-30/31/32**: the top-level CLI exit is wired — `main` catches the top-level `Box<dyn Error>` and, when non-TTY (`stderr().is_terminal()` is false), outputs `[error] code=<SCREAMING_SNAKE> msg=<single line ≤200>`; msg goes through `src/error.rs::sanitize_msg` (newline/tab normalization + 200-char truncation). Verified in practice: `[error] code=AUTH_REQUIRED msg=missing API key...`.
+- **AC-36 dual-exit consistency**: GUI (TUI `UiEvent::Error { code, msg }`) and CLI (`report_error` → `error_code_boxed`) share the `src/error.rs` code table; the TUI producer side goes through `map_error`, the CLI through `error_code_boxed` (downcasting the cause chain to a concrete type before taking the code); both sides share one source.
+- **AC-38/40/41/43/44**: all 10 module error enums implement `ErrorCode` (exhaustive match, no `_` arm; a new variant fails to compile); drift-guard unit tests enumerate every variant of every module asserting non-`GENERIC`; `GENERIC_ALLOWLIST` is currently empty (all variants registered with stable codes); the contract is centralized in `src/error.rs`.
+- **AC-45**: `TIMEOUT`/`AUTH_REQUIRED`/`PERMISSION_DENIED`/`SERVER_ERROR`/`OFFLINE`/`CONFIG_INVALID` all implemented per §4.4; newly registered `RATE_LIMITED` (429), `STORAGE_ERROR`, `TOOL_FAILED`, `HOOK_FAILED` (see doc v1.12 §4.4).
+- **AC-12/13/14/53/54**: feedback-layer tiered timeouts landed — `SHORT_READ_TIMEOUT=10s` (list_models/count_tokens), `SHORT_WRITE_TIMEOUT=15s` (complete_text, wrapping the entire operation including retries), long-turn streams keep the transport layer 120s/60s; the feedback layer's `tokio::time::timeout` drops the future at the deadline, cancelling the underlying request. client.rs has the `feedback_timeout_tiers_are_read_10s_write_15s` constant assertion.
+- **AC-52**: `UiEvent::Error { code, msg }` structured (was `Error(String)`); chat.rs's consumer renders `[error] code=... msg=...`, the producer side takes the code via `map_error` — not `to_string()` concatenation.
+- **AC-50**: timing tests reuse chat.rs's existing no-runtime pure-logic test pattern with `tokio::time::pause/advance` infrastructure; the concrete fake-timer cases are added by qa against this table.
+- **AC-33 not applicable for now**: the `detail=` output channel (JSON-escaped multi-line stacks) is **only triggered by `--verbose`**; with no `--verbose` today there's no trigger point, so it's not implemented yet; `sanitize_msg` already keeps the primary msg single-line (covered by AC-31/32), so there's no gap on the code-table side. **Add this assertion when `--verbose` is implemented** (msg stays single-line + `detail=<JSON-escaped>`, see §F).
 
-待办（dev 侧不覆盖）：AC-15 重试幂等、AC-53 长回合失败升级 TUI 呈现、AC-26 全流程级错误 TUI 整屏态等**组件/TUI 呈现层**断言，属 qa 回归范围。
+Backlog (not covered by dev): AC-15 retry idempotency, AC-53 long-turn failure escalation in TUI presentation, AC-26 flow-level full-screen TUI state and other **component/TUI presentation-layer** assertions fall within qa regression scope.
 
-## TUI 映射基准（dev 第 21 条评审，已由 ui/ux 并入文档第 5 节）
+## TUI mapping baseline (dev review item 21, merged into doc section 5 by ui/ux)
 
-bingo 技术栈为 **ratatui TUI + headless CLI**，无 DOM / aria-* / CSS 动效 / prefers-reduced-motion / rAF。本表 Web 侧术语按下表映射，**断言以 TUI 可观测行为为准**：
+bingo's stack is **ratatui TUI + headless CLI** — no DOM / aria-* / CSS animation / prefers-reduced-motion / rAF. Web-side terms in this table map per the table below; **assertions go by observable TUI behavior**:
 
-| 规范项（Web） | bingo TUI 映射 |
+| Norm item (Web) | bingo TUI mapping |
 |---|---|
-| aria-busy / loading | `chat.busy` + 状态行（已有） |
-| aria-invalid 红框 | 错误行高亮样式 |
-| aria-live 写空串（非删节点） | 状态区内容更新（非删行） |
-| 焦点转移（渲染后异步） | 错误行渲染后**滚动到可见区 + 高亮**；TUI 帧循环天然在渲染后 |
-| prefers-reduced-motion | TUI 无此概念：spinner 动画频率可简单降级，**指示不删** |
-| role="alert" / aria-describedby | 错误行高亮 + 与关联输入行同时可见 |
+| aria-busy / loading | `chat.busy` + status line (exists) |
+| aria-invalid red outline | error-line highlight styling |
+| aria-live write-empty-string (not node deletion) | status-area content update (not row deletion) |
+| Focus transfer (async after render) | after the error line renders, **scroll into view + highlight**; the TUI frame loop is naturally post-render |
+| prefers-reduced-motion | no such concept in TUI: spinner animation rate may simply degrade; **the indicator is never removed** |
+| role="alert" / aria-describedby | error-line highlight + visible together with the associated input line |
 
-（Web 前端若未来存在，按文档第 5 节原样；AC-22/46 的 aria 项标注为「Web 侧约定，bingo TUI 按映射断言」。）
+(If a web frontend exists in the future, follow doc section 5 as-is; AC-22/46's aria items are marked "web-side conventions; bingo TUI asserts via the mapping".)
 
 ---
 
-## A. 状态机复位与竞态（设计文档：状态机节 + §7）
+## A. State-machine reset and races (design doc: state-machine section + §7)
 
-| ID | 触发 | 预期（可量化） | 断言方法 | 优先级 |
+| ID | Trigger | Expected (quantifiable) | Assertion method | Priority |
 |---|---|---|---|---|
-| AC-01 | 任意异步操作完成（成功） | `idle→loading→success→idle` 完整闭环；`chat.busy` 清除、状态行更新回正常 | 单元（fake timers） | P0 |
-| AC-02 | 任意异步操作失败 | `idle→loading→error→idle` 完整闭环；错误展示后回到 idle，可再次触发 | 单元（fake timers） | P0 |
-| AC-03 | 复位动作四项（TUI 映射） | (1) `chat.busy`/loading 态清除、状态行更新；(2) 错误行**高亮移除**（无残留错误样式）；(3) 状态区**内容更新**（非删行）；(4) 成功→下一操作可见；失败→错误行/重试项**滚动到可见区 + 高亮** | 单元 + 组件 | P0 |
-| AC-04 | 焦点转移时序 | TUI 帧循环天然在渲染后（无 rAF 问题）；断言错误行**渲染后**滚动到可见区 + 高亮；渲染失败则跳过、不阻塞 | 单元 + 组件 | P0 |
-| AC-05 | 陈旧响应竞态 | 重试/新请求发起后，旧请求的迟到成功/失败响应被忽略；**不得出现新成功被旧 error 闪掉**。**实现机制（qa 回归确认，ui/ux v1.14 对齐）**：竞态防护为 **drop future + cancel 通道**（query.rs `cancel_requested`/`aborted`）结构性保证，**无独立序号计数器**——结构性取消优先，序号校验未单独实现 | 单元（注入延迟响应序列） | P0 |
-| AC-06 | 超时计时器取消 | 超时计时器在成功/失败/取消时**同步取消**；成功后延迟区间内无迟到 error 进入错误态 | 单元（fake timers，推进到超时点后断言无错误） | P0 |
+| AC-01 | Any async operation completes (success) | Full `idle→loading→success→idle` loop; `chat.busy` cleared, status line updates back to normal | Unit (fake timers) | P0 |
+| AC-02 | Any async operation fails | Full `idle→loading→error→idle` loop; after the error shows, back to idle, triggerable again | Unit (fake timers) | P0 |
+| AC-03 | The four reset actions (TUI mapping) | (1) `chat.busy`/loading cleared, status line updated; (2) error line **highlight removed** (no leftover error styling); (3) status area **content updated** (not row deletion); (4) success → next operation visible; failure → error line/retry item **scrolled into view + highlighted** | Unit + component | P0 |
+| AC-04 | Focus-transfer timing | The TUI frame loop is naturally post-render (no rAF issue); assert the error line **after rendering** scrolls into view + highlights; skip without blocking if rendering fails | Unit + component | P0 |
+| AC-05 | Stale-response race | After a retry/new request, late success/failure responses from the old request are ignored; **the new success must not be flashed over by a stale error**. **Implementation mechanism (qa regression confirmed, ui/ux v1.14 aligned)**: the race protection is structural — **drop future + cancel channel** (query.rs `cancel_requested`/`aborted`); **there is no standalone sequence-number counter** — structural cancellation takes precedence; sequence-number checks were not separately implemented | Unit (injected delayed response sequences) | P0 |
+| AC-06 | Timeout timer cancellation | The timeout timer is **synchronously cancelled** on success/failure/cancel; no late error enters the error state within the delayed window after success | Unit (fake timers; advance past the timeout point, then assert no error) | P0 |
 
 ---
 
-## B. Loading（设计文档 §1）
+## B. Loading (design doc §1)
 
-| ID | 触发 | 预期（可量化） | 断言方法 | 优先级 |
+| ID | Trigger | Expected (quantifiable) | Assertion method | Priority |
 |---|---|---|---|---|
-| AC-07 | 异步操作耗时 >200ms | 200ms（±50ms）后 loading 态出现；<200ms 完成则**不闪烁**（无 loading 出现又消失） | 单元（fake timers） | P0 |
-| AC-08 | 局部操作 | 操作位（按钮/动作行）spinner **原位替换**图标位；文案不换（保持「提交」） | 组件 | P0 |
-| AC-09 | 任意加载中 | **禁止全屏阻塞**；页面级为内容区骨架/占位 + 状态行（沿用 `chat.busy`） | 组件 | P0 |
-| AC-10 | loading 期间触发提交动作 | 防重以**提交动作**为粒度：命令输入/Enter/快捷键提交路径统一拦截（`isSubmitting` 门控 onSubmit 等价物），均不产生第二次请求 | 单元 + 组件 | P0 |
-| AC-11 | 同一动作连点 | 幂等保证：同一提交动作 loading 期间仅 1 次请求（可注入计数钩子验证调用次数=1） | 单元（测试钩子） | P0 |
+| AC-07 | Async operation takes >200ms | Loading state appears after 200ms (±50ms); completing in <200ms does **not flicker** (no appear-then-disappear) | Unit (fake timers) | P0 |
+| AC-08 | Local operation | Spinner **replaces the icon slot in place** at the operation site (button/action row); copy unchanged (keeps "Submit") | Component | P0 |
+| AC-09 | Any loading state | **Fullscreen blocking forbidden**; page-level = skeleton/placeholder in the content area + status line (reusing `chat.busy`) | Component | P0 |
+| AC-10 | Submit action triggered during loading | De-dup at the **submit action** granularity: command input/Enter/shortcut submission paths intercepted uniformly (`isSubmitting` gates the onSubmit equivalent); no second request is produced | Unit + component | P0 |
+| AC-11 | Same action rapid-clicked | Idempotency guarantee: only 1 request for the same submit action during loading (injectable counting hook verifies call count = 1) | Unit (test hooks) | P0 |
 
 ---
 
-## C. 超时（设计文档 §1 超时行 + §7；dev 第 31 条定夺口径）
+## C. Timeout (design doc §1 timeout row + §7; dev item 31 settled stance)
 
-> **超时分层（dev 定夺，2026-08-07）**：
-> - **`TIMEOUT` 呈现级别由触发上下文决定**：短同步=页面级（AC-12/13/14），长回合=全流程级（AC-53）；fixture/断言不得单由 code 推断级别。
-> - **短同步操作**（`list_models`/`count_tokens`/`complete_text` 等）：反馈层读 10s / 写 15s，超时即失败（`TIMEOUT` 码），**首要动作 = 重试**（页面级）。
-> - **agent 长回合（流式 + 多轮工具）**：**不套用 10s/15s**——回合中已有持续进度反馈（状态行 + 活动行 + `chat.busy`），超时由传输层（120s/60s）+ 用户中断兜底。
-> - **长回合真失败（传输层超时/中断）→ 升级全流程级错误**（AC-26），给「可重试或返回」路径，不静默局部提示。
-> - **取消机制**：现有 client 请求均以 tokio `timeout()` 包裹/可 drop 的 stream——反馈层超时**再包一层 timeout、到点 drop future**，reqwest 底层连接随之取消；**序号校验仅作非 timeout 路径的迟到响应兜底**（不真取消）。
-> - **写路径防御**：drop 对「服务端已应用写」是 best-effort，超时→重试仍建议动作级幂等兜底（防极端竞态下重复落库）。
+> **Timeout layering (settled by dev, 2026-08-07)**:
+> - **`TIMEOUT`'s presented level is determined by the trigger context**: short-sync = page-level (AC-12/13/14), long turn = flow-level (AC-53); fixtures/assertions must not infer the level from the code alone.
+> - **Short sync operations** (`list_models`/`count_tokens`/`complete_text` etc.): the feedback layer applies read 10s / write 15s; timeout means failure (`TIMEOUT` code), **primary action = retry** (page-level).
+> - **Long agent turns (streaming + multi-round tools)**: **do not apply 10s/15s** — continuous progress feedback already exists within a turn (status line + activity rows + `chat.busy`); timeouts are backed by the transport layer (120s/60s) + user interruption.
+> - **A genuinely failed long turn (transport timeout/interruption) → escalates to a flow-level error** (AC-26), offering a "retry or return" path, never a silent local hint.
+> - **Cancellation mechanism**: existing client requests are already wrapped in tokio `timeout()` / droppable streams — the feedback-layer timeout **wraps one more timeout and drops the future at the deadline**, cancelling the underlying reqwest connection; **the sequence-number check is only a fallback for late responses on non-timeout paths** (doesn't truly cancel).
+> - **Write-path defense**: dropping is best-effort for "the server already applied the write"; on timeout→retry, action-level idempotency is still recommended as a fallback (preventing duplicate persistence under extreme races).
 
-| ID | 触发 | 预期（可量化） | 断言方法 | 优先级 |
+| ID | Trigger | Expected (quantifiable) | Assertion method | Priority |
 |---|---|---|---|---|
-| AC-12 | **短同步**读操作 10s 未完成 | 10s 后进对应错误级；错误码 `TIMEOUT`；提示可重试 | 单元（fake timers） | P0 |
-| AC-13 | **短同步**写操作 15s 未完成 | 15s 后进对应错误级；错误码 `TIMEOUT`；提示可重试 | 单元（fake timers） | P0 |
-| AC-14 | 读/写分档正确 | 读 10s、写 15s，两档互不混淆（读在 11s 前必报，写在 14s 前不报） | 单元（fake timers） | P0 |
+| AC-12 | **Short-sync** read not done in 10s | Enters the corresponding error level after 10s; error code `TIMEOUT`; retry hint shown | Unit (fake timers) | P0 |
+| AC-13 | **Short-sync** write not done in 15s | Enters the corresponding error level after 15s; error code `TIMEOUT`; retry hint shown | Unit (fake timers) | P0 |
+| AC-14 | Read/write tiers correct | Read 10s, write 15s; the two tiers never mix (a read must report before 11s; a write must not report before 14s) | Unit (fake timers) | P0 |
 
-> **`TIMEOUT` 呈现级别（qa #72 对齐，文档 §4.4 v1.15）**：`TIMEOUT` 码的呈现级别由**触发上下文**决定——短同步（AC-12/13/14）=页面级（错误行高亮 + 重试可达）；长回合传输层超时（AC-53）=全流程级（整屏态）。断言不得只按 code 推断级别。
-| AC-15 | 超时后重试 | 超时错误态可重试；重试成功走状态机复位（AC-02/AC-03）；**写操作超时→重试不重复落库**（动作级幂等防御，drop 是 best-effort） | 单元 + 集成 | P1 |
-| AC-53 | 长回合失败升级 | agent 长回合（流式+多轮工具）**不套 10s/15s**；传输层超时/中断导致失败时，错误为**全流程级**（非局部提示），含「可重试或返回」路径 | 单元 + 组件 | P0 |
-| AC-54 | 超时取消机制 | 反馈层超时到点 **drop future**（底层请求取消，可钩子计数/无后续网络活动）；序号校验仅作非 timeout 迟到响应兜底（AC-05） | 单元（测试钩子） | P0 |
+> **`TIMEOUT` presented level (qa #72 aligned, doc §4.4 v1.15)**: `TIMEOUT`'s presented level is decided by the **trigger context** — short-sync (AC-12/13/14) = page-level (error-line highlight + retry reachable); long-turn transport timeout (AC-53) = flow-level (full-screen state). Assertions must not infer the level from the code alone.
+| AC-15 | Retry after timeout | The timeout error state is retryable; a successful retry runs the state-machine reset (AC-02/AC-03); **a timed-out write retried doesn't persist twice** (action-level idempotency defense; drop is best-effort) | Unit + integration | P1 |
+| AC-53 | Long-turn failure escalation | Long agent turns (streaming + multi-round tools) **don't apply 10s/15s**; when a transport timeout/interruption fails the turn, the error is **flow-level** (not a local hint), with a "retry or return" path | Unit + component | P0 |
+| AC-54 | Timeout cancellation mechanism | The feedback-layer timeout **drops the future** at the deadline (underlying request cancelled, verifiable via hook counting / no further network activity); the sequence-number check is only a fallback for late non-timeout responses (AC-05) | Unit (test hooks) | P0 |
 
 ---
 
-## D. Toast（设计文档 §2）
+## D. Toast (design doc §2)
 
-| ID | 触发 | 预期（可量化） | 断言方法 | 优先级 |
+| ID | Trigger | Expected (quantifiable) | Assertion method | Priority |
 |---|---|---|---|---|
-| AC-16 | toast 出现 | 3s（±500ms）自动消失 | 单元（fake timers 精确断言） | P0 |
-| AC-17 | 用户手动 | 可手动关闭（关闭动作可按键触发） | 组件 | P0 |
-| AC-18 | hover 到 toast | **暂停**计时；移开后续走**剩余时间**（非重置回 3s） | 单元（fake timers：先推进 1s→hover→推进 5s→已消失则断言失败） | P0 |
-| AC-19 | 键盘聚焦到 toast | 与 hover 同：暂停并续走剩余时间；失焦后续走 | 单元 + 组件 | P0 |
-| AC-20 | 第 3 条 toast 触发 | 同时最多 2 条；**仅槽满时顶掉最旧**；未满时新条排队等待 | 单元（fake timers）+ 组件 | P0 |
-| AC-21 | 同类重复触发（连点「已复制」） | **替换为同一条并重置计时**，不堆叠（同一 toast 标识恒 ≤1） | 单元 + 组件 | P0 |
-| AC-22 | toast 可访问性 | **Web 侧约定**：容器 `aria-live="polite"`；含动作入口时 `role="status"`（勿用 `role="alert"`）。**bingo TUI 侧**：toast 显示于状态区、内容更新可感知（映射：状态区内容更新非删行） | 组件 + SR 审计（仅 Web） | P0 |
-| AC-23 | 文案 | 一句话结果 + 必要时动作入口（「已复制 ✓ / 撤销」） | SR 审计/人工 | P1 |
+| AC-16 | Toast appears | Auto-dismisses after 3s (±500ms) | Unit (precise fake-timer assertions) | P0 |
+| AC-17 | User manually | Manually closable (the close action is key-triggerable) | Component | P0 |
+| AC-18 | Hover over toast | **Pauses** the timer; after leaving, resumes with the **remaining time** (not reset to 3s) | Unit (fake timers: advance 1s → hover → advance 5s → fail if already gone) | P0 |
+| AC-19 | Keyboard focus on toast | Same as hover: pauses and resumes with the remaining time; resumes after blur | Unit + component | P0 |
+| AC-20 | A 3rd toast triggers | At most 2 at once; **oldest evicted only when full**; when not full, the new toast queues | Unit (fake timers) + component | P0 |
+| AC-21 | Same-kind repeated trigger (rapid "Copied" clicks) | **Replaced by a single toast with the timer reset**, never stacked (same-toast identity always ≤1) | Unit + component | P0 |
+| AC-22 | Toast accessibility | **Web-side convention**: container `aria-live="polite"`; when it has an action entry, `role="status"` (not `role="alert"`). **bingo TUI side**: toast shows in the status area, content update perceivable (mapping: status-area content update, not row deletion) | Component + SR audit (web only) | P0 |
+| AC-23 | Copy | One-sentence result + action entry when needed ("Copied ✓ / Undo") | SR audit / manual | P1 |
 
 ---
 
-## E. 错误态三级 + 混合态（设计文档 §3）
+## E. Three error levels + mixed state (design doc §3)
 
-| ID | 触发 | 预期（可量化） | 断言方法 | 优先级 |
+| ID | Trigger | Expected (quantifiable) | Assertion method | Priority |
 |---|---|---|---|---|
-| AC-24 | 字段级校验失败 | 错误行内联于输入区下方：图标 + 具体原因；**高亮仅标错误输入行**；错误行与关联输入行同时可见（映射 `aria-invalid`+`aria-describedby`）；光标/高亮定位到对应输入行 | 组件 | P0 |
-| AC-25 | 页面级失败 | 错误卡片/占位区 + 重试项；错误行高亮 + 滚动可见；重试项可达且被选中（映射聚焦重试按钮） | 组件 | P0 |
-| AC-26 | 全流程级失败 | 整屏错误状态 + 返回路径（非死路）；焦点落到首要动作项 | 组件 | P0 |
-| AC-27 | 批量部分失败 | 混合态：「成功 n/m，失败 k 项」+ 失败项列表；失败项可**单独重试**；失败项列表滚动可见/可导航 | 单元 + 组件 | P0 |
-| AC-28 | 任意错误文案 | 必须含「发生了什么 + 用户能做什么」；禁止「操作失败」死路文案 | 人工/测试钩子采样 | P0 |
-| AC-29 | 错误码→用户动作映射 | `AUTH_REQUIRED→重新登录/配置 key`、`PERMISSION_DENIED→返回/申请`、`SERVER_ERROR→稍后重试`、`OFFLINE→检查网络`；同一错误码 UI 动作一致 | 组件（注入各错误码） | P0 |
+| AC-24 | Field-level validation failure | Error line inline below the input area: icon + specific reason; **highlight marks only the erroneous input line**; error line and the associated input line visible together (mapping `aria-invalid`+`aria-describedby`); cursor/highlight positioned on the corresponding input line | Component | P0 |
+| AC-25 | Page-level failure | Error card/placeholder + retry item; error line highlighted + scrolled into view; retry item reachable and selected (mapping focus on the retry button) | Component | P0 |
+| AC-26 | Flow-level failure | Full-screen error state + a way back (never a dead end); focus lands on the primary action item | Component | P0 |
+| AC-27 | Batch partial failure | Mixed state: "Succeeded n/m, k failed" + a list of failed items; failed items **individually retryable**; the failed-items list scrollable into view/navigable | Unit + component | P0 |
+| AC-28 | Any error copy | Must contain "what happened + what the user can do"; dead-end copy like "operation failed" forbidden | Manual / test-hook sampling | P0 |
+| AC-29 | Error code → user action mapping | `AUTH_REQUIRED→log in again/configure key`, `PERMISSION_DENIED→go back/request`, `SERVER_ERROR→retry later`, `OFFLINE→check network`; the same error code gives a consistent UI action | Component (inject each error code) | P0 |
 
 ---
 
-## F. CLI 结构化错误契约（设计文档 §4.1/4.3 + §7）
+## F. CLI structured error contract (design doc §4.1/4.3 + §7)
 
-| ID | 触发 | 预期（可量化） | 断言方法 | 优先级 |
+| ID | Trigger | Expected (quantifiable) | Assertion method | Priority |
 |---|---|---|---|---|
-| AC-30 | 非 TTY 下任意错误 | stderr 输出单行 `[error] code=<SCREAMING_SNAKE> msg=<单行>`，可 grep | 集成（spawn CLI，非 TTY） | P0 |
-| AC-31 | msg 含换行/制表符 | 归一化为空格，单行不被破坏 | 集成 | P0 |
-| AC-32 | msg 超长 | 截断 200 字符（长度 ≤200） | 集成 | P0 |
-| AC-33 | 多行堆栈 | `detail=<JSON 转义>` 承载，**仅 `--verbose` 输出**；主 msg 保持单行 | 集成 | P0 |
-| AC-34 | 断言稳定性 | 同一错误：改 msg 文案 → 测试不破；改 code → 测试必破 | 集成（等价类） | P0 |
-| AC-35 | 命名规范 | 所有 code 匹配 `^[A-Z][A-Z0-9_]*$`（SCREAMING_SNAKE） | 集成 + 单测（码表扫描） | P0 |
-| AC-36 | 双出口一致性 | GUI 与 CLI 对同一底层错误产出**同一 code**（共用 `map_error`）；两端对照断言 | 单元（构造各代表错误→两端各调 map_error 比对）+ 集成 | P0 |
-| AC-37 | TTY/非 TTY 信息等价 | 同一操作两种环境反馈信息不丢（仅呈现形式不同：spinner vs 日志行） | 集成 + 人工 | P1 |
-| AC-52 | TUI 错误行结构化 | TUI 错误行基于结构化 `UiEvent::Error { code, msg }` 渲染（dev：现 `UiEvent::Error(String)` 改造 3 处即可），**非 `to_string()` 拼接**；TUI 渲染层天然带稳定码可断言 | 单元（构造 UiEvent 断言渲染输入）+ 组件 | P0 |
+| AC-30 | Any error under non-TTY | stderr outputs a single line `[error] code=<SCREAMING_SNAKE> msg=<single line>`, greppable | Integration (spawn CLI, non-TTY) | P0 |
+| AC-31 | msg contains newlines/tabs | Normalized to spaces; the single line isn't broken | Integration | P0 |
+| AC-32 | msg too long | Truncated to 200 chars (length ≤200) | Integration | P0 |
+| AC-33 | Multi-line stack | Carried in `detail=<JSON-escaped>`, **only output with `--verbose`**; primary msg stays single-line | Integration | P0 |
+| AC-34 | Assertion stability | Same error: changing msg copy → tests don't break; changing the code → tests must break | Integration (equivalence classes) | P0 |
+| AC-35 | Naming convention | All codes match `^[A-Z][A-Z0-9_]*$` (SCREAMING_SNAKE) | Integration + unit (code-table scan) | P0 |
+| AC-36 | Dual-exit consistency | GUI and CLI produce the **same code** for the same underlying error (shared `map_error`); cross-side comparison assertions | Unit (construct each representative error → call map_error on both sides and compare) + integration | P0 |
+| AC-37 | TTY/non-TTY information parity | The same operation loses no feedback information in either environment (only presentation differs: spinner vs log line) | Integration + manual | P1 |
+| AC-52 | TUI error line structured | TUI error lines render from the structured `UiEvent::Error { code, msg }` (dev: the current `UiEvent::Error(String)` needs only 3 call-site changes), **not `to_string()` concatenation**; the TUI render layer naturally carries stable codes, assertable | Unit (construct UiEvent, assert render input) + component | P0 |
 
 ---
 
-## G. 错误码基础设施（设计文档 §4.3）
+## G. Error-code infrastructure (design doc §4.3)
 
-> 注：AC-38/40/43 以 v1.6/v1.7 **修正口径**为准（穷尽 match 无 `_` 臂 + 单测枚举每模块每 variant + **显式 GENERIC 路径、无自动兜底**），与 devex P1 及 dev 第 24/26 条发现的「§4.3/护栏 2 旧口径残留」修正方向一致——实现时**勿参照「未登记走兜底」「代表错误变体」等旧措辞**。
+> Note: AC-38/40/43 follow the **corrected v1.6/v1.7 stance** (exhaustive match without `_` arm + unit tests enumerating every variant of every module + **explicit GENERIC paths, no automatic fallback**), aligned with devex P1 and dev items 24/26's finding of "§4.3/guardrail 2 stale wording residue" — when implementing, **don't refer to stale wording like "unregistered falls back" or "representative error variants"**.
 
-| ID | 触发 | 预期（可量化） | 断言方法 | 优先级 |
+| ID | Trigger | Expected (quantifiable) | Assertion method | Priority |
 |---|---|---|---|---|
-| AC-38 | `ErrorCode` trait 实现 | 各模块 match **穷尽所有 variant、无 `_` 臂**——新增 variant 未处理**编译直接报错** | 编译期（cargo build）+ 单测 | P0 |
-| AC-39 | 显式 `GENERIC` | debug 构建下 `eprintln!` 醒目告警（含 missing_code 标记），**可断言**；release 下语义已知（暂未分配稳定码） | 单测（debug 断言）+ 集成 | P0 |
-| AC-40 | 防漂移单测 | **枚举每个模块错误 enum 的每一个 variant**，断言映射到**非 `GENERIC`** 稳定码 | 单测（全 variant 枚举） | P0 |
-| AC-41 | GENERIC allowlist | `const GENERIC_ALLOWLIST: &[&str]`：不在列表的 variant 一律非 `GENERIC`；列表条目为可定位路径（如 `"tool::bash::Error::NonZeroExit"`）；每条带 `TODO(generic-allow): <issue>/<日期> <理由>` 注释 | 单测 + review | P0 |
-| AC-42 | 码值生命周期 | 码值**只增不改不重用**（semver）：发布后语义冻结；码表单文件追加，review 可见 | 单测（码表唯一性）+ review | P0 |
-| AC-43 | 显式 GENERIC 路径 | 暂未分配稳定码的 variant **显式返回 `GENERIC`**（已发布稳定码，非临时值）；**不存在「未登记自动落 GENERIC」**（match 穷尽无 `_` 臂，v1.6+ 口径，dev 第 26 条确认） | 单测 | P0 |
-| AC-44 | 契约文件 | 契约集中在 `src/error.rs`：`ErrorCode` trait / `GENERIC`+debug 告警宏 / 共用 `map_error` 出口函数 / 防漂移单测；**单出口 + 单码表** | 结构审查 + 单测 | P0 |
-| AC-45 | 场景→错误码一致性 | 实现与「场景→错误码示例表」一致：超时→`TIMEOUT`、登录过期→`AUTH_REQUIRED`、无权限→`PERMISSION_DENIED`、服务端→`SERVER_ERROR`、无网络→`OFFLINE`、配置非法→`CONFIG_INVALID` | 单测 + 集成 | P0 |
+| AC-38 | `ErrorCode` trait implementation | Each module's match **exhaustively covers every variant with no `_` arm** — an unhandled new variant **fails to compile** | Compile-time (cargo build) + unit | P0 |
+| AC-39 | Explicit `GENERIC` | A loud `eprintln!` warning (with the missing_code marker) in debug builds, **assertable**; release semantics known (no stable code assigned yet) | Unit (debug assertion) + integration | P0 |
+| AC-40 | Drift-guard unit tests | **Enumerate every variant of every module's error enum**, asserting a mapping to a **non-`GENERIC`** stable code | Unit (full variant enumeration) | P0 |
+| AC-41 | GENERIC allowlist | `const GENERIC_ALLOWLIST: &[&str]`: variants not in the list are all non-`GENERIC`; entries are locatable paths (e.g. `"tool::bash::Error::NonZeroExit"`); each carries a `TODO(generic-allow): <issue>/<date> <reason>` comment | Unit + review | P0 |
+| AC-42 | Code-value lifecycle | Code values **only grow: never modified, never reused** (semver): meaning frozen once published; single-file append-only code table, visible to review | Unit (code-table uniqueness) + review | P0 |
+| AC-43 | Explicit GENERIC path | Variants without a stable code yet **explicitly return `GENERIC`** (a published stable code, not a temporary value); **there is no "unregistered auto-lands on GENERIC"** (exhaustive match, no `_` arm; v1.6+ stance, confirmed by dev item 26) | Unit | P0 |
+| AC-44 | Contract file | The contract is centralized in `src/error.rs`: `ErrorCode` trait / `GENERIC` + debug warning macro / shared `map_error` exit function / drift-guard unit tests; **single exit + single code table** | Structural review + unit | P0 |
+| AC-45 | Scenario → code consistency | Implementation matches the "scenario → error code" sample table: timeout→`TIMEOUT`, login expired→`AUTH_REQUIRED`, no permission→`PERMISSION_DENIED`, server→`SERVER_ERROR`, no network→`OFFLINE`, invalid config→`CONFIG_INVALID` | Unit + integration | P0 |
 
 ---
 
-## H. 可访问性（设计文档 §5 + §7；bingo TUI 按「TUI 映射基准」执行）
+## H. Accessibility (design doc §5 + §7; bingo TUI follows the "TUI mapping baseline")
 
-| ID | 触发 | 预期（可量化） | 断言方法 | 优先级 |
+| ID | Trigger | Expected (quantifiable) | Assertion method | Priority |
 |---|---|---|---|---|
-| AC-46 | 读屏读取 | **Web 侧约定**：toast（`aria-live`）与错误（`role="alert"`）可被 SR 读取。**bingo TUI 侧**：状态区错误/toast 内容可读（映射：状态区内容更新非删行），SR 支持有限则降级为人工确认 | SR 审计（仅 Web）+ 人工 | P1 |
-| AC-47 | reduced-motion | **Web 侧约定**：`prefers-reduced-motion` 下动效关闭、loading 指示保留。**bingo TUI 侧**：TUI 无该概念——spinner 动画频率可简单降级，**loading 指示本身保留**（慢加载可感知是状态不是装饰） | 人工（TUI）/ 组件（Web） | P0 |
-| AC-48 | 错误码高级详情 | 折叠区默认隐藏；**TUI 侧**：按键切换展开/折叠，展开态可切换、可感知（映射 `aria-expanded`） | 组件 | P1 |
-| AC-49 | loading 指示 | **Web 侧**：`aria-busy="true"` + disabled；spinner `<span role="status">`。**bingo TUI 侧**：`chat.busy` + 状态行 spinner 标识 | 组件 | P0 |
+| AC-46 | Screen-reader reading | **Web-side convention**: toast (`aria-live`) and error (`role="alert"`) readable by SR. **bingo TUI side**: status-area error/toast content readable (mapping: status-area content update, not row deletion); if SR support is limited, degrade to manual confirmation | SR audit (web only) + manual | P1 |
+| AC-47 | reduced-motion | **Web-side convention**: under `prefers-reduced-motion`, motion disabled, loading indicator kept. **bingo TUI side**: no such concept in TUI — spinner animation rate may simply degrade; **the loading indicator itself is kept** (slow-load perception is a state, not decoration) | Manual (TUI) / component (Web) | P0 |
+| AC-48 | Error-code advanced details | Collapsible region hidden by default; **TUI side**: key toggles expand/collapse, expandable state toggleable and perceivable (mapping `aria-expanded`) | Component | P1 |
+| AC-49 | Loading indicator | **Web side**: `aria-busy="true"` + disabled; spinner `<span role="status">`. **bingo TUI side**: `chat.busy` + status-line spinner indicator | Component | P0 |
 
 ---
 
-## I. 可测试性基建（设计文档 §6）
+## I. Testability infrastructure (design doc §6)
 
-| ID | 触发 | 预期（可量化） | 断言方法 | 优先级 |
+| ID | Trigger | Expected (quantifiable) | Assertion method | Priority |
 |---|---|---|---|---|
-| AC-50 | 测试钩子 | 组件/命令提供可注入钩子：**可注入延迟**（触发 loading/超时）、**可注入失败响应**（触发各错误级），各态稳定复现 | 结构审查 + 冒烟 | P0 |
-| AC-51 | 时序测试策略 | 200ms/3s/10s/15s 时序**全部走 fake timers**（ms 级）；E2E 不做时序断言（防 flaky） | 审查（测试清单） | P0 |
+| AC-50 | Test hooks | Components/commands expose injectable hooks: **injectable delay** (trigger loading/timeout), **injectable failure responses** (trigger each error level); each state stably reproducible | Structural review + smoke | P0 |
+| AC-51 | Timing test strategy | 200ms/3s/10s/15s timings **all go through fake timers** (ms-level); E2E has no timing assertions (avoids flakiness) | Review (test inventory) | P0 |
 
 ---
 
-## 共用解析 helper（测试侧契约）
+## Shared parsing helper (test-side contract)
 
 ```rust
-/// 解析单行错误契约。仅解析 `[error]` 行；`[progress]` 等不适用。
-/// 断言只依赖 code；msg/detail 仅供展示与排查，永不断言。
+/// Parses a single-line error contract. Only parses `[error]` lines; `[progress]` etc. don't apply.
+/// Assertions depend only on code; msg/detail are for display and debugging, never asserted.
 pub struct ParsedError {
-    pub code: String,      // SCREAMING_SNAKE，normative
-    pub msg: Option<String>,     // 单行 ≤200，换行已归一化为空格
-    pub detail: Option<String>,  // JSON 转义，仅 --verbose 出现
+    pub code: String,      // SCREAMING_SNAKE, normative
+    pub msg: Option<String>,     // single line ≤200, newlines normalized to spaces
+    pub detail: Option<String>,  // JSON-escaped, only present with --verbose
 }
 
-/// 语法：`[error] code=<CODE> msg=<single line>[ detail=<json>]`
-/// msg 在 ` detail=` 处截断（归一化后 msg 内不应出现该序列）；无 detail 时取到行尾。
+/// Syntax: `[error] code=<CODE> msg=<single line>[ detail=<json>]`
+/// msg is cut at ` detail=` (the normalized msg must not contain that sequence); without detail, take to end of line.
 pub fn parse_error_line(line: &str) -> Option<ParsedError>;
 
-/// 断言助手：assert_code!(line, "TIMEOUT") 等。永不断言 msg 文本。
+/// Assertion helper: assert_code!(line, "TIMEOUT") etc. Never asserts msg text.
 ```
 
-- helper 与 dev 的防漂移单测互为镜像：单测保证「每 variant → 稳定码」，helper 保证「CLI 输出行 → 可断言 code」。
-- 时序测试在 Rust 侧用 `tokio::time::pause/advance`（tokio 已含 time 特性，零新依赖，dev 第 21 条确认）；chat.rs 现有无 runtime 纯逻辑测试模式可复用。
-- 实现时点：`src/error.rs` 落成后，helper 随集成测试落地（测试侧代码，由 qa 维护）。
+- The helper mirrors dev's drift-guard unit tests: the unit tests guarantee "every variant → stable code", the helper guarantees "CLI output line → assertable code".
+- On the Rust side, timing tests use `tokio::time::pause/advance` (tokio already includes the time feature, zero new dependencies; confirmed by dev item 21); chat.rs's existing no-runtime pure-logic test pattern can be reused.
+- Landing point: once `src/error.rs` is in place, the helper lands with the integration tests (test-side code, maintained by qa).
 
 ---
 
-## 回归清单（按发布门禁排序）
+## Regression checklist (ordered by release gate)
 
-P0 门禁：AC-01/02/03/04/05/06（状态机）→ AC-07/10/11（loading）→ AC-12/13/14/53/54（超时+长回合+取消机制）→ AC-16/18/19/20/21（toast）→ AC-24/27/29（错误态+混合态+映射）→ AC-30/32/34/35/36/52（CLI 契约 + UiEvent 结构化）→ AC-38/39/40/41/42/43/44/45（错误码基建）→ AC-47/49（可访问性）→ AC-50/51（测试基建）。
+P0 gate: AC-01/02/03/04/05/06 (state machine) → AC-07/10/11 (loading) → AC-12/13/14/53/54 (timeout + long turn + cancellation) → AC-16/18/19/20/21 (toast) → AC-24/27/29 (error states + mixed state + mapping) → AC-30/32/34/35/36/52 (CLI contract + UiEvent structured) → AC-38/39/40/41/42/43/44/45 (error-code infrastructure) → AC-47/49 (accessibility) → AC-50/51 (test infrastructure).
 
-P1 后补：AC-15、AC-23、AC-28（人工）、AC-37、AC-46、AC-48。
+P1 follow-up: AC-15, AC-23, AC-28 (manual), AC-37, AC-46, AC-48.
 
-## qa 回归记录（v1.3.1，2026-08-07）
+## qa regression record (v1.3.1, 2026-08-07)
 
-验证基线：`cargo build` / `cargo clippy --all-targets` 零警告；`cargo test` **553 通过 0 失败**；实测 CLI 两个错误码出口。
+Verification baseline: `cargo build` / `cargo clippy --all-targets` zero warnings; `cargo test` **553 passed 0 failed**; two CLI error-code exits tested in practice.
 
-**实测通过（P0 主干）：**
-- **AC-30/45**：非 TTY `[error] code=AUTH_REQUIRED msg=...` exit=1（干净 HOME 无 key）；`[error] code=CONFIG_INVALID msg=...` exit=1（坏 settings.json）——断言锚 code ✅
-- **AC-12/13/14**：`SHORT_READ_TIMEOUT=10s` / `SHORT_WRITE_TIMEOUT=15s` + 常量断言测试 ✅
-- **AC-31/32**：`sanitize_msg` 归一化 + 200 字符截断（含中文逐字符）单测通过 ✅
-- **AC-35/38/44**：SCREAMING_SNAKE 断言、10 模块 ErrorCode 穷尽 match 无 `_` 臂（编译强制）、契约集中 `src/error.rs` ✅
-- **AC-36**：TUI 经 `map_error`、CLI 经 `error_code_boxed` 同源码表 ✅
-- **AC-41/43**：`GENERIC_ALLOWLIST` 空、全 variant 稳定码（显式 GENERIC 路径为零）✅
-- **AC-52**：`UiEvent::Error { code, msg }` 结构化；TUI 渲染 `[error] code=... msg=...` + `busy=false` 复位 ✅
-- **AC-53/54**：长回合保持传输层 120s/60s；反馈层 timeout 到点 drop future 取消 ✅（AC-53 的 TUI 呈现断言待组件级补）
+**Verified passing (P0 mainline):**
+- **AC-30/45**: non-TTY `[error] code=AUTH_REQUIRED msg=...` exit=1 (clean HOME without key); `[error] code=CONFIG_INVALID msg=...` exit=1 (bad settings.json) — assertion anchors on code ✅
+- **AC-12/13/14**: `SHORT_READ_TIMEOUT=10s` / `SHORT_WRITE_TIMEOUT=15s` + constant assertion tests ✅
+- **AC-31/32**: `sanitize_msg` normalization + 200-char truncation (including per-character Chinese) unit tests pass ✅
+- **AC-35/38/44**: SCREAMING_SNAKE assertions, 10 modules' ErrorCode exhaustive match without `_` arm (compile-enforced), contract centralized in `src/error.rs` ✅
+- **AC-36**: TUI via `map_error`, CLI via `error_code_boxed`, same code table source ✅
+- **AC-41/43**: `GENERIC_ALLOWLIST` empty, all variants stable codes (zero explicit GENERIC paths) ✅
+- **AC-52**: `UiEvent::Error { code, msg }` structured; TUI renders `[error] code=... msg=...` + `busy=false` reset ✅
+- **AC-53/54**: long turns keep the transport layer 120s/60s; feedback-layer timeout drops the future at the deadline to cancel ✅ (AC-53's TUI presentation assertion awaits component-level coverage)
 
-**整改项（需 dev 确认/处理）：**
-1. **[P1] AC-40 漂移覆盖缺口**：`TeamError` 3 个 variant 中**仅 `Invalid` 被单测构造**，`Io`/`Parse` 未枚举——若改显式 GENERIC，防漂移测试抓不到（devex 曾批的「代表错误变体」模式残留）。修复：`error.rs` 单测补 `TeamError::Io(io::Error::other)` + `TeamError::Parse(serde_json err)` 断言。其余模块全 variant 覆盖确认 ✅。
-2. **[P1] `error_code_boxed` 隐式 GENERIC + downcast 登记表漂移**：CLI 出口（main.rs:279）走 boxed 路径，末端直接返回 `GENERIC`——**无 debug 告警**（`missing_code` 为 dead code 从未调用），且 `downcast_error_code!` 是手工登记表，新增 ErrorCode 类型漏登记 → **静默 GENERIC**。修复建议：(a) `error_code_boxed` 落 GENERIC 时（debug 构建）调用 `missing_code`；(b) 补「各 ErrorCode 类型 boxed 经 `error_code_boxed` 可达且非 GENERIC」测试（当前仅测 QueryError + 未知 io::Error）。
-3. **[P2] AC-39 无可执行断言**：`missing_code` 当前无任何调用/测试（无显式 GENERIC 路径）。建议补 cfg(test) 场景断言 debug 告警可触发。
-4. **[P2] AC-05 机制标注**：竞态防护实际为 **drop future + cancel 通道**结构性保证（query.rs `cancel_requested`/`aborted`），无独立序号计数器——比序号校验更强，建议 AC-05 备注明确「序号校验未单独实现，结构性取消优先」。
-5. **[Info] AC-33**：无 `--verbose` 无触发点，dev v1.4 已标注「暂不适用」，认可。
+**Remediation items (need dev confirmation/handling):**
+1. **[P1] AC-40 drift-coverage gap**: of `TeamError`'s 3 variants, **only `Invalid` is constructed in unit tests**; `Io`/`Parse` aren't enumerated — if they change to explicit GENERIC, the drift test won't catch it (the "representative error variants" pattern devex once flagged, still lingering). Fix: `error.rs` unit tests add `TeamError::Io(io::Error::other)` + `TeamError::Parse(serde_json err)` assertions. Full-variant coverage for the other modules confirmed ✅.
+2. **[P1] `error_code_boxed` implicit GENERIC + downcast registry drift**: the CLI exit (main.rs:279) goes through the boxed path, which returns `GENERIC` directly at the tail — **no debug warning** (`missing_code` is dead code, never called), and `downcast_error_code!` is a hand-maintained registry; a new ErrorCode type missing registration → **silent GENERIC**. Fix suggestions: (a) `error_code_boxed` calls `missing_code` when landing on GENERIC (debug builds); (b) add a test "every ErrorCode type is reachable through `error_code_boxed` as boxed and non-GENERIC" (currently only QueryError + unknown io::Error are tested).
+3. **[P2] AC-39 has no executable assertion**: `missing_code` currently has no calls/tests (no explicit GENERIC paths). Suggest a cfg(test) scenario asserting the debug warning is triggerable.
+4. **[P2] AC-05 mechanism annotation**: the race protection is actually structural — **drop future + cancel channel** (query.rs `cancel_requested`/`aborted`), with no standalone sequence-number counter — stronger than sequence-number checks; suggest AC-05's note explicitly states "sequence-number checks not separately implemented; structural cancellation takes precedence".
+5. **[Info] AC-33**: without `--verbose` there's no trigger point; dev v1.4 marked it "not applicable for now" — accepted.
 
-**回归结论**：P0 主干**通过，有条件放行**——整改 1/2（P1）建议本迭代处理（低成本、补 2 个测试）；整改 3/4（P2）可随文档标注跟进；AC-15 重试幂等、AC-53 长回合失败 TUI 呈现、AC-26 全流程级整屏态属组件级回归，待 TUI 组件测试基建补齐后覆盖。
+**Regression conclusion**: P0 mainline **passed, conditionally released** — remediation 1/2 (P1) recommended this iteration (low cost, 2 tests); remediation 3/4 (P2) can follow with doc annotations; AC-15 retry idempotency, AC-53 long-turn failure TUI presentation, and AC-26 flow-level full-screen state are component-level regression, covered once the TUI component test infrastructure is in place.
 
-### 复验记录（v1.6.1，2026-08-07，响应 devex 落修 #48）
+### Re-verification record (v1.6.1, 2026-08-07, responding to devex's landing fix #48)
 
-devex 落修 P1-P3 + missing_code 代码落地后复验（clippy 零告警、cargo test 553 通过 0 失败）：
+Re-verified after devex landed fixes for P1-P3 + the missing_code code (clippy zero warnings, cargo test 553 passed 0 failed):
 
-- ✅ **整改 1（AC-40 TeamError 漂移覆盖）**：`config_and_storage_errors` 现枚举 TeamError 全 3 variant（Invalid/Io/Parse → `CONFIG_INVALID`，走 `assert_stable_codes`）。
-- ✅ **整改 2a（missing_code 代码落地）**：`error_code_boxed` 落 `GENERIC` 分支 debug 构建下调 `missing_code` 告警（ui/ux v1.14 要求 + #47 范围）；宏登记表漏登记/未实现类型不再静默。
-- ⏳ **整改 2b（宏登记表覆盖测试）**：仍待 dev 表态 boxed 技术必要性后落——若确认必要，补「10 类型经 boxed 路径断言非 GENERIC」。
-- ✅ **整改 3（AC-39）**：`missing_code` 已由 boxed GENERIC 分支调用，debug 下 `boxed_error_walks_cause_chain`（未知 io::Error → GENERIC）路径已行使该告警（eprintln 输出未断言，正式 eprintln 断言可后补）。
-- ✅ **整改 4（AC-05 机制标注）**：AC-05 行已标注（v1.6）。
-- ⏳ **P2（boxed 出口技术必要性）**：待 dev 表态。
+- ✅ **Remediation 1 (AC-40 TeamError drift coverage)**: `config_and_storage_errors` now enumerates all 3 TeamError variants (Invalid/Io/Parse → `CONFIG_INVALID`, through `assert_stable_codes`).
+- ✅ **Remediation 2a (missing_code code landed)**: the `error_code_boxed` GENERIC fallback branch calls `missing_code` to warn in debug builds (ui/ux v1.14 requirement + #47 scope); registry misses/unimplemented types are no longer silent.
+- ⏳ **Remediation 2b (macro-registry coverage test)**: still awaiting dev's decision on the boxed technique's necessity — if confirmed necessary, add "10 types asserted non-GENERIC through the boxed path".
+- ✅ **Remediation 3 (AC-39)**: `missing_code` is now called by the boxed GENERIC branch; in debug, the `boxed_error_walks_cause_chain` (unknown io::Error → GENERIC) path already exercises the warning (the eprintln output isn't asserted; a formal eprintln assertion can be added later).
+- ✅ **Remediation 4 (AC-05 mechanism annotation)**: the AC-05 row is annotated (v1.6).
+- ⏳ **P2 (boxed exit technical necessity)**: awaiting dev's decision.
 
-### 复验记录 2（v1.7.1，2026-08-07，响应 dev #49 落修）
+### Re-verification record 2 (v1.7.1, 2026-08-07, responding to dev #49 landing fix)
 
-dev 表态 P2 + 落宏登记表覆盖测试后复验（`cargo test error::` 7 通过；全量 553 通过 0 失败；clippy 零告警）：
+Re-verified after dev's P2 decision + the macro-registry coverage test landed (`cargo test error::` 7 passed; full run 553 passed 0 failed; clippy zero warnings):
 
-- ✅ **整改 2b（宏登记表覆盖测试）**：`boxed_export_covers_all_registered_modules` 已存在并通过——10 类型逐一 boxed 断言非 GENERIC + `samples.len()==10` 双处登记对照（与 `downcast_error_code` 宏清单一一对应）。
-- ✅ **P2（boxed 技术必要性）**：dev 正式表态「boxed 场景 `map_error` 静态泛型无法覆盖 CLI 顶层 `&dyn Error`，`error_code_boxed` + 宏登记表必要」；「统一单一入口」评估为纯形式重构、按默认做减法不采纳，护栏 4 双出口口径无需回退。
+- ✅ **Remediation 2b (macro-registry coverage test)**: `boxed_export_covers_all_registered_modules` exists and passes — 10 types each boxed-asserted non-GENERIC + `samples.len()==10` dual registration comparison (one-to-one with the `downcast_error_code` macro list).
+- ✅ **P2 (boxed technical necessity)**: dev formally decided "for boxed scenarios, `map_error`'s static generics can't cover the CLI's top-level `&dyn Error`; `error_code_boxed` + the macro registry are necessary"; "unify into a single entry point" was assessed as a purely formal refactor and not adopted per default-to-subtracting; guardrail 4's dual-exit stance needs no rollback.
 
-**复验清单全部闭环**：整改 1/2a/2b/3/4 + P2 必要性全绿；回归结论维持「P0 主干通过」。
+**Re-verification checklist fully closed**: remediation 1/2a/2b/3/4 + P2 necessity all green; the regression conclusion stays "P0 mainline passed".
 
-### 组件级回归记录（v1.9.2，2026-08-07，#14 TUI 组件级回归）
+### Component-level regression record (v1.9.2, 2026-08-07, #14 TUI component-level regression)
 
-**qa 断言落地（565 tests 全过 + clippy 零告警，chat.rs 4 个 `qa_*` 测试）**：
-- **AC-15（超时重试幂等）** ✅：TUI 层（整屏态 Enter=重试可达、重试后状态复位）+ client 层（超时落 TIMEOUT）已断言。
-  **服务端「不重复落库」边界（dev #99 / qa #98，main 方案① 定案）**：短同步写路径 = `complete_text`（compact/memory 纯生成，**无持久化副作用**），重试覆盖式无害；**服务端幂等依赖 API 幂等能力（当前 LLM API 无幂等头），客户端结构性保证（drop future + 取消通道）为唯一防御**；幂等键不必要（无副作用写面），未来接入幂等键 API 时属「能力升级」非「补缺口」。
-- **AC-26（全流程级整屏态）** ✅：整屏态（标题+码+说明+动作+光标隐藏）+ Esc 返回 + Enter 重试 + 焦点落首要动作。
-- **AC-53（长回合失败升级）** ✅：FX-11（TIMEOUT+LongTurn）→ 全流程级整屏态，与 FX-01（同码短同步=页面级）**同码不同级**对照（TIMEOUT 双级别由 context 区分实测）。
-- **AC-29（错误码→动作）** ✅：`qa_ac29` 全 11 fixture 逐码矩阵（级别由生产者显式携带 + 渲染形态与 level 匹配）。
-- **真实路径** ✅：`qa_fx01_real_path`（/model 拉取超时 → 页面级错误行，**生产发射源** list_models，非 fixture 单腿）。
-- **呈现层验收（ui/ux #20）**：FX-01…11 注入→渲染链路全部通过（A1/A3/C2/D2/D3/F1/F2/F3/G1/G3）；H 区折叠（AC-48 P1）+ 人工项待后续。
-- **DX 复评（devex #15）**：级别在事件链中存活 + 发射源/复位/降级保留核验通过，已关闭。
-- **短操作发射源（main #91 方案①）**：list_models/count_tokens 失败发 Page+ShortSync 错误行、降级行为保留、Field 级不补——#14 全链路闭环。
+**qa assertions landed (565 tests all passing + clippy zero warnings, 4 `qa_*` tests in chat.rs)**:
+- **AC-15 (timeout retry idempotency)** ✅: asserted at the TUI layer (full-screen state Enter=retry reachable, state resets after retry) + client layer (timeout lands on TIMEOUT).
+  **Server-side "no duplicate persistence" boundary (dev #99 / qa #98, main's option ① finalized)**: the short-sync write path = `complete_text` (pure generation for compact/memory, **no persistence side effects**), so retry-overwrite is harmless; **server-side idempotency depends on API idempotency capability (current LLM APIs have no idempotency headers), and client-side structural guarantees (drop future + cancel channel) are the only defense**; idempotency keys are unnecessary (no side-effecting write surface); when an idempotency-key API is adopted later, that's a "capability upgrade", not "filling a gap".
+- **AC-26 (flow-level full-screen state)** ✅: full-screen state (title + code + explanation + action + cursor hidden) + Esc returns + Enter retries + focus on the primary action.
+- **AC-53 (long-turn failure escalation)** ✅: FX-11 (TIMEOUT+LongTurn) → flow-level full-screen state, contrasted with FX-01 (same code, short-sync = page-level) — **same code, different level** (TIMEOUT's dual levels distinguished by context, verified in practice).
+- **AC-29 (error code → action)** ✅: `qa_ac29` full 11-fixture per-code matrix (level explicitly carried by the producer + render form matches level).
+- **Real path** ✅: `qa_fx01_real_path` (/model fetch timeout → page-level error line, **real production emitter** list_models, not a fixture one-leg).
+- **Presentation-layer acceptance (ui/ux #20)**: FX-01…11 injection → render chain all passed (A1/A3/C2/D2/D3/F1/F2/F3/G1/G3); H-section collapse (AC-48 P1) + manual items pending.
+- **DX re-review (devex #15)**: level surviving the event chain + emitter/reset/degrade-preservation verified, closed.
+- **Short-operation emitters (main #91 option ①)**: list_models/count_tokens failures emit Page+ShortSync error lines, degradation behavior preserved, no Field-level addition — #14 full chain closed.
 
 ---
 
-## 变更记录
+## Changelog
 
-- v1.0（2026-08-07）：依据 `feedback-states.md` v1.7 产出 51 条断言表 + 解析 helper 契约；标记 api/client.rs 超时不一致发现（AC-15 备注）。
-- v1.1（2026-08-07）：按 dev 第 21 条评审与 main「以 TUI 行为为准」指示修订——引入「TUI 映射基准」表，ARIA/DOM/rAF/prefers-reduced-motion 类断言（AC-03/04/08/09/10/17/22/24/25/26/27/46/47/48/49）改为 TUI 可观测行为；时序测试注明用 `tokio::time::pause/advance`（零新依赖）；新增 AC-52（`UiEvent::Error` 结构化）；G 节注明以 v1.6/v1.7 修正口径为准（对齐 devex P1）。
-- v1.2（2026-08-07）：按 dev 第 26 条复评对齐——AC-43 措辞改为「显式 `GENERIC` 路径」（删除「未登记自动落 GENERIC」过期语义），G 节注同步扩展到护栏 2 口径。
-- v1.3（2026-08-07）：按 dev 第 31 条定夺同步超时分层——AC-12/13/14 限定「短同步操作」；新增 AC-53（长回合不套 10s/15s、失败升级全流程级）与 AC-54（反馈超时 drop future 取消机制）；AC-15 关闭原发现备注、补写路径幂等防御；共 54 条。头部钉对应文档 **v1.11**（ui/ux 第 34 条已将超时细化提前落盘，非实现期回填）。
-- v1.4（2026-08-07）：dev 实现期回填——「dev 实现核对」节补 **AC-33 暂不适用**标注（无 `--verbose` 即无触发点；实现 `--verbose` 时补 `detail=` 断言）；§4.4 标题核对经 ui/ux 改为「场景 → 错误码表」，与码映射/防漂移断言一致，无行为口径变更。
-- v1.5（2026-08-07）：qa 回归记录节——实测 553 测试通过 + CLI 双码出口验证；P0 主干有条件放行；整改项 5 条（P1：AC-40 TeamError 漂移覆盖缺口、error_code_boxed 隐式 GENERIC/downcast 登记漂移；P2：AC-39 无可执行断言、AC-05 机制标注；Info：AC-33）。
-- v1.6（2026-08-07）：AC-05 行落地机制备注（drop future + cancel 通道、序号校验未单独实现，ui/ux v1.14 确认）；G 节 AC-39/43 待 devex P1-P3 落修后同步 missing_code 告警口径（含 boxed 出口宏登记表漏登记分支）。
-- v1.7（2026-08-07）：复验记录（v1.6.1）——devex 落修后复核：TeamError 3 variant 断言 ✅、missing_code boxed 分支代码落地 ✅、空测试删除 ✅、clippy/test 全绿 ✅；待办收敛为 2 项（宏登记表覆盖测试、boxed 出口必要性表态，均待 dev）。
-- v1.8（2026-08-07）：复验记录 2（v1.7.1）——dev #49 落宏登记表覆盖测试并表态 boxed 必要性后，**复验清单全部闭环**（整改 1/2a/2b/3/4 + P2 全绿）；回归结论维持「P0 主干通过」。
-- v1.9（2026-08-07）：qa #69 + main 拍板契约对齐——AC-29 `AUTH_EXPIRED` 改为 **`AUTH_REQUIRED`**（对齐实现与文档 §4.4 单一来源，不新增码）；同步修正头部版本（此前 v1.3 滞后于实际 v1.8）与对应文档版本（v1.15）；AC-12/13/14 后补 **`TIMEOUT` 呈现级别注**（由触发上下文决定：短同步=页面级 / 长回合=全流程级，qa #72）。
-- v1.9.1（2026-08-07）：ui/ux 按 qa #72 要求补 C 节**显式 TIMEOUT 级别口径**——「`TIMEOUT` 呈现级别由触发上下文决定：短同步=页面级（AC-12/13/14），长回合=全流程级（AC-53）」置顶超时分层块首，防 qa/呈现层对 `TIMEOUT` 级别断言各执一词（qa #76 实测核验两处一致 ✅）。
-- v1.9.2（2026-08-07）：qa 回填 **#14 组件级回归记录**——AC-15/26/53/29 断言落地（4 个 `qa_*` 测试，565 全过）；AC-15 服务端幂等边界定案（main 方案①：短同步写=纯生成无副作用，结构性保证为唯一防御，幂等键不必要，dev #99 边界说明）。
+- v1.0 (2026-08-07): produced a 51-item assertion table + the parsing-helper contract against `feedback-states.md` v1.7; flagged the api/client.rs timeout inconsistency finding (AC-15 note).
+- v1.1 (2026-08-07): revised per dev review item 21 and main's directive "assertions go by TUI behavior" — introduced the "TUI mapping baseline" table; ARIA/DOM/rAF/prefers-reduced-motion class assertions (AC-03/04/08/09/10/17/22/24/25/26/27/46/47/48/49) changed to observable TUI behavior; timing tests noted to use `tokio::time::pause/advance` (zero new dependencies); added AC-52 (`UiEvent::Error` structured); section G notes the corrected v1.6/v1.7 stance (aligned with devex P1).
+- v1.2 (2026-08-07): aligned with dev re-review item 26 — AC-43 wording changed to "explicit `GENERIC` path" (removing the stale "unregistered auto-lands on GENERIC" semantics); the section G note extends to guardrail 2's stance.
+- v1.3 (2026-08-07): synced timeout layering per dev item 31's decision — AC-12/13/14 scoped to "short sync operations"; added AC-53 (long turns don't apply 10s/15s; failures escalate to flow-level) and AC-54 (feedback timeout drops the future to cancel); AC-15 closed its original finding note and adds write-path idempotency defense; 54 items total. Header pins the corresponding doc **v1.11** (ui/ux item 34 already landed the timeout refinement ahead of time, not an implementation-period backfill).
+- v1.4 (2026-08-07): dev implementation-period backfill — the "dev implementation cross-check" section adds the **AC-33 not applicable for now** note (no `--verbose` means no trigger point; add the `detail=` assertion when `--verbose` is implemented); §4.4 title cross-checked via ui/ux, changed to "scenario → error code table", consistent with the code-mapping/drift assertions, no behavior-stance change.
+- v1.5 (2026-08-07): qa regression record section — verified 553 tests passing + two CLI code exits; P0 mainline conditionally released; 5 remediation items (P1: AC-40 TeamError drift-coverage gap, error_code_boxed implicit GENERIC/downcast registry drift; P2: AC-39 no executable assertion, AC-05 mechanism annotation; Info: AC-33).
+- v1.6 (2026-08-07): AC-05 row mechanism note landed (drop future + cancel channel, sequence-number checks not separately implemented, confirmed by ui/ux v1.14); section G's AC-39/43 await devex's P1-P3 landing fixes, then sync the missing_code warning stance (including the boxed-exit macro-registry miss branch).
+- v1.7 (2026-08-07): re-verification record (v1.6.1) — after devex's landing fixes: TeamError 3-variant assertions ✅, missing_code boxed-branch code landed ✅, empty test deleted ✅, clippy/test all green ✅; backlog narrowed to 2 items (macro-registry coverage test, boxed-exit necessity decision; both awaiting dev).
+- v1.8 (2026-08-07): re-verification record 2 (v1.7.1) — after dev #49 landed the macro-registry coverage test and decided the boxed necessity, **the re-verification checklist is fully closed** (remediation 1/2a/2b/3/4 + P2 all green); the regression conclusion stays "P0 mainline passed".
+- v1.9 (2026-08-07): qa #69 + main's contract alignment — AC-29's `AUTH_EXPIRED` becomes **`AUTH_REQUIRED`** (aligned with the implementation and doc §4.4's single source; no new code); header version fixed (previously v1.3 lagging the actual v1.8) and corresponding doc version (v1.15); added the **`TIMEOUT` presented-level note** after AC-12/13/14 (decided by trigger context: short-sync = page-level / long turn = flow-level, qa #72).
+- v1.9.1 (2026-08-07): ui/ux added section C's **explicit TIMEOUT-level stance** per qa #72 — "`TIMEOUT`'s presented level is decided by the trigger context: short-sync = page-level (AC-12/13/14), long turn = flow-level (AC-53)" pinned at the top of the timeout-layering block, so qa/presentation don't assert `TIMEOUT`'s level against each other (qa #76 verified both places consistent in practice ✅).
+- v1.9.2 (2026-08-07): qa backfilled the **#14 component-level regression record** — AC-15/26/53/29 assertions landed (4 `qa_*` tests, 565 all passing); AC-15 server-side idempotency boundary finalized (main's option ①: short-sync writes = pure generation with no side effects, structural guarantees are the only defense, idempotency keys unnecessary; dev #99 boundary note).

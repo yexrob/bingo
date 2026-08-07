@@ -5,7 +5,7 @@ use crate::skills::{expand_skill, format_listing, Skill, DEFAULT_CHAR_BUDGET};
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-/// Skill 工具输入。
+/// Skill tool input.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SkillInput {
     #[schemars(description = "The skill name (e.g. \"commit\", \"review-pr\")")]
@@ -15,10 +15,10 @@ pub struct SkillInput {
     pub args: Option<String>,
 }
 
-/// Skill：在技能注册表中按名执行。
-/// 单行返回 `✦ {name} — read <SKILL.md 路径>`（磁盘技能指自身文件，
-/// 内置技能物化到缓存目录），模型需要完整指令时自行 Read；
-/// 物化失败才展开全量内联兜底。
+/// Skill: execute a skill by name from the skills registry.
+/// Returns a single line `✦ {name} — read <SKILL.md path>` (disk skills point at their own
+/// file; bundled skills are materialized into the cache directory); the model Reads it for
+/// full instructions; only if materialization fails, expand the full content inline as a fallback.
 pub struct SkillTool {
     skills: Vec<Skill>,
 }
@@ -70,9 +70,10 @@ IMPORTANT: When a skill matches the user's request, invoke the Skill tool BEFORE
             .find(&params.skill)
             .ok_or_else(|| ToolError::failed(format!("Unknown skill: {}", params.skill)))?;
         let content = match skill_path(skill, &ctx.home) {
-            // 单行返回：✦ 图标 + 路径，模型自行 Read 拿完整指令。
+            // Single-line return: ✦ icon + path; the model Reads it for full instructions.
             Some(path) => format!("✦ {} — read {}", skill.name, path.display()),
-            // 物化失败（如缓存目录不可写）：全量内联兜底，唯一来源。
+            // Materialization failed (e.g. cache dir not writable): fall back to full inline
+            // content, the single source.
             None => format!(
                 "✦ {} — built-in skill, instructions inline:\n\n{}",
                 skill.name,
@@ -87,9 +88,9 @@ IMPORTANT: When a skill matches the user's request, invoke the Skill tool BEFORE
     }
 }
 
-/// 技能的可读文件路径：磁盘技能即 base_dir/SKILL.md；
-/// 内置技能物化到 `$XDG_CACHE_HOME/bingo/skills/{name}/SKILL.md`
-/// （无 XDG_CACHE_HOME 时用 `~/.cache`），写失败返回 None。
+/// Readable file path for a skill: for disk skills it's base_dir/SKILL.md;
+/// bundled skills are materialized to `$XDG_CACHE_HOME/bingo/skills/{name}/SKILL.md`
+/// (or `~/.cache` without XDG_CACHE_HOME); returns None if writing fails.
 fn skill_path(skill: &Skill, home: &std::path::Path) -> Option<std::path::PathBuf> {
     if !skill.base_dir.as_os_str().is_empty() {
         return Some(skill.base_dir.join("SKILL.md"));
@@ -178,7 +179,7 @@ mod tests {
             std::fs::read_to_string(path).is_ok_and(|c| c.contains("Follow the {name} procedure.")),
             "物化文件内容完整: {path:?}"
         );
-        // 物化后模型可用 Read 读它：路径即 base_dir 语义。
+        // Once materialized the model can Read it: the path acts as the base_dir.
         assert!(!text.contains("instructions inline"), "{text}");
     }
 

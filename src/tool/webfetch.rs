@@ -7,18 +7,18 @@ use serde::Deserialize;
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-/// 请求超时：60s。
+/// Request timeout: 60s.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
-/// 内容大小上限：10MB。
+/// Content size cap: 10MB.
 const MAX_CONTENT_BYTES: u64 = 10 * 1024 * 1024;
-/// 抓取结果回填上限：100k 字符。
+/// Fetch result backfill cap: 100k characters.
 const MAX_FETCH_CHARS: usize = 100_000;
-/// URL 长度上限：2000 字符。
+/// URL length cap: 2000 characters.
 const MAX_URL_LENGTH: usize = 2000;
-/// 重定向上限：10 次。
+/// Redirect cap: 10 hops.
 const MAX_REDIRECTS: u32 = 10;
 
-/// 缓存：URL 键、15 分钟 TTL、50MB 总量。
+/// Cache: URL key, 15-minute TTL, 50MB total.
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const CACHE_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -48,7 +48,7 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// 缓存读写：先清过期条目，超总量时逐出最旧条目。
+/// Cache read/write: evict expired entries first, then evict the oldest when over the total budget.
 fn cache_get(url: &str) -> Option<CacheEntry> {
     let mut cache = FETCH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cutoff = now_secs().saturating_sub(CACHE_TTL.as_secs());
@@ -103,8 +103,9 @@ pub struct WebFetchInput {
     pub prompt: Option<String>,
 }
 
-/// WebFetch：抓取 URL → HTML 转 Markdown → 返回。
-/// 简化：不引入次模型总结，返回原文；prompt 字段接受但忽略。二进制内容不落盘。
+/// WebFetch: fetch URL → convert HTML to Markdown → return.
+/// Simplified: no secondary-model summarization, returns the raw content; the prompt field
+/// is accepted but ignored. Binary content is not persisted.
 pub struct WebFetchTool;
 
 #[async_trait]
@@ -137,7 +138,8 @@ impl Tool for WebFetchTool {
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: WebFetchInput = parse_input(&input)?;
-        // prompt 语义是次模型总结；bingo 无次模型，接受但忽略。
+        // The prompt field is meant for secondary-model summarization; bingo has no secondary
+        // model, so it's accepted but ignored.
         let _ = &params.prompt;
         validate_url(&params.url)?;
         let upgraded = upgrade_https(&params.url);
@@ -185,7 +187,7 @@ impl Tool for WebFetchTool {
     }
 }
 
-/// URL 校验：长度、无凭据、hostname 至少两段。
+/// URL validation: length, no credentials, hostname with at least two parts.
 fn validate_url(url: &str) -> Result<(), ToolError> {
     if url.len() > MAX_URL_LENGTH {
         return Err(ToolError::failed(format!(
@@ -205,7 +207,7 @@ fn validate_url(url: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// http → https 升级。
+/// Upgrade http → https.
 fn upgrade_https(url: &str) -> String {
     let mut parsed = match url.parse::<reqwest::Url>() {
         Ok(p) => p,
@@ -217,8 +219,8 @@ fn upgrade_https(url: &str) -> String {
     parsed.to_string()
 }
 
-/// 流式读 body 并在读取过程中强制上限：无 Content-Length 的响应
-/// 也不会先读满内存再检查（读超即断）。
+/// Stream the body and enforce the cap while reading: responses without Content-Length
+/// are not read fully into memory before the check (cut off as soon as the limit is exceeded).
 async fn read_body_capped(response: reqwest::Response) -> Result<Vec<u8>, ToolError> {
     use futures_util::StreamExt;
     let read = async {
@@ -240,8 +242,8 @@ async fn read_body_capped(response: reqwest::Response) -> Result<Vec<u8>, ToolEr
         .map_err(|_| ToolError::failed("fetch body timed out".to_string()))?
 }
 
-/// 重定向检查：协议/端口相同、无凭据、
-/// hostname 去 www 后相同（路径可任意变化）。
+/// Redirect check: same scheme/port, no credentials, and hostname equal after stripping
+/// www (the path may change arbitrarily).
 fn is_permitted_redirect(original: &reqwest::Url, redirect: &reqwest::Url) -> bool {
     if redirect.scheme() != original.scheme() || redirect.port() != original.port() {
         return false;
@@ -261,7 +263,8 @@ fn strip_www(host: &str) -> &str {
     host.strip_prefix("www.").unwrap_or(host)
 }
 
-/// 跟随许可的重定向（同 host）；跨 host 返回提示文本让模型重新 fetch。
+/// Follow permitted redirects (same host); cross-host redirects return a hint for the
+/// model to refetch.
 async fn fetch(
     client: &reqwest::Client,
     initial_url: &str,
@@ -337,8 +340,9 @@ async fn fetch(
             )));
         }
 
-        // 预检只在服务器给了 Content-Length 时有意义：
-        // chunked 响应没有该头，曾被 unwrap_or(u64::MAX) 当成超大而 100% 失败。
+        // The pre-check only makes sense when the server provides Content-Length:
+        // chunked responses lack it and were once treated as oversized via
+        // unwrap_or(u64::MAX), failing 100% of the time.
         if let Some(len) = response.content_length()
             && len > MAX_CONTENT_BYTES
         {
@@ -405,8 +409,8 @@ mod tests {
         assert!(!is_permitted_redirect(&a, &http));
     }
 
-    /// 最小 HTTP 服务器：返回 chunked（无 Content-Length）响应。
-    /// total_bytes 为要写出的正文总量。
+    /// Minimal HTTP server: returns a chunked response (no Content-Length).
+    /// total_bytes is the total body size to write out.
     async fn chunked_server(total_bytes: usize) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -445,7 +449,8 @@ mod tests {
         format!("http://{addr}/")
     }
 
-    /// M2 回归：无 Content-Length 的 chunked 响应曾被当成超大而 100% 失败。
+    /// M2 regression: chunked responses without Content-Length were once treated as
+    /// oversized and failed 100% of the time.
     #[tokio::test]
     async fn chunked_response_without_content_length_succeeds() {
         let url = chunked_server(4096).await;
@@ -457,7 +462,7 @@ mod tests {
         assert!(content_type.contains("text/plain"));
     }
 
-    /// M2 回归：上限在流式读取过程中强制，不是读完才检查。
+    /// M2 regression: the cap is enforced while streaming, not checked after reading everything.
     #[tokio::test]
     async fn oversized_streamed_body_is_rejected() {
         let url = chunked_server(MAX_CONTENT_BYTES as usize + 512 * 1024).await;
@@ -481,7 +486,7 @@ mod tests {
         );
         let hit = cache_get(url).expect("cached entry should be found");
         assert_eq!(hit.content, "hello");
-        // 过期条目被忽略
+        // Expired entries are ignored
         cache_put(
             url.to_string(),
             CacheEntry {

@@ -10,20 +10,21 @@ use async_trait::async_trait;
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
-/// 周期命令默认检查间隔（无显式 -n 时）。
+/// Default check interval for periodic commands (when no explicit -n is given).
 pub const DEFAULT_WATCH_INTERVAL_SECS: u64 = 5;
-/// 命令结束后等 reader 收尾的上限（孙进程仍持有管道时不无限等）。
+/// Upper bound for waiting on readers to drain after the command exits (so we don't
+/// wait forever if grandchild processes still hold the pipe).
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// 需要 TTY 的交互式命令拒绝原因（`!` 命令与 Bash 工具共用）。
-/// bingo 子进程 stdin/stdout 均为管道：全屏 TUI（top/htop/vim）输出乱码，
-/// ssh/fzf/sudo 等会直连 /dev/tty 抢占终端（raw mode 下画面被撕毁），
-/// 裸 shell/REPL 无输入即退出（无意义）。命中返回拒绝原因与可用替代。
-/// 交互式终端应用无法被 agent 的 bash 工具驱动。
+/// Rejection reason for interactive commands requiring a TTY (shared by the `!` command and the Bash tool).
+/// The bingo child process's stdin/stdout are pipes: full-screen TUIs (top/htop/vim) garble their output,
+/// ssh/fzf/sudo etc. grab the terminal by connecting to /dev/tty directly (tearing the screen in raw mode),
+/// and a bare shell/REPL exits immediately without input (pointless). On a match, returns the rejection
+/// reason and usable alternatives. Interactive terminal apps cannot be driven by the agent's bash tool.
 pub fn interactive_command_reason(command: &str) -> Option<String> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     let mut i = 0;
-    // 解包常见包装命令（sudo/env/nohup/command/exec/doas）。
+    // Unwrap common wrapper commands (sudo/env/nohup/command/exec/doas).
     while matches!(
         tokens.get(i).copied(),
         Some("sudo" | "doas" | "env" | "nohup" | "command" | "exec")
@@ -32,7 +33,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         i += 1;
         if i >= tokens.len() {
             return match wrapper {
-                // 裸 sudo/doas 会占 /dev/tty 问口令。
+                // A bare sudo/doas grabs /dev/tty to prompt for a password.
                 "sudo" | "doas" => {
                     Some("sudo/doas 需要交互口令（TTY），已拒绝".to_string())
                 }
@@ -40,8 +41,9 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
             };
         }
         if matches!(wrapper, "sudo" | "doas") {
-            // sudo 旗标：-i/-s 交互登录；取值旗标连值一起跳过。
-            // 旗标可能耗尽 tokens（`sudo -v`）：全程 get，末尾无命令时按裸 sudo 处理。
+            // sudo flags: -i/-s mean interactive login; value-taking flags are skipped
+            // together with their value. Flags may exhaust the tokens (`sudo -v`): keep
+            // getting throughout; if no command remains at the end, treat as bare sudo.
             let mut non_prompting = false;
             while let Some(flag) = tokens.get(i).copied().filter(|t| t.starts_with('-')) {
                 i += 1;
@@ -50,7 +52,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
                         "sudo 交互登录 shell（{flag}）需要 TTY，已拒绝"
                     ));
                 }
-                // 这些旗标不会弹口令提示（-n 直接失败，-k/-K 只清时间戳）。
+                // These flags never prompt for a password (-n fails immediately, -k/-K only clear timestamps).
                 if matches!(flag, "-n" | "--non-interactive" | "-k" | "-K" | "-V" | "--version") {
                     non_prompting = true;
                 }
@@ -68,7 +70,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
                     .then(|| "sudo/doas 需要交互口令（TTY），已拒绝".to_string());
             }
         } else if wrapper == "env" {
-            // env 的 VAR=value 赋值不是命令。
+            // env's VAR=value assignments are not commands.
             while tokens.get(i).is_some_and(|t| t.contains('=')) {
                 i += 1;
             }
@@ -77,7 +79,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
             }
         }
     }
-    // 空命令（或只有包装词）无基命令可判：放行给 shell。
+    // An empty command (or one with only wrappers) has no base command to judge: let the shell handle it.
     let base = tokens.get(i).copied()?;
     let name = std::path::Path::new(base)
         .file_name()
@@ -85,7 +87,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         .unwrap_or(base);
     let rest = &tokens[i + 1..];
 
-    // 全屏系统监控：允许 -b/--batch（一次性快照，非交互）。
+    // Full-screen system monitors: allow -b/--batch (one-shot snapshot, non-interactive).
     const MONITORS: &[&str] = &[
         "top", "htop", "btop", "bpytop", "bashtop", "btm", "nmon", "glances", "s-tui",
         "gtop", "vtop", "ktop", "ctop", "ytop",
@@ -119,14 +121,15 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
     if TUI_TOOLS.contains(&name) {
         return Some(format!("{name} 是交互式 TUI 程序（需要 TTY），已拒绝"));
     }
-    // gdb：无 -batch 即交互调试器。
+    // gdb: without -batch it is an interactive debugger.
     if name == "gdb"
         && !rest.iter().any(|a| matches!(*a, "-batch" | "--batch"))
     {
         return Some("gdb 调试器需要 TTY，已拒绝。批处理可用 `gdb -batch -ex ...`".to_string());
     }
-    // 裸 shell/REPL：无输入立即退出（无意义）；带参数（bash -c / python x.py）放行。
-    // DB 客户端另有规则：只有连接参数而无执行旗标/脚本/SQL 位置参数 = REPL。
+    // Bare shell/REPL: exits immediately without input (pointless); allow when given
+    // arguments (bash -c / python x.py). DB clients have separate rules: connection args
+    // without an execution flag/script/SQL positional argument = REPL.
     const REPLS: &[&str] = &[
         "bash", "sh", "zsh", "fish", "ksh", "dash", "elvish", "xonsh", "python", "python2",
         "python3", "ipython", "pypy", "node", "deno", "bun", "ruby", "irb", "perl", "php",
@@ -137,8 +140,8 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
             "{name} 是交互式 shell/REPL（需要 TTY），已拒绝。带参数执行（如 `{name} -c '...'`）可以"
         ));
     }
-    // DB 交互客户端：无执行旗标（-c/-e/-f/--eval…）、无 stdin 重定向、
-    // 无 SQL/脚本位置参数 → 会进入交互提示符。
+    // Interactive DB clients: without an execution flag (-c/-e/-f/--eval…), stdin redirection,
+    // or SQL/script positional arguments → they enter an interactive prompt.
     const DB_REPLS: &[&str] = &["sqlite3", "psql", "mysql", "mongosh", "redis-cli"];
     if DB_REPLS.contains(&name) {
         let flags = |exec: &[&str]| rest.iter().any(|a| exec.contains(a));
@@ -159,7 +162,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
                     && !has_stdin
                     && !positional.iter().any(|a| a.ends_with(".js"))
             }
-            // redis-cli：无位置参数即交互提示符。
+            // redis-cli: no positional arguments means an interactive prompt.
             _ => {
                 !flags(&["--version", "--help"]) && positional.is_empty() && !has_stdin
             }
@@ -170,7 +173,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
             ));
         }
     }
-    // ssh：-t 强制分配 TTY；或只有主机没有远程命令 = 交互会话（口令/远程 shell）。
+    // ssh: -t forces a TTY; or a host without a remote command = interactive session (password prompt/remote shell).
     if name == "ssh" {
         let tty = rest.iter().any(|a| matches!(*a, "-t" | "-tt"));
         let mut has_host = false;
@@ -206,7 +209,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
             );
         }
     }
-    // 容器 exec/run -it / attach：交互 shell。
+    // Container exec/run -it / attach: interactive shell.
     if matches!(name, "docker" | "nerdctl" | "podman" | "kubectl" | "docker-compose") {
         let sub = rest.first().copied().unwrap_or("");
         if sub == "attach" {
@@ -224,7 +227,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
             }
         }
     }
-    // tmux attach / 前台 new（无 -d）：需要 TTY；send-keys/capture-pane 等脚本用法放行。
+    // tmux attach / foreground new (no -d): needs a TTY; scripted uses like send-keys/capture-pane are allowed.
     if name == "tmux" {
         let sub = rest.first().copied().unwrap_or("");
         if matches!(sub, "attach" | "a" | "attach-session") {
@@ -237,8 +240,8 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
     None
 }
 
-/// 周期命令检查间隔识别：`watch -n N cmd` → N 秒；`watch cmd` /
-/// while/until/for 循环 / `tail -f` → 默认间隔。其余返回 None。
+/// Recognize the check interval of periodic commands: `watch -n N cmd` → N seconds; `watch cmd` /
+/// while/until/for loops / `tail -f` → default interval. Anything else returns None.
 pub fn periodic_bash_interval(command: &str) -> Option<std::time::Duration> {
     let mut parts = command.split_whitespace();
     let first = parts.next()?;
@@ -271,17 +274,19 @@ struct BashInput {
     #[serde(default)]
     #[schemars(description = "超时秒数，默认 120")]
     timeout: Option<u64>,
-    /// 后台监控的通知条件：任一字样出现在输出中即触发通知（如 ["ERROR", "panic"]）。
-    /// 不设置时默认检测常见错误行。
+    /// Background monitor notification conditions: any of these strings appearing in the output
+    /// triggers a notification (e.g. ["ERROR", "panic"]). When unset, common error lines are
+    /// detected by default.
     #[serde(default)]
     #[schemars(description = "后台监控通知条件：任一字样命中输出即通知（不设则默认检测错误行）")]
     notify_on: Option<Vec<String>>,
-    /// 后台监控的正则通知条件：输出行匹配即触发通知。
+    /// Background monitor regex notification condition: a matching output line triggers a notification.
     #[serde(default)]
     #[schemars(description = "后台监控正则通知条件：输出行匹配即通知")]
     notify_regex: Option<String>,
-    /// 后台化：立即返回 async_launched，完成时通知。对非依赖/长时命令
-    /// 使用（结果不立即需要时）；默认同步等待输出。
+    /// Background mode: returns async_launched immediately and notifies when done. Use for
+    /// non-dependent/long-running commands (when the result is not needed right away);
+    /// defaults to waiting for output synchronously.
     #[serde(default)]
     #[schemars(description = "后台执行（默认 false）：立即返回任务 id，完成时通知；对结果不立即需要的命令使用")]
     background: Option<bool>,
@@ -330,30 +335,33 @@ impl Tool for BashTool {
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: BashInput = parse_input(&input)?;
-        // 交互式/TTY 命令（top/htop/vim/ssh 等）：先拒绝，避免乱码与终端抢占。
+        // Interactive/TTY commands (top/htop/vim/ssh etc.): reject up front to avoid garbled
+        // output and terminal hijacking.
         if let Some(reason) = interactive_command_reason(&params.command) {
             return Err(ToolError::failed(reason));
         }
         let timeout = Duration::from_secs(params.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS));
 
-        // 周期命令（watch/while/until/for/tail -f）自动后台化：
-        // 立即返回 async_launched，后台执行 + 轮次检查 + 完成通知。
+        // Periodic commands (watch/while/until/for/tail -f) are backgrounded automatically:
+        // immediately return async_launched; background execution + per-round checks + completion notification.
         if let Some(interval) = periodic_bash_interval(&params.command) {
             return launch_background(&params, ctx, Some(interval)).await;
         }
-        // 显式后台化：非依赖/长时命令（如 cargo build、npm install），
-        // 结果不立即需要时主 agent 不等。
+        // Explicit backgrounding: for non-dependent/long-running commands (e.g. cargo build,
+        // npm install), the main agent does not wait when the result is not needed immediately.
         if params.background.unwrap_or(false) {
             return launch_background(&params, ctx, None).await;
         }
 
         let mut command = shell_command(&params.command, &ctx.cwd);
-        // 回合被中断（Esc）时 future drop 会连带杀掉子进程，不留孤儿。
+        // When the turn is interrupted (Esc), dropping the future kills the child process too,
+        // leaving no orphans.
         command.kill_on_drop(true);
         let child = command
             .spawn()
             .map_err(|e| ToolError::failed(format!("failed to run command: {e}")))?;
-        // 进程组 leader = 子 shell 自身：超时时整组清理，孙进程不孤儿化。
+        // Process group leader = the child shell itself: on timeout the whole group is cleaned
+        // up; grandchild processes are not orphaned.
         let pgid = child.id();
 
         let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
@@ -393,8 +401,8 @@ impl Tool for BashTool {
     }
 }
 
-/// 子 shell 命令：独立进程组（超时/取消时整组清理）、stdin 断开
-/// （子进程不得抢 TUI 输入）、stdout/stderr 走管道。
+/// Child shell command: its own process group (whole group cleaned up on timeout/cancel),
+/// stdin disconnected (child must not steal TUI input), stdout/stderr through pipes.
 fn shell_command(command: &str, cwd: &std::path::Path) -> tokio::process::Command {
     use std::os::unix::process::CommandExt;
     let mut std_command = std::process::Command::new("/bin/zsh");
@@ -405,13 +413,14 @@ fn shell_command(command: &str, cwd: &std::path::Path) -> tokio::process::Comman
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        // 新进程组：pgid == 子 shell pid，孙进程一并落在组内。
+        // New process group: pgid == child shell pid; grandchild processes land in the same group.
         .process_group(0);
     tokio::process::Command::from(std_command)
 }
 
-/// 杀掉整个进程组（孙进程一并清理）。
-/// AGENTS.md 禁 unsafe，killpg(2) 走 `/bin/sh` 内建 kill 的负 pid 语义达成。
+/// Kill the whole process group (grandchild processes cleaned up as well).
+/// AGENTS.md forbids unsafe, so killpg(2) is achieved via `/bin/sh`'s built-in kill
+/// with a negative pid.
 async fn kill_process_group(pgid: u32) {
     let script = format!("kill -TERM -{pgid} 2>/dev/null; kill -KILL -{pgid} 2>/dev/null");
     let _ = tokio::process::Command::new("/bin/sh")
@@ -424,9 +433,10 @@ async fn kill_process_group(pgid: u32) {
         .await;
 }
 
-/// 周期命令后台执行：注册 watchable（interval 轮询）+ spawn 流式执行。
-/// interval=None（显式 background）也要轮询：否则 notify_on/notify_regex/
-/// 默认 Errors 条件无人驱动，静默失效。
+/// Run a periodic command in the background: register a watchable (interval polling) +
+/// spawn streaming execution. interval=None (explicit background) must also poll:
+/// otherwise notify_on/notify_regex/the default Errors condition are never driven
+/// and silently fail.
 async fn launch_background(
     params: &BashInput,
     ctx: &ToolContext,
@@ -444,8 +454,8 @@ async fn launch_background(
     }
     let cell = Arc::new(BashCell::new());
     let label = format!("$ {}", params.command);
-    // 周期命令的轮次语义（Idle = 一轮）只对 watch/loop 类命令成立；
-    // 显式 background 只借轮询驱动条件匹配，状态保持 Running。
+    // Round semantics for periodic commands (Idle = one round) only apply to watch/loop-style
+    // commands; explicit background only uses polling to drive condition matching, staying Running.
     let periodic = interval.is_some();
     let id = ctx
         .watch
@@ -460,7 +470,7 @@ async fn launch_background(
     let command = params.command.clone();
     let cwd = ctx.cwd.clone();
     tokio::spawn(async move {
-        // 后台任务独立生命周期：周期命令不受单次 timeout 限制。
+        // Background tasks have their own lifecycle: periodic commands are not limited by a single timeout.
         match run_streaming(&command, &cwd, None, cell, watch.clone(), id).await {
             Ok((text, code)) => {
                 watch.set_state(
@@ -488,7 +498,7 @@ async fn launch_background(
     })
 }
 
-/// 流式执行：逐行读输出（更新行数统计），命令结束返回全文 + 退出码。
+/// Streaming execution: read output line by line (updating line counts), return full text + exit code when done.
 async fn run_streaming(
     command: &str,
     cwd: &std::path::Path,
@@ -549,8 +559,8 @@ async fn run_streaming(
             Err(e) => return Err(format!("failed to wait: {e}")),
         },
     };
-    // 孙进程可能仍持有 stdout：join 加超时兜底，否则 reader 永挂、
-    // watch 条目永远停在 Running。
+    // Grandchild processes may still hold stdout: guard the join with a timeout, otherwise
+    // readers hang forever and the watch entry stays Running.
     for mut reader in readers {
         if tokio::time::timeout(READER_DRAIN_TIMEOUT, &mut reader)
             .await
@@ -568,7 +578,7 @@ async fn run_streaming(
     Ok((text, code))
 }
 
-/// 后台 Bash 的共享执行状态：轮次 = 自上次 poll 以来的新输出行。
+/// Shared execution state for background Bash: a round = new output lines since the last poll.
 struct BashCell {
     started: Instant,
     rounds: AtomicUsize,
@@ -618,7 +628,8 @@ struct BashWatch {
     cell: Arc<BashCell>,
     label: String,
     interval: Duration,
-    /// 周期命令（watch/loop/tail -f）才有轮次语义；显式 background 只借轮询驱动条件。
+    /// Only periodic commands (watch/loop/tail -f) have round semantics; explicit
+    /// background only uses polling to drive conditions.
     periodic: bool,
 }
 
@@ -710,7 +721,7 @@ mod tests {
             .unwrap();
         let text = result.content.as_str().unwrap();
         assert!(text.contains("async_launched"), "launched: {text}");
-        // 后台任务完成 → Done 事件 + 通知含输出。
+        // Background task completion → Done event + notification contains output.
         let mut rx = watch.subscribe();
         let deadline = std::time::Instant::now() + Duration::from_secs(8);
         let mut done = false;
@@ -753,8 +764,9 @@ mod tests {
         assert_eq!(periodic_bash_interval("git status"), None);
     }
 
-    /// 交互式/TTY 命令拒绝：全屏 TUI、编辑器、裸 shell/REPL、无命令 ssh、
-    /// 容器 -it、tmux 前台一律拒绝；批量快照/带参数/脚本用法放行。
+    /// Interactive/TTY commands are rejected: full-screen TUIs, editors, bare shell/REPL,
+    /// ssh without a command, container -it, and foreground tmux are all refused; batch
+    /// snapshots/commands with arguments/scripted uses are allowed.
     #[test]
     fn rejects_interactive_tty_commands() {
         let rejected = [
@@ -846,17 +858,18 @@ mod tests {
         }
     }
 
-    /// 回归：旗标耗尽 tokens 时曾越界索引 panic（`sudo -v` / `sudo -k` / 空命令）。
+    /// Regression: flag parsing once panicked on out-of-bounds indexing when flags
+    /// exhausted the tokens (`sudo -v` / `sudo -k` / empty command).
     #[test]
     fn flag_only_wrapper_commands_do_not_panic() {
-        // 会弹口令的 sudo 变体：拒绝但不 panic。
+        // sudo variants that prompt for a password: rejected without panicking.
         for cmd in ["sudo -v", "sudo -u root", "sudo -p prompt", "doas -"] {
             assert!(
                 interactive_command_reason(cmd).is_some(),
                 "应当拒绝且不 panic: {cmd}"
             );
         }
-        // 不弹口令 / 无基命令：放行且不 panic。
+        // No password prompt / no base command: allowed without panicking.
         for cmd in ["", "   ", "sudo -k", "sudo -n", "sudo -K", "env", "nohup", "exec"] {
             assert_eq!(
                 interactive_command_reason(cmd),
@@ -866,7 +879,7 @@ mod tests {
         }
     }
 
-    /// 超时：整个进程组被清理，孙进程不孤儿化。
+    /// Timeout: the whole process group is cleaned up; grandchild processes are not orphaned.
     #[tokio::test]
     async fn timeout_kills_whole_process_group() {
         let marker = std::env::temp_dir()
@@ -883,7 +896,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
         };
-        // 孙进程写下自己的 pid 后长睡；父 shell 也长睡触发超时。
+        // The grandchild writes its pid then sleeps; the parent shell also sleeps to trigger the timeout.
         let command = format!(
             "( sleep 30 & echo $! > {} ); sleep 30",
             marker.to_string_lossy()
@@ -896,7 +909,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
-        // 组清理是异步信号：给内核一点时间。
+        // Group cleanup is an asynchronous signal: give the kernel a moment.
         tokio::time::sleep(Duration::from_millis(500)).await;
         let pid = std::fs::read_to_string(&marker)
             .unwrap_or_default()
@@ -913,7 +926,8 @@ mod tests {
         assert!(!alive, "孙进程 {pid} 应随进程组一起被清理");
     }
 
-    /// 回归：background:true（非周期）也要驱动条件匹配，notify_on 不再静默失效。
+    /// Regression: background:true (non-periodic) must also drive condition matching;
+    /// notify_on no longer silently fails.
     #[tokio::test]
     async fn explicit_background_conditions_fire() {
         let watch = crate::watch::WatchRegistry::new();
@@ -956,7 +970,7 @@ mod tests {
         assert!(signalled, "notify_on 条件应在后台任务上触发信号");
     }
 
-    /// 交互式命令在 Bash 工具层被拒绝（模型路径同样生效）。
+    /// Interactive commands are rejected at the Bash tool layer (the model path is covered too).
     #[tokio::test]
     async fn bash_tool_refuses_interactive_commands() {
         let ctx = ToolContext {

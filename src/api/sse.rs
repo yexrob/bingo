@@ -1,13 +1,17 @@
-/// 未成帧缓冲上限：越过即判定协议错误，而不是无界增长到 OOM。
+/// Unframed-buffer ceiling: past this it is judged a protocol error, instead
+/// of growing unboundedly until OOM.
 const MAX_BUFFERED: usize = 8 * 1024 * 1024;
 
-/// 帧边界最长 4 字节（`\r\n\r\n`）：续扫时回退 3 字节，避免漏掉跨 chunk 的边界。
+/// A frame boundary is at most 4 bytes (`\r\n\r\n`): the rescan rolls back
+/// 3 bytes so a boundary split across chunks is not missed.
 const BOUNDARY_OVERLAP: usize = 3;
 
-/// 增量 SSE 帧解析：字节流 → 完整事件块（event/data 对）。
+/// Incremental SSE frame parser: byte stream → complete event blocks
+/// (event/data pairs).
 pub struct SseParser {
     buf: Vec<u8>,
-    /// 已确认无边界的前缀长度（下次从这里减去重叠续扫，避免 O(k·n) 全量重扫）。
+    /// Length of the prefix confirmed to have no boundary (the rescan starts
+    /// from here minus the overlap, avoiding an O(k·n) full rescan).
     scanned: usize,
 }
 
@@ -22,8 +26,9 @@ impl SseParser {
         Self { buf: Vec::with_capacity(1024), scanned: 0 }
     }
 
-    /// 喂入原始字节，返回本次累积出的完整帧。
-    /// 缓冲超过 MAX_BUFFERED 仍未成帧即报协议错误。
+    /// Feed raw bytes; returns the complete frames accumulated this round.
+    /// If the buffer exceeds MAX_BUFFERED without framing, that is a
+    /// protocol error.
     pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<SseFrame>, String> {
         self.buf.extend_from_slice(chunk);
         let mut frames = Vec::new();
@@ -49,7 +54,8 @@ impl SseParser {
     }
 }
 
-/// 定位帧边界（`\n\n` 或 `\r\n\r\n`），返回边界**末字节**的索引。
+/// Locate a frame boundary (`\n\n` or `\r\n\r\n`), returning the index of the
+/// boundary's **last** byte.
 fn find_block_end(buf: &[u8]) -> Option<usize> {
     let lf_lf = buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 1);
     let crlf_crlf = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 3);
@@ -131,7 +137,8 @@ mod tests {
         assert_eq!(frames[0].event, "ping");
     }
 
-    /// LF-LF 与 CRLF-CRLF 的下标语义一致：边界整体消费，缓冲不留残余换行。
+    /// LF-LF and CRLF-CRLF share the same index semantics: the boundary is
+    /// consumed whole, leaving no residual newline in the buffer.
     #[test]
     fn lf_and_crlf_boundaries_consume_the_whole_separator() {
         for sep in ["\n\n", "\r\n\r\n"] {
@@ -143,7 +150,8 @@ mod tests {
         }
     }
 
-    /// 边界跨 chunk 落在续扫重叠区内，仍能被认出来。
+    /// A boundary split across chunks, landing in the rescan overlap region,
+    /// is still recognised.
     #[test]
     fn boundary_split_across_chunks_is_found() {
         let mut p = SseParser::new();
@@ -154,7 +162,8 @@ mod tests {
         assert_eq!(frames[1].event, "message_stop");
     }
 
-    /// 永不成帧的流不得无界增长：越过上限报协议错误。
+    /// A stream that never frames must not grow unboundedly: past the
+    /// ceiling it is a protocol error.
     #[test]
     fn unbounded_buffer_is_a_protocol_error() {
         let mut p = SseParser::new();

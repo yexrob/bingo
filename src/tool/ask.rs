@@ -5,8 +5,8 @@ use serde::Deserialize;
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-/// 单条问题：
-/// options 2-4 个、label 唯一；header 为短标签（≤12 字符）。
+/// A single question:
+/// 2-4 options with unique labels; header is a short tag (≤12 chars).
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 struct AskQuestion {
@@ -41,8 +41,8 @@ const MAX_QUESTIONS: usize = 4;
 const MIN_OPTIONS: usize = 2;
 const MAX_OPTIONS: usize = 4;
 
-/// 问用户选择题：暂停回合，用户以数字键回答，
-/// Esc 跳过。答案回填模型（`The user answered: "q"="a"`）；全部未答 →
+/// Asks the user multiple-choice questions: the turn pauses and the user answers with number keys;
+/// Esc skips. Answers are fed back to the model (`The user answered: "q"="a"`); if none were answered →
 /// `The user did not answer the questions.`
 pub struct AskUserQuestionTool;
 
@@ -67,7 +67,7 @@ impl Tool for AskUserQuestionTool {
     }
 
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
-        // 阻塞等待用户回答，不能与其他工具并行。
+        // Blocks waiting for the user's answer, so it cannot run in parallel with other tools.
         false
     }
 
@@ -122,7 +122,7 @@ impl Tool for AskUserQuestionTool {
     }
 }
 
-/// 输入约束：questions 1-4、options 2-4、问题与选项各自唯一。
+/// Input constraints: 1-4 questions, 2-4 options each, and unique question/label texts.
 fn validate(params: &AskUserQuestionInput) -> Result<(), ToolError> {
     let n = params.questions.len();
     if !(1..=MAX_QUESTIONS).contains(&n) {
@@ -180,24 +180,24 @@ mod tests {
     #[test]
     fn rejects_bad_input() {
         let cases = [
-            // 空 questions
+            // empty questions
             serde_json::json!({"questions": []}),
-            // 5 个问题
+            // 5 questions
             serde_json::json!({"questions": (0..5).map(|i| serde_json::json!({
                 "question": format!("q{i}?"),
                 "options": [{"label": "a"}, {"label": "b"}],
             })).collect::<Vec<_>>()}),
-            // 单选项
+            // single option
             serde_json::json!({"questions": [{
                 "question": "q?",
                 "options": [{"label": "a"}],
             }]}),
-            // 重复 label
+            // duplicate label
             serde_json::json!({"questions": [{
                 "question": "q?",
                 "options": [{"label": "a"}, {"label": "a"}],
             }]}),
-            // 重复问题文本
+            // duplicate question text
             serde_json::json!({"questions": [
                 {"question": "same?", "options": [{"label": "a"}, {"label": "b"}]},
                 {"question": "same?", "options": [{"label": "c"}, {"label": "d"}]},
@@ -209,8 +209,8 @@ mod tests {
         }
     }
 
-    /// 端到端：AskUserQuestion 经执行队列调用，ask_question 回调返回选项索引，
-    /// 结果按 CC 格式回填。
+    /// End-to-end: AskUserQuestion is invoked through the execution queue; the ask_question callback
+    /// returns an option index and the result is fed back in the CC format.
     #[tokio::test]
     async fn asks_and_returns_answer() {
         let ctx = ToolContext {
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(text, "The user answered: \"用哪个库？\"=\"B\"");
     }
 
-    /// Other 自由输入：答案回填为自定义文本（CC 自动提供的 Other 选项）。
+    /// Other free-form input: the answer is fed back as custom text (the Other option CC provides automatically).
     #[tokio::test]
     async fn other_text_answer_backfills_raw_text() {
         let ctx = ToolContext {
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(text, "The user answered: \"用哪个库？\"=\"用 serde\"");
     }
 
-    /// Esc 跳过（None）→ 未回答。
+    /// Esc skip (None) → treated as not answered.
     #[tokio::test]
     async fn skipped_returns_did_not_answer() {
         let ctx = ToolContext {
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(text, "The user did not answer the questions.");
     }
 
-    /// multiSelect 暂不支持：报错让模型改单选。
+    /// multiSelect is not supported yet: the error instructs the model to use single-select.
     #[tokio::test]
     async fn multi_select_rejected() {
         let ctx = ToolContext {
@@ -355,7 +355,7 @@ mod tests {
         assert!(err.to_string().contains("multiSelect"), "{err}");
     }
 
-    /// 与 Bash 并置时执行队列串行化（AskUserQuestion 阻塞等待回答）。
+    /// When placed alongside Bash, the execution queue serializes them (AskUserQuestion blocks for the answer).
     #[tokio::test]
     async fn ask_question_is_not_concurrency_safe() {
         let ctx = ToolContext {

@@ -6,16 +6,18 @@ use crate::hooks::{run_post_compact, run_pre_compact};
 use crate::permission::PermissionMode;
 use crate::query::Session;
 
-/// 压缩后保留的最近消息条数。
+/// Number of most recent messages kept after compaction.
 const KEEP_RECENT: usize = 8;
 
-/// count_tokens 实测间隔（轮）：每轮一次 = 一次额外往返，20 工具轮就是 20 次。
+/// count_tokens measurement interval (turns): measuring every turn = one extra round
+/// trip each; 20 tool turns = 20 round trips.
 const COUNT_TOKENS_INTERVAL: u32 = 5;
 
-/// 本地估算比上次实测涨过这么多就提前实测一次。
+/// Measure early when the local estimate has grown this much over the last exact count.
 const COUNT_TOKENS_GROWTH: u64 = 20_000;
 
-/// count_tokens 不可用只警告一次（非 Anthropic 端点每轮刷屏没有意义）。
+/// Warn only once when count_tokens is unavailable (no point spamming every turn on
+/// non-Anthropic endpoints).
 static COUNT_TOKENS_WARNED: AtomicBool = AtomicBool::new(false);
 
 const COMPACT_PROMPT: &str = "\
@@ -26,9 +28,10 @@ const COMPACT_PROMPT: &str = "\
 对话内容：
 ";
 
-/// 压缩切点：从 split 向后推进到第一条不含 tool_result 的消息边界。
-/// 硬切会把 assistant(tool_use)/user(tool_result) 对切开，保留侧首条成为
-/// 孤儿 tool_result，此后每个请求都 400。
+/// Compaction split point: advance from split to the first message boundary that
+/// contains no tool_result.
+/// A hard cut would split the assistant(tool_use)/user(tool_result) pair, leaving an
+/// orphan tool_result as the kept side's first message — every later request then 400s.
 fn safe_split(messages: &[Message], split: usize) -> usize {
     let mut split = split;
     while split < messages.len()
@@ -42,7 +45,7 @@ fn safe_split(messages: &[Message], split: usize) -> usize {
     split
 }
 
-/// 旧消息 → 摘要提示词。
+/// Old messages → summary prompt.
 fn summary_prompt(old: &[Message]) -> String {
     let mut prompt = String::from(COMPACT_PROMPT);
     for message in old {
@@ -61,10 +64,13 @@ fn summary_prompt(old: &[Message]) -> String {
     prompt
 }
 
-/// 上下文超阈值时自动压缩：旧消息 → 模型摘要，保留最近 KEEP_RECENT 条。
-/// 成功清零熔断计数；失败递增（连续 MAX_COMPACT_FAILURES 次后由调用方跳过）。
-/// 摘要拿到之前不动 messages——失败时原样保留，绝不用占位串顶替真实历史。
-/// 返回是否发生了压缩。
+/// Auto-compact when context exceeds the threshold: old messages → model summary,
+/// keep the most recent KEEP_RECENT.
+/// Success resets the circuit breaker; failure increments it (after
+/// MAX_COMPACT_FAILURES consecutive failures the caller skips).
+/// messages aren't touched until the summary arrives — on failure history is kept
+/// verbatim, never replaced by a placeholder string.
+/// Returns whether compaction happened.
 pub async fn maybe_compact(
     session: &Session,
     messages: &mut Vec<Message>,
@@ -124,9 +130,9 @@ pub async fn maybe_compact(
     true
 }
 
-/// count_tokens 不可用时的本地估算：约 4 字符 1 token。
-/// 非 Anthropic 端点（DeepSeek/ollama）没有这个接口，静默 return
-/// 会让自动压缩永不触发、上下文一路涨到爆。
+/// Local estimate when count_tokens is unavailable: ~4 chars per token.
+/// Non-Anthropic endpoints (DeepSeek/ollama) lack this API; silently returning
+/// would mean auto-compact never triggers and context grows until it explodes.
 fn estimate_tokens(system: &[SystemBlock], messages: &[Message]) -> u64 {
     let mut chars: usize = system.iter().map(|b| b.text.chars().count()).sum();
     for message in messages {
@@ -138,7 +144,7 @@ fn estimate_tokens(system: &[SystemBlock], messages: &[Message]) -> u64 {
                     name.chars().count() + input.to_string().chars().count()
                 }
                 ContentBlock::ToolResult { content, .. } => content.to_string().chars().count(),
-                // 图片块按 base64 长度估算（真实占位大头）。
+                // Image blocks estimated by base64 length (the real token hog).
                 ContentBlock::Image { source } => source.data.chars().count(),
             };
         }
@@ -146,12 +152,13 @@ fn estimate_tokens(system: &[SystemBlock], messages: &[Message]) -> u64 {
     (chars / 4) as u64
 }
 
-/// count_tokens 调用节流：回合开始必测，之后每 COUNT_TOKENS_INTERVAL 轮、
-/// 或本地估算比上次实测涨过 COUNT_TOKENS_GROWTH 才再测；其余轮按
-/// 「上次实测 + 估算增量」外推，避免每轮都多一次往返。
+/// count_tokens call throttling: always measured at turn start, then every
+/// COUNT_TOKENS_INTERVAL turns or when the local estimate has grown past
+/// COUNT_TOKENS_GROWTH over the last exact count; other turns extrapolate from
+/// "last exact + estimate delta" to avoid one extra round trip per turn.
 #[derive(Debug, Default)]
 pub struct TokenGate {
-    /// (上次实测值, 当时的本地估算)。
+    /// (last exact count, local estimate at that time).
     last: Option<(u64, u64)>,
     turns_since_exact: u32,
 }
@@ -174,7 +181,8 @@ impl TokenGate {
         self.turns_since_exact = 0;
     }
 
-    /// 未实测的轮：按估算增量从上次实测值外推。
+    /// Turns without an exact count: extrapolate from the last exact value by the
+    /// estimate delta.
     fn project(&mut self, estimate: u64) -> u64 {
         self.turns_since_exact = self.turns_since_exact.saturating_add(1);
         match self.last {
@@ -184,7 +192,8 @@ impl TokenGate {
     }
 }
 
-/// 每轮请求前调用：token 超阈值即压缩；熔断后跳过并提醒。
+/// Called before every turn's request: compact when tokens exceed the threshold; skip
+/// and remind once the breaker has tripped.
 pub async fn check_and_compact(
     session: &Session,
     messages: &mut Vec<Message>,
@@ -283,8 +292,9 @@ mod tests {
         assert!(AUTOCOMPACT_THRESHOLD < crate::budget::CONTEXT_WINDOW);
     }
 
-    /// 切点落在 tool_use/tool_result 对中间时向后推进：
-    /// 保留侧首条不得是孤儿 tool_result（否则此后每个请求都 400）。
+    /// When the split point lands mid tool_use/tool_result pair, advance:
+    /// the kept side's first message must not be an orphan tool_result (otherwise every
+    /// later request 400s).
     #[test]
     fn split_advances_past_tool_result_boundary() {
         let messages = vec![
@@ -293,7 +303,7 @@ mod tests {
             tool_result("tu_1"),
             text(Role::Assistant, "done"),
         ];
-        // 硬切点 2 会把 tool_use/tool_result 对切开。
+        // Hard split point 2 would cut the tool_use/tool_result pair.
         let split = safe_split(&messages, 2);
         assert_eq!(split, 3, "推进到 tool_result 之后");
         assert!(
@@ -305,7 +315,7 @@ mod tests {
         );
     }
 
-    /// 连续多个 tool_result 也要一路推过去。
+    /// Consecutive tool_results must all be advanced past too.
     #[test]
     fn split_advances_past_consecutive_tool_results() {
         let messages = vec![
@@ -324,15 +334,16 @@ mod tests {
         assert_eq!(safe_split(&messages, 1), 1);
     }
 
-    /// 全是 tool_result 时推到末尾，maybe_compact 会因 split == len 而全量压缩，
-    /// 但绝不会越界。
+    /// All tool_results: advance to the end; maybe_compact then fully compacts because
+    /// split == len, but never out of bounds.
     #[test]
     fn split_never_exceeds_len() {
         let messages = vec![tool_result("a"), tool_result("b")];
         assert_eq!(safe_split(&messages, 0), messages.len());
     }
 
-    /// count_tokens 不可用时的本地估算：随内容单调增长，不恒为 0。
+    /// Local estimate when count_tokens is unavailable: grows monotonically with
+    /// content, never stuck at 0.
     #[test]
     fn local_estimate_grows_with_content() {
         let system = vec![SystemBlock { text: "s".repeat(400), cache: false }];
@@ -344,12 +355,13 @@ mod tests {
         assert!(with_message > empty);
         assert_eq!(with_message, 1_100);
 
-        // tool_use / tool_result 也计入，不然工具轮的增长看不见。
+        // tool_use / tool_result count too, otherwise tool-turn growth is invisible.
         let with_tools = estimate_tokens(&system, &[tool_use("a"), tool_result("a")]);
         assert!(with_tools > empty);
     }
 
-    /// 节流：首轮必测；随后按间隔或估算增量决定，其余轮外推。
+    /// Throttling: first turn always measures; then by interval or estimate growth,
+    /// other turns extrapolate.
     #[test]
     fn token_gate_throttles_exact_counts() {
         let mut gate = TokenGate::new();

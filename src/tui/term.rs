@@ -1412,22 +1412,28 @@ mod tests {
         assert_eq!(&screen[3..8], &["u0", "u1", "u2", "c0", "c1"]);
     }
 
-    /// 回归（真机回修五）：收缩把顶行清空进银行后再增长（reclaim 路径），
-    /// prev buffer 必须继续镜像物理屏——曾被整个清空成「全空白」，diff 便
-    /// 认定屏幕已空：新帧的空行不清底下的旧字、变短的行不清行尾。真机上
-    /// 回合结束（status 行消失 → 收缩）后按 Ctrl+C（notice 行出现 → 增长）
-    /// 稳定触发整屏错位重影。
+    /// Regression (real-machine fix five): after a shrink clears the top row
+    /// into the bank and a grow (reclaim path) follows, the prev buffer must
+    /// keep mirroring the physical screen — it was once wiped completely
+    /// blank, so the diff believed the screen was empty: blank rows in the new
+    /// frame then never erased the stale glyphs underneath, and shortened
+    /// rows never cleared their line tails. On a real machine, pressing
+    /// Ctrl+C after a turn ends (status line disappears → shrink) then grows
+    /// (notice line appears → grow) reliably triggers whole-screen
+    /// misalignment ghosting.
     #[test]
     fn grow_after_shrink_repaints_over_every_stale_row() {
         let mut term = term(10, 12, 0);
         term.draw(4, paint(&["aaaa", "bbbb", "cccc", "dddd"]), None)
             .unwrap();
-        // 收缩 1 行：视口底锚（y=1），顶行清空进银行。
+        // Shrink by 1 row: the viewport stays bottom-anchored (y=1) and the
+        // top row is cleared into the bank.
         term.draw(3, paint(&["bbbb", "cccc", "dddd"]), None).unwrap();
         assert_eq!(term.gap_above, 1);
         assert_eq!(term.viewport(), Rect::new(0, 1, 10, 3));
 
-        // 增长回 4 行走 reclaim：新帧在旧字位置对出一个空行和一个短行。
+        // Grow back to 4 rows via reclaim: the new frame diffs a blank row
+        // and a short row against the stale glyphs.
         term.draw(4, paint(&["eeee", "", "ffff", "gg"]), None).unwrap();
 
         assert_eq!(term.viewport(), Rect::new(0, 0, 10, 4));

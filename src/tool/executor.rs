@@ -5,14 +5,15 @@ use super::{Tool, ToolContext, ToolError, ToolResult};
 
 pub const MAX_CONCURRENCY: usize = 10;
 
-/// 等待下一次「取消」信号。
+/// Wait for the next "cancel" signal.
 ///
-/// 两个必须点（否则 select 分支会空转或误触发）：
-/// 1. 先 `borrow_and_update` 清掉版本，`changed()` 才只在真正的新信号上就绪
-///    ——否则 subscribe 晚于 `send_replace` 的新 receiver 立刻 ready，
-///    select 随机挑分支，约半数回合会丢掉已发出的请求重发；
-/// 2. sender 被 drop 后 `changed()` 恒 Err 立即返回，必须视作「不可再取消」
-///    并挂起，绝不能让调用方继续循环重建工作。
+/// Two must-haves (otherwise the select branches idle-spin or misfire):
+/// 1. Call `borrow_and_update` first to clear the version, so `changed()` only becomes ready
+///    on a genuinely new signal — otherwise a receiver subscribed after `send_replace` is
+///    immediately ready, select picks a branch at random, and roughly half the turns would
+///    drop the already-sent request and resend it;
+/// 2. After the sender is dropped, `changed()` keeps returning Err immediately: treat it as
+///    "no longer cancellable" and park, never let the caller keep looping to rebuild work.
 pub(crate) async fn cancel_requested(cancel: &mut watch::Receiver<bool>) -> bool {
     loop {
         if cancel.changed().await.is_err() {
@@ -24,7 +25,7 @@ pub(crate) async fn cancel_requested(cancel: &mut watch::Receiver<bool>) -> bool
     }
 }
 
-/// 一轮中待执行的工具调用（已通过权限门）。
+/// Tool calls pending execution in a turn (already past the permission gate).
 pub struct PendingCall<'a> {
     pub tool_use_id: String,
     pub tool: &'a dyn Tool,
@@ -34,15 +35,16 @@ pub struct PendingCall<'a> {
 pub struct ExecOutcome {
     pub tool_use_id: String,
     pub result: Result<ToolResult, ToolError>,
-    /// 工具执行耗时（毫秒）。
+    /// Tool execution duration in milliseconds.
     pub duration_ms: u64,
 }
 
-/// 执行队列（D7）：
-/// 连续 concurrency-safe 的工具一批并行（上限 MAX_CONCURRENCY），
-/// 非 safe 工具单独串行；结果保持入队顺序。
-/// cancel：Some 时每批与中断信号竞争——信号到达立即停止（正在执行的
-/// future drop 即取消），已完成的保留返回；调用方丢弃整轮（不回填）。
+/// Execution queue (D7):
+/// consecutive concurrency-safe tools run in parallel batches (capped at MAX_CONCURRENCY),
+/// non-safe tools run serially on their own; results keep insertion order.
+/// cancel: when Some, each batch races the interruption signal — on arrival, stop immediately
+/// (in-flight futures are cancelled by dropping), completed results are kept and returned;
+/// the caller discards the whole turn (no backfill).
 pub async fn execute_calls<'a>(
     calls: Vec<PendingCall<'a>>,
     ctx: &ToolContext,
@@ -83,10 +85,10 @@ pub async fn execute_calls<'a>(
     (outcomes, false)
 }
 
-/// 一批并行执行；cancel 命中返回 `(已完成的结果, 中断)`。
-/// 逐个收（FuturesUnordered）而不是整批 join_all：中断时已跑完的工具
-/// 副作用已经发生，结果必须保留，否则 UI 报 interrupted 会误导用户。
-/// 结果按入队顺序返回。
+/// Run a batch in parallel; on cancel hit returns `(completed results, interrupted)`.
+/// Collect one by one (FuturesUnordered) rather than join_all: on interruption, tools that
+/// already finished have side effects that happened, so results must be kept, otherwise
+/// the UI reporting "interrupted" would mislead the user. Results keep insertion order.
 async fn run_batch<'a>(
     batch: &[PendingCall<'a>],
     ctx: &ToolContext,
@@ -104,7 +106,8 @@ async fn run_batch<'a>(
 
     let mut done: Vec<Option<ExecOutcome>> = (0..batch.len()).map(|_| None).collect();
     let mut aborted = false;
-    // 清版本的同时认已置位的信号：批次之间到达的取消不能被 borrow_and_update 吞掉。
+    // Acknowledge an already-set signal while clearing the version: a cancel arriving between
+    // batches must not be swallowed by borrow_and_update.
     if let Some(cancel) = cancel.as_deref_mut()
         && *cancel.borrow_and_update()
     {
@@ -133,7 +136,7 @@ async fn run_batch<'a>(
     (done.into_iter().flatten().collect(), aborted)
 }
 
-/// 单个工具执行；cancel 命中返回 None（中断）。
+/// Run a single tool; on cancel hit returns None (interrupted).
 async fn call_or_cancel<'a>(
     call: &PendingCall<'a>,
     ctx: &ToolContext,
@@ -143,7 +146,7 @@ async fn call_or_cancel<'a>(
     futures_util::pin_mut!(fut);
     match cancel {
         Some(cancel) => {
-            // 清版本的同时认已置位的信号（见 run_batch 同处注释）。
+            // Acknowledge an already-set signal while clearing the version (see the same note in run_batch).
             if *cancel.borrow_and_update() {
                 return None;
             }
@@ -416,8 +419,8 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
-    /// 并行批次被中断：已跑完的工具（副作用已发生）结果必须保留，
-    /// 而不是随 join_all 一起丢掉。
+    /// A parallel batch interrupted: results of already-finished tools (whose side effects
+    /// have happened) must be kept, not discarded with join_all.
     #[tokio::test]
     async fn cancel_keeps_completed_results_in_parallel_batch() {
         let counter = Arc::new(AtomicUsize::new(0));
@@ -457,8 +460,9 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 2, "只有两个跑完");
     }
 
-    /// send_replace(false) 后订阅的 receiver：changed() 会立刻就绪，
-    /// 但那不是取消——工具必须照常跑完，不能被误判中断。
+    /// A receiver subscribed after send_replace(false): changed() becomes ready immediately,
+    /// but that is not a cancel — the tool must finish normally and must not be misjudged
+    /// as interrupted.
     #[tokio::test]
     async fn stale_watch_version_does_not_cancel() {
         let (tx, _seed) = tokio::sync::watch::channel(false);
@@ -483,8 +487,9 @@ mod tests {
         assert_eq!(outcomes.len(), 2);
     }
 
-    /// sender 被 drop：changed() 恒 Err，必须视作「不可再取消」并挂起，
-    /// 而不是让 select 分支立刻就绪把工作反复重建（紧循环）。
+    /// Sender dropped: changed() keeps returning Err, which must be treated as "no longer
+    /// cancellable" and parked, rather than letting the select branch become ready and
+    /// repeatedly rebuild work (tight loop).
     #[tokio::test]
     async fn dropped_sender_never_cancels() {
         let (tx, mut rx) = tokio::sync::watch::channel(false);
@@ -511,7 +516,8 @@ mod tests {
         assert_eq!(outcomes.len(), 1, "工具照常跑完");
     }
 
-    /// 取消已置位后才进入执行：借用清版本时必须认这个信号，不能吞掉。
+    /// Cancel was already set before entering execution: when borrowing to clear the version,
+    /// this signal must be acknowledged, not swallowed.
     #[tokio::test]
     async fn already_set_cancel_aborts_immediately() {
         let (tx, mut rx) = tokio::sync::watch::channel(false);

@@ -1,86 +1,87 @@
-//! 语义色板（dark 令牌），
-//! 附 bingo 自有的语义令牌（diff/code/thinking 等）。所有渲染走这一个
-//! [`Theme`]，样式方法返回 [`SegStyle`]。
+//! Semantic colour palette (dark tokens), plus bingo's own semantic tokens
+//! (diff/code/thinking, etc.). All rendering goes through this one [`Theme`];
+//! the style methods return [`SegStyle`].
 
 use ratatui::style::Color;
 
 use crate::tui::line::SegStyle;
 
-/// 语义颜色令牌集合。
+/// Semantic colour token set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
-    /// 正文（rgb(255,255,255)）。
+    /// Body text (rgb(255,255,255)).
     pub text: Color,
-    /// 弱化文本（rgb(153,153,153)，即 ink dimColor）。
+    /// Muted text (rgb(153,153,153), i.e. ink dimColor).
     pub inactive: Color,
-    /// 极弱文本（实体选择器计数等）。
+    /// Faint text (entity-picker counts, etc.).
     pub subtle: Color,
-    /// 主强调色（rgb(215,119,87)）。
+    /// Primary accent (rgb(215,119,87)).
     pub claude: Color,
-    /// 权限对话框强调色（rgb(177,185,249)）。
+    /// Permission-dialog accent (rgb(177,185,249)).
     pub permission: Color,
-    /// 成功（rgb(78,186,101)）。
+    /// Success (rgb(78,186,101)).
     pub success: Color,
-    /// 错误（rgb(255,107,128)）。
+    /// Error (rgb(255,107,128)).
     pub error: Color,
-    /// 警告（rgb(255,193,7)）。
+    /// Warning (rgb(255,193,7)).
     pub warning: Color,
-    /// plan 模式（rgb(72,150,140)）。
+    /// Plan mode (rgb(72,150,140)).
     pub plan_mode: Color,
-    /// accept edits 模式（rgb(175,135,255)）。
+    /// Accept-edits mode (rgb(175,135,255)).
     pub accept_edits: Color,
-    /// 输入框下边框（rgb(136,136,136)）。
+    /// Input-box bottom border (rgb(136,136,136)).
     pub prompt_border: Color,
-    /// bash 模式强调（rgb(253,93,177)）。
+    /// Bash-mode accent (rgb(253,93,177)).
     pub bash_border: Color,
-    /// 用户消息气泡背景（rgb(55,55,55)）。
+    /// User-message bubble background (rgb(55,55,55)).
     pub user_message_bg: Color,
-    /// 行内代码。
+    /// Inline code.
     pub code_fg: Color,
-    /// 代码块文本。
+    /// Code-block text.
     pub code_block_fg: Color,
-    /// 代码块背景。
+    /// Code-block background.
     pub code_block_bg: Color,
-    /// 链接。
+    /// Links.
     pub link: Color,
-    /// 数学公式。
+    /// Math.
     pub math: Color,
-    /// 标题色（按级别，1 起；越界回退最后一项）。
+    /// Heading colours (by level, 1-based; out of range falls back to the
+    /// last entry).
     pub headings: Vec<Color>,
-    /// 引用文本。
+    /// Quote text.
     pub quote: Color,
-    /// 引用左栏。
+    /// Quote left bar.
     pub quote_bar: Color,
-    /// 已完成任务标记。
+    /// Completed task marker.
     pub task_done: Color,
-    /// 未完成任务标记。
+    /// Open task marker.
     pub task_open: Color,
-    /// 列表符号。
+    /// List marker.
     pub list_marker: Color,
-    /// 表格网格线。
+    /// Table grid lines.
     pub table_border: Color,
-    /// 表格表头。
+    /// Table header.
     pub table_header: Color,
-    /// 分隔线。
+    /// Horizontal rule.
     pub hr: Color,
-    /// 脚注。
+    /// Footnote.
     pub footnote: Color,
-    /// 思考块（CC：dim italic `∴ Thinking`）。
+    /// Thinking block (CC: dim italic `∴ Thinking`).
     pub thinking: Color,
-    /// 运行中的工具。
+    /// Running tool.
     pub tool_running: Color,
-    /// 工具输出预览。
+    /// Tool output preview.
     pub tool_output: Color,
-    /// Diff hunk 头。
+    /// Diff hunk header.
     pub diff_hunk: Color,
-    /// Diff 上下文行。
+    /// Diff context line.
     pub diff_context: Color,
-    /// `✻` 编辑标记。
+    /// `✻` edit marker.
     pub diff_edit: Color,
 }
 
 impl Theme {
-    /// 深色预设（默认）。
+    /// Dark preset (default).
     pub fn dark() -> Self {
         Self {
             text: Color::Rgb(255, 255, 255),
@@ -125,7 +126,8 @@ impl Theme {
         }
     }
 
-    /// 浅色预设（正文黑、主强调橙保持橙）。
+    /// Light preset (black body text; the orange primary accent stays
+    /// orange).
     pub fn light() -> Self {
         Self {
             text: Color::Rgb(0, 0, 0),
@@ -171,7 +173,7 @@ impl Theme {
     }
 }
 
-/// 主题设置：auto 跟随终端背景亮度。
+/// Theme setting: auto follows the terminal background brightness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeSetting {
     Auto,
@@ -180,7 +182,8 @@ pub enum ThemeSetting {
 }
 
 impl ThemeSetting {
-    /// 从 settings 字符串解析；缺省 / 非法值回落 auto。
+    /// Parse from the settings string; missing / invalid values fall back to
+    /// auto.
     pub fn parse(s: Option<&str>) -> Self {
         match s.map(str::trim).unwrap_or("") {
             "dark" => Self::Dark,
@@ -191,15 +194,17 @@ impl ThemeSetting {
 }
 
 impl Theme {
-    /// 检测终端 truecolor 能力（COLORTERM=truecolor/24bit）。
+    /// Detect the terminal's truecolor capability
+    /// (COLORTERM=truecolor/24bit).
     pub fn terminal_supports_truecolor() -> bool {
         std::env::var("COLORTERM")
             .map(|v| v.contains("truecolor") || v.contains("24bit"))
             .unwrap_or(false)
     }
 
-    /// 解析 `$COLORFGBG`（fg;bg 或 fg;other;bg，bg 为 ANSI 色号）：
-    /// rxvt 约定 0-6/8 为暗色背景、7/9-15 为亮色。
+    /// Parse `$COLORFGBG` (fg;bg or fg;other;bg, bg as an ANSI colour
+    /// number): the rxvt convention is 0-6/8 = dark background, 7/9-15 =
+    /// light.
     fn detect_from_color_fgbg() -> Option<bool> {
         let bg = std::env::var("COLORFGBG")
             .ok()?
@@ -212,10 +217,12 @@ impl Theme {
         Some(bg <= 6 || bg == 8)
     }
 
-    /// 终端查询：临时 raw mode 下向 /dev/tty 写入查询序列并读回响应。
+    /// Terminal query: write the query sequences to /dev/tty under a
+    /// temporary raw mode and read the response back.
     ///
-    /// 用 O_NONBLOCK + 轮询，任何时刻都不阻塞；查询期间按键可能被消费
-    /// （约 deadline 时长，可接受）。无 tty（管道/测试）时返回 None。
+    /// Uses O_NONBLOCK + polling, never blocking at any point; keystrokes may
+    /// be consumed during the query (for about the deadline duration, which
+    /// is acceptable). Returns `None` without a tty (pipes/tests).
     pub(crate) async fn query_terminal(
         queries: &[&[u8]],
         deadline: std::time::Duration,
@@ -258,9 +265,9 @@ impl Theme {
         Some(buf)
     }
 
-    /// 通过 OSC 11 查询终端真实背景色。
-    /// 发送 `ESC ] 11 ; ? ESC \`，读回 `rgb:RRRR/GGGG/BBBB`，按 BT.709
-    /// 相对亮度判断：> 0.5 为浅色。
+    /// Query the terminal's real background colour via OSC 11. Sends
+    /// `ESC ] 11 ; ? ESC \`, reads back `rgb:RRRR/GGGG/BBBB`, and judges by
+    /// BT.709 relative luminance: > 0.5 means light.
     pub async fn detect_system_theme() -> Option<bool> {
         let buf = Self::query_terminal(
             &[b"\x1b]11;?\x1b\\"],
@@ -270,10 +277,11 @@ impl Theme {
         theme_from_osc(&buf)
     }
 
-    /// 当前终端的主题：按设置解析（auto 优先 OSC 11 实测背景色，
-    /// 其次 `$COLORFGBG`，最后回落 dark），
-    /// 不支持 truecolor 时 RGB 降级为 256 色近似
-    /// （否则终端忽略 24bit 序列，全部文本回退默认色）。
+    /// The current terminal's theme: resolved by setting (auto prefers the
+    /// OSC 11 measured background, then `$COLORFGBG`, and finally falls back
+    /// to dark). Without truecolor support the RGB colours are downgraded to
+    /// 256-colour approximations (otherwise the terminal ignores the 24-bit
+    /// sequences and all text falls back to the default colour).
     pub fn for_terminal(setting: ThemeSetting, detected: Option<bool>) -> Self {
         let t = match setting {
             ThemeSetting::Dark => Theme::dark(),
@@ -291,7 +299,7 @@ impl Theme {
         }
     }
 
-    /// 把所有 RGB 颜色映射为 256 色（Indexed）近似。
+    /// Map every RGB colour to a 256-colour (Indexed) approximation.
     fn downgrade_to_256(mut self) -> Self {
         let f = |c: Color| match c {
             Color::Rgb(r, g, b) => Color::Indexed(rgb_to_ansi256(r, g, b)),
@@ -334,43 +342,44 @@ impl Theme {
         self
     }
 
-    /// 正文。
+    /// Body text.
     pub fn text(&self) -> SegStyle {
         SegStyle::fg(self.text)
     }
-    /// 弱化文本。
+    /// Muted text.
     pub fn dim(&self) -> SegStyle {
         SegStyle::fg(self.inactive)
     }
-    /// 加粗。
+    /// Bold.
     pub fn strong(&self) -> SegStyle {
         SegStyle::plain().bold()
     }
-    /// 斜体。
+    /// Italic.
     pub fn emphasis(&self) -> SegStyle {
         SegStyle::plain().italic()
     }
-    /// 删除线（真实 `CROSSED_OUT`，前景弱化以保持 CC 的完成态观感）。
+    /// Strikethrough (a real `CROSSED_OUT`, with a muted foreground to keep
+    /// CC's completed-state look).
     pub fn strikethrough(&self) -> SegStyle {
         SegStyle::fg(self.inactive).strikethrough()
     }
-    /// 行内代码。
+    /// Inline code.
     pub fn code(&self) -> SegStyle {
         SegStyle::fg(self.code_fg)
     }
-    /// 代码块。
+    /// Code block.
     pub fn code_block(&self) -> SegStyle {
         SegStyle::fg(self.code_block_fg).with_bg(self.code_block_bg)
     }
-    /// 链接（下划线）。
+    /// Links (underlined).
     pub fn link(&self) -> SegStyle {
         SegStyle::fg(self.link).underline()
     }
-    /// 数学（斜体）。
+    /// Math (italic).
     pub fn math(&self) -> SegStyle {
         SegStyle::fg(self.math).italic()
     }
-    /// 标题（级别 1 起；0 或越界回退）。
+    /// Heading (levels start at 1; 0 or out of range falls back).
     pub fn heading(&self, level: u8) -> SegStyle {
         let color = if level == 0 {
             self.text
@@ -382,83 +391,83 @@ impl Theme {
         };
         SegStyle::fg(color).bold().underline()
     }
-    /// 引用文本。
+    /// Quote text.
     pub fn quote(&self) -> SegStyle {
         SegStyle::fg(self.quote)
     }
-    /// 引用左栏。
+    /// Quote left bar.
     pub fn quote_bar(&self) -> SegStyle {
         SegStyle::fg(self.quote_bar)
     }
-    /// 已完成任务标记。
+    /// Completed task marker.
     pub fn task_done(&self) -> SegStyle {
         SegStyle::fg(self.task_done).bold()
     }
-    /// 未完成任务标记。
+    /// Open task marker.
     pub fn task_open(&self) -> SegStyle {
         SegStyle::fg(self.task_open)
     }
-    /// 列表符号。
+    /// List marker.
     pub fn list_marker(&self) -> SegStyle {
         SegStyle::fg(self.list_marker)
     }
-    /// 表格网格线。
+    /// Table grid lines.
     pub fn table_border(&self) -> SegStyle {
         SegStyle::fg(self.table_border)
     }
-    /// 表格表头。
+    /// Table header.
     pub fn table_header(&self) -> SegStyle {
         SegStyle::fg(self.table_header).bold()
     }
-    /// 分隔线。
+    /// Horizontal rule.
     pub fn hr(&self) -> SegStyle {
         SegStyle::fg(self.hr)
     }
-    /// 脚注。
+    /// Footnote.
     pub fn footnote(&self) -> SegStyle {
         SegStyle::fg(self.footnote)
     }
-    /// 思考块（dim italic）。
+    /// Thinking block (dim italic).
     pub fn thinking(&self) -> SegStyle {
         SegStyle::fg(self.thinking).italic()
     }
-    /// 完成的工具。
+    /// Completed tool.
     pub fn tool_done(&self) -> SegStyle {
         SegStyle::fg(self.success).bold()
     }
-    /// 失败的工具。
+    /// Failed tool.
     pub fn tool_error(&self) -> SegStyle {
         SegStyle::fg(self.error).bold()
     }
-    /// 工具输出预览。
+    /// Tool output preview.
     pub fn tool_output(&self) -> SegStyle {
         SegStyle::fg(self.tool_output)
     }
-    /// Diff hunk 头。
+    /// Diff hunk header.
     pub fn diff_hunk(&self) -> SegStyle {
         SegStyle::fg(self.diff_hunk).bold()
     }
-    /// Diff 新增。
+    /// Diff addition.
     pub fn diff_added(&self) -> SegStyle {
         SegStyle::fg(self.success)
     }
-    /// Diff 删除。
+    /// Diff removal.
     pub fn diff_removed(&self) -> SegStyle {
         SegStyle::fg(self.error)
     }
-    /// Diff 上下文。
+    /// Diff context.
     pub fn diff_context(&self) -> SegStyle {
         SegStyle::fg(self.diff_context)
     }
-    /// 权限标题。
+    /// Permission title.
     pub fn permission(&self) -> SegStyle {
         SegStyle::fg(self.permission).bold()
     }
 }
 
-/// RGB → 256 色（Indexed）近似：6×6×6 cube + 灰阶。
+/// RGB → 256-colour (Indexed) approximation: 6×6×6 cube + grey ramp.
 fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
-    // 灰阶：r==g==b 且不在 cube 节点附近
+    // Greyscale: r==g==b and not near a cube node
     if r == g && g == b {
         let v = r;
         if v < 8 {
@@ -467,7 +476,7 @@ fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
         if v > 248 {
             return 231;
         }
-        // 24 级灰阶近似（灰阶步长 10）
+        // 24-level greyscale approximation (step 10)
         let idx = (((v as u16 - 8) + 5) / 10).clamp(0, 23) as u8;
         return 232 + idx;
     }
@@ -483,8 +492,9 @@ fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * q(r) + 6 * q(g) + q(b)
 }
 
-/// 解析 OSC 11 颜色响应（`rgb:RRRR/GGGG/BBBB` 或 `#RRGGBB`），
-/// 按 BT.709 相对亮度返回：true = 深色背景，false = 浅色。无法解析返回 None。
+/// Parse an OSC 11 colour response (`rgb:RRRR/GGGG/BBBB` or `#RRGGBB`),
+/// returning by BT.709 relative luminance: `true` = dark background,
+/// `false` = light. Returns `None` when unparseable.
 fn theme_from_osc(data: &[u8]) -> Option<bool> {
     let text = std::str::from_utf8(data).ok()?;
     let payload = text.split("]11;").nth(1)?.split("\x1b\\").next()?;
@@ -538,7 +548,8 @@ mod tests {
 
     #[test]
     fn light_differs() {
-        // light 主题正文黑、背景浅；主强调橙两主题相同。
+        // Light theme: black body text, light background; the orange primary
+        // accent is the same in both themes.
         assert_eq!(Theme::dark().claude, Theme::light().claude);
         assert_ne!(Theme::dark().text, Theme::light().text);
         assert_ne!(
@@ -549,12 +560,12 @@ mod tests {
 
     #[test]
     fn rgb_downgrades_to_ansi256() {
-        // 主强调橙 → 256 色
+        // Primary orange → 256 colour
         let downgraded = Theme::dark().downgrade_to_256();
         assert_eq!(downgraded.claude, Color::Indexed(173));
         assert_eq!(downgraded.permission, Color::Indexed(147));
         assert_eq!(downgraded.user_message_bg, Color::Indexed(237));
-        // 非 RGB 保持
+        // Non-RGB colours are kept
         assert_eq!(downgraded.code_fg, Theme::dark().code_fg);
     }
 
@@ -563,7 +574,7 @@ mod tests {
         assert_eq!(rgb_to_ansi256(0, 0, 0), 16);
         assert_eq!(rgb_to_ansi256(255, 255, 255), 231);
         assert_eq!(rgb_to_ansi256(128, 128, 128), 244);
-        // 红 cube
+        // Red cube
         assert_eq!(rgb_to_ansi256(255, 0, 0), 196);
         assert_eq!(rgb_to_ansi256(0, 255, 0), 46);
         assert_eq!(rgb_to_ansi256(0, 0, 255), 21);
@@ -589,7 +600,7 @@ mod tests {
 
     #[test]
     fn for_terminal_respects_setting() {
-        // 显式主题不依赖终端检测。
+        // An explicit theme does not depend on terminal detection.
         let dark = Theme::for_terminal(ThemeSetting::Dark, None);
         let light = Theme::for_terminal(ThemeSetting::Light, None);
         assert_eq!(dark.text, Color::Rgb(255, 255, 255));
@@ -598,28 +609,28 @@ mod tests {
 
     #[test]
     fn auto_uses_detected_background() {
-        // Some(true) = 深色背景。
+        // Some(true) = dark background.
         let dark = Theme::for_terminal(ThemeSetting::Auto, Some(true));
         assert_eq!(dark.text, Color::Rgb(255, 255, 255));
-        // Some(false) = 浅色背景。
+        // Some(false) = light background.
         let light = Theme::for_terminal(ThemeSetting::Auto, Some(false));
         assert_eq!(light.text, Color::Rgb(0, 0, 0));
     }
 
     #[test]
     fn osc11_parses_rgb_components() {
-        // 深色：亮度低 → true。
+        // Dark: low luminance → true.
         assert_eq!(theme_from_osc(b"\x1b]11;rgb:0000/0000/0000\x1b\\"), Some(true));
         assert_eq!(theme_from_osc(b"\x1b]11;rgb:1a1a/1a1a/1a1a\x1b\\"), Some(true));
-        // 浅色：亮度高 → false。
+        // Light: high luminance → false.
         assert_eq!(theme_from_osc(b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\"), Some(false));
-        // 短格式（Terminal.app / kitty 等 1-4 位 hex）。
+        // Short form (Terminal.app / kitty etc., 1-4 hex digits).
         assert_eq!(theme_from_osc(b"\x1b]11;rgb:ff/ff/ff\x1b\\"), Some(false));
         assert_eq!(theme_from_osc(b"\x1b]11;rgb:00/00/00\x1b\\"), Some(true));
-        // 半位 #RRGGBB 格式。
+        // Nibble #RRGGBB form.
         assert_eq!(theme_from_osc(b"\x1b]11;#ffffff\x1b\\"), Some(false));
         assert_eq!(theme_from_osc(b"\x1b]11;#000000\x1b\\"), Some(true));
-        // 无法解析 → None。
+        // Unparseable → None.
         assert_eq!(theme_from_osc(b"garbage"), None);
         assert_eq!(theme_from_osc(b"\x1b]11;rgb:zzzz/0000/0000\x1b\\"), None);
     }

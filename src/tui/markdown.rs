@@ -1,7 +1,10 @@
-//! Markdown AST → 样式化行（rsmarkdown-tui `StreamMarkdownRenderer` 的移植）。
+//! Markdown AST → styled lines (a port of rsmarkdown-tui's
+//! `StreamMarkdownRenderer`).
 //!
-//! 解析走 `rsmarkdown-core`（与显示无关），本模块把 block AST 渲染成
-//! [`Line`]（CJK 感知换行，宽度固定后按块缓存——只有源文本变化的块重渲）。
+//! Parsing is delegated to `rsmarkdown-core` (display-independent); this
+//! module renders the block AST into [`Line`]s — CJK-aware wrapping, cached
+//! per block once the width is fixed, so only blocks whose source text
+//! changed re-render.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,20 +17,22 @@ use crate::tui::gfx::{ImageCap, ImageMeta};
 use crate::tui::line::{char_width, ImageRef, SegStyle, Line};
 use crate::tui::theme::Theme;
 
-/// 一个显示适配器：markdown AST → 样式化行。
+/// A display adapter: markdown AST → styled lines.
 pub struct MarkdownRenderer {
-    /// 换行宽度。
+    /// Wrap width.
     width: usize,
-    /// 语义色板。
+    /// Semantic colour palette.
     pub theme: Theme,
-    /// 逐块缓存：(块源文本, 渲染行)。
+    /// Per-block cache: (block source text, rendered lines).
     cached: Vec<Option<(String, Vec<Line>)>>,
     lines: Vec<Line>,
-    /// 终端图片能力（kitty 协议）；None = 只显示 `#[image]` 占位。
+    /// Terminal image capability (kitty protocol); `None` = only the
+    /// `#[image]` placeholder is shown.
     image_cap: Option<ImageCap>,
-    /// 已加载图片（url → 元数据）。
+    /// Loaded images (url → metadata).
     images: HashMap<String, Arc<ImageMeta>>,
-    /// 图片缓存版本（Chat 递增；变化时清逐块缓存）。
+    /// Image cache version (bumped by Chat; on change the per-block cache is
+    /// cleared).
     images_version: u64,
 }
 
@@ -38,12 +43,12 @@ impl Default for MarkdownRenderer {
 }
 
 impl MarkdownRenderer {
-    /// 创建给定换行宽度的渲染器（深色主题）。
+    /// Build a renderer with the given wrap width (dark theme).
     pub fn new(width: usize) -> Self {
         Self::with_theme(width, Theme::dark())
     }
 
-    /// 显式主题。
+    /// With an explicit theme.
     pub fn with_theme(width: usize, theme: Theme) -> Self {
         Self {
             width,
@@ -56,7 +61,7 @@ impl MarkdownRenderer {
         }
     }
 
-    /// 修改换行宽度（使逐块缓存失效）。
+    /// Change the wrap width (invalidates the per-block cache).
     pub fn set_width(&mut self, width: usize) {
         if self.width != width {
             self.width = width;
@@ -64,13 +69,14 @@ impl MarkdownRenderer {
         }
     }
 
-    /// 图片缓存版本（`set_images` 生效后递增）。
+    /// Image cache version (incremented once `set_images` takes effect).
     pub fn images_version(&self) -> u64 {
         self.images_version
     }
 
-    /// 更新图片能力与已加载图片；版本变化时清逐块缓存（图片从占位
-    /// 变为块渲染）。
+    /// Update the image capability and loaded images; on a version change the
+    /// per-block cache is cleared (images go from placeholder to block
+    /// rendering).
     pub fn set_images(
         &mut self,
         cap: Option<ImageCap>,
@@ -84,7 +90,7 @@ impl MarkdownRenderer {
         self.cached.clear();
     }
 
-    /// 最近一次 `render` 的输出行。
+    /// The output lines of the most recent `render`.
     pub fn lines(&self) -> &[Line] {
         &self.lines
     }
@@ -99,8 +105,10 @@ impl Renderer for MarkdownRenderer {
             let rendered = match cached {
                 Some((src, lines)) if src == &block.content => lines.clone(),
                 _ => {
-                    // 段落尾部为图片的块 → 块级图片渲染（对齐 rsmarkdown-tui
-                    // image_paragraph）；未加载时回落普通段落（行内 #[image]）。
+                    // Blocks whose paragraph ends in an image render as block
+                    // images (mirroring rsmarkdown-tui's image_paragraph);
+                    // when not loaded, fall back to an ordinary paragraph
+                    // (inline #[image]).
                     let lines = match block
                         .ast
                         .as_ref()
@@ -123,7 +131,8 @@ impl Renderer for MarkdownRenderer {
     }
 }
 
-/// 段落尾部为图片时返回图片 url（块级图片判定）。
+/// Returns the image url when the paragraph ends in an image (block-image
+/// detection).
 fn image_paragraph(block: &Block) -> Option<&str> {
     let Block::Paragraph(inlines) = block else {
         return None;
@@ -134,8 +143,10 @@ fn image_paragraph(block: &Block) -> Option<&str> {
     None
 }
 
-/// 图片块 → `rows` 行：首行占位文本（canvas 期显示 `#[image]`），
-/// 全部行携带 [`ImageRef`]（落盘时首行输出 kitty 序列、续行跳过）。
+/// Image block → `rows` lines: the first line holds the placeholder text
+/// (shows `#[image]` during the canvas phase) and every line carries an
+/// [`ImageRef`] (on flush, the first line emits the kitty sequence and
+/// continuation lines are skipped).
 fn image_block_lines(url: &str, meta: &ImageMeta, theme: Theme) -> Vec<Line> {
     let img = ImageRef {
         url: url.to_string(),
@@ -153,7 +164,7 @@ fn image_block_lines(url: &str, meta: &ImageMeta, theme: Theme) -> Vec<Line> {
     out
 }
 
-/// 渲染一个块的 AST 为样式化行。
+/// Render a block's AST into styled lines.
 pub fn render_block(ast: &Option<Ast>, width: usize, theme: &Theme) -> Vec<Line> {
     let Some(ast) = ast else { return Vec::new() };
     let mut out = Vec::new();
@@ -351,7 +362,7 @@ fn render_table(
     if cols == 0 {
         return;
     }
-    // 每列的纯文本宽度
+    // Plain-text width of each column
     let mut widths = vec![0usize; cols];
     for (c, cell) in headers.iter().enumerate() {
         widths[c] = plain_width(cell);
@@ -361,7 +372,7 @@ fn render_table(
             widths[c] = widths[c].max(plain_width(cell));
         }
     }
-    // 适配可用宽度
+    // Fit the available width
     let total: usize = widths.iter().sum::<usize>() + (cols.saturating_sub(1) * 3);
     if total > available {
         shrink_columns(&mut widths, available - (cols.saturating_sub(1) * 3));
@@ -411,7 +422,7 @@ fn shrink_columns(widths: &mut [usize], budget: usize) {
         }
     }
     let remaining = budget.min(widths.iter().sum());
-    // 硬上限
+    // Hard cap
     let mut sum: usize = widths.iter().sum();
     while sum > remaining {
         let mut max_i = 0;
@@ -429,10 +440,10 @@ fn shrink_columns(widths: &mut [usize], budget: usize) {
 }
 
 // ---------------------------------------------------------------------------
-// 行内渲染 + 换行
+// Inline rendering + wrapping
 // ---------------------------------------------------------------------------
 
-/// 渲染行内内容为换行后的样式化行。
+/// Render inline content into wrapped styled lines.
 pub fn render_inlines(inlines: &[Inline], width: usize, theme: &Theme) -> Vec<Line> {
     let mut segs: Vec<Seg> = Vec::new();
     collect_inlines(inlines, theme.text(), theme, &mut segs);
@@ -449,8 +460,9 @@ fn collect_inlines(inlines: &[Inline], style: SegStyle, theme: &Theme, out: &mut
     let mut i = 0usize;
     while i < inlines.len() {
         let inline = &inlines[i];
-        // `![alt](url)` 的 alt 由解析器作为图片前紧邻的 Text 输出：与
-        // 图片同现的紧邻 Text 是 alt 本身，跳过（只留 `#[image]`）。
+        // The parser emits the alt of `![alt](url)` as the Text immediately
+        // before the image: a Text adjacent to an image is the alt itself, so
+        // skip it (keep only `#[image]`).
         if matches!(inline, Inline::Text(_))
             && matches!(inlines.get(i + 1), Some(Inline::Image { .. }))
         {
@@ -506,7 +518,7 @@ fn collect_inlines(inlines: &[Inline], style: SegStyle, theme: &Theme, out: &mut
     }
 }
 
-/// 按 `width` 列换行（CJK 感知），折叠行首空白。
+/// Wrap by `width` display columns (CJK-aware), folding leading whitespace.
 fn wrap_segs(segs: Vec<Seg>, width: usize) -> Vec<Line> {
     let mut lines: Vec<Line> = Vec::new();
     let mut current: Vec<Seg> = Vec::new();
@@ -543,7 +555,7 @@ fn wrap_segs(segs: Vec<Seg>, width: usize) -> Vec<Line> {
     lines
 }
 
-/// 把 `current` 压入 `lines`，剔除尾部空白段。
+/// Push `current` onto `lines`, dropping trailing whitespace segments.
 fn push_line(lines: &mut Vec<Line>, current: &mut Vec<Seg>) {
     while let Some(seg) = current.last() {
         if seg.text.trim().is_empty() {
@@ -564,10 +576,10 @@ fn push_line(lines: &mut Vec<Line>, current: &mut Vec<Seg>) {
 }
 
 // ---------------------------------------------------------------------------
-// 辅助
+// Helpers
 // ---------------------------------------------------------------------------
 
-/// 展平行内 AST 为纯文本。
+/// Flatten inline AST to plain text.
 pub fn plain_text(inlines: &[Inline]) -> String {
     let mut out = String::new();
     for i in inlines {
@@ -593,7 +605,7 @@ pub fn plain_width(inlines: &[Inline]) -> usize {
     plain_text(inlines).width()
 }
 
-/// 截断字符串到 `width` 显示列（CJK 感知）。
+/// Truncate a string to `width` display columns (CJK-aware).
 pub fn truncate(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_string();

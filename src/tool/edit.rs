@@ -16,7 +16,7 @@ pub struct EditInput {
     pub replace_all: bool,
 }
 
-/// Edit：old_string → new_string 精确替换。
+/// Edit: exact replacement of old_string → new_string.
 pub struct EditTool;
 
 #[async_trait]
@@ -37,7 +37,7 @@ impl Tool for EditTool {
     fn is_destructive(&self, _input: &serde_json::Value) -> bool {
         true
     }
-    /// 编辑类工具：acceptEdits 模式下自动允许。
+    /// Edit-type tools: automatically allowed in acceptEdits mode.
     fn is_edit_tool(&self, _input: &serde_json::Value) -> bool {
         true
     }

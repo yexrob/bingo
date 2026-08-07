@@ -43,21 +43,24 @@ use crate::query::Session;
 use crate::tui::chat::Chat;
 use crate::tui::theme::{Theme, ThemeSetting};
 
-/// 启动 TUI 会话。`fullscreen=false`（默认）：inline 模式——定稿内容
-/// 打印进终端 scrollback、视口只画动态尾部；`fullscreen=true`：全屏
-/// canvas（app 内滚动 + 鼠标交互）。
+/// Start a TUI session. `fullscreen=false` (default): inline mode — finalized
+/// content goes into the terminal scrollback and the viewport only paints the
+/// live tail; `fullscreen=true`: fullscreen canvas (in-app scrolling + mouse
+/// interaction).
 pub async fn run_tui_session(
     session: Arc<Session>,
     expand_rx: tokio::sync::watch::Receiver<bool>,
     fullscreen: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // raw mode 之前查一次终端背景色，供 auto 主题解析（探测自己会临时
-    // 开关 raw mode 并直接读 /dev/tty）。
+    // Query the terminal background colour once before raw mode, for the auto
+    // theme resolution (the probe itself toggles raw mode temporarily and
+    // reads /dev/tty directly).
     let detected_background = Theme::detect_system_theme().await;
 
-    // 全屏每帧 diff 重绘无法稳定承载 kitty 图片 → 只有 inline 模式启用
-    // 真实图片显示（定稿行一次落盘进 scrollback）。同样必须在 raw mode
-    // 之前完成：探测走的是同一条 /dev/tty 查询路径。
+    // Fullscreen's per-frame diff repaint cannot reliably carry kitty images,
+    // so real image display is only enabled in inline mode (finalized rows
+    // land in scrollback once). This must also happen before raw mode: the
+    // probe uses the same /dev/tty query path.
     let image_probe = if fullscreen {
         gfx::ImageProbe::default()
     } else {
@@ -87,7 +90,8 @@ pub async fn run_tui_session(
         detected_background,
     );
     chat.image_cap = image_cap;
-    // 探测到 kitty 终端但 tmux passthrough 没开等情况：告诉用户怎么开。
+    // When a kitty terminal is detected but tmux passthrough is off, tell the
+    // user how to turn it on.
     if let Some(warning) = image_probe.warning {
         chat.push_warning(warning);
     }
@@ -104,27 +108,31 @@ pub async fn run_tui_session(
     } else {
         execute!(out, EnableBracketedPaste)
     };
-    // 进入失败也要把 raw mode 收回去（终端否则留在半配置状态）。
+    // Even on setup failure, raw mode is reverted (the terminal would
+    // otherwise be left half-configured).
     if let Err(e) = setup {
         let _ = disable_raw_mode();
         return Err(e.into());
     }
 
-    // 宿主构造失败也要走完拆除（下面的反序拆除对两条路径都生效）。
+    // Even if the host fails to construct, teardown still runs (the
+    // reverse-order teardown below applies to both paths).
     let result: Result<(), Box<dyn std::error::Error>> = if fullscreen {
         match Terminal::new(CrosstermBackend::new(stdout())) {
             Ok(terminal) => app::run_fullscreen(chat, expand_rx, terminal).await,
             Err(e) => Err(e.into()),
         }
     } else {
-        // 光标此刻停在 shell 提示行：驱动以它为视口原点。
+        // The cursor is parked on the shell prompt line right now: the driver
+        // uses it as the viewport origin.
         match term::InlineTerm::stdout() {
             Ok(host) => app::run_inline(chat, expand_rx, host).await,
             Err(e) => Err(e.into()),
         }
     };
 
-    // 反序拆除，每一步都尽力而为：中间某步失败不能把终端留在 raw mode。
+    // Tear down in reverse order, best-effort at each step: a failure halfway
+    // must not leave the terminal in raw mode.
     let mut out = stdout();
     if fullscreen {
         let _ = execute!(

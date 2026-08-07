@@ -1,73 +1,73 @@
 ---
 name: guide
 description: >-
-  bingo 使用指南与诊断手册：settings 配置、slash 命令、模式、MCP、故障排查。
+  bingo usage guide and diagnostic manual: settings config, slash commands,
+  modes, MCP, troubleshooting.
   Use when the user asks how to use/configure bingo, or reports a problem
-  ("为什么", "怎么配置", "怎么诊断", "不工作").
+  ("why", "how to configure", "how to diagnose", "not working").
 when_to_use: >-
   User asks how to configure or use bingo · reports a bug or unexpected
   behavior · asks about settings.json / slash commands / MCP / permissions.
 ---
 
-# bingo 使用与诊断指南
+# bingo Usage and Diagnostic Guide
 
-回答用户问题时按本指南定位配置项、命令与排查路径；结论给具体文件路径、
-命令与验证步骤，不臆测功能（能力以实际行为为准，拿不准时读源码确认）。
+When answering user questions, use this guide to locate config options, commands, and troubleshooting paths; give concrete file paths,
+commands, and verification steps in conclusions. Never speculate about features (capabilities follow actual behavior; when unsure, read the source to confirm).
 
-## 快速上手
+## Quick start
 
-- 启动需要 API key：`ANTHROPIC_API_KEY`（Anthropic）或 `DEEPSEEK_API_KEY`
-  （DeepSeek）；自定义端点用 `ANTHROPIC_BASE_URL`。也支持写进 settings.json
-  （`apiKey`/`apiBaseUrl`，见下，settings 优先于环境变量）。缺失时启动即报错。
-- 输入 `!` 进入 bash 模式（直接执行命令不经模型，前缀 `!` 粘性保留）；
-  输入 `!echo hello` 试试。交互式/全屏命令（top/vim/ssh/fzf/lazygit）会被拒绝，
-  用批处理替代：`top -b -n 1`、`vim file` → 用 Edit 工具。
-- 快捷键（空输入按 `?` 看全表）：Enter 发送 · `\`+Enter / Ctrl+J 换行（多行输入）·
-  Esc busy 中断 / 关下拉与面板 / 双击清空输入 · Ctrl+C busy 中断 / 有文本清空 /
-  空输入连按两次退出 · ↑↓ 历史回溯（多行输入内先移光标；busy 空输入 ↑ 取回排队消息）·
-  Ctrl+R 历史反向搜索 · Ctrl+A/E 行首尾 · Alt+B/F 按词移动 · Ctrl+W/U/K 删词/删到
-  行首/行尾 · Ctrl+Y 粘回删除 · Ctrl+S 暂存/恢复输入 · Ctrl+_ 撤销 · ctrl+o
-  展开/闭合切换（展开 = 重放完整 transcript 供终端上滑翻看；再按闭合折回
-  聚合态并清屏收拢）· Ctrl+T 显隐任务区 · Ctrl+G agent/频道选择器（↑↓ 选、
-  Enter 打开全屏视图、Esc 关；agent 视图看该实例完整对话与流式产出，频道视图
-  是微信式群聊房间、可直接以 user 身份发言）· Ctrl+L 清屏重画 · Shift+Tab 循环权限
-  模式（default → acceptEdits → plan）· Alt+T 思考开关 · busy 时回车把消息排队，
-  回合结束自动发送。
-- 大段粘贴自动折叠为 `[Pasted text #N +M lines]` 占位，发送时展开真实内容
-  （经终端 bracketed paste 事件精确识别；不支持该特性的终端退回按键突发
-  启发式，极快连打可能误判，停顿即恢复）。
-- **图片发送**：macOS 下复制图片（截图等）后粘贴（Cmd+V）即挂载为附件，
-  输入框显示 `#[image N]` 占位；拖拽/粘贴图片文件路径（独立成行或
-  `![alt](路径)`）提交时同样挂载。消息历史保留占位文本；当前端点配置
-  `supportsImages`/`sendImages` 时图片以 base64 内容块随文本发给模型
-  （自动压缩到 2000px / ~3.75MB 内），否则只发文本、图片留在本地。
+- Starting requires an API key: `ANTHROPIC_API_KEY` (Anthropic) or `DEEPSEEK_API_KEY`
+  (DeepSeek); custom endpoints use `ANTHROPIC_BASE_URL`. These can also go in settings.json
+  (`apiKey`/`apiBaseUrl`, see below; settings take precedence over environment variables). Startup errors if missing.
+- Type `!` to enter bash mode (commands run directly without the model; the `!` prefix is sticky);
+  try `!echo hello`. Interactive/fullscreen commands (top/vim/ssh/fzf/lazygit) are rejected —
+  use batch alternatives: `top -b -n 1`; for `vim file` use the Edit tool.
+- Shortcuts (press `?` with an empty input for the full table): Enter sends · `\`+Enter / Ctrl+J newline (multi-line input) ·
+  Esc busy interrupt / close dropdowns and panels / double-press clears input · Ctrl+C busy interrupt / clears text /
+  empty input twice exits · ↑↓ history (move the cursor first in multi-line input; busy empty-input ↑ recalls queued messages) ·
+  Ctrl+R reverse history search · Ctrl+A/E line start/end · Alt+B/F word movement · Ctrl+W/U/K delete word/to line
+  start/end · Ctrl+Y paste back deleted · Ctrl+S stash/restore input · Ctrl+_ undo · ctrl+o
+  expand/collapse toggle (expand = replays the full transcript for terminal scroll-up; press again to collapse back to
+  aggregates and clear/consolidate) · Ctrl+T toggle the task area · Ctrl+G agent/channel selector (↑↓ to select,
+  Enter opens a fullscreen view, Esc closes; the agent view shows that instance's full conversation and streaming output; the channel view
+  is a WeChat-style group room where you can speak directly as user) · Ctrl+L clear and redraw · Shift+Tab cycles permission
+  modes (default → acceptEdits → plan) · Alt+T thinking toggle · while busy, Enter queues the message, sent automatically at turn end.
+- Large pastes auto-collapse to a `[Pasted text #N +M lines]` placeholder; the real content expands on send
+  (precisely detected via terminal bracketed-paste events; terminals without that feature fall back to a
+  key-burst heuristic — extremely fast typing may misdetect, and pausing recovers).
+- **Sending images**: on macOS, copy an image (screenshot etc.) and paste (Cmd+V) to attach it;
+  the input shows a `#[image N]` placeholder; dragging/pasting image file paths (as their own line or
+  `![alt](path)`) attaches on submit too. Message history keeps the placeholder text; when the current endpoint is configured
+  with `supportsImages`/`sendImages`, images go to the model as base64 content blocks with the text
+  (auto-compressed to 2000px / ~3.75MB), otherwise only text is sent and images stay local.
 
-## 配置指南（settings.json）
+## Config guide (settings.json)
 
-三层配置浅层合并，后者覆盖前者：
-1. **user**：`~/.config/bingo/settings.json`（`XDG_CONFIG_HOME` 优先）
-2. **project**：`.bingo/settings.json`
-3. **local**：`.bingo/local.json`（个人覆盖，不入库）
+Three config layers, shallow-merged; the later one overrides:
+1. **user**: `~/.config/bingo/settings.json` (`XDG_CONFIG_HOME` takes precedence)
+2. **project**: `.bingo/settings.json`
+3. **local**: `.bingo/local.json` (personal overrides, never committed)
 
-| 配置项 | 类型 | 说明 |
+| Setting | Type | Description |
 |---|---|---|
-| `apiKey` | string | API key（settings 优先于 `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`）；建议放 user 层，项目层会入库 |
-| `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
-| `providers` | object | 命名 provider（Anthropic 协议）：`{名: {apiKey, apiBaseUrl}}`，`/provider <名>` 切换；可选 `supportsImages: true` 表示该端点模型接受图片 |
-| `sendImages` | bool | 默认（default）端点是否把消息框图片附件发给模型（命名 provider 用各自的 `supportsImages`；缺省都不发） |
-| `thinkingLevel` | string | 思考级别：`off` 不发 thinking 参数（兼容 DeepSeek，缺省）；`low`/`medium`/`high` 一律发 `{"type":"adaptive"}` 自适应思考（Claude 5 家族已移除 budget_tokens，级别暂不影响深度） |
+| `apiKey` | string | API key (settings take precedence over `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`); put it in the user layer — the project layer gets committed |
+| `apiBaseUrl` | string | API endpoint (settings take precedence over `ANTHROPIC_BASE_URL`; default is the official one) |
+| `providers` | object | Named providers (Anthropic protocol): `{name: {apiKey, apiBaseUrl}}`, switch via `/provider <name>`; optional `supportsImages: true` means that endpoint's model accepts images |
+| `sendImages` | bool | Whether the default endpoint sends message-box image attachments to the model (named providers use their own `supportsImages`; by default none are sent) |
+| `thinkingLevel` | string | Thinking level: `off` sends no thinking param (DeepSeek-compatible, default); `low`/`medium`/`high` always send `{"type":"adaptive"}` adaptive thinking (the Claude 5 family removed budget_tokens; the level doesn't affect depth for now) |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
-| `theme` | string | `auto`（跟随终端背景）/ `dark` / `light` |
-| `cacheControl` | bool | 发送 prompt caching；非官方端点不稳定时关闭 |
-| `respondToBashCommands` | bool | `!` 命令执行后是否交模型回应（默认 true；false = 纯执行） |
-| `mcpServers` | object | `{name: {type?, command, args, env}}`（stdio，缺省）或 `{name: {type: "http", url, headers?}}`（streamable HTTP） |
-| `disabledMcpServers` | string[] | 禁用的 MCP 服务器名单（/mcp disable 写入） |
-| `permissions` | object | `{allow[], deny[], ask[]}`，规则语法 `Tool(content)`，`:*` 为前缀通配（如 `Bash(git push:*)`）；Bash 规则按子命令逐段匹配，路径规则匹配前归一化（详见诊断 4） |
-| `experimental` | object | 实验特性：`{"agentChannels": true}` 开启 agent 频道互发（主会话得 Channel/Post 工具，直接子代理得 Post）；`channelMessageLimit`（默认 500，超限冻结频道）/ `agentMessageLimit`（默认 50）为预算闸 |
-| `team` | object | agent team 启动行为：`{"autoStart": true}`（缺省 true = 项目绑定 team 且存在时启动自动拉起，成员 Idle 待命零 token；`--no-team` 或 false 关闭） |
-| `hooks` | object | PreToolUse/PostToolUse/PreCompact/PostCompact/UserPromptSubmit/Stop/SessionStart/SessionEnd/TaskCreated/TaskCompleted，matcher + command；matcher 为整串锚定正则（`Edit\|Write`、`mcp__.*`），非法正则退回全等匹配 |
+| `theme` | string | `auto` (follows the terminal background) / `dark` / `light` |
+| `cacheControl` | bool | Send prompt caching; turn off if a non-official endpoint is unstable |
+| `respondToBashCommands` | bool | Whether `!` commands are handed to the model for a response after execution (default true; false = pure execution) |
+| `mcpServers` | object | `{name: {type?, command, args, env}}` (stdio, default) or `{name: {type: "http", url, headers?}}` (streamable HTTP) |
+| `disabledMcpServers` | string[] | List of disabled MCP servers (written by `/mcp disable`) |
+| `permissions` | object | `{allow[], deny[], ask[]}`; rule syntax `Tool(content)`, `:*` is a prefix wildcard (e.g. `Bash(git push:*)`); Bash rules match per subcommand segment; path rules normalize before matching (see diagnostics 4) |
+| `experimental` | object | Experimental features: `{"agentChannels": true}` enables agent channel messaging (the main session gets the Channel/Post tools, direct subagents get Post); `channelMessageLimit` (default 500, freezes the channel when exceeded) / `agentMessageLimit` (default 50) are budget gates |
+| `team` | object | agent team startup behavior: `{"autoStart": true}` (default true = when a project-bound team exists, start it automatically at launch; members stand by Idle at zero tokens; `--no-team` or false turns it off) |
+| `hooks` | object | PreToolUse/PostToolUse/PreCompact/PostCompact/UserPromptSubmit/Stop/SessionStart/SessionEnd/TaskCreated/TaskCompleted, matcher + command; the matcher is a whole-string anchored regex (`Edit\|Write`, `mcp__.*`); invalid regexes fall back to exact matching |
 
-示例（.bingo/settings.json）：
+Example (.bingo/settings.json):
 ```json
 {
   "apiKey": "sk-ant-xxxx",
@@ -86,114 +86,116 @@ when_to_use: >-
 }
 ```
 
-## slash 命令速查
+## Slash command quick reference
 
-`/help` 全量清单。常用：`/model [名]`、`/provider [名称]`（列出/切换多 provider）、
-`/think [off|low|medium|high]`（思考级别，持久化 settings）、`/theme`、
-`/permissions [allow|deny|ask] [规则]`、
-`/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
-`/skills`（清单，`/技能名` 直接执行）· `/context`（用量）· `/status` ·
-`/compact`（强制压缩）· `/resume [名称]`（恢复历史会话）· `/rename` · `/clear` · `/exit`。
-`/team`（项目级编队）：`list`（图纸+运行区同屏）· `start`（拉起/幂等复用）· `status` ·
-`assign <成员> <任务>`（派活）· `stop` · `validate` · `new`（脚手架生成 team.json）·
-`memory list|gc`（跨会话记忆管理）。
+`/help` for the full list. Common ones: `/model [name]`, `/provider [name]` (list/switch multiple providers),
+`/think [off|low|medium|high]` (thinking level, persisted to settings), `/theme`,
+`/permissions [allow|deny|ask] [rule]`,
+`/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
+`/skills` (list; `/skill-name` executes) · `/context` (usage) · `/status` ·
+`/compact` (force compaction) · `/resume [name]` (resume a historical session) · `/rename` · `/clear` · `/exit`.
+`/team` (project-scoped team): `list` (blueprint + runtime area on one screen) · `start` (start/idempotent reuse) · `status` ·
+`assign <member> <task>` (delegate) · `stop` · `validate` · `new` (scaffold a team.json) ·
+`memory list|gc` (cross-session memory management).
 
-## 诊断指南（常见问题 → 排查路径）
+## Diagnostic guide (common problems → troubleshooting paths)
 
-1. **启动报错 missing API key**：设 `ANTHROPIC_API_KEY` 或 `DEEPSEEK_API_KEY`，
-   或在 settings.json 写 `apiKey`（settings 优先）。
-2. **模型请求失败/超时**：`/status` 看当前模型，`/model` 切换；多 provider 用
-   `/provider <名称>` 切换（settings 的 providers 段）；`/context` 看用量，
-   接近上下文窗口时 `/compact`（自动压缩阈值 = 有效窗口（200k − 64k 输出预算）
-   的 90% ≈ 122k，约总窗口 61%）。非 Anthropic 端点（DeepSeek/ollama）无
-   count_tokens 接口时自动改用本地估算（字符数/4），首次回退告警一次。
-3. **MCP 服务器不工作**：`/mcp` 查看状态——`✗ failed: <详情>` 按详情修
-   （命令不存在/spawn 失败/握手失败；http 服务器另查 url 可达性与 headers 鉴权）；
-   stdio 服务器自身的报错输出在 `~/.local/share/bingo/logs/mcp-<名>.log`
-   （每次连接重写，不会打进界面）；修好后 `/mcp reconnect <name>`。`type: sse/ws` 会报"不支持（stdio / http）"。
-   禁用/启用：`/mcp disable|enable [name|all]`
-   （禁用名单持久化到 settings.json）。MCP 工具名为 `mcp__<server>__<tool>`，
-   权限规则请用全名（transcript 工具行显示为 `◆ server:tool`，仅是显示别名）。
-   连接在后台进行，不阻塞回合输入；连接失败的提示在输入框上方显示约 10 秒后自动消失，
-   详情以 `/mcp` 状态为准。
-4. **权限弹窗/拒绝不符合预期**：`/permissions` 列出当前规则；规则语法
-   `Tool(内容)`，`:*` 为前缀通配（如 `Bash(git push:*)`）。Bash 规则按
-   shell 操作符（`&&` `;` `|` 等）切成子命令逐段匹配：deny/ask 任一子命令
-   命中即生效；allow 需**单条规则覆盖全部子命令**才免询问，含 `$()`/子 shell/
-   未闭合引号的命令一律不自动放行（`Bash(git log)` 放行 `git log` 但不放行
-   `git log | head`）。文件类规则匹配前做路径归一化（`~` 展开、相对路径按
-   cwd 展开、消解 `..`），`Read(src/)` 也能匹配 cwd 下的绝对路径。MCP 工具
-   不因服务器自报只读而免询问，需显式 allow（`mcp__server` 或
-   `mcp__server__tool`）。改 `permissions.allow/deny/ask` 或切换
-   `permissionMode`（bypassPermissions 全放行、plan 只读）。
-5. **`!` 命令被拒**：交互式/TTY 命令（top/vim/ssh/sudo -i/fzf 等）设计上拒绝，
-   用非交互等价物（`top -b -n 1`、`ssh host 'cmd'`）。
-6. **bash 模式退不出来/误触**：空输入时 Esc/退格/Ctrl+U 均可退出 bash 模式；
-   `!` 前缀非空输入时是普通字符；Tab 从本会话 `!` 历史前缀补全。
-7. **找不到历史会话**：transcript 存 `~/.local/share/bingo/transcripts`（`--continue`
-   续上次，`/resume` 列出/切换）。
-8. **工具输出被折叠**：ctrl+o 展开全部折叠项并把完整 transcript 重放到
-   终端（上滑滚动翻看；已打印的折叠旧拷贝留在更上方，属正常）；全展开
-   态再按 ctrl+o 闭合——折回聚合态并清屏收拢；长输出显示 `+N lines`。
-9. **slash 下拉没出现想要的命令**：输入前缀过滤（如 `/m` 匹配 mcp/model/meye）；
-   Esc 关闭菜单；技能在 `/skills` 清单，`/技能名` 执行。
-10. **Grep/Glob 搜不到东西**：默认跳过 `.git`/`target`/`node_modules` 与 `.`
-   开头目录（把 `path` 显式指向它们时照常搜索）；pattern 对齐搜索根的相对
-   路径（`src/**/*.rs` 生效），不含 `/` 的 pattern 按文件名匹配任意深度
-   （`*.rs` 全树命中）；结果达上限即停止遍历。
-11. **超时/中断后有进程残留**：Bash 命令在独立进程组运行，超时与取消整组
-   终止（孙进程不再孤儿化）；Esc 中断回合后未完成工具会补占位结果，
-   会话保持可恢复（不会因孤儿 tool_use 导致后续请求 400）。
 
-## 能力地图（问"bingo 能做什么"时对照）
+1. **Startup error missing API key**: set `ANTHROPIC_API_KEY` or `DEEPSEEK_API_KEY`,
+   or write `apiKey` in settings.json (settings take precedence).
+2. **Model request fails/times out**: `/status` shows the current model; `/model` switches it; with multiple providers use
+   `/provider <name>` (the settings `providers` section); `/context` shows usage —
+   when close to the context window, `/compact` (auto-compaction threshold = 90% of the effective window
+   (200k − 64k output budget) ≈ 122k, about 61% of the total window). Non-Anthropic endpoints (DeepSeek/ollama) without a
+   count_tokens API automatically fall back to local estimation (characters/4), with a one-time warning on first fallback.
+3. **MCP server not working**: `/mcp` shows status — `✗ failed: <details>` fixes per the details
+   (command missing/spawn failure/handshake failure; for http servers also check url reachability and headers auth);
+   the stdio server's own error output lives in `~/.local/share/bingo/logs/mcp-<name>.log`
+   (rewritten per connection; never printed into the UI); after fixing, `/mcp reconnect <name>`. `type: sse/ws` errors with "unsupported (stdio / http)".
+   Disable/enable: `/mcp disable|enable [name|all]`
+   (the disabled list persists to settings.json). MCP tool names are `mcp__<server>__<tool>`;
+   use the full name in permission rules (the transcript tool row shows `◆ server:tool`, which is only a display alias).
+   Connections run in the background and never block turn input;
+   connection-failure notices above the input box auto-expire after about 10s;
+   details are authoritative in the `/mcp` status.
+4. **Permission prompts/denials not as expected**: `/permissions` lists the current rules; rule syntax is
+   `Tool(content)`; `:*` is a prefix wildcard (e.g. `Bash(git push:*)`). Bash rules split the command on
+   shell operators (`&&` `;` `|` etc.) into subcommands and match each segment: if any subcommand hits deny/ask, it takes effect;
+   allow requires a **single rule covering all subcommands** to skip the prompt; commands containing `$()`/subshells/
+   unclosed quotes are never auto-allowed (`Bash(git log)` allows `git log` but not
+   `git log | head`). File rules normalize paths before matching (`~` expansion, relative paths expanded against
+   cwd, `..` resolved), so `Read(src/)` also matches absolute paths under cwd. MCP tools
+   don't skip the prompt just because the server reports read-only; they need an explicit allow (`mcp__server` or
+   `mcp__server__tool`). Edit `permissions.allow/deny/ask` or switch
+   `permissionMode` (bypassPermissions allows everything; plan is read-only).
+5. **`!` command rejected**: interactive/TTY commands (top/vim/ssh/sudo -i/fzf etc.) are rejected by design —
+   use non-interactive equivalents (`top -b -n 1`, `ssh host 'cmd'`).
+6. **Stuck in bash mode/accidental trigger**: with an empty input, Esc/backspace/Ctrl+U all exit bash mode;
+   with non-empty input `!` is an ordinary character; Tab completes from this session's `!` history prefix.
+7. **Can't find a historical session**: transcripts live in `~/.local/share/bingo/transcripts` (`--continue`
+   resumes the last one; `/resume` lists/switches).
+8. **Tool output collapsed**: ctrl+o expands all collapsed items and replays the full transcript to the
+   terminal (scroll up to read; printed old collapsed copies stay higher up — normal); pressing ctrl+o again in the fully expanded
+   state collapses — back to aggregates with a clear/consolidate; long output shows `+N lines`.
+9. **Slash dropdown doesn't have the command you want**: type a prefix to filter (e.g. `/m` matches mcp/model/meye);
+   Esc closes the menu; skills are listed in `/skills`, run with `/skill-name`.
+10. **Grep/Glob finds nothing**: `.git`/`target`/`node_modules` and dot-prefixed directories are skipped by default
+    (they still search when `path` points at them explicitly); patterns are relative to the search root
+    (`src/**/*.rs` works); patterns without `/` match file names at any depth
+    (`*.rs` hits the whole tree); traversal stops when the result cap is reached.
+11. **Processes left behind after timeout/interruption**: Bash commands run in their own process group; timeouts and cancellation
+    terminate the whole group (grandchildren no longer orphan); after Esc interrupts a turn, unfinished tools get placeholder results,
+    and the session stays recoverable (no 400s on later requests from orphaned tool_use).
 
-- **内置工具**：Bash（经权限门）、Read/Glob/Grep、Edit/Write、WebFetch/WebSearch、
-  Agent（子代理）、SendMessage/AgentControl（子代理续话与生命周期，仅主会话）、
-  Task 族（任务追踪）、AskUserQuestion、Skill（技能调用）、
-  ExperiencePropose/Commit/Query/Forget（项目经验沉淀与检索）。
-- **经验（Experience）**：跨会话复用可重跑的工作流。会话开始时注入本项目
-  active 经验索引（≤10 条一行一条，空则不注入），全文用 ExperienceQuery 按
-  trigger 词元检索（大小写不敏感、共享前缀容错，active 优先、按采用次数排序）；
-  ExperiencePropose 生成候选（不落盘），用户确认后 ExperienceCommit 落盘
-  （同内容稳定 id，重提交更新而非重复、采用计数 +1，status: stale 标记失效
-  退出注入但仍可查）；ExperienceForget 淘汰（须用户确认）。存储于
-  `~/.config/bingo/experience/<project-key>/entries/`（用户级、不进项目仓库），
-  项目键取 git remote URL（归一化）→ git 根 → 规范化绝对路径，跨目录/机器稳定。
-- **子代理**：Agent 派生的实例有名字（`name` 参数，缺省取定义名/agent，重名
-  自动 -2/-3），transcript 显示为 `◉ 名字 · 任务`；完成后历史保留，主 agent 可
-  SendMessage 续话（忙碌排队、空闲唤醒）、AgentControl list/stop/delete 管理。
-  **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`（同名项目层
-  优先）；frontmatter `name/description/model/provider/thinking`，正文 = 子代理
-  system prompt；Agent 工具的 `agent` 参数引用。
-  **逐实例模型/思考**：Agent 工具的 `model`/`provider`/`thinking` 参数可给单个
-  子代理指定模型、provider（settings 的 providers 段，跨端点/跨 key）与思考级别
-  （`off/low/medium/high/xhigh/max`）；优先级 显式参数 > 具名定义 > 继承父会话
-  当前值（模型/provider/思考各自独立，互不影响父会话）。
-  **频道互发**（实验，`experimental.agentChannels`）：主 agent 用 Channel 工具
-  建频道/进出成员（成员限直接子代理，主 agent 名 `main` 自动入席），成员用 Post
-  发言——消息进全体成员上下文（同序），发件人由运行时盖戳；serial 频道落后
-  发言会被弹回并附新增消息（agent 阅读后自行改口/放弃，报数式顺序由此涌现），
-  free 频道允许交叉。频道在 transcript 显示为 `◇ #名字` 行（可展开看完整群聊）；
-  预算超限自动冻结频道并通知主 agent。
-  **底部实体区**：有实例/频道时输入框上方显示一行摘要，Ctrl+G 进入选择
-  （↑↓/Enter），agent 打开全屏对话视图（历史 + 流式活尾，只读），频道打开
-  全屏微信式房间——他人靠左带名签、你（user）靠右，底部输入 Enter 直接发言
-  （与 Post 同一投递路径，正常唤醒成员；渲染即已读，serial 不会弹你），Esc 返回。
-- **agent team**（项目级编队）：`.bingo/team.json`（camelCase：`name`/`channel{mode,messageLimit}`/
-  `members[{name,agent}]`，成员引用 AgentDef）把多名角色固定到一个项目；启动默认拉起
-  （`settings.team.autoStart`，`--no-team` 关闭；拉起 ≠ 唤醒——成员 Idle 待命零 token，
-  等 `/team assign` 或频道消息才开跑；幂等键 = 实例名，重复 start 复用）。`/team` 命令族
-  管理；team 记忆按「项目路径哈希 + 分支」存 `~/.config/bingo/teams/`（完整历史跨会话恢复 +
-  append-only 决策记录，`/team memory list|gc` 管理）。
-- **技能**：内置 `guide`（本指南）+ `~/.config/bingo/skills/` 与 `.bingo/skills/`
-  目录技能（同名磁盘技能覆盖内置）；模型经 SkillTool 调用，用户经 `/技能名` 执行。
-- **图片**：模型回复中的 markdown 图片（`![alt](路径)`，支持相对路径/data/http(s)）
-  在支持 kitty graphics 的终端（Ghostty/kitty/WezTerm 等）内联渲染，其余终端显示
-  `#[image]` 占位。tmux 内：外层终端为 Ghostty/kitty 且 `tmux set -g
-  allow-passthrough on` 时经 Unicode 占位符（U=1）渲染，图片随文本正常滚动；
-  passthrough 未开会收到一次性提示；外层为 WezTerm/Konsole（不支持 U=1）或
-  screen 走占位。图片随消息自动加载并在消息定稿落盘时渲染，不需要额外命令。
-- **MCP**：stdio 与 streamable HTTP（`type: "http"`，可带自定义 headers）服务器工具接入（见上）。
-- **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/`，文件名
-  `<项目名>-<路径哈希>.md`，同名目录不串味）+ 项目 CLAUDE.md（Anthropic 惯例）。
-- **会话**：transcript 持久化（JSONL），`--continue`/`/resume` 恢复，`/compact` 压缩。
+## Capability map (reference when asked "what can bingo do")
+
+- **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep, Edit/Write, WebFetch/WebSearch,
+  Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
+  the Task family (task tracking), AskUserQuestion, Skill (skill invocation),
+  ExperiencePropose/Commit/Query/Forget (project experience capture and retrieval).
+- **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
+  experience index is injected (≤10 entries, one per line; nothing injected when empty); full text is searched with ExperienceQuery by
+  trigger tokens (case-insensitive, shared-prefix tolerant; active first, sorted by adoption count);
+  ExperiencePropose generates candidates (not persisted); after user confirmation ExperienceCommit persists
+  (same content → stable id, re-committing updates rather than duplicates, adoption count +1; `status: stale` marks invalidation,
+  exits injection but stays queryable); ExperienceForget evicts (requires user confirmation). Stored in
+  `~/.config/bingo/experience/<project-key>/entries/` (user-level, not in the project repo);
+  the project key is derived from the git remote URL (normalized) → git root → normalized absolute path, stable across directories/machines.
+- **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
+  auto-suffix -2/-3), shown in the transcript as `◉ name · task`; history is kept after completion, and the main agent can
+  SendMessage to continue (queued while busy, woken when idle), or manage with AgentControl list/stop/delete.
+  **Named definitions**: `~/.config/bingo/agents/*.md` and `.bingo/agents/*.md` (same-name project layer wins);
+  frontmatter `name/description/model/provider/thinking`, body = the subagent's system prompt; referenced by the Agent tool's
+  `agent` argument.
+  **Per-instance model/thinking**: the Agent tool's `model`/`provider`/`thinking` args give a single
+  subagent a model, provider (the settings `providers` section; cross-endpoint/cross-key), and thinking level
+  (`off/low/medium/high/xhigh/max`); precedence: explicit args > named definition > inherit the parent session's
+  current values (model/provider/thinking are independent and don't affect the parent session).
+  **Channel messaging** (experimental, `experimental.agentChannels`): the main agent uses the Channel tool
+  to create channels and manage members (members limited to direct subagents; the main agent is auto-seated as `main`), members speak
+  via Post — messages enter every member's context (same order), the sender is stamped by the runtime; in serial channels, a stale
+  post is bounced back with the new messages attached (the agent reads them, then re-decides/abandons; count-based ordering emerges this way);
+  free channels allow interleaving. Channels show in the transcript as `◇ #name` rows (expandable to the full group chat);
+  over-budget channels auto-freeze and notify the main agent.
+  **Bottom entity area**: when instances/channels exist, a one-line summary shows above the input box; Ctrl+G enters selection
+  (↑↓/Enter); an agent opens the fullscreen conversation view (history + streaming live tail, read-only); a channel opens the
+  fullscreen WeChat-style room — others left-aligned with name tags, you (user) right-aligned, the bottom input's Enter speaks
+  directly (same delivery path as Post, members woken normally; rendering = read, serial never bounces you), Esc returns.
+- **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
+  `members[{name,agent}]`, members reference AgentDefs) pins multiple roles to one project; started by default at launch
+  (`settings.team.autoStart`; `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,
+  only `/team assign` or channel messages start them; idempotency key = instance name, repeated start reuses). The `/team` command family
+  manages it; team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (full history restored across sessions +
+  append-only decision records; `/team memory list|gc` manages it).
+- **Skills**: built-in `guide` (this guide) + `~/.config/bingo/skills/` and `.bingo/skills/`
+  directory skills (same-name disk skills override built-ins); the model invokes them via SkillTool, users run them via `/skill-name`.
+- **Images**: markdown images in model replies (`![alt](path)`, supports relative paths/data/http(s))
+  render inline on kitty-graphics-capable terminals (Ghostty/kitty/WezTerm etc.); other terminals show a
+  `#[image]` placeholder. In tmux: when the outer terminal is Ghostty/kitty and `tmux set -g
+  allow-passthrough on`, images render via Unicode placeholders (U=1) and scroll normally with the text;
+  without passthrough you get a one-time notice; with an outer WezTerm/Konsole (no U=1) or
+  screen, placeholders are used. Images load automatically with the message and render when the message settles — no extra command needed.
+- **MCP**: stdio and streamable HTTP (`type: "http"`, with custom headers) server tools are integrated (see above).
+- **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
+  `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
+- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts.

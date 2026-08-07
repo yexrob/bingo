@@ -24,95 +24,100 @@ impl ErrorCode for SettingsError {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// API key（`apiKey`）：settings 优先，回落 ANTHROPIC_API_KEY/DEEPSEEK_API_KEY。
-    /// 放 user 层（`~/.config/bingo/settings.json`）；项目层会入库，注意别提交。
+    /// API key (`apiKey`): settings win, fall back to ANTHROPIC_API_KEY/DEEPSEEK_API_KEY.
+    /// Put it in the user layer (`~/.config/bingo/settings.json`); the project layer gets
+    /// committed — mind not to check it in.
     #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
-    /// API 端点（`apiBaseUrl`）：settings 优先，回落 ANTHROPIC_BASE_URL。
+    /// API endpoint (`apiBaseUrl`): settings win, fall back to ANTHROPIC_BASE_URL.
     #[serde(rename = "apiBaseUrl")]
     pub api_base_url: Option<String>,
-    /// 命名 provider（`providers`，Anthropic 协议）：`/provider <名>` 切换。
-    /// 顶层 apiKey/apiBaseUrl（或 env）构成默认 provider "default"。
+    /// Named providers (`providers`, Anthropic protocol): `/provider <name>` switches.
+    /// Top-level apiKey/apiBaseUrl (or env) form the default provider "default".
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
-    /// 默认模型（`model`）：`/model` 选择持久化于此。
-    /// 优先级 `--model` > settings（user < project < local）> 内置默认。
+    /// Default model (`model`): `/model` selection persists here.
+    /// Precedence `--model` > settings (user < project < local) > built-in default.
     pub model: Option<String>,
-    /// 默认（default）provider 是否把图片附件发给模型（`sendImages`）。
-    /// 命名 provider 用各自的 `supportsImages`；None = 不发送。
+    /// Whether the default provider sends image attachments to the model (`sendImages`).
+    /// Named providers use their own `supportsImages`; None = don't send.
     #[serde(rename = "sendImages", default)]
     pub send_images: Option<bool>,
-    /// 思考级别（`thinkingLevel`）：off | low | medium | high | xhigh | max。
-    /// 缺省不发 thinking 参数（兼容 DeepSeek 等端点）；其余档位发
-    /// `{"type":"adaptive"}` + `output_config.effort`——Claude 5 家族已移除
-    /// budget_tokens，深度由 effort 承担。
+    /// Thinking level (`thinkingLevel`): off | low | medium | high | xhigh | max.
+    /// Default sends no thinking parameter (compatible with DeepSeek etc.); the other
+    /// levels send `{"type":"adaptive"}` + `output_config.effort` — the Claude 5 family
+    /// removed budget_tokens; effort carries the depth.
     #[serde(rename = "thinkingLevel", default)]
     pub thinking_level: Option<String>,
     #[serde(rename = "permissionMode")]
     pub permission_mode: Option<String>,
-    /// TUI 主题：auto（跟随终端背景）/ dark / light。默认 auto。
+    /// TUI theme: auto (follow terminal background) / dark / light. Default auto.
     pub theme: Option<String>,
-    /// 发送 cache_control（prompt caching）。默认关闭：非官方端点处理不稳定。
+    /// Send cache_control (prompt caching). Off by default: non-official endpoints
+    /// handle it unreliably.
     #[serde(rename = "cacheControl")]
     pub cache_control: Option<bool>,
-    /// `!` 命令（bash 模式）执行后是否把输出交给模型回应
-    /// （`respondToBashCommands`，默认 true；false = 纯执行不查模型）。
+    /// Whether `!` commands (bash mode) hand their output to the model after running
+    /// (`respondToBashCommands`, default true; false = pure execution, no model query).
     #[serde(rename = "respondToBashCommands")]
     pub respond_to_bash_commands: Option<bool>,
     pub hooks: HooksConfig,
     #[serde(rename = "mcpServers")]
     pub mcp_servers: HashMap<String, McpServerConfig>,
-    /// 禁用的 MCP 服务器名单。
+    /// Disabled MCP server names.
     #[serde(rename = "disabledMcpServers", default)]
     pub disabled_mcp_servers: Vec<String>,
-    /// 权限规则表（allow/deny/ask，规则语法 `Tool(content)`）。
+    /// Permission rule tables (allow/deny/ask, rule syntax `Tool(content)`).
     pub permissions: PermissionRules,
-    /// 实验特性开关（`experimental`）。
+    /// Experimental feature switches (`experimental`).
     #[serde(default)]
     pub experimental: ExperimentalSettings,
-    /// team 设置（`team`）：D31 项目级编队。
+    /// Team settings (`team`): D31 project-level crew.
     #[serde(default)]
     pub team: TeamSettings,
 }
 
-/// team 设置（D31）。职责：管「要不要拉起」；team 文件（.bingo/team.json）管「拉起什么」。
+/// Team settings (D31). Responsibility: "whether to start"; the team file
+/// (.bingo/team.json) governs "what to start".
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TeamSettings {
-    /// 项目启动时自动拉起 team（`team.autoStart`）。缺省 true（需求字面
-    /// 「启动默认读取」）；双 opt-out：本开关 + `--no-team` CLI。
+    /// Auto-start the team on project start (`team.autoStart`). Default true (the
+    /// requirement literally reads "start reads by default"); double opt-out: this
+    /// switch + `--no-team` CLI.
     #[serde(rename = "autoStart", default)]
     pub auto_start: Option<bool>,
 }
 
-/// 实验特性（默认全关）。
+/// Experimental features (all off by default).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ExperimentalSettings {
-    /// agent 频道互发（`agentChannels`）：开启后主会话获得 Channel/Post
-    /// 工具，直接子代理获得 Post 工具。
+    /// Agent channels (`agentChannels`): when enabled, the main session gains
+    /// Channel/Post tools and direct subagents gain the Post tool.
     #[serde(rename = "agentChannels", default)]
     pub agent_channels: bool,
-    /// 每频道消息总上限（`channelMessageLimit`，默认 500；超限冻结频道并通知主 agent）。
+    /// Per-channel total message cap (`channelMessageLimit`, default 500; beyond it the
+    /// channel freezes and the main agent is notified).
     #[serde(rename = "channelMessageLimit")]
     pub channel_message_limit: Option<u64>,
-    /// 每 agent 每频道发言上限（`agentMessageLimit`，默认 50）。
+    /// Per-agent per-channel message cap (`agentMessageLimit`, default 50).
     #[serde(rename = "agentMessageLimit")]
     pub agent_message_limit: Option<u64>,
 }
 
-/// 命名 provider（Anthropic 协议端点）。
+/// Named provider (Anthropic-protocol endpoint).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
     #[serde(rename = "apiKey")]
     pub api_key: String,
     #[serde(rename = "apiBaseUrl")]
     pub api_base_url: String,
-    /// 该 provider 的模型是否接受图片内容（`supportsImages`；
-    /// None/缺省 = 不发送图片）。
+    /// Whether this provider's model accepts image content (`supportsImages`;
+    /// None/default = don't send images).
     #[serde(rename = "supportsImages", default)]
     pub supports_images: Option<bool>,
 }
 
-/// 权限规则（settings permissions 段）。
+/// Permission rules (settings permissions section).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PermissionRules {
@@ -121,22 +126,22 @@ pub struct PermissionRules {
     pub ask: Vec<String>,
 }
 
-/// MCP server 定义。
+/// MCP server definition.
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpServerConfig {
-    /// 传输类型：stdio（缺省）| http（streamable HTTP）。
-    /// sse / ws 暂未落地，配置后连接时报错。
+    /// Transport type: stdio (default) | http (streamable HTTP).
+    /// sse / ws not implemented yet; configuring them errors at connect time.
     #[serde(rename = "type", default)]
     pub kind: Option<String>,
-    /// stdio 服务器的启动命令（type=stdio 必需）。
+    /// Launch command for stdio servers (required for type=stdio).
     pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
-    /// http 服务器端点（type=http 必需）。
+    /// Endpoint for http servers (required for type=http).
     pub url: Option<String>,
-    /// http 请求自定义头（Authorization 等鉴权头）。
+    /// Custom headers for http requests (Authorization etc.).
     #[serde(default)]
     pub headers: HashMap<String, String>,
 }
@@ -180,7 +185,7 @@ pub struct Hook {
     pub command: String,
 }
 
-/// 配置分层（D9）：user / project / local 浅层合并，后者覆盖前者。
+/// Config layering (D9): user / project / local shallow merge, later layers override.
 pub fn load_settings(
     user_dir: &std::path::Path,
     project_dir: &std::path::Path,
@@ -256,7 +261,8 @@ fn merge(base: &mut Settings, layer: Settings) {
     if !layer.permissions.ask.is_empty() {
         base.permissions.ask.extend(layer.permissions.ask);
     }
-    // experimental：逐字段合并（开关任一层开启即开；上限后层覆盖前层）。
+    // experimental: merge field by field (any layer enabling a switch turns it on; caps
+    // are overridden by later layers).
     if layer.experimental.agent_channels {
         base.experimental.agent_channels = true;
     }
@@ -266,7 +272,7 @@ fn merge(base: &mut Settings, layer: Settings) {
     if let Some(v) = layer.experimental.agent_message_limit {
         base.experimental.agent_message_limit = Some(v);
     }
-    // team：autoStart 后层覆盖前层（user → project → local）。
+    // team: autoStart overridden by later layers (user → project → local).
     if let Some(v) = layer.team.auto_start {
         base.team.auto_start = Some(v);
     }
@@ -284,8 +290,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     }
 }
 
-/// 读改写 `.bingo/settings.json` 的顶层字段（/permissions /theme 持久化）：
-/// 保留文件内其他配置，仅覆盖 patch 中的键；无文件则新建。
+/// Read-modify-write the top-level fields of `.bingo/settings.json`
+/// (/permissions /theme persistence): keep other config in the file, only override the
+/// keys in the patch; create the file if missing.
 pub fn upsert_project_settings(
     project_dir: &std::path::Path,
     patch: &serde_json::Value,
@@ -349,7 +356,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// cacheControl 必须逐层合并——漏掉它 prompt caching 永远关闭。
+    /// cacheControl must merge layer by layer — skipping it would leave prompt caching
+    /// permanently off.
     #[test]
     fn merges_cache_control() {
         let tmp = std::env::temp_dir().join(format!("bingo-settings-cache-{}", std::process::id()));
@@ -359,7 +367,7 @@ mod tests {
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.cache_control, Some(true), "user 层 cacheControl 生效");
 
-        // project 层覆盖 user 层。
+        // Project layer overrides user layer.
         write(&tmp, ".bingo/settings.json", r#"{"cacheControl":false}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.cache_control, Some(false));
@@ -384,7 +392,7 @@ mod tests {
         write(&tmp, ".bingo/settings.json", r#"{"apiKey":"sk-project","apiBaseUrl":"https://project.example"}"#);
         write(&tmp, "user/bingo/settings.json", r#"{"apiKey":"sk-user","apiBaseUrl":"https://user.example"}"#);
 
-        // project 层覆盖 user（layer 顺序 user → project → local，后者覆盖前者）。
+        // Project layer overrides user (layer order user → project → local, later wins).
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.api_key.as_deref(), Some("sk-project"));
         assert_eq!(settings.api_base_url.as_deref(), Some("https://project.example"));
@@ -396,7 +404,7 @@ mod tests {
     fn parses_experimental_settings() {
         let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-exp", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        // 缺省全关。
+        // All off by default.
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert!(!settings.experimental.agent_channels);
         assert!(settings.experimental.channel_message_limit.is_none());
@@ -413,7 +421,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// model 逐层覆盖：后层（local > project > user）胜出，缺省 None。
+    /// model overrides layer by layer: later layer (local > project > user) wins,
+    /// default None.
     #[test]
     fn merges_model() {
         let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-model", std::process::id()));
@@ -437,10 +446,10 @@ mod tests {
     fn merges_team_auto_start_across_layers() {
         let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-team", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        // 缺省：None（运行时回落 true，见 D31）。
+        // Default: None (runtime falls back to true, see D31).
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.team.auto_start, None);
-        // user 层设 true。
+        // User layer sets true.
         write(
             &tmp,
             "user/bingo/settings.json",
@@ -448,12 +457,13 @@ mod tests {
         );
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.team.auto_start, Some(true));
-        // project 层未设 → 保持 user 层值；local 层 false 覆盖。
+        // Project layer unset → keep user-layer value; local layer false overrides.
         write(&tmp, ".bingo/settings.json", r#"{"permissionMode":"plan"}"#);
         write(&tmp, ".bingo/local.json", r#"{"team":{"autoStart":false}}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.team.auto_start, Some(false), "local 覆盖 user");
-        // 未知字段（旧版本无 team 段）应忽略不报错：清掉 local 的覆盖再看。
+        // Unknown fields (older versions without a team section) must be ignored, not
+        // error: clear local's override and re-check.
         write(&tmp, ".bingo/local.json", r#"{"permissionMode":"plan"}"#);
         write(&tmp, ".bingo/settings.json", r#"{"team":{"autoStart":true,"futureField":1}}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
@@ -477,7 +487,7 @@ mod tests {
         assert_eq!(ds.api_base_url, "https://api.deepseek.com");
         assert_eq!(settings.providers.len(), 2);
 
-        // 层间合并：user 层 provider 与 project 层并存。
+        // Cross-layer merge: user-layer providers coexist with project-layer ones.
         write(
             &tmp,
             "user/bingo/settings.json",
@@ -490,7 +500,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// supportsImages/sendImages：缺省 None（不发送），逐层合并。
+    /// supportsImages/sendImages: default None (don't send), merged layer by layer.
     #[test]
     fn parses_image_support_flags() {
         let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-img", std::process::id()));
@@ -505,11 +515,11 @@ mod tests {
         assert_eq!(settings.providers["road"].supports_images, Some(true));
         assert_eq!(settings.providers["ds"].supports_images, None, "缺省不发图片");
 
-        // 层间覆盖：project 层 sendImages 覆盖 user 层（后层胜出）。
+        // Cross-layer override: project-layer sendImages overrides user layer (later wins).
         write(&tmp, "user/bingo/settings.json", r#"{"sendImages":false}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.send_images, Some(true), "project 覆盖 user");
-        // 只有 user 层时其值生效。
+        // Only the user layer present: its value takes effect.
         write(&tmp, ".bingo/settings.json", r#"{"model":"m"}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.send_images, Some(false));

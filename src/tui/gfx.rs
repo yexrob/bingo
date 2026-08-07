@@ -1,8 +1,10 @@
-//! 终端图片显示：kitty graphics protocol 能力检测 + 序列构建 + 图片加载。
+//! Terminal image display: kitty graphics protocol capability detection +
+//! sequence building + image loading.
 //!
-//! 只做 kitty 协议（Ghostty/kitty/WezTerm/Konsole 均支持）；其余终端
-//! 由渲染层显示 `#[image]` 占位。图片以 PNG 传输（协议只认 PNG/RGB/RGBA），
-//! 传输前按 cell 尺寸缩放到目标单元格尺寸。
+//! Only the kitty protocol is implemented (supported by Ghostty/kitty/WezTerm/
+//! Konsole); other terminals get the `#[image]` placeholder from the render
+//! layer. Images travel as PNG (the protocol only accepts PNG/RGB/RGBA) and
+//! are rescaled to the target cell size before transmission.
 //!
 //! Placement comes in two flavours, picked once at detection time:
 //! - [`ImageMode::Direct`] — bare kitty escapes with `C=1`, used when nothing
@@ -13,13 +15,14 @@
 
 use std::path::Path;
 
-/// 最大显示宽度（单元格列数）。
+/// Maximum display width (in cells).
 pub const MAX_COLS: u32 = 60;
-/// 最大显示高度（单元格行数）。
+/// Maximum display height (in cells).
 pub const MAX_ROWS: u32 = 18;
-/// 单个图片文件大小上限。
+/// Size cap for a single image file.
 const MAX_BYTES: usize = 10 * 1024 * 1024;
-/// 图片像素尺寸上限（防止超大图撑爆解码与传输）。
+/// Pixel-size cap for images (keeps huge images from blowing up decode and
+/// transmission).
 const MAX_DIM: u32 = 16_000;
 
 /// Plausible cell pixel bounds. A `14t` answer or a grid size that divides out
@@ -53,12 +56,12 @@ pub enum ImageMode {
     TmuxPlaceholder,
 }
 
-/// kitty 协议图片能力（含探测到的 cell 尺寸）。
+/// kitty protocol image capability (including the probed cell size).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageCap {
-    /// 单个字符单元格的像素宽。
+    /// Pixel width of one character cell.
     pub cell_w: u32,
-    /// 单个字符单元格的像素高。
+    /// Pixel height of one character cell.
     pub cell_h: u32,
     /// Transport + placement scheme to use for this terminal.
     pub mode: ImageMode,
@@ -72,7 +75,7 @@ pub struct ImageProbe {
     pub warning: Option<String>,
 }
 
-/// 一张已加载图片：目标单元格尺寸 + PNG 字节。
+/// A loaded image: target cell size + PNG bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageMeta {
     pub cols: usize,
@@ -81,7 +84,8 @@ pub struct ImageMeta {
 }
 
 impl ImageCap {
-    /// 默认 cell 尺寸（查询失败时回落；Ghostty 默认字体约 8×16）。
+    /// Default cell size (fallback when the query fails; Ghostty's default
+    /// font is about 8×16).
     pub const fn default_cells() -> Self {
         Self { cell_w: 8, cell_h: 16, mode: ImageMode::Direct }
     }
@@ -102,12 +106,14 @@ enum ProbePlan {
     TmuxUnsupported,
 }
 
-/// 检测终端是否支持 kitty graphics protocol（及 cell 尺寸）。
+/// Detect whether the terminal supports the kitty graphics protocol (and the
+/// cell size).
 ///
-/// 快速路径：`TERM_PROGRAM=ghostty/WezTerm/kitty/konsole` 或
-/// `TERM=xterm-kitty` 直接判定支持；否则向终端发起协议查询
-/// （`a=q` 查询动作 + DA + 14t 像素尺寸），读到 `\x1b_Gi=31;OK`
-/// 即支持。需在进 raw mode / 全屏前调用。
+/// Fast path: `TERM_PROGRAM=ghostty/WezTerm/kitty/konsole` or
+/// `TERM=xterm-kitty` decides support directly; otherwise the terminal is
+/// queried (`a=q` query action + DA + 14t pixel size) and support is granted
+/// on reading `\x1b_Gi=31;OK`. Must be called before entering raw mode /
+/// fullscreen.
 ///
 /// Inside tmux the same `a=q` probe is sent wrapped in a tmux passthrough
 /// envelope; an answer means passthrough is on and images can be placed with
@@ -187,7 +193,8 @@ fn cap_from(buf: Option<&[u8]>, grid: Option<(u16, u16)>, mode: ImageMode) -> Im
     }
 }
 
-/// 从环境变量判断 kitty 协议支持（纯函数，便于测试）。
+/// Decide kitty protocol support from environment variables (pure function,
+/// easy to test).
 pub fn env_kitty(term_program: Option<&str>, term: Option<&str>) -> bool {
     match term_program {
         Some("ghostty") | Some("WezTerm") | Some("kitty") | Some("konsole") => true,
@@ -195,7 +202,8 @@ pub fn env_kitty(term_program: Option<&str>, term: Option<&str>) -> bool {
     }
 }
 
-/// 查询响应中是否含 kitty 图形协议 OK 应答（`\x1b_Gi=31;OK`）。
+/// Whether the query response contains the kitty graphics protocol OK answer
+/// (`\x1b_Gi=31;OK`).
 fn graphics_query_ok(buf: &[u8]) -> bool {
     buf.windows(b"\x1b_Gi=31;OK".len())
         .any(|w| w == b"\x1b_Gi=31;OK")
@@ -227,7 +235,8 @@ fn cells_from_text_area(
     Some((cell_w, cell_h))
 }
 
-/// 解析 `\x1b[14t` 响应（`CSI 4 ; height ; width t`）为文本区 (宽, 高) 像素。
+/// Parse a `\x1b[14t` response (`CSI 4 ; height ; width t`) into text-area
+/// (width, height) pixels.
 fn parse_text_area_px(buf: &[u8]) -> Option<(u32, u32)> {
     let s = std::str::from_utf8(buf).ok()?;
     let start = s.find("\x1b[4;")?;
@@ -242,8 +251,8 @@ fn parse_text_area_px(buf: &[u8]) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
-/// 图片像素尺寸 → 目标单元格 (cols, rows)：等比缩放适配最大显示框，
-/// 不放大小图。
+/// Image pixel size → target cell (cols, rows): scale proportionally to fit
+/// the maximum display box, never upscale small images.
 pub fn fit_cells(
     w: u32,
     h: u32,
@@ -259,8 +268,9 @@ pub fn fit_cells(
     (cols, rows)
 }
 
-/// base64 按 4096 字节分块（协议上限）切成 kitty `\e_G…\e\\` 传输块：
-/// 首块携带 `first_header` 的完整控制数据，续块只带 `m`。
+/// Split base64 into kitty `\e_G…\e\\` transmission chunks of 4096 bytes (the
+/// protocol cap): the first chunk carries the full control data from
+/// `first_header`, continuation chunks only `m`.
 fn kitty_chunks(png: &[u8], first_header: &str) -> Vec<Vec<u8>> {
     use base64::Engine;
     const CHUNK: usize = 4096;
@@ -291,9 +301,11 @@ fn kitty_chunks(png: &[u8], first_header: &str) -> Vec<Vec<u8>> {
     chunks
 }
 
-/// 构建 kitty 传输+放置序列：首块控制数据为 `a=T` 传输并显示、PNG、
-/// 静默 OK 应答、不移动光标。末尾追加 `rows` 个 `\r\n` 推进光标
-/// （`C=1` 放置不移动光标；raw mode 下裸 `\n` 只下移不回车，必须带 CR）。
+/// Build the kitty transmit+place sequence: the first chunk's control data is
+/// `a=T` transmit-and-display, PNG, silent OK reply, cursor not moved. Appends
+/// `rows` `\r\n`s to advance the cursor (`C=1` placement does not move the
+/// cursor; under raw mode a bare `\n` only moves down without a carriage
+/// return, so CR is required).
 pub fn kitty_image_bytes(png: &[u8], cols: usize, rows: usize) -> Vec<u8> {
     let header = format!("a=T,f=100,q=1,c={cols},r={rows},C=1");
     let mut out: Vec<u8> = kitty_chunks(png, &header).concat();
@@ -407,7 +419,8 @@ pub fn image_id_for(url: &str) -> u32 {
     normalize_image_id((hasher.finish() & 0xFF_FFFF) as u32)
 }
 
-/// 单一出口：按 `cap.mode` 分派出「传输 + 放置 + 光标推进」的完整字节序列。
+/// Single exit point: dispatch on `cap.mode` to the complete byte sequence of
+/// "transmit + place + cursor advance".
 ///
 /// `id` only matters in placeholder mode, where it ties the transmitted image
 /// to the placeholder cells; it is masked to 24 bits.
@@ -429,12 +442,13 @@ pub fn image_print_bytes(
     }
 }
 
-/// 从 url 加载图片并转成可传输的 ImageMeta：
-/// - `data:image/...;base64,` — 内联 base64
-/// - `http(s)://` — 下载（reqwest）
-/// - 其他 — 本地路径（相对 cwd）
+/// Load an image from a url and turn it into a transmittable `ImageMeta`:
+/// - `data:image/...;base64,` — inline base64
+/// - `http(s)://` — download (reqwest)
+/// - anything else — local path (relative to cwd)
 ///
-/// 解码 → 缩放（fit_cells）→ 编码 PNG。任何一步失败返回 None。
+/// Decode → resize (`fit_cells`) → encode PNG. Any failing step returns
+/// `None`.
 pub async fn load_image(url: &str, cwd: &Path, cap: &ImageCap) -> Option<ImageMeta> {    let bytes = fetch_bytes(url, cwd).await?;
     if bytes.len() > MAX_BYTES {
         return None;
@@ -467,10 +481,10 @@ pub async fn load_image(url: &str, cwd: &Path, cap: &ImageCap) -> Option<ImageMe
     })
 }
 
-/// 按 url 类型取原始字节。
+/// Fetch the raw bytes by url type.
 async fn fetch_bytes(url: &str, cwd: &Path) -> Option<Vec<u8>> {
-    // CommonMark 角括号包裹的 URL（`![alt](<path with spaces>)`）剥壳，
-    // 与渲染层的 key 保持一致。
+    // CommonMark angle-bracket-wrapped urls (`![alt](<path with spaces>)`)
+    // are unwrapped, staying consistent with the render layer's key.
     let url = url
         .strip_prefix('<')
         .and_then(|u| u.strip_suffix('>'))
@@ -499,7 +513,7 @@ async fn fetch_bytes(url: &str, cwd: &Path) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
-/// 解码 `data:[mediatype][;base64],<data>`（仅支持 base64 变体）。
+/// Decode `data:[mediatype][;base64],<data>` (base64 variant only).
 fn decode_data_url(head: &str) -> Option<Vec<u8>> {
     use base64::Engine;
     let comma = head.find(',')?;
@@ -514,10 +528,12 @@ fn decode_data_url(head: &str) -> Option<Vec<u8>> {
     }).ok()
 }
 
-/// 从 markdown 文本提取图片 url（`![alt](url)`，url 不含空白）。
+/// Extract image urls from markdown text (`![alt](url)`, url without
+/// whitespace).
 pub fn extract_image_urls(text: &str) -> Vec<String> {
-    // 捕获后剥 `<>`（CommonMark 角括号包裹）：渲染层（rsmarkdown）同样
-    // 剥壳，保持同一 key，否则加载缓存与渲染对不上。
+    // After capture, strip `<>` (CommonMark angle brackets): the render layer
+    // (rsmarkdown) strips them too, keeping the same key — otherwise the load
+    // cache and the render would disagree.
     let Ok(re) = regex::Regex::new(r"!\[[^\]]*\]\(([^)\s]+)\)") else {
         return Vec::new();
     };
@@ -532,8 +548,9 @@ pub fn extract_image_urls(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// macOS：剪贴板含图片时读出 PNG 字节（osascript `«class PNGf»`；
-/// 非 macOS / 剪贴板无图片 / 任一步失败返回 None）。
+/// macOS: read PNG bytes from the clipboard when it holds an image (osascript
+/// `«class PNGf»`; non-macOS / no image on the clipboard / any failing step
+/// returns `None`).
 pub fn clipboard_image_png() -> Option<Vec<u8>> {
     if !cfg!(target_os = "macos") {
         return None;
@@ -654,13 +671,13 @@ mod tests {
     #[test]
     fn fit_cells_scales_to_fit_without_upscale() {
         let cap = ImageCap::default_cells();
-        // 80×80 像素 = 10×2.5 cells；不放大。
+        // 80×80 pixels = 10×2.5 cells; not upscaled.
         assert_eq!(fit_cells(80, 40, &cap, MAX_COLS, MAX_ROWS), (10, 3));
-        // 超大图 → 缩到最大框（60×18 内，等比）。
+        // Huge image → shrunk to the max box (within 60×18, proportional).
         assert_eq!(fit_cells(8000, 6000, &cap, MAX_COLS, MAX_ROWS), (48, 18));
-        // 小图不放大。
+        // Small images are not upscaled.
         assert_eq!(fit_cells(16, 16, &cap, MAX_COLS, MAX_ROWS), (2, 1));
-        // 行高受限时按行反推。
+        // When row height is the constraint, derive columns from it.
         let (c, r) = fit_cells(4000, 4000, &cap, MAX_COLS, MAX_ROWS);
         assert_eq!(r, 18);
         assert_eq!(c, 36);
@@ -668,7 +685,8 @@ mod tests {
 
     #[test]
     fn kitty_sequence_single_chunk() {
-        // 小 payload：单块 m=0，含完整控制数据，末尾 rows 个 \r\n。
+        // Small payload: a single chunk m=0 with the full control data,
+        // ending in rows `\r\n`s.
         let out = kitty_image_bytes(b"abc", 12, 4);
         let s = String::from_utf8(out).unwrap();
         assert!(s.starts_with("\x1b_Ga=T,f=100,q=1,c=12,r=4,C=1,m=0;"));
@@ -679,7 +697,7 @@ mod tests {
 
     #[test]
     fn kitty_sequence_chunks_at_4096() {
-        // 每 4096 base64 字符 = 3072 字节。6000 字节 → 2 块。
+        // Every 4096 base64 chars = 3072 bytes. 6000 bytes → 2 chunks.
         let png = vec![0u8; 6000];
         let out = kitty_image_bytes(&png, 10, 2);
         let s = String::from_utf8(out).unwrap();
@@ -688,7 +706,7 @@ mod tests {
         assert!(s.contains("m=0;"), "末块 m=0");
         let first = &s[s.find("m=1;").unwrap() + 4..];
         assert_eq!(first.find("\x1b\\").unwrap(), 4096, "首块 4096 字符");
-        // 续块只带 m。
+        // Continuation chunks carry only `m`.
         let second_start = s.find("m=0;").unwrap();
         assert!(!s[second_start..].contains("a=T"), "续块不含控制数据");
         assert!(s.contains("\x1b_Gm=0;"));
@@ -836,7 +854,8 @@ mod tests {
             extract_image_urls("看 ![图](a.png) 和 ![b](https://x.com/i.png) 完"),
             vec!["a.png".to_string(), "https://x.com/i.png".to_string()]
         );
-        // 角括号包裹的 URL（CommonMark `<...>`）剥壳，与渲染层 key 一致。
+        // Angle-bracket-wrapped urls (CommonMark `<...>`) are stripped,
+        // consistent with the render layer's key.
         assert_eq!(
             extract_image_urls("![图](</Users/x/Untitled-1.png>)"),
             vec!["/Users/x/Untitled-1.png".to_string()]
@@ -864,12 +883,13 @@ mod tests {
         std::fs::write(&path, b"\x89PNG\r\n\x1a\n").unwrap();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        // file:// + 百分号编码（模型常把含空格路径写成 %20）。
+        // file:// + percent-encoding (models often write paths with spaces as
+        // %20).
         let url = format!("file://{}", path.display());
         let encoded = url.replace(' ', "%20");
         let bytes = runtime.block_on(fetch_bytes(&encoded, Path::new("/nonexistent")));
         assert_eq!(bytes, Some(b"\x89PNG\r\n\x1a\n".to_vec()), "file url decodes");
-        // 相对 file 路径按 cwd 解析。
+        // Relative file paths resolve against cwd.
         let rel = runtime.block_on(fetch_bytes("sub/img.png", &tmp));
         assert_eq!(rel, None, "相对路径缺失时失败");
         std::fs::create_dir_all(tmp.join("sub")).unwrap();
@@ -887,7 +907,7 @@ mod tests {
         assert!(meta.is_none());
     }
 
-    /// 4×2 纯色 PNG（测试用）。
+    /// A 4×2 solid-colour PNG (for tests).
     fn tiny_png() -> Vec<u8> {
         let img = image::RgbaImage::from_pixel(4, 2, image::Rgba([255u8, 0, 0, 255]));
         let mut out = Vec::new();

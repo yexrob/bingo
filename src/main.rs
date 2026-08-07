@@ -42,38 +42,39 @@ mod watch;
 #[derive(Debug, Parser)]
 #[command(name = "bingo", version, about = "Rust agent CLI")]
 struct Cli {
-    /// headless 模式：直接把回复打到 stdout
+    /// Headless mode: print the reply straight to stdout
     #[arg(short, long)]
     print: bool,
 
-    /// 全屏模式（备用屏 canvas，输入吸底、app 内滚动）；默认 inline：
-    /// 像普通终端一样输出，历史在终端 scrollback
+    /// Fullscreen mode (alternate-screen canvas, input pinned at the bottom, in-app
+    /// scrolling); default is inline: output like a normal terminal, history in the
+    /// terminal scrollback
     #[arg(long)]
     fullscreen: bool,
 
-    /// 使用的模型（缺省依次回落 settings `model`、内置默认）
+    /// Model to use (defaults to settings `model`, then the built-in default)
     #[arg(long)]
     model: Option<String>,
 
-    /// 不自动拉起项目 team（覆盖 settings `team.autoStart`；D31）
+    /// Do not auto-start the project team (overrides settings `team.autoStart`; D31)
     #[arg(long)]
     no_team: bool,
 
-    /// 权限模式（默认从 settings 读取）
+    /// Permission mode (defaults to the settings)
     #[arg(long)]
     permission_mode: Option<String>,
 
-    /// 恢复最近的会话继续对话
+    /// Resume the most recent session
     #[arg(long)]
     continue_: bool,
 
-    /// prompt；缺省时从 stdin 读取（交互模式忽略）
+    /// Prompt; reads from stdin when omitted (ignored in interactive mode)
     prompt: Vec<String>,
 }
 
-/// 顶层出口（C 出口映射）：所有 `?` 传播到顶层的错误统一经
-/// [`report_error`] 格式化——非 TTY（headless/管道/CI）走稳定契约
-/// `[error] code=... msg=...`（AC-30/31/32），TTY 下保持原样。
+/// Top-level exit (C exit mapping): all errors propagated to the top with `?` are
+/// formatted through [`report_error`] — non-TTY (headless/pipe/CI) uses the stable
+/// contract `[error] code=... msg=...` (AC-30/31/32); TTY keeps it as-is.
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
@@ -82,7 +83,7 @@ async fn main() {
     }
 }
 
-/// 实际主流程（原 `main` 主体）。错误一律向上传播，由 [`main`] 统一出口。
+/// The actual main flow (formerly the `main` body). Errors propagate upward and exit through [`main`].
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
@@ -114,7 +115,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         load_project_memory(&home, &project_dir),
         settings.cache_control.unwrap_or(false),
     );
-    // 会话开始注入本项目经验索引（仅命中>0 时；≤10 行一行一条，全文按需 Query）。
+    // Inject this project's experience index at session start (only when hits > 0; ≤10 lines,
+    // one per line; full entries via Query on demand).
     let experience_index = crate::tool::experience::session_index(&home, &project_dir);
     if !experience_index.is_empty() {
         system.push(crate::api::types::SystemBlock {
@@ -152,15 +154,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let (expand_tx, expand_rx) = tokio::sync::watch::channel(false);
-    // 任务列表按会话隔离：key = transcript 文件 stem（--continue 恢复同一会话
-    // 的 todo；新会话另开列表）。transcript 创建失败时回落项目级共享列表。
+    // Task lists are isolated per session: key = transcript file stem (--continue restores the
+    // same session's todos; new sessions get a fresh list). Falls back to the project-wide
+    // shared list if the transcript fails to create.
     let task_list_key = transcript
         .as_ref()
         .and_then(|t| t.path().file_stem())
         .map(|s| s.to_string_lossy().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| crate::tasks::project_task_key(&project_dir));
-    // 模型优先级：--model > settings（user < project < local 合并结果）> 内置默认。
+    // Model precedence: --model > settings (merged user < project < local) > built-in default.
     let model = cli
         .model
         .or_else(|| settings.model.clone())
@@ -198,8 +201,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mode_str = session.permission_mode_str();
     crate::hooks::run_session_start(&session.settings.hooks, mode_str).await;
 
-    // D31 启动默认加载：项目绑定 team 且 autoStart（缺省 true）→ 拉起。
-    // 双 opt-out：settings `team.autoStart:false` + `--no-team`。
+    // D31 startup default: project-bound team with autoStart (default true) → spawn it.
+    // Double opt-out: settings `team.autoStart:false` + `--no-team`.
     if !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
         let branch = crate::team::current_branch(&project_dir);
         let defs = crate::agents::load_agent_defs(&home, &project_dir);
@@ -251,14 +254,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let outcome = run_query(&session, initial_messages, &prompt, &[], &mut ui, None).await?;
             extract_memory(&session, &outcome.messages, &home, &project_dir).await;
         } else {
-            drop(initial_messages); // 交互模式下 --continue 历史由后续轮次复用
+            drop(initial_messages); // in interactive mode, --continue history is reused by later turns
             tui::run_tui_session(session.clone(), expand_rx, cli.fullscreen).await?;
         }
         Ok::<(), Box<dyn std::error::Error>>(())
     }
     .await;
 
-    // D31 会话结束落盘：team 成员最新历史（跨会话恢复用；失败静默）。
+    // D31 session-end persistence: latest history of team members (for cross-session
+    // restore; failures are silent).
     if !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
         persist_team_memory(&session, &home, &project_dir);
     }
@@ -266,10 +270,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-/// 顶层错误出口（C 出口映射）：`Box<dyn Error>` 沿 cause 链取稳定码
-/// （[`crate::error::error_code_boxed`]），msg 经转义/截断。
-/// 非 TTY 输出 `[error] code=<SCREAMING_SNAKE> msg=<单行 ≤200>`（AC-30/31/32）；
-/// TTY 下打印原样（交互环境错误在界面内呈现）。
+/// Top-level error exit (C exit mapping): `Box<dyn Error>` walks the cause chain for a stable
+/// code ([`crate::error::error_code_boxed`]); msg is escaped/truncated.
+/// Non-TTY prints `[error] code=<SCREAMING_SNAKE> msg=<single line ≤200>` (AC-30/31/32);
+/// TTY prints it as-is (interactive errors are shown in the UI).
 fn report_error(err: &(dyn std::error::Error + 'static)) {
     use std::io::IsTerminal;
     if std::io::stderr().is_terminal() {
@@ -281,8 +285,8 @@ fn report_error(err: &(dyn std::error::Error + 'static)) {
     eprintln!("[error] code={code} msg={msg}");
 }
 
-/// 落盘全部 team 成员的最新消息历史（仅保存有内容的成员；失败静默——
-/// 记忆是增强不是契约）。
+/// Persist the latest message history of all team members (only members with content;
+/// failures are silent — memory is an enhancement, not a contract).
 fn persist_team_memory(session: &Arc<Session>, home: &Path, project_dir: &std::path::Path) {
     let Ok(Some(team)) = crate::team::load_team_file(project_dir) else {
         return;

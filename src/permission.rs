@@ -1,6 +1,6 @@
 use crate::tool::Tool;
 
-/// 权限模式：default/acceptEdits/auto/bypassPermissions/dontAsk/plan。
+/// Permission modes: default/acceptEdits/auto/bypassPermissions/dontAsk/plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
     Default,
@@ -54,19 +54,20 @@ fn ask(reason: impl Into<String>) -> PermissionResult {
     }
 }
 
-/// 规则表语义：deny/ask 只要任一子命令命中即成立；allow 要求全部子命令命中。
+/// Rule table semantics: deny/ask hold if any sub-command matches; allow requires all
+/// sub-commands to match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MatchMode {
-    /// deny / ask：命中任一即成立（fail closed）。
+    /// deny / ask: holds on any match (fail closed).
     Any,
-    /// allow：全部命中才成立（fail closed）。
+    /// allow: holds only when all match (fail closed).
     All,
 }
 
-/// shell 顺序操作符切分：`&&` `||` `;` `|` `&` 换行，
-/// 外加子 shell / 命令替换定界符 `(` `)` `` ` `` `{` `}`。
-/// 引号内的分隔符不切。返回 (子命令, 是否可信)——引号不闭合时不可信，
-/// 调用方对 allow 规则一律不放行。
+/// Split on shell sequencing operators: `&&` `||` `;` `|` `&` newline,
+/// plus sub-shell / command-substitution delimiters `(` `)` `` ` `` `{` `}`.
+/// Separators inside quotes aren't split. Returns (sub-commands, trusted) — an
+/// unterminated quote is untrusted and the caller never lets allow rules through.
 fn split_shell_commands(command: &str) -> (Vec<String>, bool) {
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -78,7 +79,7 @@ fn split_shell_commands(command: &str) -> (Vec<String>, bool) {
             if c == q {
                 quote = None;
             } else if q == '"' && c == '\\' {
-                // 双引号内的转义：下一个字符不结束引号。
+                // Escaped char inside double quotes: the next char doesn't close the quote.
                 if let Some(next) = chars.next() {
                     current.push(next);
                 }
@@ -109,30 +110,31 @@ fn split_shell_commands(command: &str) -> (Vec<String>, bool) {
     parts.push(current);
     let parts = parts
         .into_iter()
-        // `$(` 的 `$` 落在前一段尾部，去掉后才是真正的命令。
+        // The `$` of `$(` ends up at the tail of the previous segment; strip it to get the real command.
         .map(|p| p.trim().trim_end_matches('$').trim().to_string())
         .filter(|p| !p.is_empty())
         .collect();
     (parts, quote.is_none())
 }
 
-/// Bash 规则匹配：对每个子命令做前缀匹配。
-/// 整串前缀匹配会被 `cd /tmp && rm -rf /` 绕过 deny，
-/// 也会让 `Bash(ls)` 放行 `ls; rm -rf ~`。
+/// Bash rule matching: prefix-match each sub-command.
+/// Whole-string prefix matching can be bypassed by `cd /tmp && rm -rf /`,
+/// and would let `Bash(ls)` pass `ls; rm -rf ~`.
 fn bash_content_matches(command: &str, content: &str, mode: MatchMode) -> bool {
     let (parts, trusted) = split_shell_commands(command);
     match mode {
-        // deny/ask：任一子命令命中即成立；切不动时对整串兜底匹配。
+        // deny/ask: any sub-command match holds; fall back to whole-string match when splitting fails.
         MatchMode::Any => {
             parts.iter().any(|p| p.starts_with(content)) || command.trim().starts_with(content)
         }
-        // allow：全部子命令命中才放行；切分不可信一律不放行。
+        // allow: all sub-commands must match; an untrusted split never allows.
         MatchMode::All => trusted && !parts.is_empty() && parts.iter().all(|p| p.starts_with(content)),
     }
 }
 
-/// 路径归一化：`~` 展开、相对路径按进程 cwd 展开、消解 `.` 与 `..`。
-/// 不查文件系统（规则对不存在的路径同样要成立）。
+/// Path normalization: `~` expansion, relative paths expanded against the process cwd,
+/// `.` and `..` resolved.
+/// No filesystem lookups (rules must hold for non-existent paths too).
 fn normalize_path(path: &str) -> String {
     use std::path::{Component, PathBuf};
     let expanded = match path.strip_prefix("~/") {
@@ -158,7 +160,8 @@ fn normalize_path(path: &str) -> String {
         }
     }
     let normalized = out.to_string_lossy().into_owned();
-    // 归一化会吃掉结尾斜杠，目录规则（`Read(/etc/)`）要保留边界语义。
+    // Normalization eats the trailing slash; directory rules (`Read(/etc/)`) need the
+    // boundary semantics preserved.
     if path.ends_with('/') && !normalized.ends_with('/') {
         format!("{normalized}/")
     } else {
@@ -166,17 +169,17 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
-/// 规则内容匹配：`Tool(content)` 的 content 对当前调用是否成立。
-/// Bash 按子命令匹配命令前缀；文件类工具归一化路径后匹配路径前缀；
-/// WebFetch 支持 `domain:` 与 URL 前缀；Skill 精确/`name:*` 前缀匹配；
-/// `*` 匹配一切；`prefix:` 前缀忽略。
+/// Rule content matching: whether `Tool(content)`'s content holds for the current call.
+/// Bash matches sub-commands by command prefix; file tools match path prefixes after
+/// normalization; WebFetch supports `domain:` and URL prefixes; Skill matches exact
+/// or `name:*` prefix; `*` matches everything; `prefix:` is ignored.
 fn content_matches(
     tool_name: &str,
     input: &serde_json::Value,
     content: &str,
     mode: MatchMode,
 ) -> bool {
-    // Skill 规则：`Skill(name)` 精确；`Skill(name:*)` 前缀；`*` 匹配一切。
+    // Skill rules: `Skill(name)` exact; `Skill(name:*)` prefix; `*` matches everything.
     if tool_name == "Skill" {
         let name = input.get("skill").and_then(|v| v.as_str());
         return match content {
@@ -222,7 +225,7 @@ fn content_matches(
                 && let Ok(parsed) = url::Url::parse(url)
                 && let Some(host) = parsed.host_str()
             {
-                // domain: 规则按 hostname 匹配。
+                // domain: rules match on hostname.
                 return host == domain.trim_end_matches('*');
             }
             url
@@ -232,8 +235,8 @@ fn content_matches(
     target.is_some_and(|t| t.starts_with(content))
 }
 
-/// 规则 `Tool(content)` 对当前工具调用是否匹配。
-/// `mcp__server` 形式：匹配该 server 全部工具。
+/// Whether rule `Tool(content)` matches the current tool call.
+/// The `mcp__server` form matches all tools of that server.
 fn rule_matches(
     rule: &str,
     tool_name: &str,
@@ -252,7 +255,7 @@ fn rule_matches(
         }
         content_matches(tool_name, input, content, mode)
     } else if rule.contains("__") {
-        // mcp__server 规则：工具名前缀匹配
+        // mcp__server rule: prefix-match the tool name.
         tool_name.starts_with(rule)
     } else {
         rule == tool_name
@@ -268,7 +271,8 @@ fn rule_hits(
     rules.iter().any(|r| rule_matches(r, tool_name, input, mode))
 }
 
-/// safetyCheck 敏感目录：写工具目标落在这些目录内 → 必须提示（bypass 免疫）。
+/// safetyCheck sensitive dirs: a write tool targeting inside these dirs → must prompt
+/// (immune to bypass).
 const SENSITIVE_DIRS: &[&str] = &[".git", ".claude", ".vscode", ".idea"];
 
 fn safety_check(tool: &dyn Tool, input: &serde_json::Value) -> Option<String> {
@@ -285,7 +289,7 @@ fn safety_check(tool: &dyn Tool, input: &serde_json::Value) -> Option<String> {
     sensitive.then(|| format!("writing into a sensitive path: {target}"))
 }
 
-/// 统一权限门：模式 × 规则表 × 工具属性 → allow/deny/ask。
+/// Unified permission gate: mode × rule tables × tool properties → allow/deny/ask.
 pub fn can_use_tool(
     tool: &dyn Tool,
     input: &serde_json::Value,
@@ -295,16 +299,17 @@ pub fn can_use_tool(
     allow_rules: &[String],
 ) -> PermissionResult {
     let name = tool.name();
-    // 1. deny 规则（整工具或内容匹配）：任一子命令命中即拒。
+    // 1. deny rules (whole tool or content match): any sub-command hit denies.
     if rule_hits(rules, &name, input, MatchMode::Any) {
         return deny(format!("denied by permission rule: {name}"));
     }
-    // 2. ask 规则：bypass 模式也尊重（内容 ask 例外）
+    // 2. ask rules: respected even in bypass mode (content-ask exception)
     if rule_hits(ask_rules, &name, input, MatchMode::Any) {
         return ask(format!("permission rule requires confirmation: {name}"));
     }
-    // 2b. WebFetch 预批准域名自动放行。
-    //     注意：无 url 字段的畸形调用不命中，继续走后续检查。
+    // 2b. WebFetch preapproved domains auto-allow.
+    //     Note: malformed calls without a url field don't hit, continue with the
+    //     remaining checks.
     if name == "WebFetch"
         && let Some(url) = input.get("url").and_then(|v| v.as_str())
         && crate::preapproved::is_preapproved_url(url)
@@ -314,34 +319,35 @@ pub fn can_use_tool(
             reason: "preapproved host".into(),
         };
     }
-    // 3. 只读工具直接放行。两个例外：
-    //    WebFetch（非预批准域名仍需用户批准）；
-    //    MCP 工具（readOnlyHint 由服务器自报，是不可信输入，不得短路权限门）。
+    // 3. Read-only tools pass directly. Two exceptions:
+    //    WebFetch (non-preapproved domains still need user approval);
+    //    MCP tools (readOnlyHint is server-reported, untrusted input; must not
+    //    short-circuit the permission gate).
     if tool.is_read_only(input) && name != "WebFetch" && !name.starts_with("mcp__") {
         return PermissionResult {
             behavior: PermissionBehavior::Allow,
             reason: "read-only tool".into(),
         };
     }
-    // 4. safetyCheck：敏感路径，bypass 免疫，必须提示
+    // 4. safetyCheck: sensitive paths, bypass-immune, must prompt
     if let Some(reason) = safety_check(tool, input) {
         return ask(reason);
     }
-    // 5. bypass 检查
+    // 5. bypass check
     if mode == PermissionMode::BypassPermissions {
         return PermissionResult {
             behavior: PermissionBehavior::Allow,
             reason: "bypassPermissions mode".into(),
         };
     }
-    // 6. acceptEdits：编辑类工具自动允许
+    // 6. acceptEdits: edit tools auto-allowed
     if mode == PermissionMode::AcceptEdits && tool.is_edit_tool(input) {
         return PermissionResult {
             behavior: PermissionBehavior::Allow,
             reason: "acceptEdits mode".into(),
         };
     }
-    // 7. allow 规则：Bash 需要全部子命令命中才放行。
+    // 7. allow rules: Bash needs every sub-command to match.
     if rule_hits(allow_rules, &name, input, MatchMode::All) {
         return PermissionResult {
             behavior: PermissionBehavior::Allow,
@@ -350,8 +356,9 @@ pub fn can_use_tool(
     }
     match mode {
         PermissionMode::DontAsk => deny("dontAsk mode denies non-read-only tools"),
-        // Task 工具族豁免（plan 模式提示 "create a task list to track the work"）：
-        // plan 模式允许建/改任务列表，其余非只读工具照常 deny。
+        // Task tool family exemption (plan mode prompts "create a task list to track
+        // the work"): plan mode allows creating/editing task lists, other non-read-only
+        // tools are denied as usual.
         PermissionMode::Plan if name.starts_with("Task") => PermissionResult {
             behavior: PermissionBehavior::Allow,
             reason: "plan mode allows task list management".into(),
@@ -418,7 +425,7 @@ mod tests {
             "old_string": "a",
             "new_string": "b"
         });
-        // safetyCheck 优先于 acceptEdits（bypass 免疫）
+        // safetyCheck takes precedence over acceptEdits (bypass-immune)
         let result = decide(&tool as &dyn Tool, input, PermissionMode::AcceptEdits, &[]);
         assert_eq!(result.behavior, PermissionBehavior::Ask);
     }
@@ -431,19 +438,19 @@ mod tests {
             let all: Vec<String> = rules.iter().map(|s| s.to_string()).collect();
             can_use_tool(&tool as &dyn Tool, &input(), PermissionMode::Default, &[], &[], &all)
         };
-        // 无规则 → 询问（技能执行非只读）
+        // No rules → ask (skill execution is non-read-only)
         let result = allow(&[]);
         assert_eq!(result.behavior, PermissionBehavior::Ask);
-        // 精确匹配
+        // Exact match
         let result = allow(&["Skill(review-pr)"]);
         assert_eq!(result.behavior, PermissionBehavior::Allow);
-        // 前缀匹配（CC `review:*` 语义）
+        // Prefix match (CC `review:*` semantics)
         let result = allow(&["Skill(review:*)"]);
         assert_eq!(result.behavior, PermissionBehavior::Allow);
-        // 通配
+        // Wildcard
         let result = allow(&["Skill(*)"]);
         assert_eq!(result.behavior, PermissionBehavior::Allow);
-        // 不匹配的精确规则不放过
+        // A non-matching exact rule doesn't pass
         let result = allow(&["Skill(commit)"]);
         assert_eq!(result.behavior, PermissionBehavior::Ask);
     }
@@ -576,7 +583,7 @@ mod tests {
         )
     }
 
-    /// 安全回归：deny 规则不得被顺序操作符绕过。
+    /// Security regression: deny rules must not be bypassable via sequencing operators.
     #[test]
     fn deny_rule_matches_any_sub_command() {
         for command in [
@@ -596,7 +603,7 @@ mod tests {
                 "deny 应命中: {command}"
             );
         }
-        // 引号内的分隔符不是操作符，也不该造出假命中。
+        // Separators inside quotes aren't operators and must not create false hits.
         assert_eq!(
             bash_decision("echo 'a; b'", &["Bash(b)"], &[]).behavior,
             PermissionBehavior::Ask,
@@ -604,15 +611,15 @@ mod tests {
         );
     }
 
-    /// 安全回归：allow 规则必须全部子命令命中才放行。
+    /// Security regression: allow rules only pass when every sub-command matches.
     #[test]
     fn allow_rule_requires_every_sub_command_to_match() {
-        // 单命令：照常放行。
+        // Single command: passes as usual.
         assert_eq!(
             bash_decision("ls -la", &[], &["Bash(ls)"]).behavior,
             PermissionBehavior::Allow
         );
-        // 追加的第二条命令未被规则覆盖 → 必须询问。
+        // Second appended command isn't covered by the rule → must ask.
         for command in [
             "ls; rm -rf ~",
             "ls && rm -rf ~",
@@ -626,12 +633,12 @@ mod tests {
                 "不应免询问放行: {command}"
             );
         }
-        // 全部子命令命中 → 放行。
+        // All sub-commands match → pass.
         assert_eq!(
             bash_decision("ls -la && ls /tmp", &[], &["Bash(ls)"]).behavior,
             PermissionBehavior::Allow
         );
-        // 引号不闭合（切分不可信）→ 不放行。
+        // Unterminated quote (untrusted split) → no pass.
         assert_eq!(
             bash_decision("ls \"; rm -rf ~", &[], &["Bash(ls)"]).behavior,
             PermissionBehavior::Ask,
@@ -650,7 +657,7 @@ mod tests {
         assert_eq!(parts.len(), 3, "{parts:?}");
     }
 
-    /// 安全回归：路径规则匹配前归一化，`..` 不能绕过目录边界。
+    /// Security regression: path rules normalize before matching; `..` can't cross directory boundaries.
     #[test]
     fn file_rules_normalize_paths() {
         let tool = ReadTool::new();
@@ -668,9 +675,9 @@ mod tests {
         assert_eq!(denied("/etc/passwd"), PermissionBehavior::Deny);
         assert_eq!(denied("/etc/../etc/passwd"), PermissionBehavior::Deny);
         assert_eq!(denied("/etc/./ssh/../passwd"), PermissionBehavior::Deny);
-        // 目录外的路径不受影响（只读工具放行）。
+        // Paths outside the directory are unaffected (read-only tools pass).
         assert_eq!(denied("/var/log/x"), PermissionBehavior::Allow);
-        // 相对路径按 cwd 展开后与绝对规则对表。
+        // Relative paths expand against cwd, then match against absolute rules.
         let cwd = std::env::current_dir().unwrap_or_default();
         let rule = format!("Read({})", cwd.join("src").to_string_lossy());
         let hit = can_use_tool(
@@ -684,7 +691,7 @@ mod tests {
         assert_eq!(hit.behavior, PermissionBehavior::Deny);
     }
 
-    /// MCP 服务器自报的 readOnlyHint 不得短路权限门（不可信输入）。
+    /// MCP server-reported readOnlyHint must not short-circuit the permission gate (untrusted input).
     #[test]
     fn mcp_read_only_hint_does_not_bypass_permission_gate() {
         struct FakeMcpTool;
@@ -718,7 +725,7 @@ mod tests {
             PermissionBehavior::Ask,
             "readOnlyHint 不再免询问"
         );
-        // 显式 allow 规则仍可放行。
+        // An explicit allow rule can still pass.
         let allow = vec!["mcp__srv".to_string()];
         let result = can_use_tool(
             &tool as &dyn Tool,
@@ -729,7 +736,7 @@ mod tests {
             &allow,
         );
         assert_eq!(result.behavior, PermissionBehavior::Allow);
-        // 内置只读工具不受影响。
+        // Built-in read-only tools are unaffected.
         let read = ReadTool::new();
         let result = can_use_tool(
             &read as &dyn Tool,

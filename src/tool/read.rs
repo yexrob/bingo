@@ -6,10 +6,10 @@ use async_trait::async_trait;
 
 use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 
-/// 单次读取的最大字符数，超出截断。
+/// Max characters per read; anything beyond is truncated.
 const MAX_READ_CHARS: usize = 20_000;
-/// 部分读取的字节上限：UTF-8 一个字符最多 4 字节，
-/// 读到这么多就一定够填满 MAX_READ_CHARS（多出的余量留给尾部截断的半个字符）。
+/// Byte cap for partial reads: a UTF-8 character is at most 4 bytes, so reading this much
+/// is guaranteed to fill MAX_READ_CHARS (the extra bytes leave room for a trailing split character).
 const MAX_READ_BYTES: u64 = MAX_READ_CHARS as u64 * 4 + 4;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -68,7 +68,8 @@ impl Tool for ReadTool {
             ctx.cwd.join(&path)
         };
 
-        // 先看大小：超限的文件只读需要的前缀，不把整份内容读进内存再丢掉。
+        // Check the size first: for oversized files only read the needed prefix, instead of
+        // loading the whole content into memory and discarding it.
         let size = tokio::fs::metadata(&path)
             .await
             .map_err(|e| ToolError::failed(format!("failed to read {}: {e}", path.display())))?
@@ -105,7 +106,8 @@ impl Tool for ReadTool {
     }
 }
 
-/// 只读文件开头的 MAX_READ_BYTES 字节（尾部可能切在多字节字符中间，lossy 转换）。
+/// Read only the first MAX_READ_BYTES bytes of the file (the tail may cut through a
+/// multibyte character; lossy conversion).
 async fn read_prefix(path: &std::path::Path) -> Result<String, ToolError> {
     use tokio::io::AsyncReadExt;
     let file = tokio::fs::File::open(path)
@@ -151,11 +153,11 @@ mod tests {
             .to_string()
     }
 
-    /// L4：超大文件只读前缀，仍按字符正确截断（多字节安全）。
+    /// L4: huge files only read the prefix, still truncated correctly by character (multibyte-safe).
     #[tokio::test]
     async fn huge_file_is_partially_read_and_truncated() {
         let path = std::env::temp_dir().join(format!("bingo-read-huge-{}", std::process::id()));
-        // 每字符 3 字节的中文，总量远超 MAX_READ_BYTES。
+        // 3-byte-per-char Chinese, far exceeding MAX_READ_BYTES in total.
         let body = "中".repeat(MAX_READ_CHARS * 3);
         std::fs::write(&path, &body).unwrap();
         let text = read(&path).await;
@@ -165,7 +167,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
-    /// 小文件原样返回，不加截断标注。
+    /// Small files are returned verbatim without a truncation note.
     #[tokio::test]
     async fn small_file_is_returned_verbatim() {
         let path = std::env::temp_dir().join(format!("bingo-read-small-{}", std::process::id()));

@@ -1,10 +1,10 @@
-//! 聊天状态机：消息/活动/折叠组的增量模型 + 文档行构建。
+//! Incremental model for the chat state machine: messages/activities/collapse groups + document row construction.
 //!
-//! 移植自旧 `tui.rs` 的 `BingoChat`（ratatui 版）：事件处理语义、
-//! 折叠判定、展开切换原样保留；`draw` 换成 [`Chat::build_rows`]，
-//! 产出显示无关的样式化行文档，由 [`crate::tui::view`] 映射为终端行。
-//! 事件从通道（`UiEvent` / `AskRequest`）流入，键盘/鼠标经
-//! [`Chat::on_key`] / [`Chat::doc_click`] 流入。
+//! Ported from the old `tui.rs` `BingoChat` (ratatui edition): event handling semantics,
+//! collapse detection, and expand/collapse toggling are preserved as-is; `draw` is replaced by [`Chat::build_rows`],
+//! which produces display-agnostic styled row documents, mapped to terminal rows by [`crate::tui::view`].
+//! Events arrive from channels (`UiEvent` / `AskRequest`); keyboard/mouse come in via
+//! [`Chat::on_key`] / [`Chat::doc_click`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -27,12 +27,12 @@ use crate::tui::markdown::MarkdownRenderer;
 use crate::tui::theme::{Theme, ThemeSetting};
 use crate::ui::{AskRequest, DialogAction, PermissionRequest, UiEvent};
 
-/// AskUserQuestion 回答结果块（`User answered the questions` 消息）。
+/// Result block for an AskUserQuestion answer (the `User answered the questions` message).
 #[derive(Debug, Clone, Default)]
 pub struct AskResult {
-    /// (问题, 答案) 已答条目。
+    /// Answered entries as (question, answer).
     pub answered: Vec<(String, String)>,
-    /// 用户 Esc 拒绝回答（free_text 请求）。
+    /// User declined to answer with Esc (free_text request).
     pub declined: bool,
 }
 
@@ -42,13 +42,13 @@ impl AskResult {
     }
 }
 
-/// 文档中一行：样式化行 + 整行背景（用户气泡用）。
+/// One document row: a styled line + an optional full-row background (for user bubbles).
 #[derive(Debug, Clone)]
 pub struct Row {
     pub line: Line,
-    /// 整行背景。
+    /// Full-row background.
     pub bg: Option<Color>,
-    /// 行内右侧留白（CC 用户气泡 paddingRight=1）。
+    /// Right padding inside the row (CC user bubble paddingRight=1).
     pub padding_right: usize,
 }
 
@@ -65,7 +65,7 @@ impl Row {
         }
     }
 
-    /// 整行背景的气泡行（用户消息；CC paddingRight=1）。
+    /// Bubble row with a full-row background (user messages; CC paddingRight=1).
     pub fn bubble(line: Line, bg: Color) -> Self {
         let mut row = Row::new(line);
         row.bg = Some(bg);
@@ -74,18 +74,18 @@ impl Row {
     }
 }
 
-/// 文档行的点击目标。
+/// Click target of a document row.
 #[derive(Debug, Clone)]
 pub enum ClickTarget {
-    /// 折叠组行（折叠/展开组）。
+    /// Collapse-group row (collapses/expands the group).
     Group { message: usize, group: usize },
-    /// 活动头部行（折叠/展开活动）。
+    /// Activity header row (collapses/expands the activity).
     Activity { message: usize, path: Vec<usize> },
-    /// 权限选项（按索引确认）。
+    /// Permission option (confirm by index).
     AskOption(usize),
 }
 
-/// 可点击行的文档坐标范围。
+/// Document coordinate range of a clickable row.
 #[derive(Debug, Clone)]
 pub struct ClickRange {
     pub start: usize,
@@ -93,99 +93,99 @@ pub struct ClickRange {
     pub target: ClickTarget,
 }
 
-/// 滚动文档：全部行 + 点击范围。
+/// Scrollable document: all rows + click ranges.
 ///
-/// inline 模式下文档只覆盖"尚未落盘"的部分（[`Chat::flushed_segments`]
-/// 之后的消息），行号因此不是全局的——点击定位与滚动只在全屏模式用。
+/// In inline mode the document only covers the "not yet flushed" part (messages after [`Chat::flushed_segments`]),
+/// so row numbers are not global — click targeting and scrolling are only used in fullscreen mode.
 #[derive(Debug, Clone)]
 pub struct Doc {
     pub rows: Vec<Row>,
     pub click_ranges: Vec<ClickRange>,
-    /// 前置"定稿"行数：不再变化、可一次性打印进终端 scrollback 的行
-    /// （REPL 模式的打印边界；全屏模式不用）。
-    /// 生产路径经 `settled_marks` 取检查点；此聚合值保留为测试面的
-    /// 「定稿前缀行数」句柄。
+    /// Number of leading "settled" rows: rows that no longer change and can be printed
+    /// into the terminal scrollback in one go (the print boundary for REPL mode; unused in fullscreen).
+    /// Production uses `settled_marks` checkpoints; this aggregate is kept as the test-facing
+    /// "settled prefix row count" handle.
     #[cfg_attr(not(test), allow(dead_code))]
     pub settled: usize,
-    /// 定稿检查点（欢迎卡 / 每条定稿消息 / 问答块各一个，行号递增）：
-    /// 懒落盘按检查点整段冻结，resize 回灌按检查点整段取回。
+    /// Settled checkpoints (one per welcome card / settled message / ask block, row numbers increasing):
+    /// lazy flushing freezes whole segments at checkpoints; resize rehydration pulls them back the same way.
     pub settled_marks: Vec<SettledMark>,
-    /// 文档尾部的瞬态行数（slash 输出，TTL 后消失）：懒落盘的窗口计算
-    /// 必须剔除它们——临时列表把窗口挤小不构成冻结活内容的理由。
+    /// Number of transient rows at the end of the document (slash output, gone after TTL): lazy-flush
+    /// window math must exclude them — a transient list shrinking the window is no reason to freeze live content.
     pub transient_rows: usize,
 }
 
-/// 一个定稿检查点：`row_end` 之前的行全部定稿。`segments`/`ask_rows`
-/// 是构建内累计值，跨多次 [`Chat::advance_flushed_upto`] 的增量由
-/// `Chat::mark_base` 消化。
+/// A settled checkpoint: all rows before `row_end` are settled. `segments`/`ask_rows` are
+/// build-internal accumulators; the deltas across multiple [`Chat::advance_flushed_upto`] calls are
+/// consumed by `Chat::mark_base`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SettledMark {
-    /// 该检查点覆盖的行数（doc.rows 内的排他终点）。
+    /// Row count covered by this checkpoint (exclusive end within doc.rows).
     pub row_end: usize,
-    /// 覆盖的消息段数（构建内累计，含欢迎卡）。
+    /// Message segments covered (build-internal accumulation, including the welcome card).
     pub segments: usize,
-    /// 覆盖的问答结果块行数（构建内累计）。
+    /// Ask result block rows covered (build-internal accumulation).
     pub ask_rows: usize,
 }
 
-/// 当前错误态（#18 呈现层）：`code`/`msg`/`level`/`context` 来自结构化
-/// `UiEvent::Error`，级别由触发上下文决定（短同步=页面级，长回合=全流程级）。
+/// Current error state (#18 presentation layer): `code`/`msg`/`level`/`context` come from structured
+/// `UiEvent::Error`; the level is decided by the triggering context (short sync = page-level, long turn = full-flow).
 #[derive(Debug, Clone)]
 pub struct ErrorState {
     pub code: &'static str,
     pub msg: String,
     pub level: crate::error::ErrorLevel,
-    /// 触发上下文（契约字段：事件链「生产者→事件→状态」上下文存活，
-    /// 供审计与未来短操作接入；渲染分支用 `level`）。
+    /// Triggering context (contract field: the event chain "producer → event → state" keeps
+    /// context alive for auditing and future short-op integration; the render branch uses `level`).
     #[allow(dead_code)]
     pub context: crate::error::ErrorContext,
 }
 
-/// 一条会话消息（用户或 assistant 文本 + assistant 活动提示）。
+/// A session message (user or assistant text + assistant activity notices).
 #[derive(Debug, Clone)]
 pub struct UiMessage {
     pub role: Role,
     pub text: String,
     pub activities: Vec<Activity>,
-    /// activities[i] 创建时 text 的字符数：渲染时 text 与活动按模型输出顺序交错。
+    /// Char count of text at activities[i] creation: rendering interleaves text and activities in model output order.
     pub insert_points: Vec<usize>,
-    /// 连续 Read/Search 折叠组。
+    /// Collapse groups for consecutive Read/Search operations.
     pub groups: Vec<CollapseGroup>,
-    /// activities[i] 所属折叠组索引（None = 独立活动）。
+    /// Index of the collapse group activities[i] belongs to (None = standalone activity).
     pub group_of: Vec<Option<usize>>,
 }
 
-/// Read/Search 连续操作的折叠组：折叠为一行规则摘要（`Read 3 files`）。
+/// Collapse group for consecutive Read/Search operations: collapses into a one-line rule summary (`Read 3 files`).
 #[derive(Debug, Clone)]
 pub struct CollapseGroup {
-    /// 组内活动索引（顺序）。
+    /// Activity indices in the group (in order).
     pub activities: Vec<usize>,
-    /// 搜索操作数。
+    /// Number of search operations.
     pub search: usize,
-    /// Read 文件路径（去重计数）。
+    /// Read file paths (deduplicated count).
     pub read_paths: Vec<String>,
-    /// 无路径的读取操作数。
+    /// Number of read operations without a path.
     pub read_ops: usize,
-    /// 列举操作数（ls/tree/du）。
+    /// Number of list operations (ls/tree/du).
     pub list: usize,
-    /// 普通 Bash 操作数。
+    /// Number of plain Bash operations.
     pub bash: usize,
-    /// 组仍开放（进行中 → 摘要用进行时 + …）。
+    /// Group still open (in progress → summary uses the -ing form + …).
     pub active: bool,
-    /// ctrl+o / 点击展开组内逐工具。
+    /// ctrl+o / click expands the group into individual tools.
     pub expanded: bool,
-    /// 组内最近一个工具的输入 hint（执行中显示在 ⎿ 行）。
+    /// Input hint of the group's most recent tool (shown on the ⎿ line while running).
     pub last_hint: Option<String>,
 }
 
-/// 工具的可折叠分类（isSearchOrReadCommand）。
+/// Collapsible classification of a tool (isSearchOrReadCommand).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum CollapseKind {
     Search,
-    /// Read 或读取类 Bash：携带文件路径（Bash 类为 None）。
+    /// Read or read-like Bash: carries a file path (None for Bash).
     Read(Option<String>),
     List,
-    /// 非搜索/读/列举的普通 Bash。
+    /// Plain Bash that is neither search, read, nor list.
     Bash,
 }
 
@@ -195,8 +195,8 @@ pub enum Role {
     Assistant,
 }
 
-/// 不在 transcript 展示的工具调用（renderToolUseMessage = null）：
-/// Task 工具族（任务区面板即展示）、AskUserQuestion（对话框即展示）。
+/// Tool calls not shown in the transcript (renderToolUseMessage = null):
+/// the Task tool family (shown in the task panel) and AskUserQuestion (shown in the dialog).
 pub fn is_hidden_tool(name: &str) -> bool {
     matches!(
         name,
@@ -205,13 +205,13 @@ pub fn is_hidden_tool(name: &str) -> bool {
             | "TaskGet"
             | "TaskList"
             | "AskUserQuestion"
-            // Agent 对齐 Task renderToolUseMessage=null：不渲染工具行，
-            // 进度由 Watch 活动行（`Agent: 描述 · 已产出 N 字符`）一处承载。
+            // Agent aligns with Task renderToolUseMessage=null: no tool row is rendered,
+            // progress is carried solely by the Watch activity row (`Agent: <description> · N chars produced`).
             | "Agent"
     )
 }
 
-/// 内置 slash 命令表（/help 与下拉建议共用单一来源）。
+/// Built-in slash command table (single source shared by /help and the dropdown suggestions).
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("help", "显示可用命令"),
     ("clear", "清空对话，开始新会话（别名 /reset /new）"),
@@ -232,14 +232,14 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("exit", "退出会话"),
 ];
 
-/// slash 下拉建议项（/name + 描述）。
+/// Slash dropdown suggestion item (/name + description).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlashSuggestion {
     pub name: String,
     pub description: String,
 }
 
-/// footer 模型徽标：`{model} · think {level}`（off = 不显示等级，保持简洁）。
+/// Footer model badge: `{model} · think {level}` (off = no level shown, keeps it concise).
 pub fn model_footer_label(model: &str, thinking: Option<&str>) -> String {
     match thinking {
         Some(level) if level != "off" => format!("{model} · think {level}"),
@@ -247,34 +247,34 @@ pub fn model_footer_label(model: &str, thinking: Option<&str>) -> String {
     }
 }
 
-/// `/model` 二级选择器状态：一级 = endpoint 列表，二级 = 该 endpoint 的模型
-/// （异步拉取 `/v1/models` 补充；拉取完成前显示已知模型 + loading）。
+/// `/model` two-level selector state: level one = endpoint list, level two = that endpoint's models
+/// (fetched async from `/v1/models`; shows known models + loading until the fetch completes).
 #[derive(Clone)]
 pub struct ModelMenu {
-    /// 一级列表：`default`（顶层配置）+ settings.providers 名字。
+    /// Level-one list: `default` (top-level config) + settings.providers names.
     pub providers: Vec<String>,
     pub provider_selected: usize,
-    /// 二级模型列表（None = 停在一级）。
+    /// Level-two model list (None = still on level one).
     pub models: Option<ModelMenuModels>,
 }
 
 #[derive(Clone)]
 pub struct ModelMenuModels {
     pub provider: String,
-    /// 已加载的模型（异步补充；可能未拉完）。
+    /// Loaded models (filled in asynchronously; may be incomplete).
     pub models: Vec<String>,
     pub loading: bool,
     pub selected: usize,
 }
 
-/// `/think` 单级选择器状态（等级表 = off + [`crate::api::types::THINKING_LEVELS`]）。
+/// `/think` single-level selector state (level table = off + [`crate::api::types::THINKING_LEVELS`]).
 #[derive(Clone)]
 pub struct ThinkMenu {
     pub selected: usize,
 }
 
-/// `/think` 选择器条目：等级名 + 说明（off 之外与 THINKING_LEVELS 一一对应，
-/// 顺序一致；一致性由测试保证）。
+/// `/think` selector entries: level name + description (everything past off corresponds one-to-one with
+/// THINKING_LEVELS, in the same order; consistency is guaranteed by a test).
 pub const THINK_LEVELS: &[(&str, &str)] = &[
     ("off", "不发 thinking 参数（兼容 DeepSeek 等端点）"),
     ("low", "adaptive thinking · effort low"),
@@ -284,46 +284,46 @@ pub const THINK_LEVELS: &[(&str, &str)] = &[
     ("max", "adaptive thinking · effort max（最深推理）"),
 ];
 
-/// 下拉最大可见行数（OVERLAY_MAX_ITEMS = 5）。
+/// Max visible rows in the dropdown (OVERLAY_MAX_ITEMS = 5).
 pub const SLASH_SUGGESTIONS_MAX: usize = 5;
 
-/// 输入区最多渲染的行数（更长的输入滚动到光标所在行）。
+/// Max rows rendered for the input area (longer input scrolls to the caret's line).
 pub const INPUT_ROWS_MAX: usize = 10;
-/// 排队消息最多显示的行数（更多的折叠为 `… +N more`）。
+/// Max rows shown for queued messages (more collapse into `… +N more`).
 pub const QUEUE_ROWS_MAX: usize = 3;
-/// 实体选择器聚焦时最多逐行显示的实体数。
+/// Max entities shown one per line while the entity selector is focused.
 pub const ENTITY_ROWS_MAX: usize = 6;
-/// 撤销栈深度（ctrl+_）。
+/// Undo stack depth (ctrl+_).
 pub const UNDO_MAX: usize = 20;
-/// 两次 Ctrl+C 之间的退出确认窗口。
+/// Exit-confirmation window between two Ctrl+C presses.
 pub const CTRL_C_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
-/// 两次 Esc 之间的清空确认窗口。
+/// Clear-confirmation window between two Esc presses.
 pub const ESC_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
-/// 粘贴突发判定：按键间隔短于此值即视为同一批输入。
+/// Paste-burst detection: key intervals shorter than this count as one batch of input.
 ///
-/// 支持 bracketed paste 的终端走 [`Chat::on_paste`]（真实 `Event::Paste`），
-/// 这套启发式只是不支持的终端上的兜底。它的局限（写在这里，因为它决定了
-/// 那些终端上的体验边界）：
-/// - 打字极快的人（<10ms/键，连续 [`PASTE_BURST_KEYS`] 次以上）会被误判为
-///   粘贴，此时 Enter 变成换行而不是发送——按 Esc 或停顿一下即恢复；
-/// - 逐字符重放的自动化输入（tmux send-keys、expect）同样会被误判；
-/// - 反过来，慢速粘贴（SSH 抖动）会被当作打字，此时 Enter 直接发送。
+/// Terminals with bracketed paste go through [`Chat::on_paste`] (real `Event::Paste`);
+/// this heuristic is only a fallback for terminals without it. Its limitations are documented here
+/// because they define the experience boundary on those terminals:
+/// - very fast typists (<10ms/key for more than [`PASTE_BURST_KEYS`] presses in a row) are
+///   misjudged as pasting: Enter inserts a newline instead of sending — press Esc or pause to recover;
+/// - automated char-by-char replay (tmux send-keys, expect) is misjudged the same way;
+/// - conversely, slow pastes (SSH jitter) look like typing, so Enter sends directly.
 pub const PASTE_BURST_GAP: std::time::Duration = std::time::Duration::from_millis(10);
-/// 连续多少个"快"按键之后才认定是粘贴（低于此值是正常快打）。
+/// Number of consecutive "fast" keys before it counts as a paste (below this is normal typing).
 pub const PASTE_BURST_KEYS: usize = 4;
-/// 粘贴超过这么多行时折叠为占位符。
+/// Pastes longer than this many lines collapse into a placeholder.
 pub const PASTE_COLLAPSE_LINES: usize = 10;
 
-/// 图片占位引用（`#[image N]` → 附件表第 N 张，1 起）。
+/// Image placeholder reference (`#[image N]` → the Nth attachment, 1-based).
 static IMAGE_MARKER_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"#\[image (\d+)\]").expect("static regex"));
 
-/// 图片占位符文本：`#[image N]`。
+/// Image placeholder text: `#[image N]`.
 fn image_marker(id: usize) -> String {
     format!("#[image {id}]")
 }
 
-/// 展开 `~` 前缀为 home 目录（无 home 时原样返回）。
+/// Expands a `~` prefix to the home directory (returns unchanged when there is no home).
 fn expand_home(path: &str) -> String {
     if let (Some(rest), Ok(home)) = (path.strip_prefix("~/"), std::env::var("HOME")) {
         return format!("{home}/{rest}");
@@ -331,7 +331,7 @@ fn expand_home(path: &str) -> String {
     path.to_string()
 }
 
-/// 独立成行的图片路径：路径特征（`~` 开头或含 `/`）+ 图片扩展名。
+/// An image path on its own line: path signature (`~` prefix or contains `/`) + image extension.
 fn standalone_image_path(s: &str) -> Option<String> {
     if !(s.starts_with('~') || s.contains('/')) {
         return None;
@@ -344,7 +344,7 @@ fn standalone_image_path(s: &str) -> Option<String> {
         .then(|| s.to_string())
 }
 
-/// `![alt](path)` 整行的路径（path 无空格；`<path>` 包裹解包）。
+/// Path of a whole `![alt](path)` line (no spaces in path; unwraps `<path>`).
 fn markdown_image_path(s: &str) -> Option<String> {
     let rest = s.strip_prefix("![")?;
     let close = rest.find("](")?;
@@ -355,13 +355,13 @@ fn markdown_image_path(s: &str) -> Option<String> {
     (!p.is_empty() && !p.contains(' ')).then(|| p.to_string())
 }
 
-/// 单张图片的加载上限（超时按加载失败处理）。
+/// Load timeout for a single image (a timeout counts as a load failure).
 pub const IMAGE_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// slash 临时提示存活时长：超时后从输入框上方消失（不落盘）。
+/// Lifetime of slash transient hints: they disappear from above the input after the timeout (never flushed).
 pub const SLASH_OUTPUT_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Read/Search 类工具判定。
+/// Classifies Read/Search-like tools.
 pub fn classify_tool(name: &str, input: &serde_json::Value) -> Option<CollapseKind> {
     match name {
         "Read" => input
@@ -390,7 +390,7 @@ pub fn classify_tool(name: &str, input: &serde_json::Value) -> Option<CollapseKi
     }
 }
 
-/// 命令是否含非中性段（纯 echo/printf 等不折叠）。
+/// Whether the command contains a non-neutral segment (pure echo/printf etc. do not collapse).
 fn bash_has_work(command: &str) -> bool {
     const NEUTRAL: &[&str] = &["echo", "printf", "true", "false", ":"];
     let mut skip_next = false;
@@ -415,8 +415,8 @@ fn bash_has_work(command: &str) -> bool {
     false
 }
 
-/// Bash 命令分类（按 && / || / | / ; 分段，跳过量词/重定向目标与中性命令，
-/// 所有段都必须属于搜索/读取/列举集合；混合时按 list > search > read 归位）。
+/// Bash command classification (split on && / || / | / ;, skipping quantifiers, redirection targets,
+/// and neutral commands; every segment must belong to the search/read/list sets; when mixed, place by list > search > read).
 pub fn classify_bash_command(command: &str) -> Option<CollapseKind> {
     const SEARCH: &[&str] = &[
         "find", "grep", "rg", "ag", "ack", "locate", "which", "whereis",
@@ -474,7 +474,7 @@ pub fn classify_bash_command(command: &str) -> Option<CollapseKind> {
     }
 }
 
-/// 折叠组执行中的 hint：组内最近工具的输入。
+/// Hint shown while a collapse group runs: the input of the group's most recent tool.
 fn hint_for(name: &str, input: &serde_json::Value) -> String {
     let map = input.as_object();
     match name {
@@ -497,8 +497,8 @@ fn hint_for(name: &str, input: &serde_json::Value) -> String {
     }
 }
 
-/// 折叠组摘要文本：`Searched for 2 patterns, read 3 files`；
-/// 进行中用进行时 + 末尾 …。
+/// Collapse-group summary text: `Searched for 2 patterns, read 3 files`;
+/// uses the -ing form plus a trailing … while in progress.
 pub fn collapse_summary(g: &CollapseGroup, in_progress: bool) -> String {
     let active = in_progress;
     let mut parts: Vec<String> = Vec::new();
@@ -576,7 +576,7 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// 展开态 1 行结果摘要（CC renderToolResultMessage）。
+/// One-line result summary for the expanded state (CC renderToolResultMessage).
 pub fn result_summary(name: &str, output: &str) -> Option<String> {
     let lines = output.lines().filter(|l| !l.trim().is_empty()).count();
     match name {
@@ -595,8 +595,8 @@ pub fn result_summary(name: &str, output: &str) -> Option<String> {
     }
 }
 
-/// Bash 工具结果预览：去掉 `$ cmd` 回显与 `[Exited with code N]` 尾注，
-/// 只留命令输出（BashModeProgress 的裸输出展示）。
+/// Bash tool result preview: strips the `$ cmd` echo and the `[Exited with code N]` footnote,
+/// leaving only the command output (the bare output shown for BashModeProgress).
 fn bash_output_preview(lines: &[String]) -> Vec<String> {
     let mut out: Vec<String> = lines.to_vec();
     if out.first().is_some_and(|l| l.starts_with("$ ")) {
@@ -608,7 +608,7 @@ fn bash_output_preview(lines: &[String]) -> Vec<String> {
     out
 }
 
-/// 思考阶段俏皮词。
+/// Playful words for the thinking stage.
 const THINKING_WORDS: [&str; 12] = [
     "Bootstrapping",
     "Razzle-dazzling",
@@ -624,7 +624,7 @@ const THINKING_WORDS: [&str; 12] = [
     "Weaving",
 ];
 
-/// 思考完成态随机词（`TURN_COMPLETION_VERBS`，均适配 `for Xs`）。
+/// Random completion words (`TURN_COMPLETION_VERBS`, all fit `for Xs`).
 const COMPLETION_WORDS: [&str; 8] = [
     "Baked",
     "Brewed",
@@ -640,7 +640,7 @@ fn thinking_stage(seed: usize) -> &'static str {
     THINKING_WORDS[seed % THINKING_WORDS.len()]
 }
 
-/// 完成态词：按创建时刻纳秒随机取样（与运行词不同源，`✻ Churned for 40s`）。
+/// Completion word: sampled from creation-time nanoseconds (a different source than the running words, `✻ Churned for 40s`).
 fn thinking_done_verb() -> &'static str {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -649,8 +649,8 @@ fn thinking_done_verb() -> &'static str {
     COMPLETION_WORDS[nanos % COMPLETION_WORDS.len()]
 }
 
-/// 编辑动作分类：连续的同类微编辑（逐字插入/逐字删除）在撤销栈里合并
-/// 为一步，整体替换（kill / yank / 换行 / 历史回填）各自成步。
+/// Edit action classification: consecutive same-kind micro-edits (char-by-char insert/delete) merge
+/// into one undo step; whole replacements (kill / yank / newline / history fill) are their own steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EditKind {
     Insert,
@@ -658,29 +658,29 @@ enum EditKind {
     Bulk,
 }
 
-/// 底部运行状态：`✻ {verb}… (esc to interrupt · {N}s · ↓ {tokens} tokens)`。
+/// Bottom running status: `✻ {verb}… (esc to interrupt · {N}s · ↓ {tokens} tokens)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunningStatus {
-    /// 当前动词（工具摘要 / thinking 俏皮词 / `Working`）。
+    /// Current verb (tool summary / thinking word / `Working`).
     pub verb: String,
-    /// 本回合已耗时（秒）。
+    /// Seconds elapsed in this turn.
     pub elapsed: f64,
-    /// 本回合已产出的 token 数（0 = 该段省略）。
+    /// Tokens produced this turn (0 = segment omitted).
     pub tokens: u64,
 }
 
-/// ctrl+r 反向搜索态：查询串 + 当前命中（inline 经典版）。
+/// ctrl+r reverse search state: query string + current hit (the classic inline edition).
 #[derive(Debug, Clone, Default)]
 pub struct HistorySearch {
-    /// 用户输入的过滤串。
+    /// The filter string typed by the user.
     pub query: String,
-    /// 命中的历史条目（None = 无匹配）。
+    /// The matched history entry (None = no match).
     pub hit: Option<String>,
-    /// 命中条目在历史中的下标（再按 ctrl+r 从它继续往旧找）。
+    /// Index of the hit in history (pressing ctrl+r again keeps searching older from it).
     pub index: Option<usize>,
 }
 
-/// bingo 聊天组件状态：消息流 + 活动提示 + 输入 + 权限请求。
+/// bingo chat component state: message stream + activity notices + input + permission requests.
 pub struct Chat {
     pub session: Arc<Session>,
     pub(super) events: mpsc::UnboundedSender<UiEvent>,
@@ -689,159 +689,159 @@ pub struct Chat {
     asks_rx: mpsc::UnboundedReceiver<AskRequest>,
     pub messages: Vec<UiMessage>,
     pub input: String,
-    /// 光标在 `input` 中的字节位置（恒落在字符边界上）。
+    /// Byte position of the caret in `input` (always on a char boundary).
     pub cursor: usize,
-    /// 最近一次 ctrl+k/u/w 删除的文本（ctrl+y 粘回）。
+    /// Text last deleted with ctrl+k/u/w (ctrl+y pastes it back).
     kill: String,
-    /// 编辑撤销栈（文本 + 光标），封顶 [`UNDO_MAX`]。
+    /// Edit undo stack (text + caret), capped at [`UNDO_MAX`].
     undo: Vec<(String, usize)>,
-    /// 上一次编辑的类型（连续同类编辑在撤销栈里合并）。
+    /// Type of the last edit (consecutive same-kind edits merge in the undo stack).
     last_edit: Option<EditKind>,
-    /// Alt+T 关闭思考前的等级（再按恢复它）。
+    /// Thinking level before Alt+T disabled it (pressing again restores it).
     last_thinking: Option<String>,
-    /// ctrl+s 暂存的输入（文本 + 光标）。
+    /// Input stashed with ctrl+s (text + caret).
     stash: Option<(String, usize)>,
-    /// 提交过的 prompt（按 cwd 持久化，写失败降级为会话内）。
+    /// Submitted prompts (persisted per cwd; falls back to in-session on write failure).
     pub history: crate::tui::history::History,
-    /// 历史文件是否可写（一次失败后不再重试，避免每轮提交都撞同一个错）。
+    /// Whether the history file is writable (after one failure, never retry — avoid hitting the same error on every submit).
     history_writable: bool,
-    /// busy 期间排队的消息（TurnEnd 后逐条提交）。
+    /// Messages queued while busy (submitted one by one after TurnEnd).
     pub queued: Vec<String>,
-    /// `?` 快捷键面板是否展开。
+    /// Whether the `?` shortcut panel is expanded.
     pub help_visible: bool,
-    /// 底部临时提示（`Press ctrl-c again to exit` 等）。
+    /// Bottom transient notice (`Press ctrl-c again to exit` etc.).
     pub notice: Option<&'static str>,
-    /// 最近一次空输入 Ctrl+C 的时刻（[`CTRL_C_WINDOW`] 内再按即退出）。
+    /// Time of the most recent Ctrl+C on empty input (a second press within [`CTRL_C_WINDOW`] exits).
     ctrl_c_at: Option<std::time::Instant>,
-    /// 最近一次 Esc 的时刻（[`ESC_WINDOW`] 内再按即清空输入）。
+    /// Time of the most recent Esc (a second press within [`ESC_WINDOW`] clears the input).
     esc_at: Option<std::time::Instant>,
-    /// 上一次按键时刻与连续"快"按键计数（粘贴突发启发式）。
+    /// Time of the last key press and the count of consecutive "fast" keys (paste-burst heuristic).
     last_key_at: Option<std::time::Instant>,
     burst_keys: usize,
-    /// 折叠的粘贴块：占位符 `[Pasted text #N +M lines]` → 真实内容。
+    /// Collapsed paste blocks: placeholder `[Pasted text #N +M lines]` → real content.
     pastes: Vec<(String, String)>,
-    /// 消息框挂载的图片附件（`#[image N]` 占位 → N 对应此表下标+1）。
+    /// Image attachments mounted in the message box (`#[image N]` placeholder → N = index here + 1).
     attachments: Vec<crate::api::types::ImageAttachment>,
-    /// 本会话执行过的 `!` 命令（bash 模式 Tab 前缀补全）。
+    /// `!` commands run in this session (prefix completion for Tab in bash mode).
     bash_history: Vec<String>,
-    /// ctrl+r 反向搜索态（None = 未激活）。
+    /// ctrl+r reverse search state (None = not active).
     pub search: Option<HistorySearch>,
-    /// 当前权限模式（shift+tab 循环）。Session 在 Arc 里不可变，
-    /// 这里持有真正生效的那份：每回合以它派生 Session 副本。
+    /// Current permission mode (cycled with shift+tab). `Session` is immutable inside an `Arc`,
+    /// so this holds the one actually in effect: each turn derives a `Session` copy from it.
     pub permission_mode: PermissionMode,
-    /// ctrl+l 请求整屏重画（渲染层消费后清除）。
+    /// ctrl+l requests a full-screen repaint (cleared after the render layer consumes it).
     pub force_redraw: bool,
-    /// inline ctrl+o 请求整卷 transcript 重放：全部展开、游标已回卷，
-    /// app 层下一帧把定稿部分一次冻结进 scrollback（消费后清除）。
+    /// inline ctrl+o requests a full-transcript replay: everything expanded, the flush cursor
+    /// rewound; the app freezes the settled part into scrollback on the next frame (cleared after consumption).
     pub dump_transcript: bool,
-    /// bash 模式（`!` 前缀）：输入直接执行，不经模型。
+    /// bash mode (`!` prefix): input executes directly, bypassing the model.
     pub bash_mode: bool,
     pub busy: bool,
-    /// Esc/Ctrl+C 中断过当前回合：后台任务完成通知不再自动拉起新回合
-    /// （interrupt 语义：等待用户主动提交才继续），start_turn 时复位。
+    /// Esc/Ctrl+C interrupted the current turn: background-task completion no longer auto-starts
+    /// a new turn (interrupt semantics: wait for the user to submit), reset in start_turn.
     pub interrupted: bool,
-    /// 当前 assistant 消息索引。
+    /// Index of the current assistant message.
     pub stream_msg: Option<usize>,
     thinking_buf: String,
-    /// 当前 thinking 段是否开放续写：ToolStart/TextDelta（段边界）后关闭，
-    /// 同一段内的 delta 续写不加段落分隔；新段（工具后的新推理）\n\n 聚合。
+    /// Whether the current thinking segment is open for continuation: closed after ToolStart/TextDelta
+    /// (segment boundaries); deltas in the same segment continue without paragraph breaks; new segments (fresh reasoning after a tool) are aggregated with \n\n.
     thinking_seg_open: bool,
     output_tokens: u64,
     pub tick: u64,
-    /// TurnStart 时的 tick：运行态 thinking 的相对计时基准。
+    /// Tick at TurnStart: the relative timing baseline for running-state thinking.
     turn_start_tick: u64,
-    /// TurnStart 的真实时钟（状态行耗时基准；TurnEnd 清空）。
+    /// Real clock at TurnStart (baseline for the status-row elapsed time; cleared at TurnEnd).
     turn_started: Option<std::time::Instant>,
-    /// 非致命警告（时间戳 + 文案）：超过 WARNING_TTL 自动过期，
-    /// 渲染只显示有效条目（push 时顺带清理）。
+    /// Non-fatal warnings (timestamp + text): entries past `WARNING_TTL` expire
+    /// automatically; rendering shows only valid entries (pruned on push).
     pub warnings: Vec<(std::time::Instant, String)>,
-    /// 当前错误态（#18 呈现层）：驱动错误行高亮与全流程级整屏态。
-    /// `UiEvent::Error` 到达时记录；复位动作（AC-03 复位四项）清除。
-    /// 渲染端按 `level` 分支：Field/Page → 错误行高亮，Full → 整屏错误态。
+    /// Current error state (#18 presentation layer): drives the error-row highlight and the full-flow full-screen state.
+    /// Recorded when `UiEvent::Error` arrives; cleared by the reset action (AC-03's four resets).
+    /// The render side branches on `level`: Field/Page → error-row highlight, Full → full-screen error state.
     pub last_error: Option<ErrorState>,
-    /// 最近一次模型回合提交的输入（#18 整屏错误态 Enter=重试时重跑）。
+    /// Input of the last submitted model turn (#18 full-screen error state reruns it on Enter=retry).
     pub last_prompt: String,
     pub cwd: String,
-    /// 权限询问：请求 + 结果回执。
+    /// Permission prompt: request + result receipt.
     pub pending_ask: Option<(PermissionRequest, oneshot::Sender<DialogAction>)>,
-    /// 对话框焦点行（0..=options.len()；== options.len() = Other 输入）。
+    /// Dialog focus row (0..=options.len(); == options.len() = Other input).
     ask_focus: usize,
-    /// Other 自由输入缓冲。
+    /// Buffer for Other free-form input.
     ask_other: String,
-    /// AskUserQuestion 已答结果块（结果消息；跨请求累积）。
+    /// AskUserQuestion answered-result block (result message; accumulates across requests).
     pub ask_result: Option<AskResult>,
-    /// 任务列表磁盘快照缓存（tick 周期刷新）。
+    /// Cached disk snapshot of the task list (refreshed on a tick cadence).
     tasks_cache: Vec<TodoItem>,
     processor: MarkdownProcessor,
     renderer: MarkdownRenderer,
     reply_cache: HashMap<String, Vec<Line>>,
-    /// 终端图片能力（kitty 协议；inline 模式检测，fullscreen 为 None）。
+    /// Terminal image capability (kitty protocol; detected in inline mode, None in fullscreen).
     pub image_cap: Option<ImageCap>,
-    /// 已加载图片缓存（url → PNG 字节 + 单元格尺寸）。
+    /// Loaded image cache (url → PNG bytes + cell dimensions).
     pub images: HashMap<String, Arc<ImageMeta>>,
-    /// 拉取中的图片 url（防重复加载）。
+    /// Image urls currently being fetched (prevents duplicate loads).
     images_pending: HashSet<String>,
-    /// 图片缓存版本（加载完成递增 → 渲染缓存失效）。
+    /// Image cache version (bumped on load completion → invalidates the render cache).
     images_version: u64,
-    /// 文档是否待重建（事件/tick/展开等写入后置位；布局层消费后清除）。
+    /// Whether the document needs rebuilding (set after writes like events/tick/expand; cleared after the layout layer consumes it).
     pub dirty: bool,
-    /// 上次 build_rows 的宽度（markdown 缓存按宽度失效）。
+    /// Width of the last build_rows (markdown cache invalidated by width).
     prev_build_width: usize,
     pub width: usize,
-    /// 视口行数（布局层写入；reconcile_scroll 用它钳制滚动）。
+    /// Viewport row count (written by the layout layer; reconcile_scroll clamps scrolling with it).
     pub viewport_height: usize,
-    /// 终端总行数（布局层写入；`?` 面板按它算行数预算）。
+    /// Total terminal rows (written by the layout layer; the `?` panel budgets rows with it).
     pub height: usize,
     pub scroll: usize,
     pub auto_scroll: bool,
-    /// 上次 build_rows 的文档（点击定位）。
+    /// Document from the last build_rows (click targeting).
     pub doc: Doc,
-    /// 等待 ToolReady（完整 input）归类的工具活动索引（FIFO）。
+    /// Tool activity indices waiting to be classified on ToolReady (full input) (FIFO).
     pending_tools: Vec<usize>,
     pub theme: Theme,
-    /// 终端背景色探测结果（/theme 重建主题用）。
+    /// Detected terminal background color (used by /theme to rebuild the theme).
     detected_background: Option<bool>,
-    /// slash 命令输出行（/help /status 等）：渲染在消息之后、空闲时定稿。
+    /// Slash command output lines (/help /status etc.): rendered after messages, settled when idle.
     pub slash_lines: Vec<String>,
-    /// slash 输出出现时间（tick 超时自动消失）。
+    /// When the slash output appeared (auto-dismissed by tick timeout).
     pub slash_at: Option<std::time::Instant>,
-    /// /exit 请求退出（组件层消费 → system.exit）。
+    /// /exit requested quitting (component layer consumes → system.exit).
     pub exit: bool,
-    /// inline：已落盘进 scrollback 的文档前缀段数——0 = 无，1 = 欢迎卡，
-    /// 1+k = 欢迎卡 + 前 k 条消息。落盘游标按**消息边界**而非行号计，
-    /// 于是宽度变化后重排（行号全变）也不会重复打印。
+    /// inline: segments of the document prefix already flushed to scrollback — 0 = none, 1 = welcome card,
+    /// 1+k = welcome card + first k messages. The flush cursor counts by **message boundary**, not row number,
+    /// so re-layout after a width change (all row numbers change) never reprints.
     pub flushed_segments: usize,
-    /// inline：已落盘的提问结果块行数（块只追加，跳过前缀即可）。
+    /// inline: ask result block rows already flushed (blocks only append; skipping the prefix suffices).
     pub flushed_ask_rows: usize,
-    /// inline：当前 doc 中已落盘的行数（canvas 尾部起点）；每次
-    /// build_rows 归零——重建后落盘部分已不在文档里。
+    /// inline: rows of the current doc already flushed (the canvas tail start); reset to zero
+    /// on every build_rows — after a rebuild the flushed part is no longer in the doc.
     pub tail_start: usize,
-    /// 检查点累计值的消化基线：同一次构建内多次推进落盘游标时防止
-    /// 重复累加（build_rows 归零）。
+    /// Baseline that absorbs checkpoint accumulators: prevents double-counting when the flush cursor
+    /// advances multiple times within one build (reset by build_rows).
     mark_base: (usize, usize),
-    /// slash 下拉建议（输入 `/` 且无参数时非空；组件层渲染）。
+    /// Slash dropdown suggestions (non-empty when input starts with `/` and has no args; rendered by the component layer).
     pub slash_suggestions: Vec<SlashSuggestion>,
-    /// 下拉选中索引。
+    /// Selected index in the dropdown.
     pub slash_selected: usize,
-    /// `/model` 二级选择器（一级 endpoint → 二级模型列表；None = 未激活）。
+    /// `/model` two-level selector (level-one endpoint → level-two model list; None = inactive).
     pub model_menu: Option<ModelMenu>,
-    /// `/think` 等级选择器（None = 未激活）。
+    /// `/think` level selector (None = inactive).
     pub think_menu: Option<ThinkMenu>,
-    /// 任务区展开信号（Task 工具调用 → 展示任务列表）。
+    /// Task-area expand signal (Task tool call → show the task list).
     pub tasks_visible: bool,
-    /// 任务区是否由 TaskCreate 自动打开（非 ctrl+t 手动）：全部完成后自动隐藏。
+    /// Whether the task area was auto-opened by TaskCreate (not manually via ctrl+t): hides automatically when everything is done.
     pub tasks_auto: bool,
-    /// 底部实体区快照（agent 实例 + 频道；tick/WatchEvent 时刷新）。
+    /// Snapshot of the bottom entity area (agent instances + channels; refreshed on tick/WatchEvent).
     pub entities: Vec<EntityRow>,
-    /// 实体选择器焦点（Some(i) = 选择模式：↑↓/Enter/Esc 被捕获）。
+    /// Entity selector focus (Some(i) = selection mode: ↑↓/Enter/Esc are captured).
     pub entity_focus: Option<usize>,
-    /// 待打开的实体视图（app 层消费 → 进入全屏模态）。
+    /// Entity view pending open (app layer consumes → enters the fullscreen modal).
     pub open_entity: Option<EntityOpen>,
-    /// 中断信号：busy 时 Ctrl+C / Esc → send(true)，回合内流读取立即中止。
+    /// Interrupt signal: Ctrl+C / Esc while busy → send(true), aborting stream reads in the turn immediately.
     cancel_tx: tokio::sync::watch::Sender<bool>,
 }
 
-/// 底部实体区的一行：子代理实例或频道。
+/// One row of the bottom entity area: a subagent instance or a channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityRow {
     Agent {
@@ -856,7 +856,7 @@ pub enum EntityRow {
     },
 }
 
-/// 选中回车后要打开的实体视图。
+/// Entity view to open after selecting with Enter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityOpen {
     Agent(String),
@@ -864,10 +864,11 @@ pub enum EntityOpen {
 }
 
 impl Chat {
-    /// 非致命警告的展示时限：过期条目不再渲染（push 时顺带清理）。
+    /// Display TTL for non-fatal warnings: expired entries are no longer
+    /// rendered (pruned on push).
     const WARNING_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
-    /// 记录一条非致命警告（去重 + 清理过期）。
+    /// Record a non-fatal warning (de-duped + stale entries pruned).
     pub(crate) fn push_warning(&mut self, message: String) {
         self.warnings.retain(|(t, _)| t.elapsed() < Self::WARNING_TTL);
         if !self.warnings.iter().any(|(_, w)| w == &message) {
@@ -875,7 +876,8 @@ impl Chat {
         }
     }
 
-    /// 当前应显示的警告（无过期条目时 None）。
+    /// The warning currently displayed (`None` when nothing is
+    /// unexpired).
     pub fn visible_warning(&self) -> Option<&str> {
         self.warnings
             .iter()
@@ -891,8 +893,8 @@ impl Chat {
         theme: Theme,
         detected_background: Option<bool>,
     ) -> Self {
-        // Watchable 事件转发：registry 广播 → UiEvent 通道（跨回合常驻）。
-        // 测试环境无 tokio runtime 时跳过。
+        // Watchable event forwarding: registry broadcast → UiEvent channel (persists across turns).
+        // Skipped when there is no tokio runtime (tests).
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let watch_events = events.clone();
             let mut rx = session.watch.subscribe();
@@ -1027,7 +1029,7 @@ impl Chat {
         }
     }
 
-    /// 消费通道里所有待处理事件。返回是否处理了任何事件。
+    /// Drains all pending events from the channel. Returns whether any event was handled.
     pub fn drain_events(&mut self) -> bool {
         let mut handled = false;
         while let Ok(event) = self.events_rx.try_recv() {
@@ -1037,7 +1039,7 @@ impl Chat {
         handled
     }
 
-    /// 消费权限通道（一次一个：新请求只在无待处理请求时接收）。
+    /// Drains the permission channel (one at a time: a new request is only accepted when none is pending).
     pub fn drain_asks(&mut self) -> bool {
         if self.pending_ask.is_none()
             && let Ok(request) = self.asks_rx.try_recv()
@@ -1050,7 +1052,7 @@ impl Chat {
         false
     }
 
-    /// 消费所有通道。返回是否有任何新状态。
+    /// Drains all channels. Returns whether there is any new state.
     pub fn drain_all(&mut self) -> bool {
         let mut changed = self.drain_events();
         changed |= self.drain_asks();
@@ -1063,8 +1065,8 @@ impl Chat {
     fn handle(&mut self, event: UiEvent) {
         match event {
             UiEvent::ModelsLoaded { provider, models } => {
-                // 二级菜单补充异步拉取结果；列表仍空说明拉取失败（保留 loading
-                // 不阻塞：用户可直接输入模型名或 Esc 退出）。
+                // The level-two menu receives async fetch results; a still-empty list means the fetch failed (keep loading
+                // so it does not block: the user can type a model name directly or exit with Esc).
                 if let Some(menu) = &mut self.model_menu
                     && let Some(m) = &mut menu.models
                     && m.provider == provider
@@ -1085,14 +1087,14 @@ impl Chat {
                         self.push_warning(format!("图片加载失败: {url}"));
                     }
                 }
-                // 缓存版本递增：渲染器逐块缓存与 reply_cache 一并失效。
+                // Bump the cache version: the renderer's per-block cache and reply_cache invalidate together.
                 self.images_version = self.images_version.wrapping_add(1);
                 self.reply_cache.clear();
                 self.dirty = true;
             }
             UiEvent::TurnStart => {
-                // 新回合开始 = 错误态复位（AC-03）：页面级错误行随新回合消失
-                // （整屏级 Full 在 error_screen_key 已 dismiss，此处兜底）。
+                // A new turn resets the error state (AC-03): page-level error rows vanish with the new turn
+                // (full-screen Full is already dismissed in error_screen_key; this is a fallback).
                 self.last_error = None;
                 self.thinking_buf.clear();
                 self.thinking_seg_open = false;
@@ -1109,8 +1111,8 @@ impl Chat {
                 self.stream_msg = Some(self.messages.len() - 1);
                 self.busy = true;
                 self.turn_start_tick = self.tick;
-                // 占位 thinking：端点延迟推送 delta 时（DeepSeek 常达数十秒），
-                // 运行态行立即可见。
+                // Placeholder thinking: when the endpoint delays deltas (DeepSeek often by tens of seconds),
+                // the running row is visible immediately.
                 let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                     state: ThinkingState::Running,
                     duration_ms: 0,
@@ -1134,8 +1136,8 @@ impl Chat {
                     if let Some(g) = self.messages[i].groups.last_mut() {
                         g.active = false;
                     }
-                    // 正文是阶段边界：正文后的 thinking 新开块（不再聚合），
-                    // 运行中的思考块随之收尾（同 ToolStart 的收尾语义）。
+                    // Text is a segment boundary: thinking after text opens a new block (no more aggregation),
+                    // and the running thinking block closes with it (same closing semantics as ToolStart).
                     self.thinking_buf.clear();
                     self.thinking_seg_open = false;
                     for hint in &mut self.messages[i].activities {
@@ -1185,9 +1187,9 @@ impl Chat {
                         if dup {
                             return;
                         }
-                        // 聚合：正文未打断时（thinking_buf 仍持有本阶段文本），
-                        // 新推理并入最后一个 thinking 块。同段续写（段未关）
-                        // 直接追加；新段（工具/正文之后）空行分隔并计数。
+                        // Aggregation: when text has not interrupted (thinking_buf still holds this stage's text),
+                        // new reasoning merges into the last thinking block. Same-segment continuation (segment open)
+                        // appends directly; a new segment (after a tool/text) is separated by a blank line and counted.
                         if !self.thinking_buf.is_empty() {
                             let was_open = self.thinking_seg_open;
                             if was_open {
@@ -1263,7 +1265,7 @@ impl Chat {
                         }
                     }
                 }
-                // 工具开始 = 推理段边界：后续 delta 聚合为新段。
+                // Tool start = reasoning segment boundary: subsequent deltas aggregate into a new segment.
                 self.thinking_seg_open = false;
                 let name: &'static str = Box::leak(name.into_boxed_str());
                 let mut hint = Activity::new(ActivityKind::Tool(ToolCall::running(
@@ -1294,7 +1296,7 @@ impl Chat {
                 if let ActivityKind::Tool(call) = &mut self.messages[i].activities[idx].kind {
                     call.summary = crate::query::summarize_input(&name, &input);
                 }
-                // `!` 命令：独立活动（输出预览直接展开），不参与折叠组。
+                // `!` commands: standalone activities (output preview expanded directly), not part of collapse groups.
                 if standalone {
                     return;
                 }
@@ -1347,7 +1349,7 @@ impl Chat {
                 payload,
                 signal,
             } => {
-                // agent/频道的生命周期事件顺带刷新底部实体区。
+                // Agent/channel lifecycle events also refresh the bottom entity area.
                 self.refresh_entities();
                 let found = self.messages.iter_mut().find_map(|m| {
                     m.activities.iter_mut().find(|a| {
@@ -1410,13 +1412,13 @@ impl Chat {
                     {
                         w.detail = Some(sig.clone());
                     }
-                    // 用户中断过回合后不自动续跑（等主动提交）。
+                    // After the user interrupted a turn, never auto-run again (wait for an explicit submit).
                     if !self.interrupted {
                         self.submit_auto();
                     }
                 }
-                // 频道行更新且 hub 空闲有邮件：拉起回合消化（子代理发言时
-                // hub 多半不在回合中——没有这次唤醒，消息会一直睡到用户开口）。
+                // A channel row updated and the hub is idle with mail: start a turn to digest it (when a subagent posts,
+                // the hub is usually not in a turn — without this wake-up the message would sleep until the user speaks).
                 if kind == crate::watch::WatchKind::Channel
                     && !self.interrupted
                     && self.queued.is_empty()
@@ -1427,8 +1429,8 @@ impl Chat {
             }
             UiEvent::RoundEnd => {
                 if let Some(i) = self.stream_msg {
-                    // 折叠组以正文为边界：模型轮次（round）不拆组，thinking
-                    // 也不拆组——正文（TextDelta）与非折叠工具才关组。
+                    // Collapse groups are bounded by text: model rounds do not split a group, nor does thinking —
+                    // only text (TextDelta) and non-collapsible tools close the group.
                     // Warm the image cache a round early: by TurnEnd the message
                     // settles and flushes, and an image that only starts loading
                     // then would miss the flush (see `message_settled`).
@@ -1475,11 +1477,11 @@ impl Chat {
                         if in_group {
                             call.result_summary = result_summary(&done.name, &done.output);
                         } else {
-                            // 独立 Bash（`!` 命令）：预览 = 输出本身（去掉
-                            // `$ cmd` 回显与 `[Exited with code N]` 尾注），
-                            // 默认展开（BashModeProgress 直接展示输出）。
-                            // Skill：结果行只显示 `✦ 技能名`（与活动头
-                            // `✦ Skill(输入)` 同族），指针路径只留在 tool_result。
+                            // Standalone Bash (`!` commands): preview = the output itself (stripped of the
+                            // `$ cmd` echo and the `[Exited with code N]` footnote),
+                            // expanded by default (BashModeProgress shows the output directly).
+                            // Skill: the result row shows only `✦ <skill name>` (same family as the activity header
+                            // `✦ Skill(input)`); the pointer path stays only in tool_result.
                             if done.name == "Skill" {
                                 call.result_summary = done.output.lines().next().and_then(|l| {
                                     l.strip_prefix("✦ ")
@@ -1516,14 +1518,14 @@ impl Chat {
                 self.turn_started = None;
                 self.output_tokens = 0;
                 self.thinking_seg_open = false;
-                // AskUserQuestion 回答反馈是回合内瞬态：回合结束即清，
-                // 不悬挂在输入框上方（块渲染在文档尾部、不参与消息流，
-                // 常驻会像残留物）。游标同步归零——否则下次回答的块
-                // 会跳过前 flushed_ask_rows 行。
+                // AskUserQuestion answer feedback is transient within a turn: cleared at turn end,
+                // not left hanging above the input (the block renders at the end of the doc, outside the message flow;
+                // a persistent block would look like residue). The cursor is zeroed too — otherwise the next answer's block
+                // would skip the first flushed_ask_rows rows.
                 self.ask_result = None;
                 self.flushed_ask_rows = 0;
-                // 用户中断后不再因后台任务完成自动拉起新回合；
-                // 有排队消息时先让用户的消息走（下面统一提交）。
+                // After a user interrupt, background-task completion no longer auto-starts a new turn;
+                // with queued messages, the user's message goes first (submitted together below).
                 if (self.session.watch.has_wake_notifications()
                     || self.session.channels.has_hub_mail())
                     && !self.interrupted
@@ -1535,7 +1537,7 @@ impl Chat {
                     if let Some(g) = self.messages[i].groups.last_mut() {
                         g.active = false;
                     }
-                    // 同步移除：空占位 thinking 与它的插入点。
+                    // Remove synchronously: the empty placeholder thinking and its insert point.
                     let mut keep = Vec::new();
                     for (idx, a) in self.messages[i].activities.iter().enumerate() {
                         if matches!(a.kind, ActivityKind::Thinking(_)) && a.content.is_empty() {
@@ -1579,7 +1581,7 @@ impl Chat {
                             hint.expanded = false;
                         }
                     }
-                    // 文本已定稿 → 异步加载其中的图片（完成后回发 ImageReady）。
+                    // Text is settled → asynchronously load its images (reply with ImageReady when done).
                     let text = self.messages[i].text.clone();
                     self.load_message_images(&text);
                 }
@@ -1595,9 +1597,9 @@ impl Chat {
             UiEvent::Error { code, msg, level, context } => {
                 self.busy = false;
                 self.stream_msg = None;
-                // #18：错误态结构化记录（code/msg/level/context），渲染端据此
-                // 生成错误行（Page/Field）或整屏态（Full）——不依赖消息文本
-                // 替换与 doc 重建时机，无双显。
+                // #18: structured error-state record (code/msg/level/context); the render side uses it to
+                // produce the error row (Page/Field) or the full-screen state (Full) — independent of message-text
+                // replacement and doc-rebuild timing, so nothing renders twice.
                 self.last_error = Some(ErrorState {
                     code,
                     msg: msg.clone(),
@@ -1618,8 +1620,8 @@ impl Chat {
         self.handle(event);
     }
 
-    /// 扫描消息文本中的 markdown 图片引用，异步加载未缓存/未在途的
-    /// url（data:/http(s)/本地路径），完成后回发 `ImageReady`。
+    /// Scans message text for markdown image references and asynchronously loads urls not cached
+    /// or already in flight (data:/http(s)/local paths), replying with `ImageReady` when done.
     fn load_message_images(&mut self, text: &str) {
         let Some(cap) = self.image_cap else {
             return;
@@ -1664,8 +1666,8 @@ impl Chat {
         first
     }
 
-    /// thinking 内容走 markdown streaming 渲染（代码块/列表随流更新）。
-    /// 每次以完整文本重渲染（thinking 增量不大）。
+    /// Thinking content renders with markdown streaming (code blocks/lists update as the stream flows).
+    /// Re-renders with the full text each time (thinking deltas are small).
     fn render_thinking(&mut self, text: &str) -> Vec<Line> {
         if text.is_empty() {
             return Vec::new();
@@ -1676,8 +1678,8 @@ impl Chat {
         self.renderer.lines().to_vec()
     }
 
-    /// 点击（doc 行号）命中的行 → 折叠/展开 / 权限选项确认。
-    /// 返回是否处理了点击。
+    /// A click (doc row number) hitting a row → collapse/expand / permission-option confirm.
+    /// Returns whether the click was handled.
     pub fn doc_click(&mut self, doc_row: usize) -> bool {
         let Some(range) = self
             .doc
@@ -1719,7 +1721,7 @@ impl Chat {
         }
     }
 
-    /// 点击对话框选项：Other 行 → 进入输入模式；其余立即确认。
+    /// Click on a dialog option: the Other row → enter input mode; anything else confirms immediately.
     fn ask_click(&mut self, index: usize) {
         let Some((request, _)) = &self.pending_ask else {
             return;
@@ -1733,8 +1735,8 @@ impl Chat {
         self.choose_ask_option(index);
     }
 
-    /// ctrl+o：全局展开/折叠 transcript（CC app:toggleTranscript）。
-    /// 优先级：展开的组先折叠回聚合态；否则有折叠项 → 全部展开；否则全部折叠。
+    /// ctrl+o: globally expand/collapse the transcript (CC app:toggleTranscript).
+    /// Priority: expanded groups collapse back first; otherwise, if anything is collapsible → expand all; else collapse all.
     pub fn toggle_transcript(&mut self) -> bool {
         let Some(i) = self.messages.len().checked_sub(1) else {
             return false;
@@ -1766,16 +1768,16 @@ impl Chat {
         true
     }
 
-    /// inline ctrl+o 展开方向（CC 非全屏 transcript）：已打印进 scrollback
-    /// 的行改不动（write-once），所以不折叠切换，而是**整卷重放**——全历史
-    /// 所有可折叠项展开、落盘游标回卷，app 层随即把整卷 transcript 一次
-    /// 冻结进 scrollback，用户用终端滚动翻看。scrollback 里已有的折叠
-    /// 旧拷贝收不回，接受重复（与回灌同一取舍）。全部已在屏上且无可
-    /// 展开项时 no-op：重放不会增加任何信息。
+    /// inline ctrl+o expand direction (CC non-fullscreen transcript): rows already printed to scrollback
+    /// cannot change (write-once), so instead of a collapse toggle it does a **full replay** — every collapsible item
+    /// in all of history expands and the flush cursor rewinds; the app then freezes the whole transcript
+    /// into scrollback in one go, where the user can scroll back to read it. Old collapsed copies already
+    /// in scrollback cannot be retracted — duplicates are accepted (the same trade-off as rehydration). When everything
+    /// is already on screen with nothing to expand, it is a no-op: the replay adds no information.
     ///
-    /// 重放帧走 `force_redraw`（清可见屏）：与 resize 同款，先清后写，
-    /// 重放内容从屏幕顶部铺起、chrome 紧随其下——不清屏的话旧画面与
-    /// 重放行的相对位置取决于视口历史，短内容时会出现同屏重复。
+    /// The replay frame uses `force_redraw` (clear the visible screen): same as resize, clear first then write,
+    /// replay content starts from the top of the screen with chrome right below — without clearing, the old frame and
+    /// the replay rows would align by viewport history, so short content appears twice on screen.
     pub fn expand_transcript(&mut self) -> bool {
         let mut changed = false;
         for message in &mut self.messages {
@@ -1801,9 +1803,9 @@ impl Chat {
         true
     }
 
-    /// ctrl+o 的切换方向判定：transcript 里存在可折叠项且**全部**处于
-    /// 展开态才为真（下一按走闭合）。无可折叠项时恒为假——此时 ctrl+o
-    /// 退化为纯重放，反复按也只是重印，不会误入闭合分支。
+    /// ctrl+o toggle direction: true only when the transcript has collapsible items and they are **all**
+    /// expanded (the next press collapses). Always false with nothing collapsible — ctrl+o then
+    /// degrades to a pure replay: pressing it repeatedly just reprints, never entering the collapse branch.
     pub fn transcript_fully_expanded(&self) -> bool {
         let mut any = false;
         for message in &self.messages {
@@ -1827,10 +1829,10 @@ impl Chat {
         any
     }
 
-    /// inline ctrl+o 闭合方向：全历史折回默认聚合态。只改折叠状态；
-    /// 展示层由调用方走 resize 同款路径收拢（清屏重画 + 回灌），因为
-    /// 屏上的展开重放行同样属于 write-once 的已打印内容，不清屏就会
-    /// 与折叠后的窗口同屏并存。
+    /// inline ctrl+o collapse direction: all history folds back to the default aggregate state. Only the fold state
+    /// changes; the caller's display layer closes it up via the same path as resize (clear-redraw + rehydration), because
+    /// the expanded replay rows on screen are also write-once printed content — without clearing, they would
+    /// coexist on screen with the collapsed window.
     pub fn collapse_transcript(&mut self) -> bool {
         let mut changed = false;
         for message in &mut self.messages {
@@ -1862,7 +1864,7 @@ impl Chat {
             self.set_input(text);
             return;
         }
-        // 回合进行中：入队，TurnEnd 后逐条提交（CC 消息排队）。
+        // Turn in progress: queue it, submitted one by one after TurnEnd (CC message queueing).
         if self.busy {
             let text = self.expand_pastes(&text);
             let text = self.expand_image_paths(&text);
@@ -1880,8 +1882,8 @@ impl Chat {
             return;
         }
         if let Some(cmd) = text.strip_prefix('/') {
-            // Enter 时输入是部分前缀且有下拉建议：应用选中项并执行
-            //（handleEnter：suggestions 存在时 Enter = 补全 + 执行）。
+            // Enter with a partial prefix and dropdown suggestions: apply the selection and run it
+            // (handleEnter: with suggestions present, Enter = complete + execute).
             if !self.slash_suggestions.is_empty()
                 && !self
                     .slash_suggestions
@@ -1904,9 +1906,9 @@ impl Chat {
         self.start_turn(text, true);
     }
 
-    /// 大段粘贴折叠为占位符：输入框里留 `[Pasted text #N +M lines]`，
-    /// 真实内容存在 [`Chat::pastes`]，提交时由 [`Chat::expand_pastes`] 还原。
-    /// 只在粘贴突发中调用（判定局限见 [`PASTE_BURST_GAP`]）。
+    /// Large pastes collapse into a placeholder: the input keeps `[Pasted text #N +M lines]`,
+    /// with the real content in [`Chat::pastes`], restored by [`Chat::expand_pastes`] on submit.
+    /// Only called during a paste burst (detection limits see [`PASTE_BURST_GAP`]).
     fn collapse_paste(&mut self) {
         let lines = self.input.lines().count();
         if lines < PASTE_COLLAPSE_LINES {
@@ -1924,13 +1926,14 @@ impl Chat {
     /// the prompt. Terminals send bare CR for the line breaks inside a paste,
     /// so they are normalised first — the fold threshold counts lines.
     ///
-    /// 剪贴板含图片（macOS）时优先挂载图片：`#[image N]` 占位插到光标处，
-    /// 文本 payload 忽略（终端对纯图片剪贴板的 paste 事件没有文本内容）。
+    /// When the clipboard holds an image (macOS), prefer mounting it: the `#[image N]` placeholder
+    /// goes in at the caret and the text payload is ignored (terminals send no text for pure-image pastes).
     /// The burst heuristic ([`PASTE_BURST_GAP`]) stays as the fallback for
     /// terminals that do not report bracketed paste.
     pub fn on_paste(&mut self, text: &str) {
-        // 测试环境不读系统剪贴板：剪贴板里的图片会把文本粘贴误判为图片占位符
-        // （bracketed_paste 测试曾因本机剪贴板有图片而 flaky）。
+        // Tests must not read the system clipboard: an image in it would turn
+        // a text paste into an image placeholder (the bracketed_paste test was
+        // once flaky because the host clipboard held an image).
         if !cfg!(test)
             && let Some(id) = self.paste_clipboard_image()
         {
@@ -1957,13 +1960,13 @@ impl Chat {
         self.dirty = true;
     }
 
-    /// 剪贴板含图片（macOS）：osascript 读 PNG → 压缩 → 注册附件 → 占位 id。
+    /// Clipboard with an image (macOS): osascript reads the PNG → compress → register the attachment → placeholder id.
     fn paste_clipboard_image(&mut self) -> Option<usize> {
         let bytes = crate::tui::gfx::clipboard_image_png()?;
         self.register_image(&bytes)
     }
 
-    /// 把占位符换回真实内容（提交时）。
+    /// Swaps placeholders back to their real content (at submit time).
     fn expand_pastes(&self, text: &str) -> String {
         let mut out = text.to_string();
         for (token, body) in &self.pastes {
@@ -1972,8 +1975,8 @@ impl Chat {
         out
     }
 
-    /// 输入中的图片路径（独立成行的路径，或 `![alt](path)` 整行）→ 读文件
-    /// → 压缩注册 → 替换为 `#[image N]` 占位。无法识别/读取的行原样保留。
+    /// An image path in the input (a standalone path line, or a whole `![alt](path)` line) → read the file
+    /// → compress and register → replace with the `#[image N]` placeholder. Unrecognized/unreadable lines stay as-is.
     fn expand_image_paths(&mut self, text: &str) -> String {
         let cwd = self.cwd.clone();
         let mut out: Vec<String> = Vec::new();
@@ -1997,7 +2000,7 @@ impl Chat {
         out.join("\n")
     }
 
-    /// 解析文本中的 `#[image N]` 引用 → 附件（去重保序）；未知 id 忽略。
+    /// Resolves `#[image N]` references in text → attachments (deduped, in order); unknown ids are ignored.
     fn resolve_images(&self, text: &str) -> Vec<crate::api::types::ImageAttachment> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -2013,7 +2016,7 @@ impl Chat {
         out
     }
 
-    /// 原始图片字节 → 压缩（API 上限内）→ 注册附件 → 占位 id。
+    /// Raw image bytes → compress (within the API limit) → register the attachment → placeholder id.
     fn register_image(&mut self, bytes: &[u8]) -> Option<usize> {
         let prepared = crate::api::image::prepare_image(bytes)?;
         self.attachments.push(crate::api::types::ImageAttachment {
@@ -2023,15 +2026,15 @@ impl Chat {
         Some(self.attachments.len())
     }
 
-    /// 图片文件 → 注册附件（读失败/非图片 → None）。
+    /// Image file → register the attachment (read failure / non-image → None).
     fn register_image_file(&mut self, path: &std::path::Path) -> Option<usize> {
         let bytes = std::fs::read(path).ok()?;
         self.register_image(&bytes)
     }
 
-    /// 本回合生效的 Session：`Session` 在 `Arc` 里不可变，而 shift+tab 要
-    /// 换权限模式——每回合派生一份带当前模式的副本（其余字段是共享句柄：
-    /// Runtime 的 watch 通道、任务存储、watch 注册表都仍指向同一份状态）。
+    /// The `Session` in effect for this turn: `Session` is immutable inside `Arc`, and shift+tab must
+    /// switch permission modes — so each turn derives a copy carrying the current mode (the other fields are shared
+    /// handles: Runtime's watch channel, task store, and watch registry still point at the same state).
     fn session_for_turn(&self) -> Arc<Session> {
         if self.permission_mode == self.session.permission_mode {
             return self.session.clone();
@@ -2041,7 +2044,7 @@ impl Chat {
         Arc::new(session)
     }
 
-    /// slash 输出行入队（临时提示：渲染在消息之后、输入框上方，TTL 后消失）。
+    /// Queues slash output lines (transient hints: rendered after messages and above the input, gone after TTL).
     fn push_slash_output(&mut self, text: String) {
         for line in text.lines() {
             self.slash_lines.push(line.to_string());
@@ -2050,10 +2053,10 @@ impl Chat {
         self.dirty = true;
     }
 
-    /// slash 命令分发。返回 true = 已消费。
+    /// Slash command dispatch. Returns true = consumed.
     fn run_slash(&mut self, line: &str) -> bool {
-        // 任何 slash 执行都关闭下拉建议（完整输入 Enter 时不走 submit 的清菜单分支，
-        // 否则 `+ /model …` 建议行永久残留在输入框下方）。
+        // Any slash run closes the dropdown (Enter on a full input skips submit's clear-menu branch,
+        // otherwise suggestion rows like `+ /model …` would linger below the input forever).
         self.slash_suggestions.clear();
         let (cmd, arg) = match line.split_once(char::is_whitespace) {
             Some((c, a)) => (c, a.trim()),
@@ -2078,15 +2081,15 @@ impl Chat {
             "tasks" => self.slash_tasks(),
             "team" => self.slash_team(arg),
             other => {
-                // 技能名（prompt Command：技能与内置命令同注册表，输入
-                // /技能名 即执行；全量正文不进上下文，见下方 marker 注释）。
+                // Skill name (prompt Command: skills share the registry with built-in commands; typing
+                // /skill-name runs it; the full body never enters the context, see the marker comment below).
                 let skills = crate::skills::load_skills(
                     &self.session.home,
                     &std::path::PathBuf::from(&self.cwd),
                 );
                 if let Some(skill) = skills.iter().find(|s| s.name == other) {
-                    // 渐进披露：只提交 `✦ 技能名 [参数]` 标记，正文由模型经
-                    // Skill 工具指针（`✦ name — read <path>`）+ Read 按需读取。
+                    // Progressive disclosure: only the `✦ <skill name> [args]` marker is submitted; the model
+                    // reads the body on demand via the Skill tool pointer (`✦ name — read <path>`) + Read.
                     let marker = if arg.is_empty() {
                         format!("✦ {}", skill.name)
                     } else {
@@ -2133,14 +2136,14 @@ impl Chat {
         self.set_model(arg.to_string());
     }
 
-    /// 切换运行时模型并持久化为默认（与 /theme /think 同路径：写 project 层）。
+    /// Switches the runtime model and persists it as the default (same path as /theme /think: writes the project layer).
     fn set_model(&mut self, model: String) {
         let _ = self.session.runtime.model_tx.send(model.clone());
         self.persist_model(&model);
         self.push_slash_output(format!("✓ 模型已切换: {model}"));
     }
 
-    /// 模型选择写回 `.bingo/settings.json`（下次启动作为默认；--model 仍可覆盖）。
+    /// Writes the model choice back to `.bingo/settings.json` (used as the default on next start; --model can still override).
     fn persist_model(&self, model: &str) {
         let cwd = std::path::PathBuf::from(&self.cwd);
         let _ = crate::settings::upsert_project_settings(
@@ -2149,7 +2152,7 @@ impl Chat {
         );
     }
 
-    /// 进入 `/model` 二级选择器：一级 = 当前 endpoint + 配置 providers。
+    /// Enters the `/model` two-level selector: level one = current endpoint + configured providers.
     fn open_model_menu(&mut self) {
         let mut providers = vec!["default".to_string()];
         providers.extend(self.session.client.provider_names());
@@ -2166,8 +2169,8 @@ impl Chat {
         self.slash_suggestions.clear();
     }
 
-    /// 一级 Enter：以该 provider 端点异步拉取模型列表（fork 端点，不切换当前），
-    /// 拉取完成经 ModelsLoaded 事件补充进菜单。
+    /// Level-one Enter: asynchronously fetches the model list from that provider endpoint (forks the endpoint,
+    /// without switching the current one); results arrive via the ModelsLoaded event.
     fn open_model_models(&mut self, provider: String) {
         let session = self.session.clone();
         let events = self.events.clone();
@@ -2175,14 +2178,14 @@ impl Chat {
         tokio::spawn(async move {
             let client = match session.client.with_provider(&provider_for_spawn) {
                 Ok(c) => c,
-                // default：直接克隆当前端点。
+                // default: clone the current endpoint directly.
                 Err(_) => session.client.clone(),
             };
             let models = match client.list_models().await {
                 Ok(m) => m,
                 Err(e) => {
-                    // #18/main #91：短操作失败可见（页面级错误行，error 色），
-                    // 行为降级不变（菜单仍显示空/已知模型）——「降级 + 可见」。
+                    // #18/main #91: short-op failures must be visible (page-level error row, error color),
+                    // behavior keeps degrading gracefully (menu still shows empty/known models) — "degraded + visible".
                     let _ = events.send(UiEvent::Error {
                         code: crate::error::map_error(&e),
                         msg: e.to_string(),
@@ -2194,7 +2197,7 @@ impl Chat {
             };
             let _ = events.send(UiEvent::ModelsLoaded { provider: provider_for_spawn, models });
         });
-        // 菜单已由 Enter 分支 take 出来——这里重建二级状态。
+        // The menu was taken out by the Enter branch — rebuild the level-two state here.
         self.model_menu = Some(ModelMenu {
             providers: vec![provider.clone()],
             provider_selected: 0,
@@ -2207,7 +2210,7 @@ impl Chat {
         });
     }
 
-    /// 模型菜单键盘：↑↓ 移动、Enter 进入二级/确认、Esc 退出。返回已消费。
+    /// Model menu keys: ↑↓ move, Enter goes to level two / confirms, Esc exits. Returns whether consumed.
     fn model_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let Some(menu) = &mut self.model_menu else {
             return false;
@@ -2242,7 +2245,7 @@ impl Chat {
                     return true;
                 };
                 let Some(m) = menu.models else {
-                    // 一级：进入二级并异步拉取模型列表。
+                    // Level one: go to level two and fetch the model list asynchronously.
                     let provider = menu
                         .providers
                         .get(menu.provider_selected)
@@ -2251,7 +2254,7 @@ impl Chat {
                     self.open_model_models(provider);
                     return true;
                 };
-                // 二级：确认选中的模型。列表为空（拉取失败/未返回）时保留菜单。
+                // Level two: confirm the selected model. Keep the menu when the list is empty (fetch failed/none returned).
                 let provider = m.provider.clone();
                 let model = m.models.get(m.selected).cloned().unwrap_or_default();
                 if model.is_empty() {
@@ -2280,7 +2283,7 @@ impl Chat {
                 true
             }
             KeyCode::Esc => {
-                // 二级 → 回一级；一级 → 整体退出（逐级返回）。
+                // Level two → back to level one; level one → exit entirely (returns one level at a time).
                 if self
                     .model_menu
                     .as_mut()
@@ -2308,7 +2311,7 @@ impl Chat {
             ThemeSetting::Auto => "auto",
         };
         self.theme = Theme::for_terminal(setting, self.detected_background);
-        // renderer 烘焙了主题样式、reply_cache 缓存了旧主题行——同步重建。
+        // The renderer baked in theme styles and reply_cache holds old-theme rows — rebuild them in sync.
         self.renderer = crate::tui::markdown::MarkdownRenderer::with_theme(
             self.width,
             self.theme.clone(),
@@ -2424,7 +2427,7 @@ impl Chat {
         });
     }
 
-    /// /status 与 /context 共用的异步统计：消息数 + token 数。
+    /// Async stats shared by /status and /context: message count + token count.
     fn slash_stats_async(
         &mut self,
         format: impl Fn(usize, u64) -> String + Send + 'static,
@@ -2445,8 +2448,8 @@ impl Chat {
             {
                 Ok(t) => t,
                 Err(e) => {
-                    // #18/main #91：短操作失败可见（页面级错误行），
-                    // 行为降级不变（预算仍显示 0）。
+                    // #18/main #91: short-op failures must be visible (page-level error row),
+                    // behavior keeps degrading gracefully (budget still shows 0).
                     let _ = events.send(UiEvent::Error {
                         code: crate::error::map_error(&e),
                         msg: e.to_string(),
@@ -2722,8 +2725,8 @@ impl Chat {
         self.set_think_level(arg);
     }
 
-    /// 设置思考级别（运行时 + 持久化）。等级表 = off + THINKING_LEVELS：
-    /// off 不发参数，其余发 adaptive thinking + output_config.effort。
+    /// Sets the thinking level (runtime + persisted). Level table = off + THINKING_LEVELS:
+    /// off sends no parameter; the rest send adaptive thinking + output_config.effort.
     fn set_think_level(&mut self, arg: &str) {
         let level = if arg == "off" {
             None
@@ -2745,7 +2748,7 @@ impl Chat {
         self.push_slash_output(format!("✓ 思考级别已设置: {saved}"));
     }
 
-    /// 进入 `/think` 等级选择器：预选当前等级（未设置 = off）。
+    /// Enters the `/think` level selector: preselects the current level (off when unset).
     fn open_think_menu(&mut self) {
         let current = self.session.runtime.thinking.borrow().clone();
         let current = current.as_deref().unwrap_or("off");
@@ -2757,7 +2760,7 @@ impl Chat {
         self.slash_suggestions.clear();
     }
 
-    /// 思考等级菜单键盘：↑↓ 移动（循环）、Enter 确认、Esc 退出。返回已消费。
+    /// Think level menu keys: ↑↓ move (wraps), Enter confirms, Esc exits. Returns whether consumed.
     fn think_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let Some(menu) = &mut self.think_menu else {
             return false;
@@ -2806,7 +2809,7 @@ impl Chat {
 
     fn slash_tasks(&mut self) {
         self.refresh_tasks();
-        // task_lines 受任务区可见性门控——/tasks 显式请求，临时放行。
+        // task_lines is gated by task-area visibility — /tasks explicitly asks for them, so bypass it temporarily.
         let was_visible = self.tasks_visible;
         self.tasks_visible = true;
         let lines = self.task_lines();
@@ -2819,15 +2822,15 @@ impl Chat {
         self.push_slash_output(text.join("\n"));
     }
 
-    /// `/team <子命令>`（D31 项目级编队）：分发到 team_cmd，输出多行一次入队。
+    /// `/team <subcommand>` (D31 project-level formation): dispatched to team_cmd, multi-line output queued at once.
     fn slash_team(&mut self, arg: &str) {
         let lines = crate::team_cmd::run(&self.session, &std::path::PathBuf::from(&self.cwd), arg);
         self.push_slash_output(lines.join("\n"));
     }
 
-    /// 重建 slash 下拉建议（输入变化时调用）：
-    /// `/` 开头且无参数时显示；空 query 列全部（内置命令 + 技能），
-    /// 否则前缀/包含匹配（generateCommandSuggestions 的简化版）。
+    /// Rebuilds the slash dropdown suggestions (called when the input changes):
+    /// shown when the input starts with `/` and has no args; an empty query lists everything (built-ins + skills),
+    /// otherwise prefix/substring matching (a simplified generateCommandSuggestions).
     fn update_slash_suggestions(&mut self) {
         self.slash_suggestions.clear();
         let input = self.input.trim_end();
@@ -2835,7 +2838,7 @@ impl Chat {
             return;
         };
         if query.contains(char::is_whitespace) {
-            return; // 已带参数：不显示
+            return; // has args: do not show
         }
         let mut items: Vec<SlashSuggestion> = SLASH_COMMANDS
             .iter()
@@ -2844,9 +2847,9 @@ impl Chat {
                 description: (*desc).to_string(),
             })
             .collect();
-        // 技能并入（/ 菜单含 skills）。描述截断：
-        // 超长行不折行，会被终端自己折成两行、把帧高度算错；
-        // 上限 MAX_LISTING_DESC_CHARS。
+        // Merge skills in (the / menu includes skills). Description truncation:
+        // overlong lines do not wrap — the terminal wraps them itself, breaking the frame-height math;
+        // capped at MAX_LISTING_DESC_CHARS.
         let home = self.session.home.clone();
         let cwd = std::path::PathBuf::from(&self.cwd);
         for skill in crate::skills::load_skills(&home, &cwd) {
@@ -2865,7 +2868,7 @@ impl Chat {
         }
         let q = query.to_lowercase();
         if !q.is_empty() {
-            // 前缀优先（短者在前），其次包含匹配；保持内置在前。
+            // Prefix matches first (shorter first), then substring matches; built-ins stay ahead.
             items.retain(|s| {
                 let n = s.name.to_lowercase();
                 n.starts_with(&q) || n.contains(&q)
@@ -2880,9 +2883,9 @@ impl Chat {
         self.slash_selected = self.slash_selected.min(self.slash_suggestions.len().saturating_sub(1));
     }
 
-    /// 下拉键盘消费：↑↓ 移动选中、Tab 补全（不执行）、Esc 关闭。
-    /// 不用 j/k 导航：菜单打开时 j/k 会被当作输入字符（如 /thin → think），
-    /// 吞键导致命令被截断。返回 true = 已消费。
+    /// Dropdown key handling: ↑↓ move the selection, Tab completes (without running), Esc closes.
+    /// No j/k navigation: while the menu is open, j/k would be typed as input chars (e.g. /thin → think),
+    /// swallowing keys and truncating the command. Returns true = consumed.
     fn slash_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         if self.slash_suggestions.is_empty() {
             return false;
@@ -2911,7 +2914,7 @@ impl Chat {
         }
     }
 
-    /// 应用选中建议（applyCommandSuggestion）：`/name ` 回填输入。
+    /// Applies the selected suggestion (applyCommandSuggestion): fills `/name ` back into the input.
     fn apply_slash_suggestion(&mut self) {
         if let Some(s) = self.slash_suggestions.get(self.slash_selected) {
             self.input = format!("/{} ", s.name);
@@ -2919,7 +2922,7 @@ impl Chat {
         self.slash_suggestions.clear();
     }
 
-    /// 回合结束后提交下一条排队消息（每次一条：下一轮结束再接着走）。
+    /// Submits the next queued message after a turn (one at a time: the next turn continues).
     fn submit_queued(&mut self) {
         if self.busy || self.queued.is_empty() {
             return;
@@ -2931,8 +2934,8 @@ impl Chat {
         self.start_turn(text, true);
     }
 
-    /// 系统触发回合：watchable 信号/终态通知唤醒主 agent。
-    /// 无用户输入（通知在 run_query 首轮注入）；不管用户状态。
+    /// System-triggered turn: a watchable signal/terminal notification wakes the main agent.
+    /// No user input (the notification is injected in run_query's first round); user state is irrelevant.
     fn submit_auto(&mut self) {
         if self.busy {
             return;
@@ -2943,7 +2946,7 @@ impl Chat {
         self.start_turn(String::new(), false);
     }
 
-    /// 多轮连续性：加载 transcript 历史作为本轮上下文（每轮独立 run_query）。
+    /// Multi-turn continuity: loads transcript history as this turn's context (each turn runs its own run_query).
     fn load_history(
         session: &Session,
         on_warning: &mut (dyn FnMut(String) + Send),
@@ -2965,9 +2968,9 @@ impl Chat {
         }
     }
 
-    /// 回合结束后处理：先发 TurnEnd（busy 复位 / 完成行立即出现），
-    /// 记忆抽取后置——它是一次非流式模型调用（数秒），收尾不应阻塞
-    /// 回合结束的 UI 表现；抽取与下一回合（如 watch 唤醒）并行无碍。
+    /// Post-turn handling: send TurnEnd first (busy resets / the completion row appears immediately),
+    /// memory extraction is deferred — it is a non-streaming model call (seconds) and the wrap-up should not block
+    /// the turn-end UI; extraction runs fine in parallel with the next turn (e.g. a watch wake-up).
     async fn finish_turn(
         events: &mpsc::UnboundedSender<UiEvent>,
         session: &Arc<Session>,
@@ -2998,9 +3001,9 @@ impl Chat {
         let events = self.events.clone();
         let asks = self.asks.clone();
         let images = self.resolve_images(&text);
-        // 先订阅再复位：tokio watch 的 send 在无 receiver 时不更新值——
-        // 上一轮 spawn 结束后 receiver 已全部 drop，若先 send(false) 会静默
-        // 失效（值保持 true），新回合会在连接阶段被误判为中断。
+        // Subscribe first, then reset: tokio watch's send does not update the value with no receivers —
+        // after the previous spawn ends, all receivers are dropped; sending false first would silently
+        // fail (the value stays true) and the new turn would be misread as interrupted during connection.
         let cancel_rx = self.cancel_tx.subscribe();
         self.cancel_tx.send_replace(false);
         tokio::spawn(async move {
@@ -3016,7 +3019,7 @@ impl Chat {
                     let _ = events.send(UiEvent::Error {
                         code: crate::error::map_error(&e),
                         msg: e.to_string(),
-                        // 回合级错误 = 长回合失败 → 全流程级整屏态（AC-53）。
+                        // Turn-level error = long-turn failure → full-flow full-screen state (AC-53).
                         level: crate::error::ErrorLevel::Full,
                         context: crate::error::ErrorContext::LongTurn,
                     });
@@ -3025,8 +3028,8 @@ impl Chat {
         });
     }
 
-    /// bash 模式回合（processBashCommand）：`!` 命令直接执行，
-    /// 输出展示为工具活动；respondToBashCommands 开启时模型随后回应。
+    /// bash-mode turn (processBashCommand): `!` commands execute directly,
+    /// output shown as a tool activity; with respondToBashCommands on, the model replies afterwards.
     fn start_bash_turn(&mut self, command: String) {
         self.messages.push(UiMessage {
             role: Role::User,
@@ -3040,7 +3043,7 @@ impl Chat {
         let session = self.session_for_turn();
         let events = self.events.clone();
         let asks = self.asks.clone();
-        // 与 start_turn 相同：先订阅再复位（send 无 receiver 时不更新值）。
+        // Same as start_turn: subscribe first, then reset (send does not update with no receivers).
         let cancel_rx = self.cancel_tx.subscribe();
         self.cancel_tx.send_replace(false);
         tokio::spawn(async move {
@@ -3063,7 +3066,7 @@ impl Chat {
                     let _ = events.send(UiEvent::Error {
                         code: crate::error::map_error(&e),
                         msg: e.to_string(),
-                        // 回合级错误 = 长回合失败 → 全流程级整屏态（AC-53）。
+                        // Turn-level error = long-turn failure → full-flow full-screen state (AC-53).
                         level: crate::error::ErrorLevel::Full,
                         context: crate::error::ErrorContext::LongTurn,
                     });
@@ -3072,9 +3075,9 @@ impl Chat {
         });
     }
 
-    /// 对话框键盘输入（Select 语义）：
-    /// 数字/Enter 确认、↑/↓ 移动焦点、Esc 取消；焦点在 Other 时直接打字。
-    /// 返回是否消费。
+    /// Dialog key input (Select semantics):
+    /// digits/Enter confirm, ↑/↓ move the focus, Esc cancels; typing goes directly when the focus is on Other.
+    /// Returns whether it was consumed.
     pub fn ask_key(&mut self, code: KeyCode) -> bool {
         let Some((request, _)) = &self.pending_ask else {
             return false;
@@ -3144,7 +3147,7 @@ impl Chat {
         }
     }
 
-    /// 提交 Other 自由输入（CC SelectInputOption onSubmit：空文本 = 取消）。
+    /// Submits Other free-form input (CC SelectInputOption onSubmit: empty text = cancel).
     fn submit_ask_answer(&mut self, text: String) {
         if text.trim().is_empty() {
             let free_text = self
@@ -3168,7 +3171,7 @@ impl Chat {
         }
     }
 
-    /// 确认选项 `index`（0 起；越界 = 取消）。
+    /// Confirms option `index` (0-based; out of range = cancel).
     fn choose_ask_option(&mut self, index: usize) {
         if let Some((request, tx)) = self.pending_ask.take() {
             if index < request.options.len() {
@@ -3185,18 +3188,18 @@ impl Chat {
         }
     }
 
-    /// 键盘事件。真实时钟版本；语义见 [`Chat::on_key_at`]。
+    /// Keyboard events. Real-clock version; semantics in [`Chat::on_key_at`].
     pub fn on_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         self.on_key_at(code, modifiers, std::time::Instant::now())
     }
 
-    /// 复位错误态（AC-03 复位四项之一：错误行/整屏错误态清除）。
+    /// Resets the error state (one of AC-03's four resets: clears the error row / full-screen error state).
     fn dismiss_error(&mut self) {
         self.last_error = None;
     }
 
-    /// #18 全流程级整屏错误态按键（AC-26/53：返回路径非死路）：
-    /// Enter = 重试（重跑最近输入）、Esc = 返回、Ctrl+C = 退出，其余忽略。
+    /// #18 full-flow full-screen error-state keys (AC-26/53: the way back is not a dead end):
+    /// Enter = retry (reruns the last input), Esc = back, Ctrl+C = quit, the rest ignored.
     fn error_screen_key(
         &mut self,
         code: KeyCode,
@@ -3220,10 +3223,10 @@ impl Chat {
         }
     }
 
-    /// 键盘事件（`now` 可注入：Ctrl+C 双击窗口与粘贴突发检测都依赖时钟）。
+    /// Keyboard events (`now` is injectable: the Ctrl+C double-press window and paste-burst detection both need a clock).
     ///
-    /// 优先级自上而下：对话框 → `/model` 菜单 → 历史搜索 → 中断/退出语义
-    /// → 编辑键。返回是否消费。
+    /// Priority, top to bottom: dialog → `/model` menu → history search → interrupt/quit semantics
+    /// → editing keys. Returns whether it was consumed.
     pub fn on_key_at(
         &mut self,
         code: KeyCode,
@@ -3231,7 +3234,7 @@ impl Chat {
         now: std::time::Instant,
     ) -> bool {
         let pasting = self.track_burst(now);
-        // #18 全流程级整屏错误态：首要动作 Enter=重试 / Esc=返回，其余忽略。
+        // #18 full-flow full-screen error state: primary actions Enter=retry / Esc=back, the rest ignored.
         if let Some(err) = &self.last_error
             && err.level == crate::error::ErrorLevel::Full
         {
@@ -3240,7 +3243,7 @@ impl Chat {
         if self.ask_key(code) {
             return true;
         }
-        // `/model` `/think` 选择器优先于输入（↑↓/Enter/Esc 全消费）。
+        // `/model` `/think` selectors take priority over input (↑↓/Enter/Esc fully consumed).
         if self.model_menu_key(code, modifiers) {
             return true;
         }
@@ -3250,11 +3253,11 @@ impl Chat {
         if self.search.is_some() {
             return self.search_key(code, modifiers);
         }
-        // 实体选择器（ctrl+g / 聚焦时 ↑↓ Enter Esc）先于全局 Esc 语义。
+        // Entity selector (ctrl+g / ↑↓ Enter Esc while focused) precedes the global Esc semantics.
         if self.entity_key(code, modifiers) {
             return true;
         }
-        // 中断（busy）与退出（空闲）都挂在 Ctrl+C / Esc 上，先于编辑键判定。
+        // Interrupt (busy) and quit (idle) both live on Ctrl+C / Esc, judged before editing keys.
         if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
             return self.ctrl_c(now);
         }
@@ -3262,7 +3265,7 @@ impl Chat {
             return self.escape(now);
         }
         self.notice = None;
-        // slash 下拉键盘（Tab 补全 / Esc 关闭 / ↑↓ 导航）优先于输入。
+        // Slash dropdown keys (Tab completes / Esc closes / ↑↓ navigate) take priority over input.
         if !self.bash_mode && self.slash_menu_key(code, modifiers) {
             return true;
         }
@@ -3277,7 +3280,7 @@ impl Chat {
             return self.alt_key(c);
         }
         match code {
-            // Shift+Tab：权限模式循环（CC app:cyclePermissionMode）。
+            // Shift+Tab: cycle the permission mode (CC app:cyclePermissionMode).
             KeyCode::BackTab => {
                 self.cycle_permission_mode();
                 true
@@ -3301,7 +3304,7 @@ impl Chat {
             KeyCode::Up => self.vertical(false),
             KeyCode::Down => self.vertical(true),
             KeyCode::Backspace => {
-                // bash 模式下空输入退格退出 shell 模式（CC）。
+                // Empty-input backspace in bash mode exits shell mode (CC).
                 if self.bash_mode && self.input.is_empty() {
                     self.bash_mode = false;
                     return true;
@@ -3321,20 +3324,20 @@ impl Chat {
                 self.complete_bash_history();
                 true
             }
-            // Shift+Enter（终端上报增强键盘时可得）与粘贴中的 Enter 都是换行。
+            // Shift+Enter (available when the terminal reports enhanced keyboards) and pasted Enter are both newlines.
             KeyCode::Enter
                 if pasting
                     || modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
             {
                 self.insert_newline();
-                // 粘贴中的换行才可能堆出大段文本 → 到阈值就折叠为占位符。
+                // Only pasted newlines can pile up large text → fold into a placeholder at the threshold.
                 if pasting {
                     self.collapse_paste();
                 }
                 true
             }
             KeyCode::Enter => {
-                // `\` + Enter：所有终端都能打出的换行（CC）。
+                // `\` + Enter: the newline every terminal can type (CC).
                 if self.input.ends_with('\\') && self.cursor == self.input.len() {
                     self.snapshot(EditKind::Bulk);
                     self.input.pop();
@@ -3345,12 +3348,12 @@ impl Chat {
                 self.submit();
                 true
             }
-            // 空输入的 `?` 开关快捷键面板；有文本时是普通字符。
+            // `?` on empty input toggles the shortcut panel; with text it is an ordinary character.
             KeyCode::Char('?') if self.input.is_empty() && !self.bash_mode => {
                 self.help_visible = !self.help_visible;
                 true
             }
-            // 空输入的 `!` 进入 shell 模式（`!` 本身不入输入）。
+            // `!` on empty input enters shell mode (`!` itself never enters the input).
             KeyCode::Char('!') if self.input.is_empty() && !self.bash_mode => {
                 self.bash_mode = true;
                 true
@@ -3382,8 +3385,8 @@ impl Chat {
         }
     }
 
-    /// 粘贴突发检测：连续 [`PASTE_BURST_KEYS`] 个间隔小于
-    /// [`PASTE_BURST_GAP`] 的按键即判定为粘贴（局限见该常量的注释）。
+    /// Paste-burst detection: [`PASTE_BURST_KEYS`] consecutive key presses with intervals under
+    /// [`PASTE_BURST_GAP`] count as a paste (limitations in that constant's comment).
     fn track_burst(&mut self, now: std::time::Instant) -> bool {
         let fast = self
             .last_key_at
@@ -3393,8 +3396,8 @@ impl Chat {
         self.burst_keys >= PASTE_BURST_KEYS
     }
 
-    /// Ctrl+C：busy 中断；空闲且有文本清空（进历史，↑ 可找回）；
-    /// 空闲空输入第一次提示，[`CTRL_C_WINDOW`] 内第二次退出。
+    /// Ctrl+C: interrupts when busy; with text while idle, clears it (into history, retrievable with ↑);
+    /// first press on idle empty input shows a hint, a second press within [`CTRL_C_WINDOW`] quits.
     fn ctrl_c(&mut self, now: std::time::Instant) -> bool {
         if self.busy {
             self.interrupt();
@@ -3418,7 +3421,7 @@ impl Chat {
         true
     }
 
-    /// Esc：busy 中断；菜单/建议关闭；空闲且有文本双击清空（存入历史）。
+    /// Esc: interrupts when busy; closes menus/suggestions; double-press with text while idle clears (into history).
     fn escape(&mut self, now: std::time::Instant) -> bool {
         if self.busy {
             self.interrupt();
@@ -3454,13 +3457,13 @@ impl Chat {
         true
     }
 
-    /// 中断当前回合（Esc / Ctrl+C on busy）。
+    /// Interrupts the current turn (Esc / Ctrl+C while busy).
     fn interrupt(&mut self) {
         self.interrupted = true;
         self.cancel_tx.send_replace(true);
     }
 
-    /// Ctrl+<char> 编辑命令（readline 语义）。
+    /// Ctrl+<char> editing commands (readline semantics).
     fn control_key(&mut self, c: char) -> bool {
         match c {
             'a' => {
@@ -3478,7 +3481,7 @@ impl Chat {
                 true
             }
             'u' => {
-                // bash 模式空输入：ctrl+u 退出 shell 模式（CC）。
+                // Empty-input ctrl+u in bash mode exits shell mode (CC).
                 if self.bash_mode && self.input.is_empty() {
                     self.bash_mode = false;
                     return true;
@@ -3505,7 +3508,7 @@ impl Chat {
                 self.after_edit();
                 true
             }
-            // ctrl+d 只在有文本时删光标后字符（空输入不退出会话）。
+            // ctrl+d deletes the char after the caret only when there is text (empty input never quits).
             'd' => {
                 if self.input.is_empty() {
                     return true;
@@ -3539,15 +3542,15 @@ impl Chat {
             't' => {
                 self.tasks_visible = !self.tasks_visible;
                 if self.tasks_visible {
-                    // 手动打开：全部完成也保留面板（用户显式要看的态）。
+                    // Manually opened: keep the panel even when everything is done (the user explicitly wants to see it).
                     self.tasks_auto = false;
                     self.refresh_tasks();
                 }
                 self.dirty = true;
                 true
             }
-            // Ctrl+_ 到达时的字节是 0x1F，crossterm 报成 Ctrl+7；开启增强
-            // 键盘协议的终端才报 `_` 或 `/`——三者都当撤销。
+            // Ctrl+_ arrives as byte 0x1F, which crossterm reports as Ctrl+7; terminals with the enhanced
+            // keyboard protocol report `_` or `/` — all three count as undo.
             '7' | '_' | '/' => {
                 self.undo_edit();
                 true
@@ -3556,7 +3559,7 @@ impl Chat {
         }
     }
 
-    /// Alt+<char>：词间移动与思考开关。
+    /// Alt+<char>: word movement and the thinking toggle.
     fn alt_key(&mut self, c: char) -> bool {
         match c {
             'b' => {
@@ -3575,10 +3578,10 @@ impl Chat {
         }
     }
 
-    /// ↑/↓：先在多行输入内移动，到首/末行再切换历史；
-    /// busy 且有队列时 ↑ 取回最后一条排队消息。
+    /// ↑/↓: move within a multi-line input first, then switch history at the first/last row;
+    /// ↑ while busy with a queue pulls back the last queued message.
     fn vertical(&mut self, down: bool) -> bool {
-        // 取回排队消息只在输入为空时发生：正在写的内容不该被顶掉。
+        // Pulling back a queued message only happens on empty input: what is being typed should not be clobbered.
         if !down && self.busy && self.input.is_empty() && !self.queued.is_empty() {
             if let Some(text) = self.queued.pop() {
                 self.set_input(text);
@@ -3609,26 +3612,26 @@ impl Chat {
         }
     }
 
-    /// 输入区可用宽度（终端宽 - 前缀 2 列 - 右侧留白）。
+    /// Available input width (terminal width - 2 prefix columns - right padding).
     pub fn input_width(&self) -> usize {
         self.width.saturating_sub(4).max(8)
     }
 
-    /// 换行插入（`\`+Enter / Ctrl+J / Shift+Enter / 粘贴中的 Enter）。
+    /// Newline insertion (`\`+Enter / Ctrl+J / Shift+Enter / Enter inside a paste).
     fn insert_newline(&mut self) {
         self.snapshot(EditKind::Bulk);
         crate::tui::input::insert(&mut self.input, &mut self.cursor, "\n");
         self.after_edit();
     }
 
-    /// 替换整个输入并把光标放到末尾。
+    /// Replaces the whole input and puts the caret at the end.
     pub fn set_input(&mut self, text: impl Into<String>) {
         self.input = text.into();
         self.cursor = self.input.len();
         self.update_slash_suggestions();
     }
 
-    /// 清空输入并把它记进历史（Ctrl+C / 双击 Esc：可用 ↑ 找回）。
+    /// Clears the input and records it in history (Ctrl+C / double Esc: retrievable with ↑).
     fn clear_input_into_history(&mut self) {
         let text = std::mem::take(&mut self.input);
         self.cursor = 0;
@@ -3637,14 +3640,14 @@ impl Chat {
         self.update_slash_suggestions();
     }
 
-    /// 每次编辑之后的收尾：刷新下拉建议、离开历史浏览态。
+    /// Wrap-up after every edit: refresh the dropdown suggestions, leave history-browsing mode.
     fn after_edit(&mut self) {
         self.history.detach();
         self.update_slash_suggestions();
     }
 
-    /// 记录并持久化一条 prompt。写盘失败只降级为会话内历史（记一次，
-    /// 不反复重试）。
+    /// Records and persists a prompt. A write failure only degrades to in-session history (once,
+    /// no repeated retries).
     fn record_history(&mut self, text: &str) {
         if !self.history.record(text) || !self.history_writable {
             return;
@@ -3655,7 +3658,7 @@ impl Chat {
         }
     }
 
-    /// 撤销栈：连续插入合并为一步，删除/整体替换各自成步。
+    /// Undo stack: consecutive inserts merge into one step; deletes/whole replacements are their own steps.
     fn snapshot(&mut self, kind: EditKind) {
         let coalesce = kind != EditKind::Bulk
             && self.last_edit == Some(kind)
@@ -3670,7 +3673,7 @@ impl Chat {
         }
     }
 
-    /// Ctrl+_：回到上一步的文本与光标。
+    /// Ctrl+_: returns to the previous step's text and caret.
     fn undo_edit(&mut self) {
         let Some((text, cursor)) = self.undo.pop() else {
             return;
@@ -3681,7 +3684,7 @@ impl Chat {
         self.update_slash_suggestions();
     }
 
-    /// Ctrl+S：有文本则暂存并清空，空输入则恢复（含光标位）。
+    /// Ctrl+S: with text, stash and clear it; on empty input, restore (including the caret).
     fn toggle_stash(&mut self) {
         if self.input.is_empty() {
             if let Some((text, cursor)) = self.stash.take() {
@@ -3698,19 +3701,19 @@ impl Chat {
     }
 
     /// Shift+Tab：default → acceptEdits → plan → default。
-    /// bypassPermissions / dontAsk 只有启动时就在该模式才留在循环里
-    /// （危险模式不能靠一次误按进入）。
+    /// bypassPermissions / dontAsk stay in the cycle only when the session started in that mode
+    /// (dangerous modes must not be reachable by one mispress).
     fn cycle_permission_mode(&mut self) {
         self.permission_mode = match self.permission_mode {
             PermissionMode::Default => PermissionMode::AcceptEdits,
             PermissionMode::AcceptEdits => PermissionMode::Plan,
             PermissionMode::Plan => PermissionMode::Default,
-            // 启动即 bypass/dontAsk：在它与 default 之间切换，不引入新的危险模式。
+            // Started in bypass/dontAsk: toggle between it and default, never introducing a new dangerous mode.
             PermissionMode::BypassPermissions | PermissionMode::DontAsk => {
                 PermissionMode::Default
             }
         };
-        // 从 default 切回启动模式（bypass/dontAsk 会话才有这条边）。
+        // From default, switch back to the startup mode (an edge that only bypass/dontAsk sessions have).
         if self.permission_mode == PermissionMode::AcceptEdits
             && matches!(
                 self.session.permission_mode,
@@ -3722,7 +3725,7 @@ impl Chat {
         self.dirty = true;
     }
 
-    /// Alt+T：思考开关（off ↔ 上一次的非 off 等级，默认 medium）。
+    /// Alt+T: thinking toggle (off ↔ the last non-off level, default medium).
     fn toggle_thinking(&mut self) {
         let current = self.session.runtime.thinking.borrow().clone();
         let next = match current.as_deref() {
@@ -3735,7 +3738,7 @@ impl Chat {
         self.slash_think(&next);
     }
 
-    /// bash 模式 Tab：用本会话执行过的 `!` 命令做前缀补全。
+    /// bash-mode Tab: prefix-completes from the `!` commands run in this session.
     fn complete_bash_history(&mut self) {
         let prefix = self.input.clone();
         let Some(hit) = self
@@ -3750,7 +3753,7 @@ impl Chat {
         self.set_input(hit);
     }
 
-    /// Ctrl+R：进入历史反向搜索（空查询先命中最近一条）。
+    /// Ctrl+R: enters reverse history search (an empty query hits the most recent entry first).
     fn open_search(&mut self) {
         let mut search = HistorySearch::default();
         if let Some((index, hit)) = self.history.search("", None) {
@@ -3761,8 +3764,8 @@ impl Chat {
         self.slash_suggestions.clear();
     }
 
-    /// 搜索态键盘：打字过滤、Ctrl+R 取更旧命中、Tab/Esc 采纳继续编辑、
-    /// Enter 采纳并提交、Ctrl+C 取消还原。返回是否消费（恒 true）。
+    /// Search-mode keys: typing filters, Ctrl+R takes an older hit, Tab/Esc adopt and keep editing,
+    /// Enter adopts and submits, Ctrl+C cancels and restores. Returns consumed (always true).
     fn search_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let Some(mut search) = self.search.take() else {
             return false;
@@ -3821,20 +3824,20 @@ impl Chat {
         true
     }
 
-    /// tick：spinner 帧与运行态 thinking 独立计时。
+    /// tick: independent timing for spinner frames and running-state thinking.
     ///
-    /// 只有存在随 tick 变化的行时才置 dirty：空闲时无条件重建整个文档
-    /// 等于 30fps 全量重排，既费 CPU 又让宿主每帧重画一次视口。
+    /// Only set dirty when some row changes with the tick: rebuilding the whole document on idle
+    /// equals a 30fps full re-layout, wasting CPU and forcing the host to repaint the viewport every frame.
     pub fn tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
         if self.has_dynamic_rows() {
             self.dirty = true;
         }
-        // 底部实体区随注册表变化（agent 状态/频道条数）；变化才置 dirty。
+        // The bottom entity area follows the registry (agent states/channel counts); dirty only on change.
         if self.tick.is_multiple_of(15) {
             self.refresh_entities();
         }
-        // slash 临时提示超时消失（操作确认类不留永久占位）。
+        // Slash transient hints expire (operation confirmations leave no permanent placeholder).
         if let Some(at) = self.slash_at
             && at.elapsed() > SLASH_OUTPUT_TTL
         {
@@ -3856,8 +3859,8 @@ impl Chat {
         }
     }
 
-    /// 是否存在随 tick 变化的行（spinner 帧 / 运行时长 / 状态行）。
-    /// 空闲时为 false —— tick 不重建文档，宿主 tick 循环也不唤醒组件。
+    /// Whether any row changes with the tick (spinner frames / elapsed time / status rows).
+    /// false when idle — the tick neither rebuilds the doc nor wakes the component.
     pub fn has_dynamic_rows(&self) -> bool {
         self.busy
             || self.messages.iter().any(|m| {
@@ -3871,8 +3874,8 @@ impl Chat {
                     .any(|t| t.status == TodoStatus::InProgress))
     }
 
-    /// 宿主 tick 循环是否需要做事。空闲时返回 false，宿主据此整帧跳过——
-    /// 无动画、无待处理事件时一个字节都不写。
+    /// Whether the host's tick loop has work to do. Returns false when idle so the host skips the whole frame —
+    /// with no animation and no pending events, not a single byte is written.
     pub fn needs_tick(&self) -> bool {
         self.has_dynamic_rows()
             || self.slash_at.is_some()
@@ -3880,7 +3883,7 @@ impl Chat {
             || !self.asks_rx.is_empty()
     }
 
-    /// 任务区数据源：磁盘 store 实时快照。
+    /// Task-area data source: live snapshot of the on-disk store.
     pub fn tasks(&self) -> Vec<TodoItem> {
         self.session
             .tasks
@@ -3900,17 +3903,17 @@ impl Chat {
             .collect()
     }
 
-    /// 刷新任务缓存（磁盘快照；tick 周期 + 事件排空时调用）。
-    /// 快照变化才置 dirty——任务区行数变化会改 canvas 高度，交给渲染层
-    /// 的形状检测触发全量重画。
+    /// Refreshes the task cache (disk snapshot; called on the tick cadence and after draining events).
+    /// Only set dirty when the snapshot changes — row-count changes alter the canvas height, and the render
+    /// layer's shape detection triggers a full repaint.
     pub fn refresh_tasks(&mut self) {
         let next = self.tasks();
         if next != self.tasks_cache {
             self.tasks_cache = next;
             self.dirty = true;
         }
-        // 自动打开的任务区：全部完成即隐藏（工作结束，面板离场），
-        // 推一行 2s 瞬态提示给闭合感 + 找回路径；手动打开的保留。
+        // Auto-opened task area: hide once everything is done (work over, panel leaves),
+        // push a 2s transient line for closure + a way back; manually opened panels stay.
         if self.tasks_auto
             && self.tasks_visible
             && !self.tasks_cache.is_empty()
@@ -3923,14 +3926,14 @@ impl Chat {
         }
     }
 
-    /// 已完成项最多保留尾部几条，更老的折叠进 `… N done`。
+    /// Keep at most this many trailing done items; older ones fold into `… N done`.
     const DONE_SHOWN: usize = 3;
-    /// 活动项窗口大小，超出折叠进 `… +N more`。
+    /// Active-item window size; overflow folds into `… +N more`.
     const TODO_SHOWN: usize = 5;
 
-    /// 任务区行（CC TaskListV2 位置：输入框上方）。
-    /// 有展开信号且存在任务时显示；自动打开的列表全部完成即隐藏
-    /// （`refresh_tasks` 收口），手动打开的保留。
+    /// Task-area rows (CC TaskListV2 placement: above the input).
+    /// Shown when the expand signal is set and tasks exist; auto-opened lists hide when everything is done
+    /// (wrapped up in `refresh_tasks`); manually opened ones stay.
     pub fn task_lines(&self) -> Vec<Line> {
         if !self.tasks_visible {
             return Vec::new();
@@ -3941,7 +3944,7 @@ impl Chat {
         }
         let theme = &self.theme;
         let mut out = Vec::new();
-        // 头部：`{spinner}todo · N/M tasks`
+        // Header: `{spinner}todo · N/M tasks`
         let mut header = Line::empty();
         if t.iter().any(|i| i.status == TodoStatus::InProgress) {
             header.push_styled(
@@ -3971,7 +3974,7 @@ impl Chat {
             ));
         }
         for &idx in done_indices.iter().skip(hidden_done) {
-            // `☒` + 划掉的文本（真实删除线 + dim，见 Theme::strikethrough）。
+            // `☒` + struck-through text (real strikethrough + dim, see Theme::strikethrough).
             let mut line = Line::styled("☒ ", theme.task_done());
             line.push_styled(t[idx].text.clone(), theme.strikethrough());
             out.push(line);
@@ -3981,7 +3984,7 @@ impl Chat {
             .filter(|i| i.status != TodoStatus::Done)
             .collect();
         for item in active.iter().take(Self::TODO_SHOWN) {
-            // `☐` 未完成；进行中的项整行用主强调色（CC 的活动项高亮）。
+            // `☐` not done; in-progress items use the primary accent color for the whole row (CC's active-item highlight).
             let style = match item.status {
                 TodoStatus::Pending => theme.task_open(),
                 TodoStatus::InProgress => SegStyle::fg(theme.claude).bold(),
@@ -4000,7 +4003,7 @@ impl Chat {
         out
     }
 
-    /// 权限模式标签（footer 徽标）。
+    /// Permission-mode label (footer badge).
     pub fn permission_mode_label(&self) -> &'static str {
         match self.permission_mode {
             PermissionMode::Default => "default",
@@ -4011,9 +4014,9 @@ impl Chat {
         }
     }
 
-    /// 运行状态行（ActivityIndicator）：busy 时返回动词 + 已耗时 + 已产出
-    /// token 数——优先运行中的工具（summary/名字）、其次运行中的
-    /// thinking（俏皮词）、兜底 "Working"。空闲返回 None（状态行隐藏）。
+    /// Running status row (ActivityIndicator): when busy, returns the verb + elapsed time + tokens
+    /// produced — preferring the running tool (summary/name), then the running
+    /// thinking (whimsical word), falling back to "Working". Returns None when idle (row hidden).
     pub fn running_status(&self) -> Option<RunningStatus> {
         if !self.busy {
             return None;
@@ -4032,8 +4035,8 @@ impl Chat {
                             t.summary.clone()
                         })
                     }
-                    // 运行中的后台任务/子代理（ActivityIndicator 显示
-                    // agent activeForm）：label 即 `Agent: 描述`。
+                    // Running background task/subagent (ActivityIndicator shows the agent activeForm):
+                    // the label is `Agent: <description>`.
                     ActivityKind::Watch(w) if w.status == WatchStatus::Running => {
                         Some(w.label.clone())
                     }
@@ -4055,14 +4058,14 @@ impl Chat {
         })
     }
 
-    /// 输入区渲染行（含 ▋ 光标）——行数模型与渲染的单一来源：
-    /// chrome 高度按它计数，组装按它出行。
+    /// Input-area rendered rows (with the ▋ caret) — the single source for the row-count model and rendering:
+    /// chrome height is counted from it and assembly emits rows from it.
     ///
-    /// 空输入给一行 dim 占位提示；多行输入超过 [`INPUT_ROWS_MAX`] 时只显示
-    /// 光标所在的那一屏（末尾对齐），行数因此恒有上界。
+    /// Empty input gets a one-line dim placeholder; multi-line input beyond [`INPUT_ROWS_MAX`] shows only
+    /// the screen around the caret (tail-aligned), so the row count always has an upper bound.
     pub fn prompt_lines(&self) -> Vec<Line> {
         let style = SegStyle::fg(self.theme.text);
-        // 搜索态：输入行显示当前命中，查询串在下方提示行。
+        // Search mode: the input row shows the current hit; the query sits in the hint line below.
         if let Some(search) = &self.search {
             let hit = search.hit.clone().unwrap_or_default();
             return vec![Line::styled(one_line(&hit, self.input_width()), style)];
@@ -4089,7 +4092,7 @@ impl Chat {
                 if i != row {
                     return Line::styled(line.text.clone(), style);
                 }
-                // 光标处画 ▋，其后文字照常显示。
+                // Draw ▋ at the caret; text after it renders normally.
                 let mut at = 0usize;
                 let mut w = 0usize;
                 for ch in line.text.chars() {
@@ -4104,8 +4107,8 @@ impl Chat {
                 out.push_styled(line.text[at..].to_string(), style);
                 out
             })
-            // 每行恰占一行：历史里回填的文本可能带制表符（折成空格），
-            // 否则列宽核算与 canvas 高度都对不上。
+            // Each row must occupy exactly one line: history-filled text may contain tabs (folded to spaces),
+            // otherwise the column-width math and canvas height would both drift.
             .map(|mut line| {
                 line.sanitize();
                 line
@@ -4113,7 +4116,7 @@ impl Chat {
             .collect()
     }
 
-    /// 刷新底部实体区快照（agent 实例 + 频道）。内容变化才置 dirty。
+    /// Refreshes the bottom entity-area snapshot (agent instances + channels). Dirty only on change.
     pub fn refresh_entities(&mut self) {
         let mut fresh: Vec<EntityRow> = self
             .session
@@ -4134,7 +4137,7 @@ impl Chat {
             }
         }));
         if fresh != self.entities {
-            // 选中项随列表收缩钳制。
+            // Clamp the selection when the list shrinks.
             if let Some(i) = self.entity_focus
                 && i >= fresh.len()
             {
@@ -4145,8 +4148,8 @@ impl Chat {
         }
     }
 
-    /// 底部实体区：收起 = 一行摘要（dim）；聚焦 = 逐行列表 + `❯` 选中 +
-    /// 操作提示。没有实体时不占行。
+    /// Bottom entity area: collapsed = a one-line summary (dim); focused = a per-row list with `❯` selection +
+    /// action hints. Takes no rows when there are no entities.
     pub fn entity_rows(&self, width: usize) -> Vec<Line> {
         if self.entities.is_empty() {
             return Vec::new();
@@ -4175,7 +4178,7 @@ impl Chat {
             )];
         };
         let mut rows = Vec::new();
-        // 选中项保持可见：窗口围绕 selected 滑动。
+        // Keep the selection visible: the window slides around selected.
         let cap = ENTITY_ROWS_MAX;
         let start = selected.saturating_sub(cap.saturating_sub(1));
         for (i, e) in self.entities.iter().enumerate().skip(start).take(cap) {
@@ -4216,8 +4219,8 @@ impl Chat {
         rows
     }
 
-    /// 实体选择器按键：ctrl+g 开关聚焦；聚焦时 ↑↓ 移动、Enter 打开、
-    /// Esc 关闭。返回是否消费。
+    /// Entity selector keys: ctrl+g toggles focus; while focused, ↑↓ move, Enter opens,
+    /// Esc closes. Returns whether consumed.
     pub fn entity_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         if code == KeyCode::Char('g') && ctrl {
@@ -4265,18 +4268,18 @@ impl Chat {
         }
     }
 
-    /// `?` 面板的行（快捷键表单一来源）。行数预算由终端高度决定：
-    /// 面板不能把视口顶到终端高度以上。
+    /// `?` panel rows (single source for the shortcut table). The row budget comes from the terminal height:
+    /// the panel must not push the viewport above the terminal height.
     pub fn help_lines(&self) -> Vec<String> {
         if !self.help_visible {
             return Vec::new();
         }
-        // 预留：输入框 3 行 + footer 1 行 + 状态/建议等 4 行余量 + 1 行安全边。
+        // Reserve: input 3 rows + footer 1 + a 4-row margin for status/suggestions + 1 safety row.
         let budget = self.height.saturating_sub(9);
         crate::tui::keys::help_lines(self.width.saturating_sub(2), budget)
     }
 
-    /// 排队消息行（输入框下方 dim `> {text}`），超出上限折叠为一行。
+    /// Queued-message rows (dim `> {text}` below the input); overflow folds into one row.
     pub fn queue_lines(&self) -> Vec<String> {
         if self.queued.is_empty() {
             return Vec::new();
@@ -4293,7 +4296,7 @@ impl Chat {
         out
     }
 
-    /// ctrl+r 搜索提示行（`(reverse-i-search)`query': hit`）。
+    /// ctrl+r search hint line (`(reverse-i-search)`query': hit`).
     pub fn search_line(&self) -> Option<String> {
         let search = self.search.as_ref()?;
         let hit = search.hit.as_deref().unwrap_or("");
@@ -4303,7 +4306,7 @@ impl Chat {
         ))
     }
 
-    /// 滚动与文档一致性：clamp 滚动到文档末尾，auto_scroll 贴底。
+    /// Scroll/doc consistency: clamp the scroll to the doc end; auto_scroll sticks to the bottom.
     pub fn reconcile_scroll(&mut self, viewport: usize) {
         self.viewport_height = viewport;
         let total = self.doc.rows.len();
@@ -4318,9 +4321,9 @@ impl Chat {
         }
     }
 
-    /// 消息是否"定稿"：行内容不再变化（流式停止、无运行中活动）。
-    /// REPL 模式：定稿消息的行一次性打印进 scrollback；未定稿的留在
-    /// 动态尾部原地重绘。定稿是单向的——一旦为 true，其行永不变。
+    /// Whether a message is "settled": its rows no longer change (stream stopped, no running activities).
+    /// REPL mode: settled messages print into scrollback in one go; unsettled ones stay in
+    /// the dynamic tail for in-place redraws. Settling is one-way — once true, the rows never change.
     fn message_settled(&self, i: usize) -> bool {
         if Some(i) == self.stream_msg {
             return false;
@@ -4344,15 +4347,15 @@ impl Chat {
             && !m.activities.iter().any(|a| a.is_running())
     }
 
-    /// 构建滚动文档：欢迎卡片 + 消息（text 与活动按插入点交错）+
-    /// 权限请求块。`doc.settled` = 前置定稿行数（欢迎卡片 + 全部
-    /// 已定稿消息；权限请求块永远不定稿）。
+    /// Builds the scrollable doc: welcome card + messages (text and activities interleaved by insert point) +
+    /// permission request blocks. `doc.settled` = leading settled row count (welcome card + all
+    /// settled messages; permission blocks never settle).
     ///
-    /// inline 模式下已落盘的段（[`Chat::flushed_segments`]）整段跳过：
-    /// 文档只覆盖动态尾部，落盘越多重建越省。
+    /// In inline mode, segments already flushed ([`Chat::flushed_segments`]) are skipped wholesale:
+    /// the doc only covers the dynamic tail, so more flushing means cheaper rebuilds.
     pub fn build_rows(&mut self, width: usize) -> &Doc {
-        // markdown 渲染缓存不区分宽度——宽度变化时清空，
-        // 否则 resize 后消息文本沿用旧宽度折行。
+        // The markdown render cache is not width-aware — clear it when the width changes,
+        // otherwise message text keeps wrapping at the old width after a resize.
         if self.prev_build_width != width {
             self.prev_build_width = width;
             self.reply_cache.clear();
@@ -4360,9 +4363,9 @@ impl Chat {
         let mut rows: Vec<Row> = Vec::new();
         let mut click_ranges: Vec<ClickRange> = Vec::new();
         let theme = self.theme.clone();
-        // 段编号：0 = 欢迎卡，i+1 = messages[i]。clamp 是防御：消息集合
-        // 若被整体替换（/clear、/resume）而游标没跟着复位，宁可重复渲染
-        // 也不要整屏空白。
+        // Segment numbering: 0 = welcome card, i+1 = messages[i]. The clamp is defensive: if the message set
+        // is replaced wholesale (/clear, /resume) without the cursor resetting, better to re-render
+        // than leave a blank screen.
         let skip = self.flushed_segments.min(self.messages.len() + 1);
         self.tail_start = 0;
         self.mark_base = (0, 0);
@@ -4386,7 +4389,7 @@ impl Chat {
                 ask_rows: 0,
             });
         }
-        // 消息块间距（CC marginTop=1）：欢迎卡片后与每条消息前留一行。
+        // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
         for i in 0..self.messages.len() {
             if skip >= i + 2 {
                 continue;
@@ -4401,8 +4404,8 @@ impl Chat {
                     ));
                 }
                 Role::Assistant => {
-                    // markdown 渲染闭包：只借用互不相交的字段，避免与
-                    // `self.messages` 的只读借用冲突。
+                    // Markdown render closure: borrows only disjoint fields to avoid conflicting with
+                    // the shared read borrow of `self.messages`.
                     let mut render = {
                         let processor = &mut self.processor;
                         let renderer = &mut self.renderer;
@@ -4418,7 +4421,7 @@ impl Chat {
                                 return lines.clone();
                             }
                             renderer.set_width(width);
-                            // 图片缓存版本变化 → 同步渲染器（清逐块缓存）。
+                            // Image cache version changed → sync the renderer (clears its per-block cache).
                             if renderer.images_version() != images_version {
                                 renderer.set_images(image_cap, images, images_version);
                             }
@@ -4464,7 +4467,7 @@ impl Chat {
                         if let Some(g) = group_idx
                             && !msg.groups[g].expanded
                         {
-                            // 折叠组：一行规则摘要（`Read 3 files (ctrl+o to expand)`）。
+                            // Collapse group: a one-line rule summary (`Read 3 files (ctrl+o to expand)`).
                             let in_progress = msg.groups[g].active
                                 && msg.groups[g].activities.iter().any(|&ai| {
                                     matches!(
@@ -4477,7 +4480,7 @@ impl Chat {
                                     )
                                 });
                             let summary = collapse_summary(&msg.groups[g], in_progress);
-                            // 组行是静态的 `⏺ …`：spinner 只在底部状态行。
+                            // The group row is a static `⏺ …`: the spinner only lives in the bottom status row.
                             let mut line = Line::styled(
                                 "⏺ ",
                                 if in_progress {
@@ -4498,9 +4501,9 @@ impl Chat {
                                 end: row + 1,
                                 target: ClickTarget::Group { message: i, group: g },
                             });
-                            // 执行中的折叠组下方显示最近工具的输入（CC ⎿ 行）。
-                            // hint 可能是多行 bash 命令：单行化 + 按宽截断，
-                            // 否则该行会撑成多行，行数模型与 canvas 脱节。
+                            // Below a running collapse group, show the most recent tool's input (the CC ⎿ row).
+                            // The hint may be a multi-line bash command: single-line it and truncate by width,
+                            // otherwise the row balloons into multiple lines and the row model drifts from the canvas.
                             if in_progress
                                 && let Some(hint) = &msg.groups[g].last_hint
                             {
@@ -4518,7 +4521,7 @@ impl Chat {
                             &theme,
                             &mut |reply: &str| render(reply),
                         );
-                        // 组展开态：组首工具行同时是聚合行的位置——点击它折叠回组。
+                        // Expanded group: the group-head tool row is also the summary row's spot — clicking it collapses back.
                         if let Some(g) = group_idx
                             && let Some(first) = local.first()
                         {
@@ -4546,11 +4549,11 @@ impl Chat {
                         let reply = render(&text[rendered_bytes..]);
                         push_text(&theme, &mut rows, reply);
                     }
-                    // 思考完成行（CC SystemTextMessage `✻ Churned for 40s`）：
-                    // 渲染在消息末尾（正文与全部工具之后），取最后一个已完成的
-                    // 真实思考块（空占位块不产生完成行）。
-                    // 只在回合结束后渲染：进行中展示会让 `✻ Baked for 0.4s` 在
-                    // 工具还在跑时就出现，与底部运行状态行互相矛盾。
+                    // Thinking completion row (CC SystemTextMessage `✻ Churned for 40s`):
+                    // rendered at the end of the message (after text and all tools), from the last completed
+                    // real thinking block (empty placeholder blocks produce no completion row).
+                    // Only rendered after the turn ends: while running, `✻ Baked for 0.4s` would appear
+                    // while tools are still running, contradicting the bottom running-status row.
                     let show_done_line = i == self.messages.len() - 1 && self.stream_msg.is_none()
                         || self.message_settled(i);
                     if show_done_line
@@ -4581,9 +4584,9 @@ impl Chat {
             }
         }
 
-        // AskUserQuestion 结果块（`● User answered the questions:`）：
-        // 只追加，故按行前缀跳过已落盘部分（块的位置随消息增长而后移，
-        // 用消息段号定位会重复渲染）。
+        // AskUserQuestion result block (`● User answered the questions:`):
+        // append-only, so skip the flushed prefix by row count (the block shifts as messages grow;
+        // locating it by message segment would re-render).
         if let Some(result) = &self.ask_result
             && !result.is_empty()
         {
@@ -4620,9 +4623,9 @@ impl Chat {
             }
         }
 
-        // 权限/提问块（PermissionDialog / AskUserQuestion）：
-        // 标题（permission bold）+ 说明（dim）+ 编号选项（Select：
-        // `❯ n. label` 焦点指示、desc 副行 dim、Other 自由输入）+ 快捷键提示。
+        // Permission/ask block (PermissionDialog / AskUserQuestion):
+        // title (permission bold) + description (dim) + numbered options (Select:
+        // `❯ n. label` focus marker, desc sub-row dim, Other free input) + shortcut hints.
         if let Some((request, _)) = &self.pending_ask {
             let mut title = Line::styled("⏺ ", SegStyle::fg(theme.text));
             title.push_styled(request.title.clone(), theme.permission());
@@ -4631,7 +4634,7 @@ impl Chat {
                 format!("  {}", request.question),
                 SegStyle::fg(theme.text),
             )));
-            // CC Select：问题与选项之间留一行空白。
+            // CC Select: one blank row between the question and the options.
             rows.push(Row::new(Line::empty()));
             let focus_color = theme.permission;
             for (opt_idx, option) in request.options.iter().enumerate() {
@@ -4714,8 +4717,8 @@ impl Chat {
             )));
         }
 
-        // slash 命令输出（/help /status /compact 等）：临时提示——渲染在消息之后、
-        // 输入框上方，**不定稿不落盘**，tick 超时（SLASH_OUTPUT_TTL）后自动消失。
+        // Slash command output (/help /status /compact etc.): transient hints — rendered after messages and
+        // above the input, **never settled or flushed**, auto-dismissed after the tick timeout (SLASH_OUTPUT_TTL).
         if !self.slash_lines.is_empty() {
             for line in &self.slash_lines {
                 rows.push(Row::new(Line::styled(
@@ -4735,8 +4738,8 @@ impl Chat {
         &self.doc
     }
 
-    /// 复位落盘游标：消息集合被整体替换（/clear、/resume）后段编号失效，
-    /// 文档从欢迎卡开始重建（新内容重新落盘进 scrollback）。
+    /// Resets the flush cursor: after the message set is replaced wholesale (/clear, /resume), segment numbers
+    /// are invalid, so the doc rebuilds from the welcome card (new content flushes into scrollback again).
     fn reset_flushed(&mut self) {
         self.flushed_segments = 0;
         self.flushed_ask_rows = 0;
@@ -4745,9 +4748,9 @@ impl Chat {
         self.dirty = true;
     }
 
-    /// 落盘 `doc.rows[tail_start..settled]` 之后推进游标：下次重建跳过
-    /// 这些段，当前 doc 的尾部起点同步前移（重建前 canvas 就不再画它们）。
-    // 生产路径按检查点部分推进（懒落盘）；全量推进保留为测试面原语。
+    /// After flushing `doc.rows[tail_start..settled]`, advance the cursor: the next rebuild skips
+    /// those segments and the current doc's tail start moves up (the canvas stops drawing them before a rebuild).
+    // Production advances partially by checkpoints (lazy flush); full advance stays as a test-facing primitive.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn advance_flushed(&mut self) {
         if let Some(mark) = self.doc.settled_marks.last().copied() {
@@ -4755,9 +4758,9 @@ impl Chat {
         }
     }
 
-    /// 落盘 `doc.rows[tail_start..mark.row_end]` 之后推进游标到该检查点。
-    /// 同一次构建内可多次调用（`mark_base` 消化检查点里的构建内累计值，
-    /// 防止重复累加）；宽度变化后重排安全——段计数与行号无关。
+    /// After flushing `doc.rows[tail_start..mark.row_end]`, advance the cursor to that checkpoint.
+    /// Callable multiple times within one build (`mark_base` absorbs the build-internal accumulators,
+    /// preventing double-counting); safe across width-change re-layouts — segment counts are row-number independent.
     pub fn advance_flushed_upto(&mut self, mark: SettledMark) {
         self.flushed_segments += mark.segments.saturating_sub(self.mark_base.0);
         self.flushed_ask_rows += mark.ask_rows.saturating_sub(self.mark_base.1);
@@ -4765,11 +4768,11 @@ impl Chat {
         self.tail_start = mark.row_end;
     }
 
-    /// resize 后窗口容量变大：把最近落盘的内容取回活文档重新渲染填满
-    /// 窗口。scrollback 里的旧拷贝物理上收不回来——接受上滑时看到一份
-    /// 旧宽度的重复（明确认可的取舍，见 research.md D27）。回灌是纯记
-    /// 账（不写终端），以「不超出 `doc_budget` 行」为界，超出即回退，
-    /// 保证不会与懒落盘互相打架（回灌完不存在越过窗口顶的定稿段）。
+    /// After a resize the window can hold more: pull the most recently flushed content back into the live doc
+    /// to refill it. Old copies in scrollback cannot be physically retracted — accept seeing a duplicate
+    /// at the old width when scrolling up (an explicitly accepted trade-off, see research.md D27). Rehydration is
+    /// purely bookkeeping (writes nothing to the terminal), bounded by "no more than `doc_budget` rows"; beyond that it rolls back,
+    /// guaranteeing no conflict with lazy flushing (after rehydration no settled segment crosses the window top).
     pub fn rehydrate(&mut self, width: usize, doc_budget: usize) {
         loop {
             if self.flushed_ask_rows == 0 && self.flushed_segments == 0 {
@@ -4797,11 +4800,11 @@ impl Chat {
     }
 }
 
-/// 用户消息行：`❯ ` 前缀 + 按宽折行的正文（含换行的粘贴消息拆成多行）。
-/// 每行一个气泡 Row——整条塞进单个 height=1 的 View 会把换行之后的内容
-/// 全部裁掉，且让 canvas 实际高度与行数模型脱节。
+/// User message rows: a `❯ ` prefix + body wrapped to the width (multi-line pasted messages split into rows).
+/// One bubble Row per line — stuffing the whole message into a single height=1 View would clip
+/// everything after the first newline and detach the canvas height from the row model.
 fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<Row> {
-    // 前缀 2 列 + 气泡右侧留白 1 列。
+    // 2 prefix columns + 1 column of right padding inside the bubble.
     let body_width = width.saturating_sub(3).max(1);
     let style = SegStyle::fg(theme.text);
     wrap_words(text, body_width)
@@ -4815,14 +4818,14 @@ fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<Row> {
         .collect()
 }
 
-/// 单行化 + 截断：摘要/提示类文本可能含换行（多行 bash 命令），
-/// 而每个 Row 必须恰好一行。
+/// Single-line + truncate: summary/hint text may contain newlines (multi-line bash commands),
+/// while every Row must be exactly one line.
 pub(crate) fn one_line(text: &str, width: usize) -> String {
     let flat = crate::tui::line::sanitize(text);
     crate::tui::markdown::truncate(flat.as_ref(), width.max(1))
 }
 
-/// text 段折叠：段 >2 行时折叠为首 2 行 + 提示（CC `… +N lines`）。
+/// Text segment folding: segments >2 lines fold into the first 2 lines + a hint (CC `… +N lines`).
 fn push_text(theme: &Theme, rows: &mut Vec<Row>, reply: Vec<Line>) {
     let claude = theme.claude;
     for (j, line) in reply.into_iter().enumerate() {
@@ -4871,7 +4874,7 @@ fn welcome_rows(
     rows
 }
 
-/// 欢迎卡片行（带 ╭╮ 边框），作为滚动内容的一部分。
+/// Welcome card rows (with the ╭╮ border), part of the scrollable content.
 fn welcome_card_rows(
     theme: &Theme,
     model: &str,
@@ -4906,24 +4909,24 @@ mod tests {
     use base64::Engine;
     use serde_json::json;
 
-    /// 测试用 Chat：独立通道 + 完整 Session。
+    /// Test Chat: independent channels + a full Session.
     pub(super) fn test_chat() -> Chat {
         test_chat_home(std::env::temp_dir())
     }
 
-    /// 最新定稿检查点覆盖的段数（旧聚合字段的检查点等价读法）。
+    /// Segments covered by the latest settled checkpoint (checkpoint-equivalent read of the old aggregate field).
     fn settled_segments(chat: &Chat) -> usize {
         chat.doc.settled_marks.last().map_or(0, |m| m.segments)
     }
 
-    /// 最新定稿检查点覆盖的问答块行数。
+    /// Ask block rows covered by the latest settled checkpoint.
     fn settled_ask_rows(chat: &Chat) -> usize {
         chat.doc.settled_marks.last().map_or(0, |m| m.ask_rows)
     }
 
-    /// 自建 home 的 Chat（slash 测试用唯一目录，避免与其他测试共享
-    /// transcript/task 存储）。cwd 同指 home：/model /think /theme 等
-    /// 持久化路径写 `{cwd}/.bingo`，不得污染仓库真实配置。
+    /// Chat with a dedicated home (a unique directory for slash tests, avoiding shared
+    /// transcript/task storage with other tests). cwd points at the same home: /model /think /theme
+    /// persist into `{cwd}/.bingo` and must not pollute the repo's real config.
     fn test_chat_home(home: std::path::PathBuf) -> Chat {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
@@ -4978,7 +4981,7 @@ mod tests {
         }
     }
 
-    /// 模拟组件层：build_rows + 滚动 + 视口切片 → 可见文本。
+    /// Simulates the component layer: build_rows + scroll + viewport slice → visible text.
     fn visible(chat: &mut Chat, width: usize, height: usize) -> String {
         chat.build_rows(width);
         chat.reconcile_scroll(height.saturating_sub(3));
@@ -5017,7 +5020,7 @@ mod tests {
         chat.stream_msg = None;
     }
 
-    /// start_group + 工具完成（带显式摘要，如旧 build_group_chat(true)）。
+    /// start_group + tool completion (with explicit summaries, like the old build_group_chat(true)).
     fn start_group_done(chat: &mut Chat) {
         start_group(chat);
         for (summary, out) in [("Read a.md", "l1\nl2\nl3"), ("Read b.md", "x\ny")] {
@@ -5033,8 +5036,8 @@ mod tests {
         chat.drain_events();
     }
 
-    /// Task 工具族 / AskUserQuestion 的调用不在 transcript 展示
-    /// （renderToolUseMessage = null；任务区面板 / 对话框即展示）。
+    /// Task-family / AskUserQuestion calls are not shown in the transcript
+    /// (renderToolUseMessage = null; the task panel / dialog shows them).
     #[test]
     fn hidden_tools_produce_no_activities() {
         let mut chat = test_chat();
@@ -5056,7 +5059,7 @@ mod tests {
             chat.messages[0].activities
         );
         assert!(chat.pending_tools.is_empty(), "pending FIFO 不失配");
-        // 可见工具仍正常展示。
+        // Visible tools still render normally.
         let _ = chat.events.send(UiEvent::ToolStart { name: "Bash".into() });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
@@ -5070,7 +5073,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_tasks_reflect_store_changes() {
-        // TUI 任务区数据源 = 磁盘 store 实时快照（tick 广播链路的数据层）。
+        // The TUI task area's data source = live snapshot of the disk store (the data layer of the tick broadcast chain).
         let mut chat = test_chat();
         assert!(chat.tasks().is_empty());
         let store = chat.session.tasks.clone();
@@ -5108,7 +5111,7 @@ mod tests {
         assert!(chat.tasks_cache.is_empty());
     }
 
-    /// 建任务并返回 id（写入临时 store）。
+    /// Creates a task and returns its id (writes to the temp store).
     async fn create_task(chat: &Chat, subject: &str) -> String {
         chat.session
             .tasks
@@ -5127,8 +5130,8 @@ mod tests {
             .unwrap()
     }
 
-    /// 自动打开的任务区（TaskCreate 信号语义）：全部完成 → 隐藏 + 瞬态行；
-    /// 再建任务 → 重现；再全完成 → 再隐藏；隐藏后空闲零写入。
+    /// Auto-opened task area (TaskCreate signal semantics): all done → hide + transient line;
+    /// new task → reappears; all done again → hides again; once hidden, idle writes nothing.
     #[tokio::test]
     async fn auto_todo_hides_when_all_done() {
         let mut chat = chat_with_history("todo-auto");
@@ -5161,7 +5164,7 @@ mod tests {
         );
         assert!(!chat.has_dynamic_rows(), "隐藏后任务区不驱动 tick");
 
-        // 再建任务（expand 信号重开面板）→ 重现；再全完成 → 再隐藏。
+        // Create another task (the expand signal reopens the panel) → reappears; all done again → hides again.
         let id2 = create_task(&chat, "t2").await;
         chat.tasks_visible = true;
         chat.tasks_auto = true;
@@ -5181,7 +5184,7 @@ mod tests {
         assert!(!chat.tasks_visible, "再次全完成再次隐藏");
     }
 
-    /// ctrl+t 手动打开的面板：全部完成也保留（用户显式要看的态），且不推瞬态行。
+    /// Panel opened manually with ctrl+t: kept even when everything is done (the user explicitly wants to see it), no transient line.
     #[tokio::test]
     async fn manual_todo_stays_when_all_done() {
         let mut chat = chat_with_history("todo-manual");
@@ -5212,7 +5215,7 @@ mod tests {
         );
     }
 
-    /// `/tasks` 显式请求：全部完成也输出 ☒ 列表，不误报「没有后台任务」。
+    /// `/tasks` explicit request: outputs the ☒ list even when everything is done, never falsely reports "no background tasks".
     #[tokio::test]
     async fn slash_tasks_shows_done_list() {
         let mut chat = chat_with_history("todo-slash");
@@ -5269,8 +5272,8 @@ mod tests {
         assert!(!chat.doc_click(999), "no range -> no toggle");
     }
 
-    /// 运行状态行数据（ActivityIndicator）：空闲 None；
-    /// busy 时优先运行中工具 summary、其次 thinking 俏皮词、兜底 Working。
+    /// Running status-row data (ActivityIndicator): None when idle;
+    /// when busy, prefer the running tool's summary, then a thinking word, fall back to Working.
     #[test]
     fn running_status_verb_priority() {
         let mut chat = test_chat();
@@ -5292,8 +5295,8 @@ mod tests {
         let verb = chat.running_status().expect("busy status").verb;
         assert_eq!(verb, "$ cargo test", "运行中工具 summary 优先");
 
-        // 运行中的 Watch（子代理/后台任务）动词 = label（CC ActivityIndicator
-        // 显示 agent activeForm）：工具之后、thinking 之前。
+        // A running Watch (subagent/background task) verb = its label (CC ActivityIndicator
+        // shows the agent activeForm): after tools, before thinking.
         chat.messages[0].activities.clear();
         chat.messages[0].activities.push(Activity::new(ActivityKind::Watch(
             WatchCall {
@@ -5307,7 +5310,7 @@ mod tests {
         let verb = chat.running_status().expect("busy status").verb;
         assert_eq!(verb, "scout · 列出桌面目录内容", "Watch Running 动词 = label");
 
-        // Done 的 Watch 不再占用动词（落到 thinking/Working）。
+        // A Done Watch no longer claims the verb (falls through to thinking/Working).
         if let ActivityKind::Watch(w) = &mut chat.messages[0].activities[0].kind {
             w.status = WatchStatus::Done;
         }
@@ -5316,7 +5319,7 @@ mod tests {
 
         chat.messages[0].activities.clear();
         chat.apply_turn_start();
-        // TurnStart 追加新消息（索引 1）：占位 thinking 在其中。
+        // TurnStart appends a new message (index 1): the placeholder thinking lives there.
         let stage = match &chat.messages[1].activities[0].kind {
             ActivityKind::Thinking(t) => t.stage,
             _ => unreachable!(),
@@ -5325,8 +5328,8 @@ mod tests {
         assert_eq!(verb, stage, "thinking 俏皮词");
     }
 
-    /// bash 模式切换：空输入按 `!` 进入、`!` 不插入输入、
-    /// 输入非空时 `!` 正常插入、空输入退格退出。
+    /// bash-mode toggle: `!` on empty input enters, `!` never enters the input,
+    /// `!` inserts normally when the input is non-empty, backspace on empty input exits.
     #[test]
     fn bang_toggles_bash_mode() {
         let mut chat = test_chat();
@@ -5345,8 +5348,8 @@ mod tests {
         assert!(!chat.bash_mode, "空输入退格退出 bash 模式");
     }
 
-    /// `!` 命令（standalone 工具活动）：不参与折叠组，完成后默认展开，
-    /// 预览 = 输出本身（去掉 `$ cmd` 回显与 `[Exited with code N]` 尾注）。
+    /// `!` commands (standalone tool activity): not part of collapse groups, expanded by default when done,
+    /// preview = the output itself (stripped of the `$ cmd` echo and the `[Exited with code N]` footnote).
     #[test]
     fn bash_preview_expands_with_output() {
         let mut chat = test_chat();
@@ -5380,7 +5383,7 @@ mod tests {
         );
     }
 
-    /// 模型驱动的 Bash（standalone=false）仍按原样折叠成组。
+    /// Model-driven Bash (standalone=false) still folds into a group as before.
     #[test]
     fn model_bash_still_folds_into_group() {
         let mut chat = test_chat();
@@ -5397,8 +5400,8 @@ mod tests {
         assert_eq!(chat.messages[0].groups.len(), 1, "模型驱动照常折叠");
     }
 
-    /// bash 模式提交：用户消息带 `!` 前缀，命令经工具活动执行并正常收尾
-    /// （respondToBashCommands=false → 无模型调用，回合结束 busy 复位）。
+    /// bash-mode submit: the user message carries the `!` prefix, the command runs as a tool activity and finishes normally
+    /// (respondToBashCommands=false → no model call; the turn ends and busy resets).
     #[tokio::test]
     async fn bash_submit_runs_command_and_ends_turn() {
         let session = Arc::new(Session {
@@ -5473,8 +5476,8 @@ mod tests {
             .to_string()
     }
 
-    /// 正文未打断时工具轮之间的 thinking 聚合到同一块（段间空行分隔），
-    /// 后续 delta 续写到聚合块。
+    /// Thinking between tool rounds merges into one block when text has not interrupted (segments split by blank lines),
+    /// with later deltas continuing into the merged block.
     #[test]
     fn tool_turn_thinking_blocks_merge_until_text() {
         let mut chat = test_chat();
@@ -5495,7 +5498,7 @@ mod tests {
         assert!(text.contains("got it, summarizing"), "merged segment: {text}");
     }
 
-    /// 正文打断后 thinking 新开块，不再聚合。
+    /// Thinking after text interrupts opens a new block, no longer merging.
     #[test]
     fn thinking_after_text_opens_new_block() {
         let mut chat = test_chat();
@@ -5513,8 +5516,8 @@ mod tests {
         assert_eq!(thinking_text(second), "reflect");
     }
 
-    /// 思考完成行（CC SystemTextMessage `✻ Churned for 40s`）渲染在消息末尾：
-    /// 正文与全部活动之后；空占位思考（无内容）不产生完成行。
+    /// The thinking completion row (CC SystemTextMessage `✻ Churned for 40s`) renders at the end of the message:
+    /// after text and all activities; empty placeholder thinking (no content) produces no completion row.
     #[test]
     fn thinking_completion_line_renders_at_message_end() {
         let mut chat = test_chat();
@@ -5554,7 +5557,7 @@ mod tests {
             "完成行在消息末尾: {lines:?}"
         );
 
-        // 空占位思考（无内容）→ 无完成行。
+        // Empty placeholder thinking (no content) → no completion row.
         let mut chat2 = test_chat();
         chat2.apply_turn_start();
         let mut ph = chat2.messages[0].activities[0].clone();
@@ -5575,8 +5578,8 @@ mod tests {
         assert!(!joined2.contains("for 0.4s"), "空占位无完成行: {joined2}");
     }
 
-    /// 完成行只在回合结束后出现：thinking 已 Done 但工具仍在运行时
-    /// 不渲染 `✻ Baked for 0.4s`，避免与底部运行状态行互相矛盾。
+    /// The completion row only appears after the turn ends: with thinking Done but tools still running,
+    /// `✻ Baked for 0.4s` is not rendered, avoiding a contradiction with the bottom running-status row.
     #[test]
     fn thinking_completion_line_waits_for_turn_end() {
         let mut chat = test_chat();
@@ -5608,7 +5611,7 @@ mod tests {
         );
     }
 
-    /// 单轮内连续 delta 续写同一块。
+    /// Consecutive deltas within one turn continue the same block.
     #[test]
     fn single_turn_thinking_accumulates() {
         let mut chat = test_chat();
@@ -5621,7 +5624,7 @@ mod tests {
         assert_eq!(thinking_text(&acts[0]), "ab");
     }
 
-    /// 交错渲染：text 与活动按插入点交叉（模型输出 text → tool → text 顺序）。
+    /// Interleaved rendering: text and activities cross by insert point (model output in text → tool → text order).
     #[test]
     fn interleaves_text_and_activities_in_order() {
         let mut chat = test_chat();
@@ -5640,11 +5643,11 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // slash 命令（/help /model /clear /exit /theme /rename /resume
-    // /permissions /skills /tasks /compact）
+    // Slash commands (/help /model /clear /exit /theme /rename /resume
+    // /permissions /skills /tasks /compact)
     // ------------------------------------------------------------------
 
-    /// 输入层拦截：/ 开头不启动回合；/help 输出清单、未知命令给提示。
+    /// Input-layer interception: a leading / never starts a turn; /help lists commands, unknown ones get a hint.
     #[test]
     fn slash_intercepts_and_help_lists_commands() {
         let mut chat = test_chat();
@@ -5664,7 +5667,7 @@ mod tests {
         );
     }
 
-    /// /model：带参切换运行时模型（下一轮生效）并持久化默认；无参进入选择器。
+    /// /model: with an arg, switch the runtime model (effective next turn) and persist as default; without, open the selector.
     #[test]
     fn slash_model_switches_runtime_model() {
         let home = std::env::temp_dir().join(format!("bingo-model-{}", std::process::id()));
@@ -5685,7 +5688,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// /exit 置退出标志（组件层消费 → system.exit）。
+    /// /exit sets the quit flag (component layer consumes → system.exit).
     #[test]
     fn slash_exit_requests_shutdown() {
         let mut chat = test_chat();
@@ -5694,7 +5697,7 @@ mod tests {
         assert!(chat.exit);
     }
 
-    /// /clear：清空 UI 消息并换新 transcript（任务列表键随会话隔离，M0 不跟随）。
+    /// /clear: clears the UI messages and swaps in a new transcript (task keys stay per-session; M0 does not follow).
     #[test]
     fn slash_clear_resets_session() {
         let mut chat = test_chat();
@@ -5708,7 +5711,7 @@ mod tests {
         );
     }
 
-    /// /theme：重建主题（dark → light 渲染差异）+ 持久化到 .bingo/settings.json。
+    /// /theme: rebuilds the theme (dark → light render difference) + persists to .bingo/settings.json.
     #[test]
     fn slash_theme_switches_and_persists() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-theme", std::process::id()));
@@ -5724,14 +5727,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// /rename：重命名 transcript 文件并更新运行时引用。
+    /// /rename: renames the transcript file and updates the runtime reference.
     #[test]
     fn slash_rename_renames_transcript() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-rename", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let home = tmp.join("home");
         let t = crate::transcript::create(&home, &tmp).unwrap();
-        // create 只建目录；先落一条消息让文件存在。
+        // create only makes the directory; drop a message first so the file exists.
         let _ = t.append(&crate::api::types::Message::user_text("hi"));
         let mut chat = test_chat();
         let _ = chat.session.runtime.transcript_tx.send(Some(t));
@@ -5743,7 +5746,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// /resume：无参列出全部会话；带参按关键词切换运行时 transcript。
+    /// /resume: without args, list all sessions; with an arg, switch the runtime transcript by keyword.
     #[test]
     fn slash_resume_lists_and_switches() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-resume", std::process::id()));
@@ -5769,7 +5772,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// /permissions：列出规则；添加规则 → 运行时表 + settings.json 持久化。
+    /// /permissions: lists rules; adding a rule → runtime table + settings.json persistence.
     #[test]
     fn slash_permissions_adds_and_lists() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-perms", std::process::id()));
@@ -5795,7 +5798,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// /skills：项目层技能目录加载并列出。
+    /// /skills: loads and lists the project-level skills directory.
     #[test]
     fn slash_skills_lists_project_skills() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-skills", std::process::id()));
@@ -5819,7 +5822,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// /tasks：列出任务区（Todo 列表）。用独立 home 避免污染共享测试 store。
+    /// /tasks: lists the task area (Todo list). Uses a dedicated home to avoid polluting the shared test store.
     #[tokio::test]
     async fn slash_tasks_lists_todos() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-tasks", std::process::id()));
@@ -5853,7 +5856,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// slash 输出是临时提示：渲染在消息之后、输入框上方，不定稿（不落盘）。
+    /// Slash output is transient: rendered after messages and above the input, never settled (not flushed).
     #[test]
     fn slash_output_rows_render_transient() {
         let mut chat = test_chat();
@@ -5873,15 +5876,15 @@ mod tests {
             .collect();
         assert!(joined.iter().any(|l| l.contains("/model")), "{joined:?}");
 
-        // TTL 后 tick 清空：临时提示消失。
+        // After the TTL, a tick clears it: the transient hint disappears.
         chat.slash_at = Some(std::time::Instant::now() - SLASH_OUTPUT_TTL - std::time::Duration::from_millis(1));
         chat.tick();
         assert!(chat.slash_lines.is_empty(), "超时后 slash 输出消失");
         assert!(chat.slash_at.is_none());
     }
 
-    /// 内置/磁盘技能经 `/技能名` 提交 `✦ 技能名 [参数]` 标记（渐进披露，
-    /// 全量正文由模型经 Skill 工具 + Read 按需读取，不进上下文）。
+    /// Built-in/disk skills submit a `✦ <skill name> [args]` marker via `/skill-name` (progressive disclosure;
+    /// the model reads the full body on demand via the Skill tool + Read, never into the context).
     #[tokio::test]
     async fn slash_skill_submits_marker_not_full_content() {
         let mut chat = test_chat();
@@ -5907,7 +5910,7 @@ mod tests {
         );
     }
 
-    /// 未知 slash 命令仍提示 /help（技能名不匹配时不误消费）。
+    /// Unknown slash commands still point to /help (no mis-consumption when the skill name does not match).
     #[test]
     fn slash_unknown_still_guides() {
         let mut chat = test_chat();
@@ -5926,7 +5929,7 @@ mod tests {
         let out = chat.slash_lines.join("\n");
         assert!(out.contains("当前 provider: default"), "{out}");
 
-        // 配置一个命名 provider 后切换。
+        // Configure a named provider, then switch.
         let providers = std::collections::HashMap::from([(
             "deepseek".to_string(),
             crate::settings::ProviderConfig {
@@ -5936,7 +5939,7 @@ mod tests {
             })]);
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::new("sk-main".into(), "https://main.example".into());
-        // set_provider 需要 providers 表——通过 from_settings 构造更直接。
+        // set_provider needs a providers table — constructing via from_settings is more direct.
         drop(providers);
         let mut settings = crate::settings::Settings {
             api_key: Some("sk-main".into()),
@@ -5981,7 +5984,7 @@ mod tests {
         let mut chat = test_chat_home(tmp.join("home"));
         chat.cwd = tmp.display().to_string();
 
-        // 无参进入等级选择器（预选 off = 首项）。
+        // No arg → open the level selector (preselects off = first item).
         chat.input = "/think".to_string();
         chat.submit();
         let menu = chat.think_menu.as_ref().expect("菜单已打开");
@@ -5989,7 +5992,7 @@ mod tests {
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
         assert!(chat.think_menu.is_none(), "Esc 退出菜单");
 
-        // 新档位 xhigh：运行时生效 + 持久化。
+        // New level xhigh: runtime effect + persistence.
         chat.input = "/think xhigh".to_string();
         chat.submit();
         let out = chat.slash_lines.join("\n");
@@ -6023,7 +6026,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // /mcp：列出 / enable|disable（持久化名单）/ reconnect
+    // /mcp: list / enable|disable (persisted list) / reconnect
     // ------------------------------------------------------------------
 
     async fn slash_mcp_wait(chat: &mut Chat) -> String {
@@ -6089,13 +6092,13 @@ mod tests {
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
         assert!(out.contains("已禁用 1 个 MCP 服务器: files"), "{out}");
-        // 持久化到 .bingo/settings.json
+        // Persisted to .bingo/settings.json
         let saved: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(saved["disabledMcpServers"], serde_json::json!(["files"]));
-        // 列表显示 disabled
+        // The list shows disabled
         chat.input = "/mcp".to_string();
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
@@ -6138,7 +6141,7 @@ mod tests {
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
         assert!(out.contains("未找到 MCP 服务器 \"nope\""), "{out}");
-        // 重连失败服务器：失败详情透出
+        // Reconnect a failing server: the failure detail shows through
         chat.input = "/mcp reconnect files".to_string();
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
@@ -6148,14 +6151,14 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // slash 下拉建议（/ 输入弹出，Tab 补全 / ↑↓ 导航 / Enter 执行 / Esc 关闭）
+    // Slash dropdown suggestions (pop up on /; Tab completes / ↑↓ navigate / Enter runs / Esc closes)
     // ------------------------------------------------------------------
 
     // ------------------------------------------------------------------
-    // slash 下拉建议（/ 输入弹出，Tab 补全 / ↑↓ 导航 / Enter 执行 / Esc 关闭）
+    // Slash dropdown suggestions (pop up on /; Tab completes / ↑↓ navigate / Enter runs / Esc closes)
     // ------------------------------------------------------------------
 
-    /// 输入 `/` → 建议列出内置命令；带参数后消失。
+    /// Typing `/` → suggestions list the built-in commands; gone once args follow.
     #[test]
     fn slash_menu_lists_commands_and_hides_with_args() {
         let mut chat = test_chat();
@@ -6177,7 +6180,7 @@ mod tests {
         assert!(chat.slash_suggestions.is_empty(), "非 / 开头不显示");
     }
 
-    /// 前缀过滤 + 技能并入（项目层技能目录）。
+    /// Prefix filtering + skills merged in (project-level skills directory).
     #[test]
     fn slash_menu_filters_by_prefix_and_includes_skills() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-menu", std::process::id()));
@@ -6204,8 +6207,8 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["model"], "前缀过滤: {names:?}");
 
-        // 超长描述截断（MAX_LISTING_DESC_CHARS）：
-        // NoWrap 超长行会把 canvas 撑出终端宽 → 行 diff 错位残留。
+        // Overlong descriptions are truncated (MAX_LISTING_DESC_CHARS):
+        // a NoWrap overlong row would push the canvas past the terminal width → stale diff residue.
         let long = "x".repeat(400);
         std::fs::write(
             &skill,
@@ -6229,7 +6232,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// ↑/↓ 移动选中（消费按键，不触发滚动）；Tab 补全 `/name ` 不执行。
+    /// ↑/↓ move the selection (keys consumed, no scroll); Tab completes `/name ` without running it.
     #[test]
     fn slash_menu_navigation_and_tab_completion() {
         let mut chat = test_chat();
@@ -6248,7 +6251,7 @@ mod tests {
             "顶部回卷"
         );
 
-        // Tab 应用选中（/help）→ `/help ` 且建议清空、未执行。
+        // Tab applies the selection (/help) → `/help ` with suggestions cleared and nothing run.
         chat.input = "/".to_string();
         chat.update_slash_suggestions();
         chat.slash_selected = 0;
@@ -6257,18 +6260,18 @@ mod tests {
         assert!(chat.slash_suggestions.is_empty());
         assert!(chat.slash_lines.is_empty(), "Tab 不执行");
 
-        // Esc 关闭。
+        // Esc closes.
         chat.input = "/".to_string();
         chat.update_slash_suggestions();
         assert!(chat.slash_menu_key(KeyCode::Esc, KeyModifiers::empty()));
         assert!(chat.slash_suggestions.is_empty());
     }
 
-    /// Enter：部分前缀 → 应用选中并执行；完整命令 → 原样执行。
+    /// Enter: partial prefix → apply the selection and run; full command → run as-is.
     #[tokio::test]
     async fn slash_menu_enter_applies_and_executes() {
         let mut chat = test_chat();
-        // 完整命令：直接执行，建议菜单必须关闭（不留占位行）。
+        // Full command: run directly; the suggestion menu must close (no leftover placeholder row).
         chat.input = "/model".to_string();
         chat.update_slash_suggestions();
         assert!(
@@ -6283,11 +6286,11 @@ mod tests {
         );
         assert!(chat.slash_suggestions.is_empty(), "菜单模式无 slash 建议");
         assert!(!chat.busy);
-        // Esc 退出菜单。
+        // Esc exits the menu.
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
         assert!(chat.model_menu.is_none(), "Esc 退出菜单");
 
-        // 部分前缀 `/sta`：Enter 应用选中（status 在前）并执行。
+        // Partial prefix `/sta`: Enter applies the selection (status first) and runs it.
         chat.input = "/sta".to_string();
         chat.update_slash_suggestions();
         assert!(
@@ -6303,8 +6306,8 @@ mod tests {
         assert!(chat.slash_suggestions.is_empty(), "部分前缀执行后菜单关闭");
     }
 
-    /// `/model` 二级选择器：Enter 进入菜单（一级 endpoint 列表），
-    /// 移动选中 → Enter 进二级（loading）→ Esc 逐级退出。
+    /// `/model` two-level selector: Enter opens the menu (level-one endpoint list),
+    /// move the selection → Enter goes to level two (loading) → Esc exits level by level.
     #[tokio::test]
     async fn model_menu_two_stage_navigation() {
         let mut chat = test_chat();
@@ -6324,12 +6327,12 @@ mod tests {
             0,
             "单元素列表循环回 0"
         );
-        // Enter 进入二级：异步拉取中（loading）。
+        // Enter goes to level two: async fetch in progress (loading).
         assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
         let m = &chat.model_menu.as_ref().unwrap().models;
         assert!(m.is_some(), "已进入二级");
         assert!(m.as_ref().unwrap().loading, "拉取中");
-        // Esc 逐级返回：二级 → 一级 → 退出。
+        // Esc returns level by level: two → one → exit.
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
         assert!(
             chat.model_menu.as_ref().is_some_and(|m| m.models.is_none()),
@@ -6339,7 +6342,7 @@ mod tests {
         assert!(chat.model_menu.is_none(), "一级 Esc 整体退出");
     }
 
-    /// 二级确认：模型被选中 → 切换运行时模型并退出菜单。
+    /// Level-two confirm: the model is picked → switch the runtime model and exit the menu.
     #[tokio::test]
     async fn model_menu_picks_model_and_switches() {
         let mut chat = test_chat();
@@ -6364,7 +6367,7 @@ mod tests {
         );
     }
 
-    /// /think 无参进入等级选择器：预选当前档位，↑↓ 移动，Enter 确认，Esc 退出。
+    /// /think without args opens the level selector: preselects the current level, ↑↓ move, Enter confirms, Esc exits.
     #[test]
     fn think_menu_navigates_and_confirms() {
         let home =
@@ -6376,7 +6379,7 @@ mod tests {
         chat.submit();
         let menu = chat.think_menu.as_ref().expect("菜单已打开");
         assert_eq!(THINK_LEVELS[menu.selected].0, "high", "预选当前档位");
-        // ↑ 到 medium，Enter 确认：运行时生效 + 持久化 + 关闭菜单。
+        // ↑ to medium, Enter confirms: runtime effect + persistence + menu closes.
         assert!(chat.on_key(KeyCode::Up, KeyModifiers::empty()));
         assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
         assert!(chat.think_menu.is_none(), "确认后关闭菜单");
@@ -6389,7 +6392,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved["thinkingLevel"], "medium", "选择持久化");
-        // 再开菜单：Esc 直接退出；off 清空等级。
+        // Reopen the menu: Esc exits directly; off clears the level.
         chat.input = "/think".to_string();
         chat.submit();
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
@@ -6404,7 +6407,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// THINK_LEVELS（选择器）与 API 层 THINKING_LEVELS 一致：off + 全档位，顺序一致。
+    /// THINK_LEVELS (selector) matches the API layer's THINKING_LEVELS: off + all levels, in the same order.
     #[test]
     fn think_levels_match_api_levels() {
         assert_eq!(THINK_LEVELS[0].0, "off");
@@ -6412,7 +6415,7 @@ mod tests {
         assert_eq!(menu, crate::api::types::THINKING_LEVELS.to_vec());
     }
 
-    /// footer 徽标：带思考等级时显示 `模型 · think 等级`，off 只显示模型名。
+    /// Footer badge: shows `model · think level` when a level is set; off shows only the model name.
     #[test]
     fn footer_model_label_shows_thinking_level() {
         assert_eq!(
@@ -6427,7 +6430,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // 折叠分类与摘要（原 fold_tests）
+    // Collapse classification & summaries (formerly fold_tests)
     // ------------------------------------------------------------------
 
     #[test]
@@ -6555,7 +6558,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // 折叠渲染（原 fold_render_tests / fold_toggle_tests / 部分 live）
+    // Collapse rendering (formerly fold_render_tests / fold_toggle_tests / part of live)
     // ------------------------------------------------------------------
 
     #[test]
@@ -6645,7 +6648,7 @@ mod tests {
 
     #[test]
     fn tool_after_thinking_placeholder_groups_without_panic() {
-        // 回归：TurnStart 占位 thinking 后接工具——group_of 必须与 activities 同步。
+        // Regression: a tool right after the TurnStart placeholder thinking — group_of must stay in sync with activities.
         let mut chat = test_chat();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
@@ -6705,7 +6708,7 @@ mod tests {
         start_group_done(&mut chat);
         finish_turn(&mut chat);
         chat.build_rows(120);
-        // 点击组折叠行展开
+        // Clicking the group fold row expands
         let row = chat
             .doc
             .click_ranges
@@ -6716,7 +6719,7 @@ mod tests {
         assert!(chat.doc_click(row), "click expands group");
         let expanded = visible(&mut chat, 120, 40);
         assert!(expanded.contains("Read a.md"), "click expanded: {expanded}");
-        // ctrl+o 折叠回
+        // ctrl+o collapses back
         assert!(chat.toggle_transcript());
         let collapsed = visible(&mut chat, 120, 40);
         assert!(collapsed.contains("Read 2 files"), "ctrl+o collapsed: {collapsed}");
@@ -6740,7 +6743,7 @@ mod tests {
             joined.contains("pdf doc.md"),
             "running header shows input summary: {joined}"
         );
-        // 完成后 duration 用真实值
+        // After completion, duration uses the real value
         let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
             name: "Skill".into(),
             summary: "pdf doc.md".into(),
@@ -6751,8 +6754,8 @@ mod tests {
         }));
         chat.drain_events();
         let joined = visible(&mut chat, 120, 30);
-        // CC 双行：耗时并入结果行，且只有慢命令（>2s）才显示。
-        // Skill 用 ✦ 图标（类别图标：⏺ 内建 / ◆ MCP / ✦ Skill）。
+        // CC two-line form: elapsed time merges into the result row, and only slow commands (>2s) show it.
+        // Skill uses the ✦ icon (category icons: ⏺ built-in / ◆ MCP / ✦ Skill).
         assert!(joined.contains("✦ Skill(pdf doc.md)"), "头行: {joined}");
         assert!(joined.contains("✦ pdf"), "结果行只显示 ✦ 技能名: {joined}");
         assert!(
@@ -6763,8 +6766,8 @@ mod tests {
         assert!(!joined.contains("3210ms"), "毫秒不再进头行: {joined}");
     }
 
-    /// Agent 对齐 Task renderToolUseMessage=null：ToolStart 不创建工具活动行，
-    /// 消息区只由 Watch 进度行承载（唯一显示，原地更新）。
+    /// Agent aligns with Task renderToolUseMessage=null: ToolStart creates no tool activity row,
+    /// the message area is carried solely by the Watch progress row (the only display, updated in place).
     #[test]
     fn agent_tool_start_creates_no_tool_activity() {
         assert!(is_hidden_tool("Agent"), "Agent 是隐藏工具");
@@ -6786,7 +6789,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        // Watch 活动行正常创建（唯一 Agent 显示）。
+        // The Watch activity row is created normally (the only Agent display).
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 列出桌面目录内容".into(),
             kind: crate::watch::WatchKind::Agent,
@@ -6804,7 +6807,7 @@ mod tests {
             .count();
         assert_eq!(watch_rows, 1, "Watch 行唯一");
 
-        // 同 label 后续事件原地更新，不新建行。
+        // Later events with the same label update in place, creating no new row.
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 列出桌面目录内容".into(),
             kind: crate::watch::WatchKind::Agent,
@@ -6895,7 +6898,7 @@ mod tests {
         assert_eq!(chat.input, "我还在打字", "input preserved");
     }
 
-    /// 测试用 watchable：状态恒 Running。
+    /// Test watchable: state always Running.
     struct FakeWatchable;
 
     impl crate::watch::Watchable for FakeWatchable {
@@ -7172,8 +7175,8 @@ mod tests {
         assert!(!joined.contains("⎿"), "hint hidden when group done: {joined}");
     }
 
-    /// 折叠组以正文为边界：RoundEnd（模型轮次）与 thinking 都不拆组，
-    /// 跨轮次的工具并入同一组；正文（TextDelta）才开新组。
+    /// Collapse groups are bounded by text: neither RoundEnd (model rounds) nor thinking splits them,
+    /// tools across rounds merge into one group; only text (TextDelta) opens a new one.
     #[test]
     fn group_survives_rounds_and_thinking_until_text() {
         let mut chat = test_chat();
@@ -7212,7 +7215,7 @@ mod tests {
         });
         chat.drain_events();
         assert_eq!(chat.messages[0].groups.len(), 1, "same-group Read joins group");
-        // 正文出现：组关闭，后续工具开新组。
+        // Text appears: the group closes and later tools open a new one.
         let _ = chat.events.send(UiEvent::TextDelta("结论…".into()));
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolStart { name: "Grep".into() });
@@ -7317,8 +7320,8 @@ mod tests {
         assert_eq!(row.unwrap().bg, Some(chat.theme.user_message_bg));
     }
 
-    /// 含换行的用户消息（粘贴多行）必须拆成多个单行 Row：一个 Row 恒占
-    /// 一行，混进换行就会让行数模型与实际视口高度脱节。
+    /// User messages with newlines (multi-line pastes) must split into single-line Rows: a Row always
+    /// occupies one line; mixing in newlines would detach the row model from the actual viewport height.
     #[test]
     fn multiline_user_message_wraps_into_single_line_rows() {
         let mut chat = test_chat();
@@ -7337,11 +7340,11 @@ mod tests {
             }
         }
         assert!(bubbles[0].line.plain_text().starts_with("❯ first line"));
-        // 续行缩进对齐，不重复前缀。
+        // Continuation lines align with indentation, never repeating the prefix.
         assert!(bubbles[1].line.plain_text().starts_with("  second line"));
     }
 
-    /// 超长（无换行）用户消息按终端宽度折行，不再撑出屏幕。
+    /// Overlong (newline-free) user messages wrap to the terminal width instead of spilling off screen.
     #[test]
     fn long_user_message_wraps_to_width() {
         let mut chat = test_chat();
@@ -7351,7 +7354,7 @@ mod tests {
         let bubbles: Vec<&Row> = chat.doc.rows.iter().filter(|r| r.bg.is_some()).collect();
         assert!(bubbles.len() > 1, "长消息折成多行");
         for row in bubbles {
-            // 前缀 2 列 + 正文 ≤ width-1（气泡右侧留白 1 列）。
+            // 2 prefix columns + body ≤ width-1 (1 column of right padding inside the bubble).
             assert!(
                 text_width(&row.line.plain_text()) <= 29,
                 "行宽超限: {:?}",
@@ -7360,7 +7363,7 @@ mod tests {
         }
     }
 
-    /// 折叠组的 `⎿ hint` 行可能是多行 bash 命令：必须单行化 + 截断。
+    /// A collapse group's `⎿ hint` row may hold a multi-line bash command: it must be single-lined + truncated.
     #[test]
     fn multiline_hint_stays_one_row() {
         let mut chat = test_chat();
@@ -7385,7 +7388,7 @@ mod tests {
         assert!(text_width(&hint.line.plain_text()) <= 60, "hint 按宽截断");
     }
 
-    /// 落盘游标按消息边界：宽度变化后重排（行号全变）仍不重复落盘。
+    /// The flush cursor counts by message boundary: re-layout after a width change (all row numbers change) never re-flushes.
     #[test]
     fn flush_cursor_survives_width_change() {
         let mut chat = test_chat();
@@ -7401,7 +7404,7 @@ mod tests {
         assert_eq!(chat.flushed_segments, 3);
         assert_eq!(chat.tail_start, chat.doc.rows.len());
 
-        // 宽度变化重建：已落盘的段不再出现在文档里。
+        // Rebuild after a width change: already-flushed segments no longer appear in the doc.
         chat.build_rows(40);
         assert_eq!(chat.tail_start, 0, "重建后尾部从头算");
         assert!(chat.doc.rows.is_empty(), "已落盘内容不重复构建");
@@ -7413,7 +7416,7 @@ mod tests {
             .collect();
         assert!(!text.contains("第一条消息"), "不重复打印");
 
-        // 新消息只构建自己那一段。
+        // A new message only builds its own segment.
         chat.messages.push(msg(Role::User, "第二条"));
         chat.build_rows(40);
         assert!(
@@ -7423,8 +7426,8 @@ mod tests {
         assert_eq!(settled_segments(&chat), 1, "只新增 1 段");
     }
 
-    /// 流式（未定稿）内容不落盘：markdown 全量重解析会改写早先的行，
-    /// 落进 scrollback 就成了改不掉的中间态。
+    /// Streaming (unsettled) content is not flushed: a full markdown re-parse rewrites earlier rows,
+    /// which would be frozen in scrollback as an unchangeable intermediate state.
     #[test]
     fn streaming_content_is_not_flushed_until_settled() {
         let mut chat = test_chat();
@@ -7448,8 +7451,8 @@ mod tests {
         assert_eq!(chat.flushed_segments, welcome_segments + 1, "消息落盘");
     }
 
-    /// `/clear`（与 `/resume`）整体替换消息集合 → 段编号失效，落盘游标
-    /// 必须复位，否则新会话的文档被整段跳过（空白界面）。
+    /// `/clear` (and `/resume`) replace the message set wholesale → segment numbers become invalid, so the flush
+    /// cursor must reset, otherwise the new session's doc is skipped wholesale (blank screen).
     #[test]
     fn clear_resets_flush_cursor() {
         let mut chat = test_chat();
@@ -7468,7 +7471,7 @@ mod tests {
         );
     }
 
-    /// 提问结果块只追加：已落盘的条目不重渲，新条目不重复 header。
+    /// The ask result block is append-only: flushed entries are not re-rendered and new ones never repeat the header.
     #[test]
     fn ask_result_block_flushes_incrementally() {
         let mut chat = test_chat();
@@ -7482,7 +7485,7 @@ mod tests {
         chat.advance_flushed();
         assert_eq!(chat.flushed_ask_rows, 2);
 
-        // 再答一题：只渲染新条目。
+        // Answer another question: only the new entry renders.
         chat.ask_result
             .as_mut()
             .expect("result")
@@ -7496,8 +7499,8 @@ mod tests {
         assert_eq!(settled_ask_rows(&chat), 1);
     }
 
-    /// 回答反馈是回合内瞬态：TurnEnd 清除 ask_result 与落盘游标，
-    /// 块不再渲染在输入框上方（回归：此前常驻到 /clear）。
+    /// Answer feedback is transient within a turn: TurnEnd clears ask_result and the flush cursor,
+    /// so the block stops rendering above the input (regression: previously it persisted until /clear).
     #[test]
     fn turn_end_clears_ask_result() {
         let mut chat = test_chat();
@@ -7518,7 +7521,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!joined.contains("User answered"), "块已消失: {joined}");
-        // 下一回合新回答：块从头完整渲染（游标不残留）。
+        // The next turn's answer: the block renders fully from scratch (no cursor residue).
         chat.ask_result = Some(AskResult {
             answered: vec![("新问题".into(), "新答案".into())],
             declined: false,
@@ -7534,7 +7537,7 @@ mod tests {
         assert!(joined.contains("新问题"), "新块完整渲染: {joined}");
     }
 
-    /// 模拟 inline 组件的落盘循环：重建 → 落盘定稿前缀 → 推进游标。
+    /// Simulates the inline component's flush loop: rebuild → flush the settled prefix → advance the cursor.
     fn flush_frame(chat: &mut Chat, width: usize, printed: &mut Vec<String>) {
         chat.build_rows(width);
         if chat.doc.settled > chat.tail_start {
@@ -7545,8 +7548,8 @@ mod tests {
         }
     }
 
-    /// 全流程回归：流式 + 中途 resize + 定稿，scrollback 里任何一行都
-    /// 不重复（旧实现的行号游标在 resize 重排后会重打一遍）。
+    /// Full-flow regression: streaming + mid-turn resize + settling — no row in the scrollback
+    /// is ever repeated (the old row-number cursor re-printed everything after a resize re-layout).
     #[test]
     fn streaming_with_resize_never_prints_a_row_twice() {
         let mut chat = test_chat();
@@ -7562,19 +7565,19 @@ mod tests {
             chat.handle(UiEvent::TextDelta(chunk.into()));
             flush_frame(&mut chat, 100, &mut printed);
         }
-        // 回合中途 resize：重排后行号全变。
+        // Mid-turn resize: all row numbers change after re-layout.
         flush_frame(&mut chat, 60, &mut printed);
         chat.handle(UiEvent::TextDelta("结尾。".into()));
         chat.handle(UiEvent::TurnEnd);
         flush_frame(&mut chat, 60, &mut printed);
-        // 空转几帧不应再打印任何东西。
+        // Idling a few frames must print nothing more.
         let after = printed.len();
         for _ in 0..3 {
             flush_frame(&mut chat, 60, &mut printed);
         }
         assert_eq!(printed.len(), after, "无新增落盘");
 
-        // 欢迎卡自身含多行相同的分栏留白，按内容去重会误报——只查消息部分。
+        // The welcome card itself has repeated padded rows; deduping by content would false-positive — check only the message part.
         let mut seen: HashMap<&str, usize> = HashMap::new();
         for line in &printed[welcome..] {
             if line.trim().is_empty() {
@@ -7591,18 +7594,18 @@ mod tests {
         assert!(chat.doc.rows.is_empty(), "全部落盘后尾部为空");
     }
 
-    /// inline ctrl+o 重放：无新信息时 no-op；有已落盘内容或可展开项时
-    /// 展开一切、游标回卷并请求整卷冻结。
+    /// inline ctrl+o replay: a no-op with nothing new; with flushed content or expandable items,
+    /// it expands everything, rewinds the cursor, and requests a full freeze.
     #[test]
     fn expand_transcript_rewinds_and_expands_everything() {
         let mut chat = test_chat();
-        // 空会话且全部在屏 → no-op（重放不增加信息）。
+        // Empty session, everything on screen → no-op (the replay adds no information).
         assert!(!chat.expand_transcript());
         assert!(!chat.dump_transcript);
         assert!(!chat.force_redraw);
 
-        // 消息落盘后 → 重放：游标回卷，重建的文档重含全部段；
-        // 先清屏再写（置顶，与 resize 同款）。
+        // After a message flushed → replay: the cursor rewinds and the rebuilt doc contains all segments;
+        // clear the screen first, then write (top-aligned, same as resize).
         chat.messages.push(msg(Role::Assistant, "回复"));
         chat.build_rows(80);
         chat.advance_flushed();
@@ -7621,7 +7624,7 @@ mod tests {
             .join("\n");
         assert!(text.contains("回复"), "重放文档含已落盘消息: {text}");
 
-        // 有折叠组的历史消息 → 重放前全部展开。
+        // Historical messages with collapse groups → everything expands before the replay.
         chat.dump_transcript = false;
         start_group(&mut chat);
         let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
@@ -7643,8 +7646,8 @@ mod tests {
             "全部折叠组已展开"
         );
 
-        // 全展开态 → 第二按走闭合方向：折回聚合态（展示层由 app 层
-        // 走清屏重画 + 回灌收拢）。
+        // Fully expanded → the second press goes the collapse direction: back to aggregates (the app layer
+        // handles the clear-redraw + rehydration to close it up).
         assert!(chat.transcript_fully_expanded());
         assert!(chat.collapse_transcript());
         assert!(
@@ -7655,7 +7658,7 @@ mod tests {
         assert!(!chat.collapse_transcript(), "已全闭合，再闭合无变化");
     }
 
-    /// 空闲时 tick 不置 dirty（不重建文档）；有动态元素时才置位。
+    /// The tick does not set dirty when idle (no doc rebuild); it does when dynamic elements exist.
     #[test]
     fn tick_marks_dirty_only_when_dynamic() {
         let mut chat = test_chat();
@@ -7667,7 +7670,7 @@ mod tests {
         chat.tick();
         assert!(chat.dirty, "busy 时重建（spinner/耗时行）");
         assert!(chat.needs_tick());
-        // 待处理事件也要唤醒（否则事件永远排不出去）。
+        // Pending events must also wake it up (otherwise they would never drain).
         chat.busy = false;
         chat.dirty = false;
         let _ = chat.events.send(UiEvent::Warning("w".into()));
@@ -7681,16 +7684,16 @@ mod tests {
         let welcome = chat.doc.settled;
         assert!(welcome > 0, "welcome card rows are settled");
         assert_eq!(chat.doc.settled, chat.doc.rows.len(), "empty session fully settled");
-        // 回合开始：流式消息 + 占位 thinking → 不得定稿。
+        // Turn start: streaming message + placeholder thinking → must not settle.
         chat.handle(UiEvent::TurnStart);
         chat.build_rows(100);
         assert_eq!(chat.doc.settled, welcome, "streaming message not settled");
         assert!(chat.doc.rows.len() > welcome, "streaming message rendered");
-        // 回合结束：消息定稿，所有行进入 settled。
+        // Turn end: the message settles, all rows enter settled.
         chat.handle(UiEvent::TurnEnd);
         chat.build_rows(100);
         assert_eq!(chat.doc.settled, chat.doc.rows.len(), "all rows settled after turn");
-        // 定稿单向：第二条消息（流式）不动已有边界。
+        // Settling is one-way: a second message (streaming) does not move existing boundaries.
         let after_turn = chat.doc.settled;
         chat.handle(UiEvent::TurnStart);
         chat.build_rows(100);
@@ -7702,13 +7705,13 @@ mod tests {
         let mut chat = test_chat();
         chat.build_rows(100);
         let welcome = chat.doc.settled;
-        // 一条带运行中工具的消息。
+        // A message with a running tool.
         let mut m = msg(Role::Assistant, "");
         m.activities.push(tool_activity());
         chat.messages.push(m);
         chat.build_rows(100);
         assert_eq!(chat.doc.settled, welcome, "running tool keeps message dynamic");
-        // 工具完成 → 定稿。
+        // Tool done → settles.
         let a = &mut chat.messages[0].activities[0];
         match &mut a.kind {
             ActivityKind::Tool(t) => t.status = ToolStatus::Done,
@@ -7723,11 +7726,11 @@ mod tests {
         let mut chat = test_chat();
         chat.build_rows(100);
         let welcome = chat.doc.settled;
-        // 流式回合（动态消息）。
+        // Streaming turn (dynamic message).
         chat.handle(UiEvent::TurnStart);
         chat.build_rows(100);
         assert_eq!(chat.doc.settled, welcome, "streaming message dynamic");
-        // 权限请求块出现 → 边界不动（请求块不定稿）。
+        // A permission block appears → the boundary stays put (ask blocks never settle).
         let (tx, _rx) = tokio::sync::oneshot::channel();
         chat.pending_ask = Some((
             PermissionRequest::new("允许执行 Bash", "cargo build", vec!["允许".into()]),
@@ -7735,7 +7738,7 @@ mod tests {
         ));
         chat.build_rows(100);
         assert_eq!(chat.doc.settled, welcome, "ask block not settled");
-        // 回合结束 + 请求解决 → 全部定稿。
+        // Turn end + request resolved → everything settles.
         chat.pending_ask = None;
         chat.handle(UiEvent::TurnEnd);
         chat.build_rows(100);
@@ -7890,8 +7893,8 @@ mod tests {
         );
     }
 
-    /// Esc（busy 时）置中断标志：后台任务完成通知不再自动拉起新回合；
-    /// 新回合（start_turn）复位。
+    /// Esc (while busy) sets the interrupt flag: background-task completion no longer auto-starts a turn;
+    /// a new turn (start_turn) resets it.
     #[test]
     fn esc_sets_interrupted_and_start_turn_resets() {
         let mut chat = test_chat();
@@ -7918,8 +7921,8 @@ mod tests {
         drop(cancel_rx);
     }
 
-    /// start_turn 的复位顺序：先订阅再 send_replace——上一轮的 receiver 全部
-    /// drop 后（tokio watch 无 receiver 时 send 不更新值），新回合仍能看到 false。
+    /// start_turn's reset order: subscribe first, then send_replace — after the previous turn's receivers are all
+    /// dropped (send does not update with no receivers), the new turn still sees false.
     #[test]
     fn cancel_reset_works_after_all_receivers_dropped() {
         let chat = test_chat();
@@ -7971,7 +7974,7 @@ mod tests {
         assert!(chat.images_pending.is_empty());
     }
 
-    /// TurnEnd → 异步加载 data URL 图片 → ImageReady 回传 → 文档出现图片块。
+    /// TurnEnd → asynchronously load the data-URL image → ImageReady reply → the image block appears in the doc.
     #[tokio::test]
     async fn turn_end_loads_images_and_renders_image_block() {
         let mut chat = test_chat();
@@ -8006,8 +8009,8 @@ mod tests {
         assert_eq!(image_rows, meta.rows, "块行数 = meta.rows");
     }
 
-    /// 图片仍在加载时消息不定稿——否则 `#[image]` 回落行会被落盘进
-    /// scrollback，而 kitty 序列只在落盘那一刻输出，图片永远出不来。
+    /// A message with images still loading never settles — otherwise the `#[image]` fallback rows would flush
+    /// into scrollback, and since the kitty sequence is only emitted at flush time, the picture could never appear.
     #[test]
     fn message_waits_for_pending_images_before_settling() {
         let mut chat = test_chat();
@@ -8017,7 +8020,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(tiny_png())
         );
         chat.messages.push(msg(Role::Assistant, &format!("![图]({url})")));
-        // 加载在途（load_message_images 的效果）。
+        // Load in flight (the effect of load_message_images).
         chat.images_pending.insert(url.clone());
         chat.build_rows(100);
         assert_eq!(
@@ -8025,7 +8028,7 @@ mod tests {
             "只有欢迎卡定稿，含在途图片的消息不定稿"
         );
 
-        // 加载成功 → 消息定稿，且落盘行携带 ImageRef（块首行输出 kitty 序列）。
+        // Load succeeds → the message settles, and flushed rows carry an ImageRef (the block head emits the kitty sequence).
         let meta = ImageMeta { cols: 4, rows: 2, bytes: tiny_png() };
         chat.handle(UiEvent::ImageReady { url: url.clone(), meta: Some(meta) });
         chat.build_rows(100);
@@ -8040,7 +8043,7 @@ mod tests {
         assert!(!image_rows.is_empty(), "定稿行里有图片块");
     }
 
-    /// 加载失败（含超时回报的 None）同样解除阻塞：以 `#[image]` 占位定稿。
+    /// A failed load (including None from a timeout) also releases the block: it settles with the `#[image]` placeholder.
     #[test]
     fn failed_image_load_settles_with_placeholder() {
         let mut chat = test_chat();
@@ -8065,7 +8068,7 @@ mod tests {
         assert!(text.contains("#[image]"), "占位文本落稿: {text}");
     }
 
-    /// 无图片能力时不进在途集合，消息照常立即定稿（行为不变）。
+    /// Without image capability, nothing enters the in-flight set and messages settle immediately (unchanged behavior).
     #[test]
     fn without_image_capability_messages_settle_immediately() {
         let mut chat = test_chat();
@@ -8075,9 +8078,9 @@ mod tests {
         assert_eq!(settled_segments(&chat), 2, "无能力不等图片");
     }
 
-    // ---- 交互（CC 手感）：光标编辑 / 历史 / 多行 / 双击语义 / 排队 ----
+    // ---- Interactions (CC feel): caret editing / history / multiline / double-press semantics / queueing ----
 
-    /// 独立 home 的 Chat：历史文件按 home 分家，测试之间互不串。
+    /// Chat with a dedicated home: history files are split per home, so tests never cross-contaminate.
     fn chat_with_history(tag: &str) -> Chat {
         let home = std::env::temp_dir().join(format!("bingo-chat-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
@@ -8088,8 +8091,8 @@ mod tests {
         static KEY_TICK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
-    /// 测试按键时钟：每次按键推进 50ms——远大于粘贴突发阈值，于是
-    /// "测试里连打" 不会被粘贴启发式误判（真实打字同理）。
+    /// Test key clock: every key advances 50ms — far above the paste-burst threshold, so
+    /// "rapid typing in tests" is never misjudged as a paste (same as real typing).
     fn key_time() -> std::time::Instant {
         let n = KEY_TICK.with(|c| {
             let v = c.get() + 1;
@@ -8117,8 +8120,8 @@ mod tests {
         chat.on_key_at(KeyCode::Char(c), KeyModifiers::ALT, key_time())
     }
 
-    /// 光标编辑：←/→ 移动、ctrl+a/e 行首行尾、alt+b/f 词间、
-    /// 插入落在光标处而非行尾。
+    /// Caret editing: ←/→ move, ctrl+a/e line start/end, alt+b/f word movement,
+    /// insertion lands at the caret, not the line end.
     #[test]
     fn cursor_moves_and_inserts_at_position() {
         let mut chat = chat_with_history("cursor");
@@ -8135,13 +8138,13 @@ mod tests {
         assert_eq!(chat.cursor, "hiello ".len(), "alt+b 退一个词");
         assert!(alt(&mut chat, 'f'));
         assert_eq!(chat.cursor, chat.input.len(), "alt+f 前进一个词");
-        // CJK 按字符移动、按显示宽渲染。
+        // CJK moves by character and renders by display width.
         chat.set_input("中文");
         press(&mut chat, KeyCode::Left);
         assert_eq!(chat.cursor, 3, "一次退一个汉字（3 字节）");
     }
 
-    /// ctrl+k/u/w 删除进 kill 缓冲，ctrl+y 粘回；ctrl+d 删光标后字符。
+    /// ctrl+k/u/w delete into the kill buffer, ctrl+y pastes back; ctrl+d deletes after the caret.
     #[test]
     fn kill_ring_round_trip() {
         let mut chat = chat_with_history("kill");
@@ -8163,8 +8166,8 @@ mod tests {
         assert_eq!(chat.input, "ac", "ctrl+d 删光标后字符");
     }
 
-    /// 历史：提交入历史并落盘；↑/↓ 切换，回到底部恢复 draft；
-    /// 连续相同 prompt 只记一条。
+    /// History: submitted entries go into history and persist; ↑/↓ navigate, back at the bottom restores the draft;
+    /// consecutive identical prompts are recorded once.
     #[test]
     fn prompt_history_persists_and_navigates() {
         let mut chat = chat_with_history("history");
@@ -8172,7 +8175,7 @@ mod tests {
         chat.record_history("second");
         chat.record_history("second");
         assert_eq!(chat.history.entries(), ["first", "second"], "连续重复只记一条");
-        // 落盘：同一 home + cwd 的新会话读得到。
+        // Persisted: a new session with the same home + cwd can read it.
         let reloaded = crate::tui::history::load(
             &chat.session.home,
             std::path::Path::new(&chat.cwd),
@@ -8191,8 +8194,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&chat.session.home);
     }
 
-    /// 多行输入：`\`+Enter 与 ctrl+j 插入换行，Enter 提交整体；
-    /// 渲染为多行（每行 height=1，不靠单行塞 \n）。
+    /// Multi-line input: `\`+Enter and ctrl+j insert newlines, Enter submits the whole;
+    /// rendered as multiple rows (each height=1, not a single row stuffed with \n).
     #[test]
     fn multiline_input_renders_as_multiple_rows() {
         let mut chat = chat_with_history("multiline");
@@ -8209,7 +8212,7 @@ mod tests {
             assert!(!row.plain_text().contains('\n'), "行内不含换行");
         }
         assert!(rows[2].plain_text().contains('▋'), "光标画在末行");
-        // ↑ 在多行里先走视觉行，不切历史。
+        // ↑ moves along visual rows within a multi-line input before switching history.
         chat.record_history("older");
         press(&mut chat, KeyCode::Up);
         assert_eq!(chat.input, "first\nsecond\nthird", "行内移动不动文本");
@@ -8219,7 +8222,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&chat.session.home);
     }
 
-    /// 输入区行数有上限：长输入只显示光标所在的一屏。
+    /// The input area has a row cap: long input only shows the screen around the caret.
     #[test]
     fn prompt_rows_are_capped() {
         let mut chat = chat_with_history("caprows");
@@ -8228,8 +8231,8 @@ mod tests {
         assert_eq!(chat.prompt_lines().len(), INPUT_ROWS_MAX);
     }
 
-    /// Ctrl+C（CC 语义）：busy 中断；有文本先清空（进历史）；
-    /// 空输入第一次提示，窗口内第二次退出，超时重新计数。
+    /// Ctrl+C (CC semantics): interrupts when busy; with text, clears it first (into history);
+    /// on empty input, first press hints and a second within the window quits; the counter resets on timeout.
     #[test]
     fn ctrl_c_interrupt_clear_then_exit() {
         let mut chat = chat_with_history("ctrlc");
@@ -8252,7 +8255,7 @@ mod tests {
         chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0 + CTRL_C_WINDOW);
         assert!(chat.exit, "窗口内第二次退出");
 
-        // 超窗后重新计数。
+        // The counter restarts after the window expires.
         let mut chat = chat_with_history("ctrlc2");
         chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
         chat.on_key_at(
@@ -8265,7 +8268,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&chat.session.home);
     }
 
-    /// Esc：busy 中断；建议/面板逐层关闭；有文本双击清空并存历史。
+    /// Esc: interrupts when busy; closes suggestions/panels layer by layer; double-press with text clears and saves to history.
     #[test]
     fn esc_closes_layers_then_clears_input() {
         let mut chat = chat_with_history("esc");
@@ -8291,7 +8294,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&chat.session.home);
     }
 
-    /// Shift+Tab 循环权限模式，且真正作用于下一回合的 Session。
+    /// Shift+Tab cycles the permission mode, and it really applies to the next turn's Session.
     #[test]
     fn shift_tab_cycles_permission_mode() {
         let mut chat = chat_with_history("mode");
@@ -8303,12 +8306,12 @@ mod tests {
         assert_eq!(chat.permission_mode, PermissionMode::Plan);
         press(&mut chat, KeyCode::BackTab);
         assert_eq!(chat.permission_mode, PermissionMode::Default, "循环回默认");
-        // 回合用的 Session 带当前模式（Session 在 Arc 里不可变 → 派生副本）。
+        // The turn's Session carries the current mode (Session is immutable in Arc → derive a copy).
         press(&mut chat, KeyCode::BackTab);
         assert_eq!(chat.session_for_turn().permission_mode, PermissionMode::AcceptEdits);
         assert_eq!(chat.session.permission_mode, PermissionMode::Default, "原 Session 不变");
 
-        // 启动即 bypass 的会话只在 bypass ↔ default 之间切（不引入新危险模式）。
+        // A session started in bypass only toggles between bypass ↔ default (never introduces a new dangerous mode).
         let mut chat = chat_with_history("mode-bypass");
         chat.permission_mode = PermissionMode::BypassPermissions;
         let mut session = (*chat.session).clone();
@@ -8320,7 +8323,7 @@ mod tests {
         assert_eq!(chat.permission_mode, PermissionMode::BypassPermissions);
     }
 
-    /// busy 时 Enter 不再无效：消息入队、显示在输入框下方，↑ 取回最后一条。
+    /// Enter while busy is no longer a no-op: messages queue and show below the input; ↑ pulls back the last one.
     #[test]
     fn messages_queue_while_busy() {
         let mut chat = chat_with_history("queue");
@@ -8335,24 +8338,24 @@ mod tests {
         let lines = chat.queue_lines();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].starts_with("> first queued"), "{lines:?}");
-        // busy 时 ↑ 取回最后一条排队消息继续编辑。
+        // While busy, ↑ pulls back the last queued message for further editing.
         press(&mut chat, KeyCode::Up);
         assert_eq!(chat.input, "second queued");
         assert_eq!(chat.queued.len(), 1);
     }
 
-    /// 底部实体区：ctrl+g 聚焦选择，↑↓ 移动、Enter 打开、Esc 关闭；
-    /// 收起态一行摘要，无实体时不占行且 ctrl+g 给提示。
+    /// Bottom entity area: ctrl+g focuses the selector, ↑↓ move, Enter opens, Esc closes;
+    /// collapsed state is a one-line summary; no entities → no rows and ctrl+g gives a hint.
     #[test]
     fn entity_selector_picks_agent_and_channel() {
         let mut chat = test_chat();
         chat.width = 80;
-        // 无实体：不占行，ctrl+g 提示。
+        // No entities: takes no rows; ctrl+g shows a hint.
         assert!(chat.entity_rows(80).is_empty());
         assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
         assert!(chat.notice.is_some(), "空态提示");
         assert!(chat.entity_focus.is_none());
-        // 造一个 agent 实例 + 一个频道。
+        // Create one agent instance + one channel.
         chat.session
             .agents
             .insert("scout", None, "调研".into(), chat.session.clone());
@@ -8362,7 +8365,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         chat.refresh_entities();
         assert_eq!(chat.entities.len(), 2);
-        // 收起态：一行摘要含两者。
+        // Collapsed: one summary line containing both.
         let rows = chat.entity_rows(80);
         assert_eq!(rows.len(), 1);
         let summary = rows[0].plain_text();
@@ -8370,14 +8373,14 @@ mod tests {
             summary.contains("◉ scout(running)") && summary.contains("◇ #table(0)"),
             "{summary}"
         );
-        // 聚焦：逐行 + ❯ 选中 + 提示行。
+        // Focused: per-row list + ❯ selection + hint row.
         assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
         assert_eq!(chat.entity_focus, Some(0));
         let rows = chat.entity_rows(80);
         let joined: Vec<String> = rows.iter().map(|l| l.plain_text()).collect();
         assert!(joined[0].starts_with("❯ ◉ scout"), "{joined:?}");
         assert!(joined.last().unwrap_or(&String::new()).contains("enter 打开"));
-        // ↓ 到频道，Enter 打开。
+        // ↓ to the channel, Enter opens it.
         assert!(chat.on_key(KeyCode::Down, KeyModifiers::empty()));
         assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
         assert_eq!(
@@ -8386,13 +8389,13 @@ mod tests {
             "选中频道"
         );
         assert!(chat.entity_focus.is_none(), "打开后退出聚焦");
-        // 再次聚焦后 Esc 只关选择器（不触发全局 Esc 语义）。
+        // After refocusing, Esc only closes the selector (does not trigger global Esc semantics).
         let _ = chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL);
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
         assert!(chat.entity_focus.is_none());
     }
 
-    /// 队列超出上限时折叠为一行（行数进 chrome，必须有上界）。
+    /// Queues beyond the cap fold into one row (row count feeds chrome, so it must be bounded).
     #[test]
     fn queue_lines_are_capped() {
         let mut chat = chat_with_history("queuecap");
@@ -8401,7 +8404,7 @@ mod tests {
         assert!(chat.queue_lines().last().is_some_and(|l| l.contains("more queued")));
     }
 
-    /// `?`：空输入开关面板；有文本时是普通字符。
+    /// `?`: toggles the panel on empty input; an ordinary character otherwise.
     #[test]
     fn question_mark_toggles_help_panel() {
         let mut chat = chat_with_history("help");
@@ -8420,7 +8423,7 @@ mod tests {
         assert!(!chat.help_visible);
     }
 
-    /// 帮助面板行数受终端高度约束（canvas 不得超过终端高度）。
+    /// Help panel rows are bounded by the terminal height (the canvas must never exceed it).
     #[test]
     fn help_panel_shrinks_on_short_terminals() {
         let mut chat = chat_with_history("helpshort");
@@ -8436,7 +8439,7 @@ mod tests {
         assert!(chat.help_lines().is_empty(), "极矮终端不显示面板");
     }
 
-    /// ctrl+s 暂存/恢复（含光标位）、ctrl+_ 撤销、ctrl+t 任务区、ctrl+l 重画。
+    /// ctrl+s stash/restore (with the caret), ctrl+_ undo, ctrl+t task area, ctrl+l repaint.
     #[test]
     fn stash_undo_tasks_and_redraw() {
         let mut chat = chat_with_history("t2");
@@ -8447,7 +8450,7 @@ mod tests {
         assert!(ctrl(&mut chat, 's'));
         assert_eq!((chat.input.as_str(), chat.cursor), ("stashed", 3), "恢复含光标");
 
-        // 撤销：整体编辑（kill）回退一步。
+        // Undo: a bulk edit (kill) steps back one.
         chat.set_input("undo me");
         chat.cursor = chat.input.len();
         assert!(ctrl(&mut chat, 'w'));
@@ -8465,7 +8468,7 @@ mod tests {
         assert!(chat.force_redraw, "ctrl+l 请求整屏重画");
     }
 
-    /// bash 模式：空输入 Esc/退格/ctrl+u 退出；Tab 从会话内 `!` 历史补全。
+    /// bash mode: empty-input Esc/backspace/ctrl+u exit; Tab completes from this session's `!` history.
     #[test]
     fn bash_mode_exits_and_completes() {
         let mut chat = chat_with_history("bash");
@@ -8483,14 +8486,14 @@ mod tests {
         assert_eq!(chat.input, "cargo test --all", "Tab 前缀补全");
     }
 
-    /// 粘贴突发：突发中的 Enter 是换行而不是发送；≥10 行折叠为占位符，
-    /// 提交时展开真实内容。
+    /// Paste burst: Enter inside a burst is a newline, not send; ≥10 lines fold into a placeholder,
+    /// with the real content expanded at submit time.
     #[test]
     fn paste_burst_inserts_newlines_and_collapses() {
         let mut chat = chat_with_history("paste");
         let mut now = std::time::Instant::now();
         let fast = std::time::Duration::from_millis(1);
-        // 逐字符“粘贴” 12 行。
+        // "Paste" 12 lines character by character.
         for i in 0..12 {
             for c in format!("line{i}").chars() {
                 now += fast;
@@ -8504,9 +8507,9 @@ mod tests {
         assert_eq!(chat.pastes.len(), 1);
         assert!(chat.expand_pastes(&chat.input).contains("line11"), "提交时展开真实内容");
 
-        // 正常打字（间隔大）时 Enter 照常提交，不再变成换行。
+        // Normal typing (wide intervals): Enter submits as usual instead of inserting a newline.
         let mut chat = chat_with_history("paste2");
-        chat.busy = true; // 走排队路径：不需要 tokio runtime
+        chat.busy = true; // queueing path: no tokio runtime needed
         let slow = std::time::Duration::from_millis(50);
         let mut now = std::time::Instant::now();
         for c in "hi".chars() {
@@ -8519,8 +8522,8 @@ mod tests {
         assert_eq!(chat.queued, vec!["hi".to_string()]);
     }
 
-    /// bracketed paste：整段插到光标处、只占一步撤销；≥10 行折叠为占位符，
-    /// 提交时展开真实内容。CR 换行（终端粘贴用的就是 CR）先归一。
+    /// Bracketed paste: the whole chunk inserts at the caret as one undo step; ≥10 lines fold into a placeholder,
+    /// with the real content expanded at submit time. CR newlines (what terminals paste) are normalized first.
     #[test]
     fn bracketed_paste_inserts_and_collapses() {
         let mut chat = chat_with_history("paste-real");
@@ -8532,13 +8535,13 @@ mod tests {
         chat.undo_edit();
         assert_eq!(chat.input, "ab", "一次粘贴 = 一步撤销");
 
-        // 短段不折叠（阈值以下）。
+        // Short chunks do not fold (below the threshold).
         let mut chat = chat_with_history("paste-short");
         chat.on_paste("line1\nline2");
         assert_eq!(chat.input, "line1\nline2");
         assert!(chat.pastes.is_empty(), "未到阈值不折叠");
 
-        // ≥ PASTE_COLLAPSE_LINES 行折叠；CR 与 CRLF 都算换行。
+        // ≥ PASTE_COLLAPSE_LINES lines fold; CR and CRLF both count as newlines.
         let mut chat = chat_with_history("paste-fold");
         let body: String = (0..PASTE_COLLAPSE_LINES)
             .map(|i| format!("line{i}\r"))
@@ -8556,14 +8559,14 @@ mod tests {
         );
         assert!(!chat.expand_pastes(&chat.input).contains('\r'), "CR 已归一");
 
-        // 空粘贴什么也不做（不写撤销栈）。
+        // An empty paste does nothing (no undo-stack write).
         let mut chat = chat_with_history("paste-empty");
         chat.on_paste("");
         assert!(chat.input.is_empty());
         assert!(chat.undo.is_empty());
     }
 
-    /// 生成一张测试 PNG，返回路径。
+    /// Generates a test PNG and returns its path.
     fn test_png_path(dir: &std::path::Path, name: &str, w: u32, h: u32) -> std::path::PathBuf {
         let path = dir.join(name);
         let img = image::RgbaImage::from_pixel(w, h, image::Rgba([255u8, 0, 0, 255]));
@@ -8576,7 +8579,7 @@ mod tests {
         path
     }
 
-    /// 提交时独立成行的图片路径 → 注册附件 + `#[image N]` 占位（文本保留）。
+    /// A standalone image path line at submit time → register the attachment + `#[image N]` placeholder (text kept).
     #[test]
     fn image_path_line_becomes_marker_on_submit() {
         let mut chat = chat_with_history("img-path");
@@ -8584,7 +8587,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let png = test_png_path(&dir, "a.png", 8, 8);
         chat.set_input(&format!("看一下这张图\n{}", png.display()));
-        chat.busy = true; // 走排队路径：不需要 tokio runtime
+        chat.busy = true; // queueing path: no tokio runtime needed
         chat.submit();
         assert_eq!(chat.queued.len(), 1);
         assert_eq!(
@@ -8598,7 +8601,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `![alt](path)` 整行同样识别；非图片路径/不存在的文件原样保留。
+    /// A whole `![alt](path)` line is recognized too; non-image paths/missing files stay as-is.
     #[test]
     fn markdown_image_syntax_and_non_image_lines() {
         let mut chat = chat_with_history("img-md");
@@ -8615,7 +8618,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// resolve_images：按占位序号取附件（去重、越界忽略）。
+    /// resolve_images: picks attachments by placeholder number (deduped, out-of-range ignored).
     #[test]
     fn resolve_images_extracts_attachments_in_order() {
         let mut chat = chat_with_history("img-resolve");
@@ -8633,8 +8636,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ctrl+r 反向搜索：过滤命中、再按取更旧、Tab 采纳继续编辑、
-    /// ctrl+c 取消还原。
+    /// ctrl+r reverse search: filter hits, press again for older, Tab adopts and keeps editing,
+    /// ctrl+c cancels and restores.
     #[test]
     fn reverse_search_walks_history() {
         let mut chat = chat_with_history("search");
@@ -8655,13 +8658,13 @@ mod tests {
             chat.search.as_ref().and_then(|s| s.hit.clone()).as_deref(),
             Some("cargo test")
         );
-        // 搜索态的输入行显示命中。
+        // In search mode, the input row shows the hit.
         assert_eq!(chat.prompt_lines()[0].plain_text(), "cargo test");
         press(&mut chat, KeyCode::Tab);
         assert!(chat.search.is_none(), "Tab 采纳并退出搜索");
         assert_eq!(chat.input, "cargo test");
 
-        // ctrl+c 取消：输入还原为搜索前的内容。
+        // ctrl+c cancels: the input restores to its pre-search content.
         chat.set_input("keep");
         ctrl(&mut chat, 'r');
         ctrl(&mut chat, 'c');
@@ -8670,7 +8673,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&chat.session.home);
     }
 
-    /// Alt+T 思考开关：off ↔ 上一次的等级。
+    /// Alt+T thinking toggle: off ↔ the previous level.
     #[test]
     fn alt_t_toggles_thinking() {
         let mut chat = chat_with_history("think");
@@ -8685,7 +8688,7 @@ mod tests {
         );
     }
 
-    /// 任务区（CC 字形）：`☐`/`☒`，已完成项弱化 + 删除线语义。
+    /// Task area (CC glyphs): `☐`/`☒`, completed items dimmed + strikethrough semantics.
     #[test]
     fn task_lines_use_checkbox_glyphs() {
         let mut chat = chat_with_history("todo");
@@ -8711,7 +8714,7 @@ mod tests {
         assert_eq!(done_text.style.fg, Some(chat.theme.inactive), "并弱化呈现");
     }
 
-    /// 空输入的占位提示（CC placeholder），有输入即消失。
+    /// Empty-input placeholder hint (CC placeholder); gone once there is input.
     #[test]
     fn empty_prompt_shows_placeholder() {
         let mut chat = chat_with_history("placeholder");
@@ -8728,7 +8731,7 @@ mod tests {
         assert_eq!(text, "x▋", "有输入即无占位");
     }
 
-    /// 4×2 纯色 PNG（测试用）。
+    /// A 4×2 solid-color PNG (for tests).
     fn tiny_png() -> Vec<u8> {
         let img = image::RgbaImage::from_pixel(4, 2, image::Rgba([255u8, 0, 0, 255]));
         let mut out = Vec::new();
@@ -8738,11 +8741,11 @@ mod tests {
         out
     }
 
-    // ---- #18 呈现层最小实现：错误行高亮 + 整屏态 + 重试/返回 ----
+    // ---- #18 presentation-layer minimal implementation: error-row highlight + full-screen state + retry/back ----
 
-    /// #18 全流程级整屏错误态：注入 Full 级 fixture → `last_error` 记录 →
-    /// `Frame::assemble` 出整屏错误行（标题/稳定码/动作）→ Esc 返回清错误态
-    /// （AC-26/53 返回路径非死路）。
+    /// #18 full-flow full-screen error state: inject a Full-level fixture → `last_error` recorded →
+    /// `Frame::assemble` produces the full-screen error rows (title/stable code/actions) → Esc returns and clears the error state
+    /// (AC-26/53: the way back is not a dead end).
     #[test]
     fn full_error_shows_full_screen_and_esc_returns() {
         use crate::error::ErrorLevel;
@@ -8771,13 +8774,13 @@ mod tests {
         assert!(joined.contains("code=AUTH_REQUIRED"), "稳定码可见: {joined}");
         assert!(joined.contains("重试"), "首要动作提示: {joined}");
         assert!(frame.cursor.is_none(), "整屏态输入光标隐藏");
-        // Esc 返回：非死路。
+        // Esc returns: not a dead end.
         chat.on_key(KeyCode::Esc, KeyModifiers::empty());
         assert!(chat.last_error.is_none(), "Esc 返回清除错误态");
     }
 
-    /// #18 页面级错误行高亮：注入 Page 级 fixture → `[error]` 行叠加 error 色
-    /// （A 区，theme.error = (255,107,128) 样色基线）。
+    /// #18 page-level error-row highlight: inject a Page-level fixture → the `[error]` row uses the error color
+    /// (A zone; theme.error = (255,107,128) color baseline).
     #[test]
     fn page_error_row_is_highlighted_with_error_color() {
         use crate::error::ErrorLevel;
@@ -8813,7 +8816,7 @@ mod tests {
         );
     }
 
-    /// #18 整屏态 Enter 重试最近输入（AC-15/53 重试路径骨架）。
+    /// #18 full-screen state: Enter retries the last input (AC-15/53 retry-path skeleton).
     #[tokio::test]
     async fn full_error_enter_retries_last_prompt() {
         use crate::error::ErrorLevel;
@@ -8836,11 +8839,11 @@ mod tests {
         assert!(chat.busy, "Enter 重试启动新回合");
     }
 
-    // ---- qa 断言侧（交付 3/3）：AC-53 / AC-29 / 呈现层样式 ----
+    // ---- QA assertion side (delivery 3/3): AC-53 / AC-29 / presentation styling ----
 
-    /// AC-53 长回合失败升级：FX-11（TIMEOUT + LongTurn）→ 全流程级整屏态，
-    /// 与 FX-01（TIMEOUT + ShortSync，页面级）**同码不同级**，由 context 区分。
-    /// 整屏态含稳定码 + 重试/返回路径（AC-53 F3），光标隐藏。
+    /// AC-53 long-turn failure escalates: FX-11 (TIMEOUT + LongTurn) → full-flow full-screen state,
+    /// versus FX-01 (TIMEOUT + ShortSync, page-level): **same code, different level**, distinguished by context.
+    /// The full-screen state shows the stable code + retry/back paths (AC-53 F3) and hides the caret.
     #[test]
     fn qa_ac53_long_turn_timeout_escalates_to_full_screen() {
         use crate::error::ErrorContext;
@@ -8848,7 +8851,7 @@ mod tests {
         use crate::tui::app::Frame;
         use crate::tui::test_util::error_fixtures;
         use ratatui::layout::Size;
-        // 长回合传输层超时 → 全流程级。
+        // Long-turn transport timeout → full-flow level.
         let mut chat = test_chat();
         let fx = error_fixtures()
             .into_iter()
@@ -8872,7 +8875,7 @@ mod tests {
             "AC-53 含「可重试或返回」路径: {joined}"
         );
         assert!(frame.cursor.is_none(), "整屏态输入光标隐藏");
-        // 同码短同步（FX-01）→ 页面级错误行，非整屏态——TIMEOUT 双级别由上下文区分。
+        // Same code, short sync (FX-01) → page-level error row, not full-screen — the two TIMEOUT levels are told apart by context.
         let mut short = test_chat();
         let fx_short = error_fixtures()
             .into_iter()
@@ -8894,9 +8897,9 @@ mod tests {
         assert!(!joined_short.contains("出错了"), "短同步不整屏: {joined_short}");
     }
 
-    /// AC-29 逐码矩阵：error_fixtures() 全部 11 个 fixture 注入，断言
-    /// 「级别由生产者显式携带 + 渲染形态与 level 匹配」——Full → 整屏态，
-    /// Page/Field → 错误行。断言锚 = 稳定码，不匹配 msg 文案。
+    /// AC-29 per-code matrix: inject all 11 fixtures from error_fixtures(), asserting that
+    /// "the level is carried explicitly by the producer and the render shape matches it" — Full → full screen,
+    /// Page/Field → error row. The assertion anchor is the stable code, never the msg text.
     #[test]
     fn qa_ac29_fixture_matrix_renders_by_level() {
         use crate::error::ErrorLevel;
@@ -8943,9 +8946,9 @@ mod tests {
         }
     }
 
-    /// 呈现层样式（A 区）：页面级错误行经 `render_rows` 渲染到 Buffer 后，
-    /// **真实 cell 用 error 色 (255,107,128)**（非仅 SegStyle 层）——断言
-    /// 「用户看到的高亮」落在最终画面，样式与文本双锚。
+    /// Presentation styling (A zone): after the page-level error row renders into the Buffer via `render_rows`,
+    /// **the real cells use the error color (255,107,128)** (not just at the SegStyle layer) — asserting that
+    /// the "highlight the user sees" lands on the final picture, anchored in both style and text.
     #[test]
     fn qa_page_error_row_paints_error_color_in_buffer() {
         use crate::error::ErrorContext;
@@ -8970,7 +8973,7 @@ mod tests {
             (0..buf.area.width).any(|x| buf[(x, y)].fg == err_color)
         });
         assert!(has_err_color, "错误行真实渲染 error 色 (255,107,128) 到 cell");
-        // 文本锚（断言只锚 code）。
+        // Text anchor (assertions only anchor on the code).
         let joined: String = frame
             .rows
             .iter()
@@ -8983,11 +8986,11 @@ mod tests {
         );
     }
 
-    /// FX-01 **真实路径**断言（main #91 / dev #92 邀请）：`/model` 二级菜单
-    /// 拉取（`open_model_models` 生产发射源）在 list_models 读超时（10s）时
-    /// 发射 `UiEvent::Error { level: Page, context: ShortSync }`——不经 fixture
-    /// 注入，验证**生产触发源**接线（AC-12/13/14 页面级契约有真实落点）。
-    /// 降级行为保留：错误行可见、非整屏态、不阻断。
+    /// FX-01 **real-path** assertion (main #91 / dev #92 invite): the `/model` level-two menu
+    /// fetch (`open_model_models`, the production emission source) emits
+    /// `UiEvent::Error { level: Page, context: ShortSync }` when list_models times out (10s) — no fixture
+    /// injection, verifying the **production trigger source** wiring (AC-12/13/14 page-level contracts have a real landing).
+    /// Degraded behavior is preserved: the error row is visible, non-full-screen, non-blocking.
     #[tokio::test(start_paused = true)]
     async fn qa_fx01_real_path_model_menu_failure_emits_page_error() {
         use crate::api::client::test_hooks;
@@ -8995,20 +8998,20 @@ mod tests {
         use crate::error::ErrorLevel;
         use crate::tui::app::Frame;
         use ratatui::layout::Size;
-        let _guard = test_hooks::hang_guard(60_000); // list_models 挂起 60s，> 读档 10s
+        let _guard = test_hooks::hang_guard(60_000); // hangs list_models for 60s, > the 10s read timeout
         let mut chat = test_chat();
-        chat.open_model_models("test".into()); // 触发真实生产拉取路径（fork provider）
-        // 先让 spawn 任务启动并注册超时 timer（start_paused 下需 poll 才推进）。
+        chat.open_model_models("test".into()); // triggers the real production fetch path (fork provider)
+        // Let the spawned task start and register its timeout timer first (with start_paused, only polling advances).
         tokio::task::yield_now().await;
-        // 读档 10s 超时到点 → 发射 UiEvent::Error（页面级）。
+        // The 10s read timeout fires → emits UiEvent::Error (page-level).
         tokio::time::advance(std::time::Duration::from_secs(11)).await;
-        tokio::task::yield_now().await; // 让 spawn 任务完成事件发送
+        tokio::task::yield_now().await; // let the spawned task finish sending the event
         chat.drain_events();
         let err = chat.last_error.as_ref().expect("生产发射源已记录错误态");
         assert_eq!(err.code, "TIMEOUT", "list_models 读超时落 TIMEOUT");
         assert_eq!(err.level, ErrorLevel::Page, "短同步=页面级（真实路径）");
         assert_eq!(err.context, ErrorContext::ShortSync, "上下文=短同步");
-        // 渲染：页面级错误行可见，非整屏态（降级行为保留）。
+        // Render: the page-level error row is visible, non-full-screen (degraded behavior preserved).
         let frame = Frame::assemble(&chat, Size::new(80, 24));
         let joined: String = frame
             .rows

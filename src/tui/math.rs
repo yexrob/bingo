@@ -1,4 +1,4 @@
-//! LaTeX math → Unicode 文本转换（从 rsmarkdown-tui 移植）。
+//! LaTeX math → Unicode text conversion (ported from rsmarkdown-tui).
 //!
 //! Renders the common math subset as Unicode glyphs (∫ ∑ √ Greek letters,
 //! sub/superscripts), the approach used by terminal markdown viewers like

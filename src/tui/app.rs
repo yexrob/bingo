@@ -51,17 +51,17 @@ use crate::tui::term::{HistoryItem, StdoutTerm};
 use crate::tui::theme::Theme;
 use crate::tui::view;
 
-/// 每帧 tick 间隔（spinner/thinking 计时）。
+/// Per-frame tick interval (spinner/thinking timing).
 const TICK_MS: u64 = 33;
-/// 任务列表磁盘快照刷新间隔（tick 数）。
+/// Disk-snapshot refresh interval for the task list (in ticks).
 const TASKS_REFRESH_TICKS: u64 = 15;
 /// Rows scrolled per mouse wheel notch (fullscreen only).
 const WHEEL_ROWS: usize = 3;
-/// 拖拽 resize 是事件风暴：静默这么久才应用新尺寸并重画。风暴中以旧宽
-/// 作画只会往屏上叠更多错宽行（终端 reflow 会把它们折成残片）。
+/// Drag-resizing is an event storm: stay quiet this long before applying the new size and repainting. Painting at
+/// the old width during the storm only piles more mis-width rows on screen (terminal reflow folds them into shards).
 const RESIZE_QUIET_MS: u64 = 120;
 
-/// 全屏宿主：现成的 ratatui Terminal。
+/// Fullscreen host: the ready-made ratatui Terminal.
 pub type FullscreenHost = Terminal<CrosstermBackend<Stdout>>;
 
 /// The chrome block plus the offset of the first input row inside it (the
@@ -77,9 +77,9 @@ pub struct Frame {
     pub cursor: Option<(u16, u16)>,
 }
 
-/// inline 尾部窗口：返回 (起始行, 被省略的行数)。预算是终端高度减去
-/// chrome 与两行余量——视口顶端之上恒有 ≥2 行屏幕，落盘用的 DECSTBM
-/// 滚动区域（要求至少两行）才永远合法（与 term.rs 的视口上限同源）。
+/// Inline tail window: returns (start row, hidden row count). The budget is the terminal height minus
+/// chrome and a two-row margin — at least 2 screen rows always remain above the viewport top, so the DECSTBM
+/// scroll region (which needs two rows) is always legal (same origin as term.rs's viewport cap).
 fn tail_window(total: usize, tail_start: usize, chrome: usize, height: usize) -> (usize, usize) {
     let start = tail_start.min(total);
     let budget = height.saturating_sub(chrome).saturating_sub(2);
@@ -90,7 +90,7 @@ fn tail_window(total: usize, tail_start: usize, chrome: usize, height: usize) ->
     if len <= budget {
         return (start, 0);
     }
-    // 省略提示自己占一行。
+    // The omission hint takes a row of its own.
     let visible = budget - 1;
     (total - visible, len - visible)
 }
@@ -103,8 +103,8 @@ fn dim_row(text: impl Into<String>, theme: &Theme) -> Row {
     ))
 }
 
-/// 运行状态行（ActivityIndicator）：
-/// `✻ {动词}… (esc to interrupt · {N}s · ↓ {tokens} tokens)`。
+/// Running status row (ActivityIndicator):
+/// `✻ {verb}… (esc to interrupt · {N}s · ↓ {tokens} tokens)`.
 fn status_row(status: &crate::tui::chat::RunningStatus, spinner: char, theme: &Theme) -> Row {
     let mut meta = format!(
         "(esc to interrupt · {}s",
@@ -122,7 +122,7 @@ fn status_row(status: &crate::tui::chat::RunningStatus, spinner: char, theme: &T
     Row::new(line)
 }
 
-/// 权限模式徽标（`⏸ plan mode on`）+ 其后的 `·` 分隔符。
+/// Permission-mode badge (`⏸ plan mode on`) + the `·` separator after it.
 fn mode_badge(mode: PermissionMode, theme: &Theme) -> Vec<(String, Color)> {
     let (symbol, label, color) = match mode {
         PermissionMode::Default => return Vec::new(),
@@ -137,7 +137,7 @@ fn mode_badge(mode: PermissionMode, theme: &Theme) -> Vec<(String, Color)> {
     ]
 }
 
-/// footer：模式徽标 + 快捷键 byline（左），模型名（右）。
+/// Footer: mode badge + shortcut byline (left), model name (right).
 fn footer_row(chat: &Chat, width: usize) -> Row {
     let theme = &chat.theme;
     let hints = if chat.busy {
@@ -168,7 +168,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
         used += text_width(text);
         line.push_styled(text.clone(), SegStyle::fg(*color));
     }
-    // 右侧模型名右对齐（右侧同样留 2 列）。
+    // Right-align the model name (also leaving 2 columns on the right).
     let gap = width
         .saturating_sub(used + text_width(&model) + 2)
         .max(1);
@@ -177,8 +177,8 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     Row::new(line)
 }
 
-/// 建议区：slash 建议优先，其次 `/model` 菜单，再次 `/think` 菜单。
-/// 行数与内容同源——二者曾经分家，chrome 因此低估、canvas 越界。
+/// Suggestion area: slash suggestions first, then the `/model` menu, then the `/think` menu.
+/// Row count and content share one source — they were once separate, causing chrome to underestimate and the canvas to overflow.
 fn suggestion_rows(
     slash: &[SlashSuggestion],
     slash_selected: usize,
@@ -197,7 +197,7 @@ fn suggestion_rows(
     };
     if slash.is_empty() {
         let Some(menu) = menu else {
-            // `/think` 等级选择器（模型菜单未激活时）。
+            // `/think` level selector (when the model menu is inactive).
             let Some(think) = think else {
                 return Vec::new();
             };
@@ -222,8 +222,8 @@ fn suggestion_rows(
                 })
                 .collect();
         };
-        // `/model` 二级选择器：一级 `provider`，二级 `model`
-        //（loading / 空列表各占一行提示）。
+        // `/model` two-level selector: level one `provider`, level two `model`
+        // (loading / empty list each take one hint row).
         let items: Vec<(String, bool)> = match &menu.models {
             Some(m) if m.loading => vec![("… 拉取模型列表".to_string(), true)],
             Some(m) if m.models.is_empty() => {
@@ -260,7 +260,7 @@ fn suggestion_rows(
         .max()
         .unwrap_or(0)
         + 2;
-    // 可用描述宽度 = 终端宽 - padding(2) - "❯ "(2) - 名称列 - 分隔(2)。
+    // Available description width = terminal width - padding(2) - "❯ "(2) - name column - separator(2).
     let desc_width = width.saturating_sub(2 + 2 + name_col + 2).max(8);
     slash
         .iter()
@@ -278,7 +278,7 @@ fn suggestion_rows(
         .collect()
 }
 
-/// 输入框（上边框 + 输入行 + 下边框）。
+/// Input box (top border + input rows + bottom border).
 fn prompt_rows(chat: &Chat, width: usize) -> Vec<Row> {
     let theme = &chat.theme;
     let border_color = if chat.bash_mode {
@@ -314,8 +314,8 @@ fn prompt_rows(chat: &Chat, width: usize) -> Vec<Row> {
     rows
 }
 
-/// 输入框内的光标位置（行内偏移, 列）——与 [`Chat::prompt_lines`] 画 `▋`
-/// 的位置同源。
+/// Caret position inside the input box (row offset, column) — same source as where
+/// [`Chat::prompt_lines`] draws `▋`.
 fn caret_cell(chat: &Chat) -> (usize, usize) {
     if let Some(search) = &chat.search {
         let hit = search.hit.clone().unwrap_or_default();
@@ -330,8 +330,8 @@ fn caret_cell(chat: &Chat) -> (usize, usize) {
     (row - start, col)
 }
 
-/// transcript 之外的每一行，自上而下。`fullscreen` 只改建议区的位置
-/// （全屏在输入框上方，inline 在下方，对齐 slash 输出）。
+/// Every row outside the transcript, top to bottom. `fullscreen` only moves the suggestion area
+/// (fullscreen: above the input; inline: below, aligned with slash output).
 fn chrome_rows(chat: &Chat, width: usize, fullscreen: bool) -> Chrome {
     let theme = chat.theme.clone();
     let mut rows: Vec<Row> = Vec::new();
@@ -355,7 +355,7 @@ fn chrome_rows(chat: &Chat, width: usize, fullscreen: bool) -> Chrome {
     for line in chat.help_lines() {
         rows.push(dim_row(line, &theme));
     }
-    // 底部实体区（agent 实例 + 频道；ctrl+g 聚焦选择）。
+    // Bottom entity area (agent instances + channels; ctrl+g focuses the selector).
     for line in chat.entity_rows(width) {
         rows.push(Row::new(line));
     }
@@ -395,9 +395,9 @@ fn chrome_rows(chat: &Chat, width: usize, fullscreen: bool) -> Chrome {
     Chrome { rows, prompt_row }
 }
 
-/// #18 全流程级整屏错误态骨架（AC-26/53，ui/ux #68 规格）：错误标题 +
-/// 稳定码 + 说明（发生了什么+能做什么）+ 首要动作（重试/返回）+ 退出提示。
-/// 动作绑定在按键层（chat.rs：整屏态 Enter=重试、Esc=返回），本函数只画。
+/// #18 full-flow full-screen error-state skeleton (AC-26/53, ui/ux #68 spec): error title +
+/// stable code + description (what happened + what you can do) + primary action (retry/back) + exit hint.
+/// Actions are bound at the key layer (chat.rs: Enter=retry, Esc=back on the full-screen state); this function only draws.
 fn error_screen_rows(err: &crate::tui::chat::ErrorState, theme: &Theme) -> Vec<Row> {
     let mut rows = Vec::new();
     rows.push(Row::new(Line::styled(
@@ -418,10 +418,10 @@ fn error_screen_rows(err: &crate::tui::chat::ErrorState, theme: &Theme) -> Vec<R
 }
 
 impl Frame {
-    /// inline 帧：动态尾部（超预算时只留末尾若干行 + 省略提示）+ chrome。
-    /// 行数即视口高度，故恒 ≤ 终端高度 - 2（DECSTBM 区域恒合法）。
-    /// #18：全流程级错误态（`last_error.level == Full`）覆盖内容区为整屏错误，
-    /// 输入光标隐藏（用户处于错误屏，首要动作由按键层处理）。
+    /// Inline frame: dynamic tail (over budget → keep only the last rows + the omission hint) + chrome.
+    /// The row count is the viewport height, so it is always ≤ terminal height - 2 (the DECSTBM region stays legal).
+    /// #18: the full-flow error state (`last_error.level == Full`) covers the content area with a full-screen error,
+    /// and the input caret is hidden (the user is on the error screen; the key layer handles primary actions).
     pub fn assemble(chat: &Chat, size: Size) -> Self {
         if let Some(err) = &chat.last_error
             && err.level == crate::error::ErrorLevel::Full
@@ -446,8 +446,8 @@ impl Frame {
         }
         rows.extend(chat.doc.rows[tail_start..].iter().cloned());
         let tail_len = rows.len();
-        // #18 错误行（Page/Field 级别）：从结构化 `last_error` 生成，error 色
-        // 高亮（A 区），追加在内容区末尾——不依赖 doc 重建、无双显。
+        // #18 error row (Page/Field levels): generated from the structured `last_error`, highlighted in the error
+        // color (A zone), appended at the end of the content area — no doc rebuild, no double display.
         if let Some(err) = &chat.last_error
             && err.level != crate::error::ErrorLevel::Full
         {
@@ -458,10 +458,10 @@ impl Frame {
         }
         rows.extend(chrome.rows);
 
-        // 最后一道保险：chrome 本身也可能超过预算（很矮的终端），
-        // 此时丢最上面的行——输入框与 footer 是必须留住的那部分。
-        // 预算 = 高度 − 2：与 term.rs 的视口上限一致（顶上留两行，
-        // DECSTBM 滚动区域恒合法）。
+        // Last line of defense: chrome itself can exceed the budget (very short terminals),
+        // in which case drop the top rows — the input box and footer are the part that must stay.
+        // Budget = height − 2: same as term.rs's viewport cap (two rows left on top,
+        // so the DECSTBM scroll region is always legal).
         let budget = height.saturating_sub(2).max(1);
         let dropped = rows.len().saturating_sub(budget);
         if dropped > 0 {
@@ -479,7 +479,7 @@ impl Frame {
     }
 }
 
-/// 光标格：帧顶部被裁掉 `dropped` 行之后仍落在画面里才显示。
+/// Caret cell: shown only if it still lands on screen after the frame top dropped `dropped` rows.
 fn caret_position(
     row: usize,
     col: usize,
@@ -494,8 +494,8 @@ fn caret_position(
     Some((u16::try_from(col).ok()?, u16::try_from(y).ok()?))
 }
 
-/// 新定稿的行 → scrollback 条目。图片块首行发真实 kitty 字节（传输 +
-/// 放置 + 光标推进），块内续行由该序列一并消费，故跳过。
+/// Newly settled rows → scrollback entries. The first row of an image block emits real kitty bytes (transfer +
+/// placement + cursor advance); the sequence consumes the continuation rows, so they are skipped.
 fn flush_items(chat: &Chat, width: usize, end: usize) -> Vec<HistoryItem> {
     let end = end.min(chat.doc.rows.len());
     if end <= chat.tail_start {
@@ -532,9 +532,9 @@ fn flush_items(chat: &Chat, width: usize, end: usize) -> Vec<HistoryItem> {
     items
 }
 
-/// 懒落盘选择：最远的一个「所属段起始行已越过窗口顶端」的定稿检查点。
-/// 窗口内完整可见的定稿段不冻结（保持可重排/可折叠）；跨越顶端的段
-/// 整段冻结——否则其隐藏部分既不在屏上也不在 scrollback，无处翻看。
+/// Lazy-flush pick: the furthest settled checkpoint whose segment's start row has crossed the window top.
+/// Fully visible settled segments stay unfrozen (kept re-layoutable/collapsible); a segment crossing the top
+/// freezes wholesale — otherwise its hidden part exists neither on screen nor in scrollback, with nowhere to look.
 fn pick_flush_mark(
     marks: &[SettledMark],
     tail_start: usize,
@@ -551,7 +551,7 @@ fn pick_flush_mark(
     chosen
 }
 
-/// 该行是否为图片块首行（块内续行返回 false；块边界按 url 识别）。
+/// Whether this row is an image block's first row (continuation rows return false; boundaries are detected by url).
 fn image_block_head(rows: &[Row], i: usize) -> bool {
     let Some(img) = &rows[i].line.image else {
         return false;
@@ -560,11 +560,11 @@ fn image_block_head(rows: &[Row], i: usize) -> bool {
         .is_none_or(|prev| prev.line.image.as_ref().map(|p| &p.url) != Some(&img.url))
 }
 
-/// 按键分发。inline 模式下 ctrl+o 是展开/闭合切换（CC 非全屏语义），
-/// 两个方向都不改已打印的 scrollback：展开 = 整卷重放冻结进 scrollback
-/// （终端上滑翻看）；闭合 = 折回聚合态后走 resize 同款收拢（清屏重画 +
-/// 回灌）。其余按键（含 Ctrl+C 的中断/清空/退出三态）全部交给
-/// [`Chat`]，退出由 `chat.exit` 表达。
+/// Key dispatch. In inline mode ctrl+o toggles expand/collapse (CC non-fullscreen semantics);
+/// neither direction touches the already-printed scrollback: expand = replay the whole transcript and freeze it
+/// into scrollback (readable by scrolling up); collapse = fold back to aggregates, then close up like resize (clear-redraw +
+/// rehydration). All other keys (including Ctrl+C's interrupt/clear/quit three states) go to
+/// [`Chat`]; quitting is expressed via `chat.exit`.
 fn dispatch_key(chat: &mut Chat, key: KeyEvent, inline: bool) {
     if key.kind == KeyEventKind::Release {
         return;
@@ -573,9 +573,9 @@ fn dispatch_key(chat: &mut Chat, key: KeyEvent, inline: bool) {
         if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if chat.transcript_fully_expanded() {
                 if chat.collapse_transcript() {
-                    // 撤销尚未渲染的重放（连按两次 = 净效果闭合），
-                    // 清可见屏、按折叠后的高度回灌重画——屏上的展开
-                    // 重放行只留在 scrollback。
+                    // Cancel the not-yet-rendered replay (pressing twice = net effect of collapse),
+                    // clear the visible screen and redraw by rehydrating to the collapsed height — the expanded
+                    // replay rows on screen stay only in scrollback.
                     chat.dump_transcript = false;
                     chat.force_redraw = true;
                     let chrome_len = chrome_rows(chat, chat.width, false).rows.len();
@@ -597,8 +597,8 @@ fn dispatch_key(chat: &mut Chat, key: KeyEvent, inline: bool) {
     chat.on_key(key.code, key.modifiers);
 }
 
-/// 文档重建（尺寸变化或状态脏）。viewport = 终端高度 - chrome 行数，
-/// 与实际组装同源。
+/// Document rebuild (on size change or dirty state). viewport = terminal height - chrome rows,
+/// from the same source as the actual assembly.
 fn rebuild(chat: &mut Chat, size: Size, fullscreen: bool) {
     let width = size.width as usize;
     let height = size.height as usize;
@@ -620,10 +620,10 @@ fn rebuild(chat: &mut Chat, size: Size, fullscreen: bool) {
     }
 }
 
-/// inline 宿主：定稿行一次性进 scrollback，只有底部视口重绘。
+/// Inline host: settled rows go into scrollback in one go; only the bottom viewport is repainted.
 ///
-/// 宿主类型写死在这里（而不是对 `Backend` 泛型）：驱动对后端的约束比
-/// `Backend` 更紧（它要能直接写字节），泛型化只会在集成时炸开。
+/// The host type is hard-coded here (instead of being generic over `Backend`): the driver's constraint on the backend
+/// is tighter than `Backend` (it must write raw bytes); generifying would only blow up at integration time.
 pub async fn run_inline(
     mut chat: Chat,
     mut expand_rx: tokio::sync::watch::Receiver<bool>,
@@ -649,7 +649,7 @@ pub async fn run_inline(
                     dirty = true;
                 }
                 Some(Ok(Event::Resize(width, height))) => {
-                    // 防抖：连发的 resize 只记录最新值，静默后统一应用。
+                    // Debounce: rapid resizes only record the latest value, applied once things quiet down.
                     pending_resize = Some((Size::new(width, height), Instant::now()));
                 }
                 Some(Ok(_)) => {}
@@ -665,11 +665,11 @@ pub async fn run_inline(
                     term.resize(size)?;
                     chat.width = size.width as usize;
                     chat.height = size.height as usize;
-                    // 终端 reflow 发生在 resize 事件到达之前，旧画面折行
-                    // 位移不可知（内容顶到屏底还会整屏上滚）——不猜几何：
-                    // 清可见屏、从头按新宽重画整个窗口（走 Ctrl+L 通道）。
-                    // 回灌把内容拉回填满屏幕，画面无损；旧几何拷贝留在
-                    // scrollback（接受上滑时看到重复）。
+                    // Terminal reflow happens before the resize event arrives; the old frame's wrapped rows
+                    // shift by an unknown amount (content can even scroll the whole screen) — do not guess geometry:
+                    // clear the visible screen and redraw the whole window at the new width (via the Ctrl+L path).
+                    // Rehydration pulls the content back to fill the screen losslessly; the old-geometry copies stay
+                    // in scrollback (accept duplicates when scrolling up).
                     chat.force_redraw = true;
                     let chrome_len =
                         chrome_rows(&chat, size.width as usize, false).rows.len();
@@ -685,14 +685,14 @@ pub async fn run_inline(
                     if chat.drain_all() {
                         ticks = 0;
                     }
-                    // 任务区不可见时不查磁盘。
+                    // Skip disk reads while the task area is hidden.
                     if ticks.is_multiple_of(TASKS_REFRESH_TICKS) && chat.tasks_visible {
                         chat.refresh_tasks();
                     }
                     ticks = ticks.wrapping_add(1);
                     dirty = true;
                 } else if !dirty {
-                    // 空闲：无动画、无待处理事件、无待绘制变更 → 零写入。
+                    // Idle: no animation, no pending events, no pending draw changes → zero writes.
                     continue;
                 }
             },
@@ -710,8 +710,8 @@ pub async fn run_inline(
             },
         }
 
-        // 实体视图（ctrl+g 选择回车）：交替屏模态接管，返回后经 resize
-        // 通道确定性重画（清屏 + 回灌，不猜交替屏恢复是否可靠）。
+        // Entity view (ctrl+g then Enter): the alternate-screen modal takes over; afterwards, a deterministic
+        // redraw goes through the resize channel (clear + rehydrate, without guessing whether alt-screen restore works).
         if let Some(open) = chat.open_entity.take() {
             crate::tui::entity::run_entity_modal(&mut chat, &mut events, open, false).await?;
             if let Ok((w, h)) = crossterm::terminal::size() {
@@ -723,8 +723,8 @@ pub async fn run_inline(
             dirty = true;
         }
 
-        // resize 风暴静默前不渲染（终端几何已变，旧宽的画面只添乱）；
-        // 事件照常处理，静默后一帧补齐。
+        // Do not render before the resize storm quiets down (the terminal geometry has changed; old-width
+        // frames only add noise); events are handled as usual and one frame catches up after the quiet.
         if pending_resize.is_some() {
             if chat.exit {
                 break;
@@ -732,7 +732,7 @@ pub async fn run_inline(
             continue;
         }
 
-        // 退出前仍画完这一帧：最后一屏留在终端里（inline 退出不清屏）。
+        // Finish the current frame before quitting: the last screen stays in the terminal (inline exit does not clear).
         if !dirty {
             if chat.exit {
                 break;
@@ -741,7 +741,7 @@ pub async fn run_inline(
         }
         dirty = false;
 
-        // ctrl+l：清屏重画（花屏恢复）。
+        // ctrl+l: clear and repaint (recover from a garbled screen).
         if chat.force_redraw {
             chat.force_redraw = false;
             term.clear_visible()?;
@@ -750,24 +750,24 @@ pub async fn run_inline(
         let size = term.size();
         rebuild(&mut chat, size, false);
 
-        // 懒落盘（与绘制合成 `term.frame` 单批次）：只冻结「起始行已越
-        // 过窗口顶端」的定稿段——窗口内完整可见的定稿段留在活文档里随
-        // 时可重排。视口收缩腾出的行进 gap 银行，冻结行随即写进这些行，
-        // settle 迁移不闪、不留空白带。游标按段推进——哪怕该段只有图片
-        // 续行（不产出条目），也必须推进，否则下一帧会重复画它。
+        // Lazy flush (composited with drawing into one `term.frame` batch): freeze only the settled segments
+        // whose start row has crossed the window top — fully visible settled segments stay in the live doc
+        // for re-layout at any time. Rows freed by a shrinking viewport go into the gap bank and frozen rows
+        // are written into them right away, so settling migrates without flicker or blank bands. The cursor
+        // advances per segment — even an image-only continuation segment (no items) must advance, or the next frame would redraw it.
         let mut items = Vec::new();
         if std::mem::take(&mut chat.dump_transcript) {
-            // ctrl+o 整卷重放：游标已回卷、文档已从欢迎卡全量重建（全部
-            // 展开），定稿部分一次冻结进 scrollback——用户上滑翻看全貌，
-            // 动态尾部照常留在视口。
+            // ctrl+o full replay: the cursor has rewound and the doc fully rebuilt from the welcome card (everything
+            // expanded); the settled part freezes into scrollback in one go — the user scrolls up to see it all,
+            // while the dynamic tail stays in the viewport as usual.
             if let Some(mark) = chat.doc.settled_marks.last().copied() {
                 items = flush_items(&chat, size.width as usize, mark.row_end);
                 chat.advance_flushed_upto(mark);
             }
         } else {
             let chrome_len = chrome_rows(&chat, size.width as usize, false).rows.len();
-            // 窗口按「持久内容」算：瞬态 slash 输出（TTL 后消失）把窗口
-            // 挤小不构成冻结活内容的理由——它只是暂时盖住，不是驱逐。
+            // The window counts "persistent content": transient slash output (gone after TTL) squeezing the window
+            // is no reason to freeze live content — it merely covers it temporarily, not evicts it.
             let persistent = chat
                 .doc
                 .rows
@@ -808,7 +808,7 @@ pub async fn run_inline(
     Ok(())
 }
 
-/// 全屏宿主：整篇文档 + app 内滚动 + 鼠标点击折叠，输入区吸底。
+/// Fullscreen host: the whole document + in-app scrolling + mouse-click folding, input area pinned to the bottom.
 pub async fn run_fullscreen(
     mut chat: Chat,
     mut expand_rx: tokio::sync::watch::Receiver<bool>,
@@ -873,7 +873,7 @@ pub async fn run_fullscreen(
             },
         }
 
-        // 实体视图：已在交替屏内，模态直接接管画布，返回后整屏重画。
+        // Entity view: already on the alternate screen, the modal takes over the canvas directly; full repaint after return.
         if let Some(open) = chat.open_entity.take() {
             crate::tui::entity::run_entity_modal(&mut chat, &mut events, open, true).await?;
             chat.force_redraw = true;
@@ -889,7 +889,7 @@ pub async fn run_fullscreen(
         }
         dirty = false;
 
-        // ctrl+l：整屏重画（花屏恢复）。
+        // ctrl+l: full repaint (recover from a garbled screen).
         if chat.force_redraw {
             chat.force_redraw = false;
             terminal.clear()?;
@@ -942,7 +942,7 @@ pub async fn run_fullscreen(
     Ok(())
 }
 
-/// 全屏鼠标：滚轮滚动、点击折叠/展开（点击行号 = 滚动位置 + 屏幕行）。
+/// Fullscreen mouse: wheel scrolls, clicks fold/expand (clicked row number = scroll position + screen row).
 fn mouse_event(chat: &mut Chat, mouse: MouseEvent) -> bool {
     match mouse.kind {
         MouseEventKind::ScrollUp => {
@@ -1036,18 +1036,18 @@ mod tests {
             assert!(frame < height, "height={height} frame={frame}");
             assert_eq!(hidden, total - visible, "省略数 = 未显示行数");
         }
-        // 预算为零（chrome + 两行余量占满）：尾部一行不画，省略数不计。
+        // Zero budget (chrome + two-row margin fill it): no tail row is drawn; the hidden count is zero.
         assert_eq!(tail_window(100, 0, 4, 6), (100, 0));
-        // 内容装得下时不省略，也不裁剪。
+        // When content fits, nothing is omitted or clipped.
         assert_eq!(tail_window(3, 0, 4, 40), (0, 0));
-        // 已落盘的前缀不在尾部窗口内。
+        // The flushed prefix is outside the tail window.
         assert_eq!(tail_window(3, 2, 4, 40), (2, 0));
-        // chrome 已占满：尾部为空（画不下就一行不画，仍不越界）。
+        // Chrome fills everything: the tail is empty (nothing is drawn if it does not fit; still never overflows).
         assert_eq!(tail_window(3, 0, 4, 4), (3, 0));
     }
 
-    /// 帧高度 = 组装出来的行数，且恒 < 终端高度：不再有第二套 chrome
-    /// 公式可以和实际组装对不上。
+    /// Frame height = the assembled row count, always < terminal height: no second chrome
+    /// formula can drift from the actual assembly.
     #[test]
     fn frame_height_never_reaches_terminal_height() {
         let mut chat = chat_at(80, 24);
@@ -1065,8 +1065,8 @@ mod tests {
         }
     }
 
-    /// 极矮终端：chrome 自己就超预算时保留底部（输入框 + footer），
-    /// 帧仍不越界。
+    /// Very short terminals: when chrome itself exceeds the budget, keep the bottom (input + footer);
+    /// the frame still never overflows.
     #[test]
     fn tiny_terminal_keeps_the_prompt_and_footer() {
         let mut chat = chat_at(60, 6);
@@ -1075,19 +1075,19 @@ mod tests {
         let frame = Frame::assemble(&chat, size(60, 6));
         assert_eq!(frame.rows.len(), 4, "height-2 上限");
         let text: Vec<String> = frame.rows.iter().map(row_text).collect();
-        // 丢的是最上面的行（状态行/警告行），输入框与 footer 留住。
+        // The dropped rows are the top ones (status/warning); the input and footer stay.
         assert!(text.last().is_some_and(|l| l.contains("ctrl+o to expand")), "{text:?}");
         assert!(text.iter().any(|l| l.starts_with('╰')), "输入框下边框仍在: {text:?}");
         assert!(text.iter().any(|l| l.starts_with('╭')), "输入框上边框仍在: {text:?}");
     }
 
-    /// chrome 的每一段都出现在组装结果里（旧 Chrome 结构的对表测试：
-    /// 现在计数就是组装本身，只需验证每段确实产出行）。
+    /// Every chrome section appears in the assembled result (a table-check test for the old Chrome structure:
+    /// now the count is the assembly itself, so just verify each section really produces rows).
     #[test]
     fn chrome_contains_every_section() {
         let mut chat = chat_at(100, 40);
         let base = chrome_rows(&chat, 100, false).rows.len();
-        // 空闲：输入框 3 行（两条边框 + 一行占位提示）+ footer 1 行。
+        // Idle: input 3 rows (two borders + one placeholder row) + footer 1 row.
         assert_eq!(base, 4);
 
         chat.busy = true;
@@ -1116,7 +1116,7 @@ mod tests {
             2,
             "输入框上下边框"
         );
-        // 每一段都算进行数：漏一段就是帧高度失真。
+        // Every section counts toward the row total: missing one means the frame height is wrong.
         assert_eq!(
             rows.len(),
             1 + chat.task_lines().len()
@@ -1140,8 +1140,8 @@ mod tests {
         );
     }
 
-    /// 建议区的行数与内容天然同源（旧版两套分支规则曾经对不上，
-    /// canvas 因此越界）。
+    /// The suggestion area's row count and content are naturally one source (the old two-branch rules once disagreed,
+    /// overflowing the canvas).
     #[test]
     fn suggestion_rows_cover_every_menu_state() {
         use crate::tui::chat::{ModelMenuModels, SlashSuggestion, THINK_LEVELS, ThinkMenu};
@@ -1153,7 +1153,7 @@ mod tests {
         };
         assert_eq!(suggestion_rows(&[], 0, None, None, &theme, 80).len(), 0);
         assert_eq!(suggestion_rows(&[], 0, Some(&menu), None, &theme, 80).len(), 2);
-        // loading / 空列表各占一行提示。
+        // Loading / empty list each take one hint row.
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
             models: Vec::new(),
@@ -1168,7 +1168,7 @@ mod tests {
             selected: 0,
         });
         assert_eq!(suggestion_rows(&[], 0, Some(&menu), None, &theme, 80).len(), 1);
-        // 二级模型列表按 5+5 上限截断。
+        // The level-two model list truncates at the 5+5 cap.
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
             models: (0..30).map(|i| format!("m{i}")).collect(),
@@ -1179,7 +1179,7 @@ mod tests {
             suggestion_rows(&[], 0, Some(&menu), None, &theme, 80).len(),
             crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5
         );
-        // `/think` 菜单：每档一行，选中行带 ❯ 标记；模型菜单优先。
+        // `/think` menu: one row per level, the selected row carries ❯; the model menu takes priority.
         let think = ThinkMenu { selected: 1 };
         let think_rows = suggestion_rows(&[], 0, None, Some(&think), &theme, 80);
         assert_eq!(think_rows.len(), THINK_LEVELS.len());
@@ -1193,7 +1193,7 @@ mod tests {
             crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5,
             "模型菜单优先于 think 菜单"
         );
-        // slash 建议优先于菜单。
+        // Slash suggestions take priority over menus.
         let slash = vec![SlashSuggestion {
             name: "help".into(),
             description: "显示可用命令".into(),
@@ -1201,7 +1201,7 @@ mod tests {
         let rows = suggestion_rows(&slash, 0, Some(&menu), None, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(row_text(&rows[0]).starts_with("❯ /help"), "{}", row_text(&rows[0]));
-        // 每行都按宽度截断（超宽行会被终端折行，帧高度随即失真）。
+        // Every row truncates by width (overwide rows would be wrapped by the terminal, skewing the frame height).
         for width in 10..80usize {
             for row in suggestion_rows(&slash, 0, Some(&menu), None, &theme, width) {
                 assert!(text_width(&row_text(&row)) <= width, "width={width}");
@@ -1212,7 +1212,7 @@ mod tests {
         }
     }
 
-    /// 状态行文案（CC ActivityIndicator）。
+    /// Status-row copy (CC ActivityIndicator).
     #[test]
     fn status_row_renders_busy_verb() {
         let theme = Theme::dark();
@@ -1237,7 +1237,7 @@ mod tests {
         );
     }
 
-    /// footer：徽标 + 提示（左）、模型名（右），bash 模式多一条 shell 提示。
+    /// Footer: badge + hints (left), model name (right); bash mode adds a shell hint.
     #[test]
     fn footer_shows_hints_and_model() {
         let mut chat = chat_at(80, 24);
@@ -1245,7 +1245,7 @@ mod tests {
         assert!(text.contains("? for shortcuts · ctrl+o to expand"), "{text}");
         assert!(text.contains("test-model"), "{text}");
         assert!(!text.contains("plan mode"), "default 模式无徽标: {text}");
-        // 左右各留 2 列（CC footer padding）：模型名右端落在 width-2。
+        // 2 columns of padding on each side (CC footer padding): the model name's right edge lands at width-2.
         assert_eq!(text_width(&text), 78, "模型名右对齐到 width-2");
 
         chat.busy = true;
@@ -1261,7 +1261,7 @@ mod tests {
         assert!(text.contains("! for shell mode"), "{text}");
     }
 
-    /// 输入框：前缀 + `▋` 假光标，真实光标落在同一格。
+    /// Input box: prefix + `▋` fake caret; the real caret lands on the same cell.
     #[test]
     fn prompt_rows_and_caret_agree() {
         let mut chat = chat_at(80, 24);
@@ -1275,7 +1275,7 @@ mod tests {
         assert_eq!(caret_cell(&chat), (0, 0));
         assert!(row_text(&prompt_rows(&chat, 80)[1]).starts_with("❯ ▋"));
 
-        // 多行输入：光标行随输入行走。
+        // Multi-line input: the caret row follows the input row.
         chat.set_input("a\nb\nc");
         let rows = prompt_rows(&chat, 80);
         assert_eq!(rows.len(), 5);
@@ -1285,7 +1285,7 @@ mod tests {
         chat.set_input("ls");
         let rows = prompt_rows(&chat, 80);
         assert_eq!(row_text(&rows[1]), "! ls▋");
-        // bash 模式换边框色（CC bashBorder）。
+        // bash mode swaps the border color (CC bashBorder).
         assert_eq!(
             rows[0].line.segs[0].style.fg,
             Some(chat.theme.bash_border),
@@ -1293,7 +1293,7 @@ mod tests {
         );
     }
 
-    /// 帧里的光标落在输入行的 `▋` 上（组装位移之后仍然对齐）。
+    /// The frame caret lands on the input row's `▋` (still aligned after the assembly offsets).
     #[test]
     fn frame_cursor_points_at_the_caret() {
         let mut chat = chat_at(80, 24);
@@ -1306,7 +1306,7 @@ mod tests {
         assert_eq!(row, "❯ hello▋");
     }
 
-    /// 落盘：定稿前缀转成 scrollback 条目，气泡行补满终端宽。
+    /// Flushing: the settled prefix becomes scrollback entries; bubble rows fill the terminal width.
     #[test]
     fn flush_items_convert_settled_rows() {
         let mut chat = chat_at(40, 24);
@@ -1328,7 +1328,7 @@ mod tests {
         assert_eq!(text_width(&history_text(bubble)), 40, "气泡满行");
     }
 
-    /// 图片块：首行发字节（占 rows 行），续行跳过；无能力时退回占位文本。
+    /// Image blocks: the head emits bytes (occupying rows rows), continuations are skipped; without capability, fall back to the placeholder text.
     #[test]
     fn flush_items_emit_one_payload_per_image_block() {
         let mut chat = chat_at(40, 24);
@@ -1343,7 +1343,7 @@ mod tests {
             Row::new(img("b.png")),
         ];
         chat.doc.settled = 4;
-        // 无能力/无缓存：块首行退回 `#[image]` 占位，续行不出行。
+        // No capability/cache: the block head falls back to the `#[image]` placeholder; continuations emit nothing.
         let items = flush_items(&chat, 40, chat.doc.settled);
         assert_eq!(items.len(), 3);
         let HistoryItem::Line(head) = &items[0] else {
@@ -1351,7 +1351,7 @@ mod tests {
         };
         assert_eq!(history_text(head), view::IMAGE_PLACEHOLDER);
 
-        // 有能力 + 已加载：一块一份字节，行数 = 图片行数。
+        // Capable + loaded: one payload per block, row count = image row count.
         chat.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
         chat.images.insert(
             "a.png".into(),
@@ -1372,7 +1372,7 @@ mod tests {
         }
     }
 
-    /// 块首/续行判定（图片块只发一次字节）。
+    /// Block head/continuation detection (an image block emits bytes exactly once).
     #[test]
     fn image_block_head_detects_block_boundaries() {
         let img = |url: &str| Line {
@@ -1395,7 +1395,7 @@ mod tests {
         assert!(!image_block_head(&rows, 5), "新块续行");
     }
 
-    /// inline 的核心不变量：定稿内容落盘一次，之后视口里只剩尾部 + chrome。
+    /// The core inline invariant: settled content flushes once; afterwards the viewport holds only the tail + chrome.
     #[test]
     fn flushed_rows_leave_the_viewport() {
         let mut chat = chat_at(80, 24);
@@ -1430,7 +1430,7 @@ mod tests {
         assert!(text.iter().any(|l| l.contains("? for shortcuts")), "chrome 仍在");
     }
 
-    /// 落盘游标按消息段计：宽度变化让行号全变，也不会重复打印。
+    /// The flush cursor counts by message segment: width changes alter every row number without reprinting.
     #[test]
     fn flush_cursor_survives_a_width_change() {
         let mut chat = chat_at(80, 24);
@@ -1447,12 +1447,12 @@ mod tests {
         let first = flush_items(&chat, 80, chat.doc.settled);
         assert!(!first.is_empty(), "首轮落盘欢迎卡 + 消息");
         chat.advance_flushed();
-        // 同宽度再来一轮：没有新定稿内容 → 零条目。
+        // Another round at the same width: no new settled content → zero items.
         assert!(
             flush_items(&chat, 80, chat.doc.settled).is_empty(),
             "不重复落盘"
         );
-        // 变窄重建：段游标不变，仍然没有新内容要落盘。
+        // Narrower rebuild: the segment cursor is unchanged, so still nothing new to flush.
         chat.dirty = true;
         rebuild(&mut chat, size(40, 24), false);
         assert!(
@@ -1461,27 +1461,27 @@ mod tests {
         );
     }
 
-    /// inline 的 ctrl+o：整卷重放——落盘游标回卷 + 置重放标志，重放帧
-    /// 把全部定稿段冻结进 scrollback，视口只剩动态尾部与 chrome。
+    /// Inline ctrl+o: full replay — the flush cursor rewinds + the replay flag is set; the replay frame
+    /// freezes every settled segment into scrollback, leaving only the dynamic tail and chrome in the viewport.
     #[test]
     fn ctrl_o_replays_the_full_transcript_inline() {
         let mut chat = chat_at(80, 24);
         let key = |code, modifiers| KeyEvent::new(code, modifiers);
-        // 空会话且全部在屏 → no-op：不插字符、不重放。
+        // Empty session, everything on screen → no-op: no characters inserted, no replay.
         chat.set_input("hi");
         dispatch_key(&mut chat, key(KeyCode::Char('o'), KeyModifiers::CONTROL), true);
         assert_eq!(chat.input, "hi", "ctrl+o 未插入字符");
         assert!(!chat.dump_transcript, "屏上已是全貌，无需重放");
 
-        // Esc 一律放行（菜单退出在 on_key 里）。
+        // Esc always passes through (menu exits happen inside on_key).
         chat.set_input("/model");
         chat.submit();
         assert!(chat.model_menu.is_some(), "菜单已打开");
         dispatch_key(&mut chat, key(KeyCode::Esc, KeyModifiers::empty()), true);
         assert!(chat.model_menu.is_none(), "Esc 经 gate 退出菜单");
 
-        // 消息已落盘 → ctrl+o 请求重放；模拟重放帧：重建全量文档、
-        // 整卷冻结到最后一个检查点。
+        // A message has flushed → ctrl+o requests the replay; simulate the replay frame: rebuild the full doc
+        // and freeze everything up to the last checkpoint.
         chat.messages.push(crate::tui::chat::UiMessage {
             role: crate::tui::chat::Role::Assistant,
             text: "reply".into(),
@@ -1520,7 +1520,7 @@ mod tests {
         assert!(chat.doc.rows.is_empty(), "重放后活文档只剩动态尾部");
     }
 
-    /// Release 事件不重复触发（终端上报增强键盘时会有）。
+    /// Release events do not re-trigger (they occur when the terminal reports enhanced keyboards).
     #[test]
     fn key_release_is_ignored() {
         let mut chat = chat_at(80, 24);
@@ -1530,7 +1530,7 @@ mod tests {
         assert!(chat.input.is_empty());
     }
 
-    /// 滚轮与点击（全屏）。
+    /// Wheel scrolling and clicks (fullscreen).
     #[test]
     fn mouse_scrolls_and_clicks() {
         let mut chat = chat_at(80, 24);
@@ -1548,25 +1548,25 @@ mod tests {
         assert_eq!(chat.scroll, 10);
     }
 
-    /// 懒落盘：窗口装得下时不冻结；越过窗口顶的段（含跨越顶端的）整段冻结。
+    /// Lazy flush: nothing freezes when it fits in the window; segments past the window top (including ones crossing it) freeze wholesale.
     #[test]
     fn pick_flush_mark_freezes_only_segments_past_the_window_top() {
         let marks = vec![
             SettledMark { row_end: 5, segments: 1, ask_rows: 0 },
             SettledMark { row_end: 20, segments: 2, ask_rows: 0 },
         ];
-        // 全部可见（窗口从 0 开始）：什么都不冻结。
+        // Everything visible (window starts at 0): nothing freezes.
         assert_eq!(pick_flush_mark(&marks, 0, 0), None);
-        // 窗口顶在第 3 行：段 1（0..5）跨越顶端 → 冻结到 5；段 2 从 5 起
-        // 完整可见 → 保持活性。
+        // Window top at row 3: segment 1 (0..5) crosses the top → freeze up to 5; segment 2 from 5 on
+        // is fully visible → stays live.
         assert_eq!(pick_flush_mark(&marks, 0, 3), Some(marks[0]));
-        // 窗口顶在第 10 行：段 2（5..20）也跨越了 → 一并冻结。
+        // Window top at row 10: segment 2 (5..20) also crosses → freeze it too.
         assert_eq!(pick_flush_mark(&marks, 0, 10), Some(marks[1]));
-        // 已冻结到 5 之后窗口未再上移：不重复选已消费的检查点。
+        // After freezing up to 5, the window has not moved further up: do not re-pick a consumed checkpoint.
         assert_eq!(pick_flush_mark(&marks, 5, 5), None);
     }
 
-    /// 定稿内容在窗口内保持活性：小文档一帧都不冻结，宽度变化随重建重排。
+    /// Settled content stays live inside the window: a small doc freezes nothing, and width changes re-layout on rebuild.
     #[test]
     fn settled_rows_stay_live_while_they_fit() {
         let mut chat = chat_at(80, 24);
@@ -1583,7 +1583,7 @@ mod tests {
         );
     }
 
-    /// 瞬态 slash 输出（/resume 列表等）挤小窗口，不得因此冻结活内容。
+    /// Transient slash output (e.g. /resume lists) squeezes the window; it must not freeze live content.
     #[test]
     fn transient_slash_output_does_not_freeze_live_rows() {
         let mut chat = chat_at(80, 24);
@@ -1594,14 +1594,14 @@ mod tests {
         let chrome_len = chrome_rows(&chat, 80, false).rows.len();
         let total = chat.doc.rows.len();
 
-        // 回归防线：按全量文档算窗口，欢迎卡会被误判为越过顶端。
+        // Regression guard: computing the window over the full doc would misjudge the welcome card as past the top.
         let (naive_start, _) = tail_window(total, chat.tail_start, chrome_len, 24);
         assert!(
             pick_flush_mark(&chat.doc.settled_marks, chat.tail_start, naive_start).is_some(),
             "前提成立：瞬态行确实把窗口挤过了欢迎卡"
         );
 
-        // 生产路径剔除瞬态行：欢迎卡保持活性。
+        // The production path excludes transient rows: the welcome card stays live.
         let persistent = total - chat.doc.transient_rows;
         let (win_start, _) = tail_window(persistent, chat.tail_start, chrome_len, 24);
         assert_eq!(
@@ -1611,7 +1611,7 @@ mod tests {
         );
     }
 
-    /// 回灌：容量变大时取回已落盘的段重新渲染；超出预算即回退。
+    /// Rehydration: when capacity grows, pull flushed segments back for re-rendering; over budget, roll back.
     #[test]
     fn rehydrate_refills_the_window_after_capacity_growth() {
         let mut chat = chat_at(80, 24);
@@ -1624,14 +1624,14 @@ mod tests {
         rebuild(&mut chat, size(80, 24), false);
         assert!(chat.doc.rows.is_empty(), "落盘后活文档为空");
 
-        // 预算充足：取回欢迎卡（scrollback 里的旧拷贝由用户上滑时接受重复）。
+        // Budget is enough: pull the welcome card back (users accept the duplicates when scrolling up).
         chat.rehydrate(80, 24);
         assert_eq!(chat.flushed_segments, 0, "容量够就回灌");
         chat.dirty = true;
         rebuild(&mut chat, size(80, 24), false);
         assert_eq!(chat.doc.rows.len(), welcome_rows, "欢迎卡回到活文档");
 
-        // 预算不足：回灌会超出 → 回退，保持已落盘状态。
+        // Not enough budget: rehydration would overflow → roll back, keeping the flushed state.
         chat.advance_flushed();
         chat.rehydrate(80, welcome_rows.saturating_sub(1));
         assert_eq!(chat.flushed_segments, 1, "装不下就不取回");

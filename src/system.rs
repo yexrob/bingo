@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::api::types::SystemBlock;
 
-/// 静态基准提示词（多段精简版）。
+/// Static base prompt (multi-section condensed version).
 const BASE_PROMPT: &str = "\
 You are bingo, an agent CLI running on the user's machine.
 
@@ -72,7 +72,7 @@ You are bingo, an agent CLI running on the user's machine.
 - Do not end prose with a colon before a tool call.
 ";
 
-/// 记忆层级：user + project CLAUDE.md。
+/// Memory layers: user + project CLAUDE.md.
 #[derive(Debug, Default)]
 pub struct Memory {
     pub user: Option<String>,
@@ -89,9 +89,9 @@ fn read_opt(path: &Path) -> Option<String> {
     }
 }
 
-/// 加载记忆层（层级：user → project）。
-/// 项目级记忆源（按序读取，全部合并）：CLAUDE.md（Anthropic 惯例）+
-/// AGENTS.md（通用 agent 惯例，如 bingo 项目自身的规则）。
+/// Load memory layers (order: user → project).
+/// Project-level memory sources (read in order, all merged): CLAUDE.md (Anthropic
+/// convention) + AGENTS.md (generic agent convention, e.g. bingo's own rules).
 const PROJECT_MEMORY_FILES: [&str; 4] = [
     "CLAUDE.md",
     ".claude/CLAUDE.md",
@@ -112,9 +112,11 @@ pub fn load_memory(home: &Path, cwd: &Path) -> Memory {
     }
 }
 
-/// 拼装 system prompt：base 段始终在前；记忆段随文件存在与否增减。
-/// `cache_control` 控制是否发送 cache_control（默认关闭，非官方端点不稳定）。
-/// 环境信息动态段（OS/日期/架构）。
+/// Assemble the system prompt: the base segment always comes first; memory segments
+/// come and go depending on which files exist.
+/// `cache_control` controls whether cache_control is sent (off by default; non-official
+/// endpoints handle it unreliably).
+/// Dynamic environment segment (OS/date/arch).
 fn env_info_block() -> String {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -171,7 +173,7 @@ mod tests {
 
     #[test]
     fn base_prompt_covers_all_sections() {
-        // 分段结构：System/Doing tasks/Actions/Tools/Tone 齐备。
+        // Section structure: System/Doing tasks/Actions/Tools/Tone all present.
         for section in [
             "# System",
             "# Doing tasks",
@@ -184,13 +186,15 @@ mod tests {
                 "missing section {section}"
             );
         }
-        // watch 语义：后台任务完成会通知，不要轮询。
+        // watch semantics: background tasks notify on completion, don't poll.
         assert!(BASE_PROMPT.contains("do NOT poll them"));
         assert!(BASE_PROMPT.contains("notify condition"));
-        // 通知优先级：背景信息，不打断用户对话主线。
+        // Notification precedence: background info, doesn't interrupt the user's main
+        // conversation thread.
         assert!(BASE_PROMPT.contains("never interrupt or preempt"));
         assert!(BASE_PROMPT.contains("Keep the user's request first"));
-        // 长任务优先异步：即使后续需要结果，先回复用户等待通知。
+        // Long tasks prefer async: even when the result will be needed later, reply to
+        // the user first and wait for the notification.
         assert!(BASE_PROMPT.contains("Prefer async for long-running tasks"));
         assert!(BASE_PROMPT.contains("tell the user"));
     }
@@ -215,7 +219,7 @@ mod tests {
     fn omits_missing_memory() {
         let memory = Memory::default();
         let blocks = build_system(&memory, None, true);
-        // base + env info，无记忆段。
+        // base + env info, no memory segments.
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, BASE_PROMPT);
     }
@@ -229,7 +233,7 @@ mod tests {
         std::fs::write(tmp.join("AGENTS.md"), "agents rules").unwrap();
         let memory = load_memory(&tmp, &tmp);
         let project = memory.project.unwrap();
-        // CLAUDE.md 在前、AGENTS.md 在后，两者都保留。
+        // CLAUDE.md first, AGENTS.md after; both preserved.
         assert!(project.contains("claude rules"), "{project}");
         assert!(project.contains("agents rules"), "{project}");
         assert!(

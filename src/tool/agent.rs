@@ -18,44 +18,44 @@ const MAX_AGENT_DEPTH: usize = 3;
 pub struct AgentInput {
     #[schemars(description = "子代理的独立任务指令")]
     prompt: String,
-    /// 后台化：立即返回 async_launched，完成时通知主 agent。
+    /// Background mode: returns async_launched immediately and notifies the main agent when done.
     #[serde(default)]
     #[schemars(description = "异步执行（默认 true）：立即返回实例名，主 agent 不等待；设 false 则同步等待结果")]
     background: Option<bool>,
-    /// 通知条件：子 agent 产出内容出现任一字样即通知主 agent。
+    /// Notification condition: notify the main agent when the sub-agent output contains any of these strings.
     #[serde(default)]
     #[schemars(description = "通知条件：子 agent 产出内容命中任一字样即通知")]
     notify_on: Option<Vec<String>>,
-    /// 任务简述（可选），随 header 显示。
+    /// Short task description (optional), shown in the header.
     #[serde(default)]
     #[schemars(description = "任务简述（可选）")]
     description: Option<String>,
-    /// 子代理模型（可选）：缺省继承具名定义或父会话模型。
+    /// Sub-agent model (optional): defaults to the named definition or parent session model.
     #[serde(default)]
     #[schemars(description = "子代理使用的模型（可选，缺省继承具名定义/父会话）")]
     model: Option<String>,
-    /// 子代理 provider（可选，settings.json 的 providers 段）：指定后子代理
-    /// 使用该 provider 的端点与 key（独立于父会话的当前 provider）。
+    /// Sub-agent provider (optional, from the `providers` section of settings.json): when set, the sub-agent
+    /// uses that provider's endpoint and key (independent of the parent session's current provider).
     #[serde(default)]
     #[schemars(description = "子代理使用的 provider（可选，settings 的 providers 段；缺省继承具名定义/父会话）")]
     provider: Option<String>,
-    /// 子代理思考级别（可选）：off | low | medium | high | xhigh | max。
+    /// Sub-agent thinking level (optional): off | low | medium | high | xhigh | max.
     #[serde(default)]
     #[schemars(description = "子代理思考级别（可选）：off/low/medium/high/xhigh/max；缺省继承具名定义/父会话当前级别")]
     thinking: Option<String>,
-    /// 实例名（可选）：SendMessage/AgentControl 的地址。
+    /// Instance name (optional): address used by SendMessage/AgentControl.
     #[serde(default)]
     #[schemars(description = "实例名（可选）：后续 SendMessage/AgentControl 用它寻址；缺省取具名定义名或 agent，重名自动加 -2/-3 后缀")]
     name: Option<String>,
-    /// 具名定义（可选）：`.bingo/agents/<名>.md` 或 `~/.config/bingo/agents/<名>.md`。
+    /// Named definition (optional): `.bingo/agents/<name>.md` or `~/.config/bingo/agents/<name>.md`.
     #[serde(default)]
     #[schemars(description = "具名 agent 定义（可选）：使用该定义的 system prompt 与缺省模型/provider")]
     agent: Option<String>,
 }
 
-/// 子代理工具（D14/D29）：递归 queryLoop，独立消息历史，结果文本回填父模型。
-/// 每次派生登记为注册表实例（名字可寻址），完成后历史保留，
-/// 主 agent 经 SendMessage 续话（hub-and-spoke）。
+/// Sub-agent tool (D14/D29): recursive query loop with its own message history; result text is fed back
+/// to the parent model. Each spawn is registered as a registry instance (addressable by name); history
+/// is kept after completion and the main agent resumes the conversation via SendMessage (hub-and-spoke).
 pub struct AgentTool {
     session: Arc<Session>,
     defs: Vec<AgentDef>,
@@ -67,8 +67,8 @@ impl AgentTool {
     }
 }
 
-/// 子代理 UI：捕获文本、无交互（写工具在非 bypass 模式下被拒）。
-/// cell 记录已产出字符数（后台 agent 的 interval 进度检查）。
+/// Sub-agent UI: captures text, no interaction (write tools are rejected unless in bypass mode).
+/// The cell tracks the number of characters produced (for interval progress checks of background agents).
 fn subagent_hooks(
     output: Arc<Mutex<String>>,
     cell: Arc<AgentCell>,
@@ -84,7 +84,7 @@ fn subagent_hooks(
             {
                 output.push_str(text);
                 cell.record_chars(text.chars().count());
-                // 产出文本进条件引擎（notify_on 命中 → 信号通知）。
+                // Feed produced text into the condition engine (notify_on hit → signal notification).
                 watch.feed_content(id, text);
             }
         }),
@@ -93,14 +93,14 @@ fn subagent_hooks(
         on_round_end: Box::new(|| {}),
         on_warning: Box::new(|_| {}),
         ask: std::sync::Arc::new(move |_tool_name, _reason| Box::pin(async move { bypass })),
-        // 子代理无 UI 可问：AskUserQuestion 视为未回答（模型应避免在子代理中询问）。
+        // Sub-agents have no UI to ask: AskUserQuestion is treated as unanswered (models should avoid asking inside sub-agents).
         ask_question: std::sync::Arc::new(|_title, _question, _options| {
             Box::pin(async { None })
         }),
     }
 }
 
-/// 单行摘要（label 用）：截到换行/40 字符。
+/// Single-line excerpt (for labels): cut at newline / 40 characters.
 pub(crate) fn excerpt(text: &str) -> String {
     let line = text.lines().next().unwrap_or_default();
     let cut: String = line.chars().take(40).collect();
@@ -111,8 +111,9 @@ pub(crate) fn excerpt(text: &str) -> String {
     }
 }
 
-/// 信箱 → 回合提示：单条 hub 指令保持原文；混合/多条按序标注来源。
-/// 频道条目同时推进该成员的已读游标（消息随本回合进入其上下文）。
+/// Inbox → turn prompt: a single hub instruction is kept verbatim; mixed or multiple entries are
+/// annotated with their sources in order. Channel entries also advance the member's read cursor
+/// (messages enter its context with this turn).
 pub(crate) fn absorb_inbox(
     channels: &Arc<ChannelRegistry>,
     name: &str,
@@ -148,7 +149,7 @@ pub(crate) fn absorb_inbox(
     }
 }
 
-/// 空产出占位。
+/// Placeholder for empty output.
 fn non_empty(text: String) -> String {
     if text.trim().is_empty() {
         "[subagent returned no text]".to_string()
@@ -157,7 +158,7 @@ fn non_empty(text: String) -> String {
     }
 }
 
-/// 注册一个回合的 watch 行（◉ `{label}` · 已产出 N 字符）。
+/// Register a watch line for a run (◉ `{label}` · produced N chars).
 fn register_run_watch(
     watch: &Arc<WatchRegistry>,
     label: String,
@@ -174,9 +175,10 @@ fn register_run_watch(
     )
 }
 
-/// 后台驱动一个实例的回合链：run_query → 历史落注册表 → 信箱非空则
-/// 同任务续跑下一回合（新 watch 行），排空转 Idle。abort 句柄挂到注册表
-/// （stop/delete 可中止）。返回首回合的 watch id。
+/// Drive an instance's run chain in the background: run_query → history saved to the registry → if
+/// the inbox is non-empty, continue with the next run of the same task (new watch line); once drained,
+/// transition to Idle. The abort handle is attached to the registry (stop/delete can abort).
+/// Returns the watch id of the first run.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_agent_loop(
     registry: Arc<AgentRegistry>,
@@ -252,7 +254,7 @@ pub(crate) fn spawn_agent_loop(
 }
 
 impl AgentTool {
-    /// 解析具名定义（agent 参数）。
+    /// Resolve the named definition (agent parameter).
     fn resolve_def(&self, params: &AgentInput) -> Result<Option<&AgentDef>, ToolError> {
         let Some(want) = &params.agent else {
             return Ok(None);
@@ -274,8 +276,8 @@ impl AgentTool {
             })
     }
 
-    /// 实例落地：认领名字 → 构造子会话（携带实例名，Post 盖戳用）→
-    /// 注册表登记。返回 (实例名, 描述, 子会话)。
+    /// Spawn an instance: claim a name → build a sub-session (carrying the instance name for Post
+    /// stamps) → register in the registry. Returns (instance name, description, sub-session).
     fn spawn_instance(
         &self,
         params: &AgentInput,
@@ -337,9 +339,10 @@ impl AgentTool {
         })
     }
 
-    /// 构造子代理会话：具名定义提供 system prompt 与缺省模型/provider，
-    /// 显式参数优先于定义、定义优先于继承（provider 指定时 fork 独立端点
-    /// Client，互不影响父会话的当前 provider）。
+    /// Build a sub-agent session: the named definition provides the system prompt and default
+    /// model/provider; explicit parameters take precedence over the definition, which takes
+    /// precedence over inheritance (when a provider is set, fork an independent-endpoint client
+    /// so the parent session's current provider is unaffected).
     fn build_sub_session(
         &self,
         params: &AgentInput,
@@ -357,9 +360,10 @@ impl AgentTool {
     }
 }
 
-/// 构造子代理会话（AgentTool 与 team spawn 共用，D31）：
-/// 具名定义提供 system prompt 与缺省模型/provider，显式参数优先于定义、
-/// 定义优先于继承（provider 指定时 fork 独立端点 Client，互不影响父会话）。
+/// Build a sub-agent session (shared by AgentTool and team spawn, D31):
+/// the named definition provides the system prompt and default model/provider; explicit parameters
+/// take precedence over the definition, which takes precedence over inheritance (when a provider is
+/// set, fork an independent-endpoint client so the parent session is unaffected).
 pub(crate) fn build_sub_session(
     parent: &Arc<Session>,
     model: Option<String>,
@@ -419,7 +423,7 @@ pub(crate) fn build_sub_session(
     }))
 }
 
-/// 后台 agent 进度：已产出字符数（interval poll 用）。
+/// Background agent progress: characters produced (for interval polling).
 struct AgentCell {
     chars: std::sync::atomic::AtomicUsize,
 }
@@ -509,7 +513,8 @@ impl Tool for AgentTool {
                 "max agent depth ({MAX_AGENT_DEPTH}) exceeded"
             )));
         }
-        // 默认异步：主 agent 不等待子 agent，完成通知注入下一轮。
+        // Async by default: the main agent does not wait for the sub-agent; the completion
+        // notification is injected into the next turn.
         if params.background.unwrap_or(true) {
             return self.launch_background(&params, ctx);
         }
@@ -518,7 +523,7 @@ impl Tool for AgentTool {
         let (name, description, sub_session) = self.spawn_instance(&params, def)?;
         let _ = self.session.agents.next_run(&name);
 
-        // 前台子 agent 同样可 watch：Running（产出字符量）→ Done/Failed。
+        // Foreground sub-agents can also be watched: Running (characters produced) → Done/Failed.
         let cell = Arc::new(AgentCell::new());
         let conditions = params
             .notify_on
@@ -555,8 +560,8 @@ impl Tool for AgentTool {
                     Some("完成".to_string()),
                     Some(serde_json::json!(content.clone())),
                 );
-                // 同步路径工具串行执行，排队指令实际到不了这里；万一有，
-                // 交给后台环继续（同一续跑机制）。
+                // On the synchronous path tools run serially, so queued messages never reach here;
+                // if one somehow does, hand it to the background loop (same continuation mechanism).
                 if let Some((history, items)) = self.session.agents.finish(&name, outcome.messages)
                 {
                     let prompt = absorb_inbox(&sub_session.channels, &name, &items);
@@ -601,8 +606,9 @@ pub struct SendMessageInput {
     message: String,
 }
 
-/// 主→子续话通道（hub-and-spoke，仅主会话可用）：空闲实例带完整历史
-/// 唤醒续跑；忙碌实例排队、回合结束自动送达。
+/// Main→sub continuation channel (hub-and-spoke, main session only): an idle instance is woken
+/// with its full history to continue; a busy instance queues the message and it is delivered
+/// when the turn ends.
 pub struct SendMessageTool {
     session: Arc<Session>,
 }
@@ -680,11 +686,11 @@ impl Tool for SendMessageTool {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentAction {
-    /// 列出全部实例（名字/定义/状态/待送指令数）。
+    /// List all instances (name/definition/status/pending message count).
     List,
-    /// 停止：中止当前回合，不再接收指令；历史保留可 list。
+    /// Stop: abort the current run and stop accepting messages; history is kept and can be listed.
     Stop,
-    /// 删除：停止并移除实例（名字释放）。
+    /// Delete: stop and remove the instance (name released).
     Delete,
 }
 
@@ -698,7 +704,7 @@ pub struct AgentControlInput {
     agent: Option<String>,
 }
 
-/// 子代理生命周期管理（hub-and-spoke，仅主会话可用）。
+/// Sub-agent lifecycle management (hub-and-spoke, main session only).
 pub struct AgentControlTool {
     session: Arc<Session>,
 }
@@ -904,7 +910,7 @@ mod tests {
             Some("medium"),
             "无显式/定义时继承父会话当前思考级别"
         );
-        // 不指定 provider：共享父端点（切换父 provider 子跟随）。
+        // No provider specified: shares the parent endpoint (follows the parent's provider switch).
         client.set_provider("ds").unwrap();
         assert_eq!(
             sub.client.current_endpoint().0,
@@ -933,7 +939,7 @@ mod tests {
             Some("xhigh"),
             "显式思考级别生效"
         );
-        // fork 独立端点：父会话不受影响。
+        // Forked independent endpoint: the parent session is unaffected.
         assert_eq!(session.client.current_endpoint().0, "sk-parent");
     }
 
@@ -942,7 +948,7 @@ mod tests {
         let (session, _client) = parent_session();
         let d = def("reviewer");
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
-        // 定义提供 system/model/provider/thinking 缺省。
+        // The definition supplies system/model/provider/thinking defaults.
         let sub = tool.build_sub_session(&params("审查"), Some(&d), "sub").unwrap();
         assert_eq!(sub.system.len(), 1);
         assert_eq!(sub.system[0].text, "你是评审。", "定义正文替换 system");
@@ -953,7 +959,7 @@ mod tests {
             Some("high"),
             "定义提供思考级别缺省"
         );
-        // 显式参数优先于定义。
+        // Explicit parameters take precedence over the definition.
         let mut p = params("审查");
         p.model = Some("explicit".into());
         p.thinking = Some("off".into());
@@ -964,7 +970,7 @@ mod tests {
             Some("off"),
             "显式思考级别覆盖定义"
         );
-        // resolve_def：未知定义报错并列出可用项。
+        // resolve_def: an unknown definition errors out and lists the available ones.
         let mut p = params("x");
         p.agent = Some("nope".into());
         let err = tool.resolve_def(&p).unwrap_err().to_string();
@@ -1039,7 +1045,7 @@ mod tests {
             .await
             .unwrap();
         assert!(out.content.as_str().unwrap().contains("已停止"), "stop");
-        // 停止后 SendMessage 拒收。
+        // After stopping, SendMessage rejects delivery.
         let send = SendMessageTool::new(session.clone());
         let err = send
             .call(
@@ -1058,7 +1064,7 @@ mod tests {
             .unwrap();
         assert!(out.content.as_str().unwrap().contains("已删除"));
         assert!(session.agents.list().is_empty());
-        // 未知实例：stop 报错。
+        // Unknown instance: stop errors out.
         let err = ctl
             .call(serde_json::json!({"action": "stop", "agent": "ghost"}), &ctx)
             .await
@@ -1093,7 +1099,7 @@ mod tests {
             .unwrap();
         assert!(out.content.as_str().unwrap().contains("排队"), "queued");
         assert_eq!(session.agents.list()[0].pending, 1);
-        // 未知实例：报错并列出现有实例名。
+        // Unknown instance: the error lists the existing instance names.
         let err = send
             .call(serde_json::json!({"agent": "nobody", "message": "x"}), &ctx)
             .await

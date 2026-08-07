@@ -18,12 +18,13 @@ use crate::tool::websearch::WebSearchTool;
 use crate::tool::write::WriteTool;
 use crate::tool::Tool;
 
-/// 基础工具池 + MCP + 子代理。
+/// Base tool pool + MCP + subagents.
 pub async fn assemble_tools(
     session: &Arc<Session>,
     on_warning: &mut (dyn Fn(String) + Send),
 ) -> Vec<Box<dyn Tool>> {
-    // 技能/agent 定义扫描是同步 IO：挪出运行时线程（缓存命中时也只是几次 stat）。
+    // Skill/agent-definition scanning is synchronous IO: move it off the runtime thread
+    // (on a cache hit it's just a few stats).
     let home = session.home.clone();
     let (skills, agent_defs) = tokio::task::spawn_blocking(move || {
         let cwd = std::env::current_dir().unwrap_or_default();
@@ -55,7 +56,8 @@ pub async fn assemble_tools(
         Box::new(ExperienceQueryTool),
         Box::new(ExperienceForgetTool),
     ];
-    // hub-and-spoke：续话与生命周期管理只在主会话（子代理不管理兄弟）。
+    // hub-and-spoke: continuation and lifecycle management only on the main session
+    // (subagents don't manage siblings).
     let channels_on = session.settings.experimental.agent_channels;
     if session.depth == 0 {
         tools.push(Box::new(SendMessageTool::new(session.clone())));
@@ -69,7 +71,7 @@ pub async fn assemble_tools(
             )));
         }
     } else if channels_on && session.depth == 1 && session.instance.is_some() {
-        // 频道 cohort（实验特性）：直接子代理只拿发言工具。
+        // Channel cohort (experimental): direct subagents only get the posting tool.
         tools.push(Box::new(crate::tool::channel::PostTool::new(
             session.clone(),
         )));
@@ -88,8 +90,9 @@ pub async fn assemble_tools(
             on_warning(warning);
         }
         if !pending.is_empty() {
-            // 后台连接：回合不等待握手（坏服务器超时后记失败，
-            // 下一回合 assemble 时经 drain_unreported_failures 报告一次）。
+            // Background connect: the turn does not wait for the handshake (a
+            // bad server times out into `failures` and is reported once via
+            // drain_unreported_failures at the next turn's assemble).
             let quiet = session.quiet;
             tokio::spawn(async move {
                 let mut guard = mgr.lock().await;
@@ -153,7 +156,8 @@ mod tests {
         }
     }
 
-    /// hub-and-spoke：续话/生命周期工具只装配给主会话，子代理没有。
+    /// hub-and-spoke: continuation/lifecycle tools only assembled for the main session,
+    /// not subagents.
     #[tokio::test]
     async fn hub_agent_tools_only_at_depth_zero() {
         let mut warn = |_: String| {};
@@ -176,8 +180,8 @@ mod tests {
         }
     }
 
-    /// 频道工具（实验特性）：默认不装配；开启后 hub 拿 Channel+Post，
-    /// depth-1 具名实例只拿 Post，更深层没有。
+    /// Channel tools (experimental): not assembled by default; when enabled the hub gets
+    /// Channel+Post, named depth-1 instances only get Post, deeper levels none.
     #[tokio::test]
     async fn channel_tools_gated_by_experimental_flag() {
         let mut warn = |_: String| {};
@@ -206,7 +210,8 @@ mod tests {
         assert!(!deep.iter().any(|n| n == "Post"), "深层不入频道: {deep:?}");
     }
 
-    /// MCP 连接在后台执行：回合不等待握手，失败延迟一回合报告一次。
+    /// MCP connections run in the background: the turn does not wait for
+    /// the handshake; failures are reported once, one turn later.
     #[tokio::test]
     async fn mcp_connects_in_background_and_warns_once() {
         use crate::mcp::McpStatus;
@@ -229,7 +234,8 @@ mod tests {
         ));
         let session = std::sync::Arc::new(session);
 
-        // 第一回合：不等待握手，立即返回（无 MCP 工具），也无警告。
+        // Turn 1: no waiting for the handshake, returns immediately (no
+        // MCP tools), and no warning either.
         let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let snapshot = |warnings: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| {
             warnings.lock().map(|v| v.clone()).unwrap_or_default()
@@ -246,7 +252,7 @@ mod tests {
         assert!(!first.iter().any(|t| t.name().starts_with("mcp__")));
         assert!(snapshot(&warnings).is_empty(), "失败尚未发生");
 
-        // 等后台连接失败落定。
+        // Wait for the background connect failure to settle.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let failed = {
@@ -263,7 +269,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
-        // 第二回合：报告一次失败。
+        // Turn 2: the failure is reported once.
         let mut collect = {
             let warnings = warnings.clone();
             move |msg: String| {
@@ -278,7 +284,7 @@ mod tests {
         assert_eq!(reported.len(), 1, "只报一次: {reported:?}");
         assert!(reported[0].contains("files"), "{}", reported[0]);
 
-        // 第三回合：不再重复。
+        // Turn 3: no repeat.
         let mut collect = {
             let warnings = warnings.clone();
             move |msg: String| {

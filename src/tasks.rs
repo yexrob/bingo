@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::error::ErrorCode;
 
-/// Task 状态机：pending → in_progress → completed，deleted 为删除。
+/// Task state machine: pending → in_progress → completed; deleted is the removal state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -28,7 +28,7 @@ impl fmt::Display for TaskStatus {
     }
 }
 
-/// 单个任务（磁盘每任务一 JSON 文件）。
+/// A single task (one JSON file per task on disk).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -50,7 +50,7 @@ pub struct Task {
 }
 
 impl Task {
-    /// 内部任务标记：TaskList 隐藏（metadata._internal）。
+    /// Internal task marker: hidden from TaskList (metadata._internal).
     pub fn is_internal(&self) -> bool {
         self.metadata
             .get("_internal")
@@ -58,14 +58,15 @@ impl Task {
     }
 }
 
-/// 任务存储：`~/.local/share/bingo/tasks/<list_id>/<id>.json`。
-/// 磁盘持久化 + 进程内互斥（bingo 单进程，无跨进程并发）。
+/// Task store: `~/.local/share/bingo/tasks/<list_id>/<id>.json`.
+/// Disk persistence + in-process mutex (bingo is single-process; no cross-process concurrency).
 pub struct TaskStore {
     dir: PathBuf,
     lock: Mutex<()>,
 }
 
-/// 项目级列表键（旧行为：同一工作目录跨会话共享任务；会话键的回落）。
+/// Project-level list key (legacy behavior: tasks shared across sessions in the same
+/// working directory; fallback of the session key).
 pub fn project_task_key(cwd: &Path) -> String {
     cwd.canonicalize()
         .unwrap_or_else(|_| cwd.to_path_buf())
@@ -79,8 +80,8 @@ fn list_id_from_env_or(key: &str) -> String {
     {
         return id;
     }
-    // 会话级列表：每个 session 独立 todo（key = transcript 文件 stem，
-    // --continue 恢复同一会话）。进程内同一 key 即同一列表。
+    // Session-level list: each session has its own todo (key = transcript file stem,
+    // --continue resumes the same session). The same key in-process means the same list.
     key.to_string()
 }
 
@@ -98,9 +99,9 @@ impl TaskStore {
         }
     }
 
-    /// TUI/查询共享同一 store 实例（Arc<TaskStore>）。
+    /// TUI/query share the same store instance (Arc<TaskStore>).
     fn task_path(&self, id: &str) -> Result<PathBuf, TaskError> {
-        // id 为内部生成的数字串；防御路径穿越。
+        // ids are internally generated numeric strings; defends against path traversal.
         if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
             return Err(TaskError::InvalidId(id.to_string()));
         }
@@ -113,15 +114,16 @@ impl TaskStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(TaskError::Io(e)),
         };
-        // 解析失败曾吞成 Ok(None)：任务在列表里静默消失，用户无从知晓。
+        // Parse failures used to be swallowed as Ok(None): tasks silently vanished from
+        // the list with no way for the user to know.
         serde_json::from_str(&raw).map(Some).map_err(|e| TaskError::Parse {
             path: path.display().to_string(),
             detail: e.to_string(),
         })
     }
 
-    /// 原子写：先写临时文件再 rename，半写文件不会被读到。
-    /// `.json.tmp` 不以 `.json` 结尾，不会被 list_ids 收进任务列表。
+    /// Atomic write: write a temp file first, then rename, so half-written files are never read.
+    /// `.json.tmp` doesn't end with `.json`, so list_ids never picks it up as a task.
     fn write_file(path: &Path, task: &Task) -> Result<(), TaskError> {
         let body = serde_json::to_string_pretty(task).map_err(TaskError::Serialize)?;
         let tmp = path.with_extension("json.tmp");
@@ -135,7 +137,7 @@ impl TaskStore {
         }
     }
 
-    /// 锁内创建：id = max(现有 max, 0) + 1；ifAbsent 语义（已存在则报错）。
+    /// Create under lock: id = max(existing max, 0) + 1; ifAbsent semantics (errors if it exists).
     pub async fn create(
         &self,
         task: &Task,
@@ -161,15 +163,15 @@ impl TaskStore {
         Self::read_file(&path)
     }
 
-    /// patch 更新：仅写给出的字段（增量语义）。返回旧值。
+    /// patch update: only writes the given fields (incremental semantics). Returns the old value.
     pub async fn update(&self, id: &str, patch: &TaskPatch) -> Result<Option<Task>, TaskError> {
         let _guard = self.lock.lock().await;
         let path = self.task_path(id)?;
         let Some(mut t) = Self::read_file(&path)? else {
             return Ok(None);
         };
-        // 旧值必须在 patch 之前克隆：之后再克隆得到的是新值，
-        // statusChange 事件会退化成 from == to。
+        // The old value must be cloned before the patch: cloning afterwards would give
+        // the new value and the statusChange event would degenerate to from == to.
         let old = t.clone();
         if let Some(subject) = &patch.subject {
             t.subject = subject.clone();
@@ -199,7 +201,7 @@ impl TaskStore {
         Ok(Some(old))
     }
 
-    /// 删除 + 清理其他任务的 blocks/blockedBy 引用。
+    /// Delete + clean up blocks/blockedBy references in other tasks.
     pub async fn delete(&self, id: &str) -> Result<bool, TaskError> {
         let _guard = self.lock.lock().await;
         let path = self.task_path(id)?;
@@ -227,7 +229,7 @@ impl TaskStore {
         Ok(true)
     }
 
-    /// 双向建立依赖：a.blocks += b, b.blocked_by += a。
+    /// Establish a bidirectional dependency: a.blocks += b, b.blocked_by += a.
     pub async fn link_block(&self, a: &str, b: &str) -> Result<bool, TaskError> {
         let _guard = self.lock.lock().await;
         let (pa, pb) = (self.task_path(a)?, self.task_path(b)?);
@@ -266,7 +268,7 @@ impl TaskStore {
         Ok(ids)
     }
 
-    /// 全量列表：数字 id 排序；隐藏 _internal。
+    /// Full list: sorted by numeric id; hides _internal tasks.
     pub async fn list(&self) -> Result<Vec<Task>, TaskError> {
         let _guard = self.lock.lock().await;
         let mut tasks = Vec::new();
@@ -281,7 +283,8 @@ impl TaskStore {
         Ok(tasks)
     }
 
-    /// TUI 同步快照（每帧调用；与工具写并发时半写文件被跳过，容错）。
+    /// TUI synchronous snapshot (called every frame; half-written files racing with tool
+    /// writes are skipped — fault tolerant).
     pub fn list_ui(&self) -> Vec<Task> {
         let Ok(ids) = (|| -> Result<Vec<String>, TaskError> {
             let mut ids = Vec::new();
@@ -309,7 +312,7 @@ impl TaskStore {
     }
 }
 
-/// 增量 patch（可选字段）。
+/// Incremental patch (optional fields).
 #[derive(Debug, Default)]
 pub struct TaskPatch {
     pub subject: Option<String>,
@@ -383,7 +386,7 @@ mod tests {
                 s2.list().await.unwrap().is_empty(),
                 "新会话列表独立，不继承上一会话 todo"
             );
-            // --continue 同一会话：同 key 恢复同一列表。
+            // --continue on the same session: same key restores the same list.
             let s1b = TaskStore::new(&tmp.join("home"), "proj-1700000000");
             assert_eq!(s1b.list().await.unwrap().len(), 1, "同会话恢复同 todo");
             let _ = std::fs::remove_dir_all(&tmp);
@@ -472,7 +475,8 @@ mod tests {
         });
     }
 
-    /// L1 回归：update 返回的旧值曾在 patch 之后克隆 → statusChange from == to。
+    /// L1 regression: the old value returned by update used to be cloned after the patch
+    /// → statusChange from == to.
     #[test]
     fn update_returns_pre_patch_snapshot() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -502,7 +506,8 @@ mod tests {
         });
     }
 
-    /// L5 回归：损坏的任务文件报错而非静默消失；写入走 tmp + rename。
+    /// L5 regression: a corrupt task file reports an error instead of silently vanishing;
+    /// writes go through tmp + rename.
     #[test]
     fn corrupt_task_file_reports_error_and_writes_are_atomic() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -511,7 +516,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&tmp);
             let store = store_in(&tmp);
             let id = store.create(&task("first")).await.unwrap();
-            // 写入不留临时文件残骸。
+            // Writes leave no temp-file leftovers.
             let leftovers = std::fs::read_dir(&store.dir)
                 .unwrap()
                 .flatten()

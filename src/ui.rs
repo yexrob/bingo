@@ -13,32 +13,32 @@ use crate::api::types::StreamEvent;
 use crate::query::{ToolCallDone, UiHooks};
 use crate::tui::activities::WatchStatus;
 
-/// 权限询问：请求 + 结果回执。
+/// Permission prompt: request + result receipt.
 pub type AskRequest = (PermissionRequest, oneshot::Sender<DialogAction>);
 
-/// 权限对话框结果。
+/// Permission dialog result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogAction {
-    /// 选项 `index`（0 起）被确认。
+    /// Option `index` (0-based) confirmed.
     Confirm(usize),
-    /// AskUserQuestion 的 Other 自由输入被提交。
+    /// AskUserQuestion's Other free-form input submitted.
     Answer(String),
-    /// 对话框被 Esc 取消。
+    /// Dialog cancelled with Esc.
     Cancel,
 }
 
-/// 要展示的权限/提问块。
+/// Permission/question block to display.
 #[derive(Debug, Clone)]
 pub struct PermissionRequest {
-    /// 标题，如 `允许执行 Bash` 或 AskUserQuestion 的 header。
+    /// Title, e.g. `Allow Bash` or AskUserQuestion's header.
     pub title: String,
-    /// 标题下的说明。
+    /// Description under the title.
     pub question: String,
-    /// 编号选项（数字自动添加）。
+    /// Numbered options (numbers are added automatically).
     pub options: Vec<String>,
-    /// options[i] 的说明（CC Select 副行，dim 渲染）。
+    /// Description of options[i] (CC Select sub-line, dimmed).
     pub descriptions: Vec<Option<String>>,
-    /// AskUserQuestion：末尾自动附加 "Other" 自由输入（CC 行为）。
+    /// AskUserQuestion: a "Other" free-form input is appended automatically (CC behavior).
     pub free_text: bool,
 }
 
@@ -54,26 +54,26 @@ impl PermissionRequest {
     }
 }
 
-/// agent task → 组件的事件通道。
+/// Event channel from the agent task to components.
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     TurnStart,
-    /// 一批 toolcall 全部执行完（query loop 一轮收口）。
+    /// All tool calls in a batch finished (one query loop round closed).
     RoundEnd,
     TextDelta(String),
     ThinkingDelta(String),
-    /// message_delta 的输出 token 累计值。
+    /// Cumulative output token count from message_delta.
     OutputTokens(u64),
     ToolStart { name: String },
-    /// 工具 block 流式接收完整（含 input）：折叠判定时机。
-    /// standalone=true：`!` 命令等非模型工具——只设摘要，不参与折叠组。
+    /// Tool block fully received while streaming (including input): the fold decision point.
+    /// standalone=true: non-model tools like the `!` command — summary only, not part of a fold group.
     ToolReady {
         name: String,
         input: serde_json::Value,
         standalone: bool,
     },
     ToolDone(ToolCallDone),
-    /// Watchable 状态事件（命令/agent 生命周期，转发自 registry）。
+    /// Watchable status events (command/agent lifecycle, forwarded from the registry).
     WatchEvent {
         label: String,
         kind: crate::watch::WatchKind,
@@ -83,27 +83,30 @@ pub enum UiEvent {
         payload: Option<serde_json::Value>,
         signal: Option<String>,
     },
-    /// `/model` 二级选择器：某 provider 的模型列表异步拉取完成（补充进菜单）。
+    /// `/model` secondary selector: a provider's model list finished fetching asynchronously
+    /// (appended to the menu).
     ModelsLoaded {
         provider: String,
         models: Vec<String>,
     },
-    /// 消息定稿后图片异步加载完成（meta=None = 加载失败，显示占位）。
+    /// Image finished loading asynchronously after the message was finalized
+    /// (meta=None = load failed, placeholder shown).
     ImageReady {
         url: String,
         meta: Option<crate::tui::gfx::ImageMeta>,
     },
     TurnEnd,
-    /// 非致命警告（如 MCP 连接失败），显示在输入框上方，
-    /// 超过 WARNING_TTL（10s）自动过期（渲染端过滤）。
+    /// Non-fatal warning (e.g. MCP connection failure), shown above the input
+    /// box; expires after `WARNING_TTL` (10s, filtered at render time).
     Warning(String),
-    /// slash 命令异步结果（/compact /status /context）：渲染在消息之后。
+    /// Async slash-command result (/compact /status /context): rendered after the messages.
     SlashOutput(String),
-    /// 回合级错误（结构化）：`code` 为稳定错误码（SCREAMING_SNAKE，
-    /// 经 `crate::error::map_error` 统一出口映射），`msg` 为人话文案，
-    /// `level` 为呈现级别（渲染端按级别分支：页面级/字段级 → 错误行高亮，
-    /// 全流程级 → 整屏错误态），`context` 为触发上下文——两者均由**生产者
-    /// 发射时显式携带**（非渲染层推导），级别与上下文由 §4.4 口径保证一致。
+    /// Turn-level error (structured): `code` is a stable error code (SCREAMING_SNAKE, mapped
+    /// through the unified exit of `crate::error::map_error`), `msg` is human-readable text,
+    /// `level` is the presentation level (the renderer branches by level: page/field-level →
+    /// highlight the error line, whole-flow-level → full-screen error state), `context` is the
+    /// triggering context — both are explicitly carried by the **producer** when emitting
+    /// (not inferred by the render layer); level and context are guaranteed consistent by §4.4.
     Error {
         code: &'static str,
         msg: String,
@@ -112,7 +115,7 @@ pub enum UiEvent {
     },
 }
 
-/// 把 query 的 UiHooks 接到 TUI 通道上。
+/// Wire query's UiHooks to the TUI channels.
 pub fn tui_hooks(
     events: mpsc::UnboundedSender<UiEvent>,
     asks: mpsc::UnboundedSender<AskRequest>,
@@ -203,8 +206,8 @@ pub fn tui_hooks(
 mod tests {
     use super::*;
 
-    /// AskUserQuestion 的 TUI 挂钩：请求走权限模态（标题/问题/选项），
-    /// 确认 → Some(索引)，Esc 取消 → None。
+    /// AskUserQuestion's TUI hook: requests go through the permission modal
+    /// (title/question/options); confirm → Some(index), Esc cancel → None.
     #[tokio::test]
     async fn ask_question_hook_maps_confirm_and_cancel() {
         let (events_tx, _events_rx) = mpsc::unbounded_channel();

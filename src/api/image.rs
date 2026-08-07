@@ -1,26 +1,28 @@
-//! 图片附件发送前的准备：解码 → 缩放到 API 上限内 → PNG/JPEG 编码
-//! （体积目标对齐 Claude Code：2000×2000 与 ~3.75MB 原始字节，
-//! base64 后 ≤ 5MB API 硬限）。
+//! Pre-send preparation of image attachments: decode → scale down to the API
+//! limit → encode as PNG/JPEG (size target aligned with Claude Code:
+//! 2000×2000 and ~3.75MB of raw bytes, ≤ 5MB API hard limit after base64).
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use std::io::Cursor;
 
-/// 单边最大像素（超限等比缩小）。
+/// Maximum pixels per side (oversized images are scaled down proportionally).
 pub const IMAGE_MAX_DIMENSION: u32 = 2000;
-/// 目标原始字节上限（base64 后 ≈ 5MB API 硬限）。
+/// Target raw-byte ceiling (≈ 5MB API hard limit after base64).
 pub const IMAGE_TARGET_RAW_SIZE: usize = 3 * 1024 * 1024 + 768 * 1024;
-/// 解码上限：超大文件直接拒绝，不浪费解码时间。
+/// Decode ceiling: oversized files are rejected outright instead of wasting
+/// decode time.
 const MAX_DECODE_BYTES: usize = 32 * 1024 * 1024;
 
-/// 可发送的图片：编码格式 + base64 数据。
+/// A sendable image: encoding format + base64 data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedImage {
     pub media_type: String,
     pub data: String,
 }
 
-/// 解码/缩放/编码为 API 可接受的体积。失败（非图片、超限压缩不达）返回 None。
+/// Decode / scale / encode down to an API-acceptable size. Returns `None` on
+/// failure (not an image, or the compression never reaches the limit).
 pub fn prepare_image(bytes: &[u8]) -> Option<PreparedImage> {
     if bytes.is_empty() || bytes.len() > MAX_DECODE_BYTES {
         return None;
@@ -41,7 +43,8 @@ pub fn prepare_image(bytes: &[u8]) -> Option<PreparedImage> {
         img = img.resize(nw, nh, image::imageops::FilterType::Triangle);
     }
 
-    // PNG 优先（保留 alpha）；体积仍超目标则逐级 JPEG 降质。
+    // PNG first (keeps alpha); if the size still exceeds the target, degrade
+    // through JPEG quality levels.
     let mut png = Vec::new();
     img.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
         .ok()?;
@@ -86,7 +89,7 @@ mod tests {
         assert!(BASE64.decode(&out.data).unwrap().len() <= IMAGE_TARGET_RAW_SIZE);
     }
 
-    /// 超尺寸缩小到 2000px 内（等比）。
+    /// Oversized images are scaled down to within 2000px (proportionally).
     #[test]
     fn oversize_image_is_downscaled() {
         let out = prepare_image(&png_bytes(4000, 2000)).unwrap();

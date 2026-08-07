@@ -1,31 +1,37 @@
-//! agent 频道（D29 第二步，实验特性 `experimental.agentChannels`）。
+//! Agent channels (D29 step two, experimental feature `experimental.agentChannels`).
 //!
-//! 引擎只有四个原语，其余全是提示词：
-//! 1. 频道 = 成员名单（可见性：消息进全体成员信箱，全序投递）；
-//! 2. serial | free 提交校验（serial：发送者落后于频道头即弹回并附增量，
-//!    运行时只判"陈旧"，语义冲突由模型自判——乐观锁，模型做冲突解决器）；
-//! 3. 唤醒跟随投递（能力普遍、选择自主：沉默 = 醒后不 Post，零成本吸收态）；
-//! 4. 发件人 runtime 盖戳（from 取自会话实例名，不可伪造）+ 预算闸
-//!    （超限冻结频道并通知主 agent，不静默烧钱）。
+//! The engine has only four primitives; everything else is prompting:
+//! 1. A channel = a member list (visibility: messages go to every member's inbox,
+//!    delivered in total order);
+//! 2. serial | free commit check (serial: a sender behind the channel head is bounced
+//!    back with the increments; the runtime only judges "staleness" — semantic
+//!    conflicts are left to the model: optimistic locking with the model as resolver);
+//! 3. Wake-up follows delivery (capability is universal, choice is autonomous:
+//!    silence = don't Post after waking, a zero-cost absorbing state);
+//! 4. Sender stamping by the runtime (from comes from the session instance name and
+//!    cannot be forged) + a budget gate (freezes the channel on overrun and notifies
+//!    the main agent instead of silently burning money).
 //!
-//! 本模块是纯状态（无 watch/agents 依赖）；投递唤醒与展示行更新
-//! 由工具层（`tool::channel`）编排。主 agent 的成员名恒为 `main`。
+//! This module is pure state (no watch/agents dependencies); delivery wake-ups and
+//! display-row updates are orchestrated by the tool layer (`tool::channel`). The main
+//! agent's member name is always `main`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// 主 agent 在频道中的保留成员名。
+/// Reserved member name of the main agent in channels.
 pub const HUB_NAME: &str = "main";
-/// 用户（人）在频道中的保留成员名：TUI 频道房间里以此身份发言，
-/// 微信式视图中靠右显示；与 main 一样自动入席、不可移出、预算豁免。
+/// Reserved member name of the user (a human) in channels: speaks under this identity
+/// in the TUI channel room, shown right-aligned in the WeChat-style view; like main,
+/// auto-seated, cannot be removed, exempt from budgets.
 pub const USER_NAME: &str = "user";
 
-/// 频道发言模式。
+/// Channel speaking mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelMode {
-    /// 提交校验：开口前必须见过最新消息，落后即弹回（涌现定序）。
+    /// Commit check: must have seen the latest message before speaking; falling behind bounces back (emergent ordering).
     Serial,
-    /// 允许交叉（头脑风暴、并行独立产出）。
+    /// Allows interleaving (brainstorming, parallel independent output).
     Free,
 }
 
@@ -45,7 +51,7 @@ impl ChannelMode {
     }
 }
 
-/// 一条频道消息（seq 为频道内全序）。
+/// A channel message (seq is total order within the channel).
 #[derive(Debug, Clone)]
 pub struct ChannelMessage {
     pub seq: u64,
@@ -53,12 +59,12 @@ pub struct ChannelMessage {
     pub text: String,
 }
 
-/// 预算：超限冻结（读 settings.experimental，缺省 500/50）。
+/// Budgets: freeze on overrun (read from settings.experimental; defaults 500/50).
 #[derive(Debug, Clone, Copy)]
 pub struct ChannelLimits {
-    /// 每频道消息总上限。
+    /// Total message cap per channel.
     pub channel_total: u64,
-    /// 每 agent 每频道发言上限。
+    /// Message cap per agent per channel.
     pub per_agent: u64,
 }
 
@@ -87,20 +93,21 @@ impl ChannelLimits {
     }
 }
 
-/// post 的结果。
+/// Result of post.
 #[derive(Debug)]
 pub enum PostOutcome {
-    /// 已落地：向这些成员投递（不含发送者与 hub——hub 走 hub_mail）。
+    /// Committed: deliver to these members (excluding the sender and hub — hub goes through hub_mail).
     Sent {
         seq: u64,
         deliveries: Vec<(String, ChannelMessage)>,
     },
-    /// serial 落后：未送出，附错过的消息（已计入发送者已读——
-    /// 消息经工具结果进入其上下文，由它自判照发/改发/放弃）。
+    /// serial behind: not sent; attaches the missed messages (already counted as read by
+    /// the sender — they reach its context via the tool result, and it decides whether
+    /// to send as-is, revise, or drop).
     Stale { missed: Vec<ChannelMessage> },
 }
 
-/// list 快照。
+/// Snapshot for list.
 #[derive(Debug, Clone)]
 pub struct ChannelStatus {
     pub name: String,
@@ -115,26 +122,26 @@ struct Channel {
     mode: ChannelMode,
     seq: u64,
     log: Vec<ChannelMessage>,
-    /// 每成员已见到的频道序号（serial 提交校验的游标）。
+    /// Highest channel sequence each member has seen (the cursor for serial commit checks).
     seen: HashMap<String, u64>,
-    /// 每成员发言计数（per_agent 预算）。
+    /// Per-member post count (per_agent budget).
     sent: HashMap<String, u64>,
     frozen: bool,
-    /// 频道级消息总上限覆盖（D31 team.json channel.messageLimit；
-    /// None = 用 registry 级 ChannelLimits.channel_total）。
+    /// Channel-level total message cap override (D31 team.json channel.messageLimit;
+    /// None = use registry-level ChannelLimits.channel_total).
     message_limit: Option<u64>,
-    /// 展示行（◇ #名字）的 watch 条目。
+    /// Watch entry of the display row (◇ #name).
     watch_id: Option<crate::watch::WatchId>,
 }
 
 struct Inner {
     channels: HashMap<String, Channel>,
-    /// 待注入主 agent 上下文的频道消息（格式化文本）。
+    /// Channel messages pending injection into the main agent's context (formatted text).
     hub_mail: Vec<String>,
     limits: ChannelLimits,
 }
 
-/// 会话级频道注册中心（Session 持有 Arc，子会话共享）。
+/// Session-level channel registry (Session holds the Arc; shared by child sessions).
 pub struct ChannelRegistry {
     inner: Mutex<Inner>,
 }
@@ -158,7 +165,7 @@ impl ChannelRegistry {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 建频道（hub 自动入成员）。成员的存在性/深度由工具层校验。
+    /// Create a channel (hub auto-joins as member). Member existence/depth is validated by the tool layer.
     pub fn create(
         &self,
         name: &str,
@@ -196,7 +203,7 @@ impl ChannelRegistry {
         Ok(())
     }
 
-    /// 频道级消息总上限覆盖（D31 team.json channel.messageLimit）。
+    /// Channel-level total message cap override (D31 team.json channel.messageLimit).
     pub fn set_message_limit(&self, name: &str, limit: u64) -> Result<(), String> {
         if limit == 0 {
             return Err("messageLimit 必须为正整数".to_string());
@@ -224,8 +231,8 @@ impl ChannelRegistry {
             return Err(format!("{member} 已在 #{name} 中"));
         }
         ch.members.push(member.to_string());
-        // 迟入不补发 backlog：从当前头开始"听"（seen 置为当前 seq，
-        // serial 校验不会因为入场前的历史弹回）。
+        // Late joiners don't get backlog replay: they start "listening" from the current
+        // head (seen set to the current seq, so the serial check won't bounce on pre-join history).
         let seq = ch.seq;
         ch.seen.insert(member.to_string(), seq);
         Ok(())
@@ -247,7 +254,7 @@ impl ChannelRegistry {
         Ok(())
     }
 
-    /// 实例删除时清出全部频道（工具层在 AgentControl delete 时调用）。
+    /// Remove an instance from all channels on deletion (called by the tool layer on AgentControl delete).
     pub fn remove_member_everywhere(&self, member: &str) {
         let mut inner = self.lock();
         for ch in inner.channels.values_mut() {
@@ -255,8 +262,9 @@ impl ChannelRegistry {
         }
     }
 
-    /// 发消息。运行时只做三件事：盖戳（from 由调用方从会话实例名取，
-    /// 模型无法指定）、serial 陈旧校验、预算闸；说什么/是否重发全归模型。
+    /// Post a message. The runtime only does three things: stamping (from is taken by the
+    /// caller from the session instance name; the model can't specify it), serial staleness
+    /// check, and the budget gate; what to say / whether to resend is entirely up to the model.
     pub fn post(&self, from: &str, name: &str, text: &str) -> Result<PostOutcome, String> {
         let mut inner = self.lock();
         let limits = inner.limits;
@@ -268,14 +276,15 @@ impl ChannelRegistry {
             if !ch.members.iter().any(|m| m == from) {
                 return Err(format!("{from} 不是 #{name} 的成员"));
             }
-            // 频道级上限：team 覆盖优先，否则 registry 级。
+            // Channel-level cap: team override wins, otherwise registry-level.
             let channel_total = ch.message_limit.unwrap_or(limits.channel_total);
             if ch.frozen {
                 return Err(format!(
                     "#{name} 已冻结（达消息总上限 {channel_total}），不再接收发言"
                 ));
             }
-            // serial 提交校验：落后即弹回 + 增量（弹回内容进上下文，视为已读）。
+            // Serial commit check: fall behind → bounce back + increments (the bounced
+            // content enters the context, counted as read).
             if ch.mode == ChannelMode::Serial {
                 let seen = ch.seen.get(from).copied().unwrap_or(0);
                 if seen < ch.seq {
@@ -334,7 +343,7 @@ impl ChannelRegistry {
         Ok(outcome)
     }
 
-    /// 成员的信箱消化到 seq（其运行回合注入了该频道至 seq 的消息）。
+    /// Mark the member's inbox as digested up to seq (its running turn was injected with channel messages up to seq).
     pub fn mark_seen(&self, member: &str, name: &str, seq: u64) {
         if let Some(ch) = self.lock().channels.get_mut(name) {
             let cursor = ch.seen.entry(member.to_string()).or_insert(0);
@@ -344,7 +353,7 @@ impl ChannelRegistry {
         }
     }
 
-    /// 展示行快照：（watch_id, detail, 日志尾部文本）。
+    /// Display-row snapshot: (watch_id, detail, tail text of the log).
     pub fn row_snapshot(
         &self,
         name: &str,
@@ -375,7 +384,7 @@ impl ChannelRegistry {
         Some((ch.watch_id, detail, lines.join("\n")))
     }
 
-    /// 单频道快照（TUI 房间头部）。
+    /// Single-channel snapshot (TUI room header).
     pub fn info(&self, name: &str) -> Option<ChannelStatus> {
         let inner = self.lock();
         inner.channels.get(name).map(|ch| ChannelStatus {
@@ -387,7 +396,7 @@ impl ChannelRegistry {
         })
     }
 
-    /// 全量消息记录（TUI 房间渲染；克隆，调用方按帧取）。
+    /// Full message log (TUI room rendering; cloned, the caller polls per frame).
     pub fn log_of(&self, name: &str) -> Vec<ChannelMessage> {
         self.lock()
             .channels
@@ -417,7 +426,7 @@ impl ChannelRegistry {
         !self.lock().hub_mail.is_empty()
     }
 
-    /// 取走待注入主 agent 的频道消息（回合边界批量注入）。
+    /// Drain channel messages pending injection into the main agent (batch-injected at turn boundaries).
     pub fn drain_hub_mail(&self) -> Vec<String> {
         std::mem::take(&mut self.lock().hub_mail)
     }
@@ -460,7 +469,7 @@ mod tests {
         assert_eq!(reg.list()[0].members, vec!["main", "user", "a", "c"]);
         reg.remove_member_everywhere("a");
         assert_eq!(reg.list()[0].members, vec!["main", "user", "c"]);
-        // 单频道快照与全量日志访问器。
+        // Single-channel snapshot and full-log accessors.
         assert_eq!(reg.info("table").unwrap_or_else(|| panic!("有")).seq, 0);
         assert!(reg.info("nope").is_none());
         assert!(reg.log_of("table").is_empty());
@@ -476,13 +485,13 @@ mod tests {
         let names: Vec<&str> = deliveries.iter().map(|(m, _)| m.as_str()).collect();
         assert_eq!(names, vec!["b", "c"], "不投给发送者与 hub");
         assert!(deliveries.iter().all(|(_, m)| m.from == "a" && m.text == "大家好"));
-        // hub 是成员：消息进 hub_mail；hub 自己发不进。
+        // Hub is a member: messages go to hub_mail; the hub's own posts don't.
         assert!(reg.has_hub_mail());
         let mail = reg.drain_hub_mail();
         assert_eq!(mail, vec!["[#t 第1条] a: 大家好"]);
         let _ = sent(reg.post("main", "t", "肃静").unwrap_or_else(|e| panic!("{e}")));
         assert!(!reg.has_hub_mail(), "hub 自己的发言不回流");
-        // user（人）是天然成员：可发言，hub 能听到，不占 per_agent 预算。
+        // user (a human) is a natural member: can post, hub hears it, doesn't consume the per_agent budget.
         let (_, deliveries) =
             sent(reg.post("user", "t", "都停一下").unwrap_or_else(|e| panic!("{e}")));
         assert_eq!(
@@ -491,7 +500,7 @@ mod tests {
             "user 的发言唤醒全部 agent 成员"
         );
         assert!(reg.drain_hub_mail()[0].contains("user: 都停一下"));
-        // 非成员/未知频道报错。
+        // Non-member / unknown channel error.
         assert!(reg.post("ghost", "t", "x").is_err());
         assert!(reg.post("a", "nope", "x").is_err());
     }
@@ -502,7 +511,7 @@ mod tests {
         reg.create("count", vec!["a".into(), "b".into()], ChannelMode::Serial)
             .unwrap_or_else(|e| panic!("{e}"));
         let _ = sent(reg.post("a", "count", "1").unwrap_or_else(|e| panic!("{e}")));
-        // b 没见过 a 的 "1"（seen=0 < seq=1）→ 弹回附增量。
+        // b hasn't seen a's "1" (seen=0 < seq=1) → bounce back with increments.
         match reg.post("b", "count", "1").unwrap_or_else(|e| panic!("{e}")) {
             PostOutcome::Stale { missed } => {
                 assert_eq!(missed.len(), 1);
@@ -511,14 +520,14 @@ mod tests {
             }
             PostOutcome::Sent { .. } => panic!("应弹回"),
         }
-        // 弹回视为已读：重发落地（模型改口 "2"）。
+        // Bounce counts as read: the resend commits (the model says "2" instead).
         let (seq, _) = sent(reg.post("b", "count", "2").unwrap_or_else(|e| panic!("{e}")));
         assert_eq!(seq, 2, "重试成功，顺序涌现");
-        // mark_seen：信箱注入后 a 的游标推进，不弹回。
+        // mark_seen: after inbox injection, a's cursor advances, no bounce.
         reg.mark_seen("a", "count", 2);
         let (seq, _) = sent(reg.post("a", "count", "3").unwrap_or_else(|e| panic!("{e}")));
         assert_eq!(seq, 3);
-        // free 模式不校验。
+        // Free mode doesn't check.
         reg.create("brainstorm", vec!["a".into(), "b".into()], ChannelMode::Free)
             .unwrap_or_else(|e| panic!("{e}"));
         let _ = sent(reg.post("a", "brainstorm", "想法一").unwrap_or_else(|e| panic!("{e}")));
@@ -532,7 +541,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         let _ = sent(reg.post("a", "t", "旧闻").unwrap_or_else(|e| panic!("{e}")));
         reg.invite("t", "late").unwrap_or_else(|e| panic!("{e}"));
-        // 迟入者 seen=入场时的头：无 backlog 弹回，直接可发言。
+        // Late joiner's seen = head at join time: no backlog bounce, can post immediately.
         let (seq, _) = sent(reg.post("late", "t", "我来了").unwrap_or_else(|e| panic!("{e}")));
         assert_eq!(seq, 2);
     }
@@ -545,13 +554,13 @@ mod tests {
         });
         reg.create("t", vec!["a".into()], ChannelMode::Free)
             .unwrap_or_else(|e| panic!("{e}"));
-        // 频道级覆盖为 1：第二条就冻结。
+        // Channel-level override is 1: the second message freezes it.
         reg.set_message_limit("t", 1).unwrap_or_else(|e| panic!("{e}"));
         let _ = sent(reg.post("a", "t", "1").unwrap_or_else(|e| panic!("{e}")));
         let err = reg.post("a", "t", "2").unwrap_err();
         assert!(err.contains("冻结"), "{err}");
         assert!(reg.list()[0].frozen);
-        // 0 拒绝；未知频道报错。
+        // 0 is rejected; unknown channel errors.
         assert!(reg.set_message_limit("t", 0).is_err());
         assert!(reg.set_message_limit("nope", 5).is_err());
     }
@@ -566,10 +575,10 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         let _ = sent(reg.post("a", "t", "1").unwrap_or_else(|e| panic!("{e}")));
         let _ = sent(reg.post("a", "t", "2").unwrap_or_else(|e| panic!("{e}")));
-        // a 达 per_agent 上限。
+        // a hits the per_agent cap.
         let err = reg.post("a", "t", "3").unwrap_err();
         assert!(err.contains("上限 2"), "{err}");
-        // b 触发频道总上限：冻结 + hub 收到一次警示。
+        // b triggers the channel total cap: freeze + hub gets one warning.
         let _ = reg.drain_hub_mail();
         let err = reg.post("b", "t", "x").unwrap_err();
         assert!(err.contains("冻结"), "{err}");
@@ -577,7 +586,7 @@ mod tests {
         let mail = reg.drain_hub_mail();
         assert_eq!(mail.len(), 1, "{mail:?}");
         assert!(mail[0].contains("已冻结"));
-        // 冻结后再发：拒绝且不再重复通知。
+        // Posting after freeze: rejected, no repeated notification.
         let err = reg.post("b", "t", "y").unwrap_err();
         assert!(err.contains("已冻结"), "{err}");
         assert!(!reg.has_hub_mail());

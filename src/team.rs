@@ -1,13 +1,16 @@
-//! agent team：项目级编队（D31）。
+//! Agent teams: project-level squads (D31).
 //!
-//! 心智模型：team 是图纸（`.bingo/team.json` 持久定义），room 是工地
-//! （运行时实例 + 频道）。本模块 = 三块薄层：team.json 解析与校验
-//! （validate 与 start 同源：validate 能过 start 必成）、`spawn_team`
-//! 编排（复用现有 Agent spawn + ChannelRegistry，幂等键 = 实例名）、
-//! team 记忆（键 = 项目路径哈希 + 分支，跨会话恢复）。
+//! Mental model: the team is the blueprint (persistent definition in
+//! `.bingo/team.json`), the room is the construction site (runtime instances +
+//! channels). This module = three thin layers: team.json parsing and validation
+//! (validate and start share the same source: if validate passes, start must
+//! succeed), `spawn_team` orchestration (reuses the existing Agent spawn +
+//! ChannelRegistry; idempotency key = instance name), and team memory (key =
+//! project-path hash + branch, restored across sessions).
 //!
-//! 成员引用 AgentDef 而非内联人格——人格单一事实来源仍在
-//! `.bingo/agents/<名>.md`，team 只是编队层。
+//! Members reference AgentDefs rather than inlining personas — the single source
+//! of truth for a persona stays in `.bingo/agents/<name>.md`; the team is only a
+//! formation layer.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,9 +24,9 @@ use crate::channels::ChannelMode;
 use crate::error::ErrorCode;
 use crate::query::Session;
 
-/// team 配置文件（项目层 `.bingo/team.json`，进版本库）。
+/// Team config file (project-level `.bingo/team.json`, checked into version control).
 pub const TEAM_FILE: &str = ".bingo/team.json";
-/// 记忆根目录：`~/.config/bingo/teams/`。
+/// Memory root directory: `~/.config/bingo/teams/`.
 const TEAM_MEMORY_ROOT: &str = "teams";
 
 #[derive(Debug, Error)]
@@ -50,26 +53,26 @@ impl TeamError {
     }
 }
 
-/// 房间规格（复用 Channel 既有词汇，不发明新概念）。
+/// Room spec (reuses the existing Channel vocabulary; no new concepts invented).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelSpec {
-    /// 发言模式：serial（缺省）| free。
+    /// Speaking mode: serial (default) | free.
     #[serde(default)]
     pub mode: Option<String>,
-    /// 每频道消息总上限（缺省 500，见 ChannelLimits）。
+    /// Total message cap per channel (default 500, see ChannelLimits).
     #[serde(rename = "messageLimit", default)]
     pub message_limit: Option<u64>,
 }
 
-/// 单个成员：`name`（实例名）+ `agent`（引用的 AgentDef 名）。
+/// A single member: `name` (instance name) + `agent` (referenced AgentDef name).
 #[derive(Debug, Clone, Deserialize)]
 pub struct TeamMember {
     pub name: String,
     pub agent: String,
 }
 
-/// team 定义（图纸）。
+/// Team definition (blueprint).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamDef {
@@ -79,9 +82,9 @@ pub struct TeamDef {
     pub members: Vec<TeamMember>,
 }
 
-/// 解析 `.bingo/team.json`：不存在返回 Ok(None)；存在则解析 + 结构校验
-/// （类型/枚举非法即错误）。成员引用的 AgentDef 存在性由 `validate` 查
-/// （需要加载后的定义清单，不在纯解析里做）。
+/// Parse `.bingo/team.json`: returns Ok(None) if absent; otherwise parses + structural
+/// validation (invalid types/enums are errors). Existence of referenced AgentDefs is
+/// checked by `validate` (needs the loaded definition list; not done in pure parsing).
 pub fn load_team_file(project_dir: &Path) -> Result<Option<TeamDef>, TeamError> {
     let path = project_dir.join(TEAM_FILE);
     let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -92,8 +95,8 @@ pub fn load_team_file(project_dir: &Path) -> Result<Option<TeamDef>, TeamError> 
     Ok(Some(def))
 }
 
-/// 结构校验（不依赖 AgentDef 清单）：名字/频道模式/成员约束。
-/// 与 `validate` 共享错误格式（三段式：文件路径 + 字段路径 + 期望）。
+/// Structural validation (no AgentDef list needed): name/channel mode/member constraints.
+/// Shares the error format with `validate` (three parts: file path + field path + expectation).
 fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
     let file = path.display();
     if def.name.trim().is_empty() {
@@ -142,8 +145,9 @@ fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
     Ok(())
 }
 
-/// 引用校验：每个成员的 agent 必须存在于定义清单（项目层 + user 层）。
-/// `/team validate` 与 `spawn_team` 共用（同源：validate 能过 start 必成）。
+/// Reference validation: each member's agent must exist in the definition list
+/// (project + user layers). Shared by `/team validate` and `spawn_team` (same source:
+/// if validate passes, start must succeed).
 pub fn validate(def: &TeamDef, defs: &[AgentDef]) -> Result<(), TeamError> {
     let by_name: HashMap<&str, &AgentDef> = defs.iter().map(|d| (d.name.as_str(), d)).collect();
     for (i, m) in def.members.iter().enumerate() {
@@ -164,7 +168,7 @@ pub fn validate(def: &TeamDef, defs: &[AgentDef]) -> Result<(), TeamError> {
     Ok(())
 }
 
-/// 展示用：team 定义 + 其成员引用的定义（/team list 定义区）。
+/// For display: the team definition + the definitions its members reference (/team list definitions section).
 #[derive(Debug, Clone)]
 pub struct TeamView {
     pub def: TeamDef,
@@ -179,8 +183,9 @@ pub struct MemberView {
     pub source: AgentDefSource,
 }
 
-/// 定义区视图：成员引用缺失时 source 记 Unknown、描述留空（不报错——
-/// 展示层对坏引用宽容，拉起时才拒绝）。
+/// Definitions-section view: when a member's reference is missing, source is Unknown
+/// and description is empty (no error — the display layer tolerates bad references;
+/// rejection happens at spawn).
 pub fn view(def: &TeamDef, defs: &[AgentDef]) -> TeamView {
     let by_name: HashMap<&str, &AgentDef> = defs.iter().map(|d| (d.name.as_str(), d)).collect();
     TeamView {
@@ -203,7 +208,7 @@ pub fn view(def: &TeamDef, defs: &[AgentDef]) -> TeamView {
     }
 }
 
-/// 频道模式解析（缺省 serial）。
+/// Channel mode parsing (defaults to serial).
 pub fn channel_mode(def: &TeamDef) -> ChannelMode {
     def.channel
         .as_ref()
@@ -212,9 +217,9 @@ pub fn channel_mode(def: &TeamDef) -> ChannelMode {
         .unwrap_or(ChannelMode::Serial)
 }
 
-// ---- team 记忆（键 = 项目路径哈希 + 分支） ----
+// ---- team memory (key = project-path hash + branch) ----
 
-/// 记忆根目录：`~/.config/bingo/teams/`（user 层，默认不进版本库）。
+/// Memory root directory: `~/.config/bingo/teams/` (user level, not in version control by default).
 pub fn team_memory_root(home: &Path) -> PathBuf {
     let config = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -222,8 +227,9 @@ pub fn team_memory_root(home: &Path) -> PathBuf {
     config.join("bingo").join(TEAM_MEMORY_ROOT)
 }
 
-/// 项目键：`<目录名>-<完整路径哈希>`（与项目记忆 `memory_file` 同键族；
-/// worktree 场景天然隔离——不同 worktree 路径不同 → 键不同）。
+/// Project key: `<dir name>-<full path hash>` (same key family as project memory
+/// `memory_file`; naturally isolated across worktrees — different worktree paths →
+/// different keys).
 pub fn project_key(project_dir: &Path) -> String {
     let name = project_dir
         .file_name()
@@ -236,7 +242,7 @@ pub fn project_key(project_dir: &Path) -> String {
     format!("{name}-{}", crate::memory::path_hash(project_dir))
 }
 
-/// 当前分支名（非 git 仓库/无分支时回落 "detached"）。
+/// Current branch name (falls back to "detached" when not a git repo / no branch).
 pub fn current_branch(project_dir: &Path) -> String {
     std::process::Command::new("git")
         .arg("-C")
@@ -251,7 +257,7 @@ pub fn current_branch(project_dir: &Path) -> String {
         .unwrap_or_else(|| "detached".to_string())
 }
 
-/// 某 team 在某项目+分支下的记忆目录：
+/// Memory directory of a team under a project + branch:
 /// `~/.config/bingo/teams/<project_key>/<branch>/<team>/`。
 pub fn team_memory_dir(home: &Path, project_dir: &Path, branch: &str, team: &str) -> PathBuf {
     team_memory_root(home)
@@ -260,12 +266,12 @@ pub fn team_memory_dir(home: &Path, project_dir: &Path, branch: &str, team: &str
         .join(team)
 }
 
-/// 成员历史文件（完整消息历史落盘，供跨会话恢复）。
+/// Member history file (full message history persisted for cross-session restore).
 pub fn member_history_path(dir: &Path, member: &str) -> PathBuf {
     dir.join(format!("{}.json", sanitize_name(member)))
 }
 
-/// 决策记录文件（append-only，`sources` 管道分隔，复用 frontmatter 约定）。
+/// Decision log file (append-only, `sources` pipe-separated, reuses the frontmatter convention).
 pub fn decisions_path(dir: &Path) -> PathBuf {
     dir.join("decisions.md")
 }
@@ -276,21 +282,21 @@ fn sanitize_name(name: &str) -> String {
         .collect()
 }
 
-// ---- 拉起编排（spawn_team） ----
+// ---- spawn orchestration (spawn_team) ----
 
-/// 一次拉起的摘要（/team start 输出与事件日志共用）。
+/// Summary of one spawn (shared by /team start output and the event log).
 #[derive(Debug, Clone, Default)]
 pub struct SpawnSummary {
-    /// 新派生的实例名。
+    /// Newly spawned instance names.
     pub spawned: Vec<String>,
-    /// 复用既有空闲实例（幂等：未重派）。
+    /// Reused existing instances (idempotent: not re-spawned).
     pub reused: Vec<String>,
-    /// 失败的成员：(实例名, 原因)。
+    /// Failed members: (instance name, reason).
     pub failed: Vec<(String, String)>,
 }
 
 impl SpawnSummary {
-    /// 事件措辞（qa 验收：`spawned ×N` vs `reused ×N` 可 grep 可断言）。
+    /// Event wording (QA acceptance: `spawned ×N` vs `reused ×N` are greppable/assertable).
     pub fn events(&self) -> Vec<String> {
         let mut out = Vec::new();
         if !self.spawned.is_empty() {
@@ -303,11 +309,13 @@ impl SpawnSummary {
     }
 }
 
-/// 拉起 team（D31）：建频道（幂等）+ 派生/复用成员实例（「拉起 ≠ 唤醒」——
-/// 成员走 Idle 待命态，零 token、零回合，等 SendMessage/频道消息才开跑）。
-/// 记忆恢复同走本路径：有落盘历史则预载（不唤醒），缺文件静默回落空历史。
-/// 成员级失败隔离：单个失败不拖垮全队，失败者留在 failed 可单独 re-spawn。
-/// 返回 `Err` 仅当配置校验失败（validate 与 start 同源）。
+/// Spawn a team (D31): create the channel (idempotent) + spawn/reuse member instances
+/// ("spawn ≠ wake" — members sit in Idle standby, zero tokens, zero turns, only
+/// starting on SendMessage/channel messages). Memory restore goes through the same
+/// path: persisted history is preloaded (no wake-up), missing files silently fall
+/// back to empty history. Member-level failure isolation: one failure doesn't sink
+/// the whole team; the failed member stays in `failed` and can be re-spawned alone.
+/// Returns `Err` only on config validation failure (validate and start share the same source).
 pub fn spawn_team(
     session: &Arc<Session>,
     def: &TeamDef,
@@ -319,7 +327,7 @@ pub fn spawn_team(
     validate(def, defs)?;
     let mut summary = SpawnSummary::default();
 
-    // 频道幂等：create-if-not-exists。
+    // Channel idempotency: create-if-not-exists.
     let channel_name = &def.name;
     let channel_exists = session.channels.info(channel_name).is_some();
     if !channel_exists
@@ -333,7 +341,7 @@ pub fn spawn_team(
 
     let by_name: HashMap<&str, &AgentDef> = defs.iter().map(|d| (d.name.as_str(), d)).collect();
     for member in &def.members {
-        // 幂等键 = 实例名：已存在（Idle/Running）→ 复用，不重派。
+        // Idempotency key = instance name: already exists (Idle/Running) → reuse, no re-spawn.
         let exists = session
             .agents
             .list()
@@ -367,23 +375,24 @@ pub fn spawn_team(
         };
         let description = agent_def.description.clone();
         session.agents.insert(&name, Some(member.agent.clone()), description, sub);
-        // 记忆恢复：有落盘历史则预载（不唤醒；SendMessage 续话时自动携带）。
+        // Memory restore: persisted history is preloaded (no wake-up; automatically
+        // carried when SendMessage resumes).
         let history = load_member_history(home, project_dir, branch, &def.name, &name);
         if !history.is_empty() {
             session.agents.set_history(&name, history);
         }
-        // 拉起 ≠ 唤醒：insert 后置 Idle（零 token 待命；回合从 SendMessage 才开始）。
+        // Spawn ≠ wake: mark Idle after insert (zero-token standby; the turn only starts with SendMessage).
         session.agents.mark_idle(&name);
-        // 入席频道（迟入无 backlog，从当前头开始听）。
+        // Join the channel (late joiners get no backlog; they listen from the current head).
         let _ = session.channels.invite(channel_name, &name);
         summary.spawned.push(name);
     }
     Ok(summary)
 }
 
-// ---- 记忆读写（跨会话恢复） ----
+// ---- memory read/write (cross-session restore) ----
 
-/// 保存成员完整消息历史（落盘 JSON；失败静默——记忆是增强不是契约）。
+/// Save a member's full message history (JSON on disk; failures are silent — memory is an enhancement, not a contract).
 pub fn save_member_history(
     home: &Path,
     project_dir: &Path,
@@ -402,7 +411,7 @@ pub fn save_member_history(
     }
 }
 
-/// 读取成员历史（不存在/损坏 → 空，静默回落）。
+/// Load member history (missing/corrupt → empty, silently fall back).
 pub fn load_member_history(
     home: &Path,
     project_dir: &Path,
@@ -417,8 +426,8 @@ pub fn load_member_history(
         .unwrap_or_default()
 }
 
-/// 追加一条决策记录（append-only，零模型成本；frontmatter 管道分隔约定
-/// `sources: a|b|c`，`type` 下沉条目级）。失败静默。
+/// Append a decision record (append-only, zero model cost; frontmatter pipe-separated
+/// convention `sources: a|b|c`, `type` lives at entry level). Failures are silent.
 pub fn append_decision(
     home: &Path,
     project_dir: &Path,
@@ -492,18 +501,18 @@ mod tests {
     #[test]
     fn rejects_bad_structure_with_field_path() {
         let dir = tmp("bad");
-        // 空成员。
+        // Empty members.
         let path = write_team(&dir, r#"{"name":"t","members":[]}"#);
         let err = load_team_file(&dir).unwrap_err().to_string();
         assert!(err.contains("members") && err.contains("不能为空"), "{err}");
-        // 配置内重名。
+        // Duplicate names within the config.
         write_team(
             &dir,
             r#"{"name":"t","members":[{"name":"a","agent":"x"},{"name":"a","agent":"y"}]}"#,
         );
         let err = load_team_file(&dir).unwrap_err().to_string();
         assert!(err.contains("重名") && err.contains("members[1]"), "{err}");
-        // 非法频道模式。
+        // Invalid channel mode.
         write_team(
             &dir,
             r#"{"name":"t","channel":{"mode":"bogus"},"members":[{"name":"a","agent":"x"}]}"#,
@@ -557,7 +566,7 @@ mod tests {
         let a = team_memory_dir(home, std::path::Path::new("/work/alpha"), "main", "dev");
         let b = team_memory_dir(home, std::path::Path::new("/work/beta"), "main", "dev");
         assert_ne!(a, b, "不同项目隔离");
-        // 同项目不同分支隔离（worktree 场景）。
+        // Same project, different branches are isolated (worktree scenario).
         let c = team_memory_dir(home, std::path::Path::new("/work/alpha"), "agent-team", "dev");
         assert_ne!(a, c, "不同分支隔离");
         assert!(a.starts_with(team_memory_root(home)));
@@ -621,7 +630,8 @@ mod tests {
         })
     }
 
-    /// 拉起 ≠ 唤醒：新派生成员 Idle（零回合）、房间建成；重复 start 幂等复用。
+    /// Spawn ≠ wake: newly spawned members are Idle (zero turns), the room is built;
+    /// repeated start is an idempotent reuse.
     #[test]
     fn spawn_team_is_idempotent_and_members_idle() {
         let s = session();
@@ -634,14 +644,14 @@ mod tests {
         assert_eq!(first.spawned.len(), 3, "{first:?}");
         assert!(first.reused.is_empty());
         assert!(first.failed.is_empty());
-        // 成员 Idle 待命（零 token 未开回合）；频道建成含 hub/user + 三成员。
+        // Members in Idle standby (zero tokens, no turn started); channel built with hub/user + three members.
         let states = s.agents.list();
         assert_eq!(states.len(), 3);
         assert!(states.iter().all(|a| a.state == crate::agents::AgentState::Idle));
         let ch = s.channels.info("dev-room").unwrap_or_else(|| panic!("频道应存在"));
         assert_eq!(ch.members, vec!["main", "user", "dev-ex", "ui", "dev"]);
 
-        // 重复 start：全部复用，不重派。
+        // Repeated start: everything is reused, nothing re-spawned.
         let second = spawn_team(&s, &team, &defs, &mem_home, &mem_home, "main")
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(second.spawned.is_empty());
@@ -650,7 +660,8 @@ mod tests {
         std::fs::remove_dir_all(&mem_home).unwrap();
     }
 
-    /// 记忆恢复：落盘历史在 spawn 时预载进实例（不唤醒，等 SendMessage 续话携带）。
+    /// Memory restore: persisted history is preloaded into the instance at spawn (no
+    /// wake-up; carried when SendMessage resumes).
     #[test]
     fn spawn_team_restores_member_history() {
         let s = session();
@@ -668,7 +679,8 @@ mod tests {
         std::fs::remove_dir_all(&mem_home).unwrap();
     }
 
-    /// 配置校验失败（引用全缺）→ Err，不拉起任何东西（validate 与 start 同源）。
+    /// Config validation failure (all references missing) → Err, nothing is spawned
+    /// (validate and start share the same source).
     #[test]
     fn spawn_team_returns_err_on_invalid_config() {
         let s = session();
@@ -696,9 +708,9 @@ mod tests {
         let loaded = load_member_history(&home, &project, branch, team, "dev");
         assert_eq!(loaded.len(), 2, "roundtrip 等值");
         assert_eq!(loaded[0].content, msgs[0].content);
-        // 缺失/损坏回落空。
+        // Missing/corrupt falls back to empty.
         assert!(load_member_history(&home, &project, branch, team, "ghost").is_empty());
-        // 决策记录 append-only。
+        // Decision log is append-only.
         append_decision(&home, &project, branch, team, "decision", "用 JSON 不用 YAML", &["dev", "qa"]);
         append_decision(&home, &project, branch, team, "decision", "第二案", &["ui/ux"]);
         let raw = std::fs::read_to_string(decisions_path(&team_memory_dir(&home, &project, branch, team)))

@@ -1,5 +1,6 @@
-//! 显示层的样式化行模型：markdown 渲染与 activities 布局都产出
-//! [`Line`]，再由 [`crate::tui::view`] 映射为终端行。与显示库解耦。
+//! The styled line model of the display layer: both markdown rendering and
+//! activities layout produce [`Line`]s, which [`crate::tui::view`] maps to
+//! terminal rows. Decoupled from any display library.
 
 use std::borrow::Cow;
 
@@ -7,20 +8,20 @@ use ratatui::style::Color;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
-/// 一个带样式的文本段。
+/// One styled text segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegStyle {
-    /// 前景色。
+    /// Foreground colour.
     pub fg: Option<Color>,
-    /// 背景色。
+    /// Background colour.
     pub bg: Option<Color>,
-    /// 加粗。
+    /// Bold.
     pub bold: bool,
-    /// 斜体。
+    /// Italic.
     pub italic: bool,
-    /// 下划线。
+    /// Underline.
     pub underline: bool,
-    /// 删除线（渲染为 `Modifier::CROSSED_OUT`）。
+    /// Strikethrough (rendered as `Modifier::CROSSED_OUT`).
     pub strikethrough: bool,
 }
 
@@ -36,8 +37,8 @@ impl SegStyle {
         }
     }
 
-    /// 叠加另一层样式：`other` 中出现的字段覆盖/启用自身（只加不减，
-    /// 与 ratatui `Style::patch` 语义一致）。
+    /// Overlay another style layer: fields set in `other` override or enable
+    /// ours (additive only, matching ratatui `Style::patch` semantics).
     pub fn patch(self, other: SegStyle) -> SegStyle {
         SegStyle {
             fg: other.fg.or(self.fg),
@@ -53,7 +54,7 @@ impl SegStyle {
         Self { fg: Some(color), ..SegStyle::plain() }
     }
 
-    /// 设置背景色（链式）。
+    /// Set the background colour (chainable).
     pub fn with_bg(mut self, color: Color) -> Self {
         self.bg = Some(color);
         self
@@ -76,17 +77,19 @@ impl SegStyle {
     }
 }
 
-/// 一行样式化文本（多个段）。
+/// One line of styled text (several segments).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
-    /// 按顺序排布的段。
+    /// The segments, in order.
     pub segs: Vec<Seg>,
-    /// 图片块引用：块内每一行都携带（首行 + 后续空行），显示层按 url
-    /// 识别块边界：块首行输出 kitty 序列，续行跳过。
+    /// Image block reference: every row of the block carries it (the first
+    /// row plus the blank continuation rows); the display layer tells block
+    /// boundaries apart by url — the first row emits the kitty sequence,
+    /// continuation rows are skipped.
     pub image: Option<ImageRef>,
 }
 
-/// 图片块引用（指向 [`crate::tui::gfx::ImageMeta`]）。
+/// Image block reference (points at [`crate::tui::gfx::ImageMeta`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageRef {
     pub url: String,
@@ -123,7 +126,7 @@ impl Line {
         self.segs.iter().all(|s| s.text.is_empty())
     }
 
-    /// 整行应用一个样式（叠加，不覆盖已有颜色）。
+    /// Apply one style to the whole line (patched on; existing colours are kept).
     pub fn styled_all(mut self, style: SegStyle) -> Self {
         for seg in &mut self.segs {
             seg.style = seg.style.patch(style);
@@ -131,7 +134,7 @@ impl Line {
         self
     }
 
-    /// 行首插入一段（活动点前缀等）。
+    /// Insert a segment at the start of the line (e.g. the activity-point prefix).
     pub fn prepend(&mut self, seg: Seg) {
         self.segs.insert(0, seg);
     }
@@ -144,7 +147,7 @@ impl Line {
         self.segs.push(Seg { text: text.into(), style });
     }
 
-    /// 纯文本内容。
+    /// The plain text content.
     pub fn plain_text(&self) -> String {
         self.segs.iter().map(|s| s.text.as_str()).collect()
     }
@@ -250,12 +253,12 @@ fn tokens(s: &str) -> Vec<(bool, &str)> {
     out
 }
 
-/// CJK 感知的字符串显示宽度。
+/// CJK-aware display width of a string.
 pub fn text_width(s: &str) -> usize {
     s.width()
 }
 
-/// 单个字符的显示宽度。
+/// Display width of a single character.
 pub fn char_width(c: char) -> usize {
     c.width().unwrap_or(0)
 }
@@ -287,19 +290,19 @@ mod tests {
     fn wrap_words_breaks_on_whitespace_and_newlines() {
         assert_eq!(wrap_words("hello world", 20), vec!["hello world"]);
         assert_eq!(wrap_words("hello world", 7), vec!["hello", "world"]);
-        // 显式换行开新行，空行保留。
+        // Explicit newlines start new lines; blank lines are kept.
         assert_eq!(wrap_words("a\n\nb", 10), vec!["a", "", "b"]);
-        // 行首缩进保留。
+        // Leading indentation is kept.
         assert_eq!(wrap_words("  indented", 20), vec!["  indented"]);
-        // 空输入仍有一行（调用方按行渲染）。
+        // Empty input still yields one line (the caller renders per line).
         assert_eq!(wrap_words("", 10), vec![""]);
     }
 
     #[test]
     fn wrap_words_hard_breaks_long_runs() {
-        // 超长词（无空白可断）按宽度硬断。
+        // Over-long words (no whitespace to break at) hard-break by width.
         assert_eq!(wrap_words("aaaaaaaa", 3), vec!["aaa", "aaa", "aa"]);
-        // CJK 按显示宽度（每字 2 列）断行。
+        // CJK breaks by display width (2 columns per glyph).
         assert_eq!(wrap_words("中文换行测试", 4), vec!["中文", "换行", "测试"]);
     }
 
