@@ -260,7 +260,11 @@ Example (.bingo/settings.json):
 - **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/`，文件名
   `<项目名>-<路径哈希>.md`，同名目录不串味）+ 项目 CLAUDE.md（Anthropic 惯例）。
 - **会话**：transcript 持久化（JSONL），`--continue`/`/resume` 恢复，`/compact` 压缩。
-  **分享**：`bingo share [会话] [--output 路径] [--open]` 或会话内 `/share [--open]` 导出自包含
-  HTML 页面（对话/Team 名册/私聊/频道四视图，单文件离线可开，无外部依赖）；会话 key 与
-  `/resume` 同语义（transcript stem 或可匹配片段，缺省最近会话），生成的 HTML
-  含完整对话与工具输出，分享前自行审阅敏感信息。
+  **分享**：`bingo share [会话]` 默认生成 HTML 并上传官网分享服务，打印链接
+  （`https://bingo.ruobin.dev/share/u/<id>`）；`--local` 保留本地文件模式（`--output` 指定路径）；
+  `--open` 打开链接/文件。上传 token：env `BINGO_SHARE_TOKEN` 或
+  settings `share.uploadToken`；服务基址 settings `share.baseUrl`
+  （缺省 `https://bingo.ruobin.dev`）；上传失败自动回退本地文件。
+  会话内 `/share [--open]` 导出当前会话（本地模式）。会话 key 与 `/resume` 同语义
+  （transcript stem 或可匹配片段，缺省最近会话），生成的 HTML 含完整对话与工具
+  输出，分享前自行审阅敏感信息。

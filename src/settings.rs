@@ -79,6 +79,21 @@ pub struct Settings {
     /// Team settings (`team`): D31 project-level crew.
     #[serde(default)]
     pub team: TeamSettings,
+    /// Share upload settings (`share`): `bingo share` 上传端配置。
+    #[serde(default)]
+    pub share: ShareSettings,
+}
+
+/// Share upload settings (`share`): `bingo share` 默认上传到官网分享服务。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ShareSettings {
+    /// 上传 token（`uploadToken`）：POST 的 X-Share-Token 头；
+    /// env `BINGO_SHARE_TOKEN` 优先于 settings。
+    #[serde(rename = "uploadToken", default)]
+    pub upload_token: Option<String>,
+    /// 官网上传基址（`baseUrl`，缺省 `https://bingo.ruobin.dev`）。
+    #[serde(rename = "baseUrl", default)]
+    pub base_url: Option<String>,
 }
 
 /// Team settings (D31). Responsibility: "whether to start"; the team file
@@ -282,6 +297,13 @@ fn merge(base: &mut Settings, layer: Settings) {
     // team: autoStart overridden by later layers (user → project → local).
     if let Some(v) = layer.team.auto_start {
         base.team.auto_start = Some(v);
+    }
+    // share: uploadToken/baseUrl overridden by later layers.
+    if let Some(v) = layer.share.upload_token {
+        base.share.upload_token = Some(v);
+    }
+    if let Some(v) = layer.share.base_url {
+        base.share.base_url = Some(v);
     }
     for (base_hooks, layer_hooks) in [
         (&mut base.hooks.user_prompt_submit, &layer.hooks.user_prompt_submit),

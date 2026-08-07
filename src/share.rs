@@ -30,6 +30,8 @@ pub enum ShareError {
     NoSessions,
     #[error("no transcript matches '{0}'")]
     SessionNotFound(String),
+    #[error("share upload failed: {0}")]
+    Upload(String),
 }
 
 impl ErrorCode for ShareError {
@@ -39,7 +41,8 @@ impl ErrorCode for ShareError {
             | ShareError::Json(_)
             | ShareError::Transcript(_)
             | ShareError::NoSessions
-            | ShareError::SessionNotFound(_) => "STORAGE_ERROR",
+            | ShareError::SessionNotFound(_)
+            | ShareError::Upload(_) => "STORAGE_ERROR",
         }
     }
 }
@@ -224,19 +227,86 @@ pub fn write_html_atomic(path: &Path, content: &str) -> Result<(), ShareError> {
     Ok(())
 }
 
-/// 用系统默认浏览器打开文件（macOS open / Linux xdg-open / Windows cmd start）。
-pub fn open_in_browser(path: &Path) -> Result<(), ShareError> {
+/// 官网上传服务缺省基址（settings.share.baseUrl 可覆盖）。
+pub const DEFAULT_SHARE_BASE: &str = "https://bingo.ruobin.dev";
+
+/// 分享 id：会话 stem 的 ts 部分 + 6 位随机 [a-z0-9]（无 rand 依赖，
+/// splitmix64 混合时间与计数器）。
+pub fn share_id(stem: &str) -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let ts = stem
+        .rsplit('-')
+        .next()
+        .unwrap_or("0")
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .take(10)
+        .collect::<String>();
+    let ts = if ts.is_empty() { "0".to_string() } else { ts };
+    let mix = |mut z: u64| {
+        z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let n = COUNTER
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .wrapping_add(now);
+    let mut z = mix(n);
+    let mut suffix = String::with_capacity(6);
+    for _ in 0..6 {
+        suffix.push(ALPHABET[(z % 36) as usize] as char);
+        z /= 36;
+    }
+    format!("{ts}{suffix}")
+}
+
+/// 上传 HTML 到官网分享服务：POST `{base}/share/u/{id}`，
+/// body = HTML，X-Share-Token 头（token 有则带）。
+pub async fn upload_share(
+    base: &str,
+    id: &str,
+    html: &str,
+    token: Option<&str>,
+) -> Result<String, ShareError> {
+    let url = format!("{base}/share/u/{id}");
+    let mut req = reqwest::Client::new()
+        .post(&url)
+        .header("Content-Type", "text/html; charset=utf-8");
+    if let Some(token) = token
+        && !token.is_empty()
+    {
+        req = req.header("X-Share-Token", token);
+    }
+    let resp = req
+        .body(html.to_string())
+        .send()
+        .await
+        .map_err(|e| ShareError::Upload(format!("{e}")))?;
+    if !resp.status().is_success() {
+        return Err(ShareError::Upload(format!("HTTP {}", resp.status())));
+    }
+    Ok(url)
+}
+
+/// 用系统默认浏览器打开目标（文件路径或 URL；macOS open / Linux xdg-open / Windows cmd start）。
+pub fn open_in_browser(target: &str) -> Result<(), ShareError> {
     let mut cmd = if cfg!(target_os = "macos") {
         let mut c = std::process::Command::new("open");
-        c.arg(path);
+        c.arg(target);
         c
     } else if cfg!(target_os = "linux") {
         let mut c = std::process::Command::new("xdg-open");
-        c.arg(path);
+        c.arg(target);
         c
     } else {
         let mut c = std::process::Command::new("cmd");
-        c.arg("/c").arg("start").arg("").arg(path);
+        c.arg("/c").arg("start").arg("").arg(target);
         c
     };
     cmd.spawn()?;
@@ -667,6 +737,93 @@ mod tests {
         }];
         let doc = derive_share_doc("s", &msgs);
         assert_eq!(doc.agents[0].name, "agent-1");
+    }
+
+    #[test]
+    fn share_id_format_has_ts_and_random_suffix() {
+        let id = share_id("proj-1786092819");
+        assert!(id.starts_with("1786092819"), "{id}");
+        let suffix = &id[10..];
+        assert_eq!(suffix.len(), 6, "{id}");
+        assert!(
+            suffix
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "后缀 [a-z0-9]: {id}"
+        );
+        // 同 stem 两次生成不同（计数器混合）。
+        assert_ne!(share_id("proj-1786092819"), share_id("proj-1786092819"));
+    }
+
+    /// mock 上传：本地 TCP 服务器接收 POST，断言请求行/头/body 与返回的链接。
+    #[tokio::test]
+    async fn upload_share_posts_html_with_token() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let mut headers = Vec::new();
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                let trimmed = line.trim().to_string();
+                if trimmed.to_ascii_lowercase().starts_with("content-length:") {
+                    content_length = trimmed
+                        .split_once(':')
+                        .map(|(_, v)| v.trim().parse().unwrap_or(0))
+                        .unwrap_or(0);
+                }
+                headers.push(trimmed);
+            }
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).unwrap();
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            (request_line, headers, String::from_utf8(body).unwrap())
+        });
+        let base = format!("http://{addr}");
+        let url = upload_share(&base, "abc123", "<html>hi</html>", Some("tok-1"))
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(url, format!("{base}/share/u/abc123"));
+        let (request_line, headers, body) = handle.join().unwrap();
+        assert!(
+            request_line.starts_with("POST /share/u/abc123 "),
+            "{request_line}"
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case("X-Share-Token: tok-1")),
+            "token 头: {headers:?}"
+        );
+        assert!(body.contains("<html>hi</html>"), "{body}");
+    }
+
+    /// 上传失败（HTTP 500）→ Err。
+    #[tokio::test]
+    async fn upload_share_reports_server_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+        });
+        let base = format!("http://{addr}");
+        let err = upload_share(&base, "abc123", "x", None).await.unwrap_err();
+        assert!(err.to_string().contains("500"), "{err}");
+        handle.join().unwrap();
     }
 
     #[test]
