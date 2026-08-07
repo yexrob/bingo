@@ -4304,23 +4304,10 @@ impl Chat {
         }
     }
 
-    /// 消息是否"定稿"：行内容不再变化（流式停止、无运行中活动）。
-    /// REPL 模式：定稿消息的行一次性打印进 scrollback；未定稿的留在
-    /// 动态尾部原地重绘。定稿是单向的——一旦为 true，其行永不变。
-    fn message_settled(&self, i: usize) -> bool {
+    /// 消息自身的静态定稿条件（不依赖前置消息）：流式停止、无运行中
+    /// 活动、无加载中的图片。
+    fn message_static_settled(&self, i: usize) -> bool {
         if Some(i) == self.stream_msg {
-            return false;
-        }
-        // 顺序定稿：回合中插入的回答消息排在流式 assistant 消息之后，
-        // 若前置消息未定稿（正在流式/工具运行中/图片加载中）本消息也不得
-        // 定稿——否则落盘会越过流式行，把中间态打印进 scrollback 成为
-        // 改不掉的残留（与 `streaming_content_is_not_flushed_until_settled`
-        // 同一不变量；现状消息模型前置消息恒已定稿，此守卫只约束新场景）。
-        if self.messages[..i]
-            .iter()
-            .enumerate()
-            .any(|(j, _)| !self.message_settled(j))
-        {
             return false;
         }
         let m = &self.messages[i];
@@ -4340,6 +4327,23 @@ impl Chat {
         }
         !m.groups.iter().any(|g| g.active)
             && !m.activities.iter().any(|a| a.is_running())
+    }
+
+    /// 消息是否"定稿"：行内容不再变化（流式停止、无运行中活动）。
+    /// REPL 模式：定稿消息的行一次性打印进 scrollback；未定稿的留在
+    /// 动态尾部原地重绘。定稿是单向的——一旦为 true，其行永不变。
+    ///
+    /// 顺序定稿：回合中插入的回答消息排在流式 assistant 消息之后，
+    /// 若前置消息未定稿（正在流式/工具运行中/图片加载中）本消息也不得
+    /// 定稿——否则落盘会越过流式行，把中间态打印进 scrollback 成为
+    /// 改不掉的残留（与 `streaming_content_is_not_flushed_until_settled`
+    /// 同一不变量；现状消息模型前置消息恒已定稿，此守卫只约束新场景）。
+    ///
+    /// 前缀定稿是单调的（0..=i 全部定稿 ⟺ 0..i 全部定稿且 i 自身静态
+    /// 定稿），故按前一条递归展开即线性复杂度——不能改成对每个前置消息
+    /// 递归求值：全量定稿时那是指数爆炸（每次 build_rows 冻结热路径）。
+    fn message_settled(&self, i: usize) -> bool {
+        (i == 0 || self.message_settled(i - 1)) && self.message_static_settled(i)
     }
 
     /// 构建滚动文档：欢迎卡片 + 消息（text 与活动按插入点交错）+
@@ -7548,6 +7552,23 @@ mod tests {
             joined.contains("User answered the questions:"),
             "错误后回答仍渲染: {joined}"
         );
+    }
+
+    /// 顺序守卫必须是线性的：全量定稿（数百条消息）下 build_rows 的
+    /// 定稿判定不得指数爆炸（回归：逐前缀递归求值在 ~40 条时即卡死）。
+    #[test]
+    fn message_settled_guard_is_linear_for_large_settled_sessions() {
+        let mut chat = test_chat();
+        for _ in 0..400 {
+            chat.messages.push(msg(Role::User, "hi"));
+            chat.messages.push(msg(Role::Assistant, "ok"));
+        }
+        // 全量静态定稿：build_rows 会对每条消息做定稿判定。
+        chat.build_rows(80);
+        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "全部定稿");
+        for i in 0..chat.messages.len() {
+            assert!(chat.message_settled(i), "消息 {i} 定稿");
+        }
     }
 
     /// 模拟 inline 组件的落盘循环：重建 → 落盘定稿前缀 → 推进游标。
