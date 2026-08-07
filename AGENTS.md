@@ -9,7 +9,9 @@ An agent CLI implemented in Rust (a local agent harness).
 - Use the Rust 2024 edition; use thiserror for error handling, avoid unwrap/expect (except in tests and unreachable code).
 - Write code the way the surrounding code is written; prefer no comments, self-documenting names; comments explain only the "why".
 - Don't add unneeded dependencies; before reinventing the wheel, check whether a mature wheel already exists on crates.io.
-- Using english to write code and comments
+- English for everything the model side sees: code comments (//, ///, //!), documentation (notes/, README.md, AGENTS.md itself), tool input schemas (`#[schemars(description = …)]`), tool `description()` text, and model prompts (compaction, memory extraction, etc.).
+- Chinese is kept only on the user side: UI copy, error messages, and test data/assertion messages. Keep this split when touching existing strings: translate model-side strings, leave user-side strings as they are.
+- `README.zh-CN.md` stays as the Chinese-language documentation entry point.
 
 ## Architecture rules
 
@@ -34,6 +36,7 @@ An agent CLI implemented in Rust (a local agent harness).
 ## Committing
 
 - Conventional Commits, imperative mood, short. Write the body and issue footnotes only when they carry real information.
+- Write commit messages in English.
 - Commit only what the user asked for; never commit secrets.
 
 ## Forbidden
