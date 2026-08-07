@@ -358,6 +358,8 @@ mod tests {
     async fn cancel_aborts_in_flight_and_skips_rest() {
         let counter = Arc::new(AtomicUsize::new(0));
         let count_clone = counter.clone();
+        let running = Arc::new(AtomicUsize::new(0));
+        let running_clone = running.clone();
         let (tx, mut rx) = tokio::sync::watch::channel(false);
         let handle = tokio::spawn(async move {
             let tool = FakeTool {
@@ -366,7 +368,7 @@ mod tests {
                 delay_ms: 200,
                 counter: count_clone.clone(),
                 max_seen: Arc::new(AtomicUsize::new(0)),
-                running: Arc::new(AtomicUsize::new(0)),
+                running: running_clone,
             };
             let calls: Vec<PendingCall> = (0..3)
                 .map(|i| PendingCall {
@@ -378,7 +380,12 @@ mod tests {
             let (outcomes, aborted) = execute_calls(calls, &test_ctx(), Some(&mut rx)).await;
             (outcomes.len(), aborted)
         });
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Wait for the first call to start (not finish: this test cancels mid-flight).
+        // No deadline: on overloaded CI (2-core runners, hundreds of parallel test
+        // threads) the 50ms call can take seconds to even begin.
+        while running.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         tx.send(true).unwrap();
         let (done, aborted) = handle.await.unwrap();
         assert!(aborted, "中断后返回 aborted");
@@ -410,7 +417,12 @@ mod tests {
             let (outcomes, aborted) = execute_calls(calls, &test_ctx(), Some(&mut rx)).await;
             (outcomes, aborted)
         });
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Wait for the first 50ms call to finish before cancelling (its result must be
+        // kept). No deadline: on overloaded CI (2-core runners, hundreds of parallel
+        // test threads) a 50ms delay can take far longer than 5s of wall time.
+        while counter.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         tx.send(true).unwrap();
         let (outcomes, aborted) = handle.await.unwrap();
         assert!(aborted);

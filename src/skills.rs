@@ -112,10 +112,15 @@ pub fn first_line(markdown: &str) -> String {
 }
 
 /// User-level skills directory: `$XDG_CONFIG_HOME/bingo/skills` (mirrors the config convention in main.rs).
+/// Tests must not depend on the ambient XDG_CONFIG_HOME (CI runners may set it): the home
+/// parameter is the sole source of truth under test.
 fn user_skills_dir(home: &Path) -> PathBuf {
+    #[cfg(not(test))]
     let config = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home.join(".config"));
+    #[cfg(test)]
+    let config = home.join(".config");
     config.join("bingo").join("skills")
 }
 
@@ -185,12 +190,16 @@ pub fn bundled_skills() -> Vec<Skill> {
 
 /// Scan fingerprint: mtimes of the skill directories and loaded SKILL.md files.
 /// Directory mtime captures additions/removals; file mtime captures content changes.
-type Stamps = Vec<(PathBuf, Option<std::time::SystemTime>)>;
+type Stamps = Vec<(PathBuf, Option<(u64, std::time::SystemTime)>)>;
 
-fn stamp(path: &Path) -> (PathBuf, Option<std::time::SystemTime>) {
+/// Cache stamp: path + (len, mtime). Len catches same-timestamp rewrites (Windows mtime
+/// granularity can be coarse); mtime catches same-size edits.
+fn stamp(path: &Path) -> (PathBuf, Option<(u64, std::time::SystemTime)>) {
     (
         path.to_path_buf(),
-        std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
+        std::fs::metadata(path)
+            .ok()
+            .map(|m| (m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH))),
     )
 }
 

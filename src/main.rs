@@ -24,6 +24,7 @@ mod hooks;
 mod mcp;
 mod memory;
 mod permission;
+mod platform;
 mod preapproved;
 mod query;
 mod settings;
@@ -130,6 +131,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| home.join(".config"));
 
     let settings = load_settings(&user_dir, &project_dir)?;
+    crate::platform::init_shell(settings.shell.as_deref());
 
     let permission_mode: PermissionMode = cli
         .permission_mode

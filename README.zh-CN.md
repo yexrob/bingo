@@ -53,6 +53,22 @@ cargo install --git https://github.com/yexrob/bingo --locked
 cargo install --git https://github.com/yexrob/bingo --locked --force
 ```
 
+### 官方预编译二进制（GitHub Releases）
+
+每个版本标签发布预编译二进制（Windows 为 ZIP，macOS/Linux 为 tar.gz，
+均附带 `checksums.txt` SHA-256 校验文件）：
+
+| 平台 | 文件 |
+|---|---|
+| Windows x86_64 | `bingo-x86_64-pc-windows-msvc.zip`（内含 `bingo.exe`） |
+| macOS（Apple Silicon） | `bingo-aarch64-apple-darwin.tar.gz` |
+| macOS（Intel） | `bingo-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 | `bingo-x86_64-unknown-linux-gnu.tar.gz` |
+
+无需 WSL 或 Rust 工具链——下载解压直接运行 `bingo` / `bingo.exe`。
+Windows 构建基于原生 `x86_64-pc-windows-msvc` 目标，默认 shell 为
+PowerShell（见下文 `shell` 配置）。
+
 ### 从源码构建
 
 ```bash
@@ -162,6 +178,7 @@ bingo --continue            # 恢复最近一次会话
 | `theme` | string | `auto`（跟随终端背景）/ `dark` / `light` |
 | `cacheControl` | bool | 发送 prompt caching（默认关：非官方端点不稳定） |
 | `respondToBashCommands` | bool | `!` 命令执行后是否交模型回应（默认 true） |
+| `shell` | string | Bash 工具与 hooks 使用的 shell。默认按平台：macOS `/bin/zsh`、其他 Unix `/bin/bash`、Windows `powershell.exe`。PowerShell 系用 `-Command` 执行；配置其他 shell（如 Git Bash 的 `bash.exe`）用 `-c` 执行 |
 | `mcpServers` | object | 见下「MCP」 |
 | `disabledMcpServers` | string[] | 禁用的 MCP 服务器名单（`/mcp disable` 写入） |
 | `permissions` | object | `{allow[], deny[], ask[]}`，规则语法见「权限系统」 |
@@ -196,7 +213,7 @@ bingo --continue            # 恢复最近一次会话
 
 | 工具 | 说明 |
 |---|---|
-| `Bash` | 在独立进程组执行 shell 命令；超时/取消整组终止，不留孤儿进程；非交互命令 |
+| `Bash` | 在独立进程组（Unix）/ 进程树（Windows）执行 shell 命令；超时/取消整树终止，不留孤儿进程；非交互命令 |
 | `Read` / `Glob` / `Grep` | 只读检索；默认跳过 `.git`/`target`/`node_modules` 与隐藏目录 |
 | `Edit` / `Write` | 文件编辑（产生 unified diff 供 UI 预览） |
 | `WebFetch` / `WebSearch` | 网页抓取与搜索（共享 HTTP 连接池；预批准域名自动放行） |
@@ -350,8 +367,9 @@ bingo 的 Tool trait：
 
 - matcher 为整串锚定正则（`Edit\|Write`、`mcp__.*`），空 = 匹配一切；
   编译失败退回全等比较并告警。
-- hook 以 `/bin/zsh -c` 执行，stdin 喂事件 JSON（`hook_event_name`、
-  `tool_name`、`tool_input`、`permission_mode` 等），stdout 回传 JSON。
+- hook 以配置的 shell 执行（`-c` 风格；Windows 默认 PowerShell 用 `-Command`），
+  stdin 喂事件 JSON（`hook_event_name`、`tool_name`、`tool_input`、
+  `permission_mode` 等），stdout 回传 JSON。
 - 退出码语义：0 = 成功；2 = blocking（stderr 注入模型 / 阻断本轮）；
   其他非零 = 仅用户可见、不阻断。
 - `PreToolUse` 支持 `{"decision":"deny|ask","reason","updatedInput"}` 改写输入。

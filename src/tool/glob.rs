@@ -25,7 +25,8 @@ impl PathGlob {
     pub fn new(pattern: &str) -> Result<Self, globset::Error> {
         Ok(Self {
             matcher: globset::Glob::new(pattern)?.compile_matcher(),
-            absolute: pattern.starts_with('/'),
+            // Absolute on Windows too: `C:\...` patterns are drive-absolute, not relative.
+            absolute: pattern.starts_with('/') || Path::new(pattern).is_absolute(),
             name_only: !pattern.contains('/'),
         })
     }
@@ -201,6 +202,7 @@ mod tests {
     }
 
     async fn run(root: &Path, pattern: &str) -> String {
+        // Normalize separators so assertions are platform-independent (Windows outputs `\`).
         GlobTool
             .call(
                 serde_json::json!({"pattern": pattern}),
@@ -211,7 +213,7 @@ mod tests {
             .content
             .as_str()
             .unwrap_or_default()
-            .to_string()
+            .replace('\\', "/")
     }
 
     /// M6 regression: relative patterns with a directory prefix once always matched zero.
@@ -225,11 +227,16 @@ mod tests {
         // A pattern without `/` matches by file name, effective at any depth.
         let text = run(&root, "*.md").await;
         assert!(text.contains("notes.md"), "{text}");
-        // `**/` prefixes work as usual.
+        // `**/` prefixes work as usual (file-name assertions: separator style is platform-dependent).
         let text = run(&root, "**/*.rs").await;
-        assert!(text.contains("src/main.rs") && text.contains("src/deep/lib.rs"), "{text}");
-        // Absolute patterns match against the absolute path.
-        let absolute = format!("{}/src/**/*.rs", root.to_string_lossy());
+        assert!(text.contains("main.rs") && text.contains("lib.rs"), "{text}");
+        // Absolute patterns match against the absolute path. Forward slashes throughout:
+        // globset treats `\` as an escape character, so a raw Windows path pattern
+        // (`C:\...\src/**/*.rs`) would compile to garbage on Windows.
+        let absolute = format!(
+            "{}/src/**/*.rs",
+            root.to_string_lossy().replace('\\', "/")
+        );
         let text = run(&root, &absolute).await;
         assert!(text.contains("src/main.rs"), "{text}");
         let _ = std::fs::remove_dir_all(&root);

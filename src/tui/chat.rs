@@ -316,7 +316,8 @@ fn expand_home(path: &str) -> String {
 
 /// An image path on its own line: path signature (`~` prefix or contains `/`) + image extension.
 fn standalone_image_path(s: &str) -> Option<String> {
-    if !(s.starts_with('~') || s.contains('/')) {
+    // Windows paths use backslashes: accept either separator (plus `~` home expansion).
+    if !(s.starts_with('~') || s.contains('/') || s.contains('\\')) {
         return None;
     }
     let ext = std::path::Path::new(s)

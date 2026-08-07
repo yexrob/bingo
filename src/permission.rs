@@ -160,10 +160,13 @@ fn normalize_path(path: &str) -> String {
         }
     }
     let normalized = out.to_string_lossy().into_owned();
-    // Normalization eats the trailing slash; directory rules (`Read(/etc/)`) need the
-    // boundary semantics preserved.
-    if path.ends_with('/') && !normalized.ends_with('/') {
-        format!("{normalized}/")
+    // Normalization eats the trailing separator; directory rules (`Read(/etc/)`) need the
+    // boundary semantics preserved. The separator is platform-dependent: Windows rules
+    // like `Read(C:\etc\)` must end with `\`, not `/`.
+    if (path.ends_with('/') || path.ends_with('\\'))
+        && !normalized.ends_with(std::path::MAIN_SEPARATOR)
+    {
+        format!("{normalized}{}", std::path::MAIN_SEPARATOR)
     } else {
         normalized
     }
@@ -660,23 +663,31 @@ mod tests {
     /// Security regression: path rules normalize before matching; `..` can't cross directory boundaries.
     #[test]
     fn file_rules_normalize_paths() {
+        // Absolute roots differ per platform: `/etc` on Unix, `C:\etc` on Windows (a
+        // Unix-style `/etc/passwd` isn't absolute on Windows and would never match).
+        #[cfg(windows)]
+        let (etc, other) = ("C:\\etc", "D:\\var");
+        #[cfg(not(windows))]
+        let (etc, other) = ("/etc", "/var");
         let tool = ReadTool::new();
         let denied = |path: &str| {
             can_use_tool(
                 &tool as &dyn Tool,
                 &serde_json::json!({ "file_path": path }),
                 PermissionMode::Default,
-                &["Read(/etc/)".to_string()],
+                &[format!("Read({etc}/)")],
                 &[],
                 &[],
             )
             .behavior
         };
-        assert_eq!(denied("/etc/passwd"), PermissionBehavior::Deny);
-        assert_eq!(denied("/etc/../etc/passwd"), PermissionBehavior::Deny);
-        assert_eq!(denied("/etc/./ssh/../passwd"), PermissionBehavior::Deny);
+        assert_eq!(denied(&format!("{etc}/passwd")), PermissionBehavior::Deny);
+        // `../etc` (not `../{etc}`): repeating the Windows drive letter (`C:\etc\..\C:\etc`)
+        // would normalize to a garbage `C:\C:\etc` path instead of the drive root.
+        assert_eq!(denied(&format!("{etc}/../etc/passwd")), PermissionBehavior::Deny);
+        assert_eq!(denied(&format!("{etc}/./ssh/../passwd")), PermissionBehavior::Deny);
         // Paths outside the directory are unaffected (read-only tools pass).
-        assert_eq!(denied("/var/log/x"), PermissionBehavior::Allow);
+        assert_eq!(denied(&format!("{other}/log/x")), PermissionBehavior::Allow);
         // Relative paths expand against cwd, then match against absolute rules.
         let cwd = std::env::current_dir().unwrap_or_default();
         let rule = format!("Read({})", cwd.join("src").to_string_lossy());
