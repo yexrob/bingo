@@ -236,7 +236,7 @@ const ANCHOR_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M6.05 9.95a3 3 0 0
 
 fn anchor(id: &str) -> String {
     format!(
-        "<a class=\"anchor\" href=\"#{id}\" aria-label=\"Copy link to this message\">{ANCHOR_SVG}</a><span class=\"line\"></span>"
+        "<a class=\"anchor\" href=\"#{id}\" aria-label=\"Copy link to this message\">{ANCHOR_SVG}</a><span class=\"line\" aria-hidden=\"true\"></span>"
     )
 }
 
@@ -310,7 +310,7 @@ fn render_message(msg: &Message, index: usize) -> String {
         format!("<div class=\"body\">{texts}{extra}</div>")
     };
     format!(
-        "<article class=\"msg {role_cls}\" id=\"{id}\"><div class=\"dec\" aria-hidden=\"true\">{}</div><div class=\"content w-md\"><div class=\"meta\"><span class=\"{meta_cls}\">{label}</span></div>{content}</div></article>",
+        "<article class=\"msg {role_cls}\" id=\"{id}\"><div class=\"dec\">{}</div><div class=\"content w-md\"><div class=\"meta\"><span class=\"{meta_cls}\">{label}</span></div>{content}</div></article>",
         anchor(&id)
     )
 }
@@ -1046,8 +1046,10 @@ mod tests {
         assert!(html.contains("class=\"msg msg-user\"") && html.contains("class=\"msg msg-assistant\""));
         assert!(html.contains("id=\"msg-1\"") && html.contains("id=\"msg-2\""));
         assert!(html.contains("class=\"anchor\" href=\"#msg-1\""));
-        assert!(html.contains("<div class=\"dec\""));
-        assert!(html.contains("<span class=\"line\"></span>"));
+        // a11y：dec 容器不藏锚点，竖线承载 aria-hidden（模板 v2.2 契约）。
+        assert!(html.contains("<div class=\"dec\">"));
+        assert!(!html.contains("<div class=\"dec\" aria-hidden=\"true\">"));
+        assert!(html.contains("<span class=\"line\" aria-hidden=\"true\"></span>"));
         assert!(html.contains("<span class=\"role-user\">User</span>"));
         assert!(html.contains("<span class=\"role-assistant\">Assistant</span>"));
         assert!(html.contains("<div class=\"card\">"), "assistant 文本进细框卡");
