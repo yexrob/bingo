@@ -16,9 +16,9 @@ pub struct SkillInput {
 }
 
 /// Skill：在技能注册表中按名执行。
-/// 磁盘技能返回小展示（`Launching skill: {name}` + SKILL.md 路径），
-/// 模型需要完整指令时自行 Read 文件；内置技能（无文件基准）才展开全量
-/// 注入——那是它唯一的来源。
+/// 单行返回 `✦ {name} — read <SKILL.md 路径>`（磁盘技能指自身文件，
+/// 内置技能物化到缓存目录），模型需要完整指令时自行 Read；
+/// 物化失败才展开全量内联兜底。
 pub struct SkillTool {
     skills: Vec<Skill>,
 }
@@ -61,23 +61,21 @@ IMPORTANT: When a skill matches the user's request, invoke the Skill tool BEFORE
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: SkillInput = parse_input(&input)?;
         let skill = self
             .find(&params.skill)
             .ok_or_else(|| ToolError::failed(format!("Unknown skill: {}", params.skill)))?;
-        let content = if skill.base_dir.as_os_str().is_empty() {
-            // 内置技能：无 SKILL.md 文件可读，只能展开注入。
-            let expanded = expand_skill(skill, params.args.as_deref().unwrap_or(""));
-            format!("Launching skill: {}\n\n{expanded}", skill.name)
-        } else {
-            // 磁盘技能：小展示，让模型自己 Read SKILL.md 拿完整指令。
-            format!(
-                "Launching skill: {}\n\nRead the full skill instructions at {}",
+        let content = match skill_path(skill, &ctx.home) {
+            // 单行返回：✦ 图标 + 路径，模型自行 Read 拿完整指令。
+            Some(path) => format!("✦ {} — read {}", skill.name, path.display()),
+            // 物化失败（如缓存目录不可写）：全量内联兜底，唯一来源。
+            None => format!(
+                "✦ {} — built-in skill, instructions inline:\n\n{}",
                 skill.name,
-                skill.base_dir.join("SKILL.md").display()
-            )
+                expand_skill(skill, params.args.as_deref().unwrap_or(""))
+            ),
         };
         Ok(ToolResult {
             content: serde_json::Value::String(content),
@@ -85,6 +83,23 @@ IMPORTANT: When a skill matches the user's request, invoke the Skill tool BEFORE
             diff: None,
         })
     }
+}
+
+/// 技能的可读文件路径：磁盘技能即 base_dir/SKILL.md；
+/// 内置技能物化到 `$XDG_CACHE_HOME/bingo/skills/{name}/SKILL.md`
+/// （无 XDG_CACHE_HOME 时用 `~/.cache`），写失败返回 None。
+fn skill_path(skill: &Skill, home: &std::path::Path) -> Option<std::path::PathBuf> {
+    if !skill.base_dir.as_os_str().is_empty() {
+        return Some(skill.base_dir.join("SKILL.md"));
+    }
+    let cache = std::env::var("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| home.join(".cache"));
+    let dir = cache.join("bingo").join("skills").join(&skill.name);
+    let path = dir.join("SKILL.md");
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::write(&path, &skill.content).ok()?;
+    Some(path)
 }
 
 #[cfg(test)]
@@ -122,7 +137,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disk_skill_returns_pointer_not_full_content() {
+    async fn disk_skill_returns_single_line_pointer() {
         let tool = SkillTool::new(vec![skill("pdf")]);
         let result = tool
             .call(
@@ -132,8 +147,12 @@ mod tests {
             .await
             .unwrap();
         let text = result.content.as_str().unwrap();
-        assert!(text.starts_with("Launching skill: pdf\n\n"));
-        assert!(text.contains("/tmp/skills/SKILL.md"), "提示自行读取: {text}");
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "单行返回，不带全量正文: {text}"
+        );
+        assert_eq!(text, "✦ pdf — read /tmp/skills/SKILL.md");
         assert!(
             !text.contains("Follow the {name} procedure."),
             "不再展开全量正文: {text}"
@@ -141,7 +160,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bundled_skill_still_expands_full_content() {
+    async fn bundled_skill_materializes_to_cache_dir() {
         let mut s = skill("guide");
         s.base_dir = PathBuf::new();
         let tool = SkillTool::new(vec![s]);
@@ -150,8 +169,15 @@ mod tests {
             .await
             .unwrap();
         let text = result.content.as_str().unwrap();
-        assert!(text.starts_with("Launching skill: guide\n\n"));
-        assert!(text.contains("Follow the {name} procedure."), "内置全量: {text}");
+        assert_eq!(text.lines().count(), 1, "单行返回: {text}");
+        let path = std::path::Path::new(text.strip_prefix("✦ guide — read ").unwrap());
+        assert!(path.ends_with("bingo/skills/guide/SKILL.md"), "{text}");
+        assert!(
+            std::fs::read_to_string(path).is_ok_and(|c| c.contains("Follow the {name} procedure.")),
+            "物化文件内容完整: {path:?}"
+        );
+        // 物化后模型可用 Read 读它：路径即 base_dir 语义。
+        assert!(!text.contains("instructions inline"), "{text}");
     }
 
     #[tokio::test]
@@ -161,7 +187,7 @@ mod tests {
             .call(serde_json::json!({ "skill": "/commit" }), &ctx())
             .await
             .unwrap();
-        assert!(result.content.as_str().unwrap().starts_with("Launching skill: commit"));
+        assert!(result.content.as_str().unwrap().starts_with("✦ commit — read"));
     }
 
     #[tokio::test]
