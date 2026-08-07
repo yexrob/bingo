@@ -5020,7 +5020,10 @@ fn welcome_rows(
         theme.dim(),
     ));
     rows.push(Line::styled(
-        one_line(&format!("   bingo v0.1.0 · {model} · {mode}"), width),
+        one_line(
+            &format!("   bingo v{} · {model} · {mode}", env!("CARGO_PKG_VERSION")),
+            width,
+        ),
         theme.dim(),
     ));
     rows

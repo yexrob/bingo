@@ -40,6 +40,7 @@ mod tools;
 mod transcript;
 mod tui;
 mod ui;
+mod update;
 mod watch;
 
 #[derive(Debug, Parser)]
@@ -97,6 +98,12 @@ enum Command {
         #[arg(long)]
         open: bool,
     },
+    /// Update bingo to the latest GitHub release (SHA-256 verified, atomic replace)
+    Update {
+        /// Check for a newer version without downloading (dry-run)
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 /// Top-level exit (C exit mapping): all errors propagated to the top with `?` are
@@ -123,9 +130,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             PathBuf::new()
         }
     };
-    // 子命令快路径：share 只需 home（transcript/shares 目录），不碰 settings/API。
+    // 子命令快路径：share 只需 home（transcript/shares 目录），update 只需 home（缓存），
+    // 均不碰 settings/API。
     if let Some(Command::Share { session, local, output, open }) = cli.command {
         run_share(&home, session.as_deref(), output, local, open).await?;
+        return Ok(());
+    }
+    if let Some(Command::Update { check }) = cli.command {
+        crate::update::run_update(&home, check).await?;
         return Ok(());
     }
     let project_dir = std::env::current_dir()?;

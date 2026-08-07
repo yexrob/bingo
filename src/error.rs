@@ -150,6 +150,7 @@ fn downcast_error_code(err: &(dyn std::error::Error + 'static)) -> Option<&'stat
         crate::hooks::HookError,
         crate::mcp::McpError,
         crate::share::ShareError,
+        crate::update::UpdateError,
     )
 }
 
@@ -284,6 +285,48 @@ mod tests {
         }
         use crate::experience::ExperienceError;
         assert_eq!(ExperienceError::Io(std::io::Error::other("x")).error_code(), "STORAGE_ERROR");
+        // UpdateError 全 variant 显式枚举（Network 无公开构造器，由
+        // `update::network_error_code` 锁定映射，与 ClientError::Transport 同模式）。
+        use crate::update::UpdateError;
+        let update_variants = vec![
+            UpdateError::Http { status: 503 },
+            UpdateError::BadResponse("x".into()),
+            UpdateError::ChecksumsUnavailable("x".into()),
+            UpdateError::ChecksumMismatch { expected: "e".into(), got: "g".into() },
+            UpdateError::ArchiveInvalid("x".into()),
+            UpdateError::MissingBinary("bingo".into()),
+            UpdateError::UnsupportedPlatform("linux/aarch64".into()),
+            UpdateError::Io(std::io::Error::other("x")),
+        ];
+        assert_stable_codes("update::UpdateError", &update_variants);
+        assert_eq!(UpdateError::Http { status: 503 }.error_code(), "OFFLINE");
+        assert_eq!(UpdateError::BadResponse("x".into()).error_code(), "SERVER_ERROR");
+        assert_eq!(
+            UpdateError::ChecksumsUnavailable("x".into()).error_code(),
+            "CHECKSUMS_UNAVAILABLE"
+        );
+        assert_eq!(
+            UpdateError::ChecksumMismatch { expected: "e".into(), got: "g".into() }
+                .error_code(),
+            "CHECKSUM_MISMATCH"
+        );
+        assert_eq!(
+            UpdateError::ArchiveInvalid("x".into()).error_code(),
+            "ARCHIVE_INVALID"
+        );
+        assert_eq!(
+            UpdateError::MissingBinary("bingo".into()).error_code(),
+            "ARCHIVE_INVALID"
+        );
+        assert_eq!(
+            UpdateError::UnsupportedPlatform("linux/aarch64".into()).error_code(),
+            "UNSUPPORTED_PLATFORM"
+        );
+        assert_eq!(
+            UpdateError::Io(std::io::Error::other("x")).error_code(),
+            "STORAGE_ERROR"
+        );
+        assert_eq!(crate::update::network_error_code(), "OFFLINE");
     }
 
     #[test]
@@ -326,6 +369,7 @@ mod tests {
         use crate::team::TeamError;
         use crate::tool::ToolError;
         use crate::transcript::TranscriptError;
+        use crate::update::UpdateError;
         let samples: Vec<Box<dyn std::error::Error>> = vec![
             Box::new(ClientError::MissingApiKey),
             Box::new(QueryError::Protocol("p".into())),
@@ -338,11 +382,12 @@ mod tests {
             Box::new(HookError::Failed("x".into())),
             Box::new(McpError::Connect { server: "s".into(), detail: "d".into() }),
             Box::new(ShareError::SessionNotFound("x".into())),
+            Box::new(UpdateError::Http { status: 503 }),
         ];
         assert_eq!(
             samples.len(),
-            11,
-            "boxed 出口应有 11 个登记类型：新增实现 ErrorCode 的类型须在 \
+            12,
+            "boxed 出口应有 12 个登记类型：新增实现 ErrorCode 的类型须在 \
              `downcast_error_code` 宏登记 + 本测试补实例，双处缺一即 CI 红"
         );
         for e in &samples {

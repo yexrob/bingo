@@ -57,6 +57,10 @@ pub async fn run_tui_session(
     // reads /dev/tty directly).
     let detected_background = Theme::detect_system_theme().await;
 
+    // 版本检测预热：缓存新鲜（24h）则跳过，否则后台拉取最新 release 写缓存
+    // （欢迎卡片数据源；失败静默、不阻塞启动）。headless（--print）不经过此路径。
+    crate::update::spawn_background_check(session.home.clone());
+
     // Fullscreen's per-frame diff repaint cannot reliably carry kitty images,
     // so real image display is only enabled in inline mode (finalized rows
     // land in scrollback once). This must also happen before raw mode: the
