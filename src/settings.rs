@@ -65,6 +65,10 @@ pub struct Settings {
     /// (`respondToBashCommands`, default true; false = pure execution, no model query).
     #[serde(rename = "respondToBashCommands")]
     pub respond_to_bash_commands: Option<bool>,
+    /// Shell program (`shell`) for the Bash tool and hooks. Default per platform:
+    /// macOS /bin/zsh, other Unix /bin/bash, Windows powershell.exe (PowerShell-family
+    /// shells run with -Command; any other configured shell with -c, e.g. Git Bash).
+    pub shell: Option<String>,
     pub hooks: HooksConfig,
     #[serde(rename = "mcpServers")]
     pub mcp_servers: HashMap<String, McpServerConfig>,

@@ -65,6 +65,23 @@ Update to the latest version:
 cargo install --git https://github.com/yexrob/bingo --locked --force
 ```
 
+### Official binaries (GitHub Releases)
+
+Every version tag publishes prebuilt binaries (ZIP on Windows, tarballs on
+macOS/Linux, each with a `checksums.txt` of SHA-256 values):
+
+| Platform | File |
+|---|---|
+| Windows x86_64 | `bingo-x86_64-pc-windows-msvc.zip` (contains `bingo.exe`) |
+| macOS (Apple Silicon) | `bingo-aarch64-apple-darwin.tar.gz` |
+| macOS (Intel) | `bingo-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 | `bingo-x86_64-unknown-linux-gnu.tar.gz` |
+
+No WSL or Rust toolchain is needed — download, unpack, and run `bingo` /
+`bingo.exe` directly. The Windows build runs on the native
+`x86_64-pc-windows-msvc` target with PowerShell as the default shell (see
+`shell` below).
+
 ### Build from source
 
 ```bash
@@ -185,6 +202,7 @@ Three layers are shallow-merged; later layers override earlier ones:
 | `theme` | string | `auto` (follow terminal background) / `dark` / `light` |
 | `cacheControl` | bool | enable prompt caching (default off: unreliable on non-official endpoints) |
 | `respondToBashCommands` | bool | whether `!` commands are handed back to the model after running (default true) |
+| `shell` | string | shell program for the Bash tool and hooks. Default per platform: macOS `/bin/zsh`, other Unix `/bin/bash`, Windows `powershell.exe`. PowerShell-family shells run with `-Command`; any other configured shell (e.g. Git Bash's `bash.exe`) runs with `-c` |
 | `mcpServers` | object | see MCP below |
 | `disabledMcpServers` | string[] | disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`, rule syntax under Permission system below |
@@ -220,7 +238,7 @@ schema from a single source of truth):
 
 | Tool | Description |
 |---|---|
-| `Bash` | runs shell commands in a separate process group; timeout/cancel kills the whole group, no orphan processes; non-interactive commands |
+| `Bash` | runs shell commands in a separate process group (Unix) / process tree (Windows); timeout/cancel kills the whole tree, no orphan processes; non-interactive commands |
 | `Read` / `Glob` / `Grep` | read-only search; skips `.git`/`target`/`node_modules` and hidden dirs by default |
 | `Edit` / `Write` | file editing (produces a unified diff preview for the UI) |
 | `WebFetch` / `WebSearch` | web fetching and search (shared HTTP connection pool; pre-approved domains auto-allowed) |
@@ -402,8 +420,9 @@ Events in the `hooks` config: `PreToolUse` / `PostToolUse` / `PreCompact` /
 
 - matcher is an anchored regex (`Edit\|Write`, `mcp__.*`); empty matches
   everything; on compile failure it falls back to exact match with a warning.
-- Hooks run via `/bin/zsh -c`, event JSON on stdin (`hook_event_name`,
-  `tool_name`, `tool_input`, `permission_mode`, etc.), JSON on stdout.
+- Hooks run via the configured shell (`-c` style; PowerShell `-Command` on
+  Windows by default), event JSON on stdin (`hook_event_name`, `tool_name`,
+  `tool_input`, `permission_mode`, etc.), JSON on stdout.
 - Exit-code semantics: 0 = success; 2 = blocking (stderr injected into the
   model / blocks the turn); other non-zero = user-visible only, non-blocking.
 - `PreToolUse` supports `{"decision":"deny|ask","reason","updatedInput"}` to

@@ -586,3 +586,14 @@ Requirement (named by the user): ① teams are fixed to a project (committable),
   - **碎片清理**：`/team memory list|show|gc|merge|export` 命令族，gc 带 TTL；损坏/孤儿文件与配置错误同一视觉语言（不另造样式）。
   - **恢复时机**：启动拉起时自动恢复，一行摘要不打扰；恢复与拉起同走 spawn_team，缺文件静默回落空历史。
 - **验收断言链**：脚手架产物 → validate 通过 → start 不因配置失败；记忆 roundtrip（存→重启→恢复等值）；source 跨层覆盖；无 team 段旧项目行为完全不变。
+
+### D32. 多平台支持：shell / 进程树 / TTY 平台抽象（D25 前遗留 unix-only 消除）
+
+需求（issue #1）：原生 Windows 支持 + GitHub Releases 官方预编译二进制；用户进一步明确为多平台（Windows / macOS / Linux）。
+
+- **`src/platform.rs` 单一平台层**：`init_shell/shell`（进程级 OnceLock，main 启动时从 `settings.shell` 注入）、`shell_command`（Unix `-c` + `process_group(0)`；Windows PowerShell 系 `-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command`，其他配置 shell 回退 `-c`）、`kill_process_tree`（Unix `/bin/sh kill -pgid`，沿用 AGENTS.md 禁 unsafe 约束；Windows `taskkill /PID /T /F`）、`open_tty`（Unix `/dev/tty` O_NONBLOCK；Windows 返回 None = 主题检测安全降级）。
+- **默认 shell 按平台**：macOS `/bin/zsh`、其他 Unix `/bin/bash`（消除 Linux 无 zsh 的隐式依赖）、Windows `powershell.exe`；`settings.shell` 可覆盖（如 Git Bash）。Bash 工具与 hooks 共用。
+- **进程树终止顺序修正**：超时路径先 `kill_process_tree` 再 `child.kill()`——Windows 的 `taskkill /T` 需要根进程存活才能遍历树，先杀根会导致孙进程遗留；Unix 两侧顺序无碍。
+- **行为变化**：Linux 上 shell 从 zsh 变为 bash（确定性优先）；`interactive_command_reason` REPLS 名单加 `powershell/pwsh/cmd`。
+- **CI/Release**：`.github/workflows/ci.yml` 三平台 matrix（ubuntu/macos/windows-latest，check+clippy+test，无需 API key）；`release.yml` 标签触发，四目标（linux x64 / win x64 / mac arm64 / mac x64 交叉编译），ZIP/tar.gz + `checksums.txt` SHA-256。
+- **验证局限**：macOS 本机 628 测试全绿 + clippy 零告警；Windows 源码交叉检查被 `aws-lc-sys`（C 依赖需 windows.h）阻断，Windows 侧由 CI 原生 runner 验证。

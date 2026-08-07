@@ -116,9 +116,8 @@ async fn run_hook_with_timeout(
     input: &serde_json::Value,
     timeout: Duration,
 ) -> Result<(i32, serde_json::Value, String), HookError> {
-    let mut child = tokio::process::Command::new("/bin/zsh")
-        .arg("-c")
-        .arg(command)
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut child = crate::platform::shell_command(command, &cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -537,9 +536,22 @@ mod tests {
         assert_eq!(behavior, PermissionBehavior::Allow);
     }
 
+    /// Hook script that writes to stderr and exits 2 (blocking): PowerShell 5.1
+    /// doesn't support `>&2`, so use [Console]::Error.WriteLine there.
+    fn stderr_exit_2(msg: &str) -> String {
+        #[cfg(windows)]
+        {
+            format!("[Console]::Error.WriteLine(\"{msg}\"); exit 2")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("echo \"{msg}\" >&2; exit 2")
+        }
+    }
+
     #[tokio::test]
     async fn exit_two_blocks_with_stderr() {
-        let config = config_with(r#"echo "no git" >&2; exit 2"#);
+        let config = config_with(&stderr_exit_2("no git"));
         let (behavior, reason, _) = run_pre_tool_use(
             &config,
             "Bash",
@@ -575,7 +587,7 @@ mod tests {
     async fn user_prompt_submit_exit_two_blocks_prompt() {
         let config = serde_json::from_value(serde_json::json!({
             "UserPromptSubmit": [{
-                "hooks": [{"type": "command", "command": "echo denied >&2; exit 2"}]
+                "hooks": [{"type": "command", "command": stderr_exit_2("denied")}]
             }]
         }))
         .unwrap();
@@ -587,7 +599,7 @@ mod tests {
     async fn stop_hook_exit_two_returns_blocking_stderr() {
         let config = serde_json::from_value(serde_json::json!({
             "Stop": [{
-                "hooks": [{"type": "command", "command": "echo review pending >&2; exit 2"}]
+                "hooks": [{"type": "command", "command": stderr_exit_2("review pending")}]
             }]
         }))
         .unwrap();
