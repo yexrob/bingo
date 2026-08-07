@@ -1458,6 +1458,12 @@ impl Chat {
                 self.turn_started = None;
                 self.output_tokens = 0;
                 self.thinking_seg_open = false;
+                // AskUserQuestion 回答反馈是回合内瞬态：回合结束即清，
+                // 不悬挂在输入框上方（块渲染在文档尾部、不参与消息流，
+                // 常驻会像残留物）。游标同步归零——否则下次回答的块
+                // 会跳过前 flushed_ask_rows 行。
+                self.ask_result = None;
+                self.flushed_ask_rows = 0;
                 // 用户中断后不再因后台任务完成自动拉起新回合；
                 // 有排队消息时先让用户的消息走（下面统一提交）。
                 if (self.session.watch.has_wake_notifications()
@@ -7352,6 +7358,44 @@ mod tests {
         assert!(!text.contains("问题一"), "旧条目不重复");
         assert!(!text.contains("User answered"), "header 不重复");
         assert_eq!(settled_ask_rows(&chat), 1);
+    }
+
+    /// 回答反馈是回合内瞬态：TurnEnd 清除 ask_result 与落盘游标，
+    /// 块不再渲染在输入框上方（回归：此前常驻到 /clear）。
+    #[test]
+    fn turn_end_clears_ask_result() {
+        let mut chat = test_chat();
+        chat.ask_result = Some(AskResult {
+            answered: vec![("问题".into(), "答案".into())],
+            declined: false,
+        });
+        chat.flushed_ask_rows = 2;
+        chat.handle(UiEvent::TurnEnd);
+        assert!(chat.ask_result.is_none(), "回合结束清结果块");
+        assert_eq!(chat.flushed_ask_rows, 0, "落盘游标同步归零");
+        chat.build_rows(100);
+        let joined: String = chat
+            .doc
+            .rows
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!joined.contains("User answered"), "块已消失: {joined}");
+        // 下一回合新回答：块从头完整渲染（游标不残留）。
+        chat.ask_result = Some(AskResult {
+            answered: vec![("新问题".into(), "新答案".into())],
+            declined: false,
+        });
+        chat.build_rows(100);
+        let joined: String = chat
+            .doc
+            .rows
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("新问题"), "新块完整渲染: {joined}");
     }
 
     /// 模拟 inline 组件的落盘循环：重建 → 落盘定稿前缀 → 推进游标。

@@ -1,6 +1,6 @@
 # 反馈状态规范（Feedback States）
 
-> 版本：v1.17 · 状态：正式生效（2026-08-07）
+> 版本：v1.18 · 状态：正式生效（2026-08-07）
 > 定位：bingo 所有用户可见反馈态的统一设计约定。GUI（TUI）与 CLI（headless）两侧同源，qa 验收锚点见文末。
 
 ## 总原则
@@ -235,3 +235,4 @@ Web 侧约定（供未来 Web 前端复用）：
 - v1.15（2026-08-07）：qa #69 契约对齐 + main 拍板——§3.1 示例表 `AUTH_EXPIRED` 改为 **`AUTH_REQUIRED`**（单一来源对齐 §4.4/实现，不新增码；登录过期/缺 key/key 非法/401 语义由 msg + 用户动作承载）；§4.4 `TIMEOUT` 行补**双呈现级别注记**（短同步=页面级；长回合=全流程级，AC-53——呈现级别由触发上下文决定，不单由 code 推断）。
 - v1.16（2026-08-07）：#18 呈现层最小实现落地回填（dev #86 + #92）——`UiEvent::Error` 扩展为 `{ code, msg, level, context }`（级别/上下文由生产者发射时显式携带，chat.rs 回合级落 Full+LongTurn）；§5 补 TUI 侧注「级别由生产者携带、渲染层只消费不推导，禁止渲染层/测试侧复制码→级别映射」；§3.1 补「错误级别 = 典型档位，上下文可覆盖」注（TIMEOUT 双档、PERMISSION_DENIED 双档取全流程档）。呈现层按 `last_error`（chat.rs）驱动：Full=整屏态（标题+码+说明+动作提示，Enter 重试/Esc 返回/Ctrl+C 退出）、Page/Field=错误行 error 色高亮。**#92 短操作降级可见**：§4.4 补「短同步操作失败 = 降级可见，不静默吞错」口径——list_models/count_tokens 失败发 Page+ShortSync 错误行（行为降级保留：菜单空/预算 0 仍可用），TurnStart 复位错误态；生产 `ErrorLevel::Page`/`ErrorContext::ShortSync` 从 dead_code 转为真实发射源。
 - v1.17（2026-08-07）：todo 任务区完成态收口（ui/ux 方案）——任务区区分**自动打开**（TaskCreate 信号，`tasks_auto`）与**手动打开**（Ctrl+T）；自动打开的面板全部任务 Completed 即自动隐藏（refresh_tasks 收口），并复用 §2 瞬态行机制推 `✓ N/N tasks 完成 · ctrl+t 查看`（2s TTL 不落盘）给闭合感与找回路径；手动打开的面板全部完成保留（用户显式要看的态，不推瞬态行）；`/tasks` 显式请求临时放行不受影响（不误报「没有后台任务」）。
+- v1.18（2026-08-07）：AskUserQuestion 回答反馈块生命周期收口（main 现场报障）——回答结果块（`⏺ User answered the questions:`）从**常驻到 /clear** 改为**回合内瞬态**：TurnEnd 清除（含 `flushed_ask_rows` 游标归零，避免下次块跳过渲染）；回答过程与回合中保留（多问题中间态可见、答案回显），回合结束即消失——块渲染在文档尾部/输入框上方、不参与消息流，常驻会像残留物；与 §2 瞬态行「完成反馈不常驻」同一精神（区别：块在回合内全程可见，不走 TTL）。答案内容本就经工具回填给模型，无需 UI 常驻。
