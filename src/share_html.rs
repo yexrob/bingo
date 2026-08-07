@@ -1,20 +1,19 @@
-//! share 页面的 HTML 渲染（`bingo share` 输出 · v3.0 opencode 完全复刻）。
+//! share 页面的 HTML 渲染（`bingo share` 输出 · v4.0 Claude Code app 风格）。
 //!
-//! 产物是自包含单文件：CSS/JS 内嵌、零外部依赖、离线可用。CSS 原样移植
-//! sst/opencode share 组件（starlight-props + custom 覆盖 + share/part/
-//! content-*/copy-button 模块，命名空间化），结构与 opencode TSX 输出一致
-//! （`data-component`/`data-slot` 属性）。事实源 = `share-page-template.html`
-//! v3.0（MD5 09e59e72）；四视图（对话/Team/私聊/频道）数据语义保留 bingo，
-//! 视觉走 opencode 令牌。
+//! 产物是自包含单文件：CSS/JS 内嵌、零外部依赖、离线可用。展现形式参考
+//! Claude Code app（用户指定方向，替代 v3.x opencode 复刻）：暗色近黑底、
+//! 居中限宽消息流、用户右侧暖灰气泡、助手左侧 markdown 流、工具折叠卡
+//! （状态徽标）、陶土橙 accent。事实源 = `share-page-template.html` v4.0
+//! （MD5 8c29a17b）。
 //!
 //! 数据由 Rust 服务端渲染：所有动态文本先经 [`escape`]（`& < > " '` 全量转义）
-//! 再拼进 HTML；JS 只做渐进增强（tab/锚点复制/展开/回到顶部/打印），不拼接
-//! 任何数据——无脚本注入面。文本块走最小 markdown→HTML（标题/粗体/行内
-//! 代码/代码块/列表），不做完整 md 引擎（高亮 P2，纯 `<pre>`）。
+//! 再拼进 HTML；JS 只做渐进增强（tab/锚点复制/复制按钮/线程跳转/打印），
+//! 不拼接任何数据——无脚本注入面。文本块走最小 markdown→HTML（标题/粗体/
+//! 行内代码/代码块/列表），不做完整 md 引擎。
 
 use std::collections::HashMap;
 
-use crate::api::types::{ContentBlock, Message, Role};
+use crate::api::types::{ContentBlock, ImageSource, Message, Role};
 use crate::share::{AgentShare, ChannelShare, ShareDoc};
 
 /// HTML 转义（属性与文本上下文通用：`&` 先转，防二次转义错位）。
@@ -110,8 +109,8 @@ fn list_item(line: &str) -> Option<(bool, &str)> {
     None
 }
 
-/// 最小 markdown → HTML（design.md v3.0 §3.3 安全子集）。逐行渲染，
-/// 代码块为纯 `<pre><code>`（cm-root CSS 已内置观感，无 shiki 高亮）。
+/// 最小 markdown → HTML（design.md v4.0 §5 安全子集）。逐行渲染，
+/// 代码块为 `figure.code-block`（v4.0 模板样式依赖）。
 pub fn render_markdown(text: &str) -> String {
     let mut out = String::new();
     let mut lines = text.lines().peekable();
@@ -119,13 +118,17 @@ pub fn render_markdown(text: &str) -> String {
     let mut code_lang = String::new();
     let mut code_buf = String::new();
     let close_fence = |lang: &str, buf: &str, out: &mut String| {
+        out.push_str("<figure class=\"code-block\">");
+        if !lang.is_empty() {
+            out.push_str(&format!("<figcaption>{}</figcaption>", escape(lang)));
+        }
         out.push_str("<pre><code");
         if !lang.is_empty() {
             out.push_str(&format!(" class=\"language-{}\"", escape(lang)));
         }
         out.push('>');
         out.push_str(&escape(buf.trim_end()));
-        out.push_str("</code></pre>");
+        out.push_str("</code></pre></figure>");
     };
     while let Some(line) = lines.next() {
         if let Some(lang) = line.strip_prefix("```") {
@@ -182,7 +185,7 @@ fn tool_result_text(content: &serde_json::Value) -> String {
     }
 }
 
-/// 截断到 60 字符（超长加省略号；t-args/目标摘要用）。
+/// 截断到 60 字符（超长加省略号；工具卡 t-args 摘要用）。
 fn clip(text: &str) -> String {
     let cut: String = text.chars().take(60).collect();
     if cut.chars().count() < text.chars().count() {
@@ -192,7 +195,7 @@ fn clip(text: &str) -> String {
     }
 }
 
-/// 工具目标参数摘要（tool-title 的 target）：命令/文件路径/pattern 等首值。
+/// 工具目标参数摘要（工具卡 t-args）：命令/文件路径/pattern 等首值。
 fn tool_target(name: &str, input: &serde_json::Value) -> String {
     let picked = match name {
         "Bash" => input.get("command"),
@@ -221,8 +224,7 @@ fn tool_target(name: &str, input: &serde_json::Value) -> String {
     }
 }
 
-/// tool_use_id → (工具名, 目标摘要)，供 ToolResult 部件还原工具语义
-/// （bash 结果走终端窗、read 结果走代码卡、error 走红标）。
+/// tool_use_id → (工具名, 目标摘要)，供 ToolResult 还原工具语义与图标。
 fn build_tool_map(messages: &[Message]) -> HashMap<String, (String, String)> {
     let mut map = HashMap::new();
     for msg in messages {
@@ -235,25 +237,19 @@ fn build_tool_map(messages: &[Message]) -> HashMap<String, (String, String)> {
     map
 }
 
-// ── 锚点三态 SVG（角色图标 → hover 变 # → 复制后 ✓；part.tsx/common.tsx）──
+// ── 工具图标（15px，折叠卡 t-icon）──
 
-const ICON_USER: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="7" r="3.2"/><path d="M3.8 14.8a5.2 5.2 0 0 1 10.4 0"/></svg>"#;
-const ICON_SPARKLE: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M9 3l1.6 3.9 3.9 1.6-3.9 1.6L9 14 7.4 10.1 3.5 8.5l3.9-1.6z"/></svg>"#;
-const ICON_THINKING: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M9 4v10M4 9h10M5.5 5.5l7 7M12.5 5.5l-7 7"/></svg>"#;
-const ICON_TERMINAL: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 5l4 4-4 4M10 13h4"/></svg>"#;
-const ICON_DOC: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 2.5h6l3 3V15.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><path d="M11 2.5V6h3.5"/></svg>"#;
-const ICON_WRITE: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 2.5h6l3 3V15.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><path d="M11 2.5V6h3.5"/><path d="M9 8v4M7 10h4"/></svg>"#;
-const ICON_EDIT: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12.5 2.5 15.5 5.5 6 15H3v-3z"/><path d="M11 4l3 3"/></svg>"#;
-const ICON_GREP: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 2.5h6l3 3V15.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><circle cx="8.5" cy="10" r="1.8"/><path d="M8.5 11.8 7 13.5"/></svg>"#;
-const ICON_GLOB: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7.5" cy="7.5" r="4"/><path d="M10.5 10.5 14 14"/></svg>"#;
-const ICON_LIST: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="3.5" y="3.5" width="11" height="11" rx="1.5"/><path d="M6.5 7h5M6.5 10h5"/></svg>"#;
-const ICON_GLOBE: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="6"/><path d="M3 9h12M9 3a8.5 8.5 0 0 1 0 12M9 3a8.5 8.5 0 0 0 0 12"/></svg>"#;
-const ICON_ERROR: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="4.5" y="7" width="9" height="7" rx="1.5"/><circle cx="7.5" cy="10.5" r=".8"/><circle cx="10.5" cy="10.5" r=".8"/><path d="M9 4.5V7M9 4.5l-2-1.5M9 4.5l2-1.5"/></svg>"#;
-const ICON_IMAGE: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="3.5" width="12" height="11" rx="1.5"/><circle cx="7" cy="7.5" r="1.2"/><path d="M3.5 12.5l3.5-3 3 3 2.5-2.5 2 2"/></svg>"#;
-const ICON_HASHTAG: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6.5 3.5 5 14.5M13 3.5 11.5 14.5M3.5 7h11M3.5 11h11"/></svg>"#;
-const ICON_CHECK: &str = r#"<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="6.5"/><path d="M6 9.2l2 2 4-4.4"/></svg>"#;
+const ICON_TERMINAL: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 5l4 4-4 4M10 13h4"/></svg>"#;
+const ICON_DOC: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 2.5h6l3 3V15.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><path d="M11 2.5V6h3.5"/></svg>"#;
+const ICON_WRITE: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 2.5h6l3 3V15.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><path d="M11 2.5V6h3.5"/><path d="M9 8v4M7 10h4"/></svg>"#;
+const ICON_EDIT: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12.5 2.5 15.5 5.5 6 15H3v-3z"/><path d="M11 4l3 3"/></svg>"#;
+const ICON_GREP: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 2.5h6l3 3V15.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><circle cx="8.5" cy="10" r="1.8"/><path d="M8.5 11.8 7 13.5"/></svg>"#;
+const ICON_GLOB: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7.5" cy="7.5" r="4"/><path d="M10.5 10.5 14 14"/></svg>"#;
+const ICON_LIST: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="3.5" y="3.5" width="11" height="11" rx="1.5"/><path d="M6.5 7h5M6.5 10h5"/></svg>"#;
+const ICON_GLOBE: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="6"/><path d="M3 9h12M9 3a8.5 8.5 0 0 1 0 12M9 3a8.5 8.5 0 0 0 0 12"/></svg>"#;
+const ICON_SPARKLE: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M9 3l1.6 3.9 3.9 1.6-3.9 1.6L9 14 7.4 10.1 3.5 8.5l3.9-1.6z"/></svg>"#;
 
-/// 工具名 → 锚点首图标。
+/// 工具名 → 折叠卡图标。
 fn tool_icon(name: &str) -> &'static str {
     match name {
         "Bash" => ICON_TERMINAL,
@@ -268,295 +264,11 @@ fn tool_icon(name: &str) -> &'static str {
     }
 }
 
-/// 消息锚点（opencode data-slot="anchor"：首图标 + # + ✓ + Copied tooltip）。
-fn anchor(id: &str, icon: &str) -> String {
-    format!(
-        "<div data-slot=\"anchor\" title=\"Copy link to this message\"><a href=\"#{id}\">{icon}{ICON_HASHTAG}{ICON_CHECK}</a><span data-slot=\"tooltip\">Copied</span></div>"
-    )
-}
-
-/// 复制按钮（copy-button.tsx：hover 显现，点击复制 2s ✓）。
-const COPY_BUTTON: &str = r#"<div data-component="copy-button" class="copy-root"><button type="button" aria-label="Copy" title="Copy"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="5" y="4" width="8" height="11.5" rx="1.5"/><path d="M7.5 2.5h3v2.5h-3z"/></svg></button></div>"#;
-
-/// 展开/收起按钮（opencode ResultsButton：data-more + 图标）。
-fn expand_button(label: &str) -> String {
-    format!(
-        "<button type=\"button\" data-component=\"button-text\" data-more aria-expanded=\"true\"><span>{label}</span><span data-slot=\"icon\"><svg width=\"11\" height=\"11\" viewBox=\"0 0 18 18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\"><path d=\"M4.5 7 9 11.5 13.5 7\"/></svg></span></button>"
-    )
-}
-
-/// part 骨架：装饰列（锚点 + 3px 竖线）+ 内容列。
-fn part(id: &str, data_type: &str, role: &str, tool: Option<&str>, icon: &str, inner: &str) -> String {
-    let tool_attr = tool.map(|t| format!(" data-tool=\"{t}\"")).unwrap_or_default();
-    format!(
-        "<div class=\"part-root\" data-component=\"part\" data-type=\"{data_type}\" data-role=\"{role}\"{tool_attr} id=\"{id}\"><div data-component=\"decoration\">{}</div><div data-component=\"content\">{inner}</div></div>",
-        anchor(id, icon)
-    )
-}
-
-/// 文本部件：user 无框（content-text），assistant 蓝框卡（content-markdown）。
-fn text_part(id: &str, role: Role, text: &str) -> String {
-    match role {
-        Role::User => part(
-            id,
-            "text",
-            "user",
-            None,
-            ICON_USER,
-            &format!(
-                "<div data-component=\"user-text\"><div class=\"ct-root\" data-component=\"content-text\"><pre data-slot=\"text\">{}</pre>{COPY_BUTTON}</div></div>",
-                escape(text)
-            ),
-        ),
-        Role::Assistant => part(
-            id,
-            "text",
-            "assistant",
-            None,
-            ICON_SPARKLE,
-            &format!(
-                "<div data-component=\"assistant-text\"><div data-component=\"assistant-text-markdown\"><div class=\"cm-root\" data-component=\"content-markdown\" data-expanded><div data-slot=\"markdown\">{}</div>{COPY_BUTTON}</div></div></div>",
-                render_markdown(text)
-            ),
-        ),
-    }
-}
-
-/// thinking 部件：tool-title（Thinking）+ assistant-reasoning（蓝框小卡）。
-fn thinking_part(id: &str, thinking: &str) -> String {
-    let markdown = format!(
-        "<div data-component=\"assistant-reasoning-markdown\"><div class=\"cm-root\" data-component=\"content-markdown\" data-expanded><div data-slot=\"markdown\">{}</div></div></div>",
-        render_markdown(thinking)
-    );
-    let reasoning = format!(
-        "<div data-component=\"assistant-reasoning\">{}{markdown}</div>",
-        expand_button("Hide details")
-    );
-    let inner = format!(
-        "<div data-component=\"tool\"><div data-component=\"tool-title\"><span data-slot=\"name\">Thinking</span></div>{reasoning}</div>"
-    );
-    part(id, "reasoning", "assistant", None, ICON_THINKING, &inner)
-}
-
-/// bash 终端窗（content-bash：三点头 Shell 头 + command + output，opencode 原样）。
-fn bash_terminal(command: &str, output: &str) -> String {
-    let mut content = String::new();
-    if !command.is_empty() {
-        content.push_str(&format!("<pre>{}</pre>", escape(command)));
-    }
-    if !output.is_empty() {
-        content.push_str(&format!("<div data-slot=\"output\"><pre>{}</pre></div>", escape(output)));
-    }
-    format!(
-        "<div class=\"cb-root\" data-component=\"content-bash\" data-expanded><div data-slot=\"body\"><div data-slot=\"header\"><span>Shell</span></div><div data-slot=\"content\">{content}</div></div>{COPY_BUTTON}</div>"
-    )
-}
-
-/// Bash 非 command 字段 → tool-args 网格（A4 契约，uiux e79b37aa）：
-/// flat 值直出、嵌套值 JSON 序列化，word-break 不截断；command 不进网格。
-fn bash_extra_args(input: &serde_json::Value) -> String {
-    let Some(obj) = input.as_object() else {
-        return String::new();
-    };
-    let extras: Vec<(&String, &serde_json::Value)> = obj
-        .iter()
-        .filter(|(k, _)| k.as_str() != "command")
-        .collect();
-    if extras.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("<div data-component=\"tool-args\">");
-    for (key, value) in extras {
-        let text = match value {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        out.push_str(&format!(
-            "<div></div><div>{}</div><div>{}</div>",
-            escape(key),
-            escape(&text)
-        ));
-    }
-    out.push_str("</div>");
-    out
-}
-
-/// 代码结果块（content-code：纯 pre + copy）。
-fn code_result(pre: &str) -> String {
-    format!(
-        "<div class=\"cc-root\" data-component=\"content-code\"><pre>{}</pre>{COPY_BUTTON}</div>",
-        escape(pre)
-    )
-}
-
-/// 文本结果块（content-text compact：3 行折叠 + copy）。
-fn text_result(pre: &str) -> String {
-    format!(
-        "<div class=\"ct-root\" data-component=\"content-text\" data-compact data-expanded><pre data-slot=\"text\">{}</pre>{COPY_BUTTON}</div>",
-        escape(pre)
-    )
-}
-
-/// 工具标题行（tool-title：name + target）。
-fn tool_title(name: &str, target: &str) -> String {
-    let target = if target.is_empty() {
-        String::new()
-    } else {
-        format!("<span data-slot=\"target\" title=\"{}\">{}</span>", escape(target), escape(target))
-    };
-    format!(
-        "<div data-component=\"tool-title\"><span data-slot=\"name\">{}</span>{target}</div>",
-        escape(name)
-    )
-}
-
-/// 工具参数网格（tool-args：分隔条/键/值，未知工具 fallback 摘要；
-/// 完整 input JSON 仍在 tool-result 块呈现——A4 不丢失）。
-fn tool_args(input: &serde_json::Value) -> String {
-    let Some(map) = input.as_object() else {
-        return String::new();
-    };
-    let mut out = String::from("<div data-component=\"tool-args\">");
-    for (key, value) in map {
-        let value = value.as_str().map(clip).unwrap_or_default();
-        out.push_str(&format!(
-            "<div></div><div>{}</div><div>{}</div>",
-            escape(key),
-            escape(&value)
-        ));
-    }
-    out.push_str("</div>");
-    out
-}
-
-/// 工具部件（opencode tool 两段式）。kind = "use"（有 input）| "result"（有 output）。
-fn tool_part(
-    id: &str,
-    tool: &str,
-    icon: &str,
-    title: String,
-    args: String,
-    result: String,
-) -> String {
-    let body = format!(
-        "<div data-component=\"tool\" data-tool=\"{}\">{title}{args}{result}</div>",
-        escape(tool)
-    );
-    part(id, "tool", "assistant", Some(tool), icon, &body)
-}
-
-/// tool_use 部件：输入侧（bash → 终端窗 command；read/write 等 → 代码卡 input）。
-fn tool_use_part(id: &str, name: &str, input: &serde_json::Value) -> String {
-    let icon = tool_icon(name);
-    let target = tool_target(name, input);
-    let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
-    let args = if name == "Bash" {
-        // A4（uiux e79b37aa 契约）：非 command 字段走 opencode tool-args 网格。
-        bash_extra_args(input)
-    } else if matches!(
-        name,
-        "Read" | "Write" | "Edit" | "Grep" | "Glob" | "WebFetch" | "WebSearch"
-    ) {
-        String::new()
-    } else {
-        tool_args(input)
-    };
-    let result = if name == "Bash" {
-        let command = target.clone();
-        bash_terminal(&command, "")
-    } else if args.is_empty() {
-        format!(
-            "<div data-component=\"tool-result\">{}{}</div>",
-            expand_button("Hide input"),
-            code_result(&pretty)
-        )
-    } else {
-        format!(
-            "<div data-component=\"tool-result\">{}{}</div>",
-            expand_button("Hide input"),
-            text_result(&pretty)
-        )
-    };
-    tool_part(id, name, icon, tool_title(name, &target), args, result)
-}
-
-/// tool_result 部件：输出侧（经 tool_use_id 还原工具名；error → 红标）。
-fn tool_result_part(id: &str, tool_use_id: &str, content: &serde_json::Value, is_error: bool, map: &HashMap<String, (String, String)>) -> String {
-    let text = tool_result_text(content);
-    if is_error {
-        let inner = format!(
-            "<div data-component=\"tool\" data-tool=\"error\"><div class=\"ce-root\" data-component=\"content-error\" data-expanded><div data-section=\"content\"><pre><span data-color=\"red\" data-marker=\"label\" data-separator>Error</span><span>{}</span></pre></div></div></div>",
-            escape(&text)
-        );
-        return part(id, "tool", "user", Some("error"), ICON_ERROR, &inner);
-    }
-    let (name, target) = map.get(tool_use_id).cloned().unwrap_or_else(|| ("result".to_string(), String::new()));
-    let icon = tool_icon(&name);
-    let result = if name == "Bash" {
-        bash_terminal(&target, &text)
-    } else if matches!(name.as_str(), "Read" | "Write" | "Edit" | "WebFetch" | "WebSearch") {
-        format!(
-            "<div data-component=\"tool-result\">{}{}</div>",
-            expand_button("Hide result"),
-            code_result(&text)
-        )
-    } else {
-        format!(
-            "<div data-component=\"tool-result\">{}{}</div>",
-            expand_button("Hide result"),
-            text_result(&text)
-        )
-    };
-    tool_part(id, &name, icon, tool_title(&name, &target), String::new(), result)
-}
-
-/// 消息内容块集合 → parts（每块一个 part；id 全局递增）。
-fn render_parts(
-    messages: &[Message],
-    map: &HashMap<String, (String, String)>,
-) -> String {
-    let mut out = String::new();
-    let mut n = 0usize;
-    for msg in messages {
-        for block in &msg.content {
-            n += 1;
-            let id = format!("msg-{n}");
-            let part_html = match block {
-                ContentBlock::Text { text } => match msg.role {
-                    Role::User => text_part(&id, Role::User, text),
-                    Role::Assistant => text_part(&id, Role::Assistant, text),
-                },
-                ContentBlock::Thinking { thinking, .. } => thinking_part(&id, thinking),
-                ContentBlock::ToolUse { name, input, .. } => tool_use_part(&id, name, input),
-                ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-                    tool_result_part(&id, tool_use_id, content, *is_error, map)
-                }
-                ContentBlock::Image { source } => {
-                    let media = escape(&source.media_type);
-                    let alt = format!("image ({media})");
-                    part(
-                        &id,
-                        "image",
-                        if msg.role == Role::User { "user" } else { "assistant" },
-                        None,
-                        ICON_IMAGE,
-                        &format!(
-                            "<div style=\"max-width:var(--md-tool-width)\"><img src=\"data:{media};base64,{}\" alt=\"{alt}\"></div>",
-                            escape(&source.data)
-                        ),
-                    )
-                }
-            };
-            out.push_str(&part_html);
-        }
-    }
-    out
-}
-
-/// 成员取色（v3.0）：main/user 恒 text-strong，其余按名字 FNV 哈希取 hue-0..5。
+/// 成员取色（v4.0）：main 恒 accent，user 恒 text，其余按名字 FNV 哈希取 hue。
 fn member_color(name: &str) -> &'static str {
     match name {
-        "main" | "assistant" | "user" => "var(--color-text-strong)",
+        "main" | "assistant" => "var(--accent)",
+        "user" => "var(--text)",
         _ => {
             let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
             for b in name.bytes() {
@@ -585,7 +297,7 @@ fn state_glyph(state: &str) -> &'static str {
     }
 }
 
-/// HTML id 安全化（team/dm/channel 锚点用；实例名已接近 slug，兜底替换）。
+/// HTML id 安全化（team/dm/channel 锚点用）。
 fn id_slug(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -598,14 +310,15 @@ fn id_slug(name: &str) -> String {
     }
 }
 
-/// 彩色圆点锚点图标（Team 线程/DM/频道行首；style 注入成员色）。
-fn dot_icon(color: &str) -> String {
-    format!(
-        "<svg width=\"18\" height=\"18\" viewBox=\"0 0 18 18\" style=\"color:{color}\"><circle cx=\"9\" cy=\"9\" r=\"5.5\" fill=\"currentColor\"/></svg>"
-    )
+/// 名字首字母（头像用）。
+fn initial(name: &str) -> String {
+    name.chars()
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_default()
 }
 
-/// 消息首段文本（Team 线程预览 / DM 行文本用）。
+/// 消息首段文本（Team 线程预览 / DM 行用）。
 fn first_text(messages: &[Message]) -> String {
     for m in messages.iter().rev() {
         for block in &m.content {
@@ -619,7 +332,141 @@ fn first_text(messages: &[Message]) -> String {
     String::new()
 }
 
-/// Team 视图：线程列表（聊天应用会话列表心智，点击/锚点直达私聊 #dm-<agent>）。
+/// thinking 折叠块（灰斜体；无 token 计数——不展示该字段）。
+fn think_card(thinking: &str) -> String {
+    format!(
+        "<details class=\"think\"><summary>Thinking</summary><div class=\"think-body\">{}</div></details>",
+        render_markdown(thinking)
+    )
+}
+
+/// tool_use 折叠卡：图标 + 名 + 参数摘要 + 状态徽标；input pre = 完整 JSON
+/// （A4 不丢失，含 bash 非 command 字段）。
+fn tool_use_card(name: &str, input: &serde_json::Value) -> String {
+    let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
+    let target = tool_target(name, input);
+    format!(
+        "<details class=\"tool\" data-status=\"ok\"><summary><span class=\"t-icon\">{}</span><span class=\"t-name\">{}</span><span class=\"t-args\">{}</span><span class=\"t-status ok\">✓ done</span></summary><div class=\"t-body\"><div class=\"t-code\"><span class=\"t-label\">input</span><pre>{}</pre></div></div></details>",
+        tool_icon(name),
+        escape(name),
+        escape(&target),
+        escape(&pretty)
+    )
+}
+
+/// tool_result 折叠卡：输出 pre + 状态徽标（error 红）。
+fn tool_result_card(
+    tool_use_id: &str,
+    content: &serde_json::Value,
+    is_error: bool,
+    map: &HashMap<String, (String, String)>,
+) -> String {
+    let text = tool_result_text(content);
+    let (name, target) = map
+        .get(tool_use_id)
+        .cloned()
+        .unwrap_or_else(|| ("result".to_string(), String::new()));
+    let (status_cls, status, err_cls, label) = if is_error {
+        ("err", "✗ error", " err", "result · error")
+    } else {
+        ("ok", "✓ done", "", "result")
+    };
+    format!(
+        "<details class=\"tool\" data-status=\"{status_cls}\"><summary><span class=\"t-icon\">{}</span><span class=\"t-name\">{}</span><span class=\"t-args\">{}</span><span class=\"t-status {status_cls}\">{status}</span></summary><div class=\"t-body\"><div class=\"t-code output{err_cls}\"><span class=\"t-label\">{label}</span><pre>{}</pre></div></div></details>",
+        tool_icon(&name),
+        escape(&name),
+        escape(&target),
+        escape(&text)
+    )
+}
+
+/// 图片块：data: URI 内嵌（仅 base64，不透传外部 URL）。
+fn image_html(source: &ImageSource) -> String {
+    let media = escape(&source.media_type);
+    let alt = format!("image ({media})");
+    format!(
+        "<figure style=\"max-width:var(--bubble-max)\"><img src=\"data:{media};base64,{}\" alt=\"{alt}\"></figure>",
+        escape(&source.data)
+    )
+}
+
+/// 单条主对话消息：user 右侧气泡 / assistant 左侧 markdown 流 + 工具折叠卡。
+fn render_message(
+    msg: &Message,
+    index: usize,
+    map: &HashMap<String, (String, String)>,
+) -> String {
+    let id = format!("msg-{index}");
+    match msg.role {
+        Role::User => {
+            let mut texts = String::new();
+            let mut cards = String::new();
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text } => {
+                        if !texts.is_empty() {
+                            texts.push('\n');
+                        }
+                        texts.push_str(text);
+                    }
+                    ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                        cards.push_str(&tool_result_card(tool_use_id, content, *is_error, map))
+                    }
+                    ContentBlock::Image { source } => cards.push_str(&image_html(source)),
+                    _ => {}
+                }
+            }
+            let bubble = if texts.trim().is_empty() {
+                String::new()
+            } else {
+                format!("<div class=\"bubble\">{}</div>", escape(texts.trim_end()))
+            };
+            format!(
+                "<article class=\"msg msg-user\" id=\"{id}\"><div class=\"msg-meta\"><span class=\"who\">You</span><a class=\"anchor\" href=\"#{id}\" aria-label=\"Copy link to this message\">#</a></div>{bubble}{cards}</article>"
+            )
+        }
+        Role::Assistant => {
+            let mut md = String::new();
+            let mut extras = String::new();
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text } => md.push_str(&render_markdown(text)),
+                    ContentBlock::Thinking { thinking, .. } => extras.push_str(&think_card(thinking)),
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        extras.push_str(&tool_use_card(name, input))
+                    }
+                    ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                        extras.push_str(&tool_result_card(tool_use_id, content, *is_error, map))
+                    }
+                    ContentBlock::Image { source } => extras.push_str(&image_html(source)),
+                }
+            }
+            let md_html = if md.trim().is_empty() {
+                String::new()
+            } else {
+                format!("<div class=\"md\">{md}</div>")
+            };
+            format!(
+                "<article class=\"msg msg-assistant\" id=\"{id}\"><div class=\"msg-meta\"><span class=\"who\">Assistant</span><a class=\"anchor\" href=\"#{id}\" aria-label=\"Copy link to this message\">#</a></div><div class=\"content\">{md_html}{extras}</div></article>"
+            )
+        }
+    }
+}
+
+/// 对话视图：消息流（空态 view-empty）。
+fn render_conv(messages: &[Message], map: &HashMap<String, (String, String)>) -> String {
+    if messages.is_empty() {
+        return "<div class=\"view-empty\">— No messages —</div>".to_string();
+    }
+    let mut out = String::from("<div class=\"conv\">");
+    for (i, m) in messages.iter().enumerate() {
+        out.push_str(&render_message(m, i + 1, map));
+    }
+    out.push_str("</div>");
+    out
+}
+
+/// Team 视图：线程列表（点击/锚点直达私聊）。
 fn render_team(agents: &[AgentShare]) -> String {
     if agents.is_empty() {
         return "<div class=\"view-empty\">— No agents —</div>".to_string();
@@ -630,29 +477,19 @@ fn render_team(agents: &[AgentShare]) -> String {
         let color = member_color(&a.name);
         let def = a.def.as_deref().map(escape).unwrap_or_default();
         let preview = first_text(&a.history);
-        let preview_html = if preview.is_empty() {
-            "<p class=\"view-empty\">(no history yet)</p>".to_string()
+        let preview = if preview.is_empty() {
+            "(no history yet)".to_string()
         } else {
-            format!(
-                "<div class=\"ct-root\" data-component=\"content-text\" data-compact><pre data-slot=\"text\">{}</pre></div>",
-                escape(&preview)
-            )
+            escape(&preview)
         };
         rows.push_str(&format!(
-            "<div class=\"part-root thread-row\" data-component=\"part\" data-type=\"thread\" data-agent=\"{}\" id=\"team-{}\" data-jump=\"#dm-{}\" tabindex=\"0\" role=\"link\" aria-label=\"Open {} thread\"><div data-component=\"decoration\"><div data-slot=\"anchor\" title=\"Copy link to this message\"><a href=\"#dm-{}\">{}{}{}</a><span data-slot=\"tooltip\">Copied</span></div><div data-slot=\"bar\"></div></div><div data-component=\"content\"><div data-component=\"step-start\"><div data-slot=\"provider\" style=\"color:{}\">{}</div><div data-slot=\"model\">{} {} · {} · {} messages</div></div>{preview_html}<div data-component=\"content-footer\">last message · {} messages</div></div></div>",
+            "<a class=\"thread\" id=\"team-{slug}\" href=\"#dm-{slug}\" data-jump=\"#dm-{slug}\" aria-label=\"Open {} thread\"><span class=\"t-avatar\" style=\"--c:{color}\">{}</span><div class=\"t-main\"><div class=\"t-head\"><span class=\"t-name\">{}</span><span class=\"t-state {}\">{} {}</span><span class=\"t-count\">{} msgs</span></div><div class=\"t-preview\">{preview}</div><div class=\"t-foot\">last · {} msgs · {def}</div></div></a>",
             escape(&a.name),
-            slug,
-            slug,
+            initial(&a.name),
             escape(&a.name),
-            slug,
-            dot_icon(color),
-            ICON_HASHTAG,
-            ICON_CHECK,
-            color,
-            escape(&a.name),
+            escape(&a.state),
             state_glyph(&a.state),
             escape(&a.state),
-            def,
             a.history.len(),
             a.history.len()
         ));
@@ -660,53 +497,66 @@ fn render_team(agents: &[AgentShare]) -> String {
     format!("<div class=\"thread-list\">{rows}</div>")
 }
 
-/// 私聊视图：每子代理一个 thread part，历史为 dm-msg 聊天流（user 靠右）。
+/// 私聊视图：每代理一个聊天流（代理左 / 用户右气泡）。
 fn render_private(agents: &[AgentShare]) -> String {
     if agents.is_empty() {
         return "<div class=\"view-empty\">— No agents —</div>".to_string();
     }
-    let mut out = String::from("<div class=\"view-block\">");
+    let mut out = String::from("<div class=\"dm-list\">");
     for a in agents {
         let slug = id_slug(&a.name);
         let color = member_color(&a.name);
         let def = a.def.as_deref().map(escape).unwrap_or_default();
-        let mut thread = String::new();
+        let mut flow = String::new();
         if a.history.is_empty() {
-            thread.push_str("<div class=\"dm-thread\"><p class=\"view-empty\">(no history yet)</p></div>");
+            flow.push_str("<p class=\"view-empty\">(no history yet)</p>");
         } else {
-            thread.push_str("<div class=\"dm-thread\">");
             for m in &a.history {
-                let (from, user_cls, from_color) = match m.role {
-                    Role::User => ("user", " dm-user", "var(--color-text-strong)"),
-                    Role::Assistant => (a.name.as_str(), "", ""),
-                };
-                let from_color = if from_color.is_empty() {
-                    color
-                } else {
-                    from_color
-                };
-                let text = first_text(std::slice::from_ref(m));
-                if text.is_empty() {
-                    continue;
+                match m.role {
+                    Role::User => {
+                        let text = first_text(std::slice::from_ref(m));
+                        if text.is_empty() {
+                            continue;
+                        }
+                        flow.push_str(&format!(
+                            "<article class=\"msg msg-user\"><div class=\"msg-meta\"><span class=\"who\">You</span></div><div class=\"bubble\">{}</div></article>",
+                            escape(&text)
+                        ));
+                    }
+                    Role::Assistant => {
+                        let mut md = String::new();
+                        let mut extras = String::new();
+                        for block in &m.content {
+                            match block {
+                                ContentBlock::Text { text } => md.push_str(&render_markdown(text)),
+                                ContentBlock::Thinking { thinking, .. } => {
+                                    extras.push_str(&think_card(thinking))
+                                }
+                                ContentBlock::ToolUse { name, input, .. } => {
+                                    extras.push_str(&tool_use_card(name, input))
+                                }
+                                ContentBlock::Image { source } => extras.push_str(&image_html(source)),
+                                ContentBlock::ToolResult { .. } => {}
+                            }
+                        }
+                        let md_html = if md.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!("<div class=\"md\">{md}</div>")
+                        };
+                        flow.push_str(&format!(
+                            "<article class=\"msg msg-assistant\"><div class=\"msg-meta\"><span class=\"who\" style=\"--from:{color}\">{}</span></div>{md_html}{extras}</article>",
+                            escape(&a.name)
+                        ));
+                    }
                 }
-                thread.push_str(&format!(
-                    "<div class=\"dm-msg{user_cls}\"><div data-component=\"tool-title\"><span data-slot=\"name\" style=\"color:{from_color}\">{}</span></div><div class=\"ct-root\" data-component=\"content-text\" data-expanded><pre data-slot=\"text\">{}</pre></div></div>",
-                    escape(from),
-                    escape(&text)
-                ));
             }
-            thread.push_str("</div>");
         }
         out.push_str(&format!(
-            "<div class=\"part-root\" data-component=\"part\" data-type=\"thread\" data-role=\"assistant\" data-agent=\"{}\" id=\"dm-{}\"><div data-component=\"decoration\"><div data-slot=\"anchor\" title=\"Copy link to this message\"><a href=\"#dm-{}\">{}{}{}</a><span data-slot=\"tooltip\">Copied</span></div><div data-slot=\"bar\"></div></div><div data-component=\"content\"><div data-component=\"step-start\"><div data-slot=\"provider\" style=\"color:{}\">{}</div><div data-slot=\"model\">{} {} · {def}</div></div>{thread}</div></div>",
+            "<section class=\"dm-block\" id=\"dm-{slug}\"><header class=\"dm-head\"><span class=\"avatar\" style=\"--c:{color}\">{}</span><span class=\"name\">{}</span><span class=\"state {}\">{} {}</span><span class=\"def\">{def}</span></header><div class=\"dm-flow\">{flow}</div></section>",
+            initial(&a.name),
             escape(&a.name),
-            slug,
-            slug,
-            dot_icon(color),
-            ICON_HASHTAG,
-            ICON_CHECK,
-            color,
-            escape(&a.name),
+            escape(&a.state),
             state_glyph(&a.state),
             escape(&a.state)
         ));
@@ -715,12 +565,12 @@ fn render_private(agents: &[AgentShare]) -> String {
     out
 }
 
-/// 频道视图：每频道一个聊天记录流（part 消息，seq/成员徽标保留）。
+/// 频道视图：每频道消息流（seq + 发送者 + 文本，user 右对齐）。
 fn render_channels(channels: &[ChannelShare]) -> String {
     if channels.is_empty() {
         return "<div class=\"view-empty\">— No channels —</div>".to_string();
     }
-    let mut out = String::from("<div class=\"view-block\">");
+    let mut out = String::from("<div class=\"ch-list\">");
     for c in channels {
         let slug = id_slug(&c.name);
         let chips: String = c
@@ -734,34 +584,23 @@ fn render_channels(channels: &[ChannelShare]) -> String {
                 )
             })
             .collect();
-        let mut stream = String::new();
+        let mut flow = String::new();
         if c.messages.is_empty() {
-            stream.push_str("<p class=\"view-empty\">(no messages yet)</p>");
+            flow.push_str("<p class=\"view-empty\">(no messages yet)</p>");
         } else {
-            stream.push_str("<div class=\"ch-stream\">");
-            let mut n = 0usize;
             for m in &c.messages {
-                n += 1;
-                let color = member_color(&m.from);
-                let user_cls = if m.from == "user" { " dm-user" } else { "" };
-                stream.push_str(&format!(
-                    "<div class=\"part-root{user_cls}\" data-component=\"part\" data-type=\"text\" data-role=\"assistant\" data-from=\"{}\" id=\"ch-{}\"><div data-component=\"decoration\"><div data-slot=\"anchor\" title=\"Copy link to this message\"><a href=\"#ch-{}\">{}{}{}</a><span data-slot=\"tooltip\">Copied</span></div><div data-slot=\"bar\"></div></div><div data-component=\"content\"><div data-component=\"tool-title\"><span data-slot=\"name\" style=\"color:{}\">{}</span><span data-slot=\"target\" class=\"ch-row-seq\">#{:04}</span></div><div class=\"ct-root\" data-component=\"content-text\" data-expanded><pre data-slot=\"text\">{}</pre></div></div></div>",
-                    escape(&m.from),
-                    n,
-                    n,
-                    dot_icon(color),
-                    ICON_HASHTAG,
-                    ICON_CHECK,
-                    color,
-                    escape(&m.from),
+                let user_cls = if m.from == "user" { " ch-user" } else { "" };
+                flow.push_str(&format!(
+                    "<div class=\"ch-msg{user_cls}\"><span class=\"ch-seq\">#{:04}</span><span class=\"ch-from\" style=\"--from:{}\">{}</span><span class=\"ch-text\">{}</span></div>",
                     m.seq,
+                    member_color(&m.from),
+                    escape(&m.from),
                     escape(&m.text)
                 ));
             }
-            stream.push_str("</div>");
         }
         out.push_str(&format!(
-            "<section class=\"ch-block\" data-component=\"channel\" id=\"channel-{slug}\"><header class=\"ch-head\" data-component=\"step-start\"><div data-slot=\"provider\">◇ #{}</div><div data-slot=\"model\"><span class=\"ch-mode {}\">{}</span><span class=\"ch-members\">{chips}</span></div></header>{stream}</section>",
+            "<section class=\"ch-block\" id=\"channel-{slug}\"><header class=\"ch-head\"><h3 class=\"ch-name\">◇ #{}</h3><span class=\"ch-mode {}\">{}</span><span class=\"ch-members\">{chips}</span></header><div class=\"ch-flow\">{flow}</div></section>",
             escape(&c.name),
             escape(&c.mode),
             escape(&c.mode)
@@ -798,80 +637,80 @@ pub fn render(doc: &ShareDoc, messages: &[Message]) -> String {
     let session = escape(&doc.session);
     let created = format_epoch(doc.created_at);
     let tool_map = build_tool_map(messages);
-    let parts = render_parts(messages, &tool_map);
 
     let mut out = String::new();
     out.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
     out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+    out.push_str("<meta name=\"color-scheme\" content=\"dark\">\n");
     out.push_str("<meta name=\"generator\" content=\"bingo share\">\n");
-    out.push_str("<meta name=\"color-scheme\" content=\"light dark\">\n");
     out.push_str(&format!("<title>bingo · {session}</title>\n"));
     out.push_str("<style>\n");
     out.push_str(CSS);
     out.push_str("</style>\n</head>\n<body>\n");
-    out.push_str("<div class=\"share-root\" data-component=\"share\">\n");
-    // 头部：header-title + header-stats + header-time。
-    out.push_str("<header data-component=\"header\">");
-    out.push_str(&format!("<h1 data-component=\"header-title\">{session}</h1>"));
-    out.push_str("<div data-component=\"header-details\"><ul data-component=\"header-stats\">");
+    // 顶栏：品牌 + 会话标题 + 元信息 + 四视图 tabs。
+    out.push_str("<header class=\"topbar\"><div class=\"topbar-inner\"><div class=\"brand\">");
+    out.push_str("<span class=\"mark\">▸</span><span class=\"name\">bingo</span>");
+    out.push_str(&format!("<span class=\"session\">{session}</span>"));
     out.push_str(&format!(
-        "<li data-slot=\"item\"><span data-slot=\"icon\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 18 18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\"><rect x=\"3.5\" y=\"4.5\" width=\"11\" height=\"10\" rx=\"1.5\"/><path d=\"M3.5 7.5h11M6.5 2.5v3M11.5 2.5v3\"/></svg></span><span data-placeholder>started</span><span>{created}</span></li>"
+        "<div class=\"meta-line\"><span>started {created}</span><span>bingo</span><button type=\"button\" class=\"print-btn\" id=\"print-btn\" aria-label=\"Print this page\">⎙ Print</button></div>"
     ));
-    out.push_str("<li data-slot=\"item\"><span data-slot=\"icon\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 18 18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\"><path d=\"M3 5.5a1 1 0 0 1 1-1h3.2l1.6 2H14a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z\"/></svg></span><span>bingo</span></li>");
-    out.push_str("</ul><div data-component=\"header-time\">");
-    out.push_str(&created);
-    out.push_str("</div></div></header>\n");
-    // 四视图 tab 导航。
-    out.push_str("<nav data-component=\"tabs\" role=\"tablist\" aria-label=\"Views\">");
-    out.push_str("<button role=\"tab\" data-tab=\"conv\" aria-selected=\"true\">Conversation</button>");
-    out.push_str(&format!("<button role=\"tab\" data-tab=\"team\" aria-selected=\"false\">Team <span class=\"tab-count\">{}</span></button>", doc.agents.len()));
-    out.push_str(&format!("<button role=\"tab\" data-tab=\"dm\" aria-selected=\"false\">DM <span class=\"tab-count\">{}</span></button>", doc.agents.len()));
-    out.push_str(&format!("<button role=\"tab\" data-tab=\"channel\" aria-selected=\"false\">Channels <span class=\"tab-count\">{}</span></button>", doc.channels.len()));
-    out.push_str("</nav>\n");
-    // ① 对话：opencode parts 流（追加 view class 修正模板 tab 切换对 conv 的显隐）。
-    let conv_inner = if parts.is_empty() {
-        "<div class=\"view-empty\">— No messages —</div>".to_string()
-    } else {
-        parts
-    };
+    out.push_str("</div><nav class=\"tabs\" role=\"tablist\" aria-label=\"Views\">");
+    out.push_str("<button role=\"tab\" data-tab=\"conv\" aria-selected=\"true\"><span class=\"kbd\">[1]</span>Conversation</button>");
     out.push_str(&format!(
-        "<div class=\"parts view\" data-view=\"conv\" data-component=\"parts\">{conv_inner}</div>\n"
+        "<button role=\"tab\" data-tab=\"team\" aria-selected=\"false\"><span class=\"kbd\">[2]</span>Team <span class=\"count\">{}</span></button>",
+        doc.agents.len()
     ));
-    // ② Team 名册。
     out.push_str(&format!(
-        "<section class=\"view\" data-view=\"team\" hidden aria-label=\"Team\"><h2 data-component=\"view-title\">Team <span class=\"view-count\">· {} instances</span></h2>{}</section>\n",
+        "<button role=\"tab\" data-tab=\"dm\" aria-selected=\"false\"><span class=\"kbd\">[3]</span>DM <span class=\"count\">{}</span></button>",
+        doc.agents.len()
+    ));
+    out.push_str(&format!(
+        "<button role=\"tab\" data-tab=\"channel\" aria-selected=\"false\"><span class=\"kbd\">[4]</span>Channels <span class=\"count\">{}</span></button>",
+        doc.channels.len()
+    ));
+    out.push_str("</nav></div></header>\n<main id=\"main\">\n");
+    // ① 对话。
+    out.push_str(&format!(
+        "<section class=\"view\" data-view=\"conv\" role=\"tabpanel\" id=\"view-conv\" aria-label=\"Conversation\"><h2>Conversation <span class=\"n\">· {} messages</span></h2>{}</section>\n",
+        messages.len(),
+        render_conv(messages, &tool_map)
+    ));
+    // ② Team。
+    out.push_str(&format!(
+        "<section class=\"view\" data-view=\"team\" role=\"tabpanel\" id=\"view-team\" aria-label=\"Team\" hidden><h2>Team <span class=\"n\">· {} threads</span></h2>{}</section>\n",
         doc.agents.len(),
         render_team(&doc.agents)
     ));
-    // ③ DM 私聊。
+    // ③ DM。
     out.push_str(&format!(
-        "<section class=\"view\" data-view=\"dm\" hidden aria-label=\"Direct messages\"><h2 data-component=\"view-title\">Direct Messages <span class=\"view-count\">· {} agents</span></h2>{}</section>\n",
+        "<section class=\"view\" data-view=\"dm\" role=\"tabpanel\" id=\"view-dm\" aria-label=\"Direct messages\" hidden><h2>Direct Messages <span class=\"n\">· {} threads</span></h2>{}</section>\n",
         doc.agents.len(),
         render_private(&doc.agents)
     ));
     // ④ 频道。
     out.push_str(&format!(
-        "<section class=\"view\" data-view=\"channel\" hidden aria-label=\"Channels\"><h2 data-component=\"view-title\">Channels <span class=\"view-count\">· {} rooms</span></h2>{}</section>\n",
+        "<section class=\"view\" data-view=\"channel\" role=\"tabpanel\" id=\"view-channel\" aria-label=\"Channels\" hidden><h2>Channels <span class=\"n\">· {} rooms</span></h2>{}</section>\n",
         doc.channels.len(),
         render_channels(&doc.channels)
     ));
-    out.push_str("</div>\n");
-    // 回到顶部 + noscript + JS。
-    out.push_str("<button type=\"button\" class=\"scroll-button\" data-component=\"scroll\" data-hidden=\"true\" aria-label=\"Scroll to top\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 18 18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\"><path d=\"M4.5 11.5 9 7l4.5 4.5\"/></svg></button>\n");
-    out.push_str("<noscript><div style=\"padding:1.5rem;text-align:center;color:var(--sl-color-text-dimmed)\">This page is fully readable without JavaScript; only copy links, copy buttons and tab switching are enhanced.</div></noscript>\n");
+    out.push_str("</main>\n");
+    // 页脚 + noscript + JS。
+    out.push_str("<footer><div class=\"foot-inner\"><span><span class=\"mark\">▸</span> bingo · Rust agent CLI</span><span>generated ");
+    out.push_str(&created);
+    out.push_str(" by bingo share</span><span class=\"foot-warn\">contains full conversation &amp; tool output — review before sharing</span></div></footer>\n");
+    out.push_str("<noscript><div style=\"padding:1.5rem;text-align:center;color:var(--faint)\">This page is fully readable without JavaScript; only tab switching, copy links and copy buttons are enhanced.</div></noscript>\n");
     out.push_str("<script>\n");
     out.push_str(JS);
     out.push_str("</script>\n</body>\n</html>\n");
     out
 }
 
-/// 内嵌样式：与 share-page-template.html v3.0（MD5 09e59e72）原样一致。
-/// opencode share 组件移植（starlight-props + custom 覆盖 + share/part/
-/// content-*/copy-button，命名空间化 .root → .share-root/.part-root/…）。
+/// 内嵌样式：与 share-page-template.html v4.0（MD5 8c29a17b）原样一致
+/// （Claude Code app 风格：暗色近黑底、用户右气泡、助手左流、工具折叠卡）。
 const CSS: &str = include_str!("../notes/design/share-page-template.css");
 
-/// 渐进增强 JS（与模板同源）：四视图 tab、锚点复制、复制按钮、展开/收起、
-/// 回到顶部、打印展开。不拼接任何会话数据（防注入）。
+/// 渐进增强 JS（与模板同源）：tab 切换、锚点复制、复制按钮、线程跳转、打印。
+/// 不拼接任何会话数据（防注入）。
 const JS: &str = r#"
 (function(){
   'use strict';
@@ -881,7 +720,7 @@ const JS: &str = r#"
     for (var i = 0; i < views.length; i++){
       views[i].hidden = views[i].getAttribute('data-view') !== name;
     }
-    var tabs = document.querySelectorAll('[data-component="tabs"] button[data-tab]');
+    var tabs = document.querySelectorAll('.tabs button[data-tab]');
     for (var j = 0; j < tabs.length; j++){
       var on = tabs[j].getAttribute('data-tab') === name;
       tabs[j].setAttribute('aria-selected', on ? 'true' : 'false');
@@ -890,7 +729,7 @@ const JS: &str = r#"
     if (history.replaceState) history.replaceState(null, '', '#' + name);
   }
   function bindTabs(){
-    var tabs = Array.prototype.slice.call(document.querySelectorAll('[data-component="tabs"] button[data-tab]'));
+    var tabs = Array.prototype.slice.call(document.querySelectorAll('.tabs button[data-tab]'));
     tabs.forEach(function(btn){
       btn.addEventListener('click', function(){ activateTab(btn.getAttribute('data-tab')); });
       btn.addEventListener('keydown', function(e){
@@ -915,109 +754,82 @@ const JS: &str = r#"
 
   function bindAnchors(){
     document.addEventListener('click', function(e){
-      var anchor = e.target && e.target.closest ? e.target.closest('[data-slot="anchor"] a') : null;
+      var anchor = e.target && e.target.closest ? e.target.closest('.msg-meta .anchor') : null;
       if (!anchor) return;
       e.preventDefault();
-      var hash = anchor.getAttribute('href') || '';
-      var url = location.href.split('#')[0] + hash;
+      var url = location.href.split('#')[0] + (anchor.getAttribute('href') || '');
       function fallback(){
         var ta = document.createElement('textarea');
-        ta.value = url;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
+        ta.value = url; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
         try { document.execCommand('copy'); } catch (err) {}
         document.body.removeChild(ta);
       }
       if (navigator.clipboard && navigator.clipboard.writeText){
         navigator.clipboard.writeText(url).catch(function(){ fallback(); });
       } else { fallback(); }
-      var slot = anchor.parentElement;
-      slot.setAttribute('data-status', 'copied');
-      setTimeout(function(){ slot.removeAttribute('data-status'); }, 3000);
+      anchor.textContent = '✓';
+      setTimeout(function(){ anchor.textContent = '#'; }, 1600);
     });
+  }
+
+  function addCopyButtons(){
+    var targets = document.querySelectorAll('.code-block, .t-code');
+    for (var i = 0; i < targets.length; i++){
+      (function(t){
+        if (t.querySelector('.copy-btn')) return;
+        var pre = t.querySelector('pre');
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'copy-btn';
+        btn.textContent = 'Copy';
+        btn.setAttribute('aria-label', 'Copy code');
+        t.appendChild(btn);
+      })(targets[i]);
+    }
   }
 
   function bindCopyButtons(){
     document.addEventListener('click', function(e){
-      var btn = e.target && e.target.closest ? e.target.closest('.copy-root button') : null;
+      var btn = e.target && e.target.closest ? e.target.closest('.copy-btn') : null;
       if (!btn) return;
-      var root = btn.closest('.copy-root');
-      var container = root && root.parentElement;
+      var container = btn.parentElement;
       var pre = container ? container.querySelector('pre') : null;
       var text = pre ? pre.textContent : '';
       if (!text) return;
       function fallback(){
         var ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
         try { document.execCommand('copy'); } catch (err) {}
         document.body.removeChild(ta);
       }
       if (navigator.clipboard && navigator.clipboard.writeText){
         navigator.clipboard.writeText(text).catch(function(){ fallback(); });
       } else { fallback(); }
-      btn.setAttribute('data-copied', 'true');
-      btn.setAttribute('aria-label', 'Copied');
-      btn.setAttribute('title', 'Copied');
-      btn.innerHTML = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="6.5"/><path d="M6 9.2l2 2 4-4.4"/></svg>';
-      setTimeout(function(){
-        btn.removeAttribute('data-copied');
-        btn.setAttribute('aria-label', 'Copy');
-        btn.setAttribute('title', 'Copy');
-        btn.innerHTML = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="5" y="4" width="8" height="11.5" rx="1.5"/><path d="M7.5 2.5h3v2.5h-3z"/></svg>';
-      }, 2000);
+      btn.textContent = 'Copied ✓';
+      setTimeout(function(){ btn.textContent = 'Copy'; }, 1600);
     });
   }
 
-  function bindToggles(){
+  function bindThreadRows(){
     document.addEventListener('click', function(e){
-      var btn = e.target && e.target.closest ? e.target.closest('[data-component="button-text"][data-more]') : null;
-      if (!btn) return;
+      var row = e.target && e.target.closest ? e.target.closest('.thread[data-jump]') : null;
+      if (!row) return;
       e.preventDefault();
-      var expanded = btn.getAttribute('aria-expanded') === 'true';
-      btn.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-      var label = btn.querySelector('span');
-      var root = btn.parentElement;
-      var was = expanded;
-      if (label) {
-        var name = label.textContent || '';
-        label.textContent = was ? (name.replace(/^Hide /, 'Show ')) : (name.replace(/^Show /, 'Hide '));
-      }
-      var targets = root.querySelectorAll('[data-component="tool-result"] > :not(button), [data-component="assistant-reasoning"] > [data-component="assistant-reasoning-markdown"]');
-      for (var i = 0; i < targets.length; i++){
-        if (targets[i].hasAttribute('data-expanded')) {
-          targets[i].setAttribute('data-expanded', was ? 'false' : 'true');
-        } else {
-          targets[i].hidden = was;
-        }
-      }
-      var icon = btn.querySelector('[data-slot="icon"] svg');
-      if (icon) {
-        icon.setAttribute('d', was
-          ? 'M4.5 7 9 11.5 13.5 7'
-          : 'M7 4.5 11.5 9 7 13.5');
-      }
-    });
-  }
-
-  function bindScrollButton(){
-    var btn = document.querySelector('[data-component="scroll"]');
-    if (!btn) return;
-    window.addEventListener('scroll', function(){
-      var top = window.scrollY || document.documentElement.scrollTop;
-      btn.setAttribute('data-hidden', top < 200 ? 'true' : 'false');
-    }, { passive: true });
-    btn.addEventListener('click', function(){
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      var target = row.getAttribute('data-jump') || '';
+      var view = target.indexOf('dm') > -1 ? 'dm' : 'conv';
+      activateTab(view);
+      setTimeout(function(){
+        var el = document.querySelector(target);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 50);
     });
   }
 
   function bindPrint(){
+    var printBtn = document.getElementById('print-btn');
+    if (printBtn) printBtn.addEventListener('click', function(){ window.print(); });
     var saved = [];
     window.addEventListener('beforeprint', function(){
       saved = [];
@@ -1032,39 +844,15 @@ const JS: &str = r#"
         if (saved[k] !== undefined) ds[k].open = saved[k];
       }
       var name = (location.hash || '').replace('#', '');
-      if (['conv', 'team', 'dm', 'channel'].indexOf(name) >= 0) activateTab(name);
-      else activateTab('conv');
-    });
-  }
-
-  /* ---------- Team 线程行：点击直达私聊（data-jump；锚点内点击交给 bindAnchors） ---------- */
-  function bindThreadRows(){
-    document.addEventListener('click', function(e){
-      var row = e.target && e.target.closest ? e.target.closest('.thread-row[data-jump]') : null;
-      if (!row) return;
-      if (e.target.closest('[data-slot="anchor"]')) return;
-      e.preventDefault();
-      var target = row.getAttribute('data-jump') || '';
-      var view = target.indexOf('dm') > -1 ? 'dm' : 'conv';
-      activateTab(view);
-      setTimeout(function(){
-        var el = document.querySelector(target);
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 50);
-    });
-    document.addEventListener('keydown', function(e){
-      if (e.key !== 'Enter') return;
-      var row = e.target && e.target.closest ? e.target.closest('.thread-row[data-jump]') : null;
-      if (row){ e.preventDefault(); row.click(); }
+      activateTab(['conv', 'team', 'dm', 'channel'].indexOf(name) >= 0 ? name : 'conv');
     });
   }
 
   bindTabs();
   bindAnchors();
+  addCopyButtons();
   bindCopyButtons();
-  bindToggles();
   bindThreadRows();
-  bindScrollButton();
   bindPrint();
 })();
 "#;
@@ -1081,7 +869,7 @@ mod tests {
         }
     }
 
-    /// 富消息：thinking + tool_use(bash) + tool_result(错误) + text。
+    /// 富消息：thinking + tool_use(bash 多字段) + tool_result + 错误结果 + text。
     fn rich_messages() -> Vec<Message> {
         vec![
             Message {
@@ -1098,12 +886,26 @@ mod tests {
                     ContentBlock::ToolUse {
                         id: "tu_1".into(),
                         name: "Bash".into(),
-                        input: serde_json::json!({"command": "ls <unsafe> & echo \"x\""}),
+                        input: serde_json::json!({
+                            "command": "ls <unsafe> & echo \"x\"",
+                            "background": true,
+                            "timeout": 30
+                        }),
                     },
                     ContentBlock::ToolResult {
                         tool_use_id: "tu_1".into(),
                         content: serde_json::Value::String("src/ share.rs".into()),
                         is_error: false,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tu_2".into(),
+                        name: "Bash".into(),
+                        input: serde_json::json!({"command": "cargo test"}),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tu_2".into(),
+                        content: serde_json::Value::String("boom".into()),
+                        is_error: true,
                     },
                     ContentBlock::Text { text: "**完成**了，`OK`".into() },
                 ],
@@ -1172,7 +974,9 @@ mod tests {
         assert!(html.contains("<code>code</code>"));
         assert!(html.contains("<ul><li>a</li><li>b</li></ul>"));
         assert!(html.contains("<ol><li>一</li><li>二</li></ol>"));
-        assert!(html.contains("<pre><code class=\"language-rust\">"), "代码块纯 pre");
+        assert!(html.contains("<figure class=\"code-block\">"), "代码块容器");
+        assert!(html.contains("<figcaption>rust</figcaption>"));
+        assert!(html.contains("class=\"language-rust\""));
         assert!(html.contains("&lt;hi&gt;"), "代码块内容转义");
         assert!(html.contains("println"));
     }
@@ -1187,13 +991,15 @@ mod tests {
     #[test]
     fn markdown_unclosed_fence_renders_safely() {
         let html = render_markdown("```\nno close\n");
-        assert!(html.contains("<pre><code>no close</code></pre>"), "{html}");
+        assert!(html.contains("<figure class=\"code-block\">"), "{html}");
+        assert!(html.contains("<pre><code>no close</code></pre>"));
     }
 
     #[test]
     fn member_colors_are_stable_and_consistent() {
-        assert_eq!(member_color("main"), "var(--color-text-strong)");
-        assert_eq!(member_color("user"), "var(--color-text-strong)");
+        assert_eq!(member_color("main"), "var(--accent)");
+        assert_eq!(member_color("assistant"), "var(--accent)");
+        assert_eq!(member_color("user"), "var(--text)");
         assert_eq!(member_color("scout"), member_color("scout"));
         assert!(member_color("scout").starts_with("var(--hue-"));
         let colors: std::collections::HashSet<&str> =
@@ -1205,152 +1011,73 @@ mod tests {
     }
 
     #[test]
-    fn renders_all_four_views_with_opencode_structure() {
+    fn renders_all_four_views_with_cc_style() {
         let html = render(&doc(), &rich_messages());
-        // 四视图 data-view + share-root 骨架。
+        // 顶栏 + 四视图 data-view（v4.0 conv 也是 .view section）。
+        assert!(html.contains("class=\"topbar\"") && html.contains("class=\"brand\""));
+        assert!(html.contains("class=\"session\"") && html.contains("class=\"meta-line\""));
+        assert!(html.contains("class=\"tabs\""));
         for view in ["data-view=\"conv\"", "data-view=\"team\"", "data-view=\"dm\"", "data-view=\"channel\""] {
             assert!(html.contains(view), "缺视图 {view}");
         }
-        assert!(html.contains("data-component=\"share\""));
-        assert!(html.contains("data-component=\"header\""));
-        assert!(html.contains("data-component=\"header-title\""));
-        assert!(html.contains("data-component=\"header-stats\""));
-        assert!(html.contains("data-component=\"tabs\""));
-        // part 骨架：装饰列 + 内容列 + 锚点三态。
-        assert!(html.contains("class=\"part-root\""));
-        assert!(html.contains("data-component=\"decoration\""));
-        assert!(html.contains("data-slot=\"anchor\""));
-        assert!(html.contains("data-slot=\"bar\""));
-        assert!(html.contains("data-slot=\"tooltip\""));
-        assert!(html.contains("data-component=\"content\""));
+        // 消息部件：user 气泡 / assistant markdown 流。
+        assert!(html.contains("class=\"msg msg-user\""));
+        assert!(html.contains("class=\"bubble\""));
+        assert!(html.contains("class=\"msg msg-assistant\""));
+        assert!(html.contains("class=\"md\""));
         assert!(html.contains("id=\"msg-1\""));
-        // user 无框 content-text / assistant 蓝框 content-markdown。
-        assert!(html.contains("data-component=\"user-text\""));
-        assert!(html.contains("data-component=\"assistant-text\""));
-        assert!(html.contains("data-component=\"assistant-text-markdown\""));
-        assert!(html.contains("data-slot=\"markdown\""));
-        assert!(html.contains("class=\"cm-root\"") && html.contains("class=\"ct-root\""));
-        // Team 线程列表（thread-row + data-jump 直达私聊）。
-        assert!(html.contains("class=\"thread-list\""));
-        assert!(html.contains("class=\"part-root thread-row\""));
-        assert!(html.contains("data-jump=\"#dm-scout\""));
-        assert!(html.contains("href=\"#dm-scout\""));
-        assert!(html.contains("id=\"team-scout\""));
-        assert!(html.contains("data-slot=\"provider\""));
-        assert!(html.contains("2 messages"));
-        // DM 私聊（dm-msg 聊天流 + user 靠右；文本为纯 pre 不渲染 markdown）。
-        assert!(html.contains("data-type=\"thread\""));
+        assert!(html.contains("<a class=\"anchor\" href=\"#msg-1\""));
+        // Team 线程列表。
+        assert!(html.contains("class=\"thread-list\"") && html.contains("class=\"thread\""));
+        assert!(html.contains("data-jump=\"#dm-scout\"") && html.contains("href=\"#dm-scout\""));
+        assert!(html.contains("class=\"t-avatar\""));
+        assert!(html.contains("2 msgs"));
+        // DM 聊天流。
+        assert!(html.contains("class=\"dm-block\"") && html.contains("class=\"dm-flow\""));
         assert!(html.contains("id=\"dm-scout\""));
-        assert!(html.contains("class=\"dm-msg\""));
-        assert!(html.contains("class=\"dm-msg dm-user\""));
-        assert!(!html.contains("<strong>结论</strong>"), "dm 文本为纯 pre（不做 markdown）");
-        // 频道（part 消息流 + seq/成员徽标）。
-        assert!(html.contains("class=\"ch-block\"") && html.contains("data-component=\"channel\""));
-        assert!(html.contains("<div data-slot=\"provider\">◇ #table</div>"));
+        // 频道消息流。
+        assert!(html.contains("class=\"ch-block\"") && html.contains("class=\"ch-flow\""));
+        assert!(html.contains("class=\"ch-msg\""));
+        assert!(html.contains("<h3 class=\"ch-name\">◇ #table</h3>"));
         assert!(html.contains("class=\"ch-mode free\""));
-        assert!(html.contains("class=\"ch-row-seq\">#0001</span>"));
+        assert!(html.contains("<span class=\"ch-seq\">#0001</span>"));
         assert!(html.contains("class=\"m-chip\""));
         assert!(html.contains("大家好"));
     }
 
     #[test]
-    fn thinking_and_tools_use_opencode_components() {
+    fn thinking_and_tool_cards_use_cc_components() {
         let html = render(&doc(), &rich_messages());
-        // thinking：tool-title Thinking + assistant-reasoning。
-        assert!(html.contains("data-type=\"reasoning\""));
-        assert!(html.contains("<span data-slot=\"name\">Thinking</span>"));
-        assert!(html.contains("data-component=\"assistant-reasoning\""));
-        assert!(html.contains("data-component=\"assistant-reasoning-markdown\""));
+        // thinking 折叠块。
+        assert!(html.contains("<details class=\"think\">"));
+        assert!(html.contains("<summary>Thinking</summary>"));
+        assert!(html.contains("class=\"think-body\""));
         assert!(html.contains("深入思考一下"));
-        // bash：终端窗 Shell 头。
-        assert!(html.contains("data-tool=\"bash\""));
-        assert!(html.contains("data-slot=\"header\"><span>Shell</span>"));
-        assert!(html.contains("class=\"cb-root\""));
-        assert!(html.contains("ls &lt;unsafe&gt; &amp; echo &quot;x&quot;"));
-        // tool_result：还原 bash 语义 → 终端窗含输出。
-        assert!(html.contains("<div data-slot=\"output\"><pre>src/ share.rs</pre></div>"));
-        // 工具两段式：tool-title + tool-result + 展开按钮。
-        assert!(html.contains("data-component=\"tool-title\""));
-        assert!(html.contains("data-component=\"tool-result\""));
-        assert!(html.contains("data-component=\"button-text\" data-more"));
-        // 复制按钮。
-        assert!(html.contains("data-component=\"copy-button\""));
-        assert!(html.contains("class=\"copy-root\""));
+        // 工具折叠卡：t-icon + t-name + t-args + 状态徽标。
+        assert!(html.contains("<details class=\"tool\" data-status=\"ok\">"));
+        assert!(html.contains("<details class=\"tool\" data-status=\"err\">"));
+        assert!(html.contains("<span class=\"t-icon\">"));
+        assert!(html.contains("<span class=\"t-name\">Bash</span>"));
+        assert!(html.contains("<span class=\"t-args\">cargo test</span>"));
+        assert!(html.contains("<span class=\"t-status ok\">✓ done</span>"));
+        assert!(html.contains("<span class=\"t-status err\">✗ error</span>"));
+        assert!(html.contains("class=\"t-body\""));
+        assert!(html.contains("<span class=\"t-label\">input</span>"));
+        assert!(html.contains("<span class=\"t-label\">result</span>"));
+        assert!(html.contains("result · error"));
+        // 折叠默认收起（无 open 属性）。
+        assert!(!html.contains("<details class=\"tool\" data-status=\"ok\" open"));
     }
 
     #[test]
-    fn tool_error_uses_red_label() {
-        let msgs = vec![Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "tu_x".into(),
-                content: serde_json::Value::String("boom".into()),
-                is_error: true,
-            }],
-        }];
-        let html = render(&doc(), &msgs);
-        assert!(html.contains("data-tool=\"error\""));
-        assert!(html.contains("class=\"ce-root\""));
-        assert!(html.contains("<span data-color=\"red\" data-marker=\"label\" data-separator>Error</span>"));
-        assert!(html.contains("boom"));
-    }
-
-    #[test]
-    fn bash_input_extra_fields_are_not_lost() {
-        // A4 回归（pm #27 + uiux e79b37aa 契约）：Bash input 多字段时
-        // 其余字段以 tool-args 网格呈现（flat 直出/嵌套 JSON 序列化），
-        // 注入串实体化不丢失。
-        let msgs = vec![Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "tu_1".into(),
-                name: "Bash".into(),
-                input: serde_json::json!({
-                    "command": "ls <unsafe> & echo \"x\"",
-                    "background": true,
-                    "timeout": 1,
-                    "evil": "<img src=x onerror=alert(3)>",
-                    "nested": {"a": 1}
-                }),
-            }],
-        }];
-        let html = render(&doc(), &msgs);
-        assert!(html.contains("<pre>ls &lt;unsafe&gt; &amp; echo &quot;x&quot;</pre>"), "command 在 Shell 窗");
-        // tool-args 网格：非 command 字段逐键呈现，command 不进网格。
-        assert!(html.contains("<div data-component=\"tool-args\">"), "多余字段走 tool-args 网格");
-        assert!(html.contains(">background</div><div>true</div>"), "flat 值直出");
-        assert!(html.contains(">timeout</div><div>1</div>"));
-        assert!(html.contains(">evil</div><div>&lt;img src=x onerror=alert(3)&gt;</div>"), "注入串实体化");
-        assert!(html.contains(">nested</div><div>"), "嵌套值序列化");
+    fn bash_input_full_json_preserved() {
+        // A4（v4.0 契约）：bash input pre 始终含完整 JSON（含非 command 字段）。
+        let html = render(&doc(), &rich_messages());
+        assert!(html.contains("&quot;background&quot;: true"), "background 保留");
+        assert!(html.contains("&quot;timeout&quot;: 30"), "timeout 保留");
+        assert!(html.contains("&quot;command&quot;"), "command 键保留");
+        assert!(html.contains("ls &lt;unsafe&gt; &amp; echo"), "command 值实体化呈现");
         assert!(!html.contains("<img src=x onerror"), "无未转义标签");
-        // 仅 command 时无冗余网格。
-        let msgs = vec![Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "tu_1".into(),
-                name: "Bash".into(),
-                input: serde_json::json!({"command": "ls"}),
-            }],
-        }];
-        let html = render(&doc(), &msgs);
-        assert_eq!(html.matches("<pre>ls</pre>").count(), 1, "仅 command 一个 pre");
-        assert!(!html.contains("<div data-component=\"tool-args\">"), "无额外字段省略网格");
-    }
-
-    #[test]
-    fn unknown_tool_gets_tool_args_grid() {
-        let msgs = vec![Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "tu_1".into(),
-                name: "Agent".into(),
-                input: serde_json::json!({"name": "dev", "description": "Implement share"}),
-            }],
-        }];
-        let html = render(&doc(), &msgs);
-        assert!(html.contains("data-component=\"tool-args\""));
-        assert!(html.contains(">name</div><div>dev</div>"));
-        assert!(html.contains(">description</div><div>Implement share</div>"));
     }
 
     #[test]
@@ -1362,7 +1089,6 @@ mod tests {
             }],
         }];
         let html = render(&doc(), &msgs);
-        assert!(html.contains("data-type=\"image\""));
         assert!(html.contains("src=\"data:image/png;base64,aGVsbG8=\""));
         assert!(html.contains("alt=\"image (image/png)\""));
         assert!(!html.contains("http://") && !html.contains("https://"), "仅 data: URI");
@@ -1388,6 +1114,7 @@ mod tests {
         assert!(html.contains("prefers-reduced-motion"));
         assert!(html.contains("lang=\"en\""));
         assert!(html.contains("<noscript>"));
+        assert!(html.contains("addCopyButtons"), "复制按钮创建逻辑存在");
     }
 
     #[test]
