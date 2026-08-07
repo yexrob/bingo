@@ -2450,7 +2450,7 @@ impl Chat {
             if overwritten { "（覆盖）" } else { "" }
         )];
         if parse_share_args(arg) {
-            match crate::share::open_in_browser(&out) {
+            match crate::share::open_in_browser(&out.display().to_string()) {
                 Ok(_) => lines.push("已在浏览器中打开。".to_string()),
                 Err(e) => lines.push(format!("无法打开浏览器: {e}")),
             }

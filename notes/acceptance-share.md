@@ -129,3 +129,41 @@
 ## D. 状态
 
 - **全部闭环**：G1 ✓（1b28a39 基线：clippy 0 / test 624 passed 0 failed）；抽查 35/35 ✓（A4 修复后）；V 组 uiux 复核通过（51 项 + A4 tool-args 网格 + DOM）；模板定稿 e79b37aa（PRD 同步）。已报 main。
+
+---
+
+# 附录 B：v4.0 回归验收（Claude Code app 风格，锚点 8c29a17b）
+
+> 背景：用户指定 share 页 v4.0（Claude Code app 风格）替代 v3.x opencode 复刻；main 裁决纳入本次合并，锚点 = v4.0 模板 8c29a17b（43 项断言）。dev 集成提交 cfa8b45（后经工作流规则修正同步至 dev/main @ 306e3e6，share 代码一致）。
+
+## A. G1（v4.0 基线）
+
+| # | 结果 | 证据 |
+|---|---|---|
+| G1 | ✓ | cfa8b45 独立验证（日志 /tmp/bingo-share-acc/g1-v40b.log）：build 0 / clippy 0 / test **622 passed 0 failed**；306e3e6（dev/main 同步版）主 checkout build 通过。注：首轮受 /tmp/Cargo.toml 残留碎片（8 月 6 日残留，63B 无 manifest）破坏 cargo manifest 解析，uiux 已移走（Cargo.toml.bak-stray）后重跑全绿 |
+
+## B. A/C/E/F 回归抽查（35/35 全过）
+
+- A1 ✓ 顺序完整（5 条消息 msg-1..5 含 image）
+- A2 ✓ badlines 3 好行全出 + skipped 2 warning；A3 ✓ 空会话合法 + No messages
+- A4 ✓ **非 command 字段保留**（evil 注入串以实体入页面；input 完整 JSON 在 pre）
+- B1 ✓ thinking 灰斜体折叠 + 工具折叠卡（状态徽标 ✓/✗）
+- B2 ✓ 图片 data: URI 内嵌
+- B3/B4/B5 ✓ Team 线程列表（data-jump/#dm-）、DM 块（dm-block/dm-flow）、频道（◇ #name + mode chip + seq）
+- B6 ✓ 四面板 + view-empty 英文空态
+- C1-C3 ✓ 注入样本全实体化（无真实标签注入）；tool input 在 pre；图片仅 data: URI
+- D1 ✓ 单文件零外链（无 link/iframe）
+- E1/E2 ✓ 旧会话完整页 + 缺字段容错
+- F1-F4 ✓ 最近会话 / STORAGE_ERROR+相近列表 / 不可写路径 / help 文档化；P1-1 覆盖提示 (overwritten) ✓
+
+## C. V 组（v4.0，uiux 评审）
+
+| # | 结果 | 证据 |
+|---|---|---|
+| V1-V3 | ✓ 放行 | uiux #36：43 项断言真实产物 41/43（2 项频道数据缺位非缺陷，代码+单测补足）；DOM 复核（10 气泡 / 60 工具卡含 err 徽标 / 1 线程 / 1 DM / 76 锚点 / 61 复制按钮 JS 创建）；share_html 12 项单测全绿 |
+
+## D. 状态
+
+- **全部闭环**：G1 ✓（622 passed）/ 抽查 35/35 ✓ / V 组放行 ✓ / G2 ✓（guide.md 随 306e3e6 同步）
+- 提交：cfa8b45（v4.0 集成）→ 306e3e6（dev/main 同步，工作流规则修正）；模板定稿 8c29a17b（PRD v1.3 同步）
+- 工作流规则（main #37）：代码只提交 dev 分支，main 仅发布合并——已记录
