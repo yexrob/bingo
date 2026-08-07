@@ -793,6 +793,16 @@ pub struct Chat {
     pub theme: Theme,
     /// Detected terminal background color (used by /theme to rebuild the theme).
     detected_background: Option<bool>,
+    /// 更新提示（欢迎卡）：检测到的最新版本号（`vX.Y.Z`；None = 无提示行）。
+    /// 数据源：`crate::update::latest_cached`（24h TTL 缓存，启动预热）。
+    pub update_banner: Option<String>,
+    /// 呼吸动画起点 tick（窗口 = [`UPDATE_BANNER_FRAMES`] 帧；当前帧号 = tick − start）。
+    update_banner_start: u64,
+    /// 动画已停止（窗口内首次按键触发；提示行保留，只是不再呼吸）。
+    update_banner_stopped: bool,
+    /// motion 关停（settings `motion:"off"` 或 `BINGO_NO_MOTION=1`）：呼吸静止为 rest
+    /// 色，提示行保留（update-banner 规格 §2.5「指示器不消失，只是不动」）。
+    motion_off: bool,
     /// Slash command output lines (/help /status etc.): rendered after messages, settled when idle.
     pub slash_lines: Vec<String>,
     /// When the slash output appeared (auto-dismissed by tick timeout).
@@ -930,6 +940,11 @@ impl Chat {
             std::path::Path::new(&cwd),
         ));
         let permission_mode = session.permission_mode;
+        // 更新提示（欢迎卡）数据源 + motion 关停：在 session move 进 Self 前计算。
+        // 存纯版本号（渲染时 `banner_segments` 加 `v` 前缀）。
+        let update_banner = crate::update::latest_cached(&session.home).map(|v| v.to_string());
+        let motion_off = session.settings.motion.as_deref() == Some("off")
+            || std::env::var_os("BINGO_NO_MOTION").is_some();
         Self {
             session,
             events,
@@ -1001,6 +1016,10 @@ impl Chat {
             pending_tools: Vec::new(),
             theme,
             detected_background,
+            update_banner,
+            update_banner_start: 0,
+            update_banner_stopped: false,
+            motion_off,
             slash_lines: Vec::new(),
             slash_at: None,
             exit: false,
@@ -3420,6 +3439,11 @@ impl Chat {
         now: std::time::Instant,
     ) -> bool {
         let pasting = self.track_burst(now);
+        // 更新提示呼吸（P1）：窗口内第一次按键 → 立即静止（用户注意力已被输入带走；
+        // 提示行本身保留，只是不再呼吸）。
+        if self.update_anim_active() {
+            self.update_banner_stopped = true;
+        }
         // #18 full-flow full-screen error state: primary actions Enter=retry / Esc=back, the rest ignored.
         if let Some(err) = &self.last_error
             && err.level == crate::error::ErrorLevel::Full
@@ -4045,6 +4069,21 @@ impl Chat {
         }
     }
 
+    /// 更新提示呼吸窗口内的帧号（动画进行中 → Some；无提示 / motion off /
+    /// 已按键停止 / 窗口已过 → None 静止）。窗口 270 帧 = 9s = 3 个呼吸。
+    fn update_banner_frame(&self) -> Option<u64> {
+        if self.update_banner.is_none() || self.motion_off || self.update_banner_stopped {
+            return None;
+        }
+        let frame = self.tick.saturating_sub(self.update_banner_start);
+        (frame < UPDATE_BANNER_FRAMES).then_some(frame)
+    }
+
+    /// 更新提示呼吸是否激活（帧循环据此持续置 dirty；窗口外恢复 idle）。
+    fn update_anim_active(&self) -> bool {
+        self.update_banner_frame().is_some()
+    }
+
     /// Whether any row changes with the tick (spinner frames / elapsed time / status rows).
     /// false when idle — the tick neither rebuilds the doc nor wakes the component.
     pub fn has_dynamic_rows(&self) -> bool {
@@ -4058,6 +4097,7 @@ impl Chat {
                     .tasks_cache
                     .iter()
                     .any(|t| t.status == TodoStatus::InProgress))
+            || self.update_anim_active()
     }
 
     /// Whether the host's tick loop has work to do. Returns false when idle so the host skips the whole frame —
@@ -4575,12 +4615,20 @@ impl Chat {
         self.mark_base = 0;
 
         if skip == 0 {
+            // 新版本提示（update-banner）：窗口内用呼吸色；窗口外/无提示 → 静止 rest 或 None。
+            let banner = self.update_banner.as_deref().map(|v| {
+                let frame = self
+                    .update_banner_frame()
+                    .unwrap_or(UPDATE_BANNER_FRAMES);
+                (v, update_color(&theme, frame, self.motion_off))
+            });
             rows.extend(welcome_card_rows(
                 &theme,
                 &self.session.runtime.model.borrow(),
                 self.permission_mode_label(),
                 &self.cwd,
                 width,
+                banner,
             ));
         }
         let mut settled = rows.len();
@@ -4995,12 +5043,17 @@ fn push_text(theme: &Theme, rows: &mut Vec<Row>, reply: Vec<Line>) {
 /// Welcome card body (CC WelcomeBox): a starred greeting, the two commands
 /// worth knowing, the cwd, and a dim identity line. `bingo` stays `bingo` —
 /// this is homage, not impersonation.
+///
+/// 新版本提示行（update-banner 规格 v1.1）：位于版本身份行正上方，与 cwd
+/// 之间空一行；三段式（静态 inactive + 版本号/命令两段呼吸色、命令 bold），
+/// 呼吸只作用于提示行两个关键词段，欢迎卡其余一切元素静态。
 fn welcome_rows(
     theme: &Theme,
     model: &str,
     mode: &str,
     cwd: &str,
     width: usize,
+    banner: Option<(&str, Color)>,
 ) -> Vec<Line> {
     let mut rows = Vec::new();
     let mut greeting = Line::styled(" ✻ ", SegStyle::fg(theme.claude));
@@ -5019,6 +5072,25 @@ fn welcome_rows(
         one_line(&format!("   cwd: {cwd}"), width),
         theme.dim(),
     ));
+    // 新版本提示行（update-banner 规格 §1.1）：版本身份行正上方，与 cwd 间空一行。
+    if let Some((v, color)) = banner
+        && let Some((pre, ver, mid, cmd)) = banner_segments(v, width)
+    {
+        rows.push(Line::empty());
+        let no_color = std::env::var_os("NO_COLOR").is_some();
+        let mut line = Line::styled(&pre, theme.dim());
+        if no_color {
+            // 单色/NO_COLOR 降级：静态 bold 行（规格 §2.5）。
+            line.push_styled(ver, theme.dim());
+            line.push_styled(mid, theme.dim());
+            line.push_styled(cmd, theme.dim().bold());
+        } else {
+            line.push_styled(ver, SegStyle::fg(color));
+            line.push_styled(mid, theme.dim());
+            line.push_styled(cmd, SegStyle::fg(color).bold());
+        }
+        rows.push(line);
+    }
     rows.push(Line::styled(
         one_line(
             &format!("   bingo v{} · {model} · {mode}", env!("CARGO_PKG_VERSION")),
@@ -5030,12 +5102,14 @@ fn welcome_rows(
 }
 
 /// Welcome card rows (with the ╭╮ border), part of the scrollable content.
+/// `banner` = 新版本提示（版本号 + 当前呼吸色）；None = 无提示行。
 fn welcome_card_rows(
     theme: &Theme,
     model: &str,
     mode: &str,
     cwd: &str,
     width: usize,
+    banner: Option<(&str, Color)>,
 ) -> Vec<Row> {
     let gray = SegStyle::fg(theme.inactive);
     let inner_w = width.saturating_sub(2);
@@ -5043,7 +5117,7 @@ fn welcome_card_rows(
         format!("╭{}╮", "─".repeat(inner_w)),
         gray,
     ))];
-    for line in welcome_rows(theme, model, mode, cwd, inner_w) {
+    for line in welcome_rows(theme, model, mode, cwd, inner_w, banner) {
         let mut styled = Line::styled("│", gray);
         let pad = inner_w.saturating_sub(text_width(&line.plain_text()));
         styled.segs.extend(line.segs);
@@ -5056,6 +5130,87 @@ fn welcome_card_rows(
         gray,
     )));
     rows
+}
+
+/// 更新提示呼吸窗口：270 帧 = 9s（3 个呼吸；每周期 90 帧 = 3.0s @30fps）。
+/// 到期后静止在 rest 色，提示行常驻（update-banner 规格 §2.3）。
+pub const UPDATE_BANNER_FRAMES: u64 = 270;
+/// 呼吸周期帧数（30fps 下 3.0s 一个「呼 + 吸」）。
+pub const UPDATE_BANNER_PERIOD: u64 = 90;
+
+/// 提示行截断链（update-banner 规格 §1.3，纯函数可测）：返回
+/// (pre, ver, mid, cmd) 四段——静态段与两呼吸段分开，渲染层据此着色。
+///
+/// | inner 宽 | 呈现 |
+/// |---|---|
+/// | ≥50（或完整行放得下） | `   New version vX.Y.Z available — run bingo update` |
+/// | ≥43 | `   New version vX.Y.Z — run bingo update` |
+/// | ≥15 | `   bingo update`（只留命令，最保底动作入口） |
+/// | <15 | None（隐藏提示行） |
+///
+/// 任何档位 `bingo update` 可见、不换行、不溢出卡框。
+pub fn banner_segments(v: &str, width: usize) -> Option<(String, String, String, String)> {
+    const PRE: &str = "   New version ";
+    const MID_FULL: &str = " available — run ";
+    const MID_SHORT: &str = " — run ";
+    const CMD: &str = "bingo update";
+    let ver = format!("v{v}");
+    let full_len = text_width(PRE) + text_width(&ver) + text_width(MID_FULL) + text_width(CMD);
+    if width >= 50 || full_len <= width {
+        return Some((PRE.to_string(), ver, MID_FULL.to_string(), CMD.to_string()));
+    }
+    if width >= 43 {
+        return Some((PRE.to_string(), ver, MID_SHORT.to_string(), CMD.to_string()));
+    }
+    if width >= 15 {
+        return Some((String::new(), String::new(), "   ".to_string(), CMD.to_string()));
+    }
+    None
+}
+
+/// 提示行完整文本（`banner_segments` 的字符串形态；规格点名的纯函数，测试断言用）。
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn banner_line(v: &str, width: usize) -> Option<String> {
+    banner_segments(v, width).map(|(pre, ver, mid, cmd)| format!("{pre}{ver}{mid}{cmd}"))
+}
+
+/// 更新提示呼吸色（update-banner 规格 §2，纯函数可测）：
+/// - `motion_off`（settings `motion:"off"` 或 `BINGO_NO_MOTION`）→ 恒 rest（静态，提示保留）；
+/// - 无 truecolor（主题已 256 色降级）→ 离散两步：60 帧周期，peak 前 12 帧（≥400ms）；
+/// - truecolor → 正弦呼吸：`t = 0.5 − 0.5·cos(2π·phase/90)`，frame 0 = rest（谷）、45 = peak、
+///   90 = 回 rest；sRGB 逐通道线性插值。
+///
+/// 停止点：暗色 `#D77757 ↔ #E8896B`（全程 ≥6.24:1）；浅色 `#B05227 ↔ #9A4A24`（全程 ≥4.72:1）。
+pub fn update_color(theme: &Theme, frame: u64, motion_off: bool) -> Color {
+    let rest = if theme.is_dark {
+        theme.claude
+    } else {
+        theme.claude_deep
+    };
+    if motion_off {
+        return rest;
+    }
+    let peak = if theme.is_dark {
+        theme.claude_strong
+    } else {
+        theme.claude_deep_strong
+    };
+    if !matches!(theme.claude_strong, Color::Rgb(..)) {
+        // 离散两步（256 色终端）：60 帧周期，peak 400ms（12 帧）→ rest 1600ms。
+        return if frame % 60 < 12 { peak } else { rest };
+    }
+    let phase = (frame % UPDATE_BANNER_PERIOD) as f64;
+    let t = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * phase / UPDATE_BANNER_PERIOD as f64).cos();
+    lerp_color(rest, peak, t)
+}
+
+/// sRGB 逐通道线性插值（两档相近，不做 gamma 校正——规格注明非目标）。
+fn lerp_color(a: Color, b: Color, t: f64) -> Color {
+    let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) else {
+        return b;
+    };
+    let l = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round().clamp(0.0, 255.0) as u8;
+    Color::Rgb(l(ar, br), l(ag, bg), l(ab, bb))
 }
 
 #[cfg(test)]
@@ -5108,6 +5263,156 @@ mod tests {
             Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), None);
         chat.cwd = home.display().to_string();
         chat
+    }
+
+    /// 提示行截断链（update-banner 规格 §1.3）：完整 / 去 available 分句 / 只留命令 / 隐藏。
+    #[test]
+    fn banner_segments_width_tiers() {
+        let full = banner_segments("0.3.0", 50).unwrap();
+        assert_eq!(full.0, "   New version ");
+        assert_eq!(full.1, "v0.3.0");
+        assert_eq!(full.2, " available — run ");
+        assert_eq!(full.3, "bingo update");
+        // 完整行放得下（宽度 <50 但 full_len ≤ width）→ 仍完整
+        assert_eq!(banner_segments("0.3.0", 51).unwrap().2, " available — run ");
+        // 43-49：最长版本号 v0.12.34 完整放不下 → 去 available 分句
+        let short = banner_segments("0.12.34", 49).unwrap();
+        assert_eq!(short.2, " — run ");
+        assert_eq!(short.3, "bingo update");
+        // ≥15：只留命令
+        let cmd_only = banner_segments("0.3.0", 15).unwrap();
+        assert!(cmd_only.0.is_empty() && cmd_only.1.is_empty());
+        assert_eq!(cmd_only.3, "bingo update");
+        // <15：隐藏
+        assert!(banner_segments("0.3.0", 14).is_none());
+    }
+
+    #[test]
+    fn banner_line_width_tiers() {
+        assert_eq!(
+            banner_line("0.3.0", 50).unwrap(),
+            "   New version v0.3.0 available — run bingo update"
+        );
+        assert_eq!(
+            banner_line("0.12.34", 49).unwrap(),
+            "   New version v0.12.34 — run bingo update"
+        );
+        assert_eq!(banner_line("0.3.0", 15).unwrap(), "   bingo update");
+        assert!(banner_line("0.3.0", 14).is_none());
+    }
+
+    /// 呼吸色纯函数（update-banner 规格 §2.3/锚点 2）：phase 0 = rest（谷）、45 = peak、
+    /// 90 = 回 rest；0→45 单调上升、45→90 单调下降；motion off → 恒 rest；浅色走深橙档。
+    #[test]
+    fn update_color_breathing_wave() {
+        let dark = Theme::dark();
+        let rest = Color::Rgb(215, 119, 87);
+        let peak = Color::Rgb(232, 137, 107);
+        assert_eq!(update_color(&dark, 0, false), rest, "起步即谷（无突跳）");
+        assert_eq!(update_color(&dark, 45, false), peak, "phase 45 = peak（t=1 精确）");
+        assert_eq!(update_color(&dark, 90, false), rest);
+        assert_eq!(update_color(&dark, 135, false), peak, "周期回绕");
+        assert_eq!(update_color(&dark, 180, false), rest);
+        // 单调性（红通道）
+        let r = |f: u64| -> u8 {
+            match update_color(&dark, f, false) {
+                Color::Rgb(r, _, _) => r,
+                _ => panic!("truecolor 主题应返回 Rgb"),
+            }
+        };
+        assert!(r(15) > r(0) && r(30) > r(15) && r(45) > r(30), "0→45 单调上升");
+        assert!(r(60) < r(45) && r(75) < r(60) && r(90) < r(75), "45→90 单调下降");
+        // motion off → 恒 rest（指示器保留，只是不动）
+        assert_eq!(update_color(&dark, 45, true), rest);
+        assert_eq!(update_color(&dark, 999, true), rest);
+        // 浅色 → 深橙档（rest #B05227 / peak #9A4A24），禁用亮橙
+        let light = Theme::light();
+        assert_eq!(update_color(&light, 0, false), Color::Rgb(176, 82, 39));
+        assert_eq!(update_color(&light, 45, false), Color::Rgb(154, 74, 36));
+        for f in [0u64, 22, 45, 67, 90] {
+            assert_ne!(
+                update_color(&light, f, false),
+                Color::Rgb(215, 119, 87),
+                "浅色主题不得出现亮橙档（规格 §2.2）"
+            );
+        }
+    }
+
+    /// 256 色离散两步（update-banner 规格 §2.4）：60 帧周期，peak 400ms（12 帧）→ rest。
+    /// （`downgrade_to_256` 是 theme.rs 私有方法，测试手动构造 Indexed 主题模拟降级。）
+    #[test]
+    fn update_color_256_discrete_two_step() {
+        let mut d256 = Theme::dark();
+        d256.claude = Color::Indexed(167); // 暗色 rest 近似
+        d256.claude_strong = Color::Indexed(173); // 暗色 peak 近似
+        let f0 = update_color(&d256, 0, false);
+        let f11 = update_color(&d256, 11, false);
+        let f12 = update_color(&d256, 12, false);
+        let f59 = update_color(&d256, 59, false);
+        let f60 = update_color(&d256, 60, false);
+        assert_eq!(f0, f11, "peak 相连续（0-11 帧）");
+        assert_eq!(f12, f59, "rest 相连续（12-59 帧）");
+        assert_ne!(f0, f12, "两档不同色");
+        assert_eq!(f60, f0, "60 帧周期回绕");
+        assert!(matches!(update_color(&d256, 5, false), Color::Indexed(_)), "256 色降级输出 Indexed");
+    }
+
+    /// 欢迎卡渲染（update-banner 锚点 1/6/9）：有提示行（含两段式），无提示行布局回归不变；
+    /// 窄屏只留 `bingo update`。
+    #[test]
+    fn welcome_card_banner_rendering() {
+        let theme = Theme::dark();
+        let color = Color::Rgb(215, 119, 87);
+        let with = welcome_card_rows(&theme, "m", "d", "/cwd", 80, Some(("0.3.0", color)));
+        let texts: Vec<String> = with.iter().map(|r| r.line.plain_text()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("New version v0.3.0 available — run bingo update")),
+            "完整档提示行应在卡内: {texts:?}"
+        );
+        // 提示行在版本身份行正上方（相邻，中间无空行）
+        let banner_idx = texts.iter().position(|t| t.contains("New version")).unwrap();
+        assert!(texts[banner_idx + 1].contains("bingo v"), "提示行应紧邻身份行下方");
+        // 无提示行 → 布局与现状一致（回归）
+        let without = welcome_card_rows(&theme, "m", "d", "/cwd", 80, None);
+        assert_eq!(with.len(), without.len() + 2, "提示行 + 上方空行 = 2 行");
+        // 窄屏（inner 15）：只留命令，不出现 New version
+        let narrow = welcome_card_rows(&theme, "m", "d", "/c", 17, Some(("0.3.0", color)));
+        let narrow_texts: Vec<String> = narrow.iter().map(|r| r.line.plain_text()).collect();
+        assert!(narrow_texts.iter().any(|t| t.contains("bingo update")));
+        assert!(!narrow_texts.iter().any(|t| t.contains("New version")));
+        // 极窄（inner <15）：提示行隐藏，布局与无提示一致
+        let tiny = welcome_card_rows(&theme, "m", "d", "/c", 16, Some(("0.3.0", color)));
+        assert_eq!(tiny.len(), without.len(), "inner<15 时提示行隐藏");
+    }
+
+    /// 呼吸窗口（update-banner 锚点 3/5）：270 帧内持续激活（has_dynamic_rows）、
+    /// 窗口外恢复 idle；窗口内按键 → 立即静止；motion off → 从不激活。
+    #[test]
+    fn update_banner_animation_window_and_key_stop() {
+        let mut chat = test_chat();
+        chat.update_banner = Some("0.3.0".into());
+        chat.update_banner_start = 0;
+        chat.tick = 0;
+        assert!(chat.update_anim_active());
+        assert!(chat.has_dynamic_rows(), "呼吸窗口内帧循环持续置 dirty");
+        chat.tick = 269;
+        assert!(chat.update_anim_active(), "窗口最后一帧仍激活");
+        chat.tick = 270;
+        assert!(!chat.update_anim_active(), "窗口外静止");
+        assert!(!chat.has_dynamic_rows(), "窗口外恢复 idle（零写入）");
+        // 窗口内按键 → 立即静止（P1）
+        chat.update_banner_start = 0;
+        chat.tick = 50;
+        assert!(chat.update_anim_active());
+        let _ = chat.on_key(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(!chat.update_anim_active(), "窗口内首次按键 → 立即静止");
+        // motion off → 从不激活（提示保留静态 rest）
+        let mut chat2 = test_chat();
+        chat2.update_banner = Some("0.3.0".into());
+        chat2.motion_off = true;
+        chat2.tick = 10;
+        assert!(!chat2.update_anim_active());
+        assert!(!chat2.has_dynamic_rows());
     }
 
     fn tool_activity() -> Activity {

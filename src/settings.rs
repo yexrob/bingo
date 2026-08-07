@@ -57,6 +57,10 @@ pub struct Settings {
     pub permission_mode: Option<String>,
     /// TUI theme: auto (follow terminal background) / dark / light. Default auto.
     pub theme: Option<String>,
+    /// TUI motion: auto (default) / off。`off` 或 env `BINGO_NO_MOTION=1`：
+    /// 动效（欢迎卡更新提示呼吸等）静止为基色，提示本身不消失。
+    /// 这是 bingo 第一个动效开关，同时服务「用户关停」与「测试确定性」。
+    pub motion: Option<String>,
     /// Send cache_control (prompt caching). Off by default: non-official endpoints
     /// handle it unreliably.
     #[serde(rename = "cacheControl")]

@@ -17,6 +17,14 @@ pub struct Theme {
     pub subtle: Color,
     /// Primary accent (rgb(215,119,87)).
     pub claude: Color,
+    /// 更新提示呼吸 peak（暗色；rgb(232,137,107)，官网 --accent-strong）。
+    pub claude_strong: Color,
+    /// 更新提示呼吸 rest（浅色；rgb(176,82,39)，品牌深橙）。
+    pub claude_deep: Color,
+    /// 更新提示呼吸 peak（浅色；rgb(154,74,36)）。
+    pub claude_deep_strong: Color,
+    /// 是否暗色主题（更新提示呼吸停止点按此取用：暗色亮橙档 / 浅色深橙档）。
+    pub is_dark: bool,
     /// Permission-dialog accent (rgb(177,185,249)).
     pub permission: Color,
     /// Success (rgb(78,186,101)).
@@ -88,6 +96,10 @@ impl Theme {
             inactive: Color::Rgb(153, 153, 153),
             subtle: Color::Rgb(80, 80, 80),
             claude: Color::Rgb(215, 119, 87),
+            claude_strong: Color::Rgb(232, 137, 107),
+            claude_deep: Color::Rgb(176, 82, 39),
+            claude_deep_strong: Color::Rgb(154, 74, 36),
+            is_dark: true,
             permission: Color::Rgb(177, 185, 249),
             success: Color::Rgb(78, 186, 101),
             error: Color::Rgb(255, 107, 128),
@@ -134,6 +146,10 @@ impl Theme {
             inactive: Color::Rgb(102, 102, 102),
             subtle: Color::Rgb(175, 175, 175),
             claude: Color::Rgb(215, 119, 87),
+            claude_strong: Color::Rgb(232, 137, 107),
+            claude_deep: Color::Rgb(176, 82, 39),
+            claude_deep_strong: Color::Rgb(154, 74, 36),
+            is_dark: false,
             permission: Color::Rgb(87, 105, 247),
             success: Color::Rgb(44, 122, 57),
             error: Color::Rgb(171, 43, 63),
@@ -303,6 +319,9 @@ impl Theme {
         self.inactive = f(self.inactive);
         self.subtle = f(self.subtle);
         self.claude = f(self.claude);
+        self.claude_strong = f(self.claude_strong);
+        self.claude_deep = f(self.claude_deep);
+        self.claude_deep_strong = f(self.claude_deep_strong);
         self.permission = f(self.permission);
         self.success = f(self.success);
         self.error = f(self.error);
