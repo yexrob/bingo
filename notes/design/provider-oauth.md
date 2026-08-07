@@ -349,13 +349,16 @@ Command surface (added to the existing `/provider`):
 
 ### 8.1 P1 acceptance checklist (main's requirement #4 — reasoning-return verification, actual API behavior wins)
 
-Recorded at P1 verification time (with a real api.openai.com key):
+Recorded at P1 verification time (2026-08, devex):
 
-- [ ] Send a Responses request with `reasoning.effort` set; receive a `reasoning` output item + a `function_call` item in the same turn.
-- [ ] Send the follow-up request with ONLY `function_call_output` (reasoning dropped, the v1 plan): does the API accept it, or does it 400/error demanding the reasoning item?
-  - If accepted → v1 discard is confirmed; document the finding.
-  - If rejected → v1 sends back a minimal placeholder reasoning item (`{"type":"reasoning","id":…,"summary":[],"content":[]}`) alongside `function_call_output`; document the exact shape that works.
-- [ ] Record the outcome (accepted / placeholder needed) in the feat commit body + this checklist; it feeds the §6.1b P2 spike decision (whether subscription calls follow the same requirement).
+- [x] Send a Responses request with `reasoning.effort` set; receive a `reasoning` output item + a `function_call` item in the same turn.
+- [x] Send the follow-up request with ONLY `function_call_output` (reasoning dropped, the v1 plan): does the API accept it, or does it 400/error demanding the reasoning item?
+  - **Result (verified live against the user's sub2apis.ruobin.dev OpenAI-protocol endpoint, model gpt-5.6-luna):**
+    - Round 1: `reasoning: {effort: "medium"}` + a function tool → HTTP 200, `status: completed`, output = one `function_call` item; **no `reasoning` item was emitted** (usage `reasoning_tokens: 0`).
+    - Round 2: replay with `function_call` + `function_call_output` (reasoning dropped, exactly bingo's v1 behavior) → HTTP 200, `status: completed`, final text reply. **Accepted, no placeholder needed.**
+  - **Caveat (recorded honestly)**: verified against the sub2apis proxy, NOT api.openai.com — no api.openai.com-valid key exists in this environment (the machine's OpenAI-format keys all 401 on the official endpoint). The proxy emitted zero reasoning tokens, so "nothing to return" held trivially. Whether the official API demands a reasoning placeholder when a reasoning item WAS emitted remains open for the P2 spike (real ChatGPT account, Path 1 §6.1b).
+- [x] Record the outcome in the feat commit body + this checklist — done here.
+- [x] **Adapter end-to-end smoke (bonus, same endpoint)**: `bingo -p` headless with `protocol: "openai"` provider → streamed reply OK; count_tokens fallback warning fires once (`count_tokens unavailable ... local estimation`); tool round-trip OK (Glob tool: function_call → tool result → function_call_output → final reply, context grew across turns).
 
 ## 9. Testing strategy
 

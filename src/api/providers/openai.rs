@@ -1057,6 +1057,45 @@ mod tests {
         );
     }
 
+    /// completed → end_turn (the query loop's normal stop path; §9).
+    #[test]
+    fn sse_maps_completed_to_end_turn() {
+        let mut mapper = ResponsesSseMapper::new();
+        let ev = mapper
+            .feed(
+                "response.completed",
+                r#"{"type":"response.completed","response":{"id":"r","status":"completed","usage":{"output_tokens":42}}}"#,
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            ev,
+            StreamEvent::StopReason {
+                stop_reason: Some("end_turn".into()),
+                output_tokens: Some(42)
+            }
+        );
+    }
+
+    /// failed → ApiError with the error detail (never a silent Done; §9).
+    #[test]
+    fn sse_maps_failed_to_api_error() {
+        let mut mapper = ResponsesSseMapper::new();
+        let ev = mapper
+            .feed(
+                "response.failed",
+                r#"{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"server_error","message":"upstream unavailable"}}}"#,
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            ev,
+            StreamEvent::ApiError { message: "upstream unavailable".into() }
+        );
+    }
+
     #[test]
     fn completion_text_joins_output_parts() {
         let body = serde_json::json!({

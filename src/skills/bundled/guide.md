@@ -53,7 +53,7 @@ Three config layers, shallow-merged; the later one overrides:
 |---|---|---|
 | `apiKey` | string | API key（settings 优先于 `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`）；建议放 user 层，项目层会入库 |
 | `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
-| `providers` | object | Named providers (Anthropic protocol): `{name: {apiKey, apiBaseUrl}}`, switch via `/provider <name>`; optional `supportsImages: true` means that endpoint's model accepts images |
+| `providers` | object | Named providers: `{name: {protocol?, apiKey, apiBaseUrl?, supportsImages?}}`, switch via `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, `Authorization: Bearer`; `apiBaseUrl` defaults to `https://api.openai.com`); an empty/absent `apiBaseUrl` falls back to the protocol default; unknown protocols are a config error at startup |
 | `provider` | string | Current provider (persisted by `/provider` and the /model menu; default `"default"` = top-level `apiKey`/`apiBaseUrl`); restored at startup, an invalid name falls back to default with a warning |
 | `sendImages` | bool | Whether the default endpoint sends message-box image attachments to the model (named providers use their own `supportsImages`; by default none are sent) |
 | `thinkingLevel` | string | Thinking level: `off` sends no thinking param (DeepSeek-compatible, default); `low`/`medium`/`high` always send `{"type":"adaptive"}` adaptive thinking (the Claude 5 family removed budget_tokens; the level doesn't affect depth for now) |
@@ -76,7 +76,8 @@ Example (.bingo/settings.json):
   "apiBaseUrl": "https://api.anthropic.com",
   "providers": {
     "deepseek": { "apiKey": "sk-ds", "apiBaseUrl": "https://api.deepseek.com" },
-    "local": { "apiKey": "sk-any", "apiBaseUrl": "http://127.0.0.1:11434/v1" }
+    "local": { "apiKey": "sk-any", "apiBaseUrl": "http://127.0.0.1:11434/v1" },
+    "openai": { "protocol": "openai", "apiKey": "sk-...", "apiBaseUrl": "https://api.openai.com" }
   },
   "provider": "deepseek",
   "thinkingLevel": "medium",
@@ -110,8 +111,9 @@ Example (.bingo/settings.json):
 2. **Model request fails/times out**: `/status` shows the current model; `/model` switches it; with multiple providers use
    `/provider <name>` (the settings `providers` section); `/context` shows usage —
    when close to the context window, `/compact` (auto-compaction threshold = 90% of the effective window
-   (200k − 64k output budget) ≈ 122k, about 61% of the total window). Non-Anthropic endpoints (DeepSeek/ollama) without a
-   count_tokens API automatically fall back to local estimation (characters/4), with a one-time warning on first fallback.
+   (200k − 64k output budget) ≈ 122k, about 61% of the total window). Endpoints without a
+   count_tokens API (DeepSeek/ollama; OpenAI-protocol providers — `count_tokens` is Anthropic-only)
+   automatically fall back to local estimation (characters/4), with a one-time warning on first fallback.
 3. **MCP server not working**: `/mcp` shows status — `✗ failed: <details>` fixes per the details
    (command missing/spawn failure/handshake failure; for http servers also check url reachability and headers auth);
    the stdio server's own error output lives in `~/.local/share/bingo/logs/mcp-<name>.log`
@@ -157,6 +159,11 @@ Example (.bingo/settings.json):
   Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
   the Task family (task tracking), AskUserQuestion, Skill (skill invocation),
   ExperiencePropose/Commit/Query/Forget (project experience capture and retrieval).
+- **Provider protocols**: anthropic (Messages API, default — all existing configs) and openai (Responses API,
+  per named provider via `protocol: "openai"` in the settings `providers` section; bearer auth, `reasoning.effort`
+  for thinking levels, no count_tokens endpoint → local-estimation fallback). The top-level `apiKey`/`apiBaseUrl`
+  always form the anthropic "default" provider; subagent cross-provider rules apply across protocols
+  (explicit `model` required when forking to a different provider).
 - **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
   experience index is injected (≤10 entries, one per line; nothing injected when empty); full text is searched with ExperienceQuery by
   trigger tokens (case-insensitive, shared-prefix tolerant; active first, sorted by adoption count);
