@@ -16,8 +16,9 @@ pub struct SkillInput {
 }
 
 /// Skill：在技能注册表中按名执行。
-/// 调用展开 SKILL.md（Base directory 头 + 参数替换）作为 tool_result 注入，
-/// 模型读到技能指令后继续主对话（inline 语义）。
+/// 磁盘技能返回小展示（`Launching skill: {name}` + SKILL.md 路径），
+/// 模型需要完整指令时自行 Read 文件；内置技能（无文件基准）才展开全量
+/// 注入——那是它唯一的来源。
 pub struct SkillTool {
     skills: Vec<Skill>,
 }
@@ -66,12 +67,20 @@ IMPORTANT: When a skill matches the user's request, invoke the Skill tool BEFORE
         let skill = self
             .find(&params.skill)
             .ok_or_else(|| ToolError::failed(format!("Unknown skill: {}", params.skill)))?;
-        let expanded = expand_skill(skill, params.args.as_deref().unwrap_or(""));
+        let content = if skill.base_dir.as_os_str().is_empty() {
+            // 内置技能：无 SKILL.md 文件可读，只能展开注入。
+            let expanded = expand_skill(skill, params.args.as_deref().unwrap_or(""));
+            format!("Launching skill: {}\n\n{expanded}", skill.name)
+        } else {
+            // 磁盘技能：小展示，让模型自己 Read SKILL.md 拿完整指令。
+            format!(
+                "Launching skill: {}\n\nRead the full skill instructions at {}",
+                skill.name,
+                skill.base_dir.join("SKILL.md").display()
+            )
+        };
         Ok(ToolResult {
-            content: serde_json::Value::String(format!(
-                "Launching skill: {}\n\n{expanded}",
-                skill.name
-            )),
+            content: serde_json::Value::String(content),
             is_error: false,
             diff: None,
         })
@@ -113,7 +122,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expands_known_skill_with_base_dir_header() {
+    async fn disk_skill_returns_pointer_not_full_content() {
         let tool = SkillTool::new(vec![skill("pdf")]);
         let result = tool
             .call(
@@ -123,8 +132,26 @@ mod tests {
             .await
             .unwrap();
         let text = result.content.as_str().unwrap();
-        assert!(text.starts_with("Launching skill: pdf\n\nBase directory for this skill: /tmp/skills\n\n"));
-        assert!(text.contains("Follow the {name} procedure."));
+        assert!(text.starts_with("Launching skill: pdf\n\n"));
+        assert!(text.contains("/tmp/skills/SKILL.md"), "提示自行读取: {text}");
+        assert!(
+            !text.contains("Follow the {name} procedure."),
+            "不再展开全量正文: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bundled_skill_still_expands_full_content() {
+        let mut s = skill("guide");
+        s.base_dir = PathBuf::new();
+        let tool = SkillTool::new(vec![s]);
+        let result = tool
+            .call(serde_json::json!({ "skill": "guide" }), &ctx())
+            .await
+            .unwrap();
+        let text = result.content.as_str().unwrap();
+        assert!(text.starts_with("Launching skill: guide\n\n"));
+        assert!(text.contains("Follow the {name} procedure."), "内置全量: {text}");
     }
 
     #[tokio::test]
