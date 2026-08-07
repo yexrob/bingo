@@ -7511,6 +7511,45 @@ mod tests {
         assert_eq!(chat.flushed_segments, 4, "欢迎卡 + hi + 流式 + 回答全部落盘");
     }
 
+    /// 错误路径不经过 TurnEnd（start_turn 的 `Err(e)` 只发 UiEvent::Error）：
+    /// 回答消息仍在消息流中——旧瞬态块在错误路径下无人清理、悬挂到
+    /// /clear（24ba4d9 前旧 bug 的回归路径）；普通消息无状态可清，天然修复。
+    #[test]
+    fn ask_answer_message_survives_error_path() {
+        let mut chat = test_chat();
+        chat.messages.push(msg(Role::User, "hi"));
+        let (tx, _rx) = oneshot::channel();
+        let mut request =
+            PermissionRequest::new("技术选型", "用哪个库？", vec!["A".into(), "B".into()]);
+        request.free_text = true;
+        chat.pending_ask = Some((request, tx));
+        chat.ask_focus = 0;
+        assert!(chat.ask_key(KeyCode::Enter), "选 A");
+
+        chat.handle(UiEvent::Error {
+            code: "SERVER_ERROR",
+            msg: "回合失败".to_string(),
+            level: crate::error::ErrorLevel::Full,
+            context: crate::error::ErrorContext::LongTurn,
+        });
+        // 回答消息仍在消息流中且照常渲染。
+        let answer = chat.messages.last().expect("回答消息仍在");
+        assert_eq!(answer.role, Role::User);
+        assert!(answer.text.contains("· 用哪个库？ → A"), "{}", answer.text);
+        chat.build_rows(80);
+        let joined: String = chat
+            .doc
+            .rows
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("User answered the questions:"),
+            "错误后回答仍渲染: {joined}"
+        );
+    }
+
     /// 模拟 inline 组件的落盘循环：重建 → 落盘定稿前缀 → 推进游标。
     fn flush_frame(chat: &mut Chat, width: usize, printed: &mut Vec<String>) {
         chat.build_rows(width);
