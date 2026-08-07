@@ -358,6 +358,8 @@ mod tests {
     async fn cancel_aborts_in_flight_and_skips_rest() {
         let counter = Arc::new(AtomicUsize::new(0));
         let count_clone = counter.clone();
+        let running = Arc::new(AtomicUsize::new(0));
+        let running_clone = running.clone();
         let (tx, mut rx) = tokio::sync::watch::channel(false);
         let handle = tokio::spawn(async move {
             let tool = FakeTool {
@@ -366,7 +368,7 @@ mod tests {
                 delay_ms: 200,
                 counter: count_clone.clone(),
                 max_seen: Arc::new(AtomicUsize::new(0)),
-                running: Arc::new(AtomicUsize::new(0)),
+                running: running_clone,
             };
             let calls: Vec<PendingCall> = (0..3)
                 .map(|i| PendingCall {
@@ -378,7 +380,12 @@ mod tests {
             let (outcomes, aborted) = execute_calls(calls, &test_ctx(), Some(&mut rx)).await;
             (outcomes.len(), aborted)
         });
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Wait for the first call to start (not finish: this test cancels mid-flight):
+        // a fixed sleep is racy on slow CI (2-core runners), so poll the running counter.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while running.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         tx.send(true).unwrap();
         let (done, aborted) = handle.await.unwrap();
         assert!(aborted, "中断后返回 aborted");

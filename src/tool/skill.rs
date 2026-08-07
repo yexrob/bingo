@@ -155,7 +155,9 @@ mod tests {
             1,
             "单行返回，不带全量正文: {text}"
         );
-        assert_eq!(text, "✦ pdf — read /tmp/skills/SKILL.md");
+        // Expected pointer renders the helper's base_dir verbatim (separator style per platform).
+        let expected = format!("✦ pdf — read {}", PathBuf::from("/tmp/skills").join("SKILL.md").display());
+        assert_eq!(text, expected);
         assert!(
             !text.contains("Follow the {name} procedure."),
             "不再展开全量正文: {text}"

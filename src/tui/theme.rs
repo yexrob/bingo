@@ -592,23 +592,34 @@ mod tests {
         assert_eq!(ThemeSetting::parse(Some("")), ThemeSetting::Auto);
     }
 
+    /// Expected colour under the ambient truecolor support: without COLORTERM
+    /// (e.g. CI runners) RGB colours are downgraded to 256-colour approximations.
+    fn expect_color(rgb: (u8, u8, u8)) -> Color {
+        let (r, g, b) = rgb;
+        if Theme::terminal_supports_truecolor() {
+            Color::Rgb(r, g, b)
+        } else {
+            Color::Indexed(rgb_to_ansi256(r, g, b))
+        }
+    }
+
     #[test]
     fn for_terminal_respects_setting() {
         // An explicit theme does not depend on terminal detection.
         let dark = Theme::for_terminal(ThemeSetting::Dark, None);
         let light = Theme::for_terminal(ThemeSetting::Light, None);
-        assert_eq!(dark.text, Color::Rgb(255, 255, 255));
-        assert_eq!(light.text, Color::Rgb(0, 0, 0));
+        assert_eq!(dark.text, expect_color((255, 255, 255)));
+        assert_eq!(light.text, expect_color((0, 0, 0)));
     }
 
     #[test]
     fn auto_uses_detected_background() {
         // Some(true) = dark background.
         let dark = Theme::for_terminal(ThemeSetting::Auto, Some(true));
-        assert_eq!(dark.text, Color::Rgb(255, 255, 255));
+        assert_eq!(dark.text, expect_color((255, 255, 255)));
         // Some(false) = light background.
         let light = Theme::for_terminal(ThemeSetting::Auto, Some(false));
-        assert_eq!(light.text, Color::Rgb(0, 0, 0));
+        assert_eq!(light.text, expect_color((0, 0, 0)));
     }
 
     #[test]

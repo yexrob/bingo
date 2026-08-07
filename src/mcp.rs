@@ -745,11 +745,16 @@ mod tests {
     #[tokio::test]
     async fn hung_server_times_out_and_records_failure() {
         let mut servers = HashMap::new();
+        // A long-running dummy server: /bin/sleep on Unix, ping on Windows (no /bin/sleep).
+        #[cfg(windows)]
+        let (command, args) = ("ping".to_string(), vec!["-n".to_string(), "10".to_string(), "127.0.0.1".to_string()]);
+        #[cfg(not(windows))]
+        let (command, args) = ("/bin/sleep".to_string(), vec!["10".to_string()]);
         servers.insert(
             "hung".to_string(),
             McpServerConfig {
-                command: Some("/bin/sleep".to_string()),
-                args: vec!["10".to_string()],
+                command: Some(command),
+                args,
                 env: HashMap::new(),
                 kind: None,
                 url: None,

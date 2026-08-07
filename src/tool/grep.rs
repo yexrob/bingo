@@ -226,7 +226,11 @@ mod tests {
             .call(serde_json::json!({"pattern": "needle"}), &ctx(root.clone()))
             .await
             .unwrap();
-        let text = result.content.as_str().unwrap_or_default().to_string();
+        let text = result
+            .content
+            .as_str()
+            .unwrap_or_default()
+            .replace('\\', "/");
         assert!(text.contains("src/main.rs"), "{text}");
         assert!(text.contains("notes.md"), "{text}");
         assert!(!text.contains("target/"), "target 应跳过: {text}");

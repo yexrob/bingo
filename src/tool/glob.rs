@@ -201,6 +201,7 @@ mod tests {
     }
 
     async fn run(root: &Path, pattern: &str) -> String {
+        // Normalize separators so assertions are platform-independent (Windows outputs `\`).
         GlobTool
             .call(
                 serde_json::json!({"pattern": pattern}),
@@ -211,7 +212,7 @@ mod tests {
             .content
             .as_str()
             .unwrap_or_default()
-            .to_string()
+            .replace('\\', "/")
     }
 
     /// M6 regression: relative patterns with a directory prefix once always matched zero.

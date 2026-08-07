@@ -937,7 +937,9 @@ mod tests {
         );
         let err = BashTool::new()
             .call(
-                serde_json::json!({"command": command, "timeout": 1}),
+                // PowerShell 5.1 cold start takes 1-2s: the timeout must leave room for
+                // the script to run Start-Process before it fires.
+                serde_json::json!({"command": command, "timeout": 5}),
                 &ctx,
             )
             .await
