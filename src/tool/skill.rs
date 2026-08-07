@@ -45,7 +45,9 @@ impl Tool for SkillTool {
 
 When users ask you to perform tasks, check if any of the available skills match. Skills provide specialized capabilities and domain knowledge.
 
-When users reference a slash command or \"/<something>\" (e.g. \"/commit\"), they are referring to a skill. Use this tool to invoke it.
+When users reference a slash command or \"/<something>\" (e.g. \"/commit\"), or use a \"✦ name\" marker (e.g. \"✦ meye\"), they are referring to a skill. Use this tool to invoke it.
+
+Invoking returns a pointer to the skill's SKILL.md (\"✦ name — read <path>\"); read that file with Read to get the full instructions.
 
 IMPORTANT: When a skill matches the user's request, invoke the Skill tool BEFORE generating any other response about the task. NEVER mention a skill without actually calling this tool. Do not guess skill names — only use skills listed below."
             .to_string();
@@ -208,6 +210,14 @@ mod tests {
         assert!(desc.contains("- pdf: pdf description"));
         assert!(desc.contains("- commit: commit description"));
         assert!(desc.contains("Do not guess skill names"));
+        assert!(
+            desc.contains("✦ name"),
+            "描述需说明 ✦ 标记也是技能引用: {desc}"
+        );
+        assert!(
+            desc.contains("read that file with Read"),
+            "描述需说明指针 + Read 契约: {desc}"
+        );
 
         let empty = SkillTool::new(vec![]);
         assert!(!empty.description().contains("Available skills:"));

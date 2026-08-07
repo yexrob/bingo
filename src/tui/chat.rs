@@ -1417,14 +1417,14 @@ impl Chat {
                             // 独立 Bash（`!` 命令）：预览 = 输出本身（去掉
                             // `$ cmd` 回显与 `[Exited with code N]` 尾注），
                             // 默认展开（BashModeProgress 直接展示输出）。
-                            // Skill：结果行显示 `✦ name — read path` 单行摘要。
+                            // Skill：结果行只显示 `✦ 技能名`（与活动头
+                            // `✦ Skill(输入)` 同族），指针路径只留在 tool_result。
                             if done.name == "Skill" {
-                                call.result_summary = done
-                                    .output
-                                    .lines()
-                                    .next()
-                                    .filter(|l| !l.trim().is_empty())
-                                    .map(str::to_string);
+                                call.result_summary = done.output.lines().next().and_then(|l| {
+                                    l.strip_prefix("✦ ")
+                                        .and_then(|rest| rest.split(" — ").next())
+                                        .map(|name| format!("✦ {name}"))
+                                });
                             }
                             let lines: Vec<String> = done
                                 .output
@@ -1940,15 +1940,21 @@ impl Chat {
             "tasks" => self.slash_tasks(),
             "team" => self.slash_team(arg),
             other => {
-                // 技能名：展开为提示词并作为用户消息提交（prompt Command：
-                // 技能与内置命令同注册表，输入 /技能名 即执行）。
+                // 技能名（prompt Command：技能与内置命令同注册表，输入
+                // /技能名 即执行；全量正文不进上下文，见下方 marker 注释）。
                 let skills = crate::skills::load_skills(
                     &self.session.home,
                     &std::path::PathBuf::from(&self.cwd),
                 );
                 if let Some(skill) = skills.iter().find(|s| s.name == other) {
-                    let expanded = crate::skills::expand_skill(skill, arg);
-                    self.start_turn(expanded, true);
+                    // 渐进披露：只提交 `✦ 技能名 [参数]` 标记，正文由模型经
+                    // Skill 工具指针（`✦ name — read <path>`）+ Read 按需读取。
+                    let marker = if arg.is_empty() {
+                        format!("✦ {}", skill.name)
+                    } else {
+                        format!("✦ {} {}", skill.name, arg)
+                    };
+                    self.start_turn(marker, true);
                     return true;
                 }
                 self.push_slash_output(format!(
@@ -5735,9 +5741,10 @@ mod tests {
         assert!(chat.slash_at.is_none());
     }
 
-    /// 内置/磁盘技能经 `/技能名` 展开为提示词提交（prompt Command）。
+    /// 内置/磁盘技能经 `/技能名` 提交 `✦ 技能名 [参数]` 标记（渐进披露，
+    /// 全量正文由模型经 Skill 工具 + Read 按需读取，不进上下文）。
     #[tokio::test]
-    async fn slash_skill_expands_and_submits() {
+    async fn slash_skill_submits_marker_not_full_content() {
         let mut chat = test_chat();
         chat.input = "/guide".to_string();
         chat.submit();
@@ -5750,14 +5757,14 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "技能回合未结束");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(
-            chat.messages[0].text.contains("诊断指南"),
-            "消息为展开后的技能内容: {}",
+        assert_eq!(
+            chat.messages[0].text, "✦ guide",
+            "只提交 ✦ 标记: {}",
             &chat.messages[0].text[..chat.messages[0].text.len().min(80)]
         );
         assert!(
-            !chat.messages[0].text.starts_with("/guide"),
-            "技能名被展开而非原样发送"
+            !chat.messages[0].text.contains("诊断指南"),
+            "全量正文不再进上下文"
         );
     }
 
@@ -6607,7 +6614,11 @@ mod tests {
         // CC 双行：耗时并入结果行，且只有慢命令（>2s）才显示。
         // Skill 用 ✦ 图标（类别图标：⏺ 内建 / ◆ MCP / ✦ Skill）。
         assert!(joined.contains("✦ Skill(pdf doc.md)"), "头行: {joined}");
-        assert!(joined.contains("✦ pdf — read /tmp/skills/SKILL.md"), "结果行单行摘要: {joined}");
+        assert!(joined.contains("✦ pdf"), "结果行只显示 ✦ 技能名: {joined}");
+        assert!(
+            !joined.contains("read /tmp/skills/SKILL.md"),
+            "指针路径不进 TUI 结果行: {joined}"
+        );
         assert!(joined.contains("Ran in 3.2s"), "结果行带耗时: {joined}");
         assert!(!joined.contains("3210ms"), "毫秒不再进头行: {joined}");
     }
