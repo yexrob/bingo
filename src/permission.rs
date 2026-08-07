@@ -679,7 +679,9 @@ mod tests {
             .behavior
         };
         assert_eq!(denied(&format!("{etc}/passwd")), PermissionBehavior::Deny);
-        assert_eq!(denied(&format!("{etc}/../{etc}/passwd")), PermissionBehavior::Deny);
+        // `../etc` (not `../{etc}`): repeating the Windows drive letter (`C:\etc\..\C:\etc`)
+        // would normalize to a garbage `C:\C:\etc` path instead of the drive root.
+        assert_eq!(denied(&format!("{etc}/../etc/passwd")), PermissionBehavior::Deny);
         assert_eq!(denied(&format!("{etc}/./ssh/../passwd")), PermissionBehavior::Deny);
         // Paths outside the directory are unaffected (read-only tools pass).
         assert_eq!(denied(&format!("{other}/log/x")), PermissionBehavior::Allow);

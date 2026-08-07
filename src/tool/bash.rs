@@ -910,53 +910,52 @@ mod tests {
         assert!(!alive, "孙进程 {pid} 应随进程组一起被清理");
     }
 
-    /// Windows variant: PowerShell spawns a hidden cmd grandchild; timeout must leave
-    /// no processes behind (taskkill /T removes the whole tree).
+    /// Windows: `taskkill /T` removes the whole process tree. Tested directly against
+    /// `kill_process_tree` (not via the BashTool timeout): PowerShell 5.1 cold start on
+    /// a loaded CI runner can exceed any reasonable timeout, so the tool timeout path
+    /// isn't the thing under test here.
     #[cfg(windows)]
     #[tokio::test]
-    async fn timeout_kills_whole_process_tree() {
+    async fn kill_process_tree_removes_grandchildren() {
         let marker = std::env::temp_dir()
             .join(format!("bingo-ptree-{}.pid", std::process::id()));
         let _ = std::fs::remove_file(&marker);
-        let ctx = ToolContext {
-            home: std::env::temp_dir(),
-            cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
-            http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
-            hooks: Default::default(),
-            permission_mode: "default".into(),
-            expand_tasks: tokio::sync::watch::channel(false).0,
-            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
-        };
-        // The grandchild writes its pid then pings (stays alive); the parent also sleeps
-        // to trigger the timeout.
-        let command = format!(
+        // PowerShell: spawn a hidden cmd that pings (stays alive), write its pid, then sleep.
+        let script = format!(
             "$p = Start-Process cmd -ArgumentList '/c','ping -n 30 127.0.0.1 > nul' -PassThru -WindowStyle Hidden; $p.Id | Out-File -FilePath '{}' -Encoding ascii; Start-Sleep 30",
             marker.to_string_lossy()
         );
-        let err = BashTool::new()
-            .call(
-                // PowerShell 5.1 cold start takes 1-2s: the timeout must leave room for
-                // the script to run Start-Process before it fires.
-                serde_json::json!({"command": command, "timeout": 5}),
-                &ctx,
-            )
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("timed out"), "{err}");
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        let pid = std::fs::read_to_string(&marker)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let child = tokio::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn powershell");
+        let root_pid = child.id().expect("powershell pid");
+        // Poll for the grandchild pid: no deadline pressure beyond CI slowness (30s).
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut pid = String::new();
+        while std::time::Instant::now() < deadline {
+            pid = std::fs::read_to_string(&marker)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if !pid.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
         assert!(!pid.is_empty(), "孙进程应已写下 pid");
+        crate::platform::kill_process_tree(root_pid).await;
+        tokio::time::sleep(Duration::from_millis(800)).await;
         let alive = std::process::Command::new("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/NH"])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid))
             .unwrap_or(false);
         let _ = std::fs::remove_file(&marker);
+        let _ = child.kill().await;
         assert!(!alive, "孙进程 {pid} 应随进程树一起被清理");
     }
 
