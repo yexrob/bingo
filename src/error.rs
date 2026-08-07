@@ -149,6 +149,7 @@ fn downcast_error_code(err: &(dyn std::error::Error + 'static)) -> Option<&'stat
         crate::experience::ExperienceError,
         crate::hooks::HookError,
         crate::mcp::McpError,
+        crate::share::ShareError,
     )
 }
 
@@ -267,6 +268,19 @@ mod tests {
         use crate::transcript::TranscriptError;
         assert_eq!(TranscriptError::Io(std::io::Error::other("x")).error_code(), "STORAGE_ERROR");
         assert_eq!(TranscriptError::Parse(serde_json::from_str::<()>("x").unwrap_err()).error_code(), "STORAGE_ERROR");
+        // ShareError 全部 5 个 variant 显式枚举（AC-40）。
+        use crate::share::ShareError;
+        let share_variants = vec![
+            ShareError::Io(std::io::Error::other("x")),
+            ShareError::Json(serde_json::from_str::<()>("x").unwrap_err()),
+            ShareError::Transcript(TranscriptError::Io(std::io::Error::other("x"))),
+            ShareError::NoSessions,
+            ShareError::SessionNotFound("x".into()),
+        ];
+        assert_stable_codes("share::ShareError", &share_variants);
+        for v in &share_variants {
+            assert_eq!(v.error_code(), "STORAGE_ERROR", "ShareError 全 variant 落存储错误");
+        }
         use crate::experience::ExperienceError;
         assert_eq!(ExperienceError::Io(std::io::Error::other("x")).error_code(), "STORAGE_ERROR");
     }
@@ -293,7 +307,7 @@ mod tests {
     }
 
     /// The macro registry covers all ErrorCode-implementing types (guardrail 4
-    /// "registry is the contract's second place"): each of the 10 registered types is
+    /// "registry is the contract's second place"): each of the 11 registered types is
     /// asserted non-GENERIC through the boxed exit — a type implementing ErrorCode that
     /// only takes effect on the TUI exit while missing from the downcast macro would
     /// silently fall to GENERIC on the CLI exit and turn this test red. Cross-checked
@@ -306,6 +320,7 @@ mod tests {
         use crate::mcp::McpError;
         use crate::query::QueryError;
         use crate::settings::SettingsError;
+        use crate::share::ShareError;
         use crate::tasks::TaskError;
         use crate::team::TeamError;
         use crate::tool::ToolError;
@@ -321,11 +336,12 @@ mod tests {
             Box::new(ExperienceError::Io(std::io::Error::other("x"))),
             Box::new(HookError::Failed("x".into())),
             Box::new(McpError::Connect { server: "s".into(), detail: "d".into() }),
+            Box::new(ShareError::SessionNotFound("x".into())),
         ];
         assert_eq!(
             samples.len(),
-            10,
-            "boxed 出口应有 10 个登记类型：新增实现 ErrorCode 的类型须在 \
+            11,
+            "boxed 出口应有 11 个登记类型：新增实现 ErrorCode 的类型须在 \
              `downcast_error_code` 宏登记 + 本测试补实例，双处缺一即 CI 红"
         );
         for e in &samples {

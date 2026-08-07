@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="generator" content="bingo share">
+<title>bingo · Session</title>
+<style>
+/* ============ 令牌（浅色文档底 · opencode 对齐 · bingo 品牌橙） ============ */
+:root{
+  --bg:#FAFAF7; --bg-card:#FFFFFF; --bg-subtle:#F3F2EF;
+  --hairline:#E5E4DF; --hairline-strong:#D8D7D1;
+  --text:#1F2328; --secondary:#57606A; --dimmed:#646D76; --faint:#8A929B;
+  --accent:#B05227; --accent-soft:#D77757; --accent-border:#E7C4B2;
+  --green:#1A7F37; --red:#CF222E; --gold:#9A6700; --info:#146C7A;
+  --hue-0:#0F766E; --hue-1:#4A58C8; --hue-2:#6E40C9;
+  --hue-3:#8A6418; --hue-4:#B03A8B; --hue-5:#2F7D32;
+  --font-mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,"Liberation Mono","DejaVu Sans Mono",monospace;
+  --font-sans:-apple-system,"SF Pro Text","Segoe UI","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --fs:0.875rem; --fs-sm:0.8125rem; --fs-xs:0.75rem; --lh:1.6;
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px; --s7:48px;
+  --radius:4px;
+  --maxw:880px;
+  --w-sm:480px; --w-md:640px; --w-lg:760px;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);
+  font-family:var(--font-sans);font-size:var(--fs);line-height:var(--lh);
+  -webkit-font-smoothing:antialiased}
+[hidden]{display:none!important}
+::selection{background:var(--accent-soft);color:#fff}
+a{color:var(--accent)}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
+code,kbd,pre,.mono{font-family:var(--font-mono)}
+
+/* ============ 跳转链接 ============ */
+.skip{position:absolute;left:var(--s4);top:var(--s4);z-index:50;padding:var(--s2) var(--s3);
+  background:var(--accent);color:#fff;text-decoration:none;border-radius:var(--radius);
+  transform:translateY(-300%);transition:transform .12s}
+.skip:focus{transform:none}
+
+/* ============ topbar ============ */
+.topbar{position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--hairline)}
+.topbar-inner{max-width:var(--maxw);margin:0 auto;padding:0 var(--s4)}
+.brand{display:flex;align-items:baseline;gap:var(--s2);padding:var(--s3) 0 var(--s2)}
+.brand .mark{color:var(--accent);font-weight:700}
+.brand .name{font-weight:700;letter-spacing:.02em;font-family:var(--font-mono)}
+.brand .session{color:var(--secondary);font-size:var(--fs-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.brand .session::before{content:"· ";color:var(--faint)}
+.meta-line{display:flex;align-items:center;gap:var(--s3);margin-left:auto;color:var(--faint);
+  font-size:var(--fs-xs);white-space:nowrap;overflow:hidden}
+.print-btn{appearance:none;border:1px solid var(--hairline-strong);background:var(--bg-card);color:var(--secondary);
+  font:inherit;font-size:var(--fs-xs);padding:2px 8px;border-radius:var(--radius);cursor:pointer}
+.print-btn:hover{color:var(--accent);border-color:var(--accent)}
+.tabs{display:flex;gap:0;border-top:1px solid var(--hairline)}
+.tabs button{appearance:none;background:transparent;border:0;border-bottom:2px solid transparent;
+  color:var(--dimmed);font:inherit;font-size:var(--fs-sm);padding:var(--s2) var(--s4) calc(var(--s2) + 1px);
+  cursor:pointer;position:relative;top:-1px}
+.tabs button:hover{color:var(--text)}
+.tabs button[aria-selected="true"]{color:var(--text);border-bottom-color:var(--accent)}
+.tabs .count{color:var(--faint);font-size:var(--fs-xs);margin-left:2px}
+.tabs button[aria-selected="true"] .count{color:var(--accent)}
+.tabs .kbd{color:var(--faint);margin-right:var(--s1)}
+
+/* ============ main ============ */
+main{max-width:var(--maxw);margin:0 auto;padding:var(--s6) var(--s4) var(--s7)}
+.view[data-view]{animation:view-in .12s ease-out}
+@keyframes view-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.view h2{display:flex;align-items:baseline;gap:var(--s2);margin:0 0 var(--s4);
+  font-size:var(--fs);font-weight:700;color:var(--text);font-family:var(--font-mono)}
+.view h2 .n{color:var(--faint);font-weight:400}
+.empty{color:var(--faint);padding:var(--s7) 0;text-align:center}
+
+/* ============ 消息行：装饰列 + 内容列 ============ */
+.conv{display:flex;flex-direction:column}
+.msg{display:grid;grid-template-columns:22px minmax(0,1fr);column-gap:14px;margin-bottom:1.25rem}
+.dec{display:flex;flex-direction:column;align-items:center}
+.dec .anchor{width:18px;height:18px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+  color:var(--faint);border-radius:var(--radius);text-decoration:none}
+.dec .anchor:hover{color:var(--accent);background:var(--bg-subtle)}
+.dec .anchor svg{width:12px;height:12px;fill:currentColor}
+.dec .anchor::after{content:"";position:absolute;transform:translateY(20px);white-space:nowrap;
+  font-size:var(--fs-xs);color:#fff;background:var(--text);padding:2px 8px;border-radius:var(--radius);
+  opacity:0;pointer-events:none;transition:opacity .12s;z-index:5}
+.dec .anchor.copied::after{content:"Copied ✓";opacity:1}
+.dec .line{width:3px;flex:1;border-radius:1px;background:var(--hairline-strong);margin-top:6px}
+.content{min-width:0}
+.content .w-sm{max-width:var(--w-sm)}
+.content.w-sm{max-width:var(--w-sm)}
+.content.w-md{max-width:var(--w-md)}
+.content.w-lg{max-width:var(--w-lg)}
+
+/* 元信息：小号大写（secondary） */
+.meta{font-size:var(--fs-xs);color:var(--secondary);text-transform:uppercase;
+  letter-spacing:.05em;margin-bottom:var(--s2);display:flex;align-items:baseline;gap:var(--s2)}
+.meta time{color:var(--faint);letter-spacing:0;text-transform:none}
+.meta .role-user{color:var(--secondary)}
+.meta .role-assistant{color:var(--accent)}
+
+/* 正文 */
+.body p{margin:0 0 var(--s2)}
+.body p:last-child{margin-bottom:0}
+.card{border:1px solid var(--accent-border);background:var(--bg-card);
+  border-radius:var(--radius);padding:0.5rem;margin-bottom:var(--s3)}
+.card>:first-child{margin-top:0}
+.card>:last-child{margin-bottom:0}
+
+/* markdown 正文 */
+.card h1,.card h2,.card h3,.card h4{margin:var(--s4) 0 var(--s2);line-height:1.4;font-family:var(--font-mono)}
+.card h1{font-size:1.2em;border-bottom:1px solid var(--hairline);padding-bottom:var(--s1)}
+.card h2{font-size:1.1em}.card h3{font-size:1em}
+.card p{margin:var(--s2) 0}
+.card ul,.card ol{margin:var(--s2) 0;padding-left:var(--s5)}
+.card li{margin:2px 0}
+.card code{background:var(--bg-subtle);border:1px solid var(--hairline);border-radius:3px;
+  padding:0 4px;font-size:.92em;color:var(--info)}
+.card pre code{background:none;border:0;padding:0;color:inherit;font-size:inherit}
+.card blockquote{margin:var(--s3) 0;padding-left:var(--s4);border-left:3px solid var(--hairline-strong);color:var(--dimmed)}
+.card hr{border:0;border-top:1px solid var(--hairline);margin:var(--s4) 0}
+.card table{border-collapse:collapse;margin:var(--s3) 0;font-size:var(--fs-sm);width:100%}
+.card th,.card td{border:1px solid var(--hairline);padding:4px var(--s3);text-align:left}
+.card th{background:var(--bg-subtle);font-weight:600}
+.card del{color:var(--faint)}
+
+/* 代码块 */
+.code-block{margin:var(--s3) 0;background:var(--bg-subtle);border:1px solid var(--hairline);
+  border-radius:var(--radius);position:relative}
+.code-block figcaption{position:absolute;top:6px;right:34px;color:var(--faint);font-size:var(--fs-xs)}
+.code-block pre{margin:0;padding:var(--s3) var(--s4);overflow-x:auto;
+  font-family:var(--font-mono);font-size:var(--fs-sm);line-height:1.6;color:var(--text)}
+.copy-btn{position:absolute;top:4px;right:6px;appearance:none;border:1px solid var(--hairline);
+  background:var(--bg-card);color:var(--secondary);font:inherit;font-size:var(--fs-xs);padding:2px 8px;
+  border-radius:3px;cursor:pointer;opacity:0;transition:opacity .12s}
+.code-block:hover .copy-btn,.copy-btn:focus-visible,.t-code:hover .copy-btn{opacity:1}
+.copy-btn:hover{color:var(--accent);border-color:var(--accent)}
+
+/* 图片 */
+.img-block{margin:var(--s3) 0;border:1px solid var(--hairline);border-radius:var(--radius);
+  background:var(--bg-card);padding:var(--s2);text-align:center}
+.img-block img{max-width:100%;height:auto;display:block;margin:0 auto}
+
+/* thinking：与助手卡同款细框 */
+details.think{border:1px solid var(--accent-border);background:var(--bg-card);
+  border-radius:var(--radius);padding:0.5rem;margin-bottom:var(--s3)}
+details.think summary{cursor:pointer;color:var(--secondary);font-size:var(--fs-xs);
+  text-transform:uppercase;letter-spacing:.05em;list-style:none;display:flex;align-items:center;gap:var(--s2)}
+details.think summary::-webkit-details-marker{display:none}
+details.think summary::before{content:"∴";color:var(--accent-soft);font-size:1em;text-transform:none}
+details.think summary:hover{color:var(--text)}
+details.think[open] summary{margin-bottom:var(--s2)}
+.think-body{color:var(--dimmed);font-size:var(--fs-sm);white-space:pre-wrap;line-height:1.7}
+
+/* 工具：两段式（标题行 + 结果块） */
+.tool{margin-bottom:var(--s3)}
+.tool-title{display:flex;align-items:baseline;gap:var(--s2);font-size:var(--fs-sm);
+  font-family:var(--font-mono);color:var(--secondary);line-height:18px}
+.tool-title .t-ico{color:var(--info);font-size:.9em}
+.tool-title .t-name{font-weight:700}
+.tool-title .t-args{color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tool-title .t-status{margin-left:auto;font-weight:700;white-space:nowrap}
+.tool-title .t-status.ok{color:var(--green)}
+.tool-title .t-status.err{color:var(--red)}
+details.tool-result{margin-top:var(--s1)}
+details.tool-result summary{cursor:pointer;color:var(--secondary);font-size:var(--fs-xs);
+  text-transform:uppercase;letter-spacing:.05em;list-style:none;display:inline-flex;align-items:center;gap:var(--s1)}
+details.tool-result summary::-webkit-details-marker{display:none}
+details.tool-result summary::before{content:"▸";color:var(--accent);transition:transform .12s}
+details.tool-result[open] summary::before{transform:rotate(90deg)}
+details.tool-result summary:hover{color:var(--accent)}
+details.tool-result .t-body{margin-top:var(--s2);display:grid;gap:var(--s2)}
+.t-code{background:var(--bg-subtle);border:1px solid var(--hairline);border-radius:var(--radius)}
+.t-code .t-label{display:block;padding:4px var(--s3);color:var(--faint);font-size:var(--fs-xs);
+  border-bottom:1px solid var(--hairline);text-transform:uppercase;letter-spacing:.05em}
+.t-code pre{margin:0;padding:var(--s2) var(--s3);overflow-x:auto;
+  font-family:var(--font-mono);font-size:var(--fs-sm);line-height:1.6;color:var(--text);
+  white-space:pre-wrap;word-break:break-word}
+.t-code.output pre{color:var(--dimmed)}
+.t-code.output.err{border-color:#E5B4B8}
+.t-code.output.err .t-label{color:var(--red)}
+
+/* ============ Team 名册 ============ */
+.roster{border:1px solid var(--hairline);border-radius:var(--radius);background:var(--bg-card)}
+.r-row{display:grid;grid-template-columns:92px 120px 1fr;gap:var(--s2) var(--s4);
+  padding:var(--s3) var(--s4);align-items:baseline}
+.r-row+.r-row{border-top:1px solid var(--hairline)}
+.r-row:hover{background:var(--bg-subtle)}
+.r-state{font-size:var(--fs-sm);white-space:nowrap;color:var(--faint)}
+.r-state.idle{color:var(--faint)}
+.r-state.running{color:var(--info)}
+.r-state.stopped{color:var(--red)}
+.r-name{font-family:var(--font-mono);font-weight:700;color:var(--accent);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r-meta{color:var(--secondary);font-size:var(--fs-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r-desc{color:var(--dimmed);font-size:var(--fs-sm);grid-column:2 / -1;margin-top:-4px}
+
+/* ============ DM 私聊 ============ */
+.dm-list{display:grid;gap:var(--s3)}
+.dm-agent{border:1px solid var(--hairline);border-radius:var(--radius);background:var(--bg-card)}
+.dm-agent summary{cursor:pointer;padding:var(--s2) var(--s4);list-style:none;display:flex;align-items:center;gap:var(--s3)}
+.dm-agent summary::-webkit-details-marker{display:none}
+.dm-agent summary .a-dot{width:8px;height:8px;border-radius:50%;background:var(--dot,var(--faint))}
+.dm-agent summary .a-name{font-family:var(--font-mono);font-weight:700}
+.dm-agent summary .a-state{color:var(--faint);font-size:var(--fs-xs)}
+.dm-agent summary .a-count{margin-left:auto;color:var(--faint);font-size:var(--fs-xs)}
+.dm-agent summary:hover{background:var(--bg-subtle)}
+.dm-agent[open] summary{border-bottom:1px solid var(--hairline)}
+.dm-thread{padding:var(--s2) 0}
+.dm-row{display:grid;grid-template-columns:80px 1fr auto;gap:var(--s3);padding:var(--s1) var(--s4);align-items:baseline}
+.dm-row .dm-from{font-family:var(--font-mono);font-weight:700;color:var(--from,var(--accent));
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dm-row .dm-text{color:var(--text);white-space:pre-wrap;word-break:break-word;font-size:var(--fs-sm)}
+.dm-row .dm-time{color:var(--faint);font-size:var(--fs-xs);white-space:nowrap}
+.dm-row.dm-user .dm-text{text-align:right;color:var(--dimmed)}
+.dm-row.dm-user{grid-template-columns:1fr 80px auto}
+
+/* ============ Channels 频道 ============ */
+.ch-list{display:grid;gap:var(--s4)}
+.ch-block{border:1px solid var(--hairline);border-radius:var(--radius);background:var(--bg-card)}
+.ch-head{display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;padding:var(--s3) var(--s4);border-bottom:1px solid var(--hairline)}
+.ch-head .ch-name{margin:0;font-size:var(--fs);font-weight:700;font-family:var(--font-mono);color:var(--accent)}
+.ch-mode{font-size:var(--fs-xs);padding:1px 8px;border:1px solid;border-radius:999px;text-transform:uppercase;letter-spacing:.04em}
+.ch-mode.serial{color:var(--info);border-color:rgba(20,108,122,.4);background:rgba(20,108,122,.06)}
+.ch-mode.free{color:var(--hue-1);border-color:rgba(74,88,200,.4);background:rgba(74,88,200,.06)}
+.ch-members{margin-left:auto;display:flex;gap:var(--s1);flex-wrap:wrap}
+.m-chip{font-size:var(--fs-xs);color:var(--dimmed);display:inline-flex;align-items:center;gap:4px}
+.m-chip::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--chip,var(--faint))}
+.ch-stream{padding:var(--s2) 0}
+.ch-row{display:grid;grid-template-columns:48px 90px 1fr;gap:var(--s3);padding:var(--s1) var(--s4);align-items:baseline}
+.ch-row .ch-seq{color:var(--faint);font-size:var(--fs-xs);text-align:right;font-family:var(--font-mono)}
+.ch-row .ch-from{font-family:var(--font-mono);font-weight:700;color:var(--from,var(--accent));
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ch-row .ch-text{color:var(--text);white-space:pre-wrap;word-break:break-word}
+.ch-row.ch-user{grid-template-columns:1fr 90px 48px}
+.ch-row.ch-user .ch-text{order:1;text-align:right;color:var(--dimmed)}
+.ch-row.ch-user .ch-from{order:2}
+.ch-row.ch-user .ch-seq{order:3}
+.ch-row+.ch-row{border-top:1px dashed var(--hairline)}
+
+/* ============ footer ============ */
+footer{border-top:1px solid var(--hairline);color:var(--faint);font-size:var(--fs-xs)}
+.foot-inner{max-width:var(--maxw);margin:0 auto;padding:var(--s3) var(--s4);display:flex;gap:var(--s3);flex-wrap:wrap}
+.foot-inner .mark{color:var(--accent)}
+.foot-warn{color:var(--gold)}
+
+/* ============ 窄屏 ============ */
+@media (max-width:640px){
+  .meta-line{display:none}
+  .r-row{grid-template-columns:80px 1fr;grid-template-areas:"state name" "state meta" "desc desc"}
+  .r-state{grid-area:state}.r-name{grid-area:name}.r-meta{grid-area:meta}.r-desc{grid-area:desc;margin-top:0}
+  .dm-row{grid-template-columns:64px 1fr}
+  .dm-row .dm-time{display:none}
+  .dm-row.dm-user{grid-template-columns:1fr 64px}
+  .ch-row{grid-template-columns:40px 68px 1fr}
+  .ch-row.ch-user{grid-template-columns:1fr 68px 40px}
+  .brand .session{max-width:40vw}
+  .content.w-sm,.content.w-md,.content.w-lg{max-width:100%}
+}
+
+/* ============ 打印 ============ */
+@media print{
+  :root{--bg:#FFFFFF;--bg-subtle:#F5F5F3}
+  .topbar{position:static}
+  .tabs,.copy-btn,.print-btn,.skip,.dec .anchor{display:none!important}
+  .dec .line{background:var(--hairline)}
+  body{font-size:12px}
+  .msg{break-inside:avoid}
+  pre,details summary,figcaption{break-inside:avoid}
+  a{text-decoration:underline}
+}
+/* ============ 减弱动效 ============ */
+@media (prefers-reduced-motion:reduce){
+  *{transition:none!important;animation:none!important}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="mark">▸</span><span class="name">bingo</span>
+      <span class="session">share export design</span>
+      <div class="meta-line">
+        <span>bingo</span>
+        <span>claude-opus-4.6</span>
+        <span>08-07 09:12</span>
+        <span>mode: plan</span>
+        <button type="button" class="print-btn" id="print-btn" aria-label="Print this page">⎙ Print</button>
+      </div>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="Views">
+      <button role="tab" data-tab="conv" aria-controls="view-conv" aria-selected="true"><span class="kbd">[1]</span>Conversation</button>
+      <button role="tab" data-tab="team" aria-controls="view-team" aria-selected="false"><span class="kbd">[2]</span>Team <span class="count">3</span></button>
+      <button role="tab" data-tab="dm" aria-controls="view-dm" aria-selected="false"><span class="kbd">[3]</span>DM <span class="count">2</span></button>
+      <button role="tab" data-tab="channel" aria-controls="view-channel" aria-selected="false"><span class="kbd">[4]</span>Channels <span class="count">2</span></button>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ═══════════ Conversation：消息时间线 ═══════════ -->
+  <section class="view" data-view="conv" role="tabpanel" id="view-conv" aria-label="Conversation">
+    <h2>Conversation <span class="n">· 4 messages</span></h2>
+    <div class="conv">
+
+      <article class="msg msg-user" id="msg-1">
+        <div class="dec">
+          <a class="anchor" href="#msg-1" aria-label="Copy link to this message">
+            <svg viewBox="0 0 16 16"><path d="M6.05 9.95a3 3 0 0 0 4.24 0l2.83-2.83a3 3 0 0 0-4.24-4.24L7.5 4.26" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M9.95 6.05a3 3 0 0 0-4.24 0l-2.83 2.83a3 3 0 0 0 4.24 4.24l1.38-1.38" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </a>
+          <span class="line" aria-hidden="true"></span>
+        </div>
+        <div class="content w-md">
+          <div class="meta">User <time datetime="2026-08-07T09:12:34+08:00">· 08-07 09:12</time></div>
+          <div class="body">
+            <p>Design the export contract for <code>bingo share</code>: conversation, team roster, direct messages, channels.</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="msg msg-assistant" id="msg-2">
+        <div class="dec">
+          <a class="anchor" href="#msg-2" aria-label="Copy link to this message">
+            <svg viewBox="0 0 16 16"><path d="M6.05 9.95a3 3 0 0 0 4.24 0l2.83-2.83a3 3 0 0 0-4.24-4.24L7.5 4.26" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M9.95 6.05a3 3 0 0 0-4.24 0l-2.83 2.83a3 3 0 0 0 4.24 4.24l1.38-1.38" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </a>
+          <span class="line" aria-hidden="true"></span>
+        </div>
+        <div class="content w-md">
+          <div class="meta">Assistant · claude-opus-4.6 <time datetime="2026-08-07T09:12:41+08:00">· 08-07 09:12</time></div>
+          <div class="card">
+            <p>Let me check what persistence already exists before defining the contract.</p>
+          </div>
+          <details class="think">
+            <summary>Thinking</summary>
+            <div class="think-body">The transcript is JSONL with one Message per line. Team state lives in memory; tasks persist to disk per listId. The export derives sub-agent and channel views from tool activity in the transcript.</div>
+          </details>
+          <div class="tool">
+            <div class="tool-title">
+              <span class="t-ico">⏺</span><span class="t-name">Bash</span>
+              <span class="t-args">git status --short</span>
+              <span class="t-status ok">✓ 0.3s</span>
+            </div>
+            <details class="tool-result w-sm">
+              <summary>Show result</summary>
+              <div class="t-body">
+                <div class="t-code"><span class="t-label">input</span><pre>{ "command": "git status --short" }</pre></div>
+                <div class="t-code output"><span class="t-label">result</span><pre> M src/transcript.rs
+?? notes/design/share-page-design.md</pre></div>
+              </div>
+            </details>
+          </div>
+          <div class="tool">
+            <div class="tool-title">
+              <span class="t-ico">⏺</span><span class="t-name">Read</span>
+              <span class="t-args">src/transcript.rs</span>
+              <span class="t-status ok">✓ 0.4s</span>
+            </div>
+            <details class="tool-result w-sm">
+              <summary>Show result</summary>
+              <div class="t-body">
+                <div class="t-code"><span class="t-label">input</span><pre>{ "file_path": "src/transcript.rs" }</pre></div>
+                <div class="t-code output"><span class="t-label">result</span><pre>pub struct Transcript { path: PathBuf }</pre></div>
+              </div>
+            </details>
+          </div>
+          <div class="card">
+            <p>Confirmed. The contract maps one-to-one onto the transcript:</p>
+            <ul>
+              <li><strong>meta</strong>: title, project, model, timestamps, mode</li>
+              <li><strong>messages</strong>: full conversation with all content blocks</li>
+              <li><strong>team</strong>: roster snapshot (name / def / state / message count)</li>
+              <li><strong>dm</strong>: per-agent thread history (SendMessage exchanges)</li>
+              <li><strong>channels</strong>: <code>◇ #name</code> streams in serial order</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <article class="msg msg-assistant" id="msg-3">
+        <div class="dec">
+          <a class="anchor" href="#msg-3" aria-label="Copy link to this message">
+            <svg viewBox="0 0 16 16"><path d="M6.05 9.95a3 3 0 0 0 4.24 0l2.83-2.83a3 3 0 0 0-4.24-4.24L7.5 4.26" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M9.95 6.05a3 3 0 0 0-4.24 0l-2.83 2.83a3 3 0 0 0 4.24 4.24l1.38-1.38" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </a>
+          <span class="line" aria-hidden="true"></span>
+        </div>
+        <div class="content w-md">
+          <div class="meta">Assistant <time datetime="2026-08-07T09:13:20+08:00">· 08-07 09:13</time></div>
+          <div class="card">
+            <p>The channel <code>build</code> latest three:</p>
+            <table>
+              <thead><tr><th>seq</th><th>from</th><th>text</th></tr></thead>
+              <tbody>
+                <tr><td>0001</td><td>dev</td><td>share template out: share-page-design.md</td></tr>
+                <tr><td>0002</td><td>qa</td><td>7 acceptance checks registered</td></tr>
+                <tr><td>0003</td><td>main</td><td>data contract fields marked required/optional</td></tr>
+              </tbody>
+            </table>
+            <figure class="code-block">
+              <figcaption>rust</figcaption>
+              <pre><code>pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+}</code></pre>
+            </figure>
+          </div>
+        </div>
+      </article>
+
+      <article class="msg msg-assistant" id="msg-4">
+        <div class="dec">
+          <a class="anchor" href="#msg-4" aria-label="Copy link to this message">
+            <svg viewBox="0 0 16 16"><path d="M6.05 9.95a3 3 0 0 0 4.24 0l2.83-2.83a3 3 0 0 0-4.24-4.24L7.5 4.26" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M9.95 6.05a3 3 0 0 0-4.24 0l-2.83 2.83a3 3 0 0 0 4.24 4.24l1.38-1.38" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </a>
+          <span class="line" aria-hidden="true"></span>
+        </div>
+        <div class="content w-md">
+          <div class="meta">Assistant <time datetime="2026-08-07T09:13:40+08:00">· 08-07 09:13</time></div>
+          <div class="card">
+            <p>Tool run with an error, for reference:</p>
+          </div>
+          <div class="tool">
+            <div class="tool-title">
+              <span class="t-ico">⏺</span><span class="t-name">AgentControl</span>
+              <span class="t-args">action=stop · name=qa</span>
+              <span class="t-status err">✗ 0.2s</span>
+            </div>
+            <details class="tool-result w-sm">
+              <summary>Show result</summary>
+              <div class="t-body">
+                <div class="t-code"><span class="t-label">input</span><pre>{ "action": "stop", "name": "qa" }</pre></div>
+                <div class="t-code output err"><span class="t-label">result · error</span><pre>qa is mid-turn; stop refused</pre></div>
+              </div>
+            </details>
+          </div>
+          <figure class="img-block">
+            <img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="embedded image example (data URI, offline)">
+          </figure>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ═══════════ Team 名册 ═══════════ -->
+  <section class="view" data-view="team" role="tabpanel" id="view-team" aria-label="Team" hidden>
+    <h2>Team <span class="n">· 3 instances</span></h2>
+    <div class="roster">
+      <div class="r-row">
+        <span class="r-state idle">● idle</span>
+        <span class="r-name" style="--from:var(--hue-0)">dev</span>
+        <span class="r-meta">.bingo/agents/dev.md · 23 messages</span>
+        <span class="r-desc">Developer engineer: implementation, technical design, code quality.</span>
+      </div>
+      <div class="r-row">
+        <span class="r-state running">◐ running</span>
+        <span class="r-name" style="--from:var(--hue-1)">qa</span>
+        <span class="r-meta">.bingo/agents/qa.md · 11 messages · 2 queued</span>
+        <span class="r-desc">Quality engineer: testing, acceptance, defect tracking.</span>
+      </div>
+      <div class="r-row">
+        <span class="r-state idle">● idle</span>
+        <span class="r-name" style="--from:var(--hue-2)">ui-ux</span>
+        <span class="r-meta">.bingo/agents/ui-ux.md · 9 messages</span>
+        <span class="r-desc">Interface &amp; experience designer (motion): visual spec, interaction, animation.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════ DM 私聊 ═══════════ -->
+  <section class="view" data-view="dm" role="tabpanel" id="view-dm" aria-label="Direct messages" hidden>
+    <h2>Direct Messages <span class="n">· 2 agents</span></h2>
+    <div class="dm-list">
+
+      <details class="dm-agent">
+        <summary>
+          <span class="a-dot" style="--dot:var(--hue-0)"></span>
+          <span class="a-name">dev</span>
+          <span class="a-state">● idle</span>
+          <span class="a-count">4 messages</span>
+        </summary>
+        <div class="dm-thread">
+          <div class="dm-row">
+            <span class="dm-from" style="--from:var(--accent)">main</span>
+            <span class="dm-text">Share page template is out, see notes/design/share-page-design.md.</span>
+            <span class="dm-time">09:15</span>
+          </div>
+          <div class="dm-row">
+            <span class="dm-from" style="--from:var(--hue-0)">dev</span>
+            <span class="dm-text">Got it, structure matches, wiring to the data contract.</span>
+            <span class="dm-time">09:15</span>
+          </div>
+          <div class="dm-row dm-user">
+            <span class="dm-from" style="--from:var(--text)">user</span>
+            <span class="dm-text">Keep it zero external dependencies.</span>
+            <span class="dm-time">09:15</span>
+          </div>
+          <div class="dm-row">
+            <span class="dm-from" style="--from:var(--hue-0)">dev</span>
+            <span class="dm-text">Confirmed: system font stack, no CDN, works from file://.</span>
+            <span class="dm-time">09:16</span>
+          </div>
+        </div>
+      </details>
+
+      <details class="dm-agent">
+        <summary>
+          <span class="a-dot" style="--dot:var(--hue-1)"></span>
+          <span class="a-name">qa</span>
+          <span class="a-state">◐ running</span>
+          <span class="a-count">2 messages</span>
+        </summary>
+        <div class="dm-thread">
+          <div class="dm-row">
+            <span class="dm-from" style="--from:var(--hue-1)">qa</span>
+            <span class="dm-text">Acceptance anchors listed: empty states, print expansion, tab focus.</span>
+            <span class="dm-time">09:16</span>
+          </div>
+          <div class="dm-row">
+            <span class="dm-from" style="--from:var(--accent)">main</span>
+            <span class="dm-text">Noted, added to the checklist.</span>
+            <span class="dm-time">09:16</span>
+          </div>
+        </div>
+      </details>
+
+    </div>
+  </section>
+
+  <!-- ═══════════ Channels 频道 ═══════════ -->
+  <section class="view" data-view="channel" role="tabpanel" id="view-channel" aria-label="Channels" hidden>
+    <h2>Channels <span class="n">· 2 rooms</span></h2>
+    <div class="ch-list">
+
+      <section class="ch-block">
+        <header class="ch-head">
+          <h3 class="ch-name">◇ #build</h3>
+          <span class="ch-mode serial">serial</span>
+          <span class="ch-members">
+            <span class="m-chip" style="--chip:var(--accent)">main</span>
+            <span class="m-chip" style="--chip:var(--text)">user</span>
+            <span class="m-chip" style="--chip:var(--hue-0)">dev</span>
+            <span class="m-chip" style="--chip:var(--hue-1)">qa</span>
+          </span>
+        </header>
+        <div class="ch-stream">
+          <div class="ch-row"><span class="ch-seq">#0001</span><span class="ch-from" style="--from:var(--hue-0)">dev</span><span class="ch-text">share template is out: share-page-design.md</span></div>
+          <div class="ch-row"><span class="ch-seq">#0002</span><span class="ch-from" style="--from:var(--hue-1)">qa</span><span class="ch-text">7 acceptance checks registered, contrast 6.2:1 passed</span></div>
+          <div class="ch-row"><span class="ch-seq">#0003</span><span class="ch-from" style="--from:var(--accent)">main</span><span class="ch-text">data contract fields marked required/optional</span></div>
+          <div class="ch-row ch-user"><span class="ch-seq">#0004</span><span class="ch-from" style="--from:var(--text)">user</span><span class="ch-text">let's review site visuals tomorrow morning</span></div>
+        </div>
+      </section>
+
+      <section class="ch-block">
+        <header class="ch-head">
+          <h3 class="ch-name">◇ #ideas</h3>
+          <span class="ch-mode free">free</span>
+          <span class="ch-members">
+            <span class="m-chip" style="--chip:var(--accent)">main</span>
+            <span class="m-chip" style="--chip:var(--hue-0)">dev</span>
+            <span class="m-chip" style="--chip:var(--hue-2)">ui-ux</span>
+          </span>
+        </header>
+        <div class="ch-stream">
+          <div class="ch-row"><span class="ch-seq">#0001</span><span class="ch-from" style="--from:var(--hue-2)">ui-ux</span><span class="ch-text">site visual direction doc this week: token table + component list + vibe refs</span></div>
+          <div class="ch-row"><span class="ch-seq">#0002</span><span class="ch-from" style="--from:var(--hue-0)">dev</span><span class="ch-text">hero: real terminal recording or pure CSS mockup? CSS is controllable, zero deps.</span></div>
+        </div>
+      </section>
+
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="foot-inner">
+    <span><span class="mark">▸</span> bingo · Rust agent CLI</span>
+    <span>generated 08-07 09:45 by bingo share</span>
+    <span>bingo 0.9.0</span>
+    <span class="foot-warn">contains full conversation &amp; tool output — review before sharing</span>
+  </div>
+</footer>
+
+<noscript><div style="padding:24px;text-align:center;color:var(--faint)">This page works without JavaScript; only tab switching, copy links and print expansion are enhanced.</div></noscript>
+
+<!-- ============================================================
+ 渐进增强 JS（数据由 Rust 服务端渲染，JS 不拼接任何数据）：
+ 1) tab 切换（role=tablist + 1-4 快捷键 + hash 直达）
+ 2) 消息锚点复制链接（URL + #msg-id）
+ 3) 代码/结果复制按钮
+ 4) 打印展开全部 details
+============================================================ -->
+<script>
+(function(){
+  'use strict';
+
+  /* ---------- tabs（导航；面板已服务端渲染，JS 只切换显示） ---------- */
+  function activateTab(name){
+    var panels = document.querySelectorAll('.view');
+    for (var i = 0; i < panels.length; i++){
+      panels[i].hidden = panels[i].getAttribute('data-view') !== name;
+    }
+    var tabs = document.querySelectorAll('.tabs button');
+    for (var j = 0; j < tabs.length; j++){
+      var on = tabs[j].getAttribute('data-tab') === name;
+      tabs[j].setAttribute('aria-selected', on ? 'true' : 'false');
+      tabs[j].tabIndex = on ? 0 : -1;
+    }
+    if (history.replaceState) history.replaceState(null, '', '#' + name);
+  }
+  function bindTabs(){
+    var tabs = Array.prototype.slice.call(document.querySelectorAll('.tabs button'));
+    tabs.forEach(function(btn){
+      btn.addEventListener('click', function(){ activateTab(btn.getAttribute('data-tab')); });
+      btn.addEventListener('keydown', function(e){
+        var idx = tabs.indexOf(btn);
+        var next;
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown'){
+          e.preventDefault();
+          next = tabs[(idx + 1) % tabs.length];
+        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp'){
+          e.preventDefault();
+          next = tabs[(idx - 1 + tabs.length) % tabs.length];
+        } else { return; }
+        next.focus();
+        activateTab(next.getAttribute('data-tab'));
+      });
+    });
+    document.addEventListener('keydown', function(e){
+      if (e.altKey || e.ctrlKey || e.metaKey) return;
+      var map = { '1': 'conv', '2': 'team', '3': 'dm', '4': 'channel' };
+      if (map[e.key]) activateTab(map[e.key]);
+    });
+    var name = (location.hash || '').replace('#', '');
+    if (['conv', 'team', 'dm', 'channel'].indexOf(name) >= 0) activateTab(name);
+  }
+
+  /* ---------- 消息锚点：点击复制 URL + #id ---------- */
+  function bindAnchors(){
+    var anchors = document.querySelectorAll('.dec .anchor');
+    for (var i = 0; i < anchors.length; i++){
+      anchors[i].addEventListener('click', function(e){
+        e.preventDefault();
+        var target = this.getAttribute('href');
+        var url = location.href.split('#')[0] + target;
+        var done = function(ok){
+          this.classList.add('copied');
+          setTimeout(function(){ this.classList.remove('copied'); }.bind(this), 1600);
+        }.bind(this);
+        var fallback = function(){
+          var ta = document.createElement('textarea');
+          ta.value = url;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          var ok = false;
+          try { ok = document.execCommand('copy'); } catch (e) {}
+          document.body.removeChild(ta);
+          done(ok);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText){
+          navigator.clipboard.writeText(url).then(function(){ done(true); }, function(){ fallback(); });
+        } else { fallback(); }
+      });
+    }
+  }
+
+  /* ---------- 复制按钮（.code-block 与 .t-code） ---------- */
+  function addCopyButtons(){
+    var targets = document.querySelectorAll('.code-block, .t-code');
+    for (var i = 0; i < targets.length; i++){
+      (function(t){
+        var pre = t.querySelector('pre');
+        if (!pre || t.querySelector('.copy-btn')) return;
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'copy-btn';
+        btn.textContent = 'Copy';
+        btn.setAttribute('aria-label', 'Copy code');
+        btn.addEventListener('click', function(){
+          var text = pre.textContent;
+          function done(ok){
+            btn.textContent = ok ? 'Copied ✓' : 'Copy failed';
+            setTimeout(function(){ btn.textContent = 'Copy'; }, 1600);
+          }
+          function fallback(){
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            var ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) {}
+            document.body.removeChild(ta);
+            done(ok);
+          }
+          if (navigator.clipboard && navigator.clipboard.writeText){
+            navigator.clipboard.writeText(text).then(function(){ done(true); }, function(){ fallback(); });
+          } else { fallback(); }
+        });
+        t.appendChild(btn);
+      })(targets[i]);
+    }
+  }
+
+  /* ---------- 打印：展开全部 details ---------- */
+  function bindPrint(){
+    var printBtn = document.getElementById('print-btn');
+    if (printBtn) printBtn.addEventListener('click', function(){ window.print(); });
+    var saved = [];
+    window.addEventListener('beforeprint', function(){
+      saved = [];
+      var ds = document.querySelectorAll('details');
+      for (var i = 0; i < ds.length; i++){
+        saved.push(ds[i].open);
+        ds[i].open = true;
+      }
+    });
+    window.addEventListener('afterprint', function(){
+      var ds = document.querySelectorAll('details');
+      for (var i = 0; i < ds.length; i++){
+        if (saved[i] !== undefined) ds[i].open = saved[i];
+      }
+    });
+  }
+
+  bindTabs();
+  bindAnchors();
+  addCopyButtons();
+  bindPrint();
+})();
+</script>
+</body>
+</html>

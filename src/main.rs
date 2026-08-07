@@ -27,6 +27,8 @@ mod permission;
 mod preapproved;
 mod query;
 mod settings;
+mod share;
+mod share_html;
 mod skills;
 mod system;
 mod tasks;
@@ -41,6 +43,7 @@ mod watch;
 
 #[derive(Debug, Parser)]
 #[command(name = "bingo", version, about = "Rust agent CLI")]
+#[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     /// Headless mode: print the reply straight to stdout
     #[arg(short, long)]
@@ -68,8 +71,28 @@ struct Cli {
     #[arg(long)]
     continue_: bool,
 
-    /// Prompt; reads from stdin when omitted (ignored in interactive mode)
+    /// Prompt; reads from stdin when omitted (ignored in interactive mode).
+    /// Mutually exclusive with subcommands (args_conflicts_with_subcommands) —
+    /// `bingo --print "x"` works without a subcommand; `bingo share` parses independently.
+    #[command(subcommand)]
+    command: Option<Command>,
+
     prompt: Vec<String>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Export the current session as a self-contained HTML share page (conversation/Team/DM/channels, offline)
+    Share {
+        /// Session key: transcript stem (`{slug}-{ts}`) or a matching fragment; defaults to the latest session (/resume semantics)
+        session: Option<String>,
+        /// Output file path (default `<session>.html` in the current directory)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Open the generated page in the system default browser
+        #[arg(long)]
+        open: bool,
+    },
 }
 
 /// Top-level exit (C exit mapping): all errors propagated to the top with `?` are
@@ -96,6 +119,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             PathBuf::new()
         }
     };
+    // 子命令快路径：share 只需 home（transcript/shares 目录），不碰 settings/API。
+    if let Some(Command::Share { session, output, open }) = cli.command {
+        run_share(&home, session.as_deref(), output, open)?;
+        return Ok(());
+    }
     let project_dir = std::env::current_dir()?;
     let user_dir = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -170,7 +198,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let mut runtime = crate::query::Runtime::new(
         model,
-        transcript,
+        transcript.clone(),
         settings.permissions.clone(),
     );
     runtime.mcp = Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
@@ -209,6 +237,25 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         channels: crate::channels::ChannelRegistry::new(channel_limits),
         instance: None,
     });
+
+    // share 持久化：随会话增量记录子代理/频道快照（`bingo share` 的数据源）。
+    // 与任务列表同 key = transcript 文件 stem；创建/读取失败只告警（增强不是契约）。
+    if let Some(stem) = transcript
+        .as_ref()
+        .map(|t| t.name())
+        .filter(|s| !s.is_empty())
+    {
+        let share_path = crate::share::shares_dir(&home).join(format!("{stem}.json"));
+        match crate::share::ShareStore::load_or_create(&share_path) {
+            Ok(store) => {
+                session.agents.attach_share(store.clone());
+                session.channels.attach_share(store.clone());
+            }
+            Err(e) => eprintln!(
+                "[bingo] warning: share store unavailable ({e}); bingo share 将只有对话视图"
+            ),
+        }
+    }
 
     let mode_str = session.permission_mode_str();
     crate::hooks::run_session_start(&session.settings.hooks, mode_str).await;
@@ -281,6 +328,75 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     crate::hooks::run_session_end(&session.settings.hooks, mode_str).await;
     result
 }
+
+/// `bingo share`: resolve the session with /resume semantics → read transcript + share doc →
+/// generate self-contained HTML → print the output path → (optionally) open the browser.
+fn run_share(
+    home: &Path,
+    key: Option<&str>,
+    output: Option<PathBuf>,
+    open: bool,
+) -> Result<(), crate::share::ShareError> {
+    let transcript = crate::share::resolve_transcript(home, key)?;
+    let stem = transcript.name();
+    let messages = transcript.load_messages()?;
+
+    // Fall back to an empty doc when the share file is missing/corrupt (conversation-only view; the old-session main path).
+    let share_path = crate::share::shares_dir(home).join(format!("{stem}.json"));
+    let doc = match crate::share::ShareStore::load_or_create(&share_path) {
+        Ok(store) => store.snapshot(),
+        Err(e) => {
+            eprintln!("[bingo] warning: 无法读取 share 文档（{e}）；仅生成对话视图");
+            crate::share::ShareDoc::new(stem.clone())
+        }
+    };
+
+    let html = crate::share_html::render(&doc, &messages);
+    let out = output.unwrap_or_else(|| PathBuf::from(format!("{stem}.html")));
+    let overwritten = out.exists();
+    if let Some(parent) = out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = out.with_extension("html.tmp");
+    std::fs::write(&tmp, &html)?;
+    std::fs::rename(&tmp, &out)?;
+    println!(
+        "[share] wrote {}{}",
+        out.display(),
+        if overwritten { " (overwritten)" } else { "" }
+    );
+    eprintln!("[share] 注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。");
+    if open {
+        open_in_browser(&out).map_err(crate::share::ShareError::Io)?;
+    }
+    Ok(())
+}
+
+/// Open a file with the system default browser (macOS open / Linux xdg-open / Windows cmd start).
+fn open_in_browser(path: &Path) -> Result<(), std::io::Error> {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    } else if cfg!(target_os = "linux") {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    } else {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/c").arg("start").arg("").arg(path);
+        c
+    };
+    cmd.spawn()?;
+    Ok(())
+}
+
+/// 顶层错误出口（C 出口映射）：`Box<dyn Error>` 沿 cause 链取稳定码
+/// （[`crate::error::error_code_boxed`]），msg 经转义/截断。
+/// 非 TTY 输出 `[error] code=<SCREAMING_SNAKE> msg=<单行 ≤200>`（AC-30/31/32）；
+/// TTY 下打印原样（交互环境错误在界面内呈现）。
 
 /// Top-level error exit (C exit mapping): `Box<dyn Error>` walks the cause chain for a stable
 /// code ([`crate::error::error_code_boxed`]); msg is escaped/truncated.
