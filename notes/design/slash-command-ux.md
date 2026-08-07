@@ -296,9 +296,11 @@ the `▸` preview appears/disappears with the badge redraw. No fade, no displace
    render update; no-match hint row (G9).
 7. Tests:
    - browsing then Esc → `runtime.thinking` unchanged; footer reverts;
-   - `1`..`6` selects the right row; **while the picker is open, digits never enter
-     the input buffer**; `s` applies session-only (settings.json **not** written,
-     runtime switched); Enter still persists (regression);
+   - `1`..`6` selects the right row; **while the picker is open, `1..6` are consumed by
+     the menu and never enter the input buffer** (other digits/letters fall through to
+     the input, consistent with the menu's existing non-strictly-modal edit semantics;
+     devex review wording: "1-6 不进输入框"); `s` applies session-only (settings.json
+     **not** written, runtime switched); Enter still persists (regression);
    - footer shows `▸` while the picker is open, clears after Enter/Esc; **↑/↓ during
      preview does not dirty the document — only the footer data source switches**
      (D20i render-storm lesson);
