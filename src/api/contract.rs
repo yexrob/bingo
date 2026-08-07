@@ -27,6 +27,14 @@ pub enum ClientError {
     /// The server gave no response within the request timeout.
     #[error("request timed out")]
     Timeout,
+    /// The current protocol/endpoint does not support this operation (e.g.
+    /// count_tokens on the Responses API) — callers degrade gracefully.
+    #[error("{0}")]
+    Unsupported(String),
+    /// Provider configuration error (unknown protocol etc.), surfaced at
+    /// startup before any request goes out.
+    #[error("{0}")]
+    Config(String),
 }
 
 impl crate::error::ErrorCode for ClientError {
@@ -36,6 +44,7 @@ impl crate::error::ErrorCode for ClientError {
     fn error_code(&self) -> &'static str {
         match self {
             ClientError::MissingApiKey | ClientError::InvalidApiKey(_) => "AUTH_REQUIRED",
+            ClientError::Config(_) => "CONFIG_INVALID",
             ClientError::Api { status: 401, .. } => "AUTH_REQUIRED",
             ClientError::Api { status: 403, .. } => "PERMISSION_DENIED",
             ClientError::Api { status: 429, .. } => "RATE_LIMITED",
@@ -43,6 +52,7 @@ impl crate::error::ErrorCode for ClientError {
             // server-interaction anomaly, action = "retry later".
             ClientError::Api { .. } => "SERVER_ERROR",
             ClientError::Stream(_) => "SERVER_ERROR",
+            ClientError::Unsupported(_) => "SERVER_ERROR",
             ClientError::Transport(_) => transport_offline_code(),
             ClientError::Timeout => "TIMEOUT",
         }

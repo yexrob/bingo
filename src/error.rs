@@ -203,10 +203,16 @@ mod tests {
             ClientError::Api { status: 500, body: String::new() },
             ClientError::Stream("s".into()),
             ClientError::Timeout,
+            ClientError::Unsupported("count_tokens".into()),
+            ClientError::Config("unknown protocol".into()),
         ];
         assert_stable_codes("api::client::ClientError", &variants);
         assert_eq!(ClientError::Timeout.error_code(), "TIMEOUT");
         assert_eq!(ClientError::MissingApiKey.error_code(), "AUTH_REQUIRED");
+        assert_eq!(
+            ClientError::Config("unknown protocol".into()).error_code(),
+            "CONFIG_INVALID"
+        );
         let denied = ClientError::Api { status: 403, body: String::new() };
         assert_eq!(denied.error_code(), "PERMISSION_DENIED");
         let server = ClientError::Api { status: 500, body: String::new() };

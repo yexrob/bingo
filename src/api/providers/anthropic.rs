@@ -10,6 +10,7 @@ use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
+use super::{backoff, retryable};
 use crate::api::contract::{
     AuthStatus, BoxStream, Capabilities, ClientError, NeutralRequest, ProviderClient, StreamEvent,
     SystemBlock, ThinkingLevel,
@@ -678,26 +679,6 @@ where
     tokio::time::timeout(idle, body.next())
         .await
         .map_err(|_| ClientError::Stream(format!("no stream data for {idle:?}: server stalled")))
-}
-
-/// Exponential backoff + jitter: from 500ms, capped at 32s.
-fn backoff(attempt: u32) -> Duration {
-    let base_ms = (500u64 << attempt.min(6)).min(32_000);
-    let jitter = rand_jitter(base_ms);
-    Duration::from_millis(base_ms + jitter)
-}
-
-fn rand_jitter(scale: u64) -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
-        .unwrap_or(0);
-    nanos % (scale / 2 + 1)
-}
-
-fn retryable(status: &reqwest::StatusCode) -> bool {
-    status.is_server_error() || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
 
 /// Parse (input_tokens, context_window) from a 400 error body: locates the

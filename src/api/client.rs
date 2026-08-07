@@ -19,6 +19,15 @@ pub(crate) use crate::api::contract::transport_offline_code;
 #[cfg(test)]
 pub(crate) use crate::api::providers::anthropic::test_hooks;
 
+/// Per-protocol default endpoint base URL (used when a named provider leaves
+/// `apiBaseUrl` empty, D33).
+fn protocol_default_base_url(protocol: Option<&str>) -> String {
+    match protocol.unwrap_or("anthropic") {
+        "openai" => providers::openai::API_BASE.to_string(),
+        _ => providers::anthropic::API_BASE.to_string(),
+    }
+}
+
 /// Display info for a provider (the `/provider` listing and `/model` menu):
 /// auth material (masked by the caller) + endpoint URL.
 #[derive(Debug, Clone)]
@@ -48,7 +57,7 @@ impl Client {
 
     /// Injectable variant of from_settings (tests use a fake env, avoiding
     /// real environment variables).
-    fn from_settings_with(
+    pub(crate) fn from_settings_with(
         settings: &crate::settings::Settings,
         env: impl Fn(&str) -> std::result::Result<String, std::env::VarError>,
     ) -> Result<Self, ClientError> {
@@ -67,24 +76,37 @@ impl Client {
             .providers
             .iter()
             .map(|(name, cfg)| {
-                let adapter = providers::anthropic(
+                let protocol = cfg.protocol.as_deref();
+                let base_url = if cfg.api_base_url.is_empty() {
+                    protocol_default_base_url(protocol)
+                } else {
+                    cfg.api_base_url.clone()
+                };
+                let adapter = providers::build_provider(
                     http.clone(),
+                    protocol,
                     cfg.api_key.clone(),
-                    cfg.api_base_url.clone(),
+                    base_url.clone(),
                     cfg.supports_images.unwrap_or(false),
-                );
-                (
+                )
+                .map_err(|message| {
+                    // Config error (e.g. unknown protocol) — surfaced at
+                    // startup with the same code family as settings parse
+                    // failures, before any request goes out.
+                    ClientError::Config(format!("provider \"{name}\": {message}"))
+                })?;
+                Ok((
                     name.clone(),
                     (
                         adapter,
                         EndpointInfo {
                             api_key: cfg.api_key.clone(),
-                            base_url: cfg.api_base_url.clone(),
+                            base_url,
                         },
                     ),
-                )
+                ))
             })
-            .collect::<HashMap<String, (Arc<dyn ProviderClient>, EndpointInfo)>>();
+            .collect::<Result<HashMap<String, (Arc<dyn ProviderClient>, EndpointInfo)>, ClientError>>()?;
         // default 端点也入 providers 表（key "default"）：set_provider /
         // with_provider("default") 走通（含「切回 default」），/model 二级
         // 对 default 拉列表用顶层端点、标签与内容一致（P0-C）。default 为
@@ -287,6 +309,7 @@ mod tests {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
+                    protocol: None,
             },
         );
         settings.providers.insert(
@@ -295,6 +318,7 @@ mod tests {
                 api_key: "sk-local".into(),
                 api_base_url: "http://127.0.0.1:11434".into(),
                 supports_images: None,
+                    protocol: None,
             },
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
@@ -327,6 +351,7 @@ mod tests {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
+                    protocol: None,
             },
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
@@ -368,6 +393,7 @@ mod tests {
                 api_key: "sk-v".into(),
                 api_base_url: "https://vision.example".into(),
                 supports_images: Some(true),
+                    protocol: None,
             },
         );
         settings.providers.insert(
@@ -376,6 +402,7 @@ mod tests {
                 api_key: "sk-t".into(),
                 api_base_url: "https://text.example".into(),
                 supports_images: Some(false),
+                    protocol: None,
             },
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);

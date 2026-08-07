@@ -124,13 +124,20 @@ pub struct ExperimentalSettings {
     pub agent_message_limit: Option<u64>,
 }
 
-/// Named provider (Anthropic-protocol endpoint).
+/// Named provider. v1 = Anthropic-protocol endpoint; v2 adds the optional
+/// `protocol` field (values `anthropic` | `openai`, default `anthropic` —
+/// every existing config parses unchanged, D33).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
     #[serde(rename = "apiKey")]
     pub api_key: String,
-    #[serde(rename = "apiBaseUrl")]
+    /// Endpoint base URL; empty/missing falls back to the protocol default
+    /// (anthropic → api.anthropic.com, openai → api.openai.com).
+    #[serde(rename = "apiBaseUrl", default)]
     pub api_base_url: String,
+    /// Wire protocol: `anthropic` (default) | `openai` (Responses API).
+    #[serde(default)]
+    pub protocol: Option<String>,
     /// Whether this provider's model accepts image content (`supportsImages`;
     /// None/default = don't send images).
     #[serde(rename = "supportsImages", default)]
@@ -483,6 +490,57 @@ mod tests {
         assert_eq!(settings.provider.as_deref(), Some("local"), "project 覆盖 user");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// D33 settings v2: `protocol` optional (defaults to anthropic behavior),
+    /// `apiBaseUrl` optional (empty = protocol default), both additive — an
+    /// openai provider parses without breaking anthropic-only configs.
+    #[test]
+    fn parses_provider_protocol_v2() {
+        let json = r#"{
+            "providers": {
+                "codex": { "protocol": "openai", "apiKey": "sk-oa", "supportsImages": true },
+                "road": { "apiKey": "sk-road", "apiBaseUrl": "https://sub2apis.ruobin.dev/" }
+            }
+        }"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+        let codex = settings.providers.get("codex").unwrap();
+        assert_eq!(codex.protocol.as_deref(), Some("openai"));
+        assert_eq!(codex.api_base_url, "", "apiBaseUrl 可缺省");
+        assert_eq!(codex.supports_images, Some(true));
+        // v1 config without protocol keeps parsing (anthropic default).
+        let road = settings.providers.get("road").unwrap();
+        assert_eq!(road.protocol, None);
+        assert_eq!(road.api_base_url, "https://sub2apis.ruobin.dev/");
+    }
+
+    /// Unknown protocol values are a config error at provider build time
+    /// (surfaced at startup, CONFIG_INVALID).
+    #[test]
+    fn unknown_protocol_is_config_error() {
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        settings.providers.insert(
+            "bogus".to_string(),
+            ProviderConfig {
+                api_key: "k".into(),
+                api_base_url: String::new(),
+                protocol: Some("chatgpt".into()),
+                supports_images: None,
+            },
+        );
+        let client = crate::api::client::Client::from_settings_with(&settings, |_| {
+            Err(std::env::VarError::NotPresent)
+        });
+        let err = client.err().unwrap();
+        assert_eq!(
+            crate::error::map_error(&err),
+            "CONFIG_INVALID",
+            "未知 protocol 应落配置错误"
+        );
+        assert!(err.to_string().contains("chatgpt"), "错误文案应点名非法值");
     }
 
     #[test]

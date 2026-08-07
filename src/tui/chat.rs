@@ -6246,6 +6246,7 @@ mod tests {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
+                    protocol: None,
             },
         )]);
         Arc::get_mut(&mut chat.session).unwrap().client =
@@ -6262,6 +6263,7 @@ mod tests {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
+                    protocol: None,
             },
         );
         Arc::get_mut(&mut chat.session).unwrap().client =
@@ -6700,6 +6702,7 @@ mod tests {
                     api_key: key.into(),
                     api_base_url: url.into(),
                     supports_images: None,
+                        protocol: None,
                 },
             );
         }
@@ -6745,6 +6748,7 @@ mod tests {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
+                    protocol: None,
             },
         );
         Arc::get_mut(&mut chat.session).unwrap().client =

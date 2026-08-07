@@ -882,6 +882,7 @@ mod tests {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
+                    protocol: None,
             },
         );
         let client = Arc::new(crate::api::client::Client::from_settings(&settings).unwrap());
