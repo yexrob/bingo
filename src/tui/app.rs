@@ -907,17 +907,6 @@ pub async fn run_fullscreen(
             .take(viewport)
             .cloned()
             .collect();
-        // sticky prompt header：覆盖在滚动区顶部（不占布局，避免内容位移）。
-        let sticky = chat.doc.sticky.clone().map(|text| {
-            let head = crate::tui::markdown::truncate(
-                &format!("❯ {text}"),
-                (size.width as usize).saturating_sub(1),
-            );
-            Row::bubble(
-                Line::styled(head, SegStyle::fg(chat.theme.subtle)),
-                chat.theme.user_message_bg,
-            )
-        });
         let fg = chat.theme.text;
         let chrome_start = (size.height as usize).saturating_sub(chrome.rows.len());
         let caret = {
@@ -934,14 +923,6 @@ pub async fn run_fullscreen(
             let area = frame.area();
             let buf = frame.buffer_mut();
             view::render_rows(&slice, fg, buf, area);
-            if let Some(row) = &sticky {
-                view::render_rows(
-                    std::slice::from_ref(row),
-                    fg,
-                    buf,
-                    Rect::new(area.x, area.y, area.width, 1),
-                );
-            }
             if let Ok(y) = u16::try_from(chrome_start) {
                 view::render_rows(
                     &chrome.rows,
