@@ -283,22 +283,6 @@ pub async fn upload_share(base: &str, id: &str, html: &str) -> Result<String, Sh
     Ok(url)
 }
 
-/// 同步上传（TUI `/share` 用；CLI 走 async 版 [`upload_share`]，
-/// 语义一致：POST `{base}/share/u/{id}`，body = HTML，公开无 token）。
-pub fn upload_share_blocking(base: &str, id: &str, html: &str) -> Result<String, ShareError> {
-    let url = format!("{base}/share/u/{id}");
-    let resp = reqwest::blocking::Client::new()
-        .post(&url)
-        .header("Content-Type", "text/html; charset=utf-8")
-        .body(html.to_string())
-        .send()
-        .map_err(|e| ShareError::Upload(format!("{e}")))?;
-    if !resp.status().is_success() {
-        return Err(ShareError::Upload(format!("HTTP {}", resp.status())));
-    }
-    Ok(url)
-}
-
 /// 用系统默认浏览器打开目标（文件路径或 URL；macOS open / Linux xdg-open / Windows cmd start）。
 pub fn open_in_browser(target: &str) -> Result<(), ShareError> {
     let mut cmd = if cfg!(target_os = "macos") {

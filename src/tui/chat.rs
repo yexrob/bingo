@@ -2470,6 +2470,9 @@ impl Chat {
         }
 
         // 上传模式：settings.share.baseUrl（缺省官网基址；服务公开无 token）。
+        // 必须异步上传——reqwest::blocking 在 TUI async 事件循环内调用会 tokio
+        // panic（Cannot block the current thread from within a runtime）。结果经
+        // events.send(UiEvent::SlashOutput) 推送（同 slash_compact 模式）。
         let user_dir = std::env::var("XDG_CONFIG_HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| self.session.home.join(".config"));
@@ -2481,45 +2484,49 @@ impl Chat {
             .base_url
             .unwrap_or_else(|| crate::share::DEFAULT_SHARE_BASE.to_string());
         let id = crate::share::share_id(&stem);
-        match crate::share::upload_share_blocking(&base, &id, &html) {
-            Ok(url) => {
-                let mut lines = vec![format!("✓ 已发布: {url}")];
-                if open {
-                    match crate::share::open_in_browser(&url) {
-                        Ok(_) => lines.push("已在浏览器中打开。".to_string()),
-                        Err(e) => lines.push(format!("无法打开浏览器: {e}")),
+        let events = self.events.clone();
+        self.push_slash_output("⏳ 正在发布分享页…".to_string());
+        tokio::spawn(async move {
+            match crate::share::upload_share(&base, &id, &html).await {
+                Ok(url) => {
+                    let mut lines = vec![format!("✓ 已发布: {url}")];
+                    if open {
+                        match crate::share::open_in_browser(&url) {
+                            Ok(_) => lines.push("已在浏览器中打开。".to_string()),
+                            Err(e) => lines.push(format!("无法打开浏览器: {e}")),
+                        }
                     }
+                    lines.push(
+                        "注意：任何人可公开访问此链接；分享页含完整对话与工具输出（可能含敏感信息），传播前请自行审阅。"
+                            .to_string(),
+                    );
+                    let _ = events.send(UiEvent::SlashOutput(lines.join("\n")));
                 }
-                lines.push(
-                    "注意：任何人可公开访问此链接；分享页含完整对话与工具输出（可能含敏感信息），传播前请自行审阅。"
-                        .to_string(),
-                );
-                self.push_slash_output(lines.join("\n"));
+                Err(e) => {
+                    // 上传失败回退本地文件 + 提示（与 bingo share 子命令一致）。
+                    let mut lines = vec![format!("上传失败（{e}）；回退本地文件。")];
+                    let overwritten = out.exists();
+                    match crate::share::write_html_atomic(&out, &html) {
+                        Ok(()) => lines.push(format!(
+                            "✓ 已导出: {}{}",
+                            out.display(),
+                            if overwritten { "（覆盖）" } else { "" }
+                        )),
+                        Err(write_err) => lines.push(format!("写入失败: {write_err}")),
+                    }
+                    if open
+                        && crate::share::open_in_browser(&out.display().to_string()).is_ok()
+                    {
+                        lines.push("已在浏览器中打开。".to_string());
+                    }
+                    lines.push(
+                        "注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。"
+                            .to_string(),
+                    );
+                    let _ = events.send(UiEvent::SlashOutput(lines.join("\n")));
+                }
             }
-            Err(e) => {
-                // 上传失败回退本地文件 + 提示（与 bingo share 子命令一致）。
-                let mut lines = vec![format!("上传失败（{e}）；回退本地文件。")];
-                let overwritten = out.exists();
-                match crate::share::write_html_atomic(&out, &html) {
-                    Ok(()) => lines.push(format!(
-                        "✓ 已导出: {}{}",
-                        out.display(),
-                        if overwritten { "（覆盖）" } else { "" }
-                    )),
-                    Err(write_err) => lines.push(format!("写入失败: {write_err}")),
-                }
-                if open
-                    && crate::share::open_in_browser(&out.display().to_string()).is_ok()
-                {
-                    lines.push("已在浏览器中打开。".to_string());
-                }
-                lines.push(
-                    "注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。"
-                        .to_string(),
-                );
-                self.push_slash_output(lines.join("\n"));
-            }
-        }
+        });
     }
 
     fn slash_compact(&mut self) {
@@ -5975,8 +5982,9 @@ mod tests {
     }
 
     /// /share 默认上传模式：mock 服务器接收 POST，输出公网链接 + 公开提示。
-    #[test]
-    fn slash_share_uploads_by_default() {
+    /// 上传为异步（tokio::spawn + UiEvent::SlashOutput），断言前 drain 事件。
+    #[tokio::test]
+    async fn slash_share_uploads_by_default() {
         use std::io::{BufRead, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -6020,11 +6028,19 @@ mod tests {
         let _ = chat.session.runtime.transcript_tx.send(Some(t));
         chat.input = "/share".to_string();
         chat.submit();
+        // current_thread runtime 下 spawn 任务需让出才能执行；sleep 轮询
+        // 直到 mock 服务器线程完成（收到请求并回应），并行负载下也稳定。
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !handle.is_finished() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(handle.is_finished(), "mock 服务器未收到上传请求");
+        let (request_line, body) = handle.join().unwrap();
+        chat.drain_events();
         let joined = chat.slash_lines.join("\n");
         assert!(joined.contains("已发布"), "{joined}");
         assert!(joined.contains(&format!("http://{addr}/share/u/")), "{joined}");
         assert!(joined.contains("任何人可公开访问此链接"), "{joined}");
-        let (request_line, body) = handle.join().unwrap();
         assert!(request_line.starts_with("POST /share/u/"), "{request_line}");
         assert!(body.contains("hi"), "上传 body 为完整 HTML");
         let _ = std::fs::remove_dir_all(&tmp);
