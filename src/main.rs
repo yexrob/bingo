@@ -27,6 +27,8 @@ mod permission;
 mod preapproved;
 mod query;
 mod settings;
+mod share;
+mod share_html;
 mod skills;
 mod system;
 mod tasks;
@@ -41,6 +43,7 @@ mod watch;
 
 #[derive(Debug, Parser)]
 #[command(name = "bingo", version, about = "Rust agent CLI")]
+#[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     /// headless 模式：直接把回复打到 stdout
     #[arg(short, long)]
@@ -67,8 +70,29 @@ struct Cli {
     #[arg(long)]
     continue_: bool,
 
-    /// prompt；缺省时从 stdin 读取（交互模式忽略）
+    /// 子命令（share 等）；出现时顶层位置参数与选项不可用
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// prompt；缺省时从 stdin 读取（交互模式忽略）。
+    /// 与子命令互斥（args_conflicts_with_subcommands）——`bingo --print "x"`
+    /// 无子命令时照常工作，`bingo share` 独立解析。
     prompt: Vec<String>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// 导出会话为自包含 HTML share 页面（对话/Team/私聊/频道四视图，离线可开）
+    Share {
+        /// 会话 key：transcript stem（`{slug}-{ts}`）或可匹配片段；缺省最近会话（/resume 同语义）
+        session: Option<String>,
+        /// 输出文件路径（缺省当前目录 `<会话名>.html`）
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// 生成后用系统默认浏览器打开
+        #[arg(long)]
+        open: bool,
+    },
 }
 
 /// 顶层出口（C 出口映射）：所有 `?` 传播到顶层的错误统一经
@@ -95,6 +119,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             PathBuf::new()
         }
     };
+    // 子命令快路径：share 只需 home（transcript/shares 目录），不碰 settings/API。
+    if let Some(Command::Share { session, output, open }) = cli.command {
+        run_share(&home, session.as_deref(), output, open)?;
+        return Ok(());
+    }
     let project_dir = std::env::current_dir()?;
     let user_dir = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -167,7 +196,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let mut runtime = crate::query::Runtime::new(
         model,
-        transcript,
+        transcript.clone(),
         settings.permissions.clone(),
     );
     runtime.mcp = Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
@@ -194,6 +223,25 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         channels: crate::channels::ChannelRegistry::new(channel_limits),
         instance: None,
     });
+
+    // share 持久化：随会话增量记录子代理/频道快照（`bingo share` 的数据源）。
+    // 与任务列表同 key = transcript 文件 stem；创建/读取失败只告警（增强不是契约）。
+    if let Some(stem) = transcript
+        .as_ref()
+        .map(|t| t.name())
+        .filter(|s| !s.is_empty())
+    {
+        let share_path = crate::share::shares_dir(&home).join(format!("{stem}.json"));
+        match crate::share::ShareStore::load_or_create(&share_path) {
+            Ok(store) => {
+                session.agents.attach_share(store.clone());
+                session.channels.attach_share(store.clone());
+            }
+            Err(e) => eprintln!(
+                "[bingo] warning: share store unavailable ({e}); bingo share 将只有对话视图"
+            ),
+        }
+    }
 
     let mode_str = session.permission_mode_str();
     crate::hooks::run_session_start(&session.settings.hooks, mode_str).await;
@@ -264,6 +312,65 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     crate::hooks::run_session_end(&session.settings.hooks, mode_str).await;
     result
+}
+
+/// `bingo share`：按 /resume 语义解析会话 → 读 transcript + share 文档 →
+/// 生成自包含 HTML → 打印输出路径 →（可选）打开浏览器。
+fn run_share(
+    home: &Path,
+    key: Option<&str>,
+    output: Option<PathBuf>,
+    open: bool,
+) -> Result<(), crate::share::ShareError> {
+    let transcript = crate::share::resolve_transcript(home, key)?;
+    let stem = transcript.name();
+    let messages = transcript.load_messages()?;
+
+    // share 文档缺失/损坏时回落空文档（仅对话视图，旧会话主路径）。
+    let share_path = crate::share::shares_dir(home).join(format!("{stem}.json"));
+    let doc = match crate::share::ShareStore::load_or_create(&share_path) {
+        Ok(store) => store.snapshot(),
+        Err(e) => {
+            eprintln!("[bingo] warning: 无法读取 share 文档（{e}）；仅生成对话视图");
+            crate::share::ShareDoc::new(stem.clone())
+        }
+    };
+
+    let html = crate::share_html::render(&doc, &messages);
+    let out = output.unwrap_or_else(|| PathBuf::from(format!("{stem}.html")));
+    if let Some(parent) = out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = out.with_extension("html.tmp");
+    std::fs::write(&tmp, &html)?;
+    std::fs::rename(&tmp, &out)?;
+    println!("[share] wrote {}", out.display());
+    eprintln!("[share] 注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。");
+    if open {
+        open_in_browser(&out).map_err(crate::share::ShareError::Io)?;
+    }
+    Ok(())
+}
+
+/// 用系统默认浏览器打开文件（macOS open / Linux xdg-open / Windows cmd start）。
+fn open_in_browser(path: &Path) -> Result<(), std::io::Error> {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    } else if cfg!(target_os = "linux") {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    } else {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/c").arg("start").arg("").arg(path);
+        c
+    };
+    cmd.spawn()?;
+    Ok(())
 }
 
 /// 顶层错误出口（C 出口映射）：`Box<dyn Error>` 沿 cause 链取稳定码

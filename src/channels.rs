@@ -14,6 +14,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
+
 /// 主 agent 在频道中的保留成员名。
 pub const HUB_NAME: &str = "main";
 /// 用户（人）在频道中的保留成员名：TUI 频道房间里以此身份发言，
@@ -46,7 +48,7 @@ impl ChannelMode {
 }
 
 /// 一条频道消息（seq 为频道内全序）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
     pub seq: u64,
     pub from: String,
@@ -137,6 +139,8 @@ struct Inner {
 /// 会话级频道注册中心（Session 持有 Arc，子会话共享）。
 pub struct ChannelRegistry {
     inner: Mutex<Inner>,
+    /// share 持久化（Option 语义：不挂接时行为不变；挂接后 create/invite/kick/post 同步快照）。
+    share: Mutex<Option<Arc<crate::share::ShareStore>>>,
 }
 
 fn format_hub_line(channel: &str, msg: &ChannelMessage) -> String {
@@ -151,7 +155,35 @@ impl ChannelRegistry {
                 hub_mail: Vec::new(),
                 limits,
             }),
+            share: Mutex::new(None),
         })
+    }
+
+    /// 挂接 share 持久化：之后频道元数据/消息变更同步进 share 文档。
+    pub fn attach_share(&self, store: Arc<crate::share::ShareStore>) {
+        *self.share.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
+    }
+
+    /// 把某频道的最新元数据（模式 + 成员）写入 share 文档（无 store 时 no-op）。
+    fn sync_channel_meta(&self, name: &str) {
+        let Some(store) = self.share.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+            return;
+        };
+        let inner = self.lock();
+        let Some(ch) = inner.channels.get(name) else {
+            return;
+        };
+        store.upsert_channel_meta(name, ch.mode, ch.members.clone());
+        store.persist();
+    }
+
+    /// 把一条已落地的频道消息追加进 share 文档（无 store 时 no-op）。
+    fn sync_channel_message(&self, name: &str, msg: &ChannelMessage) {
+        let Some(store) = self.share.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+            return;
+        };
+        store.append_channel_message(name, msg.clone());
+        store.persist();
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -169,30 +201,33 @@ impl ChannelRegistry {
         if name.is_empty() {
             return Err("频道名不能为空".to_string());
         }
-        let mut inner = self.lock();
-        if inner.channels.contains_key(name) {
-            return Err(format!("频道 #{name} 已存在"));
-        }
-        let mut all = vec![HUB_NAME.to_string(), USER_NAME.to_string()];
-        for m in members {
-            if m != HUB_NAME && m != USER_NAME && !all.contains(&m) {
-                all.push(m);
+        {
+            let mut inner = self.lock();
+            if inner.channels.contains_key(name) {
+                return Err(format!("频道 #{name} 已存在"));
             }
+            let mut all = vec![HUB_NAME.to_string(), USER_NAME.to_string()];
+            for m in members {
+                if m != HUB_NAME && m != USER_NAME && !all.contains(&m) {
+                    all.push(m);
+                }
+            }
+            inner.channels.insert(
+                name.to_string(),
+                Channel {
+                    members: all,
+                    mode,
+                    seq: 0,
+                    log: Vec::new(),
+                    seen: HashMap::new(),
+                    sent: HashMap::new(),
+                    frozen: false,
+                    message_limit: None,
+                    watch_id: None,
+                },
+            );
         }
-        inner.channels.insert(
-            name.to_string(),
-            Channel {
-                members: all,
-                mode,
-                seq: 0,
-                log: Vec::new(),
-                seen: HashMap::new(),
-                sent: HashMap::new(),
-                frozen: false,
-                message_limit: None,
-                watch_id: None,
-            },
-        );
+        self.sync_channel_meta(name);
         Ok(())
     }
 
@@ -216,18 +251,21 @@ impl ChannelRegistry {
     }
 
     pub fn invite(&self, name: &str, member: &str) -> Result<(), String> {
-        let mut inner = self.lock();
-        let Some(ch) = inner.channels.get_mut(name) else {
-            return Err(format!("没有频道 #{name}"));
-        };
-        if ch.members.iter().any(|m| m == member) {
-            return Err(format!("{member} 已在 #{name} 中"));
+        {
+            let mut inner = self.lock();
+            let Some(ch) = inner.channels.get_mut(name) else {
+                return Err(format!("没有频道 #{name}"));
+            };
+            if ch.members.iter().any(|m| m == member) {
+                return Err(format!("{member} 已在 #{name} 中"));
+            }
+            ch.members.push(member.to_string());
+            // 迟入不补发 backlog：从当前头开始"听"（seen 置为当前 seq，
+            // serial 校验不会因为入场前的历史弹回）。
+            let seq = ch.seq;
+            ch.seen.insert(member.to_string(), seq);
         }
-        ch.members.push(member.to_string());
-        // 迟入不补发 backlog：从当前头开始"听"（seen 置为当前 seq，
-        // serial 校验不会因为入场前的历史弹回）。
-        let seq = ch.seq;
-        ch.seen.insert(member.to_string(), seq);
+        self.sync_channel_meta(name);
         Ok(())
     }
 
@@ -235,15 +273,18 @@ impl ChannelRegistry {
         if member == HUB_NAME || member == USER_NAME {
             return Err(format!("{member} 是保留成员，不可移出频道"));
         }
-        let mut inner = self.lock();
-        let Some(ch) = inner.channels.get_mut(name) else {
-            return Err(format!("没有频道 #{name}"));
-        };
-        let before = ch.members.len();
-        ch.members.retain(|m| m != member);
-        if ch.members.len() == before {
-            return Err(format!("{member} 不在 #{name} 中"));
+        {
+            let mut inner = self.lock();
+            let Some(ch) = inner.channels.get_mut(name) else {
+                return Err(format!("没有频道 #{name}"));
+            };
+            let before = ch.members.len();
+            ch.members.retain(|m| m != member);
+            if ch.members.len() == before {
+                return Err(format!("{member} 不在 #{name} 中"));
+            }
         }
+        self.sync_channel_meta(name);
         Ok(())
     }
 
@@ -308,6 +349,7 @@ impl ChannelRegistry {
                 text: text.to_string(),
             };
             ch.log.push(msg.clone());
+            self.sync_channel_message(name, &msg);
             ch.seen.insert(from.to_string(), ch.seq);
             *ch.sent.entry(from.to_string()).or_insert(0) += 1;
             let deliveries: Vec<(String, ChannelMessage)> = ch
@@ -581,6 +623,46 @@ mod tests {
         let err = reg.post("b", "t", "y").unwrap_err();
         assert!(err.contains("已冻结"), "{err}");
         assert!(!reg.has_hub_mail());
+    }
+
+    #[test]
+    fn share_hooks_track_create_invite_kick_post() {
+        let root = std::env::temp_dir().join(format!("bingo-ch-{}-share", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = crate::share::ShareStore::load_or_create(&root.join("s.json"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let reg = ChannelRegistry::new(ChannelLimits::default());
+        reg.attach_share(store.clone());
+
+        // create → 频道元数据（模式 + 成员）。
+        reg.create("t", vec!["a".into()], ChannelMode::Free)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let doc = store.snapshot();
+        assert_eq!(doc.channels.len(), 1);
+        assert_eq!(doc.channels[0].mode, "free");
+        assert_eq!(doc.channels[0].members, vec!["main", "user", "a"]);
+        assert!(doc.channels[0].messages.is_empty());
+
+        // invite/kick → 成员更新（消息保留）。
+        reg.invite("t", "b").unwrap_or_else(|e| panic!("{e}"));
+        reg.kick("t", "a").unwrap_or_else(|e| panic!("{e}"));
+        let doc = store.snapshot();
+        assert_eq!(doc.channels[0].members, vec!["main", "user", "b"]);
+
+        // post Sent → 追加消息。
+        let (seq, _) = sent(reg.post("b", "t", "hi").unwrap_or_else(|e| panic!("{e}")));
+        assert_eq!(seq, 1);
+        let doc = store.snapshot();
+        assert_eq!(doc.channels[0].messages.len(), 1);
+        assert_eq!(doc.channels[0].messages[0].from, "b");
+        assert_eq!(doc.channels[0].messages[0].text, "hi");
+        // 落盘 roundtrip：重载后数据一致。
+        store.persist();
+        let reloaded = crate::share::ShareStore::load_or_create(&root.join("s.json"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let doc = reloaded.snapshot();
+        assert_eq!(doc.channels[0].messages[0].seq, 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

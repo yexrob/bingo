@@ -209,13 +209,40 @@ struct Entry {
 /// 的"检查-认领"在同一把锁下原子完成，不存在丢失唤醒。
 pub struct AgentRegistry {
     inner: Mutex<HashMap<String, Entry>>,
+    /// share 持久化（Option 语义：不挂接时行为不变；挂接后 insert/finish/stop 同步快照）。
+    share: Mutex<Option<Arc<crate::share::ShareStore>>>,
 }
 
 impl AgentRegistry {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(HashMap::new()),
+            share: Mutex::new(None),
         })
+    }
+
+    /// 挂接 share 持久化：之后实例的建/完成/停止事件同步进 share 文档。
+    pub fn attach_share(&self, store: Arc<crate::share::ShareStore>) {
+        *self.share.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
+    }
+
+    /// 把某实例的最新快照写入 share 文档（无 store 时 no-op）。
+    fn sync_share(&self, name: &str) {
+        let Some(store) = self.share.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+            return;
+        };
+        let inner = self.lock();
+        let Some(entry) = inner.get(name) else {
+            return;
+        };
+        store.upsert_agent(
+            name,
+            entry.def.clone(),
+            entry.description.clone(),
+            entry.state,
+            entry.history.clone(),
+        );
+        store.persist();
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
@@ -267,6 +294,7 @@ impl AgentRegistry {
                 live: None,
             },
         );
+        self.sync_share(name);
     }
 
     /// 注入实例的初始/恢复历史（D31 team 记忆恢复：不唤醒，仅预载续话上下文）。
@@ -330,19 +358,23 @@ impl AgentRegistry {
         name: &str,
         history: Vec<Message>,
     ) -> Option<(Vec<Message>, Vec<InboxItem>)> {
-        let mut inner = self.lock();
-        let entry = inner.get_mut(name)?;
-        entry.history = history;
-        if entry.state == AgentState::Stopped {
-            return None;
-        }
-        if entry.inbox.is_empty() {
-            entry.state = AgentState::Idle;
-            return None;
-        }
-        let items = std::mem::take(&mut entry.inbox);
-        entry.state = AgentState::Running;
-        Some((entry.history.clone(), items))
+        let result = {
+            let mut inner = self.lock();
+            let entry = inner.get_mut(name)?;
+            entry.history = history;
+            if entry.state == AgentState::Stopped {
+                None
+            } else if entry.inbox.is_empty() {
+                entry.state = AgentState::Idle;
+                None
+            } else {
+                let items = std::mem::take(&mut entry.inbox);
+                entry.state = AgentState::Running;
+                Some((entry.history.clone(), items))
+            }
+        };
+        self.sync_share(name);
+        result
     }
 
     /// 回合失败：保留失败前历史，转 Idle（可经 SendMessage 重试）。
@@ -420,20 +452,25 @@ impl AgentRegistry {
     /// 返回被中止回合的 watch 行（调用方置 Cancelled）；
     /// 空闲/已停止时无进行中的行，返回 None（幂等）。
     pub fn stop(&self, name: &str) -> Result<Option<crate::watch::WatchId>, String> {
-        let mut inner = self.lock();
-        let Some(entry) = inner.get_mut(name) else {
-            return Err(format!("没有名为 {name} 的子代理"));
+        let watch_id = {
+            let mut inner = self.lock();
+            let Some(entry) = inner.get_mut(name) else {
+                return Err(format!("没有名为 {name} 的子代理"));
+            };
+            if entry.state == AgentState::Stopped {
+                None
+            } else {
+                let was_running = entry.state == AgentState::Running;
+                entry.state = AgentState::Stopped;
+                entry.inbox.clear();
+                if let Some(abort) = entry.abort.take() {
+                    abort.abort();
+                }
+                if was_running { entry.watch_id } else { None }
+            }
         };
-        if entry.state == AgentState::Stopped {
-            return Ok(None);
-        }
-        let was_running = entry.state == AgentState::Running;
-        entry.state = AgentState::Stopped;
-        entry.inbox.clear();
-        if let Some(abort) = entry.abort.take() {
-            abort.abort();
-        }
-        Ok(if was_running { entry.watch_id } else { None })
+        self.sync_share(name);
+        Ok(watch_id)
     }
 
     /// 删除：先停止，再移除条目（名字释放）。返回被中止回合的 watch 行。
@@ -649,6 +686,50 @@ mod tests {
             reg.deposit("ghost", InboxItem::Direct("y".into())),
             DepositOutcome::Dropped
         ));
+    }
+
+    #[test]
+    fn share_hooks_track_insert_finish_stop() {
+        let root = std::env::temp_dir().join(format!("bingo-agents-{}-share", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store =
+            crate::share::ShareStore::load_or_create(&root.join("shares").join("s.json"))
+                .unwrap_or_else(|e| panic!("{e}"));
+        let reg = AgentRegistry::new();
+        reg.attach_share(store.clone());
+
+        // insert → 建条目（running，空历史）。
+        reg.insert("scout", Some("scout".into()), "调研".into(), test_session());
+        let doc = store.snapshot();
+        assert_eq!(doc.agents.len(), 1);
+        assert_eq!(doc.agents[0].state, "running");
+        assert_eq!(doc.agents[0].def.as_deref(), Some("scout"));
+        assert!(doc.agents[0].history.is_empty());
+
+        // finish → 历史 + 状态（空信箱 → idle）。
+        reg.finish("scout", vec![Message::user_text("hi")]);
+        let doc = store.snapshot();
+        assert_eq!(doc.agents[0].state, "idle");
+        assert_eq!(doc.agents[0].history.len(), 1);
+        assert_eq!(doc.agents[0].history[0], Message::user_text("hi"));
+
+        // 忙碌信箱非空 → finish 后保持 running（Idle 唤醒排空 inbox 给 Start，
+        // Running 时才排队；两条指令制造排队场景）。
+        reg.deliver("scout", "再查").unwrap_or_else(|e| panic!("{e}"));
+        reg.deliver("scout", "又查").unwrap_or_else(|e| panic!("{e}"));
+        reg.finish("scout", Vec::new());
+        let doc = store.snapshot();
+        assert_eq!(doc.agents[0].state, "running");
+        // 信箱排空 → idle。
+        reg.finish("scout", Vec::new());
+        let doc = store.snapshot();
+        assert_eq!(doc.agents[0].state, "idle");
+
+        // stop → stopped。
+        reg.stop("scout").unwrap_or_else(|e| panic!("{e}"));
+        let doc = store.snapshot();
+        assert_eq!(doc.agents[0].state, "stopped");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
