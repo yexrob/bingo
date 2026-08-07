@@ -167,8 +167,12 @@ when_to_use: >-
   system prompt；Agent 工具的 `agent` 参数引用。
   **逐实例模型/思考**：Agent 工具的 `model`/`provider`/`thinking` 参数可给单个
   子代理指定模型、provider（settings 的 providers 段，跨端点/跨 key）与思考级别
-  （`off/low/medium/high/xhigh/max`）；优先级 显式参数 > 具名定义 > 继承父会话
-  当前值（模型/provider/思考各自独立，互不影响父会话）。
+  （`off/low/medium/high/xhigh/max`，非法值报错）；优先级 显式参数 > 具名定义 >
+  继承父会话当前值（模型/provider/思考各自独立，互不影响父会话）。**跨 provider
+  边界**：fork 到与父会话不同的 provider 时，父模型与思考级别都不继承——必须
+  显式指定 `model`（否则早失败提示），`thinking` 缺省为 off（不带 thinking 参数，
+  兼容 DeepSeek/Ollama 等端点）；`provider` 传 `"default"` 或省略 = 共享父端点
+  （跟随父会话切换，与 /model 菜单一致）。
   **频道互发**（实验，`experimental.agentChannels`）：主 agent 用 Channel 工具
   建频道/进出成员（成员限直接子代理，主 agent 名 `main` 自动入席），成员用 Post
   发言——消息进全体成员上下文（同序），发件人由运行时盖戳；serial 频道落后
