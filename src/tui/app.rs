@@ -702,6 +702,7 @@ pub async fn run_inline(
                 } else {
                     if *expand_rx.borrow() {
                         chat.tasks_visible = true;
+                        chat.tasks_auto = true;
                     }
                     chat.refresh_tasks();
                     dirty = true;
@@ -864,6 +865,7 @@ pub async fn run_fullscreen(
                 } else {
                     if *expand_rx.borrow() {
                         chat.tasks_visible = true;
+                        chat.tasks_auto = true;
                     }
                     chat.refresh_tasks();
                     dirty = true;
