@@ -2473,15 +2473,14 @@ impl Chat {
         // 必须异步上传——reqwest::blocking 在 TUI async 事件循环内调用会 tokio
         // panic（Cannot block the current thread from within a runtime）。结果经
         // events.send(UiEvent::SlashOutput) 推送（同 slash_compact 模式）。
-        let user_dir = std::env::var("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| self.session.home.join(".config"));
-        let settings =
-            crate::settings::load_settings(&user_dir, &std::path::PathBuf::from(&self.cwd))
-                .unwrap_or_default();
-        let base = settings
+        // baseUrl 取会话运行时配置（TUI 启动时已加载），不重读磁盘——避免
+        // XDG_CONFIG_HOME 环境差异导致配置错位（CI/测试环境敏感）。
+        let base = self
+            .session
+            .settings
             .share
             .base_url
+            .clone()
             .unwrap_or_else(|| crate::share::DEFAULT_SHARE_BASE.to_string());
         let id = crate::share::share_id(&stem);
         let events = self.events.clone();
@@ -6015,16 +6014,15 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-upshare", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let home = tmp.join("home");
-        // settings.share.baseUrl → 本地 mock 服务器。
-        std::fs::create_dir_all(home.join(".config/bingo")).unwrap();
-        std::fs::write(
-            home.join(".config/bingo/settings.json"),
-            format!("{{\"share\": {{\"baseUrl\": \"http://{addr}\"}}}}"),
-        )
-        .unwrap();
         let t = crate::transcript::create(&home, &tmp).unwrap_or_else(|e| panic!("{e}"));
         let _ = t.append(&crate::api::types::Message::user_text("hi"));
         let mut chat = test_chat_home(home.clone());
+        // settings.share.baseUrl → 本地 mock 服务器（会话运行时配置，不依赖磁盘/XDG）。
+        Arc::get_mut(&mut chat.session)
+            .unwrap_or_else(|| panic!("唯一引用"))
+            .settings
+            .share
+            .base_url = Some(format!("http://{addr}"));
         let _ = chat.session.runtime.transcript_tx.send(Some(t));
         chat.input = "/share".to_string();
         chat.submit();
