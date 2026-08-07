@@ -42,10 +42,11 @@ const SIZE_QUERY: &[u8] = b"\x1b[c\x1b[14t";
 /// How long to wait for the probe answers.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// Shown once when tmux fronts a placeholder-capable terminal but swallows the
-/// passthrough probe — almost always `allow-passthrough` being off.
+/// Shown once when the tmux passthrough probe gets no answer. Causes: the
+/// outer terminal does not speak the kitty protocol, passthrough could not be
+/// enabled, or the pane was not the focused pane during the probe.
 const TMUX_PASSTHROUGH_HINT: &str =
-    "tmux 检测到 kitty 终端但 passthrough 未开启：`tmux set -g allow-passthrough on` 可启用图片";
+    "tmux 下未确认外层终端支持 kitty 图片协议：外层需为 ghostty/kitty（WezTerm/Konsole 不支持占位符）且 bingo 需在焦点窗格启动";
 
 /// How an image is placed on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,9 +101,9 @@ enum ProbePlan {
     /// Inside tmux: probe through a passthrough envelope. Whether the outer
     /// terminal speaks kitty graphics is decided by the probe answer itself.
     TmuxProbe,
-    /// Inside tmux, fronted by a terminal known to lack `U=1` placeholder
-    /// support (WezTerm/Konsole/screen): images cannot survive the
-    /// multiplexer, so keep the `#[image]` placeholder.
+    /// Inside tmux, fronted by a terminal known to answer the kitty query but
+    /// lack `U=1` placeholder support (WezTerm/Konsole): a probe would pass
+    /// and then silently fail to display, so keep the `#[image]` placeholder.
     TmuxUnsupported,
 }
 
@@ -117,8 +118,8 @@ enum ProbePlan {
 ///
 /// Inside tmux the same `a=q` probe is sent wrapped in a tmux passthrough
 /// envelope; an answer means passthrough is on and images can be placed with
-/// Unicode placeholders. No answer yields no capability plus a hint, because
-/// the usual cause is `allow-passthrough` being off.
+/// Unicode placeholders. No answer yields no capability plus a hint (the
+/// outer terminal may lack kitty support or passthrough may be off).
 pub async fn detect_image_cap() -> ImageProbe {
     let program = std::env::var("TERM_PROGRAM").ok();
     let term = std::env::var("TERM").ok();
@@ -126,12 +127,30 @@ pub async fn detect_image_cap() -> ImageProbe {
         std::env::var_os("TMUX").is_some(),
         program.as_deref(),
         term.as_deref(),
+        // tmux overwrites `TERM_PROGRAM` in panes, so the outer terminal is
+        // identified only by variables it sets itself; `WEZTERM_EXECUTABLE`
+        // and `KONSOLE_VERSION` survive into panes untouched.
+        std::env::var_os("WEZTERM_EXECUTABLE").is_some(),
+        std::env::var_os("KONSOLE_VERSION").is_some(),
     );
     // The grid size pairs with the `14t` pixel answer to give one cell.
     let grid = crossterm::terminal::size().ok();
     match plan {
         ProbePlan::TmuxUnsupported => ImageProbe::default(),
         ProbePlan::TmuxProbe => {
+            // Best effort: allow the passthrough envelope to reach the outer
+            // terminal even when the user has not set `allow-passthrough`
+            // themselves (`-p` applies to the current pane only). Without it
+            // tmux drops the DCS payloads and nothing displays.
+            let _ = std::process::Command::new("tmux")
+                .args(["set", "-p", "allow-passthrough", "on"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .and_then(|mut child| child.wait());
+            // tmux routes the outer terminal's reply back to the focused
+            // pane; bingo probes at startup, i.e. while its pane is focused.
             let wrapped = tmux_passthrough(GRAPHICS_QUERY);
             let buf = query_terminal(&[wrapped.as_slice(), SIZE_QUERY]).await;
             if !buf.as_deref().is_some_and(graphics_query_ok) {
@@ -162,23 +181,35 @@ async fn query_terminal(queries: &[&[u8]]) -> Option<Vec<u8>> {
     crate::tui::theme::Theme::query_terminal(queries, PROBE_TIMEOUT).await
 }
 
-/// Env decision matrix (`TERM_PROGRAM` survives tmux, `TERM` does not).
-fn probe_plan(in_tmux: bool, term_program: Option<&str>, term: Option<&str>) -> ProbePlan {
+/// Env decision matrix.
+///
+/// Direct (no tmux): `TERM_PROGRAM`/`TERM` short-circuit terminals already
+/// known to speak the protocol.
+///
+/// Inside tmux the picture is different: tmux 3.x overwrites the pane's
+/// `TERM_PROGRAM` with "tmux" and `TERM` is the pane's own
+/// (`tmux-256color`), so the outer terminal cannot be identified positively
+/// from env. The only env facts that survive into panes are variables set by
+/// the outer terminal itself; we use them for a negative exclusion only —
+/// WezTerm and Konsole answer the kitty query but lack `U=1` Unicode
+/// placeholder placement, so a successful probe would transmit the image and
+/// never display it. Every other outer terminal gets a passthrough probe and
+/// the query answer is authoritative.
+fn probe_plan(
+    in_tmux: bool,
+    term_program: Option<&str>,
+    term: Option<&str>,
+    wezterm: bool,
+    konsole: bool,
+) -> ProbePlan {
     if !in_tmux {
         return ProbePlan::Direct { env_kitty: env_kitty(term_program, term) };
     }
-    if outer_supports_placeholders(term_program, term) {
-        ProbePlan::TmuxProbe
-    } else {
+    if wezterm || konsole {
         ProbePlan::TmuxUnsupported
+    } else {
+        ProbePlan::TmuxProbe
     }
-}
-
-/// Terminals implementing kitty's Unicode placeholder placement (`U=1`), the
-/// only placement that works behind a multiplexer. WezTerm and Konsole speak
-/// the graphics protocol but not placeholders, so they get no probe at all.
-fn outer_supports_placeholders(term_program: Option<&str>, term: Option<&str>) -> bool {
-    matches!(term_program, Some("ghostty") | Some("kitty")) || term == Some("xterm-kitty")
 }
 
 /// Assemble the capability from the probe answers, falling back per B's rules.
@@ -716,29 +747,38 @@ mod tests {
     fn probe_plan_env_matrix() {
         // No tmux: unchanged behaviour, env_kitty short circuit intact.
         assert_eq!(
-            probe_plan(false, Some("ghostty"), None),
+            probe_plan(false, Some("ghostty"), None, false, false),
             ProbePlan::Direct { env_kitty: true }
         );
         assert_eq!(
-            probe_plan(false, Some("WezTerm"), None),
+            probe_plan(false, Some("WezTerm"), None, false, false),
             ProbePlan::Direct { env_kitty: true }
         );
         assert_eq!(
-            probe_plan(false, Some("Apple_Terminal"), Some("xterm-256color")),
+            probe_plan(false, Some("Apple_Terminal"), Some("xterm-256color"), false, false),
             ProbePlan::Direct { env_kitty: false }
         );
-        // tmux fronted by a placeholder-capable terminal → probe.
-        assert_eq!(probe_plan(true, Some("ghostty"), None), ProbePlan::TmuxProbe);
-        assert_eq!(probe_plan(true, Some("kitty"), None), ProbePlan::TmuxProbe);
-        assert_eq!(probe_plan(true, None, Some("xterm-kitty")), ProbePlan::TmuxProbe);
-        // No U=1 support outside → placeholder, no probe.
-        assert_eq!(probe_plan(true, Some("WezTerm"), None), ProbePlan::TmuxUnsupported);
-        assert_eq!(probe_plan(true, Some("konsole"), None), ProbePlan::TmuxUnsupported);
+        // Inside tmux, `TERM_PROGRAM` is overwritten to "tmux" by tmux 3.x and
+        // `TERM` is the pane's own, so they no longer decide anything: every
+        // outer terminal we cannot positively exclude gets a passthrough probe
+        // and the query answer is authoritative.
+        assert_eq!(probe_plan(true, Some("ghostty"), None, false, false), ProbePlan::TmuxProbe);
+        assert_eq!(probe_plan(true, Some("kitty"), None, false, false), ProbePlan::TmuxProbe);
+        assert_eq!(probe_plan(true, None, Some("xterm-kitty"), false, false), ProbePlan::TmuxProbe);
+        assert_eq!(probe_plan(true, Some("tmux"), Some("tmux-256color"), false, false), ProbePlan::TmuxProbe);
+        assert_eq!(probe_plan(true, None, None, false, false), ProbePlan::TmuxProbe);
         assert_eq!(
-            probe_plan(true, Some("Apple_Terminal"), Some("screen-256color")),
-            ProbePlan::TmuxUnsupported
+            probe_plan(true, Some("Apple_Terminal"), Some("screen-256color"), false, false),
+            ProbePlan::TmuxProbe,
+            "screen does not answer the query, so the probe fails on its own"
         );
-        assert_eq!(probe_plan(true, None, None), ProbePlan::TmuxUnsupported);
+        // WezTerm/Konsole answer the kitty query but lack U=1 placeholders;
+        // they are excluded via env vars the outer terminal sets itself (and
+        // that tmux does not overwrite), never via TERM_PROGRAM.
+        assert_eq!(probe_plan(true, Some("WezTerm"), None, true, false), ProbePlan::TmuxUnsupported);
+        assert_eq!(probe_plan(true, Some("konsole"), None, false, true), ProbePlan::TmuxUnsupported);
+        assert_eq!(probe_plan(true, None, None, true, false), ProbePlan::TmuxUnsupported);
+        assert_eq!(probe_plan(true, None, None, false, true), ProbePlan::TmuxUnsupported);
     }
 
     #[test]
@@ -915,5 +955,26 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .unwrap();
         out
+    }
+
+    /// End-to-end probe: prints what `detect_image_cap` decides in the
+    /// CURRENT environment. Ignored by default — it performs live terminal
+    /// I/O (raw mode + passthrough query) that can hang in headless/harness
+    /// contexts; run on demand inside a focused tmux pane:
+    /// `cargo test debug_detect_in_current_env -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn debug_detect_in_current_env() {
+        let probe = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(detect_image_cap());
+        eprintln!(
+            "DEBUG image_cap={:?} warning={:?} TERM={:?} TERM_PROGRAM={:?} TMUX={:?}",
+            probe.cap,
+            probe.warning,
+            std::env::var("TERM").ok(),
+            std::env::var("TERM_PROGRAM").ok(),
+            std::env::var_os("TMUX"),
+        );
     }
 }

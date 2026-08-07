@@ -90,8 +90,9 @@ pub async fn run_tui_session(
         detected_background,
     );
     chat.image_cap = image_cap;
-    // When a kitty terminal is detected but tmux passthrough is off, tell the
-    // user how to turn it on.
+    // Inside tmux, a failed passthrough probe (outer terminal lacking kitty
+    // support, passthrough off, or an unfocused pane) yields a one-time hint
+    // explaining why images stay `#[image]` placeholders.
     if let Some(warning) = image_probe.warning {
         chat.push_warning(warning);
     }

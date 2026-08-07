@@ -159,9 +159,12 @@ session), `/rename`, `/clear`, `/exit`.
 ### Image rendering
 
 Markdown images in model replies (`![alt](path)`, supporting relative paths /
-data: / http(s)) render inline on kitty-graphics terminals (Ghostty/kitty/
-WezTerm, etc.); other terminals show a `#[image]` placeholder. Inside tmux,
-the outer terminal must support it and `tmux set -g allow-passthrough on`.
+data: / http(s)) render inline on kitty-graphics terminals (Ghostty/kitty,
+etc.); other terminals show a `#[image]` placeholder. Inside tmux, bingo
+enables passthrough automatically (`tmux set -p allow-passthrough on`) and the
+outer terminal must support kitty Unicode placeholders (Ghostty/kitty);
+WezTerm and Konsole speak the graphics protocol but not placeholders, so they
+still show the `#[image]` placeholder behind tmux.
 
 ## Configuration (settings.json)
 

@@ -199,10 +199,11 @@ Example (.bingo/settings.json):
   directory skills (same-name disk skills override built-ins); the model invokes them via SkillTool, users run them via `/skill-name`.
 - **Images**: markdown images in model replies (`![alt](path)`, supports relative paths/data/http(s))
   render inline on kitty-graphics-capable terminals (Ghostty/kitty/WezTerm etc.); other terminals show a
-  `#[image]` placeholder. In tmux: when the outer terminal is Ghostty/kitty and `tmux set -g
-  allow-passthrough on`, images render via Unicode placeholders (U=1) and scroll normally with the text;
-  without passthrough you get a one-time notice; with an outer WezTerm/Konsole (no U=1) or
-  screen, placeholders are used. Images load automatically with the message and render when the message settles — no extra command needed.
+  `#[image]` placeholder. Inside tmux, bingo enables passthrough automatically
+  (`tmux set -p allow-passthrough on`) and images render via Unicode placeholders (U=1) when the
+  outer terminal is Ghostty/kitty; an outer WezTerm/Konsole (no U=1) or an unrecognized outer
+  terminal keeps the `#[image]` placeholder with a one-time notice. Images load automatically
+  with the message and render when the message settles — no extra command needed.
 - **MCP**: stdio and streamable HTTP (`type: "http"`, with custom headers) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
@@ -250,10 +251,11 @@ Example (.bingo/settings.json):
   目录技能（同名磁盘技能覆盖内置）；模型经 SkillTool 调用，用户经 `/技能名` 执行。
 - **图片**：模型回复中的 markdown 图片（`![alt](路径)`，支持相对路径/data/http(s)）
   在支持 kitty graphics 的终端（Ghostty/kitty/WezTerm 等）内联渲染，其余终端显示
-  `#[image]` 占位。tmux 内：外层终端为 Ghostty/kitty 且 `tmux set -g
-  allow-passthrough on` 时经 Unicode 占位符（U=1）渲染，图片随文本正常滚动；
-  passthrough 未开会收到一次性提示；外层为 WezTerm/Konsole（不支持 U=1）或
-  screen 走占位。图片随消息自动加载并在消息定稿落盘时渲染，不需要额外命令。
+  `#[image]` 占位。tmux 内 bingo 会自动开启 passthrough（`tmux set -p
+  allow-passthrough on`），外层终端为 Ghostty/kitty 时经 Unicode 占位符（U=1）
+  渲染，图片随文本正常滚动；外层为 WezTerm/Konsole（不支持 U=1）或无法识别时
+  显示 `#[image]` 占位并提示一次。图片随消息自动加载并在消息定稿落盘时渲染，
+  不需要额外命令。
 - **MCP**：stdio 与 streamable HTTP（`type: "http"`，可带自定义 headers）服务器工具接入（见上）。
 - **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/`，文件名
   `<项目名>-<路径哈希>.md`，同名目录不串味）+ 项目 CLAUDE.md（Anthropic 惯例）。
