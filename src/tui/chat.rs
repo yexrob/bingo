@@ -27,21 +27,6 @@ use crate::tui::markdown::MarkdownRenderer;
 use crate::tui::theme::{Theme, ThemeSetting};
 use crate::ui::{AskRequest, DialogAction, PermissionRequest, UiEvent};
 
-/// AskUserQuestion 回答结果块（`User answered the questions` 消息）。
-#[derive(Debug, Clone, Default)]
-pub struct AskResult {
-    /// (问题, 答案) 已答条目。
-    pub answered: Vec<(String, String)>,
-    /// 用户 Esc 拒绝回答（free_text 请求）。
-    pub declined: bool,
-}
-
-impl AskResult {
-    fn is_empty(&self) -> bool {
-        self.answered.is_empty() && !self.declined
-    }
-}
-
 /// 文档中一行：样式化行 + 整行背景（用户气泡用）。
 #[derive(Debug, Clone)]
 pub struct Row {
@@ -107,7 +92,7 @@ pub struct Doc {
     /// 「定稿前缀行数」句柄。
     #[cfg_attr(not(test), allow(dead_code))]
     pub settled: usize,
-    /// 定稿检查点（欢迎卡 / 每条定稿消息 / 问答块各一个，行号递增）：
+    /// 定稿检查点（欢迎卡 / 每条定稿消息各一个，行号递增）：
     /// 懒落盘按检查点整段冻结，resize 回灌按检查点整段取回。
     pub settled_marks: Vec<SettledMark>,
     /// 文档尾部的瞬态行数（slash 输出，TTL 后消失）：懒落盘的窗口计算
@@ -115,8 +100,8 @@ pub struct Doc {
     pub transient_rows: usize,
 }
 
-/// 一个定稿检查点：`row_end` 之前的行全部定稿。`segments`/`ask_rows`
-/// 是构建内累计值，跨多次 [`Chat::advance_flushed_upto`] 的增量由
+/// 一个定稿检查点：`row_end` 之前的行全部定稿。`segments` 是构建内
+/// 累计值，跨多次 [`Chat::advance_flushed_upto`] 的增量由
 /// `Chat::mark_base` 消化。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SettledMark {
@@ -124,8 +109,6 @@ pub struct SettledMark {
     pub row_end: usize,
     /// 覆盖的消息段数（构建内累计，含欢迎卡）。
     pub segments: usize,
-    /// 覆盖的问答结果块行数（构建内累计）。
-    pub ask_rows: usize,
 }
 
 /// 当前错误态（#18 呈现层）：`code`/`msg`/`level`/`context` 来自结构化
@@ -360,6 +343,10 @@ pub const IMAGE_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 /// slash 临时提示存活时长：超时后从输入框上方消失（不落盘）。
 pub const SLASH_OUTPUT_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// AskUserQuestion 被用户拒绝（Esc / 空 Other 提交）时进入消息流的
+/// 用户消息文本（普通消息，随流持久）。
+pub const ASK_DECLINED_TEXT: &str = "User declined to answer questions";
 
 /// Read/Search 类工具判定。
 pub fn classify_tool(name: &str, input: &serde_json::Value) -> Option<CollapseKind> {
@@ -768,8 +755,6 @@ pub struct Chat {
     ask_focus: usize,
     /// Other 自由输入缓冲。
     ask_other: String,
-    /// AskUserQuestion 已答结果块（结果消息；跨请求累积）。
-    pub ask_result: Option<AskResult>,
     /// 任务列表磁盘快照缓存（tick 周期刷新）。
     tasks_cache: Vec<TodoItem>,
     processor: MarkdownProcessor,
@@ -811,14 +796,12 @@ pub struct Chat {
     /// 1+k = 欢迎卡 + 前 k 条消息。落盘游标按**消息边界**而非行号计，
     /// 于是宽度变化后重排（行号全变）也不会重复打印。
     pub flushed_segments: usize,
-    /// inline：已落盘的提问结果块行数（块只追加，跳过前缀即可）。
-    pub flushed_ask_rows: usize,
     /// inline：当前 doc 中已落盘的行数（canvas 尾部起点）；每次
     /// build_rows 归零——重建后落盘部分已不在文档里。
     pub tail_start: usize,
     /// 检查点累计值的消化基线：同一次构建内多次推进落盘游标时防止
     /// 重复累加（build_rows 归零）。
-    mark_base: (usize, usize),
+    mark_base: usize,
     /// slash 下拉建议（输入 `/` 且无参数时非空；组件层渲染）。
     pub slash_suggestions: Vec<SlashSuggestion>,
     /// 下拉选中索引。
@@ -980,7 +963,6 @@ impl Chat {
             pending_ask: None,
             ask_focus: 0,
             ask_other: String::new(),
-            ask_result: None,
             tasks_cache: Vec::new(),
             processor: MarkdownProcessor::default(),
             renderer: MarkdownRenderer::with_theme(80, theme.clone()),
@@ -1010,9 +992,8 @@ impl Chat {
             slash_at: None,
             exit: false,
             flushed_segments: 0,
-            flushed_ask_rows: 0,
             tail_start: 0,
-            mark_base: (0, 0),
+            mark_base: 0,
             slash_suggestions: Vec::new(),
             slash_selected: 0,
             model_menu: None,
@@ -1516,12 +1497,8 @@ impl Chat {
                 self.turn_started = None;
                 self.output_tokens = 0;
                 self.thinking_seg_open = false;
-                // AskUserQuestion 回答反馈是回合内瞬态：回合结束即清，
-                // 不悬挂在输入框上方（块渲染在文档尾部、不参与消息流，
-                // 常驻会像残留物）。游标同步归零——否则下次回答的块
-                // 会跳过前 flushed_ask_rows 行。
-                self.ask_result = None;
-                self.flushed_ask_rows = 0;
+                // AskUserQuestion 回答是普通用户消息（进入消息流、随流落盘），
+                // 回合结束无需清理——它已按消息定稿/落盘，会随会话持久。
                 // 用户中断后不再因后台任务完成自动拉起新回合；
                 // 有排队消息时先让用户的消息走（下面统一提交）。
                 if (self.session.watch.has_wake_notifications()
@@ -1792,7 +1769,7 @@ impl Chat {
                 }
             }
         }
-        if !changed && self.flushed_segments == 0 && self.flushed_ask_rows == 0 {
+        if !changed && self.flushed_segments == 0 {
             return false;
         }
         self.reset_flushed();
@@ -2115,7 +2092,6 @@ impl Chat {
         self.messages.clear();
         self.stream_msg = None;
         self.slash_lines.clear();
-        self.ask_result = None;
         self.warnings.clear();
         self.reset_flushed();
         self.push_slash_output("✓ 已清空对话，开始新会话。".to_string());
@@ -2363,7 +2339,6 @@ impl Chat {
         let _ = self.session.runtime.transcript_tx.send(Some(found.clone()));
         self.messages.clear();
         self.slash_lines.clear();
-        self.ask_result = None;
         self.reset_flushed();
         self.push_slash_output(format!(
             "✓ 已切换到会话 {}（{count} 条消息），下一轮回复使用其历史。",
@@ -3128,9 +3103,7 @@ impl Chat {
             KeyCode::Esc => {
                 if let Some((request, tx)) = self.pending_ask.take() {
                     if request.free_text {
-                        self.ask_result
-                            .get_or_insert_with(AskResult::default)
-                            .declined = true;
+                        self.push_ask_message(ASK_DECLINED_TEXT.to_string());
                     }
                     let _ = tx.send(DialogAction::Cancel);
                 }
@@ -3138,6 +3111,25 @@ impl Chat {
             }
             _ => false,
         }
+    }
+
+    /// AskUserQuestion 回答消息：header + 一行 `· 问题 → 答案`。作为
+    /// 普通用户消息进消息流（不再是指渲染在输入框上方的瞬态结果块）。
+    fn ask_answer_text(question: &str, answer: &str) -> String {
+        format!("User answered the questions:\n  · {question} → {answer}")
+    }
+
+    /// 把一条回答/拒绝记录为普通用户消息：与用户输入同样渲染（气泡）、
+    /// 定稿、落盘进 scrollback，并随会话持久——不回合瞬态残留。
+    fn push_ask_message(&mut self, text: String) {
+        self.messages.push(UiMessage {
+            role: Role::User,
+            text,
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
     }
 
     /// 提交 Other 自由输入（CC SelectInputOption onSubmit：空文本 = 取消）。
@@ -3148,7 +3140,7 @@ impl Chat {
                 .as_ref()
                 .is_some_and(|(r, _)| r.free_text);
             if free_text {
-                self.ask_result.get_or_insert_with(AskResult::default).declined = true;
+                self.push_ask_message(ASK_DECLINED_TEXT.to_string());
             }
             if let Some((_, tx)) = self.pending_ask.take() {
                 let _ = tx.send(DialogAction::Cancel);
@@ -3156,10 +3148,9 @@ impl Chat {
             return;
         }
         if let Some((request, tx)) = self.pending_ask.take() {
-            self.ask_result
-                .get_or_insert_with(AskResult::default)
-                .answered
-                .push((request.question.clone(), text.clone()));
+            let question = request.question.clone();
+            let answer = text.clone();
+            self.push_ask_message(Self::ask_answer_text(&question, &answer));
             let _ = tx.send(DialogAction::Answer(text));
         }
     }
@@ -3169,10 +3160,9 @@ impl Chat {
         if let Some((request, tx)) = self.pending_ask.take() {
             if index < request.options.len() {
                 if request.free_text {
-                    self.ask_result
-                        .get_or_insert_with(AskResult::default)
-                        .answered
-                        .push((request.question.clone(), request.options[index].clone()));
+                    let question = request.question.clone();
+                    let answer = request.options[index].clone();
+                    self.push_ask_message(Self::ask_answer_text(&question, &answer));
                 }
                 let _ = tx.send(DialogAction::Confirm(index));
             } else {
@@ -4321,6 +4311,18 @@ impl Chat {
         if Some(i) == self.stream_msg {
             return false;
         }
+        // 顺序定稿：回合中插入的回答消息排在流式 assistant 消息之后，
+        // 若前置消息未定稿（正在流式/工具运行中/图片加载中）本消息也不得
+        // 定稿——否则落盘会越过流式行，把中间态打印进 scrollback 成为
+        // 改不掉的残留（与 `streaming_content_is_not_flushed_until_settled`
+        // 同一不变量；现状消息模型前置消息恒已定稿，此守卫只约束新场景）。
+        if self.messages[..i]
+            .iter()
+            .enumerate()
+            .any(|(j, _)| !self.message_settled(j))
+        {
+            return false;
+        }
         let m = &self.messages[i];
         // Images load asynchronously. Settling (and therefore flushing) a
         // message whose images are still in flight would print the
@@ -4361,7 +4363,7 @@ impl Chat {
         // 也不要整屏空白。
         let skip = self.flushed_segments.min(self.messages.len() + 1);
         self.tail_start = 0;
-        self.mark_base = (0, 0);
+        self.mark_base = 0;
 
         if skip == 0 {
             rows.extend(welcome_card_rows(
@@ -4379,7 +4381,6 @@ impl Chat {
             settled_marks.push(SettledMark {
                 row_end: settled,
                 segments: settled_segments,
-                ask_rows: 0,
             });
         }
         // 消息块间距（CC marginTop=1）：欢迎卡片后与每条消息前留一行。
@@ -4572,46 +4573,6 @@ impl Chat {
                 settled_marks.push(SettledMark {
                     row_end: settled,
                     segments: settled_segments,
-                    ask_rows: 0,
-                });
-            }
-        }
-
-        // AskUserQuestion 结果块（`● User answered the questions:`）：
-        // 只追加，故按行前缀跳过已落盘部分（块的位置随消息增长而后移，
-        // 用消息段号定位会重复渲染）。
-        if let Some(result) = &self.ask_result
-            && !result.is_empty()
-        {
-            let all_settled_before = settled == rows.len();
-            let mut block: Vec<Row> = Vec::new();
-            let mut header = Line::styled("⏺ ", SegStyle::fg(theme.text));
-            if result.declined && result.answered.is_empty() {
-                header.push_styled("User declined to answer questions", theme.text());
-            } else {
-                header.push_styled("User answered the questions:", theme.text());
-            }
-            block.push(Row::new(header));
-            for (question, answer) in &result.answered {
-                block.push(Row::new(Line::styled(
-                    one_line(&format!("  · {question} → {answer}"), width),
-                    SegStyle::fg(theme.inactive),
-                )));
-            }
-            let fresh = block.len().saturating_sub(self.flushed_ask_rows);
-            rows.extend(block.into_iter().skip(self.flushed_ask_rows));
-            if all_settled_before
-                && self.pending_ask.is_none()
-                && self
-                    .messages
-                    .last()
-                    .is_some_and(|_| self.message_settled(self.messages.len() - 1))
-            {
-                settled = rows.len();
-                settled_marks.push(SettledMark {
-                    row_end: settled,
-                    segments: settled_segments,
-                    ask_rows: fresh,
                 });
             }
         }
@@ -4735,9 +4696,8 @@ impl Chat {
     /// 文档从欢迎卡开始重建（新内容重新落盘进 scrollback）。
     fn reset_flushed(&mut self) {
         self.flushed_segments = 0;
-        self.flushed_ask_rows = 0;
         self.tail_start = 0;
-        self.mark_base = (0, 0);
+        self.mark_base = 0;
         self.dirty = true;
     }
 
@@ -4755,9 +4715,8 @@ impl Chat {
     /// 同一次构建内可多次调用（`mark_base` 消化检查点里的构建内累计值，
     /// 防止重复累加）；宽度变化后重排安全——段计数与行号无关。
     pub fn advance_flushed_upto(&mut self, mark: SettledMark) {
-        self.flushed_segments += mark.segments.saturating_sub(self.mark_base.0);
-        self.flushed_ask_rows += mark.ask_rows.saturating_sub(self.mark_base.1);
-        self.mark_base = (mark.segments, mark.ask_rows);
+        self.flushed_segments += mark.segments.saturating_sub(self.mark_base);
+        self.mark_base = mark.segments;
         self.tail_start = mark.row_end;
     }
 
@@ -4768,20 +4727,11 @@ impl Chat {
     /// 保证不会与懒落盘互相打架（回灌完不存在越过窗口顶的定稿段）。
     pub fn rehydrate(&mut self, width: usize, doc_budget: usize) {
         loop {
-            if self.flushed_ask_rows == 0 && self.flushed_segments == 0 {
+            if self.flushed_segments == 0 {
                 break;
             }
             if self.build_rows(width).rows.len() >= doc_budget {
                 break;
-            }
-            if self.flushed_ask_rows > 0 {
-                let saved = self.flushed_ask_rows;
-                self.flushed_ask_rows = 0;
-                if self.build_rows(width).rows.len() > doc_budget {
-                    self.flushed_ask_rows = saved;
-                    break;
-                }
-                continue;
             }
             self.flushed_segments -= 1;
             if self.build_rows(width).rows.len() > doc_budget {
@@ -4910,11 +4860,6 @@ mod tests {
     /// 最新定稿检查点覆盖的段数（旧聚合字段的检查点等价读法）。
     fn settled_segments(chat: &Chat) -> usize {
         chat.doc.settled_marks.last().map_or(0, |m| m.segments)
-    }
-
-    /// 最新定稿检查点覆盖的问答块行数。
-    fn settled_ask_rows(chat: &Chat) -> usize {
-        chat.doc.settled_marks.last().map_or(0, |m| m.ask_rows)
     }
 
     /// 自建 home 的 Chat（slash 测试用唯一目录，避免与其他测试共享
@@ -7464,48 +7409,61 @@ mod tests {
         );
     }
 
-    /// 提问结果块只追加：已落盘的条目不重渲，新条目不重复 header。
+    /// AskUserQuestion 回答是普通用户消息：进入消息流、按普通消息定稿
+    /// 落盘（段数推进），不再是指渲染在输入框上方的瞬态块。
     #[test]
-    fn ask_result_block_flushes_incrementally() {
+    fn ask_answer_message_flushes_like_normal_message() {
         let mut chat = test_chat();
-        chat.messages.push(msg(Role::Assistant, "回复"));
-        chat.ask_result = Some(AskResult {
-            answered: vec![("问题一".into(), "答案一".into())],
-            declined: false,
-        });
+        chat.messages.push(msg(Role::User, "hi"));
         chat.build_rows(80);
-        assert_eq!(settled_ask_rows(&chat), 2, "header + 1 条");
         chat.advance_flushed();
-        assert_eq!(chat.flushed_ask_rows, 2);
+        assert_eq!(chat.flushed_segments, 2, "欢迎卡 + 用户输入");
 
-        // 再答一题：只渲染新条目。
-        chat.ask_result
-            .as_mut()
-            .expect("result")
-            .answered
-            .push(("问题二".into(), "答案二".into()));
+        // 回答一条问题（走真实事件路径）。
+        let (tx, _rx) = oneshot::channel();
+        let mut request =
+            PermissionRequest::new("技术选型", "用哪个库？", vec!["A".into(), "B".into()]);
+        request.free_text = true;
+        chat.pending_ask = Some((request, tx));
+        chat.ask_focus = 0;
+        assert!(chat.ask_key(KeyCode::Enter), "Enter 选 A");
+        assert!(chat.pending_ask.is_none(), "对话框已关闭");
+
+        // 回答作为一条用户消息进入消息流。
+        let answer = chat.messages.last().expect("回答消息已入流");
+        assert_eq!(answer.role, Role::User, "回答是用户消息");
+        assert!(
+            answer.text.contains("User answered the questions:"),
+            "{}",
+            answer.text
+        );
+        assert!(answer.text.contains("· 用哪个库？ → A"), "{}", answer.text);
+        // 与普通消息一样定稿与落盘：游标按消息段推进。
         chat.build_rows(80);
-        let text: String = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
-        assert!(text.contains("问题二"), "新条目渲染");
-        assert!(!text.contains("问题一"), "旧条目不重复");
-        assert!(!text.contains("User answered"), "header 不重复");
-        assert_eq!(settled_ask_rows(&chat), 1);
+        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "回答消息已定稿");
+        chat.advance_flushed();
+        assert_eq!(chat.flushed_segments, 3, "欢迎卡 + hi + 回答消息全部落盘");
     }
 
-    /// 回答反馈是回合内瞬态：TurnEnd 清除 ask_result 与落盘游标，
-    /// 块不再渲染在输入框上方（回归：此前常驻到 /clear）。
+    /// 回答消息随会话持久：TurnEnd 不再清除（此前是回合内瞬态块，
+    /// 回合结束即消失；现在是消息流的一部分）。
     #[test]
-    fn turn_end_clears_ask_result() {
+    fn ask_answer_message_persists_across_turn_end() {
         let mut chat = test_chat();
-        chat.ask_result = Some(AskResult {
-            answered: vec![("问题".into(), "答案".into())],
-            declined: false,
-        });
-        chat.flushed_ask_rows = 2;
+        chat.messages.push(msg(Role::User, "hi"));
+        let (tx, _rx) = oneshot::channel();
+        let mut request =
+            PermissionRequest::new("技术选型", "用哪个库？", vec!["A".into(), "B".into()]);
+        request.free_text = true;
+        chat.pending_ask = Some((request, tx));
+        chat.ask_focus = 1;
+        assert!(chat.ask_key(KeyCode::Enter), "Enter 选 B");
+
         chat.handle(UiEvent::TurnEnd);
-        assert!(chat.ask_result.is_none(), "回合结束清结果块");
-        assert_eq!(chat.flushed_ask_rows, 0, "落盘游标同步归零");
-        chat.build_rows(100);
+        let answer = chat.messages.last().expect("回答消息仍在");
+        assert_eq!(answer.role, Role::User, "回合结束不清除回答消息");
+        assert!(answer.text.contains("· 用哪个库？ → B"), "{}", answer.text);
+        chat.build_rows(80);
         let joined: String = chat
             .doc
             .rows
@@ -7513,21 +7471,44 @@ mod tests {
             .map(|r| r.line.plain_text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(!joined.contains("User answered"), "块已消失: {joined}");
-        // 下一回合新回答：块从头完整渲染（游标不残留）。
-        chat.ask_result = Some(AskResult {
-            answered: vec![("新问题".into(), "新答案".into())],
-            declined: false,
-        });
-        chat.build_rows(100);
-        let joined: String = chat
-            .doc
-            .rows
-            .iter()
-            .map(|r| r.line.plain_text())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("新问题"), "新块完整渲染: {joined}");
+        assert!(
+            joined.contains("User answered the questions:"),
+            "回答仍渲染在消息流: {joined}"
+        );
+    }
+
+    /// 回合中回答的消息排在流式 assistant 消息之后：顺序守卫——流式
+    /// 未结束前回答消息不得定稿（否则落盘会越过流式行把中间态打进
+    /// scrollback）；回合结束后两者一并定稿落盘。
+    #[test]
+    fn ask_answer_after_streaming_message_settles_only_after_turn_end() {
+        let mut chat = test_chat();
+        chat.messages.push(msg(Role::User, "hi"));
+        chat.handle(UiEvent::TurnStart);
+        chat.handle(UiEvent::TextDelta("思考中…".into()));
+
+        // 回合中回答（模型提问 → 用户回答，模型仍在流式）。
+        let (tx, _rx) = oneshot::channel();
+        let mut request = PermissionRequest::new("技术选型", "用哪个库？", vec!["A".into()]);
+        request.free_text = true;
+        chat.pending_ask = Some((request, tx));
+        chat.ask_focus = 0;
+        assert!(chat.ask_key(KeyCode::Enter), "选 A");
+        assert_eq!(chat.messages.len(), 3, "hi + 流式 assistant + 回答");
+
+        // 流式未结束：回答消息与流式消息都不定稿，定稿停在第一条用户消息。
+        chat.build_rows(80);
+        assert!(chat.message_settled(0), "前置用户消息已定稿");
+        assert!(!chat.message_settled(1), "流式消息不定稿");
+        assert!(!chat.message_settled(2), "回答消息在流式结束前不定稿");
+        assert_eq!(chat.doc.settled_marks.len(), 2, "欢迎卡 + 第一条用户消息");
+
+        // 回合结束：全部定稿并落盘（含回答消息，顺序正确）。
+        chat.handle(UiEvent::TurnEnd);
+        chat.build_rows(80);
+        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "回合结束后全部定稿");
+        chat.advance_flushed();
+        assert_eq!(chat.flushed_segments, 4, "欢迎卡 + hi + 流式 + 回答全部落盘");
     }
 
     /// 模拟 inline 组件的落盘循环：重建 → 落盘定稿前缀 → 推进游标。
@@ -7812,10 +7793,12 @@ mod tests {
         assert!(chat.ask_key(KeyCode::Enter), "submit");
         assert!(chat.pending_ask.is_none(), "dialog closed");
         assert_eq!(rx.try_recv(), Ok(DialogAction::Answer("serde".to_string())));
-        let result = chat.ask_result.as_ref().expect("result recorded");
+        // 回答进入消息流：一条普通用户消息（Q&A 回显）。
+        let answer = chat.messages.last().expect("回答消息已入流");
+        assert_eq!(answer.role, Role::User);
         assert_eq!(
-            result.answered,
-            vec![("用哪个库？".to_string(), "serde".to_string())]
+            answer.text,
+            "User answered the questions:\n  · 用哪个库？ → serde"
         );
         chat.build_rows(100);
         let joined: String = chat
@@ -7833,6 +7816,7 @@ mod tests {
             joined.contains("· 用哪个库？ → serde"),
             "result line: {joined}"
         );
+        assert!(joined.contains("❯ "), "回答以用户气泡渲染: {joined}");
     }
 
     #[test]
@@ -7847,10 +7831,10 @@ mod tests {
         assert!(chat.ask_key(KeyCode::Enter), "空 Other 提交");
         assert!(chat.pending_ask.is_none());
         assert_eq!(rx.try_recv(), Ok(DialogAction::Cancel));
-        assert!(
-            chat.ask_result.as_ref().is_some_and(|r| r.declined),
-            "declined recorded"
-        );
+        // 拒绝同样进入消息流（一条普通用户消息）。
+        let declined = chat.messages.last().expect("拒绝消息已入流");
+        assert_eq!(declined.role, Role::User);
+        assert_eq!(declined.text, ASK_DECLINED_TEXT);
         chat.build_rows(100);
         let joined: String = chat
             .doc
@@ -7880,9 +7864,12 @@ mod tests {
         assert_eq!(chat.ask_focus, 1);
         assert!(chat.ask_key(KeyCode::Enter), "Enter 选 B");
         assert_eq!(rx.try_recv(), Ok(DialogAction::Confirm(1)));
-        assert_eq!(
-            chat.ask_result.as_ref().unwrap().answered,
-            vec![("用哪个库？".to_string(), "B".to_string())]
+        let answer = chat.messages.last().expect("回答消息已入流");
+        assert_eq!(answer.role, Role::User);
+        assert!(
+            answer.text.contains("· 用哪个库？ → B"),
+            "选项文本作为回答: {}",
+            answer.text
         );
     }
 
@@ -8579,7 +8566,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bingo-img-dir-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let png = test_png_path(&dir, "a.png", 8, 8);
-        chat.set_input(&format!("看一下这张图\n{}", png.display()));
+        chat.set_input(format!("看一下这张图\n{}", png.display()));
         chat.busy = true; // 走排队路径：不需要 tokio runtime
         chat.submit();
         assert_eq!(chat.queued.len(), 1);
@@ -8603,7 +8590,7 @@ mod tests {
         let png = test_png_path(&dir, "b.png", 4, 4);
         let txt = dir.join("note.txt");
         std::fs::write(&txt, "hi").unwrap();
-        chat.set_input(&format!("![图]({})\n{}", png.display(), txt.display()));
+        chat.set_input(format!("![图]({})\n{}", png.display(), txt.display()));
         chat.busy = true;
         chat.submit();
         assert_eq!(chat.queued[0], format!("#[image 1]\n{}", txt.display()));

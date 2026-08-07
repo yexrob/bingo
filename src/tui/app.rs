@@ -1552,8 +1552,8 @@ mod tests {
     #[test]
     fn pick_flush_mark_freezes_only_segments_past_the_window_top() {
         let marks = vec![
-            SettledMark { row_end: 5, segments: 1, ask_rows: 0 },
-            SettledMark { row_end: 20, segments: 2, ask_rows: 0 },
+            SettledMark { row_end: 5, segments: 1 },
+            SettledMark { row_end: 20, segments: 2 },
         ];
         // 全部可见（窗口从 0 开始）：什么都不冻结。
         assert_eq!(pick_flush_mark(&marks, 0, 0), None);
