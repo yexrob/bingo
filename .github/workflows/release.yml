@@ -30,6 +30,17 @@ jobs:
             artifact: bingo-x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
+      # Release semantics: a tag on main is the official package; a tag elsewhere
+      # (e.g. dev) is a preflight build → published as a pre-release.
+      - name: Classify release (main = official, else preflight)
+        id: release_kind
+        run: |
+          git fetch origin main --depth=1
+          if git merge-base --is-ancestor HEAD origin/main; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -60,6 +71,7 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ steps.release_kind.outputs.prerelease }}
           files: |
             ${{ matrix.artifact }}.*
             dist/checksums.txt
