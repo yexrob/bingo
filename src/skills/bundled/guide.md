@@ -260,7 +260,7 @@ Example (.bingo/settings.json):
 - **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/`，文件名
   `<项目名>-<路径哈希>.md`，同名目录不串味）+ 项目 CLAUDE.md（Anthropic 惯例）。
 - **会话**：transcript 持久化（JSONL），`--continue`/`/resume` 恢复，`/compact` 压缩。
-  **分享**：`bingo share [会话] [--output 路径] [--open]` 导出自包含 HTML 页面
-  （对话/Team 名册/私聊/频道四视图，单文件离线可开，无外部依赖）；会话 key 与
+  **分享**：`bingo share [会话] [--output 路径] [--open]` 或会话内 `/share [--open]` 导出自包含
+  HTML 页面（对话/Team 名册/私聊/频道四视图，单文件离线可开，无外部依赖）；会话 key 与
   `/resume` 同语义（transcript stem 或可匹配片段，缺省最近会话），生成的 HTML
   含完整对话与工具输出，分享前自行审阅敏感信息。

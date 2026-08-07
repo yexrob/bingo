@@ -354,14 +354,7 @@ fn run_share(
     let html = crate::share_html::render(&doc, &messages);
     let out = output.unwrap_or_else(|| PathBuf::from(format!("{stem}.html")));
     let overwritten = out.exists();
-    if let Some(parent) = out.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = out.with_extension("html.tmp");
-    std::fs::write(&tmp, &html)?;
-    std::fs::rename(&tmp, &out)?;
+    crate::share::write_html_atomic(&out, &html)?;
     println!(
         "[share] wrote {}{}",
         out.display(),
@@ -369,27 +362,8 @@ fn run_share(
     );
     eprintln!("[share] 注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。");
     if open {
-        open_in_browser(&out).map_err(crate::share::ShareError::Io)?;
+        crate::share::open_in_browser(&out)?;
     }
-    Ok(())
-}
-
-/// Open a file with the system default browser (macOS open / Linux xdg-open / Windows cmd start).
-fn open_in_browser(path: &Path) -> Result<(), std::io::Error> {
-    let mut cmd = if cfg!(target_os = "macos") {
-        let mut c = std::process::Command::new("open");
-        c.arg(path);
-        c
-    } else if cfg!(target_os = "linux") {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(path);
-        c
-    } else {
-        let mut c = std::process::Command::new("cmd");
-        c.arg("/c").arg("start").arg("").arg(path);
-        c
-    };
-    cmd.spawn()?;
     Ok(())
 }
 

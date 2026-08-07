@@ -210,6 +210,38 @@ impl ShareStore {
     }
 }
 
+/// 原子写文件（tmp + rename；share 输出统一入口，CLI 与 /share 共用）。
+pub fn write_html_atomic(path: &Path, content: &str) -> Result<(), ShareError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("html.tmp");
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// 用系统默认浏览器打开文件（macOS open / Linux xdg-open / Windows cmd start）。
+pub fn open_in_browser(path: &Path) -> Result<(), ShareError> {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    } else if cfg!(target_os = "linux") {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    } else {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/c").arg("start").arg("").arg(path);
+        c
+    };
+    cmd.spawn()?;
+    Ok(())
+}
+
 /// 按会话 key 解析 transcript（/resume 语义：子串匹配，最新优先）；
 /// 无 key 取最新会话。未命中时错误信息附可用会话列表（前 5 个，防刷屏）。
 pub fn resolve_transcript(home: &Path, key: Option<&str>) -> Result<Transcript, ShareError> {
