@@ -2,7 +2,9 @@
 //!
 //! Ported from the old `tui.rs` `BingoChat` (ratatui edition): event handling semantics,
 //! collapse detection, and expand/collapse toggling are preserved as-is; `draw` is replaced by [`Chat::build_rows`],
-//! which produces display-agnostic styled row documents, mapped to terminal rows by [`crate::tui::view`].
+//! which builds transcript blocks ([`crate::tui::statics::Block`]) laid out by
+//! [`crate::tui::statics::layout`] into display-agnostic styled row documents, mapped to
+//! terminal rows by [`crate::tui::view`].
 //! Events arrive from channels (`UiEvent` / `AskRequest`); keyboard/mouse come in via
 //! [`Chat::on_key`] / [`Chat::doc_click`].
 
