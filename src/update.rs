@@ -712,9 +712,13 @@ mod tests {
             extract_binary(&archive, "nope"),
             Err(UpdateError::MissingBinary(_))
         ));
-        // 损坏 → ArchiveInvalid
+        // 损坏 → ArchiveInvalid（Windows zip 对任意短字节容错，需构造截断 zip 头）
+        #[cfg(windows)]
+        let corrupt: &[u8] = &[0x50, 0x4B, 0x03, 0x04, 0x00, 0x00]; // zip 局部头+截断
+        #[cfg(not(windows))]
+        let corrupt: &[u8] = b"not a gzip";
         assert!(matches!(
-            extract_binary(b"not a gzip", "bingo"),
+            extract_binary(corrupt, "bingo"),
             Err(UpdateError::ArchiveInvalid(_))
         ));
     }
