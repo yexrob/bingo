@@ -28,6 +28,12 @@ fn protocol_default_base_url(protocol: Option<&str>) -> String {
     }
 }
 
+/// User home (auth.json lives under ~/.local/share/bingo; bingo requires
+/// HOME at startup, so a missing var degrades to an empty path).
+fn home_dir() -> std::path::PathBuf {
+    std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_default()
+}
+
 /// Display info for a provider (the `/provider` listing and `/model` menu):
 /// auth material (masked by the caller) + endpoint URL.
 #[derive(Debug, Clone)]
@@ -83,11 +89,14 @@ impl Client {
                     cfg.api_base_url.clone()
                 };
                 let adapter = providers::build_provider(
+                    name,
                     http.clone(),
                     protocol,
                     cfg.api_key.clone(),
                     base_url.clone(),
                     cfg.supports_images.unwrap_or(false),
+                    cfg.oauth.as_ref(),
+                    &home_dir(),
                 )
                 .map_err(|message| {
                     // Config error (e.g. unknown protocol) — surfaced at
@@ -233,6 +242,12 @@ impl Client {
         self.current().count_tokens(model, system, messages).await
     }
 
+    /// Auth state of a named provider (the /provider listing; "default" is
+    /// the top-level endpoint). Unknown names return None.
+    pub fn auth_status(&self, name: &str) -> Option<crate::api::contract::AuthStatus> {
+        self.providers.get(name).map(|(p, _)| p.auth_status())
+    }
+
     fn current(&self) -> Arc<dyn ProviderClient> {
         self.endpoint.read().unwrap_or_else(|p| p.into_inner()).0.clone()
     }
@@ -309,8 +324,9 @@ mod tests {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
-                    protocol: None,
-            },
+                protocol: None,
+                oauth: None,
+                },
         );
         settings.providers.insert(
             "local".to_string(),
@@ -318,8 +334,9 @@ mod tests {
                 api_key: "sk-local".into(),
                 api_base_url: "http://127.0.0.1:11434".into(),
                 supports_images: None,
-                    protocol: None,
-            },
+                protocol: None,
+                oauth: None,
+                },
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
         let client = Client::from_settings_with(&settings, env).unwrap();
@@ -351,8 +368,9 @@ mod tests {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
-                    protocol: None,
-            },
+                protocol: None,
+                oauth: None,
+                },
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
         let client = Client::from_settings_with(&settings, env).unwrap();
@@ -393,8 +411,9 @@ mod tests {
                 api_key: "sk-v".into(),
                 api_base_url: "https://vision.example".into(),
                 supports_images: Some(true),
-                    protocol: None,
-            },
+                protocol: None,
+                oauth: None,
+                },
         );
         settings.providers.insert(
             "text-only".to_string(),
@@ -402,8 +421,9 @@ mod tests {
                 api_key: "sk-t".into(),
                 api_base_url: "https://text.example".into(),
                 supports_images: Some(false),
-                    protocol: None,
-            },
+                protocol: None,
+                oauth: None,
+                },
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
         let client = Client::from_settings_with(&settings, env).unwrap();

@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Deserialize;
 
-use super::{backoff, retryable};
+use super::{backoff, retryable, AuthSource};
 use crate::api::contract::{
     AuthStatus, BoxStream, Capabilities, ClientError, NeutralRequest, ProviderClient, StreamEvent,
     SystemBlock, ThinkingLevel,
@@ -51,7 +51,6 @@ fn effort_for(level: ThinkingLevel) -> &'static str {
 /// The endpoint (one per provider instance; mirrors the anthropic adapter).
 #[derive(Debug, Clone)]
 struct Endpoint {
-    api_key: String,
     base_url: String,
     supports_images: bool,
 }
@@ -60,35 +59,48 @@ struct Endpoint {
 pub struct OpenAIProvider {
     http: reqwest::Client,
     endpoint: Arc<std::sync::RwLock<Endpoint>>,
+    auth: AuthSource,
 }
 
 impl OpenAIProvider {
     pub fn new(
         http: reqwest::Client,
-        api_key: String,
+        auth: AuthSource,
         base_url: String,
         supports_images: bool,
     ) -> Self {
         Self {
             http,
             endpoint: Arc::new(std::sync::RwLock::new(Endpoint {
-                api_key,
                 base_url,
                 supports_images,
             })),
+            auth,
         }
     }
 
-    fn headers(&self) -> Result<HeaderMap, ClientError> {
-        let endpoint = self.endpoint.read().unwrap_or_else(|p| p.into_inner());
+    async fn headers(&self) -> Result<HeaderMap, ClientError> {
+        let bearer = match &self.auth {
+            AuthSource::ApiKey(key) => format!("Bearer {key}"),
+            AuthSource::OAuth(provider) => {
+                format!("Bearer {}", provider.access_token().await?)
+            }
+        };
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", endpoint.api_key))
-                .map_err(|e| ClientError::InvalidApiKey(e.to_string()))?,
+            HeaderValue::from_str(&bearer).map_err(|e| ClientError::InvalidApiKey(e.to_string()))?,
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(headers)
+    }
+
+    /// OAuth account for /provider listing (None = not logged in).
+    fn oauth_account(&self) -> Option<String> {
+        match &self.auth {
+            AuthSource::OAuth(provider) => provider.account_sync(),
+            AuthSource::ApiKey(_) => None,
+        }
     }
 
     fn base_url(&self) -> String {
@@ -492,22 +504,43 @@ impl ProviderClient for OpenAIProvider {
     }
 
     fn auth_status(&self) -> AuthStatus {
-        AuthStatus::ApiKey
+        match &self.auth {
+            AuthSource::ApiKey(_) => AuthStatus::ApiKey,
+            AuthSource::OAuth(_) => AuthStatus::OAuth { account: self.oauth_account() },
+        }
     }
 
     async fn stream(&self, request: &NeutralRequest) -> Result<BoxStream, ClientError> {
         let body = build_body(request);
         let mut attempt = 0;
+        let mut auth_refreshed = false;
         let base_url = self.base_url();
         loop {
             let builder = self
                 .http
                 .post(format!("{base_url}/v1/responses"))
-                .headers(self.headers()?)
+                .headers(self.headers().await?)
                 .json(&body);
             match tokio::time::timeout(REQUEST_TIMEOUT, builder.send()).await {
                 Ok(Ok(response)) if response.status().is_success() => {
                     return Ok(Box::pin(stream_body(response)));
+                }
+                // 401 with OAuth auth: refresh once (single-flight) and retry
+                // with the new token (D33 §6.3).
+                Ok(Ok(response))
+                    if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                        && matches!(&self.auth, AuthSource::OAuth(_))
+                        && !auth_refreshed =>
+                {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    if let AuthSource::OAuth(provider) = &self.auth {
+                        provider.force_refresh().await?;
+                    }
+                    auth_refreshed = true;
+                    attempt += 1;
+                    let _ = (status, body);
+                    continue;
                 }
                 Ok(Ok(response)) if retryable(&response.status()) => {
                     let status = response.status();
@@ -548,16 +581,32 @@ impl ProviderClient for OpenAIProvider {
         let mut body = build_body(request);
         body["stream"] = serde_json::json!(false);
         let base_url = self.base_url();
-        let response = tokio::time::timeout(
-            SHORT_WRITE_TIMEOUT,
-            self.http
-                .post(format!("{base_url}/v1/responses"))
-                .headers(self.headers()?)
-                .json(&body)
-                .send(),
-        )
-        .await
-        .map_err(|_| ClientError::Timeout)??;
+        // OAuth 401 recovery: refresh once and retry (short-sync write; the
+        // retry stays inside the 15s feedback-layer deadline).
+        let mut auth_refreshed = false;
+        let response = loop {
+            let response = tokio::time::timeout(
+                SHORT_WRITE_TIMEOUT,
+                self.http
+                    .post(format!("{base_url}/v1/responses"))
+                    .headers(self.headers().await?)
+                    .json(&body)
+                    .send(),
+            )
+            .await
+            .map_err(|_| ClientError::Timeout)??;
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                && matches!(&self.auth, AuthSource::OAuth(_))
+                && !auth_refreshed
+            {
+                if let AuthSource::OAuth(provider) = &self.auth {
+                    provider.force_refresh().await?;
+                }
+                auth_refreshed = true;
+                continue;
+            }
+            break response;
+        };
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -576,7 +625,7 @@ impl ProviderClient for OpenAIProvider {
             SHORT_READ_TIMEOUT,
             self.http
                 .get(format!("{base_url}/v1/models"))
-                .headers(self.headers()?)
+                .headers(self.headers().await?)
                 .send(),
         )
         .await

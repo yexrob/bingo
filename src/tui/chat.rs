@@ -2845,11 +2845,17 @@ impl Chat {
     }
 
     fn slash_provider(&mut self, arg: &str) {
+        if let Some(rest) = arg.strip_prefix("login ") {
+            return self.slash_provider_login(rest.trim());
+        }
+        if let Some(rest) = arg.strip_prefix("logout ") {
+            return self.slash_provider_logout(rest.trim());
+        }
         let session = self.session.clone();
         if arg.is_empty() {
             let current = session.runtime.provider.borrow().clone();
             // 列表：default 打头（顶层端点），其后命名 provider 各带 URL
-            // （/provider 信息量不足修复：一眼看清每个端点的去向）。
+            // 与登录态（/provider 信息量不足修复：一眼看清每个端点的去向）。
             let mut lines = vec![format!("当前 provider: {current}")];
             let mut names = vec!["default".to_string()];
             names.extend(session.client.provider_names());
@@ -2858,15 +2864,30 @@ impl Chat {
                     .client
                     .provider_endpoint(&name)
                     .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
-                // key 脱敏：仅显示前 4 字符；短 key（≤4）不加省略号。
-                let mut key_shown: String = key.chars().take(4).collect();
-                if key.chars().count() > 4 {
-                    key_shown.push('…');
-                }
                 let mark = if name == current { "●" } else { " " };
-                lines.push(format!("{mark} {name} @ {url}（key {key_shown}）"));
+                let auth = match session.client.auth_status(&name) {
+                    Some(crate::api::contract::AuthStatus::ApiKey) => {
+                        // key 脱敏：仅显示前 4 字符；短 key（≤4）不加省略号。
+                        let mut key_shown: String = key.chars().take(4).collect();
+                        if key.chars().count() > 4 {
+                            key_shown.push('…');
+                        }
+                        format!("key {key_shown}")
+                    }
+                    Some(crate::api::contract::AuthStatus::OAuth { account: Some(acc) }) => {
+                        format!("✓ {acc}")
+                    }
+                    Some(crate::api::contract::AuthStatus::OAuth { account: None }) => {
+                        "○ 未登录（/provider login）".to_string()
+                    }
+                    None => "?".to_string(),
+                };
+                lines.push(format!("{mark} {name} @ {url}（{auth}）"));
             }
-            lines.push("用法: /provider <名称>（settings.json 的 providers 段）".into());
+            lines.push(
+                "用法: /provider <名称> · login <名称> [--device-auth|--manual <token>] · logout <名称>"
+                    .into(),
+            );
             self.push_slash_output(lines.join("\n"));
             return;
         }
@@ -2885,6 +2906,194 @@ impl Chat {
             }
             Err(e) => self.push_slash_output(e),
         }
+    }
+
+    /// `/provider login <name> [--device-auth|--manual <token>]`: OAuth login
+    /// for a provider with an `oauth` config (D33 §6). Default = loopback
+    /// PKCE (opens the browser); `--device-auth` prints URL + code and polls
+    /// (headless/SSH); `--manual` stores a pasted token (no refresh).
+    fn slash_provider_login(&mut self, arg: &str) {
+        let parts: Vec<&str> = arg.split_whitespace().collect();
+        let Some(name) = parts.first() else {
+            self.push_slash_output(
+                "用法: /provider login <名称> [--device-auth|--manual <token>]".to_string(),
+            );
+            return;
+        };
+        let manual = parts
+            .iter()
+            .position(|p| *p == "--manual")
+            .and_then(|i| parts.get(i + 1).copied());
+        let device_auth = parts.contains(&"--device-auth");
+
+        let session = self.session.clone();
+        let Some(cfg) = session.settings.providers.get(*name) else {
+            self.push_slash_output(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
+            return;
+        };
+        let Some(oauth) = cfg.oauth.as_ref() else {
+            self.push_slash_output(format!(
+                "provider \"{name}\" 未配置 oauth（settings.json 加 \"oauth\": {{\"kind\":\"codex\"}}）"
+            ));
+            return;
+        };
+        if oauth.kind != "codex" {
+            self.push_slash_output(format!(
+                "不支持的 oauth.kind \"{}\"（v1 仅 codex）",
+                oauth.kind
+            ));
+            return;
+        }
+        let name = name.to_string();
+        let home = session.home.clone();
+        let events = self.events.clone();
+        let http = reqwest::Client::new();
+        let config = crate::api::auth::OauthFlowConfig::codex();
+
+        if let Some(token) = manual {
+            // --manual：直接保存粘贴的 access token（无 refresh token → 不刷新）。
+            let token = token.to_string();
+            tokio::spawn(async move {
+                let tp = crate::api::auth::TokenProvider::new(&home, &name, config);
+                let tokens = crate::api::auth::TokenSet {
+                    access_token: token,
+                    refresh_token: String::new(),
+                    id_token: None,
+                    expires_at: None,
+                    account_id: None,
+                };
+                match tp.save(&tokens).await {
+                    Ok(()) => {
+                        let _ = events.send(UiEvent::SlashOutput(format!(
+                            "✓ 已保存 {name} 的登录信息（--manual token 不自动刷新）"
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = events.send(UiEvent::SlashOutput(format!("✗ 保存失败: {e}")));
+                    }
+                }
+            });
+            return;
+        }
+
+        if device_auth {
+            // headless/SSH：打印 URL + 一次性码，轮询等待授权。
+            tokio::spawn(async move {
+                let flow = crate::api::auth::DeviceFlow::new(&http, &config);
+                match flow.start().await {
+                    Ok((prompt, device_auth_id, interval)) => {
+                        let _ = events.send(UiEvent::SlashOutput(format!(
+                            "登录 {name}（设备授权）：\n  1. 打开 {}\n  2. 输入代码 {}（15 分钟内有效）\n⏳ 等待授权…",
+                            prompt.verification_url, prompt.user_code
+                        )));
+                        match flow.poll(&device_auth_id, &prompt.user_code, interval).await {
+                            Ok(tokens) => {
+                                let tp = crate::api::auth::TokenProvider::new(&home, &name, config);
+                                match tp.save(&tokens).await {
+                                    Ok(()) => {
+                                        let _ = events.send(UiEvent::SlashOutput(format!(
+                                            "✓ 已登录 {name}"
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        let _ = events.send(UiEvent::SlashOutput(format!(
+                                            "✗ 保存失败: {e}"
+                                        )));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ =
+                                    events.send(UiEvent::SlashOutput(format!("✗ 登录失败: {e}")));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = events.send(UiEvent::SlashOutput(format!("✗ 登录失败: {e}")));
+                    }
+                }
+            });
+            return;
+        }
+
+        // 默认：loopback PKCE（本地回调 + 打开浏览器）。
+        tokio::spawn(async move {
+            let flow = crate::api::auth::LoopbackPkce::new(&http, &config);
+            match flow.authorize_url().await {
+                Ok((url, _redirect, _verifier, handle)) => {
+                    let _ = events.send(UiEvent::SlashOutput(format!(
+                        "登录 {name}：请在浏览器中完成授权（已尝试打开）…"
+                    )));
+                    let _ = crate::share::open_in_browser(&url);
+                    match handle.await {
+                        Ok(Ok(tokens)) => {
+                            let tp = crate::api::auth::TokenProvider::new(&home, &name, config);
+                            match tp.save(&tokens).await {
+                                Ok(()) => {
+                                    let _ = events.send(UiEvent::SlashOutput(format!(
+                                        "✓ 已登录 {name}"
+                                    )));
+                                }
+                                Err(e) => {
+                                    let _ = events.send(UiEvent::SlashOutput(format!(
+                                        "✗ 保存失败: {e}"
+                                    )));
+                                }
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            let _ = events.send(UiEvent::SlashOutput(format!("✗ 登录失败: {e}")));
+                        }
+                        Err(e) => {
+                            let _ = events.send(UiEvent::SlashOutput(format!("✗ 登录中断: {e}")));
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = events.send(UiEvent::SlashOutput(format!("✗ 登录失败: {e}")));
+                }
+            }
+        });
+    }
+
+    /// `/provider logout <name>`: revoke (best-effort) + clear the stored auth.
+    fn slash_provider_logout(&mut self, arg: &str) {
+        let name = arg.trim();
+        if name.is_empty() {
+            self.push_slash_output("用法: /provider logout <名称>".to_string());
+            return;
+        }
+        let session = self.session.clone();
+        let Some(cfg) = session.settings.providers.get(name) else {
+            self.push_slash_output(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
+            return;
+        };
+        let Some(oauth) = cfg.oauth.as_ref() else {
+            self.push_slash_output(format!("provider \"{name}\" 未配置 oauth，无需退出"));
+            return;
+        };
+        if oauth.kind != "codex" {
+            self.push_slash_output(format!("不支持的 oauth.kind \"{}\"（v1 仅 codex）", oauth.kind));
+            return;
+        }
+        let name = name.to_string();
+        let home = session.home.clone();
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let tp = crate::api::auth::TokenProvider::new(
+                &home,
+                &name,
+                crate::api::auth::OauthFlowConfig::codex(),
+            );
+            match tp.logout().await {
+                Ok(()) => {
+                    let _ = events.send(UiEvent::SlashOutput(format!("✓ 已退出 {name}（凭据已清除）")));
+                }
+                Err(e) => {
+                    let _ = events.send(UiEvent::SlashOutput(format!("✗ 退出失败: {e}")));
+                }
+            }
+        });
     }
 
     fn slash_think(&mut self, arg: &str) {
@@ -6246,8 +6455,9 @@ mod tests {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
-                    protocol: None,
-            },
+                protocol: None,
+                oauth: None,
+                },
         )]);
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::new("sk-main".into(), "https://main.example".into());
@@ -6263,8 +6473,9 @@ mod tests {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
-                    protocol: None,
-            },
+                protocol: None,
+                oauth: None,
+                },
         );
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::from_settings(&settings).unwrap();
@@ -6702,8 +6913,9 @@ mod tests {
                     api_key: key.into(),
                     api_base_url: url.into(),
                     supports_images: None,
-                        protocol: None,
-                },
+                    protocol: None,
+                    oauth: None,
+                    },
             );
         }
         Arc::get_mut(&mut chat.session).unwrap().client =
@@ -6748,8 +6960,9 @@ mod tests {
                 api_key: "sk-ds".into(),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
-                    protocol: None,
-            },
+                protocol: None,
+                oauth: None,
+                },
         );
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::from_settings(&settings).unwrap();

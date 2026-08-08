@@ -138,10 +138,27 @@ pub struct ProviderConfig {
     /// Wire protocol: `anthropic` (default) | `openai` (Responses API).
     #[serde(default)]
     pub protocol: Option<String>,
+    /// OAuth login config (D33 §6): present means the provider authenticates
+    /// via OAuth when no `apiKey` is set (apiKey wins over OAuth). v1 kind:
+    /// `codex` (ChatGPT subscription).
+    #[serde(default)]
+    pub oauth: Option<OauthConfig>,
     /// Whether this provider's model accepts image content (`supportsImages`;
     /// None/default = don't send images).
     #[serde(rename = "supportsImages", default)]
     pub supports_images: Option<bool>,
+}
+
+/// OAuth provider config (`providers.<name>.oauth`, D33).
+#[derive(Debug, Clone, Deserialize)]
+pub struct OauthConfig {
+    /// Built-in flow kind: `codex` (ChatGPT subscription device flow/PKCE).
+    pub kind: String,
+    /// Optional stored-account selector (multi-account; v1 stores one —
+    /// P2 stores a single account, so the field is parsed but unused yet).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub account: Option<String>,
 }
 
 /// Permission rules (settings permissions section).
@@ -529,7 +546,8 @@ mod tests {
                 api_base_url: String::new(),
                 protocol: Some("chatgpt".into()),
                 supports_images: None,
-            },
+                oauth: None,
+                },
         );
         let client = crate::api::client::Client::from_settings_with(&settings, |_| {
             Err(std::env::VarError::NotPresent)

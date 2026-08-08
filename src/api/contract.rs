@@ -27,6 +27,9 @@ pub enum ClientError {
     /// The server gave no response within the request timeout.
     #[error("request timed out")]
     Timeout,
+    /// OAuth problem (not logged in / refresh failed / ...), D33 §6.
+    #[error("{0}")]
+    Auth(String),
     /// The current protocol/endpoint does not support this operation (e.g.
     /// count_tokens on the Responses API) — callers degrade gracefully.
     #[error("{0}")]
@@ -37,6 +40,12 @@ pub enum ClientError {
     Config(String),
 }
 
+impl From<crate::api::auth::AuthError> for ClientError {
+    fn from(e: crate::api::auth::AuthError) -> Self {
+        ClientError::Auth(e.to_string())
+    }
+}
+
 impl crate::error::ErrorCode for ClientError {
     /// Outbound mapping (see the `src/error.rs` code table): every variant
     /// explicitly returns a stable code, and the match is exhaustive with no
@@ -44,6 +53,7 @@ impl crate::error::ErrorCode for ClientError {
     fn error_code(&self) -> &'static str {
         match self {
             ClientError::MissingApiKey | ClientError::InvalidApiKey(_) => "AUTH_REQUIRED",
+            ClientError::Auth(_) => "AUTH_REQUIRED",
             ClientError::Config(_) => "CONFIG_INVALID",
             ClientError::Api { status: 401, .. } => "AUTH_REQUIRED",
             ClientError::Api { status: 403, .. } => "PERMISSION_DENIED",
