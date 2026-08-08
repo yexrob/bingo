@@ -212,9 +212,13 @@ fn build_body(request: &NeutralRequest, variant: OpenAiVariant) -> serde_json::V
     }
     if let Some(level) = request.thinking {
         body["reasoning"] = serde_json::json!({ "effort": effort_for(level) });
-        // Reasoning summaries drive the thinking UI affordance (encrypted
-        // reasoning is not replayable — v1 discards it, per D33 §10).
-        body["include"] = serde_json::json!(["reasoning.summary_text"]);
+        // Reasoning summaries drive the thinking UI affordance on the public
+        // API (encrypted reasoning is not replayable — v1 discards it, D33
+        // §10). The codex endpoint rejects include values → omit it there
+        // (thinking summaries degrade on codex, recorded).
+        if variant != OpenAiVariant::Codex {
+            body["include"] = serde_json::json!(["reasoning.summary_text"]);
+        }
     }
     body
 }
@@ -638,6 +642,25 @@ impl ProviderClient for OpenAIProvider {
     }
 
     async fn complete_text(&self, request: &NeutralRequest) -> Result<String, ClientError> {
+        // Codex endpoint is stream-only (400 on stream:false): stream
+        // internally and aggregate the output text — the neutral interface
+        // is unchanged, callers (compact/memory) are unaffected.
+        if self.variant() == OpenAiVariant::Codex {
+            let mut req = request.clone();
+            req.stream = true;
+            let mut stream = self.stream(&req).await?;
+            let mut text = String::new();
+            while let Some(event) = stream.next().await {
+                match event? {
+                    StreamEvent::TextDelta { text: t, .. } => text.push_str(&t),
+                    StreamEvent::ApiError { message } => {
+                        return Err(ClientError::Stream(message));
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(text);
+        }
         let mut body = build_body(request, self.variant());
         body["stream"] = serde_json::json!(false);
         let base_url = self.base_url();
@@ -831,21 +854,29 @@ mod tests {
         assert_eq!(body["max_output_tokens"], 1024);
     }
 
-    /// Variant-isolated request params (main-reported): the codex endpoint
-    /// rejects max_output_tokens (400 Unsupported parameter — opencode
-    /// codex.ts omits it) and requires store:false; the default variant keeps
-    /// max_output_tokens and the default store. Guarded against regressions.
+    /// Variant-isolated request params (main-reported live matrix): the codex
+    /// endpoint rejects max_output_tokens, include (reasoning) and stream:false
+    /// (stream-only) and requires store:false; the default variant keeps
+    /// max_output_tokens + reasoning include + no store. Guarded vs regressions.
     #[test]
     fn codex_request_params_isolation() {
-        let r = req();
+        let mut r = req();
+        r.thinking = Some(ThinkingLevel::High);
         let codex = build_body(&r, OpenAiVariant::Codex);
         assert!(codex.get("max_output_tokens").is_none(), "codex 不传 max_output_tokens");
+        assert!(codex.get("include").is_none(), "codex 不传 reasoning include");
         assert_eq!(codex["store"], serde_json::json!(false), "codex 显式 store:false");
         assert_eq!(codex["model"], "gpt-5", "其余字段保留");
-        assert_eq!(codex["stream"], true);
+        assert_eq!(codex["stream"], true, "codex 强制流式");
+        assert_eq!(codex["reasoning"], serde_json::json!({"effort": "high"}), "reasoning 保留");
 
         let default = build_body(&r, OpenAiVariant::Default);
         assert_eq!(default["max_output_tokens"], 1024, "Default 保留 max_output_tokens");
+        assert_eq!(
+            default["include"],
+            serde_json::json!(["reasoning.summary_text"]),
+            "Default 保留 reasoning include"
+        );
         assert!(default.get("store").is_none(), "Default 不带 store（零行为变化）");
     }
 
@@ -1401,6 +1432,71 @@ mod codex_variant_tests {
         let models = provider.list_models().await.unwrap();
         assert_eq!(models, OpenAIProvider::CODEX_MODELS.to_vec());
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// codex complete_text: the endpoint is stream-only — the adapter streams
+    /// internally and aggregates the output text (neutral interface unchanged;
+    /// compact/memory callers are unaffected).
+    #[tokio::test]
+    async fn codex_complete_text_aggregates_stream() {
+        let sse = concat!(
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"model\":\"gpt-5.5\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}]}}\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hel\"}\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"delta\":\"lo\"}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\",\"annotations\":[]}]}}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"output_tokens\":5}}}\n\n",
+        )
+        .to_string();
+        let addr = spawn_sse_server(sse).await;
+        let home = tmp_home("ct");
+        let access = jwt(&serde_json::json!({"chatgpt_account_id": "acc_1"}));
+        let tp = oauth_provider(&home, &access).await;
+        let provider = OpenAIProvider::new(
+            reqwest::Client::new(),
+            AuthSource::OAuth(Arc::new(tp)),
+            addr,
+            false,
+            OpenAiVariant::Codex,
+            None,
+        );
+        let request = NeutralRequest {
+            model: "gpt-5.5".into(),
+            max_tokens: 100,
+            system: vec![],
+            messages: vec![],
+            tools: vec![],
+            stream: false,
+            thinking: None,
+        };
+        let text = provider.complete_text(&request).await.unwrap();
+        assert_eq!(text, "Hello", "流式聚合输出文本");
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// SSE server returning a canned Responses stream (200 text/event-stream).
+    async fn spawn_sse_server(sse: String) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 64 * 1024];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    sse.len(),
+                    sse
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
     }
 
     /// No cross-talk: the default variant never sends ChatGPT-Account-Id.
