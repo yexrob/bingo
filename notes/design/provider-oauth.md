@@ -360,6 +360,21 @@ Recorded at P1 verification time (2026-08, devex):
 - [x] Record the outcome in the feat commit body + this checklist — done here.
 - [x] **Adapter end-to-end smoke (bonus, same endpoint)**: `bingo -p` headless with `protocol: "openai"` provider → streamed reply OK; count_tokens fallback warning fires once (`count_tokens unavailable ... local estimation`); tool round-trip OK (Glob tool: function_call → tool result → function_call_output → final reply, context grew across turns).
 
+### 8.2 P2 acceptance record (oauth device-flow login, commit 3117d32)
+
+Independent devex review (2026-08, commit 3117d32), verification: `cargo build` ✓ · `cargo clippy --all-targets -- -D warnings` ✓ · `cargo test --bin bingo` = **662 passed / 0 failed**.
+
+Checked against D33 §6 / the codex source:
+
+- [x] **AuthStore fixes correct** (bugs my P1-auth draft exposed, fixed by dev in 3117d32): `load_unlocked` under the held lock (my draft deadlocked: `set` → lock → `load` re-locks a non-reentrant std Mutex); `accountId` camelCase serde rename for opencode-compatible shape (my `opencode_compatible_shape` test caught it). Both verified in the committed code + tests green.
+- [x] **Device flow matches codex endpoints** (`usercode` → poll 403/404=pending, 15-min cap → exchange server-generated code at `/oauth/token` with `redirect_uri={issuer}/deviceauth/callback`); **loopback PKCE** (port 1455, fallback on conflict, S256, browser open) is the default; `--device-auth` / `--manual` alternates.
+- [x] **TokenProvider**: eager refresh (5-min lead) + 401-triggered refresh + single-flight (8-concurrent assertion test); permanent refresh failures (expired/reused/revoked detected in the error body) → auth cleared + re-login prompt.
+- [x] **/provider surface**: auth column (`✓ account` / `○ 未登录（/provider login）`); `login <name> [--device-auth|--manual <token>]`; `logout <name>` (revoke + clear); apiKey wins over OAuth (settings has apiKey → no OAuth path); not-logged-in requests re-read the store (login picks up without reload).
+- [x] **Error copy taxonomy** (feedback-states): `NotLoggedIn` → "provider X 未登录：/provider login X"; `RefreshPermanent` → "登录已失效（…）：/provider login 重新登录"; `Timeout` for the device-poll cap.
+- [x] **guide.md synced** in the same commit (providers row gains `oauth`, login/logout commands in the quick reference).
+- [ ] **P2 spike — OPEN** (needs a real ChatGPT subscription account): Path 1 (`api.openai.com/v1/responses` accepts the subscription bearer → reuse the P1 openai adapter wholesale) vs Path 2 (private `chatgpt.com/backend-api` codex protocol → third adapter). Pending main/user account cooperation; outcome decides the P2 closing shape.
+- Observations (accepted, not blocking): loopback `state=bingo` is a fixed string (no per-session CSRF nonce) — acceptable for a localhost-only callback CLI (same class as many CLIs); `--manual` tokens are stored without refresh (documented in the success copy); scope omits codex's `api.connectors.*` (bingo has no connector tools).
+
 ## 9. Testing strategy
 
 - Existing mock-server pattern (raw `TcpListener` + preset SSE, `query.rs`) is reused: add a shared fixture module that serves the same logical turn as **Anthropic SSE** and as **Responses SSE**, and assert both adapters produce the same `StreamEvent` sequence (contract conformance table).
