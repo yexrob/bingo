@@ -94,10 +94,10 @@ impl SegStyle {
 pub struct Line {
     /// The segments, in order.
     pub segs: Vec<Seg>,
-    /// Image block reference: every row of the block carries it (the first
-    /// row plus the blank continuation rows); the display layer tells block
-    /// boundaries apart by url — the first row emits the kitty sequence,
-    /// continuation rows are skipped.
+    /// Image block reference: every row of the block carries it, with `row`
+    /// naming its position inside the block. The display layer renders each
+    /// row as kitty Unicode placeholder cells; the transmit layer sends the
+    /// image data once per image id.
     pub image: Option<ImageRef>,
 }
 
@@ -107,6 +107,8 @@ pub struct ImageRef {
     pub url: String,
     pub cols: usize,
     pub rows: usize,
+    /// 0-based row of this line within the image block.
+    pub row: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

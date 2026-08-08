@@ -50,8 +50,9 @@ use crate::tui::el;
 use crate::tui::gfx;
 use crate::tui::line::{Line, SegStyle};
 use crate::tui::statics::pick_flush_mark;
-use crate::tui::term::{HistoryItem, StdoutTerm, write_gfx};
+use crate::tui::term::{StdoutTerm, write_transmits};
 use crate::tui::view;
+use ratatui::text::Line as TextLine;
 
 /// Per-frame tick interval (spinner/thinking timing).
 const TICK_MS: u64 = 33;
@@ -70,10 +71,8 @@ pub type FullscreenHost = Terminal<CrosstermBackend<Stdout>>;
 pub struct Frame {
     pub rows: Vec<Row>,
     pub cursor: Option<(u16, u16)>,
-    /// Document row of the first content row in `rows` (before chrome).
-    pub doc_start: usize,
     /// Number of leading rows that belong to the transcript content (the rest
-    /// is chrome). Image placements only exist inside this span.
+    /// is chrome). Image references only exist inside this span.
     pub content_len: usize,
 }
 
@@ -96,6 +95,12 @@ fn tail_window(total: usize, tail_start: usize, chrome: usize, height: usize) ->
 }
 
 impl Frame {
+    /// The transcript-content prefix of `rows` (chrome and error rows
+    /// excluded) — the only rows that can reference images.
+    fn content(&self) -> &[Row] {
+        &self.rows[..self.content_len.min(self.rows.len())]
+    }
+
     /// Inline frame: dynamic tail (over budget → keep only the last rows + the omission hint) + chrome.
     /// The row count is the viewport height, so it is always ≤ terminal height - 2 (the DECSTBM region stays legal).
     /// #18: the full-flow error state (`last_error.level == Full`) covers the content area with a full-screen error,
@@ -107,7 +112,6 @@ impl Frame {
             return Self {
                 rows: el::render(chrome::error_screen(err, &chat.theme)).rows,
                 cursor: None,
-                doc_start: 0,
                 content_len: 0,
             };
         }
@@ -154,16 +158,10 @@ impl Frame {
         let cursor = chrome.caret.and_then(|(row, col)| {
             caret_position(pre_chrome + row, col, dropped, rows.len(), width)
         });
-        // Map content rows back to document rows for image placement: the
-        // `+N lines` omission hint is not a doc row; dropped rows above the
-        // budget shift the doc start.
-        let hidden_rows = usize::from(hidden > 0);
         let content_len = tail_len.saturating_sub(dropped);
-        let doc_start = chat.tail_start + dropped.saturating_sub(hidden_rows);
         Self {
             rows,
             cursor,
-            doc_start,
             content_len,
         }
     }
@@ -184,93 +182,51 @@ fn caret_position(
     Some((u16::try_from(col).ok()?, u16::try_from(y).ok()?))
 }
 
-/// Newly settled rows → scrollback entries. The first row of an image block emits real kitty bytes (transfer +
-/// placement + cursor advance); the sequence consumes the continuation rows, so they are skipped.
-fn flush_items(chat: &Chat, width: usize, end: usize) -> Vec<HistoryItem> {
+/// Newly settled rows → scrollback lines. Image rows freeze as placeholder
+/// cells like any other text ([`view::history_line`] → [`view::to_line`]);
+/// the image data behind them is transmitted separately
+/// ([`image_transmits`]).
+fn flush_items(chat: &Chat, width: usize, end: usize) -> Vec<TextLine<'static>> {
     let end = end.min(chat.doc.rows.len());
     if end <= chat.tail_start {
         return Vec::new();
     }
-    let pending = &chat.doc.rows[chat.tail_start..end];
-    let mut items = Vec::with_capacity(pending.len());
-    for (i, row) in pending.iter().enumerate() {
-        if let Some(img) = &row.line.image {
-            if !image_block_head(pending, i) {
-                continue;
-            }
-            if let (Some(cap), Some(meta)) = (chat.image_cap, chat.images.get(&img.url)) {
-                let bytes = gfx::image_print_bytes(
-                    &cap,
-                    &meta.bytes,
-                    img.cols,
-                    img.rows,
-                    gfx::image_id_for(&img.url),
-                );
-                items.push(HistoryItem::Raw {
-                    bytes,
-                    rows: u16::try_from(img.rows).unwrap_or(u16::MAX),
-                });
-                continue;
-            }
-        }
-        items.push(HistoryItem::Line(view::history_line(
-            row,
-            chat.theme.text,
-            width,
-        )));
-    }
-    items
+    chat.doc.rows[chat.tail_start..end]
+        .iter()
+        .map(|row| view::history_line(row, chat.theme.text, width))
+        .collect()
 }
 
-/// Whether this row is an image block's first row (continuation rows return false; boundaries are detected by url).
-fn image_block_head(rows: &[Row], i: usize) -> bool {
-    let Some(img) = &rows[i].line.image else {
-        return false;
-    };
-    rows.get(i.wrapping_sub(1))
-        .is_none_or(|prev| prev.line.image.as_ref().map(|p| &p.url) != Some(&img.url))
-}
-
-/// Image blocks fully visible in the frame's content area → screen-cell
-/// placements (`origin_row` = the viewport's top screen row). Partially
-/// visible or still-loading blocks stay as `#[image]` placeholder rows; tmux
-/// placeholder mode is not supported in the live viewport yet, so it gets no
-/// placements either.
-fn desired_placements(
-    frame: &Frame,
+/// Concatenated transmit payloads for every loaded image referenced by `rows`
+/// that the terminal does not hold yet. Position- and order-independent
+/// (`U=1` virtual placement): the placeholder cells painted by the render
+/// layer do the placing, whether they went out before or after the data —
+/// so a block whose head row is scrolled off still transmits, keyed by any
+/// of its rows.
+fn image_transmits(
     cap: gfx::ImageCap,
     images: &HashMap<String, Arc<crate::ui::ImageMeta>>,
-    origin_row: u16,
-) -> Vec<gfx::Placement> {
-    if cap.mode != gfx::ImageMode::Direct {
-        return Vec::new();
-    }
+    rows: &[Row],
+    transmits: &mut gfx::Transmits,
+) -> Vec<u8> {
     let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < frame.content_len {
-        let Some(img) = &frame.rows[i].line.image else {
-            i += 1;
+    for row in rows {
+        let Some(img) = &row.line.image else {
             continue;
         };
-        if !image_block_head(&frame.rows, i) {
-            i += 1;
+        let Some(meta) = images.get(&img.url) else {
             continue;
+        };
+        let id = gfx::image_id_for(&img.url);
+        if transmits.needs(id) {
+            out.extend_from_slice(&gfx::transmit_bytes(
+                &meta.bytes,
+                meta.cols,
+                meta.rows,
+                id,
+                cap.transport,
+            ));
         }
-        let block_rows = img.rows;
-        let end = i + block_rows;
-        if end <= frame.content_len
-            && let Some(meta) = images.get(&img.url)
-        {
-            out.push(gfx::Placement {
-                id: gfx::placement_id(&img.url, frame.doc_start + i),
-                url: img.url.clone(),
-                cols: meta.cols,
-                rows: meta.rows,
-                row: origin_row.saturating_add(u16::try_from(i).unwrap_or(u16::MAX)),
-                col: 0,
-            });
-        }
-        i = end;
     }
     out
 }
@@ -351,7 +307,7 @@ pub async fn run_inline(
     let mut ticks: u64 = 0;
     let mut expand_open = true;
     let mut dirty = true;
-    let mut layer = gfx::PlacementLayer::default();
+    let mut transmits = gfx::Transmits::default();
     let mut pending_resize: Option<(Size, Instant)> = None;
 
     loop {
@@ -461,7 +417,10 @@ pub async fn run_inline(
         if chat.force_redraw {
             chat.force_redraw = false;
             term.clear_visible()?;
-            term.write_gfx(&layer.clear())?;
+            // The terminal may have purged its image store (resize routes
+            // through here): forget what was transmitted, the next frame
+            // retransmits whatever its placeholder cells reference.
+            transmits.reset();
         }
 
         let size = term.size();
@@ -470,14 +429,15 @@ pub async fn run_inline(
         // Lazy flush (composited with drawing into one `term.frame` batch): freeze only the settled segments
         // whose start row has crossed the window top — fully visible settled segments stay in the live doc
         // for re-layout at any time. Rows freed by a shrinking viewport go into the gap bank and frozen rows
-        // are written into them right away, so settling migrates without flicker or blank bands. The cursor
-        // advances per segment — even an image-only continuation segment (no items) must advance, or the next frame would redraw it.
+        // are written into them right away, so settling migrates without flicker or blank bands.
         let mut items = Vec::new();
+        let mut flushed = None;
         if std::mem::take(&mut chat.dump_transcript) {
             // ctrl+o full replay: the cursor has rewound and the doc fully rebuilt from the welcome card (everything
             // expanded); the settled part freezes into scrollback in one go — the user scrolls up to see it all,
             // while the dynamic tail stays in the viewport as usual.
             if let Some(mark) = chat.doc.settled_marks.last().copied() {
+                flushed = Some((chat.tail_start, mark.row_end.min(chat.doc.rows.len())));
                 items = flush_items(&chat, size.width as usize, mark.row_end);
                 chat.advance_flushed_upto(mark);
             }
@@ -494,6 +454,7 @@ pub async fn run_inline(
             );
             if let Some(mark) = pick_flush_mark(&chat.doc.settled_marks, chat.tail_start, win_start)
             {
+                flushed = Some((chat.tail_start, mark.row_end.min(chat.doc.rows.len())));
                 items = flush_items(&chat, size.width as usize, mark.row_end);
                 chat.advance_flushed_upto(mark);
             }
@@ -512,18 +473,27 @@ pub async fn run_inline(
             frame.cursor,
         )?;
 
-        // Live-viewport image placements: loaded, fully visible image blocks
-        // render immediately instead of waiting for the scrollback flush.
+        // The image data behind the placeholder cells: transmit whatever the
+        // frame or the freshly flushed rows reference and the terminal does
+        // not hold yet (advance_flushed_upto moved the cursor, not the rows,
+        // so the flushed slice indices are still valid).
         if let Some(cap) = chat.image_cap {
-            let placements = desired_placements(&frame, cap, &chat.images, term.viewport_top());
-            term.write_gfx(&layer.sync(&chat.images, &placements))?;
+            let mut bytes = image_transmits(cap, &chat.images, frame.content(), &mut transmits);
+            if let Some((start, end)) = flushed {
+                bytes.extend_from_slice(&image_transmits(
+                    cap,
+                    &chat.images,
+                    &chat.doc.rows[start..end],
+                    &mut transmits,
+                ));
+            }
+            term.write_transmits(&bytes)?;
         }
         if chat.exit {
             break;
         }
     }
 
-    term.write_gfx(&layer.clear())?;
     term.finish()?;
     Ok(())
 }
@@ -537,7 +507,6 @@ fn fullscreen_frame(chat: &Chat, size: Size) -> Frame {
         return Frame {
             rows: el::render(chrome::error_screen(err, &chat.theme)).rows,
             cursor: None,
-            doc_start: 0,
             content_len: 0,
         };
     }
@@ -585,7 +554,6 @@ fn fullscreen_frame(chat: &Chat, size: Size) -> Frame {
     Frame {
         rows,
         cursor,
-        doc_start: chat.scroll,
         content_len: chrome_start,
     }
 }
@@ -602,7 +570,7 @@ pub async fn run_fullscreen(
     let mut ticks: u64 = 0;
     let mut expand_open = true;
     let mut dirty = true;
-    let mut layer = gfx::PlacementLayer::default();
+    let mut transmits = gfx::Transmits::default();
 
     loop {
         tokio::select! {
@@ -621,10 +589,10 @@ pub async fn run_fullscreen(
                     }
                 }
                 Some(Ok(Event::Resize(_, _))) => {
-                    // Resize purges the terminal's image store (ratatui's
-                    // autoresize also clears the screen); the placement layer's
-                    // transmit cache is now lies. Route through force_redraw:
-                    // clear + drop the cache + retransmit everything visible.
+                    // Resize may purge the terminal's image store (ratatui's
+                    // autoresize also clears the screen). Route through
+                    // force_redraw: clear, forget transmits, retransmit what
+                    // the repainted placeholder cells reference.
                     chat.force_redraw = true;
                     chat.dirty = true;
                     dirty = true;
@@ -681,7 +649,9 @@ pub async fn run_fullscreen(
         if chat.force_redraw {
             chat.force_redraw = false;
             terminal.clear()?;
-            write_gfx(terminal.backend_mut(), &layer.clear())?;
+            // Resize routes through here and may have purged the terminal's
+            // image store: forget transmits, the redraw below retransmits.
+            transmits.reset();
         }
 
         let size = terminal.size()?;
@@ -697,20 +667,16 @@ pub async fn run_fullscreen(
             }
         })?;
 
-        // Live-viewport image placements on the alternate screen.
+        // The image data behind the frame's placeholder cells.
         if let Some(cap) = chat.image_cap {
-            let placements = desired_placements(&frame, cap, &chat.images, 0);
-            write_gfx(
-                terminal.backend_mut(),
-                &layer.sync(&chat.images, &placements),
-            )?;
+            let bytes = image_transmits(cap, &chat.images, frame.content(), &mut transmits);
+            write_transmits(terminal.backend_mut(), &bytes)?;
         }
         if chat.exit {
             break;
         }
     }
 
-    write_gfx(terminal.backend_mut(), &layer.clear())?;
     Ok(())
 }
 
@@ -847,89 +813,113 @@ mod tests {
         chat.doc.settled = 2;
         let items = flush_items(&chat, 40, chat.doc.settled);
         assert_eq!(items.len(), 2, "只落定稿前缀");
-        let HistoryItem::Line(first) = &items[0] else {
-            panic!("text row");
-        };
-        assert_eq!(history_text(first), "first");
-        let HistoryItem::Line(bubble) = &items[1] else {
-            panic!("bubble row");
-        };
-        assert_eq!(text_width(&history_text(bubble)), 40, "气泡满行");
+        assert_eq!(history_text(&items[0]), "first");
+        assert_eq!(text_width(&history_text(&items[1])), 40, "气泡满行");
     }
 
-    /// Image blocks: the head emits bytes (occupying rows rows), continuations are skipped; without capability, fall back to the placeholder text.
-    #[test]
-    fn flush_items_emit_one_payload_per_image_block() {
-        let mut chat = chat_at(40, 24);
-        let img = |url: &str| Line {
+    fn img_row(url: &str, row: usize) -> Line {
+        Line {
             segs: Vec::new(),
             image: Some(ImageRef {
                 url: url.into(),
                 cols: 4,
                 rows: 2,
+                row,
             }),
-        };
-        chat.doc.rows = vec![
-            Row::new(img("a.png")),
-            Row::new(img("a.png")),
-            Row::new(Line::plain("text")),
-            Row::new(img("b.png")),
-        ];
-        chat.doc.settled = 4;
-        // No capability/cache: the block head falls back to the `#[image]` placeholder; continuations emit nothing.
-        let items = flush_items(&chat, 40, chat.doc.settled);
-        assert_eq!(items.len(), 3);
-        let HistoryItem::Line(head) = &items[0] else {
-            panic!("placeholder row");
-        };
-        assert_eq!(history_text(head), view::IMAGE_PLACEHOLDER);
-
-        // Capable + loaded: one payload per block, row count = image row count.
-        chat.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
-        chat.images.insert(
-            "a.png".into(),
-            std::sync::Arc::new(crate::ui::ImageMeta {
-                cols: 4,
-                rows: 2,
-                bytes: b"png".to_vec(),
-            }),
-        );
-        let items = flush_items(&chat, 40, chat.doc.settled);
-        assert_eq!(items.len(), 3, "块内续行不重复落盘");
-        match &items[0] {
-            HistoryItem::Raw { bytes, rows } => {
-                assert_eq!(*rows, 2, "占两行");
-                assert!(!bytes.is_empty());
-            }
-            HistoryItem::Line(_) => panic!("image head should be raw bytes"),
         }
     }
 
-    /// Block head/continuation detection (an image block emits bytes exactly once).
+    /// Image rows freeze as placeholder cells — one line per row, every row
+    /// carrying its own coordinates, exactly what the viewport painted.
     #[test]
-    fn image_block_head_detects_block_boundaries() {
-        let img = |url: &str| Line {
-            segs: Vec::new(),
-            image: Some(ImageRef {
-                url: url.to_string(),
-                cols: 10,
-                rows: 3,
-            }),
-        };
-        let rows = vec![
-            Row::new(img("a.png")),
-            Row::new(img("a.png")),
-            Row::new(img("a.png")),
-            Row::new(Line::plain("x")),
-            Row::new(img("b.png")),
-            Row::new(img("b.png")),
+    fn flush_items_freeze_image_rows_as_placeholder_cells() {
+        let mut chat = chat_at(40, 24);
+        chat.doc.rows = vec![
+            Row::new(img_row("a.png", 0)),
+            Row::new(img_row("a.png", 1)),
+            Row::new(Line::plain("text")),
         ];
-        assert!(image_block_head(&rows, 0), "块首");
-        assert!(!image_block_head(&rows, 1), "续行");
-        assert!(!image_block_head(&rows, 2), "续行");
-        assert!(!image_block_head(&rows, 3), "普通行");
-        assert!(image_block_head(&rows, 4), "新块首");
-        assert!(!image_block_head(&rows, 5), "新块续行");
+        chat.doc.settled = 3;
+        let items = flush_items(&chat, 40, chat.doc.settled);
+        assert_eq!(items.len(), 3, "图片行逐行落盘");
+        let head = history_text(&items[0]);
+        assert!(
+            head.starts_with(crate::tui::gfx::PLACEHOLDER),
+            "占位符单元格: {head:?}"
+        );
+        assert_ne!(
+            history_text(&items[0]),
+            history_text(&items[1]),
+            "行变音符随行号变化"
+        );
+        assert_eq!(history_text(&items[2]), "text");
+    }
+
+    /// The transmit layer sends each image once, keyed by any of its rows
+    /// (a block cut at the top still transmits), and resets with the cache.
+    #[test]
+    fn image_transmits_send_each_image_once() {
+        let cap = crate::tui::gfx::ImageCap::default_cells();
+        let images = HashMap::from([
+            (
+                "a.png".to_string(),
+                Arc::new(crate::ui::ImageMeta {
+                    cols: 4,
+                    rows: 2,
+                    bytes: b"png".to_vec(),
+                }),
+            ),
+            (
+                "b.png".to_string(),
+                Arc::new(crate::ui::ImageMeta {
+                    cols: 4,
+                    rows: 2,
+                    bytes: b"png".to_vec(),
+                }),
+            ),
+        ]);
+        let mut transmits = crate::tui::gfx::Transmits::default();
+
+        // A block whose head row is scrolled off: the continuation row alone
+        // still keys the transmit.
+        let rows = vec![
+            Row::new(img_row("a.png", 1)),
+            Row::new(Line::plain("t")),
+            Row::new(img_row("b.png", 0)),
+            Row::new(img_row("b.png", 1)),
+            Row::new(img_row("missing.png", 0)),
+        ];
+        let bytes = image_transmits(cap, &images, &rows, &mut transmits);
+        let s = String::from_utf8_lossy(&bytes);
+        assert_eq!(s.matches("a=T,U=1").count(), 2, "每张图恰好一次: {s}");
+        let id_a = crate::tui::gfx::image_id_for("a.png");
+        let id_b = crate::tui::gfx::image_id_for("b.png");
+        assert!(s.contains(&format!("i={id_a}")), "a.png 的 id 在传输里");
+        assert!(s.contains(&format!("i={id_b}")), "b.png 的 id 在传输里");
+
+        // Same rows again: the terminal already holds both images.
+        assert!(
+            image_transmits(cap, &images, &rows, &mut transmits).is_empty(),
+            "已传输不重复"
+        );
+        // After a reset (resize purged the store) they transmit again.
+        transmits.reset();
+        assert!(
+            !image_transmits(cap, &images, &rows, &mut transmits).is_empty(),
+            "reset 后重传"
+        );
+
+        // The tmux transport wraps every chunk in a passthrough envelope.
+        let tmux = crate::tui::gfx::ImageCap {
+            transport: crate::tui::gfx::Transport::Tmux,
+            ..cap
+        };
+        let mut transmits = crate::tui::gfx::Transmits::default();
+        let wrapped = image_transmits(tmux, &images, &rows, &mut transmits);
+        assert!(
+            String::from_utf8_lossy(&wrapped).starts_with("\x1bPtmux;"),
+            "tmux 传输走 passthrough"
+        );
     }
 
     /// The core inline invariant: settled content flushes once; afterwards the viewport holds only the tail + chrome.
@@ -950,10 +940,9 @@ mod tests {
 
         let items = flush_items(&chat, 80, chat.doc.settled);
         assert!(
-            items.iter().any(|item| match item {
-                HistoryItem::Line(line) => history_text(line).contains("Welcome back"),
-                HistoryItem::Raw { .. } => false,
-            }),
+            items
+                .iter()
+                .any(|line| history_text(line).contains("Welcome back")),
             "欢迎卡进 scrollback"
         );
         chat.advance_flushed();
@@ -1056,13 +1045,7 @@ mod tests {
             .copied()
             .expect("全量文档有检查点");
         let items = flush_items(&chat, 80, mark.row_end);
-        let texts: Vec<String> = items
-            .iter()
-            .filter_map(|item| match item {
-                HistoryItem::Line(line) => Some(history_text(line)),
-                HistoryItem::Raw { .. } => None,
-            })
-            .collect();
+        let texts: Vec<String> = items.iter().map(history_text).collect();
         assert!(
             texts.iter().any(|l| l.contains("Welcome")),
             "重放从欢迎卡开始: {texts:?}"
@@ -1118,122 +1101,25 @@ mod tests {
         assert_eq!(frame.content_len, 0, "错误态无内容区");
     }
 
-    /// Loaded, fully visible image blocks produce one placement at the right
-    /// screen position; partial blocks, unloaded images, continuation rows and
-    /// tmux mode produce nothing.
+    /// Feedback loop for "images render live, not as `#[image]`": on the
+    /// FIRST assembled frame after load — inline and fullscreen alike — the
+    /// image rows are inside the frame's content span (so the render layer
+    /// paints their placeholder cells) and the transmit layer sends the data.
     #[test]
-    fn desired_placements_only_for_fully_visible_loaded_blocks() {
-        use crate::tui::line::ImageRef;
-        let img_line = |url: &str, rows: usize| Line {
-            segs: Vec::new(),
-            image: Some(ImageRef {
-                url: url.to_string(),
-                cols: 4,
-                rows,
-            }),
-        };
-        let cap = crate::tui::gfx::ImageCap::default_cells(); // Direct mode
-        let images = HashMap::from([(
-            "a.png".to_string(),
-            Arc::new(crate::ui::ImageMeta {
-                cols: 4,
-                rows: 2,
-                bytes: b"png".to_vec(),
-            }),
-        )]);
-
-        // Block fully inside content (rows 2..4 of a 6-row content area).
-        let frame = Frame {
-            rows: vec![
-                Row::new(Line::plain("t")),
-                Row::new(Line::plain("t")),
-                Row::new(img_line("a.png", 2)),
-                Row::new(img_line("a.png", 2)),
-                Row::new(Line::plain("t")),
-                Row::new(Line::plain("t")),
-            ],
-            cursor: None,
-            doc_start: 10,
-            content_len: 6,
-        };
-        let placements = desired_placements(&frame, cap, &images, 3);
-        assert_eq!(placements.len(), 1, "恰好一个完整可见块");
-        assert_eq!(placements[0].url, "a.png");
-        assert_eq!(
-            (placements[0].row, placements[0].col),
-            (3 + 2, 0),
-            "锚定屏幕单元格：视口顶 + 内容行"
-        );
-        assert_eq!(
-            placements[0].id,
-            crate::tui::gfx::placement_id("a.png", 10 + 2),
-            "实例 id 锚定 doc 行"
-        );
-
-        // Partially visible (block clipped at the bottom of the content area) → skipped.
-        let clipped = Frame {
-            rows: vec![
-                Row::new(Line::plain("t")),
-                Row::new(Line::plain("t")),
-                Row::new(img_line("a.png", 2)),
-                Row::new(img_line("a.png", 2)),
-            ],
-            cursor: None,
-            doc_start: 0,
-            content_len: 3,
-        };
-        assert!(
-            desired_placements(&clipped, cap, &images, 0).is_empty(),
-            "被裁剪的块不放置"
-        );
-
-        // Unloaded url → skipped.
-        let unloaded = Frame {
-            rows: vec![Row::new(img_line("missing.png", 1))],
-            cursor: None,
-            doc_start: 0,
-            content_len: 1,
-        };
-        assert!(desired_placements(&unloaded, cap, &images, 0).is_empty());
-
-        // tmux placeholder mode → no viewport placements.
-        let tmux = crate::tui::gfx::ImageCap {
-            mode: crate::tui::gfx::ImageMode::TmuxPlaceholder,
-            ..crate::tui::gfx::ImageCap::default_cells()
-        };
-        assert!(
-            desired_placements(&frame, tmux, &images, 3).is_empty(),
-            "tmux 占位模式视口不放置"
-        );
-    }
-
-    /// Feedback loop for "images render live, not as `#[image]`": a loaded,
-    /// fully visible image block must yield a placement with transmit bytes on
-    /// the FIRST assembled frame after load — inline and fullscreen alike,
-    /// with the screen row anchored to the frame position.
-    #[test]
-    fn loaded_image_block_placement_on_first_frame_inline_and_fullscreen() {
+    fn loaded_image_renders_and_transmits_on_first_frame_inline_and_fullscreen() {
         let meta = Arc::new(crate::ui::ImageMeta {
             cols: 4,
             rows: 2,
             bytes: b"png".to_vec(),
         });
-        let img = |url: &str| Line {
-            segs: Vec::new(),
-            image: Some(ImageRef {
-                url: url.to_string(),
-                cols: 4,
-                rows: 2,
-            }),
-        };
         for fullscreen in [false, true] {
             let mut chat = chat_at(80, 30);
             chat.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
             chat.images.insert("a.png".to_string(), meta.clone());
             chat.doc.rows = vec![
                 Row::new(Line::plain("hi")),
-                Row::new(img("a.png")),
-                Row::new(img("a.png")),
+                Row::new(img_row("a.png", 0)),
+                Row::new(img_row("a.png", 1)),
                 Row::new(Line::plain("tail")),
             ];
             let frame = if fullscreen {
@@ -1241,41 +1127,43 @@ mod tests {
             } else {
                 Frame::assemble(&chat, size(80, 30))
             };
-            let origin: u16 = if fullscreen { 0 } else { 7 };
-            let cap = chat.image_cap.unwrap();
-            let placements = desired_placements(&frame, cap, &chat.images, origin);
-            assert_eq!(placements.len(), 1, "fullscreen={fullscreen} 首帧即放置");
-            assert_eq!(
-                (placements[0].row, placements[0].col),
-                (origin + 1, 0),
-                "fullscreen={fullscreen} 锚定帧内屏幕行"
-            );
-            let mut layer = crate::tui::gfx::PlacementLayer::default();
-            let ops = layer.sync(&chat.images, &placements);
-            assert_eq!(ops.len(), 1, "fullscreen={fullscreen}");
-            assert_eq!(ops[0].at, Some((origin + 1, 0)));
+            let image_rows = frame
+                .content()
+                .iter()
+                .filter(|row| row.line.image.is_some())
+                .count();
+            assert_eq!(image_rows, 2, "fullscreen={fullscreen} 图片行在内容区");
+
+            let mut transmits = crate::tui::gfx::Transmits::default();
+            let cap = chat.image_cap.expect("cap set above");
+            let bytes = image_transmits(cap, &chat.images, frame.content(), &mut transmits);
+            let s = String::from_utf8_lossy(&bytes);
             assert!(
-                String::from_utf8_lossy(&ops[0].bytes).contains("a=T"),
-                "fullscreen={fullscreen} 首帧传输+放置"
+                s.contains("a=T,U=1"),
+                "fullscreen={fullscreen} 首帧即传输: {s}"
+            );
+            assert!(
+                image_transmits(cap, &chat.images, frame.content(), &mut transmits).is_empty(),
+                "fullscreen={fullscreen} 次帧不重传"
             );
         }
     }
 
-    /// Fullscreen frames carry the doc row of their first content row so the
-    /// placement layer can anchor instance ids.
+    /// Fullscreen frames split content from chrome so the transmit layer
+    /// scans exactly the transcript span.
     #[test]
-    fn fullscreen_frame_tracks_doc_start() {
+    fn fullscreen_frame_content_spans_screen_minus_chrome() {
         let mut chat = chat_at(80, 24);
         chat.dirty = true;
         rebuild(&mut chat, size(80, 24), true);
         chat.scroll = 7;
         let frame = fullscreen_frame(&chat, size(80, 24));
-        assert_eq!(frame.doc_start, 7);
         assert_eq!(
             frame.content_len + chrome_height(&chat, 80, true),
             24,
             "内容区 + chrome = 屏高"
         );
+        assert_eq!(frame.content().len(), frame.content_len);
     }
 
     /// P0-7 regression: the fullscreen host renders Page/Field error rows
