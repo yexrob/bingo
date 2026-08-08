@@ -1,7 +1,15 @@
 //! Terminal front end.
 //!
-//! - [`slash`] owns slash command metadata and pure suggestion/help transformations.
-//! - [`chat`] is the state machine and the document builder (`build_rows`).
+//! Composition is declarative — Ink's shape without Ink's runtime (D38):
+//!
+//! - [`el`] is the element tree: components are plain functions returning
+//!   elements, and one render walk yields rows, click ranges and the caret.
+//! - [`statics`] is the Static region: the transcript as a block list with a
+//!   frozen prefix (write-once scrollback, lazy freezing — Ink `<Static>`).
+//! - [`chrome`] declares every section below the transcript.
+//! - [`chat`] is the state machine and the transcript block builder
+//!   (`build_rows`); [`slash`] owns slash command metadata and pure
+//!   suggestion/help transformations.
 //! - [`app`] is the event loop and the frame assembly.
 //! - [`view`] converts document rows to ratatui text; [`term`] is the only
 //!   module that writes to the terminal.
@@ -12,6 +20,8 @@
 pub mod activities;
 mod app;
 pub mod chat;
+mod chrome;
+pub mod el;
 mod entity;
 pub mod gfx;
 pub mod history;
@@ -22,6 +32,7 @@ pub mod markdown;
 pub mod math;
 pub mod picker;
 pub mod slash;
+pub mod statics;
 pub(crate) mod term;
 #[cfg(test)]
 mod test_util;

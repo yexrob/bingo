@@ -2,7 +2,9 @@
 //!
 //! Ported from the old `tui.rs` `BingoChat` (ratatui edition): event handling semantics,
 //! collapse detection, and expand/collapse toggling are preserved as-is; `draw` is replaced by [`Chat::build_rows`],
-//! which produces display-agnostic styled row documents, mapped to terminal rows by [`crate::tui::view`].
+//! which builds transcript blocks ([`crate::tui::statics::Block`]) laid out by
+//! [`crate::tui::statics::layout`] into display-agnostic styled row documents, mapped to
+//! terminal rows by [`crate::tui::view`].
 //! Events arrive from channels (`UiEvent` / `AskRequest`); keyboard/mouse come in via
 //! [`Chat::on_key`] / [`Chat::doc_click`].
 
@@ -27,89 +29,11 @@ use crate::tui::theme::{Theme, ThemeSetting};
 use crate::ui::{AskRequest, DialogAction, ImageMeta, PermissionRequest, UiEvent};
 use crate::watch::WatchState;
 
-/// 文档中一行：样式化行 + 整行背景（用户气泡用）。
-#[derive(Debug, Clone)]
-pub struct Row {
-    pub line: Line,
-    /// Full-row background.
-    pub bg: Option<Color>,
-    /// Right padding inside the row (CC user bubble paddingRight=1).
-    pub padding_right: usize,
-}
+pub use crate::tui::el::{ClickTarget, Row};
+pub use crate::tui::statics::{Doc, SettledMark};
 
-impl Row {
-    /// Every row is exactly one canvas line: the constructor is the single
-    /// choke point that enforces it (see [`crate::tui::line::sanitize`]).
-    pub fn new(line: Line) -> Self {
-        let mut line = line;
-        line.sanitize();
-        Self {
-            line,
-            bg: None,
-            padding_right: 0,
-        }
-    }
-
-    /// Bubble row with a full-row background (user messages; CC paddingRight=1).
-    pub fn bubble(line: Line, bg: Color) -> Self {
-        let mut row = Row::new(line);
-        row.bg = Some(bg);
-        row.padding_right = 1;
-        row
-    }
-}
-
-/// Click target of a document row.
-#[derive(Debug, Clone)]
-pub enum ClickTarget {
-    /// Collapse-group row (collapses/expands the group).
-    Group { message: usize, group: usize },
-    /// Activity header row (collapses/expands the activity).
-    Activity { message: usize, path: Vec<usize> },
-    /// Permission option (confirm by index).
-    AskOption(usize),
-}
-
-/// Document coordinate range of a clickable row.
-#[derive(Debug, Clone)]
-pub struct ClickRange {
-    pub start: usize,
-    pub end: usize,
-    pub target: ClickTarget,
-}
-
-/// Scrollable document: all rows + click ranges.
-///
-/// In inline mode the document only covers the "not yet flushed" part (messages after [`Chat::flushed_segments`]),
-/// so row numbers are not global — click targeting and scrolling are only used in fullscreen mode.
-#[derive(Debug, Clone)]
-pub struct Doc {
-    pub rows: Vec<Row>,
-    pub click_ranges: Vec<ClickRange>,
-    /// Number of leading "settled" rows: rows that no longer change and can be printed
-    /// into the terminal scrollback in one go (the print boundary for REPL mode; unused in fullscreen).
-    /// Production uses `settled_marks` checkpoints; this aggregate is kept as the test-facing
-    /// "settled prefix row count" handle.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub settled: usize,
-    /// 定稿检查点（欢迎卡 / 每条定稿消息各一个，行号递增）：
-    /// 懒落盘按检查点整段冻结，resize 回灌按检查点整段取回。
-    pub settled_marks: Vec<SettledMark>,
-    /// Number of transient rows at the end of the document (slash output, gone after TTL): lazy-flush
-    /// window math must exclude them — a transient list shrinking the window is no reason to freeze live content.
-    pub transient_rows: usize,
-}
-
-/// 一个定稿检查点：`row_end` 之前的行全部定稿。`segments` 是构建内
-/// 累计值，跨多次 [`Chat::advance_flushed_upto`] 的增量由
-/// `Chat::mark_base` 消化。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SettledMark {
-    /// Row count covered by this checkpoint (exclusive end within doc.rows).
-    pub row_end: usize,
-    /// Message segments covered (build-internal accumulation, including the welcome card).
-    pub segments: usize,
-}
+use crate::tui::el::{El, LocalClick};
+use crate::tui::statics::Block;
 
 /// Current error state (#18 presentation layer): `code`/`msg`/`level`/`context` come from structured
 /// `UiEvent::Error`; the level is decided by the triggering context (short sync = page-level, long turn = full-flow).
@@ -5404,13 +5328,15 @@ impl Chat {
     /// static), so recursing from the previous message is linear — do NOT recurse into every
     /// predecessor: with everything settled that is exponential (freezes the hot path on
     /// every build_rows).
+    #[cfg_attr(not(test), allow(dead_code))]
     fn message_settled(&self, i: usize) -> bool {
         (i == 0 || self.message_settled(i - 1)) && self.message_static_settled(i)
     }
 
     /// 构建滚动文档：欢迎卡片 + 消息（text 与活动按插入点交错）+
-    /// 权限请求块。`doc.settled` = 前置定稿行数（欢迎卡片 + 全部
-    /// 已定稿消息；权限请求块永远不定稿）。
+    /// 权限请求块。块列表交给 [`crate::tui::statics::layout`] 摆放：
+    /// `doc.settled` / 检查点 = 定稿前缀（欢迎卡片 + 全部已定稿消息；
+    /// 权限请求块永远不定稿）。
     ///
     /// In inline mode, segments already flushed ([`Chat::flushed_segments`]) are skipped wholesale:
     /// the doc only covers the dynamic tail, so more flushing means cheaper rebuilds.
@@ -5421,8 +5347,6 @@ impl Chat {
             self.prev_build_width = width;
             self.reply_cache.clear();
         }
-        let mut rows: Vec<Row> = Vec::new();
-        let mut click_ranges: Vec<ClickRange> = Vec::new();
         let theme = self.theme.clone();
         // Segment numbering: 0 = welcome card, i+1 = messages[i]. The clamp is defensive: if the message set
         // is replaced wholesale (/clear, /resume) without the cursor resetting, better to re-render
@@ -5431,305 +5355,281 @@ impl Chat {
         self.tail_start = 0;
         self.mark_base = 0;
 
-        if skip == 0 {
-            // 新版本提示（update-banner）：窗口内用呼吸色；窗口外/无提示 → 静止 rest 或 None。
-            let banner = self.update_banner.as_deref().map(|v| {
-                let frame = self.update_banner_frame().unwrap_or(UPDATE_BANNER_FRAMES);
-                (v, update_color(&theme, frame, self.motion_off))
-            });
-            rows.extend(welcome_card_rows(
-                &theme,
-                &self.session.runtime.model.borrow(),
-                self.permission_mode_label(),
-                &self.cwd,
-                width,
-                banner,
-            ));
-        }
-        let mut settled = rows.len();
-        let mut settled_segments = 1usize.saturating_sub(skip);
-        let mut settled_marks: Vec<SettledMark> = Vec::new();
-        if settled_segments > 0 {
-            settled_marks.push(SettledMark {
-                row_end: settled,
-                segments: settled_segments,
-            });
-        }
-        // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
+        // Prefix-monotone settlement, precomputed in one pass (recursing per
+        // message inside the loop would be quadratic on the hot path).
+        let mut settled_flags = Vec::with_capacity(self.messages.len());
+        let mut prefix_settled = true;
         for i in 0..self.messages.len() {
-            if skip >= i + 2 {
-                continue;
-            }
-            rows.push(Row::new(Line::empty()));
-            match self.messages[i].role {
-                Role::User => {
-                    rows.extend(user_message_rows(&self.messages[i].text, width, &theme));
-                }
-                Role::Assistant => {
-                    // Markdown render closure: borrows only disjoint fields to avoid conflicting with
-                    // the shared read borrow of `self.messages`.
-                    let mut render = {
-                        let processor = &mut self.processor;
-                        let renderer = &mut self.renderer;
-                        let cache = &mut self.reply_cache;
-                        let images = &self.images;
-                        let images_failed = &self.images_failed;
-                        let image_cap = self.image_cap;
-                        let images_version = self.images_version;
-                        move |reply: &str| -> Vec<Line> {
-                            if reply.is_empty() {
-                                return Vec::new();
-                            }
-                            if let Some(lines) = cache.get(reply) {
-                                return lines.clone();
-                            }
-                            renderer.set_width(width);
-                            // Image cache version changed → sync the renderer (clears its per-block cache).
-                            if renderer.images_version() != images_version {
-                                renderer.set_images(
-                                    image_cap,
-                                    images,
-                                    images_failed,
-                                    images_version,
-                                );
-                            }
-                            let doc = processor.process_streaming(reply);
-                            renderer.render(&doc);
-                            let lines = renderer.lines().to_vec();
-                            cache.insert(reply.to_string(), lines.clone());
-                            lines
-                        }
-                    };
-                    let msg = &self.messages[i];
-                    let text = &msg.text;
-                    let char_bounds: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
-                    let mut rendered_chars = 0usize;
-                    let mut rendered_bytes = 0usize;
-                    for (idx, act) in msg.activities.iter().enumerate() {
-                        let pos_chars = msg
-                            .insert_points
-                            .get(idx)
-                            .copied()
-                            .unwrap_or(rendered_chars)
-                            .min(text.chars().count());
-                        if pos_chars > rendered_chars {
-                            let seg_end = char_bounds.get(pos_chars).copied().unwrap_or(text.len());
-                            let reply = render(&text[rendered_bytes..seg_end]);
-                            push_text(&theme, &mut rows, reply);
-                            rendered_chars = pos_chars;
-                            rendered_bytes = seg_end;
-                        }
-                        let group_idx = msg.group_of.get(idx).copied().flatten();
-                        let group_collapsed = group_idx.is_some_and(|g| !msg.groups[g].expanded);
-                        let is_group_head = group_idx
-                            .is_some_and(|g| msg.groups[g].activities.first() == Some(&idx));
-                        if group_collapsed && !is_group_head {
-                            continue;
-                        }
-                        if let Some(g) = group_idx
-                            && !msg.groups[g].expanded
-                        {
-                            // Collapse group: a one-line rule summary (`Read 3 files (ctrl+o to expand)`).
-                            let in_progress = msg.groups[g].active
-                                && msg.groups[g].activities.iter().any(|&ai| {
-                                    matches!(
-                                        msg.activities.get(ai),
-                                        Some(a) if matches!(
-                                            &a.kind,
-                                            ActivityKind::Tool(t)
-                                                if t.status == ToolStatus::Running
-                                        )
-                                    )
-                                });
-                            let summary = collapse_summary(&msg.groups[g], in_progress);
-                            // The group row is a static `⏺ …`: the spinner only lives in the bottom status row.
-                            let mut line = Line::styled(
-                                "⏺ ",
-                                if in_progress {
-                                    theme.dim()
-                                } else {
-                                    theme.tool_done()
-                                },
-                            );
-                            line.push_styled(summary, SegStyle::fg(theme.text));
-                            line.push_styled(
-                                " (ctrl+o to expand)".to_string(),
-                                SegStyle::fg(theme.inactive),
-                            );
-                            let row = rows.len();
-                            rows.push(Row::new(line));
-                            click_ranges.push(ClickRange {
-                                start: row,
-                                end: row + 1,
-                                target: ClickTarget::Group {
-                                    message: i,
-                                    group: g,
-                                },
-                            });
-                            // Below a running collapse group, show the most recent tool's input (the CC ⎿ row).
-                            // The hint may be a multi-line bash command: single-line it and truncate by width,
-                            // otherwise the row balloons into multiple lines and the row model drifts from the canvas.
-                            if in_progress && let Some(hint) = &msg.groups[g].last_hint {
-                                rows.push(Row::new(Line::styled(
-                                    one_line(&format!("  ⎿  {hint}"), width),
-                                    SegStyle::fg(theme.inactive),
-                                )));
-                            }
-                            continue;
-                        }
-                        let (lines, mut local) = layout_activity(
-                            act,
-                            &[idx],
-                            rows.len() as u16,
-                            &theme,
-                            &mut |reply: &str| render(reply),
-                        );
-                        // Expanded group: the group-head tool row is also the summary row's spot — clicking it collapses back.
-                        if let Some(g) = group_idx
-                            && let Some(first) = local.first()
-                        {
-                            click_ranges.push(ClickRange {
-                                start: first.start as usize,
-                                end: first.end as usize,
-                                target: ClickTarget::Group {
-                                    message: i,
-                                    group: g,
-                                },
-                            });
-                        }
-                        for line in lines {
-                            rows.push(Row::new(line));
-                        }
-                        for range in &mut local {
-                            click_ranges.push(ClickRange {
-                                start: range.start as usize,
-                                end: range.end as usize,
-                                target: ClickTarget::Activity {
-                                    message: i,
-                                    path: range.path.clone(),
-                                },
-                            });
-                        }
-                    }
-                    if rendered_bytes < text.len() {
-                        let reply = render(&text[rendered_bytes..]);
-                        push_text(&theme, &mut rows, reply);
-                    }
-                    // Thinking completion row (CC SystemTextMessage `✻ Churned for 40s`):
-                    // rendered at the end of the message (after text and all tools), from the last completed
-                    // real thinking block (empty placeholder blocks produce no completion row).
-                    // Only rendered after the turn ends: while running, `✻ Baked for 0.4s` would appear
-                    // while tools are still running, contradicting the bottom running-status row.
-                    let show_done_line = i == self.messages.len() - 1 && self.stream_msg.is_none()
-                        || self.message_settled(i);
-                    if show_done_line
-                        && let Some(line) =
-                            self.messages[i]
-                                .activities
-                                .iter()
-                                .rev()
-                                .find_map(|a| match &a.kind {
-                                    ActivityKind::Thinking(t)
-                                        if t.state == ThinkingState::Done
-                                            && !a.content.is_empty() =>
-                                    {
-                                        Some(crate::tui::activities::thinking_completion_line(
-                                            t, &theme,
-                                        ))
-                                    }
-                                    _ => None,
-                                })
-                    {
-                        rows.push(Row::new(line));
-                    }
-                }
-            }
-            if self.message_settled(i) {
-                settled = rows.len();
-                settled_segments = (i + 2).saturating_sub(skip);
-                settled_marks.push(SettledMark {
-                    row_end: settled,
-                    segments: settled_segments,
-                });
-            }
+            prefix_settled = prefix_settled && self.message_static_settled(i);
+            settled_flags.push(prefix_settled);
         }
 
-        // Permission/ask block (PermissionDialog / AskUserQuestion):
-        // title (permission bold) + description (dim) + numbered options (Select:
-        // `❯ n. label` focus marker, desc sub-row dim, Other free input) + shortcut hints.
-        if let Some((request, _)) = &self.pending_ask {
-            let mut title = Line::styled("⏺ ", SegStyle::fg(theme.text));
-            title.push_styled(request.title.clone(), theme.permission());
-            rows.push(Row::new(title));
-            rows.push(Row::new(Line::styled(
-                format!("  {}", request.question),
-                SegStyle::fg(theme.text),
+        let mut blocks: Vec<Block> = Vec::new();
+        if skip == 0 {
+            blocks.push(Block::settled(self.welcome_el(width, &theme), true));
+        }
+        for (i, &settled) in settled_flags
+            .iter()
+            .enumerate()
+            .skip(skip.saturating_sub(1))
+        {
+            let body = match self.messages[i].role {
+                Role::User => El::Rows(user_message_rows(&self.messages[i].text, width, &theme)),
+                Role::Assistant => self.assistant_el(i, width, &theme, settled),
+            };
+            // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
+            blocks.push(Block::settled(El::col(vec![El::Blank, body]), settled));
+        }
+        if let Some(ask) = self.ask_el(&theme) {
+            blocks.push(Block::live(ask));
+        }
+        // Slash command output (/help /status /compact etc.): transient hints — rendered after messages and
+        // above the input, **never settled or flushed**, auto-dismissed after the tick timeout (SLASH_OUTPUT_TTL).
+        if !self.slash_lines.is_empty() {
+            blocks.push(Block::transient(El::Lines(
+                self.slash_lines
+                    .iter()
+                    .map(|line| Line::styled(one_line(line, width), SegStyle::fg(theme.text)))
+                    .collect(),
             )));
-            // CC Select: one blank row between the question and the options.
-            rows.push(Row::new(Line::empty()));
-            let focus_color = theme.permission;
-            for (opt_idx, option) in request.options.iter().enumerate() {
-                let focused = opt_idx == self.ask_focus;
-                let mut line = Line::empty();
-                let style = if focused {
-                    SegStyle::fg(focus_color)
-                } else {
-                    SegStyle::fg(theme.inactive)
-                };
-                line.push_styled(if focused { "❯ " } else { "  " }, style);
-                line.push_styled(format!("{}. {option}", opt_idx + 1), style);
-                let row = rows.len();
-                rows.push(Row::new(line));
-                click_ranges.push(ClickRange {
-                    start: row,
-                    end: row + 1,
-                    target: ClickTarget::AskOption(opt_idx),
-                });
-                if let Some(desc) = request
-                    .descriptions
-                    .get(opt_idx)
-                    .and_then(|d| d.as_deref())
-                    .filter(|d| !d.is_empty())
-                {
-                    rows.push(Row::new(Line::styled(
-                        format!("   {desc}"),
-                        if focused {
-                            SegStyle::fg(focus_color)
-                        } else {
-                            SegStyle::fg(theme.inactive)
-                        },
+        }
+        // Error/usage rows (G12/G13): longer TTL, error color, clear on the next input.
+        if !self.slash_error_lines.is_empty() {
+            blocks.push(Block::transient(El::Lines(
+                self.slash_error_lines
+                    .iter()
+                    .map(|line| Line::styled(one_line(line, width), SegStyle::fg(theme.error)))
+                    .collect(),
+            )));
+        }
+
+        self.doc = crate::tui::statics::layout(blocks);
+        &self.doc
+    }
+
+    /// Welcome-card block. It settles at birth but stays in the live doc
+    /// (banner breathing, re-wrap on resize) until it crosses the window top.
+    fn welcome_el(&self, width: usize, theme: &Theme) -> El {
+        // 新版本提示（update-banner）：窗口内用呼吸色；窗口外/无提示 → 静止 rest 或 None。
+        let banner = self.update_banner.as_deref().map(|v| {
+            let frame = self.update_banner_frame().unwrap_or(UPDATE_BANNER_FRAMES);
+            (v, update_color(theme, frame, self.motion_off))
+        });
+        El::Rows(welcome_card_rows(
+            theme,
+            &self.session.runtime.model.borrow(),
+            self.permission_mode_label(),
+            &self.cwd,
+            width,
+            banner,
+        ))
+    }
+
+    /// Assistant message: markdown text and activities interleaved in model
+    /// output order; collapse groups fold runs of read/search tools. `settled`
+    /// mirrors the old `message_settled(i)` (prefix-monotone flag).
+    fn assistant_el(&mut self, i: usize, width: usize, theme: &Theme, settled: bool) -> El {
+        // Thinking completion row (CC SystemTextMessage `✻ Churned for 40s`):
+        // rendered at the end of the message (after text and all tools), from the last completed
+        // real thinking block (empty placeholder blocks produce no completion row).
+        // Only rendered after the turn ends: while running, `✻ Baked for 0.4s` would appear
+        // while tools are still running, contradicting the bottom running-status row.
+        let show_done_line = i == self.messages.len() - 1 && self.stream_msg.is_none() || settled;
+        // Markdown render closure: borrows only disjoint fields to avoid conflicting with
+        // the shared read borrow of `self.messages`.
+        let mut render = {
+            let processor = &mut self.processor;
+            let renderer = &mut self.renderer;
+            let cache = &mut self.reply_cache;
+            let images = &self.images;
+            let images_failed = &self.images_failed;
+            let image_cap = self.image_cap;
+            let images_version = self.images_version;
+            move |reply: &str| -> Vec<Line> {
+                if reply.is_empty() {
+                    return Vec::new();
+                }
+                if let Some(lines) = cache.get(reply) {
+                    return lines.clone();
+                }
+                renderer.set_width(width);
+                // Image cache version changed → sync the renderer (clears its per-block cache).
+                if renderer.images_version() != images_version {
+                    renderer.set_images(image_cap, images, images_failed, images_version);
+                }
+                let doc = processor.process_streaming(reply);
+                renderer.render(&doc);
+                let lines = renderer.lines().to_vec();
+                cache.insert(reply.to_string(), lines.clone());
+                lines
+            }
+        };
+        let msg = &self.messages[i];
+        let text = &msg.text;
+        let char_bounds: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+        let mut rendered_chars = 0usize;
+        let mut rendered_bytes = 0usize;
+        let mut parts: Vec<El> = Vec::new();
+        for (idx, act) in msg.activities.iter().enumerate() {
+            let pos_chars = msg
+                .insert_points
+                .get(idx)
+                .copied()
+                .unwrap_or(rendered_chars)
+                .min(text.chars().count());
+            if pos_chars > rendered_chars {
+                let seg_end = char_bounds.get(pos_chars).copied().unwrap_or(text.len());
+                let reply = render(&text[rendered_bytes..seg_end]);
+                parts.push(text_el(theme, reply));
+                rendered_chars = pos_chars;
+                rendered_bytes = seg_end;
+            }
+            let group_idx = msg.group_of.get(idx).copied().flatten();
+            let group_collapsed = group_idx.is_some_and(|g| !msg.groups[g].expanded);
+            let is_group_head =
+                group_idx.is_some_and(|g| msg.groups[g].activities.first() == Some(&idx));
+            if group_collapsed && !is_group_head {
+                continue;
+            }
+            if let Some(g) = group_idx
+                && !msg.groups[g].expanded
+            {
+                // Collapse group: a one-line rule summary (`Read 3 files (ctrl+o to expand)`).
+                let in_progress = msg.groups[g].active
+                    && msg.groups[g].activities.iter().any(|&ai| {
+                        matches!(
+                            msg.activities.get(ai),
+                            Some(a) if matches!(
+                                &a.kind,
+                                ActivityKind::Tool(t)
+                                    if t.status == ToolStatus::Running
+                            )
+                        )
+                    });
+                let summary = collapse_summary(&msg.groups[g], in_progress);
+                // The group row is a static `⏺ …`: the spinner only lives in the bottom status row.
+                let mut line = Line::styled(
+                    "⏺ ",
+                    if in_progress {
+                        theme.dim()
+                    } else {
+                        theme.tool_done()
+                    },
+                );
+                line.push_styled(summary, SegStyle::fg(theme.text));
+                line.push_styled(
+                    " (ctrl+o to expand)".to_string(),
+                    SegStyle::fg(theme.inactive),
+                );
+                parts.push(El::click(
+                    ClickTarget::Group {
+                        message: i,
+                        group: g,
+                    },
+                    El::Line(line),
+                ));
+                // Below a running collapse group, show the most recent tool's input (the CC ⎿ row).
+                // The hint may be a multi-line bash command: single-line it and truncate by width,
+                // otherwise the row balloons into multiple lines and the row model drifts from the canvas.
+                // It sits outside the Click wrapper — only the summary row toggles.
+                if in_progress && let Some(hint) = &msg.groups[g].last_hint {
+                    parts.push(El::Line(Line::styled(
+                        one_line(&format!("  ⎿  {hint}"), width),
+                        SegStyle::fg(theme.inactive),
                     )));
                 }
+                continue;
             }
-            if request.free_text {
-                let other_idx = request.options.len();
-                let focused = self.ask_focus >= other_idx;
-                let mut line = Line::empty();
-                let style = if focused {
-                    SegStyle::fg(focus_color)
-                } else {
-                    SegStyle::fg(theme.inactive)
-                };
-                line.push_styled(if focused { "❯ " } else { "  " }, style);
-                line.push_styled(format!("{}. Other", other_idx + 1), style);
-                let row = rows.len();
-                rows.push(Row::new(line));
-                click_ranges.push(ClickRange {
-                    start: row,
-                    end: row + 1,
-                    target: ClickTarget::AskOption(other_idx),
-                });
-                let placeholder = if focused {
-                    if self.ask_other.is_empty() {
-                        "Type something.".to_string()
-                    } else {
-                        format!("{}{}", self.ask_other, '▋')
-                    }
-                } else {
-                    "Type something.".to_string()
-                };
-                rows.push(Row::new(Line::styled(
-                    format!("   {placeholder}"),
+            let (lines, local) =
+                layout_activity(act, &[idx], 0, theme, &mut |reply: &str| render(reply));
+            let activity = El::Annotated {
+                rows: lines.into_iter().map(Row::new).collect(),
+                clicks: local
+                    .into_iter()
+                    .map(|range| LocalClick {
+                        start: range.start as usize,
+                        end: range.end as usize,
+                        target: ClickTarget::Activity {
+                            message: i,
+                            path: range.path,
+                        },
+                    })
+                    .collect(),
+            };
+            // Expanded group: the group-head tool row doubles as the group summary row — the
+            // enclosing Click is emitted first, so clicking it collapses the group back.
+            parts.push(if let Some(g) = group_idx {
+                El::click(
+                    ClickTarget::Group {
+                        message: i,
+                        group: g,
+                    },
+                    activity,
+                )
+            } else {
+                activity
+            });
+        }
+        if rendered_bytes < text.len() {
+            let reply = render(&text[rendered_bytes..]);
+            parts.push(text_el(theme, reply));
+        }
+        if show_done_line
+            && let Some(line) =
+                self.messages[i]
+                    .activities
+                    .iter()
+                    .rev()
+                    .find_map(|a| match &a.kind {
+                        ActivityKind::Thinking(t)
+                            if t.state == ThinkingState::Done && !a.content.is_empty() =>
+                        {
+                            Some(crate::tui::activities::thinking_completion_line(t, theme))
+                        }
+                        _ => None,
+                    })
+        {
+            parts.push(El::Line(line));
+        }
+        El::Col(parts)
+    }
+
+    /// Permission/ask block (PermissionDialog / AskUserQuestion):
+    /// title (permission bold) + description (dim) + numbered options (Select:
+    /// `❯ n. label` focus marker, desc sub-row dim, Other free input) + shortcut hints.
+    fn ask_el(&self, theme: &Theme) -> Option<El> {
+        let (request, _) = self.pending_ask.as_ref()?;
+        let mut parts: Vec<El> = Vec::new();
+        let mut title = Line::styled("⏺ ", SegStyle::fg(theme.text));
+        title.push_styled(request.title.clone(), theme.permission());
+        parts.push(El::Line(title));
+        parts.push(El::Line(Line::styled(
+            format!("  {}", request.question),
+            SegStyle::fg(theme.text),
+        )));
+        // CC Select: one blank row between the question and the options.
+        parts.push(El::Blank);
+        let focus_color = theme.permission;
+        for (opt_idx, option) in request.options.iter().enumerate() {
+            let focused = opt_idx == self.ask_focus;
+            let mut line = Line::empty();
+            let style = if focused {
+                SegStyle::fg(focus_color)
+            } else {
+                SegStyle::fg(theme.inactive)
+            };
+            line.push_styled(if focused { "❯ " } else { "  " }, style);
+            line.push_styled(format!("{}. {option}", opt_idx + 1), style);
+            // Only the option row itself confirms; the description sub-row stays inert.
+            parts.push(El::click(ClickTarget::AskOption(opt_idx), El::Line(line)));
+            if let Some(desc) = request
+                .descriptions
+                .get(opt_idx)
+                .and_then(|d| d.as_deref())
+                .filter(|d| !d.is_empty())
+            {
+                parts.push(El::Line(Line::styled(
+                    format!("   {desc}"),
                     if focused {
                         SegStyle::fg(focus_color)
                     } else {
@@ -5737,45 +5637,47 @@ impl Chat {
                     },
                 )));
             }
-            let hint = if request.free_text && self.ask_focus >= request.options.len() {
-                "enter to submit · esc to cancel"
+        }
+        if request.free_text {
+            let other_idx = request.options.len();
+            let focused = self.ask_focus >= other_idx;
+            let mut line = Line::empty();
+            let style = if focused {
+                SegStyle::fg(focus_color)
             } else {
-                "enter to select · ↑/↓ to navigate · esc to cancel"
+                SegStyle::fg(theme.inactive)
             };
-            rows.push(Row::new(Line::styled(
-                format!("  {hint}"),
-                SegStyle::fg(theme.inactive),
+            line.push_styled(if focused { "❯ " } else { "  " }, style);
+            line.push_styled(format!("{}. Other", other_idx + 1), style);
+            parts.push(El::click(ClickTarget::AskOption(other_idx), El::Line(line)));
+            let placeholder = if focused {
+                if self.ask_other.is_empty() {
+                    "Type something.".to_string()
+                } else {
+                    format!("{}{}", self.ask_other, '▋')
+                }
+            } else {
+                "Type something.".to_string()
+            };
+            parts.push(El::Line(Line::styled(
+                format!("   {placeholder}"),
+                if focused {
+                    SegStyle::fg(focus_color)
+                } else {
+                    SegStyle::fg(theme.inactive)
+                },
             )));
         }
-
-        // Slash command output (/help /status /compact etc.): transient hints — rendered after messages and
-        // above the input, **never settled or flushed**, auto-dismissed after the tick timeout (SLASH_OUTPUT_TTL).
-        if !self.slash_lines.is_empty() {
-            for line in &self.slash_lines {
-                rows.push(Row::new(Line::styled(
-                    one_line(line, width),
-                    SegStyle::fg(theme.text),
-                )));
-            }
-        }
-        // Error/usage rows (G12/G13): longer TTL, error color, clear on the next input.
-        if !self.slash_error_lines.is_empty() {
-            for line in &self.slash_error_lines {
-                rows.push(Row::new(Line::styled(
-                    one_line(line, width),
-                    SegStyle::fg(theme.error),
-                )));
-            }
-        }
-
-        self.doc = Doc {
-            rows,
-            click_ranges,
-            settled,
-            settled_marks,
-            transient_rows: self.slash_lines.len() + self.slash_error_lines.len(),
+        let hint = if request.free_text && self.ask_focus >= request.options.len() {
+            "enter to submit · esc to cancel"
+        } else {
+            "enter to select · ↑/↓ to navigate · esc to cancel"
         };
-        &self.doc
+        parts.push(El::Line(Line::styled(
+            format!("  {hint}"),
+            SegStyle::fg(theme.inactive),
+        )));
+        Some(El::Col(parts))
     }
 
     /// Resets the flush cursor: after the message set is replaced wholesale (/clear, /resume), segment numbers
@@ -5854,19 +5756,26 @@ pub(crate) fn one_line(text: &str, width: usize) -> String {
     crate::tui::markdown::truncate(flat.as_ref(), width.max(1))
 }
 
-/// Text segment folding: segments >2 lines fold into the first 2 lines + a hint (CC `… +N lines`).
-fn push_text(theme: &Theme, rows: &mut Vec<Row>, reply: Vec<Line>) {
+/// Text segment: the first reply line carries the `⏺ ` marker (CC assistant
+/// reply prefix); the rest map one line per row.
+fn text_el(theme: &Theme, reply: Vec<Line>) -> El {
     let claude = theme.claude;
-    for (j, line) in reply.into_iter().enumerate() {
-        if j == 0 {
-            let mut styled = Line::styled("⏺ ", SegStyle::fg(claude));
-            styled.image = line.image.clone();
-            styled.segs.extend(line.segs);
-            rows.push(Row::new(styled));
-        } else {
-            rows.push(Row::new(line));
-        }
-    }
+    El::Rows(
+        reply
+            .into_iter()
+            .enumerate()
+            .map(|(j, line)| {
+                if j == 0 {
+                    let mut styled = Line::styled("⏺ ", SegStyle::fg(claude));
+                    styled.image = line.image.clone();
+                    styled.segs.extend(line.segs);
+                    Row::new(styled)
+                } else {
+                    Row::new(line)
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Welcome card body (CC WelcomeBox): a starred greeting, the two commands

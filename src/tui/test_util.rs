@@ -13,13 +13,60 @@
 
 use std::convert::Infallible;
 use std::ops::Range;
+use std::sync::Arc;
 
 use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Size};
 use ratatui::style::Color;
 
+use crate::query::Session;
+use crate::tui::chat::Chat;
 use crate::tui::term::RawWrite;
+use crate::tui::theme::Theme;
+
+/// A minimal offline session (no real endpoint is ever contacted in tests).
+pub fn test_session() -> Arc<Session> {
+    Arc::new(Session {
+        client: crate::api::client::Client::new(
+            "test-key".to_string(),
+            "https://example.com".to_string(),
+        ),
+        runtime: crate::query::Runtime::new("test-model".to_string(), None, Default::default()),
+        permission_mode: crate::permission::PermissionMode::Default,
+        settings: crate::settings::Settings::default(),
+        system: Vec::new(),
+        depth: 0,
+        home: std::env::temp_dir(),
+        quiet: true,
+        compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        watch: crate::watch::WatchRegistry::new(),
+        tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+        expand_tasks: tokio::sync::watch::channel(false).0,
+        agents: crate::agents::AgentRegistry::new(),
+        channels: crate::channels::ChannelRegistry::new(Default::default()),
+        instance: None,
+    })
+}
+
+/// A [`Chat`] sized to the given terminal (dark theme, offline session).
+pub fn chat_at(width: usize, height: usize) -> Chat {
+    let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut chat = Chat::new(
+        test_session(),
+        events_tx,
+        events_rx,
+        asks_tx,
+        asks_rx,
+        Theme::dark(),
+        crate::tui::theme::ThemeSetting::Auto,
+        None,
+    );
+    chat.width = width;
+    chat.height = height;
+    chat
+}
 
 /// TestBackend plus the raw-byte sink and command counters the driver needs asserting on.
 ///

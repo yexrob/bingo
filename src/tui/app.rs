@@ -1,7 +1,8 @@
 //! Event loop and frame assembly.
 //!
 //! Shared fullscreen/inline layout, top to bottom — everything below the
-//! transcript is "chrome", and the chrome rows are *built*, never predicted:
+//! transcript is "chrome" (declared in [`crate::tui::chrome`] as an element
+//! tree), and chrome rows are *rendered*, never predicted:
 //!
 //! ```text
 //! [transcript]  live tail only (settled rows already went to scrollback)
@@ -39,29 +40,17 @@ use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Size;
-use ratatui::style::Color;
 
-use crate::permission::PermissionMode;
-use crate::tui::chat::{
-    Chat, ModelMenu, ProviderMenu, ResumeMenu, Row, SettledMark, SlashSuggestion, ThemeMenu,
-    ThinkMenu, model_footer_label,
-};
+use crate::tui::chat::{Chat, Row};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// 当前激活的选择器菜单（互斥：任一时刻至多一个；渲染按此分组读壳层）。
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Menus<'a> {
-    pub model: Option<&'a ModelMenu>,
-    pub think: Option<&'a ThinkMenu>,
-    pub theme: Option<&'a ThemeMenu>,
-    pub resume: Option<&'a ResumeMenu>,
-    pub provider: Option<&'a ProviderMenu>,
-}
+use crate::tui::chrome;
+use crate::tui::el;
 use crate::tui::gfx;
-use crate::tui::line::{Line, SegStyle, text_width};
+use crate::tui::line::{Line, SegStyle};
+use crate::tui::statics::pick_flush_mark;
 use crate::tui::term::{HistoryItem, StdoutTerm, write_gfx};
-use crate::tui::theme::Theme;
 use crate::tui::view;
 
 /// Per-frame tick interval (spinner/thinking timing).
@@ -76,13 +65,6 @@ const RESIZE_QUIET_MS: u64 = 120;
 
 /// Fullscreen host: the ready-made ratatui Terminal.
 pub type FullscreenHost = Terminal<CrosstermBackend<Stdout>>;
-
-/// The chrome block plus the offset of the first input row inside it (the
-/// caret lives there).
-struct Chrome {
-    rows: Vec<Row>,
-    prompt_row: usize,
-}
 
 /// One assembled frame: the rows to draw and where the caret sits in them.
 pub struct Frame {
@@ -113,411 +95,6 @@ fn tail_window(total: usize, tail_start: usize, chrome: usize, height: usize) ->
     (total - visible, len - visible)
 }
 
-/// A dim row indented two columns (help / queue / notice / search share it).
-fn dim_row(text: impl Into<String>, theme: &Theme) -> Row {
-    Row::new(Line::styled(
-        format!("  {}", text.into()),
-        SegStyle::fg(theme.inactive),
-    ))
-}
-
-/// Running status row (ActivityIndicator):
-/// `✻ {verb}… (esc to interrupt · {N}s · ↓ {tokens} tokens)`.
-fn status_row(status: &crate::tui::chat::RunningStatus, spinner: char, theme: &Theme) -> Row {
-    let mut meta = format!(
-        "(esc to interrupt · {}s",
-        status.elapsed.round().max(0.0) as u64
-    );
-    if status.tokens > 0 {
-        meta.push_str(&format!(" · ↓ {} tokens", status.tokens));
-    }
-    meta.push(')');
-    let mut line = Line::styled(
-        format!("  {spinner} {}… ", status.verb),
-        SegStyle::fg(theme.claude),
-    );
-    line.push_styled(meta, SegStyle::fg(theme.inactive));
-    Row::new(line)
-}
-
-/// Permission-mode badge (`⏸ plan mode on`) + the `·` separator after it.
-fn mode_badge(mode: PermissionMode, theme: &Theme) -> Vec<(String, Color)> {
-    let (symbol, label, color) = match mode {
-        PermissionMode::Default => return Vec::new(),
-        PermissionMode::Plan => ("⏸", "plan mode on", theme.plan_mode),
-        PermissionMode::AcceptEdits => ("⏵⏵", "accept edits on", theme.accept_edits),
-        PermissionMode::BypassPermissions => ("⏵⏵", "bypass permissions on", theme.error),
-        PermissionMode::DontAsk => ("⏵⏵", "dont ask on", theme.error),
-    };
-    vec![
-        (format!("{symbol} {label}"), color),
-        ("·".to_string(), theme.inactive),
-    ]
-}
-
-/// Footer: mode badge + shortcut byline (left), model badge (right).
-///
-/// Model badge: `{provider} · {model} · think {level}` — the provider prefix
-/// is omitted when it is default (keeps it terse); think off omits the level (P1-D).
-fn footer_row(chat: &Chat, width: usize) -> Row {
-    let theme = &chat.theme;
-    let hints = if chat.busy {
-        crate::tui::keys::FOOTER_EXPAND_HINT.to_string()
-    } else {
-        format!(
-            "{} · {}",
-            crate::tui::keys::FOOTER_IDLE_HINT,
-            crate::tui::keys::FOOTER_EXPAND_HINT
-        )
-    };
-    let mut left = mode_badge(chat.permission_mode, theme);
-    if chat.bash_mode {
-        left.push(("! for shell mode".to_string(), theme.bash_border));
-    }
-    left.push((hints, theme.inactive));
-    let model_name = chat.session.runtime.model.borrow().clone();
-    let thinking = chat.session.runtime.thinking.borrow().clone();
-    // `/think` picker preview: while the menu is open the badge shows the browsed
-    // level with a `▸` suffix (would-be state) in the accent colour; committed
-    // badge has no suffix and stays dim.
-    let (model, model_color) = if let Some(menu) = &chat.think_menu {
-        let level = crate::tui::chat::THINK_LEVELS
-            [menu.selected.min(crate::tui::chat::THINK_LEVELS.len() - 1)]
-        .0;
-        (format!("{model_name} · think {level} ▸"), theme.claude)
-    } else {
-        (
-            model_footer_label(&model_name, thinking.as_deref()),
-            theme.inactive,
-        )
-    };
-    let provider = chat.session.runtime.provider.borrow().clone();
-    let model = if provider == "default" {
-        model
-    } else {
-        format!("{provider} · {model}")
-    };
-
-    let mut line = Line::styled("  ", SegStyle::fg(theme.text));
-    let mut used = 2usize;
-    for (i, (text, color)) in left.iter().enumerate() {
-        if i > 0 {
-            line.push_styled(" ", SegStyle::fg(theme.inactive));
-            used += 1;
-        }
-        used += text_width(text);
-        line.push_styled(text.clone(), SegStyle::fg(*color));
-    }
-    // Right-align the model name (also leaving 2 columns on the right).
-    let gap = width.saturating_sub(used + text_width(&model) + 2).max(1);
-    line.push_styled(" ".repeat(gap), SegStyle::fg(theme.inactive));
-    line.push_styled(model, SegStyle::fg(model_color));
-    Row::new(line)
-}
-
-/// Suggestion area: slash suggestions first, then the `/model` menu, then the `/think` menu.
-/// Row count and content share one source — they were once separate, causing chrome to underestimate and the canvas to overflow.
-fn suggestion_rows(
-    slash: &[SlashSuggestion],
-    slash_selected: usize,
-    menus: Menus<'_>,
-    no_match: bool,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Row> {
-    let row = |line: String, selected: bool| {
-        let color = if selected {
-            theme.permission
-        } else {
-            theme.inactive
-        };
-        Row::new(Line::styled(line, SegStyle::fg(color)))
-    };
-    if slash.is_empty() {
-        let Some(menu) = menus.model else {
-            // `/think` level selector (when the model menu is inactive).
-            if let Some(think) = menus.think {
-                // 薄壳 → 核心：行渲染与按键提示行统一委托 PickerModel（picker-model.md 提交 A）。
-                let core = think.picker();
-                let mut rows: Vec<Row> = (0..core.items.len())
-                    .map(|i| core.row(i, width, theme))
-                    .collect();
-                rows.push(core.hint_row(crate::tui::chat::ThinkMenu::keys(), width, theme));
-                return rows;
-            }
-            // `/theme` level selector（picker-model.md 提交 B）：同款薄壳渲染。
-            if let Some(theme_menu) = menus.theme {
-                let core = theme_menu.picker();
-                let mut rows: Vec<Row> = (0..core.items.len())
-                    .map(|i| core.row(i, width, theme))
-                    .collect();
-                rows.push(core.hint_row(crate::tui::chat::ThemeMenu::keys(), width, theme));
-                return rows;
-            }
-            // `/provider` selector（picker-model.md 提交 D）：同款薄壳渲染。
-            if let Some(provider_menu) = menus.provider {
-                let core = provider_menu.picker();
-                let mut rows: Vec<Row> = (0..core.items.len())
-                    .map(|i| core.row(i, width, theme))
-                    .collect();
-                rows.push(core.hint_row(crate::tui::chat::ProviderMenu::keys(), width, theme));
-                return rows;
-            }
-            // `/resume` session selector（picker-model.md 提交 C）：截断时追加说明行。
-            if let Some(resume_menu) = menus.resume {
-                let core = resume_menu.picker();
-                let mut rows: Vec<Row> = (0..core.items.len())
-                    .map(|i| core.row(i, width, theme))
-                    .collect();
-                rows.push(core.hint_row(crate::tui::chat::ResumeMenu::keys(), width, theme));
-                if resume_menu.truncated {
-                    rows.push(Row::new(Line::styled(
-                        format!(
-                            "  {}",
-                            crate::tui::markdown::truncate(
-                                "（仅显示最近 20 个会话）",
-                                width.saturating_sub(2),
-                            )
-                        ),
-                        SegStyle::fg(theme.inactive),
-                    )));
-                }
-                return rows;
-            }
-            // G9: a bare `/`-query with zero matches gets one dim hint row.
-            if no_match {
-                return vec![Row::new(Line::styled(
-                    "  （无匹配命令 · 输入 /help 查看可用命令）",
-                    SegStyle::fg(theme.inactive),
-                ))];
-            }
-            return Vec::new();
-        };
-        // `/model` two-level selector: level one `provider`（PickerModel 核心渲染，
-        // picker-model.md 提交 E）、level two `model`（loading / empty list 各一行提示）。
-        let Some(m) = &menu.models else {
-            // 一级：● 标当前 provider + 数字直达提示行（Enter = 查看模型列表）。
-            let core = menu.provider_picker();
-            let mut rows: Vec<Row> = (0..core.items.len())
-                .map(|i| core.row(i, width, theme))
-                .collect();
-            rows.push(Row::new(Line::styled(
-                format!(
-                    "  {}",
-                    crate::tui::markdown::truncate(
-                        "↑↓/1-9 选择 provider · Enter 查看模型 · Esc 返回",
-                        width.saturating_sub(2),
-                    )
-                ),
-                SegStyle::fg(theme.inactive),
-            )));
-            return rows;
-        };
-        let items: Vec<(String, bool)> = if m.loading {
-            vec![(format!("… 正在拉取 {} 的模型列表", m.provider), true)]
-        } else if m.models.is_empty() {
-            vec![("（该端点未返回模型，Esc 退出）".to_string(), true)]
-        } else {
-            m.models
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i == m.selected))
-                .collect()
-        };
-        return items
-            .into_iter()
-            .take(crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5)
-            .map(|(name, selected)| {
-                let line = crate::tui::markdown::truncate(
-                    &format!("{}{name}", if selected { "❯ " } else { "  " }),
-                    width.saturating_sub(2),
-                );
-                row(line, selected)
-            })
-            .collect();
-    }
-    let name_col = slash
-        .iter()
-        .map(|s| s.name.chars().count() + usize::from(!s.hint.is_empty()) + s.hint.chars().count())
-        .max()
-        .unwrap_or(0)
-        + 2;
-    // Available description width = terminal width - padding(2) - "❯ "(2) - name column - separator(2).
-    let desc_width = width.saturating_sub(2 + 2 + name_col + 2).max(8);
-    slash
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let selected = i == slash_selected;
-            let cmd = if s.hint.is_empty() {
-                format!("/{}", s.name)
-            } else {
-                format!("/{} {}", s.name, s.hint)
-            };
-            let name_text = format!("{cmd:<name_col$}");
-            let desc = crate::tui::markdown::truncate(&s.description, desc_width);
-            let line = crate::tui::markdown::truncate(
-                &format!("{}{name_text}  {desc}", if selected { "❯ " } else { "  " }),
-                width.saturating_sub(2),
-            );
-            row(line, selected)
-        })
-        .collect()
-}
-
-/// Input box (top border + input rows + bottom border).
-fn prompt_rows(chat: &Chat, width: usize) -> Vec<Row> {
-    let theme = &chat.theme;
-    let border_color = if chat.bash_mode {
-        theme.bash_border
-    } else {
-        theme.prompt_border
-    };
-    let prompt_style = if chat.busy {
-        theme.inactive
-    } else {
-        theme.text
-    };
-    let (prefix, prefix_color) = if chat.bash_mode {
-        ("! ".to_string(), theme.bash_border)
-    } else {
-        ("❯ ".to_string(), prompt_style)
-    };
-    let bar = "─".repeat(width.saturating_sub(2));
-    let mut rows = vec![Row::new(Line::styled(
-        format!("╭{bar}╮"),
-        SegStyle::fg(border_color),
-    ))];
-    for (i, line) in chat.prompt_lines().into_iter().enumerate() {
-        let mut row = Line::styled(
-            if i == 0 {
-                prefix.clone()
-            } else {
-                "  ".to_string()
-            },
-            SegStyle::fg(prefix_color),
-        );
-        for seg in line.segs {
-            row.push_styled(seg.text, seg.style);
-        }
-        rows.push(Row::new(row));
-    }
-    rows.push(Row::new(Line::styled(
-        format!("╰{bar}╯"),
-        SegStyle::fg(border_color),
-    )));
-    rows
-}
-
-/// Caret position inside the input box (row offset, column) — same source as where
-/// [`Chat::prompt_lines`] draws `▋`.
-fn caret_cell(chat: &Chat) -> (usize, usize) {
-    if let Some(search) = &chat.search {
-        let hit = search.hit.clone().unwrap_or_default();
-        return (0, text_width(&hit).min(chat.input_width()));
-    }
-    if chat.input.is_empty() {
-        return (0, 0);
-    }
-    let lines = crate::tui::input::visual_lines(&chat.input, chat.input_width());
-    let (row, col) = crate::tui::input::cursor_cell(&chat.input, &lines, chat.cursor);
-    let start = row.saturating_sub(crate::tui::chat::INPUT_ROWS_MAX - 1);
-    (row - start, col)
-}
-
-/// Every row outside the transcript, top to bottom. `fullscreen` only moves the suggestion area
-/// (fullscreen: above the input; inline: below, aligned with slash output).
-fn chrome_rows(chat: &Chat, width: usize, fullscreen: bool) -> Chrome {
-    let theme = chat.theme.clone();
-    let mut rows: Vec<Row> = Vec::new();
-
-    if let Some(status) = chat.running_status() {
-        rows.push(status_row(
-            &status,
-            crate::tui::activities::spinner(chat.tick),
-            &theme,
-        ));
-    }
-    for line in chat.task_lines() {
-        rows.push(Row::new(line));
-    }
-    if let Some(warning) = chat.visible_warning() {
-        rows.push(Row::new(Line::styled(
-            format!("  ⚠ {warning}"),
-            SegStyle::fg(theme.warning),
-        )));
-    }
-    for line in chat.help_lines() {
-        rows.push(dim_row(line, &theme));
-    }
-    // Bottom entity area (agent instances + channels; ctrl+g focuses the selector).
-    for line in chat.entity_rows(width) {
-        rows.push(Row::new(line));
-    }
-
-    let suggestions = suggestion_rows(
-        &chat.slash_suggestions,
-        chat.slash_selected,
-        Menus {
-            model: chat.model_menu.as_ref(),
-            think: chat.think_menu.as_ref(),
-            theme: chat.theme_menu.as_ref(),
-            resume: chat.resume_menu.as_ref(),
-            provider: chat.provider_menu.as_ref(),
-        },
-        chat.slash_no_match,
-        &theme,
-        width,
-    );
-    if fullscreen {
-        rows.extend(suggestions.iter().cloned());
-    }
-
-    let prompt = prompt_rows(chat, width);
-    let prompt_row = rows.len() + 1;
-    rows.extend(prompt);
-
-    if let Some(line) = chat.search_line() {
-        rows.push(dim_row(line, &theme));
-    }
-    for line in chat.queue_lines() {
-        rows.push(dim_row(line, &theme));
-    }
-    if !fullscreen {
-        rows.extend(suggestions);
-    }
-    if let Some(text) = chat.notice {
-        rows.push(dim_row(text, &theme));
-    }
-    rows.push(footer_row(chat, width));
-    if chat.pending_ask.is_some() {
-        rows.push(dim_row("Waiting for permission…", &theme));
-    }
-    Chrome { rows, prompt_row }
-}
-
-/// #18 full-flow full-screen error-state skeleton (AC-26/53, ui/ux #68 spec): error title +
-/// stable code + description (what happened + what you can do) + primary action (retry/back) + exit hint.
-/// Actions are bound at the key layer (chat.rs: Enter=retry, Esc=back on the full-screen state); this function only draws.
-fn error_screen_rows(err: &crate::tui::chat::ErrorState, theme: &Theme) -> Vec<Row> {
-    let mut rows = Vec::new();
-    rows.push(Row::new(Line::styled(
-        "⚠ 出错了",
-        SegStyle::fg(theme.error).bold(),
-    )));
-    rows.push(Row::new(Line::styled(
-        format!("[error] code={}", err.code),
-        SegStyle::fg(theme.error),
-    )));
-    rows.push(Row::new(Line::plain(err.msg.clone())));
-    rows.push(Row::new(Line::plain("")));
-    rows.push(Row::new(Line::styled(
-        "Enter 重试 · Esc 返回",
-        SegStyle::fg(theme.inactive),
-    )));
-    rows
-}
-
 impl Frame {
     /// Inline frame: dynamic tail (over budget → keep only the last rows + the omission hint) + chrome.
     /// The row count is the viewport height, so it is always ≤ terminal height - 2 (the DECSTBM region stays legal).
@@ -528,7 +105,7 @@ impl Frame {
             && err.level == crate::error::ErrorLevel::Full
         {
             return Self {
-                rows: error_screen_rows(err, &chat.theme),
+                rows: el::render(chrome::error_screen(err, &chat.theme)).rows,
                 cursor: None,
                 doc_start: 0,
                 content_len: 0,
@@ -536,7 +113,7 @@ impl Frame {
         }
         let width = size.width as usize;
         let height = size.height as usize;
-        let chrome = chrome_rows(chat, width, false);
+        let chrome = el::render(chrome::chrome(chat, width, false));
         let (tail_start, hidden) = tail_window(
             chat.doc.rows.len(),
             chat.tail_start,
@@ -545,7 +122,7 @@ impl Frame {
         );
         let mut rows: Vec<Row> = Vec::new();
         if hidden > 0 {
-            rows.push(dim_row(format!("… +{hidden} lines"), &chat.theme));
+            rows.push(chrome::dim_row(format!("… +{hidden} lines"), &chat.theme));
         }
         rows.extend(chat.doc.rows[tail_start..].iter().cloned());
         let tail_len = rows.len();
@@ -559,6 +136,10 @@ impl Frame {
                 SegStyle::fg(chat.theme.error),
             )));
         }
+        // The caret offset counts every row before the chrome block, error row
+        // included (the old hand-counted `prompt_row` arithmetic skipped it,
+        // parking the caret one row high whenever an error row showed).
+        let pre_chrome = rows.len();
         rows.extend(chrome.rows);
 
         // Last line of defense: chrome itself can exceed the budget (very short terminals),
@@ -570,14 +151,9 @@ impl Frame {
         if dropped > 0 {
             rows.drain(..dropped);
         }
-        let (caret_row, caret_col) = caret_cell(chat);
-        let cursor = caret_position(
-            tail_len + chrome.prompt_row + caret_row,
-            caret_col + 2,
-            dropped,
-            rows.len(),
-            width,
-        );
+        let cursor = chrome.caret.and_then(|(row, col)| {
+            caret_position(pre_chrome + row, col, dropped, rows.len(), width)
+        });
         // Map content rows back to document rows for image placement: the
         // `+N lines` omission hint is not a doc row; dropped rows above the
         // budget shift the doc start.
@@ -646,25 +222,6 @@ fn flush_items(chat: &Chat, width: usize, end: usize) -> Vec<HistoryItem> {
     items
 }
 
-/// Lazy-flush pick: the furthest settled checkpoint whose segment's start row has crossed the window top.
-/// Fully visible settled segments stay unfrozen (kept re-layoutable/collapsible); a segment crossing the top
-/// freezes wholesale — otherwise its hidden part exists neither on screen nor in scrollback, with nowhere to look.
-fn pick_flush_mark(
-    marks: &[SettledMark],
-    tail_start: usize,
-    win_start: usize,
-) -> Option<SettledMark> {
-    let mut chosen = None;
-    let mut prev_end = tail_start;
-    for mark in marks {
-        if mark.row_end > tail_start && prev_end.max(tail_start) < win_start {
-            chosen = Some(*mark);
-        }
-        prev_end = mark.row_end;
-    }
-    chosen
-}
-
 /// Whether this row is an image block's first row (continuation rows return false; boundaries are detected by url).
 fn image_block_head(rows: &[Row], i: usize) -> bool {
     let Some(img) = &rows[i].line.image else {
@@ -718,6 +275,12 @@ fn desired_placements(
     out
 }
 
+/// Chrome height, measured by rendering the tree (never predicted — the same
+/// source the frame assembler draws from).
+fn chrome_height(chat: &Chat, width: usize, fullscreen: bool) -> usize {
+    el::height(chrome::chrome(chat, width, fullscreen))
+}
+
 /// Key dispatch. In inline mode ctrl+o toggles expand/collapse (CC non-fullscreen semantics);
 /// neither direction touches the already-printed scrollback: expand = replay the whole transcript and freeze it
 /// into scrollback (readable by scrolling up); collapse = fold back to aggregates, then close up like resize (clear-redraw +
@@ -736,7 +299,7 @@ fn dispatch_key(chat: &mut Chat, key: KeyEvent, inline: bool) {
                     // replay rows on screen stay only in scrollback.
                     chat.dump_transcript = false;
                     chat.force_redraw = true;
-                    let chrome_len = chrome_rows(chat, chat.width, false).rows.len();
+                    let chrome_len = chrome_height(chat, chat.width, false);
                     let budget = chat.height.saturating_sub(2).saturating_sub(chrome_len);
                     chat.rehydrate(chat.width, budget);
                 }
@@ -762,7 +325,7 @@ fn rebuild(chat: &mut Chat, size: Size, fullscreen: bool) {
         chat.height = height;
         chat.dirty = true;
     }
-    let chrome = chrome_rows(chat, width, fullscreen).rows.len();
+    let chrome = chrome_height(chat, width, fullscreen);
     let viewport = height.saturating_sub(chrome).max(1);
     if !chat.dirty && chat.viewport_height == viewport {
         return;
@@ -827,8 +390,7 @@ pub async fn run_inline(
                     // Rehydration pulls the content back to fill the screen losslessly; the old-geometry copies stay
                     // in scrollback (accept duplicates when scrolling up).
                     chat.force_redraw = true;
-                    let chrome_len =
-                        chrome_rows(&chat, size.width as usize, false).rows.len();
+                    let chrome_len = chrome_height(&chat, size.width as usize, false);
                     let doc_budget = (size.height as usize)
                         .saturating_sub(2)
                         .saturating_sub(chrome_len);
@@ -922,7 +484,7 @@ pub async fn run_inline(
                 chat.advance_flushed_upto(mark);
             }
         } else {
-            let chrome_len = chrome_rows(&chat, size.width as usize, false).rows.len();
+            let chrome_len = chrome_height(&chat, size.width as usize, false);
             // The window counts "persistent content": transient slash output (gone after TTL) squeezing the window
             // is no reason to freeze live content — it merely covers it temporarily, not evicts it.
             let persistent = chat.doc.rows.len().saturating_sub(chat.doc.transient_rows);
@@ -975,34 +537,34 @@ fn fullscreen_frame(chat: &Chat, size: Size) -> Frame {
         && err.level == crate::error::ErrorLevel::Full
     {
         return Frame {
-            rows: error_screen_rows(err, &chat.theme),
+            rows: el::render(chrome::error_screen(err, &chat.theme)).rows,
             cursor: None,
             doc_start: 0,
             content_len: 0,
         };
     }
 
-    let chrome = chrome_rows(chat, size.width as usize, true);
+    let chrome = el::render(chrome::chrome(chat, size.width as usize, true));
     let chrome_start = (size.height as usize).saturating_sub(chrome.rows.len());
-    let viewport = (size.height as usize).saturating_sub(chrome.rows.len());
     let mut rows: Vec<Row> = chat
         .doc
         .rows
         .iter()
         .skip(chat.scroll)
-        .take(viewport)
+        .take(chrome_start)
         .cloned()
         .collect();
     rows.resize_with(chrome_start, || Row::new(Line::plain("")));
     rows.extend(chrome.rows);
-    let (row, col) = caret_cell(chat);
-    let cursor = caret_position(
-        chrome_start + chrome.prompt_row + row,
-        col + 2,
-        0,
-        size.height as usize,
-        size.width as usize,
-    );
+    let cursor = chrome.caret.and_then(|(row, col)| {
+        caret_position(
+            chrome_start + row,
+            col,
+            0,
+            size.height as usize,
+            size.width as usize,
+        )
+    });
     Frame {
         rows,
         cursor,
@@ -1159,9 +721,8 @@ fn mouse_event(chat: &mut Chat, mouse: MouseEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::Session;
-    use crate::tui::line::ImageRef;
-    use std::sync::Arc;
+    use crate::tui::line::{ImageRef, text_width};
+    use crate::tui::test_util::chat_at;
 
     /// Text of an assembled row.
     fn row_text(row: &Row) -> String {
@@ -1171,47 +732,6 @@ mod tests {
     /// A flushed scrollback line's text.
     fn history_text(line: &ratatui::text::Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
-    fn test_session() -> Arc<Session> {
-        Arc::new(Session {
-            client: crate::api::client::Client::new(
-                "test-key".to_string(),
-                "https://example.com".to_string(),
-            ),
-            runtime: crate::query::Runtime::new("test-model".to_string(), None, Default::default()),
-            permission_mode: PermissionMode::Default,
-            settings: crate::settings::Settings::default(),
-            system: Vec::new(),
-            depth: 0,
-            home: std::env::temp_dir(),
-            quiet: true,
-            compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            watch: crate::watch::WatchRegistry::new(),
-            tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
-            expand_tasks: tokio::sync::watch::channel(false).0,
-            agents: crate::agents::AgentRegistry::new(),
-            channels: crate::channels::ChannelRegistry::new(Default::default()),
-            instance: None,
-        })
-    }
-
-    fn chat_at(width: usize, height: usize) -> Chat {
-        let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut chat = Chat::new(
-            test_session(),
-            events_tx,
-            events_rx,
-            asks_tx,
-            asks_rx,
-            Theme::dark(),
-            crate::tui::theme::ThemeSetting::Auto,
-            None,
-        );
-        chat.width = width;
-        chat.height = height;
-        chat
     }
 
     fn size(width: u16, height: u16) -> Size {
@@ -1280,495 +800,6 @@ mod tests {
         assert!(
             text.iter().any(|l| l.starts_with('╭')),
             "输入框上边框仍在: {text:?}"
-        );
-    }
-
-    /// Every chrome section appears in the assembled result (a table-check test for the old Chrome structure:
-    /// now the count is the assembly itself, so just verify each section really produces rows).
-    #[test]
-    fn chrome_contains_every_section() {
-        let mut chat = chat_at(100, 40);
-        let base = chrome_rows(&chat, 100, false).rows.len();
-        // Idle: input 3 rows (two borders + one placeholder row) + footer 1 row.
-        assert_eq!(base, 4);
-
-        chat.busy = true;
-        chat.push_warning("mcp 连接失败".to_string());
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        chat.pending_ask = Some((
-            crate::ui::PermissionRequest::new("t", "q", vec!["a".into()]),
-            tx,
-        ));
-        chat.set_input("a\nb\nc");
-        chat.help_visible = true;
-        chat.queued.push(crate::tui::chat::QueuedInput {
-            text: "queued message".into(),
-            is_slash: false,
-        });
-        chat.notice = Some("Press ctrl-c again to exit");
-        chat.search = Some(crate::tui::chat::HistorySearch::default());
-        let rows = chrome_rows(&chat, 100, false).rows;
-        let text: Vec<String> = rows.iter().map(row_text).collect();
-        assert!(
-            text.iter().any(|l| l.contains("esc to interrupt")),
-            "状态行"
-        );
-        assert!(text.iter().any(|l| l.contains("⚠ mcp 连接失败")), "警告行");
-        assert!(text.iter().any(|l| l.contains("shift+tab")), "? 面板");
-        assert!(
-            text.iter().any(|l| l.contains("(reverse-i-search)")),
-            "搜索行"
-        );
-        assert!(
-            text.iter().any(|l| l.contains("> queued message")),
-            "队列行"
-        );
-        assert!(
-            text.iter().any(|l| l.contains("Press ctrl-c again")),
-            "提示行"
-        );
-        assert!(
-            text.iter().any(|l| l.contains("Waiting for permission…")),
-            "ask 行"
-        );
-        assert_eq!(
-            text.iter()
-                .filter(|l| l.starts_with('╭') || l.starts_with('╰'))
-                .count(),
-            2,
-            "输入框上下边框"
-        );
-        // Every section counts toward the row total: missing one means the frame height is wrong.
-        assert_eq!(
-            rows.len(),
-            1 + chat.task_lines().len()
-                + 1
-                + chat.help_lines().len()
-                + (2 + chat.prompt_lines().len())
-                + 1
-                + chat.queue_lines().len()
-                + suggestion_rows(
-                    &chat.slash_suggestions,
-                    chat.slash_selected,
-                    Menus {
-                        model: chat.model_menu.as_ref(),
-                        think: chat.think_menu.as_ref(),
-                        theme: chat.theme_menu.as_ref(),
-                        resume: chat.resume_menu.as_ref(),
-                        provider: chat.provider_menu.as_ref(),
-                    },
-                    chat.slash_no_match,
-                    &chat.theme,
-                    100
-                )
-                .len()
-                + 1
-                + 1
-                + 1
-        );
-    }
-
-    /// The suggestion area's row count and content are naturally one source (the old two-branch rules once disagreed,
-    /// overflowing the canvas).
-    #[test]
-    fn suggestion_rows_cover_every_menu_state() {
-        use crate::tui::chat::{ModelMenuModels, SlashSuggestion, THINK_LEVELS, ThinkMenu};
-        let theme = Theme::dark();
-        let mut menu = ModelMenu {
-            providers: vec!["default".into(), "openrouter".into()],
-            provider_selected: 0,
-            provider_current: Some(0),
-            models: None,
-        };
-        assert_eq!(
-            suggestion_rows(&[], 0, Menus::default(), false, &theme, 80).len(),
-            0
-        );
-        // G9: no-match shows one dim hint row instead of an empty gap.
-        let no_match = suggestion_rows(&[], 0, Menus::default(), true, &theme, 80);
-        assert_eq!(no_match.len(), 1);
-        assert!(
-            row_text(&no_match[0]).contains("无匹配命令"),
-            "{}",
-            row_text(&no_match[0])
-        );
-        // Level one: 2 provider rows + 1 hint row（picker-model.md 提交 E）。
-        assert_eq!(
-            suggestion_rows(
-                &[],
-                0,
-                Menus {
-                    model: Some(&menu),
-                    think: None,
-                    theme: None,
-                    resume: None,
-                    provider: None
-                },
-                false,
-                &theme,
-                80
-            )
-            .len(),
-            3
-        );
-        // Loading / empty list each take one hint row.
-        menu.models = Some(ModelMenuModels {
-            provider: "default".into(),
-            models: Vec::new(),
-            loading: true,
-            selected: 0,
-        });
-        assert_eq!(
-            suggestion_rows(
-                &[],
-                0,
-                Menus {
-                    model: Some(&menu),
-                    think: None,
-                    theme: None,
-                    resume: None,
-                    provider: None
-                },
-                false,
-                &theme,
-                80
-            )
-            .len(),
-            1
-        );
-        menu.models = Some(ModelMenuModels {
-            provider: "default".into(),
-            models: Vec::new(),
-            loading: false,
-            selected: 0,
-        });
-        assert_eq!(
-            suggestion_rows(
-                &[],
-                0,
-                Menus {
-                    model: Some(&menu),
-                    think: None,
-                    theme: None,
-                    resume: None,
-                    provider: None
-                },
-                false,
-                &theme,
-                80
-            )
-            .len(),
-            1
-        );
-        // The level-two model list truncates at the 5+5 cap.
-        menu.models = Some(ModelMenuModels {
-            provider: "default".into(),
-            models: (0..30).map(|i| format!("m{i}")).collect(),
-            loading: false,
-            selected: 0,
-        });
-        assert_eq!(
-            suggestion_rows(
-                &[],
-                0,
-                Menus {
-                    model: Some(&menu),
-                    think: None,
-                    theme: None,
-                    resume: None,
-                    provider: None
-                },
-                false,
-                &theme,
-                80
-            )
-            .len(),
-            crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5
-        );
-        // `/think` menu: one row per level + one hint row; `●` marks the in-effect
-        // level, `❯` the browse selection (two separate marks); the model menu takes priority.
-        let think = ThinkMenu {
-            selected: 1,
-            current: 0,
-        };
-        let think_rows = suggestion_rows(
-            &[],
-            0,
-            Menus {
-                model: None,
-                think: Some(&think),
-                theme: None,
-                resume: None,
-                provider: None,
-            },
-            false,
-            &theme,
-            80,
-        );
-        assert_eq!(think_rows.len(), THINK_LEVELS.len() + 1, "6 档 + 提示行");
-        assert!(
-            row_text(&think_rows[0]).contains("● off"),
-            "● 标当前生效档: {}",
-            row_text(&think_rows[0])
-        );
-        assert!(
-            row_text(&think_rows[1]).starts_with("  ❯"),
-            "❯ 标浏览选中: {}",
-            row_text(&think_rows[1])
-        );
-        assert!(
-            row_text(&think_rows[1]).contains("low"),
-            "选中行名: {}",
-            row_text(&think_rows[1])
-        );
-        // Overlap: ❯ keeps the prefix slot, ● stays in front of the name.
-        let overlap = ThinkMenu {
-            selected: 3,
-            current: 3,
-        };
-        let rows = suggestion_rows(
-            &[],
-            0,
-            Menus {
-                model: None,
-                think: Some(&overlap),
-                theme: None,
-                resume: None,
-                provider: None,
-            },
-            false,
-            &theme,
-            80,
-        );
-        assert!(
-            row_text(&rows[3]).contains("❯ ● high"),
-            "重叠行双标记: {}",
-            row_text(&rows[3])
-        );
-        // Hint row (last, dim).
-        let hint = row_text(think_rows.last().unwrap());
-        assert!(hint.contains("Esc 取消"), "提示行: {hint}");
-        assert_eq!(
-            suggestion_rows(
-                &[],
-                0,
-                Menus {
-                    model: Some(&menu),
-                    think: Some(&think),
-                    theme: None,
-                    resume: None,
-                    provider: None
-                },
-                false,
-                &theme,
-                80
-            )
-            .len(),
-            crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5,
-            "模型菜单优先于 think 菜单"
-        );
-        // Slash suggestions take priority over menus.
-        let slash = vec![SlashSuggestion {
-            name: "help".into(),
-            hint: String::new(),
-            description: "显示可用命令".into(),
-        }];
-        let rows = suggestion_rows(
-            &slash,
-            0,
-            Menus {
-                model: Some(&menu),
-                think: None,
-                theme: None,
-                resume: None,
-                provider: None,
-            },
-            false,
-            &theme,
-            80,
-        );
-        assert_eq!(rows.len(), 1);
-        assert!(
-            row_text(&rows[0]).starts_with("❯ /help"),
-            "{}",
-            row_text(&rows[0])
-        );
-        // A command with an argument hint renders name + hint in the name column.
-        let with_hint = vec![SlashSuggestion {
-            name: "think".into(),
-            hint: "[off|low|medium|high|xhigh|max]".into(),
-            description: "设置思考级别".into(),
-        }];
-        let rows = suggestion_rows(&with_hint, 0, Menus::default(), false, &theme, 80);
-        assert_eq!(rows.len(), 1);
-        assert!(
-            row_text(&rows[0]).contains("/think [off|low|medium|high|xhigh|max]"),
-            "{}",
-            row_text(&rows[0])
-        );
-        // Every row truncates by width (overwide rows would be wrapped by the terminal, skewing the frame height).
-        for width in 10..80usize {
-            for row in suggestion_rows(
-                &slash,
-                0,
-                Menus {
-                    model: Some(&menu),
-                    think: None,
-                    theme: None,
-                    resume: None,
-                    provider: None,
-                },
-                false,
-                &theme,
-                width,
-            ) {
-                assert!(text_width(&row_text(&row)) <= width, "width={width}");
-            }
-            for row in suggestion_rows(
-                &[],
-                0,
-                Menus {
-                    model: None,
-                    think: Some(&think),
-                    theme: None,
-                    resume: None,
-                    provider: None,
-                },
-                false,
-                &theme,
-                width,
-            ) {
-                assert!(text_width(&row_text(&row)) <= width, "width={width}");
-            }
-        }
-    }
-
-    /// Status-row copy (CC ActivityIndicator).
-    #[test]
-    fn status_row_renders_busy_verb() {
-        let theme = Theme::dark();
-        let status = crate::tui::chat::RunningStatus {
-            verb: "Working".to_string(),
-            elapsed: 12.5,
-            tokens: 0,
-        };
-        let text = row_text(&status_row(&status, '✻', &theme));
-        assert!(
-            text.contains("✻ Working… (esc to interrupt · 13s)"),
-            "{text}"
-        );
-        assert!(!text.contains("tokens"), "0 token 省略该段: {text}");
-
-        let status = crate::tui::chat::RunningStatus {
-            verb: "$ cargo test".to_string(),
-            elapsed: 3.2,
-            tokens: 1200,
-        };
-        let text = row_text(&status_row(&status, '✽', &theme));
-        assert!(
-            text.contains("✽ $ cargo test… (esc to interrupt · 3s · ↓ 1200 tokens)"),
-            "{text}"
-        );
-    }
-
-    /// Footer: badge + hints (left), model name (right); bash mode adds a shell hint.
-    #[test]
-    fn footer_shows_hints_and_model() {
-        let mut chat = chat_at(80, 24);
-        let text = row_text(&footer_row(&chat, 80));
-        assert!(
-            text.contains("? for shortcuts · ctrl+o to expand"),
-            "{text}"
-        );
-        assert!(text.contains("test-model"), "{text}");
-        assert!(!text.contains("plan mode"), "default 模式无徽标: {text}");
-        // 2 columns of padding on each side (CC footer padding): the model name's right edge lands at width-2.
-        assert_eq!(text_width(&text), 78, "模型名右对齐到 width-2");
-
-        chat.busy = true;
-        let text = row_text(&footer_row(&chat, 80));
-        assert!(
-            !text.contains("? for shortcuts"),
-            "busy 只留 expand 提示: {text}"
-        );
-        assert!(text.contains("ctrl+o to expand"), "{text}");
-
-        chat.busy = false;
-        chat.bash_mode = true;
-        chat.permission_mode = PermissionMode::Plan;
-        let text = row_text(&footer_row(&chat, 80));
-        assert!(text.contains("⏸ plan mode on ·"), "{text}");
-        assert!(text.contains("! for shell mode"), "{text}");
-    }
-
-    /// Footer `/think` picker preview: while the menu is open the badge shows the
-    /// browsed level with `▸`; committed badge has no suffix (Esc reverts via the
-    /// same branch — the menu is gone).
-    #[test]
-    fn footer_previews_browsed_think_level() {
-        let mut chat = chat_at(80, 24);
-        let _ = chat
-            .session
-            .runtime
-            .thinking_tx
-            .send(Some("high".to_string()));
-        let text = row_text(&footer_row(&chat, 80));
-        assert!(text.contains("test-model · think high"), "{text}");
-        assert!(!text.contains('▸'), "提交态无预览后缀: {text}");
-
-        // Open the picker (preselects high); browse to xhigh → preview shows xhigh ▸.
-        chat.input = "/think".to_string();
-        chat.submit();
-        let text = row_text(&footer_row(&chat, 80));
-        assert!(text.contains("test-model · think high ▸"), "{text}");
-        chat.on_key(
-            ratatui::crossterm::event::KeyCode::Down,
-            ratatui::crossterm::event::KeyModifiers::empty(),
-        );
-        let text = row_text(&footer_row(&chat, 80));
-        assert!(
-            text.contains("test-model · think xhigh ▸"),
-            "预览跟随浏览: {text}"
-        );
-        // Esc reverts to the committed badge (no suffix).
-        chat.on_key(
-            ratatui::crossterm::event::KeyCode::Esc,
-            ratatui::crossterm::event::KeyModifiers::empty(),
-        );
-        let text = row_text(&footer_row(&chat, 80));
-        assert!(text.contains("test-model · think high"), "{text}");
-        assert!(!text.contains('▸'), "Esc 后还原: {text}");
-    }
-
-    /// Input box: prefix + `▋` fake caret; the real caret lands on the same cell.
-    #[test]
-    fn prompt_rows_and_caret_agree() {
-        let mut chat = chat_at(80, 24);
-        chat.set_input("hi");
-        let rows = prompt_rows(&chat, 80);
-        assert_eq!(rows.len(), 3, "上下边框 + 一行输入");
-        assert_eq!(row_text(&rows[1]), "❯ hi▋");
-        assert_eq!(caret_cell(&chat), (0, 2), "光标在 ▋ 处");
-
-        chat.set_input("");
-        assert_eq!(caret_cell(&chat), (0, 0));
-        assert!(row_text(&prompt_rows(&chat, 80)[1]).starts_with("❯ ▋"));
-
-        // Multi-line input: the caret row follows the input row.
-        chat.set_input("a\nb\nc");
-        let rows = prompt_rows(&chat, 80);
-        assert_eq!(rows.len(), 5);
-        assert_eq!(caret_cell(&chat), (2, 1));
-
-        chat.bash_mode = true;
-        chat.set_input("ls");
-        let rows = prompt_rows(&chat, 80);
-        assert_eq!(row_text(&rows[1]), "! ls▋");
-        // bash mode swaps the border color (CC bashBorder).
-        assert_eq!(
-            rows[0].line.segs[0].style.fg,
-            Some(chat.theme.bash_border),
-            "边框换色"
         );
     }
 
@@ -2224,7 +1255,7 @@ mod tests {
         let frame = fullscreen_frame(&chat, size(80, 24));
         assert_eq!(frame.doc_start, 7);
         assert_eq!(
-            frame.content_len + chrome_rows(&chat, 80, true).rows.len(),
+            frame.content_len + chrome_height(&chat, 80, true),
             24,
             "内容区 + chrome = 屏高"
         );
@@ -2248,30 +1279,6 @@ mod tests {
         assert_eq!(chat.scroll, 10);
     }
 
-    /// Lazy flush: nothing freezes when it fits in the window; segments past the window top (including ones crossing it) freeze wholesale.
-    #[test]
-    fn pick_flush_mark_freezes_only_segments_past_the_window_top() {
-        let marks = vec![
-            SettledMark {
-                row_end: 5,
-                segments: 1,
-            },
-            SettledMark {
-                row_end: 20,
-                segments: 2,
-            },
-        ];
-        // Everything visible (window starts at 0): nothing freezes.
-        assert_eq!(pick_flush_mark(&marks, 0, 0), None);
-        // Window top at row 3: segment 1 (0..5) crosses the top → freeze up to 5; segment 2 from 5 on
-        // is fully visible → stays live.
-        assert_eq!(pick_flush_mark(&marks, 0, 3), Some(marks[0]));
-        // Window top at row 10: segment 2 (5..20) also crosses → freeze it too.
-        assert_eq!(pick_flush_mark(&marks, 0, 10), Some(marks[1]));
-        // After freezing up to 5, the window has not moved further up: do not re-pick a consumed checkpoint.
-        assert_eq!(pick_flush_mark(&marks, 5, 5), None);
-    }
-
     /// Settled content stays live inside the window: a small doc freezes nothing, and width changes re-layout on rebuild.
     #[test]
     fn settled_rows_stay_live_while_they_fit() {
@@ -2279,7 +1286,7 @@ mod tests {
         chat.dirty = true;
         rebuild(&mut chat, size(80, 24), false);
         assert!(!chat.doc.settled_marks.is_empty(), "欢迎卡有定稿检查点");
-        let chrome_len = chrome_rows(&chat, 80, false).rows.len();
+        let chrome_len = chrome_height(&chat, 80, false);
         let (win_start, _) = tail_window(chat.doc.rows.len(), chat.tail_start, chrome_len, 24);
         assert_eq!(
             pick_flush_mark(&chat.doc.settled_marks, chat.tail_start, win_start),
@@ -2296,7 +1303,7 @@ mod tests {
         chat.dirty = true;
         rebuild(&mut chat, size(80, 24), false);
         assert_eq!(chat.doc.transient_rows, 40);
-        let chrome_len = chrome_rows(&chat, 80, false).rows.len();
+        let chrome_len = chrome_height(&chat, 80, false);
         let total = chat.doc.rows.len();
 
         // Regression guard: computing the window over the full doc would misjudge the welcome card as past the top.
