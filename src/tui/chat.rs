@@ -266,8 +266,24 @@ pub struct ModelMenu {
     /// Level-one list: `default` (top-level config) + settings.providers names.
     pub providers: Vec<String>,
     pub provider_selected: usize,
+    /// 当前 provider 在一级列表中的位置（●；picker-model.md 提交 E）。
+    pub provider_current: Option<usize>,
     /// Level-two model list (None = still on level one).
     pub models: Option<ModelMenuModels>,
+}
+
+impl ModelMenu {
+    /// 一级列表 → PickerModel 核心（行渲染/键转移共用；两级+异步留在壳层）。
+    pub fn provider_picker(&self) -> crate::tui::picker::PickerModel {
+        crate::tui::picker::PickerModel::new(
+            self.providers
+                .iter()
+                .map(|p| crate::tui::picker::PickerItem::new(p.clone(), p.clone(), String::new()))
+                .collect(),
+            self.provider_selected,
+            self.provider_current,
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -2418,6 +2434,7 @@ impl Chat {
         self.model_menu = Some(ModelMenu {
             providers,
             provider_selected: selected,
+            provider_current: Some(selected),
             models: None,
         });
         self.clear_slash_suggestions();
@@ -2461,6 +2478,7 @@ impl Chat {
         self.model_menu = Some(ModelMenu {
             providers,
             provider_selected,
+            provider_current: None,
             models: Some(ModelMenuModels {
                 provider,
                 models: Vec::new(),
@@ -2482,8 +2500,10 @@ impl Chat {
                         m.selected = (m.selected + 1) % m.models.len();
                     }
                 } else {
-                    menu.provider_selected =
-                        (menu.provider_selected + 1) % menu.providers.len();
+                    // 一级：委托 PickerModel 核心（picker-model.md 提交 E）。
+                    let mut core = menu.provider_picker();
+                    core.move_selection(1);
+                    menu.provider_selected = core.selected;
                 }
                 true
             }
@@ -2493,12 +2513,26 @@ impl Chat {
                         m.selected = m.selected.checked_sub(1).unwrap_or(m.models.len() - 1);
                     }
                 } else {
-                    menu.provider_selected = menu
-                        .provider_selected
-                        .checked_sub(1)
-                        .unwrap_or(menu.providers.len() - 1);
+                    let mut core = menu.provider_picker();
+                    core.move_selection(-1);
+                    menu.provider_selected = core.selected;
                 }
                 true
+            }
+            // 数字直达：仅一级适用（两级第一级适用，picker-model.md 评估表）。
+            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+                if menu.models.is_some() {
+                    return false;
+                }
+                let mut core = menu.provider_picker();
+                if let Some(n) = c.to_digit(10)
+                    && core.jump(n as usize)
+                {
+                    menu.provider_selected = core.selected;
+                    true
+                } else {
+                    false
+                }
             }
             KeyCode::Enter => {
                 let Some(menu) = self.model_menu.take() else {
@@ -2521,6 +2555,7 @@ impl Chat {
                     self.model_menu = Some(ModelMenu {
                         providers: menu.providers,
                         provider_selected: menu.provider_selected,
+                        provider_current: menu.provider_current,
                         models: Some(m),
                     });
                     return true;
@@ -2531,6 +2566,7 @@ impl Chat {
                     self.model_menu = Some(ModelMenu {
                         providers: menu.providers,
                         provider_selected: menu.provider_selected,
+                        provider_current: menu.provider_current,
                         models: Some(m),
                     });
                     self.push_slash_output(e);
@@ -6399,6 +6435,50 @@ mod tests {
             "未知命令进错误行: {:?}",
             chat.slash_error_lines
         );
+    }
+
+
+    /// picker-model.md 提交 E：/model 一级走 PickerModel 核心——● 标当前 provider、
+    /// 数字直达、二级保持原逻辑（数字不进输入框）。
+    #[tokio::test]
+    async fn model_menu_level_one_uses_picker_core() {
+        let mut chat = test_chat();
+        // 一级：default + 一个命名 provider。
+        let settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        let mut s2 = settings.clone();
+        s2.providers.insert(
+            "deepseek".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: "sk-ds".into(),
+                api_base_url: "https://api.deepseek.com".into(),
+                supports_images: None,
+            },
+        );
+        Arc::get_mut(&mut chat.session).unwrap().client =
+            crate::api::client::Client::from_settings(&s2).unwrap();
+
+        chat.input = "/model".to_string();
+        chat.submit();
+        let menu = chat.model_menu.as_ref().expect("菜单已打开");
+        assert_eq!(menu.provider_current, Some(0), "● 标当前 provider default");
+        let core = menu.provider_picker();
+        assert_eq!(core.items.len(), 2, "default + deepseek");
+
+        // 数字直达 2 = deepseek；一级被消费不进输入框。
+        assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
+        let menu = chat.model_menu.as_ref().expect("菜单已打开");
+        assert_eq!(menu.provider_selected, 1, "2 直达 deepseek");
+        assert_eq!(chat.input, "", "一级数字被菜单消费");
+
+        // Enter 进二级：数字不再直达（二级不适用，落输入编辑路径）。
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
+        let menu = chat.model_menu.as_ref().expect("菜单已打开");
+        assert!(menu.models.is_some(), "进入二级");
+        assert!(chat.on_key(KeyCode::Char('3'), KeyModifiers::empty()));
+        assert_eq!(chat.input, "3", "二级数字落输入框（无直达）");
     }
 
     /// /model: with an arg, switch the runtime model (effective next turn) and persist as default; without, open the selector.

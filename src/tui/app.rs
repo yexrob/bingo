@@ -284,27 +284,35 @@ fn suggestion_rows(
             }
             return Vec::new();
         };
-        // `/model` two-level selector: level one `provider`, level two `model`
-        // (loading / empty list each take one hint row).
-        let items: Vec<(String, bool)> = match &menu.models {
-            Some(m) if m.loading => {
-                vec![(format!("… 正在拉取 {} 的模型列表", m.provider), true)]
-            }
-            Some(m) if m.models.is_empty() => {
-                vec![("（该端点未返回模型，Esc 退出）".to_string(), true)]
-            }
-            Some(m) => m
-                .models
+        // `/model` two-level selector: level one `provider`（PickerModel 核心渲染，
+        // picker-model.md 提交 E）、level two `model`（loading / empty list 各一行提示）。
+        let Some(m) = &menu.models else {
+            // 一级：● 标当前 provider + 数字直达提示行（Enter = 查看模型列表）。
+            let core = menu.provider_picker();
+            let mut rows: Vec<Row> =
+                (0..core.items.len()).map(|i| core.row(i, width, theme)).collect();
+            rows.push(Row::new(Line::styled(
+                format!(
+                    "  {}",
+                    crate::tui::markdown::truncate(
+                        "↑↓/1-9 选择 provider · Enter 查看模型 · Esc 返回",
+                        width.saturating_sub(2),
+                    )
+                ),
+                SegStyle::fg(theme.inactive),
+            )));
+            return rows;
+        };
+        let items: Vec<(String, bool)> = if m.loading {
+            vec![(format!("… 正在拉取 {} 的模型列表", m.provider), true)]
+        } else if m.models.is_empty() {
+            vec![("（该端点未返回模型，Esc 退出）".to_string(), true)]
+        } else {
+            m.models
                 .iter()
                 .enumerate()
                 .map(|(i, name)| (name.clone(), i == m.selected))
-                .collect(),
-            None => menu
-                .providers
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.clone(), i == menu.provider_selected))
-                .collect(),
+                .collect()
         };
         return items
             .into_iter()
@@ -1235,6 +1243,7 @@ mod tests {
         let mut menu = ModelMenu {
             providers: vec!["default".into(), "openrouter".into()],
             provider_selected: 0,
+            provider_current: Some(0),
             models: None,
         };
         assert_eq!(suggestion_rows(&[], 0, Menus::default(), false, &theme, 80).len(), 0);
@@ -1246,7 +1255,8 @@ mod tests {
             "{}",
             row_text(&no_match[0])
         );
-        assert_eq!(suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None , resume: None , provider: None }, false, &theme, 80).len(), 2);
+        // Level one: 2 provider rows + 1 hint row（picker-model.md 提交 E）。
+        assert_eq!(suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None , resume: None , provider: None }, false, &theme, 80).len(), 3);
         // Loading / empty list each take one hint row.
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
