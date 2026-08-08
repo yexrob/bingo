@@ -707,9 +707,21 @@ mod tests {
         let bin = b"#!/bin/sh\necho bingo\n";
         let archive = sample_archive(bin);
         assert_eq!(extract_binary(&archive, "bingo").unwrap(), bin);
-        // 缺条目 → MissingBinary
+        // 缺条目 → MissingBinary（Windows 的 .exe 兜底匹配会命中 bingo.exe，
+        // 需用不含 .exe 条目的归档验证）
+        #[cfg(windows)]
+        let no_bin = {
+            use std::io::Write;
+            let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            z.start_file("readme.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            z.write_all(b"hi").unwrap();
+            z.finish().unwrap().into_inner()
+        };
+        #[cfg(not(windows))]
+        let no_bin = archive.clone();
         assert!(matches!(
-            extract_binary(&archive, "nope"),
+            extract_binary(&no_bin, "nope"),
             Err(UpdateError::MissingBinary(_))
         ));
         // 损坏 → ArchiveInvalid（Windows zip 对任意短字节容错，需构造截断 zip 头）
