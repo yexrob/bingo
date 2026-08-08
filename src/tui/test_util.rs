@@ -38,6 +38,7 @@ pub fn test_session() -> Arc<Session> {
         system: Vec::new(),
         depth: 0,
         home: std::env::temp_dir(),
+        user_config_dir: std::env::temp_dir().join(".config"),
         quiet: true,
         compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         watch: crate::watch::WatchRegistry::new(),

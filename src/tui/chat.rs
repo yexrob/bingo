@@ -2363,6 +2363,7 @@ impl Chat {
             "share" => self.slash_share(arg),
             "compact" => self.slash_compact(),
             "status" => self.slash_status(),
+            "config" => self.slash_config(),
             "context" => self.slash_context(),
             "permissions" => self.slash_permissions(arg),
             "mcp" => self.slash_mcp(arg),
@@ -2459,7 +2460,8 @@ impl Chat {
     /// writing only one of them recreated the mismatch on restart (P0-A).
     fn persist_selection(&self, model: &str, provider: &str) {
         let cwd = std::path::PathBuf::from(&self.cwd);
-        let _ = crate::settings::upsert_project_settings(
+        let _ = crate::settings::upsert_scoped_settings(
+            &self.session.user_config_dir,
             &cwd,
             &serde_json::json!({ "model": model, "provider": provider }),
         );
@@ -2761,8 +2763,11 @@ impl Chat {
         self.reply_cache.clear();
         self.dirty = true;
         let cwd = std::path::PathBuf::from(&self.cwd);
-        let _ =
-            crate::settings::upsert_project_settings(&cwd, &serde_json::json!({ "theme": name }));
+        let _ = crate::settings::upsert_scoped_settings(
+            &self.session.user_config_dir,
+            &cwd,
+            &serde_json::json!({ "theme": name }),
+        );
         self.push_slash_output(format!("✓ 主题已切换: {name}"));
     }
 
@@ -3212,6 +3217,109 @@ impl Chat {
         });
     }
 
+    /// `/config`: the interpreter the five config sources never had — for
+    /// every effective value, WHICH layer (or env var) won; plus endpoint,
+    /// credentials location and unknown-key warnings.
+    fn slash_config(&mut self) {
+        let cwd = std::path::PathBuf::from(&self.cwd);
+        let paths = crate::settings::layer_paths(&self.session.user_config_dir, &cwd);
+        let layer_names = ["user", "project", "local"];
+        let mut lines = vec!["配置来源（user < project < local，后层覆盖前层）：".to_string()];
+        let mut layer_values: Vec<Option<serde_json::Value>> = Vec::new();
+        for (path, name) in paths.iter().zip(layer_names) {
+            let value = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+            let state = if value.is_some() {
+                "✓"
+            } else if path.exists() {
+                "✗ 解析失败"
+            } else {
+                "（不存在）"
+            };
+            lines.push(format!("  {name:8} {} {state}", path.display()));
+            layer_values.push(value);
+        }
+        let lookup = |key: &str| -> Option<(String, &'static str)> {
+            for (i, value) in layer_values.iter().enumerate().rev() {
+                if let Some(v) = value.as_ref().and_then(|v| v.get(key)) {
+                    let shown = match v {
+                        serde_json::Value::String(s) if key == "apiKey" => {
+                            let mut masked: String = s.chars().take(4).collect();
+                            masked.push('…');
+                            masked
+                        }
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    return Some((shown, layer_names[i]));
+                }
+            }
+            None
+        };
+        lines.push("生效值与来源：".to_string());
+        for key in [
+            "provider",
+            "model",
+            "thinkingLevel",
+            "theme",
+            "permissionMode",
+            "apiKey",
+            "apiBaseUrl",
+            "shell",
+            "motion",
+        ] {
+            let entry = match lookup(key) {
+                Some((value, source)) => format!("  {key:18} = {value}（{source} 层）"),
+                None => match key {
+                    "apiKey" if std::env::var("ANTHROPIC_API_KEY").is_ok() => {
+                        format!("  {key:18} = （env ANTHROPIC_API_KEY）")
+                    }
+                    "apiKey" if std::env::var("DEEPSEEK_API_KEY").is_ok() => {
+                        format!("  {key:18} = （env DEEPSEEK_API_KEY）")
+                    }
+                    "apiBaseUrl" if std::env::var("ANTHROPIC_BASE_URL").is_ok() => {
+                        format!("  {key:18} = （env ANTHROPIC_BASE_URL）")
+                    }
+                    _ => format!("  {key:18} = （默认）"),
+                },
+            };
+            lines.push(entry);
+        }
+        // Runtime identity: what this session is actually talking to.
+        let provider = self.session.runtime.provider.borrow().clone();
+        let model = self.session.runtime.model.borrow().clone();
+        let (_, url) = self.session.client.current_endpoint();
+        lines.push(format!(
+            "当前会话：{provider} · {model} · {url}{}",
+            if self.provider_session_only {
+                "（provider 为会话级）"
+            } else {
+                ""
+            }
+        ));
+        lines.push(format!(
+            "凭据存储：{}（/provider 查看各端点登录态）",
+            crate::auth::AuthStore::new(&self.session.home)
+                .path()
+                .display()
+        ));
+        // Unknown top-level keys: typos parse fine and silently do nothing.
+        for (i, value) in layer_values.iter().enumerate() {
+            if let Some(obj) = value.as_ref().and_then(|v| v.as_object()) {
+                for key in obj.keys() {
+                    if !crate::settings::KNOWN_KEYS.contains(&key.as_str()) {
+                        lines.push(format!(
+                            "⚠ {} 层未知配置项 \"{key}\"（拼写错误？不会生效）",
+                            layer_names[i]
+                        ));
+                    }
+                }
+            }
+        }
+        self.push_slash_info(lines.join("\n"));
+    }
+
     fn slash_context(&mut self) {
         let model = self.session.runtime.model.borrow().clone();
         self.slash_stats_async(move |_msg_count, tokens| {
@@ -3306,6 +3414,7 @@ impl Chat {
         use crate::mcp::McpStatus;
         let session = self.session.clone();
         let cwd = std::path::PathBuf::from(&self.cwd);
+        let user_config_dir = self.session.user_config_dir.clone();
         let events = self.events.clone();
         let parts: Vec<&str> = arg.split_whitespace().collect();
         match parts.first().copied() {
@@ -3374,11 +3483,25 @@ impl Chat {
                     for name in &targets {
                         mgr.set_enabled(name, enabled);
                     }
-                    let list = mgr.disabled();
-                    let _ = crate::settings::upsert_project_settings(
-                        &cwd,
-                        &serde_json::json!({ "disabledMcpServers": list }),
-                    );
+                    if enabled {
+                        // Union-merged key: the name must leave EVERY layer
+                        // that lists it — writing only the project layer let
+                        // a user-layer entry merge it right back next start.
+                        for name in &targets {
+                            let _ = crate::settings::remove_from_union_lists(
+                                &user_config_dir,
+                                &cwd,
+                                "disabledMcpServers",
+                                name,
+                            );
+                        }
+                    } else {
+                        let list = mgr.disabled();
+                        let _ = crate::settings::upsert_project_settings(
+                            &cwd,
+                            &serde_json::json!({ "disabledMcpServers": list }),
+                        );
+                    }
                     let verb = if enabled { "已启用" } else { "已禁用" };
                     let _ = events.send(UiEvent::SlashOutput(format!(
                         "{verb} {} 个 MCP 服务器: {}",
@@ -3978,7 +4101,8 @@ impl Chat {
         };
         if persist {
             let cwd = std::path::PathBuf::from(&self.cwd);
-            let _ = crate::settings::upsert_project_settings(
+            let _ = crate::settings::upsert_scoped_settings(
+                &self.session.user_config_dir,
                 &cwd,
                 &serde_json::json!({ "thinkingLevel": saved }),
             );
@@ -6511,6 +6635,8 @@ mod tests {
             system: Vec::new(),
             depth: 0,
             home: home.clone(),
+            // Hermetic: scoped writes must never touch the real user config.
+            user_config_dir: home.join(".config"),
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
@@ -7186,6 +7312,7 @@ mod tests {
             system: Vec::new(),
             depth: 0,
             home: std::env::temp_dir(),
+            user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
@@ -7504,11 +7631,14 @@ mod tests {
         chat.submit();
         assert_eq!(*chat.session.runtime.model.borrow(), "deepseek-v4");
         assert!(chat.slash_lines.join("\n").contains("deepseek-v4"));
+        // No layer defines `model` → the USER layer gets it; the cwd stays
+        // untouched (no conjured .bingo/ in arbitrary directories).
         let saved: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(home.join(".bingo/settings.json")).unwrap(),
+            &std::fs::read_to_string(home.join(".config/bingo/settings.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(saved["model"], "deepseek-v4", "选择写回 project settings");
+        assert_eq!(saved["model"], "deepseek-v4", "选择写回 user settings");
+        assert!(!home.join(".bingo").exists(), "不凭空创建项目层");
         chat.input = "/model".to_string();
         chat.submit();
         assert!(chat.model_menu.is_some(), "无参进入选择器");
@@ -7543,14 +7673,28 @@ mod tests {
     fn slash_theme_switches_and_persists() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-theme", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        let mut chat = test_chat();
+        let mut chat = test_chat_home(tmp.join("home"));
         chat.cwd = tmp.display().to_string();
         let dark_text = chat.theme.text;
         chat.input = "/theme light".to_string();
         chat.submit();
         assert_ne!(chat.theme.text, dark_text, "主题已切换");
-        let saved = std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap();
+        // theme 是用户级偏好：无任何层定义时写 user 层，不在 cwd 造 .bingo。
+        let saved = std::fs::read_to_string(tmp.join("home/.config/bingo/settings.json")).unwrap();
         assert!(saved.contains("\"theme\": \"light\""), "{saved}");
+        assert!(!tmp.join(".bingo").exists(), "不凭空创建项目层");
+
+        // 项目层已定义 theme 时：写在生效层（项目层），user 层不再被绕过。
+        std::fs::create_dir_all(tmp.join(".bingo")).unwrap();
+        std::fs::write(
+            tmp.join(".bingo/settings.json"),
+            "{\n  \"theme\": \"light\"\n}\n",
+        )
+        .unwrap();
+        chat.input = "/theme dark".to_string();
+        chat.submit();
+        let project = std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap();
+        assert!(project.contains("\"theme\": \"dark\""), "{project}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -7596,7 +7740,7 @@ mod tests {
             crate::tui::theme::ThemeSetting::Light,
             "Enter 应用主题"
         );
-        let saved = std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap();
+        let saved = std::fs::read_to_string(tmp.join("home/.config/bingo/settings.json")).unwrap();
         assert!(saved.contains("\"theme\": \"light\""), "{saved}");
 
         // ↑↓ 浏览与数字直达共用核心；重新打开时 ● 跟随新档。
@@ -8424,7 +8568,7 @@ mod tests {
             Some("xhigh")
         );
         let saved: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap(),
+            &std::fs::read_to_string(tmp.join("home/.config/bingo/settings.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(saved["thinkingLevel"], "xhigh");
@@ -8638,6 +8782,7 @@ mod tests {
             ("share", "share"),
             ("compact", "compact"),
             ("status", "status"),
+            ("config", "config"),
             ("context", "context"),
             ("permissions", "permissions"),
             ("mcp", "mcp"),
@@ -8972,10 +9117,10 @@ mod tests {
         chat.input = "/provider deepseek".to_string();
         chat.submit();
         let saved: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap(),
+            &std::fs::read_to_string(tmp.join("home/.config/bingo/settings.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(saved["provider"], "deepseek", "provider 持久化");
+        assert_eq!(saved["provider"], "deepseek", "provider 持久化（user 层）");
         assert_eq!(*chat.session.runtime.provider.borrow(), "deepseek");
 
         // /model 菜单：当前 provider=deepseek（预选）→ 二级确认模型
@@ -8995,7 +9140,7 @@ mod tests {
         chat.on_key(KeyCode::Enter, KeyModifiers::empty());
         assert!(chat.model_menu.is_none(), "确认后关闭菜单");
         let saved: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap(),
+            &std::fs::read_to_string(tmp.join("home/.config/bingo/settings.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(saved["model"], "deepseek-v4", "模型持久化");
@@ -9091,7 +9236,7 @@ mod tests {
             Some("medium")
         );
         let saved: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(home.join(".bingo/settings.json")).unwrap(),
+            &std::fs::read_to_string(home.join(".config/bingo/settings.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(saved["thinkingLevel"], "medium", "选择持久化");

@@ -131,6 +131,7 @@ mod tests {
             system: Vec::new(),
             depth,
             home: std::env::temp_dir(),
+            user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),

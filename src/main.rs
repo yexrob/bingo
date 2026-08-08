@@ -165,6 +165,38 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let settings = load_settings(&user_dir, &project_dir)?;
     crate::platform::init_shell(settings.shell.as_deref());
 
+    // Config lint → startup notes: unknown top-level keys (typos parse fine
+    // and silently do nothing) and enum values that silently fall back.
+    let mut config_notes: Vec<String> = Vec::new();
+    for path in crate::settings::layer_paths(&user_dir, &project_dir) {
+        for key in crate::settings::layer_keys(&path) {
+            if !crate::settings::KNOWN_KEYS.contains(&key.as_str()) {
+                config_notes.push(format!(
+                    "⚠ {} 含未知配置项 \"{key}\"（拼写错误？不会生效）",
+                    path.display()
+                ));
+            }
+        }
+    }
+    if let Some(level) = settings.thinking_level.as_deref()
+        && level != "off"
+        && !crate::api::contract::THINKING_LEVELS.contains(&level)
+    {
+        config_notes.push(format!(
+            "⚠ thinkingLevel \"{level}\" 非法（可用 off|low|medium|high|xhigh|max），已回落 off"
+        ));
+    }
+    if let Some(theme) = settings.theme.as_deref()
+        && !matches!(theme, "auto" | "dark" | "light")
+    {
+        config_notes.push(format!(
+            "⚠ theme \"{theme}\" 非法（可用 auto|dark|light），已回落 auto"
+        ));
+    }
+    for note in &config_notes {
+        eprintln!("[bingo] warning: {note}");
+    }
+
     let permission_mode: PermissionMode = cli
         .permission_mode
         .or(settings.permission_mode.clone())
@@ -190,7 +222,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Startup notes for the TUI: everything printed to stderr before the
     // alternate screen opens is wiped by it — the fullscreen (default) host
     // never showed these. They still go to stderr for headless/log capture.
-    let mut startup_notes: Vec<String> = Vec::new();
+    let mut startup_notes: Vec<String> = config_notes;
     let (transcript, initial_messages): (Option<Transcript>, Vec<Message>) = if cli.continue_ {
         match latest_transcript(&home)? {
             Some(t) => {
@@ -273,6 +305,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         system,
         depth: 0,
         home: home.clone(),
+        user_config_dir: user_dir.clone(),
         quiet: !cli.print,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         watch: crate::watch::WatchRegistry::new(),

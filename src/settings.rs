@@ -381,17 +381,126 @@ fn merge(base: &mut Settings, layer: Settings) {
     }
 }
 
-/// Read-modify-write the top-level fields of `.bingo/settings.json`
-/// (/permissions /theme persistence): keep other config in the file, only override the
-/// keys in the patch; create the file if missing.
-pub fn upsert_project_settings(
+/// Every recognized top-level settings key (`/config` flags anything else as
+/// a probable typo — serde ignores unknown fields silently by design, which
+/// doubles as forward compatibility but eats misspellings).
+pub const KNOWN_KEYS: &[&str] = &[
+    "apiKey",
+    "apiBaseUrl",
+    "providers",
+    "provider",
+    "model",
+    "sendImages",
+    "thinkingLevel",
+    "permissionMode",
+    "theme",
+    "motion",
+    "cacheControl",
+    "respondToBashCommands",
+    "shell",
+    "hooks",
+    "mcpServers",
+    "disabledMcpServers",
+    "permissions",
+    "experimental",
+    "team",
+    "share",
+];
+
+/// The three layer files, lowest to highest precedence (user < project < local).
+pub fn layer_paths(
+    user_dir: &std::path::Path,
+    project_dir: &std::path::Path,
+) -> [std::path::PathBuf; 3] {
+    [
+        user_dir.join("bingo").join("settings.json"),
+        project_dir.join(".bingo").join("settings.json"),
+        project_dir.join(".bingo").join("local.json"),
+    ]
+}
+
+/// Top-level keys present in a layer file (missing/broken file = none).
+pub fn layer_keys(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()))
+        .unwrap_or_default()
+}
+
+/// Persist a UI selection where it takes effect: each key goes to the highest
+/// layer that already defines it (writing below a defining layer is silently
+/// ineffective — the user-layer `theme` was dead in any project whose
+/// `.bingo/settings.json` mentioned theme), and to the USER layer when no
+/// layer defines it. `/theme` in a random directory no longer conjures a
+/// `.bingo/` out of thin air.
+pub fn upsert_scoped_settings(
+    user_dir: &std::path::Path,
     project_dir: &std::path::Path,
     patch: &serde_json::Value,
 ) -> Result<(), SettingsError> {
+    let paths = layer_paths(user_dir, project_dir);
+    let Some(patch_obj) = patch.as_object() else {
+        return Ok(());
+    };
+    // Group keys by target layer, then write each touched file once.
+    let mut per_layer: [serde_json::Map<String, serde_json::Value>; 3] = Default::default();
+    let keys_per_layer: Vec<Vec<String>> = paths.iter().map(|p| layer_keys(p)).collect();
+    for (key, value) in patch_obj {
+        let target = (0..3)
+            .rev()
+            .find(|&i| keys_per_layer[i].contains(key))
+            .unwrap_or(0);
+        per_layer[target].insert(key.clone(), value.clone());
+    }
+    for (i, layer_patch) in per_layer.iter().enumerate() {
+        if layer_patch.is_empty() {
+            continue;
+        }
+        upsert_file(&paths[i], &serde_json::Value::Object(layer_patch.clone()))?;
+    }
+    Ok(())
+}
+
+/// Remove a value from an array-valued key in EVERY layer that lists it —
+/// union-merged keys (`disabledMcpServers`) cannot be "un-set" by writing one
+/// layer: `/mcp enable` used to write the project layer while the user layer
+/// merged the name right back on the next start.
+pub fn remove_from_union_lists(
+    user_dir: &std::path::Path,
+    project_dir: &std::path::Path,
+    key: &str,
+    value: &str,
+) -> Result<(), SettingsError> {
+    for path in layer_paths(user_dir, project_dir) {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(list) = root.get_mut(key).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        let before = list.len();
+        list.retain(|v| v.as_str() != Some(value));
+        if list.len() != before {
+            let patch = serde_json::json!({ key: root[key].clone() });
+            upsert_file(&path, &patch)?;
+        }
+    }
+    Ok(())
+}
+
+/// Read-modify-write the top-level fields of one settings file: keep other
+/// config, only override the keys in the patch; create the file if missing.
+fn upsert_file(path: &std::path::Path, patch: &serde_json::Value) -> Result<(), SettingsError> {
     use std::io::Write;
-    let dir = project_dir.join(".bingo");
-    let path = dir.join("settings.json");
-    let mut root: serde_json::Value = std::fs::read_to_string(&path)
+    let dir = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| SettingsError::Io(std::io::Error::other("settings path has no parent")))?;
+    let mut root: serde_json::Value = std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_else(|| serde_json::json!({}));
@@ -406,7 +515,7 @@ pub fn upsert_project_settings(
     // tmp + fsync + rename (same discipline as AuthStore): a kill or full disk
     // mid-write must never leave a truncated settings.json — a broken file
     // refuses the next startup.
-    let tmp = dir.join("settings.json.tmp");
+    let tmp = path.with_extension("json.tmp");
     {
         let mut file = std::fs::File::create(&tmp)?;
         writeln!(
@@ -416,8 +525,18 @@ pub fn upsert_project_settings(
         )?;
         file.sync_all()?;
     }
-    std::fs::rename(&tmp, &path)?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Project-layer write for explicitly project-scoped state (/permissions
+/// rules, MCP disable lists): these are union-merged and project-intentioned,
+/// so `.bingo/` creation is the point, not a side effect.
+pub fn upsert_project_settings(
+    project_dir: &std::path::Path,
+    patch: &serde_json::Value,
+) -> Result<(), SettingsError> {
+    upsert_file(&project_dir.join(".bingo").join("settings.json"), patch)
 }
 
 #[cfg(test)]
@@ -428,6 +547,78 @@ mod tests {
         let path = dir.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, content).unwrap();
+    }
+
+    /// Scoped writes land where they take effect: undefined keys go to the
+    /// user layer (no conjured `.bingo/`); keys already defined in a higher
+    /// layer are updated there (a user-layer write below would be dead).
+    #[test]
+    fn scoped_upsert_targets_the_effective_layer() {
+        let tmp = std::env::temp_dir().join(format!("bingo-scoped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let user_dir = tmp.join("config");
+        let project = tmp.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+
+        // Nothing defines theme → user layer, project untouched.
+        upsert_scoped_settings(&user_dir, &project, &serde_json::json!({ "theme": "dark" }))
+            .unwrap();
+        let user_file = user_dir.join("bingo/settings.json");
+        assert!(
+            std::fs::read_to_string(&user_file)
+                .unwrap()
+                .contains("dark"),
+            "user 层承接未定义键"
+        );
+        assert!(!project.join(".bingo").exists(), "不凭空创建项目层");
+
+        // Project defines model → the pair splits: model updates in project,
+        // provider (undefined) goes to user.
+        write(&project, ".bingo/settings.json", r#"{"model": "old"}"#);
+        upsert_scoped_settings(
+            &user_dir,
+            &project,
+            &serde_json::json!({ "model": "new", "provider": "p" }),
+        )
+        .unwrap();
+        let proj_raw = std::fs::read_to_string(project.join(".bingo/settings.json")).unwrap();
+        assert!(proj_raw.contains("\"model\": \"new\""), "{proj_raw}");
+        assert!(
+            !proj_raw.contains("provider"),
+            "未定义键不进项目层: {proj_raw}"
+        );
+        let user_raw = std::fs::read_to_string(&user_file).unwrap();
+        assert!(user_raw.contains("\"provider\": \"p\""), "{user_raw}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Union-list removal touches EVERY layer that lists the value —
+    /// `/mcp enable` used to write the project layer while the user layer
+    /// merged the name straight back on the next start.
+    #[test]
+    fn union_removal_covers_all_layers() {
+        let tmp = std::env::temp_dir().join(format!("bingo-union-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let user_dir = tmp.join("config");
+        let project = tmp.join("proj");
+        write(
+            &user_dir,
+            "bingo/settings.json",
+            r#"{"disabledMcpServers": ["files", "keep"]}"#,
+        );
+        write(
+            &project,
+            ".bingo/settings.json",
+            r#"{"disabledMcpServers": ["files"]}"#,
+        );
+        remove_from_union_lists(&user_dir, &project, "disabledMcpServers", "files").unwrap();
+        let merged = load_settings(&user_dir, &project).unwrap();
+        assert_eq!(
+            merged.disabled_mcp_servers,
+            vec!["keep".to_string()],
+            "跨层清除后合并结果不再复活"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Merge-completeness guard: a layer that sets EVERY field, merged onto the
@@ -479,6 +670,22 @@ mod tests {
             merged, layer,
             "merge 漏拷字段（新加字段需同步扩展本 fixture）"
         );
+
+        // KNOWN_KEYS 与结构体同步：fixture 的每个键都必须被识别，
+        // 反向 KNOWN_KEYS 里没有 fixture 外的臆造键。
+        let value: serde_json::Value = serde_json::from_str(full).unwrap();
+        let fixture_keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for key in &fixture_keys {
+            assert!(KNOWN_KEYS.contains(key), "KNOWN_KEYS 缺 {key}");
+        }
+        for key in KNOWN_KEYS {
+            assert!(fixture_keys.contains(key), "KNOWN_KEYS 有多余键 {key}");
+        }
     }
 
     #[test]

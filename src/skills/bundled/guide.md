@@ -110,8 +110,12 @@ Example (.bingo/settings.json):
 ## Diagnostic guide (common problems → troubleshooting paths)
 
 
-1. **Startup error missing API key**: set `ANTHROPIC_API_KEY` or `DEEPSEEK_API_KEY`,
-   or write `apiKey` in settings.json (settings take precedence).
+1. **No credentials**: bingo still starts — the welcome card shows onboarding.
+   Either `/provider login codex` (ChatGPT subscription; the device code / auth
+   URL stays pinned on screen until the flow finishes), or set
+   `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`, or write `apiKey` in settings.json
+   (settings take precedence). `/config` shows which source won and the
+   current endpoint.
 2. **Model request fails/times out**: `/status` shows the current model; `/model` switches it; with multiple providers use
    `/provider <name>` (the settings `providers` section); `/context` shows usage —
    when close to the context window, `/compact` (auto-compaction threshold = 90% of the effective window
