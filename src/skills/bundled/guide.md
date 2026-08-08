@@ -213,6 +213,10 @@ Example (.bingo/settings.json):
   message as delivered (with the run it landed in), still queued (with its age), or dropped because the instance was
   stopped. Stopping or deleting an instance discards its inbox and says how many undelivered messages died with it.
   A run chain that fails leaves its queued messages in place — the next turn boundary retries them.
+  **Chasing an acknowledgement**: `SendMessage(ack_timeout: <seconds>)` hands that polling to the harness. Once the wait
+  elapses it re-reads the same record `AgentControl(action=messages)` reports; while the message is still queued it puts
+  a follow-up in the receiver's inbox and retries the boundary flush, at most 3 rounds. An on-time delivery is silent;
+  anything else — chased through, dropped, or still queued after the last round — comes back as a task notification.
   **Images to subagents**: repeat an `#[image N]` marker in the Agent prompt or SendMessage text; the attachment table
   belongs to the session, so the subagent receives the actual image (also carried along if the message has to queue).
   This also works *out* of a text-only session: when the current endpoint cannot receive images, fork a subagent onto an
@@ -295,6 +299,9 @@ Example (.bingo/settings.json):
   `AgentControl(action=messages, agent=…)` 逐条报告已送达（附落在第几轮）、仍排队（附等待时长）、
   或因实例停止而丢弃。stop/delete 会清空信箱并报告有多少条未送达指令随之丢弃；
   运行链失败时消息留在信箱，下一个回合边界重投。
+  **自动追确认**：`SendMessage(ack_timeout: <秒>)` 把这轮复查交给系统——等待到点后重读
+  `AgentControl(action=messages)` 看的同一份回执，仍在排队就往收件人信箱放一条追问并重试边界投递，
+  最多 3 轮。按时送达时全程静默；追问后才送达、被丢弃、或最后一轮仍未送达，都以任务通知回报主 agent。
   **给子代理传图**：在 Agent prompt 或 SendMessage 文本里复述 `#[image N]` 占位即可——附件表属于会话，
   子代理收到的是真图片（消息排队时图片一同携带）。这条路也能从**不收图的会话往外走**：当前端点不接受图片时，
   把子代理 fork 到支持图片的 provider（`Agent(provider: …, model: …)`，跨 provider 必须显式给 model）并复述占位，
