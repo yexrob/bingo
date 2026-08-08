@@ -38,7 +38,8 @@ fn home_dir() -> std::path::PathBuf {
 /// auth material (masked by the caller) + endpoint URL.
 #[derive(Debug, Clone)]
 struct EndpointInfo {
-    api_key: String,
+    /// Static key (None = OAuth provider — no key to mask).
+    api_key: Option<String>,
     base_url: String,
     /// Wire protocol label ("anthropic" / "openai") — the /provider listing.
     protocol: String,
@@ -130,7 +131,7 @@ impl Client {
             settings.send_images.unwrap_or(false),
         );
         let default_info = EndpointInfo {
-            api_key,
+            api_key: Some(api_key),
             base_url,
             protocol: "anthropic".to_string(),
         };
@@ -148,7 +149,7 @@ impl Client {
         let adapter =
             providers::anthropic(http.clone(), api_key.clone(), base_url.clone(), false);
         let info = EndpointInfo {
-            api_key,
+            api_key: Some(api_key),
             base_url,
             protocol: "anthropic".to_string(),
         };
@@ -174,7 +175,7 @@ impl Client {
 
     /// Endpoint of a named provider (key/url; "default" = the top-level config).
     /// Unknown names return None.
-    pub fn provider_endpoint(&self, name: &str) -> Option<(String, String)> {
+    pub fn provider_endpoint(&self, name: &str) -> Option<(Option<String>, String)> {
         self.providers
             .get(name)
             .map(|(_, info)| (info.api_key.clone(), info.base_url.clone()))
@@ -187,7 +188,7 @@ impl Client {
     }
 
     /// 当前生效的 provider 端点（key/url 引用）。
-    pub fn current_endpoint(&self) -> (String, String) {
+    pub fn current_endpoint(&self) -> (Option<String>, String) {
         let current = self.endpoint.read().unwrap_or_else(|p| p.into_inner());
         (current.1.api_key.clone(), current.1.base_url.clone())
     }
@@ -289,7 +290,7 @@ mod tests {
             }
         };
         let client = Client::from_settings_with(&settings, env).unwrap();
-        assert_eq!(client.current_endpoint().0, "sk-settings");
+        assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-settings"));
         assert_eq!(client.current_endpoint().1, "https://settings.example");
     }
 
@@ -304,7 +305,7 @@ mod tests {
             }
         };
         let client = Client::from_settings_with(&settings, env).unwrap();
-        assert_eq!(client.current_endpoint().0, "sk-deepseek");
+        assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-deepseek"));
         assert_eq!(client.current_endpoint().1, "https://deepseek.example");
     }
 
@@ -338,7 +339,7 @@ mod tests {
         settings.providers.insert(
             "deepseek".to_string(),
             crate::settings::ProviderConfig {
-                api_key: "sk-ds".into(),
+                api_key: Some("sk-ds".into()),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
                 protocol: None,
@@ -348,7 +349,7 @@ mod tests {
         settings.providers.insert(
             "local".to_string(),
             crate::settings::ProviderConfig {
-                api_key: "sk-local".into(),
+                api_key: Some("sk-local".into()),
                 api_base_url: "http://127.0.0.1:11434".into(),
                 supports_images: None,
                 protocol: None,
@@ -357,16 +358,16 @@ mod tests {
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
         let client = Client::from_settings_with(&settings, env).unwrap();
-        assert_eq!(client.current_endpoint().0, "sk-main");
+        assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-main"));
         assert_eq!(client.provider_names(), vec!["deepseek", "local"]);
 
         client.set_provider("deepseek").unwrap();
-        assert_eq!(client.current_endpoint().0, "sk-ds");
+        assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-ds"));
         assert_eq!(client.current_endpoint().1, "https://api.deepseek.com");
 
         assert!(client.set_provider("nope").is_err(), "未知 provider 报错");
         // An unknown provider does not affect the current endpoint.
-        assert_eq!(client.current_endpoint().0, "sk-ds");
+        assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-ds"));
     }
 
     /// P0-C: "default" endpoint is switchable and resolvable — provider_names excludes it,
@@ -382,7 +383,7 @@ mod tests {
         settings.providers.insert(
             "deepseek".to_string(),
             crate::settings::ProviderConfig {
-                api_key: "sk-ds".into(),
+                api_key: Some("sk-ds".into()),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
                 protocol: None,
@@ -395,22 +396,75 @@ mod tests {
         assert_eq!(client.provider_names(), vec!["deepseek"]);
         assert_eq!(
             client.provider_endpoint("default"),
-            Some(("sk-main".to_string(), "https://main.example".to_string()))
+            Some((Some("sk-main".to_string()), "https://main.example".to_string()))
         );
         assert_eq!(client.provider_endpoint("deepseek").unwrap().1, "https://api.deepseek.com");
         assert_eq!(client.provider_endpoint("nope"), None);
 
         // 切到 deepseek 再切回 default：顶层端点恢复（含 supports_images）。
         client.set_provider("deepseek").unwrap();
-        assert_eq!(client.current_endpoint().0, "sk-ds");
+        assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-ds"));
         client.set_provider("default").unwrap();
-        assert_eq!(client.current_endpoint().0, "sk-main");
+        assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-main"));
         assert_eq!(client.current_endpoint().1, "https://main.example");
 
         // with_provider("default") fork 出顶层端点（/model 二级对 default
         // 拉列表用，标签与内容一致）。
         let fork = client.with_provider("default").unwrap();
-        assert_eq!(fork.current_endpoint().0, "sk-main");
+        assert_eq!(fork.current_endpoint().0.as_deref(), Some("sk-main"));
+    }
+
+    /// ② apiKey 优先 + ③ 双缺失报 CONFIG_INVALID（main 实测 bug 回归，
+    /// D33 §5：apiKey wins over OAuth；both missing → config error）。
+    #[test]
+    fn oauth_config_resolution() {
+        // ② 同时配置 apiKey + oauth → ApiKey 生效。
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        settings.providers.insert(
+            "codex".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: Some("sk-static".into()),
+                api_base_url: String::new(),
+                supports_images: None,
+                protocol: Some("openai".into()),
+                oauth: Some(crate::settings::OauthConfig {
+                    kind: "codex".into(),
+                    account: None,
+                }),
+            },
+        );
+        let client = Client::from_settings_with(&settings, |_| {
+            Err(std::env::VarError::NotPresent)
+        })
+        .unwrap();
+        assert!(
+            matches!(client.auth_status("codex"), Some(crate::api::contract::AuthStatus::ApiKey)),
+            "apiKey 优先于 oauth"
+        );
+
+        // ③ 无 apiKey 无 oauth → CONFIG_INVALID（启动即报）。
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        settings.providers.insert(
+            "bare".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: None,
+                api_base_url: String::new(),
+                supports_images: None,
+                protocol: Some("openai".into()),
+                oauth: None,
+            },
+        );
+        let err = Client::from_settings_with(&settings, |_| Err(std::env::VarError::NotPresent))
+            .err()
+            .unwrap();
+        assert_eq!(crate::error::map_error(&err), "CONFIG_INVALID");
+        assert!(err.to_string().contains("缺少 apiKey 或 oauth"), "{err}");
     }
 
     /// supports_images：default 读顶层 sendImages；命名 provider 读各自
@@ -425,7 +479,7 @@ mod tests {
         settings.providers.insert(
             "vision".to_string(),
             crate::settings::ProviderConfig {
-                api_key: "sk-v".into(),
+                api_key: Some("sk-v".into()),
                 api_base_url: "https://vision.example".into(),
                 supports_images: Some(true),
                 protocol: None,
@@ -435,7 +489,7 @@ mod tests {
         settings.providers.insert(
             "text-only".to_string(),
             crate::settings::ProviderConfig {
-                api_key: "sk-t".into(),
+                api_key: Some("sk-t".into()),
                 api_base_url: "https://text.example".into(),
                 supports_images: Some(false),
                 protocol: None,

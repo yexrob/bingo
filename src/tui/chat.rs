@@ -2876,12 +2876,13 @@ impl Chat {
                 let (key, url) = session
                     .client
                     .provider_endpoint(&name)
-                    .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
+                    .unwrap_or_else(|| (None, "?".to_string()));
                 let mark = if name == current { "●" } else { " " };
                 let protocol = session.client.provider_protocol(&name).unwrap_or_default();
                 let auth = match session.client.auth_status(&name) {
                     Some(crate::api::contract::AuthStatus::ApiKey) => {
                         // key 脱敏：仅显示前 4 字符；短 key（≤4）不加省略号。
+                        let key = key.unwrap_or_default();
                         let mut key_shown: String = key.chars().take(4).collect();
                         if key.chars().count() > 4 {
                             key_shown.push('…');
@@ -6491,7 +6492,7 @@ mod tests {
         settings.providers.insert(
             "codex".to_string(),
             crate::settings::ProviderConfig {
-                api_key: String::new(),
+                api_key: None,
                 api_base_url: String::new(),
                 supports_images: None,
                 protocol: Some("openai".into()),
@@ -6558,7 +6559,7 @@ mod tests {
         let providers = std::collections::HashMap::from([(
             "deepseek".to_string(),
             crate::settings::ProviderConfig {
-                api_key: "sk-ds".into(),
+                api_key: Some("sk-ds".into()),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
                 protocol: None,
@@ -6576,7 +6577,7 @@ mod tests {
         settings.providers.insert(
             "deepseek".to_string(),
             crate::settings::ProviderConfig {
-                api_key: "sk-ds".into(),
+                api_key: Some("sk-ds".into()),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
                 protocol: None,
@@ -7016,7 +7017,7 @@ mod tests {
             settings.providers.insert(
                 name.to_string(),
                 crate::settings::ProviderConfig {
-                    api_key: key.into(),
+                    api_key: Some(key.into()),
                     api_base_url: url.into(),
                     supports_images: None,
                     protocol: None,
@@ -7063,7 +7064,7 @@ mod tests {
         settings.providers.insert(
             "deepseek".to_string(),
             crate::settings::ProviderConfig {
-                api_key: "sk-ds".into(),
+                api_key: Some("sk-ds".into()),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
                 protocol: None,

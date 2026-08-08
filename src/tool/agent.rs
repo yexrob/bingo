@@ -879,7 +879,7 @@ mod tests {
         settings.providers.insert(
             "ds".to_string(),
             crate::settings::ProviderConfig {
-                api_key: "sk-ds".into(),
+                api_key: Some("sk-ds".into()),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
                 protocol: None,
@@ -959,7 +959,7 @@ mod tests {
         assert_eq!(*sub.runtime.model.borrow(), "parent-model");
         assert_eq!(
             sub.client.current_endpoint(),
-            ("sk-parent".to_string(), "https://parent.example".to_string())
+            (Some("sk-parent".to_string()), "https://parent.example".to_string())
         );
         assert_eq!(sub.system.len(), 1, "无定义时继承父 system");
         assert_eq!(sub.system[0].text, "父 system");
@@ -971,8 +971,8 @@ mod tests {
         // No provider specified: shares the parent endpoint (follows the parent's provider switch).
         client.set_provider("ds").unwrap();
         assert_eq!(
-            sub.client.current_endpoint().0,
-            "sk-ds",
+            sub.client.current_endpoint().0.as_deref(),
+            Some("sk-ds"),
             "共享端点跟随父会话切换"
         );
     }
@@ -990,7 +990,7 @@ mod tests {
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
         assert_eq!(
             sub.client.current_endpoint(),
-            ("sk-ds".to_string(), "https://api.deepseek.com".to_string())
+            (Some("sk-ds".to_string()), "https://api.deepseek.com".to_string())
         );
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
@@ -998,7 +998,7 @@ mod tests {
             "显式思考级别生效"
         );
         // Forked independent endpoint: the parent session is unaffected.
-        assert_eq!(session.client.current_endpoint().0, "sk-parent");
+        assert_eq!(session.client.current_endpoint().0.as_deref(), Some("sk-parent"));
     }
 
     #[test]
@@ -1132,12 +1132,12 @@ mod tests {
         assert_eq!(sub.runtime.provider.borrow().as_str(), "default");
         assert_eq!(
             sub.client.current_endpoint(),
-            ("sk-parent".to_string(), "https://parent.example".to_string())
+            (Some("sk-parent".to_string()), "https://parent.example".to_string())
         );
         // 共享端点跟随父切换（"default" 与未指定等价）。
         client.set_provider("ds").unwrap();
         let _ = session.runtime.provider_tx.send("ds".into());
-        assert_eq!(sub.client.current_endpoint().0, "sk-ds");
+        assert_eq!(sub.client.current_endpoint().0.as_deref(), Some("sk-ds"));
         // AgentDef frontmatter provider: default 同路径（跟随父当前 provider 名）。
         let mut d = def("reviewer");
         d.provider = Some("default".into());

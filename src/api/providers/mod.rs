@@ -33,7 +33,7 @@ pub fn build_provider(
     name: &str,
     http: reqwest::Client,
     protocol: Option<&str>,
-    api_key: String,
+    api_key: Option<String>,
     base_url: String,
     supports_images: bool,
     oauth: Option<&OauthConfig>,
@@ -41,9 +41,9 @@ pub fn build_provider(
 ) -> Result<Arc<dyn ProviderClient>, String> {
     match protocol.unwrap_or("anthropic") {
         "anthropic" => {
-            if api_key.is_empty() {
+            let Some(api_key) = api_key else {
                 return Err("anthropic provider 缺少 apiKey".into());
-            }
+            };
             let base_url = if base_url.is_empty() {
                 anthropic::API_BASE.to_string()
             } else {
@@ -57,12 +57,18 @@ pub fn build_provider(
             } else {
                 base_url
             };
-            let auth = if !api_key.is_empty() {
-                AuthSource::ApiKey(api_key)
-            } else if let Some(oauth_cfg) = oauth {
-                build_oauth(name, oauth_cfg, home)?
-            } else {
-                return Err("provider 缺少 apiKey 或 oauth 配置（/provider login 或补 apiKey）".into());
+            // D33 §5: apiKey wins over OAuth; both missing → config error.
+            let auth = match api_key {
+                Some(key) => AuthSource::ApiKey(key),
+                None => match oauth {
+                    Some(oauth_cfg) => build_oauth(name, oauth_cfg, home)?,
+                    None => {
+                        return Err(
+                            "provider 缺少 apiKey 或 oauth 配置（/provider login 或补 apiKey）"
+                                .into(),
+                        )
+                    }
+                },
             };
             Ok(openai(http, auth, base_url, supports_images))
         }
