@@ -162,7 +162,7 @@ Example (.bingo/settings.json):
 - **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep, Edit/Write, WebFetch/WebSearch,
   Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
   the Task family (task tracking), AskUserQuestion, Skill (skill invocation),
-  ExperiencePropose/Commit/Query/Forget (project experience capture and retrieval).
+  ExperiencePropose/Commit/Query/Outcome/Forget (project experience capture, retrieval, and verified-use feedback).
 - **Provider protocols**: anthropic (Messages API, default — all existing configs) and openai (Responses API,
   per named provider via `protocol: "openai"` in the settings `providers` section; bearer auth, `reasoning.effort`
   for thinking levels, no count_tokens endpoint → local-estimation fallback). The top-level `apiKey`/`apiBaseUrl`
@@ -186,11 +186,13 @@ Example (.bingo/settings.json):
   header from the JWT claims; `/model` shows the subscription allowlist: gpt-5.5 / gpt-5.3-codex-spark /
   gpt-5.4 / gpt-5.4-mini).
 - **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
-  experience index is injected (≤10 entries, one per line; nothing injected when empty); full text is searched with ExperienceQuery by
-  trigger tokens (case-insensitive, shared-prefix tolerant; active first, sorted by adoption count);
+  experience index is injected (≤10 entries, ranked by observed outcomes before the legacy commit count; nothing injected when empty); full text is searched with ExperienceQuery by
+  trigger tokens (case-insensitive, shared-prefix tolerant; active first);
   ExperiencePropose generates candidates (not persisted); after user confirmation ExperienceCommit persists
-  (same content → stable id, re-committing updates rather than duplicates, adoption count +1; `status: stale` marks invalidation,
-  exits injection but stays queryable); ExperienceForget evicts (requires user confirmation). Stored in
+  (same content → stable id, re-committing updates rather than duplicates; `status: stale` marks invalidation,
+  exits injection but stays queryable). After actually applying a queried entry, ExperienceOutcome records a
+  permission-confirmed `helpful` or `harmful` result with concrete evidence; it appends outcome history and
+  never changes lifecycle status or `verified_at` automatically. ExperienceForget evicts (requires user confirmation). Stored in
   `~/.config/bingo/experience/<project-key>/entries/` (user-level, not in the project repo);
   the project key is derived from the git remote URL (normalized) → git root → normalized absolute path, stable across directories/machines.
 - **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
@@ -240,17 +242,17 @@ Example (.bingo/settings.json):
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
 - **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts.
-||||||| 0bc4c6c
 - **内置工具**：Bash（经权限门）、Read/Glob/Grep、Edit/Write、WebFetch/WebSearch、
   Agent（子代理）、SendMessage/AgentControl（子代理续话与生命周期，仅主会话）、
   Task 族（任务追踪）、AskUserQuestion、Skill（技能调用）、
-  ExperiencePropose/Commit/Query/Forget（项目经验沉淀与检索）。
+  ExperiencePropose/Commit/Query/Outcome/Forget（项目经验沉淀、检索与验证后反馈）。
 - **经验（Experience）**：跨会话复用可重跑的工作流。会话开始时注入本项目
-  active 经验索引（≤10 条一行一条，空则不注入），全文用 ExperienceQuery 按
-  trigger 词元检索（大小写不敏感、共享前缀容错，active 优先、按采用次数排序）；
+  active 经验索引（≤10 条，显式观察结果优先于旧重复提交计数，空则不注入），全文用 ExperienceQuery 按 trigger
+  词元检索（大小写不敏感、共享前缀容错、active 优先）；
   ExperiencePropose 生成候选（不落盘），用户确认后 ExperienceCommit 落盘
-  （同内容稳定 id，重提交更新而非重复、采用计数 +1，status: stale 标记失效
-  退出注入但仍可查）；ExperienceForget 淘汰（须用户确认）。存储于
+  （同内容稳定 id，重提交更新而非重复；status: stale 标记失效后退出注入但仍可查）。
+  真正采用查询结果后，ExperienceOutcome 经权限确认记录 `helpful` 或 `harmful` 与具体证据；它仅追加结果历史，绝不自动改变生命周期 `status` 或 `verified_at`。
+  ExperienceForget 淘汰（须用户确认）。存储于
   `~/.config/bingo/experience/<project-key>/entries/`（用户级、不进项目仓库），
   项目键取 git remote URL（归一化）→ git 根 → 规范化绝对路径，跨目录/机器稳定。
 - **子代理**：Agent 派生的实例有名字（`name` 参数，缺省取定义名/agent，重名

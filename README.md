@@ -27,8 +27,8 @@ produces intent; side effects are gated by the harness.
   idle at zero token cost) and managed via `/team`; cross-session memory is
   scoped by project path + git branch.
 - **Experience library**: agents accumulate reusable operational experience
-  per project (trigger/summary/steps/verify), shared across sessions via
-  Propose/Commit/Query/Forget tools.
+  per project (trigger/summary/steps/verify), share it across sessions, and
+  record verified helpful/harmful outcomes without automatic self-promotion.
 - **TUI**: ratatui dual-mode (default fullscreen alternate-screen canvas;
   `--inline` keeps finalized output in terminal scrollback and enables
   kitty-graphics image rendering), reverse history search, and a slash-command
@@ -258,7 +258,7 @@ schema from a single source of truth):
 | `Agent` | spawns a named sub-agent (async by default, completion notification injected into context; `background:false` waits synchronously) |
 | `SendMessage` / `AgentControl` | sub-agent continuation and lifecycle management (main session only) |
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | task tracking (disk-backed, same source as the TUI task area, lifecycle hooks) |
-| `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceForget` | cross-session experience library (see below) |
+| `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceOutcome`/`ExperienceForget` | cross-session experience library (see below) |
 | `AskUserQuestion` | asks the user multiple-choice questions (reuses the permission prompt modal in the TUI) |
 | `Skill` | skill invocation (see below) |
 | `mcp__<server>__<tool>` | tools exposed via MCP (see below) |
@@ -346,7 +346,9 @@ later query reusable experience — the value compounds over sessions.
 - **Storage**: `~/.config/bingo/experience/<project-key>/entries/<id>.md`
   (user-global, never touches the project workspace); per-project isolation.
 - **Entry shape**: `trigger` (keywords), `summary`, `steps`, `verify`,
-  `evidence` (where it came from) — frontmatter + free-form body.
+  `evidence` (where it came from), plus explicit helpful/harmful outcome counters
+  and append-only outcome history with SHA-256-bound evidence — frontmatter +
+  free-form body.
 - **Tools**:
   - `ExperiencePropose` — generates a candidate with a stable id; writes nothing.
   - `ExperienceCommit` — persists an entry (goes through the permission gate);
@@ -354,7 +356,13 @@ later query reusable experience — the value compounds over sessions.
     duplicating; `status: stale` stops injection into new sessions but stays
     queryable.
   - `ExperienceQuery` — matches on any trigger keyword (case-insensitive
-    substring); active entries rank above stale/degraded, then by hit count.
+    substring); active entries rank above stale/degraded, then explicit observed
+    outcomes rank before the legacy commit count; results include outcome
+    counters and history.
+  - `ExperienceOutcome` — after actually applying a queried entry, records a
+    permission-confirmed `helpful` or `harmful` result with concrete evidence;
+    it appends history and never changes lifecycle `status` or `verified_at`
+    automatically.
   - `ExperienceForget` — deletes an entry.
 - **Status lifecycle**: `active` → `degraded` → `stale`; active entries are
   injected into new sessions, stale ones are only queryable.
@@ -509,7 +517,7 @@ src/
   team.rs          team parsing / validation / spawn + team memory (D31)
   team_cmd.rs      /team slash-command family
   experience.rs    cross-session experience library
-  tool/experience.rs  ExperiencePropose/Commit/Query/Forget tools
+  tool/experience.rs  ExperiencePropose/Commit/Query/Outcome/Forget tools
   channels.rs      channel registry (experimental)
   tasks.rs         task store (Task tool family)
   skills.rs        skill loading / frontmatter / argument substitution

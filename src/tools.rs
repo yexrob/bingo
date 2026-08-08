@@ -7,7 +7,8 @@ use crate::tool::ask::AskUserQuestionTool;
 use crate::tool::bash::BashTool;
 use crate::tool::edit::EditTool;
 use crate::tool::experience::{
-    ExperienceCommitTool, ExperienceForgetTool, ExperienceProposeTool, ExperienceQueryTool,
+    ExperienceCommitTool, ExperienceForgetTool, ExperienceOutcomeTool, ExperienceProposeTool,
+    ExperienceQueryTool,
 };
 use crate::tool::glob::GlobTool;
 use crate::tool::grep::GrepTool;
@@ -54,6 +55,7 @@ pub async fn assemble_tools(
         Box::new(ExperienceProposeTool),
         Box::new(ExperienceCommitTool),
         Box::new(ExperienceQueryTool),
+        Box::new(ExperienceOutcomeTool),
         Box::new(ExperienceForgetTool),
     ];
     // hub-and-spoke: continuation and lifecycle management only on the main session
@@ -140,6 +142,19 @@ mod tests {
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
         })
+    }
+
+    #[tokio::test]
+    async fn assembles_experience_outcome_exactly_once() {
+        let mut warn = |_: String| {};
+        let tools = assemble_tools(&session_at_depth(0), &mut warn).await;
+        assert_eq!(
+            tools
+                .iter()
+                .filter(|tool| tool.name() == "ExperienceOutcome")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

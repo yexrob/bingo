@@ -19,8 +19,8 @@ Rust 实现的本地 agent CLI（agent harness）。在终端里驱动大模型�
   拉起（成员零 token 待命），`/team` 命令族管理；跨会话记忆按「项目路径 +
   分支」隔离。
 - **经验库（Experience）**：agent 按项目沉淀可复用的操作经验
-  （trigger/summary/steps/verify），跨会话复利，Propose/Commit/Query/Forget
-  工具维护。
+  （trigger/summary/steps/verify），跨会话复利，并记录经验证的 helpful/harmful
+  结果，但不会自行晋升或降级。
 - **TUI**：ratatui 双模式（默认 fullscreen 备用屏 canvas，`--inline` 将已完成
   内容保留在终端 scrollback 并启用 kitty graphics 图片渲染），历史反向搜索，
   slash 命令菜单。
@@ -232,7 +232,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `Agent` | 派生命名子代理（异步执行，完成通知注入上下文；`background:false` 可同步等待） |
 | `SendMessage` / `AgentControl` | 子代理续话与生命周期管理（仅主会话装配） |
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | 任务追踪（磁盘存储，TUI 任务区同源，含生命周期 hook） |
-| `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceForget` | 跨会话经验库（见下） |
+| `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceOutcome`/`ExperienceForget` | 跨会话经验库（见下） |
 | `AskUserQuestion` | 向用户提选择题（TUI 复用权限询问模态） |
 | `Skill` | 技能调用（见下） |
 | `mcp__<server>__<tool>` | MCP 接入的工具（见下） |
@@ -303,13 +303,18 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 - **存储**：`~/.config/bingo/experience/<项目键>/entries/<id>.md`
   （user 全局，绝不触碰项目工作区）；按项目隔离。
 - **条目结构**：`trigger`（关键词）、`summary`、`steps`、`verify`、`evidence`
-  （来源）——frontmatter + 自由正文。
+  （来源），以及显式 helpful/harmful 结果计数和用 SHA-256 绑定证据的仅追加结果历史——
+  frontmatter + 自由正文。
 - **工具**：
   - `ExperiencePropose`——生成带稳定 id 的候选条目；不写盘。
   - `ExperienceCommit`——持久化条目（过权限门）；相同内容映射同一 id，重复提交
     是更新而非重复；`status: stale` 标记失效后不再注入新会话但仍可查询。
   - `ExperienceQuery`——按任一 trigger 关键词子串匹配（不区分大小写）；
-    active 排在 stale/degraded 之前，再按命中次数。
+    active 排在 stale/degraded 之前，再按显式观察结果排序，旧的重复提交计数作为
+    最后的兼容信号；结果暴露 outcome 计数和历史。
+  - `ExperienceOutcome`——真正采用查询到的经验后，经权限确认记录 `helpful` 或
+    `harmful` 与具体证据；它仅追加历史，不会自动改变生命周期 `status` 或
+    `verified_at`。
   - `ExperienceForget`——删除条目。
 - **状态生命周期**：`active` → `degraded` → `stale`；active 条目注入新会话，
   stale 仅可查询。
@@ -447,7 +452,7 @@ src/
   team.rs          team 解析/校验/拉起编排 + team 记忆（D31）
   team_cmd.rs      /team 命令族
   experience.rs    跨会话经验库
-  tool/experience.rs  ExperiencePropose/Commit/Query/Forget 工具
+  tool/experience.rs  ExperiencePropose/Commit/Query/Outcome/Forget 工具
   channels.rs      频道注册表（实验特性）
   tasks.rs         任务存储（Task 工具族）
   skills.rs        技能加载 / frontmatter / 参数替换

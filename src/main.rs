@@ -177,12 +177,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         load_project_memory(&home, &project_dir),
         settings.cache_control.unwrap_or(false),
     );
-    // Inject this project's experience index at session start (only when hits > 0; ≤10 lines,
-    // one per line; full entries via Query on demand).
+    // Inject this project's active experience index at session start (≤10 lines;
+    // full entries via ExperienceQuery and applied-use feedback via ExperienceOutcome).
     let experience_index = crate::tool::experience::session_index(&home, &project_dir);
     if !experience_index.is_empty() {
         system.push(crate::api::contract::SystemBlock {
-            text: format!("Project experience (reusable patterns from past sessions):\n{experience_index}\n(Query full details with ExperienceQuery; propose new ones with ExperiencePropose)"),
+            text: format!("Project experience (reusable patterns from past sessions):\n{experience_index}\n(Query full details with ExperienceQuery; after applying one, record verified helpful/harmful evidence with ExperienceOutcome; propose new ones with ExperiencePropose)"),
             cache: settings.cache_control.unwrap_or(false),
         });
     }
