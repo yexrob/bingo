@@ -19,6 +19,7 @@ pub mod keys;
 pub mod line;
 pub mod markdown;
 pub mod math;
+pub mod picker;
 pub(crate) mod term;
 #[cfg(test)]
 mod test_util;

@@ -231,70 +231,11 @@ fn suggestion_rows(
                 }
                 return Vec::new();
             };
-            let name_col = crate::tui::chat::THINK_LEVELS
-                .iter()
-                .map(|(name, _)| name.chars().count())
-                .max()
-                .unwrap_or(0);
-            let mut rows = Vec::with_capacity(crate::tui::chat::THINK_LEVELS.len() + 1);
-            for (i, (name, desc)) in crate::tui::chat::THINK_LEVELS.iter().enumerate() {
-                let selected = i == think.selected;
-                let current = i == think.current;
-                let mut line = Line::empty();
-                // Fixed 2-char indent + mark column: ❯ = browse selection (moves),
-                // ● = level in effect (fixed). On overlap ❯ keeps the prefix slot
-                // and ● stays in front of the name.
-                line.push_styled("  ", SegStyle::fg(theme.inactive));
-                if selected {
-                    line.push_styled("❯ ", SegStyle::fg(theme.permission));
-                    line.push_styled(
-                        if current { "● " } else { "  " },
-                        SegStyle::fg(theme.claude),
-                    );
-                } else {
-                    line.push_styled("  ", SegStyle::fg(theme.inactive));
-                    line.push_styled(
-                        if current { "● " } else { "  " },
-                        SegStyle::fg(theme.claude),
-                    );
-                }
-                let name_style = if selected {
-                    theme.permission
-                } else if current {
-                    theme.claude
-                } else {
-                    theme.inactive
-                };
-                // Fixed chrome: 2 indent + mark (≤4 on the overlap row) + 2 separator.
-                let avail = width.saturating_sub(2 + 4 + 2);
-                let name_text = format!("{name:<name_col$}");
-                if avail >= name_text.chars().count() + 2 {
-                    // Normal widths: name and description keep their own styles.
-                    let desc_budget = avail - name_text.chars().count() - 2;
-                    line.push_styled(name_text, SegStyle::fg(name_style));
-                    line.push_styled("  ", SegStyle::fg(theme.inactive));
-                    line.push_styled(
-                        crate::tui::markdown::truncate(desc, desc_budget),
-                        SegStyle::fg(theme.inactive),
-                    );
-                } else {
-                    // Narrow terminals: truncate the whole name+description portion.
-                    line.push_styled(
-                        crate::tui::markdown::truncate(&format!("{name_text}  {desc}"), avail),
-                        SegStyle::fg(name_style),
-                    );
-                }
-                rows.push(Row::new(line));
-            }
-            // G3 hint row (dim affordance, one row; truncated on narrow terminals).
-            let hint = crate::tui::markdown::truncate(
-                "↑↓ 选择 · Enter 确认并保存 · s 仅本次会话 · 1-6 直达 · Esc 取消",
-                width.saturating_sub(2),
-            );
-            rows.push(Row::new(Line::styled(
-                format!("  {hint}"),
-                SegStyle::fg(theme.inactive),
-            )));
+            // 薄壳 → 核心：行渲染与按键提示行统一委托 PickerModel（picker-model.md 提交 A）。
+            let core = think.picker();
+            let mut rows: Vec<Row> =
+                (0..core.items.len()).map(|i| core.row(i, width, theme)).collect();
+            rows.push(core.hint_row(crate::tui::chat::ThinkMenu::keys(), width, theme));
             return rows;
         };
         // `/model` two-level selector: level one `provider`, level two `model`

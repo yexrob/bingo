@@ -280,12 +280,37 @@ pub struct ModelMenuModels {
 }
 
 /// `/think` single-level selector state (level table = off + [`crate::api::types::THINKING_LEVELS`]).
+///
+/// 薄壳：状态字段保持公开（测试 API 原样），交互逻辑委托 [`PickerModel`]
+/// （picker-model.md：提交 A 纯重构，行为零变化）。
 #[derive(Clone)]
 pub struct ThinkMenu {
     /// Browsed index (❯): moves with ↑↓/1-6, applied only on Enter/s.
     pub selected: usize,
     /// In-effect index at open time (●): fixed while browsing; the ● marker reads it.
     pub current: usize,
+}
+
+impl ThinkMenu {
+    /// 薄壳 → 核心：由 selected/current 与 THINK_LEVELS 构造（键转移与渲染共用）。
+    pub fn picker(&self) -> crate::tui::picker::PickerModel {
+        crate::tui::picker::PickerModel::new(
+            THINK_LEVELS
+                .iter()
+                .map(|(name, desc)| crate::tui::picker::PickerItem::new(*name, *name, *desc))
+                .collect(),
+            self.selected,
+            Some(self.current),
+        )
+    }
+
+    /// 场景键位配置（hint 行拼装用）。
+    pub fn keys() -> crate::tui::picker::PickerKeys {
+        crate::tui::picker::PickerKeys {
+            session_only: true,
+            number_jump: true,
+        }
+    }
 }
 
 /// `/think` selector entries: level name + description (everything past off corresponds one-to-one with
@@ -3014,53 +3039,62 @@ impl Chat {
             .iter()
             .position(|(name, _)| *name == current)
             .unwrap_or(0);
-        self.think_menu = Some(ThinkMenu {
+        let menu = ThinkMenu {
             selected: current,
             current,
-        });
+        };
+        // 空表防御（THINK_LEVELS 为 const 非空，防御性分支不可达）：菜单不开。
+        if menu.picker().is_empty() {
+            return;
+        }
+        self.think_menu = Some(menu);
         self.clear_slash_suggestions();
     }
 
-    /// Think level menu keys: ↑↓/1-6 move (wraps), Enter confirms + persists, s = session-only
-    /// (no settings write), Esc exits. Returns whether consumed.
+    /// Think level menu keys: ↑↓/1-6 move (wraps, delegated to the PickerModel core),
+    /// Enter confirms + persists, s = session-only (no settings write), Esc exits.
+    /// Returns whether consumed.
     fn think_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let Some(menu) = &mut self.think_menu else {
             return false;
         };
         match code {
             KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
-                menu.selected = (menu.selected + 1) % THINK_LEVELS.len();
+                let mut core = menu.picker();
+                core.move_selection(1);
+                menu.selected = core.selected;
                 true
             }
             KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
-                menu.selected = menu
-                    .selected
-                    .checked_sub(1)
-                    .unwrap_or(THINK_LEVELS.len() - 1);
+                let mut core = menu.picker();
+                core.move_selection(-1);
+                menu.selected = core.selected;
                 true
             }
             // Direct jump: 1 = off … 6 = max (fixed 6-item table, §G10).
             KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
                 if let Some(n) = c.to_digit(10)
-                    && n >= 1
-                    && n as usize <= THINK_LEVELS.len()
+                    && core.jump(n as usize)
                 {
-                    menu.selected = n as usize - 1;
+                    menu.selected = core.selected;
                     true
                 } else {
                     false
                 }
             }
             KeyCode::Char('s') if !modifiers.contains(KeyModifiers::CONTROL) => {
-                let selected = menu.selected.min(THINK_LEVELS.len() - 1);
+                let core = menu.picker();
+                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
                 self.think_menu = None;
-                self.set_think_level(THINK_LEVELS[selected].0, false);
+                self.set_think_level(&value, false);
                 true
             }
             KeyCode::Enter => {
-                let selected = menu.selected.min(THINK_LEVELS.len() - 1);
+                let core = menu.picker();
+                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
                 self.think_menu = None;
-                self.set_think_level(THINK_LEVELS[selected].0, true);
+                self.set_think_level(&value, true);
                 true
             }
             KeyCode::Esc => {
