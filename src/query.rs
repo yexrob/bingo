@@ -697,6 +697,7 @@ async fn query_loop(
     let mut recovery_count = 0u32;
     let mut stop_hook_fired = false;
     let mut gate = TokenGate::new();
+    normalize_synthetic_bash_calls(&mut messages);
     loop {
         check_and_compact(session, &mut messages, &mut gate).await;
         // task_reminder: no Task tool for 10 turns + 10 turns since the last reminder.
@@ -1036,19 +1037,13 @@ pub async fn run_bash_command(
     // pointless — they can't run anyway) and reject directly; with respond on, the model
     // sees the rejection reason (and can suggest alternatives).
     let interactive_reason = crate::tool::bash::interactive_command_reason(command);
-    let (executed_input, block, text, is_error, duration_ms) = match interactive_reason {
+    let (text, is_error, duration_ms) = match interactive_reason {
         Some(reason) => {
             let err = format!("interactive command not allowed: {reason}");
             // Fold rows cannot be expanded after being persisted in inline mode — the
             // rejection reason is shown directly as a warning line.
             (ui.on_warning)(err.clone());
-            (
-                input.clone(),
-                tool_result_error(&tool_use_id, format!("<tool_use_error>{err}</tool_use_error>")),
-                err,
-                true,
-                0,
-            )
+            (err, true, 0)
         }
         None => {
             let permissions = session
@@ -1068,7 +1063,6 @@ pub async fn run_bash_command(
             .await;
             match behavior {
                 PermissionBehavior::Allow => {
-                    let executed_input = gated_input.clone();
                     let (outcomes, interrupted) = execute_calls(
                         vec![PendingCall {
                             tool_use_id: tool_use_id.clone(),
@@ -1088,41 +1082,18 @@ pub async fn run_bash_command(
                     match outcome.result {
                         Ok(result) => {
                             let text = clipped_result(render_result(&result));
-                            (
-                                executed_input,
-                                tool_result_text(
-                                    &tool_use_id,
-                                    format!("<bash-stdout>{}</bash-stdout>", escape_xml(&text)),
-                                ),
-                                text,
-                                result.is_error,
-                                outcome.duration_ms,
-                            )
+                            (text, result.is_error, outcome.duration_ms)
                         }
-                        Err(e) => {
-                            let err = format!("Command failed: {e}");
-                            (
-                                executed_input,
-                                tool_result_error(
-                                    &tool_use_id,
-                                    format!("<tool_use_error>{e}</tool_use_error>"),
-                                ),
-                                err,
-                                true,
-                                outcome.duration_ms,
-                            )
-                        }
+                        Err(e) => (
+                            format!("Command failed: {e}"),
+                            true,
+                            outcome.duration_ms,
+                        ),
                     }
                 }
                 PermissionBehavior::Deny => {
                     let err = format!("permission denied: Bash ({reason})");
-                    (
-                        input.clone(),
-                        tool_result_error(&tool_use_id, format!("<permission_error>{err}</permission_error>")),
-                        err,
-                        true,
-                        0,
-                    )
+                    (err, true, 0)
                 }
                 PermissionBehavior::Ask => unreachable!("ask resolved by gate_tool"),
             }
@@ -1138,23 +1109,18 @@ pub async fn run_bash_command(
     });
     (ui.on_round_end)();
 
-    // Write the history in the real tool-turn shape (the API requires tool_result to pair
-    // with the tool_use in the same request): user `<bash-input>` → assistant ToolUse →
-    // user result.
+    // Command + output as a single user message. A fabricated assistant ToolUse is
+    // deliberately avoided: in thinking mode the API requires every assistant message
+    // to carry its thinking block unchanged, and a synthetic tool call has none.
+    let output = if is_error {
+        format!("<bash-stderr>{}</bash-stderr>", escape_xml(&text))
+    } else {
+        format!("<bash-stdout>{}</bash-stdout>", escape_xml(&text))
+    };
     let mut added: Vec<Message> = Vec::new();
-    added.push(Message::user_text(format!("<bash-input>{command}</bash-input>")));
-    added.push(Message {
-        role: Role::Assistant,
-        content: vec![ContentBlock::ToolUse {
-            id: tool_use_id,
-            name: "Bash".to_string(),
-            input: executed_input,
-        }],
-    });
-    added.push(Message {
-        role: Role::User,
-        content: vec![block],
-    });
+    added.push(Message::user_text(format!(
+        "<bash-input>{command}</bash-input>\n{output}"
+    )));
 
     let stop = run_post_tool_use(
         &session.settings.hooks,
@@ -1192,6 +1158,51 @@ pub async fn run_bash_command(
 /// Monotonic tool_use_id sequence for `!` commands (unique across turns, no clash with
 /// old pairs in the transcript).
 static BASH_CALL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Fold pre-normalization bash-turn history back into the modern shape. Old
+/// transcripts carry `user(<bash-input>) → assistant(ToolUse "bash-N") → user(ToolResult)`;
+/// the synthetic assistant message has no thinking block, which thinking-mode endpoints
+/// reject ("content[].thinking must be passed back"). The pair merges into the input
+/// message; model-generated tool calls (ids not prefixed `bash-`) are never touched.
+fn normalize_synthetic_bash_calls(messages: &mut Vec<Message>) {
+    use crate::api::types::{ContentBlock, Role};
+    let mut i = 0;
+    while i < messages.len() {
+        let is_bash_input = matches!(
+            &messages[i].content[0],
+            ContentBlock::Text { text } if text.contains("<bash-input>")
+        ) && messages[i].role == Role::User;
+        let synthetic = is_bash_input
+            && messages.get(i + 1).is_some_and(|m| {
+                m.role == Role::Assistant
+                    && !m.content.is_empty()
+                    && m.content.iter().all(|b| {
+                        matches!(b, ContentBlock::ToolUse { id, .. } if id.starts_with("bash-"))
+                    })
+            })
+            && messages.get(i + 2).is_some_and(|m| {
+                m.role == Role::User
+                    && matches!(
+                        &m.content[0],
+                        ContentBlock::ToolResult { tool_use_id, .. }
+                            if tool_use_id.starts_with("bash-")
+                    )
+            });
+        if synthetic {
+            let input_text = match &messages[i].content[0] {
+                ContentBlock::Text { text } => text.clone(),
+                _ => String::new(),
+            };
+            let result_text = match &messages[i + 2].content[0] {
+                ContentBlock::ToolResult { content, .. } => content.as_str().unwrap_or(""),
+                _ => "",
+            };
+            messages[i] = Message::user_text(format!("{input_text}\n{result_text}"));
+            messages.drain(i + 1..=i + 2);
+        }
+        i += 1;
+    }
+}
 
 fn is_cancelled(cancel: &Option<watch::Receiver<bool>>) -> bool {
     cancel.as_ref().is_some_and(|rx| *rx.borrow())
@@ -1403,8 +1414,9 @@ mod tests {
     }
 
     /// respondToBashCommands=false: `!` commands run purely (no model query);
-    /// history is [caveat, bash-input, assistant ToolUse, user ToolResult],
-    /// output wrapped in `<bash-stdout>` with & < > escaped.
+    /// history is [caveat, bash-input+output], output wrapped in `<bash-stdout>`
+    /// with & < > escaped. A synthetic assistant ToolUse is avoided on purpose
+    /// (thinking-mode endpoints reject assistant messages without a thinking block).
     #[tokio::test]
     async fn bash_command_executes_without_model_query() {
         let session = Arc::new(Session {
@@ -1442,7 +1454,7 @@ mod tests {
         .await
         .unwrap();
         assert!(!outcome.aborted);
-        assert_eq!(outcome.messages.len(), 4, "caveat + input + tool_use + result");
+        assert_eq!(outcome.messages.len(), 2, "caveat + input/output");
 
         let text_of = |m: &Message| match &m.content[0] {
             ContentBlock::Text { text } => text.clone(),
@@ -1453,23 +1465,22 @@ mod tests {
             "caveat 前置: {}",
             text_of(&outcome.messages[0])
         );
-        assert_eq!(
-            text_of(&outcome.messages[1]),
-            "<bash-input>printf '%s' 'a<b&c>'</bash-input>"
+        let merged = text_of(&outcome.messages[1]);
+        assert!(
+            merged.contains("<bash-input>printf '%s' 'a<b&c>'</bash-input>"),
+            "{merged}"
         );
-        assert!(matches!(
-            &outcome.messages[2].content[0],
-            ContentBlock::ToolUse { name, .. } if name == "Bash"
-        ));
-        let ContentBlock::ToolResult { content, is_error, .. } = &outcome.messages[3].content[0]
-        else {
-            panic!("tool result");
-        };
-        assert!(!is_error, "echo 成功");
-        let text = content.as_str().unwrap();
-        assert!(text.contains("<bash-stdout>"), "{text}");
-        assert!(text.contains("a&lt;b&amp;c&gt;"), "输出已转义: {text}");
-        assert!(!text.contains("a<b&c>"), "原始 < > 不得泄漏: {text}");
+        assert!(merged.contains("<bash-stdout>"), "{merged}");
+        assert!(merged.contains("a&lt;b&amp;c&gt;"), "输出已转义: {merged}");
+        let stdout = merged.split("<bash-stdout>").nth(1).unwrap_or("");
+        assert!(!stdout.contains("a<b&c>"), "stdout 段原始 < > 不得泄漏: {merged}");
+        assert!(
+            !outcome
+                .messages
+                .iter()
+                .any(|m| m.role == Role::Assistant),
+            "不构造合成 assistant 消息（thinking 校验）"
+        );
     }
 
     /// S2: interruption happens during tool execution — every tool_use in the history
@@ -1675,13 +1686,68 @@ mod tests {
         let outcome = run_bash_command(&session, "htop", Vec::new(), &mut ui, None)
             .await
             .unwrap();
-        let ContentBlock::ToolResult { content, is_error, .. } = &outcome.messages[3].content[0]
-        else {
-            panic!("tool result");
+        let ContentBlock::Text { text } = &outcome.messages[1].content[0] else {
+            panic!("拒绝原因以文本消息呈现");
         };
-        assert!(is_error, "htop 被拒绝");
-        let text = content.as_str().unwrap();
         assert!(text.contains("interactive command not allowed"), "{text}");
         assert!(text.contains("TTY"), "{text}");
+    }
+
+    /// Old transcript shape: `user(<bash-input>) → assistant(ToolUse "bash-N") →
+    /// user(ToolResult)` folds back into a single user message; model-generated
+    /// tool calls are untouched.
+    #[test]
+    fn normalizes_synthetic_bash_calls() {
+        let old = vec![
+            Message::user_text("<bash-input>ls</bash-input>"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "bash-1".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({ "command": "ls" }),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![tool_result_text(
+                    "bash-1",
+                    "<bash-stdout>a&lt;b</bash-stdout>",
+                )],
+            },
+            Message::user_text("普通问题"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "toolu_real".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({ "command": "make" }),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![tool_result_text("toolu_real", "ok")],
+            },
+        ];
+        let mut messages = old.clone();
+        normalize_synthetic_bash_calls(&mut messages);
+        assert_eq!(messages.len(), 4, "合成三段折叠为一条");
+        assert_eq!(
+            match &messages[0].content[0] {
+                ContentBlock::Text { text } => text.as_str(),
+                _ => "",
+            },
+            "<bash-input>ls</bash-input>\n<bash-stdout>a&lt;b</bash-stdout>"
+        );
+        assert_eq!(messages[1].role, Role::User);
+        // 模型生成的 tool_use 配对保持原样。
+        assert!(matches!(
+            &messages[2].content[0],
+            ContentBlock::ToolUse { id, .. } if id == "toolu_real"
+        ));
+        assert!(matches!(
+            &messages[3].content[0],
+            ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "toolu_real"
+        ));
     }
 }
