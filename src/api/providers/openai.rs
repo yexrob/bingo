@@ -103,15 +103,19 @@ impl OpenAIProvider {
         self.endpoint.read().unwrap_or_else(|p| p.into_inner()).variant
     }
 
-    /// Codex allowlist: the subscription's usable models. Base snapshot from
-    /// opencode codex.ts, extended with gpt-5.6-luna (main live-tested: the
-    /// endpoint accepts it; opencode's ALLOWED_MODELS is an older snapshot).
-    pub const CODEX_MODELS: [&'static str; 5] = [
-        "gpt-5.5",
+    /// Codex model snapshot (fallback when the dynamic model list fails):
+    /// all nine models main live-tested as 200-usable on the subscription
+    /// endpoint. The dynamic list is authoritative; this is the safety net.
+    pub const CODEX_MODELS: [&'static str; 9] = [
+        "gpt-5.6-sol",
+        "gpt-5.6-sol-wm",
+        "gpt-5.6-terra",
         "gpt-5.6-luna",
-        "gpt-5.3-codex-spark",
+        "gpt-5.5",
         "gpt-5.4",
         "gpt-5.4-mini",
+        "gpt-5.3-codex-spark",
+        "codex-auto-review",
     ];
 
     /// The chat endpoint path for the variant.
@@ -170,6 +174,41 @@ impl OpenAIProvider {
             .base_url
             .clone()
     }
+
+    /// Codex dynamic model list: `/codex/models?client_version=<semver>`
+    /// (the endpoint rejects other version formats, main-tested). Any failure
+    /// (network/status/parse) falls back to the static snapshot — the /model
+    /// menu must never hard-fail because of the model list.
+    async fn list_codex_models(&self) -> Result<Vec<String>, ClientError> {
+        let base_url = self.base_url();
+        // Any failure — timeout, transport, HTTP status or parse — falls
+        // back to the static snapshot (the /model menu must not hard-fail).
+        let response = match tokio::time::timeout(
+            SHORT_READ_TIMEOUT,
+            self.http
+                .get(format!("{base_url}/codex/models"))
+                .query(&[("client_version", "0.146.0")])
+                .headers(self.headers().await?)
+                .send(),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            _ => {
+                return Ok(Self::CODEX_MODELS.iter().map(|m| m.to_string()).collect());
+            }
+        };
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap_or_default();
+        if status.is_success()
+            && let Some(models) = parse_models_list(&body)
+            && !models.is_empty()
+        {
+            return Ok(models);
+        }
+        Ok(Self::CODEX_MODELS.iter().map(|m| m.to_string()).collect())
+    }
+
 }
 
 /// NeutralRequest → Responses request body (variant-isolated params).
@@ -219,13 +258,13 @@ fn build_body(request: &NeutralRequest, variant: OpenAiVariant) -> serde_json::V
     }
     if let Some(level) = request.thinking {
         body["reasoning"] = serde_json::json!({ "effort": effort_for(level) });
-        // Reasoning summaries drive the thinking UI affordance on the public
-        // API (encrypted reasoning is not replayable — v1 discards it, D33
-        // §10). The codex endpoint rejects include values → omit it there
-        // (thinking summaries degrade on codex, recorded).
-        if variant != OpenAiVariant::Codex {
-            body["include"] = serde_json::json!(["reasoning.summary_text"]);
-        }
+        // Reasoning include per endpoint: the public API takes the summary
+        // (thinking UI affordance); the codex endpoint accepts only
+        // reasoning.encrypted_content (main-tested 200; summary_text → 400).
+        body["include"] = match variant {
+            OpenAiVariant::Codex => serde_json::json!(["reasoning.encrypted_content"]),
+            OpenAiVariant::Default => serde_json::json!(["reasoning.summary_text"]),
+        };
     }
     body
 }
@@ -312,6 +351,24 @@ fn tool_output_wire(content: &serde_json::Value, is_error: bool) -> String {
             other => other.to_string(),
         }
     }
+}
+
+/// Parse a model list response: `data[].id` (OpenAI style), a plain string
+/// array, or `models[]` — tolerant of the codex endpoint's exact shape.
+fn parse_models_list(body: &serde_json::Value) -> Option<Vec<String>> {
+    let collect = |arr: &Vec<serde_json::Value>| {
+        arr.iter()
+            .filter_map(|m| {
+                m.get("id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| m.as_str())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<String>>()
+    };
+    body.get("data").and_then(|d| d.as_array()).map(collect)
+        .or_else(|| body.as_array().map(collect))
+        .or_else(|| body.get("models").and_then(|m| m.as_array()).map(collect))
 }
 
 /// Non-streaming completion reply: join `output[].content[].text`.
@@ -717,13 +774,15 @@ impl ProviderClient for OpenAIProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<String>, ClientError> {
-        // Preset allowlist first (opencode-go), then the codex static list —
-        // /model shows only what works for either subscription.
+        // Preset allowlist first (opencode-go) — /model shows only what works.
         if let Some(list) = &self.model_allowlist {
             return Ok(list.0.clone());
         }
+        // Codex: the subscription's model list is dynamic
+        // (`GET {base}/codex/models?client_version=0.146.0`, main live-tested
+        // — 9 models; a failed request falls back to the static snapshot).
         if self.variant() == OpenAiVariant::Codex {
-            return Ok(Self::CODEX_MODELS.iter().map(|m| m.to_string()).collect());
+            return self.list_codex_models().await;
         }
         let base_url = self.base_url();
         let response = tokio::time::timeout(
@@ -878,7 +937,11 @@ mod tests {
         r.thinking = Some(ThinkingLevel::High);
         let codex = build_body(&r, OpenAiVariant::Codex);
         assert!(codex.get("max_output_tokens").is_none(), "codex 不传 max_output_tokens");
-        assert!(codex.get("include").is_none(), "codex 不传 reasoning include");
+        assert_eq!(
+            codex["include"],
+            serde_json::json!(["reasoning.encrypted_content"]),
+            "codex 用 encrypted_content include（main 实测 200）"
+        );
         assert_eq!(codex["store"], serde_json::json!(false), "codex 显式 store:false");
         assert_eq!(codex["model"], "gpt-5", "其余字段保留");
         assert_eq!(codex["stream"], true, "codex 强制流式");
@@ -1430,9 +1493,77 @@ mod codex_variant_tests {
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 
-    /// Codex allowlist: list_models is static, no network.
+    /// Codex dynamic model list: a live /codex/models response (9 models,
+    /// data[].id shape) is returned as-is — /model shows the full set.
     #[tokio::test]
-    async fn codex_variant_allowlist_models() {
+    async fn codex_variant_lists_models_dynamically() {
+        let models = serde_json::json!({"data": [
+            {"id": "gpt-5.6-sol"}, {"id": "gpt-5.6-sol-wm"}, {"id": "gpt-5.6-terra"},
+            {"id": "gpt-5.6-luna"}, {"id": "gpt-5.5"}, {"id": "gpt-5.4"},
+            {"id": "gpt-5.4-mini"}, {"id": "gpt-5.3-codex-spark"}, {"id": "codex-auto-review"},
+        ]});
+        let addr = spawn_json_server(models.to_string()).await;
+        let home = tmp_home("dyn");
+        let access = jwt(&serde_json::json!({"chatgpt_account_id": "acc_1"}));
+        let tp = oauth_provider(&home, &access).await;
+        let provider = OpenAIProvider::new(
+            reqwest::Client::new(),
+            AuthSource::OAuth(Arc::new(tp)),
+            addr,
+            false,
+            OpenAiVariant::Codex,
+            None,
+        );
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 9, "动态列表 9 模型");
+        assert!(models.contains(&"gpt-5.6-sol".to_string()));
+        assert!(models.contains(&"codex-auto-review".to_string()));
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// JSON server returning a canned body (200 application/json).
+    async fn spawn_json_server(body: String) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 64 * 1024];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// parse_models_list tolerates data[].id / plain array / models[] shapes.
+    #[test]
+    fn parses_model_list_shapes() {
+        let data = serde_json::json!({"data": [{"id": "a"}, {"id": "b"}]});
+        assert_eq!(parse_models_list(&data), Some(vec!["a".into(), "b".into()]));
+        let arr = serde_json::json!(["a", "b"]);
+        assert_eq!(parse_models_list(&arr), Some(vec!["a".into(), "b".into()]));
+        let nested = serde_json::json!({"models": [{"id": "a"}]});
+        assert_eq!(parse_models_list(&nested), Some(vec!["a".into()]));
+        assert_eq!(parse_models_list(&serde_json::json!({"error": "x"})), None);
+        assert_eq!(parse_models_list(&serde_json::json!({"data": []})), Some(vec![]));
+    }
+
+    /// Codex dynamic list fallback: an unreachable /codex/models endpoint
+    /// must not hard-fail the /model menu — the static 9-model snapshot is
+    /// returned instead.
+    #[tokio::test]
+    async fn codex_variant_falls_back_to_static_models() {
         let home = tmp_home("models");
         let tp = oauth_provider(&home, "at").await;
         let provider = OpenAIProvider::new(
@@ -1444,7 +1575,9 @@ mod codex_variant_tests {
             None,
         );
         let models = provider.list_models().await.unwrap();
-        assert_eq!(models, OpenAIProvider::CODEX_MODELS.to_vec());
+        assert_eq!(models, OpenAIProvider::CODEX_MODELS.to_vec(), "fallback 静态 9 模型");
+        assert_eq!(models.len(), 9);
+        assert!(models.contains(&"gpt-5.6-luna".to_string()));
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 

@@ -29,13 +29,9 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://chatgpt.com/backend-api",
         oauth_kind: Some("codex"),
         supports_images: true,
-        model_allowlist: Some(&[
-            "gpt-5.5",
-            "gpt-5.6-luna",
-            "gpt-5.3-codex-spark",
-            "gpt-5.4",
-            "gpt-5.4-mini",
-        ]),
+        // Dynamic model list (`/codex/models?client_version=…`) with a static
+        // 9-model fallback — see OpenAIProvider::list_codex_models.
+        model_allowlist: None,
     },
     ProviderPreset {
         name: "opencode-go",
