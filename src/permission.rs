@@ -297,6 +297,9 @@ fn safety_check(tool: &dyn Tool, input: &serde_json::Value) -> Option<String> {
 }
 
 /// Unified permission gate: mode × rule tables × tool properties → allow/deny/ask.
+/// Production callers pass settings extras via `can_use_tool_with`; this default
+/// entry (no extras) is exercised by the test suite.
+#[cfg_attr(not(test), expect(dead_code))]
 pub fn can_use_tool(
     tool: &dyn Tool,
     input: &serde_json::Value,
@@ -304,6 +307,20 @@ pub fn can_use_tool(
     rules: &[String],
     ask_rules: &[String],
     allow_rules: &[String],
+) -> PermissionResult {
+    can_use_tool_with(tool, input, mode, rules, ask_rules, allow_rules, &[])
+}
+
+/// can_use_tool with settings-configured extra WebFetch preapproved domains
+/// (`settings.preapprovedDomains`, merged across layers).
+pub fn can_use_tool_with(
+    tool: &dyn Tool,
+    input: &serde_json::Value,
+    mode: PermissionMode,
+    rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+    extra_preapproved: &[String],
 ) -> PermissionResult {
     let name = tool.name();
     // 1. deny rules (whole tool or content match): any sub-command hit denies.
@@ -319,7 +336,7 @@ pub fn can_use_tool(
     //     remaining checks.
     if name == "WebFetch"
         && let Some(url) = input.get("url").and_then(|v| v.as_str())
-        && crate::preapproved::is_preapproved_url(url)
+        && crate::preapproved::is_preapproved_url_with(url, extra_preapproved)
     {
         return PermissionResult {
             behavior: PermissionBehavior::Allow,
@@ -575,6 +592,33 @@ mod tests {
             &[],
         );
         assert_eq!(result.behavior, PermissionBehavior::Ask);
+    }
+
+    #[test]
+    fn webfetch_settings_preapproved_domains_auto_allow() {
+        let tool = crate::tool::webfetch::WebFetchTool;
+        let input = serde_json::json!({"url": "https://corp.example.com/docs/guide"});
+        let extra = vec!["corp.example.com/docs".to_string()];
+        // 未配置时照常 ask；配置后放行。
+        let before = can_use_tool(
+            &tool as &dyn Tool,
+            &input,
+            PermissionMode::Default,
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(before.behavior, PermissionBehavior::Ask);
+        let after = can_use_tool_with(
+            &tool as &dyn Tool,
+            &input,
+            PermissionMode::Default,
+            &[],
+            &[],
+            &[],
+            &extra,
+        );
+        assert_eq!(after.behavior, PermissionBehavior::Allow);
     }
 
     fn bash_decision(command: &str, deny_rules: &[&str], allow: &[&str]) -> PermissionResult {

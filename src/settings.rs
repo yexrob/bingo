@@ -69,12 +69,21 @@ pub struct Settings {
     /// macOS /bin/zsh, other Unix /bin/bash, Windows powershell.exe (PowerShell-family
     /// shells run with -Command; any other configured shell with -c, e.g. Git Bash).
     pub shell: Option<String>,
+    /// Bash tool output cap in characters (`maxBashOutputChars`, default 20000;
+    /// 0 = no cap). Overlong output is truncated with a hint — a full dump costs
+    /// context and tokens either way.
+    #[serde(rename = "maxBashOutputChars")]
+    pub max_bash_output_chars: Option<usize>,
     pub hooks: HooksConfig,
     #[serde(rename = "mcpServers")]
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// Disabled MCP server names.
     #[serde(rename = "disabledMcpServers", default)]
     pub disabled_mcp_servers: Vec<String>,
+    /// Extra WebFetch preapproved domains (`preapprovedDomains`), same entry syntax
+    /// as the built-in list (host or host/path-prefix). Merged across layers.
+    #[serde(rename = "preapprovedDomains", default)]
+    pub preapproved_domains: Vec<String>,
     /// Permission rule tables (allow/deny/ask, rule syntax `Tool(content)`).
     pub permissions: PermissionRules,
     /// Experimental feature switches (`experimental`).
@@ -247,6 +256,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     if let Some(respond) = layer.respond_to_bash_commands {
         base.respond_to_bash_commands = Some(respond);
     }
+    if let Some(v) = layer.max_bash_output_chars {
+        base.max_bash_output_chars = Some(v);
+    }
     if !layer.hooks.pre_tool_use.is_empty() {
         base.hooks.pre_tool_use = layer.hooks.pre_tool_use;
     }
@@ -257,6 +269,7 @@ fn merge(base: &mut Settings, layer: Settings) {
         base.mcp_servers = layer.mcp_servers;
     }
     base.disabled_mcp_servers.extend(layer.disabled_mcp_servers);
+    base.preapproved_domains.extend(layer.preapproved_domains);
     if !layer.hooks.pre_compact.is_empty() {
         base.hooks.pre_compact = layer.hooks.pre_compact;
     }
@@ -382,6 +395,47 @@ mod tests {
         write(&tmp, ".bingo/settings.json", r#"{"cacheControl":false}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.cache_control, Some(false));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn merges_max_bash_output_chars() {
+        let tmp = std::env::temp_dir().join(format!("bingo-settings-bashcap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write(&tmp, "user/bingo/settings.json", r#"{"maxBashOutputChars":30000}"#);
+
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.max_bash_output_chars, Some(30000), "user 层 maxBashOutputChars 生效");
+
+        // Project layer overrides user layer.
+        write(&tmp, ".bingo/settings.json", r#"{"maxBashOutputChars":0}"#);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.max_bash_output_chars, Some(0), "project 层覆盖为 0（无上限）");
+
+        // 未配置的层不覆盖已生效的值。
+        write(&tmp, ".bingo/settings.json", r#"{}"#);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.max_bash_output_chars, Some(30000));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn merges_preapproved_domains_across_layers() {
+        let tmp = std::env::temp_dir().join(format!("bingo-settings-preapproved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write(&tmp, "user/bingo/settings.json", r#"{"preapprovedDomains":["corp.example.com"]}"#);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.preapproved_domains, vec!["corp.example.com".to_string()]);
+
+        // Project layer appends, does not replace.
+        write(&tmp, ".bingo/settings.json", r#"{"preapprovedDomains":["wiki.internal.net"]}"#);
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(
+            settings.preapproved_domains,
+            vec!["corp.example.com".to_string(), "wiki.internal.net".to_string()]
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

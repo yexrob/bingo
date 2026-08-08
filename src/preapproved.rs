@@ -104,9 +104,19 @@ const PREAPPROVED: &[&str] = &[
     "httpd.apache.org",
 ];
 
-/// Whether a URL falls on the preapproved list. Path-prefix entries require segment
-/// boundary matching ("/anthropics" doesn't match "/anthropics-evil").
+/// Whether a URL falls on the preapproved list (built-in entries only).
+/// Production callers pass settings extras via `is_preapproved_url_with`; this
+/// default entry (no extras) is exercised by the test suite.
+#[cfg_attr(not(test), expect(dead_code))]
 pub fn is_preapproved_url(url: &str) -> bool {
+    is_preapproved_url_with(url, &[])
+}
+
+/// Whether a URL falls on the preapproved list, built-in entries plus the
+/// settings-configured extras (same entry syntax: host or host/path-prefix).
+/// Path-prefix entries require segment boundary matching ("/anthropics" doesn't
+/// match "/anthropics-evil").
+pub fn is_preapproved_url_with(url: &str, extra: &[String]) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
@@ -114,7 +124,7 @@ pub fn is_preapproved_url(url: &str) -> bool {
         return false;
     };
     let pathname = parsed.path();
-    for entry in PREAPPROVED.iter().copied() {
+    for entry in PREAPPROVED.iter().copied().chain(extra.iter().map(|s| s.as_str())) {
         let (host, prefix) = match entry.split_once('/') {
             Some((h, p)) => (h, Some(p.to_string())),
             None => (entry, None),
@@ -156,5 +166,19 @@ mod tests {
     fn unknown_domains_rejected() {
         assert!(!is_preapproved_url("https://example.com/"));
         assert!(!is_preapproved_url("https://www.anthropic.com/"));
+    }
+
+    #[test]
+    fn extra_domains_apply_without_touching_builtins() {
+        let extra = ["example.com".to_string(), "corp.example.com/docs".to_string()];
+        // Extra host and path-prefix entries match; the path prefix keeps segment
+        // boundary semantics.
+        assert!(is_preapproved_url_with("https://example.com/a/b", &extra));
+        assert!(is_preapproved_url_with("https://corp.example.com/docs/guide", &extra));
+        assert!(!is_preapproved_url_with("https://corp.example.com/docs-evil", &extra));
+        assert!(!is_preapproved_url_with("https://other.example.com/", &extra));
+        // Built-ins still work and extras don't leak into the plain check.
+        assert!(is_preapproved_url_with("https://doc.rust-lang.org/book/", &extra));
+        assert!(!is_preapproved_url("https://example.com/"));
     }
 }

@@ -61,10 +61,12 @@ Three config layers, shallow-merged; the later one overrides:
 | `theme` | string | `auto` (follows the terminal background) / `dark` / `light` |
 | `cacheControl` | bool | Send prompt caching; turn off if a non-official endpoint is unstable |
 | `respondToBashCommands` | bool | Whether `!` commands are handed to the model for a response after execution (default true; false = pure execution) |
+| `maxBashOutputChars` | int | Bash tool output cap in characters (default 20000; `0` = no cap); overlong output is truncated at the head with a truncation hint |
 | `shell` | string | Shell program for the Bash tool and hooks; default per platform: macOS `/bin/zsh`, other Unix `/bin/bash`, Windows `powershell.exe`. PowerShell-family shells run with `-Command`; other configured shells (e.g. Git Bash `bash.exe`) with `-c` |
 | `mcpServers` | object | `{name: {type?, command, args, env}}` (stdio, default) or `{name: {type: "http", url, headers?}}` (streamable HTTP) |
 | `disabledMcpServers` | string[] | List of disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`; rule syntax `Tool(content)`, `:*` is a prefix wildcard (e.g. `Bash(git push:*)`); Bash rules match per subcommand segment; path rules normalize before matching (see diagnostics 4) |
+| `preapprovedDomains` | string[] | Extra WebFetch preapproved domains (auto-allowed without prompting), same entry syntax as the built-in list: host or `host/path-prefix` (e.g. `corp.example.com` or `corp.example.com/docs`); merged across layers |
 | `experimental` | object | Experimental features: `{"agentChannels": true}` enables agent channel messaging (the main session gets the Channel/Post tools, direct subagents get Post); `channelMessageLimit` (default 500, freezes the channel when exceeded) / `agentMessageLimit` (default 50) are budget gates |
 | `team` | object | agent team startup behavior: `{"autoStart": true}` (default true = when a project-bound team exists, start it automatically at launch; members stand by Idle at zero tokens; `--no-team` or false turns it off) |
 | `hooks` | object | PreToolUse/PostToolUse/PreCompact/PostCompact/UserPromptSubmit/Stop/SessionStart/SessionEnd/TaskCreated/TaskCompleted, matcher + command; the matcher is a whole-string anchored regex (`Edit\|Write`, `mcp__.*`); invalid regexes fall back to exact matching |

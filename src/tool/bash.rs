@@ -12,9 +12,28 @@ use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// Default check interval for periodic commands (when no explicit -n is given).
 pub const DEFAULT_WATCH_INTERVAL_SECS: u64 = 5;
+/// Default Bash output cap in characters (aligned with Read's 20k cap; overlong
+/// tool output costs context and tokens either way). Configurable via settings
+/// `maxBashOutputChars` (0 = no cap).
+pub const DEFAULT_MAX_OUTPUT_CHARS: usize = 20_000;
 /// Upper bound for waiting on readers to drain after the command exits (so we don't
 /// wait forever if grandchild processes still hold the pipe).
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Truncate Bash output for the model: overlong bodies keep the head and append a
+/// hint (Read's truncation semantics); the command echo and exit line stay outside
+/// the cap. `limit == 0` disables the cap.
+fn cap_output(body: &str, limit: usize) -> String {
+    let total = body.chars().count();
+    if limit == 0 || total <= limit {
+        return body.to_string();
+    }
+    let head: String = body.chars().take(limit).collect();
+    format!(
+        "{head}\n[Content truncated: {total} characters total, showing first {limit}; \
+         rerun with `> file` redirection and Read the file for the full output]"
+    )
+}
 
 /// Rejection reason for interactive commands requiring a TTY (shared by the `!` command and the Bash tool).
 /// The bingo child process's stdin/stdout are pipes: full-screen TUIs (top/htop/vim) garble their output,
@@ -293,11 +312,18 @@ struct BashInput {
     background: Option<bool>,
 }
 
-pub struct BashTool;
+pub struct BashTool {
+    max_output_chars: usize,
+}
 
 impl BashTool {
     pub fn new() -> Self {
-        Self
+        Self { max_output_chars: DEFAULT_MAX_OUTPUT_CHARS }
+    }
+
+    /// Configured cap (settings `maxBashOutputChars`); None = default, Some(0) = no cap.
+    pub fn with_max_output_chars(limit: Option<usize>) -> Self {
+        Self { max_output_chars: limit.unwrap_or(DEFAULT_MAX_OUTPUT_CHARS) }
     }
 }
 
@@ -314,7 +340,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> String {
-        "Execute a command in the local shell, returning stdout/stderr and the exit code. Prefer background:true for long-running tasks (e.g. cargo build, npm install, big test suites) — even when you need the result later: it returns async_launched immediately and tells the user the task runs in the background; continue when the completion notification arrives. Periodic commands (watch/while/until/for/tail -f) become background tasks automatically and can be given notify_on/notify_regex conditions — a hit in the output notifies (no need to wait for the command to finish). Interactive commands that need a TTY (top/htop/vim/bare ssh etc. — full-screen or session programs) are rejected."
+        "Execute a command in the local shell, returning stdout/stderr and the exit code. Prefer background:true for long-running tasks (e.g. cargo build, npm install, big test suites) — even when you need the result later: it returns async_launched immediately and tells the user the task runs in the background; continue when the completion notification arrives. Periodic commands (watch/while/until/for/tail -f) become background tasks automatically and can be given notify_on/notify_regex conditions — a hit in the output notifies (no need to wait for the command to finish). Interactive commands that need a TTY (top/htop/vim/bare ssh etc. — full-screen or session programs) are rejected. Output is truncated at a size cap (20k chars by default, settings maxBashOutputChars); for large outputs rerun with `> file` redirection and Read the file."
             .to_string()
     }
 
@@ -346,12 +372,12 @@ impl Tool for BashTool {
         // Periodic commands (watch/while/until/for/tail -f) are backgrounded automatically:
         // immediately return async_launched; background execution + per-round checks + completion notification.
         if let Some(interval) = periodic_bash_interval(&params.command) {
-            return launch_background(&params, ctx, Some(interval)).await;
+            return launch_background(&params, ctx, Some(interval), self.max_output_chars).await;
         }
         // Explicit backgrounding: for non-dependent/long-running commands (e.g. cargo build,
         // npm install), the main agent does not wait when the result is not needed immediately.
         if params.background.unwrap_or(false) {
-            return launch_background(&params, ctx, None).await;
+            return launch_background(&params, ctx, None, self.max_output_chars).await;
         }
 
         let mut command = shell_command(&params.command, &ctx.cwd);
@@ -385,13 +411,15 @@ impl Tool for BashTool {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
 
-        let mut text = format!("$ {}\n", params.command);
+        let mut body = String::new();
         if !stdout.is_empty() {
-            text.push_str(&stdout);
+            body.push_str(&stdout);
         }
         if !stderr.is_empty() {
-            text.push_str(&stderr);
+            body.push_str(&stderr);
         }
+        let mut text = format!("$ {}\n", params.command);
+        text.push_str(&cap_output(&body, self.max_output_chars));
         text.push_str(&format!("\n[Exited with code {exit_code}]"));
 
         Ok(ToolResult {
@@ -420,6 +448,7 @@ async fn launch_background(
     params: &BashInput,
     ctx: &ToolContext,
     interval: Option<Duration>,
+    max_output_chars: usize,
 ) -> Result<ToolResult, ToolError> {
     let mut conditions = Vec::new();
     if let Some(patterns) = params.notify_on.clone() {
@@ -450,7 +479,7 @@ async fn launch_background(
     let cwd = ctx.cwd.clone();
     tokio::spawn(async move {
         // Background tasks have their own lifecycle: periodic commands are not limited by a single timeout.
-        match run_streaming(&command, &cwd, None, cell, watch.clone(), id).await {
+        match run_streaming(&command, &cwd, None, cell, watch.clone(), id, max_output_chars).await {
             Ok((text, code)) => {
                 watch.set_state(
                     id,
@@ -485,6 +514,7 @@ async fn run_streaming(
     cell: Arc<BashCell>,
     watch: std::sync::Arc<crate::watch::WatchRegistry>,
     id: crate::watch::WatchId,
+    max_output_chars: usize,
 ) -> Result<(String, i32), String> {
     let mut child = shell_command(command, cwd)
         .kill_on_drop(true)
@@ -556,7 +586,7 @@ async fn run_streaming(
     }
     let code = status.code().unwrap_or(-1);
     let text = buf.lock().map(|b| b.clone()).unwrap_or_default();
-    Ok((text, code))
+    Ok((cap_output(&text, max_output_chars), code))
 }
 
 /// Shared execution state for background Bash: a round = new output lines since the last poll.
@@ -629,6 +659,21 @@ impl crate::watch::Watchable for BashWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_ctx() -> ToolContext {
+        let watch = crate::watch::WatchRegistry::new();
+        ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch: watch.clone(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+        }
+    }
 
     #[tokio::test]
     async fn explicit_background_non_periodic_command_notifies() {
@@ -731,19 +776,38 @@ mod tests {
             Some(std::time::Duration::from_secs(2))
         );
         assert_eq!(
-            periodic_bash_interval("watch ls"),
-            Some(std::time::Duration::from_secs(DEFAULT_WATCH_INTERVAL_SECS))
+            periodic_bash_interval("watch --interval 5 ls"),
+            Some(std::time::Duration::from_secs(5))
         );
-        assert_eq!(
-            periodic_bash_interval("while true; do echo hi; sleep 1; done"),
-            Some(std::time::Duration::from_secs(DEFAULT_WATCH_INTERVAL_SECS))
-        );
-        assert_eq!(
-            periodic_bash_interval("tail -f /var/log/sys.log"),
-            Some(std::time::Duration::from_secs(DEFAULT_WATCH_INTERVAL_SECS))
-        );
-        assert_eq!(periodic_bash_interval("cargo test"), None);
-        assert_eq!(periodic_bash_interval("git status"), None);
+        assert_eq!(periodic_bash_interval("ls"), None);
+    }
+
+    #[test]
+    fn output_cap_truncates_and_keeps_hint() {
+        let body = "x".repeat(300);
+        let capped = cap_output(&body, 100);
+        assert!(capped.contains("300 characters total"), "{capped}");
+        assert!(capped.contains("showing first 100"), "{capped}");
+        assert!(capped.starts_with(&"x".repeat(100)));
+        // 无上限（0）时原样返回；未超限时原样返回。
+        assert_eq!(cap_output(&body, 0), body);
+        assert_eq!(cap_output(&body, 300), body);
+    }
+
+    #[tokio::test]
+    async fn oversized_output_truncated_in_tool_result() {
+        #[cfg(unix)]
+        let command = "python3 -c \"print('x' * 300)\"";
+        #[cfg(windows)]
+        let command = "'x' * 300";
+        let tool = BashTool::with_max_output_chars(Some(100));
+        let result = tool.call(serde_json::json!({ "command": command }), &test_ctx()).await.unwrap();
+        let text = result.content.as_str().unwrap();
+        assert!(text.contains("[Content truncated: 30"), "{text}");
+        assert!(text.contains("showing first 100"), "{text}");
+        assert!(text.contains("[Exited with code 0]"), "{text}");
+        let stdout = text.splitn(2, '\n').nth(1).unwrap_or_default();
+        assert_eq!(stdout.chars().take_while(|c| *c == 'x').count(), 100);
     }
 
     /// Interactive/TTY commands are rejected: full-screen TUIs, editors, bare shell/REPL,

@@ -15,7 +15,7 @@ use crate::budget::MAX_RESULT_CHARS;
 use crate::compact::{check_and_compact, TokenGate};
 use crate::error::ErrorCode;
 use crate::hooks::{run_post_tool_use, run_pre_tool_use, run_stop_hooks, run_user_prompt_submit};
-use crate::permission::{can_use_tool, PermissionBehavior, PermissionMode};
+use crate::permission::{can_use_tool_with, PermissionBehavior, PermissionMode};
 use crate::settings::{HooksConfig, Settings};
 use crate::tool::executor::{cancel_requested, execute_calls, PendingCall};
 use crate::tool::{find_tool, tool_params, Tool, ToolContext, ToolError, ToolResult};
@@ -463,6 +463,7 @@ async fn gate_tool(
     mode: PermissionMode,
     hooks: &HooksConfig,
     permissions: &crate::settings::PermissionRules,
+    preapproved_domains: &[String],
     ask: &AskFn,
 ) -> (PermissionBehavior, String, serde_json::Value) {
     let (hook_behavior, hook_reason, hook_input) = run_pre_tool_use(
@@ -476,13 +477,14 @@ async fn gate_tool(
         return (hook_behavior, hook_reason, hook_input);
     }
 
-    let decision = can_use_tool(
+    let decision = can_use_tool_with(
         tool,
         &hook_input,
         mode,
         &permissions.deny,
         &permissions.ask,
         &permissions.allow,
+        preapproved_domains,
     );
     match decision.behavior {
         PermissionBehavior::Ask => {
@@ -801,6 +803,7 @@ async fn query_loop(
                     session.permission_mode,
                     &session.settings.hooks,
                     &permissions,
+                    &session.settings.preapproved_domains,
                     &*ui.ask,
                 )
                 .await
@@ -1063,6 +1066,7 @@ pub async fn run_bash_command(
                 session.permission_mode,
                 &session.settings.hooks,
                 &permissions,
+                &session.settings.preapproved_domains,
                 &*ui.ask,
             )
             .await;
