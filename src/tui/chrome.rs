@@ -210,47 +210,61 @@ fn suggestion_rows(
             return Vec::new();
         };
         // `/model` two-level selector: level one `provider`（PickerModel 核心渲染，
-        // picker-model.md 提交 E）、level two `model`（loading / empty list 各一行提示）。
+        // 与 /provider 同源的端点/认证描述列）、level two `model`（同一 Picker
+        // 核心：●/❯ 双标记 + 窗口渲染，长列表可达；loading / 失败 / 空各有说明行）。
         let Some(m) = &menu.models else {
-            // 一级：● 标当前 provider + 数字直达提示行（Enter = 查看模型列表）。
             let core = menu.provider_picker();
             let mut rows: Vec<Row> = (0..core.items.len())
                 .map(|i| core.row(i, width, theme))
                 .collect();
+            let hint = format!(
+                "↑↓/1-{} 选择 provider · Enter 查看模型 · Esc 退出",
+                core.items.len().min(9)
+            );
             rows.push(Row::new(Line::styled(
                 format!(
                     "  {}",
-                    crate::tui::markdown::truncate(
-                        "↑↓/1-9 选择 provider · Enter 查看模型 · Esc 返回",
-                        width.saturating_sub(2),
-                    )
+                    crate::tui::markdown::truncate(&hint, width.saturating_sub(2))
                 ),
                 SegStyle::fg(theme.inactive),
             )));
             return rows;
         };
-        let items: Vec<(String, bool)> = if m.loading {
-            vec![(format!("… 正在拉取 {} 的模型列表", m.provider), true)]
-        } else if m.models.is_empty() {
-            vec![("（该端点未返回模型，Esc 退出）".to_string(), true)]
-        } else {
-            m.models
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i == m.selected))
-                .collect()
+        let note = |text: String| {
+            vec![Row::new(Line::styled(
+                crate::tui::markdown::truncate(&format!("❯ {text}"), width.saturating_sub(2)),
+                SegStyle::fg(theme.permission),
+            ))]
         };
-        return items
-            .into_iter()
-            .take(crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5)
-            .map(|(name, selected)| {
-                let line = crate::tui::markdown::truncate(
-                    &format!("{}{name}", if selected { "❯ " } else { "  " }),
-                    width.saturating_sub(2),
-                );
-                row(line, selected)
-            })
-            .collect();
+        if m.loading {
+            return note(format!("… 正在拉取 {} 的模型列表", m.provider));
+        }
+        // 失败原因如实归因（401 曾被吞成「该端点未返回模型」）。
+        if let Some(reason) = &m.failed {
+            let mut rows = note(reason.clone());
+            rows.push(Row::new(Line::styled(
+                "  Esc 返回上一级",
+                SegStyle::fg(theme.inactive),
+            )));
+            return rows;
+        }
+        if m.models.is_empty() {
+            return note("（该端点未返回模型，Esc 返回上一级）".to_string());
+        }
+        let core = m.picker();
+        let mut rows = core.window_rows(crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5, width, theme);
+        let hint = format!(
+            "↑↓ 选择 · Enter 确认并保存 · 1-{} 直达 · Esc 返回上一级",
+            core.items.len().min(9)
+        );
+        rows.push(Row::new(Line::styled(
+            format!(
+                "  {}",
+                crate::tui::markdown::truncate(&hint, width.saturating_sub(2))
+            ),
+            SegStyle::fg(theme.inactive),
+        )));
+        return rows;
     }
     let name_col = slash
         .iter()
@@ -544,6 +558,7 @@ mod tests {
         let theme = Theme::dark();
         let mut menu = ModelMenu {
             providers: vec!["default".into(), "openrouter".into()],
+            provider_descs: vec![String::new(), String::new()],
             provider_selected: 0,
             provider_current: Some(0),
             models: None,
@@ -585,6 +600,8 @@ mod tests {
             models: Vec::new(),
             loading: true,
             selected: 0,
+            current: None,
+            failed: None,
         });
         assert_eq!(
             suggestion_rows(
@@ -609,6 +626,8 @@ mod tests {
             models: Vec::new(),
             loading: false,
             selected: 0,
+            current: None,
+            failed: None,
         });
         assert_eq!(
             suggestion_rows(
@@ -628,12 +647,45 @@ mod tests {
             .len(),
             1
         );
-        // The level-two model list truncates at the 5+5 cap.
+        // Level-two failure reason renders honestly (401 is not "no models").
+        menu.models = Some(ModelMenuModels {
+            provider: "default".into(),
+            models: Vec::new(),
+            loading: false,
+            selected: 0,
+            current: None,
+            failed: Some("认证失败：default 凭据无效或未登录（/provider login default）".into()),
+        });
+        let failed_rows = suggestion_rows(
+            &[],
+            0,
+            Menus {
+                model: Some(&menu),
+                think: None,
+                theme: None,
+                resume: None,
+                provider: None,
+            },
+            false,
+            &theme,
+            80,
+        );
+        assert_eq!(failed_rows.len(), 2, "原因行 + Esc 提示行");
+        assert!(
+            row_text(&failed_rows[0]).contains("认证失败"),
+            "{}",
+            row_text(&failed_rows[0])
+        );
+        // The level-two model list windows around the selection (visible cap
+        // 10) with a "+N" indicator and a hint row — items beyond the window
+        // stay reachable by moving the selection.
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
             models: (0..30).map(|i| format!("m{i}")).collect(),
             loading: false,
             selected: 0,
+            current: Some(0),
+            failed: None,
         });
         assert_eq!(
             suggestion_rows(

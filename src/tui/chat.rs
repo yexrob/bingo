@@ -150,6 +150,8 @@ pub fn model_footer_label(model: &str, thinking: Option<&str>) -> String {
 pub struct ModelMenu {
     /// Level-one list: `default` (top-level config) + settings.providers names.
     pub providers: Vec<String>,
+    /// Level-one descriptions（与 /provider 同源：URL + 认证态 + 协议）。
+    pub provider_descs: Vec<String>,
     pub provider_selected: usize,
     /// 当前 provider 在一级列表中的位置（●；picker-model.md 提交 E）。
     pub provider_current: Option<usize>,
@@ -163,7 +165,14 @@ impl ModelMenu {
         crate::tui::picker::PickerModel::new(
             self.providers
                 .iter()
-                .map(|p| crate::tui::picker::PickerItem::new(p.clone(), p.clone(), String::new()))
+                .enumerate()
+                .map(|(i, p)| {
+                    crate::tui::picker::PickerItem::new(
+                        p.clone(),
+                        p.clone(),
+                        self.provider_descs.get(i).cloned().unwrap_or_default(),
+                    )
+                })
                 .collect(),
             self.provider_selected,
             self.provider_current,
@@ -178,6 +187,25 @@ pub struct ModelMenuModels {
     pub models: Vec<String>,
     pub loading: bool,
     pub selected: usize,
+    /// 当前生效模型在列表中的位置（● 标记；载入时计算）。
+    pub current: Option<usize>,
+    /// 拉取失败原因（菜单内展示；None = 成功或未完成）。
+    pub failed: Option<String>,
+}
+
+impl ModelMenuModels {
+    /// 二级列表 → PickerModel 核心（●/❯ 双标记、窗口渲染、数字直达与
+    /// /provider 等选择器同一套约定——旧的手搓渲染没有这些）。
+    pub fn picker(&self) -> crate::tui::picker::PickerModel {
+        crate::tui::picker::PickerModel::new(
+            self.models
+                .iter()
+                .map(|m| crate::tui::picker::PickerItem::new(m.clone(), m.clone(), String::new()))
+                .collect(),
+            self.selected,
+            self.current,
+        )
+    }
 }
 
 /// `/think` single-level selector state (level table = off + [`crate::api::contract::THINKING_LEVELS`]).
@@ -936,6 +964,12 @@ pub struct Chat {
     pub slash_selected: usize,
     /// `/model` two-level selector (level-one endpoint → level-two model list; None = inactive).
     pub model_menu: Option<ModelMenu>,
+    /// Last-used model per provider (session memory): switching back to a
+    /// provider restores what you used there.
+    provider_models: std::collections::HashMap<String, String>,
+    /// Current provider was chosen session-only (`s` in the picker): model
+    /// changes stay session-only too instead of half-persisting a pair.
+    provider_session_only: bool,
     /// `/think` level selector (None = inactive).
     pub think_menu: Option<ThinkMenu>,
     /// `/theme` level selector (None = inactive).
@@ -1150,6 +1184,8 @@ impl Chat {
             slash_suggestions: Vec::new(),
             slash_selected: 0,
             model_menu: None,
+            provider_models: std::collections::HashMap::new(),
+            provider_session_only: false,
             think_menu: None,
             theme_menu: None,
             resume_menu: None,
@@ -1201,27 +1237,35 @@ impl Chat {
 
     fn handle(&mut self, event: UiEvent) {
         match event {
-            UiEvent::ModelsLoaded { provider, models } => {
-                // Cache this result (/model <name> validation + no re-fetch on re-entry).
-                self.models_cache.insert(provider.clone(), models.clone());
-                // 二级菜单补充异步拉取结果；列表仍空说明拉取失败（保留 loading
-                // 不阻塞：用户可直接输入模型名或 Esc 退出）。
+            UiEvent::ModelsLoaded {
+                provider,
+                models,
+                failed,
+            } => {
+                // Cache only successful fetches (/model <name> validation +
+                // no re-fetch on re-entry) — a cached failure would poison
+                // the advisory check and the re-entry fast path.
+                if failed.is_none() && !models.is_empty() {
+                    self.models_cache.insert(provider.clone(), models.clone());
+                }
                 if let Some(menu) = &mut self.model_menu
                     && let Some(m) = &mut menu.models
                     && m.provider == provider
                 {
                     m.models = models;
                     m.loading = false;
+                    m.failed = failed;
                     // P1-F：当前 provider 且当前模型在列表中时预选它——
                     // 与 /think 菜单预选当前档位对等，避免浏览即误切。
                     let current_provider = self.session.runtime.provider.borrow().clone();
                     let current_model = self.session.runtime.model.borrow().clone();
-                    let selected = if m.provider == current_provider {
+                    let current = if m.provider == current_provider {
                         m.models.iter().position(|name| *name == current_model)
                     } else {
                         None
                     };
-                    m.selected = selected.unwrap_or(0).min(m.models.len().saturating_sub(1));
+                    m.current = current;
+                    m.selected = current.unwrap_or(0).min(m.models.len().saturating_sub(1));
                 }
             }
             UiEvent::ImageReady { url, meta } => {
@@ -2315,30 +2359,64 @@ impl Chat {
             .get(&provider)
             .is_some_and(|known| !known.is_empty() && !known.contains(&model));
         let _ = self.session.runtime.model_tx.send(model.clone());
-        self.persist_model(&model);
-        let out = if unknown {
-            format!("✓ 模型已切换: {model}（⚠ 不在 {provider} 已知列表，若请求失败用 /model 核对）")
+        self.provider_models.insert(provider.clone(), model.clone());
+        // Persistence follows the provider's scope: a session-only provider
+        // (`s` in the picker) must not have its model half-persisted — that
+        // wrote exactly the default-endpoint + foreign-model mismatch the
+        // menu path guards against (audit A2).
+        let scope = if self.provider_session_only {
+            "（仅本次会话——provider 为会话级）"
         } else {
-            format!("✓ 模型已切换: {model}")
+            self.persist_selection(&model, &provider);
+            ""
+        };
+        let out = if unknown {
+            format!(
+                "✓ 模型已切换: {model}{scope}（⚠ 不在 {provider} 已知列表，若请求失败用 /model 核对）"
+            )
+        } else {
+            format!("✓ 模型已切换: {model}{scope}")
         };
         self.push_slash_output(out);
     }
 
-    /// Writes the model choice back to `.bingo/settings.json` (used as the default on next start; --model can still override).
-    fn persist_model(&self, model: &str) {
+    /// Persist the provider+model pair. The two are one atomic selection:
+    /// writing only one of them recreated the mismatch on restart (P0-A).
+    fn persist_selection(&self, model: &str, provider: &str) {
         let cwd = std::path::PathBuf::from(&self.cwd);
-        let _ =
-            crate::settings::upsert_project_settings(&cwd, &serde_json::json!({ "model": model }));
+        let _ = crate::settings::upsert_project_settings(
+            &cwd,
+            &serde_json::json!({ "model": model, "provider": provider }),
+        );
     }
 
-    /// Enters the `/model` two-level selector: level one = current endpoint + configured providers.
+    /// Provider 顺序（/provider 与 /model 一级共用一个来源）：default →
+    /// 内置 preset → 用户自定义。两个菜单曾各排各的——「按 3」在两处指向
+    /// 不同端点（audit C3）。
+    fn provider_order(&self) -> Vec<String> {
+        let mut names = vec!["default".to_string()];
+        let mut user_names = Vec::new();
+        for name in self.session.client.provider_names() {
+            if self.session.client.is_preset(&name) {
+                names.push(name);
+            } else {
+                user_names.push(name);
+            }
+        }
+        names.extend(user_names);
+        names
+    }
+
+    /// Enters the `/model` two-level selector: level one = current endpoint + configured providers
+    /// (with the same endpoint/auth descriptions as /provider — it is the same list).
     fn open_model_menu(&mut self) {
-        let mut providers = vec!["default".to_string()];
-        providers.extend(self.session.client.provider_names());
+        let providers = self.provider_order();
+        let provider_descs = providers.iter().map(|p| self.provider_desc(p)).collect();
         let current = self.session.runtime.provider.borrow().clone();
         let selected = providers.iter().position(|p| *p == current).unwrap_or(0);
         self.model_menu = Some(ModelMenu {
             providers,
+            provider_descs,
             provider_selected: selected,
             provider_current: Some(selected),
             models: None,
@@ -2353,39 +2431,98 @@ impl Chat {
         &mut self,
         provider: String,
         providers: Vec<String>,
+        provider_descs: Vec<String>,
         provider_selected: usize,
     ) {
+        // P2-G cache: this session already fetched the list → reuse it
+        // (the field's comment promised this; the fetch never did).
+        if let Some(models) = self
+            .models_cache
+            .get(&provider)
+            .filter(|m| !m.is_empty())
+            .cloned()
+        {
+            let current_model = self.session.runtime.model.borrow().clone();
+            let current_provider = self.session.runtime.provider.borrow().clone();
+            let current = (provider == current_provider)
+                .then(|| models.iter().position(|m| *m == current_model))
+                .flatten();
+            self.model_menu = Some(ModelMenu {
+                providers,
+                provider_descs,
+                provider_selected,
+                provider_current: None,
+                models: Some(ModelMenuModels {
+                    provider,
+                    selected: current.unwrap_or(0).min(models.len().saturating_sub(1)),
+                    models,
+                    loading: false,
+                    current,
+                    failed: None,
+                }),
+            });
+            return;
+        }
         let session = self.session.clone();
         let events = self.events.clone();
         let provider_for_spawn = provider.clone();
         tokio::spawn(async move {
+            // Unknown names must error — the old fallback silently listed the
+            // CURRENT endpoint's models under the wrong provider label.
             let client = match session.client.with_provider(&provider_for_spawn) {
                 Ok(c) => c,
-                // default: clone the current endpoint directly.
-                Err(_) => session.client.clone(),
-            };
-            let models = match client.list_models().await {
-                Ok(m) => m,
                 Err(e) => {
-                    // #18/main #91: short-op failures must be visible (page-level error row, error color),
-                    // behavior keeps degrading gracefully (menu still shows empty/known models) — "degraded + visible".
+                    // Same visibility contract as a fetch failure: page-level
+                    // error row + in-menu reason.
                     let _ = events.send(UiEvent::Error {
-                        code: crate::error::map_error(&e),
+                        code: "GENERIC",
+                        msg: e.clone(),
+                        level: crate::error::ErrorLevel::Page,
+                        context: crate::error::ErrorContext::ShortSync,
+                    });
+                    let _ = events.send(UiEvent::ModelsLoaded {
+                        provider: provider_for_spawn,
+                        models: Vec::new(),
+                        failed: Some(e),
+                    });
+                    return;
+                }
+            };
+            let (models, failed) = match client.list_models().await {
+                Ok(m) => (m, None),
+                Err(e) => {
+                    let code = crate::error::map_error(&e);
+                    // #18/main #91: short-op failures must be visible (page-level error row, error color),
+                    // behavior keeps degrading gracefully — "degraded + visible".
+                    let _ = events.send(UiEvent::Error {
+                        code,
                         msg: e.to_string(),
                         level: crate::error::ErrorLevel::Page,
                         context: crate::error::ErrorContext::ShortSync,
                     });
-                    Vec::new()
+                    // In-menu reason: a 401 is an auth problem, not "the
+                    // endpoint returned no models".
+                    let reason = if code == "AUTH_REQUIRED" {
+                        format!(
+                            "认证失败：{} 凭据无效或未登录（/provider login {}）",
+                            provider_for_spawn, provider_for_spawn
+                        )
+                    } else {
+                        format!("拉取失败（{code}）")
+                    };
+                    (Vec::new(), Some(reason))
                 }
             };
             let _ = events.send(UiEvent::ModelsLoaded {
                 provider: provider_for_spawn,
                 models,
+                failed,
             });
         });
         // The menu was taken out by the Enter branch — rebuild the level-two state here (level-one list kept).
         self.model_menu = Some(ModelMenu {
             providers,
+            provider_descs,
             provider_selected,
             provider_current: None,
             models: Some(ModelMenuModels {
@@ -2393,6 +2530,8 @@ impl Chat {
                 models: Vec::new(),
                 loading: true,
                 selected: 0,
+                current: None,
+                failed: None,
             }),
         });
     }
@@ -2405,9 +2544,10 @@ impl Chat {
         match code {
             KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(m) = &mut menu.models {
-                    if !m.models.is_empty() {
-                        m.selected = (m.selected + 1) % m.models.len();
-                    }
+                    // 二级同走 PickerModel 核心（窗口渲染跟随 selected）。
+                    let mut core = m.picker();
+                    core.move_selection(1);
+                    m.selected = core.selected;
                 } else {
                     // 一级：委托 PickerModel 核心（picker-model.md 提交 E）。
                     let mut core = menu.provider_picker();
@@ -2418,9 +2558,9 @@ impl Chat {
             }
             KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(m) = &mut menu.models {
-                    if !m.models.is_empty() {
-                        m.selected = m.selected.checked_sub(1).unwrap_or(m.models.len() - 1);
-                    }
+                    let mut core = m.picker();
+                    core.move_selection(-1);
+                    m.selected = core.selected;
                 } else {
                     let mut core = menu.provider_picker();
                     core.move_selection(-1);
@@ -2428,22 +2568,23 @@ impl Chat {
                 }
                 true
             }
-            // 数字直达：仅一级适用（两级第一级适用，picker-model.md 评估表）。
+            // 数字直达：两级都适用；越界吞掉（数字漏进输入框曾是半模态边界洞）。
             KeyCode::Char(c)
                 if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                if menu.models.is_some() {
-                    return false;
-                }
-                let mut core = menu.provider_picker();
-                if let Some(n) = c.to_digit(10)
-                    && core.jump(n as usize)
-                {
-                    menu.provider_selected = core.selected;
-                    true
+                let n = c.to_digit(10).map(|n| n as usize).unwrap_or(0);
+                if let Some(m) = &mut menu.models {
+                    let mut core = m.picker();
+                    if core.jump(n) {
+                        m.selected = core.selected;
+                    }
                 } else {
-                    false
+                    let mut core = menu.provider_picker();
+                    if core.jump(n) {
+                        menu.provider_selected = core.selected;
+                    }
                 }
+                true
             }
             KeyCode::Enter => {
                 let Some(menu) = self.model_menu.take() else {
@@ -2456,7 +2597,12 @@ impl Chat {
                         .get(menu.provider_selected)
                         .cloned()
                         .unwrap_or_default();
-                    self.open_model_models(provider, menu.providers, menu.provider_selected);
+                    self.open_model_models(
+                        provider,
+                        menu.providers,
+                        menu.provider_descs,
+                        menu.provider_selected,
+                    );
                     return true;
                 };
                 // Level two: confirm the selected model. Keep the menu when the list is empty (fetch failed/none returned).
@@ -2465,37 +2611,32 @@ impl Chat {
                 if model.is_empty() {
                     self.model_menu = Some(ModelMenu {
                         providers: menu.providers,
+                        provider_descs: menu.provider_descs,
                         provider_selected: menu.provider_selected,
                         provider_current: menu.provider_current,
                         models: Some(m),
                     });
                     return true;
                 }
-                if provider != self.session.runtime.provider.borrow().clone()
-                    && let Err(e) = self.session.client.set_provider(&provider)
-                {
-                    self.model_menu = Some(ModelMenu {
-                        providers: menu.providers,
-                        provider_selected: menu.provider_selected,
-                        provider_current: menu.provider_current,
-                        models: Some(m),
-                    });
-                    self.push_slash_output(e);
-                    return true;
+                // provider+model 是一个原子选择：跨端点确认走同一个
+                // switch_provider（登录警告、busy 守卫、成对持久化都在那里），
+                // 曾经的旁路丢掉全部 provider 侧提示（audit A3）。
+                self.provider_models.insert(provider.clone(), model.clone());
+                if provider != self.session.runtime.provider.borrow().clone() {
+                    self.switch_provider(&provider, true);
+                    if *self.session.runtime.provider.borrow() != provider {
+                        // Switch refused (busy / unknown): keep the menu alive.
+                        self.model_menu = Some(ModelMenu {
+                            providers: menu.providers,
+                            provider_descs: menu.provider_descs,
+                            provider_selected: menu.provider_selected,
+                            provider_current: menu.provider_current,
+                            models: Some(m),
+                        });
+                    }
+                } else {
+                    self.set_model(model);
                 }
-                let _ = self.session.runtime.model_tx.send(model.clone());
-                let _ = self.session.runtime.provider_tx.send(provider.clone());
-                // 模型 + provider 一并持久化（P0-A）：下次启动恢复同一端点
-                // 上的模型，避免「default 端点 + deepseek 模型」错配。
-                let cwd = std::path::PathBuf::from(&self.cwd);
-                let _ = crate::settings::upsert_project_settings(
-                    &cwd,
-                    &serde_json::json!({
-                        "model": model.clone(),
-                        "provider": provider.clone(),
-                    }),
-                );
-                self.push_slash_output(format!("✓ 模型已切换: {provider} · {model}"));
                 true
             }
             KeyCode::Esc => {
@@ -2960,24 +3101,27 @@ impl Chat {
             .unwrap_or_else(|| "无".to_string());
         let mode = session.permission_mode_str().to_string();
         self.slash_stats_async(move |msg_count, tokens| {
+            // Window/percentage measured with the model actually in use — the
+            // fixed 200k constant misread every non-Claude endpoint.
+            let window = crate::budget::context_window_for(&model).max(1);
             format!(
-                "模型: {model}\nProvider: {provider}\n思考级别: {thinking_shown}\n权限模式: {mode}\n会话: {transcript_name}\n消息数: {msg_count}\n上下文: {tokens} tokens / {}（{}%）",
-                crate::budget::CONTEXT_WINDOW,
-                tokens * 100 / crate::budget::CONTEXT_WINDOW
+                "模型: {model}\nProvider: {provider}\n思考级别: {thinking_shown}\n权限模式: {mode}\n会话: {transcript_name}\n消息数: {msg_count}\n上下文: {tokens} tokens / {window}（{}%）",
+                tokens * 100 / window
             )
         });
     }
 
     fn slash_context(&mut self) {
-        self.slash_stats_async(|_msg_count, tokens| {
-            let window = crate::budget::CONTEXT_WINDOW;
+        let model = self.session.runtime.model.borrow().clone();
+        self.slash_stats_async(move |_msg_count, tokens| {
+            let window = crate::budget::context_window_for(&model).max(1);
             let pct = tokens * 100 / window;
             let bar_len = 40usize;
             let filled = ((pct as usize * bar_len) / 100).min(bar_len);
             let bar = format!("{}·{}", "#".repeat(filled), "·".repeat(bar_len - filled));
             format!(
                 "上下文: [{bar}] {pct}%\n已用 {tokens} / {window} tokens\n自动压缩阈值: {}%",
-                crate::budget::AUTOCOMPACT_THRESHOLD * 100 / window
+                crate::budget::autocompact_threshold_for(&model) * 100 / window
             )
         });
     }
@@ -3194,31 +3338,78 @@ impl Chat {
     }
 
     /// 切换 provider：runtime 立即生效；persist=true 写 settings（重启恢复）。
+    ///
+    /// provider+model 是一个原子选择：换端点必须解决模型（本会话上次用的 →
+    /// 端点默认 → 保留 + 警告）——与子代理的跨 provider 校验同一条规则；
+    /// 主会话曾静默保留旧模型，下一条消息在新端点必 404。
     fn switch_provider(&mut self, name: &str, persist: bool) {
+        // A mid-turn protocol swap would send this conversation's accumulated
+        // thinking/reasoning blocks to the other protocol's endpoint — refuse
+        // instead of corrupting the running turn.
+        if self.busy {
+            self.push_slash_error(
+                "[error] code=BUSY msg=回合进行中无法切换 provider（Esc 中断后重试）".to_string(),
+            );
+            return;
+        }
         let session = self.session.clone();
         let name = name.to_string();
         match session.client.set_provider(&name) {
             Ok(()) => {
                 let (_, url) = session.client.current_endpoint();
+                let prev_provider = session.runtime.provider.borrow().clone();
+                let prev_model = session.runtime.model.borrow().clone();
+                if prev_provider != name {
+                    self.provider_models
+                        .insert(prev_provider, prev_model.clone());
+                }
                 let _ = session.runtime.provider_tx.send(name.clone());
+                let resolved = self
+                    .provider_models
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| session.client.provider_default_model(&name));
+                let model_note = match &resolved {
+                    Some(model) if *model != prev_model => {
+                        let _ = session.runtime.model_tx.send(model.clone());
+                        format!(" · model {model}")
+                    }
+                    Some(_) => String::new(),
+                    None => format!(" · ⚠ 模型 {prev_model} 未必在此端点可用（/model 选择）"),
+                };
+                let model_now = session.runtime.model.borrow().clone();
+                self.provider_models.insert(name.clone(), model_now.clone());
+                self.provider_session_only = !persist;
                 if persist {
-                    // 与 /model /think 同路径持久化：重启恢复当前 provider。
-                    let cwd = std::path::PathBuf::from(&self.cwd);
-                    let _ = crate::settings::upsert_project_settings(
-                        &cwd,
-                        &serde_json::json!({ "provider": name }),
-                    );
-                    self.push_slash_output(format!("✓ provider 已切换: {name}（{url}）"));
+                    // 与 /model 菜单同路径：provider+model 成对持久化。
+                    self.persist_selection(&model_now, &name);
+                    self.push_slash_output(format!(
+                        "✓ provider 已切换: {name}（{url}）{model_note}"
+                    ));
                 } else {
                     self.push_slash_output(format!(
-                        "✓ provider 已切换: {name}（{url}）（仅本次会话）"
+                        "✓ provider 已切换: {name}（{url}）{model_note}（仅本次会话）"
                     ));
                 }
-                // OAuth provider 未登录：切换成功但首次请求会失败——提前引导。
-                if let Some(crate::api::contract::AuthStatus::OAuth { account: None }) =
-                    session.client.auth_status(&name)
-                {
-                    self.push_slash_output(format!("⚠ {name} 未登录：/provider login {name}"));
+                // 凭据不可用：切换成功但首次请求会失败——提前引导（判据是
+                // 「凭据是否可用」，不再只看认证类型——无 key 的 apiKey 型
+                // preset 曾静默放行）。
+                match session.client.auth_status(&name) {
+                    Some(crate::api::contract::AuthStatus::OAuth { account: None }) => {
+                        self.push_slash_output(format!("⚠ {name} 未登录：/provider login {name}"));
+                    }
+                    Some(crate::api::contract::AuthStatus::StoredKey { configured: false }) => {
+                        self.push_slash_output(format!(
+                            "⚠ {name} 未配置 API key：/provider login {name} --manual <key>"
+                        ));
+                    }
+                    Some(crate::api::contract::AuthStatus::Unconfigured) => {
+                        self.push_slash_output(
+                            "⚠ default 未配置凭据：settings 写 apiKey 或 /provider login codex"
+                                .to_string(),
+                        );
+                    }
+                    _ => {}
                 }
             }
             Err(e) => self.push_slash_error(e),
@@ -3250,11 +3441,22 @@ impl Chat {
                     format!("key {key_shown}")
                 }
             }
+            // auth.json 里的 key（--manual）：configured 为实时读——本会话
+            // 登录立即从「未配置」翻到「已配置」。
+            Some(crate::api::contract::AuthStatus::StoredKey { configured: true }) => {
+                "✓ key（auth.json）".to_string()
+            }
+            Some(crate::api::contract::AuthStatus::StoredKey { configured: false }) => {
+                format!("○ 未配置（/provider login {name} --manual <key>）")
+            }
             Some(crate::api::contract::AuthStatus::OAuth { account: Some(acc) }) => {
                 format!("✓ {acc}")
             }
             Some(crate::api::contract::AuthStatus::OAuth { account: None }) => {
                 format!("○ 未登录（/provider login {name}）")
+            }
+            Some(crate::api::contract::AuthStatus::Unconfigured) => {
+                "○ 未配置（settings 写 apiKey 或 /provider login codex）".to_string()
             }
             None => "?".to_string(),
         };
@@ -3270,17 +3472,8 @@ impl Chat {
     /// ● 标当前 provider，互斥关闭其他菜单。
     fn open_provider_menu(&mut self) {
         let current = self.session.runtime.provider.borrow().clone();
-        // 顺序：default 打头 → 内置订阅（presets）→ 用户自定义 provider。
-        let mut names = vec!["default".to_string()];
-        let mut user_names = Vec::new();
-        for name in self.session.client.provider_names() {
-            if self.session.client.is_preset(&name) {
-                names.push(name);
-            } else {
-                user_names.push(name);
-            }
-        }
-        names.extend(user_names);
+        // 顺序与 /model 一级同源（provider_order）：数字直达在两处含义一致。
+        let names = self.provider_order();
         let mut options = Vec::with_capacity(names.len());
         for name in names {
             options.push((name.clone(), self.provider_desc(&name)));
@@ -3406,6 +3599,10 @@ impl Chat {
         if let Some(token) = manual {
             let token = token.to_string();
             let api_preset = preset.map(|p| p.oauth_kind.is_none()).unwrap_or(false);
+            // Share the session Client's TokenProvider: saving through the
+            // same instance updates the adapter's cache + account mirror, so
+            // the login takes effect in this session (no restart).
+            let shared_tp = session.client.token_provider(&name);
             tokio::spawn(async move {
                 if api_preset {
                     let store = crate::auth::AuthStore::new(&home);
@@ -3421,7 +3618,9 @@ impl Chat {
                     }
                     return;
                 }
-                let tp = crate::api::auth::TokenProvider::new(&home, &name, config);
+                let tp = shared_tp.unwrap_or_else(|| {
+                    std::sync::Arc::new(crate::api::auth::TokenProvider::new(&home, &name, config))
+                });
                 let tokens = crate::api::auth::TokenSet {
                     access_token: token,
                     refresh_token: String::new(),
@@ -3459,6 +3658,7 @@ impl Chat {
 
         if device_auth {
             // headless/SSH：打印 URL + 一次性码，轮询等待授权。
+            let shared_tp = session.client.token_provider(&name);
             tokio::spawn(async move {
                 let flow = crate::api::auth::DeviceFlow::new(&http, &config);
                 match flow.start().await {
@@ -3472,7 +3672,11 @@ impl Chat {
                             .await
                         {
                             Ok(tokens) => {
-                                let tp = crate::api::auth::TokenProvider::new(&home, &name, config);
+                                let tp = shared_tp.unwrap_or_else(|| {
+                                    std::sync::Arc::new(crate::api::auth::TokenProvider::new(
+                                        &home, &name, config,
+                                    ))
+                                });
                                 match tp.save(&tokens).await {
                                     Ok(()) => {
                                         let _ = events
@@ -3499,6 +3703,7 @@ impl Chat {
         }
 
         // 默认：loopback PKCE（本地回调 + 打开浏览器）。
+        let shared_tp = session.client.token_provider(&name);
         tokio::spawn(async move {
             let flow = crate::api::auth::LoopbackPkce::new(&http, &config);
             match flow.authorize_url().await {
@@ -3509,7 +3714,11 @@ impl Chat {
                     let _ = crate::share::open_in_browser(&url);
                     match handle.await {
                         Ok(Ok(tokens)) => {
-                            let tp = crate::api::auth::TokenProvider::new(&home, &name, config);
+                            let tp = shared_tp.unwrap_or_else(|| {
+                                std::sync::Arc::new(crate::api::auth::TokenProvider::new(
+                                    &home, &name, config,
+                                ))
+                            });
                             match tp.save(&tokens).await {
                                 Ok(()) => {
                                     let _ = events
@@ -3558,6 +3767,7 @@ impl Chat {
         let name = name.to_string();
         let home = session.home.clone();
         let events = self.events.clone();
+        let shared_tp = session.client.token_provider(&name);
         tokio::spawn(async move {
             if oauth_kind.as_deref() != Some("codex") {
                 // apiKey preset（opencode-go）：只清 auth.json 条目。
@@ -3573,11 +3783,16 @@ impl Chat {
                 }
                 return;
             }
-            let tp = crate::api::auth::TokenProvider::new(
-                &home,
-                &name,
-                crate::api::auth::OauthFlowConfig::codex(),
-            );
+            // Same shared instance as login: the session's adapter loses its
+            // cached token immediately (a stale cache kept requests working
+            // after logout).
+            let tp = shared_tp.unwrap_or_else(|| {
+                std::sync::Arc::new(crate::api::auth::TokenProvider::new(
+                    &home,
+                    &name,
+                    crate::api::auth::OauthFlowConfig::codex(),
+                ))
+            });
             match tp.logout().await {
                 Ok(()) => {
                     let _ = events.send(UiEvent::SlashOutput(format!(
@@ -3616,15 +3831,23 @@ impl Chat {
         };
         let _ = self.session.runtime.thinking_tx.send(level.clone());
         let saved = level.as_deref().unwrap_or("off");
+        // The wire gate (query.rs) skips thinking for models that reject it —
+        // say so here, or the footer shows a level that never takes effect.
+        let model = self.session.runtime.model.borrow().clone();
+        let ignored = if level.is_some() && !crate::api::models::supports_thinking(&model) {
+            format!("（⚠ {model} 不支持 thinking，该级别将被忽略）")
+        } else {
+            String::new()
+        };
         if persist {
             let cwd = std::path::PathBuf::from(&self.cwd);
             let _ = crate::settings::upsert_project_settings(
                 &cwd,
                 &serde_json::json!({ "thinkingLevel": saved }),
             );
-            self.push_slash_output(format!("✓ 思考级别已设置: {saved}"));
+            self.push_slash_output(format!("✓ 思考级别已设置: {saved}{ignored}"));
         } else {
-            self.push_slash_output(format!("✓ 思考级别已设置: {saved}（仅本次会话）"));
+            self.push_slash_output(format!("✓ 思考级别已设置: {saved}（仅本次会话）{ignored}"));
         }
     }
 
@@ -5477,6 +5700,7 @@ impl Chat {
             let frame = self.update_banner_frame().unwrap_or(UPDATE_BANNER_FRAMES);
             (v, update_color(theme, frame, self.motion_off))
         });
+        let provider = self.session.runtime.provider.borrow().clone();
         El::Rows(welcome_card_rows(
             theme,
             &self.session.runtime.model.borrow(),
@@ -5484,6 +5708,7 @@ impl Chat {
             &self.cwd,
             width,
             banner,
+            !self.session.client.is_configured(&provider),
         ))
     }
 
@@ -5854,6 +6079,7 @@ fn welcome_rows(
     cwd: &str,
     width: usize,
     banner: Option<(&str, Color)>,
+    unconfigured: bool,
 ) -> Vec<Line> {
     let mut rows = Vec::new();
     let mut greeting = Line::styled(" ✻ ", SegStyle::fg(theme.claude));
@@ -5869,6 +6095,18 @@ fn welcome_rows(
         one_line(&format!("   cwd: {cwd}"), width),
         theme.dim(),
     ));
+    // Onboarding: with no usable credentials, the card says what to do next —
+    // the login command lives in here, so the door must open before the key.
+    if unconfigured {
+        rows.push(Line::empty());
+        rows.push(Line::styled(
+            one_line(
+                "   ⚠ 未配置凭据：/provider login codex（ChatGPT 订阅）或 ~/.config/bingo/settings.json 写 apiKey",
+                width,
+            ),
+            SegStyle::fg(theme.warning),
+        ));
+    }
     // 新版本提示行（update-banner 规格 §1.1）：版本身份行正上方，与 cwd 间空一行。
     if let Some((v, color)) = banner
         && let Some((pre, ver, mid, cmd)) = banner_segments(v, width)
@@ -5907,6 +6145,7 @@ fn welcome_card_rows(
     cwd: &str,
     width: usize,
     banner: Option<(&str, Color)>,
+    unconfigured: bool,
 ) -> Vec<Row> {
     let gray = SegStyle::fg(theme.inactive);
     let inner_w = width.saturating_sub(2);
@@ -5914,7 +6153,7 @@ fn welcome_card_rows(
         format!("╭{}╮", "─".repeat(inner_w)),
         gray,
     ))];
-    for line in welcome_rows(theme, model, mode, cwd, inner_w, banner) {
+    for line in welcome_rows(theme, model, mode, cwd, inner_w, banner, unconfigured) {
         let mut styled = Line::styled("│", gray);
         let pad = inner_w.saturating_sub(text_width(&line.plain_text()));
         styled.segs.extend(line.segs);
@@ -6196,7 +6435,7 @@ mod tests {
     fn welcome_card_banner_rendering() {
         let theme = Theme::dark();
         let color = Color::Rgb(215, 119, 87);
-        let with = welcome_card_rows(&theme, "m", "d", "/cwd", 80, Some(("0.3.0", color)));
+        let with = welcome_card_rows(&theme, "m", "d", "/cwd", 80, Some(("0.3.0", color)), false);
         let texts: Vec<String> = with.iter().map(|r| r.line.plain_text()).collect();
         assert!(
             texts
@@ -6214,15 +6453,15 @@ mod tests {
             "提示行应紧邻身份行下方"
         );
         // 无提示行 → 布局与现状一致（回归）
-        let without = welcome_card_rows(&theme, "m", "d", "/cwd", 80, None);
+        let without = welcome_card_rows(&theme, "m", "d", "/cwd", 80, None, false);
         assert_eq!(with.len(), without.len() + 2, "提示行 + 上方空行 = 2 行");
         // 窄屏（inner 15）：只留命令，不出现 New version
-        let narrow = welcome_card_rows(&theme, "m", "d", "/c", 17, Some(("0.3.0", color)));
+        let narrow = welcome_card_rows(&theme, "m", "d", "/c", 17, Some(("0.3.0", color)), false);
         let narrow_texts: Vec<String> = narrow.iter().map(|r| r.line.plain_text()).collect();
         assert!(narrow_texts.iter().any(|t| t.contains("bingo update")));
         assert!(!narrow_texts.iter().any(|t| t.contains("New version")));
         // 极窄（inner <15）：提示行隐藏，布局与无提示一致
-        let tiny = welcome_card_rows(&theme, "m", "d", "/c", 16, Some(("0.3.0", color)));
+        let tiny = welcome_card_rows(&theme, "m", "d", "/c", 16, Some(("0.3.0", color)), false);
         assert_eq!(tiny.len(), without.len(), "inner<15 时提示行隐藏");
     }
 
@@ -7027,18 +7266,22 @@ mod tests {
             "default + 内置 presets（codex/opencode-go）+ deepseek"
         );
 
-        // 数字直达 2 = deepseek；一级被消费不进输入框。
+        // 数字直达 2 = codex（统一顺序：default → 内置 preset → 用户自定义）；
+        // 一级被消费不进输入框。
         assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
         let menu = chat.model_menu.as_ref().expect("菜单已打开");
-        assert_eq!(menu.provider_selected, 1, "2 直达 deepseek");
+        assert_eq!(
+            menu.provider_selected, 1,
+            "2 直达 codex（preset 在用户 provider 前）"
+        );
         assert_eq!(chat.input, "", "一级数字被菜单消费");
 
-        // Enter 进二级：数字不再直达（二级不适用，落输入编辑路径）。
+        // Enter 进二级：数字同样被菜单消费（越界也吞，不漏进输入框）。
         assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
         let menu = chat.model_menu.as_ref().expect("菜单已打开");
         assert!(menu.models.is_some(), "进入二级");
         assert!(chat.on_key(KeyCode::Char('3'), KeyModifiers::empty()));
-        assert_eq!(chat.input, "3", "二级数字落输入框（无直达）");
+        assert_eq!(chat.input, "", "二级数字被菜单消费，不漏进输入框");
     }
 
     /// /model: with an arg, switch the runtime model (effective next turn) and persist as default; without, open the selector.
@@ -8430,8 +8673,8 @@ mod tests {
         let providers = chat.model_menu.as_ref().unwrap().providers.clone();
         assert_eq!(
             providers,
-            vec!["default", "codex", "deepseek", "local", "opencode-go"],
-            "presets 进入 /model 一级"
+            vec!["default", "codex", "opencode-go", "deepseek", "local"],
+            "与 /provider 同一顺序：default → 内置 preset → 用户自定义"
         );
         assert_eq!(chat.model_menu.as_ref().unwrap().provider_selected, 0);
 
@@ -8448,7 +8691,7 @@ mod tests {
         let menu = chat.model_menu.as_ref().expect("一级仍在");
         assert_eq!(
             menu.providers,
-            vec!["default", "codex", "deepseek", "local", "opencode-go"],
+            vec!["default", "codex", "opencode-go", "deepseek", "local"],
             "列表保留"
         );
         assert_eq!(menu.provider_selected, 2, "选中保留");
@@ -8499,8 +8742,8 @@ mod tests {
         chat.submit();
         assert_eq!(
             chat.model_menu.as_ref().unwrap().provider_selected,
-            2,
-            "一级预选当前 provider（deepseek 在 presets 之后）"
+            3,
+            "一级预选当前 provider（统一顺序：default, codex, opencode-go, deepseek）"
         );
         chat.on_key(KeyCode::Enter, KeyModifiers::empty());
         if let Some(m) = &mut chat.model_menu.as_mut().unwrap().models {
@@ -8565,6 +8808,7 @@ mod tests {
         chat.handle(UiEvent::ModelsLoaded {
             provider: "default".into(),
             models: vec!["m0".into(), "test-model".into(), "m2".into()],
+            failed: None,
         });
         let m = chat.model_menu.as_ref().unwrap().models.as_ref().unwrap();
         assert_eq!(m.selected, 1, "预选当前模型");
@@ -8579,6 +8823,7 @@ mod tests {
         chat.handle(UiEvent::ModelsLoaded {
             provider: "default".into(),
             models: vec!["m0".into(), "m1".into()],
+            failed: None,
         });
         let m = chat.model_menu.as_ref().unwrap().models.as_ref().unwrap();
         assert_eq!(m.selected, 0, "未命中回 0");
@@ -11800,7 +12045,14 @@ mod tests {
         use ratatui::layout::Size;
         let _guard = test_hooks::hang_guard(60_000); // hangs list_models for 60s, > the 10s read timeout
         let mut chat = test_chat();
-        chat.open_model_models("test".into(), vec!["test".into()], 0); // 触发真实生产拉取路径（fork provider）
+        // 触发真实生产拉取路径（fork "default" —— 未知名现在如实报错而非
+        // 静默回落当前端点，不再是本测试的路径）。
+        chat.open_model_models(
+            "default".into(),
+            vec!["default".into()],
+            vec![String::new()],
+            0,
+        );
         // 先让 spawn 任务启动并注册超时 timer（start_paused 下需 poll 才推进）。
         tokio::task::yield_now().await;
         // The 10s read timeout fires → emits UiEvent::Error (page-level).
@@ -11825,6 +12077,72 @@ mod tests {
         );
         assert!(!joined.contains("出错了"), "页面级不整屏: {joined}");
     }
+    /// Batch-2 invariant: switching providers resolves the model atomically —
+    /// last-used per provider wins, the provider default fills in, and
+    /// switching back restores what you used there.
+    #[test]
+    fn switch_provider_resolves_model_atomically() {
+        let mut chat = test_chat();
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        settings.providers.insert(
+            "deepseek".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: Some("sk-ds".into()),
+                api_base_url: "https://api.deepseek.com".into(),
+                supports_images: None,
+                protocol: None,
+                oauth: None,
+            },
+        );
+        Arc::get_mut(&mut chat.session).unwrap().client =
+            crate::api::client::Client::from_settings_with(&settings, |_| {
+                Err(std::env::VarError::NotPresent)
+            })
+            .unwrap();
+        let _ = chat.session.runtime.model_tx.send("claude-sonnet-5".into());
+
+        // anthropic 协议端点：默认模型兜底（claude-sonnet-5 本就在用 → 不变）。
+        chat.input = "/provider deepseek".to_string();
+        chat.submit();
+        assert_eq!(*chat.session.runtime.provider.borrow(), "deepseek");
+        // 会话内换模型 → 切走再切回，恢复该端点上次用的模型。
+        chat.input = "/model deepseek-v4".to_string();
+        chat.submit();
+        chat.input = "/provider default".to_string();
+        chat.submit();
+        assert_eq!(
+            *chat.session.runtime.model.borrow(),
+            "claude-sonnet-5",
+            "回 default 恢复其上次模型"
+        );
+        chat.input = "/provider deepseek".to_string();
+        chat.submit();
+        assert_eq!(
+            *chat.session.runtime.model.borrow(),
+            "deepseek-v4",
+            "回 deepseek 恢复其上次模型"
+        );
+    }
+
+    /// Mid-turn provider switches are refused: a cross-protocol swap would
+    /// send this conversation's thinking blocks to the wrong endpoint.
+    #[test]
+    fn switch_provider_refuses_while_busy() {
+        let mut chat = test_chat();
+        chat.busy = true;
+        chat.input = "/provider codex".to_string();
+        chat.submit();
+        assert_eq!(*chat.session.runtime.provider.borrow(), "default", "未切换");
+        assert!(
+            chat.slash_error_lines.join("\n").contains("BUSY"),
+            "{:?}",
+            chat.slash_error_lines
+        );
+    }
+
     /// P0-9 regression: modifier chords in the Other input stay chords —
     /// ctrl+c must reach the global interrupt, not become a literal letter.
     #[test]

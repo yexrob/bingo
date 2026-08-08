@@ -38,13 +38,16 @@ fn home_dir() -> std::path::PathBuf {
 
 /// Display info for a provider (the `/provider` listing and `/model` menu):
 /// auth material (masked by the caller) + endpoint URL.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct EndpointInfo {
-    /// Static key (None = OAuth provider — no key to mask).
+    /// Static key (None = OAuth/stored-key provider — no key to mask).
     api_key: Option<String>,
     base_url: String,
     /// Wire protocol label ("anthropic" / "openai") — the /provider listing.
     protocol: String,
+    /// Shared OAuth token provider: `/provider login|logout` mutate the same
+    /// instance the adapter reads, so credentials take effect live.
+    oauth: Option<Arc<crate::api::auth::TokenProvider>>,
 }
 
 #[derive(Clone)]
@@ -96,12 +99,15 @@ impl Client {
         home: &std::path::Path,
     ) -> Result<Self, ClientError> {
         let http = reqwest::Client::new();
+        // A missing top-level key no longer aborts construction: the default
+        // provider degrades to an unconfigured fail-fast adapter so the TUI
+        // (and `/provider login`) stays reachable — the old hard failure
+        // locked subscription-only users out before the login command.
         let api_key = settings
             .api_key
             .clone()
             .or_else(|| env("ANTHROPIC_API_KEY").ok())
-            .or_else(|| env("DEEPSEEK_API_KEY").ok())
-            .ok_or(ClientError::MissingApiKey)?;
+            .or_else(|| env("DEEPSEEK_API_KEY").ok());
         let base_url = settings.api_base_url.clone().unwrap_or_else(|| {
             env("ANTHROPIC_BASE_URL").unwrap_or_else(|_| providers::anthropic::API_BASE.to_string())
         });
@@ -116,23 +122,10 @@ impl Client {
             let protocol = user
                 .and_then(|c| c.protocol.clone())
                 .unwrap_or_else(|| preset.protocol.to_string());
-            let api_key = user.and_then(|c| c.api_key.clone()).or_else(|| {
-                // apiKey presets (opencode-go): the key lives in auth.json
-                // `{type:"api"}` (set via /provider login --manual); absent
-                // → empty key → 401 with a login prompt (D34 §6.5).
-                if preset.oauth_kind.is_none() {
-                    match crate::auth::AuthStore::new(home)
-                        .get(preset.name)
-                        .ok()
-                        .flatten()
-                    {
-                        Some(crate::auth::AuthEntry::Api { key }) => Some(key),
-                        _ => Some(String::new()),
-                    }
-                } else {
-                    None
-                }
-            });
+            // apiKey presets (opencode-go) resolve their key from auth.json
+            // live per request (`stored_key` below) — a /provider login in
+            // the running session takes effect without a restart.
+            let api_key = user.and_then(|c| c.api_key.clone());
             let base_url = match user {
                 Some(c) if !c.api_base_url.is_empty() => c.api_base_url.clone(),
                 _ => preset.base_url.to_string(),
@@ -149,7 +142,7 @@ impl Client {
             let allowlist = preset.model_allowlist.map(|models| {
                 providers::openai::ModelAllowlist(models.iter().map(|m| m.to_string()).collect())
             });
-            let adapter = providers::build_provider(
+            let built = providers::build_provider(
                 preset.name,
                 http.clone(),
                 Some(&protocol),
@@ -159,6 +152,7 @@ impl Client {
                 oauth.as_ref(),
                 home,
                 allowlist,
+                true,
             )
             .map_err(|message| {
                 ClientError::Config(format!("provider \"{}\": {message}", preset.name))
@@ -166,11 +160,12 @@ impl Client {
             providers.insert(
                 preset.name.to_string(),
                 (
-                    adapter,
+                    built.adapter,
                     EndpointInfo {
                         api_key,
                         base_url,
                         protocol,
+                        oauth: built.token_provider,
                     },
                 ),
             );
@@ -187,7 +182,7 @@ impl Client {
             } else {
                 cfg.api_base_url.clone()
             };
-            let adapter = providers::build_provider(
+            let built = providers::build_provider(
                 name,
                 http.clone(),
                 protocol,
@@ -197,6 +192,7 @@ impl Client {
                 cfg.oauth.as_ref(),
                 home,
                 None,
+                false,
             )
             .map_err(|message| {
                 // Config error (e.g. unknown protocol) — surfaced at
@@ -207,11 +203,12 @@ impl Client {
             providers.insert(
                 name.clone(),
                 (
-                    adapter,
+                    built.adapter,
                     EndpointInfo {
                         api_key: cfg.api_key.clone(),
                         base_url,
                         protocol: protocol.unwrap_or("anthropic").to_string(),
+                        oauth: built.token_provider,
                     },
                 ),
             );
@@ -220,16 +217,20 @@ impl Client {
         // with_provider("default") 走通（含「切回 default」），/model 二级
         // 对 default 拉列表用顶层端点、标签与内容一致（P0-C）。default 为
         // 保留名：顶层配置优先（后插入覆盖用户同名的 providers 定义）。
-        let default_adapter = providers::anthropic(
-            http.clone(),
-            api_key.clone(),
-            base_url.clone(),
-            settings.send_images.unwrap_or(false),
-        );
+        let default_adapter = match &api_key {
+            Some(key) => providers::anthropic(
+                http.clone(),
+                key.clone(),
+                base_url.clone(),
+                settings.send_images.unwrap_or(false),
+            ),
+            None => providers::unconfigured(),
+        };
         let default_info = EndpointInfo {
-            api_key: Some(api_key),
+            api_key,
             base_url,
             protocol: "anthropic".to_string(),
+            oauth: None,
         };
         providers.insert(
             "default".to_string(),
@@ -251,6 +252,7 @@ impl Client {
             api_key: Some(api_key),
             base_url,
             protocol: "anthropic".to_string(),
+            oauth: None,
         };
         Self {
             http,
@@ -372,6 +374,41 @@ impl Client {
         self.providers.get(name).map(|(p, _)| p.auth_status())
     }
 
+    /// The shared OAuth token provider of a named provider — the SAME
+    /// instance the adapter authenticates with. `/provider login|logout`
+    /// must go through this so credentials take effect in the running
+    /// session instead of after a restart.
+    pub fn token_provider(&self, name: &str) -> Option<Arc<crate::api::auth::TokenProvider>> {
+        self.providers
+            .get(name)
+            .and_then(|(_, info)| info.oauth.clone())
+    }
+
+    /// Whether a provider has any usable credential right now (read live).
+    pub fn is_configured(&self, name: &str) -> bool {
+        match self.auth_status(name) {
+            Some(crate::api::contract::AuthStatus::ApiKey) => true,
+            Some(crate::api::contract::AuthStatus::StoredKey { configured }) => configured,
+            Some(crate::api::contract::AuthStatus::OAuth { account }) => account.is_some(),
+            Some(crate::api::contract::AuthStatus::Unconfigured) | None => false,
+        }
+    }
+
+    /// The model a provider starts with when none was remembered: preset
+    /// allowlists lead with their flagship; anthropic-protocol endpoints get
+    /// the built-in default. None = no safe guess (the caller warns).
+    pub fn provider_default_model(&self, name: &str) -> Option<String> {
+        if let Some(preset) = providers::presets::preset(name)
+            && let Some(first) = preset.model_allowlist.and_then(|list| list.first())
+        {
+            return Some(first.to_string());
+        }
+        match self.provider_protocol(name).as_deref() {
+            Some("anthropic") => Some(crate::api::types::DEFAULT_MODEL.to_string()),
+            _ => None,
+        }
+    }
+
     fn current(&self) -> Arc<dyn ProviderClient> {
         self.endpoint
             .read()
@@ -419,14 +456,21 @@ mod tests {
         assert_eq!(client.current_endpoint().1, "https://deepseek.example");
     }
 
+    /// A missing top-level key no longer aborts construction: the default
+    /// provider degrades to an unconfigured fail-fast adapter, so the TUI
+    /// (where `/provider login` lives) stays reachable.
     #[test]
-    fn from_settings_missing_key_errors() {
+    fn missing_key_degrades_default_to_unconfigured() {
         let settings = crate::settings::Settings::default();
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
+        let client = Client::from_settings_with(&settings, env).unwrap();
         assert!(matches!(
-            Client::from_settings_with(&settings, env),
-            Err(ClientError::MissingApiKey)
+            client.auth_status("default"),
+            Some(crate::api::contract::AuthStatus::Unconfigured)
         ));
+        assert!(!client.is_configured("default"));
+        // Presets stay reachable for login.
+        assert!(client.provider_names().contains(&"codex".to_string()));
     }
 
     #[test]
@@ -626,14 +670,15 @@ mod tests {
             ),
             "隔离 home 下 codex preset 未登录"
         );
-        // opencode-go：apiKey 型，未配置 → ApiKey 空。
+        // opencode-go：apiKey 型，未配置 → StoredKey（auth.json 实时读，
+        // 本会话登录立即翻到已配置）。
         assert_eq!(
             client.provider_endpoint("opencode-go").unwrap().1,
             "https://opencode.ai/zen/go"
         );
         assert!(matches!(
             client.auth_status("opencode-go"),
-            Some(crate::api::contract::AuthStatus::ApiKey)
+            Some(crate::api::contract::AuthStatus::StoredKey { configured: false })
         ));
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -365,6 +365,14 @@ async fn one_turn(
 ) -> Result<Turn, QueryError> {
     let model = session.runtime.model.borrow().clone();
     let thinking = session.runtime.thinking.borrow().clone();
+    // Thinking gate: models that reject the parameter (DeepSeek family) get
+    // none regardless of the configured level — the UI shows the same fact
+    // when the level is set, so display and wire agree.
+    let thinking = if crate::api::models::supports_thinking(&model) {
+        ThinkingLevel::parse(thinking.as_deref())
+    } else {
+        None
+    };
     let request = NeutralRequest {
         model,
         max_tokens: DEFAULT_MAX_TOKENS,
@@ -372,7 +380,7 @@ async fn one_turn(
         messages: messages.to_vec(),
         tools: tool_params(tools),
         stream: true,
-        thinking: ThinkingLevel::parse(thinking.as_deref()),
+        thinking,
     };
     // The connect phase is also interruptible (Esc gives up immediately on a hanging/
     // retrying connection, without waiting for output to start).

@@ -14,7 +14,9 @@ use super::types::{ContentBlock, Message, Role};
 /// [`ErrorCode`](crate::error::ErrorCode) (see the code table in error.rs).
 #[derive(Debug, Error)]
 pub enum ClientError {
-    #[error("missing API key: set ANTHROPIC_API_KEY or DEEPSEEK_API_KEY")]
+    #[error(
+        "missing credentials: set apiKey in ~/.config/bingo/settings.json, export ANTHROPIC_API_KEY, or run /provider login codex (ChatGPT subscription)"
+    )]
     MissingApiKey,
     #[error("invalid API key for HTTP header: {0}")]
     InvalidApiKey(String),
@@ -153,7 +155,17 @@ impl Default for Capabilities {
 #[allow(dead_code)] // P2: /provider login|logout surface
 pub enum AuthStatus {
     ApiKey,
-    OAuth { account: Option<String> },
+    /// apiKey-type provider whose key lives in auth.json (`/provider login
+    /// --manual`): `configured` is read live, so logging in takes effect in
+    /// the running session.
+    StoredKey {
+        configured: bool,
+    },
+    OAuth {
+        account: Option<String>,
+    },
+    /// No credentials at all (the default provider before onboarding).
+    Unconfigured,
 }
 
 /// A single system-prompt segment; `cache` marks the segment as cacheable

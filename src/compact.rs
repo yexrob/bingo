@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::api::contract::{NeutralRequest, SystemBlock};
 use crate::api::types::{ContentBlock, Message};
-use crate::budget::{AUTOCOMPACT_THRESHOLD, MAX_COMPACT_FAILURES, WARNING_THRESHOLD};
+use crate::budget::{MAX_COMPACT_FAILURES, autocompact_threshold_for, warning_threshold_for};
 use crate::hooks::{run_post_compact, run_pre_compact};
 use crate::permission::PermissionMode;
 use crate::query::Session;
@@ -76,7 +76,8 @@ pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, token
     if messages.len() <= KEEP_RECENT {
         return false;
     }
-    if tokens < AUTOCOMPACT_THRESHOLD {
+    let threshold = autocompact_threshold_for(&session.runtime.model.borrow().clone());
+    if tokens < threshold {
         return false;
     }
 
@@ -232,7 +233,9 @@ pub async fn check_and_compact(
     if tokens > 0 && !session.quiet {
         eprintln!("[bingo] context: {tokens} tokens");
     }
-    if tokens >= AUTOCOMPACT_THRESHOLD {
+    let model = session.runtime.model.borrow().clone();
+    let threshold = autocompact_threshold_for(&model);
+    if tokens >= threshold {
         if session.compact_failures.load(Ordering::SeqCst) >= MAX_COMPACT_FAILURES {
             if !session.quiet {
                 eprintln!(
@@ -242,10 +245,8 @@ pub async fn check_and_compact(
         } else {
             maybe_compact(session, messages, tokens).await;
         }
-    } else if tokens >= WARNING_THRESHOLD && !session.quiet {
-        eprintln!(
-            "[bingo] warning: context at {tokens} tokens, auto-compact at {AUTOCOMPACT_THRESHOLD}"
-        );
+    } else if tokens >= warning_threshold_for(&model) && !session.quiet {
+        eprintln!("[bingo] warning: context at {tokens} tokens, auto-compact at {threshold}");
     }
 }
 
@@ -296,7 +297,10 @@ mod tests {
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn compact_threshold_matches_budget() {
-        assert!(AUTOCOMPACT_THRESHOLD < crate::budget::CONTEXT_WINDOW);
+        assert!(
+            crate::budget::autocompact_threshold_for("claude-sonnet-5")
+                < crate::budget::context_window_for("claude-sonnet-5")
+        );
     }
 
     /// When the split point lands mid tool_use/tool_result pair, advance:

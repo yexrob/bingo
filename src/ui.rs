@@ -102,6 +102,9 @@ pub enum UiEvent {
     ModelsLoaded {
         provider: String,
         models: Vec<String>,
+        /// Fetch failed: short actionable reason shown inside the menu (401
+        /// used to masquerade as "the endpoint returned no models").
+        failed: Option<String>,
     },
     /// Image finished loading asynchronously after the message was finalized
     /// (meta=None = load failed, placeholder shown).

@@ -719,6 +719,16 @@ impl TokenProvider {
                 }
             }
         };
+        // A --manual token has no refresh_token: refreshing with an empty one
+        // always failed remotely, which made every manual login unusable
+        // (is_fresh(None) forced this path on the very first request). Use the
+        // stored access token as-is until a 401 forces re-login.
+        if tokens.refresh_token.is_empty() {
+            if !tokens.access_token.is_empty() {
+                return Ok(tokens);
+            }
+            return Err(AuthError::NotLoggedIn(self.provider_name.clone()));
+        }
         let body = serde_json::json!({
             "client_id": self.config.client_id,
             "grant_type": "refresh_token",
@@ -896,6 +906,35 @@ mod tests {
             std::env::temp_dir().join(format!("bingo-api-auth-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("home")
+    }
+
+    /// `--manual` tokens (no refresh_token, no expiry) are used as-is until a
+    /// 401 — the old freshness rule forced a refresh with an empty
+    /// refresh_token on the very first request, so manual logins never worked.
+    #[tokio::test]
+    async fn manual_token_without_refresh_is_used_as_is() {
+        let home = std::env::temp_dir().join(format!("bingo-auth-manual-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let provider = TokenProvider::new(&home, "codex", codex_at("http://127.0.0.1:9"));
+        provider
+            .save(&TokenSet {
+                access_token: "at_manual".into(),
+                refresh_token: String::new(),
+                id_token: None,
+                expires_at: None,
+                account_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            provider.access_token().await.unwrap(),
+            "at_manual",
+            "manual token 直接可用（不经必败的刷新）"
+        );
+        // A fresh instance (restart) reads it back from the store the same way.
+        let provider = TokenProvider::new(&home, "codex", codex_at("http://127.0.0.1:9"));
+        assert_eq!(provider.access_token().await.unwrap(), "at_manual");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     fn tokens(access: &str, refresh: &str, expires_in: i64) -> TokenSet {

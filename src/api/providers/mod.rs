@@ -20,14 +20,65 @@ use crate::settings::OauthConfig;
 pub enum AuthSource {
     /// Static key (settings `apiKey` wins over OAuth — D33 §10).
     ApiKey(String),
+    /// Key stored in auth.json (`/provider login <name> --manual <key>`),
+    /// resolved per request — a login in the running session takes effect
+    /// without a restart.
+    StoredKey(StoredKey),
     /// OAuth token provider (D33 §6): lazy/eager refresh, single-flight.
     OAuth(Arc<TokenProvider>),
+}
+
+/// Live auth.json key lookup for apiKey-type presets (opencode-go).
+#[derive(Debug, Clone)]
+pub struct StoredKey {
+    home: std::path::PathBuf,
+    provider: String,
+}
+
+impl StoredKey {
+    pub fn new(home: &Path, provider: &str) -> Self {
+        Self {
+            home: home.to_path_buf(),
+            provider: provider.to_string(),
+        }
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// The stored key, if the user has logged in (read live on purpose).
+    pub fn key(&self) -> Option<String> {
+        match crate::auth::AuthStore::new(&self.home).get(&self.provider) {
+            Ok(Some(crate::auth::AuthEntry::Api { key })) if !key.is_empty() => Some(key),
+            _ => None,
+        }
+    }
+}
+
+/// A built provider: the adapter plus its shared OAuth token provider (when
+/// the auth is OAuth) — login/logout must mutate the same instance the
+/// adapter reads, or credentials only take effect after a restart.
+pub struct BuiltProvider {
+    pub adapter: Arc<dyn ProviderClient>,
+    pub token_provider: Option<Arc<TokenProvider>>,
+}
+
+impl BuiltProvider {
+    fn plain(adapter: Arc<dyn ProviderClient>) -> Self {
+        Self {
+            adapter,
+            token_provider: None,
+        }
+    }
 }
 
 /// Build a provider adapter from settings config. `protocol` is the settings
 /// `protocol` field (None = "anthropic", backward compatible); an unknown
 /// value is a config error at startup. OAuth is only meaningful for the
 /// openai protocol (codex endpoint) — anthropic + oauth is a config error.
+/// `stored_key` opts an api-key preset into the auth.json live lookup when
+/// neither settings key nor oauth is present (instead of a config error).
 /// (Single construction point; the parameter list is the config surface.)
 #[allow(clippy::too_many_arguments)]
 pub fn build_provider(
@@ -40,7 +91,8 @@ pub fn build_provider(
     oauth: Option<&OauthConfig>,
     home: &Path,
     model_allowlist: Option<openai::ModelAllowlist>,
-) -> Result<Arc<dyn ProviderClient>, String> {
+    stored_key: bool,
+) -> Result<BuiltProvider, String> {
     match protocol.unwrap_or("anthropic") {
         "anthropic" => {
             let Some(api_key) = api_key else {
@@ -51,7 +103,12 @@ pub fn build_provider(
             } else {
                 base_url
             };
-            Ok(anthropic(http, api_key, base_url, supports_images))
+            Ok(BuiltProvider::plain(anthropic(
+                http,
+                api_key,
+                base_url,
+                supports_images,
+            )))
         }
         "openai" => {
             // oauth.kind=codex → the ChatGPT subscription endpoint variant
@@ -66,13 +123,16 @@ pub fn build_provider(
             } else {
                 base_url
             };
-            // D33 §5: apiKey wins over OAuth; both missing → config error.
-            // D33 §5: apiKey wins over OAuth; both missing → config error
-            // (apiKey presets resolve their key from auth.json in client.rs).
-            let auth = match api_key {
-                Some(key) => AuthSource::ApiKey(key),
+            // D33 §5: apiKey wins over OAuth; both missing → stored-key
+            // lookup for presets, config error otherwise.
+            let (auth, token_provider) = match api_key {
+                Some(key) => (AuthSource::ApiKey(key), None),
                 None => match oauth {
-                    Some(oauth_cfg) => build_oauth(name, oauth_cfg, home)?,
+                    Some(oauth_cfg) => {
+                        let tp = build_oauth(name, oauth_cfg, home)?;
+                        (AuthSource::OAuth(tp.clone()), Some(tp))
+                    }
+                    None if stored_key => (AuthSource::StoredKey(StoredKey::new(home, name)), None),
                     None => {
                         return Err(
                             "provider 缺少 apiKey 或 oauth 配置（/provider login 或补 apiKey）"
@@ -86,14 +146,17 @@ pub fn build_provider(
             } else {
                 openai::OpenAiVariant::Default
             };
-            Ok(openai(
-                http,
-                auth,
-                base_url,
-                supports_images,
-                variant,
-                model_allowlist,
-            ))
+            Ok(BuiltProvider {
+                adapter: openai(
+                    http,
+                    auth,
+                    base_url,
+                    supports_images,
+                    variant,
+                    model_allowlist,
+                ),
+                token_provider,
+            })
         }
         other => Err(format!(
             "未知 protocol \"{other}\"（可用：anthropic / openai）"
@@ -103,14 +166,65 @@ pub fn build_provider(
 
 /// oauth.kind → a configured TokenProvider (v1: `codex` only); the auth.json
 /// entry is keyed by the provider name.
-fn build_oauth(name: &str, cfg: &OauthConfig, home: &Path) -> Result<AuthSource, String> {
+fn build_oauth(name: &str, cfg: &OauthConfig, home: &Path) -> Result<Arc<TokenProvider>, String> {
     match cfg.kind.as_str() {
-        "codex" => {
-            let provider = TokenProvider::new(home, name, OauthFlowConfig::codex());
-            Ok(AuthSource::OAuth(Arc::new(provider)))
-        }
+        "codex" => Ok(Arc::new(TokenProvider::new(
+            home,
+            name,
+            OauthFlowConfig::codex(),
+        ))),
         other => Err(format!("未知 oauth.kind \"{other}\"（可用：codex）")),
     }
+}
+
+/// Placeholder adapter for the default provider before any credentials exist:
+/// every request fails fast with the onboarding hint instead of putting an
+/// empty key on the wire. The TUI still starts, so `/provider login` is
+/// reachable — the old hard startup failure locked subscription-only users
+/// out of the only place they could log in.
+struct Unconfigured;
+
+#[async_trait::async_trait]
+impl ProviderClient for Unconfigured {
+    fn capabilities(&self) -> crate::api::contract::Capabilities {
+        crate::api::contract::Capabilities::default()
+    }
+
+    fn auth_status(&self) -> crate::api::contract::AuthStatus {
+        crate::api::contract::AuthStatus::Unconfigured
+    }
+
+    async fn stream(
+        &self,
+        _request: &crate::api::contract::NeutralRequest,
+    ) -> Result<crate::api::contract::BoxStream, crate::api::contract::ClientError> {
+        Err(crate::api::contract::ClientError::MissingApiKey)
+    }
+
+    async fn complete_text(
+        &self,
+        _request: &crate::api::contract::NeutralRequest,
+    ) -> Result<String, crate::api::contract::ClientError> {
+        Err(crate::api::contract::ClientError::MissingApiKey)
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, crate::api::contract::ClientError> {
+        Err(crate::api::contract::ClientError::MissingApiKey)
+    }
+
+    async fn count_tokens(
+        &self,
+        _model: &str,
+        _system: &[crate::api::contract::SystemBlock],
+        _messages: &[crate::api::types::Message],
+    ) -> Result<u64, crate::api::contract::ClientError> {
+        Err(crate::api::contract::ClientError::MissingApiKey)
+    }
+}
+
+/// The unconfigured-default adapter (see [`Unconfigured`]).
+pub fn unconfigured() -> Arc<dyn ProviderClient> {
+    Arc::new(Unconfigured)
 }
 
 pub fn anthropic(

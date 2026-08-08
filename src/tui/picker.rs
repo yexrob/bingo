@@ -183,6 +183,41 @@ impl PickerModel {
         Row::new(line)
     }
 
+    /// 可视窗口渲染：条目超过 `max_rows` 时围绕 selected 取窗口，被裁一侧
+    /// 各占一行「… 还有 N 项」指示——长列表（如几十个模型）第 N 项之后
+    /// 依然可达、可见（旧的 take(N) 截断让窗口外的项永远选不到）。
+    pub fn window_rows(&self, max_rows: usize, width: usize, theme: &Theme) -> Vec<Row> {
+        let len = self.items.len();
+        let max_rows = max_rows.max(1);
+        if len <= max_rows {
+            return (0..len).map(|i| self.row(i, width, theme)).collect();
+        }
+        let more_row = |n: usize| {
+            Row::new(Line::styled(
+                crate::tui::markdown::truncate(
+                    &format!("  … 还有 {n} 项"),
+                    width.saturating_sub(2),
+                ),
+                SegStyle::fg(theme.inactive),
+            ))
+        };
+        let body = max_rows.saturating_sub(2).max(1);
+        let start = self
+            .selected
+            .saturating_sub(body / 2)
+            .min(len.saturating_sub(body));
+        let end = start + body;
+        let mut rows = Vec::with_capacity(max_rows);
+        if start > 0 {
+            rows.push(more_row(start));
+        }
+        rows.extend((start..end).map(|i| self.row(i, width, theme)));
+        if end < len {
+            rows.push(more_row(len - end));
+        }
+        rows
+    }
+
     /// 按键提示行（dim；窄屏截断；keys 由场景壳层提供）。
     pub fn hint_row(&self, keys: PickerKeys, width: usize, theme: &Theme) -> Row {
         let hint = crate::tui::markdown::truncate(
@@ -314,6 +349,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// window_rows：短列表全量；长列表围绕 selected 开窗 + 「还有 N 项」指示。
+    #[test]
+    fn window_rows_follow_the_selection() {
+        let theme = Theme::dark();
+        let items: Vec<PickerItem> = (0..30).map(|i| item(&format!("m{i}"))).collect();
+        let mut m = model(items, 0, Some(0));
+        let short = model(vec![item("a"), item("b")], 0, None);
+        assert_eq!(short.window_rows(10, 80, &theme).len(), 2, "短列表全量");
+
+        let rows = m.window_rows(10, 80, &theme);
+        assert_eq!(rows.len(), 9, "窗口 8 行 + 底部指示行");
+        assert!(text(&rows[0]).contains("m0"), "{}", text(&rows[0]));
+        assert!(
+            text(rows.last().unwrap()).contains("还有 22 项"),
+            "{}",
+            text(rows.last().unwrap())
+        );
+
+        // 选中移到末尾：窗口跟随，顶部出现指示行，选中行可见。
+        m.selected = 29;
+        let rows = m.window_rows(10, 80, &theme);
+        assert!(text(&rows[0]).contains("还有"), "{}", text(&rows[0]));
+        assert!(
+            rows.iter()
+                .any(|r| text(r).contains('❯') && text(r).contains("m29")),
+            "选中行在窗口内"
+        );
+        // 中段：两侧都有指示行。
+        m.selected = 15;
+        let rows = m.window_rows(10, 80, &theme);
+        assert!(text(&rows[0]).contains("还有"));
+        assert!(text(rows.last().unwrap()).contains("还有"));
     }
 
     /// hint_row：按 keys 拼装文案；窄屏截断；number_jump 范围 = 1..=min(len,9)。

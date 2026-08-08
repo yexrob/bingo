@@ -138,6 +138,18 @@ impl OpenAIProvider {
     async fn headers(&self) -> Result<HeaderMap, ClientError> {
         let bearer = match &self.auth {
             AuthSource::ApiKey(key) => format!("Bearer {key}"),
+            // Fail fast with the login command instead of sending an empty
+            // bearer and bouncing off a remote 401.
+            AuthSource::StoredKey(stored) => match stored.key() {
+                Some(key) => format!("Bearer {key}"),
+                None => {
+                    return Err(ClientError::Auth(format!(
+                        "provider \"{}\" 未配置 API key：/provider login {} --manual <key>",
+                        stored.provider(),
+                        stored.provider()
+                    )));
+                }
+            },
             AuthSource::OAuth(provider) => {
                 format!("Bearer {}", provider.access_token().await?)
             }
@@ -167,7 +179,7 @@ impl OpenAIProvider {
     fn oauth_account(&self) -> Option<String> {
         match &self.auth {
             AuthSource::OAuth(provider) => provider.account_sync(),
-            AuthSource::ApiKey(_) => None,
+            AuthSource::ApiKey(_) | AuthSource::StoredKey(_) => None,
         }
     }
 
@@ -639,6 +651,11 @@ impl ProviderClient for OpenAIProvider {
     fn auth_status(&self) -> AuthStatus {
         match &self.auth {
             AuthSource::ApiKey(_) => AuthStatus::ApiKey,
+            // Live read: a login in this session flips configured without a
+            // restart (the /provider listing reads this).
+            AuthSource::StoredKey(stored) => AuthStatus::StoredKey {
+                configured: stored.key().is_some(),
+            },
             AuthSource::OAuth(_) => AuthStatus::OAuth {
                 account: self.oauth_account(),
             },

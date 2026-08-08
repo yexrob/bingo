@@ -1,19 +1,30 @@
 use crate::api::types::DEFAULT_MAX_TOKENS;
 
-/// Context window size.
-pub const CONTEXT_WINDOW: u64 = 200_000;
+/// Per-model context window (prefix table in `api::models`; unknown models
+/// use the conservative Claude default). Display and auto-compact measure
+/// with the model actually in use — a fixed 200k constant misread every
+/// non-Claude endpoint.
+pub fn context_window_for(model: &str) -> u64 {
+    crate::api::models::context_window(model)
+}
 
 /// Effective input window: requests are sent with DEFAULT_MAX_TOKENS; once input
 /// crosses this line the server 400s with "input length and max_tokens exceed context
 /// limit", so the reserved headroom matches the real max_tokens (not a fixed 20k).
-pub const EFFECTIVE_WINDOW: u64 = CONTEXT_WINDOW - DEFAULT_MAX_TOKENS as u64;
+pub fn effective_window_for(model: &str) -> u64 {
+    context_window_for(model).saturating_sub(DEFAULT_MAX_TOKENS as u64)
+}
 
 /// Auto-compact threshold: 90% of the effective window (same semantics as Codex
 /// auto_compact_token_limit).
-pub const AUTOCOMPACT_THRESHOLD: u64 = EFFECTIVE_WINDOW * 9 / 10;
+pub fn autocompact_threshold_for(model: &str) -> u64 {
+    effective_window_for(model) * 9 / 10
+}
 
 /// Warning buffer before the compact threshold (20k).
-pub const WARNING_THRESHOLD: u64 = AUTOCOMPACT_THRESHOLD - 20_000;
+pub fn warning_threshold_for(model: &str) -> u64 {
+    autocompact_threshold_for(model).saturating_sub(20_000)
+}
 
 /// Consecutive compact-failure circuit breaker (cap 3).
 pub const MAX_COMPACT_FAILURES: u64 = 3;
@@ -25,20 +36,30 @@ pub const MAX_RESULT_CHARS: usize = 50_000;
 mod tests {
     use super::*;
 
+    /// Threshold hierarchy holds for every known window size (the old
+    /// constant-based test covered only the Claude default).
     #[test]
-    #[allow(clippy::assertions_on_constants)]
-    fn threshold_hierarchy() {
-        assert!(WARNING_THRESHOLD < AUTOCOMPACT_THRESHOLD);
-        assert!(AUTOCOMPACT_THRESHOLD < EFFECTIVE_WINDOW);
-        assert!(EFFECTIVE_WINDOW < CONTEXT_WINDOW);
+    fn threshold_hierarchy_per_model() {
+        for model in ["claude-sonnet-5", "gpt-5.6-sol", "deepseek-chat", "unknown"] {
+            assert!(warning_threshold_for(model) < autocompact_threshold_for(model));
+            assert!(autocompact_threshold_for(model) < effective_window_for(model));
+            assert!(effective_window_for(model) < context_window_for(model));
+        }
     }
 
     /// Compact threshold + output budget must stay inside the window, otherwise every
     /// request 400s first and then retries.
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn compaction_fires_before_the_api_rejects_the_request() {
-        assert!(AUTOCOMPACT_THRESHOLD + DEFAULT_MAX_TOKENS as u64 <= CONTEXT_WINDOW);
-        assert!(EFFECTIVE_WINDOW + DEFAULT_MAX_TOKENS as u64 <= CONTEXT_WINDOW);
+        for model in ["claude-sonnet-5", "gpt-5.6-sol", "deepseek-chat"] {
+            assert!(
+                autocompact_threshold_for(model) + DEFAULT_MAX_TOKENS as u64
+                    <= context_window_for(model)
+            );
+            assert!(
+                effective_window_for(model) + DEFAULT_MAX_TOKENS as u64
+                    <= context_window_for(model)
+            );
+        }
     }
 }
