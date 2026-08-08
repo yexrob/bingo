@@ -644,22 +644,29 @@ impl ProviderClient for OpenAIProvider {
     async fn complete_text(&self, request: &NeutralRequest) -> Result<String, ClientError> {
         // Codex endpoint is stream-only (400 on stream:false): stream
         // internally and aggregate the output text — the neutral interface
-        // is unchanged, callers (compact/memory) are unaffected.
+        // is unchanged, callers (compact/memory) are unaffected. The whole
+        // aggregation stays under the short-write budget (AC-13/14) — the
+        // codex path must not bypass the 15s feedback-layer deadline.
         if self.variant() == OpenAiVariant::Codex {
             let mut req = request.clone();
             req.stream = true;
-            let mut stream = self.stream(&req).await?;
-            let mut text = String::new();
-            while let Some(event) = stream.next().await {
-                match event? {
-                    StreamEvent::TextDelta { text: t, .. } => text.push_str(&t),
-                    StreamEvent::ApiError { message } => {
-                        return Err(ClientError::Stream(message));
+            let result = tokio::time::timeout(SHORT_WRITE_TIMEOUT, async {
+                let mut stream = self.stream(&req).await?;
+                let mut text = String::new();
+                while let Some(event) = stream.next().await {
+                    match event? {
+                        StreamEvent::TextDelta { text: t, .. } => text.push_str(&t),
+                        StreamEvent::ApiError { message } => {
+                            return Err(ClientError::Stream(message));
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-            return Ok(text);
+                Ok::<String, ClientError>(text)
+            })
+            .await
+            .map_err(|_| ClientError::Timeout)??;
+            return Ok(result);
         }
         let mut body = build_body(request, self.variant());
         body["stream"] = serde_json::json!(false);
