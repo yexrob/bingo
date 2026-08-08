@@ -188,7 +188,10 @@ impl Client {
                 protocol,
                 cfg.api_key.clone(),
                 base_url.clone(),
-                cfg.supports_images.unwrap_or(false),
+                // Both protocols define image content blocks: the capability is the
+                // baseline, and `supportsImages: false` is the opt-out for an endpoint that
+                // speaks the protocol but rejects them (some compat proxies).
+                cfg.supports_images.unwrap_or(true),
                 cfg.oauth.as_ref(),
                 home,
                 None,
@@ -222,7 +225,7 @@ impl Client {
                 http.clone(),
                 key.clone(),
                 base_url.clone(),
-                settings.send_images.unwrap_or(false),
+                settings.send_images.unwrap_or(true),
             ),
             None => providers::unconfigured(),
         };

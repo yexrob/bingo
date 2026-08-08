@@ -61,7 +61,8 @@ pub struct Settings {
     /// 优先级 `--model` > settings（user < project < local）> 内置默认。
     pub model: Option<String>,
     /// Whether the default provider sends image attachments to the model (`sendImages`).
-    /// Named providers use their own `supportsImages`; None = don't send.
+    /// Named providers use their own `supportsImages`. None = send: both protocols carry image
+    /// blocks, so this is an opt-out for endpoints that speak the protocol but reject them.
     #[serde(rename = "sendImages", default)]
     pub send_images: Option<bool>,
     /// Thinking level (`thinkingLevel`): off | low | medium | high | xhigh | max.
@@ -167,7 +168,7 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub oauth: Option<OauthConfig>,
     /// Whether this provider's model accepts image content (`supportsImages`;
-    /// None/default = don't send images).
+    /// None/default = send — set false to opt an endpoint out).
     #[serde(rename = "supportsImages", default)]
     pub supports_images: Option<bool>,
 }

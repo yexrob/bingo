@@ -41,9 +41,12 @@ commands, and verification steps in conclusions. Never speculate about features 
   key-burst heuristic — extremely fast typing may misdetect, and pausing recovers).
 - **Sending images**: on macOS, copy an image (screenshot etc.) and paste (Cmd+V) to attach it;
   the input shows a `#[image N]` placeholder; dragging/pasting image file paths (as their own line or
-  `![alt](path)`) attaches on submit too. Message history keeps the placeholder text; when the current endpoint is configured
-  with `supportsImages`/`sendImages`, images go to the model as base64 content blocks with the text
-  (auto-compressed to 2000px / ~3.75MB), otherwise only text is sent and images stay local.
+  `![alt](path)`) attaches on submit too. Message history keeps the placeholder text, and the image goes to the model as a
+  base64 content block alongside it (auto-compressed to 2000px / ~3.75MB). Both wire protocols carry image blocks, so this
+  works by default; `sendImages: false` (default endpoint) or `supportsImages: false` (named provider) opts out an endpoint
+  that speaks the protocol but rejects images, and then only the text is sent. The attachment table belongs to the session,
+  not to the input box: any subagent resolves the same `#[image N]` marker, so an opted-out session can still get an image
+  looked at by forking one onto a provider that accepts them.
 
 ## Config guide (settings.json)
 
@@ -58,7 +61,7 @@ Three config layers, shallow-merged; the later one overrides:
 | `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
 | `providers` | object | Named providers: `{name: {protocol?, apiKey, apiBaseUrl?, supportsImages?, oauth?}}`, switch via `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, `Authorization: Bearer`; `apiBaseUrl` defaults to `https://api.openai.com`); an empty/absent `apiBaseUrl` falls back to the protocol default; unknown protocols are a config error at startup. `oauth: {kind: "codex"}` enables OAuth login (apiKey wins over OAuth); the codex flow (device / loopback PKCE) is `chatgpt.com`-subscription auth, tokens stored in `~/.local/share/bingo/auth.json` (0600, never in the committed settings) |
 | `provider` | string | Current provider (persisted by `/provider` and the /model menu; default `"default"` = top-level `apiKey`/`apiBaseUrl`); restored at startup, an invalid name falls back to default with a warning |
-| `sendImages` | bool | Whether the default endpoint sends message-box image attachments to the model (named providers use their own `supportsImages`; by default none are sent) |
+| `sendImages` | bool | Whether the default endpoint sends message-box image attachments to the model (named providers use their own `supportsImages`). Both protocols carry image blocks, so this defaults to **true** — set `false` to opt out an endpoint that speaks the protocol but rejects images (some compat proxies) |
 | `thinkingLevel` | string | Thinking level: `off` sends no thinking param (DeepSeek-compatible, default); `low`/`medium`/`high`/`xhigh`/`max` send `{"type":"adaptive"}` adaptive thinking plus `output_config.effort` (the Claude 5 family removed budget_tokens; below `high` saves tokens, `xhigh`/`max` think deeper) |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto` (follows the terminal background) / `dark` / `light` |

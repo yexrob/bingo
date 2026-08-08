@@ -1036,6 +1036,9 @@ mod tests {
         let mut settings = crate::settings::Settings {
             api_key: Some("sk-parent".into()),
             api_base_url: Some("https://parent.example".into()),
+            // Explicitly opted out: models a compat proxy that speaks the protocol but rejects
+            // image blocks. Image support is otherwise the default.
+            send_images: Some(false),
             ..Default::default()
         };
         settings.providers.insert(
