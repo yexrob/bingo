@@ -350,6 +350,51 @@ impl ThemeMenu {
     }
 }
 
+/// /resume 选择器选项数上限（devex DX：会话可很多，截断最近 N 个 + 提示行注明）。
+pub const RESUME_PICKER_MAX: usize = 20;
+
+/// `/resume` 会话选择器（picker-model.md 提交 C）：动态单级（磁盘快照），
+/// Enter 切换会话；label=展示名、value=会话名，确认按 selected 索引取快照。
+#[derive(Clone)]
+pub struct ResumeMenu {
+    /// Browsed index (❯): moves with ↑↓/1-20, applied only on Enter.
+    pub selected: usize,
+    /// 当前会话在列表中的位置（●；不在列表/未设置则 None）。
+    pub current: Option<usize>,
+    /// 会话列表快照（与 items 同序；确认时按 selected 取 Transcript）。
+    pub transcripts: Vec<crate::transcript::Transcript>,
+    /// 列表被截断（超过 RESUME_PICKER_MAX）→ 渲染一行说明。
+    pub truncated: bool,
+}
+
+impl ResumeMenu {
+    pub fn picker(&self) -> crate::tui::picker::PickerModel {
+        crate::tui::picker::PickerModel::new(
+            self.transcripts
+                .iter()
+                .map(|t| {
+                    let count = t.load_messages().unwrap_or_default().len();
+                    crate::tui::picker::PickerItem::new(
+                        t.name(),
+                        t.name(),
+                        format!("{count} 条消息"),
+                    )
+                })
+                .collect(),
+            self.selected,
+            self.current,
+        )
+    }
+
+    /// 场景键位配置：无 s（切换会话即意图）、数字直达 1-20。
+    pub fn keys() -> crate::tui::picker::PickerKeys {
+        crate::tui::picker::PickerKeys {
+            session_only: false,
+            number_jump: true,
+        }
+    }
+}
+
 /// `/think` selector entries: level name + description (everything past off corresponds one-to-one with
 /// THINKING_LEVELS, in the same order; consistency is guaranteed by a test).
 pub const THINK_LEVELS: &[(&str, &str)] = &[
@@ -917,6 +962,8 @@ pub struct Chat {
     pub think_menu: Option<ThinkMenu>,
     /// `/theme` level selector (None = inactive).
     pub theme_menu: Option<ThemeMenu>,
+    /// `/resume` session selector (None = inactive).
+    pub resume_menu: Option<ResumeMenu>,
     /// 当前生效的主题设置（/theme 菜单 ● 标记的数据源；apply_theme 更新）。
     pub theme_setting: ThemeSetting,
     /// Menu-level model-list cache (provider → latest `/v1/models` result):
@@ -1119,6 +1166,7 @@ impl Chat {
             model_menu: None,
             think_menu: None,
             theme_menu: None,
+            resume_menu: None,
             theme_setting,
             models_cache: HashMap::new(),
             tasks_visible: false,
@@ -2597,12 +2645,14 @@ impl Chat {
         }
     }
 
+    /// `/resume [名称或关键词]`：无参打开会话选择器（picker-model.md 提交 C，
+    /// CC 的 /resume 同款 picker）；带参走快速路径（名称/关键词匹配，现状保留）。
     fn slash_resume(&mut self, arg: &str) {
         let home = self.session.home.clone();
         let transcripts = match crate::transcript::list(&home) {
             Ok(t) => t,
             Err(e) => {
-                self.push_slash_output(format!("无法读取会话列表: {e}"));
+                self.push_slash_error(format!("无法读取会话列表: {e}"));
                 return;
             }
         };
@@ -2611,15 +2661,23 @@ impl Chat {
                 self.push_slash_output("没有历史会话。".to_string());
                 return;
             }
-            let mut lines = vec!["历史会话（/resume [名称或关键词] 恢复）：".to_string()];
-            for t in &transcripts {
-                lines.push(format!("  {}", t.name()));
-            }
-            self.push_slash_output(lines.join("\n"));
+            self.open_resume_menu(transcripts);
             return;
         }
-        let Some(found) = transcripts.iter().find(|t| t.name().contains(arg)) else {
-            self.push_slash_output(format!("未找到包含 '{arg}' 的会话。"));
+        self.switch_transcript(
+            transcripts.iter().find(|t| t.name().contains(arg)),
+            arg,
+        );
+    }
+
+    /// 快速路径切换（带参 /resume）：命中即切换，未命中报错。
+    fn switch_transcript(
+        &mut self,
+        found: Option<&crate::transcript::Transcript>,
+        arg: &str,
+    ) {
+        let Some(found) = found else {
+            self.push_slash_error(format!("未找到包含 '{arg}' 的会话。"));
             return;
         };
         let count = found.load_messages().unwrap_or_default().len();
@@ -2631,6 +2689,87 @@ impl Chat {
             "✓ 已切换到会话 {}（{count} 条消息），下一轮回复使用其历史。",
             found.name()
         ));
+    }
+
+    /// 打开 `/resume` 选择器：磁盘快照截断最近 RESUME_PICKER_MAX 个，
+    /// ● 标当前会话（在列表内时），互斥关闭其他菜单。
+    fn open_resume_menu(&mut self, mut transcripts: Vec<crate::transcript::Transcript>) {
+        let truncated = transcripts.len() > RESUME_PICKER_MAX;
+        transcripts.truncate(RESUME_PICKER_MAX);
+        let current = self.session.runtime.transcript.borrow().clone();
+        let current = current.as_ref().and_then(|cur| {
+            transcripts.iter().position(|t| t.path() == cur.path())
+        });
+        let menu = ResumeMenu {
+            selected: current.unwrap_or(0),
+            current,
+            transcripts,
+            truncated,
+        };
+        if menu.picker().is_empty() {
+            return;
+        }
+        self.think_menu = None;
+        self.model_menu = None;
+        self.theme_menu = None;
+        self.resume_menu = Some(menu);
+        self.clear_slash_suggestions();
+    }
+
+    /// Resume menu keys: ↑↓/1-N move (delegated to the PickerModel core),
+    /// Enter switches the session (by selected index into the snapshot), Esc exits.
+    fn resume_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let Some(menu) = &mut self.resume_menu else {
+            return false;
+        };
+        match code {
+            KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(1);
+                menu.selected = core.selected;
+                true
+            }
+            KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(-1);
+                menu.selected = core.selected;
+                true
+            }
+            // Direct jump: 1..=min(len, 9)（>9 项时数字直达只覆盖前 9 个）。
+            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                if let Some(n) = c.to_digit(10)
+                    && core.jump(n as usize)
+                {
+                    menu.selected = core.selected;
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Enter => {
+                // 确认动作按 selected 索引取快照（与 items 同序；value≠label 测试锚点）。
+                let Some(t) = menu.transcripts.get(menu.selected).cloned() else {
+                    return false;
+                };
+                let name = t.name();
+                let count = t.load_messages().unwrap_or_default().len();
+                self.resume_menu = None;
+                let _ = self.session.runtime.transcript_tx.send(Some(t));
+                self.messages.clear();
+                self.slash_lines.clear();
+                self.reset_flushed();
+                self.push_slash_output(format!(
+                    "✓ 已切换到会话 {name}（{count} 条消息），下一轮回复使用其历史。"
+                ));
+                true
+            }
+            KeyCode::Esc => {
+                self.resume_menu = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// `/share`：导出当前会话分享页。默认上传官网分享服务（与 `bingo share`
@@ -3720,6 +3859,9 @@ impl Chat {
             return true;
         }
         if self.theme_menu_key(code, modifiers) {
+            return true;
+        }
+        if self.resume_menu_key(code, modifiers) {
             return true;
         }
         if self.search.is_some() {
@@ -6291,17 +6433,44 @@ mod tests {
         let t_b = crate::transcript::create(&home, &tmp).unwrap();
         let _ = t_b.append(&crate::api::types::Message::user_text("b"));
         let mut chat = test_chat_home(home.clone());
-        let _ = chat.session.runtime.transcript_tx.send(Some(t_a));
+        let _ = chat.session.runtime.transcript_tx.send(Some(t_a.clone()));
         let name_b = t_b.name();
         chat.input = "/resume".to_string();
         chat.submit();
-        let joined = chat.slash_lines.join("\n");
-        assert!(joined.contains(&name_b), "列出会话: {joined}");
+        // 无参 → 打开会话选择器（picker-model.md 提交 C）：列表含 b、● 标当前 a。
+        let menu = chat.resume_menu.as_ref().expect("选择器已打开");
+        let core = menu.picker();
+        assert!(
+            core.items.iter().any(|i| i.label == name_b),
+            "选择器列出会话 b"
+        );
+        assert_eq!(menu.current, Some(1), "● 标当前会话（t_a 较旧，位于索引 1）");
+        // Esc 取消：当前会话不变。
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(chat.resume_menu.is_none());
+        assert_eq!(
+            chat.session.runtime.transcript.borrow().clone().unwrap().name(),
+            t_a.name(),
+            "Esc 不切换"
+        );
 
-        chat.input = format!("/resume {name_b}");
+        // Enter 确认（按 selected 索引取快照，value≠label 锚点）：切换到 b。
+        chat.input = "/resume".to_string();
+        chat.submit();
+        chat.input = String::new();
+        chat.on_key(KeyCode::Char('1'), KeyModifiers::empty());
+        let menu = chat.resume_menu.as_ref().expect("选择器已打开");
+        assert_eq!(menu.selected, 0, "1 直达最新会话");
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(chat.resume_menu.is_none(), "Enter 关闭选择器");
+        let current = chat.session.runtime.transcript.borrow().clone().unwrap();
+        assert_eq!(current.name(), name_b, "Enter 切换会话（按索引取快照）");
+
+        // 带参快速路径保留。
+        chat.input = format!("/resume {}", t_a.name());
         chat.submit();
         let current = chat.session.runtime.transcript.borrow().clone().unwrap();
-        assert_eq!(current.name(), name_b, "切换到目标会话");
+        assert_eq!(current.name(), t_a.name(), "带参快速切换保留");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -43,7 +43,7 @@ use ratatui::style::Color;
 
 use crate::permission::PermissionMode;
 use crate::tui::chat::{
-    Chat, ModelMenu, Row, SettledMark, SlashSuggestion, ThemeMenu, ThinkMenu,
+    Chat, ModelMenu, ResumeMenu, Row, SettledMark, SlashSuggestion, ThemeMenu, ThinkMenu,
     model_footer_label,
 };
 
@@ -53,6 +53,7 @@ pub(crate) struct Menus<'a> {
     pub model: Option<&'a ModelMenu>,
     pub think: Option<&'a ThinkMenu>,
     pub theme: Option<&'a ThemeMenu>,
+    pub resume: Option<&'a ResumeMenu>,
 }
 use crate::tui::gfx;
 use crate::tui::line::{Line, SegStyle, text_width};
@@ -245,6 +246,26 @@ fn suggestion_rows(
                 rows.push(core.hint_row(crate::tui::chat::ThemeMenu::keys(), width, theme));
                 return rows;
             }
+            // `/resume` session selector（picker-model.md 提交 C）：截断时追加说明行。
+            if let Some(resume_menu) = menus.resume {
+                let core = resume_menu.picker();
+                let mut rows: Vec<Row> =
+                    (0..core.items.len()).map(|i| core.row(i, width, theme)).collect();
+                rows.push(core.hint_row(crate::tui::chat::ResumeMenu::keys(), width, theme));
+                if resume_menu.truncated {
+                    rows.push(Row::new(Line::styled(
+                        format!(
+                            "  {}",
+                            crate::tui::markdown::truncate(
+                                "（仅显示最近 20 个会话）",
+                                width.saturating_sub(2),
+                            )
+                        ),
+                        SegStyle::fg(theme.inactive),
+                    )));
+                }
+                return rows;
+            }
             // G9: a bare `/`-query with zero matches gets one dim hint row.
             if no_match {
                 return vec![Row::new(Line::styled(
@@ -410,6 +431,7 @@ fn chrome_rows(chat: &Chat, width: usize, fullscreen: bool) -> Chrome {
             model: chat.model_menu.as_ref(),
             think: chat.think_menu.as_ref(),
             theme: chat.theme_menu.as_ref(),
+            resume: chat.resume_menu.as_ref(),
         },
         chat.slash_no_match,
         &theme,
@@ -1180,6 +1202,7 @@ mod tests {
                         model: chat.model_menu.as_ref(),
                         think: chat.think_menu.as_ref(),
                         theme: chat.theme_menu.as_ref(),
+                        resume: chat.resume_menu.as_ref(),
                     },
                     chat.slash_no_match,
                     &chat.theme,
@@ -1212,7 +1235,7 @@ mod tests {
             "{}",
             row_text(&no_match[0])
         );
-        assert_eq!(suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None }, false, &theme, 80).len(), 2);
+        assert_eq!(suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None , resume: None }, false, &theme, 80).len(), 2);
         // Loading / empty list each take one hint row.
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
@@ -1220,14 +1243,14 @@ mod tests {
             loading: true,
             selected: 0,
         });
-        assert_eq!(suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None }, false, &theme, 80).len(), 1);
+        assert_eq!(suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None , resume: None }, false, &theme, 80).len(), 1);
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
             models: Vec::new(),
             loading: false,
             selected: 0,
         });
-        assert_eq!(suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None }, false, &theme, 80).len(), 1);
+        assert_eq!(suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None , resume: None }, false, &theme, 80).len(), 1);
         // The level-two model list truncates at the 5+5 cap.
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
@@ -1236,13 +1259,13 @@ mod tests {
             selected: 0,
         });
         assert_eq!(
-            suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None }, false, &theme, 80).len(),
+            suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None , resume: None }, false, &theme, 80).len(),
             crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5
         );
         // `/think` menu: one row per level + one hint row; `●` marks the in-effect
         // level, `❯` the browse selection (two separate marks); the model menu takes priority.
         let think = ThinkMenu { selected: 1, current: 0 };
-        let think_rows = suggestion_rows(&[], 0, Menus { model: None, think: Some(&think), theme: None }, false, &theme, 80);
+        let think_rows = suggestion_rows(&[], 0, Menus { model: None, think: Some(&think), theme: None , resume: None }, false, &theme, 80);
         assert_eq!(think_rows.len(), THINK_LEVELS.len() + 1, "6 档 + 提示行");
         assert!(
             row_text(&think_rows[0]).contains("● off"),
@@ -1261,7 +1284,7 @@ mod tests {
         );
         // Overlap: ❯ keeps the prefix slot, ● stays in front of the name.
         let overlap = ThinkMenu { selected: 3, current: 3 };
-        let rows = suggestion_rows(&[], 0, Menus { model: None, think: Some(&overlap), theme: None }, false, &theme, 80);
+        let rows = suggestion_rows(&[], 0, Menus { model: None, think: Some(&overlap), theme: None , resume: None }, false, &theme, 80);
         assert!(
             row_text(&rows[3]).contains("❯ ● high"),
             "重叠行双标记: {}",
@@ -1271,7 +1294,7 @@ mod tests {
         let hint = row_text(think_rows.last().unwrap());
         assert!(hint.contains("Esc 取消"), "提示行: {hint}");
         assert_eq!(
-            suggestion_rows(&[], 0, Menus { model: Some(&menu), think: Some(&think), theme: None }, false, &theme, 80).len(),
+            suggestion_rows(&[], 0, Menus { model: Some(&menu), think: Some(&think), theme: None , resume: None }, false, &theme, 80).len(),
             crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5,
             "模型菜单优先于 think 菜单"
         );
@@ -1281,7 +1304,7 @@ mod tests {
             hint: String::new(),
             description: "显示可用命令".into(),
         }];
-        let rows = suggestion_rows(&slash, 0, Menus { model: Some(&menu), think: None, theme: None }, false, &theme, 80);
+        let rows = suggestion_rows(&slash, 0, Menus { model: Some(&menu), think: None, theme: None , resume: None }, false, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(row_text(&rows[0]).starts_with("❯ /help"), "{}", row_text(&rows[0]));
         // A command with an argument hint renders name + hint in the name column.
@@ -1299,10 +1322,10 @@ mod tests {
         );
         // Every row truncates by width (overwide rows would be wrapped by the terminal, skewing the frame height).
         for width in 10..80usize {
-            for row in suggestion_rows(&slash, 0, Menus { model: Some(&menu), think: None, theme: None }, false, &theme, width) {
+            for row in suggestion_rows(&slash, 0, Menus { model: Some(&menu), think: None, theme: None , resume: None }, false, &theme, width) {
                 assert!(text_width(&row_text(&row)) <= width, "width={width}");
             }
-            for row in suggestion_rows(&[], 0, Menus { model: None, think: Some(&think), theme: None }, false, &theme, width) {
+            for row in suggestion_rows(&[], 0, Menus { model: None, think: Some(&think), theme: None , resume: None }, false, &theme, width) {
                 assert!(text_width(&row_text(&row)) <= width, "width={width}");
             }
         }

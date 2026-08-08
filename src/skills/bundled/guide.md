@@ -97,7 +97,7 @@ Example (.bingo/settings.json):
 `/permissions [allow|deny|ask] [规则]`、
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
 `/skills`（清单，`/技能名` 直接执行）· `/context`（用量）· `/status` ·
-`/compact`（强制压缩）· `/resume [名称]`（恢复历史会话）· `/rename` · `/clear` · `/exit`。
+`/compact`（强制压缩）· `/resume [名称]`（恢复历史会话；无参打开会话选择器，Enter 即恢复）· `/rename` · `/clear` · `/exit`。
 `/team`（项目级编队）：`list`（图纸+运行区同屏）· `start`（拉起/幂等复用）· `status` ·
 `assign <成员> <任务>`（派活）· `stop` · `validate` · `new`（脚手架生成 team.json）·
 `memory list|gc`（跨会话记忆管理）。
