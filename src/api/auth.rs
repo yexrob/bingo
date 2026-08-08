@@ -321,12 +321,18 @@ fn oauth_state() -> String {
     random_urlsafe(16)
 }
 
-/// N URL-safe random bytes (time + pid seeded, no rand dep).
+/// N URL-safe random bytes. Zero-dep: each call mixes a fresh
+/// `RandomState` hasher (per-call OS seed) with time + pid — adequate for
+/// PKCE verifiers / OAuth state (local-attacker threat model, documented
+/// trade-off; no crypto RNG dependency).
 fn random_urlsafe(len: usize) -> String {
+    use std::hash::{BuildHasher, Hasher};
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let mut bytes = vec![0u8; len];
     for (i, b) in bytes.iter_mut().enumerate() {
-        let mix = now.wrapping_mul(31).wrapping_add(i as u128 * 7) ^ std::process::id() as u128;
+        let seed = std::hash::RandomState::new().build_hasher().finish();
+        let mix = seed.wrapping_mul(31).wrapping_add(i as u64 * 7)
+            ^ (now as u64) ^ (std::process::id() as u64);
         *b = (mix >> (i % 64)) as u8 ^ (now >> (i % 8)) as u8;
     }
     URL_SAFE_NO_PAD.encode(&bytes)
@@ -386,6 +392,7 @@ impl<'a> LoopbackPkce<'a> {
         let config = self.config.clone();
         let redirect_uri_cb = redirect_uri.clone();
         let verifier_cb = verifier.clone();
+        let expected_state = state.clone();
         let handle = tokio::spawn(async move {
             let (mut socket, _) = listener
                 .accept()
@@ -396,15 +403,31 @@ impl<'a> LoopbackPkce<'a> {
                 .await
                 .map_err(|e| AuthError::Other(format!("read callback: {e}")))?;
             let head = String::from_utf8_lossy(&buf[..n]).to_string();
-            // GET /auth/callback?code=... HTTP/1.1
-            let code = head
+            // GET /auth/callback?code=...&state=... HTTP/1.1 — the state
+            // nonce is validated (CSRF): a mismatch rejects the login.
+            let (code, state) = head
                 .split_whitespace()
                 .nth(1)
                 .and_then(|path| {
                     let (_, query) = path.split_once('?')?;
-                    query.split('&').find_map(|kv| kv.strip_prefix("code="))
+                    let mut code = None;
+                    let mut state = None;
+                    for kv in query.split('&') {
+                        if let Some(v) = kv.strip_prefix("code=") {
+                            code = Some(v);
+                        } else if let Some(v) = kv.strip_prefix("state=") {
+                            state = Some(v);
+                        }
+                    }
+                    Some((code, state))
                 })
                 .ok_or_else(|| AuthError::Other("callback missing code".into()))?;
+            let Some(code) = code else {
+                return Err(AuthError::Other("callback missing code".into()));
+            };
+            if state != Some(expected_state.as_str()) {
+                return Err(AuthError::Other("callback state mismatch".into()));
+            }
             let code = urlencoding_decode(code);
             let ok = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
             let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, ok.as_bytes()).await;
@@ -984,6 +1007,38 @@ mod tests {
         handle2.abort();
         let state2 = url2.split("state=").nth(1).unwrap_or_default();
         assert_ne!(state, state2, "state 应随机");
+    }
+
+    /// 契约：loopback 回调校验 state（CSRF）——错误 state 拒绝登录；
+    /// 正确 state 通过校验进入 token 交换（本地无真实端点 → 网络错误，
+    /// 而非 state 拒绝）。
+    #[tokio::test]
+    async fn loopback_callback_validates_state() {
+        let http = reqwest::Client::new();
+        let config = OauthFlowConfig::codex();
+        let flow = LoopbackPkce::new(&http, &config);
+        let (_url, redirect_uri, _v, handle) = flow.authorize_url().await.unwrap();
+        // 错误 state → 拒绝。
+        let _ = http.get(format!("{redirect_uri}?code=bad&state=WRONG")).send().await;
+        let res = handle.await.unwrap();
+        assert!(
+            matches!(&res, Err(AuthError::Other(m)) if m.contains("state mismatch")),
+            "错误 state 应拒绝: {res:?}"
+        );
+
+        // 正确 state → 通过校验（进入交换，真实端点不可达 → 网络错误）。
+        let (url2, redirect_uri2, _v2, handle2) = flow.authorize_url().await.unwrap();
+        let state2 = url2.split("state=").nth(1).unwrap();
+        let _ = http
+            .get(format!("{redirect_uri2}?code=good&state={state2}"))
+            .send()
+            .await;
+        let res = handle2.await.unwrap();
+        assert!(
+            !matches!(&res, Err(AuthError::Other(m)) if m.contains("state mismatch")),
+            "正确 state 不应被拒绝: {res:?}"
+        );
+        assert!(res.is_err(), "进入交换后本地端点不可达应报错: {res:?}");
     }
 
     /// Token responses without account_id are backfilled from JWT claims

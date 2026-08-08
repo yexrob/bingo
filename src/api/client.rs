@@ -68,10 +68,30 @@ impl Client {
     }
 
     /// Injectable variant of from_settings (tests use a fake env, avoiding
-    /// real environment variables).
+    /// real environment variables). The auth store resolves against the
+    /// user's HOME.
     pub(crate) fn from_settings_with(
         settings: &crate::settings::Settings,
         env: impl Fn(&str) -> std::result::Result<String, std::env::VarError>,
+    ) -> Result<Self, ClientError> {
+        Self::build(settings, env, &home_dir())
+    }
+
+    /// Build against an explicit home (tests isolate the auth.json read;
+    /// production main passes the same HOME).
+    #[cfg(test)]
+    pub(crate) fn from_settings_at(
+        settings: &crate::settings::Settings,
+        env: impl Fn(&str) -> std::result::Result<String, std::env::VarError>,
+        home: &std::path::Path,
+    ) -> Result<Self, ClientError> {
+        Self::build(settings, env, home)
+    }
+
+    fn build(
+        settings: &crate::settings::Settings,
+        env: impl Fn(&str) -> std::result::Result<String, std::env::VarError>,
+        home: &std::path::Path,
     ) -> Result<Self, ClientError> {
         let http = reqwest::Client::new();
         let api_key = settings
@@ -84,7 +104,6 @@ impl Client {
             env("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|_| providers::anthropic::API_BASE.to_string())
         });
-        let home = home_dir();
         let mut providers: HashMap<String, (Arc<dyn ProviderClient>, EndpointInfo)> =
             HashMap::new();
         let mut preset_names = Vec::new();
@@ -100,7 +119,7 @@ impl Client {
                 // `{type:"api"}` (set via /provider login --manual); absent
                 // → empty key → 401 with a login prompt (D34 §6.5).
                 if preset.oauth_kind.is_none() {
-                    match crate::auth::AuthStore::new(&home).get(preset.name).ok().flatten() {
+                    match crate::auth::AuthStore::new(home).get(preset.name).ok().flatten() {
                         Some(crate::auth::AuthEntry::Api { key }) => Some(key),
                         _ => Some(String::new()),
                     }
@@ -131,7 +150,7 @@ impl Client {
                 base_url.clone(),
                 supports_images,
                 oauth.as_ref(),
-                &home,
+                home,
                 allowlist,
             )
             .map_err(|message| {
@@ -169,7 +188,7 @@ impl Client {
                 base_url.clone(),
                 cfg.supports_images.unwrap_or(false),
                 cfg.oauth.as_ref(),
-                &home,
+                home,
                 None,
             )
             .map_err(|message| {
@@ -550,13 +569,15 @@ mod tests {
     /// preset（opencode-go）未配置 key 时 auth 为空串（401 引导）。
     #[test]
     fn preset_visibility_zero_config() {
+        let tmp = std::env::temp_dir().join(format!("bingo-preset-vis-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
         let settings = crate::settings::Settings {
             api_key: Some("sk-main".into()),
             ..Default::default()
         };
-        let client = Client::from_settings_with(&settings, |_| {
+        let client = Client::from_settings_at(&settings, |_| {
             Err(std::env::VarError::NotPresent)
-        })
+        }, &tmp)
         .unwrap();
         assert_eq!(client.provider_names(), vec!["codex", "opencode-go"], "presets 零配置可见");
         assert!(client.is_preset("codex"));
@@ -568,10 +589,13 @@ mod tests {
             "https://chatgpt.com/backend-api",
             "codex preset 端点"
         );
-        assert!(matches!(
-            client.auth_status("codex"),
-            Some(crate::api::contract::AuthStatus::OAuth { account: None })
-        ));
+        assert!(
+            matches!(
+                client.auth_status("codex"),
+                Some(crate::api::contract::AuthStatus::OAuth { account: None })
+            ),
+            "隔离 home 下 codex preset 未登录"
+        );
         // opencode-go：apiKey 型，未配置 → ApiKey 空。
         assert_eq!(
             client.provider_endpoint("opencode-go").unwrap().1,
@@ -581,6 +605,7 @@ mod tests {
             client.auth_status("opencode-go"),
             Some(crate::api::contract::AuthStatus::ApiKey)
         ));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// P5 merge 矩阵：用户仅覆盖 apiBaseUrl → protocol/oauth/白名单回落 preset。

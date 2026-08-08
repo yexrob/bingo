@@ -6587,7 +6587,9 @@ mod tests {
     /// 显示协议标记 + 未登录态 + apiBaseUrl 缺省→协议默认端点。
     #[test]
     fn slash_provider_switch_warns_on_oauth_not_logged_in() {
-        let mut chat = test_chat();
+        let tmp = std::env::temp_dir().join(format!("bingo-preset-warn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut chat = test_chat_home(tmp.join("home"));
         let mut settings = crate::settings::Settings {
             api_key: Some("sk-main".into()),
             ..Default::default()
@@ -6606,7 +6608,12 @@ mod tests {
             },
         );
         Arc::get_mut(&mut chat.session).unwrap().client =
-            crate::api::client::Client::from_settings(&settings).unwrap();
+            crate::api::client::Client::from_settings_at(
+                &settings,
+                |_| Err(std::env::VarError::NotPresent),
+                &tmp.join("home"),
+            )
+            .unwrap();
         chat.input = "/provider codex".to_string();
         chat.submit();
         let out = chat.slash_lines.join("\n");
@@ -6618,6 +6625,7 @@ mod tests {
         let out = chat.slash_lines.join("\n");
         assert!(out.contains("codex @ https://chatgpt.com/backend-api"), "apiBaseUrl 缺省→preset 端点: {out}");
         assert!(out.contains("（○ 未登录（/provider login codex） · openai · 内置）"), "协议标记 + 未登录态 + 内置: {out}");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// P4：turn 级错误文案补 auth 引导——oauth provider 401 → login 引导（带名）；
