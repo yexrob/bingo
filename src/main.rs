@@ -52,11 +52,14 @@ struct Cli {
     #[arg(short, long)]
     print: bool,
 
-    /// Fullscreen mode (alternate-screen canvas, input pinned at the bottom, in-app
-    /// scrolling); default is inline: output like a normal terminal, history in the
-    /// terminal scrollback
-    #[arg(long)]
+    /// Fullscreen mode (default): alternate-screen canvas, input pinned at the
+    /// bottom, and in-app scrolling. Retained as an explicit compatibility flag.
+    #[arg(long, conflicts_with = "inline")]
     fullscreen: bool,
+
+    /// Inline mode: finalized output stays in the terminal scrollback
+    #[arg(long, conflicts_with = "fullscreen")]
+    inline: bool,
 
     /// Model to use (defaults to settings `model`, then the built-in default)
     #[arg(long)]
@@ -81,6 +84,12 @@ struct Cli {
     command: Option<Command>,
 
     prompt: Vec<String>,
+}
+
+impl Cli {
+    fn fullscreen_mode(&self) -> bool {
+        self.fullscreen || !self.inline
+    }
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -121,6 +130,7 @@ async fn main() {
 /// The actual main flow (formerly the `main` body). Errors propagate upward and exit through [`main`].
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let fullscreen = cli.fullscreen_mode();
 
     let home = match std::env::var("HOME") {
         Ok(h) => PathBuf::from(h),
@@ -338,7 +348,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             extract_memory(&session, &outcome.messages, &home, &project_dir).await;
         } else {
             drop(initial_messages); // in interactive mode, --continue history is reused by later turns
-            tui::run_tui_session(session.clone(), expand_rx, cli.fullscreen).await?;
+            tui::run_tui_session(session.clone(), expand_rx, fullscreen).await?;
         }
         Ok::<(), Box<dyn std::error::Error>>(())
     }
@@ -483,5 +493,42 @@ fn persist_team_memory(session: &Arc<Session>, home: &Path, project_dir: &std::p
                 &history,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn interactive_mode_defaults_to_fullscreen() {
+        let cli = Cli::try_parse_from(["bingo"]).unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(cli.fullscreen_mode());
+    }
+
+    #[test]
+    fn inline_flag_selects_terminal_scrollback_mode() {
+        let cli =
+            Cli::try_parse_from(["bingo", "--inline"]).unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(!cli.fullscreen_mode());
+    }
+
+    #[test]
+    fn fullscreen_flag_remains_a_compatible_explicit_selection() {
+        let cli = Cli::try_parse_from(["bingo", "--fullscreen"])
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(cli.fullscreen_mode());
+    }
+
+    #[test]
+    fn inline_and_fullscreen_flags_conflict() {
+        let error = Cli::try_parse_from(["bingo", "--inline", "--fullscreen"])
+            .expect_err("display modes must be mutually exclusive");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

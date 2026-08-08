@@ -82,7 +82,23 @@ fn help_is_a_fast_path_even_with_invalid_settings() {
     let stdout = String::from_utf8(output.stdout).expect("help output must be UTF-8");
     assert!(stdout.starts_with("Rust agent CLI\n"));
     assert!(stdout.contains("Usage: bingo"));
+    assert!(stdout.contains("--inline"));
+    assert!(stdout.contains("Inline mode: finalized output stays in the terminal scrollback"));
+    assert!(stdout.contains("--fullscreen"));
+    assert!(stdout.contains("Fullscreen mode (default)"));
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn conflicting_display_modes_fail_at_the_cli_boundary() {
+    let root = TempDir::new("display-mode-conflict");
+
+    let output = run(&root, &["--inline", "--fullscreen"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("clap error output must be UTF-8");
+    assert!(stderr.contains("the argument '--inline' cannot be used with '--fullscreen'"));
 }
 
 #[test]

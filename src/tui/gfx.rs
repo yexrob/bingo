@@ -506,6 +506,11 @@ pub async fn load_image(url: &str, cwd: &Path, cap: &ImageCap) -> Option<crate::
 
 /// Fetch the raw bytes by url type.
 async fn fetch_bytes(url: &str, cwd: &Path) -> Option<Vec<u8>> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    fetch_bytes_with_home(url, cwd, home.as_deref()).await
+}
+
+async fn fetch_bytes_with_home(url: &str, cwd: &Path, home: Option<&Path>) -> Option<Vec<u8>> {
     // CommonMark angle-bracket-wrapped urls (`![alt](<path with spaces>)`)
     // are unwrapped, staying consistent with the render layer's key.
     let url = url
@@ -528,7 +533,9 @@ async fn fetch_bytes(url: &str, cwd: &Path) -> Option<Vec<u8>> {
         return resp.bytes().await.ok().map(|b| b.to_vec());
     }
     let path = Path::new(url);
-    let path = if path.is_absolute() {
+    let path = if let Some(rest) = url.strip_prefix("~/") {
+        home?.join(rest)
+    } else if path.is_absolute() {
         path.to_path_buf()
     } else {
         cwd.join(path)
@@ -1056,6 +1063,15 @@ mod tests {
         std::fs::write(tmp.join("sub/img.png"), b"x").unwrap();
         let rel = runtime.block_on(fetch_bytes("sub/img.png", &tmp));
         assert_eq!(rel, Some(b"x".to_vec()), "相对路径按 cwd 解析");
+        let home = tmp.join("home");
+        std::fs::create_dir_all(home.join("Documents")).unwrap();
+        std::fs::write(home.join("Documents/image.png"), b"home").unwrap();
+        let tilde = runtime.block_on(fetch_bytes_with_home(
+            "~/Documents/image.png",
+            Path::new("/nonexistent"),
+            Some(&home),
+        ));
+        assert_eq!(tilde, Some(b"home".to_vec()), "波浪号路径按 HOME 解析");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -17,6 +17,9 @@ commands, and verification steps in conclusions. Never speculate about features 
 
 ## Quick start
 
+- Interactive sessions use the fullscreen alternate-screen canvas by default; run `bingo --inline`
+  when finalized output should remain in terminal scrollback. `--fullscreen` remains a compatible
+  explicit selection and conflicts with `--inline`.
 - Starting requires an API key: `ANTHROPIC_API_KEY` (Anthropic) or `DEEPSEEK_API_KEY`
   (DeepSeek); custom endpoints use `ANTHROPIC_BASE_URL`. These can also go in settings.json
   (`apiKey`/`apiBaseUrl`, see below; settings take precedence over environment variables). Startup errors if missing.
@@ -223,13 +226,13 @@ Example (.bingo/settings.json):
   append-only decision records; `/team memory list|gc` manages it).
 - **Skills**: built-in `guide` (this guide) + `~/.config/bingo/skills/` and `.bingo/skills/`
   directory skills (same-name disk skills override built-ins); the model invokes them via SkillTool, users run them via `/skill-name`.
-- **Images**: markdown images in model replies (`![alt](path)`, supports relative paths/data/http(s))
-  render inline on kitty-graphics-capable terminals (Ghostty/kitty/WezTerm etc.); other terminals show a
-  `#[image]` placeholder. Inside tmux, bingo enables passthrough automatically
-  (`tmux set -p allow-passthrough on`) and images render via Unicode placeholders (U=1) when the
-  outer terminal is Ghostty/kitty; an outer WezTerm/Konsole (no U=1) or an unrecognized outer
-  terminal keeps the `#[image]` placeholder with a one-time notice. Images load automatically
-  with the message and render when the message settles — no extra command needed.
+- **Images**: markdown images in model replies (`![alt](path)`, supports `~/`, relative paths/data/http(s))
+  render inline in `--inline` mode on kitty-graphics-capable terminals (Ghostty/kitty/WezTerm etc.);
+  fullscreen and unsupported terminals show a `#[image]` placeholder. Inside tmux, bingo enables
+  passthrough automatically (`tmux set -p allow-passthrough on`) and images render via Unicode
+  placeholders (U=1) when the outer terminal is Ghostty/kitty; an outer WezTerm/Konsole (no U=1)
+  or an unrecognized outer terminal keeps the `#[image]` placeholder with a one-time notice. Images
+  load automatically with the message and render when the message settles — no extra command needed.
 - **MCP**: stdio and streamable HTTP (`type: "http"`, with custom headers) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).

@@ -29,9 +29,10 @@ produces intent; side effects are gated by the harness.
 - **Experience library**: agents accumulate reusable operational experience
   per project (trigger/summary/steps/verify), shared across sessions via
   Propose/Commit/Query/Forget tools.
-- **TUI**: ratatui dual-mode (default inline, embedded in the terminal
-  scrollback; `--fullscreen` uses an alternate-screen canvas), kitty-graphics
-  inline image rendering, reverse history search, and a slash-command menu.
+- **TUI**: ratatui dual-mode (default fullscreen alternate-screen canvas;
+  `--inline` keeps finalized output in terminal scrollback and enables
+  kitty-graphics image rendering), reverse history search, and a slash-command
+  menu.
 - **Skills**: drop-in `SKILL.md` (YAML frontmatter + markdown); bundled `guide`
   skill plus user/project skill directories.
 - **MCP**: stdio and streamable HTTP servers, adapted to the same Tool trait.
@@ -108,7 +109,8 @@ cargo clippy -- -D warnings   # lint must pass with zero warnings
 2. **Run**:
 
 ```bash
-bingo                       # interactive TUI (inline mode by default)
+bingo                       # interactive TUI (fullscreen mode by default)
+bingo --inline              # inline mode: keep history in terminal scrollback
 bingo -p "fix this bug"      # headless: prompt argument, reply to stdout
 bingo -p < prompt.txt       # headless: read the prompt from stdin
 bingo --continue            # resume the most recent session
@@ -121,7 +123,8 @@ Startup fails with an error if no API key is present.
 | Option | Description |
 |---|---|
 | `-p, --print` | headless mode: print the reply to stdout (prompt from argument or stdin) |
-| `--fullscreen` | fullscreen mode (alternate-screen canvas, input docked at bottom, in-app scrolling); default is inline (history in terminal scrollback) |
+| `--inline` | inline mode: keep finalized output in terminal scrollback instead of using the default fullscreen canvas; conflicts with `--fullscreen` |
+| `--fullscreen` | explicitly select the default fullscreen mode (alternate-screen canvas, input docked at bottom, in-app scrolling); retained for compatibility; conflicts with `--inline` |
 | `--model <name>` | use the given model (falls back to the `model` settings key, then `claude-sonnet-5`) |
 | `--no-team` | don't auto-start the project team (overrides settings `team.autoStart`) |
 | `--permission-mode <mode>` | permission mode: `default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions` (default from settings) |
@@ -181,13 +184,14 @@ published URL. The equivalent CLI is `bingo share [session] [--public]
 
 ### Image rendering
 
-Markdown images in model replies (`![alt](path)`, supporting relative paths /
-data: / http(s)) render inline on kitty-graphics terminals (Ghostty/kitty,
-etc.); other terminals show a `#[image]` placeholder. Inside tmux, bingo
-enables passthrough automatically (`tmux set -p allow-passthrough on`) and the
-outer terminal must support kitty Unicode placeholders (Ghostty/kitty);
-WezTerm and Konsole speak the graphics protocol but not placeholders, so they
-still show the `#[image]` placeholder behind tmux.
+Markdown images in model replies (`![alt](path)`, supporting `~/`, relative
+paths, data:, and http(s)) render inline in `--inline` mode on kitty-graphics
+terminals (Ghostty/kitty, etc.); fullscreen and unsupported terminals show a
+`#[image]` placeholder. Inside tmux, bingo enables passthrough automatically
+(`tmux set -p allow-passthrough on`) and the outer terminal must support kitty
+Unicode placeholders (Ghostty/kitty); WezTerm and Konsole speak the graphics
+protocol but not placeholders, so they still show the `#[image]` placeholder
+behind tmux.
 
 ## Configuration (settings.json)
 
@@ -485,7 +489,7 @@ CLI (clap)
 Core loop semantics: **the model only produces tool_use intent; permissions,
 parallelism, side effects, compaction, memory, and the UI are the local
 harness's job**. Design decisions live in
-[`notes/research.md`](notes/research.md) (D1–D31).
+[`notes/research.md`](notes/research.md) (D1–D36).
 
 ## Project layout
 
@@ -520,7 +524,7 @@ src/
 tests/
   fixtures/        integration-test fixtures
 notes/
-  research.md      technical decision record (D1–D31)
+  research.md      technical decision record (D1–D36)
 ```
 
 ## Development conventions

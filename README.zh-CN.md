@@ -21,8 +21,9 @@ Rust 实现的本地 agent CLI（agent harness）。在终端里驱动大模型�
 - **经验库（Experience）**：agent 按项目沉淀可复用的操作经验
   （trigger/summary/steps/verify），跨会话复利，Propose/Commit/Query/Forget
   工具维护。
-- **TUI**：ratatui 双模式（默认 inline 嵌入终端 scrollback，`--fullscreen` 备用屏
-  canvas），kitty graphics 内联渲染图片，历史反向搜索，slash 命令菜单。
+- **TUI**：ratatui 双模式（默认 fullscreen 备用屏 canvas，`--inline` 将已完成
+  内容保留在终端 scrollback 并启用 kitty graphics 图片渲染），历史反向搜索，
+  slash 命令菜单。
 - **技能（Skills）**：`SKILL.md`（YAML frontmatter + markdown）即插即用，
   内置 `guide` 技能 + 用户/项目目录技能。
 - **MCP**：stdio 与 streamable HTTP 服务器接入，自动适配为同构工具。
@@ -93,7 +94,8 @@ cargo clippy -- -D warnings   # lint 必须零告警
 2. **启动**：
 
 ```bash
-bingo                       # 交互式 TUI（默认 inline 模式）
+bingo                       # 交互式 TUI（默认 fullscreen 模式）
+bingo --inline              # inline 模式：历史保留在终端 scrollback
 bingo -p "修复这个 bug"       # headless：prompt 参数，结果打到 stdout
 bingo -p < prompt.txt       # headless：从 stdin 读 prompt
 bingo --continue            # 恢复最近一次会话
@@ -106,7 +108,8 @@ bingo --continue            # 恢复最近一次会话
 | 参数 | 说明 |
 |---|---|
 | `-p, --print` | headless 模式：直接把回复打到 stdout（prompt 取参数或 stdin） |
-| `--fullscreen` | 全屏模式（备用屏 canvas，输入吸底、app 内滚动）；默认 inline（历史在终端 scrollback） |
+| `--inline` | inline 模式：不使用默认全屏 canvas，已完成内容保留在终端 scrollback；与 `--fullscreen` 互斥 |
+| `--fullscreen` | 显式选择默认全屏模式（备用屏 canvas，输入吸底、app 内滚动）；为兼容旧调用保留；与 `--inline` 互斥 |
 | `--model <名>` | 使用指定模型（缺省依次回落 settings `model`、内置 `claude-sonnet-5`） |
 | `--no-team` | 不自动拉起项目团队（覆盖 settings `team.autoStart`） |
 | `--permission-mode <模式>` | 权限模式：`default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions`（默认取 settings） |
@@ -159,12 +162,12 @@ bingo --continue            # 恢复最近一次会话
 
 ### 图片渲染
 
-模型回复中的 markdown 图片（`![alt](路径)`，支持相对路径 / data: / http(s)）在
-支持 kitty graphics 的终端（Ghostty/kitty 等）内联渲染，其余终端显示
-`#[image]` 占位。tmux 内 bingo 会自动开启 passthrough（`tmux set -p
-allow-passthrough on`），外层终端需支持 kitty Unicode 占位符（Ghostty/kitty）；
-WezTerm/Konsole 虽支持 graphics 协议但不支持占位符，tmux 下仍显示 `#[image]`
-占位。
+模型回复中的 markdown 图片（`![alt](路径)`，支持 `~/`、相对路径、data:、http(s)）
+仅在 `--inline` 模式下于支持 kitty graphics 的终端（Ghostty/kitty 等）内联渲染；
+fullscreen 与不支持该协议的终端显示 `#[image]` 占位。tmux 内 bingo 会自动开启
+passthrough（`tmux set -p allow-passthrough on`），外层终端需支持 kitty Unicode
+占位符（Ghostty/kitty）；WezTerm/Konsole 虽支持 graphics 协议但不支持占位符，
+tmux 下仍显示 `#[image]` 占位。
 
 ## 配置（settings.json）
 
@@ -425,7 +428,7 @@ CLI (clap)
 
 核心循环语义：**模型只产出 tool_use 意图；权限、并行、副作用、压缩、记忆与
 UI 由本地 harness 负责**。设计决策见 [`notes/research.md`](notes/research.md)
-（D1–D31）。
+（D1–D36）。
 
 ## 项目结构
 
@@ -460,7 +463,7 @@ src/
 tests/
   fixtures/        集成测试夹具
 notes/
-  research.md      技术决策记录（D1–D31）
+  research.md      技术决策记录（D1–D36）
 ```
 
 ## 开发约定

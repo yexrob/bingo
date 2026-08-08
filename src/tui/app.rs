@@ -1,7 +1,7 @@
 //! Event loop and frame assembly.
 //!
-//! Inline (default) layout, top to bottom — everything below the transcript is
-//! "chrome", and the chrome rows are *built*, never predicted:
+//! Shared fullscreen/inline layout, top to bottom — everything below the
+//! transcript is "chrome", and the chrome rows are *built*, never predicted:
 //!
 //! ```text
 //! [transcript]  live tail only (settled rows already went to scrollback)

@@ -46,10 +46,10 @@ use crate::query::Session;
 use crate::tui::chat::Chat;
 use crate::tui::theme::{Theme, ThemeSetting};
 
-/// Start a TUI session. `fullscreen=false` (default): inline mode — finalized
-/// content goes into the terminal scrollback and the viewport only paints the
-/// live tail; `fullscreen=true`: fullscreen canvas (in-app scrolling + mouse
-/// interaction).
+/// Start a TUI session. `fullscreen=true` (default): alternate-screen canvas
+/// with in-app scrolling and mouse interaction; `fullscreen=false`: inline
+/// mode, where finalized content enters terminal scrollback and the viewport
+/// only paints the live tail.
 pub async fn run_tui_session(
     session: Arc<Session>,
     expand_rx: tokio::sync::watch::Receiver<bool>,
