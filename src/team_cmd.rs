@@ -88,7 +88,10 @@ fn def_zone(def: &crate::team::TeamDef, defs: &[crate::agents::AgentDef]) -> Vec
             crate::agents::AgentDefSource::User => "[用户]",
             crate::agents::AgentDefSource::Unknown => "",
         };
-        out.push(format!("  {} → {} {}（{}）", m.name, m.agent, badge, m.description));
+        out.push(format!(
+            "  {} → {} {}（{}）",
+            m.name, m.agent, badge, m.description
+        ));
     }
     out
 }
@@ -199,11 +202,8 @@ fn status(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
 }
 
 fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
-    let (def, _defs) = match load_or_no_team(
-        session,
-        cwd,
-        "没有 .bingo/team.json（team 未固定）。",
-    ) {
+    let (def, _defs) = match load_or_no_team(session, cwd, "没有 .bingo/team.json（team 未固定）。")
+    {
         Ok(x) => x,
         Err(out) => return out,
     };
@@ -233,7 +233,9 @@ fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
                 message,
                 &[member],
             );
-            vec![format!("✓ 已派给 {member} · 完成后通知（/team status 查看状态）")]
+            vec![format!(
+                "✓ 已派给 {member} · 完成后通知（/team status 查看状态）"
+            )]
         }
         Err(e) => vec![format!("✗ 派发失败：{e}")],
     }
@@ -334,7 +336,11 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
         Ok(()) => {
             let count = defs.len();
             vec![
-                format!("✓ 已生成 {}（{} 成员 · serial 频道）", path.display(), count),
+                format!(
+                    "✓ 已生成 {}（{} 成员 · serial 频道）",
+                    path.display(),
+                    count
+                ),
                 "  产物已通过校验（/team start 拉起 · 手动精简 members 后 /team validate 复查）"
                     .to_string(),
             ]
@@ -371,7 +377,11 @@ fn memory(session: &Arc<Session>, cwd: &Path, sub: &str) -> Vec<String> {
             )];
             for e in entries.flatten() {
                 let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                out.push(format!("  {} · {} B", e.file_name().to_string_lossy(), size));
+                out.push(format!(
+                    "  {} · {} B",
+                    e.file_name().to_string_lossy(),
+                    size
+                ));
             }
             out
         }
@@ -415,11 +425,8 @@ mod tests {
     use super::*;
 
     fn session(name: &str) -> (Arc<Session>, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "bingo-teamcmd-{}-{}",
-            name,
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("bingo-teamcmd-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let project = root.join("proj");
         std::fs::create_dir_all(project.join(".bingo/agents")).unwrap();
@@ -435,7 +442,6 @@ mod tests {
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&root, "t")),
-            last_task_reminder_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
@@ -467,7 +473,10 @@ mod tests {
         let instances = s.agents.list();
         assert_eq!(instances.len(), 2, "qa + dev 两个成员");
         assert!(instances.iter().all(|a| a.state == AgentState::Idle));
-        assert!(s.channels.info("proj").is_some(), "频道 = team 名（缺省取目录名）");
+        assert!(
+            s.channels.info("proj").is_some(),
+            "频道 = team 名（缺省取目录名）"
+        );
         let _ = std::fs::remove_dir_all(project.parent().unwrap());
     }
 
@@ -479,7 +488,10 @@ mod tests {
         let _ = new_team(&s, &project, "qt");
 
         let out = status(&s, &project);
-        assert!(out.iter().any(|l| l.contains("○ 离线")), "未拉起成员为离线: {out:?}");
+        assert!(
+            out.iter().any(|l| l.contains("○ 离线")),
+            "未拉起成员为离线: {out:?}"
+        );
 
         let out = assign(&s, &project, "ghost 干点活".to_string());
         assert!(out[0].contains("不是 qt 的成员"), "{out:?}");

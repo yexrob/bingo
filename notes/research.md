@@ -9,7 +9,7 @@
 ┌─────────────────────────────────────────────────────────────────────┐
 │L1  CLI entry · clap (D8)                                            │
 │  --version/--help fast path → env sanitize → settings pre-read →    │
-│  MCP connect → branch: TUI (iocraft) ｜ headless --print             │
+│  MCP connect → branch: TUI (ratatui, D26) ｜ headless --print        │
 └───────────────────────────────┬─────────────────────────────────────┘
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -72,7 +72,7 @@ Round-trip principle: `the model only emits tool_use; the local harness owns per
 - mcpServers config → connect → list_tools → adapt into the same Tool trait (isMcp + mcpInfo).
 - Don't touch other MCP crates (mcp-server / mcplease have no client or are rudimentary).
 
-### D4. TUI: iocraft (declarative components)
+### D4. TUI: iocraft (superseded by D26)
 
 - `iocraft` 0.8.4 (declarative hooks + flexbox + fullscreen render loop); the component architecture is isomorphic to ink; `rsmarkdown-core` (streaming markdown parsing) is kept for AST → line rendering.
 - bingo only wires components: the Chat component consumes stream events, the permission card consumes canUseTool, Task → tasks, Agent tool → agents.
@@ -144,19 +144,19 @@ Round-trip principle: `the model only emits tool_use; the local harness owns per
 2. Concurrent queue + Hooks runtime (shell hook, JSON stdin/stdout)
 3. System prompt assembly + transcript storage + token budget (D10/D11/D12)
 4. MCP integration (rmcp → Tool adaptation)
-5. TUI wiring (iocraft) + slash commands
+5. TUI wiring (ratatui, D26) + slash commands
 6. Compact + CLAUDE.md/memdir memory + subagents (Agent tool)
 7. Later: sandbox, plugins, worktree/teammate (deferred items from D13/D14)
 
 ## References
 
 - goose (aaif-goose/goose, pure-Rust agent; permission gate + execution + agents structure)
-- iocraft README (component API, render loop, hooks semantics)
+- ratatui and crossterm documentation (current rendering/runtime stack, D26)
 - [`notes/design/feedback-states.md`](./design/feedback-states.md) (feedback-state spec: unified design conventions for user-visible feedback states, covering both the GUI/CLI sides and the error-code contract)
 
 ## Decisions (continued)
 
-### D16. TUI rendering layer: iocraft declarative components (migrated from the ratatui family)
+### D16. TUI rendering layer: iocraft declarative components (superseded by D26)
 
 - **Rationale**: declarative components (hooks + flexbox + fullscreen render loop) are the efficient shape for terminal UI; after the migration, bingo's UI architecture is isomorphic to mainstream agent TUIs, so layouts can be matched 1:1 against the reference implementation.
 - **Trade-offs**: `rsmarkdown-tui` (the App/Component framework, ~12k lines) is dropped entirely; `rsmarkdown-core` (streaming markdown parsing, display-independent) is kept. The whole rendering layer is rewritten as iocraft elements (no ratatui Line adapter bridge kept).
@@ -403,14 +403,6 @@ Requirement (named by the user): ① teams are fixed to a project (committable),
   - **Fragment cleanup**: the `/team memory list|show|gc|merge|export` command family; gc has a TTL; corrupted/orphaned files use the same visual language as config errors (no new styles).
   - **Restore timing**: auto-restore on startup launch, one unobtrusive summary line; restore and launch both go through spawn_team; missing files silently fall back to empty history.
 - **Acceptance assertion chain**: scaffold output → validate passes → start doesn't fail on config; memory roundtrip (save → restart → restore equivalent); source cross-layer override; behavior fully unchanged for old projects without a team section.
-||||||| 0bc4c6c
-- **症状**：窗口 resize 后样式乱——落盘行按旧宽度折行残留，动态区重排后错位。
-- **语义实证**（用户指出的关键点）：**视口内的内容不是 Static 的**——内容只在滚出视口后才冻结；消息重渲染依赖 resize；resize 走 fullReset：clearTerminal + 按新宽度全量重写（含内存累积的 fullStaticOutput）。
-- **实现**：inline 模式尺寸变化（last_size 检测，首帧除外）→ 置 `chat.dirty`（强制按新宽度重建 doc——tick 未跑时 dirty 未置位，否则重播用旧宽度文档）→ 置 replay 标志 → 落盘阶段执行：`\x1b[2J\x1b[H`（清可见区 + 回顶）+ 按新宽度重绘"视口内的落盘行"（`rows[printed-N..printed]`，N ≈ 屏高−动态区高，视口外 scrollback 保持原样）；printed 不重复计数。
-- **连带**：`reply_cache`（markdown 渲染缓存）不区分宽度 → 宽度变化时清空（`prev_build_width` 跟踪），否则消息文本沿用旧宽度折行。
-- **排坑**：初版用 `width_changed` 强制 build_rows 导致 mock 渲染循环停滞（帧调度破坏），改"尺寸变化 → 置 dirty"走正常重建路径。
-- 验证：178 测试全过；PTY 100→60 resize：2J 恰 1 次、重播行按 60 折行（welcome 窄栏文本溢出与用户消息不折行为既有布局行为）。
-
 ### D20f. 频繁 resize panic（落盘游标越界）
 
 - **症状**：连续 resize 时 `thread 'main' panicked at components.rs: range end index 28 out of range for slice of length 26`。
@@ -611,3 +603,12 @@ Requirement (named by the user): ① teams are fixed to a project (committable),
 - **opencode-go 订阅修正确认**（调研修正）：实为 API-key 订阅非 OAuth → 落地 = 命名 provider + protocol openai + apiKey，零 OAuth 代码；端点 P3 时核实。
 - **能力协商 v1 静态声明**（协议默认 + config 覆盖，无运行时协商）；`cacheControl` 为 anthropic-only（openai 侧 v1 不接缓存）；reasoning 摘要映射 thinking UI、不回放 verbatim。
 - **验证**：cargo build + clippy -D warnings + test --bin bingo 全绿（P0 639 / P1 650）；mock server 双协议同回合 fixture 断言同一 StreamEvent 序列（§9 契约测试）；提交两枚只进 feat/provider-oauth（♻️ refactor + ✨ feat），不碰 dev/main。
+
+### D35. Release integrity and executable acceptance gates
+
+- **Problem**: release publication previously built directly from any `v*` tag without proving that the tag matched `Cargo.toml`; CI skipped integration-test targets and formatting; archives were uploaded without executing the packaged binary. This allowed a tag/package identity mismatch and left the real CLI process boundary outside the gate.
+- **Identity contract**: a release tag must be exactly `v<package.version>`. `scripts/check_release_version.py` reads the manifest with the Python standard library and rejects malformed or mismatched tags before any release build. The current `v0.3.1` tag therefore requires package version `0.3.1` in both `Cargo.toml` and `Cargo.lock`.
+- **CI gate**: every supported host runs `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked --all-targets`; a separate rustfmt job runs `cargo fmt --all -- --check`. CI and release workflows default to read-only repository permissions.
+- **Release gate**: publication depends on a quality job that repeats identity, formatting, check, clippy, and all-target tests. Each platform archive is then unpacked by `scripts/smoke_release_archive.py` on its native architecture (including the dedicated Intel macOS runner); it must contain exactly one `bingo`/`bingo.exe`, exit successfully for `--version`, write exactly `bingo <tag-version>` to stdout, and keep stderr empty. Workflows install a pinned Python runtime before invoking the standard-library-only gate scripts. Only the final publication job receives `contents: write`.
+- **CLI acceptance seam**: `tests/cli_black_box.rs` executes the Cargo-built binary in an isolated HOME/config directory. It asserts that `--version` and `--help` bypass invalid settings and that a representative non-TTY configuration failure has a non-zero exit, empty stdout, one stable `[error] code=CONFIG_INVALID msg=...` stderr line, and no ANSI escapes.
+- **Scope**: these gates do not replace focused unit/component tests; they prove the packaging and process boundaries that in-process tests cannot cover. Release publication remains tag-triggered, but a bad tag, failing quality check, malformed archive, wrong binary version, extra binary, non-zero exit, or stderr output blocks publication.

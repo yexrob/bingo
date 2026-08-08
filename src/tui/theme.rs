@@ -114,12 +114,7 @@ impl Theme {
             code_block_bg: Color::Rgb(24, 24, 24),
             link: Color::Blue,
             math: Color::Magenta,
-            headings: vec![
-                Color::White,
-                Color::Cyan,
-                Color::Blue,
-                Color::DarkGray,
-            ],
+            headings: vec![Color::White, Color::Cyan, Color::Blue, Color::DarkGray],
             quote: Color::Gray,
             quote_bar: Color::Blue,
             task_done: Color::Green,
@@ -279,11 +274,9 @@ impl Theme {
     /// `ESC ] 11 ; ? ESC \`, reads back `rgb:RRRR/GGGG/BBBB`, and judges by
     /// BT.709 relative luminance: > 0.5 means light.
     pub async fn detect_system_theme() -> Option<bool> {
-        let buf = Self::query_terminal(
-            &[b"\x1b]11;?\x1b\\"],
-            std::time::Duration::from_millis(200),
-        )
-        .await?;
+        let buf =
+            Self::query_terminal(&[b"\x1b]11;?\x1b\\"], std::time::Duration::from_millis(200))
+                .await?;
         theme_from_osc(&buf)
     }
 
@@ -521,7 +514,11 @@ fn theme_from_osc(data: &[u8]) -> Option<bool> {
             }
             Some(u16::from_str_radix(hex, 16).ok()? as f64 / (16f64.powi(n as i32) - 1.0))
         };
-        (comp(parts.next())?, comp(parts.next())?, comp(parts.next())?)
+        (
+            comp(parts.next())?,
+            comp(parts.next())?,
+            comp(parts.next())?,
+        )
     } else {
         let rest = payload.strip_prefix('#')?;
         let n = rest.len() / 3;
@@ -549,14 +546,8 @@ mod tests {
     fn dark_matches_claude_code_tokens() {
         let t = Theme::dark();
         assert_eq!(t.claude, Color::Rgb(215, 119, 87));
-        assert_eq!(
-            t.permission,
-            Color::Rgb(177, 185, 249)
-        );
-        assert_eq!(
-            t.user_message_bg,
-            Color::Rgb(55, 55, 55)
-        );
+        assert_eq!(t.permission, Color::Rgb(177, 185, 249));
+        assert_eq!(t.user_message_bg, Color::Rgb(55, 55, 55));
     }
 
     #[test]
@@ -644,10 +635,19 @@ mod tests {
     #[test]
     fn osc11_parses_rgb_components() {
         // Dark: low luminance → true.
-        assert_eq!(theme_from_osc(b"\x1b]11;rgb:0000/0000/0000\x1b\\"), Some(true));
-        assert_eq!(theme_from_osc(b"\x1b]11;rgb:1a1a/1a1a/1a1a\x1b\\"), Some(true));
+        assert_eq!(
+            theme_from_osc(b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
+            Some(true)
+        );
+        assert_eq!(
+            theme_from_osc(b"\x1b]11;rgb:1a1a/1a1a/1a1a\x1b\\"),
+            Some(true)
+        );
         // Light: high luminance → false.
-        assert_eq!(theme_from_osc(b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\"), Some(false));
+        assert_eq!(
+            theme_from_osc(b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\"),
+            Some(false)
+        );
         // Short form (Terminal.app / kitty etc., 1-4 hex digits).
         assert_eq!(theme_from_osc(b"\x1b]11;rgb:ff/ff/ff\x1b\\"), Some(false));
         assert_eq!(theme_from_osc(b"\x1b]11;rgb:00/00/00\x1b\\"), Some(true));

@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use rmcp::model::{CallToolRequestParams, Tool as McpToolModel};
 use rmcp::service::RunningService;
+use rmcp::transport::TokioChildProcess;
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
-use rmcp::transport::TokioChildProcess;
-use async_trait::async_trait;
 use rmcp::{RoleClient, serve_client};
 use thiserror::Error;
 use tokio::process::Command as TokioCommand;
@@ -71,10 +71,7 @@ pub enum McpStatus {
 }
 
 impl McpManager {
-    pub fn new(
-        servers: HashMap<String, McpServerConfig>,
-        disabled: HashSet<String>,
-    ) -> Self {
+    pub fn new(servers: HashMap<String, McpServerConfig>, disabled: HashSet<String>) -> Self {
         Self {
             servers,
             disabled,
@@ -142,10 +139,11 @@ impl McpManager {
     }
 
     async fn connect_one(&mut self, name: &str) -> Result<(), String> {
-        let result = match tokio::time::timeout(self.connect_timeout, self.connect_one_inner(name)).await {
-            Ok(result) => result,
-            Err(_) => Err(format!("连接超时（{}s）", self.connect_timeout.as_secs())),
-        };
+        let result =
+            match tokio::time::timeout(self.connect_timeout, self.connect_one_inner(name)).await {
+                Ok(result) => result,
+                Err(_) => Err(format!("连接超时（{}s）", self.connect_timeout.as_secs())),
+            };
         if let Err(detail) = &result {
             self.failures.insert(name.to_string(), detail.clone());
         }
@@ -239,11 +237,9 @@ impl McpManager {
                         .map_err(|e| format!("http 头 {key} 值非法: {e}"))?;
                     headers.insert(header_name, header_value);
                 }
-                let transport =
-                    StreamableHttpClientTransport::from_config(
-                        StreamableHttpClientTransportConfig::with_uri(url)
-                            .custom_headers(headers),
-                    );
+                let transport = StreamableHttpClientTransport::from_config(
+                    StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers),
+                );
                 serve_client((), transport)
                     .await
                     .map_err(|e| format!("握手失败: {e}"))?
@@ -311,11 +307,10 @@ impl McpManager {
             }
             let conn = &self.connections[name.as_str()];
             for tool in &conn.tools {
-                tools.push(Box::new(McpTool::new(
-                    name,
-                    tool.clone(),
-                    conn.service.clone(),
-                )) as Box<dyn Tool>);
+                tools.push(
+                    Box::new(McpTool::new(name, tool.clone(), conn.service.clone()))
+                        as Box<dyn Tool>,
+                );
             }
         }
         tools
@@ -419,15 +414,14 @@ impl McpTool {
 /// MAX_MCP_DESCRIPTION_LENGTH / readOnlyHint concurrency marker).
 pub fn mcp_tool_facts(server_name: &str, tool: &McpToolModel) -> McpToolFacts {
     let tool_name = tool.name.to_string();
-    let description = tool
-        .description
-        .as_deref()
-        .unwrap_or_default()
-        .to_string();
+    let description = tool.description.as_deref().unwrap_or_default().to_string();
     // Byte-index slicing would panic mid-multibyte character (Chinese/emoji descriptions):
     // truncate by chars instead.
     let description = if description.chars().count() > MAX_MCP_DESCRIPTION_LENGTH {
-        let head: String = description.chars().take(MAX_MCP_DESCRIPTION_LENGTH).collect();
+        let head: String = description
+            .chars()
+            .take(MAX_MCP_DESCRIPTION_LENGTH)
+            .collect();
         format!("{head}… [truncated]")
     } else {
         description
@@ -728,7 +722,11 @@ mod tests {
 
         let first = mgr.drain_unreported_failures();
         assert_eq!(first.len(), 2, "两条失败都报告");
-        assert!(first.iter().any(|w| w.contains("files") && w.contains("boom")));
+        assert!(
+            first
+                .iter()
+                .any(|w| w.contains("files") && w.contains("boom"))
+        );
         assert!(mgr.drain_unreported_failures().is_empty(), "只报一次");
 
         // disconnect resets the reported marks: a new failure after
@@ -747,7 +745,10 @@ mod tests {
         let mut servers = HashMap::new();
         // A long-running dummy server: /bin/sleep on Unix, ping on Windows (no /bin/sleep).
         #[cfg(windows)]
-        let (command, args) = ("ping".to_string(), vec!["-n".to_string(), "10".to_string(), "127.0.0.1".to_string()]);
+        let (command, args) = (
+            "ping".to_string(),
+            vec!["-n".to_string(), "10".to_string(), "127.0.0.1".to_string()],
+        );
         #[cfg(not(windows))]
         let (command, args) = ("/bin/sleep".to_string(), vec!["10".to_string()]);
         servers.insert(
@@ -764,7 +765,9 @@ mod tests {
         let mut mgr = McpManager::new(servers, HashSet::new());
         mgr.connect_timeout = std::time::Duration::from_millis(200);
         let results = mgr.connect_all().await;
-        assert!(matches!(results.as_slice(), [(name, Err(detail))] if name == "hung" && detail.contains("连接超时")));
+        assert!(
+            matches!(results.as_slice(), [(name, Err(detail))] if name == "hung" && detail.contains("连接超时"))
+        );
         assert!(matches!(mgr.status("hung"), McpStatus::Failed { .. }));
     }
 
@@ -774,10 +777,7 @@ mod tests {
         assert_eq!(normalize_mcp_name("my-server_1"), "my-server_1");
         assert_eq!(normalize_mcp_name("a b.c"), "a_b_c");
         // 64-char cap.
-        assert_eq!(
-            normalize_mcp_name(&"x".repeat(80)).len(),
-            64
-        );
+        assert_eq!(normalize_mcp_name(&"x".repeat(80)).len(), 64);
     }
 
     fn tool_model(name: &str, description: Option<&str>, read_only: bool) -> McpToolModel {
@@ -796,10 +796,7 @@ mod tests {
 
     #[test]
     fn mcp_tool_facts_normalized_and_readonly_hint() {
-        let facts = mcp_tool_facts(
-            "my server",
-            &tool_model("read file", Some("d"), true),
-        );
+        let facts = mcp_tool_facts("my server", &tool_model("read file", Some("d"), true));
         assert_eq!(facts.name, "mcp__my_server__read_file");
         assert_eq!(facts.server_name, "my server");
         assert!(facts.read_only);
@@ -810,7 +807,10 @@ mod tests {
         let long = "d".repeat(3000);
         let facts = mcp_tool_facts("srv", &tool_model("t", Some(&long), false));
         assert!(facts.description.ends_with("… [truncated]"));
-        assert_eq!(facts.description.chars().count(), MAX_MCP_DESCRIPTION_LENGTH + 13);
+        assert_eq!(
+            facts.description.chars().count(),
+            MAX_MCP_DESCRIPTION_LENGTH + 13
+        );
         assert!(!facts.read_only);
     }
 

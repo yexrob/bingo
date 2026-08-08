@@ -3,37 +3,52 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
+use super::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 
 /// A single question:
 /// 2-4 options with unique labels; header is a short tag (≤12 chars).
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 struct AskQuestion {
-    #[schemars(description = "The full question for the user; be clear and specific, end with a question mark")]
+    #[schemars(
+        description = "The full question for the user; be clear and specific, end with a question mark"
+    )]
     question: String,
     #[schemars(description = "Short label (≤12 chars), e.g. \"Auth method\", \"Tech stack\"")]
     header: Option<String>,
-    #[schemars(description = "Possible answers (2-4); labels must be unique", length(min = 2, max = 4))]
+    #[schemars(
+        description = "Possible answers (2-4); labels must be unique",
+        length(min = 2, max = 4)
+    )]
     options: Vec<AskOption>,
     #[serde(rename = "multiSelect", default)]
-    #[schemars(rename = "multiSelect", description = "多选（暂不支持，传 true 会报错）")]
+    #[schemars(
+        rename = "multiSelect",
+        description = "多选（暂不支持，传 true 会报错）"
+    )]
     multi_select: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 struct AskOption {
-    #[schemars(description = "Option text (1-5 words, clearly describing the choice; do not provide an \"Other\" option — it is added automatically)")]
+    #[schemars(
+        description = "Option text (1-5 words, clearly describing the choice; do not provide an \"Other\" option — it is added automatically)"
+    )]
     label: String,
-    #[schemars(description = "Option description: what this option means or what choosing it leads to (optional)")]
+    #[schemars(
+        description = "Option description: what this option means or what choosing it leads to (optional)"
+    )]
     description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 struct AskUserQuestionInput {
-    #[schemars(description = "Questions to ask (1-4; asked one by one)", length(min = 1, max = 4))]
+    #[schemars(
+        description = "Questions to ask (1-4; asked one by one)",
+        length(min = 1, max = 4)
+    )]
     questions: Vec<AskQuestion>,
 }
 
@@ -97,11 +112,7 @@ impl Tool for AskUserQuestionTool {
                 .unwrap_or_else(|| format!("问题 {}", i + 1));
             match (ctx.ask_question)(title, q.question.clone(), labels).await {
                 Some(crate::query::AskAnswer::Option(idx)) => {
-                    answers.push(format!(
-                        "\"{}\"=\"{}\"",
-                        q.question,
-                        q.options[idx].label
-                    ));
+                    answers.push(format!("\"{}\"=\"{}\"", q.question, q.options[idx].label));
                 }
                 Some(crate::query::AskAnswer::Other(text)) => {
                     answers.push(format!("\"{}\"=\"{}\"", q.question, text));
@@ -162,7 +173,7 @@ fn validate(params: &AskUserQuestionInput) -> Result<(), ToolError> {
 mod tests {
     use super::*;
     use crate::tool::bash::BashTool;
-    use crate::tool::executor::{execute_calls, PendingCall};
+    use crate::tool::executor::{PendingCall, execute_calls};
 
     #[test]
     fn schema_shape() {
@@ -218,10 +229,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
-                &std::env::temp_dir(),
-                "test",
-            )),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
@@ -265,10 +273,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
-                &std::env::temp_dir(),
-                "test",
-            )),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
@@ -299,10 +304,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
-                &std::env::temp_dir(),
-                "test",
-            )),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
@@ -331,10 +333,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
-                &std::env::temp_dir(),
-                "test",
-            )),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
@@ -363,10 +362,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
-                &std::env::temp_dir(),
-                "test",
-            )),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,

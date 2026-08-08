@@ -55,7 +55,10 @@ pub enum AuthEntry {
 /// auth.json path: `~/.local/share/bingo/auth.json` (same data dir as
 /// transcripts/tasks; D33 §6.2 — data dir, never the config dir).
 pub fn auth_path(home: &Path) -> PathBuf {
-    home.join(".local").join("share").join("bingo").join(AUTH_FILE)
+    home.join(".local")
+        .join("share")
+        .join("bingo")
+        .join(AUTH_FILE)
 }
 
 /// Read-modify-write access to the auth store. bingo is single-process:
@@ -175,7 +178,9 @@ mod tests {
         let home = tmp_home("roundtrip");
         let store = AuthStore::new(&home);
         store.set("codex", oauth("a", "r", 1786000000)).unwrap();
-        store.set("deepseek", AuthEntry::Api { key: "sk-1".into() }).unwrap();
+        store
+            .set("deepseek", AuthEntry::Api { key: "sk-1".into() })
+            .unwrap();
         let all = store.load().unwrap();
         assert_eq!(all.len(), 2, "两个 provider 并存");
         assert_eq!(
@@ -183,15 +188,24 @@ mod tests {
             &oauth("a", "r", 1786000000),
             "oauth 条目完整回读"
         );
-        assert_eq!(all.get("deepseek").unwrap(), &AuthEntry::Api { key: "sk-1".into() });
+        assert_eq!(
+            all.get("deepseek").unwrap(),
+            &AuthEntry::Api { key: "sk-1".into() }
+        );
 
         // 重新加载（模拟新会话）：磁盘持久化。
         let store2 = AuthStore::new(&home);
-        assert_eq!(store2.get("codex").unwrap().unwrap(), oauth("a", "r", 1786000000));
+        assert_eq!(
+            store2.get("codex").unwrap().unwrap(),
+            oauth("a", "r", 1786000000)
+        );
 
         store2.remove("codex").unwrap();
         assert!(store2.get("codex").unwrap().is_none(), "删除后为空");
-        assert!(store2.get("deepseek").unwrap().is_some(), "其余条目不受影响");
+        assert!(
+            store2.get("deepseek").unwrap().is_some(),
+            "其余条目不受影响"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -203,11 +217,19 @@ mod tests {
         let home = tmp_home("perm");
         let store = AuthStore::new(&home);
         store.set("codex", oauth("a", "r", 1786000000)).unwrap();
-        let mode = std::fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
+        let mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600, "auth.json 必须 0600，实际 {mode:o}");
         // 原子写后（覆盖路径）权限保持不变。
         store.set("codex", oauth("b", "r2", 1786000001)).unwrap();
-        let mode = std::fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
+        let mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600, "重写后仍 0600，实际 {mode:o}");
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -227,7 +249,9 @@ mod tests {
     fn opencode_compatible_shape() {
         let home = tmp_home("opencode");
         let store = AuthStore::new(&home);
-        store.set("opencode", oauth("acc", "ref", 1730000000000)).unwrap();
+        store
+            .set("opencode", oauth("acc", "ref", 1730000000000))
+            .unwrap();
         let raw = std::fs::read_to_string(store.path()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed["opencode"]["type"], "oauth", "type 判别字段");

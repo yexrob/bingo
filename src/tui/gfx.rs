@@ -45,8 +45,7 @@ const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400)
 /// Shown once when the tmux passthrough probe gets no answer. Causes: the
 /// outer terminal does not speak the kitty protocol, passthrough could not be
 /// enabled, or the pane was not the focused pane during the probe.
-const TMUX_PASSTHROUGH_HINT: &str =
-    "tmux 下未确认外层终端支持 kitty 图片协议：外层需为 ghostty/kitty（WezTerm/Konsole 不支持占位符）且 bingo 需在焦点窗格启动";
+const TMUX_PASSTHROUGH_HINT: &str = "tmux 下未确认外层终端支持 kitty 图片协议：外层需为 ghostty/kitty（WezTerm/Konsole 不支持占位符）且 bingo 需在焦点窗格启动";
 
 /// How an image is placed on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,19 +75,15 @@ pub struct ImageProbe {
     pub warning: Option<String>,
 }
 
-/// A loaded image: target cell size + PNG bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageMeta {
-    pub cols: usize,
-    pub rows: usize,
-    pub bytes: Vec<u8>,
-}
-
 impl ImageCap {
     /// Default cell size (fallback when the query fails; Ghostty's default
     /// font is about 8×16).
     pub const fn default_cells() -> Self {
-        Self { cell_w: 8, cell_h: 16, mode: ImageMode::Direct }
+        Self {
+            cell_w: 8,
+            cell_h: 16,
+            mode: ImageMode::Direct,
+        }
     }
 }
 
@@ -203,7 +198,9 @@ fn probe_plan(
     konsole: bool,
 ) -> ProbePlan {
     if !in_tmux {
-        return ProbePlan::Direct { env_kitty: env_kitty(term_program, term) };
+        return ProbePlan::Direct {
+            env_kitty: env_kitty(term_program, term),
+        };
     }
     if wezterm || konsole {
         ProbePlan::TmuxUnsupported
@@ -219,8 +216,15 @@ fn cap_from(buf: Option<&[u8]>, grid: Option<(u16, u16)>, mode: ImageMode) -> Im
         .zip(grid)
         .and_then(|((w, h), (cols, rows))| cells_from_text_area(w, h, cols, rows));
     match cells {
-        Some((cell_w, cell_h)) => ImageCap { cell_w, cell_h, mode },
-        None => ImageCap { mode, ..ImageCap::default_cells() },
+        Some((cell_w, cell_h)) => ImageCap {
+            cell_w,
+            cell_h,
+            mode,
+        },
+        None => ImageCap {
+            mode,
+            ..ImageCap::default_cells()
+        },
     }
 }
 
@@ -258,8 +262,7 @@ fn cells_from_text_area(
     }
     let cell_w = text_px_w / cols;
     let cell_h = text_px_h / rows;
-    if !(MIN_CELL_W..=MAX_CELL_W).contains(&cell_w)
-        || !(MIN_CELL_H..=MAX_CELL_H).contains(&cell_h)
+    if !(MIN_CELL_W..=MAX_CELL_W).contains(&cell_w) || !(MIN_CELL_H..=MAX_CELL_H).contains(&cell_h)
     {
         return None;
     }
@@ -284,13 +287,7 @@ fn parse_text_area_px(buf: &[u8]) -> Option<(u32, u32)> {
 
 /// Image pixel size → target cell (cols, rows): scale proportionally to fit
 /// the maximum display box, never upscale small images.
-pub fn fit_cells(
-    w: u32,
-    h: u32,
-    cap: &ImageCap,
-    max_cols: u32,
-    max_rows: u32,
-) -> (u32, u32) {
+pub fn fit_cells(w: u32, h: u32, cap: &ImageCap, max_cols: u32, max_rows: u32) -> (u32, u32) {
     let cw = (w as f64 / cap.cell_w as f64).max(1.0);
     let ch = (h as f64 / cap.cell_h as f64).max(1.0);
     let scale = (max_cols as f64 / cw).min(max_rows as f64 / ch).min(1.0);
@@ -455,13 +452,7 @@ pub fn image_id_for(url: &str) -> u32 {
 ///
 /// `id` only matters in placeholder mode, where it ties the transmitted image
 /// to the placeholder cells; it is masked to 24 bits.
-pub fn image_print_bytes(
-    cap: &ImageCap,
-    png: &[u8],
-    cols: usize,
-    rows: usize,
-    id: u32,
-) -> Vec<u8> {
+pub fn image_print_bytes(cap: &ImageCap, png: &[u8], cols: usize, rows: usize, id: u32) -> Vec<u8> {
     match cap.mode {
         ImageMode::Direct => kitty_image_bytes(png, cols, rows),
         ImageMode::TmuxPlaceholder => {
@@ -473,14 +464,15 @@ pub fn image_print_bytes(
     }
 }
 
-/// Load an image from a url and turn it into a transmittable `ImageMeta`:
+/// Load an image from a URL and turn it into a renderer-neutral [`crate::ui::ImageMeta`]:
 /// - `data:image/...;base64,` — inline base64
 /// - `http(s)://` — download (reqwest)
 /// - anything else — local path (relative to cwd)
 ///
 /// Decode → resize (`fit_cells`) → encode PNG. Any failing step returns
 /// `None`.
-pub async fn load_image(url: &str, cwd: &Path, cap: &ImageCap) -> Option<ImageMeta> {    let bytes = fetch_bytes(url, cwd).await?;
+pub async fn load_image(url: &str, cwd: &Path, cap: &ImageCap) -> Option<crate::ui::ImageMeta> {
+    let bytes = fetch_bytes(url, cwd).await?;
     if bytes.len() > MAX_BYTES {
         return None;
     }
@@ -505,7 +497,7 @@ pub async fn load_image(url: &str, cwd: &Path, cap: &ImageCap) -> Option<ImageMe
     resized
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
         .ok()?;
-    Some(ImageMeta {
+    Some(crate::ui::ImageMeta {
         cols: cols as usize,
         rows: rows as usize,
         bytes: out,
@@ -554,9 +546,10 @@ fn decode_data_url(head: &str) -> Option<Vec<u8>> {
     }
     let b64 = &data[1..];
     let engine = base64::engine::general_purpose::STANDARD;
-    engine.decode(b64).or_else(|_| {
-        base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64)
-    }).ok()
+    engine
+        .decode(b64)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64))
+        .ok()
 }
 
 /// Extract image urls from markdown text (`![alt](url)`, url without
@@ -645,7 +638,10 @@ mod tests {
         // pixels, not one cell. The old expectation here (80×40 read as a cell
         // size) encoded the bug that squeezed images into a single cell.
         assert_eq!(parse_text_area_px(b"\x1b[4;982;1512t"), Some((1512, 982)));
-        assert_eq!(parse_text_area_px(b"junk\x1b[4;25;120tmore"), Some((120, 25)));
+        assert_eq!(
+            parse_text_area_px(b"junk\x1b[4;25;120tmore"),
+            Some((120, 25))
+        );
         assert_eq!(parse_text_area_px(b"\x1b[4;0;0t"), None);
         assert_eq!(parse_text_area_px(b"no response"), None);
     }
@@ -659,15 +655,43 @@ mod tests {
 
     #[test]
     fn cells_from_text_area_rejects_implausible() {
-        assert_eq!(cells_from_text_area(1512, 982, 0, 60), None, "divide by zero");
-        assert_eq!(cells_from_text_area(1512, 982, 189, 0), None, "divide by zero");
-        assert_eq!(cells_from_text_area(0, 0, 189, 60), None, "no pixels reported");
+        assert_eq!(
+            cells_from_text_area(1512, 982, 0, 60),
+            None,
+            "divide by zero"
+        );
+        assert_eq!(
+            cells_from_text_area(1512, 982, 189, 0),
+            None,
+            "divide by zero"
+        );
+        assert_eq!(
+            cells_from_text_area(0, 0, 189, 60),
+            None,
+            "no pixels reported"
+        );
         // The old bug: the text-area size taken straight as the cell size.
         assert_eq!(cells_from_text_area(1512, 982, 1, 1), None);
-        assert_eq!(cells_from_text_area(300, 982, 100, 60), None, "cell_w 3 < 4");
-        assert_eq!(cells_from_text_area(1512, 300, 189, 60), None, "cell_h 5 < 6");
-        assert_eq!(cells_from_text_area(6500, 1600, 100, 100), None, "cell_w 65 > 64");
-        assert_eq!(cells_from_text_area(800, 12900, 100, 100), None, "cell_h 129 > 128");
+        assert_eq!(
+            cells_from_text_area(300, 982, 100, 60),
+            None,
+            "cell_w 3 < 4"
+        );
+        assert_eq!(
+            cells_from_text_area(1512, 300, 189, 60),
+            None,
+            "cell_h 5 < 6"
+        );
+        assert_eq!(
+            cells_from_text_area(6500, 1600, 100, 100),
+            None,
+            "cell_w 65 > 64"
+        );
+        assert_eq!(
+            cells_from_text_area(800, 12900, 100, 100),
+            None,
+            "cell_h 129 > 128"
+        );
     }
 
     #[test]
@@ -675,27 +699,49 @@ mod tests {
         let full = b"\x1b_Gi=31;OK\x1b\\\x1b[?62;c\x1b[4;982;1512t";
         assert_eq!(
             cap_from(Some(full), Some((189, 60)), ImageMode::Direct),
-            ImageCap { cell_w: 8, cell_h: 16, mode: ImageMode::Direct }
+            ImageCap {
+                cell_w: 8,
+                cell_h: 16,
+                mode: ImageMode::Direct
+            }
         );
         // Unknown grid size → defaults, mode preserved.
         assert_eq!(
             cap_from(Some(full), None, ImageMode::TmuxPlaceholder),
-            ImageCap { mode: ImageMode::TmuxPlaceholder, ..ImageCap::default_cells() }
+            ImageCap {
+                mode: ImageMode::TmuxPlaceholder,
+                ..ImageCap::default_cells()
+            }
         );
         // No 14t answer → defaults.
         assert_eq!(
-            cap_from(Some(b"\x1b_Gi=31;OK\x1b\\"), Some((189, 60)), ImageMode::Direct),
+            cap_from(
+                Some(b"\x1b_Gi=31;OK\x1b\\"),
+                Some((189, 60)),
+                ImageMode::Direct
+            ),
             ImageCap::default_cells()
         );
-        assert_eq!(cap_from(None, Some((189, 60)), ImageMode::Direct), ImageCap::default_cells());
+        assert_eq!(
+            cap_from(None, Some((189, 60)), ImageMode::Direct),
+            ImageCap::default_cells()
+        );
     }
 
     #[test]
     fn fit_cells_regression_on_text_area_as_cell() {
         // Regression: the 14t numbers used as a cell size collapse everything.
-        let bug = ImageCap { cell_w: 1512, cell_h: 982, mode: ImageMode::Direct };
+        let bug = ImageCap {
+            cell_w: 1512,
+            cell_h: 982,
+            mode: ImageMode::Direct,
+        };
         assert_eq!(fit_cells(800, 600, &bug, MAX_COLS, MAX_ROWS), (1, 1));
-        let fixed = ImageCap { cell_w: 8, cell_h: 16, mode: ImageMode::Direct };
+        let fixed = ImageCap {
+            cell_w: 8,
+            cell_h: 16,
+            mode: ImageMode::Direct,
+        };
         assert_eq!(fit_cells(800, 600, &fixed, MAX_COLS, MAX_ROWS), (48, 18));
     }
 
@@ -755,36 +801,77 @@ mod tests {
             ProbePlan::Direct { env_kitty: true }
         );
         assert_eq!(
-            probe_plan(false, Some("Apple_Terminal"), Some("xterm-256color"), false, false),
+            probe_plan(
+                false,
+                Some("Apple_Terminal"),
+                Some("xterm-256color"),
+                false,
+                false
+            ),
             ProbePlan::Direct { env_kitty: false }
         );
         // Inside tmux, `TERM_PROGRAM` is overwritten to "tmux" by tmux 3.x and
         // `TERM` is the pane's own, so they no longer decide anything: every
         // outer terminal we cannot positively exclude gets a passthrough probe
         // and the query answer is authoritative.
-        assert_eq!(probe_plan(true, Some("ghostty"), None, false, false), ProbePlan::TmuxProbe);
-        assert_eq!(probe_plan(true, Some("kitty"), None, false, false), ProbePlan::TmuxProbe);
-        assert_eq!(probe_plan(true, None, Some("xterm-kitty"), false, false), ProbePlan::TmuxProbe);
-        assert_eq!(probe_plan(true, Some("tmux"), Some("tmux-256color"), false, false), ProbePlan::TmuxProbe);
-        assert_eq!(probe_plan(true, None, None, false, false), ProbePlan::TmuxProbe);
         assert_eq!(
-            probe_plan(true, Some("Apple_Terminal"), Some("screen-256color"), false, false),
+            probe_plan(true, Some("ghostty"), None, false, false),
+            ProbePlan::TmuxProbe
+        );
+        assert_eq!(
+            probe_plan(true, Some("kitty"), None, false, false),
+            ProbePlan::TmuxProbe
+        );
+        assert_eq!(
+            probe_plan(true, None, Some("xterm-kitty"), false, false),
+            ProbePlan::TmuxProbe
+        );
+        assert_eq!(
+            probe_plan(true, Some("tmux"), Some("tmux-256color"), false, false),
+            ProbePlan::TmuxProbe
+        );
+        assert_eq!(
+            probe_plan(true, None, None, false, false),
+            ProbePlan::TmuxProbe
+        );
+        assert_eq!(
+            probe_plan(
+                true,
+                Some("Apple_Terminal"),
+                Some("screen-256color"),
+                false,
+                false
+            ),
             ProbePlan::TmuxProbe,
             "screen does not answer the query, so the probe fails on its own"
         );
         // WezTerm/Konsole answer the kitty query but lack U=1 placeholders;
         // they are excluded via env vars the outer terminal sets itself (and
         // that tmux does not overwrite), never via TERM_PROGRAM.
-        assert_eq!(probe_plan(true, Some("WezTerm"), None, true, false), ProbePlan::TmuxUnsupported);
-        assert_eq!(probe_plan(true, Some("konsole"), None, false, true), ProbePlan::TmuxUnsupported);
-        assert_eq!(probe_plan(true, None, None, true, false), ProbePlan::TmuxUnsupported);
-        assert_eq!(probe_plan(true, None, None, false, true), ProbePlan::TmuxUnsupported);
+        assert_eq!(
+            probe_plan(true, Some("WezTerm"), None, true, false),
+            ProbePlan::TmuxUnsupported
+        );
+        assert_eq!(
+            probe_plan(true, Some("konsole"), None, false, true),
+            ProbePlan::TmuxUnsupported
+        );
+        assert_eq!(
+            probe_plan(true, None, None, true, false),
+            ProbePlan::TmuxUnsupported
+        );
+        assert_eq!(
+            probe_plan(true, None, None, false, true),
+            ProbePlan::TmuxUnsupported
+        );
     }
 
     #[test]
     fn graphics_query_ok_reads_passthrough_reply() {
         // The outer terminal's answer arrives unwrapped on the pane's stdin.
-        assert!(graphics_query_ok(b"\x1b_Gi=31;OK\x1b\\\x1b[?62;c\x1b[4;982;1512t"));
+        assert!(graphics_query_ok(
+            b"\x1b_Gi=31;OK\x1b\\\x1b[?62;c\x1b[4;982;1512t"
+        ));
         // passthrough off: DA/14t still answer, the graphics query does not.
         assert!(!graphics_query_ok(b"\x1b[?62;c\x1b[4;982;1512t"));
     }
@@ -796,7 +883,10 @@ mod tests {
             b"\x1bPtmux;\x1b\x1b_Gq\x1b\x1b\\\x1b\\".to_vec()
         );
         assert_eq!(tmux_passthrough(b""), b"\x1bPtmux;\x1b\\".to_vec());
-        assert_eq!(tmux_passthrough(b"plain"), b"\x1bPtmux;plain\x1b\\".to_vec());
+        assert_eq!(
+            tmux_passthrough(b"plain"),
+            b"\x1bPtmux;plain\x1b\\".to_vec()
+        );
     }
 
     #[test]
@@ -807,9 +897,16 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.matches("\x1bPtmux;").count(), 2, "one envelope per chunk");
         assert_eq!(s.matches("\x1b_G").count(), 2);
-        assert_eq!(s.matches("\x1b\x1b_G").count(), 2, "every ESC in the body doubled");
+        assert_eq!(
+            s.matches("\x1b\x1b_G").count(),
+            2,
+            "every ESC in the body doubled"
+        );
         assert!(s.contains("\x1b\x1b_Ga=T,U=1,q=2,f=100,i=66051,c=10,r=2,m=1;"));
-        assert!(s.contains("\x1b\x1b_Gm=0;"), "continuation chunk carries only m");
+        assert!(
+            s.contains("\x1b\x1b_Gm=0;"),
+            "continuation chunk carries only m"
+        );
         assert!(s.ends_with("\x1b\\"));
         assert!(!s.contains('\n'), "transport alone never moves the cursor");
     }
@@ -820,7 +917,10 @@ mod tests {
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2, "one line per row");
         for line in &lines {
-            assert!(line.starts_with("\x1b[38;2;10;11;12m"), "id in the 24-bit fg");
+            assert!(
+                line.starts_with("\x1b[38;2;10;11;12m"),
+                "id in the 24-bit fg"
+            );
             assert!(line.ends_with("\x1b[39m"), "fg reset at end of line");
             assert_eq!(
                 line.chars().filter(|c| *c == PLACEHOLDER).count(),
@@ -852,7 +952,10 @@ mod tests {
     #[test]
     fn diacritics_table_matches_kitty() {
         assert_eq!(ROWCOLUMN_DIACRITICS.len(), MAX_COLS as usize);
-        assert_eq!(ROWCOLUMN_DIACRITICS[0], '\u{305}', "index 0 encodes coordinate 0");
+        assert_eq!(
+            ROWCOLUMN_DIACRITICS[0], '\u{305}',
+            "index 0 encodes coordinate 0"
+        );
         assert_eq!(ROWCOLUMN_DIACRITICS[1], '\u{30d}');
         assert_eq!(ROWCOLUMN_DIACRITICS[59], '\u{615}');
         assert!(
@@ -869,7 +972,10 @@ mod tests {
             kitty_image_bytes(b"abc", 4, 2),
             "Direct mode is byte-identical to the plain kitty path"
         );
-        let tmux = ImageCap { mode: ImageMode::TmuxPlaceholder, ..ImageCap::default_cells() };
+        let tmux = ImageCap {
+            mode: ImageMode::TmuxPlaceholder,
+            ..ImageCap::default_cells()
+        };
         let out = image_print_bytes(&tmux, b"abc", 4, 2, 7);
         let s = String::from_utf8(out).unwrap();
         assert!(s.starts_with("\x1bPtmux;"), "transmit first");
@@ -901,15 +1007,25 @@ mod tests {
             vec!["/Users/x/Untitled-1.png".to_string()]
         );
         assert_eq!(extract_image_urls("无图片"), Vec::<String>::new());
-        assert_eq!(extract_image_urls("![alt](has space.png)"), Vec::<String>::new());
+        assert_eq!(
+            extract_image_urls("![alt](has space.png)"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn load_image_from_data_url() {
         let cap = ImageCap::default_cells();
         let png = tiny_png();
-        let url = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png));
-        let meta = tokio::runtime::Runtime::new().unwrap().block_on(load_image(&url, Path::new("."), &cap));
+        let url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        let meta = tokio::runtime::Runtime::new().unwrap().block_on(load_image(
+            &url,
+            Path::new("."),
+            &cap,
+        ));
         let meta = meta.expect("data url png loads");
         assert!(meta.cols >= 1 && meta.rows >= 1);
         assert!(meta.bytes.starts_with(b"\x89PNG"));
@@ -928,7 +1044,11 @@ mod tests {
         let url = format!("file://{}", path.display());
         let encoded = url.replace(' ', "%20");
         let bytes = runtime.block_on(fetch_bytes(&encoded, Path::new("/nonexistent")));
-        assert_eq!(bytes, Some(b"\x89PNG\r\n\x1a\n".to_vec()), "file url decodes");
+        assert_eq!(
+            bytes,
+            Some(b"\x89PNG\r\n\x1a\n".to_vec()),
+            "file url decodes"
+        );
         // Relative file paths resolve against cwd.
         let rel = runtime.block_on(fetch_bytes("sub/img.png", &tmp));
         assert_eq!(rel, None, "相对路径缺失时失败");
@@ -943,7 +1063,11 @@ mod tests {
     fn load_image_rejects_garbage() {
         let cap = ImageCap::default_cells();
         let url = "data:image/png;base64,AAAA".to_string();
-        let meta = tokio::runtime::Runtime::new().unwrap().block_on(load_image(&url, Path::new("."), &cap));
+        let meta = tokio::runtime::Runtime::new().unwrap().block_on(load_image(
+            &url,
+            Path::new("."),
+            &cap,
+        ));
         assert!(meta.is_none());
     }
 

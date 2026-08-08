@@ -127,7 +127,10 @@ impl ExperienceEntry {
         if let Some(t) = &self.verified_at {
             fm.push_str(&format!("verified_at: {t}\n"));
         }
-        fm.push_str(&format!("hits: {}\ncreated_at: {}\n---", self.hits, self.created_at));
+        fm.push_str(&format!(
+            "hits: {}\ncreated_at: {}\n---",
+            self.hits, self.created_at
+        ));
         let notes = self.notes.trim();
         if !notes.is_empty() {
             fm.push('\n');
@@ -274,9 +277,7 @@ fn normalize_remote(url: &str) -> String {
     if let Some(rest) = u.strip_prefix("git@") {
         u = rest;
     }
-    if scp_style
-        && let Some(i) = u.find(':')
-    {
+    if scp_style && let Some(i) = u.find(':') {
         let mut owned = String::with_capacity(u.len());
         owned.push_str(&u[..i]);
         owned.push('/');
@@ -385,18 +386,14 @@ pub fn query<'a>(
                 let t = t.to_lowercase();
                 !t.is_empty()
                     && (needle.contains(&t)
-                        || tokens
-                            .iter()
-                            .any(|tok| shared_prefix_len(&t, tok) >= 4))
+                        || tokens.iter().any(|tok| shared_prefix_len(&t, tok) >= 4))
             })
         })
         .collect();
     matched.sort_by(|a, b| {
         let a_active = a.status == ExperienceStatus::Active;
         let b_active = b.status == ExperienceStatus::Active;
-        b_active
-            .cmp(&a_active)
-            .then_with(|| b.hits.cmp(&a.hits))
+        b_active.cmp(&a_active).then_with(|| b.hits.cmp(&a.hits))
     });
     matched.truncate(limit);
     matched
@@ -523,14 +520,8 @@ mod tests {
 
     #[test]
     fn notes_roundtrip_preserved() {
-        let mut entry = ExperienceEntry::new(
-            "key",
-            vec![],
-            "s".into(),
-            vec!["1".into()],
-            None,
-            None,
-        );
+        let mut entry =
+            ExperienceEntry::new("key", vec![], "s".into(), vec!["1".into()], None, None);
         entry.notes = "手写说明\n第二行".into();
         let parsed = ExperienceEntry::parse(&entry.serialize()).unwrap();
         assert_eq!(parsed.notes.trim(), "手写说明\n第二行");
@@ -609,7 +600,11 @@ mod tests {
         let entries = vec![hot, stale, cold];
         let results = query(&entries, "do the migration now", 10);
         let summaries: Vec<&str> = results.iter().map(|e| e.summary.as_str()).collect();
-        assert_eq!(summaries, vec!["hot", "cold", "stale one"], "active 优先于 hits");
+        assert_eq!(
+            summaries,
+            vec!["hot", "cold", "stale one"],
+            "active 优先于 hits"
+        );
         let limited = query(&entries, "migration", 2);
         assert_eq!(limited.len(), 2);
         // Non-matching tokens → empty
@@ -619,7 +614,9 @@ mod tests {
     #[test]
     fn format_index_caps_at_ten() {
         let entries: Vec<ExperienceEntry> = (0..12)
-            .map(|i| ExperienceEntry::new("k", vec!["t".into()], format!("s{i}"), vec![], None, None))
+            .map(|i| {
+                ExperienceEntry::new("k", vec!["t".into()], format!("s{i}"), vec![], None, None)
+            })
             .collect();
         let index = format_index(&entries);
         let lines: Vec<&str> = index.lines().collect();
@@ -657,7 +654,10 @@ mod tests {
             normalize_remote("ssh://git@example.com:2222/a/b.git"),
             "example.com:2222/a/b"
         );
-        assert_eq!(normalize_remote("HTTPS://GitHub.com/Owner/Repo"), "github.com/owner/repo");
+        assert_eq!(
+            normalize_remote("HTTPS://GitHub.com/Owner/Repo"),
+            "github.com/owner/repo"
+        );
     }
 
     #[test]
@@ -672,6 +672,9 @@ mod tests {
         assert_eq!(sanitize_dirname("/a b/c"), "-a-b-c");
         // `/` flattens to `-`: project_key stays a single-level dirname (prevents `..`
         // segments escaping the experience root).
-        assert_eq!(sanitize_dirname("github.com/owner/repo"), "github.com-owner-repo");
+        assert_eq!(
+            sanitize_dirname("github.com/owner/repo"),
+            "github.com-owner-repo"
+        );
     }
 }

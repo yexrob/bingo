@@ -5,13 +5,13 @@ use std::sync::Arc;
 use clap::Parser;
 
 use crate::api::client::Client;
-use crate::api::types::{Message, DEFAULT_MODEL};
-use crate::permission::PermissionMode;
-use crate::query::{headless_hooks, run_query, Session};
+use crate::api::types::{DEFAULT_MODEL, Message};
 use crate::memory::{extract_memory, load_project_memory};
+use crate::permission::PermissionMode;
+use crate::query::{Session, headless_hooks, run_query};
 use crate::settings::load_settings;
 use crate::system::{build_system, load_memory};
-use crate::transcript::{create as create_transcript, latest as latest_transcript, Transcript};
+use crate::transcript::{Transcript, create as create_transcript, latest as latest_transcript};
 
 mod agents;
 mod api;
@@ -85,14 +85,14 @@ struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Command {
-    /// Export the current session as a self-contained HTML share page (conversation/Team/DM/channels, offline)
+    /// Export a session to local HTML by default; use --public to publish it
     Share {
         /// Session key: transcript stem (`{slug}-{ts}`) or a matching fragment; defaults to the latest session (/resume semantics)
         session: Option<String>,
-        /// Local mode: keep the file locally, do not upload to the share service
+        /// Publish the generated page to a publicly accessible share URL
         #[arg(long)]
-        local: bool,
-        /// Output file path (default `<session>.html` in the current directory; --local only)
+        public: bool,
+        /// Output file path (default `<session>.html` in the current directory; local export and upload fallback)
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Open the generated page in the system default browser (link in upload mode, file in local mode)
@@ -133,8 +133,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     // 子命令快路径：share 只需 home（transcript/shares 目录），update 只需 home（缓存），
     // 均不碰 settings/API。
-    if let Some(Command::Share { session, local, output, open }) = cli.command {
-        run_share(&home, session.as_deref(), output, local, open).await?;
+    if let Some(Command::Share {
+        session,
+        public,
+        output,
+        open,
+    }) = cli.command
+    {
+        run_share(&home, session.as_deref(), output, public, open).await?;
         return Ok(());
     }
     if let Some(Command::Update { check }) = cli.command {
@@ -181,7 +187,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(t) => (Some(t), Vec::new()),
                 Err(e) => {
                     if !cli.print {
-                        eprintln!("[bingo] warning: cannot create transcript (history will not persist): {e}");
+                        eprintln!(
+                            "[bingo] warning: cannot create transcript (history will not persist): {e}"
+                        );
                     }
                     (None, Vec::new())
                 }
@@ -192,7 +200,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(t) => (Some(t), Vec::new()),
             Err(e) => {
                 if !cli.print {
-                    eprintln!("[bingo] warning: cannot create transcript (history will not persist): {e}");
+                    eprintln!(
+                        "[bingo] warning: cannot create transcript (history will not persist): {e}"
+                    );
                 }
                 (None, Vec::new())
             }
@@ -214,11 +224,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .model
         .or_else(|| settings.model.clone())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let mut runtime = crate::query::Runtime::new(
-        model,
-        transcript.clone(),
-        settings.permissions.clone(),
-    );
+    let mut runtime =
+        crate::query::Runtime::new(model, transcript.clone(), settings.permissions.clone());
     runtime.mcp = Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
         settings.mcp_servers.clone(),
         settings.disabled_mcp_servers.iter().cloned().collect(),
@@ -231,9 +238,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(()) => {
                 let _ = runtime.provider_tx.send(name.to_string());
             }
-            Err(e) => eprintln!(
-                "[bingo] warning: provider \"{name}\" 已失效，回落 default: {e}"
-            ),
+            Err(e) => eprintln!("[bingo] warning: provider \"{name}\" 已失效，回落 default: {e}"),
         }
     }
     let channel_limits = crate::channels::ChannelLimits::from_settings(&settings);
@@ -249,7 +254,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         watch: crate::watch::WatchRegistry::new(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, &task_list_key)),
-        last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         expand_tasks: expand_tx,
         agents: crate::agents::AgentRegistry::new(),
         channels: crate::channels::ChannelRegistry::new(channel_limits),
@@ -284,31 +288,32 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let branch = crate::team::current_branch(&project_dir);
         let defs = crate::agents::load_agent_defs(&home, &project_dir);
         match crate::team::load_team_file(&project_dir) {
-            Ok(Some(team)) => match crate::team::spawn_team(
-                &session, &team, &defs, &home, &project_dir, &branch,
-            ) {
-                Ok(summary) => {
-                    let total =
-                        summary.spawned.len() + summary.reused.len() + summary.failed.len();
-                    let ready = total - summary.failed.len();
-                    if summary.failed.is_empty() {
-                        eprintln!(
-                            "[team] {} 就绪 · {ready}/{total} 待命（/team status · /team stop）",
-                            team.name
-                        );
-                    } else {
-                        eprintln!(
-                            "[team] {} 部分拉起 · {ready}/{total}（失败 {}，/team status 查看）",
-                            team.name,
-                            summary.failed.len()
-                        );
+            Ok(Some(team)) => {
+                match crate::team::spawn_team(&session, &team, &defs, &home, &project_dir, &branch)
+                {
+                    Ok(summary) => {
+                        let total =
+                            summary.spawned.len() + summary.reused.len() + summary.failed.len();
+                        let ready = total - summary.failed.len();
+                        if summary.failed.is_empty() {
+                            eprintln!(
+                                "[team] {} 就绪 · {ready}/{total} 待命（/team status · /team stop）",
+                                team.name
+                            );
+                        } else {
+                            eprintln!(
+                                "[team] {} 部分拉起 · {ready}/{total}（失败 {}，/team status 查看）",
+                                team.name,
+                                summary.failed.len()
+                            );
+                        }
                     }
+                    Err(e) => eprintln!(
+                        "[team] {} 校验失败：{e}（修复后 /team start 拉起）",
+                        team.name
+                    ),
                 }
-                Err(e) => eprintln!(
-                    "[team] {} 校验失败：{e}（修复后 /team start 拉起）",
-                    team.name
-                ),
-            },
+            }
             Ok(None) => {}
             Err(e) => eprintln!("[team] {} 读取失败：{e}", crate::team::TEAM_FILE),
         }
@@ -328,7 +333,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
             let mut ui = headless_hooks();
-            let outcome = run_query(&session, initial_messages, &prompt, &[], &mut ui, None).await?;
+            let outcome =
+                run_query(&session, initial_messages, &prompt, &[], &mut ui, None).await?;
             extract_memory(&session, &outcome.messages, &home, &project_dir).await;
         } else {
             drop(initial_messages); // in interactive mode, --continue history is reused by later turns
@@ -347,16 +353,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-/// `bingo share`: resolve the session with /resume semantics → read transcript + share doc →
-/// generate self-contained HTML → print the output path → (optionally) open the browser.
-/// `bingo share`: resolve session (/resume semantics) → read transcript + share doc →
-/// generate HTML → upload to the share service by default (link out), or keep local with `--local`.
-/// Upload failure falls back to a local file with a hint.
+/// `bingo share`: resolve a session, generate self-contained HTML, and write it
+/// locally by default. `--public` explicitly opts into publishing; failed uploads
+/// fall back to the same local artifact.
 async fn run_share(
     home: &Path,
     key: Option<&str>,
     output: Option<PathBuf>,
-    local: bool,
+    public: bool,
     open: bool,
 ) -> Result<(), crate::share::ShareError> {
     let transcript = crate::share::resolve_transcript(home, key)?;
@@ -382,8 +386,8 @@ async fn run_share(
 
     let html = crate::share_html::render(&doc, &messages);
 
-    // 本地模式：写文件（--output 或缺省 <stem>.html），可选打开。
-    if local {
+    // Local export is the safe default; `--open` opens this file without publishing it.
+    if !public {
         let out = output.unwrap_or_else(|| PathBuf::from(format!("{stem}.html")));
         let overwritten = out.exists();
         crate::share::write_html_atomic(&out, &html)?;
@@ -401,7 +405,10 @@ async fn run_share(
         return Ok(());
     }
 
-    // 上传模式：settings.share.baseUrl（缺省官网基址；服务公开，无需 token）。
+    // Safety preflight must be visible before the first upload byte leaves the machine.
+    eprintln!("[share] 警告：即将公开发布；任何人可访问完整对话与工具输出，其中可能含敏感信息。");
+
+    // Public upload uses settings.share.baseUrl (the official service by default).
     let project_dir = std::env::current_dir()?;
     let user_dir = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -415,9 +422,6 @@ async fn run_share(
     match crate::share::upload_share(&base, &id, &html).await {
         Ok(url) => {
             println!("[share] published {url}");
-            eprintln!(
-                "[share] 任何人可公开访问此链接；分享页含完整对话与工具输出（可能含敏感信息），传播前请自行审阅。"
-            );
             if open {
                 crate::share::open_in_browser(&url)?;
             }
@@ -471,7 +475,12 @@ fn persist_team_memory(session: &Arc<Session>, home: &Path, project_dir: &std::p
             && !history.is_empty()
         {
             crate::team::save_member_history(
-                home, project_dir, &branch, &team.name, &m.name, &history,
+                home,
+                project_dir,
+                &branch,
+                &team.name,
+                &m.name,
+                &history,
             );
         }
     }

@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Deserialize;
 
-use super::{backoff, retryable, AuthSource};
+use super::{AuthSource, backoff, retryable};
 use crate::api::contract::{
     AuthStatus, BoxStream, Capabilities, ClientError, NeutralRequest, ProviderClient, StreamEvent,
     SystemBlock, ThinkingLevel,
@@ -100,7 +100,10 @@ impl OpenAIProvider {
     }
 
     fn variant(&self) -> OpenAiVariant {
-        self.endpoint.read().unwrap_or_else(|p| p.into_inner()).variant
+        self.endpoint
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .variant
     }
 
     /// Codex model snapshot (fallback when the dynamic model list fails):
@@ -142,7 +145,8 @@ impl OpenAIProvider {
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(&bearer).map_err(|e| ClientError::InvalidApiKey(e.to_string()))?,
+            HeaderValue::from_str(&bearer)
+                .map_err(|e| ClientError::InvalidApiKey(e.to_string()))?,
         );
         // Codex subscription routing: ChatGPT-Account-Id from JWT claims +
         // originator (opencode codex.ts chat.headers); only on the codex
@@ -208,7 +212,6 @@ impl OpenAIProvider {
         }
         Ok(Self::CODEX_MODELS.iter().map(|m| m.to_string()).collect())
     }
-
 }
 
 /// NeutralRequest → Responses request body (variant-isolated params).
@@ -366,7 +369,9 @@ fn parse_models_list(body: &serde_json::Value) -> Option<Vec<String>> {
             })
             .collect::<Vec<String>>()
     };
-    body.get("data").and_then(|d| d.as_array()).map(collect)
+    body.get("data")
+        .and_then(|d| d.as_array())
+        .map(collect)
         .or_else(|| body.as_array().map(collect))
         .or_else(|| body.get("models").and_then(|m| m.as_array()).map(collect))
 }
@@ -634,7 +639,9 @@ impl ProviderClient for OpenAIProvider {
     fn auth_status(&self) -> AuthStatus {
         match &self.auth {
             AuthSource::ApiKey(_) => AuthStatus::ApiKey,
-            AuthSource::OAuth(_) => AuthStatus::OAuth { account: self.oauth_account() },
+            AuthSource::OAuth(_) => AuthStatus::OAuth {
+                account: self.oauth_account(),
+            },
         }
     }
 
@@ -936,25 +943,42 @@ mod tests {
         let mut r = req();
         r.thinking = Some(ThinkingLevel::High);
         let codex = build_body(&r, OpenAiVariant::Codex);
-        assert!(codex.get("max_output_tokens").is_none(), "codex 不传 max_output_tokens");
+        assert!(
+            codex.get("max_output_tokens").is_none(),
+            "codex 不传 max_output_tokens"
+        );
         assert_eq!(
             codex["include"],
             serde_json::json!(["reasoning.encrypted_content"]),
             "codex 用 encrypted_content include（main 实测 200）"
         );
-        assert_eq!(codex["store"], serde_json::json!(false), "codex 显式 store:false");
+        assert_eq!(
+            codex["store"],
+            serde_json::json!(false),
+            "codex 显式 store:false"
+        );
         assert_eq!(codex["model"], "gpt-5", "其余字段保留");
         assert_eq!(codex["stream"], true, "codex 强制流式");
-        assert_eq!(codex["reasoning"], serde_json::json!({"effort": "high"}), "reasoning 保留");
+        assert_eq!(
+            codex["reasoning"],
+            serde_json::json!({"effort": "high"}),
+            "reasoning 保留"
+        );
 
         let default = build_body(&r, OpenAiVariant::Default);
-        assert_eq!(default["max_output_tokens"], 1024, "Default 保留 max_output_tokens");
+        assert_eq!(
+            default["max_output_tokens"], 1024,
+            "Default 保留 max_output_tokens"
+        );
         assert_eq!(
             default["include"],
             serde_json::json!(["reasoning.summary_text"]),
             "Default 保留 reasoning include"
         );
-        assert!(default.get("store").is_none(), "Default 不带 store（零行为变化）");
+        assert!(
+            default.get("store").is_none(),
+            "Default 不带 store（零行为变化）"
+        );
     }
 
     /// Tools map input_schema → parameters with the function envelope.
@@ -1335,7 +1359,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             ev,
-            StreamEvent::ApiError { message: "upstream unavailable".into() }
+            StreamEvent::ApiError {
+                message: "upstream unavailable".into()
+            }
         );
     }
 
@@ -1354,18 +1380,17 @@ mod tests {
 #[cfg(test)]
 mod codex_variant_tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::api::auth::{OauthFlowConfig, TokenProvider, TokenSet};
 
     /// Fake JWT with the given payload (header.payload.sig).
     fn jwt(payload: &serde_json::Value) -> String {
         use base64::Engine;
-        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(r#"{"alg":"none"}"#);
-        let body = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(payload.to_string().as_bytes());
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
+        let body =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
         format!("{header}.{body}.sig")
     }
 
@@ -1403,16 +1428,27 @@ mod codex_variant_tests {
                 for line in lines {
                     let lower = line.to_ascii_lowercase();
                     if lower.strip_prefix("authorization:").is_some() {
-                        authorization = line.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+                        authorization = line
+                            .split_once(':')
+                            .map(|(_, v)| v.trim().to_string())
+                            .unwrap_or_default();
                     }
                     if lower.strip_prefix("chatgpt-account-id:").is_some() {
-                        account_id = line.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+                        account_id = line
+                            .split_once(':')
+                            .map(|(_, v)| v.trim().to_string())
+                            .unwrap_or_default();
                     }
                     if lower.strip_prefix("originator:").is_some() {
-                        originator = line.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+                        originator = line
+                            .split_once(':')
+                            .map(|(_, v)| v.trim().to_string())
+                            .unwrap_or_default();
                     }
                 }
-                reqs.lock().unwrap().push((request_line, authorization, account_id, originator));
+                reqs.lock()
+                    .unwrap()
+                    .push((request_line, authorization, account_id, originator));
                 hits_c.fetch_add(1, Ordering::SeqCst);
                 // 404 responses endpoint: enough to complete the request.
                 let body = r#"{"error":{"message":"mock"}}"#;
@@ -1425,7 +1461,11 @@ mod codex_variant_tests {
                 let _ = socket.shutdown().await;
             }
         });
-        Capture { addr: format!("http://{addr}"), requests, hits }
+        Capture {
+            addr: format!("http://{addr}"),
+            requests,
+            hits,
+        }
     }
 
     fn tmp_home(name: &str) -> std::path::PathBuf {
@@ -1487,7 +1527,10 @@ mod codex_variant_tests {
             request_line.starts_with("POST /codex/responses"),
             "codex 变体路径: {request_line}"
         );
-        assert!(authorization.starts_with("Bearer "), "bearer 头: {authorization}");
+        assert!(
+            authorization.starts_with("Bearer "),
+            "bearer 头: {authorization}"
+        );
         assert_eq!(account_id, "acc_1", "ChatGPT-Account-Id 来自 JWT claims");
         assert_eq!(originator, "bingo", "codex 变体带 originator 头");
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
@@ -1556,7 +1599,10 @@ mod codex_variant_tests {
         let nested = serde_json::json!({"models": [{"id": "a"}]});
         assert_eq!(parse_models_list(&nested), Some(vec!["a".into()]));
         assert_eq!(parse_models_list(&serde_json::json!({"error": "x"})), None);
-        assert_eq!(parse_models_list(&serde_json::json!({"data": []})), Some(vec![]));
+        assert_eq!(
+            parse_models_list(&serde_json::json!({"data": []})),
+            Some(vec![])
+        );
     }
 
     /// Codex dynamic list fallback: an unreachable /codex/models endpoint
@@ -1575,7 +1621,11 @@ mod codex_variant_tests {
             None,
         );
         let models = provider.list_models().await.unwrap();
-        assert_eq!(models, OpenAIProvider::CODEX_MODELS.to_vec(), "fallback 静态 9 模型");
+        assert_eq!(
+            models,
+            OpenAIProvider::CODEX_MODELS.to_vec(),
+            "fallback 静态 9 模型"
+        );
         assert_eq!(models.len(), 9);
         assert!(models.contains(&"gpt-5.6-luna".to_string()));
         let _ = std::fs::remove_dir_all(home.parent().unwrap());

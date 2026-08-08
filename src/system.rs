@@ -135,7 +135,10 @@ pub fn build_system(
     project_memory: Option<String>,
     cache_control: bool,
 ) -> Vec<SystemBlock> {
-    let block = |text: String| SystemBlock { text, cache: cache_control };
+    let block = |text: String| SystemBlock {
+        text,
+        cache: cache_control,
+    };
     let mut blocks = vec![block(BASE_PROMPT.to_string()), block(env_info_block())];
     if let Some(user) = &memory.user {
         blocks.push(block(format!("User-level memory (CLAUDE.md):\n{user}")));
@@ -146,7 +149,9 @@ pub fn build_system(
         )));
     }
     if let Some(mem) = project_memory {
-        blocks.push(block(format!("Persistent project memory (auto-extracted):\n{mem}")));
+        blocks.push(block(format!(
+            "Persistent project memory (auto-extracted):\n{mem}"
+        )));
     }
     blocks
 }
@@ -181,10 +186,7 @@ mod tests {
             "# Using your tools",
             "# Tone and style",
         ] {
-            assert!(
-                BASE_PROMPT.contains(section),
-                "missing section {section}"
-            );
+            assert!(BASE_PROMPT.contains(section), "missing section {section}");
         }
         // watch semantics: background tasks notify on completion, don't poll.
         assert!(BASE_PROMPT.contains("do NOT poll them"));
@@ -251,7 +253,9 @@ mod tests {
         std::fs::write(tmp.join("AGENTS.md"), "project agents rules").unwrap();
         let memory = load_memory(&tmp, &tmp);
         assert!(
-            memory.project.is_some_and(|p| p.contains("project agents rules")),
+            memory
+                .project
+                .is_some_and(|p| p.contains("project agents rules")),
             "AGENTS.md alone loads"
         );
         let _ = std::fs::remove_dir_all(&tmp);

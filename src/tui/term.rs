@@ -412,13 +412,13 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
             let reclaimed = (height - old.height).min(self.gap_above).min(old.y);
             if reclaimed > 0 {
                 self.gap_above -= reclaimed;
-                self.viewport =
-                    Rect::new(0, old.y - reclaimed, self.size.width, old.height + reclaimed);
-                self.retarget_buffers(
-                    old.height,
-                    self.viewport.height,
-                    -i32::from(reclaimed),
+                self.viewport = Rect::new(
+                    0,
+                    old.y - reclaimed,
+                    self.size.width,
+                    old.height + reclaimed,
                 );
+                self.retarget_buffers(old.height, self.viewport.height, -i32::from(reclaimed));
                 old = self.viewport;
                 if height == old.height && old.width == self.size.width {
                     return Ok(());
@@ -1337,8 +1337,12 @@ mod tests {
     fn frame_settles_tail_into_banked_rows_without_scrolling() {
         let mut term = term(10, 12, 0);
         // A tall frame: 6 tail rows + 2 chrome rows.
-        term.draw(8, paint(&["t0", "t1", "t2", "t3", "t4", "t5", "c0", "c1"]), None)
-            .unwrap();
+        term.draw(
+            8,
+            paint(&["t0", "t1", "t2", "t3", "t4", "t5", "c0", "c1"]),
+            None,
+        )
+        .unwrap();
         term.backend_mut().reset_counters();
 
         // The tail settles: the same 6 rows leave the viewport for scrollback
@@ -1356,7 +1360,9 @@ mod tests {
         term.backend().inner.assert_scrollback_empty();
         assert_eq!(
             term.backend().screen(),
-            vec!["t0", "t1", "t2", "t3", "t4", "t5", "c0", "c1", "", "", "", ""],
+            vec![
+                "t0", "t1", "t2", "t3", "t4", "t5", "c0", "c1", "", "", "", ""
+            ],
             "settled rows sit exactly where the viewport freed them — no blank band"
         );
         assert_eq!(term.gap_above, 0);
@@ -1388,8 +1394,12 @@ mod tests {
     #[test]
     fn grow_reclaims_banked_rows_without_scrolling() {
         let mut term = term(10, 12, 0);
-        term.draw(8, paint(&["t0", "t1", "t2", "t3", "t4", "t5", "c0", "c1"]), None)
-            .unwrap();
+        term.draw(
+            8,
+            paint(&["t0", "t1", "t2", "t3", "t4", "t5", "c0", "c1"]),
+            None,
+        )
+        .unwrap();
         // Settle only 3 of the 6 freed rows: 3 stay banked as blanks.
         let settled: Vec<String> = (0..3).map(|i| format!("t{i}")).collect();
         term.frame(lines(&settled), 2, paint(&["c0", "c1"]), None)
@@ -1428,13 +1438,15 @@ mod tests {
             .unwrap();
         // Shrink by 1 row: the viewport stays bottom-anchored (y=1) and the
         // top row is cleared into the bank.
-        term.draw(3, paint(&["bbbb", "cccc", "dddd"]), None).unwrap();
+        term.draw(3, paint(&["bbbb", "cccc", "dddd"]), None)
+            .unwrap();
         assert_eq!(term.gap_above, 1);
         assert_eq!(term.viewport(), Rect::new(0, 1, 10, 3));
 
         // Grow back to 4 rows via reclaim: the new frame diffs a blank row
         // and a short row against the stale glyphs.
-        term.draw(4, paint(&["eeee", "", "ffff", "gg"]), None).unwrap();
+        term.draw(4, paint(&["eeee", "", "ffff", "gg"]), None)
+            .unwrap();
 
         assert_eq!(term.viewport(), Rect::new(0, 0, 10, 4));
         assert!(term.backend().scrolled_up.is_empty());
@@ -1451,14 +1463,16 @@ mod tests {
     fn resize_and_clear_visible_reset_the_bank() {
         let mut term = term(10, 12, 0);
         term.draw(8, paint(&["x"; 8]), None).unwrap();
-        term.frame(Vec::new(), 2, paint(&["c0", "c1"]), None).unwrap();
+        term.frame(Vec::new(), 2, paint(&["c0", "c1"]), None)
+            .unwrap();
         assert_eq!(term.gap_above, 6, "an empty flush keeps the bank");
 
         term.resize(Size::new(10, 12)).unwrap();
         assert_eq!(term.gap_above, 0);
 
         term.draw(8, paint(&["x"; 8]), None).unwrap();
-        term.frame(Vec::new(), 2, paint(&["c0", "c1"]), None).unwrap();
+        term.frame(Vec::new(), 2, paint(&["c0", "c1"]), None)
+            .unwrap();
         assert_eq!(term.gap_above, 6);
         term.clear_visible().unwrap();
         assert_eq!(term.gap_above, 0);

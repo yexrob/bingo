@@ -77,7 +77,7 @@ pub fn build_provider(
                         return Err(
                             "provider 缺少 apiKey 或 oauth 配置（/provider login 或补 apiKey）"
                                 .into(),
-                        )
+                        );
                     }
                 },
             };
@@ -86,7 +86,14 @@ pub fn build_provider(
             } else {
                 openai::OpenAiVariant::Default
             };
-            Ok(openai(http, auth, base_url, supports_images, variant, model_allowlist))
+            Ok(openai(
+                http,
+                auth,
+                base_url,
+                supports_images,
+                variant,
+                model_allowlist,
+            ))
         }
         other => Err(format!(
             "未知 protocol \"{other}\"（可用：anthropic / openai）"
@@ -112,7 +119,12 @@ pub fn anthropic(
     base_url: String,
     supports_images: bool,
 ) -> Arc<dyn ProviderClient> {
-    Arc::new(anthropic::AnthropicProvider::new(http, api_key, base_url, supports_images))
+    Arc::new(anthropic::AnthropicProvider::new(
+        http,
+        api_key,
+        base_url,
+        supports_images,
+    ))
 }
 
 pub fn openai(

@@ -124,7 +124,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             no_type,
-            ContentBlock::Image { source: ImageSource::base64("image/jpeg", "eA==") }
+            ContentBlock::Image {
+                source: ImageSource::base64("image/jpeg", "eA==")
+            }
         );
     }
 }

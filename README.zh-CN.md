@@ -111,6 +111,7 @@ bingo --continue            # 恢复最近一次会话
 | `--no-team` | 不自动拉起项目团队（覆盖 settings `team.autoStart`） |
 | `--permission-mode <模式>` | 权限模式：`default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions`（默认取 settings） |
 | `--continue` | 恢复最近的会话继续对话 |
+| `bingo share [会话] [--public] [--open] [-o 路径]` | 默认仅在本地导出自包含 HTML；`--public` 才显式发布任何人可访问的链接（上传前显示敏感内容警告） |
 | `prompt` | 非交互提示词（缺省从 stdin 读取；交互模式忽略） |
 
 ## 使用界面
@@ -148,7 +149,10 @@ bingo --continue            # 恢复最近一次会话
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
 `/skills`（清单，`/技能名` 直接执行）、`/context`（用量）、`/status`、
 `/compact`（强制压缩）、`/resume [名称]`（恢复历史会话）、`/rename`、
-`/clear`、`/exit`。
+`/share [--public] [--open]`、`/clear`、`/exit`。
+`/share` 默认只在本地生成自包含 HTML；只有显式加 `--public` 才会上传为
+任何人可访问的公开链接，且上传前会先显示敏感内容警告。`--open` 打开本地文件
+或已发布链接。等价 CLI 为 `bingo share [会话] [--public] [--open] [-o 路径]`。
 `/team`（项目团队）：`list`（图纸+运行区同屏）、`start`（拉起/幂等复用）、
 `status`、`assign <成员> <任务>`（派活）、`stop`、`validate`、`new`
 （脚手架生成 team.json）、`memory list|gc`。

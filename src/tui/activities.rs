@@ -7,6 +7,7 @@
 
 use crate::tui::line::Line;
 use crate::tui::theme::Theme;
+use crate::watch::WatchState;
 
 /// Spinner frames: a star that grows and shrinks (`·` → `✻`/`✽` → `·`),
 /// driven by the host tick. The sequence is a there-and-back cycle, so the
@@ -70,21 +71,6 @@ impl ToolCall {
     }
 }
 
-/// Watchable lifecycle status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WatchStatus {
-    /// Running.
-    Running,
-    /// One round finished (round boundary of a periodic command).
-    Idle,
-    /// Successful terminal state.
-    Done,
-    /// Failed terminal state.
-    Failed,
-    /// Cancelled terminal state.
-    Cancelled,
-}
-
 /// A watched entity (command/agent): header + round detail + expandable
 /// content.
 #[derive(Debug, Clone)]
@@ -94,7 +80,7 @@ pub struct WatchCall {
     /// Category (icon: ⏺ command / ◉ subagent).
     pub kind: crate::watch::WatchKind,
     /// Lifecycle status.
-    pub status: WatchStatus,
+    pub status: WatchState,
     /// Current round/progress description.
     pub detail: Option<String>,
     /// Milliseconds elapsed.
@@ -334,7 +320,7 @@ impl Activity {
         match &self.kind {
             ActivityKind::Thinking(t) => t.state == ThinkingState::Running,
             ActivityKind::Tool(t) => t.status == ToolStatus::Running,
-            ActivityKind::Watch(w) => w.status == WatchStatus::Running,
+            ActivityKind::Watch(w) => w.status == WatchState::Running,
             ActivityKind::Diff(_) => false,
         }
     }
@@ -464,10 +450,10 @@ fn tool_result(t: &ToolCall, act: &Activity, theme: &Theme) -> Line {
 /// ring, a session inside a session.
 fn watch_header(w: &WatchCall, theme: &Theme) -> Line {
     let style = match w.status {
-        WatchStatus::Running | WatchStatus::Idle => theme.dim(),
-        WatchStatus::Done => theme.tool_done(),
-        WatchStatus::Failed => theme.tool_error(),
-        WatchStatus::Cancelled => theme.dim(),
+        WatchState::Running | WatchState::Idle => theme.dim(),
+        WatchState::Done => theme.tool_done(),
+        WatchState::Failed => theme.tool_error(),
+        WatchState::Cancelled => theme.dim(),
     };
     let glyph = match w.kind {
         crate::watch::WatchKind::Agent => "◉ ",
@@ -482,16 +468,16 @@ fn watch_header(w: &WatchCall, theme: &Theme) -> Line {
 fn watch_result(w: &WatchCall, act: &Activity, theme: &Theme) -> Line {
     let mut body = match (&w.detail, w.status) {
         (Some(detail), _) => detail.clone(),
-        (None, WatchStatus::Running) => "Running…".to_string(),
-        (None, WatchStatus::Idle) => "Waiting…".to_string(),
-        (None, WatchStatus::Done) => "Done".to_string(),
-        (None, WatchStatus::Failed) => "Failed".to_string(),
-        (None, WatchStatus::Cancelled) => "Cancelled".to_string(),
+        (None, WatchState::Running) => "Running…".to_string(),
+        (None, WatchState::Idle) => "Waiting…".to_string(),
+        (None, WatchState::Done) => "Done".to_string(),
+        (None, WatchState::Failed) => "Failed".to_string(),
+        (None, WatchState::Cancelled) => "Cancelled".to_string(),
     };
-    if w.status != WatchStatus::Running && w.duration_ms > SLOW_TOOL_MS {
+    if w.status != WatchState::Running && w.duration_ms > SLOW_TOOL_MS {
         body.push_str(&format!(" · Ran in {:.1}s", w.duration_ms as f64 / 1000.0));
     }
-    let style = if w.status == WatchStatus::Failed {
+    let style = if w.status == WatchState::Failed {
         theme.tool_error()
     } else {
         theme.dim()
@@ -802,9 +788,8 @@ mod tests {
     /// Edit/Write：`⏺ Update(path)` + `  ⎿  Updated path with N additions…`。
     #[test]
     fn diff_renders_update_header_and_result() {
-        let diff = Diff::parse_unified(
-            "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n+d\n",
-        );
+        let diff =
+            Diff::parse_unified("--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n+d\n");
         let h = Activity::new(ActivityKind::Diff(diff));
         let lines = render_lines(&h);
         assert_eq!(text(&lines[0]), "⏺ Update(f.txt)");
@@ -819,7 +804,11 @@ mod tests {
         let a = spinner(0);
         let b = spinner(1);
         assert_ne!(a, b);
-        assert_eq!(spinner(SPINNERS.len() as u64), a, "cycles after full rotation");
+        assert_eq!(
+            spinner(SPINNERS.len() as u64),
+            a,
+            "cycles after full rotation"
+        );
         // Starburst glyph (CC): no longer braille.
         assert_eq!(SPINNERS[0], '·');
         assert!(SPINNERS.contains(&'✻'));
@@ -873,16 +862,19 @@ mod tests {
         let agent_watch = Activity::new(ActivityKind::Watch(WatchCall {
             label: "reviewer · 整理笔记".into(),
             kind: crate::watch::WatchKind::Agent,
-            status: WatchStatus::Running,
+            status: WatchState::Running,
             detail: None,
             duration_ms: 0,
         }));
-        assert_eq!(text(&render_lines(&agent_watch)[0]), "◉ reviewer · 整理笔记");
+        assert_eq!(
+            text(&render_lines(&agent_watch)[0]),
+            "◉ reviewer · 整理笔记"
+        );
 
         let channel_watch = Activity::new(ActivityKind::Watch(WatchCall {
             label: "#table".into(),
             kind: crate::watch::WatchKind::Channel,
-            status: WatchStatus::Running,
+            status: WatchState::Running,
             detail: Some("3 条 · 最近 a: 报数".into()),
             duration_ms: 0,
         }));
@@ -896,7 +888,7 @@ mod tests {
         let w = WatchCall {
             label: "watch -n 2 ls".into(),
             kind: crate::watch::WatchKind::Command,
-            status: WatchStatus::Done,
+            status: WatchState::Done,
             detail: Some("第 2 轮".into()),
             duration_ms: 9000,
         };

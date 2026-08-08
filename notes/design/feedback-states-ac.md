@@ -1,6 +1,6 @@
 # Feedback States Specification · Acceptance Assertion Table (AC)
 
-> Version: v1.9 (qa deliverable + devex contract alignment) · Corresponding design doc: `notes/design/feedback-states.md` **v1.15** (§3.1/§4.4 contract alignment finalized)
+> Version: v1.9.3 (qa deliverable + devex contract alignment) · Corresponding design doc: `notes/design/feedback-states.md` **v1.22** (§3.1/§4.4 contract alignment plus real fullscreen/idle-host feedback regressions)
 > Purpose: dev implements against the AC table; qa regresses against the AC table. **Assertions always anchor on the error code (`[error] code=...`), never on msg copy**.
 > Priority: P0 = must pass the release gate; P1 = should pass, schedulable as follow-up.
 > Assertion methods: unit (fake timers / tokio `pause`+`advance`, ms-level determinism) ｜ integration (spawn a real CLI, non-TTY) ｜ component/E2E (TUI, smoke-only, no timing assertions) ｜ SR audit (manual screen reader, web frontend only).
@@ -18,7 +18,7 @@ The following assertions are landed in the dev implementation; qa can verify the
 - **AC-50**: timing tests reuse chat.rs's existing no-runtime pure-logic test pattern with `tokio::time::pause/advance` infrastructure; the concrete fake-timer cases are added by qa against this table.
 - **AC-33 not applicable for now**: the `detail=` output channel (JSON-escaped multi-line stacks) is **only triggered by `--verbose`**; with no `--verbose` today there's no trigger point, so it's not implemented yet; `sanitize_msg` already keeps the primary msg single-line (covered by AC-31/32), so there's no gap on the code-table side. **Add this assertion when `--verbose` is implemented** (msg stays single-line + `detail=<JSON-escaped>`, see §F).
 
-Backlog (not covered by dev): AC-15 retry idempotency, AC-53 long-turn failure escalation in TUI presentation, AC-26 flow-level full-screen TUI state and other **component/TUI presentation-layer** assertions fall within qa regression scope.
+Component-level follow-up is closed for AC-15/26/53/29: retry/reset, long-turn escalation, full-screen presentation, per-code actions, and the real short-sync path are covered by the regression record below. The 2026-08-08 follow-up additionally exercises the alternate-screen host seam and idle slash-error TTL; no item in this paragraph remains a release backlog.
 
 ## TUI mapping baseline (dev review item 21, merged into doc section 5 by ui/ux)
 
@@ -268,3 +268,4 @@ Re-verified after dev's P2 decision + the macro-registry coverage test landed (`
 - v1.9 (2026-08-07): qa #69 + main's contract alignment — AC-29's `AUTH_EXPIRED` becomes **`AUTH_REQUIRED`** (aligned with the implementation and doc §4.4's single source; no new code); header version fixed (previously v1.3 lagging the actual v1.8) and corresponding doc version (v1.15); added the **`TIMEOUT` presented-level note** after AC-12/13/14 (decided by trigger context: short-sync = page-level / long turn = flow-level, qa #72).
 - v1.9.1 (2026-08-07): ui/ux added section C's **explicit TIMEOUT-level stance** per qa #72 — "`TIMEOUT`'s presented level is decided by the trigger context: short-sync = page-level (AC-12/13/14), long turn = flow-level (AC-53)" pinned at the top of the timeout-layering block, so qa/presentation don't assert `TIMEOUT`'s level against each other (qa #76 verified both places consistent in practice ✅).
 - v1.9.2 (2026-08-07): qa backfilled the **#14 component-level regression record** — AC-15/26/53/29 assertions landed (4 `qa_*` tests, 565 all passing); AC-15 server-side idempotency boundary finalized (main's option ①: short-sync writes = pure generation with no side effects, structural guarantees are the only defense, idempotency keys unnecessary; dev #99 boundary note).
+- v1.9.3 (2026-08-08): AC-26/53 regression moved to the real alternate-screen assembly seam (`fullscreen_frame`), preventing `run_fullscreen` from bypassing the Full error screen; assertion verifies title/stable code, no prompt border, and no caret. Added idle host/state coverage for slash-error TTL: `slash_error_at` keeps ticking while otherwise idle, expires after the 8s floor, then stops ticking.

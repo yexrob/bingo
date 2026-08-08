@@ -168,21 +168,33 @@ pub fn visual_lines(text: &str, width: usize) -> Vec<VisualLine> {
     let mut current = String::new();
     for (i, ch) in text.char_indices() {
         if ch == '\n' {
-            out.push(VisualLine { start, end: i, text: std::mem::take(&mut current) });
+            out.push(VisualLine {
+                start,
+                end: i,
+                text: std::mem::take(&mut current),
+            });
             start = i + ch.len_utf8();
             col = 0;
             continue;
         }
         let w = char_width(ch);
         if col + w > width && !current.is_empty() {
-            out.push(VisualLine { start, end: i, text: std::mem::take(&mut current) });
+            out.push(VisualLine {
+                start,
+                end: i,
+                text: std::mem::take(&mut current),
+            });
             start = i;
             col = 0;
         }
         current.push(ch);
         col += w;
     }
-    out.push(VisualLine { start, end: text.len(), text: current });
+    out.push(VisualLine {
+        start,
+        end: text.len(),
+        text: current,
+    });
     out
 }
 
@@ -304,7 +316,14 @@ mod tests {
         let lines = visual_lines("ab\ncd", 10);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text, "ab");
-        assert_eq!(lines[1], VisualLine { start: 3, end: 5, text: "cd".into() });
+        assert_eq!(
+            lines[1],
+            VisualLine {
+                start: 3,
+                end: 5,
+                text: "cd".into()
+            }
+        );
         // Hard wrap by display width; CJK counts two columns.
         let lines = visual_lines("中文换行", 4);
         assert_eq!(
@@ -327,7 +346,11 @@ mod tests {
         assert_eq!(cursor_cell(text, &lines, 5), (1, 2));
         let text = "中文";
         let lines = visual_lines(text, 10);
-        assert_eq!(cursor_cell(text, &lines, 3), (0, 2), "one CJK glyph = 2 cols");
+        assert_eq!(
+            cursor_cell(text, &lines, 3),
+            (0, 2),
+            "one CJK glyph = 2 cols"
+        );
     }
 
     #[test]

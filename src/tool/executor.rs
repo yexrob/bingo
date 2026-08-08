@@ -163,8 +163,8 @@ async fn call_or_cancel<'a>(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     struct FakeTool {
@@ -233,20 +233,31 @@ mod tests {
             .collect();
 
         let start = Instant::now();
-        let (outcomes, _interrupted) = execute_calls(calls, &ToolContext {
-            home: std::env::temp_dir(),
-            cwd: Default::default(),
-            watch: crate::watch::WatchRegistry::new(),
-            http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
-            hooks: Default::default(),
-            permission_mode: "default".into(),
-            expand_tasks: tokio::sync::watch::channel(false).0,
-            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
-        }, None).await;
+        let (outcomes, _interrupted) = execute_calls(
+            calls,
+            &ToolContext {
+                home: std::env::temp_dir(),
+                cwd: Default::default(),
+                watch: crate::watch::WatchRegistry::new(),
+                http: reqwest::Client::new(),
+                tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
+                    &std::env::temp_dir(),
+                    "test",
+                )),
+                hooks: Default::default(),
+                permission_mode: "default".into(),
+                expand_tasks: tokio::sync::watch::channel(false).0,
+                ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            },
+            None,
+        )
+        .await;
         let elapsed = start.elapsed();
 
-        assert!(elapsed < Duration::from_millis(250), "not parallel: {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "not parallel: {elapsed:?}"
+        );
         assert_eq!(outcomes.len(), 5);
         assert_eq!(counter.load(Ordering::SeqCst), 5);
         assert!(max_seen.load(Ordering::SeqCst) >= 2, "never overlapped");
@@ -274,20 +285,31 @@ mod tests {
             .collect();
 
         let start = Instant::now();
-        let (outcomes, _interrupted) = execute_calls(calls, &ToolContext {
-            home: std::env::temp_dir(),
-            cwd: Default::default(),
-            watch: crate::watch::WatchRegistry::new(),
-            http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
-            hooks: Default::default(),
-            permission_mode: "default".into(),
-            expand_tasks: tokio::sync::watch::channel(false).0,
-            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
-        }, None).await;
+        let (outcomes, _interrupted) = execute_calls(
+            calls,
+            &ToolContext {
+                home: std::env::temp_dir(),
+                cwd: Default::default(),
+                watch: crate::watch::WatchRegistry::new(),
+                http: reqwest::Client::new(),
+                tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
+                    &std::env::temp_dir(),
+                    "test",
+                )),
+                hooks: Default::default(),
+                permission_mode: "default".into(),
+                expand_tasks: tokio::sync::watch::channel(false).0,
+                ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            },
+            None,
+        )
+        .await;
         let elapsed = start.elapsed();
 
-        assert!(elapsed >= Duration::from_millis(90), "not serial: {elapsed:?}");
+        assert!(
+            elapsed >= Duration::from_millis(90),
+            "not serial: {elapsed:?}"
+        );
         assert_eq!(outcomes.len(), 3);
         assert_eq!(max_seen.load(Ordering::SeqCst), 1, "overlapped");
     }
@@ -314,24 +336,47 @@ mod tests {
             running,
         };
         let calls = vec![
-            PendingCall { tool_use_id: "r1".into(), tool: &read, input: serde_json::json!({}) },
-            PendingCall { tool_use_id: "r2".into(), tool: &read, input: serde_json::json!({}) },
-            PendingCall { tool_use_id: "b1".into(), tool: &bash, input: serde_json::json!({}) },
-            PendingCall { tool_use_id: "r3".into(), tool: &read, input: serde_json::json!({}) },
+            PendingCall {
+                tool_use_id: "r1".into(),
+                tool: &read,
+                input: serde_json::json!({}),
+            },
+            PendingCall {
+                tool_use_id: "r2".into(),
+                tool: &read,
+                input: serde_json::json!({}),
+            },
+            PendingCall {
+                tool_use_id: "b1".into(),
+                tool: &bash,
+                input: serde_json::json!({}),
+            },
+            PendingCall {
+                tool_use_id: "r3".into(),
+                tool: &read,
+                input: serde_json::json!({}),
+            },
         ];
 
-        let (outcomes, _interrupted) =
-            execute_calls(calls, &ToolContext {
-            home: std::env::temp_dir(),
-            cwd: Default::default(),
-            watch: crate::watch::WatchRegistry::new(),
-            http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
-            hooks: Default::default(),
-            permission_mode: "default".into(),
-            expand_tasks: tokio::sync::watch::channel(false).0,
-            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
-        }, None).await;
+        let (outcomes, _interrupted) = execute_calls(
+            calls,
+            &ToolContext {
+                home: std::env::temp_dir(),
+                cwd: Default::default(),
+                watch: crate::watch::WatchRegistry::new(),
+                http: reqwest::Client::new(),
+                tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
+                    &std::env::temp_dir(),
+                    "test",
+                )),
+                hooks: Default::default(),
+                permission_mode: "default".into(),
+                expand_tasks: tokio::sync::watch::channel(false).0,
+                ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            },
+            None,
+        )
+        .await;
 
         let ids: Vec<&str> = outcomes.iter().map(|o| o.tool_use_id.as_str()).collect();
         assert_eq!(ids, vec!["r1", "r2", "b1", "r3"]);
@@ -343,10 +388,7 @@ mod tests {
             home: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
-                &std::env::temp_dir(),
-                "test",
-            )),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
@@ -426,7 +468,11 @@ mod tests {
         tx.send(true).unwrap();
         let (outcomes, aborted) = handle.await.unwrap();
         assert!(aborted);
-        assert_eq!(outcomes.len(), 1, "已完成的保留，执行中的取消，未开始的跳过");
+        assert_eq!(
+            outcomes.len(),
+            1,
+            "已完成的保留，执行中的取消，未开始的跳过"
+        );
         assert_eq!(outcomes[0].tool_use_id, "tu_0");
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -456,9 +502,21 @@ mod tests {
                 running: Arc::new(AtomicUsize::new(0)),
             };
             let calls = vec![
-                PendingCall { tool_use_id: "fast_0".into(), tool: &fast, input: serde_json::json!({}) },
-                PendingCall { tool_use_id: "slow_1".into(), tool: &slow, input: serde_json::json!({}) },
-                PendingCall { tool_use_id: "fast_2".into(), tool: &fast, input: serde_json::json!({}) },
+                PendingCall {
+                    tool_use_id: "fast_0".into(),
+                    tool: &fast,
+                    input: serde_json::json!({}),
+                },
+                PendingCall {
+                    tool_use_id: "slow_1".into(),
+                    tool: &slow,
+                    input: serde_json::json!({}),
+                },
+                PendingCall {
+                    tool_use_id: "fast_2".into(),
+                    tool: &fast,
+                    input: serde_json::json!({}),
+                },
             ];
             execute_calls(calls, &test_ctx(), Some(&mut rx)).await
         });
@@ -491,8 +549,16 @@ mod tests {
             running: Arc::new(AtomicUsize::new(0)),
         };
         let calls = vec![
-            PendingCall { tool_use_id: "a".into(), tool: &tool, input: serde_json::json!({}) },
-            PendingCall { tool_use_id: "b".into(), tool: &tool, input: serde_json::json!({}) },
+            PendingCall {
+                tool_use_id: "a".into(),
+                tool: &tool,
+                input: serde_json::json!({}),
+            },
+            PendingCall {
+                tool_use_id: "b".into(),
+                tool: &tool,
+                input: serde_json::json!({}),
+            },
         ];
         let (outcomes, aborted) = execute_calls(calls, &test_ctx(), Some(&mut rx)).await;
         assert!(!aborted, "假信号不得判定中断");
@@ -520,10 +586,12 @@ mod tests {
             tool: &tool,
             input: serde_json::json!({}),
         }];
-        let (outcomes, aborted) =
-            tokio::time::timeout(Duration::from_secs(5), execute_calls(calls, &test_ctx(), Some(&mut rx)))
-                .await
-                .expect("sender drop 后不得空转");
+        let (outcomes, aborted) = tokio::time::timeout(
+            Duration::from_secs(5),
+            execute_calls(calls, &test_ctx(), Some(&mut rx)),
+        )
+        .await
+        .expect("sender drop 后不得空转");
         assert!(!aborted);
         assert_eq!(outcomes.len(), 1, "工具照常跑完");
     }

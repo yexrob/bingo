@@ -7,7 +7,7 @@ use tokio::io::AsyncBufReadExt;
 
 use async_trait::async_trait;
 
-use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
+use super::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// Default check interval for periodic commands (when no explicit -n is given).
@@ -34,9 +34,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         if i >= tokens.len() {
             return match wrapper {
                 // A bare sudo/doas grabs /dev/tty to prompt for a password.
-                "sudo" | "doas" => {
-                    Some("sudo/doas 需要交互口令（TTY），已拒绝".to_string())
-                }
+                "sudo" | "doas" => Some("sudo/doas 需要交互口令（TTY），已拒绝".to_string()),
                 _ => None,
             };
         }
@@ -48,18 +46,29 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
             while let Some(flag) = tokens.get(i).copied().filter(|t| t.starts_with('-')) {
                 i += 1;
                 if matches!(flag, "-i" | "-s") {
-                    return Some(format!(
-                        "sudo 交互登录 shell（{flag}）需要 TTY，已拒绝"
-                    ));
+                    return Some(format!("sudo 交互登录 shell（{flag}）需要 TTY，已拒绝"));
                 }
                 // These flags never prompt for a password (-n fails immediately, -k/-K only clear timestamps).
-                if matches!(flag, "-n" | "--non-interactive" | "-k" | "-K" | "-V" | "--version") {
+                if matches!(
+                    flag,
+                    "-n" | "--non-interactive" | "-k" | "-K" | "-V" | "--version"
+                ) {
                     non_prompting = true;
                 }
                 if matches!(
                     flag,
-                    "-u" | "-g" | "-C" | "-p" | "-D" | "-R" | "-T" | "-r" | "-t" | "-U"
-                        | "-S" | "-P" | "-h"
+                    "-u" | "-g"
+                        | "-C"
+                        | "-p"
+                        | "-D"
+                        | "-R"
+                        | "-T"
+                        | "-r"
+                        | "-t"
+                        | "-U"
+                        | "-S"
+                        | "-P"
+                        | "-h"
                 ) && i < tokens.len()
                 {
                     i += 1;
@@ -89,8 +98,8 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
 
     // Full-screen system monitors: allow -b/--batch (one-shot snapshot, non-interactive).
     const MONITORS: &[&str] = &[
-        "top", "htop", "btop", "bpytop", "bashtop", "btm", "nmon", "glances", "s-tui",
-        "gtop", "vtop", "ktop", "ctop", "ytop",
+        "top", "htop", "btop", "bpytop", "bashtop", "btm", "nmon", "glances", "s-tui", "gtop",
+        "vtop", "ktop", "ctop", "ytop",
     ];
     if MONITORS.contains(&name) {
         let batch = rest
@@ -103,14 +112,25 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         }
     }
     const EDITORS: &[&str] = &[
-        "vim", "vi", "nvim", "nano", "emacs", "micro", "pico", "mg", "ed", "ex", "kak",
-        "kakoune", "helix", "hx", "ne", "zile", "joe",
+        "vim", "vi", "nvim", "nano", "emacs", "micro", "pico", "mg", "ed", "ex", "kak", "kakoune",
+        "helix", "hx", "ne", "zile", "joe",
     ];
     const FILE_MANAGERS: &[&str] = &[
-        "ranger", "lf", "yazi", "joshuto", "mc", "midnight-commander",
+        "ranger",
+        "lf",
+        "yazi",
+        "joshuto",
+        "mc",
+        "midnight-commander",
     ];
     const TUI_TOOLS: &[&str] = &[
-        "lazygit", "tig", "lazydocker", "k9s", "kdash", "screen", "fzf",
+        "lazygit",
+        "tig",
+        "lazydocker",
+        "k9s",
+        "kdash",
+        "screen",
+        "fzf",
     ];
     if EDITORS.contains(&name) {
         return Some(format!("{name} 是交互式编辑器（需要 TTY），已拒绝"));
@@ -122,18 +142,43 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         return Some(format!("{name} 是交互式 TUI 程序（需要 TTY），已拒绝"));
     }
     // gdb: without -batch it is an interactive debugger.
-    if name == "gdb"
-        && !rest.iter().any(|a| matches!(*a, "-batch" | "--batch"))
-    {
+    if name == "gdb" && !rest.iter().any(|a| matches!(*a, "-batch" | "--batch")) {
         return Some("gdb 调试器需要 TTY，已拒绝。批处理可用 `gdb -batch -ex ...`".to_string());
     }
     // Bare shell/REPL: exits immediately without input (pointless); allow when given
     // arguments (bash -c / python x.py). DB clients have separate rules: connection args
     // without an execution flag/script/SQL positional argument = REPL.
     const REPLS: &[&str] = &[
-        "bash", "sh", "zsh", "fish", "ksh", "dash", "elvish", "xonsh", "python", "python2",
-        "python3", "ipython", "pypy", "node", "deno", "bun", "ruby", "irb", "perl", "php",
-        "lua", "luajit", "bc", "dc", "sbcl", "ghci", "powershell", "pwsh", "cmd", "cmd.exe",
+        "bash",
+        "sh",
+        "zsh",
+        "fish",
+        "ksh",
+        "dash",
+        "elvish",
+        "xonsh",
+        "python",
+        "python2",
+        "python3",
+        "ipython",
+        "pypy",
+        "node",
+        "deno",
+        "bun",
+        "ruby",
+        "irb",
+        "perl",
+        "php",
+        "lua",
+        "luajit",
+        "bc",
+        "dc",
+        "sbcl",
+        "ghci",
+        "powershell",
+        "pwsh",
+        "cmd",
+        "cmd.exe",
         "powershell.exe",
     ];
     if REPLS.contains(&name) && rest.is_empty() {
@@ -150,13 +195,20 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         let positional: Vec<&&str> = rest.iter().filter(|a| !a.starts_with('-')).collect();
         let interactive = match name {
             "sqlite3" | "psql" => {
-                !flags(&["-c", "-f", "-l", "--command", "--file", "--list", "--version", "--help"])
-                    && !has_stdin
+                !flags(&[
+                    "-c",
+                    "-f",
+                    "-l",
+                    "--command",
+                    "--file",
+                    "--list",
+                    "--version",
+                    "--help",
+                ]) && !has_stdin
                     && positional.len() <= 1
             }
             "mysql" => {
-                !flags(&["-e", "--execute", "-f", "--force", "--version", "--help"])
-                    && !has_stdin
+                !flags(&["-e", "--execute", "-f", "--force", "--version", "--help"]) && !has_stdin
             }
             "mongosh" => {
                 !flags(&["--eval", "--version", "--help"])
@@ -164,9 +216,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
                     && !positional.iter().any(|a| a.ends_with(".js"))
             }
             // redis-cli: no positional arguments means an interactive prompt.
-            _ => {
-                !flags(&["--version", "--help"]) && positional.is_empty() && !has_stdin
-            }
+            _ => !flags(&["--version", "--help"]) && positional.is_empty() && !has_stdin,
         };
         if interactive {
             return Some(format!(
@@ -185,9 +235,28 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
             let a = rest[j];
             if matches!(
                 a,
-                "-p" | "-l" | "-i" | "-o" | "-F" | "-J" | "-L" | "-R" | "-D" | "-W" | "-m"
-                    | "-c" | "-e" | "-b" | "-K" | "-I" | "-O" | "-Q" | "-S" | "-w" | "-E"
-                    | "-G" | "-g"
+                "-p" | "-l"
+                    | "-i"
+                    | "-o"
+                    | "-F"
+                    | "-J"
+                    | "-L"
+                    | "-R"
+                    | "-D"
+                    | "-W"
+                    | "-m"
+                    | "-c"
+                    | "-e"
+                    | "-b"
+                    | "-K"
+                    | "-I"
+                    | "-O"
+                    | "-Q"
+                    | "-S"
+                    | "-w"
+                    | "-E"
+                    | "-G"
+                    | "-g"
             ) {
                 j += 2;
                 continue;
@@ -211,20 +280,21 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         }
     }
     // Container exec/run -it / attach: interactive shell.
-    if matches!(name, "docker" | "nerdctl" | "podman" | "kubectl" | "docker-compose") {
+    if matches!(
+        name,
+        "docker" | "nerdctl" | "podman" | "kubectl" | "docker-compose"
+    ) {
         let sub = rest.first().copied().unwrap_or("");
         if sub == "attach" {
-            return Some(format!(
-                "{name} attach 是交互会话（需要 TTY），已拒绝"
-            ));
+            return Some(format!("{name} attach 是交互会话（需要 TTY），已拒绝"));
         }
         if matches!(sub, "exec" | "run") {
-            let interactive = rest.iter().any(|a| matches!(*a, "-it" | "-ti" | "--interactive"))
+            let interactive = rest
+                .iter()
+                .any(|a| matches!(*a, "-it" | "-ti" | "--interactive"))
                 || (rest.contains(&"-i") && rest.contains(&"-t"));
             if interactive {
-                return Some(format!(
-                    "{name} {sub} -it 是交互会话（需要 TTY），已拒绝"
-                ));
+                return Some(format!("{name} {sub} -it 是交互会话（需要 TTY），已拒绝"));
             }
         }
     }
@@ -279,17 +349,23 @@ struct BashInput {
     /// triggers a notification (e.g. ["ERROR", "panic"]). When unset, common error lines are
     /// detected by default.
     #[serde(default)]
-    #[schemars(description = "Background notify condition: notify when any of these strings appears in the output (default: detect error lines)")]
+    #[schemars(
+        description = "Background notify condition: notify when any of these strings appears in the output (default: detect error lines)"
+    )]
     notify_on: Option<Vec<String>>,
     /// Background monitor regex notification condition: a matching output line triggers a notification.
     #[serde(default)]
-    #[schemars(description = "Background notify regex condition: notify when an output line matches")]
+    #[schemars(
+        description = "Background notify regex condition: notify when an output line matches"
+    )]
     notify_regex: Option<String>,
     /// Background mode: returns async_launched immediately and notifies when done. Use for
     /// non-dependent/long-running commands (when the result is not needed right away);
     /// defaults to waiting for output synchronously.
     #[serde(default)]
-    #[schemars(description = "Run in background (default false): returns a task id immediately and notifies on completion; use for commands whose result is not needed immediately")]
+    #[schemars(
+        description = "Run in background (default false): returns a task id immediately and notifies on completion; use for commands whose result is not needed immediately"
+    )]
     background: Option<bool>,
 }
 
@@ -436,15 +512,15 @@ async fn launch_background(
     // Round semantics for periodic commands (Idle = one round) only apply to watch/loop-style
     // commands; explicit background only uses polling to drive condition matching, staying Running.
     let periodic = interval.is_some();
-    let id = ctx
-        .watch
-        .register_with_conditions(Box::new(BashWatch {
+    let id = ctx.watch.register_with_conditions(
+        Box::new(BashWatch {
             cell: cell.clone(),
             label: label.clone(),
-            interval: interval
-                .unwrap_or_else(|| Duration::from_secs(DEFAULT_WATCH_INTERVAL_SECS)),
+            interval: interval.unwrap_or_else(|| Duration::from_secs(DEFAULT_WATCH_INTERVAL_SECS)),
             periodic,
-        }), conditions);
+        }),
+        conditions,
+    );
     let watch = ctx.watch.clone();
     let command = params.command.clone();
     let cwd = ctx.cwd.clone();
@@ -465,13 +541,15 @@ async fn launch_background(
         }
     });
     Ok(ToolResult {
-        content: serde_json::Value::String(serde_json::json!({
-            "status": "async_launched",
-            "task_id": id.0,
-            "label": label,
-            "note": "周期命令已在后台执行，状态变化与完成通知会到达",
-        })
-        .to_string()),
+        content: serde_json::Value::String(
+            serde_json::json!({
+                "status": "async_launched",
+                "task_id": id.0,
+                "label": label,
+                "note": "周期命令已在后台执行，状态变化与完成通知会到达",
+            })
+            .to_string(),
+        ),
         is_error: false,
         diff: None,
     })
@@ -494,8 +572,14 @@ async fn run_streaming(
     let buf = Arc::new(Mutex::new(String::new()));
     let mut readers = Vec::new();
     let streams: Vec<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = [
-        child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
-        child.stderr.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
     ]
     .into_iter()
     .flatten()
@@ -587,7 +671,9 @@ impl BashCell {
             let rounds = self.rounds.fetch_add(1, Ordering::SeqCst) + 1;
             crate::watch::WatchPoll {
                 state: crate::watch::WatchState::Idle,
-                detail: Some(format!("第 {rounds} 轮 · 输出 {delta} 行（累计 {total} 行）")),
+                detail: Some(format!(
+                    "第 {rounds} 轮 · 输出 {delta} 行（累计 {total} 行）"
+                )),
                 payload: None,
                 signal: None,
             }
@@ -640,7 +726,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
             http: reqwest::Client::new(),
-                        tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
@@ -686,7 +772,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
             http: reqwest::Client::new(),
-                        tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
@@ -786,10 +872,7 @@ mod tests {
             "gdb ./prog",
         ];
         for cmd in rejected {
-            assert!(
-                interactive_command_reason(cmd).is_some(),
-                "应当拒绝: {cmd}"
-            );
+            assert!(interactive_command_reason(cmd).is_some(), "应当拒绝: {cmd}");
         }
 
         let allowed = [
@@ -832,11 +915,7 @@ mod tests {
             "redis-cli --version",
         ];
         for cmd in allowed {
-            assert_eq!(
-                interactive_command_reason(cmd),
-                None,
-                "不应拒绝: {cmd}"
-            );
+            assert_eq!(interactive_command_reason(cmd), None, "不应拒绝: {cmd}");
         }
     }
 
@@ -852,7 +931,9 @@ mod tests {
             );
         }
         // No password prompt / no base command: allowed without panicking.
-        for cmd in ["", "   ", "sudo -k", "sudo -n", "sudo -K", "env", "nohup", "exec"] {
+        for cmd in [
+            "", "   ", "sudo -k", "sudo -n", "sudo -K", "env", "nohup", "exec",
+        ] {
             assert_eq!(
                 interactive_command_reason(cmd),
                 None,
@@ -866,8 +947,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_whole_process_group() {
-        let marker = std::env::temp_dir()
-            .join(format!("bingo-pgroup-{}.pid", std::process::id()));
+        let marker = std::env::temp_dir().join(format!("bingo-pgroup-{}.pid", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         let ctx = ToolContext {
             home: std::env::temp_dir(),
@@ -886,10 +966,7 @@ mod tests {
             marker.to_string_lossy()
         );
         let err = BashTool::new()
-            .call(
-                serde_json::json!({"command": command, "timeout": 1}),
-                &ctx,
-            )
+            .call(serde_json::json!({"command": command, "timeout": 1}), &ctx)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
@@ -917,8 +994,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn kill_process_tree_removes_grandchildren() {
-        let marker = std::env::temp_dir()
-            .join(format!("bingo-ptree-{}.pid", std::process::id()));
+        let marker = std::env::temp_dir().join(format!("bingo-ptree-{}.pid", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         // PowerShell: spawn a hidden cmd that pings (stays alive), write its pid, then sleep.
         let script = format!(
@@ -986,7 +1062,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(result.content.as_str().unwrap_or_default().contains("async_launched"));
+        assert!(
+            result
+                .content
+                .as_str()
+                .unwrap_or_default()
+                .contains("async_launched")
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         let mut signalled = false;
         while std::time::Instant::now() < deadline {
@@ -1022,9 +1104,6 @@ mod tests {
             .call(serde_json::json!({"command": "htop"}), &ctx)
             .await
             .unwrap_err();
-        assert!(
-            err.to_string().contains("TTY"),
-            "拒绝原因说明 TTY: {err}"
-        );
+        assert!(err.to_string().contains("TTY"), "拒绝原因说明 TTY: {err}");
     }
 }

@@ -83,13 +83,7 @@ impl Recorder {
     /// implementation; passing `None` for `fg`/`bg` leaves that dimension
     /// unrestricted. Used for "error-line highlight" assertions (the error
     /// colour `(255,107,128)` is distinguishable from the normal colour).
-    pub fn assert_row_styled(
-        &self,
-        y: u16,
-        fg: Option<Color>,
-        bg: Option<Color>,
-        contains: &str,
-    ) {
+    pub fn assert_row_styled(&self, y: u16, fg: Option<Color>, bg: Option<Color>, contains: &str) {
         let buf = self.buffer();
         if y >= buf.area.height {
             panic!(
@@ -113,10 +107,7 @@ impl Recorder {
             fg_ok && bg_ok
         });
         assert!(styled, "row {y} 无匹配样式 fg={fg:?} bg={bg:?}：{row:?}");
-        assert!(
-            row.contains(contains),
-            "row {y} 不含 {contains:?}：{row:?}"
-        );
+        assert!(row.contains(contains), "row {y} 不含 {contains:?}：{row:?}");
     }
 
     /// Viewport row lookup (B-area "scrolled into the visible region"
@@ -125,9 +116,7 @@ impl Recorder {
     /// `scrollback()` — this only checks the viewport; use
     /// [`Self::scrollback`] for the scrollback.
     pub fn visible_row_containing(&self, needle: &str) -> Option<usize> {
-        self.screen()
-            .iter()
-            .position(|row| row.contains(needle))
+        self.screen().iter().position(|row| row.contains(needle))
     }
 }
 
@@ -174,10 +163,7 @@ impl Backend for Recorder {
         self.inner.get_cursor_position()
     }
 
-    fn set_cursor_position<P: Into<Position>>(
-        &mut self,
-        position: P,
-    ) -> Result<(), Infallible> {
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Infallible> {
         self.inner.set_cursor_position(position)
     }
 
@@ -203,11 +189,7 @@ impl Backend for Recorder {
         self.inner.flush()
     }
 
-    fn scroll_region_up(
-        &mut self,
-        region: Range<u16>,
-        line_count: u16,
-    ) -> Result<(), Infallible> {
+    fn scroll_region_up(&mut self, region: Range<u16>, line_count: u16) -> Result<(), Infallible> {
         self.scrolled_up.push((region.clone(), line_count));
         self.inner.scroll_region_up(region, line_count)
     }
@@ -303,28 +285,105 @@ pub fn error_fixtures() -> Vec<ErrorFixture> {
     const ERR: (u8, u8, u8) = (255, 107, 128); // swatch baseline
     vec![
         // FX-01 short-sync read timeout → page level
-        ErrorFixture { code: "TIMEOUT", msg: "请求超时，可重试", context: ShortSync, level: Page, action: "重试", expect_style: ERR },
+        ErrorFixture {
+            code: "TIMEOUT",
+            msg: "请求超时，可重试",
+            context: ShortSync,
+            level: Page,
+            action: "重试",
+            expect_style: ERR,
+        },
         // FX-02 server error → page level
-        ErrorFixture { code: "SERVER_ERROR", msg: "服务端错误，稍后重试", context: ShortSync, level: Page, action: "稍后重试", expect_style: ERR },
+        ErrorFixture {
+            code: "SERVER_ERROR",
+            msg: "服务端错误，稍后重试",
+            context: ShortSync,
+            level: Page,
+            action: "稍后重试",
+            expect_style: ERR,
+        },
         // FX-03 no network → page level
-        ErrorFixture { code: "OFFLINE", msg: "无网络连接，请检查网络后重试", context: ShortSync, level: Page, action: "检查网络后重试", expect_style: ERR },
+        ErrorFixture {
+            code: "OFFLINE",
+            msg: "无网络连接，请检查网络后重试",
+            context: ShortSync,
+            level: Page,
+            action: "检查网络后重试",
+            expect_style: ERR,
+        },
         // FX-04 login expired / missing key → full-flow level
-        ErrorFixture { code: "AUTH_REQUIRED", msg: "登录已过期或缺少 API key，请重新登录或配置 key", context: ShortSync, level: Full, action: "重新登录", expect_style: ERR },
+        ErrorFixture {
+            code: "AUTH_REQUIRED",
+            msg: "登录已过期或缺少 API key，请重新登录或配置 key",
+            context: ShortSync,
+            level: Full,
+            action: "重新登录",
+            expect_style: ERR,
+        },
         // FX-05 no permission → full-flow level
-        ErrorFixture { code: "PERMISSION_DENIED", msg: "无权限执行此操作，请返回或申请权限", context: ShortSync, level: Full, action: "返回/申请权限", expect_style: ERR },
+        ErrorFixture {
+            code: "PERMISSION_DENIED",
+            msg: "无权限执行此操作，请返回或申请权限",
+            context: ShortSync,
+            level: Full,
+            action: "返回/申请权限",
+            expect_style: ERR,
+        },
         // FX-06 config validation failed → field level (marks only the error object)
-        ErrorFixture { code: "CONFIG_INVALID", msg: "配置校验失败，请修正配置", context: ShortSync, level: Field, action: "修正配置", expect_style: ERR },
+        ErrorFixture {
+            code: "CONFIG_INVALID",
+            msg: "配置校验失败，请修正配置",
+            context: ShortSync,
+            level: Field,
+            action: "修正配置",
+            expect_style: ERR,
+        },
         // FX-07 rate limited / 429 → page level
-        ErrorFixture { code: "RATE_LIMITED", msg: "请求过于频繁，请稍后重试", context: ShortSync, level: Page, action: "稍后重试", expect_style: ERR },
+        ErrorFixture {
+            code: "RATE_LIMITED",
+            msg: "请求过于频繁，请稍后重试",
+            context: ShortSync,
+            level: Page,
+            action: "稍后重试",
+            expect_style: ERR,
+        },
         // FX-08 tool execution failed → page level
-        ErrorFixture { code: "TOOL_FAILED", msg: "工具执行失败，请查看输出后重试", context: ShortSync, level: Page, action: "查看输出后重试", expect_style: ERR },
+        ErrorFixture {
+            code: "TOOL_FAILED",
+            msg: "工具执行失败，请查看输出后重试",
+            context: ShortSync,
+            level: Page,
+            action: "查看输出后重试",
+            expect_style: ERR,
+        },
         // FX-09 hook execution failed → page level
-        ErrorFixture { code: "HOOK_FAILED", msg: "hook 执行失败，请检查 hook 配置", context: ShortSync, level: Page, action: "检查 hook 配置", expect_style: ERR },
+        ErrorFixture {
+            code: "HOOK_FAILED",
+            msg: "hook 执行失败，请检查 hook 配置",
+            context: ShortSync,
+            level: Page,
+            action: "检查 hook 配置",
+            expect_style: ERR,
+        },
         // FX-10 local storage failed → page level
-        ErrorFixture { code: "STORAGE_ERROR", msg: "本地存储失败，请检查磁盘或权限", context: ShortSync, level: Page, action: "检查磁盘/权限", expect_style: ERR },
+        ErrorFixture {
+            code: "STORAGE_ERROR",
+            msg: "本地存储失败，请检查磁盘或权限",
+            context: ShortSync,
+            level: Page,
+            action: "检查磁盘/权限",
+            expect_style: ERR,
+        },
         // FX-11 long-turn transport timeout → full-flow level (AC-53, shares
         // the TIMEOUT code with FX-01, level told apart by context)
-        ErrorFixture { code: "TIMEOUT", msg: "长回合中断，可重试或返回", context: LongTurn, level: Full, action: "可重试或返回", expect_style: ERR },
+        ErrorFixture {
+            code: "TIMEOUT",
+            msg: "长回合中断，可重试或返回",
+            context: LongTurn,
+            level: Full,
+            action: "可重试或返回",
+            expect_style: ERR,
+        },
     ]
 }
 
@@ -396,17 +455,34 @@ mod tests {
         for f in &fxs {
             assert!(
                 !f.code.is_empty()
-                    && f.code.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-                    && f.code.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+                    && f.code
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_uppercase())
+                    && f.code
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
                 "fixture 码必须 SCREAMING_SNAKE：{:?}",
                 f.code
             );
         }
         // FX-01 and FX-11 share TIMEOUT; the level is told apart by context.
-        let short = fxs.iter().find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::ShortSync);
-        let long = fxs.iter().find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::LongTurn);
-        assert_eq!(short.map(|f| f.level), Some(ErrorLevel::Page), "短同步 TIMEOUT = 页面级");
-        assert_eq!(long.map(|f| f.level), Some(ErrorLevel::Full), "长回合 TIMEOUT = 全流程级");
+        let short = fxs
+            .iter()
+            .find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::ShortSync);
+        let long = fxs
+            .iter()
+            .find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::LongTurn);
+        assert_eq!(
+            short.map(|f| f.level),
+            Some(ErrorLevel::Page),
+            "短同步 TIMEOUT = 页面级"
+        );
+        assert_eq!(
+            long.map(|f| f.level),
+            Some(ErrorLevel::Full),
+            "长回合 TIMEOUT = 全流程级"
+        );
     }
 
     /// Dev local preview (fixture data dump): visible via
@@ -418,7 +494,13 @@ mod tests {
         for (i, f) in error_fixtures().iter().enumerate() {
             println!(
                 "FX-{:02} {:14} ctx={:?} level={:?} style={:?} action={:?} | {}",
-                i + 1, f.code, f.context, f.level, f.expect_style, f.action, f.msg
+                i + 1,
+                f.code,
+                f.context,
+                f.level,
+                f.expect_style,
+                f.action,
+                f.msg
             );
         }
     }

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::query::Session;
+use crate::tool::Tool;
 use crate::tool::agent::{AgentControlTool, AgentTool, SendMessageTool};
 use crate::tool::ask::AskUserQuestionTool;
 use crate::tool::bash::BashTool;
@@ -16,7 +17,6 @@ use crate::tool::task::{TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateToo
 use crate::tool::webfetch::WebFetchTool;
 use crate::tool::websearch::WebSearchTool;
 use crate::tool::write::WriteTool;
-use crate::tool::Tool;
 
 /// Base tool pool + MCP + subagents.
 pub async fn assemble_tools(
@@ -134,11 +134,7 @@ mod tests {
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
-                &std::env::temp_dir(),
-                "test",
-            )),
-            last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
@@ -152,7 +148,10 @@ mod tests {
         let tools = assemble_tools(&session_at_depth(0), &mut warn).await;
         let names: Vec<String> = tools.iter().map(|t| t.name()).collect();
         for expected in ["TaskCreate", "TaskUpdate", "TaskGet", "TaskList"] {
-            assert!(names.iter().any(|n| n == expected), "missing {expected}: {names:?}");
+            assert!(
+                names.iter().any(|n| n == expected),
+                "missing {expected}: {names:?}"
+            );
         }
     }
 
@@ -167,7 +166,10 @@ mod tests {
             .map(|t| t.name())
             .collect();
         for expected in ["Agent", "SendMessage", "AgentControl"] {
-            assert!(hub.iter().any(|n| n == expected), "missing {expected}: {hub:?}");
+            assert!(
+                hub.iter().any(|n| n == expected),
+                "missing {expected}: {hub:?}"
+            );
         }
         let sub: Vec<String> = assemble_tools(&session_at_depth(1), &mut warn)
             .await
@@ -176,7 +178,10 @@ mod tests {
             .collect();
         assert!(sub.iter().any(|n| n == "Agent"), "子代理仍可派生");
         for absent in ["SendMessage", "AgentControl"] {
-            assert!(!sub.iter().any(|n| n == absent), "{absent} 不应下发: {sub:?}");
+            assert!(
+                !sub.iter().any(|n| n == absent),
+                "{absent} 不应下发: {sub:?}"
+            );
         }
     }
 
@@ -185,23 +190,34 @@ mod tests {
     #[tokio::test]
     async fn channel_tools_gated_by_experimental_flag() {
         let mut warn = |_: String| {};
-        let names = |tools: Vec<Box<dyn Tool>>| -> Vec<String> {
-            tools.iter().map(|t| t.name()).collect()
-        };
+        let names =
+            |tools: Vec<Box<dyn Tool>>| -> Vec<String> { tools.iter().map(|t| t.name()).collect() };
         let off = names(assemble_tools(&session_at_depth(0), &mut warn).await);
-        assert!(!off.iter().any(|n| n == "Channel" || n == "Post"), "{off:?}");
+        assert!(
+            !off.iter().any(|n| n == "Channel" || n == "Post"),
+            "{off:?}"
+        );
 
         let hub = names(assemble_tools(&session_with(0, true), &mut warn).await);
         for expected in ["Channel", "Post"] {
-            assert!(hub.iter().any(|n| n == expected), "missing {expected}: {hub:?}");
+            assert!(
+                hub.iter().any(|n| n == expected),
+                "missing {expected}: {hub:?}"
+            );
         }
         let sub_session = std::sync::Arc::new(Session {
             instance: Some("a".into()),
             ..(*session_with(1, true)).clone()
         });
         let sub = names(assemble_tools(&sub_session, &mut warn).await);
-        assert!(sub.iter().any(|n| n == "Post"), "cohort 成员可发言: {sub:?}");
-        assert!(!sub.iter().any(|n| n == "Channel"), "频道管理仅 hub: {sub:?}");
+        assert!(
+            sub.iter().any(|n| n == "Post"),
+            "cohort 成员可发言: {sub:?}"
+        );
+        assert!(
+            !sub.iter().any(|n| n == "Channel"),
+            "频道管理仅 hub: {sub:?}"
+        );
         let deep = std::sync::Arc::new(Session {
             instance: Some("d".into()),
             ..(*session_with(2, true)).clone()

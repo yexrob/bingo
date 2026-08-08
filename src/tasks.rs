@@ -102,7 +102,10 @@ impl TaskStore {
     /// TUI/query share the same store instance (Arc<TaskStore>).
     fn task_path(&self, id: &str) -> Result<PathBuf, TaskError> {
         // ids are internally generated numeric strings; defends against path traversal.
-        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             return Err(TaskError::InvalidId(id.to_string()));
         }
         Ok(self.dir.join(format!("{id}.json")))
@@ -116,10 +119,12 @@ impl TaskStore {
         };
         // Parse failures used to be swallowed as Ok(None): tasks silently vanished from
         // the list with no way for the user to know.
-        serde_json::from_str(&raw).map(Some).map_err(|e| TaskError::Parse {
-            path: path.display().to_string(),
-            detail: e.to_string(),
-        })
+        serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|e| TaskError::Parse {
+                path: path.display().to_string(),
+                detail: e.to_string(),
+            })
     }
 
     /// Atomic write: write a temp file first, then rename, so half-written files are never read.
@@ -138,14 +143,15 @@ impl TaskStore {
     }
 
     /// Create under lock: id = max(existing max, 0) + 1; ifAbsent semantics (errors if it exists).
-    pub async fn create(
-        &self,
-        task: &Task,
-    ) -> Result<String, TaskError> {
+    pub async fn create(&self, task: &Task) -> Result<String, TaskError> {
         let _guard = self.lock.lock().await;
         std::fs::create_dir_all(&self.dir).map_err(TaskError::Io)?;
         let ids = self.list_ids_unlocked()?;
-        let max = ids.iter().filter_map(|i| i.parse::<u64>().ok()).max().unwrap_or(0);
+        let max = ids
+            .iter()
+            .filter_map(|i| i.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
         let id = (max + 1).to_string();
         let mut t = task.clone();
         t.id = id.clone();
@@ -304,7 +310,11 @@ impl TaskStore {
         };
         let mut tasks: Vec<Task> = ids
             .into_iter()
-            .filter_map(|id| self.task_path(&id).ok().and_then(|p| Self::read_file(&p).ok().flatten()))
+            .filter_map(|id| {
+                self.task_path(&id)
+                    .ok()
+                    .and_then(|p| Self::read_file(&p).ok().flatten())
+            })
             .filter(|t| !t.is_internal())
             .collect();
         tasks.sort_by_key(|t| t.id.parse::<u64>().unwrap_or(u64::MAX));
@@ -465,7 +475,9 @@ mod tests {
             let _ = std::fs::remove_dir_all(&tmp);
             let store = store_in(&tmp);
             let mut hidden = task("hidden");
-            hidden.metadata.insert("_internal".into(), serde_json::json!(true));
+            hidden
+                .metadata
+                .insert("_internal".into(), serde_json::json!(true));
             store.create(&hidden).await.unwrap();
             store.create(&task("visible")).await.unwrap();
             let list = store.list().await.unwrap();

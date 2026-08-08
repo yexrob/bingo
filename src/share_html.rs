@@ -157,7 +157,9 @@ pub fn render_markdown(text: &str) -> String {
             out.push_str(&format!("<{tag}>"));
             out.push_str(&format!("<li>{}</li>", inline_md(&escape(content))));
             while let Some(next) = lines.peek() {
-                let Some((ordered_next, content_next)) = list_item(next) else { break };
+                let Some((ordered_next, content_next)) = list_item(next) else {
+                    break;
+                };
                 if ordered_next != ordered {
                     break;
                 }
@@ -301,7 +303,13 @@ fn state_glyph(state: &str) -> &'static str {
 fn id_slug(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     if cleaned.is_empty() {
         "agent".to_string()
@@ -391,11 +399,7 @@ fn image_html(source: &ImageSource) -> String {
 }
 
 /// 单条主对话消息：user 右侧气泡 / assistant 左侧 markdown 流 + 工具折叠卡。
-fn render_message(
-    msg: &Message,
-    index: usize,
-    map: &HashMap<String, (String, String)>,
-) -> String {
+fn render_message(msg: &Message, index: usize, map: &HashMap<String, (String, String)>) -> String {
     let id = format!("msg-{index}");
     match msg.role {
         Role::User => {
@@ -409,9 +413,11 @@ fn render_message(
                         }
                         texts.push_str(text);
                     }
-                    ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-                        cards.push_str(&tool_result_card(tool_use_id, content, *is_error, map))
-                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => cards.push_str(&tool_result_card(tool_use_id, content, *is_error, map)),
                     ContentBlock::Image { source } => cards.push_str(&image_html(source)),
                     _ => {}
                 }
@@ -431,13 +437,17 @@ fn render_message(
             for block in &msg.content {
                 match block {
                     ContentBlock::Text { text } => md.push_str(&render_markdown(text)),
-                    ContentBlock::Thinking { thinking, .. } => extras.push_str(&think_card(thinking)),
+                    ContentBlock::Thinking { thinking, .. } => {
+                        extras.push_str(&think_card(thinking))
+                    }
                     ContentBlock::ToolUse { name, input, .. } => {
                         extras.push_str(&tool_use_card(name, input))
                     }
-                    ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-                        extras.push_str(&tool_result_card(tool_use_id, content, *is_error, map))
-                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => extras.push_str(&tool_result_card(tool_use_id, content, *is_error, map)),
                     ContentBlock::Image { source } => extras.push_str(&image_html(source)),
                 }
             }
@@ -535,7 +545,9 @@ fn render_private(agents: &[AgentShare]) -> String {
                                 ContentBlock::ToolUse { name, input, .. } => {
                                     extras.push_str(&tool_use_card(name, input))
                                 }
-                                ContentBlock::Image { source } => extras.push_str(&image_html(source)),
+                                ContentBlock::Image { source } => {
+                                    extras.push_str(&image_html(source))
+                                }
                                 ContentBlock::ToolResult { .. } => {}
                             }
                         }
@@ -629,7 +641,14 @@ fn format_epoch(secs: u64) -> String {
     let y = if m <= 2 { y + 1 } else { y };
     let h = secs_of_day / 3600;
     let min = (secs_of_day % 3600) / 60;
-    format!("{} {}, {} {:02}:{:02} UTC", MONTHS[(m - 1) as usize], d, y, h, min)
+    format!(
+        "{} {}, {} {:02}:{:02} UTC",
+        MONTHS[(m - 1) as usize],
+        d,
+        y,
+        h,
+        min
+    )
 }
 
 /// 生成自包含 HTML 文档（conversation 来自主 transcript，其余来自 ShareDoc）。
@@ -874,7 +893,9 @@ mod tests {
         vec![
             Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text { text: "你好".into() }],
+                content: vec![ContentBlock::Text {
+                    text: "你好".into(),
+                }],
             },
             Message {
                 role: Role::Assistant,
@@ -907,7 +928,9 @@ mod tests {
                         content: serde_json::Value::String("boom".into()),
                         is_error: true,
                     },
-                    ContentBlock::Text { text: "**完成**了，`OK`".into() },
+                    ContentBlock::Text {
+                        text: "**完成**了，`OK`".into(),
+                    },
                 ],
             },
         ]
@@ -955,7 +978,10 @@ mod tests {
             )],
         );
         assert!(!html.contains("<script>alert(1)"), "注入脚本不得原样出现");
-        assert!(!html.contains("<img src=x onerror"), "注入 img 标签不得原样出现");
+        assert!(
+            !html.contains("<img src=x onerror"),
+            "注入 img 标签不得原样出现"
+        );
         assert!(html.contains("&lt;script&gt;alert(1)"));
         assert!(html.contains("&lt;img src=x onerror"));
         assert!(html.contains("&amp;"));
@@ -984,8 +1010,14 @@ mod tests {
     #[test]
     fn markdown_escapes_before_formatting() {
         let html = render_markdown("**<b>粗</b>** 与 `<i>x</i>`");
-        assert!(html.contains("<strong>&lt;b&gt;粗&lt;/b&gt;</strong>"), "{html}");
-        assert!(html.contains("<code>&lt;i&gt;x&lt;/i&gt;</code>"), "行内代码内容转义");
+        assert!(
+            html.contains("<strong>&lt;b&gt;粗&lt;/b&gt;</strong>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<code>&lt;i&gt;x&lt;/i&gt;</code>"),
+            "行内代码内容转义"
+        );
     }
 
     #[test]
@@ -1017,7 +1049,12 @@ mod tests {
         assert!(html.contains("class=\"topbar\"") && html.contains("class=\"brand\""));
         assert!(html.contains("class=\"session\"") && html.contains("class=\"meta-line\""));
         assert!(html.contains("class=\"tabs\""));
-        for view in ["data-view=\"conv\"", "data-view=\"team\"", "data-view=\"dm\"", "data-view=\"channel\""] {
+        for view in [
+            "data-view=\"conv\"",
+            "data-view=\"team\"",
+            "data-view=\"dm\"",
+            "data-view=\"channel\"",
+        ] {
             assert!(html.contains(view), "缺视图 {view}");
         }
         // 消息部件：user 气泡 / assistant markdown 流。
@@ -1073,10 +1110,16 @@ mod tests {
     fn bash_input_full_json_preserved() {
         // A4（v4.0 契约）：bash input pre 始终含完整 JSON（含非 command 字段）。
         let html = render(&doc(), &rich_messages());
-        assert!(html.contains("&quot;background&quot;: true"), "background 保留");
+        assert!(
+            html.contains("&quot;background&quot;: true"),
+            "background 保留"
+        );
         assert!(html.contains("&quot;timeout&quot;: 30"), "timeout 保留");
         assert!(html.contains("&quot;command&quot;"), "command 键保留");
-        assert!(html.contains("ls &lt;unsafe&gt; &amp; echo"), "command 值实体化呈现");
+        assert!(
+            html.contains("ls &lt;unsafe&gt; &amp; echo"),
+            "command 值实体化呈现"
+        );
         assert!(!html.contains("<img src=x onerror"), "无未转义标签");
     }
 
@@ -1091,7 +1134,10 @@ mod tests {
         let html = render(&doc(), &msgs);
         assert!(html.contains("src=\"data:image/png;base64,aGVsbG8=\""));
         assert!(html.contains("alt=\"image (image/png)\""));
-        assert!(!html.contains("http://") && !html.contains("https://"), "仅 data: URI");
+        assert!(
+            !html.contains("http://") && !html.contains("https://"),
+            "仅 data: URI"
+        );
     }
 
     #[test]
@@ -1105,9 +1151,15 @@ mod tests {
     #[test]
     fn no_external_dependencies() {
         let html = render(&doc(), &rich_messages());
-        assert!(!html.contains("http://") && !html.contains("https://"), "无外链");
+        assert!(
+            !html.contains("http://") && !html.contains("https://"),
+            "无外链"
+        );
         assert!(!html.contains("<link"), "无外部样式表");
-        assert!(!html.contains("src=\""), "无外部脚本/图片（data: URI 除外）");
+        assert!(
+            !html.contains("src=\""),
+            "无外部脚本/图片（data: URI 除外）"
+        );
         assert!(!html.contains("@import"), "无 CSS import");
         assert!(!html.contains("<iframe"), "无 iframe");
         assert!(html.contains("@media print"));

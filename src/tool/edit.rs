@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
+use super::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EditInput {
@@ -74,9 +74,7 @@ impl Tool for EditTool {
             if count == 1 { "" } else { "s" }
         );
         if !params.replace_all && count > 1 {
-            text.push_str(&format!(
-                " ({count} total; use replace_all to replace all)"
-            ));
+            text.push_str(&format!(" ({count} total; use replace_all to replace all)"));
         }
         Ok(ToolResult {
             content: serde_json::Value::String(text),
@@ -102,15 +100,19 @@ mod tests {
                     "new_string": "line TWO",
                 }),
                 &ToolContext {
-            cwd: Default::default(),
-            home: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
-            hooks: Default::default(),
-            permission_mode: "default".into(),
-            expand_tasks: tokio::sync::watch::channel(false).0,
-            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
-        },
+                    cwd: Default::default(),
+                    home: std::env::temp_dir(),
+                    watch: crate::watch::WatchRegistry::new(),
+                    http: reqwest::Client::new(),
+                    tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
+                        &std::env::temp_dir(),
+                        "test",
+                    )),
+                    hooks: Default::default(),
+                    permission_mode: "default".into(),
+                    expand_tasks: tokio::sync::watch::channel(false).0,
+                    ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+                },
             )
             .await
             .unwrap();
@@ -131,15 +133,19 @@ mod tests {
                     "content": "hello\nworld\n",
                 }),
                 &ToolContext {
-            cwd: Default::default(),
-            home: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(), http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
-            hooks: Default::default(),
-            permission_mode: "default".into(),
-            expand_tasks: tokio::sync::watch::channel(false).0,
-            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
-        },
+                    cwd: Default::default(),
+                    home: std::env::temp_dir(),
+                    watch: crate::watch::WatchRegistry::new(),
+                    http: reqwest::Client::new(),
+                    tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
+                        &std::env::temp_dir(),
+                        "test",
+                    )),
+                    hooks: Default::default(),
+                    permission_mode: "default".into(),
+                    expand_tasks: tokio::sync::watch::channel(false).0,
+                    ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+                },
             )
             .await
             .unwrap();

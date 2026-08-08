@@ -51,7 +51,10 @@ impl SegStyle {
     }
 
     pub fn fg(color: Color) -> Self {
-        Self { fg: Some(color), ..SegStyle::plain() }
+        Self {
+            fg: Some(color),
+            ..SegStyle::plain()
+        }
     }
 
     /// Set the background colour (chainable).
@@ -65,15 +68,24 @@ impl SegStyle {
     }
 
     pub fn italic(self) -> Self {
-        Self { italic: true, ..self }
+        Self {
+            italic: true,
+            ..self
+        }
     }
 
     pub fn underline(self) -> Self {
-        Self { underline: true, ..self }
+        Self {
+            underline: true,
+            ..self
+        }
     }
 
     pub fn strikethrough(self) -> Self {
-        Self { strikethrough: true, ..self }
+        Self {
+            strikethrough: true,
+            ..self
+        }
     }
 }
 
@@ -89,7 +101,7 @@ pub struct Line {
     pub image: Option<ImageRef>,
 }
 
-/// Image block reference (points at [`crate::tui::gfx::ImageMeta`]).
+/// Image block reference (points at [`crate::ui::ImageMeta`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageRef {
     pub url: String,
@@ -106,20 +118,29 @@ pub struct Seg {
 impl Line {
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
-            segs: vec![Seg { text: text.into(), style: SegStyle::plain() }],
+            segs: vec![Seg {
+                text: text.into(),
+                style: SegStyle::plain(),
+            }],
             image: None,
         }
     }
 
     pub fn styled(text: impl Into<String>, style: SegStyle) -> Self {
         Self {
-            segs: vec![Seg { text: text.into(), style }],
+            segs: vec![Seg {
+                text: text.into(),
+                style,
+            }],
             image: None,
         }
     }
 
     pub fn empty() -> Self {
-        Self { segs: Vec::new(), image: None }
+        Self {
+            segs: Vec::new(),
+            image: None,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -140,11 +161,17 @@ impl Line {
     }
 
     pub fn prepend_styled(&mut self, text: impl Into<String>, style: SegStyle) {
-        self.prepend(Seg { text: text.into(), style });
+        self.prepend(Seg {
+            text: text.into(),
+            style,
+        });
     }
 
     pub fn push_styled(&mut self, text: impl Into<String>, style: SegStyle) {
-        self.segs.push(Seg { text: text.into(), style });
+        self.segs.push(Seg {
+            text: text.into(),
+            style,
+        });
     }
 
     /// The plain text content.
@@ -270,7 +297,10 @@ mod tests {
     #[test]
     fn sanitize_folds_newlines_and_drops_controls() {
         assert_eq!(sanitize("plain"), "plain");
-        assert!(matches!(sanitize("plain"), Cow::Borrowed(_)), "干净文本不分配");
+        assert!(
+            matches!(sanitize("plain"), Cow::Borrowed(_)),
+            "干净文本不分配"
+        );
         assert_eq!(sanitize("a\nb\r\nc"), "a b  c");
         assert_eq!(sanitize("a\tb"), "a b");
         assert_eq!(sanitize("a\u{7}b"), "ab");

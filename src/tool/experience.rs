@@ -6,19 +6,26 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::experience::{
-    delete_entry, format_index, load_entries, project_key, query as query_entries, save_entry,
-    ExperienceEntry, ExperienceError, ExperienceStatus,
+    ExperienceEntry, ExperienceError, ExperienceStatus, delete_entry, format_index, load_entries,
+    project_key, query as query_entries, save_entry,
 };
-use crate::tool::{parse_input, schema_for, Tool, ToolContext, ToolError, ToolResult};
+use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input, schema_for};
 
 fn home(ctx: &ToolContext) -> &PathBuf {
     &ctx.home
 }
 
 /// Commit field validation: trigger/summary/steps must be non-empty, status must be valid.
-fn validate(trigger: &[String], summary: &str, steps: &[String], status: Option<&str>) -> Result<Option<ExperienceStatus>, ToolError> {
+fn validate(
+    trigger: &[String],
+    summary: &str,
+    steps: &[String],
+    status: Option<&str>,
+) -> Result<Option<ExperienceStatus>, ToolError> {
     if trigger.is_empty() {
-        return Err(ToolError::failed("ExperienceCommit: trigger is required (at least one keyword)"));
+        return Err(ToolError::failed(
+            "ExperienceCommit: trigger is required (at least one keyword)",
+        ));
     }
     if summary.trim().is_empty() {
         return Err(ToolError::failed("ExperienceCommit: summary is required"));
@@ -192,7 +199,12 @@ impl Tool for ExperienceCommitTool {
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let args: ExperienceCommitInput = parse_input(&input)?;
-        let status = validate(&args.trigger, &args.summary, &args.steps, args.status.as_deref())?;
+        let status = validate(
+            &args.trigger,
+            &args.summary,
+            &args.steps,
+            args.status.as_deref(),
+        )?;
         let key = project_key(&ctx.cwd);
         let mut entry = ExperienceEntry::new(
             &key,
@@ -422,7 +434,8 @@ mod tests {
     }
 
     fn tmp(tag: &str) -> (PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!("bingo-exp-tool-{tag}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("bingo-exp-tool-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         (root.join("home"), root)
     }
@@ -443,8 +456,16 @@ mod tests {
         let ctx = ctx_at(&home, &cwd);
         let tool = ExperienceProposeTool;
         let result = tool.call(propose_input(), &ctx).await.unwrap();
-        assert!(result.content["candidate"]["id_short"].as_str().unwrap().starts_with('E'));
-        assert!(load_entries(&home, &project_key(&cwd)).is_empty(), "propose 不落盘");
+        assert!(
+            result.content["candidate"]["id_short"]
+                .as_str()
+                .unwrap()
+                .starts_with('E')
+        );
+        assert!(
+            load_entries(&home, &project_key(&cwd)).is_empty(),
+            "propose 不落盘"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -455,7 +476,12 @@ mod tests {
         let tool = ExperienceCommitTool;
         let first = tool.call(propose_input(), &ctx).await.unwrap();
         let id = first.content["id"].as_str().unwrap().to_string();
-        assert!(first.content["confirmation"].as_str().unwrap().starts_with("已沉淀"));
+        assert!(
+            first.content["confirmation"]
+                .as_str()
+                .unwrap()
+                .starts_with("已沉淀")
+        );
         assert_eq!(first.content["hits"], 0);
         let path = first.content["path"].as_str().unwrap().to_string();
         assert!(path.contains("experience"), "{path}");
@@ -480,7 +506,10 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("trigger"));
         let err = tool
-            .call(json!({"trigger": ["t"], "summary": "", "steps": ["1"]}), &ctx)
+            .call(
+                json!({"trigger": ["t"], "summary": "", "steps": ["1"]}),
+                &ctx,
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("summary"));
@@ -490,7 +519,10 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("steps"));
         let err = tool
-            .call(json!({"trigger": ["t"], "summary": "s", "steps": ["1"], "status": "bogus"}), &ctx)
+            .call(
+                json!({"trigger": ["t"], "summary": "s", "steps": ["1"], "status": "bogus"}),
+                &ctx,
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("status"));
@@ -535,10 +567,7 @@ mod tests {
         let result = commit.call(propose_input(), &ctx).await.unwrap();
         let id = result.content["id"].as_str().unwrap().to_string();
         let forget = ExperienceForgetTool;
-        let out = forget
-            .call(json!({"id": id}), &ctx)
-            .await
-            .unwrap();
+        let out = forget.call(json!({"id": id}), &ctx).await.unwrap();
         assert!(out.content["deleted"].as_bool().unwrap());
         assert!(load_entries(&home, &project_key(&cwd)).is_empty());
         // Delete again: not found but succeeds.
@@ -562,7 +591,12 @@ mod tests {
             .unwrap();
         assert_eq!(out.content["matches"][0]["steps"][0], "备份");
         assert_eq!(out.content["matches"][0]["verify"], "cargo test");
-        assert!(out.content["matches"][0]["summary"].as_str().unwrap().contains("迁移"));
+        assert!(
+            out.content["matches"][0]["summary"]
+                .as_str()
+                .unwrap()
+                .contains("迁移")
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 }

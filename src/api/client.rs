@@ -31,7 +31,9 @@ fn protocol_default_base_url(protocol: Option<&str>) -> String {
 /// User home (auth.json lives under ~/.local/share/bingo; bingo requires
 /// HOME at startup, so a missing var degrades to an empty path).
 fn home_dir() -> std::path::PathBuf {
-    std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_default()
+    std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
 }
 
 /// Display info for a provider (the `/provider` listing and `/model` menu):
@@ -101,8 +103,7 @@ impl Client {
             .or_else(|| env("DEEPSEEK_API_KEY").ok())
             .ok_or(ClientError::MissingApiKey)?;
         let base_url = settings.api_base_url.clone().unwrap_or_else(|| {
-            env("ANTHROPIC_BASE_URL")
-                .unwrap_or_else(|_| providers::anthropic::API_BASE.to_string())
+            env("ANTHROPIC_BASE_URL").unwrap_or_else(|_| providers::anthropic::API_BASE.to_string())
         });
         let mut providers: HashMap<String, (Arc<dyn ProviderClient>, EndpointInfo)> =
             HashMap::new();
@@ -112,14 +113,19 @@ impl Client {
         // preset field-by-field (absent fields fall back to the preset).
         for preset in providers::presets::PRESETS {
             let user = settings.providers.get(preset.name);
-            let protocol =
-                user.and_then(|c| c.protocol.clone()).unwrap_or_else(|| preset.protocol.to_string());
+            let protocol = user
+                .and_then(|c| c.protocol.clone())
+                .unwrap_or_else(|| preset.protocol.to_string());
             let api_key = user.and_then(|c| c.api_key.clone()).or_else(|| {
                 // apiKey presets (opencode-go): the key lives in auth.json
                 // `{type:"api"}` (set via /provider login --manual); absent
                 // → empty key → 401 with a login prompt (D34 §6.5).
                 if preset.oauth_kind.is_none() {
-                    match crate::auth::AuthStore::new(home).get(preset.name).ok().flatten() {
+                    match crate::auth::AuthStore::new(home)
+                        .get(preset.name)
+                        .ok()
+                        .flatten()
+                    {
                         Some(crate::auth::AuthEntry::Api { key }) => Some(key),
                         _ => Some(String::new()),
                     }
@@ -131,8 +137,9 @@ impl Client {
                 Some(c) if !c.api_base_url.is_empty() => c.api_base_url.clone(),
                 _ => preset.base_url.to_string(),
             };
-            let supports_images =
-                user.and_then(|c| c.supports_images).unwrap_or(preset.supports_images);
+            let supports_images = user
+                .and_then(|c| c.supports_images)
+                .unwrap_or(preset.supports_images);
             let oauth = user.and_then(|c| c.oauth.clone()).or_else(|| {
                 preset.oauth_kind.map(|kind| crate::settings::OauthConfig {
                     kind: kind.to_string(),
@@ -224,7 +231,10 @@ impl Client {
             base_url,
             protocol: "anthropic".to_string(),
         };
-        providers.insert("default".to_string(), (default_adapter.clone(), default_info.clone()));
+        providers.insert(
+            "default".to_string(),
+            (default_adapter.clone(), default_info.clone()),
+        );
         Ok(Self {
             http,
             endpoint: Arc::new(std::sync::RwLock::new((default_adapter, default_info))),
@@ -236,8 +246,7 @@ impl Client {
     #[cfg(test)]
     pub fn new(api_key: String, base_url: String) -> Self {
         let http = reqwest::Client::new();
-        let adapter =
-            providers::anthropic(http.clone(), api_key.clone(), base_url.clone(), false);
+        let adapter = providers::anthropic(http.clone(), api_key.clone(), base_url.clone(), false);
         let info = EndpointInfo {
             api_key: Some(api_key),
             base_url,
@@ -275,7 +284,9 @@ impl Client {
     /// Wire protocol label of a named provider ("anthropic"/"openai";
     /// the /provider listing). Unknown names return None.
     pub fn provider_protocol(&self, name: &str) -> Option<String> {
-        self.providers.get(name).map(|(_, info)| info.protocol.clone())
+        self.providers
+            .get(name)
+            .map(|(_, info)| info.protocol.clone())
     }
 
     /// 当前生效的 provider 端点（key/url 引用）。
@@ -323,10 +334,7 @@ impl Client {
     }
 
     /// Start a streaming request on the current provider.
-    pub async fn stream(
-        &self,
-        request: &NeutralRequest,
-    ) -> Result<BoxStream, ClientError> {
+    pub async fn stream(&self, request: &NeutralRequest) -> Result<BoxStream, ClientError> {
         self.current().stream(request).await
     }
 
@@ -365,7 +373,11 @@ impl Client {
     }
 
     fn current(&self) -> Arc<dyn ProviderClient> {
-        self.endpoint.read().unwrap_or_else(|p| p.into_inner()).0.clone()
+        self.endpoint
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .0
+            .clone()
     }
 }
 
@@ -442,7 +454,7 @@ mod tests {
                 supports_images: None,
                 protocol: None,
                 oauth: None,
-                },
+            },
         );
         settings.providers.insert(
             "local".to_string(),
@@ -452,12 +464,16 @@ mod tests {
                 supports_images: None,
                 protocol: None,
                 oauth: None,
-                },
+            },
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
         let client = Client::from_settings_with(&settings, env).unwrap();
         assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-main"));
-        assert_eq!(client.provider_names(), vec!["codex", "deepseek", "local", "opencode-go"], "presets 与用户 provider 合并");
+        assert_eq!(
+            client.provider_names(),
+            vec!["codex", "deepseek", "local", "opencode-go"],
+            "presets 与用户 provider 合并"
+        );
 
         client.set_provider("deepseek").unwrap();
         assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-ds"));
@@ -486,17 +502,27 @@ mod tests {
                 supports_images: None,
                 protocol: None,
                 oauth: None,
-                },
+            },
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
         let client = Client::from_settings_with(&settings, env).unwrap();
         // default 不出现在命名列表（调用方显式补出）。
-        assert_eq!(client.provider_names(), vec!["codex", "deepseek", "opencode-go"], "presets 可见");
+        assert_eq!(
+            client.provider_names(),
+            vec!["codex", "deepseek", "opencode-go"],
+            "presets 可见"
+        );
         assert_eq!(
             client.provider_endpoint("default"),
-            Some((Some("sk-main".to_string()), "https://main.example".to_string()))
+            Some((
+                Some("sk-main".to_string()),
+                "https://main.example".to_string()
+            ))
         );
-        assert_eq!(client.provider_endpoint("deepseek").unwrap().1, "https://api.deepseek.com");
+        assert_eq!(
+            client.provider_endpoint("deepseek").unwrap().1,
+            "https://api.deepseek.com"
+        );
         assert_eq!(client.provider_endpoint("nope"), None);
 
         // 切到 deepseek 再切回 default：顶层端点恢复（含 supports_images）。
@@ -534,12 +560,13 @@ mod tests {
                 }),
             },
         );
-        let client = Client::from_settings_with(&settings, |_| {
-            Err(std::env::VarError::NotPresent)
-        })
-        .unwrap();
+        let client =
+            Client::from_settings_with(&settings, |_| Err(std::env::VarError::NotPresent)).unwrap();
         assert!(
-            matches!(client.auth_status("codex"), Some(crate::api::contract::AuthStatus::ApiKey)),
+            matches!(
+                client.auth_status("codex"),
+                Some(crate::api::contract::AuthStatus::ApiKey)
+            ),
             "apiKey 优先于 oauth"
         );
 
@@ -575,11 +602,14 @@ mod tests {
             api_key: Some("sk-main".into()),
             ..Default::default()
         };
-        let client = Client::from_settings_at(&settings, |_| {
-            Err(std::env::VarError::NotPresent)
-        }, &tmp)
-        .unwrap();
-        assert_eq!(client.provider_names(), vec!["codex", "opencode-go"], "presets 零配置可见");
+        let client =
+            Client::from_settings_at(&settings, |_| Err(std::env::VarError::NotPresent), &tmp)
+                .unwrap();
+        assert_eq!(
+            client.provider_names(),
+            vec!["codex", "opencode-go"],
+            "presets 零配置可见"
+        );
         assert!(client.is_preset("codex"));
         assert!(client.is_preset("opencode-go"));
         assert!(!client.is_preset("default"));
@@ -625,10 +655,8 @@ mod tests {
                 oauth: None,
             },
         );
-        let client = Client::from_settings_with(&settings, |_| {
-            Err(std::env::VarError::NotPresent)
-        })
-        .unwrap();
+        let client =
+            Client::from_settings_with(&settings, |_| Err(std::env::VarError::NotPresent)).unwrap();
         assert_eq!(
             client.provider_endpoint("codex").unwrap().1,
             "https://custom.example",
@@ -641,7 +669,11 @@ mod tests {
             ),
             "oauth 回落 preset（无需重述）"
         );
-        assert_eq!(client.provider_protocol("codex").as_deref(), Some("openai"), "protocol 回落 preset");
+        assert_eq!(
+            client.provider_protocol("codex").as_deref(),
+            Some("openai"),
+            "protocol 回落 preset"
+        );
     }
 
     /// P5 零污染：presets 不写回 settings（用户配置文件保持原样）。
@@ -651,10 +683,8 @@ mod tests {
             api_key: Some("sk-main".into()),
             ..Default::default()
         };
-        let _client = Client::from_settings_with(&settings, |_| {
-            Err(std::env::VarError::NotPresent)
-        })
-        .unwrap();
+        let _client =
+            Client::from_settings_with(&settings, |_| Err(std::env::VarError::NotPresent)).unwrap();
         assert!(
             settings.providers.is_empty(),
             "presets 是运行时概念，settings 保持用户私有"
@@ -678,7 +708,7 @@ mod tests {
                 supports_images: Some(true),
                 protocol: None,
                 oauth: None,
-                },
+            },
         );
         settings.providers.insert(
             "text-only".to_string(),
@@ -688,7 +718,7 @@ mod tests {
                 supports_images: Some(false),
                 protocol: None,
                 oauth: None,
-                },
+            },
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
         let client = Client::from_settings_with(&settings, env).unwrap();

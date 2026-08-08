@@ -87,12 +87,12 @@ pub struct Settings {
     /// Team settings (`team`): D31 project-level crew.
     #[serde(default)]
     pub team: TeamSettings,
-    /// Share upload settings (`share`): `bingo share` 上传端配置。
+    /// Public-share endpoint settings (`share`), consulted only for `--public` uploads.
     #[serde(default)]
     pub share: ShareSettings,
 }
 
-/// Share upload settings (`share`): `bingo share` 默认上传到官网分享服务。
+/// Share publishing settings (`share`): used only when `bingo share --public` uploads.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ShareSettings {
     /// 官网上传基址（`baseUrl`，缺省 `https://bingo.ruobin.dev`）。
@@ -334,7 +334,10 @@ fn merge(base: &mut Settings, layer: Settings) {
         base.share.base_url = Some(v);
     }
     for (base_hooks, layer_hooks) in [
-        (&mut base.hooks.user_prompt_submit, &layer.hooks.user_prompt_submit),
+        (
+            &mut base.hooks.user_prompt_submit,
+            &layer.hooks.user_prompt_submit,
+        ),
         (&mut base.hooks.stop, &layer.hooks.stop),
         (&mut base.hooks.session_start, &layer.hooks.session_start),
         (&mut base.hooks.session_end, &layer.hooks.session_end),
@@ -388,9 +391,17 @@ mod tests {
     fn loads_and_merges_layers() {
         let tmp = std::env::temp_dir().join(format!("bingo-settings-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        write(&tmp, ".bingo/settings.json", r#"{"permissionMode":"acceptEdits"}"#);
+        write(
+            &tmp,
+            ".bingo/settings.json",
+            r#"{"permissionMode":"acceptEdits"}"#,
+        );
         write(&tmp, ".bingo/local.json", r#"{"permissionMode":"plan"}"#);
-        write(&tmp, "user/bingo/settings.json", r#"{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"echo hi"}]}]}}"#);
+        write(
+            &tmp,
+            "user/bingo/settings.json",
+            r#"{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
+        );
 
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.permission_mode.as_deref(), Some("plan"));
@@ -404,8 +415,16 @@ mod tests {
     fn merges_respond_to_bash_commands() {
         let tmp = std::env::temp_dir().join(format!("bingo-settings-bash-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        write(&tmp, "user/bingo/settings.json", r#"{"respondToBashCommands":true}"#);
-        write(&tmp, ".bingo/settings.json", r#"{"respondToBashCommands":false}"#);
+        write(
+            &tmp,
+            "user/bingo/settings.json",
+            r#"{"respondToBashCommands":true}"#,
+        );
+        write(
+            &tmp,
+            ".bingo/settings.json",
+            r#"{"respondToBashCommands":false}"#,
+        );
 
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.respond_to_bash_commands, Some(false));
@@ -422,7 +441,11 @@ mod tests {
         write(&tmp, "user/bingo/settings.json", r#"{"cacheControl":true}"#);
 
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
-        assert_eq!(settings.cache_control, Some(true), "user 层 cacheControl 生效");
+        assert_eq!(
+            settings.cache_control,
+            Some(true),
+            "user 层 cacheControl 生效"
+        );
 
         // Project layer overrides user layer.
         write(&tmp, ".bingo/settings.json", r#"{"cacheControl":false}"#);
@@ -446,13 +469,24 @@ mod tests {
     fn parses_and_merges_api_config() {
         let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-api", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        write(&tmp, ".bingo/settings.json", r#"{"apiKey":"sk-project","apiBaseUrl":"https://project.example"}"#);
-        write(&tmp, "user/bingo/settings.json", r#"{"apiKey":"sk-user","apiBaseUrl":"https://user.example"}"#);
+        write(
+            &tmp,
+            ".bingo/settings.json",
+            r#"{"apiKey":"sk-project","apiBaseUrl":"https://project.example"}"#,
+        );
+        write(
+            &tmp,
+            "user/bingo/settings.json",
+            r#"{"apiKey":"sk-user","apiBaseUrl":"https://user.example"}"#,
+        );
 
         // Project layer overrides user (layer order user → project → local, later wins).
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.api_key.as_deref(), Some("sk-project"));
-        assert_eq!(settings.api_base_url.as_deref(), Some("https://project.example"));
+        assert_eq!(
+            settings.api_base_url.as_deref(),
+            Some("https://project.example")
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -487,14 +521,26 @@ mod tests {
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.model, None, "缺省不配置模型");
 
-        write(&tmp, "user/bingo/settings.json", r#"{"model":"claude-sonnet-5"}"#);
+        write(
+            &tmp,
+            "user/bingo/settings.json",
+            r#"{"model":"claude-sonnet-5"}"#,
+        );
         write(&tmp, ".bingo/settings.json", r#"{"model":"claude-opus-5"}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
-        assert_eq!(settings.model.as_deref(), Some("claude-opus-5"), "project 覆盖 user");
+        assert_eq!(
+            settings.model.as_deref(),
+            Some("claude-opus-5"),
+            "project 覆盖 user"
+        );
 
         write(&tmp, ".bingo/local.json", r#"{"model":"deepseek-v4"}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
-        assert_eq!(settings.model.as_deref(), Some("deepseek-v4"), "local 覆盖 project");
+        assert_eq!(
+            settings.model.as_deref(),
+            Some("deepseek-v4"),
+            "local 覆盖 project"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -502,15 +548,24 @@ mod tests {
     /// provider 逐层合并：后层胜出，缺省 None（运行时回落 "default"）。
     #[test]
     fn merges_provider() {
-        let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-provsel", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-settings-{}-provsel", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.provider, None, "缺省不配置 provider");
 
-        write(&tmp, "user/bingo/settings.json", r#"{"provider":"deepseek"}"#);
+        write(
+            &tmp,
+            "user/bingo/settings.json",
+            r#"{"provider":"deepseek"}"#,
+        );
         write(&tmp, ".bingo/settings.json", r#"{"provider":"local"}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
-        assert_eq!(settings.provider.as_deref(), Some("local"), "project 覆盖 user");
+        assert_eq!(
+            settings.provider.as_deref(),
+            Some("local"),
+            "project 覆盖 user"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -586,7 +641,7 @@ mod tests {
                 protocol: Some("chatgpt".into()),
                 supports_images: None,
                 oauth: None,
-                },
+            },
         );
         let client = crate::api::client::Client::from_settings_with(&settings, |_| {
             Err(std::env::VarError::NotPresent)
@@ -623,7 +678,11 @@ mod tests {
         // Unknown fields (older versions without a team section) must be ignored, not
         // error: clear local's override and re-check.
         write(&tmp, ".bingo/local.json", r#"{"permissionMode":"plan"}"#);
-        write(&tmp, ".bingo/settings.json", r#"{"team":{"autoStart":true,"futureField":1}}"#);
+        write(
+            &tmp,
+            ".bingo/settings.json",
+            r#"{"team":{"autoStart":true,"futureField":1}}"#,
+        );
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.team.auto_start, Some(true), "未知字段忽略");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -652,7 +711,11 @@ mod tests {
             r#"{"thinkingLevel":"low","providers":{"custom":{"apiKey":"sk-c","apiBaseUrl":"https://c.example"}}}"#,
         );
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
-        assert_eq!(settings.thinking_level.as_deref(), Some("high"), "project 覆盖 user");
+        assert_eq!(
+            settings.thinking_level.as_deref(),
+            Some("high"),
+            "project 覆盖 user"
+        );
         assert!(settings.providers.contains_key("deepseek"));
         assert!(settings.providers.contains_key("custom"));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -671,7 +734,10 @@ mod tests {
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.send_images, Some(true));
         assert_eq!(settings.providers["road"].supports_images, Some(true));
-        assert_eq!(settings.providers["ds"].supports_images, None, "缺省不发图片");
+        assert_eq!(
+            settings.providers["ds"].supports_images, None,
+            "缺省不发图片"
+        );
 
         // Cross-layer override: project-layer sendImages overrides user layer (later wins).
         write(&tmp, "user/bingo/settings.json", r#"{"sendImages":false}"#);

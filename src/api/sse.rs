@@ -23,7 +23,10 @@ pub struct SseFrame {
 
 impl SseParser {
     pub fn new() -> Self {
-        Self { buf: Vec::with_capacity(1024), scanned: 0 }
+        Self {
+            buf: Vec::with_capacity(1024),
+            scanned: 0,
+        }
     }
 
     /// Feed raw bytes; returns the complete frames accumulated this round.
@@ -102,7 +105,10 @@ mod tests {
         let frames = p.feed(b"event: ping\ndata: {}\n\n").unwrap();
         assert_eq!(
             frames,
-            vec![SseFrame { event: "ping".into(), data: "{}".into() }]
+            vec![SseFrame {
+                event: "ping".into(),
+                data: "{}".into()
+            }]
         );
     }
 
@@ -123,7 +129,9 @@ mod tests {
     #[test]
     fn handles_crlf_and_multiline_data() {
         let mut p = SseParser::new();
-        let frames = p.feed(b"event: x\r\ndata: line1\r\ndata: line2\r\n\r\n").unwrap();
+        let frames = p
+            .feed(b"event: x\r\ndata: line1\r\ndata: line2\r\n\r\n")
+            .unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, "line1\nline2");
     }
@@ -143,7 +151,9 @@ mod tests {
     fn lf_and_crlf_boundaries_consume_the_whole_separator() {
         for sep in ["\n\n", "\r\n\r\n"] {
             let mut p = SseParser::new();
-            let frames = p.feed(format!("event: ping\ndata: {{}}{sep}").as_bytes()).unwrap();
+            let frames = p
+                .feed(format!("event: ping\ndata: {{}}{sep}").as_bytes())
+                .unwrap();
             assert_eq!(frames.len(), 1, "{sep:?}");
             assert!(p.buf.is_empty(), "{sep:?} 残余: {:?}", p.buf);
             assert_eq!(p.scanned, 0, "{sep:?}");
@@ -175,6 +185,9 @@ mod tests {
                 break;
             }
         }
-        assert!(err.is_some_and(|e| e.contains("without a boundary")), "应报协议错误");
+        assert!(
+            err.is_some_and(|e| e.contains("without a boundary")),
+            "应报协议错误"
+        );
     }
 }

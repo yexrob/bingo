@@ -15,10 +15,10 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::agents::DepositOutcome;
-use crate::channels::{ChannelMode, PostOutcome, HUB_NAME};
+use crate::channels::{ChannelMode, HUB_NAME, PostOutcome};
 use crate::query::Session;
 use crate::tool::agent::{absorb_inbox, excerpt, spawn_agent_loop};
-use crate::tool::{parse_input, Tool, ToolContext, ToolError, ToolResult};
+use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 use crate::watch::{WatchKind, WatchState};
 
 /// Channel display row (◇ #name · N messages · latest…): no polling; updated proactively on post.
@@ -68,8 +68,12 @@ fn sender_of(session: &Arc<Session>) -> String {
 
 /// Post outcome (the two exit paths of deliver_post).
 pub(crate) enum PostDelivery {
-    Sent { seq: u64 },
-    Stale { missed: Vec<crate::channels::ChannelMessage> },
+    Sent {
+        seq: u64,
+    },
+    Stale {
+        missed: Vec<crate::channels::ChannelMessage>,
+    },
 }
 
 /// Post + delivery wake-up + display row refresh — the Post tool and the TUI channel room
@@ -172,9 +176,7 @@ When you have nothing to say, simply don't call this tool (silence costs nothing
             .map_err(ToolError::failed)?
         {
             PostDelivery::Sent { seq } => Ok(ToolResult {
-                content: serde_json::Value::String(format!(
-                    "已发送（#{channel} 第 {seq} 条）"
-                )),
+                content: serde_json::Value::String(format!("已发送（#{channel} 第 {seq} 条）")),
                 is_error: false,
                 diff: None,
             }),
@@ -213,16 +215,22 @@ pub enum ChannelAction {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ChannelInput {
-    #[schemars(description = "Action: create a channel / invite a member / kick a member / list channels")]
+    #[schemars(
+        description = "Action: create a channel / invite a member / kick a member / list channels"
+    )]
     action: ChannelAction,
     #[serde(default)]
     #[schemars(description = "Channel name (required for create/invite/kick; without #)")]
     channel: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Member instance names: initial roster for create; target (single) for invite/kick")]
+    #[schemars(
+        description = "Member instance names: initial roster for create; target (single) for invite/kick"
+    )]
     members: Option<Vec<String>>,
     #[serde(default)]
-    #[schemars(description = "Posting mode (for create): serial (must have seen the latest before speaking; laggards bounce back) / free (interleaving allowed); default serial")]
+    #[schemars(
+        description = "Posting mode (for create): serial (must have seen the latest before speaking; laggards bounce back) / free (interleaving allowed); default serial"
+    )]
     mode: Option<String>,
 }
 
@@ -391,7 +399,6 @@ mod tests {
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "t")),
-            last_task_reminder_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
@@ -519,7 +526,10 @@ mod tests {
         // Non-member posts error out.
         let post_c = PostTool::new(sub_session(&hub, "c"));
         let err = post_c
-            .call(serde_json::json!({"channel": "t", "message": "x"}), &ctx(&hub))
+            .call(
+                serde_json::json!({"channel": "t", "message": "x"}),
+                &ctx(&hub),
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("不是"), "{err}");
@@ -543,12 +553,18 @@ mod tests {
         let post_a = PostTool::new(sub_session(&hub, "a"));
         let post_b = PostTool::new(sub_session(&hub, "b"));
         let _ = post_a
-            .call(serde_json::json!({"channel": "count", "message": "1"}), &ctx(&hub))
+            .call(
+                serde_json::json!({"channel": "count", "message": "1"}),
+                &ctx(&hub),
+            )
             .await
             .unwrap();
         // b lags → bounced back (tool result, not an error) with increments attached.
         let out = post_b
-            .call(serde_json::json!({"channel": "count", "message": "1"}), &ctx(&hub))
+            .call(
+                serde_json::json!({"channel": "count", "message": "1"}),
+                &ctx(&hub),
+            )
             .await
             .unwrap();
         let text = out.content.as_str().unwrap();
@@ -556,7 +572,10 @@ mod tests {
         assert!(text.contains("未送出") && text.contains("a: 1"), "{text}");
         // Resend lands (the model changed its message).
         let out = post_b
-            .call(serde_json::json!({"channel": "count", "message": "2"}), &ctx(&hub))
+            .call(
+                serde_json::json!({"channel": "count", "message": "2"}),
+                &ctx(&hub),
+            )
             .await
             .unwrap();
         assert!(out.content.as_str().unwrap().contains("第 2 条"));

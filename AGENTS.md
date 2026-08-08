@@ -2,15 +2,16 @@
 
 An agent CLI implemented in Rust (a local agent harness).
 
-> Architecture and selection decisions live in [`notes/research.md`](./notes/research.md) (decision records D1-D24); check against it before changing the architecture.
+> Architecture and selection decisions live in [`notes/research.md`](./notes/research.md) (decision records D1-D35, with superseded decisions retained as history); check the latest applicable decision before changing the architecture.
 
 ## Language and style
 
 - Use the Rust 2024 edition; use thiserror for error handling, avoid unwrap/expect (except in tests and unreachable code).
 - Write code the way the surrounding code is written; prefer no comments, self-documenting names; comments explain only the "why".
 - Don't add unneeded dependencies; before reinventing the wheel, check whether a mature wheel already exists on crates.io.
-- English for everything the model side sees: code comments (//, ///, //!), documentation (notes/, README.md, AGENTS.md itself), tool input schemas (`#[schemars(description = …)]`), tool `description()` text, and model prompts (compaction, memory extraction, etc.).
-- Chinese is kept only on the user side: UI copy, error messages, and test data/assertion messages. Keep this split when touching existing strings: translate model-side strings, leave user-side strings as they are.
+- Newly added or modified model-facing text must be English: tool input schemas (`#[schemars(description = …)]`), tool `description()` text, model prompts (compaction, memory extraction, etc.), and documentation intended for model consumption.
+- Newly added or modified code comments and English documentation (`notes/`, `README.md`, and AGENTS.md itself) must be English. This is an incremental rule; unrelated legacy text does not need a bulk translation.
+- User-facing UI copy, error messages, and test data/assertion messages may remain Chinese. Preserve the existing audience split when touching strings.
 - `README.zh-CN.md` stays as the Chinese-language documentation entry point.
 
 ## Architecture rules
@@ -30,7 +31,9 @@ An agent CLI implemented in Rust (a local agent harness).
 
 ## Verification
 
-- Run `cargo build` and `cargo clippy -- -D warnings` for every change; related logic must carry tests (`cargo test`).
+- Every change must pass `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked --all-targets`; related behavior needs focused regression tests.
+- User-visible CLI behavior must include black-box coverage for process exit status and stdout/stderr contracts when practical.
+- Release tags must match the Cargo package version exactly; packaged archives must be unpacked and their binary version smoke-tested before publication.
 - Unverified work is not called complete; failures are presented as-is.
 
 ## Committing

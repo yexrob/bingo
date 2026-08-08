@@ -183,25 +183,51 @@ pub struct NeutralRequest {
 /// Normalized streaming event, consumed by the query loop and the TUI.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
-    MessageStart { id: String, model: String },
-    TextStart { index: usize },
-    ThinkingStart { index: usize },
-    ToolUseStart { index: usize, id: String, name: String },
-    TextDelta { index: usize, text: String },
-    ThinkingDelta { index: usize, thinking: String },
-    SignatureDelta { index: usize, signature: String },
-    InputJsonDelta { index: usize, partial_json: String },
-    BlockStop { index: usize },
+    MessageStart {
+        id: String,
+        model: String,
+    },
+    TextStart {
+        index: usize,
+    },
+    ThinkingStart {
+        index: usize,
+    },
+    ToolUseStart {
+        index: usize,
+        id: String,
+        name: String,
+    },
+    TextDelta {
+        index: usize,
+        text: String,
+    },
+    ThinkingDelta {
+        index: usize,
+        thinking: String,
+    },
+    SignatureDelta {
+        index: usize,
+        signature: String,
+    },
+    InputJsonDelta {
+        index: usize,
+        partial_json: String,
+    },
+    BlockStop {
+        index: usize,
+    },
     StopReason {
         stop_reason: Option<String>,
         output_tokens: Option<u64>,
     },
     Done,
-    ApiError { message: String },
+    ApiError {
+        message: String,
+    },
 }
 
-pub type BoxStream =
-    Pin<Box<dyn Stream<Item = Result<StreamEvent, ClientError>> + Send>>;
+pub type BoxStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, ClientError>> + Send>>;
 
 /// A provider protocol implementation. `Client` (api::client) is the facade:
 /// provider switching, forks and endpoint info; adapters own the wire.
@@ -242,9 +268,18 @@ pub struct AssistantAccumulator {
 
 #[derive(Debug)]
 enum InFlight {
-    Text { text: String },
-    Thinking { thinking: String, signature: String },
-    ToolUse { id: String, name: String, input: String },
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: String,
+    },
 }
 
 impl AssistantAccumulator {
@@ -256,7 +291,9 @@ impl AssistantAccumulator {
         match event {
             StreamEvent::TextStart { index } => {
                 self.ensure_slot(*index)?;
-                self.in_flight = Some(InFlight::Text { text: String::new() });
+                self.in_flight = Some(InFlight::Text {
+                    text: String::new(),
+                });
             }
             StreamEvent::ThinkingStart { index } => {
                 self.ensure_slot(*index)?;
@@ -300,7 +337,10 @@ impl AssistantAccumulator {
                     _ => Err("signature delta for non-thinking block".into()),
                 })?;
             }
-            StreamEvent::InputJsonDelta { index, partial_json } => {
+            StreamEvent::InputJsonDelta {
+                index,
+                partial_json,
+            } => {
                 self.push_delta(*index, |f| match f {
                     InFlight::ToolUse { input, .. } => {
                         input.push_str(partial_json);
@@ -313,9 +353,13 @@ impl AssistantAccumulator {
                 let f = self.in_flight.take().ok_or("block stop without start")?;
                 let block = match f {
                     InFlight::Text { text } => ContentBlock::Text { text },
-                    InFlight::Thinking { thinking, signature } => {
-                        ContentBlock::Thinking { thinking, signature }
-                    }
+                    InFlight::Thinking {
+                        thinking,
+                        signature,
+                    } => ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    },
                     InFlight::ToolUse { id, name, input } => {
                         let input = serde_json::from_str(&input).unwrap_or(serde_json::Value::Null);
                         ContentBlock::ToolUse { id, name, input }
@@ -337,7 +381,10 @@ impl AssistantAccumulator {
 
     fn ensure_slot(&self, index: usize) -> Result<(), String> {
         if index != self.content.len() {
-            return Err(format!("block start out of order: {index} != {}", self.content.len()));
+            return Err(format!(
+                "block start out of order: {index} != {}",
+                self.content.len()
+            ));
         }
         Ok(())
     }
@@ -379,16 +426,31 @@ mod tests {
     fn accumulates_text_and_thinking() {
         let mut acc = AssistantAccumulator::new();
         acc.push(&StreamEvent::ThinkingStart { index: 0 }).unwrap();
-        acc.push(&StreamEvent::ThinkingDelta { index: 0, thinking: "plan".into() }).unwrap();
-        acc.push(&StreamEvent::SignatureDelta { index: 0, signature: "sig123".into() }).unwrap();
+        acc.push(&StreamEvent::ThinkingDelta {
+            index: 0,
+            thinking: "plan".into(),
+        })
+        .unwrap();
+        acc.push(&StreamEvent::SignatureDelta {
+            index: 0,
+            signature: "sig123".into(),
+        })
+        .unwrap();
         acc.push(&StreamEvent::BlockStop { index: 0 }).unwrap();
         acc.push(&StreamEvent::TextStart { index: 1 }).unwrap();
-        acc.push(&StreamEvent::TextDelta { index: 1, text: "hi".into() }).unwrap();
+        acc.push(&StreamEvent::TextDelta {
+            index: 1,
+            text: "hi".into(),
+        })
+        .unwrap();
         acc.push(&StreamEvent::BlockStop { index: 1 }).unwrap();
         assert_eq!(
             acc.content,
             vec![
-                ContentBlock::Thinking { thinking: "plan".into(), signature: "sig123".into() },
+                ContentBlock::Thinking {
+                    thinking: "plan".into(),
+                    signature: "sig123".into()
+                },
                 ContentBlock::Text { text: "hi".into() },
             ]
         );
@@ -398,12 +460,22 @@ mod tests {
     #[test]
     fn accumulates_tool_use_input() {
         let mut acc = AssistantAccumulator::new();
-        acc.push(&StreamEvent::ToolUseStart { index: 0, id: "tu_9".into(), name: "Bash".into() })
-            .unwrap();
-        acc.push(&StreamEvent::InputJsonDelta { index: 0, partial_json: "{\"command\":".into() })
-            .unwrap();
-        acc.push(&StreamEvent::InputJsonDelta { index: 0, partial_json: "\"ls\"}".into() })
-            .unwrap();
+        acc.push(&StreamEvent::ToolUseStart {
+            index: 0,
+            id: "tu_9".into(),
+            name: "Bash".into(),
+        })
+        .unwrap();
+        acc.push(&StreamEvent::InputJsonDelta {
+            index: 0,
+            partial_json: "{\"command\":".into(),
+        })
+        .unwrap();
+        acc.push(&StreamEvent::InputJsonDelta {
+            index: 0,
+            partial_json: "\"ls\"}".into(),
+        })
+        .unwrap();
         acc.push(&StreamEvent::BlockStop { index: 0 }).unwrap();
         assert_eq!(
             acc.content,
@@ -418,8 +490,12 @@ mod tests {
     #[test]
     fn tool_use_input_falls_back_to_null() {
         let mut acc = AssistantAccumulator::new();
-        acc.push(&StreamEvent::ToolUseStart { index: 0, id: "tu_1".into(), name: "Bash".into() })
-            .unwrap();
+        acc.push(&StreamEvent::ToolUseStart {
+            index: 0,
+            id: "tu_1".into(),
+            name: "Bash".into(),
+        })
+        .unwrap();
         acc.push(&StreamEvent::BlockStop { index: 0 }).unwrap();
         assert!(matches!(&acc.content[0], ContentBlock::ToolUse { input, .. } if input.is_null()));
     }
@@ -430,6 +506,9 @@ mod tests {
         acc.push(&StreamEvent::TextStart { index: 1 }).unwrap_err();
         acc.push(&StreamEvent::TextStart { index: 0 }).unwrap();
         acc.push(&StreamEvent::BlockStop { index: 0 }).unwrap();
-        assert!(acc.push(&StreamEvent::TextStart { index: 0 }).is_err(), "index 复用报错");
+        assert!(
+            acc.push(&StreamEvent::TextStart { index: 0 }).is_err(),
+            "index 复用报错"
+        );
     }
 }

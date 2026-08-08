@@ -201,12 +201,12 @@ pub async fn run_pre_tool_use(
         )
         .await
         {
-                Ok(o) => o,
-                Err(e) => {
-                    eprintln!("[bingo] warning: PreToolUse hook failed: {e}");
-                    continue;
-                }
-            };
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("[bingo] warning: PreToolUse hook failed: {e}");
+                continue;
+            }
+        };
         if code == 2 {
             // blocking: stderr injected into the model.
             let reason = if stderr.is_empty() {
@@ -234,11 +234,19 @@ pub async fn run_pre_tool_use(
             Some("deny") => {
                 return (
                     PermissionBehavior::Deny,
-                    parsed.reason.unwrap_or_else(|| "denied by PreToolUse hook".into()),
+                    parsed
+                        .reason
+                        .unwrap_or_else(|| "denied by PreToolUse hook".into()),
                     input,
                 );
             }
-            Some("ask") => return (PermissionBehavior::Ask, parsed.reason.unwrap_or_default(), input),
+            Some("ask") => {
+                return (
+                    PermissionBehavior::Ask,
+                    parsed.reason.unwrap_or_default(),
+                    input,
+                );
+            }
             _ => {}
         }
     }
@@ -351,10 +359,7 @@ pub async fn run_user_prompt_submit(
 
 /// Stop: run when a turn ends normally. exit 2 → return blocking stderr (caller
 /// injects it into the model and retries).
-pub async fn run_stop_hooks(
-    config: &HooksConfig,
-    permission_mode: &str,
-) -> Option<String> {
+pub async fn run_stop_hooks(config: &HooksConfig, permission_mode: &str) -> Option<String> {
     let commands = commands_for(config, "Stop", "");
     for command in commands {
         let input = serde_json::json!({

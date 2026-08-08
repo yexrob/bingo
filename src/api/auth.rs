@@ -8,8 +8,8 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use reqwest::header::CONTENT_TYPE;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -85,12 +85,26 @@ pub struct TokenSet {
 impl TokenSet {
     fn from_tokens_json(json: &Value) -> TokenSet {
         let expires_in = json.get("expires_in").and_then(|v| v.as_u64());
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let id_token = json.get("id_token").and_then(|v| v.as_str()).map(str::to_string);
-        let access_token = json.get("access_token").and_then(|v| v.as_str()).unwrap_or_default().into();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let id_token = json
+            .get("id_token")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let access_token = json
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .into();
         TokenSet {
             access_token,
-            refresh_token: json.get("refresh_token").and_then(|v| v.as_str()).unwrap_or_default().into(),
+            refresh_token: json
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .into(),
             id_token,
             expires_at: expires_in.map(|e| now + e),
             // The token response may omit account_id — backfill from JWT
@@ -115,7 +129,12 @@ impl TokenSet {
 
     fn from_auth_entry(entry: &AuthEntry) -> Option<TokenSet> {
         match entry {
-            AuthEntry::Oauth { access, refresh, expires, account_id } => Some(TokenSet {
+            AuthEntry::Oauth {
+                access,
+                refresh,
+                expires,
+                account_id,
+            } => Some(TokenSet {
                 access_token: access.clone(),
                 refresh_token: refresh.clone(),
                 id_token: None,
@@ -134,7 +153,10 @@ impl TokenSet {
     fn is_fresh(&self) -> bool {
         match self.expires_at {
             Some(exp) => {
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
                 exp.saturating_sub(now) > EAGER_REFRESH_LEAD
             }
             None => false, // no expiry info → refresh on first use
@@ -221,7 +243,11 @@ impl<'a> DeviceFlow<'a> {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AuthError::Other("usercode missing user_code".into()))?
             .to_string();
-        let interval = value.get("interval").and_then(|v| v.as_u64()).unwrap_or(5).max(1);
+        let interval = value
+            .get("interval")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5)
+            .max(1);
         Ok((
             DevicePrompt {
                 verification_url: format!("{}{}", self.config.issuer, self.config.verify_path),
@@ -258,8 +284,7 @@ impl<'a> DeviceFlow<'a> {
                     .map_err(|e| AuthError::Other(format!("device token: {e}")))?;
                 return self.exchange(&value).await;
             }
-            if status == reqwest::StatusCode::FORBIDDEN
-                || status == reqwest::StatusCode::NOT_FOUND
+            if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::NOT_FOUND
             {
                 // Pending: user has not entered the code yet.
                 if SystemTime::now() >= deadline {
@@ -287,7 +312,10 @@ impl<'a> DeviceFlow<'a> {
         let form = [
             ("grant_type", "authorization_code"),
             ("code", code),
-            ("redirect_uri", &format!("{}/deviceauth/callback", self.config.issuer)),
+            (
+                "redirect_uri",
+                &format!("{}/deviceauth/callback", self.config.issuer),
+            ),
             ("client_id", &self.config.client_id),
             ("code_verifier", code_verifier),
         ];
@@ -327,12 +355,16 @@ fn oauth_state() -> String {
 /// trade-off; no crypto RNG dependency).
 fn random_urlsafe(len: usize) -> String {
     use std::hash::{BuildHasher, Hasher};
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let mut bytes = vec![0u8; len];
     for (i, b) in bytes.iter_mut().enumerate() {
         let seed = std::hash::RandomState::new().build_hasher().finish();
         let mix = seed.wrapping_mul(31).wrapping_add(i as u64 * 7)
-            ^ (now as u64) ^ (std::process::id() as u64);
+            ^ (now as u64)
+            ^ (std::process::id() as u64);
         *b = (mix >> (i % 64)) as u8 ^ (now >> (i % 8)) as u8;
     }
     URL_SAFE_NO_PAD.encode(&bytes)
@@ -360,8 +392,15 @@ impl<'a> LoopbackPkce<'a> {
     /// (url, redirect_uri, code_verifier, server_handle).
     pub async fn authorize_url(
         &self,
-    ) -> Result<(String, String, String, tokio::task::JoinHandle<Result<TokenSet, AuthError>>), AuthError>
-    {
+    ) -> Result<
+        (
+            String,
+            String,
+            String,
+            tokio::task::JoinHandle<Result<TokenSet, AuthError>>,
+        ),
+        AuthError,
+    > {
         let verifier = pkce_verifier();
         let challenge = pkce_challenge(&verifier);
         // Bind with port fallback.
@@ -450,8 +489,8 @@ impl<'a> LoopbackPkce<'a> {
             if !status.is_success() {
                 return Err(AuthError::http(status.as_u16(), text));
             }
-            let value: Value = serde_json::from_str(&text)
-                .map_err(|e| AuthError::Other(format!("token: {e}")))?;
+            let value: Value =
+                serde_json::from_str(&text).map_err(|e| AuthError::Other(format!("token: {e}")))?;
             Ok(TokenSet::from_tokens_json(&value))
         });
         Ok((url, redirect_uri, verifier, handle))
@@ -505,7 +544,11 @@ pub fn jwt_account_id(token: Option<&str>) -> Option<String> {
     let claims: Value = serde_json::from_slice(&decoded).ok()?;
     claims
         .get("chatgpt_account_id")
-        .or_else(|| claims.get("https://api.openai.com/auth")?.get("chatgpt_account_id"))
+        .or_else(|| {
+            claims
+                .get("https://api.openai.com/auth")?
+                .get("chatgpt_account_id")
+        })
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .or_else(|| {
@@ -570,7 +613,11 @@ impl std::fmt::Debug for TokenProvider {
 impl TokenProvider {
     pub fn new(home: &std::path::Path, provider_name: &str, config: OauthFlowConfig) -> Self {
         let store = AuthStore::new(home);
-        let cached = store.get(provider_name).ok().flatten().and_then(|e| TokenSet::from_auth_entry(&e));
+        let cached = store
+            .get(provider_name)
+            .ok()
+            .flatten()
+            .and_then(|e| TokenSet::from_auth_entry(&e));
         let account = cached.as_ref().and_then(TokenSet::account_label);
         Self {
             provider_name: provider_name.to_string(),
@@ -596,10 +643,13 @@ impl TokenProvider {
             tokens.account_id = jwt_account_id(tokens.id_token.as_deref())
                 .or_else(|| jwt_account_id(Some(&tokens.access_token)));
         }
-        self.store().set(&self.provider_name, tokens.to_auth_entry())?;
+        self.store()
+            .set(&self.provider_name, tokens.to_auth_entry())?;
         *self.cache.lock().await = Some(tokens.clone());
-        *self.account_mirror.lock().unwrap_or_else(|p| p.into_inner()) =
-            tokens.account_label();
+        *self
+            .account_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = tokens.account_label();
         Ok(())
     }
 
@@ -623,7 +673,10 @@ impl TokenProvider {
     /// Account label for the non-async `ProviderClient::auth_status`
     /// (None = not logged in).
     pub fn account_sync(&self) -> Option<String> {
-        self.account_mirror.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.account_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// 401-triggered refresh: clear the cached token, refresh once.
@@ -686,7 +739,10 @@ impl TokenProvider {
                 // Stored refresh token is dead: clear auth, force re-login.
                 let _ = self.store().remove(&self.provider_name);
                 *self.cache.lock().await = None;
-                *self.account_mirror.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                *self
+                    .account_mirror
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()) = None;
             }
             return Err(err);
         }
@@ -724,7 +780,10 @@ impl TokenProvider {
         }
         let _ = self.store().remove(&self.provider_name);
         *self.cache.lock().await = None;
-        *self.account_mirror.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self
+            .account_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
         Ok(())
     }
 
@@ -785,10 +844,7 @@ mod tests {
                         // rest are permanent failures (revoked/expired).
                         let n = rc.fetch_add(1, Ordering::SeqCst);
                         if n >= 2 {
-                            (
-                                "400 Bad Request",
-                                r#"{"error":"refresh_token_expired"}"#,
-                            )
+                            ("400 Bad Request", r#"{"error":"refresh_token_expired"}"#)
                         } else {
                             (
                                 "200 OK",
@@ -801,10 +857,7 @@ mod tests {
                             r#"{"access_token":"at_1","refresh_token":"rt_1","expires_in":3600}"#,
                         )
                     } else {
-                        (
-                            "400 Bad Request",
-                            r#"{"error":"refresh_token_expired"}"#,
-                        )
+                        ("400 Bad Request", r#"{"error":"refresh_token_expired"}"#)
                     }
                 } else if head.contains("/oauth/revoke") {
                     ("200 OK", "{}")
@@ -839,13 +892,17 @@ mod tests {
     }
 
     fn home(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("bingo-api-auth-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("bingo-api-auth-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("home")
     }
 
     fn tokens(access: &str, refresh: &str, expires_in: i64) -> TokenSet {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         TokenSet {
             access_token: access.into(),
             refresh_token: refresh.into(),
@@ -866,11 +923,18 @@ mod tests {
         let (prompt, device_auth_id, interval) = flow.start().await.unwrap();
         assert_eq!(prompt.user_code, "ABC-DEF");
         assert!(prompt.verification_url.ends_with("/codex/device"));
-        let tokens = flow.poll(&device_auth_id, "ABC-DEF", interval).await.unwrap();
+        let tokens = flow
+            .poll(&device_auth_id, "ABC-DEF", interval)
+            .await
+            .unwrap();
         assert_eq!(tokens.access_token, "at_1");
         assert_eq!(tokens.refresh_token, "rt_1");
         assert!(tokens.expires_at.is_some());
-        assert_eq!(mock.poll_calls.load(Ordering::SeqCst), 2, "一次 pending 后成功");
+        assert_eq!(
+            mock.poll_calls.load(Ordering::SeqCst),
+            2,
+            "一次 pending 后成功"
+        );
     }
 
     /// TokenProvider: fresh token served without refresh; expiry-driven
@@ -883,9 +947,16 @@ mod tests {
 
         // Fresh token: served from cache, no refresh.
         let provider = TokenProvider::new(&home, "codex", config.clone());
-        provider.save(&tokens("at_fresh", "rt_1", 3600)).await.unwrap();
+        provider
+            .save(&tokens("at_fresh", "rt_1", 3600))
+            .await
+            .unwrap();
         assert_eq!(provider.access_token().await.unwrap(), "at_fresh");
-        assert_eq!(mock.refresh_calls.load(Ordering::SeqCst), 0, "新鲜 token 不刷新");
+        assert_eq!(
+            mock.refresh_calls.load(Ordering::SeqCst),
+            0,
+            "新鲜 token 不刷新"
+        );
 
         // Re-load with expired token → refresh (rotation) → persisted.
         let provider = TokenProvider::new(&home, "codex", config.clone());
@@ -895,7 +966,9 @@ mod tests {
         assert_eq!(mock.refresh_calls.load(Ordering::SeqCst), 1);
         let stored = AuthStore::new(&home).get("codex").unwrap().unwrap();
         match stored {
-            AuthEntry::Oauth { access, refresh, .. } => {
+            AuthEntry::Oauth {
+                access, refresh, ..
+            } => {
                 assert_eq!(access, "at_2");
                 assert_eq!(refresh, "rt_2", "refresh token 轮换已持久化");
             }
@@ -911,7 +984,10 @@ mod tests {
             provider.force_refresh().await,
             Err(AuthError::RefreshPermanent(_))
         ));
-        assert!(AuthStore::new(&home).get("codex").unwrap().is_none(), "永久失败后清除存储");
+        assert!(
+            AuthStore::new(&home).get("codex").unwrap().is_none(),
+            "永久失败后清除存储"
+        );
         assert!(!provider.is_logged_in());
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
@@ -932,7 +1008,11 @@ mod tests {
         for h in handles {
             assert_eq!(h.await.unwrap(), "at_2");
         }
-        assert_eq!(mock.refresh_calls.load(Ordering::SeqCst), 1, "并发只刷新一次");
+        assert_eq!(
+            mock.refresh_calls.load(Ordering::SeqCst),
+            1,
+            "并发只刷新一次"
+        );
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 
@@ -956,7 +1036,10 @@ mod tests {
             pkce_challenge(verifier),
             URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
         );
-        assert!(verifier.len() >= 43 && verifier.len() <= 128, "RFC 7636 长度");
+        assert!(
+            verifier.len() >= 43 && verifier.len() <= 128,
+            "RFC 7636 长度"
+        );
     }
 
     /// jwt_account_id: the three claim positions opencode checks, plus
@@ -984,7 +1067,11 @@ mod tests {
         assert_eq!(jwt_account_id(Some("not-a-jwt")), None);
         assert_eq!(jwt_account_id(None), None);
         let t = test_jwt(&serde_json::json!({"sub": "u"}));
-        assert_eq!(jwt_account_id(Some(&t)), None, "无 account claims 返回 None");
+        assert_eq!(
+            jwt_account_id(Some(&t)),
+            None,
+            "无 account claims 返回 None"
+        );
     }
 
     /// 契约：loopback authorize URL 带 codex CLI 参数 + 随机 state（main 实测
@@ -997,11 +1084,20 @@ mod tests {
         let flow = LoopbackPkce::new(&http, &config);
         let (url, _redirect, _verifier, handle) = flow.authorize_url().await.unwrap();
         handle.abort();
-        assert!(url.contains("codex_cli_simplified_flow=true"), "简化流参数: {url}");
-        assert!(url.contains("id_token_add_organizations=true"), "组织 claim 参数: {url}");
+        assert!(
+            url.contains("codex_cli_simplified_flow=true"),
+            "简化流参数: {url}"
+        );
+        assert!(
+            url.contains("id_token_add_organizations=true"),
+            "组织 claim 参数: {url}"
+        );
         assert!(url.contains("originator=bingo"), "originator: {url}");
         let state = url.split("state=").nth(1).unwrap_or_default();
-        assert!(!state.is_empty() && state != "bingo", "state 非固定: {state}");
+        assert!(
+            !state.is_empty() && state != "bingo",
+            "state 非固定: {state}"
+        );
         // 两次调用 state 不同（CSRF 随机）。
         let (url2, _r2, _v2, handle2) = flow.authorize_url().await.unwrap();
         handle2.abort();
@@ -1019,7 +1115,10 @@ mod tests {
         let flow = LoopbackPkce::new(&http, &config);
         let (_url, redirect_uri, _v, handle) = flow.authorize_url().await.unwrap();
         // 错误 state → 拒绝。
-        let _ = http.get(format!("{redirect_uri}?code=bad&state=WRONG")).send().await;
+        let _ = http
+            .get(format!("{redirect_uri}?code=bad&state=WRONG"))
+            .send()
+            .await;
         let res = handle.await.unwrap();
         assert!(
             matches!(&res, Err(AuthError::Other(m)) if m.contains("state mismatch")),
@@ -1056,7 +1155,11 @@ mod tests {
             "expires_in": 3600,
         });
         let tokens = TokenSet::from_tokens_json(&json);
-        assert_eq!(tokens.account_id.as_deref(), Some("acc_jwt"), "JWT 回填 account_id");
+        assert_eq!(
+            tokens.account_id.as_deref(),
+            Some("acc_jwt"),
+            "JWT 回填 account_id"
+        );
 
         // Access-token fallback when id_token has no account claim.
         let access_token = test_jwt(&serde_json::json!({"chatgpt_account_id": "acc_at"}));
@@ -1066,7 +1169,11 @@ mod tests {
             "expires_in": 3600,
         });
         let tokens = TokenSet::from_tokens_json(&json);
-        assert_eq!(tokens.account_id.as_deref(), Some("acc_at"), "access token 回退");
+        assert_eq!(
+            tokens.account_id.as_deref(),
+            Some("acc_at"),
+            "access token 回退"
+        );
 
         // Explicit account_id wins over JWT claims.
         let json = serde_json::json!({

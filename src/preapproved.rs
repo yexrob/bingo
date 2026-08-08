@@ -142,13 +142,19 @@ mod tests {
     #[test]
     fn hostname_entries_match_any_path() {
         assert!(is_preapproved_url("https://doc.rust-lang.org/book/"));
-        assert!(is_preapproved_url("https://developer.mozilla.org/en-US/docs/Web"));
+        assert!(is_preapproved_url(
+            "https://developer.mozilla.org/en-US/docs/Web"
+        ));
     }
 
     #[test]
     fn path_prefix_entries_require_segment_boundary() {
-        assert!(is_preapproved_url("https://github.com/anthropics/anthropic-sdk-python"));
-        assert!(!is_preapproved_url("https://github.com/anthropics-evil/repo"));
+        assert!(is_preapproved_url(
+            "https://github.com/anthropics/anthropic-sdk-python"
+        ));
+        assert!(!is_preapproved_url(
+            "https://github.com/anthropics-evil/repo"
+        ));
         assert!(!is_preapproved_url("https://github.com/other/repo"));
     }
 

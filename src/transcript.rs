@@ -31,7 +31,13 @@ pub struct Transcript {
 fn slugify(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if cleaned.is_empty() {
         "root".to_string()
@@ -42,7 +48,10 @@ fn slugify(name: &str) -> String {
 
 /// transcripts dir: ~/.local/share/bingo/transcripts.
 pub fn transcripts_dir(home: &Path) -> PathBuf {
-    home.join(".local").join("share").join("bingo").join("transcripts")
+    home.join(".local")
+        .join("share")
+        .join("bingo")
+        .join("transcripts")
 }
 
 /// New session file: <project-slug>-<unix-ts>.jsonl.
@@ -53,7 +62,10 @@ pub fn create(home: &Path, cwd: &Path) -> Result<Transcript, TranscriptError> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let name = cwd.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let name = cwd
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     let slug = slugify(&name);
     let path = dir.join(format!("{slug}-{ts}.jsonl"));
     Ok(Transcript { path })

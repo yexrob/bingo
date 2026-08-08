@@ -165,10 +165,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(data);
-    h.finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// 校验下载内容与 checksums.txt 中对应资产条目一致。
@@ -537,7 +534,9 @@ mod tests {
             header.set_size(bin_bytes.len() as u64);
             header.set_mode(0o755);
             header.set_cksum();
-            builder.append_data(&mut header, "bingo", bin_bytes).unwrap();
+            builder
+                .append_data(&mut header, "bingo", bin_bytes)
+                .unwrap();
             builder.finish().unwrap();
         }
         enc.finish().unwrap()
@@ -589,7 +588,9 @@ mod tests {
             Ordering::Equal
         );
         assert_eq!(
-            Version::parse("0.2").unwrap().cmp(&Version::parse("0.2.0").unwrap()),
+            Version::parse("0.2")
+                .unwrap()
+                .cmp(&Version::parse("0.2.0").unwrap()),
             Ordering::Equal
         );
         assert!(Version::parse("0.2").unwrap() > Version::parse("0.1.9").unwrap());
@@ -750,7 +751,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.starts_with(".bingo-update-"))
             .collect();
-        assert!(leftovers.is_empty(), "tmp 文件应被 rename 掉: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "tmp 文件应被 rename 掉: {leftovers:?}"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -815,22 +819,16 @@ mod tests {
     /// 构造完整 mock 路由（release JSON + 资产 + checksums.txt）。
     /// `tag` 为发布 tag；返回 (routes, archive)。
     fn mock_routes(tag: &str, archive: Vec<u8>) -> (Vec<(&'static str, Vec<u8>)>, Vec<u8>) {
-        let release = format!(
-            r#"{{"tag_name":"{tag}","name":"bingo {tag}","assets":[]}}"#,
-        );
+        let release = format!(r#"{{"tag_name":"{tag}","name":"bingo {tag}","assets":[]}}"#,);
         let asset = current_asset_name().expect("当前平台在发布矩阵内");
         let checksum = sha256_hex(&archive);
         let checksums = format!("{checksum}  {asset}\n");
         (
             vec![
-                (
-                    "/repos/yexrob/bingo/releases/latest",
-                    release.into_bytes(),
-                ),
+                ("/repos/yexrob/bingo/releases/latest", release.into_bytes()),
                 (
                     Box::leak(
-                        format!("/yexrob/bingo/releases/latest/download/{asset}")
-                            .into_boxed_str(),
+                        format!("/yexrob/bingo/releases/latest/download/{asset}").into_boxed_str(),
                     ),
                     archive.clone(),
                 ),
@@ -909,7 +907,9 @@ mod tests {
         let base = serve(vec![
             ("/repos/yexrob/bingo/releases/latest", release.into_bytes()),
             (
-                Box::leak(format!("/yexrob/bingo/releases/latest/download/{asset}").into_boxed_str()),
+                Box::leak(
+                    format!("/yexrob/bingo/releases/latest/download/{asset}").into_boxed_str(),
+                ),
                 archive,
             ),
             (
@@ -926,7 +926,11 @@ mod tests {
             .await
             .expect_err("校验失败必须报错");
         assert!(matches!(err, UpdateError::ChecksumMismatch { .. }));
-        assert_eq!(std::fs::read(&exe).unwrap(), b"keep-me", "失败不得触碰现有二进制");
+        assert_eq!(
+            std::fs::read(&exe).unwrap(),
+            b"keep-me",
+            "失败不得触碰现有二进制"
+        );
         assert_eq!(err.error_code(), "CHECKSUM_MISMATCH");
     }
 

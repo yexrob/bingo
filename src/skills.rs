@@ -136,9 +136,7 @@ fn project_skills_dirs(cwd: &Path) -> Vec<PathBuf> {
 }
 
 fn load_dir(dir: &Path, out: &mut Vec<Skill>) {
-    let Ok(mut entries) = std::fs::read_dir(dir)
-        .map(|rd| rd.flatten().collect::<Vec<_>>())
-    else {
+    let Ok(mut entries) = std::fs::read_dir(dir).map(|rd| rd.flatten().collect::<Vec<_>>()) else {
         return;
     };
     // readdir order isn't guaranteed (arbitrary on APFS): sort by name so the listing is predictable.
@@ -306,7 +304,10 @@ fn replace_word_boundary(haystack: &str, needle: &str, value: &str) -> String {
     let mut rest = haystack;
     while let Some(pos) = rest.find(needle) {
         let after = &rest[pos + needle.len()..];
-        let boundary = after.chars().next().is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '['));
+        let boundary = after
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '['));
         if boundary {
             out.push_str(&rest[..pos]);
             out.push_str(value);
@@ -428,7 +429,10 @@ mod tests {
         );
         assert_eq!(fm.description.as_deref(), Some("Review a PR"));
         assert_eq!(fm.when_to_use.as_deref(), Some("After opening a PR"));
-        assert_eq!(fm.argument_names, vec!["diff".to_string(), "base".to_string()]);
+        assert_eq!(
+            fm.argument_names,
+            vec!["diff".to_string(), "base".to_string()]
+        );
         assert!(body.starts_with("# Body"));
     }
 
@@ -555,7 +559,11 @@ mod tests {
             &home.join(".config/bingo/skills/one/SKILL.md"),
             "---\ndescription: second\n---\nbody\n",
         );
-        assert_eq!(desc(&load_skills(&home, &root), "one"), "second", "内容改动应失效");
+        assert_eq!(
+            desc(&load_skills(&home, &root), "one"),
+            "second",
+            "内容改动应失效"
+        );
 
         std::thread::sleep(std::time::Duration::from_millis(50));
         // A newly added skill directory must also invalidate.
@@ -600,13 +608,15 @@ mod tests {
         let content = "Do $ARGUMENTS[0] on $1 then $ARGUMENTS with $msg";
         let out = substitute_arguments(content, "fix bug", &["msg".to_string()]);
         assert_eq!(
-            out,
-            "Do fix on bug then fix bug with fix",
+            out, "Do fix on bug then fix bug with fix",
             "named 映射首个位置，$1 与 $ARGUMENTS 按同一语义"
         );
 
         let no_placeholder = substitute_arguments("plain", "a b", &[]);
-        assert!(no_placeholder.ends_with("ARGUMENTS: a b"), "{no_placeholder}");
+        assert!(
+            no_placeholder.ends_with("ARGUMENTS: a b"),
+            "{no_placeholder}"
+        );
 
         let empty = substitute_arguments("$ARGUMENTS", "", &[]);
         assert_eq!(empty, "");

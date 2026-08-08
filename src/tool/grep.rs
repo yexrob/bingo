@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
+use super::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 
 /// Per-file cap: larger files are treated as binary/too big and skipped (mirrors ripgrep behavior).
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -70,7 +70,14 @@ impl Tool for GrepTool {
         let search_root = root.clone();
         let (lines, stopped_early) = tokio::task::spawn_blocking(move || {
             let mut lines = Vec::new();
-            let stopped = search_dir(&search_root, &search_root, &re, filter.as_ref(), &mut lines, 0);
+            let stopped = search_dir(
+                &search_root,
+                &search_root,
+                &re,
+                filter.as_ref(),
+                &mut lines,
+                0,
+            );
             (lines, stopped)
         })
         .await
@@ -235,7 +242,10 @@ mod tests {
         assert!(text.contains("notes.md"), "{text}");
         assert!(!text.contains("target/"), "target 应跳过: {text}");
         assert!(!text.contains(".git/"), ".git 应跳过: {text}");
-        assert!(!text.contains("node_modules"), "node_modules 应跳过: {text}");
+        assert!(
+            !text.contains("node_modules"),
+            "node_modules 应跳过: {text}"
+        );
         // Searching works as usual when the root is explicitly pointed at.
         let result = GrepTool
             .call(
@@ -248,7 +258,11 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            result.content.as_str().unwrap_or_default().contains("build.rs"),
+            result
+                .content
+                .as_str()
+                .unwrap_or_default()
+                .contains("build.rs"),
             "显式指向 target 时不跳过"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -281,7 +295,10 @@ mod tests {
         assert!(!text.contains("notes.md"), "{text}");
         // A pattern without `/` matches by file name (ripgrep -g semantics), effective at any depth.
         let text = matched("*.rs").await;
-        assert!(text.contains("main.rs") && text.contains("lib.rs"), "{text}");
+        assert!(
+            text.contains("main.rs") && text.contains("lib.rs"),
+            "{text}"
+        );
         assert!(!text.contains("notes.md"), "{text}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -292,7 +309,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("bingo-grep-{}-cap", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let body: String = (0..MAX_GREP_LINES * 3).map(|i| format!("needle {i}\n")).collect();
+        let body: String = (0..MAX_GREP_LINES * 3)
+            .map(|i| format!("needle {i}\n"))
+            .collect();
         std::fs::write(root.join("big.txt"), body).unwrap();
         let result = GrepTool
             .call(serde_json::json!({"pattern": "needle"}), &ctx(root.clone()))

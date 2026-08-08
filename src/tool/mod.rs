@@ -116,9 +116,7 @@ pub trait Tool: Send + Sync {
 }
 
 /// Model-returned parameters → target type. Failure info is visible to the model (fed back via is_error).
-pub fn parse_input<T: for<'a> Deserialize<'a>>(
-    input: &serde_json::Value,
-) -> Result<T, ToolError> {
+pub fn parse_input<T: for<'a> Deserialize<'a>>(input: &serde_json::Value) -> Result<T, ToolError> {
     serde_json::from_value(input.clone()).map_err(|e| ToolError::failed(format!("bad input: {e}")))
 }
 
@@ -181,7 +179,10 @@ mod tests {
         assert_eq!(schema["required"], json!(["prompt"]));
         assert_eq!(schema["additionalProperties"], json!(false));
         assert!(schema["properties"]["description"].is_object());
-        assert_eq!(schema["properties"]["description"]["type"], json!(["string", "null"]));
+        assert_eq!(
+            schema["properties"]["description"]["type"],
+            json!(["string", "null"])
+        );
     }
 
     #[test]
@@ -191,7 +192,10 @@ mod tests {
         assert_eq!(schema["required"], json!(["file_path"]));
         assert_eq!(schema["additionalProperties"], json!(false));
         assert_eq!(schema["properties"]["file_path"]["type"], "string");
-        assert_eq!(schema["properties"]["file_path"]["description"], "File path to read (absolute or relative)");
+        assert_eq!(
+            schema["properties"]["file_path"]["description"],
+            "File path to read (absolute or relative)"
+        );
     }
 
     #[test]
@@ -199,12 +203,20 @@ mod tests {
         let schema = BashTool::new().input_schema();
         assert_eq!(schema["required"], json!(["command"]));
         // Option fields do not go into required
-        assert!(!schema["required"].as_array().unwrap().contains(&json!("timeout")));
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("timeout"))
+        );
     }
 
     #[test]
     fn schema_has_no_dollar_schema_key() {
         let schema = ReadTool::new().input_schema();
-        assert!(schema.get("$schema").is_none(), "发给模型的形状不含 $schema: {schema}");
+        assert!(
+            schema.get("$schema").is_none(),
+            "发给模型的形状不含 $schema: {schema}"
+        );
     }
 }

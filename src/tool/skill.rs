@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::skills::{expand_skill, format_listing, Skill, DEFAULT_CHAR_BUDGET};
+use crate::skills::{DEFAULT_CHAR_BUDGET, Skill, expand_skill, format_listing};
 
-use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
+use super::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 
 /// Skill tool input.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -126,10 +126,7 @@ mod tests {
             home: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
             http: reqwest::Client::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
-                &std::env::temp_dir(),
-                "test",
-            )),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: crate::settings::HooksConfig::default(),
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
@@ -143,20 +140,16 @@ mod tests {
     async fn disk_skill_returns_single_line_pointer() {
         let tool = SkillTool::new(vec![skill("pdf")]);
         let result = tool
-            .call(
-                serde_json::json!({ "skill": "pdf", "args": "doc" }),
-                &ctx(),
-            )
+            .call(serde_json::json!({ "skill": "pdf", "args": "doc" }), &ctx())
             .await
             .unwrap();
         let text = result.content.as_str().unwrap();
-        assert_eq!(
-            text.lines().count(),
-            1,
-            "单行返回，不带全量正文: {text}"
-        );
+        assert_eq!(text.lines().count(), 1, "单行返回，不带全量正文: {text}");
         // Expected pointer renders the helper's base_dir verbatim (separator style per platform).
-        let expected = format!("✦ pdf — read {}", PathBuf::from("/tmp/skills").join("SKILL.md").display());
+        let expected = format!(
+            "✦ pdf — read {}",
+            PathBuf::from("/tmp/skills").join("SKILL.md").display()
+        );
         assert_eq!(text, expected);
         assert!(
             !text.contains("Follow the {name} procedure."),
@@ -192,7 +185,13 @@ mod tests {
             .call(serde_json::json!({ "skill": "/commit" }), &ctx())
             .await
             .unwrap();
-        assert!(result.content.as_str().unwrap().starts_with("✦ commit — read"));
+        assert!(
+            result
+                .content
+                .as_str()
+                .unwrap()
+                .starts_with("✦ commit — read")
+        );
     }
 
     #[tokio::test]

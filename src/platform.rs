@@ -26,7 +26,10 @@ pub fn init_shell(configured: Option<&str>) {
 }
 
 pub fn shell() -> &'static str {
-    SHELL.get().map(String::as_str).unwrap_or_else(default_shell)
+    SHELL
+        .get()
+        .map(String::as_str)
+        .unwrap_or_else(default_shell)
 }
 
 pub fn default_shell() -> &'static str {
@@ -198,7 +201,10 @@ mod tests {
             .collect();
         assert_eq!(cmd.as_std().get_current_dir(), Some(Path::new("/")));
         #[cfg(windows)]
-        assert!(args.iter().any(|a| a == "-Command"), "PowerShell 用 -Command: {args:?}");
+        assert!(
+            args.iter().any(|a| a == "-Command"),
+            "PowerShell 用 -Command: {args:?}"
+        );
         #[cfg(not(windows))]
         assert_eq!(args.first().map(String::as_str), Some("-c"));
     }

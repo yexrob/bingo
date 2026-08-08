@@ -12,7 +12,10 @@ pub const HISTORY_MAX: usize = 500;
 
 /// `~/.local/share/bingo/history` (mirrors [`crate::transcript::transcripts_dir`]).
 pub fn history_dir(home: &Path) -> PathBuf {
-    home.join(".local").join("share").join("bingo").join("history")
+    home.join(".local")
+        .join("share")
+        .join("bingo")
+        .join("history")
 }
 
 /// FNV-1a of the absolute cwd: keeps same-named projects in different parents
@@ -34,9 +37,19 @@ pub fn history_path(home: &Path, cwd: &Path) -> PathBuf {
         .unwrap_or_default();
     let slug: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let slug = if slug.is_empty() { "root".to_string() } else { slug };
+    let slug = if slug.is_empty() {
+        "root".to_string()
+    } else {
+        slug
+    };
     history_dir(home).join(format!("{slug}-{:016x}.jsonl", path_hash(cwd)))
 }
 
@@ -81,7 +94,11 @@ pub struct History {
 
 impl History {
     pub fn new(entries: Vec<String>) -> Self {
-        Self { entries, cursor: None, draft: String::new() }
+        Self {
+            entries,
+            cursor: None,
+            draft: String::new(),
+        }
     }
 
     pub fn entries(&self) -> &[String] {
@@ -189,7 +206,10 @@ mod tests {
         let a = history_path(&home, Path::new("/a/project"));
         let b = history_path(&home, Path::new("/b/project"));
         assert_ne!(a, b);
-        assert!(a.file_name().is_some_and(|n| n.to_string_lossy().starts_with("project-")));
+        assert!(
+            a.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("project-"))
+        );
     }
 
     #[test]

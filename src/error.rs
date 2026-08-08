@@ -73,9 +73,7 @@ pub enum ErrorContext {
 /// function is cfg'd out entirely, so no calls are expected.
 #[cfg(debug_assertions)]
 pub fn missing_code<T: std::fmt::Debug + ?Sized>(err: &T) {
-    eprintln!(
-        "[bingo] error: {err:?} 使用 GENERIC（missing stable error code）"
-    );
+    eprintln!("[bingo] error: {err:?} 使用 GENERIC（missing stable error code）");
 }
 
 /// Single exit mapping: both GUI (TUI) and CLI exits must get their code through this
@@ -92,7 +90,13 @@ pub fn map_error<E: ErrorCode + ?Sized>(err: &E) -> &'static str {
 pub fn sanitize_msg(msg: &str) -> String {
     let normalized: String = msg
         .chars()
-        .map(|c| if c == '\n' || c == '\t' || c == '\r' { ' ' } else { c })
+        .map(|c| {
+            if c == '\n' || c == '\t' || c == '\r' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     normalized.chars().take(200).collect()
 }
@@ -206,10 +210,22 @@ mod tests {
         let variants = vec![
             ClientError::MissingApiKey,
             ClientError::InvalidApiKey("k".into()),
-            ClientError::Api { status: 401, body: String::new() },
-            ClientError::Api { status: 403, body: String::new() },
-            ClientError::Api { status: 429, body: String::new() },
-            ClientError::Api { status: 500, body: String::new() },
+            ClientError::Api {
+                status: 401,
+                body: String::new(),
+            },
+            ClientError::Api {
+                status: 403,
+                body: String::new(),
+            },
+            ClientError::Api {
+                status: 429,
+                body: String::new(),
+            },
+            ClientError::Api {
+                status: 500,
+                body: String::new(),
+            },
             ClientError::Stream("s".into()),
             ClientError::Timeout,
             ClientError::Unsupported("count_tokens".into()),
@@ -222,25 +238,31 @@ mod tests {
             ClientError::Config("unknown protocol".into()).error_code(),
             "CONFIG_INVALID"
         );
-        let denied = ClientError::Api { status: 403, body: String::new() };
+        let denied = ClientError::Api {
+            status: 403,
+            body: String::new(),
+        };
         assert_eq!(denied.error_code(), "PERMISSION_DENIED");
-        let server = ClientError::Api { status: 500, body: String::new() };
+        let server = ClientError::Api {
+            status: 500,
+            body: String::new(),
+        };
         assert_eq!(server.error_code(), "SERVER_ERROR");
         // The `ClientError::Transport` variant can't be constructed at runtime
         // (reqwest::Error has no public constructor API, all pub(crate) in 0.13.x):
         // the mapping is locked down by `transport_offline_code` and asserted here
         // (same source as the drift-guard test's other variants).
-        assert_eq!(
-            crate::api::client::transport_offline_code(),
-            "OFFLINE"
-        );
+        assert_eq!(crate::api::client::transport_offline_code(), "OFFLINE");
     }
 
     #[test]
     fn query_error_forwards_client_and_tool() {
         use crate::api::client::ClientError;
         use crate::query::QueryError;
-        assert_eq!(QueryError::Protocol("p".into()).error_code(), "SERVER_ERROR");
+        assert_eq!(
+            QueryError::Protocol("p".into()).error_code(),
+            "SERVER_ERROR"
+        );
         assert_eq!(
             QueryError::Client(ClientError::Timeout).error_code(),
             "TIMEOUT"
@@ -254,8 +276,14 @@ mod tests {
     #[test]
     fn config_and_storage_errors() {
         use crate::settings::SettingsError;
-        assert_eq!(SettingsError::Io(std::io::Error::other("x")).error_code(), "CONFIG_INVALID");
-        assert_eq!(SettingsError::Parse(serde_json::from_str::<()>("x").unwrap_err()).error_code(), "CONFIG_INVALID");
+        assert_eq!(
+            SettingsError::Io(std::io::Error::other("x")).error_code(),
+            "CONFIG_INVALID"
+        );
+        assert_eq!(
+            SettingsError::Parse(serde_json::from_str::<()>("x").unwrap_err()).error_code(),
+            "CONFIG_INVALID"
+        );
         // TeamError's 3 variants explicitly enumerated (guardrail 5: assert per variant).
         use crate::team::TeamError;
         let team_variants = vec![
@@ -265,7 +293,11 @@ mod tests {
         ];
         assert_stable_codes("team::TeamError", &team_variants);
         for v in &team_variants {
-            assert_eq!(v.error_code(), "CONFIG_INVALID", "TeamError 全 variant 落配置错误");
+            assert_eq!(
+                v.error_code(),
+                "CONFIG_INVALID",
+                "TeamError 全 variant 落配置错误"
+            );
         }
         // TaskError's 5 variants explicitly enumerated (AC-40).
         use crate::tasks::TaskError;
@@ -274,15 +306,28 @@ mod tests {
             TaskError::InvalidId("x".into()),
             TaskError::Serialize(serde_json::from_str::<()>("x").unwrap_err()),
             TaskError::CreateConflict("1".into()),
-            TaskError::Parse { path: "p".into(), detail: "d".into() },
+            TaskError::Parse {
+                path: "p".into(),
+                detail: "d".into(),
+            },
         ];
         assert_stable_codes("tasks::TaskError", &task_variants);
         for v in &task_variants {
-            assert_eq!(v.error_code(), "STORAGE_ERROR", "TaskError 全 variant 落存储错误");
+            assert_eq!(
+                v.error_code(),
+                "STORAGE_ERROR",
+                "TaskError 全 variant 落存储错误"
+            );
         }
         use crate::transcript::TranscriptError;
-        assert_eq!(TranscriptError::Io(std::io::Error::other("x")).error_code(), "STORAGE_ERROR");
-        assert_eq!(TranscriptError::Parse(serde_json::from_str::<()>("x").unwrap_err()).error_code(), "STORAGE_ERROR");
+        assert_eq!(
+            TranscriptError::Io(std::io::Error::other("x")).error_code(),
+            "STORAGE_ERROR"
+        );
+        assert_eq!(
+            TranscriptError::Parse(serde_json::from_str::<()>("x").unwrap_err()).error_code(),
+            "STORAGE_ERROR"
+        );
         // ShareError 全部 6 个 variant 显式枚举（AC-40）。
         use crate::share::ShareError;
         let share_variants = vec![
@@ -295,10 +340,17 @@ mod tests {
         ];
         assert_stable_codes("share::ShareError", &share_variants);
         for v in &share_variants {
-            assert_eq!(v.error_code(), "STORAGE_ERROR", "ShareError 全 variant 落存储错误");
+            assert_eq!(
+                v.error_code(),
+                "STORAGE_ERROR",
+                "ShareError 全 variant 落存储错误"
+            );
         }
         use crate::experience::ExperienceError;
-        assert_eq!(ExperienceError::Io(std::io::Error::other("x")).error_code(), "STORAGE_ERROR");
+        assert_eq!(
+            ExperienceError::Io(std::io::Error::other("x")).error_code(),
+            "STORAGE_ERROR"
+        );
         // UpdateError 全 variant 显式枚举（Network 无公开构造器，由
         // `update::network_error_code` 锁定映射，与 ClientError::Transport 同模式）。
         use crate::update::UpdateError;
@@ -306,7 +358,10 @@ mod tests {
             UpdateError::Http { status: 503 },
             UpdateError::BadResponse("x".into()),
             UpdateError::ChecksumsUnavailable("x".into()),
-            UpdateError::ChecksumMismatch { expected: "e".into(), got: "g".into() },
+            UpdateError::ChecksumMismatch {
+                expected: "e".into(),
+                got: "g".into(),
+            },
             UpdateError::ArchiveInvalid("x".into()),
             UpdateError::MissingBinary("bingo".into()),
             UpdateError::UnsupportedPlatform("linux/aarch64".into()),
@@ -314,14 +369,20 @@ mod tests {
         ];
         assert_stable_codes("update::UpdateError", &update_variants);
         assert_eq!(UpdateError::Http { status: 503 }.error_code(), "OFFLINE");
-        assert_eq!(UpdateError::BadResponse("x".into()).error_code(), "SERVER_ERROR");
+        assert_eq!(
+            UpdateError::BadResponse("x".into()).error_code(),
+            "SERVER_ERROR"
+        );
         assert_eq!(
             UpdateError::ChecksumsUnavailable("x".into()).error_code(),
             "CHECKSUMS_UNAVAILABLE"
         );
         assert_eq!(
-            UpdateError::ChecksumMismatch { expected: "e".into(), got: "g".into() }
-                .error_code(),
+            UpdateError::ChecksumMismatch {
+                expected: "e".into(),
+                got: "g".into()
+            }
+            .error_code(),
             "CHECKSUM_MISMATCH"
         );
         assert_eq!(
@@ -348,7 +409,14 @@ mod tests {
         use crate::hooks::HookError;
         assert_eq!(HookError::Failed("x".into()).error_code(), "HOOK_FAILED");
         use crate::mcp::McpError;
-        assert_eq!(McpError::Connect { server: "s".into(), detail: "d".into() }.error_code(), "SERVER_ERROR");
+        assert_eq!(
+            McpError::Connect {
+                server: "s".into(),
+                detail: "d".into()
+            }
+            .error_code(),
+            "SERVER_ERROR"
+        );
         use crate::tool::ToolError;
         assert_eq!(ToolError::failed("x").error_code(), "TOOL_FAILED");
     }
@@ -394,7 +462,10 @@ mod tests {
             Box::new(TranscriptError::Io(std::io::Error::other("x"))),
             Box::new(ExperienceError::Io(std::io::Error::other("x"))),
             Box::new(HookError::Failed("x".into())),
-            Box::new(McpError::Connect { server: "s".into(), detail: "d".into() }),
+            Box::new(McpError::Connect {
+                server: "s".into(),
+                detail: "d".into(),
+            }),
             Box::new(ShareError::SessionNotFound("x".into())),
             Box::new(UpdateError::Http { status: 503 }),
         ];

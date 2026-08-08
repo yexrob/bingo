@@ -1,9 +1,7 @@
 # TUI Component-Level Regression Test Infrastructure Requirements (#14)
 
-> Status: v3.0 (2026-08-07, qa deliverable 3/3 complete — 4 assertion tests written into chat.rs: qa_ac53 long-turn escalation,
-> qa_ac29 per-code matrix, qa_page_error Buffer-layer styling, qa_fx01_real_path real path; 565 tests all passing + clippy 0.
-> AC-15 persistence idempotency is the only remaining open item: there's no idempotency-key mechanism, so server-side "persistence count = 1" can't be asserted; awaiting main/dev's decision)
-> Related: `notes/design/feedback-states.md` (design v1.16), `notes/design/feedback-states-ac.md` (AC table v1.9),
+> Status: v3.1 (2026-08-08, complete — the four component assertions remain green; the AC-15 server-side boundary was finalized as non-applicable because short-sync writes are pure generation with no persistence side effects, as recorded in `feedback-states-ac.md` v1.9.2).
+> Related: `notes/design/feedback-states.md` (design v1.22), `notes/design/feedback-states-ac.md` (AC table v1.9.3),
 > `notes/design/feedback-states-presentation.md` (presentation acceptance checklist v1.8, ui/ux)
 > Roles: qa provides requirements → dev implements infrastructure → qa asserts + ui/ux accepts → devex DX re-review (#15, closed)
 

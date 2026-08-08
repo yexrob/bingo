@@ -347,9 +347,7 @@ impl ChannelRegistry {
                 inner.hub_mail.push(format!(
                     "⚠ 频道 #{name} 已达消息总上限 {channel_total}，已冻结（后续发言将被拒绝）",
                 ));
-                return Err(format!(
-                    "#{name} 达消息总上限 {channel_total}，频道已冻结"
-                ));
+                return Err(format!("#{name} 达消息总上限 {channel_total}，频道已冻结"));
             }
             ch.seq += 1;
             let msg = ChannelMessage {
@@ -364,9 +362,7 @@ impl ChannelRegistry {
             let deliveries: Vec<(String, ChannelMessage)> = ch
                 .members
                 .iter()
-                .filter(|m| {
-                    m.as_str() != from && m.as_str() != HUB_NAME && m.as_str() != USER_NAME
-                })
+                .filter(|m| m.as_str() != from && m.as_str() != HUB_NAME && m.as_str() != USER_NAME)
                 .map(|m| (m.clone(), msg.clone()))
                 .collect();
             hub_line = if from != HUB_NAME && ch.members.iter().any(|m| m == HUB_NAME) {
@@ -494,7 +490,10 @@ mod tests {
         let reg = registry();
         reg.create("table", vec!["a".into(), "b".into()], ChannelMode::Free)
             .unwrap_or_else(|e| panic!("{e}"));
-        assert!(reg.create("table", vec![], ChannelMode::Free).is_err(), "重名");
+        assert!(
+            reg.create("table", vec![], ChannelMode::Free).is_err(),
+            "重名"
+        );
         assert!(reg.create("", vec![], ChannelMode::Free).is_err(), "空名");
         let st = &reg.list()[0];
         assert_eq!(
@@ -520,24 +519,43 @@ mod tests {
     #[test]
     fn post_fans_out_excluding_sender_and_hub() {
         let reg = registry();
-        reg.create("t", vec!["a".into(), "b".into(), "c".into()], ChannelMode::Free)
-            .unwrap_or_else(|e| panic!("{e}"));
-        let (seq, deliveries) = sent(reg.post("a", "t", "大家好").unwrap_or_else(|e| panic!("{e}")));
+        reg.create(
+            "t",
+            vec!["a".into(), "b".into(), "c".into()],
+            ChannelMode::Free,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let (seq, deliveries) = sent(
+            reg.post("a", "t", "大家好")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
         assert_eq!(seq, 1);
         let names: Vec<&str> = deliveries.iter().map(|(m, _)| m.as_str()).collect();
         assert_eq!(names, vec!["b", "c"], "不投给发送者与 hub");
-        assert!(deliveries.iter().all(|(_, m)| m.from == "a" && m.text == "大家好"));
+        assert!(
+            deliveries
+                .iter()
+                .all(|(_, m)| m.from == "a" && m.text == "大家好")
+        );
         // Hub is a member: messages go to hub_mail; the hub's own posts don't.
         assert!(reg.has_hub_mail());
         let mail = reg.drain_hub_mail();
         assert_eq!(mail, vec!["[#t 第1条] a: 大家好"]);
-        let _ = sent(reg.post("main", "t", "肃静").unwrap_or_else(|e| panic!("{e}")));
+        let _ = sent(
+            reg.post("main", "t", "肃静")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
         assert!(!reg.has_hub_mail(), "hub 自己的发言不回流");
         // user (a human) is a natural member: can post, hub hears it, doesn't consume the per_agent budget.
-        let (_, deliveries) =
-            sent(reg.post("user", "t", "都停一下").unwrap_or_else(|e| panic!("{e}")));
+        let (_, deliveries) = sent(
+            reg.post("user", "t", "都停一下")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
         assert_eq!(
-            deliveries.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
+            deliveries
+                .iter()
+                .map(|(m, _)| m.as_str())
+                .collect::<Vec<_>>(),
             vec!["a", "b", "c"],
             "user 的发言唤醒全部 agent 成员"
         );
@@ -552,9 +570,15 @@ mod tests {
         let reg = registry();
         reg.create("count", vec!["a".into(), "b".into()], ChannelMode::Serial)
             .unwrap_or_else(|e| panic!("{e}"));
-        let _ = sent(reg.post("a", "count", "1").unwrap_or_else(|e| panic!("{e}")));
+        let _ = sent(
+            reg.post("a", "count", "1")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
         // b hasn't seen a's "1" (seen=0 < seq=1) → bounce back with increments.
-        match reg.post("b", "count", "1").unwrap_or_else(|e| panic!("{e}")) {
+        match reg
+            .post("b", "count", "1")
+            .unwrap_or_else(|e| panic!("{e}"))
+        {
             PostOutcome::Stale { missed } => {
                 assert_eq!(missed.len(), 1);
                 assert_eq!(missed[0].from, "a");
@@ -563,17 +587,33 @@ mod tests {
             PostOutcome::Sent { .. } => panic!("应弹回"),
         }
         // Bounce counts as read: the resend commits (the model says "2" instead).
-        let (seq, _) = sent(reg.post("b", "count", "2").unwrap_or_else(|e| panic!("{e}")));
+        let (seq, _) = sent(
+            reg.post("b", "count", "2")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
         assert_eq!(seq, 2, "重试成功，顺序涌现");
         // mark_seen: after inbox injection, a's cursor advances, no bounce.
         reg.mark_seen("a", "count", 2);
-        let (seq, _) = sent(reg.post("a", "count", "3").unwrap_or_else(|e| panic!("{e}")));
+        let (seq, _) = sent(
+            reg.post("a", "count", "3")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
         assert_eq!(seq, 3);
         // Free mode doesn't check.
-        reg.create("brainstorm", vec!["a".into(), "b".into()], ChannelMode::Free)
-            .unwrap_or_else(|e| panic!("{e}"));
-        let _ = sent(reg.post("a", "brainstorm", "想法一").unwrap_or_else(|e| panic!("{e}")));
-        let _ = sent(reg.post("b", "brainstorm", "想法二").unwrap_or_else(|e| panic!("{e}")));
+        reg.create(
+            "brainstorm",
+            vec!["a".into(), "b".into()],
+            ChannelMode::Free,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let _ = sent(
+            reg.post("a", "brainstorm", "想法一")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        let _ = sent(
+            reg.post("b", "brainstorm", "想法二")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
     }
 
     #[test]
@@ -584,7 +624,10 @@ mod tests {
         let _ = sent(reg.post("a", "t", "旧闻").unwrap_or_else(|e| panic!("{e}")));
         reg.invite("t", "late").unwrap_or_else(|e| panic!("{e}"));
         // Late joiner's seen = head at join time: no backlog bounce, can post immediately.
-        let (seq, _) = sent(reg.post("late", "t", "我来了").unwrap_or_else(|e| panic!("{e}")));
+        let (seq, _) = sent(
+            reg.post("late", "t", "我来了")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
         assert_eq!(seq, 2);
     }
 
@@ -597,7 +640,8 @@ mod tests {
         reg.create("t", vec!["a".into()], ChannelMode::Free)
             .unwrap_or_else(|e| panic!("{e}"));
         // Channel-level override is 1: the second message freezes it.
-        reg.set_message_limit("t", 1).unwrap_or_else(|e| panic!("{e}"));
+        reg.set_message_limit("t", 1)
+            .unwrap_or_else(|e| panic!("{e}"));
         let _ = sent(reg.post("a", "t", "1").unwrap_or_else(|e| panic!("{e}")));
         let err = reg.post("a", "t", "2").unwrap_err();
         assert!(err.contains("冻结"), "{err}");
@@ -682,9 +726,15 @@ mod tests {
         let (_, detail, payload) = reg.row_snapshot("t").unwrap_or_else(|| panic!("有频道"));
         assert_eq!(detail, "0 条");
         assert!(payload.is_empty());
-        let _ = sent(reg.post("a", "t", "第一句").unwrap_or_else(|e| panic!("{e}")));
+        let _ = sent(
+            reg.post("a", "t", "第一句")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
         let (_, detail, payload) = reg.row_snapshot("t").unwrap_or_else(|| panic!("有频道"));
-        assert!(detail.contains("1 条") && detail.contains("a: 第一句"), "{detail}");
+        assert!(
+            detail.contains("1 条") && detail.contains("a: 第一句"),
+            "{detail}"
+        );
         assert_eq!(payload, "1. a: 第一句");
         assert!(reg.row_snapshot("nope").is_none());
     }

@@ -72,11 +72,7 @@ fn summary_prompt(old: &[Message]) -> String {
 /// messages aren't touched until the summary arrives — on failure history is kept
 /// verbatim, never replaced by a placeholder string.
 /// Returns whether compaction happened.
-pub async fn maybe_compact(
-    session: &Session,
-    messages: &mut Vec<Message>,
-    tokens: u64,
-) -> bool {
+pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, tokens: u64) -> bool {
     if messages.len() <= KEEP_RECENT {
         return false;
     }
@@ -86,7 +82,11 @@ pub async fn maybe_compact(
 
     let split = safe_split(messages, messages.len() - KEEP_RECENT);
 
-    run_pre_compact(&session.settings.hooks, permission_mode_str(session.permission_mode)).await;
+    run_pre_compact(
+        &session.settings.hooks,
+        permission_mode_str(session.permission_mode),
+    )
+    .await;
 
     let request = NeutralRequest {
         model: session.runtime.model.borrow().clone(),
@@ -125,7 +125,11 @@ pub async fn maybe_compact(
         ))],
     );
 
-    run_post_compact(&session.settings.hooks, permission_mode_str(session.permission_mode)).await;
+    run_post_compact(
+        &session.settings.hooks,
+        permission_mode_str(session.permission_mode),
+    )
+    .await;
     eprintln!("[bingo] compacted {split} old messages");
     true
 }
@@ -261,7 +265,10 @@ mod tests {
     use crate::api::types::Role;
 
     fn text(role: Role, body: &str) -> Message {
-        Message { role, content: vec![ContentBlock::Text { text: body.into() }] }
+        Message {
+            role,
+            content: vec![ContentBlock::Text { text: body.into() }],
+        }
     }
 
     fn tool_use(id: &str) -> Message {
@@ -346,7 +353,10 @@ mod tests {
     /// content, never stuck at 0.
     #[test]
     fn local_estimate_grows_with_content() {
-        let system = vec![SystemBlock { text: "s".repeat(400), cache: false }];
+        let system = vec![SystemBlock {
+            text: "s".repeat(400),
+            cache: false,
+        }];
         let empty = estimate_tokens(&system, &[]);
         assert_eq!(empty, 100, "400 字符 ≈ 100 token");
 

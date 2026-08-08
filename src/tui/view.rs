@@ -101,10 +101,7 @@ pub fn render_rows(rows: &[Row], default_fg: Color, buf: &mut Buffer, area: Rect
         }
         let y = area.y + offset;
         if let Some(bg) = row.bg {
-            buf.set_style(
-                Rect::new(area.x, y, area.width, 1),
-                Style::default().bg(bg),
-            );
+            buf.set_style(Rect::new(area.x, y, area.width, 1), Style::default().bg(bg));
         }
         let width = area
             .width
@@ -166,7 +163,10 @@ mod tests {
         // A segment that is empty stays an (empty) span — the row still
         // occupies exactly one terminal row either way.
         let line = Line {
-            segs: vec![Seg { text: String::new(), style: SegStyle::plain() }],
+            segs: vec![Seg {
+                text: String::new(),
+                style: SegStyle::plain(),
+            }],
             image: None,
         };
         assert_eq!(to_line(&line, Color::White).spans.len(), 1);
@@ -175,8 +175,15 @@ mod tests {
     #[test]
     fn image_rows_render_the_placeholder() {
         let line = Line {
-            segs: vec![Seg { text: "ignored".into(), style: SegStyle::plain() }],
-            image: Some(ImageRef { url: "a.png".into(), cols: 10, rows: 3 }),
+            segs: vec![Seg {
+                text: "ignored".into(),
+                style: SegStyle::plain(),
+            }],
+            image: Some(ImageRef {
+                url: "a.png".into(),
+                cols: 10,
+                rows: 3,
+            }),
         };
         let out = to_line(&line, Color::White);
         assert_eq!(out.spans.len(), 1);

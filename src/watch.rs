@@ -196,8 +196,17 @@ impl ConditionState {
 /// Common error-line patterns (signal source for the default Errors condition).
 fn is_error_line(line: &str) -> bool {
     const PATTERNS: &[&str] = &[
-        "error", "ERROR", "Error", "Traceback", "panic", "PANIC", "FATAL", "fatal",
-        "FAILED", "Exception", "❌",
+        "error",
+        "ERROR",
+        "Error",
+        "Traceback",
+        "panic",
+        "PANIC",
+        "FATAL",
+        "fatal",
+        "FAILED",
+        "Exception",
+        "❌",
     ];
     PATTERNS.iter().any(|p| line.contains(p))
 }
@@ -305,10 +314,7 @@ impl WatchRegistry {
                     detail: poll.detail.clone(),
                     payload: poll.payload.clone(),
                     born: Instant::now(),
-                    conditions: conditions
-                        .into_iter()
-                        .map(ConditionState::new)
-                        .collect(),
+                    conditions: conditions.into_iter().map(ConditionState::new).collect(),
                     feed_buffer: Vec::new(),
                     total_lines: 0,
                 },
@@ -460,10 +466,7 @@ impl WatchRegistry {
     /// (polling after reaping would only spin idly).
     pub fn is_terminal(&self, id: WatchId) -> bool {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner
-            .entries
-            .get(&id)
-            .is_none_or(|e| e.state.is_terminal())
+        inner.entries.get(&id).is_none_or(|e| e.state.is_terminal())
     }
 
     /// The implementer updates state proactively (no interval, or immediate changes outside polling).
@@ -560,9 +563,10 @@ impl WatchRegistry {
     /// trigger an extra automatic turn after a turn ends.
     pub fn has_wake_notifications(&self) -> bool {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.notifications.iter().any(|n| {
-            n.state.is_terminal() || n.signal.is_some()
-        })
+        inner
+            .notifications
+            .iter()
+            .any(|n| n.state.is_terminal() || n.signal.is_some())
     }
 
     /// Take out the notifications pending injection into the model (merges adjacent Idle
@@ -577,14 +581,11 @@ impl WatchRegistry {
                 if let Some((id, label, count, last)) = pending.take() {
                     out.push(format_notification(id, label, count, last));
                 }
-                out.push(format!(
-                    "任务 {}（{}）：⚠ {sig}",
-                    n.id, n.label
-                ));
+                out.push(format!("任务 {}（{}）：⚠ {sig}", n.id, n.label));
                 continue;
             }
-            let is_same_idle = n.state == WatchState::Idle
-                && pending.as_ref().is_some_and(|(id, ..)| *id == n.id);
+            let is_same_idle =
+                n.state == WatchState::Idle && pending.as_ref().is_some_and(|(id, ..)| *id == n.id);
             if is_same_idle {
                 if let Some((_, _, count, last)) = &mut pending {
                     *count += 1;
@@ -630,7 +631,10 @@ fn prune_terminal_entries(inner: &mut Inner) {
 fn notification_body(detail: &Option<String>, payload: &Option<serde_json::Value>) -> String {
     const MAX_PAYLOAD_CHARS: usize = 4000;
     let mut body = detail.clone().unwrap_or_default();
-    if let Some(text) = payload.as_ref().and_then(|p| p.as_str().map(str::to_string)) {
+    if let Some(text) = payload
+        .as_ref()
+        .and_then(|p| p.as_str().map(str::to_string))
+    {
         if !body.is_empty() {
             body.push('\n');
         }
@@ -655,8 +659,8 @@ fn format_notification(id: WatchId, label: String, count: u32, last: String) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakeWatch {
         label: &'static str,
@@ -670,7 +674,10 @@ mod tests {
             self.label.to_string()
         }
         fn poll(&self) -> WatchPoll {
-            let i = self.index.fetch_add(1, Ordering::SeqCst).min(self.sequence.len() - 1);
+            let i = self
+                .index
+                .fetch_add(1, Ordering::SeqCst)
+                .min(self.sequence.len() - 1);
             self.sequence[i].clone()
         }
         fn check_interval(&self) -> Option<Duration> {
@@ -686,17 +693,20 @@ mod tests {
     async fn register_publishes_initial_state() {
         let reg = watch();
         let mut rx = reg.subscribe();
-        let id = reg.register_with_conditions(Box::new(FakeWatch {
-            label: "watch -n 2 ls",
-            sequence: vec![WatchPoll {
-                state: WatchState::Running,
-                detail: None,
-                payload: None,
-                signal: None,
-            }],
-            index: AtomicUsize::new(0),
-            interval: None,
-        }), Vec::new());
+        let id = reg.register_with_conditions(
+            Box::new(FakeWatch {
+                label: "watch -n 2 ls",
+                sequence: vec![WatchPoll {
+                    state: WatchState::Running,
+                    detail: None,
+                    payload: None,
+                    signal: None,
+                }],
+                index: AtomicUsize::new(0),
+                interval: None,
+            }),
+            Vec::new(),
+        );
         let ev = rx.recv().await.unwrap_or_else(|_| unreachable!());
         assert_eq!(ev.id, id);
         assert_eq!(ev.state, WatchState::Running);
@@ -706,17 +716,20 @@ mod tests {
     #[test]
     fn set_state_idempotent_and_notifies() {
         let reg = watch();
-        let id = reg.register_with_conditions(Box::new(FakeWatch {
-            label: "l",
-            sequence: vec![WatchPoll {
-                state: WatchState::Running,
-                detail: None,
-                payload: None,
-                signal: None,
-            }],
-            index: AtomicUsize::new(0),
-            interval: None,
-        }), Vec::new());
+        let id = reg.register_with_conditions(
+            Box::new(FakeWatch {
+                label: "l",
+                sequence: vec![WatchPoll {
+                    state: WatchState::Running,
+                    detail: None,
+                    payload: None,
+                    signal: None,
+                }],
+                index: AtomicUsize::new(0),
+                interval: None,
+            }),
+            Vec::new(),
+        );
         reg.set_state(id, WatchState::Running, None, None);
         assert_eq!(reg.snapshot()[0].state, WatchState::Running);
         reg.set_state(id, WatchState::Idle, Some("第 1 轮".into()), None);
@@ -730,17 +743,20 @@ mod tests {
     #[test]
     fn notifications_merge_consecutive_idle_rounds() {
         let reg = watch();
-        let id = reg.register_with_conditions(Box::new(FakeWatch {
-            label: "poll",
-            sequence: vec![WatchPoll {
-                state: WatchState::Running,
-                detail: None,
-                payload: None,
-                signal: None,
-            }],
-            index: AtomicUsize::new(0),
-            interval: None,
-        }), Vec::new());
+        let id = reg.register_with_conditions(
+            Box::new(FakeWatch {
+                label: "poll",
+                sequence: vec![WatchPoll {
+                    state: WatchState::Running,
+                    detail: None,
+                    payload: None,
+                    signal: None,
+                }],
+                index: AtomicUsize::new(0),
+                interval: None,
+            }),
+            Vec::new(),
+        );
         reg.set_state(id, WatchState::Idle, Some("第 1 轮".into()), None);
         reg.set_state(id, WatchState::Idle, Some("第 2 轮".into()), None);
         reg.set_state(id, WatchState::Done, Some("fin".into()), None);
@@ -755,17 +771,20 @@ mod tests {
     fn terminal_state_is_frozen_against_poll_override() {
         // Regression: after the subagent finishes (Done), a polling Running must not overwrite.
         let reg = watch();
-        let id = reg.register_with_conditions(Box::new(FakeWatch {
-            label: "agent",
-            sequence: vec![WatchPoll {
-                state: WatchState::Running,
-                detail: Some("已产出 33 字符".into()),
-                payload: None,
-                signal: None,
-            }],
-            index: AtomicUsize::new(0),
-            interval: None,
-        }), Vec::new());
+        let id = reg.register_with_conditions(
+            Box::new(FakeWatch {
+                label: "agent",
+                sequence: vec![WatchPoll {
+                    state: WatchState::Running,
+                    detail: Some("已产出 33 字符".into()),
+                    payload: None,
+                    signal: None,
+                }],
+                index: AtomicUsize::new(0),
+                interval: None,
+            }),
+            Vec::new(),
+        );
         reg.set_state(id, WatchState::Done, Some("完成".into()), None);
         reg.set_state(id, WatchState::Running, Some("已产出 33 字符".into()), None);
         assert_eq!(reg.snapshot()[0].state, WatchState::Done, "frozen");
@@ -791,10 +810,16 @@ mod tests {
                 .is_some_and(|s| s.contains("ERROR: boom")),
             "errors fires"
         );
-        assert!(cs.match_buffer(&["INFO ok".into()], 2).is_none(), "clean line");
+        assert!(
+            cs.match_buffer(&["INFO ok".into()], 2).is_none(),
+            "clean line"
+        );
         // Regex
         let mut cs = ConditionState::new(NotifyCondition::Regex(r"\d{4}-\d{2}".into()));
-        assert!(cs.match_buffer(&["time 2026-08-05".into()], 1).is_some(), "regex fires");
+        assert!(
+            cs.match_buffer(&["time 2026-08-05".into()], 1).is_some(),
+            "regex fires"
+        );
         // LinesOver: fires once on breakthrough
         let mut cs = ConditionState::new(NotifyCondition::LinesOver(3));
         assert!(cs.match_buffer(&[], 4).is_some(), "threshold crossed");
@@ -856,7 +881,10 @@ mod tests {
             "信号长度 {} 应受限",
             signal.chars().count()
         );
-        assert!(signal.contains("共 5000 行命中"), "标注被截断的总数: {signal}");
+        assert!(
+            signal.contains("共 5000 行命中"),
+            "标注被截断的总数: {signal}"
+        );
     }
 
     #[test]
@@ -867,7 +895,9 @@ mod tests {
         let notes = reg.consume_notifications();
         assert!(notes.iter().any(|n| n.contains("[truncated]")), "{notes:?}");
         assert!(
-            notes.iter().all(|n| n.chars().count() < MAX_SIGNAL_CHARS + 200),
+            notes
+                .iter()
+                .all(|n| n.chars().count() < MAX_SIGNAL_CHARS + 200),
             "通知长度受限"
         );
     }
@@ -876,15 +906,23 @@ mod tests {
     #[test]
     fn feed_buffer_is_bounded_without_drain() {
         let reg = watch();
-        let id = reg.register_with_conditions(running_watch("flood"), vec![NotifyCondition::Errors]);
+        let id =
+            reg.register_with_conditions(running_watch("flood"), vec![NotifyCondition::Errors]);
         for i in 0..(MAX_FEED_BUFFER_LINES * 3) {
             reg.feed_content(id, &format!("line {i}\n"));
         }
         let buffered = {
             let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner.entries.get(&id).map(|e| e.feed_buffer.len()).unwrap_or(0)
+            inner
+                .entries
+                .get(&id)
+                .map(|e| e.feed_buffer.len())
+                .unwrap_or(0)
         };
-        assert!(buffered <= MAX_FEED_BUFFER_LINES, "缓冲 {buffered} 行应受限");
+        assert!(
+            buffered <= MAX_FEED_BUFFER_LINES,
+            "缓冲 {buffered} 行应受限"
+        );
         // The cumulative line count is still tracked faithfully (the LinesOver semantics).
         let total = {
             let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -927,22 +965,29 @@ mod tests {
     async fn signal_event_queues_and_broadcasts() {
         let reg = watch();
         let mut rx = reg.subscribe();
-        let id = reg.register_with_conditions(Box::new(FakeWatch {
-            label: "log-tail",
-            sequence: vec![WatchPoll {
-                state: WatchState::Running,
-                detail: None,
-                payload: None,
-                signal: None,
-            }],
-            index: AtomicUsize::new(0),
-            interval: None,
-        }), Vec::new());
+        let id = reg.register_with_conditions(
+            Box::new(FakeWatch {
+                label: "log-tail",
+                sequence: vec![WatchPoll {
+                    state: WatchState::Running,
+                    detail: None,
+                    payload: None,
+                    signal: None,
+                }],
+                index: AtomicUsize::new(0),
+                interval: None,
+            }),
+            Vec::new(),
+        );
         let _ = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap_or_else(|_| unreachable!())
             .unwrap_or_else(|_| unreachable!());
-        reg.emit_signal(id, "发现错误：boom".to_string(), Some("发现 1 个错误".into()));
+        reg.emit_signal(
+            id,
+            "发现错误：boom".to_string(),
+            Some("发现 1 个错误".into()),
+        );
         let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap_or_else(|_| unreachable!())
@@ -950,7 +995,9 @@ mod tests {
         assert_eq!(ev.signal.as_deref(), Some("发现错误：boom"));
         let notes = reg.consume_notifications();
         assert!(
-            notes.iter().any(|n| n.contains("发现错误") && n.contains("boom")),
+            notes
+                .iter()
+                .any(|n| n.contains("发现错误") && n.contains("boom")),
             "{notes:?}"
         );
     }
@@ -959,18 +1006,46 @@ mod tests {
     async fn interval_polling_publishes_transitions() {
         let reg = watch();
         let mut rx = reg.subscribe();
-        let id = reg.register_with_conditions(Box::new(FakeWatch {
-            label: "slow",
-            sequence: vec![
-                WatchPoll { state: WatchState::Running, detail: None, payload: None, signal: None },
-                WatchPoll { state: WatchState::Idle, detail: Some("第 1 轮".into()), payload: None, signal: None },
-                WatchPoll { state: WatchState::Idle, detail: Some("第 2 轮".into()), payload: None, signal: None },
-                WatchPoll { state: WatchState::Done, detail: Some("fin".into()), payload: None, signal: None },
-                WatchPoll { state: WatchState::Done, detail: Some("fin".into()), payload: None, signal: None },
-            ],
-            index: AtomicUsize::new(0),
-            interval: Some(Duration::from_millis(5)),
-        }), Vec::new());
+        let id = reg.register_with_conditions(
+            Box::new(FakeWatch {
+                label: "slow",
+                sequence: vec![
+                    WatchPoll {
+                        state: WatchState::Running,
+                        detail: None,
+                        payload: None,
+                        signal: None,
+                    },
+                    WatchPoll {
+                        state: WatchState::Idle,
+                        detail: Some("第 1 轮".into()),
+                        payload: None,
+                        signal: None,
+                    },
+                    WatchPoll {
+                        state: WatchState::Idle,
+                        detail: Some("第 2 轮".into()),
+                        payload: None,
+                        signal: None,
+                    },
+                    WatchPoll {
+                        state: WatchState::Done,
+                        detail: Some("fin".into()),
+                        payload: None,
+                        signal: None,
+                    },
+                    WatchPoll {
+                        state: WatchState::Done,
+                        detail: Some("fin".into()),
+                        payload: None,
+                        signal: None,
+                    },
+                ],
+                index: AtomicUsize::new(0),
+                interval: Some(Duration::from_millis(5)),
+            }),
+            Vec::new(),
+        );
         // Initial event + polling events: at least Running → Idle → Done appears.
         let mut seen: Vec<WatchState> = Vec::new();
         for _ in 0..6 {

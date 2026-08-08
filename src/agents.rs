@@ -261,7 +261,11 @@ impl AgentRegistry {
     /// `main`/`user` are reserved for the hub and the user (channel member names) and
     /// are never handed out.
     pub fn claim_name(&self, base: &str) -> String {
-        let base = if base.trim().is_empty() { "agent" } else { base.trim() };
+        let base = if base.trim().is_empty() {
+            "agent"
+        } else {
+            base.trim()
+        };
         let taken = |inner: &HashMap<String, Entry>, name: &str| {
             name == crate::channels::HUB_NAME
                 || name == crate::channels::USER_NAME
@@ -288,7 +292,8 @@ impl AgentRegistry {
         def: Option<String>,
         description: String,
         session: Arc<Session>,
-    ) {        self.lock().insert(
+    ) {
+        self.lock().insert(
             name.to_string(),
             Entry {
                 def,
@@ -324,9 +329,10 @@ impl AgentRegistry {
     pub fn view_of(&self, name: &str) -> Option<(Vec<Message>, Option<String>, AgentState)> {
         let inner = self.lock();
         let entry = inner.get(name)?;
-        let live = entry.live.as_ref().map(|l| {
-            l.lock().unwrap_or_else(|e| e.into_inner()).clone()
-        });
+        let live = entry
+            .live
+            .as_ref()
+            .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).clone());
         Some((entry.history.clone(), live, entry.state))
     }
 
@@ -404,10 +410,7 @@ impl AgentRegistry {
             return Err(if known.is_empty() {
                 format!("没有名为 {name} 的子代理（当前没有任何实例）")
             } else {
-                format!(
-                    "没有名为 {name} 的子代理；现有实例：{}",
-                    known.join(", ")
-                )
+                format!("没有名为 {name} 的子代理；现有实例：{}", known.join(", "))
             });
         };
         match entry.state {
@@ -529,7 +532,6 @@ mod tests {
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "t")),
-            last_task_reminder_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
@@ -551,10 +553,7 @@ mod tests {
             &project.join(".bingo/agents/reviewer.md"),
             "---\ndescription: project reviewer\n---\n你是项目评审。\n",
         );
-        write(
-            &project.join(".bingo/agents/scout.md"),
-            "调研专用。\n",
-        );
+        write(&project.join(".bingo/agents/scout.md"), "调研专用。\n");
         let defs = load_agent_defs(&home, &project);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, vec!["reviewer", "scout"], "项目层同名覆盖用户层");
@@ -562,7 +561,11 @@ mod tests {
         assert_eq!(reviewer.description, "project reviewer");
         assert!(reviewer.system.contains("项目评审"));
         assert!(reviewer.model.is_none(), "被覆盖的 user 定义不渗透");
-        assert_eq!(reviewer.source, AgentDefSource::Project, "跨层同名覆盖 source 取项目层");
+        assert_eq!(
+            reviewer.source,
+            AgentDefSource::Project,
+            "跨层同名覆盖 source 取项目层"
+        );
         // No frontmatter: name comes from the file name, description falls back to the first body line.
         assert_eq!(defs[1].description, "调研专用。");
         assert_eq!(defs[1].source, AgentDefSource::Project);
@@ -622,7 +625,10 @@ mod tests {
         let reg = AgentRegistry::new();
         reg.insert("scout", None, "调研".into(), test_session());
         // Running: message queued.
-        match reg.deliver("scout", "补充 A").unwrap_or_else(|e| panic!("{e}")) {
+        match reg
+            .deliver("scout", "补充 A")
+            .unwrap_or_else(|e| panic!("{e}"))
+        {
             Delivery::Queued => {}
             Delivery::Start { .. } => panic!("running 应排队"),
         }
@@ -639,7 +645,10 @@ mod tests {
         assert!(reg.finish("scout", Vec::new()).is_none());
         assert_eq!(reg.list()[0].state, AgentState::Idle);
         // Idle: deliver wakes it (Start carries history and inbox).
-        match reg.deliver("scout", "再看 B").unwrap_or_else(|e| panic!("{e}")) {
+        match reg
+            .deliver("scout", "再看 B")
+            .unwrap_or_else(|e| panic!("{e}"))
+        {
             Delivery::Start { items, .. } => {
                 assert!(matches!(&items[..], [InboxItem::Direct(m)] if m == "再看 B"));
             }
@@ -665,9 +674,14 @@ mod tests {
             DepositOutcome::Queued => {}
             _ => panic!("running 应排队"),
         }
-        let (_, items) = reg.finish("w", Vec::new()).unwrap_or_else(|| panic!("续跑"));
+        let (_, items) = reg
+            .finish("w", Vec::new())
+            .unwrap_or_else(|| panic!("续跑"));
         assert_eq!(items.len(), 2);
-        assert!(matches!(&items[0], InboxItem::Direct(m) if m == "先做 1"), "同序");
+        assert!(
+            matches!(&items[0], InboxItem::Direct(m) if m == "先做 1"),
+            "同序"
+        );
         assert!(
             matches!(&items[1], InboxItem::Channel { seq: 3, from, .. } if from == "a"),
             "频道条目携带 seq/from"
@@ -701,9 +715,8 @@ mod tests {
     fn share_hooks_track_insert_finish_stop() {
         let root = std::env::temp_dir().join(format!("bingo-agents-{}-share", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let store =
-            crate::share::ShareStore::load_or_create(&root.join("shares").join("s.json"))
-                .unwrap_or_else(|e| panic!("{e}"));
+        let store = crate::share::ShareStore::load_or_create(&root.join("shares").join("s.json"))
+            .unwrap_or_else(|e| panic!("{e}"));
         let reg = AgentRegistry::new();
         reg.attach_share(store.clone());
 
@@ -724,8 +737,10 @@ mod tests {
 
         // 忙碌信箱非空 → finish 后保持 running（Idle 唤醒排空 inbox 给 Start，
         // Running 时才排队；两条指令制造排队场景）。
-        reg.deliver("scout", "再查").unwrap_or_else(|e| panic!("{e}"));
-        reg.deliver("scout", "又查").unwrap_or_else(|e| panic!("{e}"));
+        reg.deliver("scout", "再查")
+            .unwrap_or_else(|e| panic!("{e}"));
+        reg.deliver("scout", "又查")
+            .unwrap_or_else(|e| panic!("{e}"));
         reg.finish("scout", Vec::new());
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "running");
@@ -757,7 +772,10 @@ mod tests {
             Some(crate::watch::WatchId(7)),
             "运行中停止返回当前 watch 行"
         );
-        assert!(reg.stop("x").unwrap_or_else(|e| panic!("{e}")).is_none(), "幂等");
+        assert!(
+            reg.stop("x").unwrap_or_else(|e| panic!("{e}")).is_none(),
+            "幂等"
+        );
         assert!(reg.deliver("x", "还在吗").is_err(), "停止后拒收");
         // Turn finishing after a stop: history is still archived, no revival.
         assert!(reg.finish("x", vec![Message::user_text("h")]).is_none());

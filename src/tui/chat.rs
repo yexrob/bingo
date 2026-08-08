@@ -15,17 +15,17 @@ use rsmarkdown_core::{MarkdownProcessor, Renderer};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::permission::PermissionMode;
-use crate::query::{run_query, Session};
+use crate::query::{Session, run_query};
 use crate::tui::activities::{
-    activities_path_get_mut, diff_lines, layout_activity, Activity, ActivityKind, Diff,
-    Thinking, ThinkingState, TodoItem, TodoStatus, ToolCall, ToolStatus, WatchCall,
-    WatchStatus,
+    Activity, ActivityKind, Diff, Thinking, ThinkingState, TodoItem, TodoStatus, ToolCall,
+    ToolStatus, WatchCall, activities_path_get_mut, diff_lines, layout_activity,
 };
-use crate::tui::gfx::{self, ImageCap, ImageMeta};
-use crate::tui::line::{text_width, wrap_words, Line, SegStyle};
+use crate::tui::gfx::{self, ImageCap};
+use crate::tui::line::{Line, SegStyle, text_width, wrap_words};
 use crate::tui::markdown::MarkdownRenderer;
 use crate::tui::theme::{Theme, ThemeSetting};
-use crate::ui::{AskRequest, DialogAction, PermissionRequest, UiEvent};
+use crate::ui::{AskRequest, DialogAction, ImageMeta, PermissionRequest, UiEvent};
+use crate::watch::WatchState;
 
 /// 文档中一行：样式化行 + 整行背景（用户气泡用）。
 #[derive(Debug, Clone)]
@@ -194,33 +194,11 @@ pub fn is_hidden_tool(name: &str) -> bool {
     )
 }
 
-/// Built-in slash command table (single source shared by /help and the dropdown suggestions).
-/// Slash commands single source: (name, argument hint, description).
-/// `hint` is the parameter shape shown in the `/` dropdown and `/help`
-/// (`[名称]` = optional, `start|status|…` = choices; empty = no arguments).
-/// Skills share the registry at runtime (no hint).
-pub const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
-    ("help", "", "显示可用命令"),
-    ("clear", "", "清空对话，开始新会话（别名 /reset /new）"),
-    ("compact", "", "压缩上下文（旧消息 → 摘要）"),
-    ("model", "[名称]", "显示/切换模型"),
-    ("resume", "[名称或关键词]", "恢复历史会话"),
-    ("rename", "[名称]", "重命名当前会话"),
-    ("share", "[--open]", "导出当前会话为 HTML 分享页"),
-    ("context", "", "显示上下文用量"),
-    ("status", "", "显示会话状态（模型/权限/会话/上下文）"),
-    ("permissions", "[allow|deny|ask] [规则]", "列出/添加权限规则"),
-    ("theme", "[dark|light|auto]", "切换主题"),
-    ("mcp", "[enable|disable|reconnect]", "管理 MCP 服务器"),
-    ("provider", "[名称]", "列出/切换 API provider"),
-    ("think", "[off|low|medium|high|xhigh|max]", "设置思考级别"),
-    ("skills", "", "列出可用技能"),
-    ("tasks", "", "列出后台任务"),
-    ("team", "start|status|assign|stop|list", "管理项目团队"),
-    ("exit", "", "退出会话"),
-];
+pub use crate::tui::slash::{
+    COMMANDS as SLASH_COMMANDS, INSTANT_COMMANDS as INSTANT_SLASH_COMMANDS, SlashSuggestion,
+};
 
-/// `/share` 参数解析：是否包含指定 flag（--local / --open）。
+/// `/share` flag parser (`--public` / `--open`).
 fn parse_share_arg(arg: &str, flag: &str) -> bool {
     arg.split_whitespace().any(|t| t == flag)
 }
@@ -232,23 +210,6 @@ fn parse_share_arg(arg: &str, flag: &str) -> bool {
 pub struct QueuedInput {
     pub text: String,
     pub is_slash: bool,
-}
-
-/// Slash commands that run immediately while a turn is in progress: settings knobs
-/// that must apply before the next turn (`think`/`model`/`provider`/`theme`) and
-/// read-only status commands (`status`/`context`/`tasks`/`help`/`skills`). Everything
-/// else queues and runs after TurnEnd (CC semantics: "queues and runs after the
-/// current turn finishes; some commands run immediately").
-pub const INSTANT_SLASH_COMMANDS: &[&str] = &[
-    "think", "model", "provider", "theme", "status", "context", "tasks", "help", "skills",
-];
-
-/// Slash dropdown suggestion item (/name + hint + description).
-#[derive(Debug, Clone, PartialEq)]
-pub struct SlashSuggestion {
-    pub name: String,
-    pub hint: String,
-    pub description: String,
 }
 
 /// Footer model badge: `{model} · think {level}` (off = no level shown, keeps it concise).
@@ -454,7 +415,10 @@ pub const THINK_LEVELS: &[(&str, &str)] = &[
     ("low", "adaptive thinking · effort low"),
     ("medium", "adaptive thinking · effort medium"),
     ("high", "adaptive thinking · effort high（推荐档位）"),
-    ("xhigh", "adaptive thinking · effort xhigh（编码/agentic 推荐）"),
+    (
+        "xhigh",
+        "adaptive thinking · effort xhigh（编码/agentic 推荐）",
+    ),
     ("max", "adaptive thinking · effort max（最深推理）"),
 ];
 
@@ -515,8 +479,7 @@ fn standalone_image_path(s: &str) -> Option<String> {
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)?;
-    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp")
-        .then(|| s.to_string())
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp").then(|| s.to_string())
 }
 
 /// Path of a whole `![alt](path)` line (no spaces in path; unwraps `<path>`).
@@ -526,7 +489,10 @@ fn markdown_image_path(s: &str) -> Option<String> {
     let rest = &rest[close + 2..];
     let end = rest.find(')')?;
     let p = &rest[..end];
-    let p = p.strip_prefix('<').and_then(|p| p.strip_suffix('>')).unwrap_or(p);
+    let p = p
+        .strip_prefix('<')
+        .and_then(|p| p.strip_suffix('>'))
+        .unwrap_or(p);
     (!p.is_empty() && !p.contains(' ')).then(|| p.to_string())
 }
 
@@ -604,8 +570,8 @@ pub fn classify_bash_command(command: &str) -> Option<CollapseKind> {
         "find", "grep", "rg", "ag", "ack", "locate", "which", "whereis",
     ];
     const READ: &[&str] = &[
-        "cat", "head", "tail", "less", "more", "wc", "stat", "file", "strings",
-        "jq", "awk", "cut", "sort", "uniq", "tr",
+        "cat", "head", "tail", "less", "more", "wc", "stat", "file", "strings", "jq", "awk", "cut",
+        "sort", "uniq", "tr",
     ];
     const LIST: &[&str] = &["ls", "tree", "du"];
     const NEUTRAL: &[&str] = &["echo", "printf", "true", "false", ":"];
@@ -720,7 +686,10 @@ pub fn collapse_summary(g: &CollapseGroup, in_progress: bool) -> String {
     let read_count = if g.read_paths.is_empty() {
         g.read_ops
     } else {
-        g.read_paths.iter().collect::<std::collections::HashSet<_>>().len()
+        g.read_paths
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
     };
     if read_count > 0 {
         push(
@@ -740,7 +709,11 @@ pub fn collapse_summary(g: &CollapseGroup, in_progress: bool) -> String {
             format!(
                 " {} {}",
                 g.list,
-                if g.list == 1 { "directory" } else { "directories" }
+                if g.list == 1 {
+                    "directory"
+                } else {
+                    "directories"
+                }
             ),
         );
     }
@@ -756,11 +729,7 @@ pub fn collapse_summary(g: &CollapseGroup, in_progress: bool) -> String {
         );
     }
     let text = parts.join(", ");
-    if active {
-        format!("{text}…")
-    } else {
-        text
-    }
+    if active { format!("{text}…") } else { text }
 }
 
 fn capitalize(s: &str) -> String {
@@ -797,7 +766,10 @@ fn bash_output_preview(lines: &[String]) -> Vec<String> {
     if out.first().is_some_and(|l| l.starts_with("$ ")) {
         out.remove(0);
     }
-    if out.last().is_some_and(|l| l.starts_with("[Exited with code")) {
+    if out
+        .last()
+        .is_some_and(|l| l.starts_with("[Exited with code"))
+    {
         out.pop();
     }
     out
@@ -1090,7 +1062,8 @@ impl Chat {
 
     /// Record a non-fatal warning (de-duped + stale entries pruned).
     pub(crate) fn push_warning(&mut self, message: String) {
-        self.warnings.retain(|(t, _)| t.elapsed() < Self::WARNING_TTL);
+        self.warnings
+            .retain(|(t, _)| t.elapsed() < Self::WARNING_TTL);
         if !self.warnings.iter().any(|(_, w)| w == &message) {
             self.warnings.push((std::time::Instant::now(), message));
         }
@@ -1131,13 +1104,7 @@ impl Chat {
                         .send(UiEvent::WatchEvent {
                             label: ev.label,
                             kind: ev.kind,
-                            status: match ev.state {
-                                crate::watch::WatchState::Running => WatchStatus::Running,
-                                crate::watch::WatchState::Idle => WatchStatus::Idle,
-                                crate::watch::WatchState::Done => WatchStatus::Done,
-                                crate::watch::WatchState::Failed => WatchStatus::Failed,
-                                crate::watch::WatchState::Cancelled => WatchStatus::Cancelled,
-                            },
+                            status: ev.state,
                             detail: ev.detail,
                             duration_ms: ev.elapsed_ms,
                             payload: ev.payload,
@@ -1321,9 +1288,7 @@ impl Chat {
                     } else {
                         None
                     };
-                    m.selected = selected
-                        .unwrap_or(0)
-                        .min(m.models.len().saturating_sub(1));
+                    m.selected = selected.unwrap_or(0).min(m.models.len().saturating_sub(1));
                 }
             }
             UiEvent::ImageReady { url, meta } => {
@@ -1395,20 +1360,16 @@ impl Chat {
                             && t.state == ThinkingState::Running
                         {
                             t.state = ThinkingState::Done;
-                            t.duration_ms = self
-                                .tick
-                                .saturating_sub(t.start_tick)
-                                .saturating_mul(33);
+                            t.duration_ms =
+                                self.tick.saturating_sub(t.start_tick).saturating_mul(33);
                         }
                     }
                 }
             }
             UiEvent::ThinkingDelta(thinking) => {
                 if let Some(i) = self.stream_msg {
-                    let last_is_running_thinking = self.messages[i]
-                        .activities
-                        .last()
-                        .is_some_and(|a| {
+                    let last_is_running_thinking =
+                        self.messages[i].activities.last().is_some_and(|a| {
                             matches!(&a.kind, ActivityKind::Thinking(t)
                                 if t.state == ThinkingState::Running)
                         });
@@ -1432,7 +1393,9 @@ impl Chat {
                                 .rev()
                                 .find(|a| matches!(a.kind, ActivityKind::Thinking(_)))
                                 .is_some_and(|a| {
-                                    a.content.first().is_some_and(|l| l.plain_text() == thinking)
+                                    a.content
+                                        .first()
+                                        .is_some_and(|l| l.plain_text() == thinking)
                                 });
                         if dup {
                             return;
@@ -1462,10 +1425,8 @@ impl Chat {
                                     if !was_open {
                                         t.segments += 1;
                                     }
-                                    t.duration_ms = self
-                                        .tick
-                                        .saturating_sub(t.start_tick)
-                                        .saturating_mul(33);
+                                    t.duration_ms =
+                                        self.tick.saturating_sub(t.start_tick).saturating_mul(33);
                                 }
                                 hint.set_content(content);
                             }
@@ -1473,8 +1434,7 @@ impl Chat {
                         }
                         self.thinking_buf = thinking.clone();
                         self.messages[i].activities.retain(|a| {
-                            !(matches!(a.kind, ActivityKind::Thinking(_))
-                                && a.content.is_empty())
+                            !(matches!(a.kind, ActivityKind::Thinking(_)) && a.content.is_empty())
                         });
                         let buf = self.thinking_buf.clone();
                         let content = self.render_thinking(&buf);
@@ -1508,19 +1468,15 @@ impl Chat {
                             && t.state == ThinkingState::Running
                         {
                             t.state = ThinkingState::Done;
-                            t.duration_ms = self
-                                .tick
-                                .saturating_sub(t.start_tick)
-                                .saturating_mul(33);
+                            t.duration_ms =
+                                self.tick.saturating_sub(t.start_tick).saturating_mul(33);
                         }
                     }
                 }
                 // Tool start = reasoning segment boundary: subsequent deltas aggregate into a new segment.
                 self.thinking_seg_open = false;
                 let name: &'static str = Box::leak(name.into_boxed_str());
-                let mut hint = Activity::new(ActivityKind::Tool(ToolCall::running(
-                    name, "",
-                )));
+                let mut hint = Activity::new(ActivityKind::Tool(ToolCall::running(name, "")));
                 hint.expand_hint = Some("ctrl+o to expand".to_string());
                 if let Some(i) = self.stream_msg {
                     let idx = self.messages[i].activities.len();
@@ -1602,9 +1558,9 @@ impl Chat {
                 // Agent/channel lifecycle events also refresh the bottom entity area.
                 self.refresh_entities();
                 let found = self.messages.iter_mut().find_map(|m| {
-                    m.activities.iter_mut().find(|a| {
-                        matches!(&a.kind, ActivityKind::Watch(w) if w.label == *label)
-                    })
+                    m.activities
+                        .iter_mut()
+                        .find(|a| matches!(&a.kind, ActivityKind::Watch(w) if w.label == *label))
                 });
                 if let Some(hint) = found {
                     if let ActivityKind::Watch(w) = &mut hint.kind {
@@ -1649,14 +1605,14 @@ impl Chat {
                 }
                 let terminal = matches!(
                     status,
-                    WatchStatus::Done | WatchStatus::Failed | WatchStatus::Cancelled
+                    WatchState::Done | WatchState::Failed | WatchState::Cancelled
                 );
                 if terminal || signal.is_some() {
                     if let Some(sig) = &signal
                         && let Some(hint) = self.messages.iter_mut().find_map(|m| {
-                            m.activities.iter_mut().find(|a| {
-                                matches!(&a.kind, ActivityKind::Watch(w) if w.label == *label)
-                            })
+                            m.activities.iter_mut().find(
+                                |a| matches!(&a.kind, ActivityKind::Watch(w) if w.label == *label),
+                            )
                         })
                         && let ActivityKind::Watch(w) = &mut hint.kind
                     {
@@ -1719,11 +1675,7 @@ impl Chat {
                         };
                         call.summary = done.summary.clone();
                         call.duration_ms = done.duration_ms;
-                        let in_group = group_of
-                            .get(hint_idx)
-                            .copied()
-                            .flatten()
-                            .is_some();
+                        let in_group = group_of.get(hint_idx).copied().flatten().is_some();
                         if in_group {
                             call.result_summary = result_summary(&done.name, &done.output);
                         } else {
@@ -1739,11 +1691,8 @@ impl Chat {
                                         .map(|name| format!("✦ {name}"))
                                 });
                             }
-                            let lines: Vec<String> = done
-                                .output
-                                .lines()
-                                .map(str::to_string)
-                                .collect();
+                            let lines: Vec<String> =
+                                done.output.lines().map(str::to_string).collect();
                             let preview: Vec<String> = if done.name == "Bash" {
                                 bash_output_preview(&lines)
                             } else {
@@ -1804,26 +1753,24 @@ impl Chat {
                                 .filter_map(|a| old_to_new.get(a).copied())
                                 .collect();
                         }
-                        self.messages[i].activities =
-                            keep.iter().map(|&k| self.messages[i].activities[k].clone()).collect();
+                        self.messages[i].activities = keep
+                            .iter()
+                            .map(|&k| self.messages[i].activities[k].clone())
+                            .collect();
                         self.messages[i].insert_points = keep
                             .iter()
                             .map(|&k| self.messages[i].insert_points[k])
                             .collect();
-                        self.messages[i].group_of = keep
-                            .iter()
-                            .map(|&k| self.messages[i].group_of[k])
-                            .collect();
+                        self.messages[i].group_of =
+                            keep.iter().map(|&k| self.messages[i].group_of[k]).collect();
                     }
                     for hint in &mut self.messages[i].activities {
                         if let ActivityKind::Thinking(t) = &mut hint.kind
                             && t.state == ThinkingState::Running
                         {
                             t.state = ThinkingState::Done;
-                            t.duration_ms = self
-                                .tick
-                                .saturating_sub(t.start_tick)
-                                .saturating_mul(33);
+                            t.duration_ms =
+                                self.tick.saturating_sub(t.start_tick).saturating_mul(33);
                             hint.expanded = false;
                         }
                     }
@@ -1840,7 +1787,12 @@ impl Chat {
             UiEvent::SlashOutput(message) => {
                 self.push_slash_output(message);
             }
-            UiEvent::Error { code, msg, level, context } => {
+            UiEvent::Error {
+                code,
+                msg,
+                level,
+                context,
+            } => {
                 self.busy = false;
                 self.stream_msg = None;
                 // #18: structured error-state record (code/msg/level/context); the render side uses it to
@@ -2385,23 +2337,7 @@ impl Chat {
     }
 
     fn slash_help(&mut self) {
-        let mut lines = vec!["可用命令：".to_string()];
-        let cmd_col = SLASH_COMMANDS
-            .iter()
-            .map(|(name, hint, _)| {
-                name.chars().count() + usize::from(!hint.is_empty()) + hint.chars().count()
-            })
-            .max()
-            .unwrap_or(0);
-        for (name, hint, description) in SLASH_COMMANDS {
-            let cmd = if hint.is_empty() {
-                format!("/{name}")
-            } else {
-                format!("/{name} {hint}")
-            };
-            lines.push(format!("  {cmd:<cmd_col$} — {description}"));
-        }
-        self.push_slash_output(lines.join("\n"));
+        self.push_slash_output(crate::tui::slash::help_lines(SLASH_COMMANDS).join("\n"));
     }
 
     fn slash_clear(&mut self) {
@@ -2448,10 +2384,8 @@ impl Chat {
     /// Writes the model choice back to `.bingo/settings.json` (used as the default on next start; --model can still override).
     fn persist_model(&self, model: &str) {
         let cwd = std::path::PathBuf::from(&self.cwd);
-        let _ = crate::settings::upsert_project_settings(
-            &cwd,
-            &serde_json::json!({ "model": model }),
-        );
+        let _ =
+            crate::settings::upsert_project_settings(&cwd, &serde_json::json!({ "model": model }));
     }
 
     /// Enters the `/model` two-level selector: level one = current endpoint + configured providers.
@@ -2459,10 +2393,7 @@ impl Chat {
         let mut providers = vec!["default".to_string()];
         providers.extend(self.session.client.provider_names());
         let current = self.session.runtime.provider.borrow().clone();
-        let selected = providers
-            .iter()
-            .position(|p| *p == current)
-            .unwrap_or(0);
+        let selected = providers.iter().position(|p| *p == current).unwrap_or(0);
         self.model_menu = Some(ModelMenu {
             providers,
             provider_selected: selected,
@@ -2504,7 +2435,10 @@ impl Chat {
                     Vec::new()
                 }
             };
-            let _ = events.send(UiEvent::ModelsLoaded { provider: provider_for_spawn, models });
+            let _ = events.send(UiEvent::ModelsLoaded {
+                provider: provider_for_spawn,
+                models,
+            });
         });
         // The menu was taken out by the Enter branch — rebuild the level-two state here (level-one list kept).
         self.model_menu = Some(ModelMenu {
@@ -2552,7 +2486,9 @@ impl Chat {
                 true
             }
             // 数字直达：仅一级适用（两级第一级适用，picker-model.md 评估表）。
-            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c)
+                if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 if menu.models.is_some() {
                     return false;
                 }
@@ -2621,11 +2557,7 @@ impl Chat {
             }
             KeyCode::Esc => {
                 // Level two → back to level one; level one → exit entirely (returns one level at a time).
-                if self
-                    .model_menu
-                    .as_mut()
-                    .is_some_and(|m| m.models.is_some())
-                {
+                if self.model_menu.as_mut().is_some_and(|m| m.models.is_some()) {
                     self.model_menu.as_mut().expect("菜单必在").models = None;
                 } else {
                     self.model_menu = None;
@@ -2656,17 +2588,13 @@ impl Chat {
         self.theme_setting = setting;
         self.theme = Theme::for_terminal(setting, self.detected_background);
         // The renderer baked in theme styles and reply_cache holds old-theme rows — rebuild them in sync.
-        self.renderer = crate::tui::markdown::MarkdownRenderer::with_theme(
-            self.width,
-            self.theme.clone(),
-        );
+        self.renderer =
+            crate::tui::markdown::MarkdownRenderer::with_theme(self.width, self.theme.clone());
         self.reply_cache.clear();
         self.dirty = true;
         let cwd = std::path::PathBuf::from(&self.cwd);
-        let _ = crate::settings::upsert_project_settings(
-            &cwd,
-            &serde_json::json!({ "theme": name }),
-        );
+        let _ =
+            crate::settings::upsert_project_settings(&cwd, &serde_json::json!({ "theme": name }));
         self.push_slash_output(format!("✓ 主题已切换: {name}"));
     }
 
@@ -2711,7 +2639,9 @@ impl Chat {
                 true
             }
             // Direct jump: 1 = dark … 3 = auto.
-            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c)
+                if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 let mut core = menu.picker();
                 if let Some(n) = c.to_digit(10)
                     && core.jump(n as usize)
@@ -2724,7 +2654,10 @@ impl Chat {
             }
             KeyCode::Enter => {
                 let core = menu.picker();
-                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
+                let value = core
+                    .selected_item()
+                    .map(|i| i.value.clone())
+                    .unwrap_or_default();
                 self.theme_menu = None;
                 self.apply_theme(ThemeSetting::parse(Some(&value)));
                 true
@@ -2771,18 +2704,11 @@ impl Chat {
             self.open_resume_menu(transcripts);
             return;
         }
-        self.switch_transcript(
-            transcripts.iter().find(|t| t.name().contains(arg)),
-            arg,
-        );
+        self.switch_transcript(transcripts.iter().find(|t| t.name().contains(arg)), arg);
     }
 
     /// 快速路径切换（带参 /resume）：命中即切换，未命中报错。
-    fn switch_transcript(
-        &mut self,
-        found: Option<&crate::transcript::Transcript>,
-        arg: &str,
-    ) {
+    fn switch_transcript(&mut self, found: Option<&crate::transcript::Transcript>, arg: &str) {
         let Some(found) = found else {
             self.push_slash_error(format!("未找到包含 '{arg}' 的会话。"));
             return;
@@ -2804,9 +2730,9 @@ impl Chat {
         let truncated = transcripts.len() > RESUME_PICKER_MAX;
         transcripts.truncate(RESUME_PICKER_MAX);
         let current = self.session.runtime.transcript.borrow().clone();
-        let current = current.as_ref().and_then(|cur| {
-            transcripts.iter().position(|t| t.path() == cur.path())
-        });
+        let current = current
+            .as_ref()
+            .and_then(|cur| transcripts.iter().position(|t| t.path() == cur.path()));
         let menu = ResumeMenu {
             selected: current.unwrap_or(0),
             current,
@@ -2843,7 +2769,9 @@ impl Chat {
                 true
             }
             // Direct jump: 1..=min(len, 9)（>9 项时数字直达只覆盖前 9 个）。
-            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c)
+                if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 let mut core = menu.picker();
                 if let Some(n) = c.to_digit(10)
                     && core.jump(n as usize)
@@ -2879,10 +2807,10 @@ impl Chat {
         }
     }
 
-    /// `/share`：导出当前会话分享页。默认上传官网分享服务（与 `bingo share`
-    /// 子命令一致）并显示公网链接；`/share --local` 本地文件模式（保留）。
+    /// `/share` exports locally by default. Publishing a public link requires the
+    /// explicit `--public` opt-in; the warning is presented before bytes leave the machine.
     fn slash_share(&mut self, arg: &str) {
-        let local = parse_share_arg(arg, "--local");
+        let public = parse_share_arg(arg, "--public");
         let open = parse_share_arg(arg, "--open");
         let Some(transcript) = self.session.runtime.transcript.borrow().clone() else {
             self.push_slash_output("尚无会话可导出（新会话未落盘，先发一条消息）。".to_string());
@@ -2900,9 +2828,7 @@ impl Chat {
         let doc = match crate::share::ShareStore::load_or_create(&share_path) {
             Ok(store) => store.snapshot(),
             Err(e) => {
-                self.push_slash_output(format!(
-                    "无法读取 share 文档（{e}）；仅导出对话视图。"
-                ));
+                self.push_slash_output(format!("无法读取 share 文档（{e}）；仅导出对话视图。"));
                 crate::share::ShareDoc::new(stem.clone())
             }
         };
@@ -2915,8 +2841,8 @@ impl Chat {
         let html = crate::share_html::render(&doc, &messages);
         let out = std::path::PathBuf::from(&self.cwd).join(format!("{stem}.html"));
 
-        // 本地模式：写文件（覆盖提示 + 隐私警告），可选打开。
-        if local {
+        // Local export is the safe default; `--open` only opens the generated file.
+        if !public {
             let overwritten = out.exists();
             if let Err(e) = crate::share::write_html_atomic(&out, &html) {
                 self.push_slash_output(format!("写入失败: {e}"));
@@ -2941,12 +2867,8 @@ impl Chat {
             return;
         }
 
-        // 上传模式：settings.share.baseUrl（缺省官网基址；服务公开无 token）。
-        // 必须异步上传——reqwest::blocking 在 TUI async 事件循环内调用会 tokio
-        // panic（Cannot block the current thread from within a runtime）。结果经
-        // events.send(UiEvent::SlashOutput) 推送（同 slash_compact 模式）。
-        // baseUrl 取会话运行时配置（TUI 启动时已加载），不重读磁盘——避免
-        // XDG_CONFIG_HOME 环境差异导致配置错位（CI/测试环境敏感）。
+        // Public publishing is asynchronous so the TUI event loop remains responsive.
+        // The runtime settings snapshot is authoritative for the configured share service.
         let base = self
             .session
             .settings
@@ -2956,7 +2878,10 @@ impl Chat {
             .unwrap_or_else(|| crate::share::DEFAULT_SHARE_BASE.to_string());
         let id = crate::share::share_id(&stem);
         let events = self.events.clone();
-        self.push_slash_output("⏳ 正在发布分享页…".to_string());
+        self.push_slash_output(
+            "⚠ 即将公开发布：任何人可公开访问完整对话与工具输出，其中可能含敏感信息。\n⏳ 正在发布分享页…"
+                .to_string(),
+        );
         tokio::spawn(async move {
             match crate::share::upload_share(&base, &id, &html).await {
                 Ok(url) => {
@@ -2967,10 +2892,6 @@ impl Chat {
                             Err(e) => lines.push(format!("无法打开浏览器: {e}")),
                         }
                     }
-                    lines.push(
-                        "注意：任何人可公开访问此链接；分享页含完整对话与工具输出（可能含敏感信息），传播前请自行审阅。"
-                            .to_string(),
-                    );
                     let _ = events.send(UiEvent::SlashOutput(lines.join("\n")));
                 }
                 Err(e) => {
@@ -2985,9 +2906,7 @@ impl Chat {
                         )),
                         Err(write_err) => lines.push(format!("写入失败: {write_err}")),
                     }
-                    if open
-                        && crate::share::open_in_browser(&out.display().to_string()).is_ok()
-                    {
+                    if open && crate::share::open_in_browser(&out.display().to_string()).is_ok() {
                         lines.push("已在浏览器中打开。".to_string());
                     }
                     lines.push(
@@ -3011,14 +2930,11 @@ impl Chat {
                 None => Vec::new(),
             };
             if messages.len() <= 8 {
-                let _ = events.send(UiEvent::SlashOutput(
-                    "对话太短，无需压缩。".to_string(),
-                ));
+                let _ = events.send(UiEvent::SlashOutput("对话太短，无需压缩。".to_string()));
                 return;
             }
             let old_len = messages.len();
-            let compacted =
-                crate::compact::maybe_compact(&session, &mut messages, u64::MAX).await;
+            let compacted = crate::compact::maybe_compact(&session, &mut messages, u64::MAX).await;
             if !compacted {
                 let _ = events.send(UiEvent::SlashOutput(
                     "压缩失败（模型调用异常）。".to_string(),
@@ -3031,9 +2947,7 @@ impl Chat {
                     m.content
                         .iter()
                         .filter_map(|b| match b {
-                            crate::api::types::ContentBlock::Text { text } => {
-                                Some(text.clone())
-                            }
+                            crate::api::types::ContentBlock::Text { text } => Some(text.clone()),
                             _ => None,
                         })
                         .collect::<Vec<_>>()
@@ -3050,10 +2964,7 @@ impl Chat {
     }
 
     /// Async stats shared by /status and /context: message count + token count.
-    fn slash_stats_async(
-        &mut self,
-        format: impl Fn(usize, u64) -> String + Send + 'static,
-    ) {
+    fn slash_stats_async(&mut self, format: impl Fn(usize, u64) -> String + Send + 'static) {
         let session = self.session.clone();
         let events = self.events.clone();
         self.push_slash_output("⏳ 正在统计…".to_string());
@@ -3112,11 +3023,7 @@ impl Chat {
             let pct = tokens * 100 / window;
             let bar_len = 40usize;
             let filled = ((pct as usize * bar_len) / 100).min(bar_len);
-            let bar = format!(
-                "{}·{}",
-                "#".repeat(filled),
-                "·".repeat(bar_len - filled)
-            );
+            let bar = format!("{}·{}", "#".repeat(filled), "·".repeat(bar_len - filled));
             format!(
                 "上下文: [{bar}] {pct}%\n已用 {tokens} / {window} tokens\n自动压缩阈值: {}%",
                 crate::budget::AUTOCOMPACT_THRESHOLD * 100 / window
@@ -3134,9 +3041,11 @@ impl Chat {
             .clone();
         if arg.is_empty() {
             let mut lines = vec!["权限规则（.bingo/settings.json）：".to_string()];
-            for (name, list) in
-                [("allow", &rules.allow), ("deny", &rules.deny), ("ask", &rules.ask)]
-            {
+            for (name, list) in [
+                ("allow", &rules.allow),
+                ("deny", &rules.deny),
+                ("ask", &rules.ask),
+            ] {
                 if list.is_empty() {
                     lines.push(format!("  {name}: （无）"));
                 } else {
@@ -3231,7 +3140,9 @@ impl Chat {
                         };
                         lines.push(line);
                     }
-                    lines.push("用法: /mcp enable|disable [name|all] · /mcp reconnect <name>".into());
+                    lines.push(
+                        "用法: /mcp enable|disable [name|all] · /mcp reconnect <name>".into(),
+                    );
                     let _ = events.send(UiEvent::SlashOutput(lines.join("\n")));
                 });
             }
@@ -3370,7 +3281,11 @@ impl Chat {
             .client
             .provider_endpoint(name)
             .unwrap_or_else(|| (None, "?".to_string()));
-        let protocol = self.session.client.provider_protocol(name).unwrap_or_default();
+        let protocol = self
+            .session
+            .client
+            .provider_protocol(name)
+            .unwrap_or_default();
         let auth = match self.session.client.auth_status(name) {
             Some(crate::api::contract::AuthStatus::ApiKey) => {
                 let key = key.unwrap_or_default();
@@ -3392,7 +3307,11 @@ impl Chat {
             }
             None => "?".to_string(),
         };
-        let badge = if self.session.client.is_preset(name) { " · 内置" } else { "" };
+        let badge = if self.session.client.is_preset(name) {
+            " · 内置"
+        } else {
+            ""
+        };
         format!("{url}（{auth} · {protocol}{badge}）")
     }
 
@@ -3451,7 +3370,9 @@ impl Chat {
                 menu.selected = core.selected;
                 true
             }
-            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c)
+                if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 let mut core = menu.picker();
                 if let Some(n) = c.to_digit(10)
                     && core.jump(n as usize)
@@ -3464,14 +3385,20 @@ impl Chat {
             }
             KeyCode::Char('s') if !modifiers.contains(KeyModifiers::CONTROL) => {
                 let core = menu.picker();
-                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
+                let value = core
+                    .selected_item()
+                    .map(|i| i.value.clone())
+                    .unwrap_or_default();
                 self.provider_menu = None;
                 self.switch_provider(&value, false);
                 true
             }
             KeyCode::Enter => {
                 let core = menu.picker();
-                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
+                let value = core
+                    .selected_item()
+                    .map(|i| i.value.clone())
+                    .unwrap_or_default();
                 self.provider_menu = None;
                 self.switch_provider(&value, true);
                 true
@@ -3573,7 +3500,9 @@ impl Chat {
             return;
         };
         if oauth_kind != "codex" {
-            self.push_slash_output(format!("不支持的 oauth.kind \"{oauth_kind}\"（v1 仅 codex）"));
+            self.push_slash_output(format!(
+                "不支持的 oauth.kind \"{oauth_kind}\"（v1 仅 codex）"
+            ));
             return;
         }
 
@@ -3587,19 +3516,20 @@ impl Chat {
                             "登录 {name}（设备授权）：\n  1. 打开 {}\n  2. 输入代码 {}（15 分钟内有效）\n⏳ 等待授权…",
                             prompt.verification_url, prompt.user_code
                         )));
-                        match flow.poll(&device_auth_id, &prompt.user_code, interval).await {
+                        match flow
+                            .poll(&device_auth_id, &prompt.user_code, interval)
+                            .await
+                        {
                             Ok(tokens) => {
                                 let tp = crate::api::auth::TokenProvider::new(&home, &name, config);
                                 match tp.save(&tokens).await {
                                     Ok(()) => {
-                                        let _ = events.send(UiEvent::SlashOutput(format!(
-                                            "✓ 已登录 {name}"
-                                        )));
+                                        let _ = events
+                                            .send(UiEvent::SlashOutput(format!("✓ 已登录 {name}")));
                                     }
                                     Err(e) => {
-                                        let _ = events.send(UiEvent::SlashOutput(format!(
-                                            "✗ 保存失败: {e}"
-                                        )));
+                                        let _ = events
+                                            .send(UiEvent::SlashOutput(format!("✗ 保存失败: {e}")));
                                     }
                                 }
                             }
@@ -3631,14 +3561,12 @@ impl Chat {
                             let tp = crate::api::auth::TokenProvider::new(&home, &name, config);
                             match tp.save(&tokens).await {
                                 Ok(()) => {
-                                    let _ = events.send(UiEvent::SlashOutput(format!(
-                                        "✓ 已登录 {name}"
-                                    )));
+                                    let _ = events
+                                        .send(UiEvent::SlashOutput(format!("✓ 已登录 {name}")));
                                 }
                                 Err(e) => {
-                                    let _ = events.send(UiEvent::SlashOutput(format!(
-                                        "✗ 保存失败: {e}"
-                                    )));
+                                    let _ = events
+                                        .send(UiEvent::SlashOutput(format!("✗ 保存失败: {e}")));
                                 }
                             }
                         }
@@ -3656,7 +3584,6 @@ impl Chat {
             }
         });
     }
-
 
     fn slash_provider_logout(&mut self, arg: &str) {
         let name = arg.trim();
@@ -3702,7 +3629,9 @@ impl Chat {
             );
             match tp.logout().await {
                 Ok(()) => {
-                    let _ = events.send(UiEvent::SlashOutput(format!("✓ 已退出 {name}（凭据已清除）")));
+                    let _ = events.send(UiEvent::SlashOutput(format!(
+                        "✓ 已退出 {name}（凭据已清除）"
+                    )));
                 }
                 Err(e) => {
                     let _ = events.send(UiEvent::SlashOutput(format!("✗ 退出失败: {e}")));
@@ -3789,7 +3718,9 @@ impl Chat {
                 true
             }
             // Direct jump: 1 = off … 6 = max (fixed 6-item table, §G10).
-            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c)
+                if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 let mut core = menu.picker();
                 if let Some(n) = c.to_digit(10)
                     && core.jump(n as usize)
@@ -3802,14 +3733,20 @@ impl Chat {
             }
             KeyCode::Char('s') if !modifiers.contains(KeyModifiers::CONTROL) => {
                 let core = menu.picker();
-                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
+                let value = core
+                    .selected_item()
+                    .map(|i| i.value.clone())
+                    .unwrap_or_default();
                 self.think_menu = None;
                 self.set_think_level(&value, false);
                 true
             }
             KeyCode::Enter => {
                 let core = menu.picker();
-                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
+                let value = core
+                    .selected_item()
+                    .map(|i| i.value.clone())
+                    .unwrap_or_default();
                 self.think_menu = None;
                 self.set_think_level(&value, true);
                 true
@@ -3833,8 +3770,7 @@ impl Chat {
             );
             return;
         }
-        let listing =
-            crate::skills::format_listing(&skills, crate::skills::DEFAULT_CHAR_BUDGET);
+        let listing = crate::skills::format_listing(&skills, crate::skills::DEFAULT_CHAR_BUDGET);
         self.push_slash_output(format!("可用技能：\n{listing}"));
     }
 
@@ -3859,63 +3795,39 @@ impl Chat {
         self.push_slash_output(lines.join("\n"));
     }
 
-    /// Rebuilds the slash dropdown suggestions (called when the input changes):
-    /// shown when the input starts with `/` and has no args; an empty query lists everything (built-ins + skills),
-    /// otherwise prefix/substring matching (a simplified generateCommandSuggestions).
+    /// Rebuilds the slash dropdown from the registry and currently loaded skills.
     fn update_slash_suggestions(&mut self) {
         self.clear_slash_suggestions();
-        let input = self.input.trim_end();
-        let Some(query) = input.strip_prefix('/') else {
-            return;
-        };
-        if query.contains(char::is_whitespace) {
-            return; // has args: do not show
-        }
-        let mut items: Vec<SlashSuggestion> = SLASH_COMMANDS
-            .iter()
-            .map(|(name, hint, desc)| SlashSuggestion {
-                name: (*name).to_string(),
-                hint: (*hint).to_string(),
-                description: (*desc).to_string(),
-            })
-            .collect();
-        // Merge skills in (the / menu includes skills). Description truncation:
-        // overlong lines do not wrap — the terminal wraps them itself, breaking the frame-height math;
-        // capped at MAX_LISTING_DESC_CHARS.
         let home = self.session.home.clone();
         let cwd = std::path::PathBuf::from(&self.cwd);
-        for skill in crate::skills::load_skills(&home, &cwd) {
-            let mut description = skill.description;
-            if description.chars().count() > crate::skills::MAX_LISTING_DESC_CHARS {
-                let cut: String = description
-                    .chars()
-                    .take(crate::skills::MAX_LISTING_DESC_CHARS - 1)
-                    .collect();
-                description = format!("{cut}…");
-            }
-            items.push(SlashSuggestion {
-                name: skill.name,
-                hint: String::new(),
-                description,
+        let skills = crate::skills::load_skills(&home, &cwd)
+            .into_iter()
+            .map(|skill| {
+                let mut description = skill.description;
+                if description.chars().count() > crate::skills::MAX_LISTING_DESC_CHARS {
+                    let cut: String = description
+                        .chars()
+                        .take(crate::skills::MAX_LISTING_DESC_CHARS - 1)
+                        .collect();
+                    description = format!("{cut}…");
+                }
+                SlashSuggestion {
+                    name: skill.name,
+                    hint: String::new(),
+                    description,
+                }
             });
-        }
-        let q = query.to_lowercase();
-        if !q.is_empty() {
-            // Prefix matches first (shorter first), then substring matches; built-ins stay ahead.
-            items.retain(|s| {
-                let n = s.name.to_lowercase();
-                n.starts_with(&q) || n.contains(&q)
-            });
-            items.sort_by(|a, b| {
-                let pa = a.name.to_lowercase().starts_with(&q);
-                let pb = b.name.to_lowercase().starts_with(&q);
-                pb.cmp(&pa).then(a.name.len().cmp(&b.name.len()))
-            });
-        }
-        self.slash_suggestions = items.into_iter().take(SLASH_SUGGESTIONS_MAX).collect();
-        self.slash_selected = self.slash_selected.min(self.slash_suggestions.len().saturating_sub(1));
-        // G9: a bare `/`-query with zero matches shows one dim hint row, not an empty gap.
-        self.slash_no_match = !q.is_empty() && self.slash_suggestions.is_empty();
+        let result = crate::tui::slash::suggestions(
+            &self.input,
+            SLASH_COMMANDS,
+            skills,
+            SLASH_SUGGESTIONS_MAX,
+        );
+        self.slash_suggestions = result.items;
+        self.slash_selected = self
+            .slash_selected
+            .min(self.slash_suggestions.len().saturating_sub(1));
+        self.slash_no_match = result.no_match;
     }
 
     /// Dropdown key handling: ↑↓ move the selection, Tab completes (without running), Esc closes.
@@ -4061,7 +3973,8 @@ impl Chat {
             let _ = events.send(UiEvent::TurnStart);
             let mut ui = crate::ui::tui_hooks(events.clone(), asks);
             let history = Self::load_history(&session, &mut ui.on_warning);
-            let result = run_query(&session, history, &text, &images, &mut ui, Some(cancel_rx)).await;
+            let result =
+                run_query(&session, history, &text, &images, &mut ui, Some(cancel_rx)).await;
             match result {
                 Ok(outcome) => {
                     Self::finish_turn(&events, &session, &outcome).await;
@@ -4236,10 +4149,7 @@ impl Chat {
     /// 提交 Other 自由输入（CC SelectInputOption onSubmit：空文本 = 取消）。
     fn submit_ask_answer(&mut self, text: String) {
         if text.trim().is_empty() {
-            let free_text = self
-                .pending_ask
-                .as_ref()
-                .is_some_and(|(r, _)| r.free_text);
+            let free_text = self.pending_ask.as_ref().is_some_and(|(r, _)| r.free_text);
             if free_text {
                 self.push_ask_message(ASK_DECLINED_TEXT.to_string());
             }
@@ -4424,8 +4334,7 @@ impl Chat {
             }
             // Shift+Enter (available when the terminal reports enhanced keyboards) and pasted Enter are both newlines.
             KeyCode::Enter
-                if pasting
-                    || modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+                if pasting || modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
             {
                 self.insert_newline();
                 // Only pasted newlines can pile up large text → fold into a placeholder at the threshold.
@@ -4687,9 +4596,7 @@ impl Chat {
             return true;
         }
         let width = self.input_width();
-        if let Some(cursor) =
-            crate::tui::input::move_row(&self.input, self.cursor, width, down)
-        {
+        if let Some(cursor) = crate::tui::input::move_row(&self.input, self.cursor, width, down) {
             self.cursor = cursor;
             return true;
         }
@@ -4764,9 +4671,8 @@ impl Chat {
 
     /// Undo stack: consecutive inserts merge into one step; deletes/whole replacements are their own steps.
     fn snapshot(&mut self, kind: EditKind) {
-        let coalesce = kind != EditKind::Bulk
-            && self.last_edit == Some(kind)
-            && !self.undo.is_empty();
+        let coalesce =
+            kind != EditKind::Bulk && self.last_edit == Some(kind) && !self.undo.is_empty();
         self.last_edit = Some(kind);
         if coalesce {
             return;
@@ -4813,9 +4719,7 @@ impl Chat {
             PermissionMode::AcceptEdits => PermissionMode::Plan,
             PermissionMode::Plan => PermissionMode::Default,
             // Started in bypass/dontAsk: toggle between it and default, never introducing a new dangerous mode.
-            PermissionMode::BypassPermissions | PermissionMode::DontAsk => {
-                PermissionMode::Default
-            }
+            PermissionMode::BypassPermissions | PermissionMode::DontAsk => PermissionMode::Default,
         };
         // From default, switch back to the startup mode (an edge that only bypass/dontAsk sessions have).
         if self.permission_mode == PermissionMode::AcceptEdits
@@ -4833,7 +4737,10 @@ impl Chat {
     fn toggle_thinking(&mut self) {
         let current = self.session.runtime.thinking.borrow().clone();
         let next = match current.as_deref() {
-            None | Some("off") => self.last_thinking.clone().unwrap_or_else(|| "medium".into()),
+            None | Some("off") => self
+                .last_thinking
+                .clone()
+                .unwrap_or_else(|| "medium".into()),
             Some(level) => {
                 self.last_thinking = Some(level.to_string());
                 "off".to_string()
@@ -4962,10 +4869,7 @@ impl Chat {
                 if let ActivityKind::Thinking(t) = &mut act.kind
                     && t.state == ThinkingState::Running
                 {
-                    t.duration_ms = self
-                        .tick
-                        .saturating_sub(t.start_tick)
-                        .saturating_mul(33);
+                    t.duration_ms = self.tick.saturating_sub(t.start_tick).saturating_mul(33);
                 }
             }
         }
@@ -4991,8 +4895,7 @@ impl Chat {
     pub fn has_dynamic_rows(&self) -> bool {
         self.busy
             || self.messages.iter().any(|m| {
-                m.groups.iter().any(|g| g.active)
-                    || m.activities.iter().any(|a| a.is_running())
+                m.groups.iter().any(|g| g.active) || m.activities.iter().any(|a| a.is_running())
             })
             || (self.tasks_visible
                 && self
@@ -5007,6 +4910,7 @@ impl Chat {
     pub fn needs_tick(&self) -> bool {
         self.has_dynamic_rows()
             || self.slash_at.is_some()
+            || self.slash_error_at.is_some()
             || !self.events_rx.is_empty()
             || !self.asks_rx.is_empty()
     }
@@ -5045,7 +4949,10 @@ impl Chat {
         if self.tasks_auto
             && self.tasks_visible
             && !self.tasks_cache.is_empty()
-            && self.tasks_cache.iter().all(|t| t.status == TodoStatus::Done)
+            && self
+                .tasks_cache
+                .iter()
+                .all(|t| t.status == TodoStatus::Done)
         {
             self.tasks_visible = false;
             self.tasks_auto = false;
@@ -5107,10 +5014,7 @@ impl Chat {
             line.push_styled(t[idx].text.clone(), theme.strikethrough());
             out.push(line);
         }
-        let active: Vec<&TodoItem> = t
-            .iter()
-            .filter(|i| i.status != TodoStatus::Done)
-            .collect();
+        let active: Vec<&TodoItem> = t.iter().filter(|i| i.status != TodoStatus::Done).collect();
         for item in active.iter().take(Self::TODO_SHOWN) {
             // `☐` not done; in-progress items use the primary accent color for the whole row (CC's active-item highlight).
             let style = match item.status {
@@ -5165,7 +5069,7 @@ impl Chat {
                     }
                     // Running background task/subagent (ActivityIndicator shows the agent activeForm):
                     // the label is `Agent: <description>`.
-                    ActivityKind::Watch(w) if w.status == WatchStatus::Running => {
+                    ActivityKind::Watch(w) if w.status == WatchState::Running => {
                         Some(w.label.clone())
                     }
                     ActivityKind::Thinking(t) if t.state == ThinkingState::Running => {
@@ -5257,13 +5161,17 @@ impl Chat {
                 description: s.description,
             })
             .collect();
-        fresh.extend(self.session.channels.list().into_iter().map(|c| {
-            EntityRow::Channel {
-                name: c.name,
-                seq: c.seq,
-                frozen: c.frozen,
-            }
-        }));
+        fresh.extend(
+            self.session
+                .channels
+                .list()
+                .into_iter()
+                .map(|c| EntityRow::Channel {
+                    name: c.name,
+                    seq: c.seq,
+                    frozen: c.frozen,
+                }),
+        );
         if fresh != self.entities {
             // Clamp the selection when the list shrinks.
             if let Some(i) = self.entity_focus
@@ -5288,10 +5196,9 @@ impl Chat {
         };
         let brief = |e: &EntityRow| match e {
             EntityRow::Agent { name, state, .. } => format!("◉ {name}({state})"),
-            EntityRow::Channel { name, seq, frozen } => format!(
-                "◇ #{name}({seq}{})",
-                if *frozen { "❄" } else { "" }
-            ),
+            EntityRow::Channel { name, seq, frozen } => {
+                format!("◇ #{name}({seq}{})", if *frozen { "❄" } else { "" })
+            }
         };
         let Some(selected) = self.entity_focus else {
             let summary = self
@@ -5373,8 +5280,7 @@ impl Chat {
                 true
             }
             KeyCode::Down => {
-                self.entity_focus =
-                    Some((i + 1).min(self.entities.len().saturating_sub(1)));
+                self.entity_focus = Some((i + 1).min(self.entities.len().saturating_sub(1)));
                 self.dirty = true;
                 true
             }
@@ -5419,7 +5325,10 @@ impl Chat {
             .map(|item| format!("> {}", one_line(&item.text, self.width.saturating_sub(4))))
             .collect();
         if self.queued.len() > QUEUE_ROWS_MAX {
-            out.push(format!("… +{} more queued", self.queued.len() - QUEUE_ROWS_MAX));
+            out.push(format!(
+                "… +{} more queued",
+                self.queued.len() - QUEUE_ROWS_MAX
+            ));
         }
         out
     }
@@ -5470,8 +5379,7 @@ impl Chat {
         {
             return false;
         }
-        !m.groups.iter().any(|g| g.active)
-            && !m.activities.iter().any(|a| a.is_running())
+        !m.groups.iter().any(|g| g.active) && !m.activities.iter().any(|a| a.is_running())
     }
 
     /// Whether a message is "settled": its rows no longer change (stream stopped, no running activities).
@@ -5519,9 +5427,7 @@ impl Chat {
         if skip == 0 {
             // 新版本提示（update-banner）：窗口内用呼吸色；窗口外/无提示 → 静止 rest 或 None。
             let banner = self.update_banner.as_deref().map(|v| {
-                let frame = self
-                    .update_banner_frame()
-                    .unwrap_or(UPDATE_BANNER_FRAMES);
+                let frame = self.update_banner_frame().unwrap_or(UPDATE_BANNER_FRAMES);
                 (v, update_color(&theme, frame, self.motion_off))
             });
             rows.extend(welcome_card_rows(
@@ -5550,11 +5456,7 @@ impl Chat {
             rows.push(Row::new(Line::empty()));
             match self.messages[i].role {
                 Role::User => {
-                    rows.extend(user_message_rows(
-                        &self.messages[i].text,
-                        width,
-                        &theme,
-                    ));
+                    rows.extend(user_message_rows(&self.messages[i].text, width, &theme));
                 }
                 Role::Assistant => {
                     // Markdown render closure: borrows only disjoint fields to avoid conflicting with
@@ -5598,22 +5500,16 @@ impl Chat {
                             .unwrap_or(rendered_chars)
                             .min(text.chars().count());
                         if pos_chars > rendered_chars {
-                            let seg_end = char_bounds
-                                .get(pos_chars)
-                                .copied()
-                                .unwrap_or(text.len());
+                            let seg_end = char_bounds.get(pos_chars).copied().unwrap_or(text.len());
                             let reply = render(&text[rendered_bytes..seg_end]);
                             push_text(&theme, &mut rows, reply);
                             rendered_chars = pos_chars;
                             rendered_bytes = seg_end;
                         }
                         let group_idx = msg.group_of.get(idx).copied().flatten();
-                        let group_collapsed = group_idx.is_some_and(|g| {
-                            !msg.groups[g].expanded
-                        });
-                        let is_group_head = group_idx.is_some_and(|g| {
-                            msg.groups[g].activities.first() == Some(&idx)
-                        });
+                        let group_collapsed = group_idx.is_some_and(|g| !msg.groups[g].expanded);
+                        let is_group_head = group_idx
+                            .is_some_and(|g| msg.groups[g].activities.first() == Some(&idx));
                         if group_collapsed && !is_group_head {
                             continue;
                         }
@@ -5652,14 +5548,15 @@ impl Chat {
                             click_ranges.push(ClickRange {
                                 start: row,
                                 end: row + 1,
-                                target: ClickTarget::Group { message: i, group: g },
+                                target: ClickTarget::Group {
+                                    message: i,
+                                    group: g,
+                                },
                             });
                             // Below a running collapse group, show the most recent tool's input (the CC ⎿ row).
                             // The hint may be a multi-line bash command: single-line it and truncate by width,
                             // otherwise the row balloons into multiple lines and the row model drifts from the canvas.
-                            if in_progress
-                                && let Some(hint) = &msg.groups[g].last_hint
-                            {
+                            if in_progress && let Some(hint) = &msg.groups[g].last_hint {
                                 rows.push(Row::new(Line::styled(
                                     one_line(&format!("  ⎿  {hint}"), width),
                                     SegStyle::fg(theme.inactive),
@@ -5681,7 +5578,10 @@ impl Chat {
                             click_ranges.push(ClickRange {
                                 start: first.start as usize,
                                 end: first.end as usize,
-                                target: ClickTarget::Group { message: i, group: g },
+                                target: ClickTarget::Group {
+                                    message: i,
+                                    group: g,
+                                },
                             });
                         }
                         for line in lines {
@@ -5710,18 +5610,23 @@ impl Chat {
                     let show_done_line = i == self.messages.len() - 1 && self.stream_msg.is_none()
                         || self.message_settled(i);
                     if show_done_line
-                        && let Some(line) = self.messages[i].activities.iter().rev().find_map(
-                        |a| match &a.kind {
-                            ActivityKind::Thinking(t)
-                                if t.state == ThinkingState::Done && !a.content.is_empty() =>
-                            {
-                                Some(crate::tui::activities::thinking_completion_line(
-                                    t, &theme,
-                                ))
-                            }
-                            _ => None,
-                        },
-                    ) {
+                        && let Some(line) =
+                            self.messages[i]
+                                .activities
+                                .iter()
+                                .rev()
+                                .find_map(|a| match &a.kind {
+                                    ActivityKind::Thinking(t)
+                                        if t.state == ThinkingState::Done
+                                            && !a.content.is_empty() =>
+                                    {
+                                        Some(crate::tui::activities::thinking_completion_line(
+                                            t, &theme,
+                                        ))
+                                    }
+                                    _ => None,
+                                })
+                    {
                         rows.push(Row::new(line));
                     }
                 }
@@ -5972,10 +5877,7 @@ fn welcome_rows(
     rows.push(greeting);
     rows.push(Line::empty());
     rows.push(Line::styled(
-        one_line(
-            "   /help for help · /status for your current setup",
-            width,
-        ),
+        one_line("   /help for help · /status for your current setup", width),
         theme.dim(),
     ));
     rows.push(Line::empty());
@@ -6074,7 +5976,12 @@ pub fn banner_segments(v: &str, width: usize) -> Option<(String, String, String,
         return Some((PRE.to_string(), ver, MID_SHORT.to_string(), CMD.to_string()));
     }
     if width >= 15 {
-        return Some((String::new(), String::new(), "   ".to_string(), CMD.to_string()));
+        return Some((
+            String::new(),
+            String::new(),
+            "   ".to_string(),
+            CMD.to_string(),
+        ));
     }
     None
 }
@@ -6120,7 +6027,11 @@ fn lerp_color(a: Color, b: Color, t: f64) -> Color {
     let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) else {
         return b;
     };
-    let l = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round().clamp(0.0, 255.0) as u8;
+    let l = |x: u8, y: u8| {
+        (x as f64 + (y as f64 - x as f64) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
     Color::Rgb(l(ar, br), l(ag, bg), l(ab, bb))
 }
 
@@ -6170,18 +6081,22 @@ mod tests {
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
-                &home,
-                "test",
-            )),
-            last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, "test")),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
         });
-        let mut chat =
-            Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), crate::tui::theme::ThemeSetting::Auto, None);
+        let mut chat = Chat::new(
+            session,
+            events_tx,
+            events_rx,
+            asks_tx,
+            asks_rx,
+            Theme::dark(),
+            crate::tui::theme::ThemeSetting::Auto,
+            None,
+        );
         chat.cwd = home.display().to_string();
         chat
     }
@@ -6230,7 +6145,11 @@ mod tests {
         let rest = Color::Rgb(215, 119, 87);
         let peak = Color::Rgb(232, 137, 107);
         assert_eq!(update_color(&dark, 0, false), rest, "起步即谷（无突跳）");
-        assert_eq!(update_color(&dark, 45, false), peak, "phase 45 = peak（t=1 精确）");
+        assert_eq!(
+            update_color(&dark, 45, false),
+            peak,
+            "phase 45 = peak（t=1 精确）"
+        );
         assert_eq!(update_color(&dark, 90, false), rest);
         assert_eq!(update_color(&dark, 135, false), peak, "周期回绕");
         assert_eq!(update_color(&dark, 180, false), rest);
@@ -6241,8 +6160,14 @@ mod tests {
                 _ => panic!("truecolor 主题应返回 Rgb"),
             }
         };
-        assert!(r(15) > r(0) && r(30) > r(15) && r(45) > r(30), "0→45 单调上升");
-        assert!(r(60) < r(45) && r(75) < r(60) && r(90) < r(75), "45→90 单调下降");
+        assert!(
+            r(15) > r(0) && r(30) > r(15) && r(45) > r(30),
+            "0→45 单调上升"
+        );
+        assert!(
+            r(60) < r(45) && r(75) < r(60) && r(90) < r(75),
+            "45→90 单调下降"
+        );
         // motion off → 恒 rest（指示器保留，只是不动）
         assert_eq!(update_color(&dark, 45, true), rest);
         assert_eq!(update_color(&dark, 999, true), rest);
@@ -6275,7 +6200,10 @@ mod tests {
         assert_eq!(f12, f59, "rest 相连续（12-59 帧）");
         assert_ne!(f0, f12, "两档不同色");
         assert_eq!(f60, f0, "60 帧周期回绕");
-        assert!(matches!(update_color(&d256, 5, false), Color::Indexed(_)), "256 色降级输出 Indexed");
+        assert!(
+            matches!(update_color(&d256, 5, false), Color::Indexed(_)),
+            "256 色降级输出 Indexed"
+        );
     }
 
     /// 欢迎卡渲染（update-banner 锚点 1/6/9）：有提示行（含两段式），无提示行布局回归不变；
@@ -6287,12 +6215,20 @@ mod tests {
         let with = welcome_card_rows(&theme, "m", "d", "/cwd", 80, Some(("0.3.0", color)));
         let texts: Vec<String> = with.iter().map(|r| r.line.plain_text()).collect();
         assert!(
-            texts.iter().any(|t| t.contains("New version v0.3.0 available — run bingo update")),
+            texts
+                .iter()
+                .any(|t| t.contains("New version v0.3.0 available — run bingo update")),
             "完整档提示行应在卡内: {texts:?}"
         );
         // 提示行在版本身份行正上方（相邻，中间无空行）
-        let banner_idx = texts.iter().position(|t| t.contains("New version")).unwrap();
-        assert!(texts[banner_idx + 1].contains("bingo v"), "提示行应紧邻身份行下方");
+        let banner_idx = texts
+            .iter()
+            .position(|t| t.contains("New version"))
+            .unwrap();
+        assert!(
+            texts[banner_idx + 1].contains("bingo v"),
+            "提示行应紧邻身份行下方"
+        );
         // 无提示行 → 布局与现状一致（回归）
         let without = welcome_card_rows(&theme, "m", "d", "/cwd", 80, None);
         assert_eq!(with.len(), without.len() + 2, "提示行 + 上方空行 = 2 行");
@@ -6378,7 +6314,9 @@ mod tests {
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
         for path in ["a.md", "b.md"] {
-            let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+            let _ = chat.events.send(UiEvent::ToolStart {
+                name: "Read".into(),
+            });
             chat.drain_events();
             let _ = chat.events.send(UiEvent::ToolReady {
                 name: "Read".into(),
@@ -6400,14 +6338,16 @@ mod tests {
     fn start_group_done(chat: &mut Chat) {
         start_group(chat);
         for (summary, out) in [("Read a.md", "l1\nl2\nl3"), ("Read b.md", "x\ny")] {
-            let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-                name: "Read".into(),
-                summary: summary.into(),
-                output: out.into(),
-                is_error: false,
-                duration_ms: 0,
-                diff: None,
-            }));
+            let _ = chat
+                .events
+                .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                    name: "Read".into(),
+                    summary: summary.into(),
+                    output: out.into(),
+                    is_error: false,
+                    duration_ms: 0,
+                    diff: None,
+                }));
         }
         chat.drain_events();
     }
@@ -6419,7 +6359,13 @@ mod tests {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
-        for name in ["TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "AskUserQuestion"] {
+        for name in [
+            "TaskCreate",
+            "TaskUpdate",
+            "TaskGet",
+            "TaskList",
+            "AskUserQuestion",
+        ] {
             let _ = chat.events.send(UiEvent::ToolStart { name: name.into() });
             chat.drain_events();
             let _ = chat.events.send(UiEvent::ToolReady {
@@ -6436,7 +6382,9 @@ mod tests {
         );
         assert!(chat.pending_tools.is_empty(), "pending FIFO 不失配");
         // Visible tools still render normally.
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Bash".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Bash".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Bash".into(),
@@ -6534,7 +6482,9 @@ mod tests {
         assert!(!chat.tasks_auto);
         assert!(chat.task_lines().is_empty());
         assert!(
-            chat.slash_lines.iter().any(|l| l.contains("✓ 1/1 tasks 完成")),
+            chat.slash_lines
+                .iter()
+                .any(|l| l.contains("✓ 1/1 tasks 完成")),
             "隐藏瞬间推瞬态行: {:?}",
             chat.slash_lines
         );
@@ -6621,7 +6571,10 @@ mod tests {
             ..msg(Role::Assistant, "reply")
         });
         chat.build_rows(100);
-        assert!(!chat.doc.click_ranges.is_empty(), "build_rows populates ranges");
+        assert!(
+            !chat.doc.click_ranges.is_empty(),
+            "build_rows populates ranges"
+        );
 
         let start = {
             let range = &chat.doc.click_ranges[0];
@@ -6674,21 +6627,24 @@ mod tests {
         // A running Watch (subagent/background task) verb = its label (CC ActivityIndicator
         // shows the agent activeForm): after tools, before thinking.
         chat.messages[0].activities.clear();
-        chat.messages[0].activities.push(Activity::new(ActivityKind::Watch(
-            WatchCall {
+        chat.messages[0]
+            .activities
+            .push(Activity::new(ActivityKind::Watch(WatchCall {
                 label: "scout · 列出桌面目录内容".into(),
                 kind: crate::watch::WatchKind::Agent,
-                status: WatchStatus::Running,
+                status: WatchState::Running,
                 detail: Some("已产出 43 字符".into()),
                 duration_ms: 0,
-            },
-        )));
+            })));
         let verb = chat.running_status().expect("busy status").verb;
-        assert_eq!(verb, "scout · 列出桌面目录内容", "Watch Running 动词 = label");
+        assert_eq!(
+            verb, "scout · 列出桌面目录内容",
+            "Watch Running 动词 = label"
+        );
 
         // A Done Watch no longer claims the verb (falls through to thinking/Working).
         if let ActivityKind::Watch(w) = &mut chat.messages[0].activities[0].kind {
-            w.status = WatchStatus::Done;
+            w.status = WatchState::Done;
         }
         let verb = chat.running_status().expect("busy status").verb;
         assert_ne!(verb, "Agent: 列出桌面目录内容", "Done 的 Watch 不占动词");
@@ -6731,7 +6687,9 @@ mod tests {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Bash".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Bash".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Bash".into(),
@@ -6740,14 +6698,16 @@ mod tests {
         });
         chat.drain_events();
         assert!(chat.messages[0].groups.is_empty(), "standalone 不折叠");
-        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-            name: "Bash".into(),
-            summary: "$ ls".into(),
-            output: "$ ls\nREADME.md\nsrc\n[Exited with code 0]".into(),
-            is_error: false,
-            duration_ms: 5,
-            diff: None,
-        }));
+        let _ = chat
+            .events
+            .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "Bash".into(),
+                summary: "$ ls".into(),
+                output: "$ ls\nREADME.md\nsrc\n[Exited with code 0]".into(),
+                is_error: false,
+                duration_ms: 5,
+                diff: None,
+            }));
         chat.drain_events();
         let a = &chat.messages[0].activities[0];
         assert!(a.expanded, "输出预览默认展开");
@@ -6765,7 +6725,9 @@ mod tests {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Bash".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Bash".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Bash".into(),
@@ -6794,11 +6756,7 @@ mod tests {
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
-                &std::env::temp_dir(),
-                "test",
-            )),
-            last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
@@ -6806,7 +6764,16 @@ mod tests {
         });
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
-        let mut chat = Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), crate::tui::theme::ThemeSetting::Auto, None);
+        let mut chat = Chat::new(
+            session,
+            events_tx,
+            events_rx,
+            asks_tx,
+            asks_rx,
+            Theme::dark(),
+            crate::tui::theme::ThemeSetting::Auto,
+            None,
+        );
         chat.bash_mode = true;
         chat.input = "echo hello".to_string();
         chat.submit();
@@ -6817,10 +6784,7 @@ mod tests {
             if !chat.busy && !chat.messages.is_empty() {
                 break;
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "回合未在超时内结束"
-            );
+            assert!(std::time::Instant::now() < deadline, "回合未在超时内结束");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(chat.messages[0].text, "!echo hello", "用户消息带 ! 前缀");
@@ -6832,12 +6796,13 @@ mod tests {
         let preview = &chat.messages[1].activities[0];
         assert!(preview.expanded, "! 命令输出预览展开");
         assert!(
+            preview.content.iter().any(|l| l.plain_text() == "hello"),
+            "预览含命令输出: {:?}",
             preview
                 .content
                 .iter()
-                .any(|l| l.plain_text() == "hello"),
-            "预览含命令输出: {:?}",
-            preview.content.iter().map(|l| l.plain_text()).collect::<Vec<_>>()
+                .map(|l| l.plain_text())
+                .collect::<Vec<_>>()
         );
         assert!(!chat.busy, "回合结束");
     }
@@ -6859,7 +6824,9 @@ mod tests {
         let mut chat = test_chat();
         chat.apply_turn_start();
         chat.apply_event(UiEvent::ThinkingDelta("plan the fetch".into()));
-        chat.apply_event(UiEvent::ToolStart { name: "WebFetch".into() });
+        chat.apply_event(UiEvent::ToolStart {
+            name: "WebFetch".into(),
+        });
         chat.apply_event(UiEvent::ThinkingDelta("got it".into()));
         chat.apply_event(UiEvent::ThinkingDelta(", summarizing".into()));
 
@@ -6871,7 +6838,10 @@ mod tests {
         assert!(matches!(tool.kind, ActivityKind::Tool(_)));
         let text = thinking_text(first);
         assert!(text.contains("plan the fetch"), "first segment: {text}");
-        assert!(text.contains("got it, summarizing"), "merged segment: {text}");
+        assert!(
+            text.contains("got it, summarizing"),
+            "merged segment: {text}"
+        );
     }
 
     /// Thinking after text interrupts opens a new block, no longer merging.
@@ -6909,12 +6879,7 @@ mod tests {
         chat.messages[0].text = "你好！".to_string();
         chat.apply_event(UiEvent::TurnEnd);
         chat.build_rows(100);
-        let joined: Vec<String> = chat
-            .doc
-            .rows
-            .iter()
-            .map(|r| r.line.plain_text())
-            .collect();
+        let joined: Vec<String> = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
         let lines: Vec<&str> = joined.iter().map(String::as_str).collect();
         let thinking = lines
             .iter()
@@ -6961,28 +6926,23 @@ mod tests {
         let mut chat = test_chat();
         chat.apply_turn_start();
         chat.apply_event(UiEvent::ThinkingDelta("plan".into()));
-        chat.apply_event(UiEvent::ToolStart { name: "Bash".into() });
+        chat.apply_event(UiEvent::ToolStart {
+            name: "Bash".into(),
+        });
         chat.build_rows(100);
-        let rows: Vec<String> = chat
-            .doc
-            .rows
-            .iter()
-            .map(|r| r.line.plain_text())
-            .collect();
+        let rows: Vec<String> = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
         assert!(
-            !rows.iter().any(|l| l.starts_with("✻ ") && l.contains(" for ")),
+            !rows
+                .iter()
+                .any(|l| l.starts_with("✻ ") && l.contains(" for ")),
             "回合进行中不得有完成行: {rows:?}"
         );
         chat.apply_event(UiEvent::TurnEnd);
         chat.build_rows(100);
-        let rows: Vec<String> = chat
-            .doc
-            .rows
-            .iter()
-            .map(|r| r.line.plain_text())
-            .collect();
+        let rows: Vec<String> = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
         assert!(
-            rows.iter().any(|l| l.starts_with("✻ ") && l.contains(" for ")),
+            rows.iter()
+                .any(|l| l.starts_with("✻ ") && l.contains(" for ")),
             "回合结束后应有完成行: {rows:?}"
         );
     }
@@ -7031,19 +6991,22 @@ mod tests {
         chat.submit();
         assert!(!chat.busy, "slash 不启动回合");
         let joined = chat.slash_lines.join("\n");
-        for cmd in ["/clear", "/model", "/resume", "/rename", "/compact", "/exit"] {
+        for cmd in [
+            "/clear", "/model", "/resume", "/rename", "/compact", "/exit",
+        ] {
             assert!(joined.contains(cmd), "缺少 {cmd}: {joined}");
         }
 
         chat.input = "/nope".to_string();
         chat.submit();
         assert!(
-            chat.slash_error_lines.iter().any(|l| l.contains("未知命令")),
+            chat.slash_error_lines
+                .iter()
+                .any(|l| l.contains("未知命令")),
             "未知命令进错误行: {:?}",
             chat.slash_error_lines
         );
     }
-
 
     /// picker-model.md 提交 E：/model 一级走 PickerModel 核心——● 标当前 provider、
     /// 数字直达、二级保持原逻辑（数字不进输入框）。
@@ -7074,7 +7037,11 @@ mod tests {
         let menu = chat.model_menu.as_ref().expect("菜单已打开");
         assert_eq!(menu.provider_current, Some(0), "● 标当前 provider default");
         let core = menu.provider_picker();
-        assert_eq!(core.items.len(), 4, "default + 内置 presets（codex/opencode-go）+ deepseek");
+        assert_eq!(
+            core.items.len(),
+            4,
+            "default + 内置 presets（codex/opencode-go）+ deepseek"
+        );
 
         // 数字直达 2 = deepseek；一级被消费不进输入框。
         assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
@@ -7258,12 +7225,22 @@ mod tests {
             core.items.iter().any(|i| i.label == name_b),
             "选择器列出会话 b"
         );
-        assert_eq!(menu.current, Some(1), "● 标当前会话（t_a 较旧，位于索引 1）");
+        assert_eq!(
+            menu.current,
+            Some(1),
+            "● 标当前会话（t_a 较旧，位于索引 1）"
+        );
         // Esc 取消：当前会话不变。
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
         assert!(chat.resume_menu.is_none());
         assert_eq!(
-            chat.session.runtime.transcript.borrow().clone().unwrap().name(),
+            chat.session
+                .runtime
+                .transcript
+                .borrow()
+                .clone()
+                .unwrap()
+                .name(),
             t_a.name(),
             "Esc 不切换"
         );
@@ -7288,9 +7265,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// /share --local：导出当前会话 HTML 分享页（文件存在、路径输出、覆盖提示）。
+    /// /share：默认只导出当前会话 HTML 到本地（文件存在、路径输出、覆盖提示）。
     #[test]
-    fn slash_share_exports_current_session() {
+    fn slash_share_exports_current_session_locally_by_default() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-share", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let home = tmp.join("home");
@@ -7298,9 +7275,16 @@ mod tests {
         let _ = t.append(&crate::api::types::Message::user_text("hi"));
         let mut chat = test_chat_home(home.clone());
         let _ = chat.session.runtime.transcript_tx.send(Some(t));
-        chat.input = "/share --local".to_string();
+        chat.input = "/share".to_string();
         chat.submit();
-        let stem = chat.session.runtime.transcript.borrow().clone().unwrap().name();
+        let stem = chat
+            .session
+            .runtime
+            .transcript
+            .borrow()
+            .clone()
+            .unwrap()
+            .name();
         let joined = chat.slash_lines.join("\n");
         assert!(joined.contains("已导出"), "{joined}");
         assert!(joined.contains(&stem), "路径含 stem: {joined}");
@@ -7312,7 +7296,7 @@ mod tests {
         assert!(html.contains("hi"), "产物含消息文本");
         assert!(html.contains("data-view=\"conv\""), "产物为 share 页");
         // 二次导出 → 覆盖提示。
-        chat.input = "/share --local".to_string();
+        chat.input = "/share".to_string();
         chat.submit();
         assert!(
             chat.slash_lines.join("\n").contains("覆盖"),
@@ -7338,21 +7322,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// /share 参数解析（纯逻辑，不触发浏览器/上传）。
+    /// /share flag parsing (pure logic; no browser or network side effects).
     #[test]
     fn parse_share_arg_flags() {
         assert!(parse_share_arg("--open", "--open"));
-        assert!(parse_share_arg("--local --open", "--open"));
-        assert!(parse_share_arg("  --local  ", "--local"));
-        assert!(!parse_share_arg("", "--open"));
-        assert!(!parse_share_arg("--local", "--open"));
-        assert!(!parse_share_arg("--output x", "--local"));
+        assert!(parse_share_arg("--public --open", "--open"));
+        assert!(parse_share_arg("  --public  ", "--public"));
+        assert!(!parse_share_arg("", "--public"));
+        assert!(!parse_share_arg("--open", "--public"));
+        assert!(!parse_share_arg("--output x", "--public"));
     }
 
-    /// /share 默认上传模式：mock 服务器接收 POST，输出公网链接 + 公开提示。
-    /// 上传为异步（tokio::spawn + UiEvent::SlashOutput），断言前 drain 事件。
+    /// /share --public：只有显式选择公开发布时 mock 服务器才收到 POST；
+    /// 上传开始前立即显示公开访问与敏感内容警告。
     #[tokio::test]
-    async fn slash_share_uploads_by_default() {
+    async fn slash_share_public_opt_in_warns_before_upload() {
         use std::io::{BufRead, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -7393,9 +7377,17 @@ mod tests {
             .share
             .base_url = Some(format!("http://{addr}"));
         let _ = chat.session.runtime.transcript_tx.send(Some(t));
-        chat.input = "/share".to_string();
+        chat.input = "/share --public".to_string();
         chat.submit();
-        // current_thread runtime 下 spawn 任务需让出才能执行；sleep 轮询
+        let preflight = chat.slash_lines.join("\n");
+        assert!(
+            preflight.contains("任何人可公开访问"),
+            "上传前公开范围须可见: {preflight}"
+        );
+        assert!(
+            preflight.contains("敏感信息"),
+            "上传前敏感内容须可见: {preflight}"
+        );
         // 直到 mock 服务器线程完成（收到请求并回应），并行负载下也稳定。
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         while !handle.is_finished() && tokio::time::Instant::now() < deadline {
@@ -7406,16 +7398,19 @@ mod tests {
         chat.drain_events();
         let joined = chat.slash_lines.join("\n");
         assert!(joined.contains("已发布"), "{joined}");
-        assert!(joined.contains(&format!("http://{addr}/share/u/")), "{joined}");
-        assert!(joined.contains("任何人可公开访问此链接"), "{joined}");
+        assert!(
+            joined.contains(&format!("http://{addr}/share/u/")),
+            "{joined}"
+        );
+        assert!(joined.contains("任何人可公开访问"), "{joined}");
         assert!(request_line.starts_with("POST /share/u/"), "{request_line}");
         assert!(body.contains("hi"), "上传 body 为完整 HTML");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// /share --local：保留本地文件模式（不触发上传）。
+    /// Legacy `--local` remains harmless and resolves to the local-by-default path.
     #[test]
-    fn slash_share_local_keeps_file() {
+    fn slash_share_legacy_local_flag_stays_local() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-locshare", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let home = tmp.join("home");
@@ -7428,7 +7423,14 @@ mod tests {
         let joined = chat.slash_lines.join("\n");
         assert!(joined.contains("已导出"), "{joined}");
         assert!(!joined.contains("已发布"), "本地模式不上传");
-        let stem = chat.session.runtime.transcript.borrow().clone().unwrap().name();
+        let stem = chat
+            .session
+            .runtime
+            .transcript
+            .borrow()
+            .clone()
+            .unwrap()
+            .name();
         assert!(home.join(format!("{stem}.html")).exists(), "本地文件存在");
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -7476,7 +7478,9 @@ mod tests {
         chat.input = "/skills".to_string();
         chat.submit();
         assert!(
-            chat.slash_lines.join("\n").contains("- pdf: Converts documents to PDF"),
+            chat.slash_lines
+                .join("\n")
+                .contains("- pdf: Converts documents to PDF"),
             "{}",
             chat.slash_lines.join("\n")
         );
@@ -7529,16 +7533,13 @@ mod tests {
             chat.doc.rows.len(),
             "slash 输出不定稿（不落盘）"
         );
-        let joined: Vec<String> = chat
-            .doc
-            .rows
-            .iter()
-            .map(|r| r.line.plain_text())
-            .collect();
+        let joined: Vec<String> = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
         assert!(joined.iter().any(|l| l.contains("/model")), "{joined:?}");
 
         // After the TTL, a tick clears it: the transient hint disappears.
-        chat.slash_at = Some(std::time::Instant::now() - SLASH_OUTPUT_TTL - std::time::Duration::from_millis(1));
+        chat.slash_at = Some(
+            std::time::Instant::now() - SLASH_OUTPUT_TTL - std::time::Duration::from_millis(1),
+        );
         chat.tick();
         assert!(chat.slash_lines.is_empty(), "超时后 slash 输出消失");
         assert!(chat.slash_at.is_none());
@@ -7561,7 +7562,8 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(
-            chat.messages[0].text, "✦ guide",
+            chat.messages[0].text,
+            "✦ guide",
             "只提交 ✦ 标记: {}",
             &chat.messages[0].text[..chat.messages[0].text.len().min(80)]
         );
@@ -7589,7 +7591,6 @@ mod tests {
         assert!(chat.messages.is_empty(), "未知命令不启动回合");
     }
 
-
     /// G12 TTL grading: success hints expire after SLASH_OUTPUT_TTL, error/usage rows
     /// after SLASH_OUTPUT_ERROR_TTL, and error rows clear on the next input.
     #[test]
@@ -7601,13 +7602,19 @@ mod tests {
         assert_eq!(chat.slash_error_lines.len(), 1);
 
         // Past the success TTL but inside the error TTL: only the success hint expires.
-        chat.slash_at = Some(std::time::Instant::now() - SLASH_OUTPUT_TTL - std::time::Duration::from_millis(1));
+        chat.slash_at = Some(
+            std::time::Instant::now() - SLASH_OUTPUT_TTL - std::time::Duration::from_millis(1),
+        );
         chat.tick();
         assert!(chat.slash_lines.is_empty(), "成功行 2s 过期");
         assert_eq!(chat.slash_error_lines.len(), 1, "错误行未到期");
 
         // Past the error TTL: both gone.
-        chat.slash_error_at = Some(std::time::Instant::now() - SLASH_OUTPUT_ERROR_TTL - std::time::Duration::from_millis(1));
+        chat.slash_error_at = Some(
+            std::time::Instant::now()
+                - SLASH_OUTPUT_ERROR_TTL
+                - std::time::Duration::from_millis(1),
+        );
         chat.tick();
         assert!(chat.slash_error_lines.is_empty(), "错误行 8s 过期");
 
@@ -7682,13 +7689,19 @@ mod tests {
         chat.submit();
         let out = chat.slash_lines.join("\n");
         assert!(!out.contains("未找到 provider"), "{out}");
-        assert!(!out.contains("需要 API key"), "codex 是 oauth 型 preset: {out}");
+        assert!(
+            !out.contains("需要 API key"),
+            "codex 是 oauth 型 preset: {out}"
+        );
         // opencode-go 是 apiKey 型 preset → 无 --manual 时给 key 引导。
         let mut chat = test_chat_home(tmp.join("home2"));
         chat.input = "/provider login opencode-go".to_string();
         chat.submit();
         let out = chat.slash_lines.join("\n");
-        assert!(out.contains("需要 API key"), "apiKey 型 preset 引导粘贴 key: {out}");
+        assert!(
+            out.contains("需要 API key"),
+            "apiKey 型 preset 引导粘贴 key: {out}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -7754,7 +7767,10 @@ mod tests {
         chat.submit();
         let out = chat.slash_lines.join("\n");
         assert!(out.contains("✓ provider 已切换: codex"), "{out}");
-        assert!(out.contains("未登录：/provider login codex"), "未登录引导: {out}");
+        assert!(
+            out.contains("未登录：/provider login codex"),
+            "未登录引导: {out}"
+        );
 
         chat.input = "/provider".to_string();
         chat.submit();
@@ -7785,7 +7801,10 @@ mod tests {
     fn auth_error_hint_appends_login_guidance() {
         let base = "API error: HTTP 401: invalid token".to_string();
         let hinted = auth_hint_for(true, "codex", "AUTH_REQUIRED", base.clone());
-        assert!(hinted.contains("/provider login codex"), "oauth 401 引导带 provider 名: {hinted}");
+        assert!(
+            hinted.contains("/provider login codex"),
+            "oauth 401 引导带 provider 名: {hinted}"
+        );
 
         // 非 oauth provider 的 401：不加 login 引导（apiKey 失效提示检查 key 即可）。
         let api_key_msg = auth_hint_for(false, "deepseek", "AUTH_REQUIRED", base.clone());
@@ -7800,12 +7819,20 @@ mod tests {
         );
 
         // 403 → 模型/订阅提示。
-        let denied = auth_hint_for(false, "deepseek", "PERMISSION_DENIED", "API error: HTTP 403: quota".into());
+        let denied = auth_hint_for(
+            false,
+            "deepseek",
+            "PERMISSION_DENIED",
+            "API error: HTTP 403: quota".into(),
+        );
         assert!(denied.contains("/model"), "403 引导 /model: {denied}");
 
         // 无关错误码原样透传。
         let rate = "API error: HTTP 429: rate limited".to_string();
-        assert_eq!(auth_hint_for(true, "codex", "RATE_LIMITED", rate.clone()), rate);
+        assert_eq!(
+            auth_hint_for(true, "codex", "RATE_LIMITED", rate.clone()),
+            rate
+        );
     }
 
     #[test]
@@ -7834,7 +7861,7 @@ mod tests {
                 supports_images: None,
                 protocol: None,
                 oauth: None,
-                },
+            },
         )]);
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::new("sk-main".into(), "https://main.example".into());
@@ -7852,7 +7879,7 @@ mod tests {
                 supports_images: None,
                 protocol: None,
                 oauth: None,
-                },
+            },
         );
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::from_settings(&settings).unwrap();
@@ -7869,7 +7896,11 @@ mod tests {
         assert_eq!(menu.current, Some(0), "● 标当前 default");
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
         assert!(chat.provider_menu.is_none(), "Esc 关闭选择器");
-        assert_eq!(*chat.session.runtime.provider.borrow(), "default", "Esc 不改");
+        assert_eq!(
+            *chat.session.runtime.provider.borrow(),
+            "default",
+            "Esc 不改"
+        );
 
         // Enter 确认：切换 + 持久化（带参快速路径等价）。
         chat.input = "/provider".to_string();
@@ -8030,8 +8061,7 @@ mod tests {
                     },
                 )]),
                 Default::default(),
-            ),
-        ));
+            )));
         chat.input = "/mcp".to_string();
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
@@ -8085,8 +8115,7 @@ mod tests {
                     },
                 )]),
                 Default::default(),
-            ),
-        ));
+            )));
         chat.input = "/mcp reconnect nope".to_string();
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
@@ -8165,10 +8194,16 @@ mod tests {
         let arms: HashSet<&str> = dispatch.iter().map(|(a, _)| *a).collect();
         let primaries: HashSet<&str> = dispatch.iter().map(|(_, p)| *p).collect();
         for name in &table {
-            assert!(arms.contains(name), "表内命令 /{name} 缺少 run_slash 分派臂");
+            assert!(
+                arms.contains(name),
+                "表内命令 /{name} 缺少 run_slash 分派臂"
+            );
         }
         for p in &primaries {
-            assert!(table.contains(p), "分派臂主名 /{p} 不在 SLASH_COMMANDS 表内");
+            assert!(
+                table.contains(p),
+                "分派臂主名 /{p} 不在 SLASH_COMMANDS 表内"
+            );
         }
     }
 
@@ -8222,11 +8257,7 @@ mod tests {
         // Overlong descriptions are truncated (MAX_LISTING_DESC_CHARS):
         // a NoWrap overlong row would push the canvas past the terminal width → stale diff residue.
         let long = "x".repeat(400);
-        std::fs::write(
-            &skill,
-            format!("---\ndescription: {long}\n---\nbody\n"),
-        )
-        .unwrap();
+        std::fs::write(&skill, format!("---\ndescription: {long}\n---\nbody\n")).unwrap();
         chat.input = "/p".to_string();
         chat.update_slash_suggestions();
         let desc = chat
@@ -8383,8 +8414,7 @@ mod tests {
     /// （回归：open_model_models 曾把 providers 重建为单元素，Esc 后列表丢失）。
     #[tokio::test]
     async fn model_menu_esc_back_keeps_provider_list() {
-        let home =
-            std::env::temp_dir().join(format!("bingo-model-esc-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("bingo-model-esc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let mut chat = test_chat_home(home.clone());
         let mut settings = crate::settings::Settings {
@@ -8403,7 +8433,7 @@ mod tests {
                     supports_images: None,
                     protocol: None,
                     oauth: None,
-                    },
+                },
             );
         }
         Arc::get_mut(&mut chat.session).unwrap().client =
@@ -8412,7 +8442,11 @@ mod tests {
         chat.input = "/model".to_string();
         chat.submit();
         let providers = chat.model_menu.as_ref().unwrap().providers.clone();
-        assert_eq!(providers, vec!["default", "codex", "deepseek", "local", "opencode-go"], "presets 进入 /model 一级");
+        assert_eq!(
+            providers,
+            vec!["default", "codex", "deepseek", "local", "opencode-go"],
+            "presets 进入 /model 一级"
+        );
         assert_eq!(chat.model_menu.as_ref().unwrap().provider_selected, 0);
 
         // ↓ 两次选中 local → Enter 进二级（loading）→ Esc 回一级。
@@ -8420,10 +8454,17 @@ mod tests {
         chat.on_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(chat.model_menu.as_ref().unwrap().provider_selected, 2);
         chat.on_key(KeyCode::Enter, KeyModifiers::empty());
-        assert!(chat.model_menu.as_ref().unwrap().models.is_some(), "进入二级");
+        assert!(
+            chat.model_menu.as_ref().unwrap().models.is_some(),
+            "进入二级"
+        );
         chat.on_key(KeyCode::Esc, KeyModifiers::empty());
         let menu = chat.model_menu.as_ref().expect("一级仍在");
-        assert_eq!(menu.providers, vec!["default", "codex", "deepseek", "local", "opencode-go"], "列表保留");
+        assert_eq!(
+            menu.providers,
+            vec!["default", "codex", "deepseek", "local", "opencode-go"],
+            "列表保留"
+        );
         assert_eq!(menu.provider_selected, 2, "选中保留");
         assert!(menu.models.is_none(), "回到一级");
 
@@ -8434,7 +8475,8 @@ mod tests {
     /// provider + model 一并写入 `.bingo/settings.json`（重启恢复同端点模型）。
     #[tokio::test]
     async fn provider_switch_persists_provider_and_model_menu_persists_both() {
-        let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-provpersist", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-slash-{}-provpersist", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let mut chat = test_chat_home(tmp.join("home"));
         chat.cwd = tmp.display().to_string();
@@ -8450,7 +8492,7 @@ mod tests {
                 supports_images: None,
                 protocol: None,
                 oauth: None,
-                },
+            },
         );
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::from_settings(&settings).unwrap();
@@ -8559,8 +8601,7 @@ mod tests {
     /// /think 无参进入等级选择器：预选当前档位，↑↓ 移动，Enter 确认，Esc 退出。
     #[test]
     fn think_menu_navigates_and_confirms() {
-        let home =
-            std::env::temp_dir().join(format!("bingo-think-menu-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("bingo-think-menu-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let mut chat = test_chat_home(home.clone());
         let _ = chat.session.runtime.thinking_tx.send(Some("high".into()));
@@ -8644,7 +8685,10 @@ mod tests {
             "s 切换 runtime"
         );
         let out = chat.slash_lines.join("\n");
-        assert!(out.contains("（仅本次会话）"), "s 输出标注仅本次会话: {out}");
+        assert!(
+            out.contains("（仅本次会话）"),
+            "s 输出标注仅本次会话: {out}"
+        );
         assert!(
             !home.join(".bingo/settings.json").exists(),
             "s 不写 settings.json"
@@ -8745,9 +8789,15 @@ mod tests {
             expanded: false,
             last_hint: None,
         };
-        assert_eq!(collapse_summary(&g, false), "Searched for 1 pattern, read 3 files");
+        assert_eq!(
+            collapse_summary(&g, false),
+            "Searched for 1 pattern, read 3 files"
+        );
         g.search = 2;
-        assert_eq!(collapse_summary(&g, false), "Searched for 2 patterns, read 3 files");
+        assert_eq!(
+            collapse_summary(&g, false),
+            "Searched for 2 patterns, read 3 files"
+        );
         g.active = true;
         assert_eq!(
             collapse_summary(&g, true),
@@ -8780,7 +8830,10 @@ mod tests {
             expanded: false,
             last_hint: None,
         };
-        assert_eq!(collapse_summary(&g, false), "Read 2 files, listed 1 directory");
+        assert_eq!(
+            collapse_summary(&g, false),
+            "Read 2 files, listed 1 directory"
+        );
     }
 
     #[test]
@@ -8789,8 +8842,14 @@ mod tests {
             result_summary("Read", "line1\nline2\n\nline3"),
             Some("Read 3 lines".to_string())
         );
-        assert_eq!(result_summary("Grep", "a:1:x\nb:2:y"), Some("Found 2 matches".to_string()));
-        assert_eq!(result_summary("Glob", "a.rs\nb.rs"), Some("Found 2 files".to_string()));
+        assert_eq!(
+            result_summary("Grep", "a:1:x\nb:2:y"),
+            Some("Found 2 matches".to_string())
+        );
+        assert_eq!(
+            result_summary("Glob", "a.rs\nb.rs"),
+            Some("Found 2 files".to_string())
+        );
         assert_eq!(result_summary("Bash", "out"), None);
     }
 
@@ -8804,7 +8863,9 @@ mod tests {
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
         for path in ["a.md", "b.md"] {
-            let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+            let _ = chat.events.send(UiEvent::ToolStart {
+                name: "Read".into(),
+            });
             chat.drain_events();
             let _ = chat.events.send(UiEvent::ToolReady {
                 name: "Read".into(),
@@ -8814,9 +8875,15 @@ mod tests {
             chat.drain_events();
         }
         let joined = visible(&mut chat, 120, 20);
-        assert!(joined.contains("Reading 2 files"), "active summary: {joined}");
+        assert!(
+            joined.contains("Reading 2 files"),
+            "active summary: {joined}"
+        );
         assert!(joined.contains("ctrl+o to expand"), "fold hint: {joined}");
-        assert!(!joined.contains("a.md"), "paths hidden when collapsed: {joined}");
+        assert!(
+            !joined.contains("a.md"),
+            "paths hidden when collapsed: {joined}"
+        );
     }
 
     #[test]
@@ -8832,29 +8899,45 @@ mod tests {
     fn ctrl_o_expands_group_to_individual_tools() {
         let mut chat = test_chat();
         start_group(&mut chat);
-        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-            name: "Read".into(),
-            summary: "Read a.md".into(),
-            output: "l1\nl2\nl3".into(),
-            is_error: false,
-            duration_ms: 0,
-            diff: None,
-        }));
-        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-            name: "Read".into(),
-            summary: "Read b.md".into(),
-            output: "x\ny".into(),
-            is_error: false,
-            duration_ms: 0,
-            diff: None,
-        }));
+        let _ = chat
+            .events
+            .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "Read".into(),
+                summary: "Read a.md".into(),
+                output: "l1\nl2\nl3".into(),
+                is_error: false,
+                duration_ms: 0,
+                diff: None,
+            }));
+        let _ = chat
+            .events
+            .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "Read".into(),
+                summary: "Read b.md".into(),
+                output: "x\ny".into(),
+                is_error: false,
+                duration_ms: 0,
+                diff: None,
+            }));
         chat.drain_events();
         assert!(chat.toggle_transcript());
         let joined = visible(&mut chat, 120, 30);
-        assert!(joined.contains("Read a.md"), "expanded first tool: {joined}");
-        assert!(joined.contains("Read b.md"), "expanded second tool: {joined}");
-        assert!(joined.contains("Read 3 lines"), "result summary row: {joined}");
-        assert!(!joined.contains("Reading 2 files"), "no collapse line: {joined}");
+        assert!(
+            joined.contains("Read a.md"),
+            "expanded first tool: {joined}"
+        );
+        assert!(
+            joined.contains("Read b.md"),
+            "expanded second tool: {joined}"
+        );
+        assert!(
+            joined.contains("Read 3 lines"),
+            "result summary row: {joined}"
+        );
+        assert!(
+            !joined.contains("Reading 2 files"),
+            "no collapse line: {joined}"
+        );
     }
 
     #[test]
@@ -8862,14 +8945,18 @@ mod tests {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Read".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Read".into(),
             input: json!({"file_path": "a.md"}),
             standalone: false,
         });
-        let _ = chat.events.send(UiEvent::ToolStart { name: "WebSearch".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "WebSearch".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "WebSearch".into(),
@@ -8879,8 +8966,14 @@ mod tests {
         chat.drain_events();
         let joined = visible(&mut chat, 120, 20);
         assert!(joined.contains("Read 1 file"), "group rendered: {joined}");
-        assert!(joined.contains("WebSearch"), "websearch independent: {joined}");
-        assert!(!joined.contains("Reading"), "group closed by websearch: {joined}");
+        assert!(
+            joined.contains("WebSearch"),
+            "websearch independent: {joined}"
+        );
+        assert!(
+            !joined.contains("Reading"),
+            "group closed by websearch: {joined}"
+        );
     }
 
     #[test]
@@ -8890,7 +8983,9 @@ mod tests {
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
         chat.apply_turn_start();
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Read".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Read".into(),
@@ -8909,7 +9004,9 @@ mod tests {
         chat.stream_msg = Some(0);
         let _ = chat.events.send(UiEvent::TextDelta("let me read".into()));
         chat.drain_events();
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Read".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Read".into(),
@@ -8928,15 +9025,27 @@ mod tests {
         let mut chat = test_chat();
         start_group_done(&mut chat);
         finish_turn(&mut chat);
-        assert!(visible(&mut chat, 120, 40).contains("Read 2 files"), "collapsed first");
+        assert!(
+            visible(&mut chat, 120, 40).contains("Read 2 files"),
+            "collapsed first"
+        );
         assert!(chat.toggle_transcript());
         let expanded = visible(&mut chat, 120, 40);
         assert!(expanded.contains("Read a.md"), "expanded: {expanded}");
-        assert!(!expanded.contains("Read 2 files"), "no collapse line: {expanded}");
+        assert!(
+            !expanded.contains("Read 2 files"),
+            "no collapse line: {expanded}"
+        );
         assert!(chat.toggle_transcript());
         let collapsed = visible(&mut chat, 120, 40);
-        assert!(collapsed.contains("Read 2 files"), "collapsed again: {collapsed}");
-        assert!(!collapsed.contains("Read a.md"), "tools hidden: {collapsed}");
+        assert!(
+            collapsed.contains("Read 2 files"),
+            "collapsed again: {collapsed}"
+        );
+        assert!(
+            !collapsed.contains("Read a.md"),
+            "tools hidden: {collapsed}"
+        );
     }
 
     #[test]
@@ -8959,7 +9068,10 @@ mod tests {
         // ctrl+o collapses back
         assert!(chat.toggle_transcript());
         let collapsed = visible(&mut chat, 120, 40);
-        assert!(collapsed.contains("Read 2 files"), "ctrl+o collapsed: {collapsed}");
+        assert!(
+            collapsed.contains("Read 2 files"),
+            "ctrl+o collapsed: {collapsed}"
+        );
     }
 
     #[test]
@@ -8967,7 +9079,9 @@ mod tests {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Skill".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Skill".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Skill".into(),
@@ -8981,14 +9095,16 @@ mod tests {
             "running header shows input summary: {joined}"
         );
         // After completion, duration uses the real value
-        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-            name: "Skill".into(),
-            summary: "pdf doc.md".into(),
-            output: "✦ pdf — read /tmp/skills/SKILL.md".into(),
-            is_error: false,
-            diff: None,
-            duration_ms: 3210,
-        }));
+        let _ = chat
+            .events
+            .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "Skill".into(),
+                summary: "pdf doc.md".into(),
+                output: "✦ pdf — read /tmp/skills/SKILL.md".into(),
+                is_error: false,
+                diff: None,
+                duration_ms: 3210,
+            }));
         chat.drain_events();
         let joined = visible(&mut chat, 120, 30);
         // CC two-line form: elapsed time merges into the result row, and only slow commands (>2s) show it.
@@ -9011,13 +9127,15 @@ mod tests {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Agent".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Agent".into(),
+        });
         chat.drain_events();
         assert!(
-            chat.messages[0].activities.iter().all(|a| !matches!(
-                a.kind,
-                ActivityKind::Tool(_)
-            )),
+            chat.messages[0]
+                .activities
+                .iter()
+                .all(|a| !matches!(a.kind, ActivityKind::Tool(_))),
             "Agent 不创建 Tool 活动: {:?}",
             chat.messages[0]
                 .activities
@@ -9030,7 +9148,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 列出桌面目录内容".into(),
             kind: crate::watch::WatchKind::Agent,
-            status: WatchStatus::Running,
+            status: WatchState::Running,
             detail: Some("已产出 0 字符".into()),
             duration_ms: 0,
             payload: None,
@@ -9048,7 +9166,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 列出桌面目录内容".into(),
             kind: crate::watch::WatchKind::Agent,
-            status: WatchStatus::Running,
+            status: WatchState::Running,
             detail: Some("已产出 43 字符".into()),
             duration_ms: 0,
             payload: None,
@@ -9079,7 +9197,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 长任务".into(),
             kind: crate::watch::WatchKind::Agent,
-            status: WatchStatus::Running,
+            status: WatchState::Running,
             detail: None,
             duration_ms: 0,
             payload: None,
@@ -9090,7 +9208,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 长任务".into(),
             kind: crate::watch::WatchKind::Agent,
-            status: WatchStatus::Done,
+            status: WatchState::Done,
             detail: Some("完成".into()),
             duration_ms: 30000,
             payload: Some(serde_json::json!("结果")),
@@ -9112,7 +9230,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "tail -f app.log".into(),
             kind: crate::watch::WatchKind::Command,
-            status: WatchStatus::Running,
+            status: WatchState::Running,
             detail: None,
             duration_ms: 0,
             payload: None,
@@ -9122,7 +9240,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "tail -f app.log".into(),
             kind: crate::watch::WatchKind::Command,
-            status: WatchStatus::Running,
+            status: WatchState::Running,
             detail: Some("发现 1 个错误".into()),
             duration_ms: 12000,
             payload: None,
@@ -9163,7 +9281,12 @@ mod tests {
         chat.busy = true;
         let watch = chat.session.watch.clone();
         let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new());
-        watch.set_state(id, crate::watch::WatchState::Done, Some("完成".into()), None);
+        watch.set_state(
+            id,
+            crate::watch::WatchState::Done,
+            Some("完成".into()),
+            None,
+        );
         assert!(watch.has_wake_notifications(), "notification queued");
         chat.drain_events();
         assert!(chat.busy, "still busy, no auto turn mid-turn");
@@ -9185,7 +9308,9 @@ mod tests {
             let _ = chat.events.send(UiEvent::TextDelta(t));
             chat.drain_events();
         }
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Bash".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Bash".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Bash".into(),
@@ -9196,30 +9321,34 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 核查".into(),
             kind: crate::watch::WatchKind::Agent,
-            status: WatchStatus::Running,
+            status: WatchState::Running,
             detail: Some("已产出 100 字符".into()),
             duration_ms: 5000,
             payload: None,
             signal: None,
         });
         chat.drain_events();
-        let _ = chat.events.send(UiEvent::TextDelta("后续正文，还有中文，继续。".into()));
+        let _ = chat
+            .events
+            .send(UiEvent::TextDelta("后续正文，还有中文，继续。".into()));
         chat.drain_events();
-        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-            name: "Bash".into(),
-            summary: "$ cargo clippy".into(),
-            output: "ok".into(),
-            is_error: false,
-            diff: None,
-            duration_ms: 3000,
-        }));
+        let _ = chat
+            .events
+            .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "Bash".into(),
+                summary: "$ cargo clippy".into(),
+                output: "ok".into(),
+                is_error: false,
+                diff: None,
+                duration_ms: 3000,
+            }));
         chat.drain_events();
         let _ = chat.events.send(UiEvent::TurnEnd);
         chat.drain_events();
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 核查".into(),
             kind: crate::watch::WatchKind::Agent,
-            status: WatchStatus::Done,
+            status: WatchState::Done,
             detail: Some("完成".into()),
             duration_ms: 30000,
             payload: None,
@@ -9238,7 +9367,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 探索".into(),
             kind: crate::watch::WatchKind::Agent,
-            status: WatchStatus::Running,
+            status: WatchState::Running,
             detail: None,
             duration_ms: 0,
             payload: None,
@@ -9253,7 +9382,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "Agent: 探索".into(),
             kind: crate::watch::WatchKind::Agent,
-            status: WatchStatus::Done,
+            status: WatchState::Done,
             detail: Some("完成".into()),
             duration_ms: 40000,
             payload: None,
@@ -9266,7 +9395,7 @@ mod tests {
             ActivityKind::Watch(w) => w,
             _ => unreachable!(),
         };
-        assert_eq!(w.status, WatchStatus::Done, "in-place status change");
+        assert_eq!(w.status, WatchState::Done, "in-place status change");
     }
 
     #[test]
@@ -9277,7 +9406,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "watch ls".into(),
             kind: crate::watch::WatchKind::Command,
-            status: WatchStatus::Idle,
+            status: WatchState::Idle,
             detail: Some("第 1 轮".into()),
             duration_ms: 5000,
             payload: None,
@@ -9296,7 +9425,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "watch -n 2 ls".into(),
             kind: crate::watch::WatchKind::Command,
-            status: WatchStatus::Running,
+            status: WatchState::Running,
             detail: None,
             duration_ms: 0,
             payload: None,
@@ -9307,7 +9436,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "watch -n 2 ls".into(),
             kind: crate::watch::WatchKind::Command,
-            status: WatchStatus::Idle,
+            status: WatchState::Idle,
             detail: Some("第 2 轮".into()),
             duration_ms: 4000,
             payload: None,
@@ -9316,7 +9445,7 @@ mod tests {
         let _ = chat.events.send(UiEvent::WatchEvent {
             label: "watch -n 2 ls".into(),
             kind: crate::watch::WatchKind::Command,
-            status: WatchStatus::Done,
+            status: WatchState::Done,
             detail: None,
             duration_ms: 9000,
             payload: Some(serde_json::json!("done output")),
@@ -9356,21 +9485,29 @@ mod tests {
         assert_eq!(g.bash, 2);
         assert_eq!(g.read_ops, 0);
         assert_eq!(g.read_paths, vec!["a.md".to_string()]);
-        assert_eq!(collapse_summary(g, false), "Read 1 file, ran 2 bash commands");
-        assert_eq!(collapse_summary(g, true), "Reading 1 file, running 2 bash commands…");
+        assert_eq!(
+            collapse_summary(g, false),
+            "Read 1 file, ran 2 bash commands"
+        );
+        assert_eq!(
+            collapse_summary(g, true),
+            "Reading 1 file, running 2 bash commands…"
+        );
         for (summary, out) in [
             ("Bash $ cargo test", "ok"),
             ("Read a.md", "l1"),
             ("Bash $ npm run build", "done"),
         ] {
-            let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-                name: summary.split(' ').next().unwrap().into(),
-                summary: summary.into(),
-                output: out.into(),
-                is_error: false,
-                diff: None,
-                duration_ms: 1,
-            }));
+            let _ = chat
+                .events
+                .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                    name: summary.split(' ').next().unwrap().into(),
+                    summary: summary.into(),
+                    output: out.into(),
+                    is_error: false,
+                    diff: None,
+                    duration_ms: 1,
+                }));
             chat.drain_events();
         }
         let joined = visible(&mut chat, 120, 30);
@@ -9385,7 +9522,9 @@ mod tests {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Read".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Read".into(),
@@ -9398,18 +9537,23 @@ mod tests {
             joined.contains("⎿") && joined.contains("package.json"),
             "running group shows hint: {joined}"
         );
-        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-            name: "Read".into(),
-            summary: "Read package.json".into(),
-            output: "l1".into(),
-            is_error: false,
-            diff: None,
-            duration_ms: 3,
-        }));
+        let _ = chat
+            .events
+            .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "Read".into(),
+                summary: "Read package.json".into(),
+                output: "l1".into(),
+                is_error: false,
+                diff: None,
+                duration_ms: 3,
+            }));
         chat.drain_events();
         let joined = visible(&mut chat, 120, 30);
         assert!(joined.contains("Read 1 file"), "past tense: {joined}");
-        assert!(!joined.contains("⎿"), "hint hidden when group done: {joined}");
+        assert!(
+            !joined.contains("⎿"),
+            "hint hidden when group done: {joined}"
+        );
     }
 
     /// Collapse groups are bounded by text: neither RoundEnd (model rounds) nor thinking splits them,
@@ -9419,7 +9563,9 @@ mod tests {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Grep".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Grep".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Grep".into(),
@@ -9432,7 +9578,9 @@ mod tests {
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ThinkingDelta("hmm".into()));
         chat.drain_events();
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Grep".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Grep".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Grep".into(),
@@ -9443,7 +9591,9 @@ mod tests {
         assert_eq!(chat.messages[0].groups.len(), 1, "round 2 joins same group");
         let idx = chat.messages[0].activities.len() - 1;
         assert_eq!(chat.messages[0].group_of[idx], Some(0));
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Read".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Read".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Read".into(),
@@ -9451,11 +9601,17 @@ mod tests {
             standalone: false,
         });
         chat.drain_events();
-        assert_eq!(chat.messages[0].groups.len(), 1, "same-group Read joins group");
+        assert_eq!(
+            chat.messages[0].groups.len(),
+            1,
+            "same-group Read joins group"
+        );
         // Text appears: the group closes and later tools open a new one.
         let _ = chat.events.send(UiEvent::TextDelta("结论…".into()));
         chat.drain_events();
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Grep".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Grep".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Grep".into(),
@@ -9472,24 +9628,35 @@ mod tests {
     fn expand_running_then_complete_then_collapse_back() {
         let mut chat = test_chat();
         start_group(&mut chat);
-        assert!(visible(&mut chat, 120, 40).contains("Reading 2 files"), "running fold");
+        assert!(
+            visible(&mut chat, 120, 40).contains("Reading 2 files"),
+            "running fold"
+        );
         assert!(chat.toggle_transcript());
-        assert!(!visible(&mut chat, 120, 40).contains("Reading 2 files"), "expanded");
+        assert!(
+            !visible(&mut chat, 120, 40).contains("Reading 2 files"),
+            "expanded"
+        );
         for (summary, out) in [("Read a.md", "l1\nl2\nl3"), ("Read b.md", "x\ny")] {
-            let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-                name: "Read".into(),
-                summary: summary.into(),
-                output: out.into(),
-                is_error: false,
-                duration_ms: 0,
-                diff: None,
-            }));
+            let _ = chat
+                .events
+                .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                    name: "Read".into(),
+                    summary: summary.into(),
+                    output: out.into(),
+                    is_error: false,
+                    duration_ms: 0,
+                    diff: None,
+                }));
         }
         chat.drain_events();
         finish_turn(&mut chat);
         assert!(chat.toggle_transcript());
         let collapsed = visible(&mut chat, 120, 40);
-        assert!(collapsed.contains("Read 2 files"), "collapsed after turn: {collapsed}");
+        assert!(
+            collapsed.contains("Read 2 files"),
+            "collapsed after turn: {collapsed}"
+        );
     }
 
     #[test]
@@ -9516,7 +9683,10 @@ mod tests {
         assert!(head_row >= fold_row, "head row after fold row");
         assert!(chat.doc_click(head_row), "click head collapses");
         let collapsed = visible(&mut chat, 120, 40);
-        assert!(collapsed.contains("Reading 2 files"), "collapsed again: {collapsed}");
+        assert!(
+            collapsed.contains("Reading 2 files"),
+            "collapsed again: {collapsed}"
+        );
     }
 
     #[test]
@@ -9525,20 +9695,25 @@ mod tests {
         start_group(&mut chat);
         chat.stream_msg = Some(0);
         for (summary, out) in [("Read a.md", "l1"), ("Read b.md", "x")] {
-            let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-                name: "Read".into(),
-                summary: summary.into(),
-                output: out.into(),
-                is_error: false,
-                duration_ms: 0,
-                diff: None,
-            }));
+            let _ = chat
+                .events
+                .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                    name: "Read".into(),
+                    summary: summary.into(),
+                    output: out.into(),
+                    is_error: false,
+                    duration_ms: 0,
+                    diff: None,
+                }));
         }
         chat.drain_events();
         chat.stream_msg = None;
         for _ in 0..3 {
             assert!(chat.toggle_transcript());
-            assert!(!visible(&mut chat, 120, 40).contains("Read 2 files"), "expanded state");
+            assert!(
+                !visible(&mut chat, 120, 40).contains("Read 2 files"),
+                "expanded state"
+            );
             assert!(chat.toggle_transcript());
             assert!(
                 visible(&mut chat, 120, 40).contains("Read 2 files"),
@@ -9552,7 +9727,11 @@ mod tests {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::User, "hello"));
         chat.build_rows(100);
-        let row = chat.doc.rows.iter().find(|r| r.line.plain_text().starts_with("❯"));
+        let row = chat
+            .doc
+            .rows
+            .iter()
+            .find(|r| r.line.plain_text().starts_with("❯"));
         assert!(row.is_some(), "user row rendered");
         assert_eq!(row.unwrap().bg, Some(chat.theme.user_message_bg));
     }
@@ -9606,7 +9785,9 @@ mod tests {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
-        let _ = chat.events.send(UiEvent::ToolStart { name: "Bash".into() });
+        let _ = chat.events.send(UiEvent::ToolStart {
+            name: "Bash".into(),
+        });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
             name: "Bash".into(),
@@ -9633,10 +9814,7 @@ mod tests {
         chat.messages.push(msg(Role::Assistant, "回复正文"));
         chat.build_rows(100);
         assert_eq!(chat.doc.settled, chat.doc.rows.len(), "空闲全部定稿");
-        assert_eq!(
-            settled_segments(&chat), 3,
-            "欢迎卡 + 2 条消息 = 3 段"
-        );
+        assert_eq!(settled_segments(&chat), 3, "欢迎卡 + 2 条消息 = 3 段");
         chat.advance_flushed();
         assert_eq!(chat.flushed_segments, 3);
         assert_eq!(chat.tail_start, chat.doc.rows.len());
@@ -9645,19 +9823,17 @@ mod tests {
         chat.build_rows(40);
         assert_eq!(chat.tail_start, 0, "重建后尾部从头算");
         assert!(chat.doc.rows.is_empty(), "已落盘内容不重复构建");
-        let text: String = chat
-            .doc
-            .rows
-            .iter()
-            .map(|r| r.line.plain_text())
-            .collect();
+        let text: String = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
         assert!(!text.contains("第一条消息"), "不重复打印");
 
         // A new message only builds its own segment.
         chat.messages.push(msg(Role::User, "第二条"));
         chat.build_rows(40);
         assert!(
-            chat.doc.rows.iter().any(|r| r.line.plain_text().contains("第二条")),
+            chat.doc
+                .rows
+                .iter()
+                .any(|r| r.line.plain_text().contains("第二条")),
             "新消息进入文档"
         );
         assert_eq!(settled_segments(&chat), 1, "只新增 1 段");
@@ -9703,7 +9879,10 @@ mod tests {
         assert!(chat.dirty, "复位后重建");
         chat.build_rows(80);
         assert!(
-            chat.doc.rows.iter().any(|r| r.line.plain_text().contains("bingo")),
+            chat.doc
+                .rows
+                .iter()
+                .any(|r| r.line.plain_text().contains("bingo")),
             "欢迎卡重新出现"
         );
     }
@@ -9807,7 +9986,10 @@ mod tests {
         chat.build_rows(80);
         assert_eq!(chat.doc.settled, chat.doc.rows.len(), "回合结束后全部定稿");
         chat.advance_flushed();
-        assert_eq!(chat.flushed_segments, 4, "欢迎卡 + hi + 流式 + 回答全部落盘");
+        assert_eq!(
+            chat.flushed_segments, 4,
+            "欢迎卡 + hi + 流式 + 回答全部落盘"
+        );
     }
 
     /// 错误路径不经过 TurnEnd（start_turn 的 `Err(e)` 只发 UiEvent::Error）：
@@ -9890,7 +10072,12 @@ mod tests {
         chat.messages.push(msg(Role::User, "请解释一下这段代码"));
         flush_frame(&mut chat, 100, &mut printed);
         chat.handle(UiEvent::TurnStart);
-        for chunk in ["第一段文字。\n\n", "## 标题\n\n", "- 列表项一\n", "- 列表项二\n"] {
+        for chunk in [
+            "第一段文字。\n\n",
+            "## 标题\n\n",
+            "- 列表项一\n",
+            "- 列表项二\n",
+        ] {
             chat.handle(UiEvent::TextDelta(chunk.into()));
             flush_frame(&mut chat, 100, &mut printed);
         }
@@ -9956,14 +10143,16 @@ mod tests {
         // Historical messages with collapse groups → everything expands before the replay.
         chat.dump_transcript = false;
         start_group(&mut chat);
-        let _ = chat.events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-            name: "Read".into(),
-            summary: "Read a.md".into(),
-            output: "l1\nl2\nl3".into(),
-            is_error: false,
-            duration_ms: 0,
-            diff: None,
-        }));
+        let _ = chat
+            .events
+            .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "Read".into(),
+                summary: "Read a.md".into(),
+                output: "l1\nl2\nl3".into(),
+                is_error: false,
+                duration_ms: 0,
+                diff: None,
+            }));
         chat.drain_events();
         assert!(chat.expand_transcript());
         assert!(chat.dump_transcript);
@@ -9980,7 +10169,10 @@ mod tests {
         assert!(chat.transcript_fully_expanded());
         assert!(chat.collapse_transcript());
         assert!(
-            chat.messages.iter().flat_map(|m| &m.groups).all(|g| !g.expanded),
+            chat.messages
+                .iter()
+                .flat_map(|m| &m.groups)
+                .all(|g| !g.expanded),
             "折叠组全部闭合"
         );
         assert!(!chat.transcript_fully_expanded(), "闭合后回到展开方向");
@@ -10004,6 +10196,24 @@ mod tests {
         chat.dirty = false;
         let _ = chat.events.send(UiEvent::Warning("w".into()));
         assert!(chat.needs_tick(), "有待处理事件需唤醒");
+
+        let mut slash_error = test_chat();
+        slash_error.push_slash_error("未知命令，请输入 /help。".to_string());
+        assert!(
+            slash_error.needs_tick(),
+            "空闲时 slash 错误仍需驱动 tick，才能按错误 TTL 自动消失"
+        );
+        slash_error.slash_error_at = Some(
+            std::time::Instant::now()
+                - SLASH_OUTPUT_ERROR_TTL
+                - std::time::Duration::from_millis(1),
+        );
+        slash_error.tick();
+        assert!(
+            slash_error.slash_error_lines.is_empty(),
+            "错误 TTL 到期后清除"
+        );
+        assert!(!slash_error.needs_tick(), "清除后主机回到真正空闲");
     }
 
     #[test]
@@ -10012,7 +10222,11 @@ mod tests {
         chat.build_rows(100);
         let welcome = chat.doc.settled;
         assert!(welcome > 0, "welcome card rows are settled");
-        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "empty session fully settled");
+        assert_eq!(
+            chat.doc.settled,
+            chat.doc.rows.len(),
+            "empty session fully settled"
+        );
         // Turn start: streaming message + placeholder thinking → must not settle.
         chat.handle(UiEvent::TurnStart);
         chat.build_rows(100);
@@ -10021,12 +10235,19 @@ mod tests {
         // Turn end: the message settles, all rows enter settled.
         chat.handle(UiEvent::TurnEnd);
         chat.build_rows(100);
-        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "all rows settled after turn");
+        assert_eq!(
+            chat.doc.settled,
+            chat.doc.rows.len(),
+            "all rows settled after turn"
+        );
         // Settling is one-way: a second message (streaming) does not move existing boundaries.
         let after_turn = chat.doc.settled;
         chat.handle(UiEvent::TurnStart);
         chat.build_rows(100);
-        assert_eq!(chat.doc.settled, after_turn, "new turn keeps prior settled boundary");
+        assert_eq!(
+            chat.doc.settled, after_turn,
+            "new turn keeps prior settled boundary"
+        );
     }
 
     #[test]
@@ -10039,7 +10260,10 @@ mod tests {
         m.activities.push(tool_activity());
         chat.messages.push(m);
         chat.build_rows(100);
-        assert_eq!(chat.doc.settled, welcome, "running tool keeps message dynamic");
+        assert_eq!(
+            chat.doc.settled, welcome,
+            "running tool keeps message dynamic"
+        );
         // Tool done → settles.
         let a = &mut chat.messages[0].activities[0];
         match &mut a.kind {
@@ -10047,7 +10271,11 @@ mod tests {
             _ => panic!("tool activity expected"),
         }
         chat.build_rows(100);
-        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "settled after tool done");
+        assert_eq!(
+            chat.doc.settled,
+            chat.doc.rows.len(),
+            "settled after tool done"
+        );
     }
 
     #[test]
@@ -10071,7 +10299,11 @@ mod tests {
         chat.pending_ask = None;
         chat.handle(UiEvent::TurnEnd);
         chat.build_rows(100);
-        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "all settled after ask done");
+        assert_eq!(
+            chat.doc.settled,
+            chat.doc.rows.len(),
+            "all settled after ask done"
+        );
     }
 
     #[test]
@@ -10079,7 +10311,11 @@ mod tests {
         let mut chat = test_chat();
         let (tx, _rx) = oneshot::channel();
         chat.pending_ask = Some((
-            PermissionRequest::new("允许执行 Bash", "cargo build", vec!["允许".into(), "拒绝".into()]),
+            PermissionRequest::new(
+                "允许执行 Bash",
+                "cargo build",
+                vec!["允许".into(), "拒绝".into()],
+            ),
             tx,
         ));
         chat.build_rows(100);
@@ -10091,7 +10327,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("允许执行 Bash"), "title: {joined}");
-        assert!(joined.contains("❯ 1. 允许"), "focused first option: {joined}");
+        assert!(
+            joined.contains("❯ 1. 允许"),
+            "focused first option: {joined}"
+        );
         assert!(joined.contains("2. 拒绝"), "option row: {joined}");
         assert!(
             joined.contains("enter to select · ↑/↓ to navigate · esc to cancel"),
@@ -10141,7 +10380,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("❯ 3. Other"), "other focused: {joined}");
-        assert!(joined.contains("enter to submit · esc to cancel"), "input hint: {joined}");
+        assert!(
+            joined.contains("enter to submit · esc to cancel"),
+            "input hint: {joined}"
+        );
         for c in ['s', 'e', 'r', 'd', 'e'] {
             assert!(chat.ask_key(KeyCode::Char(c)), "type {c}");
         }
@@ -10198,7 +10440,10 @@ mod tests {
             .map(|r| r.line.plain_text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("User declined to answer questions"), "{joined}");
+        assert!(
+            joined.contains("User declined to answer questions"),
+            "{joined}"
+        );
     }
 
     #[test]
@@ -10274,7 +10519,8 @@ mod tests {
     #[test]
     fn image_ready_updates_cache_and_invalidates_render_cache() {
         let mut chat = test_chat();
-        chat.reply_cache.insert("x".to_string(), vec![Line::plain("old")]);
+        chat.reply_cache
+            .insert("x".to_string(), vec![Line::plain("old")]);
         let meta = ImageMeta {
             cols: 5,
             rows: 3,
@@ -10294,7 +10540,10 @@ mod tests {
             meta: None,
         });
         assert!(!chat.images.contains_key("a.png"), "失败移除缓存");
-        assert!(chat.warnings.iter().any(|(_, w)| w.contains("a.png")), "警告提示");
+        assert!(
+            chat.warnings.iter().any(|(_, w)| w.contains("a.png")),
+            "警告提示"
+        );
     }
 
     #[test]
@@ -10354,18 +10603,27 @@ mod tests {
             "data:image/png;base64,{}",
             base64::engine::general_purpose::STANDARD.encode(tiny_png())
         );
-        chat.messages.push(msg(Role::Assistant, &format!("![图]({url})")));
+        chat.messages
+            .push(msg(Role::Assistant, &format!("![图]({url})")));
         // Load in flight (the effect of load_message_images).
         chat.images_pending.insert(url.clone());
         chat.build_rows(100);
         assert_eq!(
-            settled_segments(&chat), 1,
+            settled_segments(&chat),
+            1,
             "只有欢迎卡定稿，含在途图片的消息不定稿"
         );
 
         // Load succeeds → the message settles, and flushed rows carry an ImageRef (the block head emits the kitty sequence).
-        let meta = ImageMeta { cols: 4, rows: 2, bytes: tiny_png() };
-        chat.handle(UiEvent::ImageReady { url: url.clone(), meta: Some(meta) });
+        let meta = ImageMeta {
+            cols: 4,
+            rows: 2,
+            bytes: tiny_png(),
+        };
+        chat.handle(UiEvent::ImageReady {
+            url: url.clone(),
+            meta: Some(meta),
+        });
         chat.build_rows(100);
         assert_eq!(settled_segments(&chat), 2, "图片就绪后消息定稿");
         let image_rows: Vec<&Row> = chat
@@ -10383,7 +10641,8 @@ mod tests {
     fn failed_image_load_settles_with_placeholder() {
         let mut chat = test_chat();
         chat.image_cap = Some(ImageCap::default_cells());
-        chat.messages.push(msg(Role::Assistant, "![图](missing.png)"));
+        chat.messages
+            .push(msg(Role::Assistant, "![图](missing.png)"));
         chat.images_pending.insert("missing.png".to_string());
         chat.build_rows(100);
         assert_eq!(settled_segments(&chat), 1, "在途时不定稿");
@@ -10509,12 +10768,14 @@ mod tests {
         chat.record_history("first");
         chat.record_history("second");
         chat.record_history("second");
-        assert_eq!(chat.history.entries(), ["first", "second"], "连续重复只记一条");
-        // Persisted: a new session with the same home + cwd can read it.
-        let reloaded = crate::tui::history::load(
-            &chat.session.home,
-            std::path::Path::new(&chat.cwd),
+        assert_eq!(
+            chat.history.entries(),
+            ["first", "second"],
+            "连续重复只记一条"
         );
+        // Persisted: a new session with the same home + cwd can read it.
+        let reloaded =
+            crate::tui::history::load(&chat.session.home, std::path::Path::new(&chat.cwd));
         assert_eq!(reloaded, vec!["first".to_string(), "second".to_string()]);
 
         chat.set_input("draft");
@@ -10562,7 +10823,12 @@ mod tests {
     fn prompt_rows_are_capped() {
         let mut chat = chat_with_history("caprows");
         chat.width = 40;
-        chat.set_input((0..30).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n"));
+        chat.set_input(
+            (0..30)
+                .map(|i| format!("line{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
         assert_eq!(chat.prompt_lines().len(), INPUT_ROWS_MAX);
     }
 
@@ -10582,12 +10848,19 @@ mod tests {
         chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
         assert_eq!(chat.input, "", "有文本先清空");
         assert!(!chat.exit, "清空不退出");
-        assert_eq!(chat.history.entries().last().map(String::as_str), Some("draft"));
+        assert_eq!(
+            chat.history.entries().last().map(String::as_str),
+            Some("draft")
+        );
 
         chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
         assert_eq!(chat.notice, Some("Press ctrl-c again to exit"));
         assert!(!chat.exit, "第一次只提示");
-        chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0 + CTRL_C_WINDOW);
+        chat.on_key_at(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            t0 + CTRL_C_WINDOW,
+        );
         assert!(chat.exit, "窗口内第二次退出");
 
         // The counter restarts after the window expires.
@@ -10625,7 +10898,10 @@ mod tests {
         assert_eq!(chat.notice, Some("Press esc again to clear"));
         chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
         assert_eq!(chat.input, "", "双击清空");
-        assert_eq!(chat.history.entries().last().map(String::as_str), Some("hello"));
+        assert_eq!(
+            chat.history.entries().last().map(String::as_str),
+            Some("hello")
+        );
         let _ = std::fs::remove_dir_all(&chat.session.home);
     }
 
@@ -10636,15 +10912,26 @@ mod tests {
         assert_eq!(chat.permission_mode, PermissionMode::Default);
         press(&mut chat, KeyCode::BackTab);
         assert_eq!(chat.permission_mode, PermissionMode::AcceptEdits);
-        assert_eq!(chat.permission_mode_label(), "acceptEdits", "footer 徽标同源");
+        assert_eq!(
+            chat.permission_mode_label(),
+            "acceptEdits",
+            "footer 徽标同源"
+        );
         press(&mut chat, KeyCode::BackTab);
         assert_eq!(chat.permission_mode, PermissionMode::Plan);
         press(&mut chat, KeyCode::BackTab);
         assert_eq!(chat.permission_mode, PermissionMode::Default, "循环回默认");
         // The turn's Session carries the current mode (Session is immutable in Arc → derive a copy).
         press(&mut chat, KeyCode::BackTab);
-        assert_eq!(chat.session_for_turn().permission_mode, PermissionMode::AcceptEdits);
-        assert_eq!(chat.session.permission_mode, PermissionMode::Default, "原 Session 不变");
+        assert_eq!(
+            chat.session_for_turn().permission_mode,
+            PermissionMode::AcceptEdits
+        );
+        assert_eq!(
+            chat.session.permission_mode,
+            PermissionMode::Default,
+            "原 Session 不变"
+        );
 
         // A session started in bypass only toggles between bypass ↔ default (never introduces a new dangerous mode).
         let mut chat = chat_with_history("mode-bypass");
@@ -10667,7 +10954,10 @@ mod tests {
         chat.submit();
         assert_eq!(
             chat.queued,
-            vec![QueuedInput { text: "first queued".into(), is_slash: false }]
+            vec![QueuedInput {
+                text: "first queued".into(),
+                is_slash: false
+            }]
         );
         assert_eq!(chat.input, "", "入队后输入清空");
         chat.set_input("second queued");
@@ -10681,10 +10971,6 @@ mod tests {
         assert_eq!(chat.input, "second queued");
         assert_eq!(chat.queued.len(), 1);
     }
-
-
-
-
 
     /// Busy dispatch (契约 §4.2): instant commands run immediately and never reset
     /// `busy`; other slash commands queue with the slash marker; plain messages queue.
@@ -10714,7 +11000,10 @@ mod tests {
         chat.submit();
         assert_eq!(
             chat.queued,
-            vec![QueuedInput { text: "/clear".into(), is_slash: true }],
+            vec![QueuedInput {
+                text: "/clear".into(),
+                is_slash: true
+            }],
             "非白名单 slash 命令带标记入队"
         );
 
@@ -10730,15 +11019,23 @@ mod tests {
     /// in order, until a plain message starts the next turn.
     #[tokio::test]
     async fn queued_slashes_drain_through_run_slash() {
-        let tmp =
-            std::env::temp_dir().join(format!("bingo-slash-{}-drain", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-drain", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let mut chat = test_chat_home(tmp.join("home"));
         chat.cwd = tmp.display().to_string();
         chat.queued = vec![
-            QueuedInput { text: "/think low".into(), is_slash: true },
-            QueuedInput { text: "/nope".into(), is_slash: true },
-            QueuedInput { text: "the message".into(), is_slash: false },
+            QueuedInput {
+                text: "/think low".into(),
+                is_slash: true,
+            },
+            QueuedInput {
+                text: "/nope".into(),
+                is_slash: true,
+            },
+            QueuedInput {
+                text: "the message".into(),
+                is_slash: false,
+            },
         ];
         chat.submit_queued();
         // Both slash commands ran (think applied + unknown guidance), then the message started a turn.
@@ -10755,7 +11052,9 @@ mod tests {
         assert!(chat.busy, "最后一条普通消息开新回合");
         assert_eq!(chat.messages.last().map(|m| m.role), Some(Role::User));
         assert!(
-            chat.messages.last().is_some_and(|m| m.text == "the message"),
+            chat.messages
+                .last()
+                .is_some_and(|m| m.text == "the message"),
             "普通消息经 start_turn 发给模型"
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -10796,7 +11095,12 @@ mod tests {
         let rows = chat.entity_rows(80);
         let joined: Vec<String> = rows.iter().map(|l| l.plain_text()).collect();
         assert!(joined[0].starts_with("❯ ◉ scout"), "{joined:?}");
-        assert!(joined.last().unwrap_or(&String::new()).contains("enter 打开"));
+        assert!(
+            joined
+                .last()
+                .unwrap_or(&String::new())
+                .contains("enter 打开")
+        );
         // ↓ to the channel, Enter opens it.
         assert!(chat.on_key(KeyCode::Down, KeyModifiers::empty()));
         assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
@@ -10817,10 +11121,17 @@ mod tests {
     fn queue_lines_are_capped() {
         let mut chat = chat_with_history("queuecap");
         chat.queued = (0..10)
-            .map(|i| QueuedInput { text: format!("m{i}"), is_slash: false })
+            .map(|i| QueuedInput {
+                text: format!("m{i}"),
+                is_slash: false,
+            })
             .collect();
         assert_eq!(chat.queue_lines().len(), QUEUE_ROWS_MAX + 1);
-        assert!(chat.queue_lines().last().is_some_and(|l| l.contains("more queued")));
+        assert!(
+            chat.queue_lines()
+                .last()
+                .is_some_and(|l| l.contains("more queued"))
+        );
     }
 
     /// `?`: toggles the panel on empty input; an ordinary character otherwise.
@@ -10867,7 +11178,11 @@ mod tests {
         assert!(ctrl(&mut chat, 's'));
         assert_eq!(chat.input, "", "ctrl+s 暂存并清空");
         assert!(ctrl(&mut chat, 's'));
-        assert_eq!((chat.input.as_str(), chat.cursor), ("stashed", 3), "恢复含光标");
+        assert_eq!(
+            (chat.input.as_str(), chat.cursor),
+            ("stashed", 3),
+            "恢复含光标"
+        );
 
         // Undo: a bulk edit (kill) steps back one.
         chat.set_input("undo me");
@@ -10922,9 +11237,16 @@ mod tests {
             chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now);
         }
         assert!(!chat.busy, "粘贴中的 Enter 不发送");
-        assert!(chat.input.starts_with("[Pasted text #1 +"), "占位符: {}", chat.input);
+        assert!(
+            chat.input.starts_with("[Pasted text #1 +"),
+            "占位符: {}",
+            chat.input
+        );
         assert_eq!(chat.pastes.len(), 1);
-        assert!(chat.expand_pastes(&chat.input).contains("line11"), "提交时展开真实内容");
+        assert!(
+            chat.expand_pastes(&chat.input).contains("line11"),
+            "提交时展开真实内容"
+        );
 
         // Normal typing (wide intervals): Enter submits as usual instead of inserting a newline.
         let mut chat = chat_with_history("paste2");
@@ -10940,7 +11262,10 @@ mod tests {
         assert_eq!(chat.input, "", "Enter 提交而不是换行");
         assert_eq!(
             chat.queued,
-            vec![QueuedInput { text: "hi".into(), is_slash: false }]
+            vec![QueuedInput {
+                text: "hi".into(),
+                is_slash: false
+            }]
         );
     }
 
@@ -11035,7 +11360,10 @@ mod tests {
         chat.set_input(format!("![图]({})\n{}", png.display(), txt.display()));
         chat.busy = true;
         chat.submit();
-        assert_eq!(chat.queued[0].text, format!("#[image 1]\n{}", txt.display()));
+        assert_eq!(
+            chat.queued[0].text,
+            format!("#[image 1]\n{}", txt.display())
+        );
         assert_eq!(chat.attachments.len(), 1, "txt 不注册");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -11050,7 +11378,8 @@ mod tests {
         let b = test_png_path(&dir, "b.png", 6, 6);
         let id1 = chat.register_image_file(&a).unwrap();
         let id2 = chat.register_image_file(&b).unwrap();
-        let text = format!("看 #[image {id1}] 和 #[image {id2}] 再看 #[image {id1}] 和 #[image 99]");
+        let text =
+            format!("看 #[image {id1}] 和 #[image {id2}] 再看 #[image {id1}] 和 #[image 99]");
         let imgs = chat.resolve_images(&text);
         assert_eq!(imgs.len(), 2, "去重 + 越界忽略");
         assert_eq!(imgs[0].data, chat.attachments[id1 - 1].data);
@@ -11069,7 +11398,10 @@ mod tests {
         chat.set_input("keep");
         assert!(ctrl(&mut chat, 'r'));
         assert!(chat.search.is_some(), "进入搜索态");
-        assert_eq!(chat.search_line().as_deref(), Some("(reverse-i-search)`': cargo build"));
+        assert_eq!(
+            chat.search_line().as_deref(),
+            Some("(reverse-i-search)`': cargo build")
+        );
         type_text(&mut chat, "cargo");
         assert_eq!(
             chat.search.as_ref().and_then(|s| s.hit.clone()).as_deref(),
@@ -11099,7 +11431,11 @@ mod tests {
     #[test]
     fn alt_t_toggles_thinking() {
         let mut chat = chat_with_history("think");
-        let _ = chat.session.runtime.thinking_tx.send(Some("high".to_string()));
+        let _ = chat
+            .session
+            .runtime
+            .thinking_tx
+            .send(Some("high".to_string()));
         alt(&mut chat, 't');
         assert_eq!(*chat.session.runtime.thinking.borrow(), None, "关闭思考");
         alt(&mut chat, 't');
@@ -11116,9 +11452,18 @@ mod tests {
         let mut chat = chat_with_history("todo");
         chat.tasks_visible = true;
         chat.tasks_cache = vec![
-            TodoItem { text: "done one".into(), status: TodoStatus::Done },
-            TodoItem { text: "doing".into(), status: TodoStatus::InProgress },
-            TodoItem { text: "later".into(), status: TodoStatus::Pending },
+            TodoItem {
+                text: "done one".into(),
+                status: TodoStatus::Done,
+            },
+            TodoItem {
+                text: "doing".into(),
+                status: TodoStatus::InProgress,
+            },
+            TodoItem {
+                text: "later".into(),
+                status: TodoStatus::Pending,
+            },
         ];
         let lines = chat.task_lines();
         let joined: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
@@ -11126,7 +11471,11 @@ mod tests {
         assert!(joined.iter().any(|l| l == "☒ done one"), "{joined:?}");
         assert!(joined.iter().any(|l| l == "☐ doing"), "{joined:?}");
         assert!(joined.iter().any(|l| l == "☐ later"), "{joined:?}");
-        assert!(!joined.iter().any(|l| l.contains("[x]") || l.contains("[ ]")));
+        assert!(
+            !joined
+                .iter()
+                .any(|l| l.contains("[x]") || l.contains("[ ]"))
+        );
         let done_text = lines
             .iter()
             .find(|l| l.plain_text() == "☒ done one")
@@ -11193,7 +11542,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("出错了"), "整屏错误态标题: {joined}");
-        assert!(joined.contains("code=AUTH_REQUIRED"), "稳定码可见: {joined}");
+        assert!(
+            joined.contains("code=AUTH_REQUIRED"),
+            "稳定码可见: {joined}"
+        );
         assert!(joined.contains("重试"), "首要动作提示: {joined}");
         assert!(frame.cursor.is_none(), "整屏态输入光标隐藏");
         // Esc returns: not a dead end.
@@ -11207,7 +11559,7 @@ mod tests {
     fn page_error_row_is_highlighted_with_error_color() {
         use crate::error::ErrorLevel;
         use crate::tui::app::Frame;
-        use crate::tui::test_util::{error_fixtures, ErrorContext};
+        use crate::tui::test_util::{ErrorContext, error_fixtures};
         use ratatui::layout::Size;
         use ratatui::style::Color;
         let mut chat = test_chat();
@@ -11217,10 +11569,7 @@ mod tests {
             .expect("FX-01 在清单中");
         fx.inject(&chat.events);
         chat.drain_events();
-        assert_eq!(
-            chat.last_error.as_ref().unwrap().level,
-            ErrorLevel::Page
-        );
+        assert_eq!(chat.last_error.as_ref().unwrap().level, ErrorLevel::Page);
         let frame = Frame::assemble(&chat, Size::new(80, 24));
         let error_row = frame
             .rows
@@ -11252,10 +11601,7 @@ mod tests {
             .expect("FX-05 在清单中");
         fx.inject(&chat.events);
         chat.drain_events();
-        assert_eq!(
-            chat.last_error.as_ref().unwrap().level,
-            ErrorLevel::Full
-        );
+        assert_eq!(chat.last_error.as_ref().unwrap().level, ErrorLevel::Full);
         chat.on_key(KeyCode::Enter, KeyModifiers::empty());
         assert!(chat.last_error.is_none(), "Enter 清除错误态");
         assert!(chat.busy, "Enter 重试启动新回合");
@@ -11283,7 +11629,11 @@ mod tests {
         chat.drain_events();
         let err = chat.last_error.as_ref().expect("错误态已记录");
         assert_eq!(err.code, "TIMEOUT");
-        assert_eq!(err.level, ErrorLevel::Full, "长回合 TIMEOUT 升级全流程级（AC-53）");
+        assert_eq!(
+            err.level,
+            ErrorLevel::Full,
+            "长回合 TIMEOUT 升级全流程级（AC-53）"
+        );
         let frame = Frame::assemble(&chat, Size::new(80, 24));
         let joined: String = frame
             .rows
@@ -11316,7 +11666,10 @@ mod tests {
             joined_short.contains("[error] code=TIMEOUT"),
             "短同步 TIMEOUT = 页面级错误行: {joined_short}"
         );
-        assert!(!joined_short.contains("出错了"), "短同步不整屏: {joined_short}");
+        assert!(
+            !joined_short.contains("出错了"),
+            "短同步不整屏: {joined_short}"
+        );
     }
 
     /// AC-29 per-code matrix: inject all 11 fixtures from error_fixtures(), asserting that
@@ -11348,7 +11701,11 @@ mod tests {
                 .join("\n");
             match fx.level {
                 ErrorLevel::Full => {
-                    assert!(joined.contains("出错了"), "全流程级整屏态标题: {} / {joined}", fx.code);
+                    assert!(
+                        joined.contains("出错了"),
+                        "全流程级整屏态标题: {} / {joined}",
+                        fx.code
+                    );
                     assert!(
                         joined.contains(&format!("code={}", fx.code)),
                         "整屏态含稳定码: {} / {joined}",
@@ -11362,7 +11719,11 @@ mod tests {
                         "页面/字段级错误行含稳定码: {} / {joined}",
                         fx.code
                     );
-                    assert!(!joined.contains("出错了"), "页面/字段级不整屏: {} / {joined}", fx.code);
+                    assert!(
+                        !joined.contains("出错了"),
+                        "页面/字段级不整屏: {} / {joined}",
+                        fx.code
+                    );
                 }
             }
         }
@@ -11391,10 +11752,12 @@ mod tests {
         let area = buf.area;
         crate::tui::view::render_rows(&frame.rows, Color::White, &mut buf, area);
         let err_color = Color::Rgb(255, 107, 128);
-        let has_err_color = (0..buf.area.height).any(|y| {
-            (0..buf.area.width).any(|x| buf[(x, y)].fg == err_color)
-        });
-        assert!(has_err_color, "错误行真实渲染 error 色 (255,107,128) 到 cell");
+        let has_err_color =
+            (0..buf.area.height).any(|y| (0..buf.area.width).any(|x| buf[(x, y)].fg == err_color));
+        assert!(
+            has_err_color,
+            "错误行真实渲染 error 色 (255,107,128) 到 cell"
+        );
         // Text anchor (assertions only anchor on the code).
         let joined: String = frame
             .rows

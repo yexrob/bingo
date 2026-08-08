@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
+use super::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 
 /// Request timeout: 60s.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -53,15 +53,12 @@ fn cache_get(url: &str) -> Option<CacheEntry> {
     let mut cache = FETCH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cutoff = now_secs().saturating_sub(CACHE_TTL.as_secs());
     cache.entries.retain(|_, e| e.fetched_at > cutoff);
-    cache
-        .entries
-        .get(url)
-        .map(|e| CacheEntry {
-            bytes: e.bytes,
-            content_type: e.content_type.clone(),
-            content: e.content.clone(),
-            fetched_at: e.fetched_at,
-        })
+    cache.entries.get(url).map(|e| CacheEntry {
+        bytes: e.bytes,
+        content_type: e.content_type.clone(),
+        content: e.content.clone(),
+        fetched_at: e.fetched_at,
+    })
 }
 
 fn cache_put(url: String, entry: CacheEntry) {
@@ -74,11 +71,7 @@ fn cache_put(url: String, entry: CacheEntry) {
         let cutoff = now_secs().saturating_sub(CACHE_TTL.as_secs());
         cache.entries.retain(|_, e| e.fetched_at > cutoff);
     }
-    cache.total_bytes = cache
-        .entries
-        .values()
-        .map(|e| e.bytes)
-        .sum::<u64>();
+    cache.total_bytes = cache.entries.values().map(|e| e.bytes).sum::<u64>();
     while cache.total_bytes > CACHE_MAX_BYTES && cache.entries.len() > 1 {
         let oldest = cache
             .entries
@@ -99,7 +92,9 @@ fn cache_put(url: String, entry: CacheEntry) {
 pub struct WebFetchInput {
     pub url: String,
     #[serde(default)]
-    #[schemars(description = "what to extract from the page (accepted, content is returned verbatim)")]
+    #[schemars(
+        description = "what to extract from the page (accepted, content is returned verbatim)"
+    )]
     pub prompt: Option<String>,
 }
 
@@ -194,15 +189,17 @@ fn validate_url(url: &str) -> Result<(), ToolError> {
             "invalid URL: longer than {MAX_URL_LENGTH} characters"
         )));
     }
-    let parsed = url::Url::parse(url)
-        .map_err(|_| ToolError::failed(format!("invalid URL: {url}")))?;
-    if !parsed.username().is_empty()
-        || parsed.password().is_some_and(|s| !s.is_empty())
-    {
-        return Err(ToolError::failed("invalid URL: must not contain credentials"));
+    let parsed =
+        url::Url::parse(url).map_err(|_| ToolError::failed(format!("invalid URL: {url}")))?;
+    if !parsed.username().is_empty() || parsed.password().is_some_and(|s| !s.is_empty()) {
+        return Err(ToolError::failed(
+            "invalid URL: must not contain credentials",
+        ));
     }
     if parsed.host_str().is_some_and(|h| h.split('.').count() < 2) {
-        return Err(ToolError::failed("invalid URL: hostname must have at least two parts"));
+        return Err(ToolError::failed(
+            "invalid URL: hostname must have at least two parts",
+        ));
     }
     Ok(())
 }
@@ -248,9 +245,7 @@ fn is_permitted_redirect(original: &reqwest::Url, redirect: &reqwest::Url) -> bo
     if redirect.scheme() != original.scheme() || redirect.port() != original.port() {
         return false;
     }
-    if !redirect.username().is_empty()
-        || redirect.password().is_some_and(|s| !s.is_empty())
-    {
+    if !redirect.username().is_empty() || redirect.password().is_some_and(|s| !s.is_empty()) {
         return false;
     }
     original
@@ -305,8 +300,8 @@ async fn fetch(
                 .or_else(|_| url::Url::parse(&url).and_then(|base| base.join(&location)));
             let redirect_url = redirect_url
                 .map_err(|e| ToolError::failed(format!("bad redirect location: {e}")))?;
-            let original = url::Url::parse(&url)
-                .map_err(|e| ToolError::failed(format!("bad url: {e}")))?;
+            let original =
+                url::Url::parse(&url).map_err(|e| ToolError::failed(format!("bad url: {e}")))?;
             if is_permitted_redirect(&original, &redirect_url) {
                 url = redirect_url.to_string();
                 hops += 1;
@@ -393,7 +388,10 @@ mod tests {
             upgrade_https("http://example.com/a"),
             "https://example.com/a"
         );
-        assert_eq!(upgrade_https("https://example.com/a"), "https://example.com/a");
+        assert_eq!(
+            upgrade_https("https://example.com/a"),
+            "https://example.com/a"
+        );
     }
 
     #[test]

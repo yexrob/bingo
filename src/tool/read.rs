@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use async_trait::async_trait;
 
-use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
+use super::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 
 /// Max characters per read; anything beyond is truncated.
 const MAX_READ_CHARS: usize = 20_000;
@@ -161,7 +161,11 @@ mod tests {
         let body = "中".repeat(MAX_READ_CHARS * 3);
         std::fs::write(&path, &body).unwrap();
         let text = read(&path).await;
-        assert!(text.contains("[Content truncated: file is"), "{}", &text[..80]);
+        assert!(
+            text.contains("[Content truncated: file is"),
+            "{}",
+            &text[..80]
+        );
         let head: String = text.chars().take_while(|c| *c == '中').collect();
         assert_eq!(head.chars().count(), MAX_READ_CHARS);
         std::fs::remove_file(&path).unwrap();

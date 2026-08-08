@@ -13,9 +13,10 @@ use unicode_width::UnicodeWidthStr;
 
 use rsmarkdown_core::{Alignment, Ast, Block, Document, Inline, ListItem, Renderer};
 
-use crate::tui::gfx::{ImageCap, ImageMeta};
-use crate::tui::line::{char_width, ImageRef, SegStyle, Line};
+use crate::tui::gfx::ImageCap;
+use crate::tui::line::{ImageRef, Line, SegStyle, char_width};
 use crate::tui::theme::Theme;
+use crate::ui::ImageMeta;
 
 /// A display adapter: markdown AST → styled lines.
 pub struct MarkdownRenderer {
@@ -86,7 +87,8 @@ impl MarkdownRenderer {
         self.image_cap = cap;
         self.images_version = version;
         self.images.clear();
-        self.images.extend(images.iter().map(|(k, v)| (k.clone(), v.clone())));
+        self.images
+            .extend(images.iter().map(|(k, v)| (k.clone(), v.clone())));
         self.cached.clear();
     }
 
@@ -159,7 +161,10 @@ fn image_block_lines(url: &str, meta: &ImageMeta, theme: Theme) -> Vec<Line> {
     first.image = Some(img.clone());
     out.push(first);
     for _ in 1..meta.rows {
-        out.push(Line { segs: Vec::new(), image: Some(img.clone()) });
+        out.push(Line {
+            segs: Vec::new(),
+            image: Some(img.clone()),
+        });
     }
     out
 }
@@ -333,7 +338,10 @@ fn render_list(
         }
         let mut styled = Line::plain(" ".repeat(indent));
         styled.push_styled(marker, marker_style);
-        styled.push_styled(" ".repeat(marker_w.saturating_sub(marker_w_used)), SegStyle::plain());
+        styled.push_styled(
+            " ".repeat(marker_w.saturating_sub(marker_w_used)),
+            SegStyle::plain(),
+        );
         let first = inner.remove(0);
         styled.segs.extend(first.segs);
         out.push(styled);
@@ -382,24 +390,28 @@ fn render_table(
         let mut styled = Line::styled("│", theme.table_border());
         for (i, cw) in w.iter().enumerate() {
             styled.push_styled("─".repeat(*cw + 2), theme.table_border());
-            styled.push_styled(if i + 1 == w.len() { "│" } else { "┼" }, theme.table_border());
+            styled.push_styled(
+                if i + 1 == w.len() { "│" } else { "┼" },
+                theme.table_border(),
+            );
         }
         styled
     };
 
-    let push_row = |out: &mut Vec<Line>, widths: &[usize], cells: &[Vec<Inline>], style: SegStyle| {
-        let mut styled = Line::styled("│", theme.table_border());
-        for (c, w) in widths.iter().enumerate() {
-            let cell = cells.get(c);
-            let text = cell.map(|c| plain_text(c)).unwrap_or_default();
-            styled.push_styled(" ", SegStyle::plain());
-            styled.push_styled(truncate(&text, *w), style);
-            let pad = w.saturating_sub(text.width()) + 1;
-            styled.push_styled(" ".repeat(pad), SegStyle::plain());
-            styled.push_styled("│", theme.table_border());
-        }
-        out.push(styled);
-    };
+    let push_row =
+        |out: &mut Vec<Line>, widths: &[usize], cells: &[Vec<Inline>], style: SegStyle| {
+            let mut styled = Line::styled("│", theme.table_border());
+            for (c, w) in widths.iter().enumerate() {
+                let cell = cells.get(c);
+                let text = cell.map(|c| plain_text(c)).unwrap_or_default();
+                styled.push_styled(" ", SegStyle::plain());
+                styled.push_styled(truncate(&text, *w), style);
+                let pad = w.saturating_sub(text.width()) + 1;
+                styled.push_styled(" ".repeat(pad), SegStyle::plain());
+                styled.push_styled("│", theme.table_border());
+            }
+            out.push(styled);
+        };
 
     push_row(out, &widths, headers, theme.table_header());
     out.push(sep(&widths));
@@ -470,10 +482,22 @@ fn collect_inlines(inlines: &[Inline], style: SegStyle, theme: &Theme, out: &mut
             continue;
         }
         match inline {
-            Inline::Text(t) => out.push(Seg { text: t.clone(), style }),
-            Inline::SoftBreak => out.push(Seg { text: " ".to_string(), style }),
-            Inline::HardBreak => out.push(Seg { text: " ".to_string(), style }),
-            Inline::Code(c) => out.push(Seg { text: c.clone(), style: theme.code() }),
+            Inline::Text(t) => out.push(Seg {
+                text: t.clone(),
+                style,
+            }),
+            Inline::SoftBreak => out.push(Seg {
+                text: " ".to_string(),
+                style,
+            }),
+            Inline::HardBreak => out.push(Seg {
+                text: " ".to_string(),
+                style,
+            }),
+            Inline::Code(c) => out.push(Seg {
+                text: c.clone(),
+                style: theme.code(),
+            }),
             Inline::Strong(children) => {
                 collect_inlines(children, style.patch(theme.strong()), theme, out)
             }
@@ -568,7 +592,10 @@ fn push_line(lines: &mut Vec<Line>, current: &mut Vec<Seg>) {
         lines.push(Line {
             segs: std::mem::take(current)
                 .into_iter()
-                .map(|s| crate::tui::line::Seg { text: s.text, style: s.style })
+                .map(|s| crate::tui::line::Seg {
+                    text: s.text,
+                    style: s.style,
+                })
                 .collect(),
             image: None,
         });
@@ -661,7 +688,10 @@ mod tests {
             .map(|s| s.text.as_str())
             .collect();
         assert_eq!(bold, "bold");
-        let code = line.segs.iter().find(|s| s.style.fg == Some(Theme::dark().code_fg));
+        let code = line
+            .segs
+            .iter()
+            .find(|s| s.style.fg == Some(Theme::dark().code_fg));
         assert!(code.is_some(), "code styled");
     }
 
@@ -748,6 +778,9 @@ mod tests {
         images.insert("a.png".to_string(), meta);
         renderer.set_images(Some(ImageCap::default_cells()), &images, 2);
         renderer.render(&doc);
-        assert!(renderer.lines()[0].image.is_some(), "版本变化后重建为图片块");
+        assert!(
+            renderer.lines()[0].image.is_some(),
+            "版本变化后重建为图片块"
+        );
     }
 }

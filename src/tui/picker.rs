@@ -294,11 +294,7 @@ mod tests {
     #[test]
     fn row_renders_dual_markers_and_truncates() {
         let theme = Theme::dark();
-        let m = model(
-            vec![item("off"), item("low"), item("medium")],
-            1,
-            Some(0),
-        );
+        let m = model(vec![item("off"), item("low"), item("medium")], 1, Some(0));
         let r0 = text(&m.row(0, 80, &theme));
         assert!(r0.contains("● off"), "● 标生效行: {r0}");
         assert!(!r0.contains('❯'), "生效行非浏览: {r0}");
@@ -312,7 +308,10 @@ mod tests {
         // name 列宽 = 最长 label；每行总宽 ≤ width。
         for width in 10..40usize {
             for i in 0..m.items.len() {
-                assert!(text_width(&text(&m.row(i, width, &theme))) <= width, "width={width}");
+                assert!(
+                    text_width(&text(&m.row(i, width, &theme))) <= width,
+                    "width={width}"
+                );
             }
         }
     }
@@ -323,7 +322,10 @@ mod tests {
         let theme = Theme::dark();
         let m = model(vec![item("a"), item("b"), item("c")], 0, None);
         let full = text(&m.hint_row(
-            PickerKeys { session_only: true, number_jump: true },
+            PickerKeys {
+                session_only: true,
+                number_jump: true,
+            },
             80,
             &theme,
         ));

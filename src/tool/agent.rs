@@ -9,7 +9,7 @@ use crate::api::types::Message;
 use crate::channels::ChannelRegistry;
 use crate::permission::PermissionMode;
 use crate::query::{Session, UiHooks};
-use crate::tool::{parse_input, Tool, ToolContext, ToolError, ToolResult};
+use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 use crate::watch::{NotifyCondition, WatchId, WatchKind, WatchRegistry, WatchState};
 
 const MAX_AGENT_DEPTH: usize = 3;
@@ -21,11 +21,15 @@ pub struct AgentInput {
     prompt: String,
     /// Background mode: returns async_launched immediately and notifies the main agent when done.
     #[serde(default)]
-    #[schemars(description = "Async execution (default true): returns the instance name immediately without waiting; set false to wait synchronously for the result")]
+    #[schemars(
+        description = "Async execution (default true): returns the instance name immediately without waiting; set false to wait synchronously for the result"
+    )]
     background: Option<bool>,
     /// Notification condition: notify the main agent when the sub-agent output contains any of these strings.
     #[serde(default)]
-    #[schemars(description = "Notify condition: notify when the subagent's output contains any of these strings")]
+    #[schemars(
+        description = "Notify condition: notify when the subagent's output contains any of these strings"
+    )]
     notify_on: Option<Vec<String>>,
     /// Short task description (optional), shown in the header.
     #[serde(default)]
@@ -33,24 +37,34 @@ pub struct AgentInput {
     description: Option<String>,
     /// Sub-agent model (optional): defaults to the named definition or parent session model.
     #[serde(default)]
-    #[schemars(description = "Model for the subagent (optional; inherits the named definition / parent session by default); required when crossing providers — the parent model is not inherited")]
+    #[schemars(
+        description = "Model for the subagent (optional; inherits the named definition / parent session by default); required when crossing providers — the parent model is not inherited"
+    )]
     model: Option<String>,
     /// Sub-agent provider (optional, from the `providers` section of settings.json): when set, the sub-agent
     /// uses that provider's endpoint and key (independent of the parent session's current provider).
     #[serde(default)]
-    #[schemars(description = "Provider for the subagent (optional; the providers section of settings; \"default\" or omitted = shared parent endpoint; specify model when crossing providers)")]
+    #[schemars(
+        description = "Provider for the subagent (optional; the providers section of settings; \"default\" or omitted = shared parent endpoint; specify model when crossing providers)"
+    )]
     provider: Option<String>,
     /// Sub-agent thinking level (optional): off | low | medium | high | xhigh | max.
     #[serde(default)]
-    #[schemars(description = "Thinking level for the subagent (optional): off/low/medium/high/xhigh/max; invalid values are rejected; defaults to off when crossing providers, otherwise inherits the named definition / parent session's current level")]
+    #[schemars(
+        description = "Thinking level for the subagent (optional): off/low/medium/high/xhigh/max; invalid values are rejected; defaults to off when crossing providers, otherwise inherits the named definition / parent session's current level"
+    )]
     thinking: Option<String>,
     /// Instance name (optional): address used by SendMessage/AgentControl.
     #[serde(default)]
-    #[schemars(description = "Instance name (optional): used to address it later via SendMessage/AgentControl; defaults to the named definition name or agent, with -2/-3 suffixes on name collisions")]
+    #[schemars(
+        description = "Instance name (optional): used to address it later via SendMessage/AgentControl; defaults to the named definition name or agent, with -2/-3 suffixes on name collisions"
+    )]
     name: Option<String>,
     /// Named definition (optional): `.bingo/agents/<name>.md` or `~/.config/bingo/agents/<name>.md`.
     #[serde(default)]
-    #[schemars(description = "Named agent definition (optional): uses that definition's system prompt and default model/provider")]
+    #[schemars(
+        description = "Named agent definition (optional): uses that definition's system prompt and default model/provider"
+    )]
     agent: Option<String>,
 }
 
@@ -95,9 +109,7 @@ fn subagent_hooks(
         on_warning: Box::new(|_| {}),
         ask: std::sync::Arc::new(move |_tool_name, _reason| Box::pin(async move { bypass })),
         // Sub-agents have no UI to ask: AskUserQuestion is treated as unanswered (models should avoid asking inside sub-agents).
-        ask_question: std::sync::Arc::new(|_title, _question, _options| {
-            Box::pin(async { None })
-        }),
+        ask_question: std::sync::Arc::new(|_title, _question, _options| Box::pin(async { None })),
     }
 }
 
@@ -398,7 +410,10 @@ pub(crate) fn build_sub_session(
         .or_else(|| def.and_then(|d| d.provider.clone()))
         .filter(|p| p != "default");
     let client = match &named_provider {
-        Some(name) => parent.client.with_provider(name).map_err(ToolError::failed)?,
+        Some(name) => parent
+            .client
+            .with_provider(name)
+            .map_err(ToolError::failed)?,
         None => parent.client.clone(),
     };
     let provider_name = named_provider
@@ -463,7 +478,6 @@ pub(crate) fn build_sub_session(
         compact_failures: parent.compact_failures.clone(),
         watch: parent.watch.clone(),
         tasks: parent.tasks.clone(),
-        last_task_reminder_turn: parent.last_task_reminder_turn.clone(),
         expand_tasks: parent.expand_tasks.clone(),
         agents: parent.agents.clone(),
         channels: parent.channels.clone(),
@@ -483,8 +497,7 @@ impl AgentCell {
         }
     }
     fn record_chars(&self, n: usize) {
-        self.chars
-            .fetch_add(n, std::sync::atomic::Ordering::SeqCst);
+        self.chars.fetch_add(n, std::sync::atomic::Ordering::SeqCst);
     }
     fn poll(&self) -> crate::watch::WatchPoll {
         crate::watch::WatchPoll {
@@ -648,7 +661,9 @@ impl Tool for AgentTool {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct SendMessageInput {
-    #[schemars(description = "Target subagent instance name (the name returned by the Agent tool; see AgentControl list)")]
+    #[schemars(
+        description = "Target subagent instance name (the name returned by the Agent tool; see AgentControl list)"
+    )]
     agent: String,
     #[schemars(description = "Follow-up instruction/message to send")]
     message: String,
@@ -884,7 +899,7 @@ mod tests {
                 supports_images: None,
                 protocol: None,
                 oauth: None,
-                },
+            },
         );
         let client = Arc::new(crate::api::client::Client::from_settings(&settings).unwrap());
         let mut runtime = Runtime::new("parent-model".into(), None, Default::default());
@@ -907,7 +922,6 @@ mod tests {
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
-            last_task_reminder_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
@@ -955,11 +969,16 @@ mod tests {
         let (session, client) = parent_session();
         let _ = session.runtime.thinking_tx.send(Some("medium".into()));
         let tool = AgentTool::new(session.clone(), Vec::new());
-        let sub = tool.build_sub_session(&params("do it"), None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&params("do it"), None, "sub")
+            .unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "parent-model");
         assert_eq!(
             sub.client.current_endpoint(),
-            (Some("sk-parent".to_string()), "https://parent.example".to_string())
+            (
+                Some("sk-parent".to_string()),
+                "https://parent.example".to_string()
+            )
         );
         assert_eq!(sub.system.len(), 1, "无定义时继承父 system");
         assert_eq!(sub.system[0].text, "父 system");
@@ -990,7 +1009,10 @@ mod tests {
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
         assert_eq!(
             sub.client.current_endpoint(),
-            (Some("sk-ds".to_string()), "https://api.deepseek.com".to_string())
+            (
+                Some("sk-ds".to_string()),
+                "https://api.deepseek.com".to_string()
+            )
         );
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
@@ -998,7 +1020,10 @@ mod tests {
             "显式思考级别生效"
         );
         // Forked independent endpoint: the parent session is unaffected.
-        assert_eq!(session.client.current_endpoint().0.as_deref(), Some("sk-parent"));
+        assert_eq!(
+            session.client.current_endpoint().0.as_deref(),
+            Some("sk-parent")
+        );
     }
 
     #[test]
@@ -1007,7 +1032,9 @@ mod tests {
         let d = def("reviewer");
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
         // The definition supplies system/model/provider/thinking defaults.
-        let sub = tool.build_sub_session(&params("审查"), Some(&d), "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&params("审查"), Some(&d), "sub")
+            .unwrap();
         assert_eq!(sub.system.len(), 1);
         assert_eq!(sub.system[0].text, "你是评审。", "定义正文替换 system");
         assert_eq!(*sub.runtime.model.borrow(), "def-model");
@@ -1066,7 +1093,10 @@ mod tests {
         d.model = None;
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
         let err = sub_err(tool.build_sub_session(&params("审查"), Some(&d), "sub"));
-        assert!(err.contains("需要 model"), "定义侧跨 provider 同样报错：{err}");
+        assert!(
+            err.contains("需要 model"),
+            "定义侧跨 provider 同样报错：{err}"
+        );
         // 同 provider（父当前就是 ds）→ 继承模型，不报错。
         let _ = session.runtime.provider_tx.send("ds".into());
         let tool = AgentTool::new(session.clone(), Vec::new());
@@ -1132,7 +1162,10 @@ mod tests {
         assert_eq!(sub.runtime.provider.borrow().as_str(), "default");
         assert_eq!(
             sub.client.current_endpoint(),
-            (Some("sk-parent".to_string()), "https://parent.example".to_string())
+            (
+                Some("sk-parent".to_string()),
+                "https://parent.example".to_string()
+            )
         );
         // 共享端点跟随父切换（"default" 与未指定等价）。
         client.set_provider("ds").unwrap();
@@ -1156,10 +1189,7 @@ mod tests {
             let mut p = params("do it");
             p.thinking = Some(bad.into());
             let err = sub_err(tool.build_sub_session(&p, None, "sub"));
-            assert!(
-                err.contains("无效思考级别"),
-                "非法档位 {bad:?} 报错：{err}"
-            );
+            assert!(err.contains("无效思考级别"), "非法档位 {bad:?} 报错：{err}");
         }
         // 定义侧非法值同样报错。
         let mut d = def("reviewer");
@@ -1221,17 +1251,17 @@ mod tests {
         let text = out.content.as_str().unwrap();
         assert!(text.contains("scout") && text.contains("running"), "{text}");
         let out = ctl
-            .call(serde_json::json!({"action": "stop", "agent": "scout"}), &ctx)
+            .call(
+                serde_json::json!({"action": "stop", "agent": "scout"}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(out.content.as_str().unwrap().contains("已停止"), "stop");
         // After stopping, SendMessage rejects delivery.
         let send = SendMessageTool::new(session.clone());
         let err = send
-            .call(
-                serde_json::json!({"agent": "scout", "message": "hi"}),
-                &ctx,
-            )
+            .call(serde_json::json!({"agent": "scout", "message": "hi"}), &ctx)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("已停止"), "{err}");
@@ -1246,7 +1276,10 @@ mod tests {
         assert!(session.agents.list().is_empty());
         // Unknown instance: stop errors out.
         let err = ctl
-            .call(serde_json::json!({"action": "stop", "agent": "ghost"}), &ctx)
+            .call(
+                serde_json::json!({"action": "stop", "agent": "ghost"}),
+                &ctx,
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("ghost"), "{err}");

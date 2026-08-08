@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
+use super::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 
 /// Search request timeout.
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
@@ -68,7 +68,9 @@ impl Tool for WebSearchTool {
     ) -> Result<ToolResult, ToolError> {
         let params: WebSearchInput = parse_input(&input)?;
         if params.query.trim().len() < 2 {
-            return Err(ToolError::failed("search query must be at least 2 characters"));
+            return Err(ToolError::failed(
+                "search query must be at least 2 characters",
+            ));
         }
         if !params.allowed_domains.is_empty() && !params.blocked_domains.is_empty() {
             return Err(ToolError::failed(
@@ -118,7 +120,10 @@ fn current_year() -> u32 {
 }
 
 /// Search via the DuckDuckGo HTML endpoint (no key). Returns raw hits (unfiltered).
-async fn search(client: &reqwest::Client, params: &WebSearchInput) -> Result<Vec<SearchHit>, ToolError> {
+async fn search(
+    client: &reqwest::Client,
+    params: &WebSearchInput,
+) -> Result<Vec<SearchHit>, ToolError> {
     let response = tokio::time::timeout(SEARCH_TIMEOUT, async {
         client
             .get("https://html.duckduckgo.com/html/")
@@ -163,7 +168,11 @@ fn parse_results(html: &str) -> Vec<SearchHit> {
         let url = unwrap_ddg_redirect(&decode_entity(&cap[1]));
         let title = strip_tags(&decode_entity(&cap[2]));
         let snippet = strip_tags(&decode_entity(&cap[3]));
-        hits.push(SearchHit { title, url, snippet });
+        hits.push(SearchHit {
+            title,
+            url,
+            snippet,
+        });
     }
     hits
 }
@@ -305,15 +314,22 @@ mod tests {
     #[test]
     fn unwraps_duckduckgo_redirect() {
         assert_eq!(
-            unwrap_ddg_redirect("//duckduckgo.com/l/?uddg=https%3A%2F%2Frust-lang.org%2Fdocs&rut=1"),
+            unwrap_ddg_redirect(
+                "//duckduckgo.com/l/?uddg=https%3A%2F%2Frust-lang.org%2Fdocs&rut=1"
+            ),
             "https://rust-lang.org/docs"
         );
         assert_eq!(
-            unwrap_ddg_redirect("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fa.example%2Fx%3Fq%3D1"),
+            unwrap_ddg_redirect(
+                "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fa.example%2Fx%3Fq%3D1"
+            ),
             "https://a.example/x?q=1"
         );
         // Non-DDG links are returned as-is; protocol-relative URLs get https prepended.
-        assert_eq!(unwrap_ddg_redirect("https://other.org/x"), "https://other.org/x");
+        assert_eq!(
+            unwrap_ddg_redirect("https://other.org/x"),
+            "https://other.org/x"
+        );
         assert_eq!(unwrap_ddg_redirect("//other.org/x"), "https://other.org/x");
         // A DDG link without the uddg parameter: left intact.
         assert_eq!(

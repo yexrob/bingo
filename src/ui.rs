@@ -3,7 +3,7 @@
 //! Nothing here may depend on a terminal library: [`UiEvent`] and the dialog
 //! transport types are what a TUI, a GUI or a test harness all consume, and
 //! [`tui_hooks`] is the adapter that turns [`UiHooks`] callbacks into channel
-//! traffic. The TUI implementation lives in [`crate::tui`].
+//! traffic. Front-end implementations live outside this module.
 
 use std::sync::Arc;
 
@@ -11,7 +11,15 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::api::contract::StreamEvent;
 use crate::query::{ToolCallDone, UiHooks};
-use crate::tui::activities::WatchStatus;
+use crate::watch::WatchState;
+
+/// A loaded image payload: target cell size plus renderer-ready PNG bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageMeta {
+    pub cols: usize,
+    pub rows: usize,
+    pub bytes: Vec<u8>,
+}
 
 /// Permission prompt: request + result receipt.
 pub type AskRequest = (PermissionRequest, oneshot::Sender<DialogAction>);
@@ -43,7 +51,11 @@ pub struct PermissionRequest {
 }
 
 impl PermissionRequest {
-    pub fn new(title: impl Into<String>, question: impl Into<String>, options: Vec<String>) -> Self {
+    pub fn new(
+        title: impl Into<String>,
+        question: impl Into<String>,
+        options: Vec<String>,
+    ) -> Self {
         Self {
             title: title.into(),
             question: question.into(),
@@ -64,7 +76,9 @@ pub enum UiEvent {
     ThinkingDelta(String),
     /// Cumulative output token count from message_delta.
     OutputTokens(u64),
-    ToolStart { name: String },
+    ToolStart {
+        name: String,
+    },
     /// Tool block fully received while streaming (including input): the fold decision point.
     /// standalone=true: non-model tools like the `!` command — summary only, not part of a fold group.
     ToolReady {
@@ -77,7 +91,7 @@ pub enum UiEvent {
     WatchEvent {
         label: String,
         kind: crate::watch::WatchKind,
-        status: WatchStatus,
+        status: WatchState,
         detail: Option<String>,
         duration_ms: u64,
         payload: Option<serde_json::Value>,
@@ -93,7 +107,7 @@ pub enum UiEvent {
     /// (meta=None = load failed, placeholder shown).
     ImageReady {
         url: String,
-        meta: Option<crate::tui::gfx::ImageMeta>,
+        meta: Option<ImageMeta>,
     },
     TurnEnd,
     /// Non-fatal warning (e.g. MCP connection failure), shown above the input
@@ -136,7 +150,10 @@ pub fn tui_hooks(
             StreamEvent::ToolUseStart { name, .. } => {
                 let _ = events.send(UiEvent::ToolStart { name: name.clone() });
             }
-            StreamEvent::StopReason { output_tokens: Some(tokens), .. } => {
+            StreamEvent::StopReason {
+                output_tokens: Some(tokens),
+                ..
+            } => {
                 let _ = events.send(UiEvent::OutputTokens(*tokens));
             }
             _ => {}
@@ -174,9 +191,7 @@ pub fn tui_hooks(
             if ask_asks.send((request, tx)).is_err() {
                 return Box::pin(async { false });
             }
-            Box::pin(async move {
-                matches!(rx.await, Ok(DialogAction::Confirm(0)))
-            })
+            Box::pin(async move { matches!(rx.await, Ok(DialogAction::Confirm(0))) })
         }),
         ask_question: Arc::new(move |title, question, options| {
             let mut request = PermissionRequest::new(title, question, Vec::new());
@@ -192,9 +207,7 @@ pub fn tui_hooks(
                     Ok(DialogAction::Confirm(index)) => {
                         Some(crate::query::AskAnswer::Option(index))
                     }
-                    Ok(DialogAction::Answer(text)) => {
-                        Some(crate::query::AskAnswer::Other(text))
-                    }
+                    Ok(DialogAction::Answer(text)) => Some(crate::query::AskAnswer::Other(text)),
                     Ok(DialogAction::Cancel) | Err(_) => None,
                 }
             })

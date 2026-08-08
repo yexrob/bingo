@@ -97,7 +97,10 @@ impl ShareDoc {
 
 /// shares 目录：~/.local/share/bingo/shares（与 transcripts 同级）。
 pub fn shares_dir(home: &Path) -> PathBuf {
-    home.join(".local").join("share").join("bingo").join("shares")
+    home.join(".local")
+        .join("share")
+        .join("bingo")
+        .join("shares")
 }
 
 /// 会话级共享文档存储（Session 持有 Arc，子会话经 registry 共享）。
@@ -503,10 +506,18 @@ mod tests {
             AgentState::Idle,
             vec![msg("hi")],
         );
-        store.upsert_channel_meta("table", ChannelMode::Free, vec!["main".into(), "user".into(), "scout".into()]);
+        store.upsert_channel_meta(
+            "table",
+            ChannelMode::Free,
+            vec!["main".into(), "user".into(), "scout".into()],
+        );
         store.append_channel_message(
             "table",
-            ChannelMessage { seq: 1, from: "scout".into(), text: "大家好".into() },
+            ChannelMessage {
+                seq: 1,
+                from: "scout".into(),
+                text: "大家好".into(),
+            },
         );
         store
     }
@@ -569,7 +580,13 @@ mod tests {
         let store = ShareStore::load_or_create(&path).unwrap_or_else(|e| panic!("{e}"));
         store.upsert_agent("a", None, "初版".into(), AgentState::Running, Vec::new());
         store.upsert_agent("a", None, "新版".into(), AgentState::Idle, vec![msg("x")]);
-        store.upsert_agent("b", None, "另一个人".into(), AgentState::Stopped, Vec::new());
+        store.upsert_agent(
+            "b",
+            None,
+            "另一个人".into(),
+            AgentState::Stopped,
+            Vec::new(),
+        );
         let doc = store.snapshot();
         assert_eq!(doc.agents.len(), 2, "同名更新不重复建条目");
         assert_eq!(doc.agents[0].description, "新版");
@@ -579,14 +596,28 @@ mod tests {
 
         store.upsert_channel_meta("c1", ChannelMode::Serial, vec!["main".into()]);
         store.upsert_channel_meta("c1", ChannelMode::Free, vec!["main".into(), "a".into()]);
-        store.append_channel_message("c1", ChannelMessage { seq: 1, from: "a".into(), text: "t".into() });
+        store.append_channel_message(
+            "c1",
+            ChannelMessage {
+                seq: 1,
+                from: "a".into(),
+                text: "t".into(),
+            },
+        );
         let doc = store.snapshot();
         assert_eq!(doc.channels.len(), 1, "同名频道更新不重复");
         assert_eq!(doc.channels[0].mode, "free");
         assert_eq!(doc.channels[0].members, vec!["main", "a"]);
         assert_eq!(doc.channels[0].messages.len(), 1);
         // 元数据未落地前消息不建频道（create 先于 post 是调用方契约）。
-        store.append_channel_message("ghost", ChannelMessage { seq: 1, from: "x".into(), text: "y".into() });
+        store.append_channel_message(
+            "ghost",
+            ChannelMessage {
+                seq: 1,
+                from: "x".into(),
+                text: "y".into(),
+            },
+        );
         assert_eq!(store.snapshot().channels.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -612,48 +643,46 @@ mod tests {
     fn derive_share_doc_from_transcript_tools() {
         // 构造含 Agent/SendMessage/AgentControl/Channel/Post 的 transcript，
         // 断言旧会话回退推导出 Team/DM/频道数据。
-        let msgs = vec![
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::ToolUse {
-                        id: "t1".into(),
-                        name: "Agent".into(),
-                        input: serde_json::json!({
-                            "name": "scout",
-                            "agent": "scout",
-                            "description": "调研",
-                            "prompt": "去调研一下"
-                        }),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t2".into(),
-                        name: "SendMessage".into(),
-                        input: serde_json::json!({"agent": "scout", "message": "再看 B"}),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t3".into(),
-                        name: "Channel".into(),
-                        input: serde_json::json!({
-                            "action": "create",
-                            "channel": "table",
-                            "members": ["scout"],
-                            "mode": "free"
-                        }),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t4".into(),
-                        name: "Post".into(),
-                        input: serde_json::json!({"channel": "table", "message": "大家好"}),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t5".into(),
-                        name: "AgentControl".into(),
-                        input: serde_json::json!({"action": "stop", "agent": "scout"}),
-                    },
-                ],
-            },
-        ];
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "Agent".into(),
+                    input: serde_json::json!({
+                        "name": "scout",
+                        "agent": "scout",
+                        "description": "调研",
+                        "prompt": "去调研一下"
+                    }),
+                },
+                ContentBlock::ToolUse {
+                    id: "t2".into(),
+                    name: "SendMessage".into(),
+                    input: serde_json::json!({"agent": "scout", "message": "再看 B"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "t3".into(),
+                    name: "Channel".into(),
+                    input: serde_json::json!({
+                        "action": "create",
+                        "channel": "table",
+                        "members": ["scout"],
+                        "mode": "free"
+                    }),
+                },
+                ContentBlock::ToolUse {
+                    id: "t4".into(),
+                    name: "Post".into(),
+                    input: serde_json::json!({"channel": "table", "message": "大家好"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "t5".into(),
+                    name: "AgentControl".into(),
+                    input: serde_json::json!({"action": "stop", "agent": "scout"}),
+                },
+            ],
+        }];
         let doc = derive_share_doc("proj-1700000000", &msgs);
         assert_eq!(doc.session, "proj-1700000000");
         // Agent 条目：name/def/description/state。
@@ -665,7 +694,10 @@ mod tests {
         assert_eq!(doc.agents[0].history.len(), 1);
         assert!(matches!(
             &doc.agents[0].history[0],
-            Message { role: Role::User, .. }
+            Message {
+                role: Role::User,
+                ..
+            }
         ));
         // AgentControl stop → stopped（send 之后）。
         assert_eq!(doc.agents[0].state, "stopped");
@@ -712,8 +744,14 @@ mod tests {
         let doc = derive_share_doc("s", &msgs);
         assert_eq!(doc.agents.len(), 1, "重名派生不重复");
         assert_eq!(doc.agents[0].name, "w");
-        assert_eq!(doc.agents[0].description, "干活", "description 回落 prompt 摘要");
-        assert!(doc.agents[0].history.is_empty(), "未知 agent 的 SendMessage 静默");
+        assert_eq!(
+            doc.agents[0].description, "干活",
+            "description 回落 prompt 摘要"
+        );
+        assert!(
+            doc.agents[0].history.is_empty(),
+            "未知 agent 的 SendMessage 静默"
+        );
         assert!(doc.channels.is_empty(), "未知频道的 Post 静默");
         // 无 name/agent 的派生 → 自动编号 agent-1。
         let msgs = vec![Message {
@@ -808,7 +846,8 @@ mod tests {
             let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
             let _ = reader.read_line(&mut line);
-            let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+            let _ = stream
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
         });
         let base = format!("http://{addr}");
         let err = upload_share(&base, "abc123", "x").await.unwrap_err();
@@ -830,11 +869,10 @@ mod tests {
         let latest = resolve_transcript(&home, None).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(latest.name(), t_b.name());
         // 子串匹配（/resume 同语义：list 按 mtime 新→旧，find 取第一个命中）。
-        let hit = resolve_transcript(&home, Some(&t_a.name()))
-            .unwrap_or_else(|e| panic!("{e}"));
+        let hit = resolve_transcript(&home, Some(&t_a.name())).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(hit.name(), t_a.name());
-        let fragment = resolve_transcript(&home, Some(&t_b.name()[..8]))
-            .unwrap_or_else(|e| panic!("{e}"));
+        let fragment =
+            resolve_transcript(&home, Some(&t_b.name()[..8])).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(fragment.name(), t_b.name());
         // 未命中报错。
         assert!(matches!(

@@ -2,8 +2,8 @@
 //! limit → encode as PNG/JPEG (size target aligned with Claude Code:
 //! 2000×2000 and ~3.75MB of raw bytes, ≤ 5MB API hard limit after base64).
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use std::io::Cursor;
 
 /// Maximum pixels per side (oversized images are scaled down proportionally).

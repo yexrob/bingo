@@ -128,7 +128,9 @@ fn bash_content_matches(command: &str, content: &str, mode: MatchMode) -> bool {
             parts.iter().any(|p| p.starts_with(content)) || command.trim().starts_with(content)
         }
         // allow: all sub-commands must match; an untrusted split never allows.
-        MatchMode::All => trusted && !parts.is_empty() && parts.iter().all(|p| p.starts_with(content)),
+        MatchMode::All => {
+            trusted && !parts.is_empty() && parts.iter().all(|p| p.starts_with(content))
+        }
     }
 }
 
@@ -216,9 +218,7 @@ fn content_matches(
             .get("file_path")
             .or_else(|| input.get("path"))
             .and_then(|v| v.as_str())
-            .is_some_and(|target| {
-                normalize_path(target).starts_with(&normalize_path(content))
-            });
+            .is_some_and(|target| normalize_path(target).starts_with(&normalize_path(content)));
     }
     let target = match tool_name {
         "WebFetch" => {
@@ -240,12 +240,7 @@ fn content_matches(
 
 /// Whether rule `Tool(content)` matches the current tool call.
 /// The `mcp__server` form matches all tools of that server.
-fn rule_matches(
-    rule: &str,
-    tool_name: &str,
-    input: &serde_json::Value,
-    mode: MatchMode,
-) -> bool {
+fn rule_matches(rule: &str, tool_name: &str, input: &serde_json::Value, mode: MatchMode) -> bool {
     if let Some(open) = rule.find('(') {
         let rule_tool = rule[..open].trim();
         let rest = &rule[open + 1..];
@@ -271,7 +266,9 @@ fn rule_hits(
     input: &serde_json::Value,
     mode: MatchMode,
 ) -> bool {
-    rules.iter().any(|r| rule_matches(r, tool_name, input, mode))
+    rules
+        .iter()
+        .any(|r| rule_matches(r, tool_name, input, mode))
 }
 
 /// safetyCheck sensitive dirs: a write tool targeting inside these dirs → must prompt
@@ -406,7 +403,12 @@ mod tests {
     fn bypass_allows_everything() {
         let tool = WriteTool;
         let input = serde_json::json!({"file_path": "/tmp/x.txt", "content": "hi"});
-        let result = decide(&tool as &dyn Tool, input, PermissionMode::BypassPermissions, &[]);
+        let result = decide(
+            &tool as &dyn Tool,
+            input,
+            PermissionMode::BypassPermissions,
+            &[],
+        );
         assert_eq!(result.behavior, PermissionBehavior::Allow);
     }
 
@@ -416,7 +418,12 @@ mod tests {
         let input = || serde_json::json!({"file_path": "/tmp/x.txt", "content": "hi"});
         let result = decide(&tool as &dyn Tool, input(), PermissionMode::Default, &[]);
         assert_eq!(result.behavior, PermissionBehavior::Ask);
-        let result = decide(&tool as &dyn Tool, input(), PermissionMode::AcceptEdits, &[]);
+        let result = decide(
+            &tool as &dyn Tool,
+            input(),
+            PermissionMode::AcceptEdits,
+            &[],
+        );
         assert_eq!(result.behavior, PermissionBehavior::Allow);
     }
 
@@ -439,7 +446,14 @@ mod tests {
         let input = || serde_json::json!({"skill": "review-pr"});
         let allow = |rules: &[&str]| {
             let all: Vec<String> = rules.iter().map(|s| s.to_string()).collect();
-            can_use_tool(&tool as &dyn Tool, &input(), PermissionMode::Default, &[], &[], &all)
+            can_use_tool(
+                &tool as &dyn Tool,
+                &input(),
+                PermissionMode::Default,
+                &[],
+                &[],
+                &all,
+            )
         };
         // No rules → ask (skill execution is non-read-only)
         let result = allow(&[]);
@@ -684,8 +698,14 @@ mod tests {
         assert_eq!(denied(&format!("{etc}/passwd")), PermissionBehavior::Deny);
         // `../etc` (not `../{etc}`): repeating the Windows drive letter (`C:\etc\..\C:\etc`)
         // would normalize to a garbage `C:\C:\etc` path instead of the drive root.
-        assert_eq!(denied(&format!("{etc}/../etc/passwd")), PermissionBehavior::Deny);
-        assert_eq!(denied(&format!("{etc}/./ssh/../passwd")), PermissionBehavior::Deny);
+        assert_eq!(
+            denied(&format!("{etc}/../etc/passwd")),
+            PermissionBehavior::Deny
+        );
+        assert_eq!(
+            denied(&format!("{etc}/./ssh/../passwd")),
+            PermissionBehavior::Deny
+        );
         // Paths outside the directory are unaffected (read-only tools pass).
         assert_eq!(denied(&format!("{other}/log/x")), PermissionBehavior::Allow);
         // Relative paths expand against cwd, then match against absolute rules.
@@ -730,7 +750,14 @@ mod tests {
         }
         let tool = FakeMcpTool;
         let input = serde_json::json!({});
-        let result = can_use_tool(&tool as &dyn Tool, &input, PermissionMode::Default, &[], &[], &[]);
+        let result = can_use_tool(
+            &tool as &dyn Tool,
+            &input,
+            PermissionMode::Default,
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(
             result.behavior,
             PermissionBehavior::Ask,

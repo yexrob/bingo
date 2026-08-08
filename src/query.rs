@@ -1,7 +1,7 @@
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::collections::HashMap;
 
 use futures_util::StreamExt;
 use thiserror::Error;
@@ -9,15 +9,15 @@ use tokio::sync::watch;
 
 use crate::api::client::{AssistantAccumulator, Client, ClientError};
 use crate::api::contract::{NeutralRequest, StreamEvent, SystemBlock, ThinkingLevel};
-use crate::api::types::{ContentBlock, Message, Role, DEFAULT_MAX_TOKENS};
+use crate::api::types::{ContentBlock, DEFAULT_MAX_TOKENS, Message, Role};
 use crate::budget::MAX_RESULT_CHARS;
-use crate::compact::{check_and_compact, TokenGate};
+use crate::compact::{TokenGate, check_and_compact};
 use crate::error::ErrorCode;
 use crate::hooks::{run_post_tool_use, run_pre_tool_use, run_stop_hooks, run_user_prompt_submit};
-use crate::permission::{can_use_tool, PermissionBehavior, PermissionMode};
+use crate::permission::{PermissionBehavior, PermissionMode, can_use_tool};
 use crate::settings::{HooksConfig, Settings};
-use crate::tool::executor::{cancel_requested, execute_calls, PendingCall};
-use crate::tool::{find_tool, tool_params, Tool, ToolContext, ToolError, ToolResult};
+use crate::tool::executor::{PendingCall, cancel_requested, execute_calls};
+use crate::tool::{Tool, ToolContext, ToolError, ToolResult, find_tool, tool_params};
 use crate::transcript::Transcript;
 
 #[derive(Debug, Error)]
@@ -96,8 +96,16 @@ fn task_reminder_turn_distances(messages: &[Message]) -> (u64, u64) {
             break;
         }
     }
-    let since_management = if management_seen { since_management } else { TASK_REMINDER_TURNS + 1 };
-    let since_reminder = if reminder_seen { since_reminder } else { TASK_REMINDER_TURNS + 1 };
+    let since_management = if management_seen {
+        since_management
+    } else {
+        TASK_REMINDER_TURNS + 1
+    };
+    let since_reminder = if reminder_seen {
+        since_reminder
+    } else {
+        TASK_REMINDER_TURNS + 1
+    };
     (since_management, since_reminder)
 }
 
@@ -203,10 +211,6 @@ pub struct Session {
     pub watch: Arc<crate::watch::WatchRegistry>,
     /// Task store (shared by the Task tool family + TUI task panel + reminder injection).
     pub tasks: Arc<crate::tasks::TaskStore>,
-    /// Dead field: turn distances are actually computed by `task_reminder_turn_distances`
-    /// from the message history; never read or written here. Construction sites are scattered
-    /// across the TUI/sub-agents; removal would require cross-module changes.
-    pub last_task_reminder_turn: Arc<std::sync::atomic::AtomicU64>,
     /// Task panel expand signal (subscribed by the TUI loop).
     pub expand_tasks: watch::Sender<bool>,
     /// Sub-agent instance registry (continuation/lifecycle; sub-sessions share the same table).
@@ -247,9 +251,12 @@ pub enum AskAnswer {
 
 /// Ask-the-user callback (AskUserQuestion tool): title + question + options
 /// (label, description) → answer (None = user skipped/Esc).
-pub type AskQuestionFn = dyn Fn(String, String, Vec<(String, Option<String>)>) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<AskAnswer>> + Send>,
-    > + Send
+pub type AskQuestionFn = dyn Fn(
+        String,
+        String,
+        Vec<(String, Option<String>)>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<AskAnswer>> + Send>>
+    + Send
     + Sync;
 
 /// UI hooks: stream events, tool completion, permission prompts, non-fatal warnings.
@@ -416,8 +423,7 @@ async fn one_turn(
                 return Err(QueryError::Protocol(message.clone()));
             }
             StreamEvent::BlockStop { index } => {
-                if let Some(ContentBlock::ToolUse { id, name, input }) = acc.content.get(*index)
-                {
+                if let Some(ContentBlock::ToolUse { id, name, input }) = acc.content.get(*index) {
                     tool_uses.push(ContentBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
@@ -463,13 +469,8 @@ async fn gate_tool(
     permissions: &crate::settings::PermissionRules,
     ask: &AskFn,
 ) -> (PermissionBehavior, String, serde_json::Value) {
-    let (hook_behavior, hook_reason, hook_input) = run_pre_tool_use(
-        hooks,
-        &tool.name(),
-        input,
-        permission_mode_str(mode),
-    )
-    .await;
+    let (hook_behavior, hook_reason, hook_input) =
+        run_pre_tool_use(hooks, &tool.name(), input, permission_mode_str(mode)).await;
     if hook_behavior != PermissionBehavior::Allow {
         return (hook_behavior, hook_reason, hook_input);
     }
@@ -553,10 +554,7 @@ pub(crate) fn summarize_input(tool_name: &str, input: &serde_json::Value) -> Str
             {
                 format!("description=\"{desc}\"")
             } else if let Some(p) = map.get("prompt").and_then(|p| p.as_str()) {
-                format!(
-                    "prompt=\"{}\"",
-                    p.chars().take(40).collect::<String>()
-                )
+                format!("prompt=\"{}\"", p.chars().take(40).collect::<String>())
             } else {
                 String::new()
             }
@@ -720,19 +718,15 @@ async fn query_loop(
                 mail.join("\n")
             )));
         }
-        let turn = one_turn(
-            session,
-            &messages,
-            tools,
-            &mut *ui,
-            cancel_rx.as_mut(),
-        )
-        .await?;
+        let turn = one_turn(session, &messages, tools, &mut *ui, cancel_rx.as_mut()).await?;
         if turn.aborted {
             // Interrupted: the whole turn is discarded (assistant incomplete); neither
             // executed nor pending tools are filled back.
             println!();
-            return Ok(QueryOutcome { messages, aborted: true });
+            return Ok(QueryOutcome {
+                messages,
+                aborted: true,
+            });
         }
         // The assistant message must enter history before branching: max_tokens recovery
         // and the Stop hook both need the model to see the truncated content, and a normal
@@ -762,7 +756,10 @@ async fn query_loop(
                 continue;
             }
             println!();
-            return Ok(QueryOutcome { messages, aborted: false });
+            return Ok(QueryOutcome {
+                messages,
+                aborted: false,
+            });
         }
 
         // Phase 1: run each tool through the permission gate (serial, possibly interactive;
@@ -771,7 +768,9 @@ async fn query_loop(
         let mut blocks: Vec<ContentBlock> = Vec::new();
         for tool_use in &turn.tool_uses {
             let (id, name, input) = match tool_use {
-                ContentBlock::ToolUse { id, name, input } => (id.clone(), name.clone(), input.clone()),
+                ContentBlock::ToolUse { id, name, input } => {
+                    (id.clone(), name.clone(), input.clone())
+                }
                 _ => unreachable!(),
             };
             let Some(tool) = find_tool(tools, &name) else {
@@ -841,10 +840,9 @@ async fn query_loop(
         let mut stop_after_tools = false;
         let (outcomes, interrupted) = execute_calls(pending, ctx, cancel_rx.as_mut()).await;
         for outcome in outcomes {
-            let tool_use = turn
-                .tool_uses
-                .iter()
-                .find(|t| matches!(t, ContentBlock::ToolUse { id, .. } if id == &outcome.tool_use_id));
+            let tool_use = turn.tool_uses.iter().find(
+                |t| matches!(t, ContentBlock::ToolUse { id, .. } if id == &outcome.tool_use_id),
+            );
             let Some(ContentBlock::ToolUse { name, input, .. }) = tool_use else {
                 continue;
             };
@@ -917,12 +915,18 @@ async fn query_loop(
         record(
             session,
             &mut messages,
-            Message { role: Role::User, content: blocks },
+            Message {
+                role: Role::User,
+                content: blocks,
+            },
             ui,
         );
         if interrupted {
             println!();
-            return Ok(QueryOutcome { messages, aborted: true });
+            return Ok(QueryOutcome {
+                messages,
+                aborted: true,
+            });
         }
         // All tools in this batch are closed: RoundEnd only marks a batch boundary (image
         // warm-up etc.); fold groups are bounded by text — tools across turns stay in the
@@ -954,7 +958,12 @@ pub async fn run_query(
     let ctx = tool_context(session, &*ui)?;
 
     // UserPromptSubmit: the hook may block this submission.
-    if run_user_prompt_submit(&session.settings.hooks, user_input, permission_mode_str(session.permission_mode)).await
+    if run_user_prompt_submit(
+        &session.settings.hooks,
+        user_input,
+        permission_mode_str(session.permission_mode),
+    )
+    .await
     {
         return Ok(QueryOutcome {
             messages: initial_messages,
@@ -980,13 +989,18 @@ fn user_message_with_images(
     send_images: bool,
 ) -> Message {
     use crate::api::types::{ContentBlock, ImageSource, Role};
-    let mut content = vec![ContentBlock::Text { text: text.to_string() }];
+    let mut content = vec![ContentBlock::Text {
+        text: text.to_string(),
+    }];
     if send_images {
         content.extend(images.iter().map(|img| ContentBlock::Image {
             source: ImageSource::base64(&img.media_type, &img.data),
         }));
     }
-    Message { role: Role::User, content }
+    Message {
+        role: Role::User,
+        content,
+    }
 }
 
 /// Caveat injected before running a local command: `!` command output stays in the
@@ -1075,18 +1089,17 @@ pub async fn run_bash_command(
                     // interrupted: the `!` command's tool_use is not yet in history, so
                     // returning directly leaves no orphans.
                     let Some(outcome) = outcomes.into_iter().next().filter(|_| !interrupted) else {
-                        return Ok(QueryOutcome { messages, aborted: true });
+                        return Ok(QueryOutcome {
+                            messages,
+                            aborted: true,
+                        });
                     };
                     match outcome.result {
                         Ok(result) => {
                             let text = clipped_result(render_result(&result));
                             (text, result.is_error, outcome.duration_ms)
                         }
-                        Err(e) => (
-                            format!("Command failed: {e}"),
-                            true,
-                            outcome.duration_ms,
-                        ),
+                        Err(e) => (format!("Command failed: {e}"), true, outcome.duration_ms),
                     }
                 }
                 PermissionBehavior::Deny => {
@@ -1221,8 +1234,12 @@ mod tests {
         }];
         let msg = user_message_with_images("看图 #[image 1]", &imgs, true);
         assert_eq!(msg.content.len(), 2);
-        assert!(matches!(msg.content[0], ContentBlock::Text { ref text } if text == "看图 #[image 1]"));
-        assert!(matches!(&msg.content[1], ContentBlock::Image { source } if source.data == "aGVsbG8="));
+        assert!(
+            matches!(msg.content[0], ContentBlock::Text { ref text } if text == "看图 #[image 1]")
+        );
+        assert!(
+            matches!(&msg.content[1], ContentBlock::Image { source } if source.data == "aGVsbG8=")
+        );
 
         let msg = user_message_with_images("看图 #[image 1]", &imgs, false);
         assert_eq!(msg.content.len(), 1, "不支持时图片块不发送");
@@ -1271,7 +1288,10 @@ mod tests {
 
     fn text_turn(text: &str, stop_reason: &str) -> String {
         sse(&[
-            ("message_start", r#"{"message":{"id":"m_1","model":"m"}}"#.into()),
+            (
+                "message_start",
+                r#"{"message":{"id":"m_1","model":"m"}}"#.into(),
+            ),
             (
                 "content_block_start",
                 r#"{"index":0,"content_block":{"type":"text","text":""}}"#.into(),
@@ -1283,7 +1303,9 @@ mod tests {
             ("content_block_stop", r#"{"index":0}"#.into()),
             (
                 "message_delta",
-                format!(r#"{{"delta":{{"stop_reason":"{stop_reason}"}},"usage":{{"output_tokens":5}}}}"#),
+                format!(
+                    r#"{{"delta":{{"stop_reason":"{stop_reason}"}},"usage":{{"output_tokens":5}}}}"#
+                ),
             ),
             ("message_stop", "{}".into()),
         ])
@@ -1293,7 +1315,10 @@ mod tests {
         let input = serde_json::to_string(&serde_json::json!({ "command": command }).to_string())
             .unwrap_or_default();
         sse(&[
-            ("message_start", r#"{"message":{"id":"m_1","model":"m"}}"#.into()),
+            (
+                "message_start",
+                r#"{"message":{"id":"m_1","model":"m"}}"#.into(),
+            ),
             (
                 "content_block_start",
                 format!(
@@ -1302,7 +1327,9 @@ mod tests {
             ),
             (
                 "content_block_delta",
-                format!(r#"{{"index":0,"delta":{{"type":"input_json_delta","partial_json":{input}}}}}"#),
+                format!(
+                    r#"{{"index":0,"delta":{{"type":"input_json_delta","partial_json":{input}}}}}"#
+                ),
             ),
             ("content_block_stop", r#"{"index":0}"#.into()),
             (
@@ -1326,7 +1353,6 @@ mod tests {
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
-            last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
@@ -1408,7 +1434,10 @@ mod tests {
     fn escapes_xml_for_bash_output() {
         assert_eq!(escape_xml("a<b&c>"), "a&lt;b&amp;c&gt;");
         assert_eq!(escape_xml("plain"), "plain");
-        assert_eq!(escape_xml("<bash-stdout>x</bash-stdout>"), "&lt;bash-stdout&gt;x&lt;/bash-stdout&gt;");
+        assert_eq!(
+            escape_xml("<bash-stdout>x</bash-stdout>"),
+            "&lt;bash-stdout&gt;x&lt;/bash-stdout&gt;"
+        );
     }
 
     /// respondToBashCommands=false: `!` commands run purely (no model query);
@@ -1431,26 +1460,16 @@ mod tests {
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
-                &std::env::temp_dir(),
-                "test",
-            )),
-            last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
         });
         let mut ui = headless_hooks();
-        let outcome = run_bash_command(
-            &session,
-            "printf '%s' 'a<b&c>'",
-            Vec::new(),
-            &mut ui,
-            None,
-        )
-        .await
-        .unwrap();
+        let outcome = run_bash_command(&session, "printf '%s' 'a<b&c>'", Vec::new(), &mut ui, None)
+            .await
+            .unwrap();
         assert!(!outcome.aborted);
         assert_eq!(outcome.messages.len(), 2, "caveat + input/output");
 
@@ -1471,12 +1490,12 @@ mod tests {
         assert!(merged.contains("<bash-stdout>"), "{merged}");
         assert!(merged.contains("a&lt;b&amp;c&gt;"), "输出已转义: {merged}");
         let stdout = merged.split("<bash-stdout>").nth(1).unwrap_or("");
-        assert!(!stdout.contains("a<b&c>"), "stdout 段原始 < > 不得泄漏: {merged}");
         assert!(
-            !outcome
-                .messages
-                .iter()
-                .any(|m| m.role == Role::Assistant),
+            !stdout.contains("a<b&c>"),
+            "stdout 段原始 < > 不得泄漏: {merged}"
+        );
+        assert!(
+            !outcome.messages.iter().any(|m| m.role == Role::Assistant),
             "不构造合成 assistant 消息（thinking 校验）"
         );
     }
@@ -1570,7 +1589,11 @@ mod tests {
             .filter(|(_, text)| !text.starts_with(TASK_REMINDER_MARKER))
             .collect();
 
-        assert_eq!(texts.len(), 4, "user / assistant / resume / assistant: {texts:?}");
+        assert_eq!(
+            texts.len(),
+            4,
+            "user / assistant / resume / assistant: {texts:?}"
+        );
         assert_eq!(texts[1], (Role::Assistant, "partial answer".to_string()));
         assert_eq!(texts[2], (Role::User, MAX_TOKENS_RESUME_PROMPT.to_string()));
         assert_eq!(
@@ -1645,7 +1668,13 @@ mod tests {
         ];
         let mut blocks = vec![tool_result_text("a", "done")];
         fill_missing_tool_results(&tool_uses, &mut blocks);
-        assert_eq!(tool_result_ids(&[Message { role: Role::User, content: blocks.clone() }]), vec!["a", "b"]);
+        assert_eq!(
+            tool_result_ids(&[Message {
+                role: Role::User,
+                content: blocks.clone()
+            }]),
+            vec!["a", "b"]
+        );
 
         // Running again must not fill duplicates.
         fill_missing_tool_results(&tool_uses, &mut blocks);
@@ -1670,11 +1699,7 @@ mod tests {
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
-            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
-                &std::env::temp_dir(),
-                "test",
-            )),
-            last_task_reminder_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),

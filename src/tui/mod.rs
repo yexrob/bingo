@@ -1,5 +1,6 @@
 //! Terminal front end.
 //!
+//! - [`slash`] owns slash command metadata and pure suggestion/help transformations.
 //! - [`chat`] is the state machine and the document builder (`build_rows`).
 //! - [`app`] is the event loop and the frame assembly.
 //! - [`view`] converts document rows to ratatui text; [`term`] is the only
@@ -20,6 +21,7 @@ pub mod line;
 pub mod markdown;
 pub mod math;
 pub mod picker;
+pub mod slash;
 pub(crate) mod term;
 #[cfg(test)]
 mod test_util;

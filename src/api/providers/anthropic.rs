@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 use super::{backoff, retryable};
@@ -16,7 +16,7 @@ use crate::api::contract::{
     SystemBlock, ThinkingLevel,
 };
 use crate::api::sse::SseParser;
-use crate::api::types::{Message, DEFAULT_MAX_TOKENS};
+use crate::api::types::{DEFAULT_MAX_TOKENS, Message};
 
 pub const API_BASE: &str = "https://api.anthropic.com";
 pub const API_VERSION: &str = "2023-06-01";
@@ -139,7 +139,10 @@ impl WireRequest {
             system: request
                 .system
                 .iter()
-                .map(|b| WireSystemBlock { text: b.text.clone(), cache: b.cache })
+                .map(|b| WireSystemBlock {
+                    text: b.text.clone(),
+                    cache: b.cache,
+                })
                 .collect(),
             messages: request.messages.clone(),
             tools: request.tools.clone(),
@@ -209,21 +212,13 @@ struct MessageStartInner {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum DeltaPayload {
     #[serde(rename = "text_delta")]
-    Text {
-        text: String,
-    },
+    Text { text: String },
     #[serde(rename = "thinking_delta")]
-    Thinking {
-        thinking: String,
-    },
+    Thinking { thinking: String },
     #[serde(rename = "signature_delta")]
-    Signature {
-        signature: String,
-    },
+    Signature { signature: String },
     #[serde(rename = "input_json_delta")]
-    InputJson {
-        partial_json: String,
-    },
+    InputJson { partial_json: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,10 +261,7 @@ struct ErrorInner {
 fn parse_content_block_start(data: &str) -> Result<Option<StreamEvent>, String> {
     let value: serde_json::Value =
         serde_json::from_str(data).map_err(|e| format!("bad content_block_start: {e}"))?;
-    let index = value
-        .get("index")
-        .and_then(|i| i.as_u64())
-        .unwrap_or(0) as usize;
+    let index = value.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
     let block = value
         .get("content_block")
         .ok_or("content_block_start without content_block")?;
@@ -393,24 +385,23 @@ impl AnthropicProvider {
             HeaderValue::from_str(&endpoint.api_key)
                 .map_err(|e| ClientError::InvalidApiKey(e.to_string()))?,
         );
-        headers.insert(
-            "anthropic-version",
-            HeaderValue::from_static(API_VERSION),
-        );
+        headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(headers)
     }
 
     /// Start a streaming request, returning a normalized event stream.
-    async fn stream_inner(
-        &self,
-        request: &WireRequest,
-    ) -> Result<BoxStream, ClientError> {
+    async fn stream_inner(&self, request: &WireRequest) -> Result<BoxStream, ClientError> {
         // The 400 context-overflow recompute needs to mutate max_tokens →
         // clone a mutable request.
         let mut request = request.clone();
         let mut attempt = 0;
-        let base_url = self.endpoint.read().unwrap_or_else(|p| p.into_inner()).base_url.clone();
+        let base_url = self
+            .endpoint
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .base_url
+            .clone();
         loop {
             let builder = self
                 .http
@@ -431,7 +422,10 @@ impl AnthropicProvider {
                         .map(Duration::from_secs);
                     let body = response.text().await.unwrap_or_default();
                     if attempt >= MAX_RETRIES {
-                        return Err(ClientError::Api { status: status.as_u16(), body });
+                        return Err(ClientError::Api {
+                            status: status.as_u16(),
+                            body,
+                        });
                     }
                     let delay = retry_after.unwrap_or_else(|| backoff(attempt));
                     tokio::time::sleep(delay).await;
@@ -456,7 +450,10 @@ impl AnthropicProvider {
                         attempt += 1;
                         continue;
                     }
-                    return Err(ClientError::Api { status: status.as_u16(), body });
+                    return Err(ClientError::Api {
+                        status: status.as_u16(),
+                        body,
+                    });
                 }
                 Ok(Err(_transport)) if attempt < MAX_RETRIES => {
                     tokio::time::sleep(backoff(attempt)).await;
@@ -476,7 +473,12 @@ impl AnthropicProvider {
     async fn complete_text_inner(&self, request: &WireRequest) -> Result<String, ClientError> {
         let mut request = request.clone();
         request.stream = false;
-        let base_url = self.endpoint.read().unwrap_or_else(|p| p.into_inner()).base_url.clone();
+        let base_url = self
+            .endpoint
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .base_url
+            .clone();
         let mut attempt = 0;
         let response = loop {
             let builder = self
@@ -498,7 +500,10 @@ impl AnthropicProvider {
                 Ok(response) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
-                    return Err(ClientError::Api { status: status.as_u16(), body });
+                    return Err(ClientError::Api {
+                        status: status.as_u16(),
+                        body,
+                    });
                 }
                 Err(_transport) if attempt < MAX_RETRIES => {
                     tokio::time::sleep(backoff(attempt)).await;
@@ -572,7 +577,10 @@ impl ProviderClient for AnthropicProvider {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .supports_images;
-        Capabilities { supports_images, ..Default::default() }
+        Capabilities {
+            supports_images,
+            ..Default::default()
+        }
     }
 
     fn auth_status(&self) -> AuthStatus {
@@ -586,13 +594,21 @@ impl ProviderClient for AnthropicProvider {
 
     async fn complete_text(&self, request: &NeutralRequest) -> Result<String, ClientError> {
         let wire = WireRequest::from_neutral(request);
-        tokio::time::timeout(SHORT_WRITE_TIMEOUT, maybe_hang(self.complete_text_inner(&wire)))
-            .await
-            .map_err(|_| ClientError::Timeout)?
+        tokio::time::timeout(
+            SHORT_WRITE_TIMEOUT,
+            maybe_hang(self.complete_text_inner(&wire)),
+        )
+        .await
+        .map_err(|_| ClientError::Timeout)?
     }
 
     async fn list_models(&self) -> Result<Vec<String>, ClientError> {
-        let base_url = self.endpoint.read().unwrap_or_else(|p| p.into_inner()).base_url.clone();
+        let base_url = self
+            .endpoint
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .base_url
+            .clone();
         let response = tokio::time::timeout(
             SHORT_READ_TIMEOUT,
             maybe_hang(
@@ -637,7 +653,12 @@ impl ProviderClient for AnthropicProvider {
             "system": system.iter().map(|b| WireSystemBlock { text: b.text.clone(), cache: b.cache }).collect::<Vec<_>>(),
             "messages": messages,
         });
-        let base_url = self.endpoint.read().unwrap_or_else(|p| p.into_inner()).base_url.clone();
+        let base_url = self
+            .endpoint
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .base_url
+            .clone();
         let response = tokio::time::timeout(
             SHORT_READ_TIMEOUT,
             maybe_hang(
@@ -669,10 +690,7 @@ impl ProviderClient for AnthropicProvider {
 /// Idle-timeout wrapper for `stream.next()`: if not a single event arrives
 /// within the idle period, the stream is judged dead — so headless does not
 /// block forever when the server hangs.
-async fn next_with_idle<S, T>(
-    body: &mut S,
-    idle: Duration,
-) -> Result<Option<T>, ClientError>
+async fn next_with_idle<S, T>(body: &mut S, idle: Duration) -> Result<Option<T>, ClientError>
 where
     S: futures_util::Stream<Item = T> + Unpin,
 {
@@ -756,7 +774,10 @@ mod tests {
         let handle = tokio::spawn(async move { provider.list_models().await });
         tokio::time::advance(Duration::from_secs(11)).await;
         let res = handle.await.unwrap();
-        assert!(matches!(res, Err(ClientError::Timeout)), "读超时应落 TIMEOUT");
+        assert!(
+            matches!(res, Err(ClientError::Timeout)),
+            "读超时应落 TIMEOUT"
+        );
     }
 
     /// AC-13/14 deadline behaviour + tiering not confused: a write must not
@@ -789,7 +810,10 @@ mod tests {
         // At 16s the write tier fires.
         tokio::time::advance(Duration::from_secs(2)).await;
         let res = handle.await.unwrap();
-        assert!(matches!(res, Err(ClientError::Timeout)), "写超时应落 TIMEOUT");
+        assert!(
+            matches!(res, Err(ClientError::Timeout)),
+            "写超时应落 TIMEOUT"
+        );
     }
 
     #[test]
@@ -831,7 +855,10 @@ mod tests {
         let err = next_with_idle(&mut stalled, Duration::from_millis(50))
             .await
             .unwrap_err();
-        assert!(matches!(&err, ClientError::Stream(m) if m.contains("server stalled")), "{err}");
+        assert!(
+            matches!(&err, ClientError::Stream(m) if m.contains("server stalled")),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -851,10 +878,23 @@ mod tests {
     /// is a 400 everywhere.
     #[test]
     fn wire_thinking_is_adaptive_for_every_enabled_level() {
-        for level in [ThinkingLevel::Low, ThinkingLevel::Medium, ThinkingLevel::High, ThinkingLevel::Xhigh, ThinkingLevel::Max] {
+        for level in [
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Xhigh,
+            ThinkingLevel::Max,
+        ] {
             let param = wire_thinking(Some(level)).unwrap();
-            assert_eq!(param, serde_json::json!({ "type": "adaptive" }), "{level:?}");
-            assert!(param.get("budget_tokens").is_none(), "{level:?} 不得带 budget");
+            assert_eq!(
+                param,
+                serde_json::json!({ "type": "adaptive" }),
+                "{level:?}"
+            );
+            assert!(
+                param.get("budget_tokens").is_none(),
+                "{level:?} 不得带 budget"
+            );
         }
     }
 
@@ -886,11 +926,17 @@ mod tests {
         };
         let json = serde_json::to_value(WireRequest::from_neutral(&req)).unwrap();
         assert!(json.get("thinking").is_none(), "无 thinking 不序列化");
-        assert!(json.get("output_config").is_none(), "无 output_config 不序列化");
+        assert!(
+            json.get("output_config").is_none(),
+            "无 output_config 不序列化"
+        );
         req.thinking = Some(ThinkingLevel::Xhigh);
         let json = serde_json::to_value(WireRequest::from_neutral(&req)).unwrap();
         assert_eq!(json["thinking"], serde_json::json!({ "type": "adaptive" }));
-        assert_eq!(json["output_config"], serde_json::json!({ "effort": "xhigh" }));
+        assert_eq!(
+            json["output_config"],
+            serde_json::json!({ "effort": "xhigh" })
+        );
     }
 
     #[test]
@@ -901,7 +947,13 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(ev, StreamEvent::TextDelta { index: 1, text: "Hello".into() });
+        assert_eq!(
+            ev,
+            StreamEvent::TextDelta {
+                index: 1,
+                text: "Hello".into()
+            }
+        );
     }
 
     #[test]
@@ -914,7 +966,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             ev,
-            StreamEvent::ToolUseStart { index: 2, id: "tu_1".into(), name: "Bash".into() }
+            StreamEvent::ToolUseStart {
+                index: 2,
+                id: "tu_1".into(),
+                name: "Bash".into()
+            }
         );
     }
 
@@ -945,7 +1001,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             ev,
-            StreamEvent::ApiError { message: "overloaded_error: Overloaded".into() }
+            StreamEvent::ApiError {
+                message: "overloaded_error: Overloaded".into()
+            }
         );
     }
 
@@ -959,13 +1017,19 @@ mod tests {
     /// the block is plain text.
     #[test]
     fn wire_system_block_cache_control() {
-        let wire = WireSystemBlock { text: "sys".into(), cache: true };
+        let wire = WireSystemBlock {
+            text: "sys".into(),
+            cache: true,
+        };
         let json = serde_json::to_value(&wire).unwrap();
         assert_eq!(
             json,
             serde_json::json!({"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}})
         );
-        let wire = WireSystemBlock { text: "sys".into(), cache: false };
+        let wire = WireSystemBlock {
+            text: "sys".into(),
+            cache: false,
+        };
         let json = serde_json::to_value(&wire).unwrap();
         assert_eq!(json, serde_json::json!({"type": "text", "text": "sys"}));
     }

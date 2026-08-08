@@ -1,4 +1,6 @@
 /target
 .DS_Store
+__pycache__/
+*.py[cod]
 notes/memory.md
 .bingo/

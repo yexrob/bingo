@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::tasks::{Task, TaskPatch, TaskStatus, TaskStore};
-use crate::tool::{parse_input, schema_for, Tool, ToolContext, ToolError, ToolResult};
+use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input, schema_for};
 
 fn store(ctx: &ToolContext) -> &std::sync::Arc<TaskStore> {
     &ctx.tasks
@@ -55,9 +55,12 @@ fn coerce_create(input: serde_json::Value) -> (serde_json::Value, Vec<&'static s
         return (value, fixed);
     }
     // Backfill subject/description from each other when one is missing
-    let has_subject = map.get("subject").is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()));
-    let has_description =
-        map.get("description").is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()));
+    let has_subject = map
+        .get("subject")
+        .is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()));
+    let has_description = map
+        .get("description")
+        .is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()));
     if has_subject && !has_description {
         map.insert(
             "description".to_string(),
@@ -65,7 +68,10 @@ fn coerce_create(input: serde_json::Value) -> (serde_json::Value, Vec<&'static s
         );
         fixed.push("backfill_description");
     } else if has_description && !has_subject {
-        map.insert("subject".to_string(), map.get("description").cloned().unwrap());
+        map.insert(
+            "subject".to_string(),
+            map.get("description").cloned().unwrap(),
+        );
         fixed.push("backfill_subject");
     }
     (value, fixed)
@@ -397,7 +403,9 @@ impl Tool for TaskUpdateTool {
             Some("in_progress") => Some(TaskStatus::InProgress),
             Some("completed") => Some(TaskStatus::Completed),
             Some(other) => {
-                return Err(ToolError::failed(format!("[Tasks] invalid status: {other}")));
+                return Err(ToolError::failed(format!(
+                    "[Tasks] invalid status: {other}"
+                )));
             }
             None => None,
         };
@@ -729,8 +737,10 @@ mod tests {
             parse_input(&json!({"taskId": "3", "status": "in_progress"})).unwrap();
         assert_eq!(canonical.task_id, "3");
         // Historical/dialect callers pass task_id: still parseable after coerce fixes it.
-        let aliased: TaskUpdateInput =
-            parse_input(&coerce_update(json!({"task_id": "3", "status": "in_progress"}))).unwrap();
+        let aliased: TaskUpdateInput = parse_input(&coerce_update(
+            json!({"task_id": "3", "status": "in_progress"}),
+        ))
+        .unwrap();
         assert_eq!(aliased.task_id, "3");
         let by_id: TaskUpdateInput =
             parse_input(&coerce_update(json!({"id": "3", "status": "completed"}))).unwrap();

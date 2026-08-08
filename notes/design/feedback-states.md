@@ -248,3 +248,4 @@ Web-side conventions (for a future web frontend to reuse):
   slash 错误结构化（UNKNOWN_COMMAND / BAD_ARGUMENT，`[error] code=… msg=…` 单行，qa 只断言 code）；
   slash 输出 TTL 分级（成功 2s / 错误与用法 ≥8s 且下次输入清除——规格见设计契约 §4.4）；
   defer 记案：子命令二级补全、/model 的 s session-only、模型/思考持久化层（Q1 待议）。
+- v1.22（2026-08-08）：修复真实主机路径的反馈生命周期偏差——alternate-screen `run_fullscreen` 现与 inline 帧共用 Full 错误态语义（标题、稳定码、说明、Enter 重试 / Esc 返回，隐藏输入框与光标），不再绕过 `Frame::assemble` 的错误分支；slash 错误/用法行的 idle 调度把 `slash_error_at` 纳入 `needs_tick`，因此即使用户无后续输入也会在 8s TTL 到期后清除并回到真正 idle。新增真实 fullscreen frame 与 host/state idle TTL 回归，覆盖「用户看到什么」与「反馈何时消失」。公开分享反馈同步收口：本地导出为默认，只有 `--public` 显式选择才联网；任何字节上传前先显示「任何人可访问 + 可能含敏感信息」警告。

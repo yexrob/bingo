@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::{parse_input, Tool, ToolContext, ToolError, ToolResult};
+use super::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 
 /// Glob result cap: prevents the model from receiving an overly long list (truncated with a note when exceeded).
 const MAX_GLOB_RESULTS: usize = 500;
@@ -126,13 +126,7 @@ impl Tool for GlobTool {
 /// Depth-first collection of matching files (paths relative to root); skips symlinked dirs to
 /// prevent cycles, and skips .git/target/node_modules/hidden directories. Returns true when the
 /// cap is reached and traversal stops early.
-fn collect(
-    root: &Path,
-    dir: &Path,
-    matcher: &PathGlob,
-    out: &mut Vec<String>,
-    depth: u32,
-) -> bool {
+fn collect(root: &Path, dir: &Path, matcher: &PathGlob, out: &mut Vec<String>, depth: u32) -> bool {
     if depth > 24 || out.len() >= MAX_GLOB_RESULTS {
         return out.len() >= MAX_GLOB_RESULTS;
     }
@@ -229,14 +223,14 @@ mod tests {
         assert!(text.contains("notes.md"), "{text}");
         // `**/` prefixes work as usual (file-name assertions: separator style is platform-dependent).
         let text = run(&root, "**/*.rs").await;
-        assert!(text.contains("main.rs") && text.contains("lib.rs"), "{text}");
+        assert!(
+            text.contains("main.rs") && text.contains("lib.rs"),
+            "{text}"
+        );
         // Absolute patterns match against the absolute path. Forward slashes throughout:
         // globset treats `\` as an escape character, so a raw Windows path pattern
         // (`C:\...\src/**/*.rs`) would compile to garbage on Windows.
-        let absolute = format!(
-            "{}/src/**/*.rs",
-            root.to_string_lossy().replace('\\', "/")
-        );
+        let absolute = format!("{}/src/**/*.rs", root.to_string_lossy().replace('\\', "/"));
         let text = run(&root, &absolute).await;
         assert!(text.contains("src/main.rs"), "{text}");
         let _ = std::fs::remove_dir_all(&root);
@@ -263,7 +257,11 @@ mod tests {
             std::fs::write(root.join(format!("f{i:04}.txt")), "x").unwrap();
         }
         let text = run(&root, "*.txt").await;
-        assert!(text.contains("stopped at the"), "{}", &text[..200.min(text.len())]);
+        assert!(
+            text.contains("stopped at the"),
+            "{}",
+            &text[..200.min(text.len())]
+        );
         assert_eq!(
             text.lines().filter(|l| l.ends_with(".txt")).count(),
             MAX_GLOB_RESULTS

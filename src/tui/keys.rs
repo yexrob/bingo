@@ -15,26 +15,86 @@ pub struct Binding {
 
 /// Every binding the TUI implements, in the order the `?` panel lists them.
 pub const BINDINGS: &[Binding] = &[
-    Binding { keys: "enter", description: "send message" },
-    Binding { keys: "\\ + enter", description: "insert newline (or ctrl+j)" },
-    Binding { keys: "esc", description: "interrupt · esc esc clears input" },
-    Binding { keys: "ctrl+c", description: "interrupt · clear · twice to exit" },
-    Binding { keys: "up/down", description: "prompt history (queue while busy)" },
-    Binding { keys: "ctrl+a/e", description: "start / end of line" },
-    Binding { keys: "alt+b/f", description: "move one word" },
-    Binding { keys: "ctrl+w/u/k", description: "delete word / to start / to end" },
-    Binding { keys: "ctrl+y", description: "paste back last deletion" },
-    Binding { keys: "ctrl+r", description: "search prompt history" },
-    Binding { keys: "ctrl+s", description: "stash input · press again to restore" },
-    Binding { keys: "ctrl+_", description: "undo edit" },
-    Binding { keys: "ctrl+o", description: "expand / collapse output" },
-    Binding { keys: "ctrl+t", description: "toggle task list" },
-    Binding { keys: "ctrl+g", description: "agents / channels (↑↓ pick · enter open)" },
-    Binding { keys: "ctrl+l", description: "redraw screen" },
-    Binding { keys: "shift+tab", description: "cycle permission mode" },
-    Binding { keys: "alt+t", description: "toggle extended thinking" },
-    Binding { keys: "! / /", description: "shell mode / commands" },
-    Binding { keys: "?", description: "toggle this panel" },
+    Binding {
+        keys: "enter",
+        description: "send message",
+    },
+    Binding {
+        keys: "\\ + enter",
+        description: "insert newline (or ctrl+j)",
+    },
+    Binding {
+        keys: "esc",
+        description: "interrupt · esc esc clears input",
+    },
+    Binding {
+        keys: "ctrl+c",
+        description: "interrupt · clear · twice to exit",
+    },
+    Binding {
+        keys: "up/down",
+        description: "prompt history (queue while busy)",
+    },
+    Binding {
+        keys: "ctrl+a/e",
+        description: "start / end of line",
+    },
+    Binding {
+        keys: "alt+b/f",
+        description: "move one word",
+    },
+    Binding {
+        keys: "ctrl+w/u/k",
+        description: "delete word / to start / to end",
+    },
+    Binding {
+        keys: "ctrl+y",
+        description: "paste back last deletion",
+    },
+    Binding {
+        keys: "ctrl+r",
+        description: "search prompt history",
+    },
+    Binding {
+        keys: "ctrl+s",
+        description: "stash input · press again to restore",
+    },
+    Binding {
+        keys: "ctrl+_",
+        description: "undo edit",
+    },
+    Binding {
+        keys: "ctrl+o",
+        description: "expand / collapse output",
+    },
+    Binding {
+        keys: "ctrl+t",
+        description: "toggle task list",
+    },
+    Binding {
+        keys: "ctrl+g",
+        description: "agents / channels (↑↓ pick · enter open)",
+    },
+    Binding {
+        keys: "ctrl+l",
+        description: "redraw screen",
+    },
+    Binding {
+        keys: "shift+tab",
+        description: "cycle permission mode",
+    },
+    Binding {
+        keys: "alt+t",
+        description: "toggle extended thinking",
+    },
+    Binding {
+        keys: "! / /",
+        description: "shell mode / commands",
+    },
+    Binding {
+        keys: "?",
+        description: "toggle this panel",
+    },
 ];
 
 /// Footer hint shown while idle (CC `? for shortcuts`).
@@ -63,7 +123,11 @@ pub fn help_lines(width: usize, max_rows: usize) -> Vec<String> {
     }
     let key_w = keys_column();
     let cell = |b: &Binding| format!("{:<key_w$}  {}", b.keys, b.description, key_w = key_w);
-    let cell_w = BINDINGS.iter().map(|b| text_width(&cell(b))).max().unwrap_or(0);
+    let cell_w = BINDINGS
+        .iter()
+        .map(|b| text_width(&cell(b)))
+        .max()
+        .unwrap_or(0);
     // Two columns only when both fit with a gutter and a left margin.
     let columns = if width >= cell_w * 2 + 6 { 2 } else { 1 };
     let rows_needed = BINDINGS.len().div_ceil(columns);

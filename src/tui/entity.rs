@@ -22,13 +22,13 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use futures_util::StreamExt;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 
 use crate::api::types::{ContentBlock, Message, Role};
 use crate::channels::{ChannelMessage, USER_NAME};
 use crate::tui::chat::{Chat, EntityOpen, Row};
-use crate::tui::line::{text_width, wrap_words, Line, SegStyle};
+use crate::tui::line::{Line, SegStyle, text_width, wrap_words};
 use crate::tui::theme::Theme;
 use crate::tui::view;
 
@@ -77,10 +77,7 @@ pub fn agent_view_rows(
                     for para in text.lines() {
                         let lines = wrap_words(para, wrap_w);
                         for l in &lines {
-                            rows.push(Row::new(Line::styled(
-                                l.clone(),
-                                SegStyle::fg(theme.text),
-                            )));
+                            rows.push(Row::new(Line::styled(l.clone(), SegStyle::fg(theme.text))));
                         }
                         if lines.is_empty() {
                             rows.push(Row::new(Line::empty()));
@@ -173,9 +170,7 @@ pub fn room_rows(log: &[ChannelMessage], width: usize, theme: &Theme) -> Vec<Row
                 let body = format!(" {l} ");
                 let mut row = Line::empty();
                 if mine {
-                    let pad = width
-                        .saturating_sub(2)
-                        .saturating_sub(text_width(&body));
+                    let pad = width.saturating_sub(2).saturating_sub(text_width(&body));
                     row.push_styled(" ".repeat(pad), SegStyle::fg(theme.text));
                 } else {
                     row.push_styled("  ".to_string(), SegStyle::fg(theme.text));
@@ -298,17 +293,14 @@ async fn modal_loop(
             let height = area.height as usize;
             let (header, content, footer, cursor_col) = match open {
                 EntityOpen::Agent(name) => {
-                    let (history, live, state) = session
-                        .agents
-                        .view_of(name)
-                        .unwrap_or((Vec::new(), None, crate::agents::AgentState::Stopped));
-                    let header = header_rows(
-                        format!("◉ {name} · {}", state.label()),
-                        width,
-                        &theme,
-                    );
-                    let content =
-                        agent_view_rows(&history, live.as_deref(), width, &theme);
+                    let (history, live, state) = session.agents.view_of(name).unwrap_or((
+                        Vec::new(),
+                        None,
+                        crate::agents::AgentState::Stopped,
+                    ));
+                    let header =
+                        header_rows(format!("◉ {name} · {}", state.label()), width, &theme);
+                    let content = agent_view_rows(&history, live.as_deref(), width, &theme);
                     let footer = vec![Row::new(Line::styled(
                         "esc 返回 · ↑↓ 滚动".to_string(),
                         SegStyle::fg(theme.inactive),
@@ -364,12 +356,7 @@ async fn modal_loop(
             let max_up = content.len().saturating_sub(viewport);
             let up = scroll_up.min(max_up);
             let start = content.len().saturating_sub(viewport + up);
-            let slice: Vec<Row> = content
-                .iter()
-                .skip(start)
-                .take(viewport)
-                .cloned()
-                .collect();
+            let slice: Vec<Row> = content.iter().skip(start).take(viewport).cloned().collect();
             let buf = frame.buffer_mut();
             let fg = theme.text;
             view::render_rows(&header, fg, buf, area);
@@ -415,18 +402,8 @@ async fn modal_loop(
 
 /// Speak as `user` (the same delivery/wake path as the Post tool).
 /// Returns `None` = success; `Some` = notice text (bounce-back/error).
-fn post_as_user(
-    session: &Arc<crate::query::Session>,
-    channel: &str,
-    text: &str,
-) -> Option<String> {
-    match crate::tool::channel::deliver_post(
-        session,
-        &session.watch,
-        USER_NAME,
-        channel,
-        text,
-    ) {
+fn post_as_user(session: &Arc<crate::query::Session>, channel: &str, text: &str) -> Option<String> {
+    match crate::tool::channel::deliver_post(session, &session.watch, USER_NAME, channel, text) {
         Ok(crate::tool::channel::PostDelivery::Sent { .. }) => None,
         // With render-as-read this rarely bounces; if it does (same-frame
         // race), prompt the user to resend.
@@ -485,25 +462,30 @@ mod tests {
         let lead = text.len() - text.trim_start().len();
         assert!(lead > 40, "右对齐（前导空白 {lead}）: {text:?}");
         // user bubbles use user_message_bg, others use code_block_bg.
-        assert!(mine
-            .line
-            .segs
-            .iter()
-            .any(|s| s.style.bg == Some(theme.user_message_bg)));
+        assert!(
+            mine.line
+                .segs
+                .iter()
+                .any(|s| s.style.bg == Some(theme.user_message_bg))
+        );
         let other = rows
             .iter()
             .find(|r| r.line.plain_text().contains("收到"))
             .unwrap_or_else(|| panic!("有 scout 行"));
-        assert!(other
-            .line
-            .segs
-            .iter()
-            .any(|s| s.style.bg == Some(theme.code_block_bg)));
+        assert!(
+            other
+                .line
+                .segs
+                .iter()
+                .any(|s| s.style.bg == Some(theme.code_block_bg))
+        );
         // Empty log: placeholder notice.
-        assert!(room_rows(&[], 80, &theme)[0]
-            .line
-            .plain_text()
-            .contains("还没有消息"));
+        assert!(
+            room_rows(&[], 80, &theme)[0]
+                .line
+                .plain_text()
+                .contains("还没有消息")
+        );
     }
 
     /// Agent conversation view: ❯ prompts, body, ⏺ tool lines, the live tail
@@ -529,7 +511,10 @@ mod tests {
         ];
         let rows = agent_view_rows(&history, Some("正在写第二段"), 80, &theme);
         let joined: Vec<String> = rows.iter().map(|r| r.line.plain_text()).collect();
-        assert!(joined.iter().any(|t| t.starts_with("❯ 调研 D27")), "{joined:?}");
+        assert!(
+            joined.iter().any(|t| t.starts_with("❯ 调研 D27")),
+            "{joined:?}"
+        );
         assert!(joined.iter().any(|t| t.contains("⏺ Bash($ rg lazy)")));
         assert!(joined.iter().any(|t| t.contains("结论：懒落盘正确。")));
         assert!(joined.iter().any(|t| t.contains("正在写第二段")));

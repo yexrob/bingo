@@ -5,7 +5,21 @@ on:
     branches: [dev, main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
   test:
     name: ${{ matrix.os }} · check / clippy / test
     runs-on: ${{ matrix.os }}
@@ -20,8 +34,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo check
-        run: cargo check --locked
+        run: cargo check --locked --all-targets
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: cargo test
-        run: cargo test --locked --bin bingo
+        run: cargo test --locked --all-targets

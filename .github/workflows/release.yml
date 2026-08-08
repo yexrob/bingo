@@ -5,11 +5,35 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  quality:
+    name: Quality and release identity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify tag matches Cargo package version
+        run: python scripts/check_release_version.py --tag "${GITHUB_REF_NAME}"
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+      - name: cargo check
+        run: cargo check --locked --all-targets
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --locked --all-targets
+
   build:
-    name: ${{ matrix.artifact }}
+    name: Build and smoke ${{ matrix.artifact }}
+    needs: quality
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -24,8 +48,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: bingo-aarch64-apple-darwin
-          # Intel Macs: cross-compiled from the arm64 runner (no extra toolchain needed).
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             artifact: bingo-x86_64-apple-darwin
     steps:
@@ -45,12 +68,20 @@ jobs:
           mkdir -p dist
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp target/${{ matrix.target }}/release/bingo.exe dist/bingo.exe
-            # Zip lives next to the tarballs (repo root) so the artifact glob below matches.
             powershell -NoProfile -Command "Compress-Archive -Path dist/bingo.exe -DestinationPath ${{ matrix.artifact }}.zip -Force"
           else
             cp target/${{ matrix.target }}/release/bingo dist/bingo
             tar -czf ${{ matrix.artifact }}.tar.gz -C dist bingo
           fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Smoke unpacked archive and binary version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          python scripts/smoke_release_archive.py "${{ matrix.artifact }}.$([[ '${{ runner.os }}' == 'Windows' ]] && echo zip || echo tar.gz)" --version "$version"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -61,15 +92,16 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      # Release semantics: a tag on main is the official package; a tag elsewhere
-      # (e.g. dev) is a preflight build → published as a pre-release.
-      # Single upload job: concurrent softprops uploads to one release race each other.
+        with:
+          fetch-depth: 0
       - name: Classify release (main = official, else preflight)
         id: release_kind
         run: |
-          git fetch origin main --depth=1
+          git fetch origin main
           if git merge-base --is-ancestor HEAD origin/main; then
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else

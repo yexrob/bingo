@@ -126,6 +126,7 @@ Startup fails with an error if no API key is present.
 | `--no-team` | don't auto-start the project team (overrides settings `team.autoStart`) |
 | `--permission-mode <mode>` | permission mode: `default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions` (default from settings) |
 | `--continue` | resume the most recent session |
+| `bingo share [session] [--public] [--open] [-o path]` | export self-contained HTML locally by default; `--public` explicitly publishes a link anyone can access (with a sensitive-content warning before upload) |
 | `prompt` | non-interactive prompt (read from stdin if omitted; ignored in interactive mode) |
 
 ## Interface
@@ -168,7 +169,12 @@ opens the level picker; the choice persists), `/theme`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` executes directly), `/context` (usage),
 `/status`, `/compact` (force compaction), `/resume [name]` (resume a past
-session), `/rename`, `/clear`, `/exit`.
+session), `/rename`, `/share [--public] [--open]`, `/clear`, `/exit`.
+`/share` writes a self-contained HTML file locally by default. `--public` is
+an explicit opt-in to upload it to a link anyone can access; bingo shows the
+sensitive-content warning before upload. `--open` opens the local file or the
+published URL. The equivalent CLI is `bingo share [session] [--public]
+[--open] [-o path]`.
 `/team` (project teams): `list` (roster + runtime), `start` (pull up / reuse),
 `status`, `assign <member> <task>`, `stop`, `validate`, `new` (scaffold
 `team.json`), `memory list|gc`.

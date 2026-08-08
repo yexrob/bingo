@@ -46,7 +46,13 @@ pub fn memory_file(home: &Path, cwd: &Path) -> PathBuf {
         .unwrap_or_else(|| "root".to_string());
     let name: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     memdir_dir(home).join(format!("{name}-{}.md", path_hash(cwd)))
 }
@@ -126,7 +132,8 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
     }
 
     let path = memory_file(home, cwd);
-    if let Err(e) = std::fs::create_dir_all(path.parent().expect("记忆文件路径必有父目录")) {
+    if let Err(e) = std::fs::create_dir_all(path.parent().expect("记忆文件路径必有父目录"))
+    {
         if !session.quiet {
             eprintln!("[bingo] memory: cannot create dir: {e}");
         }
@@ -168,7 +175,11 @@ mod tests {
         let cwd = Path::new("/tmp/h/proj");
         let path = memory_file(home, cwd);
         assert!(path.starts_with("/tmp/h/.config/bingo/memdir"));
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         assert!(name.starts_with("proj-") && name.ends_with(".md"), "{name}");
         // Same path is stable.
         assert_eq!(memory_file(home, cwd), path);
@@ -182,8 +193,14 @@ mod tests {
         let b = memory_file(home, Path::new("/work/beta/web"));
         assert_ne!(a, b, "同名 web 目录应有不同记忆文件");
         assert!(
-            a.file_name().unwrap_or_default().to_string_lossy().starts_with("web-")
-                && b.file_name().unwrap_or_default().to_string_lossy().starts_with("web-"),
+            a.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .starts_with("web-")
+                && b.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .starts_with("web-"),
             "仍保留可读的目录名前缀"
         );
     }

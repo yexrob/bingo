@@ -111,9 +111,8 @@ fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
     }
     if let Some(spec) = &def.channel {
         if let Some(mode) = &spec.mode {
-            ChannelMode::parse(mode).map_err(|e| {
-                TeamError::invalid(format!("{file}: channel.mode: {e}"))
-            })?;
+            ChannelMode::parse(mode)
+                .map_err(|e| TeamError::invalid(format!("{file}: channel.mode: {e}")))?;
         }
         if let Some(limit) = spec.message_limit
             && limit == 0
@@ -237,7 +236,13 @@ pub fn project_key(project_dir: &Path) -> String {
         .unwrap_or_else(|| "root".to_string());
     let name: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("{name}-{}", crate::memory::path_hash(project_dir))
 }
@@ -278,7 +283,13 @@ pub fn decisions_path(dir: &Path) -> PathBuf {
 
 fn sanitize_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -331,7 +342,9 @@ pub fn spawn_team(
     let channel_name = &def.name;
     let channel_exists = session.channels.info(channel_name).is_some();
     if !channel_exists
-        && let Err(e) = session.channels.create(channel_name, Vec::new(), channel_mode(def))
+        && let Err(e) = session
+            .channels
+            .create(channel_name, Vec::new(), channel_mode(def))
     {
         summary.failed.push((channel_name.clone(), e));
     }
@@ -342,11 +355,7 @@ pub fn spawn_team(
     let by_name: HashMap<&str, &AgentDef> = defs.iter().map(|d| (d.name.as_str(), d)).collect();
     for member in &def.members {
         // Idempotency key = instance name: already exists (Idle/Running) → reuse, no re-spawn.
-        let exists = session
-            .agents
-            .list()
-            .iter()
-            .any(|a| a.name == member.name);
+        let exists = session.agents.list().iter().any(|a| a.name == member.name);
         if exists {
             summary.reused.push(member.name.clone());
             continue;
@@ -374,7 +383,9 @@ pub fn spawn_team(
             }
         };
         let description = agent_def.description.clone();
-        session.agents.insert(&name, Some(member.agent.clone()), description, sub);
+        session
+            .agents
+            .insert(&name, Some(member.agent.clone()), description, sub);
         // Memory restore: persisted history is preloaded (no wake-up; automatically
         // carried when SendMessage resumes).
         let history = load_member_history(home, project_dir, branch, &def.name, &name);
@@ -447,7 +458,11 @@ pub fn append_decision(
         entry.push_str(&format!("  sources: {}\n", sources.join("|")));
     }
     use std::io::Write;
-    let mut file = match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         Ok(f) => f,
         Err(_) => return,
     };
@@ -567,7 +582,12 @@ mod tests {
         let b = team_memory_dir(home, std::path::Path::new("/work/beta"), "main", "dev");
         assert_ne!(a, b, "不同项目隔离");
         // Same project, different branches are isolated (worktree scenario).
-        let c = team_memory_dir(home, std::path::Path::new("/work/alpha"), "agent-team", "dev");
+        let c = team_memory_dir(
+            home,
+            std::path::Path::new("/work/alpha"),
+            "agent-team",
+            "dev",
+        );
         assert_ne!(a, c, "不同分支隔离");
         assert!(a.starts_with(team_memory_root(home)));
         assert!(a.to_string_lossy().contains("dev"), "{a:?}");
@@ -578,7 +598,8 @@ mod tests {
         let p = std::path::Path::new("/tmp/h/proj");
         assert_eq!(project_key(p), project_key(p), "稳定");
         assert!(
-            project_key(std::path::Path::new("/a/web")) != project_key(std::path::Path::new("/b/web")),
+            project_key(std::path::Path::new("/a/web"))
+                != project_key(std::path::Path::new("/b/web")),
             "同名目录不同项目不碰撞"
         );
     }
@@ -622,7 +643,6 @@ mod tests {
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "t")),
-            last_task_reminder_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
             channels: ChannelRegistry::new(ChannelLimits::default()),
@@ -637,7 +657,10 @@ mod tests {
         let s = session();
         let mem_home = tmp("spawn-mem");
         let defs = vec![def("dev-ex"), def("ui/ux"), def("dev")];
-        let team = team_def("dev-room", &[("dev-ex", "dev-ex"), ("ui", "ui/ux"), ("dev", "dev")]);
+        let team = team_def(
+            "dev-room",
+            &[("dev-ex", "dev-ex"), ("ui", "ui/ux"), ("dev", "dev")],
+        );
 
         let first = spawn_team(&s, &team, &defs, &mem_home, &mem_home, "main")
             .unwrap_or_else(|e| panic!("{e}"));
@@ -647,8 +670,15 @@ mod tests {
         // Members in Idle standby (zero tokens, no turn started); channel built with hub/user + three members.
         let states = s.agents.list();
         assert_eq!(states.len(), 3);
-        assert!(states.iter().all(|a| a.state == crate::agents::AgentState::Idle));
-        let ch = s.channels.info("dev-room").unwrap_or_else(|| panic!("频道应存在"));
+        assert!(
+            states
+                .iter()
+                .all(|a| a.state == crate::agents::AgentState::Idle)
+        );
+        let ch = s
+            .channels
+            .info("dev-room")
+            .unwrap_or_else(|| panic!("频道应存在"));
         assert_eq!(ch.members, vec!["main", "user", "dev-ex", "ui", "dev"]);
 
         // Repeated start: everything is reused, nothing re-spawned.
@@ -673,7 +703,10 @@ mod tests {
 
         spawn_team(&s, &team, &defs, &mem_home, &mem_home, "main")
             .unwrap_or_else(|e| panic!("{e}"));
-        let (history, _, state) = s.agents.view_of("qa").unwrap_or_else(|| panic!("实例应存在"));
+        let (history, _, state) = s
+            .agents
+            .view_of("qa")
+            .unwrap_or_else(|| panic!("实例应存在"));
         assert_eq!(history.len(), 1, "历史已预载");
         assert_eq!(state, crate::agents::AgentState::Idle, "恢复不唤醒");
         std::fs::remove_dir_all(&mem_home).unwrap();
@@ -711,10 +744,28 @@ mod tests {
         // Missing/corrupt falls back to empty.
         assert!(load_member_history(&home, &project, branch, team, "ghost").is_empty());
         // Decision log is append-only.
-        append_decision(&home, &project, branch, team, "decision", "用 JSON 不用 YAML", &["dev", "qa"]);
-        append_decision(&home, &project, branch, team, "decision", "第二案", &["ui/ux"]);
-        let raw = std::fs::read_to_string(decisions_path(&team_memory_dir(&home, &project, branch, team)))
-            .unwrap();
+        append_decision(
+            &home,
+            &project,
+            branch,
+            team,
+            "decision",
+            "用 JSON 不用 YAML",
+            &["dev", "qa"],
+        );
+        append_decision(
+            &home,
+            &project,
+            branch,
+            team,
+            "decision",
+            "第二案",
+            &["ui/ux"],
+        );
+        let raw = std::fs::read_to_string(decisions_path(&team_memory_dir(
+            &home, &project, branch, team,
+        )))
+        .unwrap();
         assert_eq!(raw.matches("type: decision").count(), 2, "追加两条");
         assert!(raw.contains("sources: dev|qa"), "管道分隔 sources");
         std::fs::remove_dir_all(&home).unwrap();

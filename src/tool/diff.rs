@@ -71,7 +71,13 @@ pub fn unified_diff(path: &str, old: &str, new: &str) -> Option<String> {
             ns + 1,
             ne - ns
         ));
-        Hunk { out: &mut out, a: &a, b: &b, matches: &matches }.emit(os, oe, ns, ne);
+        Hunk {
+            out: &mut out,
+            a: &a,
+            b: &b,
+            matches: &matches,
+        }
+        .emit(os, oe, ns, ne);
     }
     Some(out)
 }
