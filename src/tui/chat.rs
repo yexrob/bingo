@@ -2870,8 +2870,17 @@ impl Chat {
             // 列表：default 打头（顶层端点），其后命名 provider 各带 URL
             // 与登录态（/provider 信息量不足修复：一眼看清每个端点的去向）。
             let mut lines = vec![format!("当前 provider: {current}")];
+            // 顺序：default → 内置订阅（presets）→ 用户自定义 provider。
             let mut names = vec!["default".to_string()];
-            names.extend(session.client.provider_names());
+            let mut user_names = Vec::new();
+            for name in session.client.provider_names() {
+                if session.client.is_preset(&name) {
+                    names.push(name);
+                } else {
+                    user_names.push(name);
+                }
+            }
+            names.extend(user_names);
             for name in names {
                 let (key, url) = session
                     .client
@@ -2883,11 +2892,16 @@ impl Chat {
                     Some(crate::api::contract::AuthStatus::ApiKey) => {
                         // key 脱敏：仅显示前 4 字符；短 key（≤4）不加省略号。
                         let key = key.unwrap_or_default();
-                        let mut key_shown: String = key.chars().take(4).collect();
-                        if key.chars().count() > 4 {
-                            key_shown.push('…');
+                        if key.is_empty() {
+                            // apiKey preset 未设置 key（opencode-go）：
+                            format!("○ 未配置（/provider login {name}）")
+                        } else {
+                            let mut key_shown: String = key.chars().take(4).collect();
+                            if key.chars().count() > 4 {
+                                key_shown.push('…');
+                            }
+                            format!("key {key_shown}")
                         }
-                        format!("key {key_shown}")
                     }
                     Some(crate::api::contract::AuthStatus::OAuth { account: Some(acc) }) => {
                         format!("✓ {acc}")
@@ -2897,7 +2911,8 @@ impl Chat {
                     }
                     None => "?".to_string(),
                 };
-                lines.push(format!("{mark} {name} @ {url}（{auth} · {protocol}）"));
+                let badge = if session.client.is_preset(&name) { " · 内置" } else { "" };
+                lines.push(format!("{mark} {name} @ {url}（{auth} · {protocol}{badge}）"));
             }
             lines.push(
                 "用法: /provider <名称> · login <名称> [--device-auth|--manual <token>] · logout <名称>"
@@ -2950,33 +2965,46 @@ impl Chat {
         let device_auth = parts.contains(&"--device-auth");
 
         let session = self.session.clone();
-        let Some(cfg) = session.settings.providers.get(*name) else {
+        // Effective config = user settings ⊕ built-in preset (D34 §6.5):
+        // presets make official subscriptions loginable with zero config.
+        let preset = crate::api::providers::presets::preset(name);
+        let known = session.settings.providers.contains_key(*name) || preset.is_some();
+        if !known {
             self.push_slash_output(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
             return;
-        };
-        let Some(oauth) = cfg.oauth.as_ref() else {
-            self.push_slash_output(format!(
-                "provider \"{name}\" 未配置 oauth（settings.json 加 \"oauth\": {{\"kind\":\"codex\"}}）"
-            ));
-            return;
-        };
-        if oauth.kind != "codex" {
-            self.push_slash_output(format!(
-                "不支持的 oauth.kind \"{}\"（v1 仅 codex）",
-                oauth.kind
-            ));
-            return;
         }
+        let oauth_kind = session
+            .settings
+            .providers
+            .get(*name)
+            .and_then(|c| c.oauth.as_ref().map(|o| o.kind.clone()))
+            .or_else(|| preset.and_then(|p| p.oauth_kind.map(str::to_string)));
         let name = name.to_string();
         let home = session.home.clone();
         let events = self.events.clone();
         let http = reqwest::Client::new();
         let config = crate::api::auth::OauthFlowConfig::codex();
 
+        // --manual first: works for both apiKey presets (opencode-go, stores
+        // auth.json `{type:"api"}`) and oauth presets (pasted access token).
         if let Some(token) = manual {
-            // --manual：直接保存粘贴的 access token（无 refresh token → 不刷新）。
             let token = token.to_string();
+            let api_preset = preset.map(|p| p.oauth_kind.is_none()).unwrap_or(false);
             tokio::spawn(async move {
+                if api_preset {
+                    let store = crate::auth::AuthStore::new(&home);
+                    match store.set(&name, crate::auth::AuthEntry::Api { key: token }) {
+                        Ok(()) => {
+                            let _ = events.send(UiEvent::SlashOutput(format!(
+                                "✓ 已保存 {name} 的 API key（订阅 key）"
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = events.send(UiEvent::SlashOutput(format!("✗ 保存失败: {e}")));
+                        }
+                    }
+                    return;
+                }
                 let tp = crate::api::auth::TokenProvider::new(&home, &name, config);
                 let tokens = crate::api::auth::TokenSet {
                     access_token: token,
@@ -2996,6 +3024,18 @@ impl Chat {
                     }
                 }
             });
+            return;
+        }
+
+        // OAuth gate: codex only in v1; apiKey presets guide the key paste.
+        let Some(oauth_kind) = oauth_kind else {
+            self.push_slash_output(format!(
+                "provider \"{name}\" 需要 API key（订阅 key）：\n  1. 到 opencode.ai/auth 获取\n  2. /provider login {name} --manual <key>"
+            ));
+            return;
+        };
+        if oauth_kind != "codex" {
+            self.push_slash_output(format!("不支持的 oauth.kind \"{oauth_kind}\"（v1 仅 codex）"));
             return;
         }
 
@@ -3079,7 +3119,7 @@ impl Chat {
         });
     }
 
-    /// `/provider logout <name>`: revoke (best-effort) + clear the stored auth.
+
     fn slash_provider_logout(&mut self, arg: &str) {
         let name = arg.trim();
         if name.is_empty() {
@@ -3087,22 +3127,36 @@ impl Chat {
             return;
         }
         let session = self.session.clone();
-        let Some(cfg) = session.settings.providers.get(name) else {
+        let preset = crate::api::providers::presets::preset(name);
+        let known = session.settings.providers.contains_key(name) || preset.is_some();
+        if !known {
             self.push_slash_output(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
             return;
-        };
-        let Some(oauth) = cfg.oauth.as_ref() else {
-            self.push_slash_output(format!("provider \"{name}\" 未配置 oauth，无需退出"));
-            return;
-        };
-        if oauth.kind != "codex" {
-            self.push_slash_output(format!("不支持的 oauth.kind \"{}\"（v1 仅 codex）", oauth.kind));
-            return;
         }
+        let oauth_kind = session
+            .settings
+            .providers
+            .get(name)
+            .and_then(|c| c.oauth.as_ref().map(|o| o.kind.clone()))
+            .or_else(|| preset.and_then(|p| p.oauth_kind.map(str::to_string)));
         let name = name.to_string();
         let home = session.home.clone();
         let events = self.events.clone();
         tokio::spawn(async move {
+            if oauth_kind.as_deref() != Some("codex") {
+                // apiKey preset（opencode-go）：只清 auth.json 条目。
+                match crate::auth::AuthStore::new(&home).remove(&name) {
+                    Ok(()) => {
+                        let _ = events.send(UiEvent::SlashOutput(format!(
+                            "✓ 已退出 {name}（key 已清除）"
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = events.send(UiEvent::SlashOutput(format!("✗ 退出失败: {e}")));
+                    }
+                }
+                return;
+            }
             let tp = crate::api::auth::TokenProvider::new(
                 &home,
                 &name,
@@ -6480,6 +6534,55 @@ mod tests {
         assert!(!out.contains("main…"), "{out}");
     }
 
+    /// P5（D34）：空 settings 下 /provider login codex 走 preset oauth——
+    /// 不报"未找到 provider"，也不报"需要 API key"（codex 是 oauth 型）。
+    /// (tokio: the device-auth branch spawns on the runtime.)
+    #[tokio::test]
+    async fn slash_provider_login_uses_preset_with_empty_settings() {
+        let tmp = std::env::temp_dir().join(format!("bingo-preset-login-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut chat = test_chat_home(tmp.join("home"));
+        chat.input = "/provider login codex --device-auth".to_string();
+        chat.submit();
+        let out = chat.slash_lines.join("\n");
+        assert!(!out.contains("未找到 provider"), "{out}");
+        assert!(!out.contains("需要 API key"), "codex 是 oauth 型 preset: {out}");
+        // opencode-go 是 apiKey 型 preset → 无 --manual 时给 key 引导。
+        let mut chat = test_chat_home(tmp.join("home2"));
+        chat.input = "/provider login opencode-go".to_string();
+        chat.submit();
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("需要 API key"), "apiKey 型 preset 引导粘贴 key: {out}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// P5：opencode-go --manual 存 auth.json `{type:"api"}`（零污染 settings）。
+    #[tokio::test]
+    async fn slash_provider_login_opencode_go_manual_stores_api_key() {
+        let tmp = std::env::temp_dir().join(format!("bingo-preset-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        let mut chat = test_chat_home(home.clone());
+        chat.input = "/provider login opencode-go --manual sk-og".to_string();
+        chat.submit();
+        let store = crate::auth::AuthStore::new(&home);
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if let Ok(Some(entry)) = store.get("opencode-go") {
+                match entry {
+                    crate::auth::AuthEntry::Api { key } => {
+                        assert_eq!(key, "sk-og", "opencode-go key 存储");
+                    }
+                    other => panic!("应为 Api 条目: {other:?}"),
+                }
+                let _ = std::fs::remove_dir_all(&tmp);
+                return;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        panic!("opencode-go key 未存储");
+    }
+
     /// P4：切换到未登录的 OAuth provider → 切换成功但带 login 引导；列表
     /// 显示协议标记 + 未登录态 + apiBaseUrl 缺省→协议默认端点。
     #[test]
@@ -6513,8 +6616,8 @@ mod tests {
         chat.input = "/provider".to_string();
         chat.submit();
         let out = chat.slash_lines.join("\n");
-        assert!(out.contains("codex @ https://api.openai.com"), "apiBaseUrl 缺省→协议默认: {out}");
-        assert!(out.contains("（○ 未登录（/provider login codex） · openai）"), "协议标记 + 未登录态: {out}");
+        assert!(out.contains("codex @ https://chatgpt.com/backend-api"), "apiBaseUrl 缺省→preset 端点: {out}");
+        assert!(out.contains("（○ 未登录（/provider login codex） · openai · 内置）"), "协议标记 + 未登录态 + 内置: {out}");
     }
 
     /// P4：turn 级错误文案补 auth 引导——oauth provider 401 → login 引导（带名）；
@@ -7031,7 +7134,7 @@ mod tests {
         chat.input = "/model".to_string();
         chat.submit();
         let providers = chat.model_menu.as_ref().unwrap().providers.clone();
-        assert_eq!(providers, vec!["default", "deepseek", "local"]);
+        assert_eq!(providers, vec!["default", "codex", "deepseek", "local", "opencode-go"], "presets 进入 /model 一级");
         assert_eq!(chat.model_menu.as_ref().unwrap().provider_selected, 0);
 
         // ↓ 两次选中 local → Enter 进二级（loading）→ Esc 回一级。
@@ -7042,7 +7145,7 @@ mod tests {
         assert!(chat.model_menu.as_ref().unwrap().models.is_some(), "进入二级");
         chat.on_key(KeyCode::Esc, KeyModifiers::empty());
         let menu = chat.model_menu.as_ref().expect("一级仍在");
-        assert_eq!(menu.providers, vec!["default", "deepseek", "local"], "列表保留");
+        assert_eq!(menu.providers, vec!["default", "codex", "deepseek", "local", "opencode-go"], "列表保留");
         assert_eq!(menu.provider_selected, 2, "选中保留");
         assert!(menu.models.is_none(), "回到一级");
 
@@ -7090,8 +7193,8 @@ mod tests {
         chat.submit();
         assert_eq!(
             chat.model_menu.as_ref().unwrap().provider_selected,
-            1,
-            "一级预选当前 provider"
+            2,
+            "一级预选当前 provider（deepseek 在 presets 之后）"
         );
         chat.on_key(KeyCode::Enter, KeyModifiers::empty());
         if let Some(m) = &mut chat.model_menu.as_mut().unwrap().models {

@@ -5,6 +5,7 @@
 
 pub mod anthropic;
 pub mod openai;
+pub mod presets;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -38,6 +39,7 @@ pub fn build_provider(
     supports_images: bool,
     oauth: Option<&OauthConfig>,
     home: &Path,
+    model_allowlist: Option<openai::ModelAllowlist>,
 ) -> Result<Arc<dyn ProviderClient>, String> {
     match protocol.unwrap_or("anthropic") {
         "anthropic" => {
@@ -65,6 +67,8 @@ pub fn build_provider(
                 base_url
             };
             // D33 §5: apiKey wins over OAuth; both missing → config error.
+            // D33 §5: apiKey wins over OAuth; both missing → config error
+            // (apiKey presets resolve their key from auth.json in client.rs).
             let auth = match api_key {
                 Some(key) => AuthSource::ApiKey(key),
                 None => match oauth {
@@ -82,7 +86,7 @@ pub fn build_provider(
             } else {
                 openai::OpenAiVariant::Default
             };
-            Ok(openai(http, auth, base_url, supports_images, variant))
+            Ok(openai(http, auth, base_url, supports_images, variant, model_allowlist))
         }
         other => Err(format!(
             "未知 protocol \"{other}\"（可用：anthropic / openai）"
@@ -117,8 +121,16 @@ pub fn openai(
     base_url: String,
     supports_images: bool,
     variant: openai::OpenAiVariant,
+    model_allowlist: Option<openai::ModelAllowlist>,
 ) -> Arc<dyn ProviderClient> {
-    Arc::new(openai::OpenAIProvider::new(http, auth, base_url, supports_images, variant))
+    Arc::new(openai::OpenAIProvider::new(
+        http,
+        auth,
+        base_url,
+        supports_images,
+        variant,
+        model_allowlist,
+    ))
 }
 
 /// Exponential backoff + jitter: from 500ms, capped at 32s (shared by every

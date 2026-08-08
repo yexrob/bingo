@@ -54,6 +54,9 @@ pub struct Client {
     /// Named-provider table (default is not in the table for listing, but is
     /// stored under the reserved key "default").
     providers: HashMap<String, (Arc<dyn ProviderClient>, EndpointInfo)>,
+    /// Names coming from the built-in preset registry (D34): the /provider
+    /// listing shows them with a 内置 badge.
+    preset_names: Vec<String>,
 }
 
 impl Client {
@@ -81,45 +84,112 @@ impl Client {
             env("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|_| providers::anthropic::API_BASE.to_string())
         });
-        let mut providers = settings
-            .providers
-            .iter()
-            .map(|(name, cfg)| {
-                let protocol = cfg.protocol.as_deref();
-                let base_url = if cfg.api_base_url.is_empty() {
-                    protocol_default_base_url(protocol)
+        let home = home_dir();
+        let mut providers: HashMap<String, (Arc<dyn ProviderClient>, EndpointInfo)> =
+            HashMap::new();
+        let mut preset_names = Vec::new();
+        // ① Built-in official subscriptions (D34 §6.5): visible and loginable
+        // with zero config; a user `providers.<name>` entry overrides the
+        // preset field-by-field (absent fields fall back to the preset).
+        for preset in providers::presets::PRESETS {
+            let user = settings.providers.get(preset.name);
+            let protocol =
+                user.and_then(|c| c.protocol.clone()).unwrap_or_else(|| preset.protocol.to_string());
+            let api_key = user.and_then(|c| c.api_key.clone()).or_else(|| {
+                // apiKey presets (opencode-go): the key lives in auth.json
+                // `{type:"api"}` (set via /provider login --manual); absent
+                // → empty key → 401 with a login prompt (D34 §6.5).
+                if preset.oauth_kind.is_none() {
+                    match crate::auth::AuthStore::new(&home).get(preset.name).ok().flatten() {
+                        Some(crate::auth::AuthEntry::Api { key }) => Some(key),
+                        _ => Some(String::new()),
+                    }
                 } else {
-                    cfg.api_base_url.clone()
-                };
-                let adapter = providers::build_provider(
-                    name,
-                    http.clone(),
-                    protocol,
-                    cfg.api_key.clone(),
-                    base_url.clone(),
-                    cfg.supports_images.unwrap_or(false),
-                    cfg.oauth.as_ref(),
-                    &home_dir(),
-                )
-                .map_err(|message| {
-                    // Config error (e.g. unknown protocol) — surfaced at
-                    // startup with the same code family as settings parse
-                    // failures, before any request goes out.
-                    ClientError::Config(format!("provider \"{name}\": {message}"))
-                })?;
-                Ok((
-                    name.clone(),
-                    (
-                        adapter,
-                        EndpointInfo {
-                            api_key: cfg.api_key.clone(),
-                            base_url,
-                            protocol: protocol.unwrap_or("anthropic").to_string(),
-                        },
-                    ),
-                ))
-            })
-            .collect::<Result<HashMap<String, (Arc<dyn ProviderClient>, EndpointInfo)>, ClientError>>()?;
+                    None
+                }
+            });
+            let base_url = match user {
+                Some(c) if !c.api_base_url.is_empty() => c.api_base_url.clone(),
+                _ => preset.base_url.to_string(),
+            };
+            let supports_images =
+                user.and_then(|c| c.supports_images).unwrap_or(preset.supports_images);
+            let oauth = user.and_then(|c| c.oauth.clone()).or_else(|| {
+                preset.oauth_kind.map(|kind| crate::settings::OauthConfig {
+                    kind: kind.to_string(),
+                    account: None,
+                })
+            });
+            let allowlist = preset.model_allowlist.map(|models| {
+                providers::openai::ModelAllowlist(models.iter().map(|m| m.to_string()).collect())
+            });
+            let adapter = providers::build_provider(
+                preset.name,
+                http.clone(),
+                Some(&protocol),
+                api_key.clone(),
+                base_url.clone(),
+                supports_images,
+                oauth.as_ref(),
+                &home,
+                allowlist,
+            )
+            .map_err(|message| {
+                ClientError::Config(format!("provider \"{}\": {message}", preset.name))
+            })?;
+            providers.insert(
+                preset.name.to_string(),
+                (
+                    adapter,
+                    EndpointInfo {
+                        api_key,
+                        base_url,
+                        protocol,
+                    },
+                ),
+            );
+            preset_names.push(preset.name.to_string());
+        }
+        // ② User-only providers (preset names are already merged above).
+        for (name, cfg) in &settings.providers {
+            if providers::presets::preset(name).is_some() {
+                continue;
+            }
+            let protocol = cfg.protocol.as_deref();
+            let base_url = if cfg.api_base_url.is_empty() {
+                protocol_default_base_url(protocol)
+            } else {
+                cfg.api_base_url.clone()
+            };
+            let adapter = providers::build_provider(
+                name,
+                http.clone(),
+                protocol,
+                cfg.api_key.clone(),
+                base_url.clone(),
+                cfg.supports_images.unwrap_or(false),
+                cfg.oauth.as_ref(),
+                &home,
+                None,
+            )
+            .map_err(|message| {
+                // Config error (e.g. unknown protocol) — surfaced at
+                // startup with the same code family as settings parse
+                // failures, before any request goes out.
+                ClientError::Config(format!("provider \"{name}\": {message}"))
+            })?;
+            providers.insert(
+                name.clone(),
+                (
+                    adapter,
+                    EndpointInfo {
+                        api_key: cfg.api_key.clone(),
+                        base_url,
+                        protocol: protocol.unwrap_or("anthropic").to_string(),
+                    },
+                ),
+            );
+        }
         // default 端点也入 providers 表（key "default"）：set_provider /
         // with_provider("default") 走通（含「切回 default」），/model 二级
         // 对 default 拉列表用顶层端点、标签与内容一致（P0-C）。default 为
@@ -140,6 +210,7 @@ impl Client {
             http,
             endpoint: Arc::new(std::sync::RwLock::new((default_adapter, default_info))),
             providers,
+            preset_names,
         })
     }
 
@@ -157,6 +228,7 @@ impl Client {
             http,
             endpoint: Arc::new(std::sync::RwLock::new((adapter.clone(), info.clone()))),
             providers: HashMap::from([("default".to_string(), (adapter, info))]),
+            preset_names: Vec::new(),
         }
     }
 
@@ -227,6 +299,7 @@ impl Client {
             http: self.http.clone(),
             endpoint: Arc::new(std::sync::RwLock::new((adapter, info))),
             providers: self.providers.clone(),
+            preset_names: self.preset_names.clone(),
         })
     }
 
@@ -258,6 +331,12 @@ impl Client {
         messages: &[Message],
     ) -> Result<u64, ClientError> {
         self.current().count_tokens(model, system, messages).await
+    }
+
+    /// Whether the provider comes from the built-in preset registry (D34) —
+    /// the /provider listing shows a 内置 badge.
+    pub fn is_preset(&self, name: &str) -> bool {
+        self.preset_names.iter().any(|p| p == name)
     }
 
     /// Auth state of a named provider (the /provider listing; "default" is
@@ -359,7 +438,7 @@ mod tests {
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
         let client = Client::from_settings_with(&settings, env).unwrap();
         assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-main"));
-        assert_eq!(client.provider_names(), vec!["deepseek", "local"]);
+        assert_eq!(client.provider_names(), vec!["codex", "deepseek", "local", "opencode-go"], "presets 与用户 provider 合并");
 
         client.set_provider("deepseek").unwrap();
         assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-ds"));
@@ -393,7 +472,7 @@ mod tests {
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
         let client = Client::from_settings_with(&settings, env).unwrap();
         // default 不出现在命名列表（调用方显式补出）。
-        assert_eq!(client.provider_names(), vec!["deepseek"]);
+        assert_eq!(client.provider_names(), vec!["codex", "deepseek", "opencode-go"], "presets 可见");
         assert_eq!(
             client.provider_endpoint("default"),
             Some((Some("sk-main".to_string()), "https://main.example".to_string()))
@@ -465,6 +544,96 @@ mod tests {
             .unwrap();
         assert_eq!(crate::error::map_error(&err), "CONFIG_INVALID");
         assert!(err.to_string().contains("缺少 apiKey 或 oauth"), "{err}");
+    }
+
+    /// P5（D34）：空 settings 下内置 presets 可见、端点/认证正确；apiKey 型
+    /// preset（opencode-go）未配置 key 时 auth 为空串（401 引导）。
+    #[test]
+    fn preset_visibility_zero_config() {
+        let settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        let client = Client::from_settings_with(&settings, |_| {
+            Err(std::env::VarError::NotPresent)
+        })
+        .unwrap();
+        assert_eq!(client.provider_names(), vec!["codex", "opencode-go"], "presets 零配置可见");
+        assert!(client.is_preset("codex"));
+        assert!(client.is_preset("opencode-go"));
+        assert!(!client.is_preset("default"));
+        // codex：preset 端点 + OAuth（未登录）。
+        assert_eq!(
+            client.provider_endpoint("codex").unwrap().1,
+            "https://chatgpt.com/backend-api",
+            "codex preset 端点"
+        );
+        assert!(matches!(
+            client.auth_status("codex"),
+            Some(crate::api::contract::AuthStatus::OAuth { account: None })
+        ));
+        // opencode-go：apiKey 型，未配置 → ApiKey 空。
+        assert_eq!(
+            client.provider_endpoint("opencode-go").unwrap().1,
+            "https://opencode.ai/zen/go"
+        );
+        assert!(matches!(
+            client.auth_status("opencode-go"),
+            Some(crate::api::contract::AuthStatus::ApiKey)
+        ));
+    }
+
+    /// P5 merge 矩阵：用户仅覆盖 apiBaseUrl → protocol/oauth/白名单回落 preset。
+    #[test]
+    fn preset_field_merge_keeps_template() {
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        settings.providers.insert(
+            "codex".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: None,
+                api_base_url: "https://custom.example".into(),
+                supports_images: None,
+                protocol: None,
+                oauth: None,
+            },
+        );
+        let client = Client::from_settings_with(&settings, |_| {
+            Err(std::env::VarError::NotPresent)
+        })
+        .unwrap();
+        assert_eq!(
+            client.provider_endpoint("codex").unwrap().1,
+            "https://custom.example",
+            "apiBaseUrl 用户覆盖"
+        );
+        assert!(
+            matches!(
+                client.auth_status("codex"),
+                Some(crate::api::contract::AuthStatus::OAuth { .. })
+            ),
+            "oauth 回落 preset（无需重述）"
+        );
+        assert_eq!(client.provider_protocol("codex").as_deref(), Some("openai"), "protocol 回落 preset");
+    }
+
+    /// P5 零污染：presets 不写回 settings（用户配置文件保持原样）。
+    #[test]
+    fn presets_do_not_pollute_settings() {
+        let settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        let _client = Client::from_settings_with(&settings, |_| {
+            Err(std::env::VarError::NotPresent)
+        })
+        .unwrap();
+        assert!(
+            settings.providers.is_empty(),
+            "presets 是运行时概念，settings 保持用户私有"
+        );
     }
 
     /// supports_images：default 读顶层 sendImages；命名 provider 读各自

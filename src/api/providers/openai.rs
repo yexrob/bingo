@@ -65,11 +65,17 @@ struct Endpoint {
     variant: OpenAiVariant,
 }
 
+/// Static model allowlist (preset subscriptions): list_models returns it
+/// verbatim; None = pull the endpoint's model list (existing behavior).
+#[derive(Debug, Clone)]
+pub struct ModelAllowlist(pub Vec<String>);
+
 #[derive(Debug, Clone)]
 pub struct OpenAIProvider {
     http: reqwest::Client,
     endpoint: Arc<std::sync::RwLock<Endpoint>>,
     auth: AuthSource,
+    model_allowlist: Option<ModelAllowlist>,
 }
 
 impl OpenAIProvider {
@@ -79,6 +85,7 @@ impl OpenAIProvider {
         base_url: String,
         supports_images: bool,
         variant: OpenAiVariant,
+        model_allowlist: Option<ModelAllowlist>,
     ) -> Self {
         Self {
             http,
@@ -88,6 +95,7 @@ impl OpenAIProvider {
                 variant,
             })),
             auth,
+            model_allowlist,
         }
     }
 
@@ -662,8 +670,11 @@ impl ProviderClient for OpenAIProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<String>, ClientError> {
-        // Codex subscription: no public model list — the allowlist is the
-        // list (opencode codex.ts static filter); /model shows only what works.
+        // Preset allowlist first (opencode-go), then the codex static list —
+        // /model shows only what works for either subscription.
+        if let Some(list) = &self.model_allowlist {
+            return Ok(list.0.clone());
+        }
         if self.variant() == OpenAiVariant::Codex {
             return Ok(Self::CODEX_MODELS.iter().map(|m| m.to_string()).collect());
         }
@@ -1314,6 +1325,7 @@ mod codex_variant_tests {
             cap.addr.clone(),
             false,
             OpenAiVariant::Codex,
+            None,
         );
         let request = NeutralRequest {
             model: "gpt-5.5".into(),
@@ -1347,6 +1359,7 @@ mod codex_variant_tests {
             "http://127.0.0.1:9".into(),
             false,
             OpenAiVariant::Codex,
+            None,
         );
         let models = provider.list_models().await.unwrap();
         assert_eq!(models, OpenAIProvider::CODEX_MODELS.to_vec());
@@ -1363,6 +1376,7 @@ mod codex_variant_tests {
             cap.addr.clone(),
             false,
             OpenAiVariant::Default,
+            None,
         );
         let request = NeutralRequest {
             model: "gpt-5".into(),

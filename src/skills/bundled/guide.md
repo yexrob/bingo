@@ -167,6 +167,11 @@ Example (.bingo/settings.json):
   `{"protocol": "openai", "apiKey": "<go-key>", "apiBaseUrl": "https://opencode.ai/zen/go"}` — its Responses
   models (e.g. gpt-5.6-luna) work through the openai adapter; its chat/completions models need an adapter
   that is not implemented yet; its anthropic-protocol models can be added as a separate provider entry.
+- **Built-in provider presets (zero-config)**: official subscriptions ship inside bingo — `codex` (ChatGPT,
+  `protocol: openai` + `oauth.kind: codex` → chatgpt.com/backend-api/codex/responses) and `opencode-go`
+  (`protocol: openai` + apiKey → opencode.ai/zen/go) are visible in `/provider` (内置 badge) and loginable with
+  no settings entry (`/provider login codex` / `opencode-go --manual <key>`); user `providers.<name>` entries
+  override the preset field-by-field (e.g. only `apiBaseUrl` to customize).
 - **Provider OAuth (codex/ChatGPT)**: `oauth: {kind: "codex"}` on a named provider enables subscription login —
   `/provider login <name>` (default: opens the browser with loopback PKCE; `--device-auth` prints a URL + one-time
   code and polls for headless/SSH; `--manual <token>` pastes a stored token), `/provider logout <name>` revokes and
