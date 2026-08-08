@@ -89,8 +89,6 @@ pub struct LocalClick {
 /// contain. Conditional rendering is ordinary Rust producing [`El::None`].
 #[derive(Debug, Clone)]
 pub enum El {
-    /// Renders nothing (the unit of conditional composition).
-    None,
     /// One empty row (block spacing).
     Blank,
     /// One row of styled text.
@@ -168,7 +166,6 @@ pub fn height(el: El) -> usize {
 
 fn walk(el: El, out: &mut Rendered) {
     match el {
-        El::None => {}
         El::Blank => out.rows.push(Row::new(Line::empty())),
         El::Line(line) => out.rows.push(Row::new(line)),
         El::Row(row) => out.rows.push(row),
@@ -225,7 +222,7 @@ mod tests {
     fn leaves_stack_in_order() {
         let el = El::col(vec![
             El::Line(Line::plain("a")),
-            El::None,
+            El::Col(Vec::new()),
             El::Blank,
             El::Lines(vec![Line::plain("b"), Line::plain("c")]),
             El::Rows(vec![Row::new(Line::plain("d"))]),
@@ -238,7 +235,11 @@ mod tests {
 
     #[test]
     fn height_measures_by_rendering() {
-        let el = El::col(vec![El::Blank, El::None, El::Line(Line::plain("x"))]);
+        let el = El::col(vec![
+            El::Blank,
+            El::Col(Vec::new()),
+            El::Line(Line::plain("x")),
+        ]);
         assert_eq!(height(el), 2);
     }
 
@@ -303,7 +304,7 @@ mod tests {
 
     #[test]
     fn caret_on_an_empty_child_declares_nothing() {
-        let out = render(El::caret(0, El::None));
+        let out = render(El::caret(0, El::Rows(Vec::new())));
         assert!(out.caret.is_none());
     }
 }

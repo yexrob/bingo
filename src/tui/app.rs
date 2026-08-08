@@ -40,7 +40,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Size;
 
-use crate::tui::chat::{Chat, Row, SettledMark};
+use crate::tui::chat::{Chat, Row};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -48,6 +48,7 @@ use crate::tui::chrome;
 use crate::tui::el;
 use crate::tui::gfx;
 use crate::tui::line::{Line, SegStyle};
+use crate::tui::statics::pick_flush_mark;
 use crate::tui::term::{HistoryItem, StdoutTerm, write_gfx};
 use crate::tui::view;
 
@@ -218,25 +219,6 @@ fn flush_items(chat: &Chat, width: usize, end: usize) -> Vec<HistoryItem> {
         )));
     }
     items
-}
-
-/// Lazy-flush pick: the furthest settled checkpoint whose segment's start row has crossed the window top.
-/// Fully visible settled segments stay unfrozen (kept re-layoutable/collapsible); a segment crossing the top
-/// freezes wholesale — otherwise its hidden part exists neither on screen nor in scrollback, with nowhere to look.
-fn pick_flush_mark(
-    marks: &[SettledMark],
-    tail_start: usize,
-    win_start: usize,
-) -> Option<SettledMark> {
-    let mut chosen = None;
-    let mut prev_end = tail_start;
-    for mark in marks {
-        if mark.row_end > tail_start && prev_end.max(tail_start) < win_start {
-            chosen = Some(*mark);
-        }
-        prev_end = mark.row_end;
-    }
-    chosen
 }
 
 /// Whether this row is an image block's first row (continuation rows return false; boundaries are detected by url).
@@ -1294,30 +1276,6 @@ mod tests {
         assert!(!chat.auto_scroll);
         assert!(mouse_event(&mut chat, wheel(MouseEventKind::ScrollDown)));
         assert_eq!(chat.scroll, 10);
-    }
-
-    /// Lazy flush: nothing freezes when it fits in the window; segments past the window top (including ones crossing it) freeze wholesale.
-    #[test]
-    fn pick_flush_mark_freezes_only_segments_past_the_window_top() {
-        let marks = vec![
-            SettledMark {
-                row_end: 5,
-                segments: 1,
-            },
-            SettledMark {
-                row_end: 20,
-                segments: 2,
-            },
-        ];
-        // Everything visible (window starts at 0): nothing freezes.
-        assert_eq!(pick_flush_mark(&marks, 0, 0), None);
-        // Window top at row 3: segment 1 (0..5) crosses the top → freeze up to 5; segment 2 from 5 on
-        // is fully visible → stays live.
-        assert_eq!(pick_flush_mark(&marks, 0, 3), Some(marks[0]));
-        // Window top at row 10: segment 2 (5..20) also crosses → freeze it too.
-        assert_eq!(pick_flush_mark(&marks, 0, 10), Some(marks[1]));
-        // After freezing up to 5, the window has not moved further up: do not re-pick a consumed checkpoint.
-        assert_eq!(pick_flush_mark(&marks, 5, 5), None);
     }
 
     /// Settled content stays live inside the window: a small doc freezes nothing, and width changes re-layout on rebuild.
