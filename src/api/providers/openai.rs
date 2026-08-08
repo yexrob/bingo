@@ -49,10 +49,20 @@ fn effort_for(level: ThinkingLevel) -> &'static str {
 }
 
 /// The endpoint (one per provider instance; mirrors the anthropic adapter).
+/// Endpoint flavor: the public Responses API (default) or the ChatGPT
+/// subscription endpoint (codex variant, D33 §6.1b / Path 2): same wire
+/// format, different path + ChatGPT-Account-Id header + model allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiVariant {
+    Default,
+    Codex,
+}
+
 #[derive(Debug, Clone)]
 struct Endpoint {
     base_url: String,
     supports_images: bool,
+    variant: OpenAiVariant,
 }
 
 #[derive(Debug, Clone)]
@@ -68,15 +78,39 @@ impl OpenAIProvider {
         auth: AuthSource,
         base_url: String,
         supports_images: bool,
+        variant: OpenAiVariant,
     ) -> Self {
         Self {
             http,
             endpoint: Arc::new(std::sync::RwLock::new(Endpoint {
                 base_url,
                 supports_images,
+                variant,
             })),
             auth,
         }
+    }
+
+    fn variant(&self) -> OpenAiVariant {
+        self.endpoint.read().unwrap_or_else(|p| p.into_inner()).variant
+    }
+
+    /// Codex allowlist (opencode codex.ts): the subscription's usable models.
+    pub const CODEX_MODELS: [&'static str; 4] =
+        ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"];
+
+    /// The chat endpoint path for the variant.
+    fn api_path(&self) -> &'static str {
+        match self.variant() {
+            OpenAiVariant::Default => "/v1/responses",
+            OpenAiVariant::Codex => "/codex/responses",
+        }
+    }
+
+    /// The model-list path (codex short-circuits to the allowlist before
+    /// any network request).
+    fn models_path(&self) -> &'static str {
+        "/v1/models"
     }
 
     async fn headers(&self) -> Result<HeaderMap, ClientError> {
@@ -91,6 +125,14 @@ impl OpenAIProvider {
             AUTHORIZATION,
             HeaderValue::from_str(&bearer).map_err(|e| ClientError::InvalidApiKey(e.to_string()))?,
         );
+        // Codex subscription routing: ChatGPT-Account-Id from JWT claims
+        // (opencode codex.ts); only on the codex variant — no cross-talk.
+        if self.variant() == OpenAiVariant::Codex
+            && let Some(account) = self.oauth_account()
+            && let Ok(value) = HeaderValue::from_str(&account)
+        {
+            headers.insert("ChatGPT-Account-Id", value);
+        }
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(headers)
     }
@@ -518,7 +560,7 @@ impl ProviderClient for OpenAIProvider {
         loop {
             let builder = self
                 .http
-                .post(format!("{base_url}/v1/responses"))
+                .post(format!("{base_url}{}", self.api_path()))
                 .headers(self.headers().await?)
                 .json(&body);
             match tokio::time::timeout(REQUEST_TIMEOUT, builder.send()).await {
@@ -588,7 +630,7 @@ impl ProviderClient for OpenAIProvider {
             let response = tokio::time::timeout(
                 SHORT_WRITE_TIMEOUT,
                 self.http
-                    .post(format!("{base_url}/v1/responses"))
+                    .post(format!("{base_url}{}", self.api_path()))
                     .headers(self.headers().await?)
                     .json(&body)
                     .send(),
@@ -620,11 +662,16 @@ impl ProviderClient for OpenAIProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<String>, ClientError> {
+        // Codex subscription: no public model list — the allowlist is the
+        // list (opencode codex.ts static filter); /model shows only what works.
+        if self.variant() == OpenAiVariant::Codex {
+            return Ok(Self::CODEX_MODELS.iter().map(|m| m.to_string()).collect());
+        }
         let base_url = self.base_url();
         let response = tokio::time::timeout(
             SHORT_READ_TIMEOUT,
             self.http
-                .get(format!("{base_url}/v1/models"))
+                .get(format!("{base_url}{}", self.models_path()))
                 .headers(self.headers().await?)
                 .send(),
         )
@@ -1154,5 +1201,185 @@ mod tests {
             ]
         });
         assert_eq!(parse_completion_text(&body), "abc");
+    }
+}
+
+#[cfg(test)]
+mod codex_variant_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use crate::api::auth::{OauthFlowConfig, TokenProvider, TokenSet};
+
+    /// Fake JWT with the given payload (header.payload.sig).
+    fn jwt(payload: &serde_json::Value) -> String {
+        use base64::Engine;
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"alg":"none"}"#);
+        let body = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(payload.to_string().as_bytes());
+        format!("{header}.{body}.sig")
+    }
+
+    /// Mock server capturing request lines + relevant headers.
+    struct Capture {
+        addr: String,
+        requests: Arc<Mutex<Vec<(String, String, String)>>>, // (request_line, authorization, account_id)
+        hits: Arc<AtomicUsize>,
+    }
+
+    async fn spawn_capture() -> Capture {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let requests: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let reqs = requests.clone();
+        let hits_c = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 64 * 1024];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let mut lines = head.lines();
+                let request_line = lines.next().unwrap_or_default().to_string();
+                let mut authorization = String::new();
+                let mut account_id = String::new();
+                for line in lines {
+                    let lower = line.to_ascii_lowercase();
+                    if lower.strip_prefix("authorization:").is_some() {
+                        authorization = line.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+                    }
+                    if lower.strip_prefix("chatgpt-account-id:").is_some() {
+                        account_id = line.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+                    }
+                }
+                reqs.lock().unwrap().push((request_line, authorization, account_id));
+                hits_c.fetch_add(1, Ordering::SeqCst);
+                // 404 responses endpoint: enough to complete the request.
+                let body = r#"{"error":{"message":"mock"}}"#;
+                let response = format!(
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        Capture { addr: format!("http://{addr}"), requests, hits }
+    }
+
+    fn tmp_home(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("bingo-codex-v-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("home")
+    }
+
+    /// OAuth TokenProvider seeded with a **fresh** fake JWT access token
+    /// (expires in the future → no refresh on use; the account id is
+    /// backfilled from the JWT claims on save).
+    async fn oauth_provider(home: &std::path::Path, access: &str) -> TokenProvider {
+        let tp = TokenProvider::new(home, "codex", OauthFlowConfig::codex());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let tokens = TokenSet {
+            access_token: access.into(),
+            refresh_token: "rt".into(),
+            id_token: None,
+            expires_at: Some(now + 3600),
+            account_id: None,
+        };
+        tp.save(&tokens).await.unwrap();
+        tp
+    }
+
+    /// Codex variant: POST goes to /codex/responses with the bearer + the
+    /// ChatGPT-Account-Id header from JWT claims.
+    #[tokio::test]
+    async fn codex_variant_posts_to_codex_responses_with_account_header() {
+        let cap = spawn_capture().await;
+        let home = tmp_home("path");
+        let access = jwt(&serde_json::json!({"chatgpt_account_id": "acc_1"}));
+        let tp = oauth_provider(&home, &access).await;
+        let provider = OpenAIProvider::new(
+            reqwest::Client::new(),
+            AuthSource::OAuth(Arc::new(tp)),
+            cap.addr.clone(),
+            false,
+            OpenAiVariant::Codex,
+        );
+        let request = NeutralRequest {
+            model: "gpt-5.5".into(),
+            max_tokens: 100,
+            system: vec![],
+            messages: vec![],
+            tools: vec![],
+            stream: true,
+            thinking: None,
+        };
+        let _ = provider.stream(&request).await;
+        assert_eq!(cap.hits.load(Ordering::SeqCst), 1, "发出一次请求");
+        let (request_line, authorization, account_id) = cap.requests.lock().unwrap()[0].clone();
+        assert!(
+            request_line.starts_with("POST /codex/responses"),
+            "codex 变体路径: {request_line}"
+        );
+        assert!(authorization.starts_with("Bearer "), "bearer 头: {authorization}");
+        assert_eq!(account_id, "acc_1", "ChatGPT-Account-Id 来自 JWT claims");
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// Codex allowlist: list_models is static, no network.
+    #[tokio::test]
+    async fn codex_variant_allowlist_models() {
+        let home = tmp_home("models");
+        let tp = oauth_provider(&home, "at").await;
+        let provider = OpenAIProvider::new(
+            reqwest::Client::new(),
+            AuthSource::OAuth(Arc::new(tp)),
+            "http://127.0.0.1:9".into(),
+            false,
+            OpenAiVariant::Codex,
+        );
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models, OpenAIProvider::CODEX_MODELS.to_vec());
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// No cross-talk: the default variant never sends ChatGPT-Account-Id.
+    #[tokio::test]
+    async fn default_variant_does_not_send_account_header() {
+        let cap = spawn_capture().await;
+        let provider = OpenAIProvider::new(
+            reqwest::Client::new(),
+            AuthSource::ApiKey("sk-oa".into()),
+            cap.addr.clone(),
+            false,
+            OpenAiVariant::Default,
+        );
+        let request = NeutralRequest {
+            model: "gpt-5".into(),
+            max_tokens: 100,
+            system: vec![],
+            messages: vec![],
+            tools: vec![],
+            stream: true,
+            thinking: None,
+        };
+        let _ = provider.stream(&request).await;
+        let (request_line, authorization, account_id) = cap.requests.lock().unwrap()[0].clone();
+        assert!(
+            request_line.starts_with("POST /v1/responses"),
+            "默认变体路径: {request_line}"
+        );
+        assert_eq!(account_id, "", "默认变体不带 ChatGPT-Account-Id");
+        assert!(authorization.starts_with("Bearer sk-oa"), "{authorization}");
     }
 }

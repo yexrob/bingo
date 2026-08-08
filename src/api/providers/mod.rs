@@ -52,8 +52,15 @@ pub fn build_provider(
             Ok(anthropic(http, api_key, base_url, supports_images))
         }
         "openai" => {
+            // oauth.kind=codex → the ChatGPT subscription endpoint variant
+            // (Path 2, D33 §6.1b): chatgpt.com/backend-api + /codex/responses.
+            let codex = matches!(oauth, Some(c) if c.kind == "codex");
             let base_url = if base_url.is_empty() {
-                openai::API_BASE.to_string()
+                if codex {
+                    "https://chatgpt.com/backend-api".to_string()
+                } else {
+                    openai::API_BASE.to_string()
+                }
             } else {
                 base_url
             };
@@ -70,7 +77,12 @@ pub fn build_provider(
                     }
                 },
             };
-            Ok(openai(http, auth, base_url, supports_images))
+            let variant = if codex {
+                openai::OpenAiVariant::Codex
+            } else {
+                openai::OpenAiVariant::Default
+            };
+            Ok(openai(http, auth, base_url, supports_images, variant))
         }
         other => Err(format!(
             "未知 protocol \"{other}\"（可用：anthropic / openai）"
@@ -104,8 +116,9 @@ pub fn openai(
     auth: AuthSource,
     base_url: String,
     supports_images: bool,
+    variant: openai::OpenAiVariant,
 ) -> Arc<dyn ProviderClient> {
-    Arc::new(openai::OpenAIProvider::new(http, auth, base_url, supports_images))
+    Arc::new(openai::OpenAIProvider::new(http, auth, base_url, supports_images, variant))
 }
 
 /// Exponential backoff + jitter: from 500ms, capped at 32s (shared by every

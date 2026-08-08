@@ -298,14 +298,15 @@ B. Custom device flow (codex --device-auth; opencode "headless"; NOT RFC 8628):
 
 Refresh: `POST {issuer}/oauth/token` (grant_type refresh_token, may rotate). Codex distinguishes permanent refresh failures in user-facing copy: `refresh_token_expired` / `_reused` / `_invalidated` / account-mismatch → "log out and sign in again". 401 recovery = refresh first (single-flight), only re-login when refresh fails. Logout: `POST {issuer}/oauth/revoke` + delete local auth.
 
-### 6.1b P2 RISK — which endpoint does the subscription speak? (spike at P2 start)
+### 6.1b P2 RISK — RESOLVED: the subscription speaks the codex endpoint VARIANT of the Responses protocol (spike, 2026-08)
 
-Two observed paths, must be verified with a real ChatGPT subscription before committing P2's protocol work:
+**Spike outcome (user live-tested + opencode `codex.ts` source + DeepWiki):** Path 1 rejected — `api.openai.com/v1/responses` does NOT accept the ChatGPT subscription bearer. Path 2 confirmed, but **it is an endpoint variant, not a new protocol**:
 
-- **Path 1 (cheap, prefer first): api.openai.com/v1/responses with the OAuth access token.** opencode sends ChatGPT subscription tokens through the standard `@ai-sdk/openai` Responses SDK (baseURL `https://api.openai.com/v1`); its catalog hides only chat-completions-only models. If the public Responses endpoint accepts subscription bearer tokens (possibly with `ChatGPT-Account-ID` / `OAI-Product-Sku` headers), **P2 reuses the P1 openai adapter wholesale** — OAuth is purely additive.
-- **Path 2 (expensive): private chatgpt.com/backend-api "codex responses" protocol.** codex CLI itself talks to `{chatgpt_base_url}` (default `https://chatgpt.com/backend-api/`) with `OAI-PRODUCT-SKU: codex` + account headers and a **private SSE format** (response_item.done etc.). If Path 1 fails, P2 needs a third protocol adapter ("codex") against this private endpoint — brittle, reverse-engineered, follow codex's own client as the reference.
-
-**P2 acceptance must include a 0.5-day spike**: login with a real account → hit Path 1 with the openai adapter → record the outcome. Design consequence: `protocol: "openai"` (public) and the future `protocol: "codex"` (subscription, if needed) are separate adapters; the OAuth `TokenProvider` is shared by both.
+- `CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"`; opencode rewrites every `/v1/responses` request to it (opencode never uses the public endpoint for subscriptions).
+- **Request body = OpenAI Responses format pass-through; SSE response pass-through** — protocol-compatible, no private format conversion (supersedes the earlier "private SSE (response_item.done)" hypothesis).
+- Extra headers: `Authorization: Bearer <access>` + `ChatGPT-Account-Id` (only when an account id is known). accountId extraction (opencode `extractAccountId`): id_token first, fallback access_token; claim order `chatgpt_account_id` → `"https://api.openai.com/auth".chatgpt_account_id` → `organizations[0].id`.
+- Model whitelist: `gpt-5.5 / gpt-5.3-codex-spark / gpt-5.4 / gpt-5.4-mini` (gpt-5.5-pro excluded); the model list is filtered statically.
+- Implementation: `OpenAiVariant { Default, Codex }` on the openai adapter — api_path (`/v1/responses` vs `/codex/responses`), ChatGPT-Account-Id header (Codex variant only), default base_url `https://chatgpt.com/backend-api` for the Codex variant, static whitelist `list_models`. Plus `jwt_account_id()` (~15 lines hand-rolled base64url, no dep) backfilling `account_id` into the persisted token set at `TokenProvider::save`. Risk noted: refresh body JSON (bingo) vs form (opencode) — keep JSON, live-verify; switch to form (one line) + body-shape contract test if the API 400s.
 
 ### 6.2 Token storage (both tools agree; adopt as-is)
 
@@ -342,6 +343,39 @@ Command surface (added to the existing `/provider`):
 - `/provider login <name>` — default loopback PKCE (opens browser, local callback); `--device-auth` for headless/SSH (print URL + code, poll); `--manual` accepts a pasted token (CI fallback)
 - `/provider logout <name>` — clear auth.json entry (+ best-effort revoke via `{issuer}/oauth/revoke`)
 - `/status` shows the current provider's auth kind; `/provider` listing shows auth status per provider
+
+### 6.5 Built-in official provider presets (zero-config subscriptions — main's product direction, 2026-08)
+
+**Problem**: official subscriptions (codex/ChatGPT, opencode-go) must not require hand-editing `settings.json`. codex CLI / opencode are install-and-use (`/provider login codex`); bingo ships the full templates and the user only logs in.
+
+**Preset table** (`src/api/providers/presets.rs`, compile-time consts, no IO):
+
+| name | display | protocol | variant | base_url (default) | auth | model whitelist (static) |
+|---|---|---|---|---|---|---|
+| `codex` | Codex (ChatGPT 订阅) | openai | `Codex` | `https://chatgpt.com/backend-api` | `oauth.kind: "codex"` | gpt-5.5 / gpt-5.3-codex-spark / gpt-5.4 / gpt-5.4-mini |
+| `opencode-go` | opencode Go (订阅) | openai | `Default` | `https://opencode.ai/zen/go` | apiKey (set via `/provider login` → stored in auth.json `{type:"api"}`) | gpt-5.6-luna |
+
+**Effective config = preset ⊕ user overrides (field-merge at build time)**:
+- User `providers.<name>` fields override the preset **field by field** (protocol / apiBaseUrl / apiKey / oauth / supportsImages); absent or empty fields fall back to the preset default (serde-default-like). E.g. `{"codex": {"apiBaseUrl": "https://custom"}}` keeps protocol/variant/oauth/whitelist from the preset — matches main's "自定义 apiBaseUrl" without restating the template.
+- `settings.providers` stays **user-only** (no pollution); presets are resolved at build time in `Client::from_settings_with` / the registry. A preset name overridden by the user still resolves to the user's protocol when explicitly set (field-merge covers "my own codex with anthropic protocol").
+- apiKey present → wins over OAuth (D33 §5, unchanged); a preset always defines its auth, so double-missing cannot occur for presets — `CONFIG_INVALID` remains for user-configured providers only.
+- **Pre-build all effective providers at startup** (presets ∪ user entries, ~2 extra adapters, zero on-demand complexity): `provider_names` / `provider_endpoint` / `provider_protocol` / `auth_status` / `set_provider` / `with_provider` all work unchanged over the merged table.
+
+**/provider listing** (built-in badge):
+```
+当前 provider: codex
+● codex @ https://chatgpt.com/backend-api（✓ user@x · openai · 内置）
+  opencode-go @ https://opencode.ai/zen/go（○ 未配置（/provider login opencode-go 设置 key）· openai · 内置）
+  default @ …（key sk-… · anthropic）
+  road @ …（key sk-… · anthropic）
+```
+Order: current first, then built-ins (official subscriptions), then user providers — or keep name-sorted with a 内置 badge; pick at implementation (lean: built-ins first, 内置 badge).
+
+**Login flow adaptation**:
+- `/provider login <name>` resolves the **effective** config (user ⊕ preset): codex → oauth flow as today (preset supplies `oauth.kind` when the user didn't); `opencode-go` (apiKey preset) → prompt "粘贴 opencode-go API key" → store `{type:"api", key}` in auth.json (existing Api entry; if the user later sets settings apiKey → apiKey wins and the auth.json entry is ignored). `/provider logout` symmetric.
+- `/model` menu: level-1 list includes presets; level-2 = preset whitelist (static) — only usable models appear.
+
+**Landing**: same batch as the codex endpoint variant or immediately after (main's suggestion). Phase **P5 — built-in provider presets**. Tests: field-merge matrix (apiBaseUrl-only override keeps protocol/variant/oauth), provider_names includes presets, listing shows 内置 badge, `/provider login codex` with an empty settings `providers` works, opencode-go login stores the key, settings untouched (no pollution), user protocol override still CONFIG_INVALID on unknown values.
 
 ## 7. Migration & compatibility
 

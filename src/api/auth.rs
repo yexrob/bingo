@@ -86,12 +86,21 @@ impl TokenSet {
     fn from_tokens_json(json: &Value) -> TokenSet {
         let expires_in = json.get("expires_in").and_then(|v| v.as_u64());
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let id_token = json.get("id_token").and_then(|v| v.as_str()).map(str::to_string);
+        let access_token = json.get("access_token").and_then(|v| v.as_str()).unwrap_or_default().into();
         TokenSet {
-            access_token: json.get("access_token").and_then(|v| v.as_str()).unwrap_or_default().into(),
+            access_token,
             refresh_token: json.get("refresh_token").and_then(|v| v.as_str()).unwrap_or_default().into(),
-            id_token: json.get("id_token").and_then(|v| v.as_str()).map(str::to_string),
+            id_token,
             expires_at: expires_in.map(|e| now + e),
-            account_id: json.get("account_id").and_then(|v| v.as_str()).map(str::to_string),
+            // The token response may omit account_id — backfill from JWT
+            // claims (opencode extractAccountId, D33 §6 / P2 codex variant).
+            account_id: json
+                .get("account_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| jwt_account_id(json.get("id_token").and_then(|v| v.as_str())))
+                .or_else(|| jwt_account_id(json.get("access_token").and_then(|v| v.as_str()))),
         }
     }
 
@@ -446,6 +455,40 @@ fn urlencoding_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
+/// Extract the ChatGPT account id from a JWT (opencode `extractAccountId`
+/// semantics): `chatgpt_account_id` claim, or the same under
+/// `https://api.openai.com/auth`, or the first organization id. Returns
+/// None for non-JWTs / missing claims — the caller falls back to the
+/// access token or omits the account header (codex semantics).
+pub fn jwt_account_id(token: Option<&str>) -> Option<String> {
+    let token = token?;
+    let payload = token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: Value = serde_json::from_slice(&decoded).ok()?;
+    claims
+        .get("chatgpt_account_id")
+        .or_else(|| claims.get("https://api.openai.com/auth")?.get("chatgpt_account_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            claims
+                .get("organizations")?
+                .as_array()?
+                .first()?
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+}
+
+/// Minimal JWT for tests: base64url(header).base64url(payload).signature.
+#[cfg(test)]
+fn test_jwt(payload: &serde_json::Value) -> String {
+    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
+    let body = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
+    format!("{header}.{body}.sig")
+}
+
 /// Refreshes access tokens and persists them via `AuthStore`: lazy + eager
 /// (5 min lead), 401-triggered (`force_refresh`), single-flight so concurrent
 /// streams do not stampede the token endpoint. Permanent failures clear the
@@ -507,7 +550,14 @@ impl TokenProvider {
     }
 
     /// Persist a freshly-obtained token set (from device flow / PKCE login).
+    /// account_id is backfilled from JWT claims when the response omitted it
+    /// (codex semantics — the ChatGPT-Account-Id header depends on it).
     pub async fn save(&self, tokens: &TokenSet) -> Result<(), AuthError> {
+        let mut tokens = tokens.clone();
+        if tokens.account_id.is_none() {
+            tokens.account_id = jwt_account_id(tokens.id_token.as_deref())
+                .or_else(|| jwt_account_id(Some(&tokens.access_token)));
+        }
         self.store().set(&self.provider_name, tokens.to_auth_entry())?;
         *self.cache.lock().await = Some(tokens.clone());
         *self.account_mirror.lock().unwrap_or_else(|p| p.into_inner()) =
@@ -869,5 +919,71 @@ mod tests {
             URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
         );
         assert!(verifier.len() >= 43 && verifier.len() <= 128, "RFC 7636 长度");
+    }
+
+    /// jwt_account_id: the three claim positions opencode checks, plus
+    /// non-JWT input → None (the ChatGPT-Account-Id header is omitted).
+    #[test]
+    fn jwt_account_id_extracts_from_claims() {
+        // ① top-level chatgpt_account_id.
+        let t = test_jwt(&serde_json::json!({"chatgpt_account_id": "acc_1"}));
+        assert_eq!(jwt_account_id(Some(&t)).as_deref(), Some("acc_1"));
+        // ② nested https://api.openai.com/auth.
+        let t = test_jwt(&serde_json::json!({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acc_2"}
+        }));
+        assert_eq!(jwt_account_id(Some(&t)).as_deref(), Some("acc_2"));
+        // ③ organizations[0].id.
+        let t = test_jwt(&serde_json::json!({"organizations": [{"id": "org_3"}]}));
+        assert_eq!(jwt_account_id(Some(&t)).as_deref(), Some("org_3"));
+        // Precedence: top-level wins over the nested claim.
+        let t = test_jwt(&serde_json::json!({
+            "chatgpt_account_id": "acc_1",
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acc_2"}
+        }));
+        assert_eq!(jwt_account_id(Some(&t)).as_deref(), Some("acc_1"));
+        // Non-JWT / missing claims → None.
+        assert_eq!(jwt_account_id(Some("not-a-jwt")), None);
+        assert_eq!(jwt_account_id(None), None);
+        let t = test_jwt(&serde_json::json!({"sub": "u"}));
+        assert_eq!(jwt_account_id(Some(&t)), None, "无 account claims 返回 None");
+    }
+
+    /// Token responses without account_id are backfilled from JWT claims
+    /// (opencode extractAccountId semantics) — the ChatGPT-Account-Id header
+    /// and /provider account display depend on it.
+    #[test]
+    fn tokens_backfill_account_id_from_jwt() {
+        let id_token = test_jwt(&serde_json::json!({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acc_jwt"}
+        }));
+        let json = serde_json::json!({
+            "access_token": "at",
+            "refresh_token": "rt",
+            "id_token": id_token,
+            "expires_in": 3600,
+        });
+        let tokens = TokenSet::from_tokens_json(&json);
+        assert_eq!(tokens.account_id.as_deref(), Some("acc_jwt"), "JWT 回填 account_id");
+
+        // Access-token fallback when id_token has no account claim.
+        let access_token = test_jwt(&serde_json::json!({"chatgpt_account_id": "acc_at"}));
+        let json = serde_json::json!({
+            "access_token": access_token,
+            "refresh_token": "rt",
+            "expires_in": 3600,
+        });
+        let tokens = TokenSet::from_tokens_json(&json);
+        assert_eq!(tokens.account_id.as_deref(), Some("acc_at"), "access token 回退");
+
+        // Explicit account_id wins over JWT claims.
+        let json = serde_json::json!({
+            "access_token": access_token,
+            "refresh_token": "rt",
+            "account_id": "acc_explicit",
+            "expires_in": 3600,
+        });
+        let tokens = TokenSet::from_tokens_json(&json);
+        assert_eq!(tokens.account_id.as_deref(), Some("acc_explicit"));
     }
 }

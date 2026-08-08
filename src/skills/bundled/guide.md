@@ -172,7 +172,10 @@ Example (.bingo/settings.json):
   code and polls for headless/SSH; `--manual <token>` pastes a stored token), `/provider logout <name>` revokes and
   clears. Tokens live in `~/.local/share/bingo/auth.json` (0600, opencode-compatible shape) — never in the committed
   settings; `apiKey` in settings wins over OAuth; refresh is automatic (eager 5 min before expiry + on 401),
-  permanent refresh failures clear the login and prompt `/provider login <name>` again.
+  permanent refresh failures clear the login and prompt `/provider login <name>` again. Codex providers route to
+  `https://chatgpt.com/backend-api/codex/responses` (Responses wire format, same adapter; `ChatGPT-Account-Id`
+  header from the JWT claims; `/model` shows the subscription allowlist: gpt-5.5 / gpt-5.3-codex-spark /
+  gpt-5.4 / gpt-5.4-mini).
 - **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
   experience index is injected (≤10 entries, one per line; nothing injected when empty); full text is searched with ExperienceQuery by
   trigger tokens (case-insensitive, shared-prefix tolerant; active first, sorted by adoption count);
