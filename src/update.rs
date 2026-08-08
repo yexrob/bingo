@@ -543,6 +543,23 @@ mod tests {
         enc.finish().unwrap()
     }
 
+    /// 按当前平台构造可解压的发布归档（Windows → zip，其他 → tar.gz）。
+    fn sample_archive(bin_bytes: &[u8]) -> Vec<u8> {
+        #[cfg(windows)]
+        {
+            use std::io::Write;
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            zip.start_file("bingo.exe", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(bin_bytes).unwrap();
+            zip.finish().unwrap().into_inner()
+        }
+        #[cfg(not(windows))]
+        {
+            sample_tar_gz(bin_bytes)
+        }
+    }
+
     #[test]
     fn version_parse() {
         assert_eq!(Version::parse("0.2.1").unwrap().parts(), &[0, 2, 1]);
@@ -686,18 +703,34 @@ mod tests {
     }
 
     #[test]
-    fn extract_binary_from_tar_gz() {
+    fn extract_binary_from_archive() {
         let bin = b"#!/bin/sh\necho bingo\n";
-        let archive = sample_tar_gz(bin);
+        let archive = sample_archive(bin);
         assert_eq!(extract_binary(&archive, "bingo").unwrap(), bin);
-        // 缺条目 → MissingBinary
+        // 缺条目 → MissingBinary（Windows 的 .exe 兜底匹配会命中 bingo.exe，
+        // 需用不含 .exe 条目的归档验证）
+        #[cfg(windows)]
+        let no_bin = {
+            use std::io::Write;
+            let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            z.start_file("readme.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            z.write_all(b"hi").unwrap();
+            z.finish().unwrap().into_inner()
+        };
+        #[cfg(not(windows))]
+        let no_bin = archive.clone();
         assert!(matches!(
-            extract_binary(&archive, "nope"),
+            extract_binary(&no_bin, "nope"),
             Err(UpdateError::MissingBinary(_))
         ));
-        // 损坏 → ArchiveInvalid
+        // 损坏 → ArchiveInvalid（Windows zip 对任意短字节容错，需构造截断 zip 头）
+        #[cfg(windows)]
+        let corrupt: &[u8] = &[0x50, 0x4B, 0x03, 0x04, 0x00, 0x00]; // zip 局部头+截断
+        #[cfg(not(windows))]
+        let corrupt: &[u8] = b"not a gzip";
         assert!(matches!(
-            extract_binary(b"not a gzip", "bingo"),
+            extract_binary(corrupt, "bingo"),
             Err(UpdateError::ArchiveInvalid(_))
         ));
     }
@@ -813,7 +846,7 @@ mod tests {
     #[tokio::test]
     async fn perform_update_end_to_end() {
         let bin = b"BINGO-BIN-2026";
-        let (routes, _) = mock_routes("v99.0.0", sample_tar_gz(bin));
+        let (routes, _) = mock_routes("v99.0.0", sample_archive(bin));
         let base = serve(routes).await;
 
         let home = tmp_home();
