@@ -234,7 +234,8 @@ Example (.bingo/settings.json):
   outer terminal is Ghostty/kitty; an outer WezTerm/Konsole (no U=1) or an unrecognized outer
   terminal keeps the `#[image]` placeholder with a one-time notice (the live viewport also keeps the
   placeholder inside tmux). Images load automatically with the message and render when the message
-  settles — no extra command needed.
+  settles — no extra command needed. A failed fetch (network error, 4xx/5xx, undecodable data) marks
+  the row as `#[image ✗ 加载失败]` and shows a warning line with the url.
 - **MCP**: stdio and streamable HTTP (`type: "http"`, with custom headers) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
@@ -286,7 +287,8 @@ Example (.bingo/settings.json):
   allow-passthrough on`），外层终端为 Ghostty/kitty 时经 Unicode 占位符（U=1）
   渲染，图片随文本正常滚动；外层为 WezTerm/Konsole（不支持 U=1）或无法识别时
   显示 `#[image]` 占位并提示一次。图片随消息自动加载并在消息定稿落盘时渲染，
-  不需要额外命令。
+  不需要额外命令。抓取失败（网络错误、4xx/5xx、数据不可解码）时该行显示
+  `#[image ✗ 加载失败]`，并有警告行给出 url。
 - **MCP**：stdio 与 streamable HTTP（`type: "http"`，可带自定义 headers）服务器工具接入（见上）。
 - **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/`，文件名
   `<项目名>-<路径哈希>.md`，同名目录不串味）+ 项目 CLAUDE.md（Anthropic 惯例）。

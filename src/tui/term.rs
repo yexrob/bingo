@@ -74,6 +74,35 @@ impl<W: IoWrite> RawWrite for CrosstermBackend<W> {
     }
 }
 
+/// Emit graphics writes as one synchronized-update batch: save the cursor
+/// (DECSC), for each op move to its cell (CUP) when it has one and append the
+/// payload, restore the cursor (DECRC), flush once. The cursor ends exactly
+/// where it started, so callers' cursor bookkeeping stays valid. Payloads are
+/// trusted to contain no cursor escapes of their own
+/// ([`crate::tui::gfx::GfxWrite`]'s contract).
+pub fn write_gfx<B: RawWrite>(
+    backend: &mut B,
+    ops: &[crate::tui::gfx::GfxWrite],
+) -> Result<(), B::Error> {
+    if ops.is_empty() {
+        return Ok(());
+    }
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(SYNC_BEGIN);
+    bytes.extend_from_slice(b"\x1b7");
+    for op in ops {
+        if let Some((row, col)) = op.at {
+            let cup = format!("\x1b[{};{}H", u32::from(row) + 1, u32::from(col) + 1);
+            bytes.extend_from_slice(cup.as_bytes());
+        }
+        bytes.extend_from_slice(&op.bytes);
+    }
+    bytes.extend_from_slice(b"\x1b8");
+    bytes.extend_from_slice(SYNC_END);
+    backend.write_raw(&bytes)?;
+    Backend::flush(backend)
+}
+
 /// One unit of scrollback output.
 #[derive(Debug, Clone)]
 pub enum HistoryItem {
@@ -185,13 +214,10 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
         self.viewport.y
     }
 
-    /// Write raw bytes at the parked cursor position without touching the
-    /// double buffer (used by the kitty placement layer after the frame draw;
-    /// the control sequences do not move the cursor).
-    pub fn write_raw_bytes(&mut self, bytes: &[u8]) -> Result<(), B::Error> {
-        self.backend.write_raw(bytes)?;
-        Backend::flush(&mut self.backend)?;
-        Ok(())
+    /// Emit cursor-positioned graphics writes for the placement layer; see
+    /// [`write_gfx`].
+    pub fn write_gfx(&mut self, ops: &[crate::tui::gfx::GfxWrite]) -> Result<(), B::Error> {
+        write_gfx(&mut self.backend, ops)
     }
 
     /// Accept a new terminal size.
@@ -833,6 +859,29 @@ mod tests {
         let mut backend = Recorder::new(width, height);
         backend.set_cursor_position(Position::new(0, row)).unwrap();
         InlineTerm::new(backend).unwrap()
+    }
+
+    /// write_gfx: empty ops write nothing; otherwise one synchronized batch,
+    /// DECSC/DECRC bracket, CUP (1-based) only before positioned payloads.
+    #[test]
+    fn write_gfx_positions_in_one_batch_and_restores_the_cursor() {
+        let mut backend = Recorder::new(20, 6);
+        write_gfx(&mut backend, &[]).unwrap();
+        assert!(backend.raw.is_empty(), "empty ops are a no-op");
+
+        let ops = [
+            crate::tui::gfx::GfxWrite {
+                at: Some((2, 0)),
+                bytes: b"P1".to_vec(),
+            },
+            crate::tui::gfx::GfxWrite {
+                at: None,
+                bytes: b"D1".to_vec(),
+            },
+        ];
+        write_gfx(&mut backend, &ops).unwrap();
+        let raw = String::from_utf8_lossy(&backend.raw);
+        assert_eq!(raw, "\x1b[?2026h\x1b7\x1b[3;1HP1D1\x1b8\x1b[?2026l");
     }
 
     /// Fill the viewport buffer with `rows`, top-down.

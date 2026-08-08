@@ -946,6 +946,9 @@ pub struct Chat {
     pub images: HashMap<String, Arc<ImageMeta>>,
     /// Image urls currently being fetched (prevents duplicate loads).
     images_pending: HashSet<String>,
+    /// Image urls whose load failed (rendered with a failure marker; a retry
+    /// on a later message clears the mark).
+    images_failed: HashSet<String>,
     /// Image cache version (bumped on load completion → invalidates the render cache).
     images_version: u64,
     /// Whether the document needs rebuilding (set after writes like events/tick/expand; cleared after the layout layer consumes it).
@@ -1183,6 +1186,7 @@ impl Chat {
             image_cap: None,
             images: HashMap::new(),
             images_pending: HashSet::new(),
+            images_failed: HashSet::new(),
             images_version: 1,
             dirty: true,
             prev_build_width: 0,
@@ -1295,10 +1299,12 @@ impl Chat {
                 self.images_pending.remove(&url);
                 match meta {
                     Some(meta) => {
+                        self.images_failed.remove(&url);
                         self.images.insert(url.clone(), Arc::new(meta));
                     }
                     None => {
                         self.images.remove(&url);
+                        self.images_failed.insert(url.clone());
                         self.push_warning(format!("图片加载失败: {url}"));
                     }
                 }
@@ -1833,6 +1839,7 @@ impl Chat {
                 continue;
             }
             self.images_pending.insert(url.clone());
+            self.images_failed.remove(&url);
             let events = self.events.clone();
             let cwd = self.cwd.clone();
             handle.spawn(async move {
@@ -5466,6 +5473,7 @@ impl Chat {
                         let renderer = &mut self.renderer;
                         let cache = &mut self.reply_cache;
                         let images = &self.images;
+                        let images_failed = &self.images_failed;
                         let image_cap = self.image_cap;
                         let images_version = self.images_version;
                         move |reply: &str| -> Vec<Line> {
@@ -5478,7 +5486,12 @@ impl Chat {
                             renderer.set_width(width);
                             // Image cache version changed → sync the renderer (clears its per-block cache).
                             if renderer.images_version() != images_version {
-                                renderer.set_images(image_cap, images, images_version);
+                                renderer.set_images(
+                                    image_cap,
+                                    images,
+                                    images_failed,
+                                    images_version,
+                                );
                             }
                             let doc = processor.process_streaming(reply);
                             renderer.render(&doc);
@@ -7265,7 +7278,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// /share：默认只导出当前会话 HTML 到本地（文件存在、路径输出、覆盖提示）。
+    /// /share: by default exports the current session's HTML locally only
+    /// (file exists, path echoed, overwrite hint).
     #[test]
     fn slash_share_exports_current_session_locally_by_default() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-share", std::process::id()));
@@ -7333,8 +7347,9 @@ mod tests {
         assert!(!parse_share_arg("--output x", "--public"));
     }
 
-    /// /share --public：只有显式选择公开发布时 mock 服务器才收到 POST；
-    /// 上传开始前立即显示公开访问与敏感内容警告。
+    /// /share --public: the mock server receives a POST only when public
+    /// publishing is explicitly chosen; the public-access and sensitive-content
+    /// warning shows before the upload starts.
     #[tokio::test]
     async fn slash_share_public_opt_in_warns_before_upload() {
         use std::io::{BufRead, Read, Write};
@@ -10636,7 +10651,9 @@ mod tests {
         assert!(!image_rows.is_empty(), "定稿行里有图片块");
     }
 
-    /// A failed load (including None from a timeout) also releases the block: it settles with the `#[image]` placeholder.
+    /// A failed load (including None from a timeout) also releases the block:
+    /// it settles with a failure-marked placeholder, distinguishable from a
+    /// still-loading one.
     #[test]
     fn failed_image_load_settles_with_placeholder() {
         let mut chat = test_chat();
@@ -10659,7 +10676,7 @@ mod tests {
             .map(|r| r.line.plain_text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("#[image]"), "占位文本落稿: {text}");
+        assert!(text.contains("#[image ✗ 加载失败]"), "失败标记落稿: {text}");
     }
 
     /// Without image capability, nothing enters the in-flight set and messages settle immediately (unchanged behavior).

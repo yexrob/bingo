@@ -60,7 +60,7 @@ pub(crate) struct Menus<'a> {
 }
 use crate::tui::gfx;
 use crate::tui::line::{Line, SegStyle, text_width};
-use crate::tui::term::{HistoryItem, RawWrite, StdoutTerm};
+use crate::tui::term::{HistoryItem, StdoutTerm, write_gfx};
 use crate::tui::theme::Theme;
 use crate::tui::view;
 
@@ -674,11 +674,11 @@ fn image_block_head(rows: &[Row], i: usize) -> bool {
         .is_none_or(|prev| prev.line.image.as_ref().map(|p| &p.url) != Some(&img.url))
 }
 
-/// Image blocks fully visible in the frame's content area → absolute screen
-/// placements (pixel coordinates, `origin_row` = the viewport's top screen
-/// row). Partially visible or still-loading blocks stay as `#[image]`
-/// placeholder rows; tmux placeholder mode is not supported in the live
-/// viewport yet, so it gets no placements either.
+/// Image blocks fully visible in the frame's content area → screen-cell
+/// placements (`origin_row` = the viewport's top screen row). Partially
+/// visible or still-loading blocks stay as `#[image]` placeholder rows; tmux
+/// placeholder mode is not supported in the live viewport yet, so it gets no
+/// placements either.
 fn desired_placements(
     frame: &Frame,
     cap: gfx::ImageCap,
@@ -709,10 +709,8 @@ fn desired_placements(
                 url: img.url.clone(),
                 cols: meta.cols,
                 rows: meta.rows,
-                x: 0,
-                y: u32::from(origin_row)
-                    .saturating_add(i as u32)
-                    .saturating_mul(cap.cell_h),
+                row: origin_row.saturating_add(u16::try_from(i).unwrap_or(u16::MAX)),
+                col: 0,
             });
         }
         i = end;
@@ -903,10 +901,7 @@ pub async fn run_inline(
         if chat.force_redraw {
             chat.force_redraw = false;
             term.clear_visible()?;
-            let bytes = layer.clear();
-            if !bytes.is_empty() {
-                term.write_raw_bytes(&bytes)?;
-            }
+            term.write_gfx(&layer.clear())?;
         }
 
         let size = term.size();
@@ -961,20 +956,14 @@ pub async fn run_inline(
         // render immediately instead of waiting for the scrollback flush.
         if let Some(cap) = chat.image_cap {
             let placements = desired_placements(&frame, cap, &chat.images, term.viewport_top());
-            let bytes = layer.sync(&chat.images, &placements);
-            if !bytes.is_empty() {
-                term.write_raw_bytes(&bytes)?;
-            }
+            term.write_gfx(&layer.sync(&chat.images, &placements))?;
         }
         if chat.exit {
             break;
         }
     }
 
-    let bytes = layer.clear();
-    if !bytes.is_empty() {
-        term.write_raw_bytes(&bytes)?;
-    }
+    term.write_gfx(&layer.clear())?;
     term.finish()?;
     Ok(())
 }
@@ -1053,6 +1042,11 @@ pub async fn run_fullscreen(
                     }
                 }
                 Some(Ok(Event::Resize(_, _))) => {
+                    // Resize purges the terminal's image store (ratatui's
+                    // autoresize also clears the screen); the placement layer's
+                    // transmit cache is now lies. Route through force_redraw:
+                    // clear + drop the cache + retransmit everything visible.
+                    chat.force_redraw = true;
                     chat.dirty = true;
                     dirty = true;
                 }
@@ -1108,10 +1102,7 @@ pub async fn run_fullscreen(
         if chat.force_redraw {
             chat.force_redraw = false;
             terminal.clear()?;
-            let bytes = layer.clear();
-            if !bytes.is_empty() {
-                terminal.backend_mut().write_raw(&bytes)?;
-            }
+            write_gfx(terminal.backend_mut(), &layer.clear())?;
         }
 
         let size = terminal.size()?;
@@ -1130,20 +1121,17 @@ pub async fn run_fullscreen(
         // Live-viewport image placements on the alternate screen.
         if let Some(cap) = chat.image_cap {
             let placements = desired_placements(&frame, cap, &chat.images, 0);
-            let bytes = layer.sync(&chat.images, &placements);
-            if !bytes.is_empty() {
-                terminal.backend_mut().write_raw(&bytes)?;
-            }
+            write_gfx(
+                terminal.backend_mut(),
+                &layer.sync(&chat.images, &placements),
+            )?;
         }
         if chat.exit {
             break;
         }
     }
 
-    let bytes = layer.clear();
-    if !bytes.is_empty() {
-        terminal.backend_mut().write_raw(&bytes)?;
-    }
+    write_gfx(terminal.backend_mut(), &layer.clear())?;
     Ok(())
 }
 
@@ -2123,7 +2111,11 @@ mod tests {
         let placements = desired_placements(&frame, cap, &images, 3);
         assert_eq!(placements.len(), 1, "恰好一个完整可见块");
         assert_eq!(placements[0].url, "a.png");
-        assert_eq!(placements[0].y, (3 + 2) * cap.cell_h, "屏幕行换算像素");
+        assert_eq!(
+            (placements[0].row, placements[0].col),
+            (3 + 2, 0),
+            "锚定屏幕单元格：视口顶 + 内容行"
+        );
         assert_eq!(
             placements[0].id,
             crate::tui::gfx::placement_id("a.png", 10 + 2),
@@ -2165,6 +2157,60 @@ mod tests {
             desired_placements(&frame, tmux, &images, 3).is_empty(),
             "tmux 占位模式视口不放置"
         );
+    }
+
+    /// Feedback loop for "images render live, not as `#[image]`": a loaded,
+    /// fully visible image block must yield a placement with transmit bytes on
+    /// the FIRST assembled frame after load — inline and fullscreen alike,
+    /// with the screen row anchored to the frame position.
+    #[test]
+    fn loaded_image_block_placement_on_first_frame_inline_and_fullscreen() {
+        let meta = Arc::new(crate::ui::ImageMeta {
+            cols: 4,
+            rows: 2,
+            bytes: b"png".to_vec(),
+        });
+        let img = |url: &str| Line {
+            segs: Vec::new(),
+            image: Some(ImageRef {
+                url: url.to_string(),
+                cols: 4,
+                rows: 2,
+            }),
+        };
+        for fullscreen in [false, true] {
+            let mut chat = chat_at(80, 30);
+            chat.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
+            chat.images.insert("a.png".to_string(), meta.clone());
+            chat.doc.rows = vec![
+                Row::new(Line::plain("hi")),
+                Row::new(img("a.png")),
+                Row::new(img("a.png")),
+                Row::new(Line::plain("tail")),
+            ];
+            let frame = if fullscreen {
+                fullscreen_frame(&chat, size(80, 30))
+            } else {
+                Frame::assemble(&chat, size(80, 30))
+            };
+            let origin: u16 = if fullscreen { 0 } else { 7 };
+            let cap = chat.image_cap.unwrap();
+            let placements = desired_placements(&frame, cap, &chat.images, origin);
+            assert_eq!(placements.len(), 1, "fullscreen={fullscreen} 首帧即放置");
+            assert_eq!(
+                (placements[0].row, placements[0].col),
+                (origin + 1, 0),
+                "fullscreen={fullscreen} 锚定帧内屏幕行"
+            );
+            let mut layer = crate::tui::gfx::PlacementLayer::default();
+            let ops = layer.sync(&chat.images, &placements);
+            assert_eq!(ops.len(), 1, "fullscreen={fullscreen}");
+            assert_eq!(ops[0].at, Some((origin + 1, 0)));
+            assert!(
+                String::from_utf8_lossy(&ops[0].bytes).contains("a=T"),
+                "fullscreen={fullscreen} 首帧传输+放置"
+            );
+        }
     }
 
     /// Fullscreen frames carry the doc row of their first content row so the

@@ -330,12 +330,13 @@ fn kitty_chunks(png: &[u8], first_header: &str) -> Vec<Vec<u8>> {
 }
 
 /// Build the kitty transmit+place sequence: the first chunk's control data is
-/// `a=T` transmit-and-display, PNG, silent OK reply, cursor not moved. Appends
-/// `rows` `\r\n`s to advance the cursor (`C=1` placement does not move the
-/// cursor; under raw mode a bare `\n` only moves down without a carriage
-/// return, so CR is required).
+/// `a=T` transmit-and-display, PNG, all replies silenced (`q=2` — `q=1` still
+/// sends error replies, which reach the event loop as stray input), cursor not
+/// moved. Appends `rows` `\r\n`s to advance the cursor (`C=1` placement does
+/// not move the cursor; under raw mode a bare `\n` only moves down without a
+/// carriage return, so CR is required).
 pub fn kitty_image_bytes(png: &[u8], cols: usize, rows: usize) -> Vec<u8> {
-    let header = format!("a=T,f=100,q=1,c={cols},r={rows},C=1");
+    let header = format!("a=T,f=100,q=2,c={cols},r={rows},C=1");
     let mut out: Vec<u8> = kitty_chunks(png, &header).concat();
     for _ in 0..rows {
         out.extend_from_slice(b"\r\n");
@@ -447,16 +448,18 @@ pub fn image_id_for(url: &str) -> u32 {
     normalize_image_id((hasher.finish() & 0xFF_FFFF) as u32)
 }
 
-/// One image instance placed at an absolute screen position (pixel
-/// coordinates, origin = top-left of the terminal content area).
+/// One image instance anchored to a screen cell (`row`/`col`, origin =
+/// top-left of the screen). Kitty graphics carry no screen-position keys —
+/// a placement lands at the cursor cell, so the driver parks the cursor
+/// there before the payload goes out ([`crate::tui::term::write_gfx`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placement {
     pub id: u32,
     pub url: String,
     pub cols: usize,
     pub rows: usize,
-    pub x: u32,
-    pub y: u32,
+    pub row: u16,
+    pub col: u16,
 }
 
 /// Stable per-instance placement id: two copies of the same url in one view get
@@ -470,6 +473,17 @@ pub fn placement_id(url: &str, doc_row: usize) -> u32 {
     normalize_image_id((hasher.finish() & 0xFF_FFFF) as u32)
 }
 
+/// One write produced by the placement layer: a kitty graphics payload plus
+/// the screen cell `(row, col)` the cursor must sit on while it goes out
+/// (`None` for position-independent deletes). Emitting — cursor movement
+/// included — is [`crate::tui::term::write_gfx`]'s job; payloads never
+/// contain cursor escapes themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GfxWrite {
+    pub at: Option<(u16, u16)>,
+    pub bytes: Vec<u8>,
+}
+
 /// Terminal-side image layer for the live viewport: keeps a diff of the
 /// placements currently on screen. PNG bytes are transmitted once per instance
 /// id; later frames only place, move, or delete.
@@ -481,40 +495,44 @@ pub struct PlacementLayer {
 
 impl PlacementLayer {
     /// Diff `desired` against the active placements and return the terminal
-    /// byte sequence that converges the screen: deletes for removed instances,
+    /// writes that converge the screen: deletes for removed instances,
     /// transmit+place for new ones, place-only for moved ones. Empty when
     /// nothing changed. Instances whose image is not loaded yet are skipped.
     pub fn sync(
         &mut self,
         images: &std::collections::HashMap<String, std::sync::Arc<crate::ui::ImageMeta>>,
         desired: &[Placement],
-    ) -> Vec<u8> {
+    ) -> Vec<GfxWrite> {
         let mut out = Vec::new();
         let mut next: Vec<Placement> = Vec::with_capacity(desired.len());
         for placement in desired {
+            let at = Some((placement.row, placement.col));
             if let Some(prev) = self.active.iter().find(|p| p.id == placement.id) {
-                if prev.x != placement.x || prev.y != placement.y {
-                    out.extend_from_slice(&place_only_bytes(placement));
+                if prev.row != placement.row || prev.col != placement.col {
+                    out.push(GfxWrite {
+                        at,
+                        bytes: place_only_bytes(placement),
+                    });
                 }
             } else {
                 let Some(meta) = images.get(&placement.url) else {
                     continue;
                 };
-                if self.transmitted.insert(placement.id) {
-                    out.extend_from_slice(&transmit_place_bytes(
-                        placement.id,
-                        &meta.bytes,
-                        placement,
-                    ));
+                let bytes = if self.transmitted.insert(placement.id) {
+                    transmit_place_bytes(placement.id, &meta.bytes, placement)
                 } else {
-                    out.extend_from_slice(&place_only_bytes(placement));
-                }
+                    place_only_bytes(placement)
+                };
+                out.push(GfxWrite { at, bytes });
             }
             next.push(placement.clone());
         }
         for prev in &self.active {
             if !next.iter().any(|p| p.id == prev.id) {
-                out.extend_from_slice(&delete_bytes(prev.id));
+                out.push(GfxWrite {
+                    at: None,
+                    bytes: delete_bytes(prev.id),
+                });
                 self.transmitted.remove(&prev.id);
             }
         }
@@ -522,39 +540,49 @@ impl PlacementLayer {
         out
     }
 
-    /// Bytes that remove every active placement (called on clear/exit).
-    pub fn clear(&mut self) -> Vec<u8> {
-        let mut out = Vec::new();
-        for placement in &self.active {
-            out.extend_from_slice(&delete_bytes(placement.id));
-        }
+    /// Writes that remove every active placement (called on clear/exit).
+    pub fn clear(&mut self) -> Vec<GfxWrite> {
+        let out = self
+            .active
+            .iter()
+            .map(|placement| GfxWrite {
+                at: None,
+                bytes: delete_bytes(placement.id),
+            })
+            .collect();
         self.active.clear();
         self.transmitted.clear();
         out
     }
 }
 
-/// Transmit (once per instance) and place at the pixel position.
+/// Transmit (once per instance) and place at the cursor cell. `p=1` names the
+/// placement, so a later put with the same (image id, placement id) replaces
+/// it — an id-less put would pile up a second copy instead of moving the
+/// first. `C=1` keeps the cursor where the driver parked it. Kitty's `x=`/`y=`
+/// keys are source-crop offsets, not screen coordinates, so they never appear
+/// here: screen position is the cursor cell alone. `q=2` silences error
+/// replies too — `q=1` still answers failures, and those APC replies land in
+/// the event loop as typed input.
 fn transmit_place_bytes(id: u32, png: &[u8], p: &Placement) -> Vec<u8> {
-    let header = format!(
-        "a=T,f=100,q=1,i={id},c={},r={},x={},y={}",
-        p.cols, p.rows, p.x, p.y
-    );
+    let header = format!("a=T,f=100,q=2,i={id},p=1,C=1,c={},r={}", p.cols, p.rows);
     kitty_chunks(png, &header).concat()
 }
 
-/// Place an already-transmitted image at a (possibly new) pixel position.
+/// Place an already-transmitted image at the cursor cell (same placement-id
+/// replacement and quiet semantics as [`transmit_place_bytes`]).
 fn place_only_bytes(p: &Placement) -> Vec<u8> {
     format!(
-        "\x1b_Ga=p,q=1,i={},c={},r={},x={},y={}\x1b\\",
-        p.id, p.cols, p.rows, p.x, p.y
+        "\x1b_Ga=p,q=2,i={},p=1,C=1,c={},r={}\x1b\\",
+        p.id, p.cols, p.rows
     )
     .into_bytes()
 }
 
-/// Delete every placement of one instance id.
+/// Delete every placement of one instance id. `q=2`: deleting an id the
+/// terminal already purged (resize, clear) must stay silent.
 fn delete_bytes(id: u32) -> Vec<u8> {
-    format!("\x1b_Ga=d,i={id},d=I\x1b\\").into_bytes()
+    format!("\x1b_Ga=d,q=2,i={id},d=I\x1b\\").into_bytes()
 }
 
 /// Single exit point: dispatch on `cap.mode` to the complete byte sequence of
@@ -638,8 +666,18 @@ async fn fetch_bytes_with_home(url: &str, cwd: &Path, home: Option<&Path>) -> Op
         return std::fs::read(path.as_ref()).ok();
     }
     if url.starts_with("http://") || url.starts_with("https://") {
+        // Some CDNs (e.g. Wikimedia) reject clients without a User-Agent with
+        // 403; and a non-2xx body is an error page, not image bytes — decoding
+        // it would only fail later with a less honest signal.
         let client = reqwest::Client::new();
-        let resp = client.get(url).send().await.ok()?;
+        let resp = client
+            .get(url)
+            .header(reqwest::header::USER_AGENT, "bingo")
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
         return resp.bytes().await.ok().map(|b| b.to_vec());
     }
     let path = Path::new(url);
@@ -883,7 +921,7 @@ mod tests {
         // ending in rows `\r\n`s.
         let out = kitty_image_bytes(b"abc", 12, 4);
         let s = String::from_utf8(out).unwrap();
-        assert!(s.starts_with("\x1b_Ga=T,f=100,q=1,c=12,r=4,C=1,m=0;"));
+        assert!(s.starts_with("\x1b_Ga=T,f=100,q=2,c=12,r=4,C=1,m=0;"));
         assert!(s.ends_with("\r\n\r\n\r\n\r\n"));
         assert!(s.contains("\x1b\\"));
         assert_eq!(s.matches("\x1b\\").count(), 1);
@@ -1197,15 +1235,21 @@ mod tests {
         assert!(meta.is_none());
     }
 
-    fn placement(url: &str, row: usize, y: u32) -> Placement {
+    fn placement(url: &str, doc_row: usize, row: u16) -> Placement {
         Placement {
-            id: placement_id(url, row),
+            id: placement_id(url, doc_row),
             url: url.to_string(),
             cols: 4,
             rows: 2,
-            x: 0,
-            y,
+            row,
+            col: 0,
         }
+    }
+
+    fn text_of(ops: &[GfxWrite]) -> String {
+        ops.iter()
+            .map(|op| String::from_utf8_lossy(&op.bytes).into_owned())
+            .collect()
     }
 
     fn image_map(
@@ -1226,31 +1270,58 @@ mod tests {
     }
 
     /// First frame transmits+places; an unchanged frame emits nothing; a move
-    /// emits place-only (no retransmit); a removal emits a delete.
+    /// emits place-only (no retransmit) at the new cell; a removal emits a
+    /// cursor-independent delete.
     #[test]
     fn placement_layer_diffs_transmit_move_and_delete() {
         let images = image_map(&["a.png"]);
         let mut layer = PlacementLayer::default();
 
-        let first = layer.sync(&images, &[placement("a.png", 3, 48)]);
+        let first = layer.sync(&images, &[placement("a.png", 3, 5)]);
+        let first_text = text_of(&first);
         assert!(
-            String::from_utf8_lossy(&first).contains("a=T"),
-            "首次出现传输+放置: {:?}",
-            String::from_utf8_lossy(&first)
+            first_text.contains("a=T"),
+            "首次出现传输+放置: {first_text}"
         );
-        assert!(String::from_utf8_lossy(&first).contains("i="));
+        assert!(first_text.contains("i="));
+        assert_eq!(first[0].at, Some((5, 0)), "放置锚定屏幕单元格");
 
-        let same = layer.sync(&images, &[placement("a.png", 3, 48)]);
+        let same = layer.sync(&images, &[placement("a.png", 3, 5)]);
         assert!(same.is_empty(), "未变化不发字节");
 
-        let moved = layer.sync(&images, &[placement("a.png", 3, 80)]);
-        let moved_text = String::from_utf8_lossy(&moved);
+        let moved = layer.sync(&images, &[placement("a.png", 3, 7)]);
+        let moved_text = text_of(&moved);
         assert!(moved_text.contains("a=p"), "移动仅重放置: {moved_text}");
         assert!(!moved_text.contains("a=T"), "不重复传输: {moved_text}");
+        assert_eq!(moved[0].at, Some((7, 0)), "移动锚定新单元格");
 
         let removed = layer.sync(&images, &[]);
-        let removed_text = String::from_utf8_lossy(&removed);
+        let removed_text = text_of(&removed);
         assert!(removed_text.contains("a=d"), "移除发删除: {removed_text}");
+        assert_eq!(removed[0].at, None, "删除与光标位置无关");
+    }
+
+    /// Payload byte contract: screen position never rides in the payload
+    /// (kitty `x=`/`y=` are source-crop keys, not coordinates), every put
+    /// names placement `p=1` so a re-put replaces instead of accumulating,
+    /// `C=1` pins the cursor, and every command — puts and deletes alike —
+    /// carries `q=2`: `q=1` still sends error replies, and those APC replies
+    /// arrive on stdin as typed garbage (main saw `ENOENT: image not found`
+    /// flood the input box after a resize purged the terminal's image store).
+    #[test]
+    fn placement_bytes_follow_kitty_placement_semantics() {
+        let p = placement("a.png", 3, 5);
+        let place = String::from_utf8_lossy(&place_only_bytes(&p)).into_owned();
+        assert_eq!(
+            place,
+            format!("\x1b_Ga=p,q=2,i={},p=1,C=1,c=4,r=2\x1b\\", p.id)
+        );
+        let transmit =
+            String::from_utf8_lossy(&transmit_place_bytes(p.id, b"png", &p)).into_owned();
+        let expected_head = format!("\x1b_Ga=T,f=100,q=2,i={},p=1,C=1,c=4,r=2,m=0;", p.id);
+        assert!(transmit.starts_with(&expected_head), "{transmit}");
+        let delete = String::from_utf8_lossy(&delete_bytes(p.id)).into_owned();
+        assert_eq!(delete, format!("\x1b_Ga=d,q=2,i={},d=I\x1b\\", p.id));
     }
 
     /// Two copies of the same url get distinct ids; deleting one leaves the
@@ -1265,15 +1336,12 @@ mod tests {
 
         layer.sync(&images, &[a.clone(), b.clone()]);
         let drop_a = layer.sync(&images, std::slice::from_ref(&b));
-        let text = String::from_utf8_lossy(&drop_a);
+        let text = text_of(&drop_a);
         assert!(text.contains(&format!("i={}", a.id)), "删除 a 实例: {text}");
         assert!(!text.contains(&format!("i={}", b.id)), "b 不受影响: {text}");
 
         let re_add = layer.sync(&images, &[a.clone(), b.clone()]);
-        assert!(
-            String::from_utf8_lossy(&re_add).contains("a=T"),
-            "重新出现需重新传输"
-        );
+        assert!(text_of(&re_add).contains("a=T"), "重新出现需重新传输");
     }
 
     /// clear() removes everything and resets the transmit cache.
@@ -1283,7 +1351,7 @@ mod tests {
         let mut layer = PlacementLayer::default();
         layer.sync(&images, &[placement("a.png", 3, 0)]);
         let clear = layer.clear();
-        assert!(String::from_utf8_lossy(&clear).contains("a=d"));
+        assert!(text_of(&clear).contains("a=d"));
         assert!(
             !layer.sync(&images, &[placement("a.png", 3, 0)]).is_empty(),
             "清理后重新出现需重新传输"
@@ -1300,6 +1368,54 @@ mod tests {
         );
         assert!(bytes.is_empty());
         assert!(layer.active.is_empty());
+    }
+
+    /// HTTP fetches carry a User-Agent (some CDNs, e.g. Wikimedia, 403
+    /// anonymous clients) and non-2xx responses yield None instead of handing
+    /// an error page to the image decoder.
+    #[tokio::test]
+    async fn http_fetch_sends_user_agent_and_rejects_error_status() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut agents = Vec::new();
+            for (i, stream) in listener.incoming().take(2).enumerate() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut agent = None;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("user-agent:") {
+                        agent = Some(value.trim().to_string());
+                    }
+                }
+                agents.push(agent);
+                let resp = if i == 0 {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nimg"
+                } else {
+                    "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                };
+                stream.write_all(resp.as_bytes()).unwrap();
+            }
+            agents
+        });
+
+        let url = format!("http://{addr}/a.png");
+        let ok = fetch_bytes_with_home(&url, Path::new("."), None).await;
+        assert_eq!(ok.as_deref(), Some(b"img".as_slice()), "2xx 返回响应体字节");
+        let denied = fetch_bytes_with_home(&url, Path::new("."), None).await;
+        assert!(denied.is_none(), "非 2xx 不得交给图片解码");
+        let agents = server.join().unwrap();
+        assert!(
+            agents.iter().all(|a| a.as_deref() == Some("bingo")),
+            "两次请求都带 User-Agent: {agents:?}"
+        );
     }
 
     /// A 4×2 solid-colour PNG (for tests).

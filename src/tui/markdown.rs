@@ -6,7 +6,7 @@
 //! per block once the width is fixed, so only blocks whose source text
 //! changed re-render.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use unicode_width::UnicodeWidthStr;
@@ -32,6 +32,9 @@ pub struct MarkdownRenderer {
     image_cap: Option<ImageCap>,
     /// Loaded images (url → metadata).
     images: HashMap<String, Arc<ImageMeta>>,
+    /// Urls whose load failed (rendered as a failure marker instead of the
+    /// indistinguishable loading placeholder).
+    images_failed: HashSet<String>,
     /// Image cache version (bumped by Chat; on change the per-block cache is
     /// cleared).
     images_version: u64,
@@ -58,6 +61,7 @@ impl MarkdownRenderer {
             lines: Vec::new(),
             image_cap: None,
             images: HashMap::new(),
+            images_failed: HashSet::new(),
             images_version: 0,
         }
     }
@@ -75,13 +79,14 @@ impl MarkdownRenderer {
         self.images_version
     }
 
-    /// Update the image capability and loaded images; on a version change the
-    /// per-block cache is cleared (images go from placeholder to block
-    /// rendering).
+    /// Update the image capability, loaded images and failed urls; on a
+    /// version change the per-block cache is cleared (images go from
+    /// placeholder to block or failure rendering).
     pub fn set_images(
         &mut self,
         cap: Option<ImageCap>,
         images: &HashMap<String, Arc<ImageMeta>>,
+        failed: &HashSet<String>,
         version: u64,
     ) {
         self.image_cap = cap;
@@ -89,6 +94,7 @@ impl MarkdownRenderer {
         self.images.clear();
         self.images
             .extend(images.iter().map(|(k, v)| (k.clone(), v.clone())));
+        self.images_failed = failed.clone();
         self.cached.clear();
     }
 
@@ -109,15 +115,21 @@ impl Renderer for MarkdownRenderer {
                 _ => {
                     // Blocks whose paragraph ends in an image render as block
                     // images (mirroring rsmarkdown-tui's image_paragraph);
-                    // when not loaded, fall back to an ordinary paragraph
+                    // a failed load renders a distinct marker; when merely not
+                    // loaded yet, fall back to an ordinary paragraph
                     // (inline #[image]).
                     let lines = match block
                         .ast
                         .as_ref()
                         .and_then(|a| a.children.iter().find_map(image_paragraph))
-                        .and_then(|url| self.images.get(url).map(|m| (url, m)))
                     {
-                        Some((url, meta)) => image_block_lines(url, meta, self.theme.clone()),
+                        Some(url) => match self.images.get(url) {
+                            Some(meta) => image_block_lines(url, meta, self.theme.clone()),
+                            None if self.images_failed.contains(url) => {
+                                failed_image_lines(&self.theme)
+                            }
+                            None => render_block(&block.ast, self.width, &self.theme),
+                        },
                         None => render_block(&block.ast, self.width, &self.theme),
                     };
                     *cached = Some((block.content.clone(), lines.clone()));
@@ -143,6 +155,15 @@ fn image_paragraph(block: &Block) -> Option<&str> {
         return Some(url);
     }
     None
+}
+
+/// One-line marker for an image whose load failed: unlike the bare loading
+/// placeholder, the user can tell the picture is not coming (the warning line
+/// carries the url).
+fn failed_image_lines(theme: &Theme) -> Vec<Line> {
+    let mut line = Line::empty();
+    line.push_styled("#[image ✗ 加载失败]", theme.dim());
+    vec![line]
 }
 
 /// Image block → `rows` lines: the first line holds the placeholder text
@@ -731,7 +752,7 @@ mod tests {
         });
         let mut images = HashMap::new();
         images.insert("a.png".to_string(), meta);
-        renderer.set_images(Some(ImageCap::default_cells()), &images, 1);
+        renderer.set_images(Some(ImageCap::default_cells()), &images, &HashSet::new(), 1);
         let doc = processor.process_static("![alt](a.png)");
         renderer.render(&doc);
         let lines = renderer.lines().to_vec();
@@ -749,11 +770,31 @@ mod tests {
         assert_eq!(lines[3].plain_text(), "");
     }
 
+    /// A failed url renders the failure marker instead of the loading
+    /// placeholder — the user can tell the picture is not coming.
+    #[test]
+    fn failed_image_renders_failure_marker() {
+        let mut processor = MarkdownProcessor::default();
+        let mut renderer = MarkdownRenderer::with_theme(40, Theme::dark());
+        let mut failed = HashSet::new();
+        failed.insert("a.png".to_string());
+        renderer.set_images(Some(ImageCap::default_cells()), &HashMap::new(), &failed, 1);
+        let doc = processor.process_static("![alt](a.png)");
+        renderer.render(&doc);
+        assert_eq!(renderer.lines()[0].plain_text(), "#[image ✗ 加载失败]");
+        assert!(renderer.lines()[0].image.is_none(), "失败行不携带图片引用");
+    }
+
     #[test]
     fn image_not_loaded_falls_back_to_paragraph() {
         let mut processor = MarkdownProcessor::default();
         let mut renderer = MarkdownRenderer::with_theme(40, Theme::dark());
-        renderer.set_images(Some(ImageCap::default_cells()), &HashMap::new(), 1);
+        renderer.set_images(
+            Some(ImageCap::default_cells()),
+            &HashMap::new(),
+            &HashSet::new(),
+            1,
+        );
         let doc = processor.process_static("![alt](a.png)");
         renderer.render(&doc);
         assert_eq!(renderer.lines()[0].plain_text(), "#[image]");
@@ -764,7 +805,12 @@ mod tests {
     fn image_block_invalidated_on_version_bump() {
         let mut processor = MarkdownProcessor::default();
         let mut renderer = MarkdownRenderer::with_theme(40, Theme::dark());
-        renderer.set_images(Some(ImageCap::default_cells()), &HashMap::new(), 1);
+        renderer.set_images(
+            Some(ImageCap::default_cells()),
+            &HashMap::new(),
+            &HashSet::new(),
+            1,
+        );
         let doc = processor.process_static("![alt](a.png)");
         renderer.render(&doc);
         assert!(renderer.lines()[0].image.is_none(), "未加载 → 占位行");
@@ -776,7 +822,7 @@ mod tests {
         });
         let mut images = HashMap::new();
         images.insert("a.png".to_string(), meta);
-        renderer.set_images(Some(ImageCap::default_cells()), &images, 2);
+        renderer.set_images(Some(ImageCap::default_cells()), &images, &HashSet::new(), 2);
         renderer.render(&doc);
         assert!(
             renderer.lines()[0].image.is_some(),
