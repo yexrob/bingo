@@ -147,6 +147,23 @@ pub enum UiEvent {
     },
 }
 
+/// Permission prompt backed by the TUI modal. Shared by `tui_hooks` and the subagent prompt
+/// surface attached to the registry, so a subagent's request lands in the same modal queue.
+pub fn modal_ask(asks: mpsc::UnboundedSender<AskRequest>) -> Arc<crate::query::AskFn> {
+    Arc::new(move |tool_name, reason| {
+        let request = PermissionRequest::new(
+            format!("允许执行 {tool_name}"),
+            reason,
+            vec!["允许".to_string(), "拒绝".to_string()],
+        );
+        let (tx, rx) = oneshot::channel();
+        if asks.send((request, tx)).is_err() {
+            return Box::pin(async { false });
+        }
+        Box::pin(async move { matches!(rx.await, Ok(DialogAction::Confirm(0))) })
+    })
+}
+
 /// Wire query's UiHooks to the TUI channels.
 pub fn tui_hooks(
     events: mpsc::UnboundedSender<UiEvent>,
@@ -199,18 +216,7 @@ pub fn tui_hooks(
         on_warning: Box::new(move |message| {
             let _ = warn_events.send(UiEvent::Warning(message));
         }),
-        ask: Arc::new(move |tool_name, reason| {
-            let request = PermissionRequest::new(
-                format!("允许执行 {tool_name}"),
-                reason,
-                vec!["允许".to_string(), "拒绝".to_string()],
-            );
-            let (tx, rx) = oneshot::channel();
-            if ask_asks.send((request, tx)).is_err() {
-                return Box::pin(async { false });
-            }
-            Box::pin(async move { matches!(rx.await, Ok(DialogAction::Confirm(0))) })
-        }),
+        ask: modal_ask(ask_asks),
         ask_question: Arc::new(move |title, question, options| {
             let mut request = PermissionRequest::new(title, question, Vec::new());
             request.free_text = true;

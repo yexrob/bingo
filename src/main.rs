@@ -209,12 +209,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         load_project_memory(&home, &project_dir),
         settings.cache_control.unwrap_or(false),
     );
-    // Inject this project's experience index at session start (only when hits > 0; ≤10 lines,
-    // one per line; full entries via Query on demand).
+    // Inject this project's active experience index at session start (≤10 lines;
+    // full entries via ExperienceQuery and applied-use feedback via ExperienceOutcome).
     let experience_index = crate::tool::experience::session_index(&home, &project_dir);
     if !experience_index.is_empty() {
         system.push(crate::api::contract::SystemBlock {
-            text: format!("Project experience (reusable patterns from past sessions):\n{experience_index}\n(Query full details with ExperienceQuery; propose new ones with ExperiencePropose)"),
+            text: format!("Project experience (reusable patterns from past sessions):\n{experience_index}\n(Query full details with ExperienceQuery; after applying one, record verified helpful/harmful evidence with ExperienceOutcome; propose new ones with ExperiencePropose)"),
             cache: settings.cache_control.unwrap_or(false),
         });
     }
@@ -314,6 +314,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         agents: crate::agents::AgentRegistry::new(),
         channels: crate::channels::ChannelRegistry::new(channel_limits),
         instance: None,
+        attachments: crate::api::image::Attachments::new(),
     });
 
     // share 持久化：随会话增量记录子代理/频道快照（`bingo share` 的数据源）。
@@ -395,6 +396,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // (`[error] code=… msg=…`) only holds on the report_error path.
                 return Err("no prompt provided (stdin was empty)".into());
             }
+            // Subagents borrow the same stdin prompt (serialized in the Agent tool), so a
+            // background instance can still ask rather than having the call auto-denied.
+            session.agents.attach_ask(crate::query::stdin_ask());
             let mut ui = headless_hooks();
             let outcome =
                 run_query(&session, initial_messages, &prompt, &[], &mut ui, None).await?;

@@ -14,10 +14,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::agents::DepositOutcome;
 use crate::channels::{ChannelMode, HUB_NAME, PostOutcome};
 use crate::query::Session;
-use crate::tool::agent::{absorb_inbox, excerpt, spawn_agent_loop};
+use crate::tool::agent::flush_agent_inbox;
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 use crate::watch::{WatchKind, WatchState};
 
@@ -88,34 +87,20 @@ pub(crate) fn deliver_post(
     match session.channels.post(from, channel, text)? {
         PostOutcome::Sent { seq, deliveries } => {
             refresh_channel_row(session, channel);
-            // Delivery wake-up: idle members start a run immediately; busy members accumulate in their inbox.
+            // Deposit only: idle members are started by the turn-boundary flush, so a burst of
+            // posts reaches a member as one batch rather than one run per message.
             for (member, msg) in deliveries {
-                let item = crate::agents::InboxItem::Channel {
-                    channel: channel.to_string(),
-                    from: msg.from.clone(),
-                    text: msg.text.clone(),
-                    seq: msg.seq,
-                };
-                if let DepositOutcome::Start {
-                    session: sub,
-                    history,
-                    items,
-                } = session.agents.deposit(&member, item)
-                {
-                    let prompt = absorb_inbox(&sub.channels, &member, &items);
-                    let n = session.agents.next_run(&member);
-                    spawn_agent_loop(
-                        session.agents.clone(),
-                        watch.clone(),
-                        member.clone(),
-                        sub,
-                        history,
-                        prompt.clone(),
-                        format!("{member} #{n} · {}", excerpt(&prompt)),
-                        Vec::new(),
-                    );
-                }
+                session.agents.deposit(
+                    &member,
+                    crate::agents::InboxItem::Channel {
+                        channel: channel.to_string(),
+                        from: msg.from.clone(),
+                        text: msg.text.clone(),
+                        seq: msg.seq,
+                    },
+                );
             }
+            flush_agent_inbox(session, watch);
             Ok(PostDelivery::Sent { seq })
         }
         PostOutcome::Stale { missed } => Ok(PostDelivery::Stale { missed }),
@@ -313,6 +298,7 @@ impl Tool for ChannelTool {
                         label: format!("#{name}"),
                     }),
                     Vec::new(),
+                    ctx.instance.clone(),
                 );
                 self.session.channels.set_watch(&name, id);
                 format!(
@@ -404,6 +390,7 @@ mod tests {
             agents: AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         })
     }
 
@@ -427,6 +414,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         }
     }
 
@@ -503,10 +491,11 @@ mod tests {
             .await
             .unwrap();
         assert!(out.content.as_str().unwrap().contains("第 1 条"));
-        let (_, items) = hub
+        let items = hub
             .agents
             .finish("b", Vec::new())
-            .unwrap_or_else(|| panic!("b 信箱应有消息"));
+            .unwrap_or_else(|| panic!("b 信箱应有消息"))
+            .items;
         assert!(
             matches!(&items[..], [crate::agents::InboxItem::Channel { from, text, .. }]
                 if from == "a" && text == "大家好"),

@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::api::types::Message;
 use crate::query::Session;
@@ -34,8 +35,12 @@ pub struct AgentDef {
     pub provider: Option<String>,
     /// Default thinking level (same precedence; None = inherit the parent session's current level).
     pub thinking: Option<String>,
-    /// Body = the subagent's system prompt (replaces the parent session's system; empty means inherit).
+    /// Body = the subagent's system prompt (empty means inherit the parent's unchanged).
     pub system: String,
+    /// Whether the body is appended to the parent's system blocks (default) or replaces them.
+    /// Replacing also drops the environment info, CLAUDE.md/AGENTS.md and project memory, so it
+    /// is opt-in: `inherit_system: false` in the frontmatter.
+    pub inherit_system: bool,
     /// First origin (the loading layer before first-wins dedup).
     pub source: AgentDefSource,
 }
@@ -90,6 +95,7 @@ fn load_dir(dir: &Path, source: AgentDefSource, out: &mut Vec<AgentDef>) {
             provider: None,
             thinking: None,
             system: body.trim_end().to_string(),
+            inherit_system: true,
             source,
         };
         for (key, value) in pairs {
@@ -99,6 +105,12 @@ fn load_dir(dir: &Path, source: AgentDefSource, out: &mut Vec<AgentDef>) {
                 "model" => def.model = Some(value),
                 "provider" => def.provider = Some(value),
                 "thinking" => def.thinking = Some(value),
+                "inherit_system" => {
+                    def.inherit_system = !matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "false" | "no" | "off" | "0"
+                    )
+                }
                 _ => {}
             }
         }
@@ -152,13 +164,62 @@ pub struct AgentStatus {
     pub def: Option<String>,
     pub description: String,
     pub state: AgentState,
+    /// Messages waiting in the inbox for the next turn boundary.
     pub pending: usize,
+    /// Messages accepted but not yet folded into a prompt (the sender's outstanding acks).
+    pub unacked: usize,
 }
+
+/// Message identifier, unique per registry. Handed back to the sender so it can check later
+/// whether the message actually reached the receiver's context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MsgId(pub u64);
+
+impl std::fmt::Display for MsgId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// What became of a sent message. `Queued` is not an acknowledgement: it only means the message
+/// is sitting in the inbox. Only `Delivered` proves it entered the receiver's context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AckState {
+    Queued,
+    /// Folded into the prompt of the instance's run #N.
+    Delivered {
+        run: u64,
+    },
+    /// Never delivered, and never will be (instance stopped or removed).
+    Dropped {
+        reason: String,
+    },
+}
+
+/// One message's delivery record, kept after the fact so the sender can audit it.
+#[derive(Debug, Clone)]
+pub struct Ack {
+    pub id: MsgId,
+    /// First line of the message, for identifying it in a listing.
+    pub excerpt: String,
+    pub state: AckState,
+    /// When the message was accepted (age drives the "still not acknowledged?" check).
+    pub queued_at: Instant,
+}
+
+/// Retained delivery records per instance. Bounded: acks are an audit trail, not storage.
+const MAX_ACKS: usize = 64;
 
 /// Inbox item: a direct hub command, or a channel message (injected in batch on wake, in order).
 #[derive(Debug, Clone)]
 pub enum InboxItem {
-    Direct(String),
+    Direct {
+        id: MsgId,
+        text: String,
+        /// Images the `#[image N]` markers in `text` resolved to at send time. Carried with the
+        /// message so a queued instruction still has them when it is finally delivered.
+        images: Vec<crate::api::types::ImageAttachment>,
+    },
     Channel {
         channel: String,
         from: String,
@@ -167,28 +228,23 @@ pub enum InboxItem {
     },
 }
 
-/// Delivery result of SendMessage.
-pub enum Delivery {
-    /// Instance busy: queued; delivered automatically at turn end.
-    Queued,
-    /// Instance idle: starts a new turn immediately with a history copy (inbox drained in the same pass).
-    Start {
-        session: Arc<Session>,
-        history: Vec<Message>,
-        items: Vec<InboxItem>,
-    },
+/// A run the caller should start: the instance was idle with a non-empty inbox, and this call
+/// claimed it (state is already Running, inbox already drained) — so two flushes can't
+/// double-start the same instance.
+pub struct Wake {
+    pub name: String,
+    pub session: Arc<Session>,
+    pub history: Vec<Message>,
+    pub items: Vec<InboxItem>,
+    /// Sequence number of the run these items were folded into.
+    pub run: u64,
 }
 
-/// Channel delivery outcome (deposit): same as Delivery, except Stopped is silently dropped.
-pub enum DepositOutcome {
-    Queued,
-    Start {
-        session: Arc<Session>,
-        history: Vec<Message>,
-        items: Vec<InboxItem>,
-    },
-    /// Instance stopped: dropped (stopped members are no longer woken).
-    Dropped,
+/// Continuation of a finished turn: the inbox refilled while it was running.
+pub struct Continuation {
+    pub history: Vec<Message>,
+    pub items: Vec<InboxItem>,
+    pub run: u64,
 }
 
 struct Entry {
@@ -197,8 +253,11 @@ struct Entry {
     state: AgentState,
     /// Full message history since the last completed turn (continuation context).
     history: Vec<Message>,
-    /// Inbox accumulated while busy (commands + channel messages, injected in batch at turn boundaries).
+    /// Inbox accumulated since the last drain (commands + channel messages, injected as one
+    /// batch at a turn boundary — never one message per turn).
     inbox: Vec<InboxItem>,
+    /// Delivery records for direct messages, oldest first, capped at MAX_ACKS.
+    acks: Vec<Ack>,
     session: Arc<Session>,
     abort: Option<tokio::task::AbortHandle>,
     /// Cumulative run count (watch lines are labeled `#N`).
@@ -218,6 +277,12 @@ pub struct AgentRegistry {
     inner: Mutex<HashMap<String, Entry>>,
     /// share 持久化（Option 语义：不挂接时行为不变；挂接后 insert/finish/stop 同步快照）。
     share: Mutex<Option<Arc<crate::share::ShareStore>>>,
+    /// Permission prompt of the session that owns the UI. Subagents have none of their own, so
+    /// they borrow this one; the registry is the single place every spawn path can reach it from
+    /// (the Agent tool, channel delivery, and the TUI channel room alike).
+    ask: Mutex<Option<Arc<crate::query::AskFn>>>,
+    /// Monotonic message id source (registry-wide, so ids never collide across instances).
+    next_msg: std::sync::atomic::AtomicU64,
 }
 
 impl AgentRegistry {
@@ -225,12 +290,30 @@ impl AgentRegistry {
         Arc::new(Self {
             inner: Mutex::new(HashMap::new()),
             share: Mutex::new(None),
+            ask: Mutex::new(None),
+            next_msg: std::sync::atomic::AtomicU64::new(1),
         })
+    }
+
+    fn mint_msg_id(&self) -> MsgId {
+        MsgId(
+            self.next_msg
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// 挂接 share 持久化：之后实例的建/完成/停止事件同步进 share 文档。
     pub fn attach_share(&self, store: Arc<crate::share::ShareStore>) {
         *self.share.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
+    }
+
+    /// Attach the prompt surface subagents borrow (called once by whoever owns the UI).
+    pub fn attach_ask(&self, ask: Arc<crate::query::AskFn>) {
+        *self.ask.lock().unwrap_or_else(|e| e.into_inner()) = Some(ask);
+    }
+
+    pub fn ask_fn(&self) -> Option<Arc<crate::query::AskFn>> {
+        self.ask.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 把某实例的最新快照写入 share 文档（无 store 时 no-op）。
@@ -301,6 +384,7 @@ impl AgentRegistry {
                 state: AgentState::Running,
                 history: Vec::new(),
                 inbox: Vec::new(),
+                acks: Vec::new(),
                 session,
                 abort: None,
                 runs: 0,
@@ -368,11 +452,7 @@ impl AgentRegistry {
     /// Turn finished: store the latest history. Inbox non-empty → stay Running and
     /// return (history copy, drained inbox); empty → switch to Idle.
     /// Stopped (stopped mid-turn) never revives and never returns a continuation.
-    pub fn finish(
-        &self,
-        name: &str,
-        history: Vec<Message>,
-    ) -> Option<(Vec<Message>, Vec<InboxItem>)> {
+    pub fn finish(&self, name: &str, history: Vec<Message>) -> Option<Continuation> {
         let result = {
             let mut inner = self.lock();
             let entry = inner.get_mut(name)?;
@@ -383,13 +463,49 @@ impl AgentRegistry {
                 entry.state = AgentState::Idle;
                 None
             } else {
-                let items = std::mem::take(&mut entry.inbox);
+                let items = drain_inbox(entry);
                 entry.state = AgentState::Running;
-                Some((entry.history.clone(), items))
+                Some(Continuation {
+                    history: entry.history.clone(),
+                    items,
+                    run: entry.runs,
+                })
             }
         };
         self.sync_share(name);
         result
+    }
+
+    /// Turn-boundary batch delivery: every idle instance with a non-empty inbox is claimed
+    /// (flipped to Running, inbox drained in one pass) and handed back for the caller to run.
+    ///
+    /// Delivery is deliberately not immediate. Several messages sent within one turn all land in
+    /// the inbox first and are folded into a *single* prompt here — waking on the first one would
+    /// make the receiver process them one at a time. It also means a run chain that died with
+    /// messages still queued gets picked up at the next boundary instead of stranding them.
+    pub fn flush_pending(&self) -> Vec<Wake> {
+        let mut woken = Vec::new();
+        {
+            let mut inner = self.lock();
+            for (name, entry) in inner.iter_mut() {
+                if entry.state != AgentState::Idle || entry.inbox.is_empty() {
+                    continue;
+                }
+                let items = drain_inbox(entry);
+                entry.state = AgentState::Running;
+                woken.push(Wake {
+                    name: name.clone(),
+                    session: entry.session.clone(),
+                    history: entry.history.clone(),
+                    items,
+                    run: entry.runs,
+                });
+            }
+        }
+        for wake in &woken {
+            self.sync_share(&wake.name);
+        }
+        woken
     }
 
     /// Turn failed: keep the pre-failure history, switch to Idle (retryable via SendMessage).
@@ -403,7 +519,15 @@ impl AgentRegistry {
 
     /// Deliver a hub command: queue when Running; wake when Idle (returns the session,
     /// history and drained inbox needed to continue); error when Stopped/unknown.
-    pub fn deliver(&self, name: &str, message: &str) -> Result<Delivery, String> {
+    /// Queue a hub command. Returns the message id — the receipt the sender uses to check the
+    /// outcome later; delivery itself happens at the next turn boundary (see `flush_pending`).
+    pub fn deliver(
+        &self,
+        name: &str,
+        message: &str,
+        images: Vec<crate::api::types::ImageAttachment>,
+    ) -> Result<MsgId, String> {
+        let id = self.mint_msg_id();
         let mut inner = self.lock();
         let Some(entry) = inner.get_mut(name) else {
             let known: Vec<String> = inner.keys().cloned().collect();
@@ -413,83 +537,82 @@ impl AgentRegistry {
                 format!("没有名为 {name} 的子代理；现有实例：{}", known.join(", "))
             });
         };
-        match entry.state {
-            AgentState::Running => {
-                entry.inbox.push(InboxItem::Direct(message.to_string()));
-                Ok(Delivery::Queued)
-            }
-            AgentState::Idle => {
-                entry.inbox.push(InboxItem::Direct(message.to_string()));
-                let items = std::mem::take(&mut entry.inbox);
-                entry.state = AgentState::Running;
-                Ok(Delivery::Start {
-                    session: entry.session.clone(),
-                    history: entry.history.clone(),
-                    items,
-                })
-            }
-            AgentState::Stopped => Err(format!(
+        if entry.state == AgentState::Stopped {
+            return Err(format!(
                 "{name} 已停止，不再接收指令（delete 可移除该实例）"
-            )),
+            ));
         }
+        entry.inbox.push(InboxItem::Direct {
+            id,
+            text: message.to_string(),
+            images,
+        });
+        push_ack(
+            entry,
+            Ack {
+                id,
+                excerpt: first_line(message),
+                state: AckState::Queued,
+                queued_at: Instant::now(),
+            },
+        );
+        Ok(id)
     }
 
-    /// Deliver a channel message: same shape as deliver, but stopped members are silently
-    /// dropped (no error — a broadcast doesn't fail because one member stopped).
-    pub fn deposit(&self, name: &str, item: InboxItem) -> DepositOutcome {
+    /// Queue a channel message. A stopped member is silently skipped — a broadcast doesn't fail
+    /// because one member stopped. Returns whether it was accepted.
+    pub fn deposit(&self, name: &str, item: InboxItem) -> bool {
         let mut inner = self.lock();
         let Some(entry) = inner.get_mut(name) else {
-            return DepositOutcome::Dropped;
+            return false;
         };
-        match entry.state {
-            AgentState::Running => {
-                entry.inbox.push(item);
-                DepositOutcome::Queued
-            }
-            AgentState::Idle => {
-                entry.inbox.push(item);
-                let items = std::mem::take(&mut entry.inbox);
-                entry.state = AgentState::Running;
-                DepositOutcome::Start {
-                    session: entry.session.clone(),
-                    history: entry.history.clone(),
-                    items,
-                }
-            }
-            AgentState::Stopped => DepositOutcome::Dropped,
+        if entry.state == AgentState::Stopped {
+            return false;
         }
+        entry.inbox.push(item);
+        true
+    }
+
+    /// Delivery records for one instance, newest last (None = no such instance).
+    pub fn acks_of(&self, name: &str) -> Option<Vec<Ack>> {
+        Some(self.lock().get(name)?.acks.clone())
     }
 
     /// Stop: abort a running turn (abort), no longer accept commands; history is kept
     /// and listable. Returns the watch line of the aborted turn (the caller sets
     /// Cancelled); when idle/already stopped there is no active line, returns None (idempotent).
-    pub fn stop(&self, name: &str) -> Result<Option<crate::watch::WatchId>, String> {
-        let watch_id = {
+    /// Stopping discards the inbox, so every message still in it is recorded as dropped: a
+    /// sender that only ever saw "queued" must be able to find out it was never delivered.
+    /// Returns the watch line and how many messages died with it.
+    pub fn stop(&self, name: &str) -> Result<(Option<crate::watch::WatchId>, usize), String> {
+        let result = {
             let mut inner = self.lock();
             let Some(entry) = inner.get_mut(name) else {
                 return Err(format!("没有名为 {name} 的子代理"));
             };
             if entry.state == AgentState::Stopped {
-                None
+                (None, 0)
             } else {
                 let was_running = entry.state == AgentState::Running;
                 entry.state = AgentState::Stopped;
-                entry.inbox.clear();
+                let dropped = mark_inbox_dropped(entry, "实例已停止");
                 if let Some(abort) = entry.abort.take() {
                     abort.abort();
                 }
-                if was_running { entry.watch_id } else { None }
+                let id = if was_running { entry.watch_id } else { None };
+                (id, dropped)
             }
         };
         self.sync_share(name);
-        Ok(watch_id)
+        Ok(result)
     }
 
-    /// Remove: stop first, then drop the entry (name released). Returns the watch line of the aborted turn.
-    pub fn remove(&self, name: &str) -> Result<Option<crate::watch::WatchId>, String> {
-        let id = self.stop(name)?;
+    /// Remove: stop first, then drop the entry (name released). The ack trail goes with it, so
+    /// the dropped count is the sender's last chance to learn what was lost.
+    pub fn remove(&self, name: &str) -> Result<(Option<crate::watch::WatchId>, usize), String> {
+        let outcome = self.stop(name)?;
         self.lock().remove(name);
-        Ok(id)
+        Ok(outcome)
     }
 
     /// Snapshot of all instances (sorted by name for stable list output).
@@ -503,10 +626,73 @@ impl AgentRegistry {
                 description: e.description.clone(),
                 state: e.state,
                 pending: e.inbox.len(),
+                unacked: e
+                    .acks
+                    .iter()
+                    .filter(|a| a.state == AckState::Queued)
+                    .count(),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
+    }
+}
+
+/// Take the whole inbox in one pass and acknowledge every direct message in it: being folded
+/// into the next prompt is exactly the moment a message enters the receiver's context.
+fn drain_inbox(entry: &mut Entry) -> Vec<InboxItem> {
+    let items = std::mem::take(&mut entry.inbox);
+    entry.runs += 1;
+    let run = entry.runs;
+    for item in &items {
+        if let InboxItem::Direct { id, .. } = item {
+            set_ack(entry, *id, AckState::Delivered { run });
+        }
+    }
+    items
+}
+
+/// Record every still-queued inbox message as dropped; returns how many.
+fn mark_inbox_dropped(entry: &mut Entry, reason: &str) -> usize {
+    let items = std::mem::take(&mut entry.inbox);
+    let mut dropped = 0;
+    for item in &items {
+        if let InboxItem::Direct { id, .. } = item {
+            set_ack(
+                entry,
+                *id,
+                AckState::Dropped {
+                    reason: reason.to_string(),
+                },
+            );
+            dropped += 1;
+        }
+    }
+    dropped
+}
+
+fn set_ack(entry: &mut Entry, id: MsgId, state: AckState) {
+    if let Some(ack) = entry.acks.iter_mut().find(|a| a.id == id) {
+        ack.state = state;
+    }
+}
+
+fn push_ack(entry: &mut Entry, ack: Ack) {
+    entry.acks.push(ack);
+    if entry.acks.len() > MAX_ACKS {
+        let overflow = entry.acks.len() - MAX_ACKS;
+        entry.acks.drain(..overflow);
+    }
+}
+
+/// First line, bounded — enough to recognize a message in a listing.
+fn first_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default().trim();
+    let cut: String = line.chars().take(40).collect();
+    if cut.chars().count() < line.chars().count() {
+        format!("{cut}…")
+    } else {
+        cut
     }
 }
 
@@ -537,6 +723,7 @@ mod tests {
             agents: AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         })
     }
 
@@ -607,6 +794,30 @@ mod tests {
         assert_eq!(defs[0].provider.as_deref(), Some("ds"));
         assert_eq!(defs[0].thinking.as_deref(), Some("xhigh"));
         assert_eq!(defs[0].system, "system 正文");
+        assert!(defs[0].inherit_system, "缺省追加到父 system");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `inherit_system: false` opts into replacing the parent's system blocks; anything else
+    /// (including a typo) keeps the safe default.
+    #[test]
+    fn frontmatter_inherit_system_opt_out() {
+        let root =
+            std::env::temp_dir().join(format!("bingo-agents-{}-inherit", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        write(
+            &home.join(".config/bingo/agents/lean.md"),
+            "---\nname: lean\ninherit_system: false\n---\n只要人设\n",
+        );
+        write(
+            &home.join(".config/bingo/agents/keep.md"),
+            "---\nname: keep\ninherit_system: yes\n---\n照常追加\n",
+        );
+        let defs = load_agent_defs(&home, &root);
+        let by = |n: &str| defs.iter().find(|d| d.name == n).unwrap().inherit_system;
+        assert!(!by("lean"));
+        assert!(by("keep"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -625,45 +836,46 @@ mod tests {
     fn lifecycle_running_idle_queue_and_revive() {
         let reg = AgentRegistry::new();
         reg.insert("scout", None, "调研".into(), test_session());
-        // Running: message queued.
-        match reg
-            .deliver("scout", "补充 A")
-            .unwrap_or_else(|e| panic!("{e}"))
-        {
-            Delivery::Queued => {}
-            Delivery::Start { .. } => panic!("running 应排队"),
-        }
-        // Turn finished + inbox non-empty → continues immediately (history saved, inbox drained).
-        let next = reg.finish("scout", vec![Message::user_text("hi")]);
-        let (history, items) = next.unwrap_or_else(|| panic!("应续跑"));
-        assert_eq!(history.len(), 1, "续跑携带最新历史");
+        // Running: message queued (delivery never happens inside deliver itself).
+        let first = reg
+            .deliver("scout", "补充 A", Vec::new())
+            .unwrap_or_else(|e| panic!("{e}"));
+        // Turn finished + inbox non-empty → continues (history saved, inbox drained, ack set).
+        let next = reg
+            .finish("scout", vec![Message::user_text("hi")])
+            .unwrap_or_else(|| panic!("应续跑"));
+        assert_eq!(next.history.len(), 1, "续跑携带最新历史");
         assert!(
-            matches!(&items[..], [InboxItem::Direct(m)] if m == "补充 A"),
+            matches!(&next.items[..], [InboxItem::Direct { text: m, .. }] if m == "补充 A"),
             "信箱内容"
         );
         assert_eq!(reg.list()[0].state, AgentState::Running);
+        let acks = reg.acks_of("scout").unwrap_or_else(|| unreachable!());
+        assert_eq!(acks[0].id, first);
+        assert_eq!(acks[0].state, AckState::Delivered { run: next.run });
         // Finish again with an empty inbox → Idle.
         assert!(reg.finish("scout", Vec::new()).is_none());
         assert_eq!(reg.list()[0].state, AgentState::Idle);
-        // Idle: deliver wakes it (Start carries history and inbox).
-        match reg
-            .deliver("scout", "再看 B")
-            .unwrap_or_else(|e| panic!("{e}"))
-        {
-            Delivery::Start { items, .. } => {
-                assert!(matches!(&items[..], [InboxItem::Direct(m)] if m == "再看 B"));
-            }
-            Delivery::Queued => panic!("idle 应唤醒"),
-        }
+        // Idle: the message waits for a flush rather than starting a run on the spot.
+        let _ = reg
+            .deliver("scout", "再看 B", Vec::new())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(reg.list()[0].state, AgentState::Idle, "投递不自行起跑");
+        let woken = reg.flush_pending();
+        assert_eq!(woken.len(), 1);
+        assert!(
+            matches!(&woken[0].items[..], [InboxItem::Direct { text: m, .. }] if m == "再看 B")
+        );
         assert_eq!(reg.list()[0].state, AgentState::Running);
+        assert!(reg.flush_pending().is_empty(), "已认领的实例不会重复起跑");
     }
 
     #[test]
     fn inbox_accumulates_direct_and_channel_items_in_order() {
         let reg = AgentRegistry::new();
         reg.insert("w", None, "w".into(), test_session());
-        let _ = reg.deliver("w", "先做 1");
-        match reg.deposit(
+        let _ = reg.deliver("w", "先做 1", Vec::new());
+        assert!(reg.deposit(
             "w",
             InboxItem::Channel {
                 channel: "t".into(),
@@ -671,16 +883,14 @@ mod tests {
                 text: "报数".into(),
                 seq: 3,
             },
-        ) {
-            DepositOutcome::Queued => {}
-            _ => panic!("running 应排队"),
-        }
-        let (_, items) = reg
+        ));
+        let items = reg
             .finish("w", Vec::new())
-            .unwrap_or_else(|| panic!("续跑"));
+            .unwrap_or_else(|| panic!("续跑"))
+            .items;
         assert_eq!(items.len(), 2);
         assert!(
-            matches!(&items[0], InboxItem::Direct(m) if m == "先做 1"),
+            matches!(&items[0], InboxItem::Direct { text: m, .. } if m == "先做 1"),
             "同序"
         );
         assert!(
@@ -689,7 +899,7 @@ mod tests {
         );
         // Idle: deposit wakes it; Stopped/unknown silently dropped.
         assert!(reg.finish("w", Vec::new()).is_none());
-        match reg.deposit(
+        assert!(reg.deposit(
             "w",
             InboxItem::Channel {
                 channel: "t".into(),
@@ -697,19 +907,19 @@ mod tests {
                 text: "x".into(),
                 seq: 4,
             },
-        ) {
-            DepositOutcome::Start { items, .. } => assert_eq!(items.len(), 1),
-            _ => panic!("idle 应唤醒"),
-        }
+        ));
+        let woken = reg.flush_pending();
+        assert_eq!(woken.len(), 1);
+        assert_eq!(woken[0].items.len(), 1);
         let _ = reg.stop("w");
-        assert!(matches!(
-            reg.deposit("w", InboxItem::Direct("y".into())),
-            DepositOutcome::Dropped
-        ));
-        assert!(matches!(
-            reg.deposit("ghost", InboxItem::Direct("y".into())),
-            DepositOutcome::Dropped
-        ));
+        let dropped = InboxItem::Channel {
+            channel: "t".into(),
+            from: "c".into(),
+            text: "y".into(),
+            seq: 5,
+        };
+        assert!(!reg.deposit("w", dropped.clone()), "停止的成员不再收件");
+        assert!(!reg.deposit("ghost", dropped), "未知实例静默丢弃");
     }
 
     #[test]
@@ -738,9 +948,9 @@ mod tests {
 
         // 忙碌信箱非空 → finish 后保持 running（Idle 唤醒排空 inbox 给 Start，
         // Running 时才排队；两条指令制造排队场景）。
-        reg.deliver("scout", "再查")
+        reg.deliver("scout", "再查", Vec::new())
             .unwrap_or_else(|e| panic!("{e}"));
-        reg.deliver("scout", "又查")
+        reg.deliver("scout", "又查", Vec::new())
             .unwrap_or_else(|e| panic!("{e}"));
         reg.finish("scout", Vec::new());
         let doc = store.snapshot();
@@ -763,6 +973,68 @@ mod tests {
         assert_eq!(reg.claim_name("main"), "main-2", "main 为 hub 保留");
     }
 
+    /// Several messages sent before a boundary arrive as one batch: the receiver reads them
+    /// together instead of burning a turn per message.
+    #[test]
+    fn messages_sent_in_one_turn_arrive_as_one_batch() {
+        let reg = AgentRegistry::new();
+        reg.insert("w", None, "w".into(), test_session());
+        assert!(reg.finish("w", Vec::new()).is_none(), "先转 idle");
+        for text in ["先看 A", "再看 B", "最后 C"] {
+            reg.deliver("w", text, Vec::new())
+                .unwrap_or_else(|e| panic!("{e}"));
+        }
+        assert_eq!(reg.list()[0].pending, 3, "全部积压，未逐条起跑");
+
+        let woken = reg.flush_pending();
+        assert_eq!(woken.len(), 1, "一个实例只起一轮");
+        assert_eq!(woken[0].items.len(), 3, "三条一次性送达");
+        let acks = reg.acks_of("w").unwrap_or_else(|| unreachable!());
+        assert!(
+            acks.iter()
+                .all(|a| a.state == AckState::Delivered { run: woken[0].run }),
+            "三条落在同一轮：{acks:?}"
+        );
+    }
+
+    /// Stopping discards the inbox — every message in it is recorded as dropped, so a sender
+    /// that only saw "queued" can still find out it was never delivered.
+    #[test]
+    fn stop_records_undelivered_messages_as_dropped() {
+        let reg = AgentRegistry::new();
+        reg.insert("w", None, "w".into(), test_session());
+        let id = reg
+            .deliver("w", "还来得及吗", Vec::new())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let (_, dropped) = reg.stop("w").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(dropped, 1);
+        let acks = reg.acks_of("w").unwrap_or_else(|| unreachable!());
+        assert_eq!(acks.len(), 1);
+        assert_eq!(acks[0].id, id);
+        assert!(
+            matches!(&acks[0].state, AckState::Dropped { reason } if reason.contains("停止")),
+            "{:?}",
+            acks[0].state
+        );
+        assert_eq!(reg.list()[0].pending, 0, "信箱已清空");
+    }
+
+    /// A run chain that dies with messages still queued must not strand them: the instance goes
+    /// back to Idle and the next boundary flush picks the batch up.
+    #[test]
+    fn messages_survive_a_failed_run_and_are_retried() {
+        let reg = AgentRegistry::new();
+        reg.insert("w", None, "w".into(), test_session());
+        reg.deliver("w", "继续", Vec::new())
+            .unwrap_or_else(|e| panic!("{e}"));
+        // The run failed (spawn_agent_loop's error branch) — it only marks the instance idle.
+        reg.mark_idle("w");
+        assert_eq!(reg.list()[0].pending, 1, "消息还在信箱里");
+        let woken = reg.flush_pending();
+        assert_eq!(woken.len(), 1, "下一个回合边界重新投递");
+        assert_eq!(woken[0].items.len(), 1);
+    }
+
     #[test]
     fn stop_and_delete_semantics() {
         let reg = AgentRegistry::new();
@@ -770,27 +1042,30 @@ mod tests {
         reg.set_run_watch("x", crate::watch::WatchId(7));
         assert_eq!(
             reg.stop("x").unwrap_or_else(|e| panic!("{e}")),
-            Some(crate::watch::WatchId(7)),
+            (Some(crate::watch::WatchId(7)), 0),
             "运行中停止返回当前 watch 行"
         );
         assert!(
-            reg.stop("x").unwrap_or_else(|e| panic!("{e}")).is_none(),
+            reg.stop("x").unwrap_or_else(|e| panic!("{e}")).0.is_none(),
             "幂等"
         );
-        assert!(reg.deliver("x", "还在吗").is_err(), "停止后拒收");
+        assert!(
+            reg.deliver("x", "还在吗", Vec::new()).is_err(),
+            "停止后拒收"
+        );
         // Turn finishing after a stop: history is still archived, no revival.
         assert!(reg.finish("x", vec![Message::user_text("h")]).is_none());
         assert_eq!(reg.list()[0].state, AgentState::Stopped);
         reg.remove("x").unwrap_or_else(|e| panic!("{e}"));
         assert!(reg.list().is_empty());
         assert_eq!(reg.claim_name("x"), "x", "删除释放名字");
-        assert!(reg.deliver("x", "hi").is_err(), "未知实例报错");
+        assert!(reg.deliver("x", "hi", Vec::new()).is_err(), "未知实例报错");
         // Stopping an idle instance: no active line.
         reg.insert("y", None, "y".into(), test_session());
         reg.set_run_watch("y", crate::watch::WatchId(9));
         assert!(reg.finish("y", Vec::new()).is_none());
         assert!(
-            reg.stop("y").unwrap_or_else(|e| panic!("{e}")).is_none(),
+            reg.stop("y").unwrap_or_else(|e| panic!("{e}")).0.is_none(),
             "idle 停止不取消已终态的行"
         );
     }

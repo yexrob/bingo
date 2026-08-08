@@ -361,10 +361,7 @@ fn tool_output_wire(content: &serde_json::Value, is_error: bool) -> String {
     if is_error {
         serde_json::json!({ "is_error": true, "content": content }).to_string()
     } else {
-        match content {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        }
+        crate::api::types::tool_result_text(content)
     }
 }
 

@@ -188,7 +188,10 @@ impl Client {
                 protocol,
                 cfg.api_key.clone(),
                 base_url.clone(),
-                cfg.supports_images.unwrap_or(false),
+                // Both protocols define image content blocks: the capability is the
+                // baseline, and `supportsImages: false` is the opt-out for an endpoint that
+                // speaks the protocol but rejects them (some compat proxies).
+                cfg.supports_images.unwrap_or(true),
                 cfg.oauth.as_ref(),
                 home,
                 None,
@@ -222,7 +225,7 @@ impl Client {
                 http.clone(),
                 key.clone(),
                 base_url.clone(),
-                settings.send_images.unwrap_or(false),
+                settings.send_images.unwrap_or(true),
             ),
             None => providers::unconfigured(),
         };
@@ -281,6 +284,23 @@ impl Client {
         self.providers
             .get(name)
             .map(|(_, info)| (info.api_key.clone(), info.base_url.clone()))
+    }
+
+    /// Named providers whose endpoint accepts image blocks. A text-only session can still put an
+    /// attachment in front of a model by forking a subagent onto one of these, so the list is
+    /// what makes that route discoverable instead of guessable. "default" is excluded: as a
+    /// sub-agent argument it means "share the parent endpoint", which is the one that can't.
+    pub fn image_capable_providers(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .providers
+            .iter()
+            .filter(|(name, (adapter, _))| {
+                name.as_str() != "default" && adapter.capabilities().supports_images
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
     }
 
     /// Wire protocol label of a named provider ("anthropic"/"openai";

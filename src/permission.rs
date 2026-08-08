@@ -392,6 +392,32 @@ mod tests {
     }
 
     #[test]
+    fn experience_outcome_permission_matrix() {
+        let tool = crate::tool::experience::ExperienceOutcomeTool;
+        let input = serde_json::json!({"id": "full-id", "outcome": "helpful"});
+        assert_eq!(
+            decide(&tool, input.clone(), PermissionMode::Default, &[]).behavior,
+            PermissionBehavior::Ask
+        );
+        assert_eq!(
+            decide(&tool, input.clone(), PermissionMode::AcceptEdits, &[]).behavior,
+            PermissionBehavior::Ask
+        );
+        assert_eq!(
+            decide(&tool, input.clone(), PermissionMode::BypassPermissions, &[]).behavior,
+            PermissionBehavior::Allow
+        );
+        assert_eq!(
+            decide(&tool, input.clone(), PermissionMode::DontAsk, &[]).behavior,
+            PermissionBehavior::Deny
+        );
+        assert_eq!(
+            decide(&tool, input, PermissionMode::Plan, &[]).behavior,
+            PermissionBehavior::Deny
+        );
+    }
+
+    #[test]
     fn read_only_always_allowed() {
         let tool = ReadTool::new();
         let input = serde_json::json!({"file_path": "Cargo.toml"});

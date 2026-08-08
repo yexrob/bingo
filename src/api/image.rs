@@ -21,6 +21,79 @@ pub struct PreparedImage {
     pub data: String,
 }
 
+/// Image placeholder reference (`#[image N]` → the Nth attachment, 1-based).
+static MARKER_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"#\[image (\d+)\]").expect("static regex"));
+
+/// Image placeholder text: `#[image N]`.
+pub fn marker(id: usize) -> String {
+    format!("#[image {id}]")
+}
+
+/// Whether the text references an attachment at all.
+pub fn has_marker(text: &str) -> bool {
+    MARKER_RE.is_match(text)
+}
+
+/// Session-scoped attachment table. Images the user mounts on the input box live here as
+/// base64; the message text carries only `#[image N]` markers, so the model has a stable
+/// handle it can repeat — including when handing work to a subagent, which is why the table
+/// belongs to the session rather than to the input box.
+#[derive(Default)]
+pub struct Attachments {
+    inner: std::sync::Mutex<Vec<crate::api::types::ImageAttachment>>,
+}
+
+impl Attachments {
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<crate::api::types::ImageAttachment>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Raw bytes → compressed attachment; returns the 1-based placeholder id (None = not an image).
+    pub fn register(&self, bytes: &[u8]) -> Option<usize> {
+        let prepared = prepare_image(bytes)?;
+        let mut inner = self.lock();
+        inner.push(crate::api::types::ImageAttachment {
+            media_type: prepared.media_type,
+            data: prepared.data,
+        });
+        Some(inner.len())
+    }
+
+    /// Markers in `text` → attachments, deduplicated, in order of first appearance.
+    /// Unknown ids are ignored: a stale marker degrades to plain text, never to an error.
+    pub fn resolve(&self, text: &str) -> Vec<crate::api::types::ImageAttachment> {
+        let inner = self.lock();
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for cap in MARKER_RE.captures_iter(text) {
+            if let Ok(n) = cap[1].parse::<usize>()
+                && n >= 1
+                && n <= inner.len()
+                && seen.insert(n)
+            {
+                out.push(inner[n - 1].clone());
+            }
+        }
+        out
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// Nth attachment, 1-based (mirrors the placeholder numbering).
+    #[cfg(test)]
+    pub fn get(&self, id: usize) -> Option<crate::api::types::ImageAttachment> {
+        self.lock().get(id.checked_sub(1)?).cloned()
+    }
+}
+
 /// Decode / scale / encode down to an API-acceptable size. Returns `None` on
 /// failure (not an image, or the compression never reaches the limit).
 pub fn prepare_image(bytes: &[u8]) -> Option<PreparedImage> {

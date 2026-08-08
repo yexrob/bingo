@@ -3,16 +3,31 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::agents::{AgentDef, AgentRegistry, Delivery, InboxItem};
+use crate::agents::{AgentDef, AgentRegistry, InboxItem};
 use crate::api::contract::SystemBlock;
 use crate::api::types::Message;
 use crate::channels::ChannelRegistry;
-use crate::permission::PermissionMode;
 use crate::query::{Session, UiHooks};
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 use crate::watch::{NotifyCondition, WatchId, WatchKind, WatchRegistry, WatchState};
 
 const MAX_AGENT_DEPTH: usize = 3;
+
+/// Appended to every sub-agent's system prompt. The base prompt is written for the session that
+/// owns the terminal, and two of its promises do not hold here: rendering images for the user,
+/// and being woken by background-task notifications. Say so rather than letting the model plan
+/// against a surface it does not have.
+const SUBAGENT_NOTE: &str = "\
+# You are a subagent
+
+- The main agent (the hub) spawned you for one task. Your final text is returned to the hub
+  as its tool result; it is not displayed to the user, and markdown image blocks are not
+  rendered for anyone. Put conclusions in the text itself.
+- You cannot question the user: AskUserQuestion is not available here. Permission prompts do
+  reach the user, but anything else you need must be reported back to the hub.
+- Your turn ends when you stop calling tools, and background tasks you started will NOT wake
+  you afterwards. Finish what needs finishing within this turn, or state what is still
+  pending — the hub can resume you with a follow-up message.";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -45,7 +60,7 @@ pub struct AgentInput {
     /// uses that provider's endpoint and key (independent of the parent session's current provider).
     #[serde(default)]
     #[schemars(
-        description = "Provider for the subagent (optional; the providers section of settings; \"default\" or omitted = shared parent endpoint; specify model when crossing providers)"
+        description = "Provider for the subagent (optional; the providers section of settings; \"default\" or omitted = shared parent endpoint; specify model when crossing providers). Also the way to get an image looked at when this endpoint cannot receive one: fork onto an image-capable provider and repeat the `#[image N]` marker in the prompt — the attachment table is shared, so the subagent receives the real image."
     )]
     provider: Option<String>,
     /// Sub-agent thinking level (optional): off | low | medium | high | xhigh | max.
@@ -82,16 +97,25 @@ impl AgentTool {
     }
 }
 
-/// Sub-agent UI: captures text, no interaction (write tools are rejected unless in bypass mode).
-/// The cell tracks the number of characters produced (for interval progress checks of background agents).
+/// Serializes permission prompts forwarded by subagents: several background instances can
+/// reach the single user at once, and both prompt surfaces (TUI modal, headless stdin) answer
+/// one question at a time. Queue them instead of interleaving.
+fn ask_gate() -> &'static tokio::sync::Mutex<()> {
+    static GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Sub-agent UI: captures text, renders nothing, and forwards permission prompts to the
+/// session that owns the UI. The cell tracks the number of characters produced (for interval
+/// progress checks of background agents).
 fn subagent_hooks(
     output: Arc<Mutex<String>>,
     cell: Arc<AgentCell>,
-    permission_mode: PermissionMode,
     watch: Arc<WatchRegistry>,
     id: WatchId,
+    instance: String,
+    ask: Option<Arc<crate::query::AskFn>>,
 ) -> UiHooks {
-    let bypass = permission_mode == PermissionMode::BypassPermissions;
     UiHooks {
         on_event: Box::new(move |event| {
             if let crate::api::contract::StreamEvent::TextDelta { text, .. } = event
@@ -107,9 +131,52 @@ fn subagent_hooks(
         on_tool_done: Box::new(|_| {}),
         on_round_end: Box::new(|| {}),
         on_warning: Box::new(|_| {}),
-        ask: std::sync::Arc::new(move |_tool_name, _reason| Box::pin(async move { bypass })),
-        // Sub-agents have no UI to ask: AskUserQuestion is treated as unanswered (models should avoid asking inside sub-agents).
+        // A subagent has no prompt surface of its own, so its Ask decisions are forwarded to
+        // the session that owns the UI, stamped with the instance name. Auto-denying here
+        // would fail the tool call as "user denied" without the user ever being asked — and
+        // auto-allowing under bypassPermissions would silently clear the safety-check gate
+        // that is supposed to survive bypass.
+        ask: std::sync::Arc::new(move |tool_name, reason| {
+            // No prompt surface attached: both real entry points (TUI, headless) attach one at
+            // startup, so this is the embedded/test path — fall back to denying.
+            let Some(ask) = ask.clone() else {
+                return Box::pin(async { false });
+            };
+            let request = format!("{instance} · {reason}");
+            let tool_name = tool_name.to_string();
+            Box::pin(async move {
+                let _serialized = ask_gate().lock().await;
+                ask(&tool_name, &request).await
+            })
+        }),
+        // AskUserQuestion is not assembled for subagents (see `assemble_tools`); if one ever
+        // reaches here, treat it as unanswered rather than blocking on a modal.
         ask_question: std::sync::Arc::new(|_title, _question, _options| Box::pin(async { None })),
+    }
+}
+
+/// Turn-boundary delivery: start a run for every instance that has messages waiting.
+///
+/// This is the only place a queued message becomes a running turn. Holding delivery until the
+/// boundary is what makes a batch a batch — messages sent during one turn arrive together
+/// instead of one per turn — and it doubles as the recovery path for a run chain that died
+/// with messages still in its inbox.
+pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &Arc<WatchRegistry>) {
+    for wake in session.agents.flush_pending() {
+        let (prompt, images) = absorb_inbox(&session.channels, &wake.name, &wake.items);
+        let label = format!("{} #{} · {}", wake.name, wake.run, excerpt(&prompt));
+        spawn_agent_loop(
+            session.agents.clone(),
+            watch.clone(),
+            wake.name,
+            wake.session,
+            wake.history,
+            prompt,
+            images,
+            label,
+            Vec::new(),
+            session.instance.clone(),
+        );
     }
 }
 
@@ -124,14 +191,14 @@ pub(crate) fn excerpt(text: &str) -> String {
     }
 }
 
-/// Inbox → turn prompt: a single hub instruction is kept verbatim; mixed or multiple entries are
-/// annotated with their sources in order. Channel entries also advance the member's read cursor
-/// (messages enter its context with this turn).
+/// Inbox → turn prompt plus the images those instructions carried: a single hub instruction is
+/// kept verbatim; mixed or multiple entries are annotated with their sources in order. Channel
+/// entries also advance the member's read cursor (messages enter its context with this turn).
 pub(crate) fn absorb_inbox(
     channels: &Arc<ChannelRegistry>,
     name: &str,
     items: &[InboxItem],
-) -> String {
+) -> (String, Vec<crate::api::types::ImageAttachment>) {
     let mut latest: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
     for item in items {
         if let InboxItem::Channel { channel, seq, .. } = item {
@@ -144,12 +211,20 @@ pub(crate) fn absorb_inbox(
     for (channel, seq) in latest {
         channels.mark_seen(name, channel, seq);
     }
-    match items {
-        [InboxItem::Direct(m)] => m.clone(),
+    let images: Vec<crate::api::types::ImageAttachment> = items
+        .iter()
+        .filter_map(|item| match item {
+            InboxItem::Direct { images, .. } => Some(images.clone()),
+            InboxItem::Channel { .. } => None,
+        })
+        .flatten()
+        .collect();
+    let prompt = match items {
+        [InboxItem::Direct { text, .. }] => text.clone(),
         _ => items
             .iter()
             .map(|item| match item {
-                InboxItem::Direct(m) => format!("[追加指令] {m}"),
+                InboxItem::Direct { text, .. } => format!("[追加指令] {text}"),
                 InboxItem::Channel {
                     channel,
                     from,
@@ -159,7 +234,8 @@ pub(crate) fn absorb_inbox(
             })
             .collect::<Vec<_>>()
             .join("\n"),
-    }
+    };
+    (prompt, images)
 }
 
 /// Placeholder for empty output.
@@ -177,6 +253,7 @@ fn register_run_watch(
     label: String,
     cell: Arc<AgentCell>,
     conditions: Vec<NotifyCondition>,
+    owner: Option<String>,
 ) -> WatchId {
     watch.register_with_conditions(
         Box::new(AgentWatch {
@@ -185,6 +262,7 @@ fn register_run_watch(
             interval: Some(std::time::Duration::from_secs(5)),
         }),
         conditions,
+        owner,
     )
 }
 
@@ -200,19 +278,21 @@ pub(crate) fn spawn_agent_loop(
     session: Arc<Session>,
     history: Vec<Message>,
     prompt: String,
+    images: Vec<crate::api::types::ImageAttachment>,
     first_label: String,
     conditions: Vec<NotifyCondition>,
+    owner: Option<String>,
 ) -> WatchId {
     let cell = Arc::new(AgentCell::new());
-    let first_id = register_run_watch(&watch, first_label, cell.clone(), conditions);
+    let first_id = register_run_watch(&watch, first_label, cell.clone(), conditions, owner.clone());
     registry.set_run_watch(&name, first_id);
-    let permission_mode = session.permission_mode;
     let loop_registry = registry.clone();
     let loop_name = name.clone();
     let handle = tokio::spawn(async move {
         let name = loop_name;
         let mut history = history;
         let mut prompt = prompt;
+        let mut images = images;
         let mut run = (first_id, cell);
         loop {
             let output = Arc::new(Mutex::new(String::new()));
@@ -220,11 +300,13 @@ pub(crate) fn spawn_agent_loop(
             let mut ui = subagent_hooks(
                 output.clone(),
                 run.1.clone(),
-                permission_mode,
                 watch.clone(),
                 run.0,
+                name.clone(),
+                loop_registry.ask_fn(),
             );
-            match crate::query::run_query(&session, history, &prompt, &[], &mut ui, None).await {
+            match crate::query::run_query(&session, history, &prompt, &images, &mut ui, None).await
+            {
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     loop_registry.set_live(&name, None);
@@ -235,13 +317,18 @@ pub(crate) fn spawn_agent_loop(
                         Some(serde_json::json!(non_empty(text))),
                     );
                     match loop_registry.finish(&name, outcome.messages) {
-                        Some((next_history, items)) => {
-                            history = next_history;
-                            prompt = absorb_inbox(&session.channels, &name, &items);
+                        Some(next) => {
+                            history = next.history;
+                            (prompt, images) = absorb_inbox(&session.channels, &name, &next.items);
                             let cell = Arc::new(AgentCell::new());
-                            let n = loop_registry.next_run(&name);
-                            let label = format!("{name} #{n} · {}", excerpt(&prompt));
-                            let id = register_run_watch(&watch, label, cell.clone(), Vec::new());
+                            let label = format!("{name} #{} · {}", next.run, excerpt(&prompt));
+                            let id = register_run_watch(
+                                &watch,
+                                label,
+                                cell.clone(),
+                                Vec::new(),
+                                owner.clone(),
+                            );
                             loop_registry.set_run_watch(&name, id);
                             run = (id, cell);
                         }
@@ -336,8 +423,10 @@ impl AgentTool {
             sub_session,
             Vec::new(),
             params.prompt.clone(),
+            self.session.attachments.resolve(&params.prompt),
             format!("{name} · {description}"),
             conditions,
+            ctx.instance.clone(),
         );
         Ok(ToolResult {
             content: serde_json::Value::String(serde_json::json!({
@@ -447,23 +536,34 @@ pub(crate) fn build_sub_session(
         None if cross_provider => None,
         None => parent.runtime.thinking.borrow().clone(),
     };
-    let system = match def {
-        Some(d) if !d.system.trim().is_empty() => vec![SystemBlock {
-            text: d.system.clone(),
-            cache: parent.settings.cache_control.unwrap_or(false),
-        }],
-        _ => parent.system.clone(),
+    let cache = parent.settings.cache_control.unwrap_or(false);
+    let persona = |text: &str| SystemBlock {
+        text: text.to_string(),
+        cache,
     };
-    let runtime = crate::query::Runtime::new(
-        model,
-        None,
-        parent
-            .runtime
-            .permissions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone(),
-    );
+    let mut system = match def {
+        Some(d) if d.system.trim().is_empty() => parent.system.clone(),
+        // Replacing wholesale also drops the environment info, CLAUDE.md/AGENTS.md and project
+        // memory — rarely what a persona wants, so appending is the default.
+        Some(d) if d.inherit_system => {
+            let mut blocks = parent.system.clone();
+            blocks.push(persona(&d.system));
+            blocks
+        }
+        Some(d) => vec![persona(&d.system)],
+        None => parent.system.clone(),
+    };
+    // Uncached on purpose: a short tail block is not worth another cache breakpoint.
+    system.push(SystemBlock {
+        text: SUBAGENT_NOTE.to_string(),
+        cache: false,
+    });
+    let mut runtime = crate::query::Runtime::new(model, None, Default::default());
+    // Share the parent's permission table and MCP connections rather than snapshotting them:
+    // `/permissions` edits reach instances that are already running, and a subagent reuses the
+    // parent's MCP handshake instead of starting from an empty manager (i.e. no MCP tools).
+    runtime.permissions = parent.runtime.permissions.clone();
+    runtime.mcp = parent.runtime.mcp.clone();
     let _ = runtime.provider_tx.send(provider_name);
     let _ = runtime.thinking_tx.send(thinking);
     Ok(Arc::new(Session {
@@ -483,6 +583,7 @@ pub(crate) fn build_sub_session(
         agents: parent.agents.clone(),
         channels: parent.channels.clone(),
         instance: Some(instance.to_string()),
+        attachments: parent.attachments.clone(),
     }))
 }
 
@@ -597,6 +698,7 @@ impl Tool for AgentTool {
             format!("{name} · {description}"),
             cell.clone(),
             conditions,
+            ctx.instance.clone(),
         );
         self.session.agents.set_run_watch(&name, id);
         let output = Arc::new(Mutex::new(String::new()));
@@ -604,13 +706,21 @@ impl Tool for AgentTool {
         let mut ui = subagent_hooks(
             output.clone(),
             cell.clone(),
-            sub_session.permission_mode,
             ctx.watch.clone(),
             id,
+            name.clone(),
+            self.session.agents.ask_fn(),
         );
-        let sync_run =
-            crate::query::run_query(&sub_session, Vec::new(), &params.prompt, &[], &mut ui, None)
-                .await;
+        let images = self.session.attachments.resolve(&params.prompt);
+        let sync_run = crate::query::run_query(
+            &sub_session,
+            Vec::new(),
+            &params.prompt,
+            &images,
+            &mut ui,
+            None,
+        )
+        .await;
         self.session.agents.set_live(&name, None);
         match sync_run {
             Ok(outcome) => {
@@ -624,19 +734,19 @@ impl Tool for AgentTool {
                 );
                 // On the synchronous path tools run serially, so queued messages never reach here;
                 // if one somehow does, hand it to the background loop (same continuation mechanism).
-                if let Some((history, items)) = self.session.agents.finish(&name, outcome.messages)
-                {
-                    let prompt = absorb_inbox(&sub_session.channels, &name, &items);
-                    let n = self.session.agents.next_run(&name);
+                if let Some(next) = self.session.agents.finish(&name, outcome.messages) {
+                    let (prompt, images) = absorb_inbox(&sub_session.channels, &name, &next.items);
                     spawn_agent_loop(
                         self.session.agents.clone(),
                         ctx.watch.clone(),
                         name.clone(),
                         sub_session,
-                        history,
+                        next.history,
                         prompt.clone(),
-                        format!("{name} #{n} · {}", excerpt(&prompt)),
+                        images,
+                        format!("{name} #{} · {}", next.run, excerpt(&prompt)),
                         Vec::new(),
+                        ctx.instance.clone(),
                     );
                 }
                 Ok(ToolResult {
@@ -689,7 +799,7 @@ impl Tool for SendMessageTool {
         "SendMessage".to_string()
     }
     fn description(&self) -> String {
-        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Idle instance: wakes and resumes immediately, notifying on completion; busy instance: queued and delivered automatically when its current turn ends. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
+        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id: the message is queued and delivered at the end of this turn, batched with any other message sent to the same instance in this turn, so the receiver reads them together rather than one per turn. Queued is not yet an acknowledgement — AgentControl(action=messages) reports whether it was delivered, is still queued, or was dropped because the instance stopped. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<SendMessageInput>()
@@ -703,47 +813,28 @@ impl Tool for SendMessageTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        ctx: &ToolContext,
+        _ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: SendMessageInput = parse_input(&input)?;
-        let registry = self.session.agents.clone();
-        match registry.deliver(&params.agent, &params.message) {
-            Ok(Delivery::Queued) => Ok(ToolResult {
-                content: serde_json::Value::String(format!(
-                    "{} 正在执行，指令已排队（当前回合结束自动送达）",
-                    params.agent
-                )),
-                is_error: false,
-                diff: None,
-            }),
-            Ok(Delivery::Start {
-                session,
-                history,
-                items,
-            }) => {
-                let prompt = absorb_inbox(&session.channels, &params.agent, &items);
-                let n = registry.next_run(&params.agent);
-                spawn_agent_loop(
-                    registry,
-                    ctx.watch.clone(),
-                    params.agent.clone(),
-                    session,
-                    history,
-                    prompt.clone(),
-                    format!("{} #{n} · {}", params.agent, excerpt(&prompt)),
-                    Vec::new(),
-                );
-                Ok(ToolResult {
-                    content: serde_json::Value::String(format!(
-                        "{} 已唤醒（历史保留），完成通知会注入下一轮上下文",
-                        params.agent
-                    )),
-                    is_error: false,
-                    diff: None,
-                })
-            }
-            Err(e) => Err(ToolError::failed(e)),
-        }
+        let images = self.session.attachments.resolve(&params.message);
+        let id = self
+            .session
+            .agents
+            .deliver(&params.agent, &params.message, images)
+            .map_err(ToolError::failed)?;
+        Ok(ToolResult {
+            content: serde_json::json!({
+                "status": "queued",
+                "message_id": id.0,
+                "agent": params.agent,
+                "note": "本回合结束时与同一收件人的其他消息合并成一批送达；\
+                         久未确认可用 AgentControl(action=messages, agent=…) 复查",
+            })
+            .to_string()
+            .into(),
+            is_error: false,
+            diff: None,
+        })
     }
 }
 
@@ -752,6 +843,9 @@ impl Tool for SendMessageTool {
 pub enum AgentAction {
     /// List all instances (name/definition/status/pending message count).
     List,
+    /// Delivery records for one instance: which messages were delivered, are still queued, or
+    /// were dropped.
+    Messages,
     /// Stop: abort the current run and stop accepting messages; history is kept and can be listed.
     Stop,
     /// Delete: stop and remove the instance (name released).
@@ -761,10 +855,12 @@ pub enum AgentAction {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AgentControlInput {
-    #[schemars(description = "Action: list all instances / stop one / delete one")]
+    #[schemars(
+        description = "Action: list all instances / check message delivery / stop one / delete one"
+    )]
     action: AgentAction,
     #[serde(default)]
-    #[schemars(description = "Target instance name (required for stop/delete)")]
+    #[schemars(description = "Target instance name (required for messages/stop/delete)")]
     agent: Option<String>,
 }
 
@@ -783,7 +879,7 @@ impl AgentControlTool {
             .agent
             .as_deref()
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| ToolError::failed("stop/delete 需要 agent 参数（实例名）"))
+            .ok_or_else(|| ToolError::failed("messages/stop/delete 需要 agent 参数（实例名）"))
     }
 }
 
@@ -793,7 +889,7 @@ impl Tool for AgentControlTool {
         "AgentControl".to_string()
     }
     fn description(&self) -> String {
-        "Manage subagent instances: list all (name/definition/status/queued-instruction count), stop one (aborts the current run, stops accepting instructions; history kept), delete one (stops and removes it; the name is released).".to_string()
+        "Manage subagent instances: list all (name/definition/status/queued-instruction count), check messages sent to one (per-message delivered/queued/dropped plus how long it has been waiting — use this when a SendMessage has gone unacknowledged for a while), stop one (aborts the current run, stops accepting instructions; history kept), delete one (stops and removes it; the name is released).".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<AgentControlInput>()
@@ -802,7 +898,10 @@ impl Tool for AgentControlTool {
         false
     }
     fn is_read_only(&self, input: &serde_json::Value) -> bool {
-        input.get("action").and_then(|a| a.as_str()) == Some("list")
+        matches!(
+            input.get("action").and_then(|a| a.as_str()),
+            Some("list") | Some("messages")
+        )
     }
     async fn call(
         &self,
@@ -830,8 +929,13 @@ impl Tool for AgentControlTool {
                             } else {
                                 String::new()
                             };
+                            let unacked = if s.unacked > 0 {
+                                format!("，{} 条未确认", s.unacked)
+                            } else {
+                                String::new()
+                            };
                             format!(
-                                "- {}（{}{def}{pending}）：{}",
+                                "- {}（{}{def}{pending}{unacked}）：{}",
                                 s.name,
                                 s.state.label(),
                                 s.description
@@ -841,9 +945,43 @@ impl Tool for AgentControlTool {
                         .join("\n")
                 }
             }
+            AgentAction::Messages => {
+                let name = Self::require_agent(&params)?;
+                let acks = registry
+                    .acks_of(name)
+                    .ok_or_else(|| ToolError::failed(format!("没有名为 {name} 的子代理")))?;
+                if acks.is_empty() {
+                    format!("还没有发给 {name} 的消息")
+                } else {
+                    acks.iter()
+                        .map(|a| {
+                            let detail = match &a.state {
+                                crate::agents::AckState::Queued => format!(
+                                    "queued（等待 {}s，将在下一个回合边界成批送达）",
+                                    a.queued_at.elapsed().as_secs()
+                                ),
+                                crate::agents::AckState::Delivered { run } => {
+                                    format!("delivered（第 {run} 轮已进入上下文）")
+                                }
+                                crate::agents::AckState::Dropped { reason } => {
+                                    format!("dropped（{reason}，未送达）")
+                                }
+                            };
+                            format!("- #{} {detail}：{}", a.id, a.excerpt)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            }
             AgentAction::Stop => {
                 let name = Self::require_agent(&params)?;
-                match registry.stop(name).map_err(ToolError::failed)? {
+                let (watch_id, dropped) = registry.stop(name).map_err(ToolError::failed)?;
+                let lost = if dropped > 0 {
+                    format!("，{dropped} 条未送达指令已丢弃")
+                } else {
+                    String::new()
+                };
+                match watch_id {
                     Some(id) => {
                         ctx.watch.set_state(
                             id,
@@ -851,15 +989,23 @@ impl Tool for AgentControlTool {
                             Some("已停止".to_string()),
                             None,
                         );
-                        format!("已停止 {name}（当前回合中止，历史保留）")
+                        format!("已停止 {name}（当前回合中止，历史保留{lost}）")
                     }
-                    None => format!("{name} 已停止（无进行中的回合）"),
+                    None => format!("{name} 已停止（无进行中的回合{lost}）"),
                 }
             }
             AgentAction::Delete => {
                 let name = Self::require_agent(&params)?;
                 self.session.channels.remove_member_everywhere(name);
-                match registry.remove(name).map_err(ToolError::failed)? {
+                let (watch_id, dropped) = registry.remove(name).map_err(ToolError::failed)?;
+                // The ack trail is removed with the instance, so this count is the sender's
+                // last chance to learn that queued instructions never landed.
+                let lost = if dropped > 0 {
+                    format!("，{dropped} 条未送达指令已丢弃")
+                } else {
+                    String::new()
+                };
+                match watch_id {
                     Some(id) => {
                         ctx.watch.set_state(
                             id,
@@ -867,9 +1013,9 @@ impl Tool for AgentControlTool {
                             Some("已删除".to_string()),
                             None,
                         );
-                        format!("已删除 {name}（回合中止，名字释放）")
+                        format!("已删除 {name}（回合中止，名字释放{lost}）")
                     }
-                    None => format!("已删除 {name}（名字释放）"),
+                    None => format!("已删除 {name}（名字释放{lost}）"),
                 }
             }
         };
@@ -890,6 +1036,9 @@ mod tests {
         let mut settings = crate::settings::Settings {
             api_key: Some("sk-parent".into()),
             api_base_url: Some("https://parent.example".into()),
+            // Explicitly opted out: models a compat proxy that speaks the protocol but rejects
+            // image blocks. Image support is otherwise the default.
+            send_images: Some(false),
             ..Default::default()
         };
         settings.providers.insert(
@@ -898,6 +1047,18 @@ mod tests {
                 api_key: Some("sk-ds".into()),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
+                protocol: None,
+                oauth: None,
+            },
+        );
+        // An image-capable endpoint next to a text-only default: the shape that lets a text-only
+        // session delegate an attachment to a subagent.
+        settings.providers.insert(
+            "vision".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: Some("sk-v".into()),
+                api_base_url: "https://vision.example".into(),
+                supports_images: Some(true),
                 protocol: None,
                 oauth: None,
             },
@@ -928,6 +1089,7 @@ mod tests {
             agents: AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         });
         (session, client)
     }
@@ -954,6 +1116,7 @@ mod tests {
             provider: Some("ds".into()),
             thinking: Some("high".into()),
             system: "你是评审。".into(),
+            inherit_system: true,
             source: crate::agents::AgentDefSource::Unknown,
         }
     }
@@ -982,8 +1145,7 @@ mod tests {
                 "https://parent.example".to_string()
             )
         );
-        assert_eq!(sub.system.len(), 1, "无定义时继承父 system");
-        assert_eq!(sub.system[0].text, "父 system");
+        assert_eq!(sub.system[0].text, "父 system", "无定义时继承父 system");
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
             Some("medium"),
@@ -1037,8 +1199,13 @@ mod tests {
         let sub = tool
             .build_sub_session(&params("审查"), Some(&d), "sub")
             .unwrap();
-        assert_eq!(sub.system.len(), 1);
-        assert_eq!(sub.system[0].text, "你是评审。", "定义正文替换 system");
+        // Default is append: 父 system + 人设 + 子代理说明块。
+        let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["父 system", "你是评审。", SUBAGENT_NOTE],
+            "具名定义默认追加而非替换"
+        );
         assert_eq!(*sub.runtime.model.borrow(), "def-model");
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
         assert_eq!(
@@ -1243,6 +1410,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         };
         assert!(ctl.is_read_only(&serde_json::json!({"action": "list"})));
         assert!(!ctl.is_read_only(&serde_json::json!({"action": "stop", "agent": "scout"})));
@@ -1304,6 +1472,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         };
         let out = send
             .call(
@@ -1312,13 +1481,206 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(out.content.as_str().unwrap().contains("排队"), "queued");
-        assert_eq!(session.agents.list()[0].pending, 1);
+        // The receipt carries the message id; delivery itself waits for the turn boundary.
+        let receipt: serde_json::Value =
+            serde_json::from_str(out.content.as_str().unwrap_or_default())
+                .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(receipt["status"], "queued");
+        assert_eq!(receipt["message_id"], 1);
+        let status = &session.agents.list()[0];
+        assert_eq!(status.pending, 1);
+        assert_eq!(status.unacked, 1, "queued 还不是回执");
         // Unknown instance: the error lists the existing instance names.
         let err = send
             .call(serde_json::json!({"agent": "nobody", "message": "x"}), &ctx)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("worker"), "{err}");
+    }
+
+    /// The hub forwards an image to a subagent by repeating its `#[image N]` marker: the
+    /// attachment table is shared with the sub-session, and the resolved images ride along with
+    /// the queued instruction so a busy instance still receives them.
+    #[test]
+    fn image_markers_resolve_for_spawn_and_follow_up() {
+        let (session, _client) = parent_session();
+        let png = {
+            let img = image::RgbaImage::from_pixel(4, 2, image::Rgba([255u8, 0, 0, 255]));
+            let mut out = Vec::new();
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .unwrap_or_else(|_| unreachable!());
+            out
+        };
+        assert_eq!(session.attachments.register(&png), Some(1));
+
+        // Spawn: markers in the prompt resolve against the session table.
+        let images = session.attachments.resolve("看这张 #[image 1] 再判断");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].media_type, "image/png");
+        // Sub-sessions share the table, so a nested spawn can resolve the same marker.
+        let sub = build_sub_session(&session, None, None, None, None, "worker").unwrap();
+        assert_eq!(sub.attachments.resolve("#[image 1]").len(), 1);
+
+        // Follow-up: a queued instruction keeps its images until it is delivered.
+        session
+            .agents
+            .insert("worker", None, "d".into(), sub.clone());
+        let id = session
+            .agents
+            .deliver("worker", "对比 #[image 1]", images.clone())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let (prompt, carried) = match session.agents.finish("worker", Vec::new()) {
+            Some(next) => absorb_inbox(&sub.channels, "worker", &next.items),
+            None => unreachable!("排队消息应在回合结束时取出"),
+        };
+        let acks = session
+            .agents
+            .acks_of("worker")
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(acks[0].id, id);
+        assert_eq!(prompt, "对比 #[image 1]");
+        assert_eq!(carried.len(), 1, "图片随排队指令一同送达");
+        assert_eq!(carried[0].data, images[0].data);
+    }
+
+    /// A text-only main session can still get an image looked at: the attachment table is
+    /// session-scoped and independent of endpoint capability, so a subagent forked onto an
+    /// image-capable provider resolves the same `#[image N]` marker and actually receives it.
+    #[test]
+    fn text_only_parent_can_hand_an_image_to_a_vision_subagent() {
+        let (parent, _client) = parent_session();
+        let png = {
+            let img = image::RgbaImage::from_pixel(4, 2, image::Rgba([9u8, 9, 9, 255]));
+            let mut out = Vec::new();
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .unwrap_or_else(|_| unreachable!());
+            out
+        };
+        assert_eq!(parent.attachments.register(&png), Some(1));
+        assert!(
+            !parent.client.supports_images(),
+            "父端点不收图（本用例的前提）"
+        );
+
+        // Markers resolve regardless of what the parent endpoint can carry.
+        let images = parent.attachments.resolve("描述 #[image 1]");
+        assert_eq!(images.len(), 1, "解析不受端点能力影响");
+
+        // Forked onto the vision provider, the sub-session is the one whose capability decides.
+        let sub = build_sub_session(
+            &parent,
+            Some("vision-model".into()),
+            Some("vision".into()),
+            None,
+            None,
+            "looker",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(sub.client.supports_images(), "子会话端点收图");
+        assert!(
+            Arc::ptr_eq(&sub.attachments, &parent.attachments),
+            "附件表共享，子代理复述占位即可命中"
+        );
+        assert!(
+            parent
+                .client
+                .image_capable_providers()
+                .contains(&"vision".to_string()),
+            "提示里指的路是可发现的：{:?}",
+            parent.client.image_capable_providers()
+        );
+    }
+
+    /// `inherit_system: false` opts back into wholesale replacement; the subagent note is still
+    /// appended, because it describes the runtime rather than the persona.
+    #[test]
+    fn inherit_system_false_replaces_parent_blocks() {
+        let (session, _client) = parent_session();
+        let mut d = def("reviewer");
+        d.inherit_system = false;
+        let tool = AgentTool::new(session, vec![d.clone()]);
+        let sub = tool
+            .build_sub_session(&params("审查"), Some(&d), "sub")
+            .unwrap();
+        let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, ["你是评审。", SUBAGENT_NOTE]);
+    }
+
+    /// No named definition: the parent's system carries over, plus the note.
+    #[test]
+    fn plain_subagent_inherits_parent_system_plus_note() {
+        let (session, _client) = parent_session();
+        let sub = build_sub_session(&session, None, None, None, None, "worker").unwrap();
+        let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, ["父 system", SUBAGENT_NOTE]);
+        assert!(
+            !sub.system.last().map(|b| b.cache).unwrap_or(true),
+            "说明块不占 cache breakpoint"
+        );
+    }
+
+    /// MCP connections and the permission table are shared handles, not snapshots: a subagent
+    /// sees the parent's MCP tools, and `/permissions` edits reach instances already running.
+    #[test]
+    fn sub_session_shares_parent_mcp_and_permissions() {
+        let (parent, _) = parent_session();
+        let sub = build_sub_session(&parent, None, None, None, None, "worker").unwrap();
+        assert!(
+            Arc::ptr_eq(&sub.runtime.mcp, &parent.runtime.mcp),
+            "MCP 管理器应共享，否则子代理拿不到任何 MCP 工具"
+        );
+        assert!(
+            Arc::ptr_eq(&sub.runtime.permissions, &parent.runtime.permissions),
+            "权限表应共享，否则 spawn 后的 /permissions 改动传不到"
+        );
+    }
+
+    /// A subagent's Ask decision is forwarded to the attached prompt surface, stamped with the
+    /// instance name — never silently auto-denied (or auto-allowed under bypass).
+    #[tokio::test]
+    async fn subagent_ask_forwards_to_attached_prompt() {
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorder = seen.clone();
+        let ask: Arc<crate::query::AskFn> = Arc::new(move |tool, reason| {
+            recorder
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(format!("{tool}|{reason}"));
+            Box::pin(async { true })
+        });
+        let watch = crate::watch::WatchRegistry::new();
+        let id = register_run_watch(
+            &watch,
+            "l".into(),
+            Arc::new(AgentCell::new()),
+            Vec::new(),
+            None,
+        );
+        let ui = subagent_hooks(
+            Arc::new(Mutex::new(String::new())),
+            Arc::new(AgentCell::new()),
+            watch.clone(),
+            id,
+            "worker".into(),
+            Some(ask),
+        );
+        assert!((ui.ask)("Write", "Write needs permission").await);
+        assert_eq!(
+            seen.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            ["Write|worker · Write needs permission"]
+        );
+
+        // Nothing attached (embedded/test path): deny rather than block on a modal nobody shows.
+        let ui = subagent_hooks(
+            Arc::new(Mutex::new(String::new())),
+            Arc::new(AgentCell::new()),
+            watch,
+            id,
+            "worker".into(),
+            None,
+        );
+        assert!(!(ui.ask)("Write", "Write needs permission").await);
     }
 }

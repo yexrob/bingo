@@ -2,7 +2,7 @@
 
 An agent CLI implemented in Rust (a local agent harness).
 
-> Architecture and selection decisions live in [`notes/research.md`](./notes/research.md) (decision records D1-D40, with superseded decisions retained as history); check the latest applicable decision before changing the architecture.
+> Architecture and selection decisions live in [`notes/research.md`](./notes/research.md) (decision records D1-D42, with superseded decisions retained as history); check the latest applicable decision before changing the architecture.
 
 ## Language and style
 

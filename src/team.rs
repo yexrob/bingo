@@ -561,6 +561,7 @@ mod tests {
             provider: None,
             thinking: None,
             system: "s".into(),
+            inherit_system: true,
             source: AgentDefSource::Project,
         };
         let ok = TeamDef {
@@ -612,6 +613,7 @@ mod tests {
             provider: None,
             thinking: None,
             system: format!("你是 {name}。"),
+            inherit_system: true,
             source: AgentDefSource::Project,
         }
     }
@@ -648,6 +650,7 @@ mod tests {
             agents: AgentRegistry::new(),
             channels: ChannelRegistry::new(ChannelLimits::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         })
     }
 

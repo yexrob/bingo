@@ -224,6 +224,10 @@ pub struct Session {
     /// This session's instance name (sub-agents = Some(registry name); main session None,
     /// channel member name main).
     pub instance: Option<String>,
+    /// Images the user mounted on the input box, addressed by the `#[image N]` markers left in
+    /// the message text. Sub-sessions share the table, so the hub forwards an image to a
+    /// subagent by repeating its marker.
+    pub attachments: Arc<crate::api::image::Attachments>,
 }
 
 /// Single tool completion event.
@@ -281,6 +285,27 @@ pub struct UiHooks {
     pub ask_question: Arc<AskQuestionFn>,
 }
 
+/// Headless permission prompt (stderr question, stdin answer). Shared by `headless_hooks` and
+/// the subagent prompt surface attached to the registry, so both ask the same way.
+pub fn stdin_ask() -> Arc<AskFn> {
+    Arc::new(|tool_name, reason| {
+        let prompt = format!("允许 {tool_name} 执行吗？({reason}) [y/N] ");
+        Box::pin(async move {
+            eprintln!("{prompt}");
+            let answer = tokio::task::spawn_blocking(move || {
+                let mut line = String::new();
+                if let Err(e) = std::io::stdin().lock().read_line(&mut line) {
+                    eprintln!("[bingo] warning: cannot read answer from stdin: {e}");
+                }
+                line.trim().to_ascii_lowercase()
+            })
+            .await
+            .unwrap_or_default();
+            answer == "y" || answer == "yes"
+        })
+    })
+}
+
 /// Default headless hooks: text deltas to stdout; permissions via stdin interaction.
 pub fn headless_hooks() -> UiHooks {
     UiHooks {
@@ -294,22 +319,7 @@ pub fn headless_hooks() -> UiHooks {
         on_tool_done: Box::new(|_| {}),
         on_round_end: Box::new(|| {}),
         on_warning: Box::new(|message| eprintln!("[bingo] warning: {message}")),
-        ask: Arc::new(|tool_name, reason| {
-            let prompt = format!("允许 {tool_name} 执行吗？({reason}) [y/N] ");
-            Box::pin(async move {
-                eprintln!("{prompt}");
-                let answer = tokio::task::spawn_blocking(move || {
-                    let mut line = String::new();
-                    if let Err(e) = std::io::stdin().lock().read_line(&mut line) {
-                        eprintln!("[bingo] warning: cannot read answer from stdin: {e}");
-                    }
-                    line.trim().to_ascii_lowercase()
-                })
-                .await
-                .unwrap_or_default();
-                answer == "y" || answer == "yes"
-            })
-        }),
+        ask: stdin_ask(),
         ask_question: Arc::new(|title, question, options| {
             Box::pin(async move {
                 eprintln!("[bingo] {title}: {question}");
@@ -529,17 +539,39 @@ impl Session {
 }
 
 fn render_result(result: &ToolResult) -> String {
-    match &result.content {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
+    crate::api::types::tool_result_text(&result.content)
 }
 
 fn result_block(tool_use_id: &str, result: &ToolResult) -> ContentBlock {
+    // Array content is already a list of protocol blocks (text plus images). Pass it through:
+    // stringifying it here is what would turn an image result into a wall of base64 text.
+    if let serde_json::Value::Array(blocks) = &result.content {
+        return ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: serde_json::Value::Array(
+                blocks.iter().map(clip_text_block).collect::<Vec<_>>(),
+            ),
+            is_error: result.is_error,
+        };
+    }
     if result.is_error {
         tool_result_error(tool_use_id, clipped_result(render_result(result)))
     } else {
         tool_result_text(tool_use_id, clipped_result(render_result(result)))
+    }
+}
+
+/// Apply the tool-result length cap to a block's text, leaving image blocks untouched
+/// (they are already bounded by `prepare_image`).
+fn clip_text_block(block: &serde_json::Value) -> serde_json::Value {
+    match (
+        block.get("type").and_then(|t| t.as_str()),
+        block.get("text").and_then(|t| t.as_str()),
+    ) {
+        (Some("text"), Some(text)) => {
+            serde_json::json!({"type": "text", "text": clipped_result(text.to_string())})
+        }
+        _ => block.clone(),
     }
 }
 
@@ -643,6 +675,7 @@ fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContext, QueryErr
         permission_mode: permission_mode_str(session.permission_mode).to_string(),
         expand_tasks: session.expand_tasks.clone(),
         ask_question: ui.ask_question.clone(),
+        instance: session.instance.clone(),
     })
 }
 
@@ -710,11 +743,17 @@ async fn query_loop(
         check_and_compact(session, &mut messages, &mut gate).await;
         // task_reminder: no Task tool for 10 turns + 10 turns since the last reminder.
         maybe_inject_task_reminder(session, &mut messages).await;
+        // Messages queued by the previous step are delivered here, one batch per recipient:
+        // the SendMessage tool only enqueues, so several messages sent in the same step reach
+        // the receiver together instead of one per turn.
+        crate::tool::agent::flush_agent_inbox(session, &ctx.watch);
         // Background task notification injection (dynamic awareness while running): before
         // each reasoning step, pending state-transition notifications (rounds/completion/
         // failure) are injected into the context; anything unconsumed by the end of the
         // turn carries over to the next turn.
-        let notes = session.watch.consume_notifications();
+        let notes = session
+            .watch
+            .consume_notifications(session.instance.as_deref());
         if !notes.is_empty() {
             messages.push(Message::user_text(format!(
                 "<task-notifications>\n{}\n</task-notifications>",
@@ -987,7 +1026,12 @@ pub async fn run_query(
     record(
         session,
         &mut messages,
-        user_message_with_images(user_input, images, session.client.supports_images()),
+        user_message_with_images(
+            user_input,
+            images,
+            session.client.supports_images(),
+            &session.client.image_capable_providers(),
+        ),
         ui,
     );
     query_loop(session, messages, ui, &tools, &ctx, cancel).await
@@ -995,16 +1039,24 @@ pub async fn run_query(
 
 /// User input → message: text block first, image blocks after (when the provider supports
 /// them). The text keeps `#[image N]` placeholders so the model senses the images through them.
+///
+/// When a placeholder arrives without its image, say why. A bare dangling marker reads to the
+/// model as an image it merely failed to locate, and it will go looking — through the
+/// transcript, through temp directories — instead of telling the user what is actually wrong.
 fn user_message_with_images(
     text: &str,
     images: &[crate::api::types::ImageAttachment],
     send_images: bool,
+    image_providers: &[String],
 ) -> Message {
     use crate::api::types::{ContentBlock, ImageSource, Role};
-    let mut content = vec![ContentBlock::Text {
-        text: text.to_string(),
-    }];
-    if send_images {
+    let attaching = send_images && !images.is_empty();
+    let mut body = text.to_string();
+    if !attaching && crate::api::image::has_marker(text) {
+        body.push_str(&missing_image_note(images.is_empty(), image_providers));
+    }
+    let mut content = vec![ContentBlock::Text { text: body }];
+    if attaching {
         content.extend(images.iter().map(|img| ContentBlock::Image {
             source: ImageSource::base64(&img.media_type, &img.data),
         }));
@@ -1013,6 +1065,42 @@ fn user_message_with_images(
         role: Role::User,
         content,
     }
+}
+
+/// Explains a placeholder whose image is not attached, and — when the attachment exists and only
+/// this endpoint can't take it — points at the way through instead of the way out: a subagent
+/// forked onto an image-capable provider resolves the same marker against the same session table,
+/// so a text-only main session can still get an image looked at.
+fn missing_image_note(unresolved: bool, image_providers: &[String]) -> String {
+    if unresolved {
+        return "\n\n<system-reminder>The `#[image N]` placeholders above have no image attached: \
+                the referenced attachment is not in this session (attachments live in memory, so \
+                markers from a resumed or restored session no longer resolve). Do not go looking \
+                for the file — tell the user the image needs to be attached again.\
+                </system-reminder>"
+            .to_string();
+    }
+    let route = if image_providers.is_empty() {
+        "No configured provider accepts images, so nothing in this session can look at it: tell \
+         the user to enable `sendImages` (or set `supportsImages` on a provider) and resend."
+            .to_string()
+    } else {
+        format!(
+            "The attachment itself is still held by this session, and a subagent resolves the \
+             same marker against the same table. To get it looked at, spawn one on an \
+             image-capable provider and repeat the marker in its prompt — \
+             Agent(provider: \"<one of: {}>\", model: \"<model on that provider>\", \
+             prompt: \"…#[image N]…\") — it receives the real image and reports back to you. \
+             Crossing providers requires an explicit model, and the provider must already be \
+             keyed or logged in.",
+            image_providers.join(", ")
+        )
+    };
+    format!(
+        "\n\n<system-reminder>The `#[image N]` placeholders above have no image attached: this \
+         endpoint does not accept image blocks. Do not go looking for the file. {route}\
+         </system-reminder>"
+    )
 }
 
 /// Caveat injected before running a local command: `!` command output stays in the
@@ -1217,8 +1305,10 @@ fn normalize_synthetic_bash_calls(messages: &mut Vec<Message>) {
                 _ => String::new(),
             };
             let result_text = match &messages[i + 2].content[0] {
-                ContentBlock::ToolResult { content, .. } => content.as_str().unwrap_or(""),
-                _ => "",
+                ContentBlock::ToolResult { content, .. } => {
+                    crate::api::types::tool_result_text(content)
+                }
+                _ => String::new(),
             };
             messages[i] = Message::user_text(format!("{input_text}\n{result_text}"));
             messages.drain(i + 1..=i + 2);
@@ -1235,6 +1325,91 @@ fn is_cancelled(cancel: &Option<watch::Receiver<bool>>) -> bool {
 mod tests {
     use super::*;
 
+    /// A tool result carrying images must reach the API as protocol blocks. Re-stringifying it
+    /// here is what would turn a screenshot into a wall of base64 text the model can't see.
+    #[test]
+    fn image_tool_results_stay_blocks_while_text_is_still_clipped() {
+        let long = "x".repeat(200_000);
+        let result = ToolResult {
+            content: crate::api::types::tool_result_blocks(
+                &long,
+                &[crate::api::types::ImageAttachment {
+                    media_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                }],
+            ),
+            is_error: false,
+            diff: None,
+        };
+        let ContentBlock::ToolResult { content, .. } = result_block("t1", &result) else {
+            unreachable!("tool result block")
+        };
+        let blocks = content.as_array().unwrap_or_else(|| unreachable!());
+        assert_eq!(blocks[1]["type"], "image", "图片块原样保留");
+        assert_eq!(blocks[1]["source"]["data"], "aGVsbG8=");
+        let text = blocks[0]["text"].as_str().unwrap_or_default();
+        assert!(text.len() < long.len(), "文本仍受截断上限约束");
+
+        // A plain string result keeps the old shape.
+        let plain = ToolResult {
+            content: serde_json::Value::String("ok".into()),
+            is_error: false,
+            diff: None,
+        };
+        let ContentBlock::ToolResult { content, .. } = result_block("t2", &plain) else {
+            unreachable!("tool result block")
+        };
+        assert_eq!(content, serde_json::Value::String("ok".into()));
+    }
+
+    /// A placeholder that arrives without its image must say why. Left bare, the model reads it
+    /// as an image it failed to locate and starts hunting through the transcript and temp dirs
+    /// instead of telling the user what is actually wrong.
+    #[test]
+    fn dangling_image_marker_explains_itself() {
+        use crate::api::types::{ContentBlock, ImageAttachment};
+        let imgs = vec![ImageAttachment {
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+        }];
+        let text_of = |msg: &Message| match &msg.content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => unreachable!("text block first"),
+        };
+
+        // Endpoint cannot take images and nothing else can either: point at the setting.
+        let msg = user_message_with_images("看图 #[image 1]", &imgs, false, &[]);
+        assert_eq!(msg.content.len(), 1, "端点不支持时不发图片块");
+        let text = text_of(&msg);
+        assert!(text.contains("sendImages"), "{text}");
+        assert!(text.contains("Do not go looking"), "{text}");
+
+        // Endpoint cannot take images but a capable provider exists: name the way through
+        // (delegate to a subagent) rather than telling the model to give up.
+        let msg = user_message_with_images(
+            "看图 #[image 1]",
+            &imgs,
+            false,
+            &["road".to_string(), "vision".to_string()],
+        );
+        let text = text_of(&msg);
+        assert!(text.contains("<one of: road, vision>"), "{text}");
+        assert!(text.contains("requires an explicit model"), "{text}");
+        assert!(!text.contains("resend"), "不该劝用户重发：{text}");
+
+        // Marker that no longer resolves (resumed session): say the attachment is gone.
+        let msg = user_message_with_images("看图 #[image 9]", &[], true, &[]);
+        let text = text_of(&msg);
+        assert!(text.contains("not in this session"), "{text}");
+
+        // No marker, no note — the reminder is only for a placeholder without its image.
+        let msg = user_message_with_images("随便问问", &[], true, &[]);
+        assert_eq!(text_of(&msg), "随便问问");
+        // Images actually attached: text stays verbatim.
+        let msg = user_message_with_images("看图 #[image 1]", &imgs, true, &[]);
+        assert_eq!(text_of(&msg), "看图 #[image 1]");
+    }
+
     /// Image attachments: text block + image blocks when the provider supports them;
     /// text only otherwise.
     #[test]
@@ -1244,7 +1419,7 @@ mod tests {
             media_type: "image/png".into(),
             data: "aGVsbG8=".into(),
         }];
-        let msg = user_message_with_images("看图 #[image 1]", &imgs, true);
+        let msg = user_message_with_images("看图 #[image 1]", &imgs, true, &[]);
         assert_eq!(msg.content.len(), 2);
         assert!(
             matches!(msg.content[0], ContentBlock::Text { ref text } if text == "看图 #[image 1]")
@@ -1253,7 +1428,7 @@ mod tests {
             matches!(&msg.content[1], ContentBlock::Image { source } if source.data == "aGVsbG8=")
         );
 
-        let msg = user_message_with_images("看图 #[image 1]", &imgs, false);
+        let msg = user_message_with_images("看图 #[image 1]", &imgs, false, &[]);
         assert_eq!(msg.content.len(), 1, "不支持时图片块不发送");
         assert!(matches!(msg.content[0], ContentBlock::Text { .. }));
     }
@@ -1370,6 +1545,7 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         })
     }
 
@@ -1479,6 +1655,7 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         });
         let mut ui = headless_hooks();
         let outcome = run_bash_command(&session, "printf '%s' 'a<b&c>'", Vec::new(), &mut ui, None)
@@ -1719,6 +1896,7 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         });
         let mut ui = headless_hooks();
         let outcome = run_bash_command(&session, "htop", Vec::new(), &mut ui, None)

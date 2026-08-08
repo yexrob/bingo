@@ -133,6 +133,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_title, _question, _options| {
                 Box::pin(async { None })
             }),
+            instance: None,
         }
     }
 

@@ -520,6 +520,7 @@ async fn launch_background(
             periodic,
         }),
         conditions,
+        ctx.instance.clone(),
     );
     let watch = ctx.watch.clone();
     let command = params.command.clone();
@@ -731,6 +732,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         };
         let tool = BashTool::new();
         let result = tool
@@ -755,7 +757,7 @@ mod tests {
             }
         }
         assert!(done, "explicit background reaches Done");
-        let notes = watch.consume_notifications();
+        let notes = watch.consume_notifications(None);
         assert!(
             notes.iter().any(|n| n.contains("finished")),
             "output in notification: {notes:?}"
@@ -777,6 +779,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         };
         let tool = BashTool::new();
         #[cfg(unix)]
@@ -803,7 +806,7 @@ mod tests {
             }
         }
         assert!(done, "background bash reaches Done");
-        let notes = watch.consume_notifications();
+        let notes = watch.consume_notifications(None);
         assert!(
             notes.iter().any(|n| n.contains("tick")),
             "payload in notification: {notes:?}"
@@ -959,6 +962,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         };
         // The grandchild writes its pid then sleeps; the parent shell also sleeps to trigger the timeout.
         let command = format!(
@@ -1050,6 +1054,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         };
         let result = BashTool::new()
             .call(
@@ -1074,7 +1079,7 @@ mod tests {
         while std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(200)).await;
             if watch
-                .consume_notifications()
+                .consume_notifications(None)
                 .iter()
                 .any(|n| n.contains("BOOM_MARKER"))
             {
@@ -1098,6 +1103,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         };
         let tool = BashTool::new();
         let err = tool

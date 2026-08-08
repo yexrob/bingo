@@ -55,7 +55,9 @@ fn summary_prompt(old: &[Message]) -> String {
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.clone()),
-                ContentBlock::ToolResult { content, .. } => Some(content.to_string()),
+                ContentBlock::ToolResult { content, .. } => {
+                    Some(crate::api::types::tool_result_text(content))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()

@@ -41,9 +41,12 @@ commands, and verification steps in conclusions. Never speculate about features 
   key-burst heuristic — extremely fast typing may misdetect, and pausing recovers).
 - **Sending images**: on macOS, copy an image (screenshot etc.) and paste (Cmd+V) to attach it;
   the input shows a `#[image N]` placeholder; dragging/pasting image file paths (as their own line or
-  `![alt](path)`) attaches on submit too. Message history keeps the placeholder text; when the current endpoint is configured
-  with `supportsImages`/`sendImages`, images go to the model as base64 content blocks with the text
-  (auto-compressed to 2000px / ~3.75MB), otherwise only text is sent and images stay local.
+  `![alt](path)`) attaches on submit too. Message history keeps the placeholder text, and the image goes to the model as a
+  base64 content block alongside it (auto-compressed to 2000px / ~3.75MB). Both wire protocols carry image blocks, so this
+  works by default; `sendImages: false` (default endpoint) or `supportsImages: false` (named provider) opts out an endpoint
+  that speaks the protocol but rejects images, and then only the text is sent. The attachment table belongs to the session,
+  not to the input box: any subagent resolves the same `#[image N]` marker, so an opted-out session can still get an image
+  looked at by forking one onto a provider that accepts them.
 
 ## Config guide (settings.json)
 
@@ -58,7 +61,7 @@ Three config layers, shallow-merged; the later one overrides:
 | `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
 | `providers` | object | Named providers: `{name: {protocol?, apiKey, apiBaseUrl?, supportsImages?, oauth?}}`, switch via `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, `Authorization: Bearer`; `apiBaseUrl` defaults to `https://api.openai.com`); an empty/absent `apiBaseUrl` falls back to the protocol default; unknown protocols are a config error at startup. `oauth: {kind: "codex"}` enables OAuth login (apiKey wins over OAuth); the codex flow (device / loopback PKCE) is `chatgpt.com`-subscription auth, tokens stored in `~/.local/share/bingo/auth.json` (0600, never in the committed settings) |
 | `provider` | string | Current provider (persisted by `/provider` and the /model menu; default `"default"` = top-level `apiKey`/`apiBaseUrl`); restored at startup, an invalid name falls back to default with a warning |
-| `sendImages` | bool | Whether the default endpoint sends message-box image attachments to the model (named providers use their own `supportsImages`; by default none are sent) |
+| `sendImages` | bool | Whether the default endpoint sends message-box image attachments to the model (named providers use their own `supportsImages`). Both protocols carry image blocks, so this defaults to **true** — set `false` to opt out an endpoint that speaks the protocol but rejects images (some compat proxies) |
 | `thinkingLevel` | string | Thinking level: `off` sends no thinking param (DeepSeek-compatible, default); `low`/`medium`/`high`/`xhigh`/`max` send `{"type":"adaptive"}` adaptive thinking plus `output_config.effort` (the Claude 5 family removed budget_tokens; below `high` saves tokens, `xhigh`/`max` think deeper) |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto` (follows the terminal background) / `dark` / `light` |
@@ -163,10 +166,12 @@ Example (.bingo/settings.json):
 
 ## Capability map (reference when asked "what can bingo do")
 
-- **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep, Edit/Write, WebFetch/WebSearch,
+- **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep (Read returns image files as
+  viewable images, so screenshots and rendered charts can be inspected), Edit/Write, WebFetch/WebSearch,
   Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
-  the Task family (task tracking), AskUserQuestion, Skill (skill invocation),
-  ExperiencePropose/Commit/Query/Forget (project experience capture and retrieval).
+  the Task family (task tracking), AskUserQuestion (main session only — a subagent has no prompt surface),
+  Skill (skill invocation),
+  ExperiencePropose/Commit/Query/Outcome/Forget (project experience capture, retrieval, and verified-use feedback).
 - **Provider protocols**: anthropic (Messages API, default — all existing configs) and openai (Responses API,
   per named provider via `protocol: "openai"` in the settings `providers` section; bearer auth, `reasoning.effort`
   for thinking levels, no count_tokens endpoint → local-estimation fallback). The top-level `apiKey`/`apiBaseUrl`
@@ -190,19 +195,40 @@ Example (.bingo/settings.json):
   header from the JWT claims; `/model` shows the subscription allowlist: gpt-5.5 / gpt-5.3-codex-spark /
   gpt-5.4 / gpt-5.4-mini).
 - **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
-  experience index is injected (≤10 entries, one per line; nothing injected when empty); full text is searched with ExperienceQuery by
-  trigger tokens (case-insensitive, shared-prefix tolerant; active first, sorted by adoption count);
+  experience index is injected (≤10 entries, ranked by observed outcomes before the legacy commit count; nothing injected when empty); full text is searched with ExperienceQuery by
+  trigger tokens (case-insensitive, shared-prefix tolerant; active first);
   ExperiencePropose generates candidates (not persisted); after user confirmation ExperienceCommit persists
-  (same content → stable id, re-committing updates rather than duplicates, adoption count +1; `status: stale` marks invalidation,
-  exits injection but stays queryable); ExperienceForget evicts (requires user confirmation). Stored in
+  (same content → stable id, re-committing updates rather than duplicates; `status: stale` marks invalidation,
+  exits injection but stays queryable). After actually applying a queried entry, ExperienceOutcome records a
+  permission-confirmed `helpful` or `harmful` result with concrete evidence; it appends outcome history and
+  never changes lifecycle status or `verified_at` automatically. ExperienceForget evicts (requires user confirmation). Stored in
   `~/.config/bingo/experience/<project-key>/entries/` (user-level, not in the project repo);
   the project key is derived from the git remote URL (normalized) → git root → normalized absolute path, stable across directories/machines.
 - **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
   auto-suffix -2/-3), shown in the transcript as `◉ name · task`; history is kept after completion, and the main agent can
-  SendMessage to continue (queued while busy, woken when idle), or manage with AgentControl list/stop/delete.
+  SendMessage to continue, or manage with AgentControl list/messages/stop/delete.
+  **Messaging**: SendMessage returns a `message_id` and only queues — delivery happens at the turn boundary, where
+  every message sent to the same instance in that turn is folded into one prompt (the receiver reads them together
+  rather than one per turn). Queued is not an acknowledgement: `AgentControl(action=messages, agent=…)` reports each
+  message as delivered (with the run it landed in), still queued (with its age), or dropped because the instance was
+  stopped. Stopping or deleting an instance discards its inbox and says how many undelivered messages died with it.
+  A run chain that fails leaves its queued messages in place — the next turn boundary retries them.
+  **Images to subagents**: repeat an `#[image N]` marker in the Agent prompt or SendMessage text; the attachment table
+  belongs to the session, so the subagent receives the actual image (also carried along if the message has to queue).
+  This also works *out* of a text-only session: when the current endpoint cannot receive images, fork a subagent onto an
+  image-capable provider (`Agent(provider: …, model: …)` — crossing providers requires an explicit model) and repeat the
+  marker; resolution is independent of endpoint capability, so the subagent sees the real image and reports back. A
+  placeholder that arrives without its image now says which case it is (endpoint cannot carry images — with the capable
+  providers listed — versus the attachment being gone from a resumed session) instead of leaving the model to hunt for a
+  file that was never on disk.
   **Named definitions**: `~/.config/bingo/agents/*.md` and `.bingo/agents/*.md` (same-name project layer wins);
-  frontmatter `name/description/model/provider/thinking`, body = the subagent's system prompt; referenced by the Agent tool's
-  `agent` argument.
+  frontmatter `name/description/model/provider/thinking/inherit_system`, body = the subagent's system prompt; referenced by
+  the Agent tool's `agent` argument. The body is appended to the parent's system blocks by default; `inherit_system: false`
+  replaces them instead, which also drops the environment info, CLAUDE.md/AGENTS.md and project memory.
+  **What a subagent shares with the main session**: MCP connections and the permission-rule table are shared handles
+  (a subagent gets the same MCP tools; `/permissions` edits reach running instances), and permission prompts are
+  forwarded to the main session's modal — a subagent never has a tool call silently auto-denied. What it does not get:
+  AskUserQuestion, and being woken by background-task notifications (its result goes back to the hub instead).
   **Per-instance model/thinking**: the Agent tool's `model`/`provider`/`thinking` args give a single
   subagent a model, provider (the settings `providers` section; cross-endpoint/cross-key), and thinking level
   (`off/low/medium/high/xhigh/max`); precedence: explicit args > named definition > inherit the parent session's
@@ -243,24 +269,35 @@ Example (.bingo/settings.json):
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
 - **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts.
-||||||| 0bc4c6c
-- **内置工具**：Bash（经权限门）、Read/Glob/Grep、Edit/Write、WebFetch/WebSearch、
+- **内置工具**：Bash（经权限门）、Read/Glob/Grep（Read 对图片文件返回可看的图像，
+  截图与渲染图表可直接查看）、Edit/Write、WebFetch/WebSearch、
   Agent（子代理）、SendMessage/AgentControl（子代理续话与生命周期，仅主会话）、
-  Task 族（任务追踪）、AskUserQuestion、Skill（技能调用）、
-  ExperiencePropose/Commit/Query/Forget（项目经验沉淀与检索）。
+  Task 族（任务追踪）、AskUserQuestion（仅主会话——子代理没有提问界面）、Skill（技能调用）、
+  ExperiencePropose/Commit/Query/Outcome/Forget（项目经验沉淀、检索与验证后反馈）。
 - **经验（Experience）**：跨会话复用可重跑的工作流。会话开始时注入本项目
-  active 经验索引（≤10 条一行一条，空则不注入），全文用 ExperienceQuery 按
-  trigger 词元检索（大小写不敏感、共享前缀容错，active 优先、按采用次数排序）；
+  active 经验索引（≤10 条，显式观察结果优先于旧重复提交计数，空则不注入），全文用 ExperienceQuery 按 trigger
+  词元检索（大小写不敏感、共享前缀容错、active 优先）；
   ExperiencePropose 生成候选（不落盘），用户确认后 ExperienceCommit 落盘
-  （同内容稳定 id，重提交更新而非重复、采用计数 +1，status: stale 标记失效
-  退出注入但仍可查）；ExperienceForget 淘汰（须用户确认）。存储于
+  （同内容稳定 id，重提交更新而非重复；status: stale 标记失效后退出注入但仍可查）。
+  真正采用查询结果后，ExperienceOutcome 经权限确认记录 `helpful` 或 `harmful` 与具体证据；它仅追加结果历史，绝不自动改变生命周期 `status` 或 `verified_at`。
+  ExperienceForget 淘汰（须用户确认）。存储于
   `~/.config/bingo/experience/<project-key>/entries/`（用户级、不进项目仓库），
   项目键取 git remote URL（归一化）→ git 根 → 规范化绝对路径，跨目录/机器稳定。
 - **子代理**：Agent 派生的实例有名字（`name` 参数，缺省取定义名/agent，重名
   自动 -2/-3），transcript 显示为 `◉ 名字 · 任务`；完成后历史保留，主 agent 可
-  SendMessage 续话（忙碌排队、空闲唤醒）、AgentControl list/stop/delete 管理。
+  SendMessage 续话、AgentControl list/messages/stop/delete 管理。
+  **消息机制**：SendMessage 返回 `message_id` 且只入队，投递发生在回合边界——同一回合发给同一实例的
+  多条消息合并成一个 prompt 一次性送达，而不是一条一轮。排队不等于回执：
+  `AgentControl(action=messages, agent=…)` 逐条报告已送达（附落在第几轮）、仍排队（附等待时长）、
+  或因实例停止而丢弃。stop/delete 会清空信箱并报告有多少条未送达指令随之丢弃；
+  运行链失败时消息留在信箱，下一个回合边界重投。
+  **给子代理传图**：在 Agent prompt 或 SendMessage 文本里复述 `#[image N]` 占位即可——附件表属于会话，
+  子代理收到的是真图片（消息排队时图片一同携带）。这条路也能从**不收图的会话往外走**：当前端点不接受图片时，
+  把子代理 fork 到支持图片的 provider（`Agent(provider: …, model: …)`，跨 provider 必须显式给 model）并复述占位，
+  解析不受端点能力影响，子代理看得到真图并回报结论。占位符到达而图片不在时会说明是哪种情况
+  （端点不收图——并列出可用 provider——还是恢复会话导致附件已不在），而不是让模型去找一个从未落盘的文件。
   **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`（同名项目层
-  优先）；frontmatter `name/description/model/provider/thinking`，正文 = 子代理
+  优先）；frontmatter `name/description/model/provider/thinking/inherit_system`，正文 = 子代理
   system prompt；Agent 工具的 `agent` 参数引用。
   **逐实例模型/思考**：Agent 工具的 `model`/`provider`/`thinking` 参数可给单个
   子代理指定模型、provider（settings 的 providers 段，跨端点/跨 key）与思考级别

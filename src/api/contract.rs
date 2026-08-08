@@ -140,7 +140,9 @@ pub struct Capabilities {
 impl Default for Capabilities {
     fn default() -> Self {
         Self {
-            supports_images: false,
+            // The Anthropic Messages API and the OpenAI Responses API both carry image blocks;
+            // an endpoint that cannot is the exception and declares itself so in config.
+            supports_images: true,
             supports_thinking: true,
             supports_count_tokens: true,
             supports_prompt_caching: true,
