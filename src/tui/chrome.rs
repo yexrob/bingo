@@ -408,6 +408,20 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     // Bottom entity area (agent instances + channels; ctrl+g focuses the selector).
     children.push(El::Lines(chat.entity_rows(width)));
 
+    // Pinned panels (login flows, long-operation progress): persistent until
+    // the owning flow unpins them — the one place a device code can wait out
+    // its 15 minutes without a TTL eating it.
+    for (_, lines) in &chat.pinned_panels {
+        for (i, line) in lines.iter().enumerate() {
+            let style = if i == 0 {
+                SegStyle::fg(theme.claude)
+            } else {
+                SegStyle::fg(theme.text)
+            };
+            children.push(El::Line(Line::styled(format!("  {line}"), style)));
+        }
+    }
+
     let mut suggestion_area = Some(suggestions(chat, width));
     if fullscreen && let Some(s) = suggestion_area.take() {
         children.push(s);

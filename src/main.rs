@@ -187,6 +187,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Startup notes for the TUI: everything printed to stderr before the
+    // alternate screen opens is wiped by it — the fullscreen (default) host
+    // never showed these. They still go to stderr for headless/log capture.
+    let mut startup_notes: Vec<String> = Vec::new();
     let (transcript, initial_messages): (Option<Transcript>, Vec<Message>) = if cli.continue_ {
         match latest_transcript(&home)? {
             Some(t) => {
@@ -200,6 +204,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         eprintln!(
                             "[bingo] warning: cannot create transcript (history will not persist): {e}"
                         );
+                        startup_notes.push(format!("⚠ 无法创建 transcript（历史不会持久化）：{e}"));
                     }
                     (None, Vec::new())
                 }
@@ -213,6 +218,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!(
                         "[bingo] warning: cannot create transcript (history will not persist): {e}"
                     );
+                    startup_notes.push(format!("⚠ 无法创建 transcript（历史不会持久化）：{e}"));
                 }
                 (None, Vec::new())
             }
@@ -248,7 +254,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(()) => {
                 let _ = runtime.provider_tx.send(name.to_string());
             }
-            Err(e) => eprintln!("[bingo] warning: provider \"{name}\" 已失效，回落 default: {e}"),
+            Err(e) => {
+                eprintln!("[bingo] warning: provider \"{name}\" 已失效，回落 default: {e}");
+                // The single most consequential silent fallback: it changes
+                // WHO the session talks to.
+                startup_notes.push(format!(
+                    "⚠ settings 里的 provider \"{name}\" 已失效，已回落 default：{e}"
+                ));
+            }
         }
     }
     let channel_limits = crate::channels::ChannelLimits::from_settings(&settings);
@@ -355,7 +368,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             extract_memory(&session, &outcome.messages, &home, &project_dir).await;
         } else {
             drop(initial_messages); // in interactive mode, --continue history is reused by later turns
-            tui::run_tui_session(session.clone(), expand_rx, fullscreen).await?;
+            tui::run_tui_session(session.clone(), expand_rx, fullscreen, startup_notes).await?;
         }
         Ok::<(), Box<dyn std::error::Error>>(())
     }

@@ -118,6 +118,21 @@ pub enum UiEvent {
     Warning(String),
     /// Async slash-command result (/compact /status /context): rendered after the messages.
     SlashOutput(String),
+    /// Slash error/usage output (async producers): error tier — 8s floor +
+    /// clear on next input.
+    SlashError(String),
+    /// Informational slash output (async producers): persists until the next
+    /// input or Esc.
+    SlashInfo(String),
+    /// Pin/replace a persistent panel (login flows, long operations): shown
+    /// above the prompt until `Unpin` with the same id.
+    PinPanel {
+        id: String,
+        lines: Vec<String>,
+    },
+    Unpin {
+        id: String,
+    },
     /// Turn-level error (structured): `code` is a stable error code (SCREAMING_SNAKE, mapped
     /// through the unified exit of `crate::error::map_error`), `msg` is human-readable text,
     /// `level` is the presentation level (the renderer branches by level: page/field-level →

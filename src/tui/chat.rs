@@ -941,6 +941,13 @@ pub struct Chat {
     pub slash_at: Option<std::time::Instant>,
     /// Error/usage slash rows (G12/G13): longer TTL, clear on the next input, error color.
     pub slash_error_lines: Vec<String>,
+    /// Informational output the user asked for (/help /status lists): stays
+    /// until the next input or Esc — the old 2s TTL burned 18 lines of /help
+    /// before anyone could read them.
+    pub slash_info_lines: Vec<String>,
+    /// Pinned panels (id → lines): persistent until their flow unpins them.
+    /// OAuth device codes (valid 15 minutes) used to display for 2 seconds.
+    pub pinned_panels: Vec<(String, Vec<String>)>,
     /// When the last error batch was pushed (longer TTL expiry base).
     pub slash_error_at: Option<std::time::Instant>,
     /// `/zzz` no-match flag (G9): the dropdown is empty but the input is a bare
@@ -1175,6 +1182,8 @@ impl Chat {
             slash_lines: Vec::new(),
             slash_at: None,
             slash_error_lines: Vec::new(),
+            slash_info_lines: Vec::new(),
+            pinned_panels: Vec::new(),
             slash_error_at: None,
             slash_no_match: false,
             exit: false,
@@ -1766,6 +1775,18 @@ impl Chat {
             UiEvent::SlashOutput(message) => {
                 self.push_slash_output(message);
             }
+            UiEvent::SlashError(message) => {
+                self.push_slash_error(message);
+            }
+            UiEvent::SlashInfo(message) => {
+                self.push_slash_info(message);
+            }
+            UiEvent::PinPanel { id, lines } => {
+                self.pin_panel(&id, lines);
+            }
+            UiEvent::Unpin { id } => {
+                self.unpin_panel(&id);
+            }
             UiEvent::Error {
                 code,
                 msg,
@@ -2262,6 +2283,38 @@ impl Chat {
         self.dirty = true;
     }
 
+    /// Informational output tier: persists until the next input or Esc (no
+    /// TTL) — for content the user explicitly asked to read.
+    fn push_slash_info(&mut self, text: String) {
+        for line in text.lines() {
+            self.slash_info_lines.push(line.to_string());
+        }
+        self.dirty = true;
+    }
+
+    /// Startup note (invalid provider fallback etc.): info tier — persists
+    /// until the first input, unlike stderr which the alt screen wipes.
+    pub fn push_startup_note(&mut self, note: String) {
+        self.push_slash_info(note);
+    }
+
+    /// Pin (or replace) a persistent panel: shown above the prompt until the
+    /// owning flow unpins it. For anything that must outlive a TTL — device
+    /// codes, long-operation progress.
+    pub fn pin_panel(&mut self, id: &str, lines: Vec<String>) {
+        if let Some(entry) = self.pinned_panels.iter_mut().find(|(pid, _)| pid == id) {
+            entry.1 = lines;
+        } else {
+            self.pinned_panels.push((id.to_string(), lines));
+        }
+        self.dirty = true;
+    }
+
+    pub fn unpin_panel(&mut self, id: &str) {
+        self.pinned_panels.retain(|(pid, _)| pid != id);
+        self.dirty = true;
+    }
+
     /// Clears the slash dropdown and its no-match flag together (single lifecycle).
     fn clear_slash_suggestions(&mut self) {
         self.slash_suggestions.clear();
@@ -2324,7 +2377,7 @@ impl Chat {
     }
 
     fn slash_help(&mut self) {
-        self.push_slash_output(crate::tui::slash::help_lines(SLASH_COMMANDS).join("\n"));
+        self.push_slash_info(crate::tui::slash::help_lines(SLASH_COMMANDS).join("\n"));
     }
 
     fn slash_clear(&mut self) {
@@ -2764,7 +2817,7 @@ impl Chat {
 
     fn slash_rename(&mut self, arg: &str) {
         let Some(t) = self.session.runtime.transcript.borrow().clone() else {
-            self.push_slash_output("当前会话无 transcript，无法重命名。".to_string());
+            self.push_slash_error("当前会话无 transcript，无法重命名。".to_string());
             return;
         };
         match t.rename(arg) {
@@ -2773,7 +2826,7 @@ impl Chat {
                 let _ = self.session.runtime.transcript_tx.send(Some(new_t));
                 self.push_slash_output(format!("✓ 会话已重命名: {name}"));
             }
-            Err(e) => self.push_slash_output(format!("重命名失败: {e}")),
+            Err(e) => self.push_slash_error(format!("重命名失败: {e}")),
         }
     }
 
@@ -2911,7 +2964,7 @@ impl Chat {
         let messages = match transcript.load_messages() {
             Ok(m) => m,
             Err(e) => {
-                self.push_slash_output(format!("读取会话失败: {e}"));
+                self.push_slash_error(format!("读取会话失败: {e}"));
                 return;
             }
         };
@@ -2920,7 +2973,7 @@ impl Chat {
         let doc = match crate::share::ShareStore::load_or_create(&share_path) {
             Ok(store) => store.snapshot(),
             Err(e) => {
-                self.push_slash_output(format!("无法读取 share 文档（{e}）；仅导出对话视图。"));
+                self.push_slash_error(format!("无法读取 share 文档（{e}）；仅导出对话视图。"));
                 crate::share::ShareDoc::new(stem.clone())
             }
         };
@@ -2937,7 +2990,7 @@ impl Chat {
         if !public {
             let overwritten = out.exists();
             if let Err(e) = crate::share::write_html_atomic(&out, &html) {
-                self.push_slash_output(format!("写入失败: {e}"));
+                self.push_slash_error(format!("写入失败: {e}"));
                 return;
             }
             let mut lines = vec![format!(
@@ -2955,7 +3008,7 @@ impl Chat {
                 "注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。"
                     .to_string(),
             );
-            self.push_slash_output(lines.join("\n"));
+            self.push_slash_info(lines.join("\n"));
             return;
         }
 
@@ -2970,11 +3023,20 @@ impl Chat {
             .unwrap_or_else(|| crate::share::DEFAULT_SHARE_BASE.to_string());
         let id = crate::share::share_id(&stem);
         let events = self.events.clone();
-        self.push_slash_output(
-            "⚠ 即将公开发布：任何人可公开访问完整对话与工具输出，其中可能含敏感信息。\n⏳ 正在发布分享页…"
-                .to_string(),
+        self.pin_panel(
+            "share",
+            vec![
+                "⚠ 即将公开发布：任何人可公开访问完整对话与工具输出，其中可能含敏感信息。"
+                    .to_string(),
+                "⏳ 正在发布分享页…".to_string(),
+            ],
         );
         tokio::spawn(async move {
+            let unpin = || {
+                let _ = events.send(UiEvent::Unpin {
+                    id: "share".to_string(),
+                });
+            };
             match crate::share::upload_share(&base, &id, &html).await {
                 Ok(url) => {
                     let mut lines = vec![format!("✓ 已发布: {url}")];
@@ -2984,7 +3046,9 @@ impl Chat {
                             Err(e) => lines.push(format!("无法打开浏览器: {e}")),
                         }
                     }
-                    let _ = events.send(UiEvent::SlashOutput(lines.join("\n")));
+                    unpin();
+                    // The URL must survive long enough to copy — info tier.
+                    let _ = events.send(UiEvent::SlashInfo(lines.join("\n")));
                 }
                 Err(e) => {
                     // 上传失败回退本地文件 + 提示（与 bingo share 子命令一致）。
@@ -3005,7 +3069,8 @@ impl Chat {
                         "注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。"
                             .to_string(),
                     );
-                    let _ = events.send(UiEvent::SlashOutput(lines.join("\n")));
+                    unpin();
+                    let _ = events.send(UiEvent::SlashError(lines.join("\n")));
                 }
             }
         });
@@ -3014,21 +3079,30 @@ impl Chat {
     fn slash_compact(&mut self) {
         let session = self.session.clone();
         let events = self.events.clone();
-        self.push_slash_output("⏳ 正在压缩上下文…".to_string());
+        // Long operation (a full model call): pinned until the flow resolves —
+        // a 2s hint left the rest of the wait silent.
+        self.pin_panel("compact", vec!["⏳ 正在压缩上下文…".to_string()]);
         tokio::spawn(async move {
+            let unpin = || {
+                let _ = events.send(UiEvent::Unpin {
+                    id: "compact".to_string(),
+                });
+            };
             let transcript = session.runtime.transcript.borrow().clone();
             let mut messages = match &transcript {
                 Some(t) => t.load_messages().unwrap_or_default(),
                 None => Vec::new(),
             };
             if messages.len() <= 8 {
+                unpin();
                 let _ = events.send(UiEvent::SlashOutput("对话太短，无需压缩。".to_string()));
                 return;
             }
             let old_len = messages.len();
             let compacted = crate::compact::maybe_compact(&session, &mut messages, u64::MAX).await;
             if !compacted {
-                let _ = events.send(UiEvent::SlashOutput(
+                unpin();
+                let _ = events.send(UiEvent::SlashError(
                     "压缩失败（模型调用异常）。".to_string(),
                 ));
                 return;
@@ -3049,7 +3123,8 @@ impl Chat {
             if let Some(t) = transcript {
                 let _ = t.replace_messages(&messages);
             }
-            let _ = events.send(UiEvent::SlashOutput(format!(
+            unpin();
+            let _ = events.send(UiEvent::SlashInfo(format!(
                 "✓ 已压缩 {old_len} 条消息 → 摘要 + 最近 8 条。\n摘要: {summary}"
             )));
         });
@@ -3059,8 +3134,13 @@ impl Chat {
     fn slash_stats_async(&mut self, format: impl Fn(usize, u64) -> String + Send + 'static) {
         let session = self.session.clone();
         let events = self.events.clone();
-        self.push_slash_output("⏳ 正在统计…".to_string());
+        self.pin_panel("stats", vec!["⏳ 正在统计…".to_string()]);
         tokio::spawn(async move {
+            let unpin = || {
+                let _ = events.send(UiEvent::Unpin {
+                    id: "stats".to_string(),
+                });
+            };
             let model = session.runtime.model.borrow().clone();
             let transcript = session.runtime.transcript.borrow().clone();
             let msgs = transcript
@@ -3084,7 +3164,8 @@ impl Chat {
                     0
                 }
             };
-            let _ = events.send(UiEvent::SlashOutput(format(msgs.len(), tokens)));
+            unpin();
+            let _ = events.send(UiEvent::SlashInfo(format(msgs.len(), tokens)));
         });
     }
 
@@ -3151,15 +3232,15 @@ impl Chat {
                 }
             }
             lines.push("用法: /permissions [allow|deny|ask] [规则，如 Skill(review:*)]".into());
-            self.push_slash_output(lines.join("\n"));
+            self.push_slash_info(lines.join("\n"));
             return;
         }
         let Some((kind, rule)) = arg.split_once(char::is_whitespace) else {
-            self.push_slash_output("用法: /permissions [allow|deny|ask] [规则]".to_string());
+            self.push_slash_error("用法: /permissions [allow|deny|ask] [规则]".to_string());
             return;
         };
         if !["allow", "deny", "ask"].contains(&kind) || rule.is_empty() {
-            self.push_slash_output("用法: /permissions [allow|deny|ask] [规则]".to_string());
+            self.push_slash_error("用法: /permissions [allow|deny|ask] [规则]".to_string());
             return;
         }
         let mut rules = self
@@ -3209,12 +3290,18 @@ impl Chat {
         let parts: Vec<&str> = arg.split_whitespace().collect();
         match parts.first().copied() {
             None => {
-                self.push_slash_output("⏳ 正在检查 MCP 服务器…".to_string());
+                self.pin_panel("mcp", vec!["⏳ 正在检查 MCP 服务器…".to_string()]);
                 tokio::spawn(async move {
+                    let unpin = || {
+                        let _ = events.send(UiEvent::Unpin {
+                            id: "mcp".to_string(),
+                        });
+                    };
                     let mgr = session.runtime.mcp.lock().await;
                     let names = mgr.configured();
                     if names.is_empty() {
-                        let _ = events.send(UiEvent::SlashOutput(
+                        unpin();
+                        let _ = events.send(UiEvent::SlashInfo(
                             "未配置 MCP 服务器。\n在 .bingo/settings.json 或 \
                              ~/.config/bingo/settings.json 的 mcpServers 中添加。"
                                 .to_string(),
@@ -3238,7 +3325,8 @@ impl Chat {
                     lines.push(
                         "用法: /mcp enable|disable [name|all] · /mcp reconnect <name>".into(),
                     );
-                    let _ = events.send(UiEvent::SlashOutput(lines.join("\n")));
+                    unpin();
+                    let _ = events.send(UiEvent::SlashInfo(lines.join("\n")));
                 });
             }
             Some(action @ ("enable" | "disable")) => {
@@ -3258,7 +3346,7 @@ impl Chat {
                         Vec::new()
                     };
                     if targets.is_empty() {
-                        let _ = events.send(UiEvent::SlashOutput(format!(
+                        let _ = events.send(UiEvent::SlashError(format!(
                             "未找到 MCP 服务器 \"{target}\"。"
                         )));
                         return;
@@ -3281,21 +3369,28 @@ impl Chat {
             }
             Some("reconnect") => {
                 let Some(name) = parts.get(1).copied() else {
-                    self.push_slash_output("用法: /mcp reconnect <服务器名>".to_string());
+                    self.push_slash_error("用法: /mcp reconnect <服务器名>".to_string());
                     return;
                 };
                 let name = name.to_string();
-                self.push_slash_output(format!("⏳ 正在重连 {name}…"));
+                self.pin_panel("mcp", vec![format!("⏳ 正在重连 {name}…")]);
                 tokio::spawn(async move {
+                    let unpin = || {
+                        let _ = events.send(UiEvent::Unpin {
+                            id: "mcp".to_string(),
+                        });
+                    };
                     let mut mgr = session.runtime.mcp.lock().await;
                     if !mgr.configured().contains(&name) {
-                        let _ = events.send(UiEvent::SlashOutput(format!(
+                        unpin();
+                        let _ = events.send(UiEvent::SlashError(format!(
                             "未找到 MCP 服务器 \"{name}\"。"
                         )));
                         return;
                     }
                     if mgr.is_disabled(&name) {
-                        let _ = events.send(UiEvent::SlashOutput(format!(
+                        unpin();
+                        let _ = events.send(UiEvent::SlashError(format!(
                             "{name} 已禁用，先 /mcp enable {name} 再重连。"
                         )));
                         return;
@@ -3306,17 +3401,19 @@ impl Chat {
                                 McpStatus::Connected { tool_count } => tool_count,
                                 _ => 0,
                             };
+                            unpin();
                             let _ = events.send(UiEvent::SlashOutput(format!(
                                 "✓ {name} 已重连 · {count} tools"
                             )));
                         }
                         Err(e) => {
-                            let _ = events.send(UiEvent::SlashOutput(format!("✗ {e}")));
+                            unpin();
+                            let _ = events.send(UiEvent::SlashError(format!("✗ {e}")));
                         }
                     }
                 });
             }
-            _ => self.push_slash_output(
+            _ => self.push_slash_error(
                 "用法: /mcp [enable|disable [name|all]] · /mcp reconnect <name>".to_string(),
             ),
         }
@@ -3579,7 +3676,7 @@ impl Chat {
         let preset = crate::api::providers::presets::preset(name);
         let known = session.settings.providers.contains_key(*name) || preset.is_some();
         if !known {
-            self.push_slash_output(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
+            self.push_slash_error(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
             return;
         }
         let oauth_kind = session
@@ -3613,7 +3710,7 @@ impl Chat {
                             )));
                         }
                         Err(e) => {
-                            let _ = events.send(UiEvent::SlashOutput(format!("✗ 保存失败: {e}")));
+                            let _ = events.send(UiEvent::SlashError(format!("✗ 保存失败: {e}")));
                         }
                     }
                     return;
@@ -3635,7 +3732,7 @@ impl Chat {
                         )));
                     }
                     Err(e) => {
-                        let _ = events.send(UiEvent::SlashOutput(format!("✗ 保存失败: {e}")));
+                        let _ = events.send(UiEvent::SlashError(format!("✗ 保存失败: {e}")));
                     }
                 }
             });
@@ -3644,13 +3741,13 @@ impl Chat {
 
         // OAuth gate: codex only in v1; apiKey presets guide the key paste.
         let Some(oauth_kind) = oauth_kind else {
-            self.push_slash_output(format!(
+            self.push_slash_info(format!(
                 "provider \"{name}\" 需要 API key（订阅 key）：\n  1. 到 opencode.ai/auth 获取\n  2. /provider login {name} --manual <key>"
             ));
             return;
         };
         if oauth_kind != "codex" {
-            self.push_slash_output(format!(
+            self.push_slash_error(format!(
                 "不支持的 oauth.kind \"{oauth_kind}\"（v1 仅 codex）"
             ));
             return;
@@ -3663,14 +3760,25 @@ impl Chat {
                 let flow = crate::api::auth::DeviceFlow::new(&http, &config);
                 match flow.start().await {
                     Ok((prompt, device_auth_id, interval)) => {
-                        let _ = events.send(UiEvent::SlashOutput(format!(
-                            "登录 {name}（设备授权）：\n  1. 打开 {}\n  2. 输入代码 {}（15 分钟内有效）\n⏳ 等待授权…",
-                            prompt.verification_url, prompt.user_code
-                        )));
-                        match flow
+                        // Pinned: the code is valid for 15 minutes — it must
+                        // stay on screen for all of them (the 2s TTL burned
+                        // it before anyone could type it).
+                        let _ = events.send(UiEvent::PinPanel {
+                            id: "login".to_string(),
+                            lines: vec![
+                                format!("登录 {name}（设备授权）"),
+                                format!("  1. 打开 {}", prompt.verification_url),
+                                format!("  2. 输入代码 {}（15 分钟内有效）", prompt.user_code),
+                                "⏳ 等待授权…（Esc 不会取消；完成后此面板自动消失）".to_string(),
+                            ],
+                        });
+                        let outcome = flow
                             .poll(&device_auth_id, &prompt.user_code, interval)
-                            .await
-                        {
+                            .await;
+                        let _ = events.send(UiEvent::Unpin {
+                            id: "login".to_string(),
+                        });
+                        match outcome {
                             Ok(tokens) => {
                                 let tp = shared_tp.unwrap_or_else(|| {
                                     std::sync::Arc::new(crate::api::auth::TokenProvider::new(
@@ -3695,7 +3803,7 @@ impl Chat {
                         }
                     }
                     Err(e) => {
-                        let _ = events.send(UiEvent::SlashOutput(format!("✗ 登录失败: {e}")));
+                        let _ = events.send(UiEvent::SlashError(format!("✗ 登录失败: {e}")));
                     }
                 }
             });
@@ -3708,11 +3816,23 @@ impl Chat {
             let flow = crate::api::auth::LoopbackPkce::new(&http, &config);
             match flow.authorize_url().await {
                 Ok((url, _redirect, _verifier, handle)) => {
-                    let _ = events.send(UiEvent::SlashOutput(format!(
-                        "登录 {name}：请在浏览器中完成授权（已尝试打开）…"
-                    )));
+                    // Pinned, with the URL itself: on SSH/no-GUI hosts the
+                    // browser never opens and this line is the only way
+                    // through (it used to say "已尝试打开" and show nothing).
+                    let _ = events.send(UiEvent::PinPanel {
+                        id: "login".to_string(),
+                        lines: vec![
+                            format!("登录 {name}：请在浏览器中完成授权（已尝试自动打开）"),
+                            format!("  {url}"),
+                            format!("  打不开浏览器？/provider login {name} --device-auth"),
+                        ],
+                    });
                     let _ = crate::share::open_in_browser(&url);
-                    match handle.await {
+                    let outcome = handle.await;
+                    let _ = events.send(UiEvent::Unpin {
+                        id: "login".to_string(),
+                    });
+                    match outcome {
                         Ok(Ok(tokens)) => {
                             let tp = shared_tp.unwrap_or_else(|| {
                                 std::sync::Arc::new(crate::api::auth::TokenProvider::new(
@@ -3731,15 +3851,15 @@ impl Chat {
                             }
                         }
                         Ok(Err(e)) => {
-                            let _ = events.send(UiEvent::SlashOutput(format!("✗ 登录失败: {e}")));
+                            let _ = events.send(UiEvent::SlashError(format!("✗ 登录失败: {e}")));
                         }
                         Err(e) => {
-                            let _ = events.send(UiEvent::SlashOutput(format!("✗ 登录中断: {e}")));
+                            let _ = events.send(UiEvent::SlashError(format!("✗ 登录中断: {e}")));
                         }
                     }
                 }
                 Err(e) => {
-                    let _ = events.send(UiEvent::SlashOutput(format!("✗ 登录失败: {e}")));
+                    let _ = events.send(UiEvent::SlashError(format!("✗ 登录失败: {e}")));
                 }
             }
         });
@@ -3748,14 +3868,14 @@ impl Chat {
     fn slash_provider_logout(&mut self, arg: &str) {
         let name = arg.trim();
         if name.is_empty() {
-            self.push_slash_output("用法: /provider logout <名称>".to_string());
+            self.push_slash_error("用法: /provider logout <名称>".to_string());
             return;
         }
         let session = self.session.clone();
         let preset = crate::api::providers::presets::preset(name);
         let known = session.settings.providers.contains_key(name) || preset.is_some();
         if !known {
-            self.push_slash_output(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
+            self.push_slash_error(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
             return;
         }
         let oauth_kind = session
@@ -3778,7 +3898,7 @@ impl Chat {
                         )));
                     }
                     Err(e) => {
-                        let _ = events.send(UiEvent::SlashOutput(format!("✗ 退出失败: {e}")));
+                        let _ = events.send(UiEvent::SlashError(format!("✗ 退出失败: {e}")));
                     }
                 }
                 return;
@@ -3800,7 +3920,7 @@ impl Chat {
                     )));
                 }
                 Err(e) => {
-                    let _ = events.send(UiEvent::SlashOutput(format!("✗ 退出失败: {e}")));
+                    let _ = events.send(UiEvent::SlashError(format!("✗ 退出失败: {e}")));
                 }
             }
         });
@@ -3945,7 +4065,7 @@ impl Chat {
             return;
         }
         let listing = crate::skills::format_listing(&skills, crate::skills::DEFAULT_CHAR_BUDGET);
-        self.push_slash_output(format!("可用技能：\n{listing}"));
+        self.push_slash_info(format!("可用技能：\n{listing}"));
     }
 
     fn slash_tasks(&mut self) {
@@ -3960,13 +4080,13 @@ impl Chat {
             return;
         }
         let text: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
-        self.push_slash_output(text.join("\n"));
+        self.push_slash_info(text.join("\n"));
     }
 
     /// `/team <subcommand>` (D31 project-level formation): dispatched to team_cmd, multi-line output queued at once.
     fn slash_team(&mut self, arg: &str) {
         let lines = crate::team_cmd::run(&self.session, &std::path::PathBuf::from(&self.cwd), arg);
-        self.push_slash_output(lines.join("\n"));
+        self.push_slash_info(lines.join("\n"));
     }
 
     /// Rebuilds the slash dropdown from the registry and currently loaded skills.
@@ -4643,6 +4763,11 @@ impl Chat {
             self.clear_slash_suggestions();
             return true;
         }
+        if !self.slash_info_lines.is_empty() {
+            self.slash_info_lines.clear();
+            self.dirty = true;
+            return true;
+        }
         if self.help_visible {
             self.help_visible = false;
             return true;
@@ -4859,6 +4984,11 @@ impl Chat {
         if !self.slash_error_lines.is_empty() {
             self.slash_error_lines.clear();
             self.slash_error_at = None;
+            self.dirty = true;
+        }
+        // Info output follows the same rule: reading time until the user acts.
+        if !self.slash_info_lines.is_empty() {
+            self.slash_info_lines.clear();
             self.dirty = true;
         }
     }
@@ -5687,6 +5817,16 @@ impl Chat {
                     .collect(),
             )));
         }
+        // Informational output (/help /status …): persists until the next
+        // input/Esc; never settles into scrollback.
+        if !self.slash_info_lines.is_empty() {
+            blocks.push(Block::transient(El::Lines(
+                self.slash_info_lines
+                    .iter()
+                    .map(|line| Line::styled(one_line(line, width), SegStyle::fg(theme.text)))
+                    .collect(),
+            )));
+        }
 
         self.doc = crate::tui::statics::layout(blocks);
         &self.doc
@@ -6269,11 +6409,12 @@ mod tests {
         test_chat_home(std::env::temp_dir())
     }
 
-    /// Joined text of both slash output buckets (success hints + error/usage rows).
+    /// Joined text of every slash output bucket (confirm + error + info).
     fn all_slash_text(chat: &Chat) -> String {
         chat.slash_lines
             .iter()
             .chain(&chat.slash_error_lines)
+            .chain(&chat.slash_info_lines)
             .cloned()
             .collect::<Vec<_>>()
             .join("\n")
@@ -6781,7 +6922,7 @@ mod tests {
             .await
             .unwrap();
         chat.slash_tasks();
-        let joined = chat.slash_lines.join("\n");
+        let joined = chat.slash_info_lines.join("\n");
         assert!(joined.contains("☒ t1"), "{joined:?}");
         assert!(!joined.contains("当前没有后台任务"), "{joined:?}");
     }
@@ -7213,7 +7354,7 @@ mod tests {
         chat.input = "/help".to_string();
         chat.submit();
         assert!(!chat.busy, "slash 不启动回合");
-        let joined = chat.slash_lines.join("\n");
+        let joined = chat.slash_info_lines.join("\n");
         for cmd in [
             "/clear", "/model", "/resume", "/rename", "/compact", "/exit",
         ] {
@@ -7513,7 +7654,7 @@ mod tests {
             .clone()
             .unwrap()
             .name();
-        let joined = chat.slash_lines.join("\n");
+        let joined = chat.slash_info_lines.join("\n");
         assert!(joined.contains("已导出"), "{joined}");
         assert!(joined.contains(&stem), "路径含 stem: {joined}");
         assert!(joined.contains("注意：此文件包含完整对话"), "隐私警告");
@@ -7527,9 +7668,9 @@ mod tests {
         chat.input = "/share".to_string();
         chat.submit();
         assert!(
-            chat.slash_lines.join("\n").contains("覆盖"),
+            chat.slash_info_lines.join("\n").contains("覆盖"),
             "覆盖提示: {}",
-            chat.slash_lines.join("\n")
+            chat.slash_info_lines.join("\n")
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -7608,7 +7749,12 @@ mod tests {
         let _ = chat.session.runtime.transcript_tx.send(Some(t));
         chat.input = "/share --public".to_string();
         chat.submit();
-        let preflight = chat.slash_lines.join("\n");
+        let preflight = chat
+            .pinned_panels
+            .iter()
+            .flat_map(|(_, lines)| lines.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             preflight.contains("任何人可公开访问"),
             "上传前公开范围须可见: {preflight}"
@@ -7625,13 +7771,13 @@ mod tests {
         assert!(handle.is_finished(), "mock 服务器未收到上传请求");
         let (request_line, body) = handle.join().unwrap();
         chat.drain_events();
-        let joined = chat.slash_lines.join("\n");
+        let joined = chat.slash_info_lines.join("\n");
         assert!(joined.contains("已发布"), "{joined}");
         assert!(
             joined.contains(&format!("http://{addr}/share/u/")),
             "{joined}"
         );
-        assert!(joined.contains("任何人可公开访问"), "{joined}");
+        assert!(chat.pinned_panels.is_empty(), "上传完成后进度面板解除");
         assert!(request_line.starts_with("POST /share/u/"), "{request_line}");
         assert!(body.contains("hi"), "上传 body 为完整 HTML");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -7649,7 +7795,7 @@ mod tests {
         let _ = chat.session.runtime.transcript_tx.send(Some(t));
         chat.input = "/share --local".to_string();
         chat.submit();
-        let joined = chat.slash_lines.join("\n");
+        let joined = chat.slash_info_lines.join("\n");
         assert!(joined.contains("已导出"), "{joined}");
         assert!(!joined.contains("已发布"), "本地模式不上传");
         let stem = chat
@@ -7673,7 +7819,7 @@ mod tests {
         chat.cwd = tmp.display().to_string();
         chat.input = "/permissions".to_string();
         chat.submit();
-        assert!(chat.slash_lines.join("\n").contains("allow: （无）"));
+        assert!(chat.slash_info_lines.join("\n").contains("allow: （无）"));
 
         chat.input = "/permissions allow Skill(review:*)".to_string();
         chat.submit();
@@ -7707,11 +7853,11 @@ mod tests {
         chat.input = "/skills".to_string();
         chat.submit();
         assert!(
-            chat.slash_lines
+            chat.slash_info_lines
                 .join("\n")
                 .contains("- pdf: Converts documents to PDF"),
             "{}",
-            chat.slash_lines.join("\n")
+            chat.slash_info_lines.join("\n")
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -7744,7 +7890,7 @@ mod tests {
             .unwrap();
         chat.input = "/tasks".to_string();
         chat.submit();
-        let listed = chat.slash_lines.join("\n");
+        let listed = chat.slash_info_lines.join("\n");
         let _ = store.delete(&id).await;
         assert!(listed.contains("do things"), "{listed}");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -7916,7 +8062,7 @@ mod tests {
         let mut chat = test_chat_home(tmp.join("home"));
         chat.input = "/provider login codex --device-auth".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
+        let out = all_slash_text(&chat);
         assert!(!out.contains("未找到 provider"), "{out}");
         assert!(
             !out.contains("需要 API key"),
@@ -7926,7 +8072,7 @@ mod tests {
         let mut chat = test_chat_home(tmp.join("home2"));
         chat.input = "/provider login opencode-go".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
+        let out = all_slash_text(&chat);
         assert!(
             out.contains("需要 API key"),
             "apiKey 型 preset 引导粘贴 key: {out}"
@@ -8240,12 +8386,18 @@ mod tests {
     // ------------------------------------------------------------------
 
     async fn slash_mcp_wait(chat: &mut Chat) -> String {
+        // Results land in whichever tier fits (confirm/info/error); only NEW
+        // lines count — info/error persist across steps by design.
         let start = chat.slash_lines.len();
+        let start_info = chat.slash_info_lines.len();
+        let start_err = chat.slash_error_lines.len();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             chat.drain_all();
-            let output: Vec<String> = chat.slash_lines[start..]
+            let output: Vec<String> = chat.slash_lines[start.min(chat.slash_lines.len())..]
                 .iter()
+                .chain(&chat.slash_info_lines[start_info.min(chat.slash_info_lines.len())..])
+                .chain(&chat.slash_error_lines[start_err.min(chat.slash_error_lines.len())..])
                 .filter(|l| !l.starts_with('⏳'))
                 .map(|l| l.to_string())
                 .collect();
@@ -8442,7 +8594,7 @@ mod tests {
     fn slash_help_lists_every_command_with_hint() {
         let mut chat = test_chat();
         chat.run_slash("help");
-        let lines: Vec<&str> = chat.slash_lines.iter().map(String::as_str).collect();
+        let lines: Vec<&str> = chat.slash_info_lines.iter().map(String::as_str).collect();
         assert_eq!(lines.len(), SLASH_COMMANDS.len() + 1, "标题 + 每命令一行");
         assert_eq!(lines[0], "可用命令：");
         for ((name, hint, desc), line) in SLASH_COMMANDS.iter().zip(&lines[1..]) {
@@ -8572,7 +8724,9 @@ mod tests {
         );
         chat.submit();
         assert!(
-            chat.slash_lines.join("\n").contains("⏳"),
+            chat.pinned_panels
+                .iter()
+                .any(|(_, l)| l.join("").contains("⏳")),
             "status 已执行（异步统计提示）"
         );
         assert!(chat.slash_suggestions.is_empty(), "部分前缀执行后菜单关闭");
@@ -12077,6 +12231,55 @@ mod tests {
         );
         assert!(!joined.contains("出错了"), "页面级不整屏: {joined}");
     }
+    /// Info tier: /help output persists (no TTL) until the next input or Esc
+    /// — the old 2s TTL burned it before anyone could read.
+    #[test]
+    fn info_output_persists_until_input_or_escape() {
+        let mut chat = test_chat();
+        chat.input = "/help".to_string();
+        chat.submit();
+        assert!(!chat.slash_info_lines.is_empty(), "/help 落 info 桶");
+        chat.tick();
+        assert!(
+            !chat.slash_info_lines.is_empty(),
+            "tick 不清 info（无 TTL）"
+        );
+        // 打字即清（读完即行动）。
+        chat.on_key(KeyCode::Char('h'), KeyModifiers::empty());
+        assert!(chat.slash_info_lines.is_empty(), "输入清 info");
+
+        chat.input = "/help".to_string();
+        chat.submit();
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(chat.slash_info_lines.is_empty(), "Esc 清 info");
+    }
+
+    /// Pinned panels survive ticks and render in the chrome until unpinned.
+    #[test]
+    fn pinned_panel_lives_until_unpinned() {
+        let mut chat = test_chat();
+        chat.pin_panel(
+            "login",
+            vec![
+                "登录 codex（设备授权）".to_string(),
+                "  输入代码 ABCD-EFGH".to_string(),
+            ],
+        );
+        chat.tick();
+        assert_eq!(chat.pinned_panels.len(), 1, "tick 不清 pinned");
+        let rows = crate::tui::el::render(crate::tui::chrome::chrome(&chat, 80, false)).rows;
+        let joined: String = rows
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("ABCD-EFGH"), "面板可见: {joined}");
+        chat.handle(UiEvent::Unpin {
+            id: "login".to_string(),
+        });
+        assert!(chat.pinned_panels.is_empty(), "unpin 即消失");
+    }
+
     /// Batch-2 invariant: switching providers resolves the model atomically —
     /// last-used per provider wins, the provider default fills in, and
     /// switching back restores what you used there.

@@ -65,6 +65,7 @@ pub async fn run_tui_session(
     session: Arc<Session>,
     expand_rx: tokio::sync::watch::Receiver<bool>,
     fullscreen: bool,
+    startup_notes: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Query the terminal background colour once before raw mode, for the auto
     // theme resolution (the probe itself toggles raw mode temporarily and
@@ -108,6 +109,12 @@ pub async fn run_tui_session(
     // explaining why images stay `#[image]` placeholders.
     if let Some(warning) = image_probe.warning {
         chat.push_warning(warning);
+    }
+    // Startup notes (invalid provider fallback, transcript failures): stderr
+    // is wiped by the alternate screen, so they land in the info tier —
+    // visible until the first input.
+    for note in startup_notes {
+        chat.push_startup_note(note);
     }
 
     enable_raw_mode()?;
