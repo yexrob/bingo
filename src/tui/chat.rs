@@ -491,6 +491,19 @@ fn hint_for(name: &str, input: &serde_json::Value) -> String {
     }
 }
 
+/// Pure form of [`Chat::auth_error_hint`] (testable without a Session).
+fn auth_hint_for(oauth: bool, provider: &str, code: &str, msg: String) -> String {
+    match code {
+        "AUTH_REQUIRED" if oauth && !msg.contains("/provider login") => {
+            format!("{msg}（登录已过期？/provider login {provider} 重新登录）")
+        }
+        "PERMISSION_DENIED" if !msg.contains("/model") => {
+            format!("{msg}（当前订阅/权限无权使用该模型，/model 切换或检查 apiKey）")
+        }
+        _ => msg,
+    }
+}
+
 /// Collapse-group summary text: `Searched for 2 patterns, read 3 files`;
 /// uses the -ing form plus a trailing … while in progress.
 pub fn collapse_summary(g: &CollapseGroup, in_progress: bool) -> String {
@@ -2865,6 +2878,7 @@ impl Chat {
                     .provider_endpoint(&name)
                     .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
                 let mark = if name == current { "●" } else { " " };
+                let protocol = session.client.provider_protocol(&name).unwrap_or_default();
                 let auth = match session.client.auth_status(&name) {
                     Some(crate::api::contract::AuthStatus::ApiKey) => {
                         // key 脱敏：仅显示前 4 字符；短 key（≤4）不加省略号。
@@ -2878,11 +2892,11 @@ impl Chat {
                         format!("✓ {acc}")
                     }
                     Some(crate::api::contract::AuthStatus::OAuth { account: None }) => {
-                        "○ 未登录（/provider login）".to_string()
+                        format!("○ 未登录（/provider login {name}）")
                     }
                     None => "?".to_string(),
                 };
-                lines.push(format!("{mark} {name} @ {url}（{auth}）"));
+                lines.push(format!("{mark} {name} @ {url}（{auth} · {protocol}）"));
             }
             lines.push(
                 "用法: /provider <名称> · login <名称> [--device-auth|--manual <token>] · logout <名称>"
@@ -2902,7 +2916,15 @@ impl Chat {
                     &cwd,
                     &serde_json::json!({ "provider": name }),
                 );
-                self.push_slash_output(format!("✓ provider 已切换: {name}（{url}）"));
+                // OAuth provider 未登录：切换成功但首次请求会失败——提前引导。
+                let hint = match session.client.auth_status(&name) {
+                    Some(crate::api::contract::AuthStatus::OAuth { account: None }) => {
+                        format!("
+⚠ {name} 未登录：/provider login {name}")
+                    }
+                    _ => String::new(),
+                };
+                self.push_slash_output(format!("✓ provider 已切换: {name}（{url}）{hint}"));
             }
             Err(e) => self.push_slash_output(e),
         }
@@ -3395,9 +3417,10 @@ impl Chat {
                     Self::finish_turn(&events, &session, &outcome).await;
                 }
                 Err(e) => {
+                    let code = crate::error::map_error(&e);
                     let _ = events.send(UiEvent::Error {
-                        code: crate::error::map_error(&e),
-                        msg: e.to_string(),
+                        code,
+                        msg: Self::auth_error_hint(&session, code, e.to_string()),
                         // Turn-level error = long-turn failure → full-flow full-screen state (AC-53).
                         level: crate::error::ErrorLevel::Full,
                         context: crate::error::ErrorContext::LongTurn,
@@ -3405,6 +3428,21 @@ impl Chat {
                 }
             }
         });
+    }
+
+    /// Turn-level error message with auth guidance for the current provider:
+    /// `AUTH_REQUIRED` on an oauth-configured provider appends a re-login
+    /// hint (the raw API error body rarely tells the user what to do);
+    /// `PERMISSION_DENIED` points at the model/subscription (D33 §6.4).
+    fn auth_error_hint(session: &Session, code: &str, msg: String) -> String {
+        let provider = session.runtime.provider.borrow().clone();
+        let oauth = session
+            .settings
+            .providers
+            .get(&provider)
+            .and_then(|c| c.oauth.as_ref())
+            .is_some();
+        auth_hint_for(oauth, &provider, code, msg)
     }
 
     /// bash-mode turn (processBashCommand): `!` commands execute directly,
@@ -3442,9 +3480,10 @@ impl Chat {
                     Self::finish_turn(&events, &session, &outcome).await;
                 }
                 Err(e) => {
+                    let code = crate::error::map_error(&e);
                     let _ = events.send(UiEvent::Error {
-                        code: crate::error::map_error(&e),
-                        msg: e.to_string(),
+                        code,
+                        msg: Self::auth_error_hint(&session, code, e.to_string()),
                         // Turn-level error = long-turn failure → full-flow full-screen state (AC-53).
                         level: crate::error::ErrorLevel::Full,
                         context: crate::error::ErrorContext::LongTurn,
@@ -6436,8 +6475,75 @@ mod tests {
         chat.submit();
         let out = chat.slash_lines.join("\n");
         assert!(out.contains("default @ https://api.anthropic.com"), "{out}");
-        assert!(out.contains("（key main）"), "短 key 无省略号: {out}");
+        assert!(out.contains("（key main · anthropic）"), "短 key 无省略号 + 协议标记: {out}");
         assert!(!out.contains("main…"), "{out}");
+    }
+
+    /// P4：切换到未登录的 OAuth provider → 切换成功但带 login 引导；列表
+    /// 显示协议标记 + 未登录态 + apiBaseUrl 缺省→协议默认端点。
+    #[test]
+    fn slash_provider_switch_warns_on_oauth_not_logged_in() {
+        let mut chat = test_chat();
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        settings.providers.insert(
+            "codex".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: String::new(),
+                api_base_url: String::new(),
+                supports_images: None,
+                protocol: Some("openai".into()),
+                oauth: Some(crate::settings::OauthConfig {
+                    kind: "codex".into(),
+                    account: None,
+                }),
+            },
+        );
+        Arc::get_mut(&mut chat.session).unwrap().client =
+            crate::api::client::Client::from_settings(&settings).unwrap();
+        chat.input = "/provider codex".to_string();
+        chat.submit();
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("✓ provider 已切换: codex"), "{out}");
+        assert!(out.contains("未登录：/provider login codex"), "未登录引导: {out}");
+
+        chat.input = "/provider".to_string();
+        chat.submit();
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("codex @ https://api.openai.com"), "apiBaseUrl 缺省→协议默认: {out}");
+        assert!(out.contains("（○ 未登录（/provider login codex） · openai）"), "协议标记 + 未登录态: {out}");
+    }
+
+    /// P4：turn 级错误文案补 auth 引导——oauth provider 401 → login 引导（带名）；
+    /// 非 oauth 401 不加（apiKey 场景无 login 概念）；403 → 模型/订阅提示；
+    /// 已含引导/无关码原样透传。
+    #[test]
+    fn auth_error_hint_appends_login_guidance() {
+        let base = "API error: HTTP 401: invalid token".to_string();
+        let hinted = auth_hint_for(true, "codex", "AUTH_REQUIRED", base.clone());
+        assert!(hinted.contains("/provider login codex"), "oauth 401 引导带 provider 名: {hinted}");
+
+        // 非 oauth provider 的 401：不加 login 引导（apiKey 失效提示检查 key 即可）。
+        let api_key_msg = auth_hint_for(false, "deepseek", "AUTH_REQUIRED", base.clone());
+        assert_eq!(api_key_msg, base, "非 oauth 401 原样透传");
+
+        // 已含 login 引导的 AuthError（refresh 永久失败）不重复追加。
+        let already = "登录已失效（refresh_token_expired）：/provider login 重新登录".to_string();
+        assert_eq!(
+            auth_hint_for(true, "codex", "AUTH_REQUIRED", already.clone()),
+            already,
+            "已有引导不重复"
+        );
+
+        // 403 → 模型/订阅提示。
+        let denied = auth_hint_for(false, "deepseek", "PERMISSION_DENIED", "API error: HTTP 403: quota".into());
+        assert!(denied.contains("/model"), "403 引导 /model: {denied}");
+
+        // 无关错误码原样透传。
+        let rate = "API error: HTTP 429: rate limited".to_string();
+        assert_eq!(auth_hint_for(true, "codex", "RATE_LIMITED", rate.clone()), rate);
     }
 
     #[test]

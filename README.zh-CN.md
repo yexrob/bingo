@@ -174,7 +174,7 @@ WezTerm/Konsole 虽支持 graphics 协议但不支持占位符，tmux 下仍显�
 |---|---|---|
 | `apiKey` | string | API key（settings 优先于 `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`） |
 | `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
-| `providers` | object | 命名 provider：`{名: {protocol?, apiKey, apiBaseUrl?, supportsImages?}}`，`/provider <名>` 切换；`protocol` 为 `"anthropic"`（缺省）或 `"openai"`（Responses API，Bearer 认证；`apiBaseUrl` 缺省 `https://api.openai.com`） |
+| `providers` | object | 命名 provider：`{名: {protocol?, apiKey, apiBaseUrl?, supportsImages?, oauth?}}`，`/provider <名>` 切换；`protocol` 为 `"anthropic"`（缺省）或 `"openai"`（Responses API，Bearer 认证；`apiBaseUrl` 缺省 `https://api.openai.com`）；`oauth: {kind: "codex"}` 启用 OAuth 登录（`/provider login`，apiKey 优先） |
 | `model` | string | 默认模型（`/model` 选择写入）；优先级 `--model` > settings > 内置 `claude-sonnet-5` |
 | `thinkingLevel` | string | `off` 不发 thinking 参数（兼容 DeepSeek，缺省）；`low`/`medium`/`high`/`xhigh`/`max` 发自适应 thinking + 对应档位的 `output_config.effort` |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |

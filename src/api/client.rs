@@ -40,6 +40,8 @@ fn home_dir() -> std::path::PathBuf {
 struct EndpointInfo {
     api_key: String,
     base_url: String,
+    /// Wire protocol label ("anthropic" / "openai") — the /provider listing.
+    protocol: String,
 }
 
 #[derive(Clone)]
@@ -111,6 +113,7 @@ impl Client {
                         EndpointInfo {
                             api_key: cfg.api_key.clone(),
                             base_url,
+                            protocol: protocol.unwrap_or("anthropic").to_string(),
                         },
                     ),
                 ))
@@ -126,7 +129,11 @@ impl Client {
             base_url.clone(),
             settings.send_images.unwrap_or(false),
         );
-        let default_info = EndpointInfo { api_key, base_url };
+        let default_info = EndpointInfo {
+            api_key,
+            base_url,
+            protocol: "anthropic".to_string(),
+        };
         providers.insert("default".to_string(), (default_adapter.clone(), default_info.clone()));
         Ok(Self {
             http,
@@ -140,7 +147,11 @@ impl Client {
         let http = reqwest::Client::new();
         let adapter =
             providers::anthropic(http.clone(), api_key.clone(), base_url.clone(), false);
-        let info = EndpointInfo { api_key, base_url };
+        let info = EndpointInfo {
+            api_key,
+            base_url,
+            protocol: "anthropic".to_string(),
+        };
         Self {
             http,
             endpoint: Arc::new(std::sync::RwLock::new((adapter.clone(), info.clone()))),
@@ -167,6 +178,12 @@ impl Client {
         self.providers
             .get(name)
             .map(|(_, info)| (info.api_key.clone(), info.base_url.clone()))
+    }
+
+    /// Wire protocol label of a named provider ("anthropic"/"openai";
+    /// the /provider listing). Unknown names return None.
+    pub fn provider_protocol(&self, name: &str) -> Option<String> {
+        self.providers.get(name).map(|(_, info)| info.protocol.clone())
     }
 
     /// 当前生效的 provider 端点（key/url 引用）。

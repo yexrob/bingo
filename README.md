@@ -195,7 +195,7 @@ Three layers are shallow-merged; later layers override earlier ones:
 |---|---|---|
 | `apiKey` | string | API key (settings take precedence over `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`) |
 | `apiBaseUrl` | string | API endpoint (settings take precedence over `ANTHROPIC_BASE_URL`; default is the official one) |
-| `providers` | object | named providers: `{name: {protocol?, apiKey, apiBaseUrl?, supportsImages?}}`, switch with `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, bearer auth; `apiBaseUrl` defaults to `https://api.openai.com`) |
+| `providers` | object | named providers: `{name: {protocol?, apiKey, apiBaseUrl?, supportsImages?, oauth?}}`, switch with `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, bearer auth; `apiBaseUrl` defaults to `https://api.openai.com`); `oauth: {kind: "codex"}` enables OAuth login (`/provider login`, apiKey wins) |
 | `model` | string | default model (written by `/model`); precedence: `--model` > settings > built-in `claude-sonnet-5` |
 | `thinkingLevel` | string | `off` omits thinking params (DeepSeek-compatible, default); `low`/`medium`/`high`/`xhigh`/`max` send adaptive thinking + `output_config.effort` at that level |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
