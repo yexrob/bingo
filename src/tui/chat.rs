@@ -395,6 +395,42 @@ impl ResumeMenu {
     }
 }
 
+/// `/provider` 选择器（picker-model.md 提交 D）：静态单级（default + settings
+/// providers 快照），desc 保留信息列（URL + 脱敏 key）；Enter=切换+持久化、
+/// s=仅本次会话（与 /think 一致）。
+#[derive(Clone)]
+pub struct ProviderMenu {
+    /// Browsed index (❯): moves with ↑↓/1-N, applied only on Enter/s.
+    pub selected: usize,
+    /// 当前 provider 在列表中的位置（●）。
+    pub current: Option<usize>,
+    /// 选项快照（name, desc）：desc 由 provider_desc 生成（url + key 前 4 字符）。
+    pub options: Vec<(String, String)>,
+}
+
+impl ProviderMenu {
+    pub fn picker(&self) -> crate::tui::picker::PickerModel {
+        crate::tui::picker::PickerModel::new(
+            self.options
+                .iter()
+                .map(|(name, desc)| {
+                    crate::tui::picker::PickerItem::new(name.clone(), name.clone(), desc.clone())
+                })
+                .collect(),
+            self.selected,
+            self.current,
+        )
+    }
+
+    /// 场景键位配置：s = 仅本次会话（切换不写 settings）、数字直达 1-9。
+    pub fn keys() -> crate::tui::picker::PickerKeys {
+        crate::tui::picker::PickerKeys {
+            session_only: true,
+            number_jump: true,
+        }
+    }
+}
+
 /// `/think` selector entries: level name + description (everything past off corresponds one-to-one with
 /// THINKING_LEVELS, in the same order; consistency is guaranteed by a test).
 pub const THINK_LEVELS: &[(&str, &str)] = &[
@@ -964,6 +1000,8 @@ pub struct Chat {
     pub theme_menu: Option<ThemeMenu>,
     /// `/resume` session selector (None = inactive).
     pub resume_menu: Option<ResumeMenu>,
+    /// `/provider` selector (None = inactive).
+    pub provider_menu: Option<ProviderMenu>,
     /// 当前生效的主题设置（/theme 菜单 ● 标记的数据源；apply_theme 更新）。
     pub theme_setting: ThemeSetting,
     /// Menu-level model-list cache (provider → latest `/v1/models` result):
@@ -1167,6 +1205,7 @@ impl Chat {
             think_menu: None,
             theme_menu: None,
             resume_menu: None,
+            provider_menu: None,
             theme_setting,
             models_cache: HashMap::new(),
             tasks_visible: false,
@@ -3209,46 +3248,129 @@ impl Chat {
         }
     }
 
+    /// `/provider [名称]`：无参打开选择器（picker-model.md 提交 D）；带参快速路径。
     fn slash_provider(&mut self, arg: &str) {
-        let session = self.session.clone();
         if arg.is_empty() {
-            let current = session.runtime.provider.borrow().clone();
-            // 列表：default 打头（顶层端点），其后命名 provider 各带 URL
-            // （/provider 信息量不足修复：一眼看清每个端点的去向）。
-            let mut lines = vec![format!("当前 provider: {current}")];
-            let mut names = vec!["default".to_string()];
-            names.extend(session.client.provider_names());
-            for name in names {
-                let (key, url) = session
-                    .client
-                    .provider_endpoint(&name)
-                    .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
-                // key 脱敏：仅显示前 4 字符；短 key（≤4）不加省略号。
-                let mut key_shown: String = key.chars().take(4).collect();
-                if key.chars().count() > 4 {
-                    key_shown.push('…');
-                }
-                let mark = if name == current { "●" } else { " " };
-                lines.push(format!("{mark} {name} @ {url}（key {key_shown}）"));
-            }
-            lines.push("用法: /provider <名称>（settings.json 的 providers 段）".into());
-            self.push_slash_output(lines.join("\n"));
+            self.open_provider_menu();
             return;
         }
-        let name = arg.to_string();
+        self.switch_provider(arg, true);
+    }
+
+    /// 切换 provider：runtime 立即生效；persist=true 写 settings（重启恢复）。
+    fn switch_provider(&mut self, name: &str, persist: bool) {
+        let session = self.session.clone();
+        let name = name.to_string();
         match session.client.set_provider(&name) {
             Ok(()) => {
                 let (_, url) = session.client.current_endpoint();
                 let _ = session.runtime.provider_tx.send(name.clone());
-                // 与 /model /think 同路径持久化：重启恢复当前 provider。
-                let cwd = std::path::PathBuf::from(&self.cwd);
-                let _ = crate::settings::upsert_project_settings(
-                    &cwd,
-                    &serde_json::json!({ "provider": name }),
-                );
-                self.push_slash_output(format!("✓ provider 已切换: {name}（{url}）"));
+                if persist {
+                    // 与 /model /think 同路径持久化：重启恢复当前 provider。
+                    let cwd = std::path::PathBuf::from(&self.cwd);
+                    let _ = crate::settings::upsert_project_settings(
+                        &cwd,
+                        &serde_json::json!({ "provider": name }),
+                    );
+                    self.push_slash_output(format!("✓ provider 已切换: {name}（{url}）"));
+                } else {
+                    self.push_slash_output(format!(
+                        "✓ provider 已切换: {name}（{url}）（仅本次会话）"
+                    ));
+                }
             }
-            Err(e) => self.push_slash_output(e),
+            Err(e) => self.push_slash_error(e),
+        }
+    }
+
+    /// 选项说明：URL + 脱敏 key（前 4 字符，短 key 不加省略号——沿用现有信息列）。
+    fn provider_desc(&self, name: &str) -> String {
+        let (key, url) = self
+            .session
+            .client
+            .provider_endpoint(name)
+            .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
+        let mut key_shown: String = key.chars().take(4).collect();
+        if key.chars().count() > 4 {
+            key_shown.push('…');
+        }
+        format!("{url}（key {key_shown}）")
+    }
+
+    /// 打开 `/provider` 选择器：default 打头（顶层端点），其后命名 provider；
+    /// ● 标当前 provider，互斥关闭其他菜单。
+    fn open_provider_menu(&mut self) {
+        let current = self.session.runtime.provider.borrow().clone();
+        let mut options = vec![("default".to_string(), self.provider_desc("default"))];
+        for name in self.session.client.provider_names() {
+            options.push((name.clone(), self.provider_desc(&name)));
+        }
+        let current = options.iter().position(|(n, _)| *n == current);
+        let menu = ProviderMenu {
+            selected: current.unwrap_or(0),
+            current,
+            options,
+        };
+        if menu.picker().is_empty() {
+            return;
+        }
+        self.think_menu = None;
+        self.model_menu = None;
+        self.theme_menu = None;
+        self.resume_menu = None;
+        self.provider_menu = Some(menu);
+        self.clear_slash_suggestions();
+    }
+
+    /// Provider menu keys: ↑↓/1-N move (delegated to the PickerModel core),
+    /// Enter switches + persists, s = session-only (no settings write), Esc exits.
+    fn provider_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let Some(menu) = &mut self.provider_menu else {
+            return false;
+        };
+        match code {
+            KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(1);
+                menu.selected = core.selected;
+                true
+            }
+            KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(-1);
+                menu.selected = core.selected;
+                true
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                if let Some(n) = c.to_digit(10)
+                    && core.jump(n as usize)
+                {
+                    menu.selected = core.selected;
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Char('s') if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let core = menu.picker();
+                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
+                self.provider_menu = None;
+                self.switch_provider(&value, false);
+                true
+            }
+            KeyCode::Enter => {
+                let core = menu.picker();
+                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
+                self.provider_menu = None;
+                self.switch_provider(&value, true);
+                true
+            }
+            KeyCode::Esc => {
+                self.provider_menu = None;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -3862,6 +3984,9 @@ impl Chat {
             return true;
         }
         if self.resume_menu_key(code, modifiers) {
+            return true;
+        }
+        if self.provider_menu_key(code, modifiers) {
             return true;
         }
         if self.search.is_some() {
@@ -6842,19 +6967,36 @@ mod tests {
             crate::api::client::Client::from_settings(&settings).unwrap();
         chat.input = "/provider".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
-        assert!(out.contains("default @ https://api.anthropic.com"), "{out}");
-        assert!(out.contains("（key main）"), "短 key 无省略号: {out}");
-        assert!(!out.contains("main…"), "{out}");
+        // 无参 → 打开选择器：信息列（URL + 脱敏 key）进入 desc（picker-model.md 提交 D）。
+        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        let core = menu.picker();
+        let desc = core
+            .items
+            .iter()
+            .find(|i| i.label == "default")
+            .map(|i| i.description.as_str())
+            .expect("default 选项");
+        assert!(desc.contains("https://api.anthropic.com"), "{desc}");
+        assert!(desc.contains("（key main）"), "短 key 无省略号: {desc}");
+        assert!(!desc.contains("main…"), "{desc}");
     }
 
     #[test]
     fn slash_provider_lists_and_switches() {
+        let s_tmp = std::env::temp_dir().join(format!("bingo-slash-{}-provs", std::process::id()));
+        let _ = std::fs::remove_dir_all(&s_tmp);
         let mut chat = test_chat();
         chat.input = "/provider".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
-        assert!(out.contains("当前 provider: default"), "{out}");
+        // 无参 → 打开选择器：default 打头、● 标当前。
+        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        assert_eq!(menu.current, Some(0), "● 标当前 default");
+        let core = menu.picker();
+        assert_eq!(
+            core.items.first().map(|i| i.label.as_str()),
+            Some("default"),
+            "default 打头"
+        );
 
         // Configure a named provider, then switch.
         let providers = std::collections::HashMap::from([(
@@ -6884,24 +7026,69 @@ mod tests {
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::from_settings(&settings).unwrap();
 
+        // 重新打开选择器：列表含 deepseek；Esc 不改当前。
         chat.input = "/provider".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
-        assert!(out.contains("deepseek"), "{out}");
+        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        let core = menu.picker();
+        assert!(
+            core.items.iter().any(|i| i.label == "deepseek"),
+            "选择器列出 deepseek"
+        );
+        assert_eq!(menu.current, Some(0), "● 标当前 default");
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(chat.provider_menu.is_none(), "Esc 关闭选择器");
+        assert_eq!(*chat.session.runtime.provider.borrow(), "default", "Esc 不改");
 
-        chat.input = "/provider deepseek".to_string();
+        // Enter 确认：切换 + 持久化（带参快速路径等价）。
+        chat.input = "/provider".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
-        assert!(out.contains("✓ provider 已切换: deepseek"), "{out}");
+        assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
+        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        assert_eq!(menu.selected, 1, "2 直达 deepseek");
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(chat.provider_menu.is_none(), "Enter 关闭选择器");
         assert_eq!(
             *chat.session.runtime.provider.borrow(),
             "deepseek",
             "runtime provider 同步"
         );
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("✓ provider 已切换: deepseek"), "{out}");
 
+        // 带参快速路径保留。
+        chat.input = "/provider deepseek".to_string();
+        chat.submit();
+        assert_eq!(*chat.session.runtime.provider.borrow(), "deepseek");
+        let _ = std::fs::remove_dir_all(&s_tmp);
+
+        // s = 仅本次会话（独立 chat，无先前持久化）：runtime 切换但不写 settings。
+        let mut chat = test_chat_home(s_tmp.join("home"));
+        chat.cwd = s_tmp.display().to_string();
+        Arc::get_mut(&mut chat.session).unwrap().client =
+            crate::api::client::Client::from_settings(&settings).unwrap();
+        chat.input = "/provider".to_string();
+        chat.submit();
+        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        assert_eq!(menu.current, Some(0), "● 标当前 default");
+        assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
+        assert!(chat.on_key(KeyCode::Char('s'), KeyModifiers::empty()));
+        assert_eq!(
+            *chat.session.runtime.provider.borrow(),
+            "deepseek",
+            "s 切换 runtime"
+        );
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("（仅本次会话）"), "s 标注: {out}");
+        assert!(
+            !s_tmp.join(".bingo/settings.json").exists(),
+            "s 不写 settings"
+        );
+
+        // 未命中报错（走错误桶）。
         chat.input = "/provider nope".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
+        let out = all_slash_text(&chat);
         assert!(out.contains("未找到 provider"), "{out}");
     }
 

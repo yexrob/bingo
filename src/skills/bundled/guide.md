@@ -92,7 +92,7 @@ Example (.bingo/settings.json):
 ## Slash command quick reference
 
 `/help` for the full list. Common ones: `/model [name]` (no args: two-level picker — level 1 providers → level 2 model list; with a name: switch directly, validated against the known list when available),
-`/provider [name]` (lists each endpoint's URL / current marker, or switches; switching persists to settings),
+`/provider [name]` (no args: picker — ● current, s = session-only, Enter persists; with a name: switch directly),
 `/think [off|low|medium|high|xhigh|max]`（思考级别，持久化 settings；无参打开档位选择器：●=当前生效、↑↓/1-6 浏览、Enter 确认、Esc 取消）、`/theme [dark|light|auto]`（无参打开档位选择器，`/theme auto` 显式快捷保留）、
 `/permissions [allow|deny|ask] [规则]`、
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
