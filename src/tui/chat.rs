@@ -195,25 +195,29 @@ pub fn is_hidden_tool(name: &str) -> bool {
 }
 
 /// Built-in slash command table (single source shared by /help and the dropdown suggestions).
-pub const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("help", "显示可用命令"),
-    ("clear", "清空对话，开始新会话（别名 /reset /new）"),
-    ("compact", "压缩上下文（旧消息 → 摘要）"),
-    ("model", "显示/切换模型（/model [名称]）"),
-    ("resume", "恢复历史会话（/resume [名称或关键词]）"),
-    ("rename", "重命名当前会话（/rename [名称]）"),
-    ("share", "导出当前会话为 HTML 分享页（/share [--open]）"),
-    ("context", "显示上下文用量"),
-    ("status", "显示会话状态（模型/权限/会话/上下文）"),
-    ("permissions", "列出/添加权限规则"),
-    ("theme", "切换主题（/theme [dark|light|auto]）"),
-    ("mcp", "管理 MCP 服务器（/mcp [enable|disable|reconnect]）"),
-    ("provider", "列出/切换 API provider（/provider [名称]）"),
-    ("think", "设置思考级别（/think [off|low|medium|high|xhigh|max]）"),
-    ("skills", "列出可用技能"),
-    ("tasks", "列出后台任务"),
-    ("team", "管理项目团队（/team start|status|assign|stop|list）"),
-    ("exit", "退出会话"),
+/// Slash commands single source: (name, argument hint, description).
+/// `hint` is the parameter shape shown in the `/` dropdown and `/help`
+/// (`[名称]` = optional, `start|status|…` = choices; empty = no arguments).
+/// Skills share the registry at runtime (no hint).
+pub const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
+    ("help", "", "显示可用命令"),
+    ("clear", "", "清空对话，开始新会话（别名 /reset /new）"),
+    ("compact", "", "压缩上下文（旧消息 → 摘要）"),
+    ("model", "[名称]", "显示/切换模型"),
+    ("resume", "[名称或关键词]", "恢复历史会话"),
+    ("rename", "[名称]", "重命名当前会话"),
+    ("share", "[--open]", "导出当前会话为 HTML 分享页"),
+    ("context", "", "显示上下文用量"),
+    ("status", "", "显示会话状态（模型/权限/会话/上下文）"),
+    ("permissions", "[allow|deny|ask] [规则]", "列出/添加权限规则"),
+    ("theme", "[dark|light|auto]", "切换主题"),
+    ("mcp", "[enable|disable|reconnect]", "管理 MCP 服务器"),
+    ("provider", "[名称]", "列出/切换 API provider"),
+    ("think", "[off|low|medium|high|xhigh|max]", "设置思考级别"),
+    ("skills", "", "列出可用技能"),
+    ("tasks", "", "列出后台任务"),
+    ("team", "start|status|assign|stop|list", "管理项目团队"),
+    ("exit", "", "退出会话"),
 ];
 
 /// `/share` 参数解析：是否包含指定 flag（--local / --open）。
@@ -221,10 +225,29 @@ fn parse_share_arg(arg: &str, flag: &str) -> bool {
     arg.split_whitespace().any(|t| t == flag)
 }
 
-/// Slash dropdown suggestion item (/name + description).
+/// One queued input, submitted after TurnEnd: a slash command (dispatched through
+/// `run_slash`) or a plain message (`start_turn`). The marker keeps the two apart —
+/// a queued slash must never reach the model as literal text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedInput {
+    pub text: String,
+    pub is_slash: bool,
+}
+
+/// Slash commands that run immediately while a turn is in progress: settings knobs
+/// that must apply before the next turn (`think`/`model`/`provider`/`theme`) and
+/// read-only status commands (`status`/`context`/`tasks`/`help`/`skills`). Everything
+/// else queues and runs after TurnEnd (CC semantics: "queues and runs after the
+/// current turn finishes; some commands run immediately").
+pub const INSTANT_SLASH_COMMANDS: &[&str] = &[
+    "think", "model", "provider", "theme", "status", "context", "tasks", "help", "skills",
+];
+
+/// Slash dropdown suggestion item (/name + hint + description).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlashSuggestion {
     pub name: String,
+    pub hint: String,
     pub description: String,
 }
 
@@ -243,8 +266,24 @@ pub struct ModelMenu {
     /// Level-one list: `default` (top-level config) + settings.providers names.
     pub providers: Vec<String>,
     pub provider_selected: usize,
+    /// 当前 provider 在一级列表中的位置（●；picker-model.md 提交 E）。
+    pub provider_current: Option<usize>,
     /// Level-two model list (None = still on level one).
     pub models: Option<ModelMenuModels>,
+}
+
+impl ModelMenu {
+    /// 一级列表 → PickerModel 核心（行渲染/键转移共用；两级+异步留在壳层）。
+    pub fn provider_picker(&self) -> crate::tui::picker::PickerModel {
+        crate::tui::picker::PickerModel::new(
+            self.providers
+                .iter()
+                .map(|p| crate::tui::picker::PickerItem::new(p.clone(), p.clone(), String::new()))
+                .collect(),
+            self.provider_selected,
+            self.provider_current,
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -257,9 +296,155 @@ pub struct ModelMenuModels {
 }
 
 /// `/think` single-level selector state (level table = off + [`crate::api::types::THINKING_LEVELS`]).
+///
+/// 薄壳：状态字段保持公开（测试 API 原样），交互逻辑委托 [`PickerModel`]
+/// （picker-model.md：提交 A 纯重构，行为零变化）。
 #[derive(Clone)]
 pub struct ThinkMenu {
+    /// Browsed index (❯): moves with ↑↓/1-6, applied only on Enter/s.
     pub selected: usize,
+    /// In-effect index at open time (●): fixed while browsing; the ● marker reads it.
+    pub current: usize,
+}
+
+impl ThinkMenu {
+    /// 薄壳 → 核心：由 selected/current 与 THINK_LEVELS 构造（键转移与渲染共用）。
+    pub fn picker(&self) -> crate::tui::picker::PickerModel {
+        crate::tui::picker::PickerModel::new(
+            THINK_LEVELS
+                .iter()
+                .map(|(name, desc)| crate::tui::picker::PickerItem::new(*name, *name, *desc))
+                .collect(),
+            self.selected,
+            Some(self.current),
+        )
+    }
+
+    /// 场景键位配置（hint 行拼装用）。
+    pub fn keys() -> crate::tui::picker::PickerKeys {
+        crate::tui::picker::PickerKeys {
+            session_only: true,
+            number_jump: true,
+        }
+    }
+}
+
+/// `/theme` 选择器选项表（dark/light/auto；与 ThemeSetting 的映射见 open_theme_menu）。
+pub const THEME_LEVELS: &[(&str, &str)] = &[
+    ("dark", "深色主题"),
+    ("light", "浅色主题"),
+    ("auto", "跟随终端背景"),
+];
+
+/// `/theme` 单级选择器状态（薄壳，同 ThinkMenu：字段公开、逻辑委托 PickerModel）。
+#[derive(Clone)]
+pub struct ThemeMenu {
+    /// Browsed index (❯): moves with ↑↓/1-3, applied only on Enter.
+    pub selected: usize,
+    /// In-effect index at open time (●).
+    pub current: usize,
+}
+
+impl ThemeMenu {
+    pub fn picker(&self) -> crate::tui::picker::PickerModel {
+        crate::tui::picker::PickerModel::new(
+            THEME_LEVELS
+                .iter()
+                .map(|(name, desc)| crate::tui::picker::PickerItem::new(*name, *name, *desc))
+                .collect(),
+            self.selected,
+            Some(self.current),
+        )
+    }
+
+    /// 场景键位配置：无 s（主题持久化是设计）、数字直达 1-3。
+    pub fn keys() -> crate::tui::picker::PickerKeys {
+        crate::tui::picker::PickerKeys {
+            session_only: false,
+            number_jump: true,
+        }
+    }
+}
+
+/// /resume 选择器选项数上限（devex DX：会话可很多，截断最近 N 个 + 提示行注明）。
+pub const RESUME_PICKER_MAX: usize = 20;
+
+/// `/resume` 会话选择器（picker-model.md 提交 C）：动态单级（磁盘快照），
+/// Enter 切换会话；label=展示名、value=会话名，确认按 selected 索引取快照。
+#[derive(Clone)]
+pub struct ResumeMenu {
+    /// Browsed index (❯): moves with ↑↓/1-20, applied only on Enter.
+    pub selected: usize,
+    /// 当前会话在列表中的位置（●；不在列表/未设置则 None）。
+    pub current: Option<usize>,
+    /// 会话列表快照（与 items 同序；确认时按 selected 取 Transcript）。
+    pub transcripts: Vec<crate::transcript::Transcript>,
+    /// 列表被截断（超过 RESUME_PICKER_MAX）→ 渲染一行说明。
+    pub truncated: bool,
+}
+
+impl ResumeMenu {
+    pub fn picker(&self) -> crate::tui::picker::PickerModel {
+        crate::tui::picker::PickerModel::new(
+            self.transcripts
+                .iter()
+                .map(|t| {
+                    let count = t.load_messages().unwrap_or_default().len();
+                    crate::tui::picker::PickerItem::new(
+                        t.name(),
+                        t.name(),
+                        format!("{count} 条消息"),
+                    )
+                })
+                .collect(),
+            self.selected,
+            self.current,
+        )
+    }
+
+    /// 场景键位配置：无 s（切换会话即意图）、数字直达 1-20。
+    pub fn keys() -> crate::tui::picker::PickerKeys {
+        crate::tui::picker::PickerKeys {
+            session_only: false,
+            number_jump: true,
+        }
+    }
+}
+
+/// `/provider` 选择器（picker-model.md 提交 D）：静态单级（default + settings
+/// providers 快照），desc 保留信息列（URL + 脱敏 key）；Enter=切换+持久化、
+/// s=仅本次会话（与 /think 一致）。
+#[derive(Clone)]
+pub struct ProviderMenu {
+    /// Browsed index (❯): moves with ↑↓/1-N, applied only on Enter/s.
+    pub selected: usize,
+    /// 当前 provider 在列表中的位置（●）。
+    pub current: Option<usize>,
+    /// 选项快照（name, desc）：desc 由 provider_desc 生成（url + key 前 4 字符）。
+    pub options: Vec<(String, String)>,
+}
+
+impl ProviderMenu {
+    pub fn picker(&self) -> crate::tui::picker::PickerModel {
+        crate::tui::picker::PickerModel::new(
+            self.options
+                .iter()
+                .map(|(name, desc)| {
+                    crate::tui::picker::PickerItem::new(name.clone(), name.clone(), desc.clone())
+                })
+                .collect(),
+            self.selected,
+            self.current,
+        )
+    }
+
+    /// 场景键位配置：s = 仅本次会话（切换不写 settings）、数字直达 1-9。
+    pub fn keys() -> crate::tui::picker::PickerKeys {
+        crate::tui::picker::PickerKeys {
+            session_only: true,
+            number_jump: true,
+        }
+    }
 }
 
 /// `/think` selector entries: level name + description (everything past off corresponds one-to-one with
@@ -268,7 +453,7 @@ pub const THINK_LEVELS: &[(&str, &str)] = &[
     ("off", "不发 thinking 参数（兼容 DeepSeek 等端点）"),
     ("low", "adaptive thinking · effort low"),
     ("medium", "adaptive thinking · effort medium"),
-    ("high", "adaptive thinking · effort high（默认档位）"),
+    ("high", "adaptive thinking · effort high（推荐档位）"),
     ("xhigh", "adaptive thinking · effort xhigh（编码/agentic 推荐）"),
     ("max", "adaptive thinking · effort max（最深推理）"),
 ];
@@ -350,6 +535,9 @@ pub const IMAGE_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 /// Lifetime of slash transient hints: they disappear from above the input after the timeout (never flushed).
 pub const SLASH_OUTPUT_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+/// Error/usage slash rows live at least this long (G12 floor; they also clear on the
+/// next input, so the user keeps a chance to act).
+pub const SLASH_OUTPUT_ERROR_TTL: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// User message text entering the message flow when AskUserQuestion is declined
 /// (Esc / empty Other submit) — an ordinary message, persistent with the flow.
@@ -700,7 +888,7 @@ pub struct Chat {
     /// Whether the history file is writable (after one failure, never retry — avoid hitting the same error on every submit).
     history_writable: bool,
     /// Messages queued while busy (submitted one by one after TurnEnd).
-    pub queued: Vec<String>,
+    pub queued: Vec<QueuedInput>,
     /// Whether the `?` shortcut panel is expanded.
     pub help_visible: bool,
     /// Bottom transient notice (`Press ctrl-c again to exit` etc.).
@@ -807,6 +995,13 @@ pub struct Chat {
     pub slash_lines: Vec<String>,
     /// When the slash output appeared (auto-dismissed by tick timeout).
     pub slash_at: Option<std::time::Instant>,
+    /// Error/usage slash rows (G12/G13): longer TTL, clear on the next input, error color.
+    pub slash_error_lines: Vec<String>,
+    /// When the last error batch was pushed (longer TTL expiry base).
+    pub slash_error_at: Option<std::time::Instant>,
+    /// `/zzz` no-match flag (G9): the dropdown is empty but the input is a bare
+    /// `/`-query — the suggestion area shows one dim hint row instead of a gap.
+    pub slash_no_match: bool,
     /// /exit requested quitting (component layer consumes → system.exit).
     pub exit: bool,
     /// inline: segments of the document prefix already flushed to scrollback — 0 = none, 1 = welcome card,
@@ -827,6 +1022,14 @@ pub struct Chat {
     pub model_menu: Option<ModelMenu>,
     /// `/think` level selector (None = inactive).
     pub think_menu: Option<ThinkMenu>,
+    /// `/theme` level selector (None = inactive).
+    pub theme_menu: Option<ThemeMenu>,
+    /// `/resume` session selector (None = inactive).
+    pub resume_menu: Option<ResumeMenu>,
+    /// `/provider` selector (None = inactive).
+    pub provider_menu: Option<ProviderMenu>,
+    /// 当前生效的主题设置（/theme 菜单 ● 标记的数据源；apply_theme 更新）。
+    pub theme_setting: ThemeSetting,
     /// Menu-level model-list cache (provider → latest `/v1/models` result):
     /// validates `/model <name>` direct sets against the known list; avoids
     /// re-fetching when re-entering level two (P2-G cache, per-session).
@@ -888,6 +1091,7 @@ impl Chat {
             .find(|(t, _)| t.elapsed() < Self::WARNING_TTL)
             .map(|(_, w)| w.as_str())
     }
+    #[allow(clippy::too_many_arguments)] // 状态机构造器：显式参数可读性优先（同 tool/agent.rs 惯例）
     pub fn new(
         session: Arc<Session>,
         events: mpsc::UnboundedSender<UiEvent>,
@@ -895,6 +1099,7 @@ impl Chat {
         asks: mpsc::UnboundedSender<AskRequest>,
         asks_rx: mpsc::UnboundedReceiver<AskRequest>,
         theme: Theme,
+        theme_setting: ThemeSetting,
         detected_background: Option<bool>,
     ) -> Self {
         // Watchable event forwarding: registry broadcast → UiEvent channel (persists across turns).
@@ -1022,6 +1227,9 @@ impl Chat {
             motion_off,
             slash_lines: Vec::new(),
             slash_at: None,
+            slash_error_lines: Vec::new(),
+            slash_error_at: None,
+            slash_no_match: false,
             exit: false,
             flushed_segments: 0,
             tail_start: 0,
@@ -1030,6 +1238,10 @@ impl Chat {
             slash_selected: 0,
             model_menu: None,
             think_menu: None,
+            theme_menu: None,
+            resume_menu: None,
+            provider_menu: None,
+            theme_setting,
             models_cache: HashMap::new(),
             tasks_visible: false,
             tasks_auto: false,
@@ -1889,7 +2101,20 @@ impl Chat {
         if self.busy {
             let text = self.expand_pastes(&text);
             let text = self.expand_image_paths(&text);
-            self.queued.push(text);
+            // Instant commands bypass the queue (CC semantics: settings knobs apply
+            // before the next turn; read-only status commands run mid-turn). This is a
+            // side-channel dispatch — it must not reset `busy`. run_slash's contract is
+            // the line WITHOUT the leading slash, so strip it here.
+            if let Some(rest) = text.strip_prefix('/') {
+                let name = rest.split_whitespace().next().unwrap_or("");
+                if INSTANT_SLASH_COMMANDS.contains(&name) {
+                    self.run_slash(rest);
+                    self.update_slash_suggestions();
+                    return;
+                }
+            }
+            let is_slash = text.starts_with('/');
+            self.queued.push(QueuedInput { text, is_slash });
             self.update_slash_suggestions();
             return;
         }
@@ -1912,7 +2137,7 @@ impl Chat {
                     .any(|s| s.name == cmd.trim_end())
             {
                 let selected = self.slash_suggestions.get(self.slash_selected).cloned();
-                self.slash_suggestions.clear();
+                self.clear_slash_suggestions();
                 if let Some(s) = selected
                     && self.run_slash(&s.name)
                 {
@@ -2074,11 +2299,28 @@ impl Chat {
         self.dirty = true;
     }
 
+    /// Queues slash error/usage rows (G12): they live longer than success hints
+    /// ([`SLASH_OUTPUT_ERROR_TTL`] floor) and clear on the next input — the user needs
+    /// time to read "what happened + what you can do" (feedback-states §3).
+    fn push_slash_error(&mut self, text: String) {
+        for line in text.lines() {
+            self.slash_error_lines.push(line.to_string());
+        }
+        self.slash_error_at = Some(std::time::Instant::now());
+        self.dirty = true;
+    }
+
+    /// Clears the slash dropdown and its no-match flag together (single lifecycle).
+    fn clear_slash_suggestions(&mut self) {
+        self.slash_suggestions.clear();
+        self.slash_no_match = false;
+    }
+
     /// Slash command dispatch. Returns true = consumed.
     fn run_slash(&mut self, line: &str) -> bool {
         // Any slash run closes the dropdown (Enter on a full input skips submit's clear-menu branch,
         // otherwise suggestion rows like `+ /model …` would linger below the input forever).
-        self.slash_suggestions.clear();
+        self.clear_slash_suggestions();
         let (cmd, arg) = match line.split_once(char::is_whitespace) {
             Some((c, a)) => (c, a.trim()),
             None => (line, ""),
@@ -2120,8 +2362,9 @@ impl Chat {
                     self.start_turn(marker, true);
                     return true;
                 }
-                self.push_slash_output(format!(
-                    "未知命令: /{other}。输入 /help 查看可用命令。"
+                self.push_slash_error(format!(
+                    "[error] code={} msg=未知命令: /{other}。输入 /help 查看可用命令。",
+                    crate::error::SLASH_ERROR_UNKNOWN_COMMAND
                 ))
             }
         }
@@ -2130,8 +2373,20 @@ impl Chat {
 
     fn slash_help(&mut self) {
         let mut lines = vec!["可用命令：".to_string()];
-        for (name, description) in SLASH_COMMANDS {
-            lines.push(format!("  /{name:<12} — {description}"));
+        let cmd_col = SLASH_COMMANDS
+            .iter()
+            .map(|(name, hint, _)| {
+                name.chars().count() + usize::from(!hint.is_empty()) + hint.chars().count()
+            })
+            .max()
+            .unwrap_or(0);
+        for (name, hint, description) in SLASH_COMMANDS {
+            let cmd = if hint.is_empty() {
+                format!("/{name}")
+            } else {
+                format!("/{name} {hint}")
+            };
+            lines.push(format!("  {cmd:<cmd_col$} — {description}"));
         }
         self.push_slash_output(lines.join("\n"));
     }
@@ -2198,9 +2453,10 @@ impl Chat {
         self.model_menu = Some(ModelMenu {
             providers,
             provider_selected: selected,
+            provider_current: Some(selected),
             models: None,
         });
-        self.slash_suggestions.clear();
+        self.clear_slash_suggestions();
     }
 
     /// Level-one Enter: asynchronously fetches the model list from that provider endpoint (forks the
@@ -2241,6 +2497,7 @@ impl Chat {
         self.model_menu = Some(ModelMenu {
             providers,
             provider_selected,
+            provider_current: None,
             models: Some(ModelMenuModels {
                 provider,
                 models: Vec::new(),
@@ -2262,8 +2519,10 @@ impl Chat {
                         m.selected = (m.selected + 1) % m.models.len();
                     }
                 } else {
-                    menu.provider_selected =
-                        (menu.provider_selected + 1) % menu.providers.len();
+                    // 一级：委托 PickerModel 核心（picker-model.md 提交 E）。
+                    let mut core = menu.provider_picker();
+                    core.move_selection(1);
+                    menu.provider_selected = core.selected;
                 }
                 true
             }
@@ -2273,12 +2532,26 @@ impl Chat {
                         m.selected = m.selected.checked_sub(1).unwrap_or(m.models.len() - 1);
                     }
                 } else {
-                    menu.provider_selected = menu
-                        .provider_selected
-                        .checked_sub(1)
-                        .unwrap_or(menu.providers.len() - 1);
+                    let mut core = menu.provider_picker();
+                    core.move_selection(-1);
+                    menu.provider_selected = core.selected;
                 }
                 true
+            }
+            // 数字直达：仅一级适用（两级第一级适用，picker-model.md 评估表）。
+            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+                if menu.models.is_some() {
+                    return false;
+                }
+                let mut core = menu.provider_picker();
+                if let Some(n) = c.to_digit(10)
+                    && core.jump(n as usize)
+                {
+                    menu.provider_selected = core.selected;
+                    true
+                } else {
+                    false
+                }
             }
             KeyCode::Enter => {
                 let Some(menu) = self.model_menu.take() else {
@@ -2301,6 +2574,7 @@ impl Chat {
                     self.model_menu = Some(ModelMenu {
                         providers: menu.providers,
                         provider_selected: menu.provider_selected,
+                        provider_current: menu.provider_current,
                         models: Some(m),
                     });
                     return true;
@@ -2311,6 +2585,7 @@ impl Chat {
                     self.model_menu = Some(ModelMenu {
                         providers: menu.providers,
                         provider_selected: menu.provider_selected,
+                        provider_current: menu.provider_current,
                         models: Some(m),
                     });
                     self.push_slash_output(e);
@@ -2348,17 +2623,24 @@ impl Chat {
         }
     }
 
+    /// `/theme [dark|light|auto]`：无参打开档位选择器（picker-model.md 提交 B）；
+    /// 带参走快速路径（`/theme auto` 显式快捷保留）。
     fn slash_theme(&mut self, arg: &str) {
-        let setting = if arg.is_empty() {
-            ThemeSetting::Auto
-        } else {
-            ThemeSetting::parse(Some(arg))
-        };
+        if arg.is_empty() {
+            self.open_theme_menu();
+            return;
+        }
+        self.apply_theme(ThemeSetting::parse(Some(arg)));
+    }
+
+    /// 应用主题：重建渲染器/缓存、持久化、更新 theme_setting（菜单 ● 数据源）。
+    fn apply_theme(&mut self, setting: ThemeSetting) {
         let name = match setting {
             ThemeSetting::Dark => "dark",
             ThemeSetting::Light => "light",
             ThemeSetting::Auto => "auto",
         };
+        self.theme_setting = setting;
         self.theme = Theme::for_terminal(setting, self.detected_background);
         // The renderer baked in theme styles and reply_cache holds old-theme rows — rebuild them in sync.
         self.renderer = crate::tui::markdown::MarkdownRenderer::with_theme(
@@ -2373,6 +2655,73 @@ impl Chat {
             &serde_json::json!({ "theme": name }),
         );
         self.push_slash_output(format!("✓ 主题已切换: {name}"));
+    }
+
+    /// 打开 `/theme` 选择器：预选当前档位（theme_setting），互斥关闭其他菜单。
+    fn open_theme_menu(&mut self) {
+        let current = match self.theme_setting {
+            ThemeSetting::Dark => 0,
+            ThemeSetting::Light => 1,
+            ThemeSetting::Auto => 2,
+        };
+        let menu = ThemeMenu {
+            selected: current,
+            current,
+        };
+        // 空表防御（THEME_LEVELS 为 const 非空，防御性分支不可达）。
+        if menu.picker().is_empty() {
+            return;
+        }
+        self.think_menu = None;
+        self.model_menu = None;
+        self.theme_menu = Some(menu);
+        self.clear_slash_suggestions();
+    }
+
+    /// Theme menu keys: ↑↓/1-3 move (delegated to the PickerModel core),
+    /// Enter applies + persists, Esc exits. Returns whether consumed.
+    fn theme_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let Some(menu) = &mut self.theme_menu else {
+            return false;
+        };
+        match code {
+            KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(1);
+                menu.selected = core.selected;
+                true
+            }
+            KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(-1);
+                menu.selected = core.selected;
+                true
+            }
+            // Direct jump: 1 = dark … 3 = auto.
+            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                if let Some(n) = c.to_digit(10)
+                    && core.jump(n as usize)
+                {
+                    menu.selected = core.selected;
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Enter => {
+                let core = menu.picker();
+                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
+                self.theme_menu = None;
+                self.apply_theme(ThemeSetting::parse(Some(&value)));
+                true
+            }
+            KeyCode::Esc => {
+                self.theme_menu = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     fn slash_rename(&mut self, arg: &str) {
@@ -2390,12 +2739,14 @@ impl Chat {
         }
     }
 
+    /// `/resume [名称或关键词]`：无参打开会话选择器（picker-model.md 提交 C，
+    /// CC 的 /resume 同款 picker）；带参走快速路径（名称/关键词匹配，现状保留）。
     fn slash_resume(&mut self, arg: &str) {
         let home = self.session.home.clone();
         let transcripts = match crate::transcript::list(&home) {
             Ok(t) => t,
             Err(e) => {
-                self.push_slash_output(format!("无法读取会话列表: {e}"));
+                self.push_slash_error(format!("无法读取会话列表: {e}"));
                 return;
             }
         };
@@ -2404,15 +2755,23 @@ impl Chat {
                 self.push_slash_output("没有历史会话。".to_string());
                 return;
             }
-            let mut lines = vec!["历史会话（/resume [名称或关键词] 恢复）：".to_string()];
-            for t in &transcripts {
-                lines.push(format!("  {}", t.name()));
-            }
-            self.push_slash_output(lines.join("\n"));
+            self.open_resume_menu(transcripts);
             return;
         }
-        let Some(found) = transcripts.iter().find(|t| t.name().contains(arg)) else {
-            self.push_slash_output(format!("未找到包含 '{arg}' 的会话。"));
+        self.switch_transcript(
+            transcripts.iter().find(|t| t.name().contains(arg)),
+            arg,
+        );
+    }
+
+    /// 快速路径切换（带参 /resume）：命中即切换，未命中报错。
+    fn switch_transcript(
+        &mut self,
+        found: Option<&crate::transcript::Transcript>,
+        arg: &str,
+    ) {
+        let Some(found) = found else {
+            self.push_slash_error(format!("未找到包含 '{arg}' 的会话。"));
             return;
         };
         let count = found.load_messages().unwrap_or_default().len();
@@ -2424,6 +2783,87 @@ impl Chat {
             "✓ 已切换到会话 {}（{count} 条消息），下一轮回复使用其历史。",
             found.name()
         ));
+    }
+
+    /// 打开 `/resume` 选择器：磁盘快照截断最近 RESUME_PICKER_MAX 个，
+    /// ● 标当前会话（在列表内时），互斥关闭其他菜单。
+    fn open_resume_menu(&mut self, mut transcripts: Vec<crate::transcript::Transcript>) {
+        let truncated = transcripts.len() > RESUME_PICKER_MAX;
+        transcripts.truncate(RESUME_PICKER_MAX);
+        let current = self.session.runtime.transcript.borrow().clone();
+        let current = current.as_ref().and_then(|cur| {
+            transcripts.iter().position(|t| t.path() == cur.path())
+        });
+        let menu = ResumeMenu {
+            selected: current.unwrap_or(0),
+            current,
+            transcripts,
+            truncated,
+        };
+        if menu.picker().is_empty() {
+            return;
+        }
+        self.think_menu = None;
+        self.model_menu = None;
+        self.theme_menu = None;
+        self.resume_menu = Some(menu);
+        self.clear_slash_suggestions();
+    }
+
+    /// Resume menu keys: ↑↓/1-N move (delegated to the PickerModel core),
+    /// Enter switches the session (by selected index into the snapshot), Esc exits.
+    fn resume_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let Some(menu) = &mut self.resume_menu else {
+            return false;
+        };
+        match code {
+            KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(1);
+                menu.selected = core.selected;
+                true
+            }
+            KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(-1);
+                menu.selected = core.selected;
+                true
+            }
+            // Direct jump: 1..=min(len, 9)（>9 项时数字直达只覆盖前 9 个）。
+            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                if let Some(n) = c.to_digit(10)
+                    && core.jump(n as usize)
+                {
+                    menu.selected = core.selected;
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Enter => {
+                // 确认动作按 selected 索引取快照（与 items 同序；value≠label 测试锚点）。
+                let Some(t) = menu.transcripts.get(menu.selected).cloned() else {
+                    return false;
+                };
+                let name = t.name();
+                let count = t.load_messages().unwrap_or_default().len();
+                self.resume_menu = None;
+                let _ = self.session.runtime.transcript_tx.send(Some(t));
+                self.messages.clear();
+                self.slash_lines.clear();
+                self.reset_flushed();
+                self.push_slash_output(format!(
+                    "✓ 已切换到会话 {name}（{count} 条消息），下一轮回复使用其历史。"
+                ));
+                true
+            }
+            KeyCode::Esc => {
+                self.resume_menu = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// `/share`：导出当前会话分享页。默认上传官网分享服务（与 `bingo share`
@@ -2863,46 +3303,129 @@ impl Chat {
         }
     }
 
+    /// `/provider [名称]`：无参打开选择器（picker-model.md 提交 D）；带参快速路径。
     fn slash_provider(&mut self, arg: &str) {
-        let session = self.session.clone();
         if arg.is_empty() {
-            let current = session.runtime.provider.borrow().clone();
-            // 列表：default 打头（顶层端点），其后命名 provider 各带 URL
-            // （/provider 信息量不足修复：一眼看清每个端点的去向）。
-            let mut lines = vec![format!("当前 provider: {current}")];
-            let mut names = vec!["default".to_string()];
-            names.extend(session.client.provider_names());
-            for name in names {
-                let (key, url) = session
-                    .client
-                    .provider_endpoint(&name)
-                    .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
-                // key 脱敏：仅显示前 4 字符；短 key（≤4）不加省略号。
-                let mut key_shown: String = key.chars().take(4).collect();
-                if key.chars().count() > 4 {
-                    key_shown.push('…');
-                }
-                let mark = if name == current { "●" } else { " " };
-                lines.push(format!("{mark} {name} @ {url}（key {key_shown}）"));
-            }
-            lines.push("用法: /provider <名称>（settings.json 的 providers 段）".into());
-            self.push_slash_output(lines.join("\n"));
+            self.open_provider_menu();
             return;
         }
-        let name = arg.to_string();
+        self.switch_provider(arg, true);
+    }
+
+    /// 切换 provider：runtime 立即生效；persist=true 写 settings（重启恢复）。
+    fn switch_provider(&mut self, name: &str, persist: bool) {
+        let session = self.session.clone();
+        let name = name.to_string();
         match session.client.set_provider(&name) {
             Ok(()) => {
                 let (_, url) = session.client.current_endpoint();
                 let _ = session.runtime.provider_tx.send(name.clone());
-                // 与 /model /think 同路径持久化：重启恢复当前 provider。
-                let cwd = std::path::PathBuf::from(&self.cwd);
-                let _ = crate::settings::upsert_project_settings(
-                    &cwd,
-                    &serde_json::json!({ "provider": name }),
-                );
-                self.push_slash_output(format!("✓ provider 已切换: {name}（{url}）"));
+                if persist {
+                    // 与 /model /think 同路径持久化：重启恢复当前 provider。
+                    let cwd = std::path::PathBuf::from(&self.cwd);
+                    let _ = crate::settings::upsert_project_settings(
+                        &cwd,
+                        &serde_json::json!({ "provider": name }),
+                    );
+                    self.push_slash_output(format!("✓ provider 已切换: {name}（{url}）"));
+                } else {
+                    self.push_slash_output(format!(
+                        "✓ provider 已切换: {name}（{url}）（仅本次会话）"
+                    ));
+                }
             }
-            Err(e) => self.push_slash_output(e),
+            Err(e) => self.push_slash_error(e),
+        }
+    }
+
+    /// 选项说明：URL + 脱敏 key（前 4 字符，短 key 不加省略号——沿用现有信息列）。
+    fn provider_desc(&self, name: &str) -> String {
+        let (key, url) = self
+            .session
+            .client
+            .provider_endpoint(name)
+            .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
+        let mut key_shown: String = key.chars().take(4).collect();
+        if key.chars().count() > 4 {
+            key_shown.push('…');
+        }
+        format!("{url}（key {key_shown}）")
+    }
+
+    /// 打开 `/provider` 选择器：default 打头（顶层端点），其后命名 provider；
+    /// ● 标当前 provider，互斥关闭其他菜单。
+    fn open_provider_menu(&mut self) {
+        let current = self.session.runtime.provider.borrow().clone();
+        let mut options = vec![("default".to_string(), self.provider_desc("default"))];
+        for name in self.session.client.provider_names() {
+            options.push((name.clone(), self.provider_desc(&name)));
+        }
+        let current = options.iter().position(|(n, _)| *n == current);
+        let menu = ProviderMenu {
+            selected: current.unwrap_or(0),
+            current,
+            options,
+        };
+        if menu.picker().is_empty() {
+            return;
+        }
+        self.think_menu = None;
+        self.model_menu = None;
+        self.theme_menu = None;
+        self.resume_menu = None;
+        self.provider_menu = Some(menu);
+        self.clear_slash_suggestions();
+    }
+
+    /// Provider menu keys: ↑↓/1-N move (delegated to the PickerModel core),
+    /// Enter switches + persists, s = session-only (no settings write), Esc exits.
+    fn provider_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let Some(menu) = &mut self.provider_menu else {
+            return false;
+        };
+        match code {
+            KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(1);
+                menu.selected = core.selected;
+                true
+            }
+            KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(-1);
+                menu.selected = core.selected;
+                true
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                if let Some(n) = c.to_digit(10)
+                    && core.jump(n as usize)
+                {
+                    menu.selected = core.selected;
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Char('s') if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let core = menu.picker();
+                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
+                self.provider_menu = None;
+                self.switch_provider(&value, false);
+                true
+            }
+            KeyCode::Enter => {
+                let core = menu.picker();
+                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
+                self.provider_menu = None;
+                self.switch_provider(&value, true);
+                true
+            }
+            KeyCode::Esc => {
+                self.provider_menu = None;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -2911,65 +3434,102 @@ impl Chat {
             self.open_think_menu();
             return;
         }
-        self.set_think_level(arg);
+        self.set_think_level(arg, true);
     }
 
-    /// Sets the thinking level (runtime + persisted). Level table = off + THINKING_LEVELS:
-    /// off sends no parameter; the rest send adaptive thinking + output_config.effort.
-    fn set_think_level(&mut self, arg: &str) {
+    /// Sets the thinking level. Level table = off + THINKING_LEVELS: off sends no
+    /// parameter; the rest send adaptive thinking + output_config.effort.
+    /// `persist = false` applies to the current session only (no settings write).
+    fn set_think_level(&mut self, arg: &str, persist: bool) {
         let level = if arg == "off" {
             None
         } else if crate::api::types::THINKING_LEVELS.contains(&arg) {
             Some(arg.to_string())
         } else {
-            self.push_slash_output(
-                "用法: /think [off|low|medium|high|xhigh|max]".to_string(),
-            );
+            self.push_slash_error(format!(
+                "[error] code={} msg=用法: /think [off|low|medium|high|xhigh|max]",
+                crate::error::SLASH_ERROR_BAD_ARGUMENT
+            ));
             return;
         };
         let _ = self.session.runtime.thinking_tx.send(level.clone());
         let saved = level.as_deref().unwrap_or("off");
-        let cwd = std::path::PathBuf::from(&self.cwd);
-        let _ = crate::settings::upsert_project_settings(
-            &cwd,
-            &serde_json::json!({ "thinkingLevel": saved }),
-        );
-        self.push_slash_output(format!("✓ 思考级别已设置: {saved}"));
+        if persist {
+            let cwd = std::path::PathBuf::from(&self.cwd);
+            let _ = crate::settings::upsert_project_settings(
+                &cwd,
+                &serde_json::json!({ "thinkingLevel": saved }),
+            );
+            self.push_slash_output(format!("✓ 思考级别已设置: {saved}"));
+        } else {
+            self.push_slash_output(format!("✓ 思考级别已设置: {saved}（仅本次会话）"));
+        }
     }
 
     /// Enters the `/think` level selector: preselects the current level (off when unset).
     fn open_think_menu(&mut self) {
         let current = self.session.runtime.thinking.borrow().clone();
         let current = current.as_deref().unwrap_or("off");
-        let selected = THINK_LEVELS
+        let current = THINK_LEVELS
             .iter()
             .position(|(name, _)| *name == current)
             .unwrap_or(0);
-        self.think_menu = Some(ThinkMenu { selected });
-        self.slash_suggestions.clear();
+        let menu = ThinkMenu {
+            selected: current,
+            current,
+        };
+        // 空表防御（THINK_LEVELS 为 const 非空，防御性分支不可达）：菜单不开。
+        if menu.picker().is_empty() {
+            return;
+        }
+        self.think_menu = Some(menu);
+        self.clear_slash_suggestions();
     }
 
-    /// Think level menu keys: ↑↓ move (wraps), Enter confirms, Esc exits. Returns whether consumed.
+    /// Think level menu keys: ↑↓/1-6 move (wraps, delegated to the PickerModel core),
+    /// Enter confirms + persists, s = session-only (no settings write), Esc exits.
+    /// Returns whether consumed.
     fn think_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let Some(menu) = &mut self.think_menu else {
             return false;
         };
         match code {
             KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
-                menu.selected = (menu.selected + 1) % THINK_LEVELS.len();
+                let mut core = menu.picker();
+                core.move_selection(1);
+                menu.selected = core.selected;
                 true
             }
             KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
-                menu.selected = menu
-                    .selected
-                    .checked_sub(1)
-                    .unwrap_or(THINK_LEVELS.len() - 1);
+                let mut core = menu.picker();
+                core.move_selection(-1);
+                menu.selected = core.selected;
+                true
+            }
+            // Direct jump: 1 = off … 6 = max (fixed 6-item table, §G10).
+            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                if let Some(n) = c.to_digit(10)
+                    && core.jump(n as usize)
+                {
+                    menu.selected = core.selected;
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Char('s') if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let core = menu.picker();
+                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
+                self.think_menu = None;
+                self.set_think_level(&value, false);
                 true
             }
             KeyCode::Enter => {
-                let selected = menu.selected.min(THINK_LEVELS.len() - 1);
+                let core = menu.picker();
+                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
                 self.think_menu = None;
-                self.set_think_level(THINK_LEVELS[selected].0);
+                self.set_think_level(&value, true);
                 true
             }
             KeyCode::Esc => {
@@ -3021,7 +3581,7 @@ impl Chat {
     /// shown when the input starts with `/` and has no args; an empty query lists everything (built-ins + skills),
     /// otherwise prefix/substring matching (a simplified generateCommandSuggestions).
     fn update_slash_suggestions(&mut self) {
-        self.slash_suggestions.clear();
+        self.clear_slash_suggestions();
         let input = self.input.trim_end();
         let Some(query) = input.strip_prefix('/') else {
             return;
@@ -3031,8 +3591,9 @@ impl Chat {
         }
         let mut items: Vec<SlashSuggestion> = SLASH_COMMANDS
             .iter()
-            .map(|(name, desc)| SlashSuggestion {
+            .map(|(name, hint, desc)| SlashSuggestion {
                 name: (*name).to_string(),
+                hint: (*hint).to_string(),
                 description: (*desc).to_string(),
             })
             .collect();
@@ -3052,6 +3613,7 @@ impl Chat {
             }
             items.push(SlashSuggestion {
                 name: skill.name,
+                hint: String::new(),
                 description,
             });
         }
@@ -3070,6 +3632,8 @@ impl Chat {
         }
         self.slash_suggestions = items.into_iter().take(SLASH_SUGGESTIONS_MAX).collect();
         self.slash_selected = self.slash_selected.min(self.slash_suggestions.len().saturating_sub(1));
+        // G9: a bare `/`-query with zero matches shows one dim hint row, not an empty gap.
+        self.slash_no_match = !q.is_empty() && self.slash_suggestions.is_empty();
     }
 
     /// Dropdown key handling: ↑↓ move the selection, Tab completes (without running), Esc closes.
@@ -3096,7 +3660,7 @@ impl Chat {
                 true
             }
             KeyCode::Esc => {
-                self.slash_suggestions.clear();
+                self.clear_slash_suggestions();
                 true
             }
             _ => false,
@@ -3108,10 +3672,11 @@ impl Chat {
         if let Some(s) = self.slash_suggestions.get(self.slash_selected) {
             self.input = format!("/{} ", s.name);
         }
-        self.slash_suggestions.clear();
+        self.clear_slash_suggestions();
     }
 
-    /// Submits the next queued message after a turn (one at a time: the next turn continues).
+    /// Submits the next queued item after a turn (one at a time: a plain message starts
+    /// the next turn; queued slash commands drain synchronously until one does).
     fn submit_queued(&mut self) {
         if self.busy || self.queued.is_empty() {
             return;
@@ -3119,8 +3684,23 @@ impl Chat {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        let text = self.queued.remove(0);
-        self.start_turn(text, true);
+        // Drain queued slash commands synchronously; stop at the first plain message
+        // (it starts a turn, which re-triggers submit_queued on TurnEnd).
+        loop {
+            let Some(first) = self.queued.first() else {
+                return;
+            };
+            if !first.is_slash {
+                break;
+            }
+            let item = self.queued.remove(0);
+            self.run_slash(item.text.strip_prefix('/').unwrap_or(&item.text));
+            if self.busy {
+                return; // a skill command started a turn; the rest waits for TurnEnd
+            }
+        }
+        let item = self.queued.remove(0);
+        self.start_turn(item.text, true);
     }
 
     /// System-triggered turn: a watchable signal/terminal notification wakes the main agent.
@@ -3460,6 +4040,15 @@ impl Chat {
         if self.think_menu_key(code, modifiers) {
             return true;
         }
+        if self.theme_menu_key(code, modifiers) {
+            return true;
+        }
+        if self.resume_menu_key(code, modifiers) {
+            return true;
+        }
+        if self.provider_menu_key(code, modifiers) {
+            return true;
+        }
         if self.search.is_some() {
             return self.search_key(code, modifiers);
         }
@@ -3638,7 +4227,7 @@ impl Chat {
             return true;
         }
         if !self.slash_suggestions.is_empty() {
-            self.slash_suggestions.clear();
+            self.clear_slash_suggestions();
             return true;
         }
         if self.help_visible {
@@ -3793,8 +4382,8 @@ impl Chat {
     fn vertical(&mut self, down: bool) -> bool {
         // Pulling back a queued message only happens on empty input: what is being typed should not be clobbered.
         if !down && self.busy && self.input.is_empty() && !self.queued.is_empty() {
-            if let Some(text) = self.queued.pop() {
-                self.set_input(text);
+            if let Some(item) = self.queued.pop() {
+                self.set_input(item.text);
             }
             return true;
         }
@@ -3854,6 +4443,12 @@ impl Chat {
     fn after_edit(&mut self) {
         self.history.detach();
         self.update_slash_suggestions();
+        // G12: error/usage rows clear on the next input — the user has acted on them.
+        if !self.slash_error_lines.is_empty() {
+            self.slash_error_lines.clear();
+            self.slash_error_at = None;
+            self.dirty = true;
+        }
     }
 
     /// Records and persists a prompt. A write failure only degrades to in-session history (once,
@@ -3971,7 +4566,7 @@ impl Chat {
             search.hit = Some(hit);
         }
         self.search = Some(search);
-        self.slash_suggestions.clear();
+        self.clear_slash_suggestions();
     }
 
     /// Search-mode keys: typing filters, Ctrl+R takes an older hit, Tab/Esc adopt and keep editing,
@@ -4047,12 +4642,20 @@ impl Chat {
         if self.tick.is_multiple_of(15) {
             self.refresh_entities();
         }
-        // Slash transient hints expire (operation confirmations leave no permanent placeholder).
+        // Slash transient hints expire (operation confirmations leave no permanent placeholder);
+        // error/usage rows live longer (G12) — they additionally clear on the next input.
         if let Some(at) = self.slash_at
             && at.elapsed() > SLASH_OUTPUT_TTL
         {
             self.slash_lines.clear();
             self.slash_at = None;
+            self.dirty = true;
+        }
+        if let Some(at) = self.slash_error_at
+            && at.elapsed() > SLASH_OUTPUT_ERROR_TTL
+        {
+            self.slash_error_lines.clear();
+            self.slash_error_at = None;
             self.dirty = true;
         }
         for msg in &mut self.messages {
@@ -4514,7 +5117,7 @@ impl Chat {
             .queued
             .iter()
             .take(QUEUE_ROWS_MAX)
-            .map(|text| format!("> {}", one_line(text, self.width.saturating_sub(4))))
+            .map(|item| format!("> {}", one_line(&item.text, self.width.saturating_sub(4))))
             .collect();
         if self.queued.len() > QUEUE_ROWS_MAX {
             out.push(format!("… +{} more queued", self.queued.len() - QUEUE_ROWS_MAX));
@@ -4938,13 +5541,22 @@ impl Chat {
                 )));
             }
         }
+        // Error/usage rows (G12/G13): longer TTL, error color, clear on the next input.
+        if !self.slash_error_lines.is_empty() {
+            for line in &self.slash_error_lines {
+                rows.push(Row::new(Line::styled(
+                    one_line(line, width),
+                    SegStyle::fg(theme.error),
+                )));
+            }
+        }
 
         self.doc = Doc {
             rows,
             click_ranges,
             settled,
             settled_marks,
-            transient_rows: self.slash_lines.len(),
+            transient_rows: self.slash_lines.len() + self.slash_error_lines.len(),
         };
         &self.doc
     }
@@ -5224,6 +5836,16 @@ mod tests {
         test_chat_home(std::env::temp_dir())
     }
 
+    /// Joined text of both slash output buckets (success hints + error/usage rows).
+    fn all_slash_text(chat: &Chat) -> String {
+        chat.slash_lines
+            .iter()
+            .chain(&chat.slash_error_lines)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Segments covered by the latest settled checkpoint (checkpoint-equivalent read of the old aggregate field).
     fn settled_segments(chat: &Chat) -> usize {
         chat.doc.settled_marks.last().map_or(0, |m| m.segments)
@@ -5260,7 +5882,7 @@ mod tests {
             instance: None,
         });
         let mut chat =
-            Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), None);
+            Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), crate::tui::theme::ThemeSetting::Auto, None);
         chat.cwd = home.display().to_string();
         chat
     }
@@ -5885,7 +6507,7 @@ mod tests {
         });
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
-        let mut chat = Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), None);
+        let mut chat = Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), crate::tui::theme::ThemeSetting::Auto, None);
         chat.bash_mode = true;
         chat.input = "echo hello".to_string();
         chat.submit();
@@ -6117,9 +6739,54 @@ mod tests {
         chat.input = "/nope".to_string();
         chat.submit();
         assert!(
-            chat.slash_lines.iter().any(|l| l.contains("未知命令")),
-            "{joined}"
+            chat.slash_error_lines.iter().any(|l| l.contains("未知命令")),
+            "未知命令进错误行: {:?}",
+            chat.slash_error_lines
         );
+    }
+
+
+    /// picker-model.md 提交 E：/model 一级走 PickerModel 核心——● 标当前 provider、
+    /// 数字直达、二级保持原逻辑（数字不进输入框）。
+    #[tokio::test]
+    async fn model_menu_level_one_uses_picker_core() {
+        let mut chat = test_chat();
+        // 一级：default + 一个命名 provider。
+        let settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        let mut s2 = settings.clone();
+        s2.providers.insert(
+            "deepseek".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: "sk-ds".into(),
+                api_base_url: "https://api.deepseek.com".into(),
+                supports_images: None,
+            },
+        );
+        Arc::get_mut(&mut chat.session).unwrap().client =
+            crate::api::client::Client::from_settings(&s2).unwrap();
+
+        chat.input = "/model".to_string();
+        chat.submit();
+        let menu = chat.model_menu.as_ref().expect("菜单已打开");
+        assert_eq!(menu.provider_current, Some(0), "● 标当前 provider default");
+        let core = menu.provider_picker();
+        assert_eq!(core.items.len(), 2, "default + deepseek");
+
+        // 数字直达 2 = deepseek；一级被消费不进输入框。
+        assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
+        let menu = chat.model_menu.as_ref().expect("菜单已打开");
+        assert_eq!(menu.provider_selected, 1, "2 直达 deepseek");
+        assert_eq!(chat.input, "", "一级数字被菜单消费");
+
+        // Enter 进二级：数字不再直达（二级不适用，落输入编辑路径）。
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
+        let menu = chat.model_menu.as_ref().expect("菜单已打开");
+        assert!(menu.models.is_some(), "进入二级");
+        assert!(chat.on_key(KeyCode::Char('3'), KeyModifiers::empty()));
+        assert_eq!(chat.input, "3", "二级数字落输入框（无直达）");
     }
 
     /// /model: with an arg, switch the runtime model (effective next turn) and persist as default; without, open the selector.
@@ -6182,6 +6849,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// `/theme` 无参 → 打开档位选择器（picker-model.md 提交 B）：预选当前档、
+    /// ↑↓/1-3 浏览、Enter 应用+持久化、Esc 取消不改状态；`/theme auto` 快捷保留。
+    #[test]
+    fn theme_picker_selects_and_applies() {
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-slash-{}-theme-picker", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut chat = test_chat_home(tmp.join("home"));
+        chat.cwd = tmp.display().to_string();
+
+        // 无参 → 菜单打开，预选当前档（默认 Auto = index 2）。
+        chat.input = "/theme".to_string();
+        chat.submit();
+        let menu = chat.theme_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THEME_LEVELS[menu.selected].0, "auto", "预选当前档 auto");
+        assert_eq!(THEME_LEVELS[menu.current].0, "auto", "● 标当前档");
+        // Esc 取消：状态不变、菜单关闭。
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(chat.theme_menu.is_none(), "Esc 关闭菜单");
+        assert_eq!(
+            chat.theme_setting,
+            crate::tui::theme::ThemeSetting::Auto,
+            "Esc 不改主题"
+        );
+        assert!(
+            !tmp.join(".bingo/settings.json").exists(),
+            "取消不写 settings"
+        );
+
+        // 数字直达 2 = light，Enter 应用 + 持久化 + 关闭。
+        chat.input = "/theme".to_string();
+        chat.submit();
+        assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
+        let menu = chat.theme_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THEME_LEVELS[menu.selected].0, "light", "2 直达 light");
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(chat.theme_menu.is_none(), "Enter 关闭菜单");
+        assert_eq!(
+            chat.theme_setting,
+            crate::tui::theme::ThemeSetting::Light,
+            "Enter 应用主题"
+        );
+        let saved = std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap();
+        assert!(saved.contains("\"theme\": \"light\""), "{saved}");
+
+        // ↑↓ 浏览与数字直达共用核心；重新打开时 ● 跟随新档。
+        chat.input = "/theme".to_string();
+        chat.submit();
+        let menu = chat.theme_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THEME_LEVELS[menu.current].0, "light", "● 跟随生效档");
+        assert!(chat.on_key(KeyCode::Up, KeyModifiers::empty()));
+        let menu = chat.theme_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THEME_LEVELS[menu.selected].0, "dark", "↑ 到 dark");
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+
+        // 快捷路径保留：/theme auto 直接切换。
+        chat.input = "/theme auto".to_string();
+        chat.submit();
+        assert_eq!(
+            chat.theme_setting,
+            crate::tui::theme::ThemeSetting::Auto,
+            "显式快捷保留"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// /rename: renames the transcript file and updates the runtime reference.
     #[test]
     fn slash_rename_renames_transcript() {
@@ -6213,17 +6946,44 @@ mod tests {
         let t_b = crate::transcript::create(&home, &tmp).unwrap();
         let _ = t_b.append(&crate::api::types::Message::user_text("b"));
         let mut chat = test_chat_home(home.clone());
-        let _ = chat.session.runtime.transcript_tx.send(Some(t_a));
+        let _ = chat.session.runtime.transcript_tx.send(Some(t_a.clone()));
         let name_b = t_b.name();
         chat.input = "/resume".to_string();
         chat.submit();
-        let joined = chat.slash_lines.join("\n");
-        assert!(joined.contains(&name_b), "列出会话: {joined}");
+        // 无参 → 打开会话选择器（picker-model.md 提交 C）：列表含 b、● 标当前 a。
+        let menu = chat.resume_menu.as_ref().expect("选择器已打开");
+        let core = menu.picker();
+        assert!(
+            core.items.iter().any(|i| i.label == name_b),
+            "选择器列出会话 b"
+        );
+        assert_eq!(menu.current, Some(1), "● 标当前会话（t_a 较旧，位于索引 1）");
+        // Esc 取消：当前会话不变。
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(chat.resume_menu.is_none());
+        assert_eq!(
+            chat.session.runtime.transcript.borrow().clone().unwrap().name(),
+            t_a.name(),
+            "Esc 不切换"
+        );
 
-        chat.input = format!("/resume {name_b}");
+        // Enter 确认（按 selected 索引取快照，value≠label 锚点）：切换到 b。
+        chat.input = "/resume".to_string();
+        chat.submit();
+        chat.input = String::new();
+        chat.on_key(KeyCode::Char('1'), KeyModifiers::empty());
+        let menu = chat.resume_menu.as_ref().expect("选择器已打开");
+        assert_eq!(menu.selected, 0, "1 直达最新会话");
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(chat.resume_menu.is_none(), "Enter 关闭选择器");
+        let current = chat.session.runtime.transcript.borrow().clone().unwrap();
+        assert_eq!(current.name(), name_b, "Enter 切换会话（按索引取快照）");
+
+        // 带参快速路径保留。
+        chat.input = format!("/resume {}", t_a.name());
         chat.submit();
         let current = chat.session.runtime.transcript.borrow().clone().unwrap();
-        assert_eq!(current.name(), name_b, "切换到目标会话");
+        assert_eq!(current.name(), t_a.name(), "带参快速切换保留");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -6516,9 +7276,71 @@ mod tests {
         let mut chat = test_chat();
         chat.input = "/nope-skill".to_string();
         chat.submit();
-        let joined = chat.slash_lines.join("\n");
-        assert!(joined.contains("未知命令: /nope-skill"), "{joined}");
+        let joined = all_slash_text(&chat);
+        assert!(
+            joined.contains("未知命令: /nope-skill"),
+            "未知命令指导保留: {joined}"
+        );
+        assert!(
+            joined.contains("code=UNKNOWN_COMMAND"),
+            "G13 稳定错误码: {joined}"
+        );
         assert!(chat.messages.is_empty(), "未知命令不启动回合");
+    }
+
+
+    /// G12 TTL grading: success hints expire after SLASH_OUTPUT_TTL, error/usage rows
+    /// after SLASH_OUTPUT_ERROR_TTL, and error rows clear on the next input.
+    #[test]
+    fn slash_error_rows_have_longer_ttl_and_clear_on_input() {
+        let mut chat = test_chat();
+        chat.push_slash_output("✓ 完成".to_string());
+        chat.push_slash_error("[error] code=BAD_ARGUMENT msg=用法: /think [...]".to_string());
+        assert_eq!(chat.slash_lines.len(), 1);
+        assert_eq!(chat.slash_error_lines.len(), 1);
+
+        // Past the success TTL but inside the error TTL: only the success hint expires.
+        chat.slash_at = Some(std::time::Instant::now() - SLASH_OUTPUT_TTL - std::time::Duration::from_millis(1));
+        chat.tick();
+        assert!(chat.slash_lines.is_empty(), "成功行 2s 过期");
+        assert_eq!(chat.slash_error_lines.len(), 1, "错误行未到期");
+
+        // Past the error TTL: both gone.
+        chat.slash_error_at = Some(std::time::Instant::now() - SLASH_OUTPUT_ERROR_TTL - std::time::Duration::from_millis(1));
+        chat.tick();
+        assert!(chat.slash_error_lines.is_empty(), "错误行 8s 过期");
+
+        // A fresh error clears on the next real input edit (after_edit path).
+        chat.push_slash_error("用法: /think [...]".to_string());
+        assert!(chat.on_key(KeyCode::Char('a'), KeyModifiers::empty()));
+        assert!(chat.slash_error_lines.is_empty(), "下次输入清除错误行");
+    }
+
+    /// G9 no-match hint: a bare `/`-query with zero matches flags the hint; any further
+    /// keystroke (re-filter) or closing clears it.
+    #[test]
+    fn slash_no_match_flags_hint_row() {
+        let mut chat = test_chat();
+        chat.input = "/zzz".to_string();
+        chat.update_slash_suggestions();
+        assert!(chat.slash_suggestions.is_empty());
+        assert!(chat.slash_no_match, "/zzz 无匹配显示提示");
+        // Typing further re-filters: still no match, hint stays.
+        chat.input = "/zzzx".to_string();
+        chat.update_slash_suggestions();
+        assert!(chat.slash_no_match);
+        // A matching prefix clears it.
+        chat.input = "/th".to_string();
+        chat.update_slash_suggestions();
+        assert!(!chat.slash_suggestions.is_empty());
+        assert!(!chat.slash_no_match, "有匹配不显示提示");
+        // Clearing the input (any path that re-runs the filter) removes the hint.
+        chat.input = "/zzz".to_string();
+        chat.update_slash_suggestions();
+        assert!(chat.slash_no_match);
+        chat.input = String::new();
+        chat.update_slash_suggestions();
+        assert!(!chat.slash_no_match, "空输入不显示提示");
     }
 
     /// P1-E：/provider 列表 key 脱敏——短 key（≤4 字符）不追加省略号。
@@ -6533,19 +7355,36 @@ mod tests {
             crate::api::client::Client::from_settings(&settings).unwrap();
         chat.input = "/provider".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
-        assert!(out.contains("default @ https://api.anthropic.com"), "{out}");
-        assert!(out.contains("（key main）"), "短 key 无省略号: {out}");
-        assert!(!out.contains("main…"), "{out}");
+        // 无参 → 打开选择器：信息列（URL + 脱敏 key）进入 desc（picker-model.md 提交 D）。
+        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        let core = menu.picker();
+        let desc = core
+            .items
+            .iter()
+            .find(|i| i.label == "default")
+            .map(|i| i.description.as_str())
+            .expect("default 选项");
+        assert!(desc.contains("https://api.anthropic.com"), "{desc}");
+        assert!(desc.contains("（key main）"), "短 key 无省略号: {desc}");
+        assert!(!desc.contains("main…"), "{desc}");
     }
 
     #[test]
     fn slash_provider_lists_and_switches() {
+        let s_tmp = std::env::temp_dir().join(format!("bingo-slash-{}-provs", std::process::id()));
+        let _ = std::fs::remove_dir_all(&s_tmp);
         let mut chat = test_chat();
         chat.input = "/provider".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
-        assert!(out.contains("当前 provider: default"), "{out}");
+        // 无参 → 打开选择器：default 打头、● 标当前。
+        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        assert_eq!(menu.current, Some(0), "● 标当前 default");
+        let core = menu.picker();
+        assert_eq!(
+            core.items.first().map(|i| i.label.as_str()),
+            Some("default"),
+            "default 打头"
+        );
 
         // Configure a named provider, then switch.
         let providers = std::collections::HashMap::from([(
@@ -6575,24 +7414,69 @@ mod tests {
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::from_settings(&settings).unwrap();
 
+        // 重新打开选择器：列表含 deepseek；Esc 不改当前。
         chat.input = "/provider".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
-        assert!(out.contains("deepseek"), "{out}");
+        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        let core = menu.picker();
+        assert!(
+            core.items.iter().any(|i| i.label == "deepseek"),
+            "选择器列出 deepseek"
+        );
+        assert_eq!(menu.current, Some(0), "● 标当前 default");
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(chat.provider_menu.is_none(), "Esc 关闭选择器");
+        assert_eq!(*chat.session.runtime.provider.borrow(), "default", "Esc 不改");
 
-        chat.input = "/provider deepseek".to_string();
+        // Enter 确认：切换 + 持久化（带参快速路径等价）。
+        chat.input = "/provider".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
-        assert!(out.contains("✓ provider 已切换: deepseek"), "{out}");
+        assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
+        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        assert_eq!(menu.selected, 1, "2 直达 deepseek");
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(chat.provider_menu.is_none(), "Enter 关闭选择器");
         assert_eq!(
             *chat.session.runtime.provider.borrow(),
             "deepseek",
             "runtime provider 同步"
         );
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("✓ provider 已切换: deepseek"), "{out}");
 
+        // 带参快速路径保留。
+        chat.input = "/provider deepseek".to_string();
+        chat.submit();
+        assert_eq!(*chat.session.runtime.provider.borrow(), "deepseek");
+        let _ = std::fs::remove_dir_all(&s_tmp);
+
+        // s = 仅本次会话（独立 chat，无先前持久化）：runtime 切换但不写 settings。
+        let mut chat = test_chat_home(s_tmp.join("home"));
+        chat.cwd = s_tmp.display().to_string();
+        Arc::get_mut(&mut chat.session).unwrap().client =
+            crate::api::client::Client::from_settings(&settings).unwrap();
+        chat.input = "/provider".to_string();
+        chat.submit();
+        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        assert_eq!(menu.current, Some(0), "● 标当前 default");
+        assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
+        assert!(chat.on_key(KeyCode::Char('s'), KeyModifiers::empty()));
+        assert_eq!(
+            *chat.session.runtime.provider.borrow(),
+            "deepseek",
+            "s 切换 runtime"
+        );
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("（仅本次会话）"), "s 标注: {out}");
+        assert!(
+            !s_tmp.join(".bingo/settings.json").exists(),
+            "s 不写 settings"
+        );
+
+        // 未命中报错（走错误桶）。
         chat.input = "/provider nope".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
+        let out = all_slash_text(&chat);
         assert!(out.contains("未找到 provider"), "{out}");
     }
 
@@ -6634,8 +7518,11 @@ mod tests {
 
         chat.input = "/think bogus".to_string();
         chat.submit();
-        let out = chat.slash_lines.join("\n");
-        assert!(out.contains("用法: /think"), "{out}");
+        let out = chat.slash_error_lines.join("\n");
+        assert!(
+            out.contains("用法: /think") && out.contains("code=BAD_ARGUMENT"),
+            "用法行带稳定错误码: {out}"
+        );
         assert_eq!(
             chat.session.runtime.thinking.borrow().as_deref(),
             None,
@@ -6797,6 +7684,68 @@ mod tests {
         chat.input = "hi".to_string();
         chat.update_slash_suggestions();
         assert!(chat.slash_suggestions.is_empty(), "非 / 开头不显示");
+    }
+
+    /// Dispatch completeness: every SLASH_COMMANDS entry has a `run_slash` arm, and every
+    /// dispatch arm's primary name lives in the table (aliases normalize to a primary).
+    /// The mirror list below must stay in sync with `run_slash`'s match arms — this test is the gate.
+    #[test]
+    fn slash_dispatch_covers_every_table_entry() {
+        use std::collections::HashSet;
+        // run_slash match arms as (arm, primary); aliases share the primary's handler.
+        let dispatch: &[(&str, &str)] = &[
+            ("help", "help"),
+            ("?", "help"),
+            ("exit", "exit"),
+            ("quit", "exit"),
+            ("clear", "clear"),
+            ("reset", "clear"),
+            ("new", "clear"),
+            ("model", "model"),
+            ("theme", "theme"),
+            ("rename", "rename"),
+            ("resume", "resume"),
+            ("share", "share"),
+            ("compact", "compact"),
+            ("status", "status"),
+            ("context", "context"),
+            ("permissions", "permissions"),
+            ("mcp", "mcp"),
+            ("provider", "provider"),
+            ("think", "think"),
+            ("skills", "skills"),
+            ("tasks", "tasks"),
+            ("team", "team"),
+        ];
+        let table: HashSet<&str> = SLASH_COMMANDS.iter().map(|(n, _, _)| *n).collect();
+        let arms: HashSet<&str> = dispatch.iter().map(|(a, _)| *a).collect();
+        let primaries: HashSet<&str> = dispatch.iter().map(|(_, p)| *p).collect();
+        for name in &table {
+            assert!(arms.contains(name), "表内命令 /{name} 缺少 run_slash 分派臂");
+        }
+        for p in &primaries {
+            assert!(table.contains(p), "分派臂主名 /{p} 不在 SLASH_COMMANDS 表内");
+        }
+    }
+
+    /// `/help` renders every SLASH_COMMANDS entry (title + one line each) with its hint,
+    /// straight from the same table — the single source stays the only source.
+    #[test]
+    fn slash_help_lists_every_command_with_hint() {
+        let mut chat = test_chat();
+        chat.run_slash("help");
+        let lines: Vec<&str> = chat.slash_lines.iter().map(String::as_str).collect();
+        assert_eq!(lines.len(), SLASH_COMMANDS.len() + 1, "标题 + 每命令一行");
+        assert_eq!(lines[0], "可用命令：");
+        for ((name, hint, desc), line) in SLASH_COMMANDS.iter().zip(&lines[1..]) {
+            let cmd = if hint.is_empty() {
+                format!("/{name}")
+            } else {
+                format!("/{name} {hint}")
+            };
+            assert!(line.contains(&cmd), "行包含命令与参数提示: {line}");
+            assert!(line.ends_with(desc), "行尾为描述: {line}");
+        }
     }
 
     /// Prefix filtering + skills merged in (project-level skills directory).
@@ -7205,6 +8154,54 @@ mod tests {
         assert_eq!(THINK_LEVELS[0].0, "off");
         let menu: Vec<&str> = THINK_LEVELS[1..].iter().map(|(n, _)| *n).collect();
         assert_eq!(menu, crate::api::types::THINKING_LEVELS.to_vec());
+    }
+
+    /// 1..6 direct jump selects the right row and the digits never reach the input;
+    /// `s` applies session-only (runtime changes, settings.json not written).
+    #[test]
+    fn think_menu_direct_jump_and_session_only() {
+        let home = std::env::temp_dir().join(format!("bingo-think-menu-s-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let mut chat = test_chat_home(home.clone());
+        let _ = chat.session.runtime.thinking_tx.send(Some("off".into()));
+        chat.input = "/think".to_string();
+        chat.submit();
+        let menu = chat.think_menu.as_ref().expect("菜单已打开");
+        assert_eq!(menu.current, 0, "● 记录打开时的生效档");
+        // '3' jumps to medium (off=1, low=2, medium=3); digits are consumed, not typed.
+        assert!(chat.on_key(KeyCode::Char('3'), KeyModifiers::empty()));
+        let menu = chat.think_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THINK_LEVELS[menu.selected].0, "medium", "3 直达 medium");
+        assert_eq!(chat.input, "", "数字键被菜单消费，不进输入框");
+        // '6' wraps-jumps to max; Enter persists.
+        assert!(chat.on_key(KeyCode::Char('6'), KeyModifiers::empty()));
+        let menu = chat.think_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THINK_LEVELS[menu.selected].0, "max", "6 直达 max");
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert_eq!(
+            chat.session.runtime.thinking.borrow().as_deref(),
+            Some("off"),
+            "Esc 不改状态"
+        );
+
+        // `s`: session-only — runtime switches, no settings write.
+        chat.input = "/think".to_string();
+        chat.submit();
+        assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
+        assert!(chat.on_key(KeyCode::Char('s'), KeyModifiers::empty()));
+        assert!(chat.think_menu.is_none(), "s 确认后关闭菜单");
+        assert_eq!(
+            chat.session.runtime.thinking.borrow().as_deref(),
+            Some("low"),
+            "s 切换 runtime"
+        );
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("（仅本次会话）"), "s 输出标注仅本次会话: {out}");
+        assert!(
+            !home.join(".bingo/settings.json").exists(),
+            "s 不写 settings.json"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// Footer badge: shows `model · think level` when a level is set; off shows only the model name.
@@ -9220,7 +10217,10 @@ mod tests {
         chat.busy = true;
         chat.set_input("first queued");
         chat.submit();
-        assert_eq!(chat.queued, vec!["first queued".to_string()]);
+        assert_eq!(
+            chat.queued,
+            vec![QueuedInput { text: "first queued".into(), is_slash: false }]
+        );
         assert_eq!(chat.input, "", "入队后输入清空");
         chat.set_input("second queued");
         chat.submit();
@@ -9232,6 +10232,85 @@ mod tests {
         press(&mut chat, KeyCode::Up);
         assert_eq!(chat.input, "second queued");
         assert_eq!(chat.queued.len(), 1);
+    }
+
+
+
+
+
+    /// Busy dispatch (契约 §4.2): instant commands run immediately and never reset
+    /// `busy`; other slash commands queue with the slash marker; plain messages queue.
+    #[test]
+    fn busy_dispatch_runs_instant_and_queues_the_rest() {
+        let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-busy", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut chat = test_chat_home(tmp.join("home"));
+        chat.cwd = tmp.display().to_string();
+        chat.busy = true;
+
+        // Instant: /think xhigh applies now, not queued; busy stays true.
+        chat.set_input("/think xhigh");
+        chat.submit();
+        assert_eq!(
+            chat.session.runtime.thinking.borrow().as_deref(),
+            Some("xhigh"),
+            "忙时白名单命令立即生效"
+        );
+        assert!(chat.busy, "白名单路径不重置 busy");
+        assert!(chat.queued.is_empty(), "白名单命令不入队");
+        let out = chat.slash_lines.join("\n");
+        assert!(out.contains("✓ 思考级别已设置: xhigh"), "{out}");
+
+        // Non-instant slash: queued with the slash marker (never sent as a prompt).
+        chat.set_input("/clear");
+        chat.submit();
+        assert_eq!(
+            chat.queued,
+            vec![QueuedInput { text: "/clear".into(), is_slash: true }],
+            "非白名单 slash 命令带标记入队"
+        );
+
+        // Plain message: queued without the marker.
+        chat.set_input("hello");
+        chat.submit();
+        assert_eq!(chat.queued.len(), 2);
+        assert!(!chat.queued[1].is_slash);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// After TurnEnd, queued slash commands drain through `run_slash` (not `start_turn`),
+    /// in order, until a plain message starts the next turn.
+    #[tokio::test]
+    async fn queued_slashes_drain_through_run_slash() {
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-slash-{}-drain", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut chat = test_chat_home(tmp.join("home"));
+        chat.cwd = tmp.display().to_string();
+        chat.queued = vec![
+            QueuedInput { text: "/think low".into(), is_slash: true },
+            QueuedInput { text: "/nope".into(), is_slash: true },
+            QueuedInput { text: "the message".into(), is_slash: false },
+        ];
+        chat.submit_queued();
+        // Both slash commands ran (think applied + unknown guidance), then the message started a turn.
+        assert_eq!(
+            chat.session.runtime.thinking.borrow().as_deref(),
+            Some("low"),
+            "队列中的 slash 命令按命令执行"
+        );
+        let out = all_slash_text(&chat);
+        assert!(
+            out.contains("未知命令: /nope") && out.contains("code=UNKNOWN_COMMAND"),
+            "未知命令走指导而非发模型: {out}"
+        );
+        assert!(chat.busy, "最后一条普通消息开新回合");
+        assert_eq!(chat.messages.last().map(|m| m.role), Some(Role::User));
+        assert!(
+            chat.messages.last().is_some_and(|m| m.text == "the message"),
+            "普通消息经 start_turn 发给模型"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Bottom entity area: ctrl+g focuses the selector, ↑↓ move, Enter opens, Esc closes;
@@ -9289,7 +10368,9 @@ mod tests {
     #[test]
     fn queue_lines_are_capped() {
         let mut chat = chat_with_history("queuecap");
-        chat.queued = (0..10).map(|i| format!("m{i}")).collect();
+        chat.queued = (0..10)
+            .map(|i| QueuedInput { text: format!("m{i}"), is_slash: false })
+            .collect();
         assert_eq!(chat.queue_lines().len(), QUEUE_ROWS_MAX + 1);
         assert!(chat.queue_lines().last().is_some_and(|l| l.contains("more queued")));
     }
@@ -9409,7 +10490,10 @@ mod tests {
         now += slow;
         chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now);
         assert_eq!(chat.input, "", "Enter 提交而不是换行");
-        assert_eq!(chat.queued, vec!["hi".to_string()]);
+        assert_eq!(
+            chat.queued,
+            vec![QueuedInput { text: "hi".into(), is_slash: false }]
+        );
     }
 
     /// Bracketed paste: the whole chunk inserts at the caret as one undo step; ≥10 lines fold into a placeholder,
@@ -9481,10 +10565,10 @@ mod tests {
         chat.submit();
         assert_eq!(chat.queued.len(), 1);
         assert_eq!(
-            chat.queued[0],
+            chat.queued[0].text,
             format!("看一下这张图\n#[image 1]"),
             "路径行替换为占位：{}",
-            chat.queued[0]
+            chat.queued[0].text
         );
         assert_eq!(chat.attachments.len(), 1);
         assert_eq!(chat.attachments[0].media_type, "image/png");
@@ -9503,7 +10587,7 @@ mod tests {
         chat.set_input(format!("![图]({})\n{}", png.display(), txt.display()));
         chat.busy = true;
         chat.submit();
-        assert_eq!(chat.queued[0], format!("#[image 1]\n{}", txt.display()));
+        assert_eq!(chat.queued[0].text, format!("#[image 1]\n{}", txt.display()));
         assert_eq!(chat.attachments.len(), 1, "txt 不注册");
         let _ = std::fs::remove_dir_all(&dir);
     }

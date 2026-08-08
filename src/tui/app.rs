@@ -43,8 +43,19 @@ use ratatui::style::Color;
 
 use crate::permission::PermissionMode;
 use crate::tui::chat::{
-    Chat, ModelMenu, Row, SettledMark, SlashSuggestion, ThinkMenu, model_footer_label,
+    Chat, ModelMenu, ProviderMenu, ResumeMenu, Row, SettledMark, SlashSuggestion,
+    ThemeMenu, ThinkMenu, model_footer_label,
 };
+
+/// 当前激活的选择器菜单（互斥：任一时刻至多一个；渲染按此分组读壳层）。
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Menus<'a> {
+    pub model: Option<&'a ModelMenu>,
+    pub think: Option<&'a ThinkMenu>,
+    pub theme: Option<&'a ThemeMenu>,
+    pub resume: Option<&'a ResumeMenu>,
+    pub provider: Option<&'a ProviderMenu>,
+}
 use crate::tui::gfx;
 use crate::tui::line::{Line, SegStyle, text_width};
 use crate::tui::term::{HistoryItem, StdoutTerm};
@@ -159,7 +170,20 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     left.push((hints, theme.inactive));
     let model_name = chat.session.runtime.model.borrow().clone();
     let thinking = chat.session.runtime.thinking.borrow().clone();
-    let model = model_footer_label(&model_name, thinking.as_deref());
+    // `/think` picker preview: while the menu is open the badge shows the browsed
+    // level with a `▸` suffix (would-be state) in the accent colour; committed
+    // badge has no suffix and stays dim.
+    let (model, model_color) = if let Some(menu) = &chat.think_menu {
+        let level = crate::tui::chat::THINK_LEVELS
+            [menu.selected.min(crate::tui::chat::THINK_LEVELS.len() - 1)]
+            .0;
+        (
+            format!("{model_name} · think {level} ▸"),
+            theme.claude,
+        )
+    } else {
+        (model_footer_label(&model_name, thinking.as_deref()), theme.inactive)
+    };
     let provider = chat.session.runtime.provider.borrow().clone();
     let model = if provider == "default" {
         model
@@ -182,7 +206,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
         .saturating_sub(used + text_width(&model) + 2)
         .max(1);
     line.push_styled(" ".repeat(gap), SegStyle::fg(theme.inactive));
-    line.push_styled(model, SegStyle::fg(theme.inactive));
+    line.push_styled(model, SegStyle::fg(model_color));
     Row::new(line)
 }
 
@@ -191,8 +215,8 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
 fn suggestion_rows(
     slash: &[SlashSuggestion],
     slash_selected: usize,
-    menu: Option<&ModelMenu>,
-    think: Option<&ThinkMenu>,
+    menus: Menus<'_>,
+    no_match: bool,
     theme: &Theme,
     width: usize,
 ) -> Vec<Row> {
@@ -205,53 +229,90 @@ fn suggestion_rows(
         Row::new(Line::styled(line, SegStyle::fg(color)))
     };
     if slash.is_empty() {
-        let Some(menu) = menu else {
+        let Some(menu) = menus.model else {
             // `/think` level selector (when the model menu is inactive).
-            let Some(think) = think else {
-                return Vec::new();
-            };
-            let name_col = crate::tui::chat::THINK_LEVELS
-                .iter()
-                .map(|(name, _)| name.chars().count())
-                .max()
-                .unwrap_or(0);
-            return crate::tui::chat::THINK_LEVELS
-                .iter()
-                .enumerate()
-                .map(|(i, (name, desc))| {
-                    let selected = i == think.selected;
-                    let line = crate::tui::markdown::truncate(
-                        &format!(
-                            "{}{name:<name_col$}  {desc}",
-                            if selected { "❯ " } else { "  " }
+            if let Some(think) = menus.think {
+                // 薄壳 → 核心：行渲染与按键提示行统一委托 PickerModel（picker-model.md 提交 A）。
+                let core = think.picker();
+                let mut rows: Vec<Row> =
+                    (0..core.items.len()).map(|i| core.row(i, width, theme)).collect();
+                rows.push(core.hint_row(crate::tui::chat::ThinkMenu::keys(), width, theme));
+                return rows;
+            }
+            // `/theme` level selector（picker-model.md 提交 B）：同款薄壳渲染。
+            if let Some(theme_menu) = menus.theme {
+                let core = theme_menu.picker();
+                let mut rows: Vec<Row> =
+                    (0..core.items.len()).map(|i| core.row(i, width, theme)).collect();
+                rows.push(core.hint_row(crate::tui::chat::ThemeMenu::keys(), width, theme));
+                return rows;
+            }
+            // `/provider` selector（picker-model.md 提交 D）：同款薄壳渲染。
+            if let Some(provider_menu) = menus.provider {
+                let core = provider_menu.picker();
+                let mut rows: Vec<Row> =
+                    (0..core.items.len()).map(|i| core.row(i, width, theme)).collect();
+                rows.push(core.hint_row(crate::tui::chat::ProviderMenu::keys(), width, theme));
+                return rows;
+            }
+            // `/resume` session selector（picker-model.md 提交 C）：截断时追加说明行。
+            if let Some(resume_menu) = menus.resume {
+                let core = resume_menu.picker();
+                let mut rows: Vec<Row> =
+                    (0..core.items.len()).map(|i| core.row(i, width, theme)).collect();
+                rows.push(core.hint_row(crate::tui::chat::ResumeMenu::keys(), width, theme));
+                if resume_menu.truncated {
+                    rows.push(Row::new(Line::styled(
+                        format!(
+                            "  {}",
+                            crate::tui::markdown::truncate(
+                                "（仅显示最近 20 个会话）",
+                                width.saturating_sub(2),
+                            )
                         ),
-                        width.saturating_sub(2),
-                    );
-                    row(line, selected)
-                })
-                .collect();
+                        SegStyle::fg(theme.inactive),
+                    )));
+                }
+                return rows;
+            }
+            // G9: a bare `/`-query with zero matches gets one dim hint row.
+            if no_match {
+                return vec![Row::new(Line::styled(
+                    "  （无匹配命令 · 输入 /help 查看可用命令）",
+                    SegStyle::fg(theme.inactive),
+                ))];
+            }
+            return Vec::new();
         };
-        // `/model` two-level selector: level one `provider`, level two `model`
-        // (loading / empty list each take one hint row).
-        let items: Vec<(String, bool)> = match &menu.models {
-            Some(m) if m.loading => {
-                vec![(format!("… 正在拉取 {} 的模型列表", m.provider), true)]
-            }
-            Some(m) if m.models.is_empty() => {
-                vec![("（该端点未返回模型，Esc 退出）".to_string(), true)]
-            }
-            Some(m) => m
-                .models
+        // `/model` two-level selector: level one `provider`（PickerModel 核心渲染，
+        // picker-model.md 提交 E）、level two `model`（loading / empty list 各一行提示）。
+        let Some(m) = &menu.models else {
+            // 一级：● 标当前 provider + 数字直达提示行（Enter = 查看模型列表）。
+            let core = menu.provider_picker();
+            let mut rows: Vec<Row> =
+                (0..core.items.len()).map(|i| core.row(i, width, theme)).collect();
+            rows.push(Row::new(Line::styled(
+                format!(
+                    "  {}",
+                    crate::tui::markdown::truncate(
+                        "↑↓/1-9 选择 provider · Enter 查看模型 · Esc 返回",
+                        width.saturating_sub(2),
+                    )
+                ),
+                SegStyle::fg(theme.inactive),
+            )));
+            return rows;
+        };
+        let items: Vec<(String, bool)> = if m.loading {
+            vec![(format!("… 正在拉取 {} 的模型列表", m.provider), true)]
+        } else if m.models.is_empty() {
+            vec![("（该端点未返回模型，Esc 退出）".to_string(), true)]
+        } else {
+            m.models
                 .iter()
                 .enumerate()
                 .map(|(i, name)| (name.clone(), i == m.selected))
-                .collect(),
-            None => menu
-                .providers
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.clone(), i == menu.provider_selected))
-                .collect(),
+                .collect()
         };
         return items
             .into_iter()
@@ -267,7 +328,11 @@ fn suggestion_rows(
     }
     let name_col = slash
         .iter()
-        .map(|s| s.name.chars().count())
+        .map(|s| {
+            s.name.chars().count()
+                + usize::from(!s.hint.is_empty())
+                + s.hint.chars().count()
+        })
         .max()
         .unwrap_or(0)
         + 2;
@@ -278,7 +343,12 @@ fn suggestion_rows(
         .enumerate()
         .map(|(i, s)| {
             let selected = i == slash_selected;
-            let name_text = format!("/{:<width$}", s.name, width = name_col);
+            let cmd = if s.hint.is_empty() {
+                format!("/{}", s.name)
+            } else {
+                format!("/{} {}", s.name, s.hint)
+            };
+            let name_text = format!("{cmd:<name_col$}");
             let desc = crate::tui::markdown::truncate(&s.description, desc_width);
             let line = crate::tui::markdown::truncate(
                 &format!("{}{name_text}  {desc}", if selected { "❯ " } else { "  " }),
@@ -374,8 +444,14 @@ fn chrome_rows(chat: &Chat, width: usize, fullscreen: bool) -> Chrome {
     let suggestions = suggestion_rows(
         &chat.slash_suggestions,
         chat.slash_selected,
-        chat.model_menu.as_ref(),
-        chat.think_menu.as_ref(),
+        Menus {
+            model: chat.model_menu.as_ref(),
+            think: chat.think_menu.as_ref(),
+            theme: chat.theme_menu.as_ref(),
+            resume: chat.resume_menu.as_ref(),
+            provider: chat.provider_menu.as_ref(),
+        },
+        chat.slash_no_match,
         &theme,
         width,
     );
@@ -1025,6 +1101,7 @@ mod tests {
             asks_tx,
             asks_rx,
             Theme::dark(),
+            crate::tui::theme::ThemeSetting::Auto,
             None,
         );
         chat.width = width;
@@ -1110,7 +1187,7 @@ mod tests {
         ));
         chat.set_input("a\nb\nc");
         chat.help_visible = true;
-        chat.queued.push("queued message".into());
+        chat.queued.push(crate::tui::chat::QueuedInput { text: "queued message".into(), is_slash: false });
         chat.notice = Some("Press ctrl-c again to exit");
         chat.search = Some(crate::tui::chat::HistorySearch::default());
         let rows = chrome_rows(&chat, 100, false).rows;
@@ -1139,8 +1216,14 @@ mod tests {
                 + suggestion_rows(
                     &chat.slash_suggestions,
                     chat.slash_selected,
-                    chat.model_menu.as_ref(),
-                    chat.think_menu.as_ref(),
+                    Menus {
+                        model: chat.model_menu.as_ref(),
+                        think: chat.think_menu.as_ref(),
+                        theme: chat.theme_menu.as_ref(),
+                        resume: chat.resume_menu.as_ref(),
+                        provider: chat.provider_menu.as_ref(),
+                    },
+                    chat.slash_no_match,
                     &chat.theme,
                     100
                 )
@@ -1160,10 +1243,20 @@ mod tests {
         let mut menu = ModelMenu {
             providers: vec!["default".into(), "openrouter".into()],
             provider_selected: 0,
+            provider_current: Some(0),
             models: None,
         };
-        assert_eq!(suggestion_rows(&[], 0, None, None, &theme, 80).len(), 0);
-        assert_eq!(suggestion_rows(&[], 0, Some(&menu), None, &theme, 80).len(), 2);
+        assert_eq!(suggestion_rows(&[], 0, Menus::default(), false, &theme, 80).len(), 0);
+        // G9: no-match shows one dim hint row instead of an empty gap.
+        let no_match = suggestion_rows(&[], 0, Menus::default(), true, &theme, 80);
+        assert_eq!(no_match.len(), 1);
+        assert!(
+            row_text(&no_match[0]).contains("无匹配命令"),
+            "{}",
+            row_text(&no_match[0])
+        );
+        // Level one: 2 provider rows + 1 hint row（picker-model.md 提交 E）。
+        assert_eq!(suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None , resume: None , provider: None }, false, &theme, 80).len(), 3);
         // Loading / empty list each take one hint row.
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
@@ -1171,14 +1264,14 @@ mod tests {
             loading: true,
             selected: 0,
         });
-        assert_eq!(suggestion_rows(&[], 0, Some(&menu), None, &theme, 80).len(), 1);
+        assert_eq!(suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None , resume: None , provider: None }, false, &theme, 80).len(), 1);
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
             models: Vec::new(),
             loading: false,
             selected: 0,
         });
-        assert_eq!(suggestion_rows(&[], 0, Some(&menu), None, &theme, 80).len(), 1);
+        assert_eq!(suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None , resume: None , provider: None }, false, &theme, 80).len(), 1);
         // The level-two model list truncates at the 5+5 cap.
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
@@ -1187,37 +1280,73 @@ mod tests {
             selected: 0,
         });
         assert_eq!(
-            suggestion_rows(&[], 0, Some(&menu), None, &theme, 80).len(),
+            suggestion_rows(&[], 0, Menus { model: Some(&menu), think: None, theme: None , resume: None , provider: None }, false, &theme, 80).len(),
             crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5
         );
-        // `/think` menu: one row per level, the selected row carries ❯; the model menu takes priority.
-        let think = ThinkMenu { selected: 1 };
-        let think_rows = suggestion_rows(&[], 0, None, Some(&think), &theme, 80);
-        assert_eq!(think_rows.len(), THINK_LEVELS.len());
+        // `/think` menu: one row per level + one hint row; `●` marks the in-effect
+        // level, `❯` the browse selection (two separate marks); the model menu takes priority.
+        let think = ThinkMenu { selected: 1, current: 0 };
+        let think_rows = suggestion_rows(&[], 0, Menus { model: None, think: Some(&think), theme: None , resume: None , provider: None }, false, &theme, 80);
+        assert_eq!(think_rows.len(), THINK_LEVELS.len() + 1, "6 档 + 提示行");
         assert!(
-            row_text(&think_rows[1]).starts_with("❯ low"),
-            "{}",
+            row_text(&think_rows[0]).contains("● off"),
+            "● 标当前生效档: {}",
+            row_text(&think_rows[0])
+        );
+        assert!(
+            row_text(&think_rows[1]).starts_with("  ❯"),
+            "❯ 标浏览选中: {}",
             row_text(&think_rows[1])
         );
+        assert!(
+            row_text(&think_rows[1]).contains("low"),
+            "选中行名: {}",
+            row_text(&think_rows[1])
+        );
+        // Overlap: ❯ keeps the prefix slot, ● stays in front of the name.
+        let overlap = ThinkMenu { selected: 3, current: 3 };
+        let rows = suggestion_rows(&[], 0, Menus { model: None, think: Some(&overlap), theme: None , resume: None , provider: None }, false, &theme, 80);
+        assert!(
+            row_text(&rows[3]).contains("❯ ● high"),
+            "重叠行双标记: {}",
+            row_text(&rows[3])
+        );
+        // Hint row (last, dim).
+        let hint = row_text(think_rows.last().unwrap());
+        assert!(hint.contains("Esc 取消"), "提示行: {hint}");
         assert_eq!(
-            suggestion_rows(&[], 0, Some(&menu), Some(&think), &theme, 80).len(),
+            suggestion_rows(&[], 0, Menus { model: Some(&menu), think: Some(&think), theme: None , resume: None , provider: None }, false, &theme, 80).len(),
             crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5,
             "模型菜单优先于 think 菜单"
         );
         // Slash suggestions take priority over menus.
         let slash = vec![SlashSuggestion {
             name: "help".into(),
+            hint: String::new(),
             description: "显示可用命令".into(),
         }];
-        let rows = suggestion_rows(&slash, 0, Some(&menu), None, &theme, 80);
+        let rows = suggestion_rows(&slash, 0, Menus { model: Some(&menu), think: None, theme: None , resume: None , provider: None }, false, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(row_text(&rows[0]).starts_with("❯ /help"), "{}", row_text(&rows[0]));
+        // A command with an argument hint renders name + hint in the name column.
+        let with_hint = vec![SlashSuggestion {
+            name: "think".into(),
+            hint: "[off|low|medium|high|xhigh|max]".into(),
+            description: "设置思考级别".into(),
+        }];
+        let rows = suggestion_rows(&with_hint, 0, Menus::default(), false, &theme, 80);
+        assert_eq!(rows.len(), 1);
+        assert!(
+            row_text(&rows[0]).contains("/think [off|low|medium|high|xhigh|max]"),
+            "{}",
+            row_text(&rows[0])
+        );
         // Every row truncates by width (overwide rows would be wrapped by the terminal, skewing the frame height).
         for width in 10..80usize {
-            for row in suggestion_rows(&slash, 0, Some(&menu), None, &theme, width) {
+            for row in suggestion_rows(&slash, 0, Menus { model: Some(&menu), think: None, theme: None , resume: None , provider: None }, false, &theme, width) {
                 assert!(text_width(&row_text(&row)) <= width, "width={width}");
             }
-            for row in suggestion_rows(&[], 0, None, Some(&think), &theme, width) {
+            for row in suggestion_rows(&[], 0, Menus { model: None, think: Some(&think), theme: None , resume: None , provider: None }, false, &theme, width) {
                 assert!(text_width(&row_text(&row)) <= width, "width={width}");
             }
         }
@@ -1270,6 +1399,39 @@ mod tests {
         let text = row_text(&footer_row(&chat, 80));
         assert!(text.contains("⏸ plan mode on ·"), "{text}");
         assert!(text.contains("! for shell mode"), "{text}");
+    }
+
+    /// Footer `/think` picker preview: while the menu is open the badge shows the
+    /// browsed level with `▸`; committed badge has no suffix (Esc reverts via the
+    /// same branch — the menu is gone).
+    #[test]
+    fn footer_previews_browsed_think_level() {
+        let mut chat = chat_at(80, 24);
+        let _ = chat
+            .session
+            .runtime
+            .thinking_tx
+            .send(Some("high".to_string()));
+        let text = row_text(&footer_row(&chat, 80));
+        assert!(text.contains("test-model · think high"), "{text}");
+        assert!(!text.contains('▸'), "提交态无预览后缀: {text}");
+
+        // Open the picker (preselects high); browse to xhigh → preview shows xhigh ▸.
+        chat.input = "/think".to_string();
+        chat.submit();
+        let text = row_text(&footer_row(&chat, 80));
+        assert!(text.contains("test-model · think high ▸"), "{text}");
+        chat.on_key(ratatui::crossterm::event::KeyCode::Down, ratatui::crossterm::event::KeyModifiers::empty());
+        let text = row_text(&footer_row(&chat, 80));
+        assert!(
+            text.contains("test-model · think xhigh ▸"),
+            "预览跟随浏览: {text}"
+        );
+        // Esc reverts to the committed badge (no suffix).
+        chat.on_key(ratatui::crossterm::event::KeyCode::Esc, ratatui::crossterm::event::KeyModifiers::empty());
+        let text = row_text(&footer_row(&chat, 80));
+        assert!(text.contains("test-model · think high"), "{text}");
+        assert!(!text.contains('▸'), "Esc 后还原: {text}");
     }
 
     /// Input box: prefix + `▋` fake caret; the real caret lands on the same cell.

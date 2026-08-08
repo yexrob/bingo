@@ -19,6 +19,7 @@ pub mod keys;
 pub mod line;
 pub mod markdown;
 pub mod math;
+pub mod picker;
 pub(crate) mod term;
 #[cfg(test)]
 mod test_util;
@@ -81,16 +82,15 @@ pub async fn run_tui_session(
 
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (asks_tx, asks_rx) = mpsc::unbounded_channel();
+    let theme_setting = ThemeSetting::parse(session.settings.theme.as_deref());
     let mut chat = Chat::new(
         session.clone(),
         events_tx,
         events_rx,
         asks_tx,
         asks_rx,
-        Theme::for_terminal(
-            ThemeSetting::parse(session.settings.theme.as_deref()),
-            detected_background,
-        ),
+        Theme::for_terminal(theme_setting, detected_background),
+        theme_setting,
         detected_background,
     );
     chat.image_cap = image_cap;

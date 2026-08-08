@@ -238,3 +238,13 @@ Web-side conventions (for a future web frontend to reuse):
 - v1.19（2026-08-07）：非致命警告生命周期收口（main 现场报障）——输入框上方 `⚠` 警告行（MCP 连接失败/图片加载失败等）从**常驻到 /clear** 改为 **10s TTL 自动过期**（`Chat::WARNING_TTL`，push 时清理过期条目 + 渲染过滤，去重语义保留）；与 §2 Toast「轻提示自动消失」同一精神（区别：警告是输入框上方的静态行，不走 Toast 通道）。MCP 连接改为后台执行（不阻塞回合输入），失败延迟到下一回合经 `drain_unreported_failures` 报告一次，`/mcp reconnect` 后的新失败可再报告。
 - v1.18（2026-08-07）：AskUserQuestion 回答反馈块生命周期收口（main 现场报障）——回答结果块（`⏺ User answered the questions:`）从**常驻到 /clear** 改为**回合内瞬态**：TurnEnd 清除（含 `flushed_ask_rows` 游标归零，避免下次块跳过渲染）；回答过程与回合中保留（多问题中间态可见、答案回显），回合结束即消失——块渲染在文档尾部/输入框上方、不参与消息流，常驻会像残留物；与 §2 瞬态行「完成反馈不常驻」同一精神（区别：块在回合内全程可见，不走 TTL）。答案内容本就经工具回填给模型，无需 UI 常驻。**已被 v1.20 取代**。
 - v1.20（2026-08-07）：AskUserQuestion 回答改为**普通用户消息进消息流**（main 现场报障：v1.18 后块仍吸在输入框上方）——根因：结果块渲染在文档尾部（消息之后、输入框上方），且只在「前置消息全定稿 + 无 pending_ask + 末消息定稿」时进定稿/落盘，回合内模型流式期间条件不满足 → 块常驻输入框上方。修复：删除 AskResult 结构 / `ask_result` 字段 / `flushed_ask_rows` 游标 / `SettledMark.ask_rows`（连根拔掉块特殊逻辑）；回答提交、选项确认、Esc 拒绝（free_text 请求）时直接 push 一条 **User 消息**（内容保留：`User answered the questions:\n  · 问题 → 答案`；拒绝为 `User declined to answer questions`），与用户输入同渲染（气泡）、同定稿、同落盘进 scrollback、随会话持久（TurnEnd 不再清除）。**顺序定稿守卫**：回合中回答的消息排在流式 assistant 消息之后，若前置消息未定稿（流式/工具运行中/图片加载中）本消息也不得定稿——否则落盘会越过流式行把中间态打进 scrollback（与「流式内容不落盘」同一不变量）。与 v1.18 的差别：回答不再回合瞬态，而是像普通消息一样留在会话里（上滑可见、`/clear` 才清）。
+
+- v1.21（2026-08-07）：slash command 交互对齐落地（Team A · feat/slash-ux）——
+  忙时白名单即时命令（think/model/provider/theme/status/context/tasks/help/skills 忙时立即执行且 busy 不变；
+  其余 slash 命令入队，TurnEnd 后按命令分派，不再作为纯文本发模型）；
+  `/think` 档位选择器双标记（●=当前生效固定、❯=浏览选中）+ 1-6 直达 + footer `think {level} ▸` 预览态
+  （Enter 落地 / Esc 还原）；slash 补全行 arg_hint 参数提示；
+  无匹配提示行（`/zzz` → dim 行，属 chrome 提示非 error 级，不走错误码）；
+  slash 错误结构化（UNKNOWN_COMMAND / BAD_ARGUMENT，`[error] code=… msg=…` 单行，qa 只断言 code）；
+  slash 输出 TTL 分级（成功 2s / 错误与用法 ≥8s 且下次输入清除——规格见设计契约 §4.4）；
+  defer 记案：子命令二级补全、/model 的 s session-only、模型/思考持久化层（Q1 待议）。
