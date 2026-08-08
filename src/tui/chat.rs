@@ -27,56 +27,7 @@ use crate::tui::theme::{Theme, ThemeSetting};
 use crate::ui::{AskRequest, DialogAction, ImageMeta, PermissionRequest, UiEvent};
 use crate::watch::WatchState;
 
-/// 文档中一行：样式化行 + 整行背景（用户气泡用）。
-#[derive(Debug, Clone)]
-pub struct Row {
-    pub line: Line,
-    /// Full-row background.
-    pub bg: Option<Color>,
-    /// Right padding inside the row (CC user bubble paddingRight=1).
-    pub padding_right: usize,
-}
-
-impl Row {
-    /// Every row is exactly one canvas line: the constructor is the single
-    /// choke point that enforces it (see [`crate::tui::line::sanitize`]).
-    pub fn new(line: Line) -> Self {
-        let mut line = line;
-        line.sanitize();
-        Self {
-            line,
-            bg: None,
-            padding_right: 0,
-        }
-    }
-
-    /// Bubble row with a full-row background (user messages; CC paddingRight=1).
-    pub fn bubble(line: Line, bg: Color) -> Self {
-        let mut row = Row::new(line);
-        row.bg = Some(bg);
-        row.padding_right = 1;
-        row
-    }
-}
-
-/// Click target of a document row.
-#[derive(Debug, Clone)]
-pub enum ClickTarget {
-    /// Collapse-group row (collapses/expands the group).
-    Group { message: usize, group: usize },
-    /// Activity header row (collapses/expands the activity).
-    Activity { message: usize, path: Vec<usize> },
-    /// Permission option (confirm by index).
-    AskOption(usize),
-}
-
-/// Document coordinate range of a clickable row.
-#[derive(Debug, Clone)]
-pub struct ClickRange {
-    pub start: usize,
-    pub end: usize,
-    pub target: ClickTarget,
-}
+pub use crate::tui::el::{ClickRange, ClickTarget, Row};
 
 /// Scrollable document: all rows + click ranges.
 ///

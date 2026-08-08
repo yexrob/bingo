@@ -12,6 +12,8 @@
 pub mod activities;
 mod app;
 pub mod chat;
+mod chrome;
+pub mod el;
 mod entity;
 pub mod gfx;
 pub mod history;
