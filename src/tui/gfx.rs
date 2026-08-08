@@ -1,17 +1,21 @@
 //! Terminal image display: kitty graphics protocol capability detection +
 //! sequence building + image loading.
 //!
-//! Only the kitty protocol is implemented (supported by Ghostty/kitty/WezTerm/
-//! Konsole); other terminals get the `#[image]` placeholder from the render
-//! layer. Images travel as PNG (the protocol only accepts PNG/RGB/RGBA) and
-//! are rescaled to the target cell size before transmission.
+//! One placement scheme only: kitty's Unicode placeholders (`U=1`). The image
+//! data is transmitted once per image id; the cells it appears in are ordinary
+//! styled text (the placeholder character plus row/column diacritics, the id
+//! riding in the foreground colour), painted by the render layer like any
+//! other text. Placement therefore survives redraws, scrolling, clipping and
+//! multiplexer repaints with no placement bookkeeping at all.
 //!
-//! Placement comes in two flavours, picked once at detection time:
-//! - [`ImageMode::Direct`] — bare kitty escapes with `C=1`, used when nothing
-//!   sits between us and the terminal.
-//! - [`ImageMode::TmuxPlaceholder`] — inside tmux every escape chunk travels in
-//!   a tmux passthrough envelope and the image is placed with kitty's Unicode
-//!   placeholders (`U=1`), the scheme kitty designed for multiplexers.
+//! Only the transport varies, picked once at detection time:
+//! - [`Transport::Bare`] — escape chunks go to the terminal as-is.
+//! - [`Transport::Tmux`] — every chunk travels in a tmux passthrough envelope.
+//!
+//! Terminals that answer the kitty graphics query but lack Unicode-placeholder
+//! support (WezTerm, Konsole) are excluded at detection time and keep the
+//! `#[image]` text fallback. Images travel as PNG (the protocol only accepts
+//! PNG/RGB/RGBA) and are rescaled to the target cell size before transmission.
 
 use std::path::Path;
 
@@ -47,13 +51,19 @@ const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400)
 /// enabled, or the pane was not the focused pane during the probe.
 const TMUX_PASSTHROUGH_HINT: &str = "tmux 下未确认外层终端支持 kitty 图片协议：外层需为 ghostty/kitty（WezTerm/Konsole 不支持占位符）且 bingo 需在焦点窗格启动";
 
-/// How an image is placed on screen.
+/// Shown once on terminals that answer the kitty graphics query but cannot
+/// render Unicode placeholders (WezTerm/Konsole): a probe would pass, the
+/// transmit would succeed, and nothing would ever display.
+const PLACEHOLDER_UNSUPPORTED_HINT: &str =
+    "此终端不支持 kitty Unicode 占位符（WezTerm/Konsole），图片以 #[image] 显示";
+
+/// How transmit chunks reach the terminal that renders the image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImageMode {
-    /// Bare kitty escapes, `C=1` placement (no multiplexer in between).
-    Direct,
-    /// tmux passthrough transport + kitty Unicode placeholders (`U=1`).
-    TmuxPlaceholder,
+pub enum Transport {
+    /// Escape chunks go out as-is (no multiplexer in between).
+    Bare,
+    /// Every chunk is wrapped in a tmux passthrough envelope.
+    Tmux,
 }
 
 /// kitty protocol image capability (including the probed cell size).
@@ -63,8 +73,8 @@ pub struct ImageCap {
     pub cell_w: u32,
     /// Pixel height of one character cell.
     pub cell_h: u32,
-    /// Transport + placement scheme to use for this terminal.
-    pub mode: ImageMode,
+    /// Transport the transmit chunks use to reach the rendering terminal.
+    pub transport: Transport,
 }
 
 /// Outcome of [`detect_image_cap`]: the capability plus an optional one-shot
@@ -82,7 +92,7 @@ impl ImageCap {
         Self {
             cell_w: 8,
             cell_h: 16,
-            mode: ImageMode::Direct,
+            transport: Transport::Bare,
         }
     }
 }
@@ -96,20 +106,21 @@ enum ProbePlan {
     /// Inside tmux: probe through a passthrough envelope. Whether the outer
     /// terminal speaks kitty graphics is decided by the probe answer itself.
     TmuxProbe,
-    /// Inside tmux, fronted by a terminal known to answer the kitty query but
-    /// lack `U=1` placeholder support (WezTerm/Konsole): a probe would pass
-    /// and then silently fail to display, so keep the `#[image]` placeholder.
-    TmuxUnsupported,
+    /// A terminal known to answer the kitty query but lack `U=1` placeholder
+    /// support (WezTerm/Konsole), inside tmux or not: a probe would pass and
+    /// the image would never display, so keep the `#[image]` text fallback
+    /// and say so once.
+    Unsupported,
 }
 
-/// Detect whether the terminal supports the kitty graphics protocol (and the
-/// cell size).
+/// Detect whether the terminal supports the kitty graphics protocol with
+/// Unicode placeholders (and the cell size).
 ///
-/// Fast path: `TERM_PROGRAM=ghostty/WezTerm/kitty/konsole` or
-/// `TERM=xterm-kitty` decides support directly; otherwise the terminal is
-/// queried (`a=q` query action + DA + 14t pixel size) and support is granted
-/// on reading `\x1b_Gi=31;OK`. Must be called before entering raw mode /
-/// fullscreen.
+/// Fast path: `TERM_PROGRAM=ghostty/kitty` or `TERM=xterm-kitty` decides
+/// support directly; WezTerm/Konsole are excluded (no placeholder support);
+/// otherwise the terminal is queried (`a=q` query action + DA + 14t pixel
+/// size) and support is granted on reading `\x1b_Gi=31;OK`. Must be called
+/// before entering raw mode / fullscreen.
 ///
 /// Inside tmux the same `a=q` probe is sent wrapped in a tmux passthrough
 /// envelope; an answer means passthrough is on and images can be placed with
@@ -131,7 +142,10 @@ pub async fn detect_image_cap() -> ImageProbe {
     // The grid size pairs with the `14t` pixel answer to give one cell.
     let grid = crossterm::terminal::size().ok();
     match plan {
-        ProbePlan::TmuxUnsupported => ImageProbe::default(),
+        ProbePlan::Unsupported => ImageProbe {
+            cap: None,
+            warning: Some(PLACEHOLDER_UNSUPPORTED_HINT.to_string()),
+        },
         ProbePlan::TmuxProbe => {
             // Best effort: allow the passthrough envelope to reach the outer
             // terminal even when the user has not set `allow-passthrough`
@@ -155,7 +169,7 @@ pub async fn detect_image_cap() -> ImageProbe {
                 };
             }
             ImageProbe {
-                cap: Some(cap_from(buf.as_deref(), grid, ImageMode::TmuxPlaceholder)),
+                cap: Some(cap_from(buf.as_deref(), grid, Transport::Tmux)),
                 warning: None,
             }
         }
@@ -165,7 +179,7 @@ pub async fn detect_image_cap() -> ImageProbe {
                 return ImageProbe::default();
             }
             ImageProbe {
-                cap: Some(cap_from(buf.as_deref(), grid, ImageMode::Direct)),
+                cap: Some(cap_from(buf.as_deref(), grid, Transport::Bare)),
                 warning: None,
             }
         }
@@ -178,18 +192,18 @@ async fn query_terminal(queries: &[&[u8]]) -> Option<Vec<u8>> {
 
 /// Env decision matrix.
 ///
-/// Direct (no tmux): `TERM_PROGRAM`/`TERM` short-circuit terminals already
-/// known to speak the protocol.
-///
-/// Inside tmux the picture is different: tmux 3.x overwrites the pane's
-/// `TERM_PROGRAM` with "tmux" and `TERM` is the pane's own
-/// (`tmux-256color`), so the outer terminal cannot be identified positively
-/// from env. The only env facts that survive into panes are variables set by
-/// the outer terminal itself; we use them for a negative exclusion only —
 /// WezTerm and Konsole answer the kitty query but lack `U=1` Unicode
-/// placeholder placement, so a successful probe would transmit the image and
-/// never display it. Every other outer terminal gets a passthrough probe and
-/// the query answer is authoritative.
+/// placeholder placement — the only scheme in use — so a successful probe
+/// would transmit the image and never display it. They are excluded first,
+/// inside tmux or not. Outside tmux they identify themselves via
+/// `TERM_PROGRAM`; inside tmux 3.x overwrites `TERM_PROGRAM` with "tmux", so
+/// the exclusion rests on variables the outer terminal sets itself
+/// (`WEZTERM_EXECUTABLE` / `KONSOLE_VERSION`, which survive into panes).
+///
+/// Direct (no tmux): `TERM_PROGRAM`/`TERM` short-circuit terminals already
+/// known to render placeholders (ghostty/kitty). Everything else — including
+/// every non-excluded outer terminal under tmux — gets a probe whose answer
+/// is authoritative.
 fn probe_plan(
     in_tmux: bool,
     term_program: Option<&str>,
@@ -197,20 +211,20 @@ fn probe_plan(
     wezterm: bool,
     konsole: bool,
 ) -> ProbePlan {
-    if !in_tmux {
-        return ProbePlan::Direct {
-            env_kitty: env_kitty(term_program, term),
-        };
+    if wezterm || konsole || matches!(term_program, Some("WezTerm") | Some("konsole")) {
+        return ProbePlan::Unsupported;
     }
-    if wezterm || konsole {
-        ProbePlan::TmuxUnsupported
-    } else {
+    if in_tmux {
         ProbePlan::TmuxProbe
+    } else {
+        ProbePlan::Direct {
+            env_kitty: env_kitty(term_program, term),
+        }
     }
 }
 
 /// Assemble the capability from the probe answers, falling back per B's rules.
-fn cap_from(buf: Option<&[u8]>, grid: Option<(u16, u16)>, mode: ImageMode) -> ImageCap {
+fn cap_from(buf: Option<&[u8]>, grid: Option<(u16, u16)>, transport: Transport) -> ImageCap {
     let cells = buf
         .and_then(parse_text_area_px)
         .zip(grid)
@@ -219,20 +233,21 @@ fn cap_from(buf: Option<&[u8]>, grid: Option<(u16, u16)>, mode: ImageMode) -> Im
         Some((cell_w, cell_h)) => ImageCap {
             cell_w,
             cell_h,
-            mode,
+            transport,
         },
         None => ImageCap {
-            mode,
+            transport,
             ..ImageCap::default_cells()
         },
     }
 }
 
-/// Decide kitty protocol support from environment variables (pure function,
-/// easy to test).
+/// Decide Unicode-placeholder support from environment variables (pure
+/// function, easy to test). Only ghostty and kitty are known to render
+/// placeholders; WezTerm/Konsole are excluded earlier in [`probe_plan`].
 pub fn env_kitty(term_program: Option<&str>, term: Option<&str>) -> bool {
     match term_program {
-        Some("ghostty") | Some("WezTerm") | Some("kitty") | Some("konsole") => true,
+        Some("ghostty") | Some("kitty") => true,
         _ => term == Some("xterm-kitty"),
     }
 }
@@ -329,21 +344,6 @@ fn kitty_chunks(png: &[u8], first_header: &str) -> Vec<Vec<u8>> {
     chunks
 }
 
-/// Build the kitty transmit+place sequence: the first chunk's control data is
-/// `a=T` transmit-and-display, PNG, all replies silenced (`q=2` — `q=1` still
-/// sends error replies, which reach the event loop as stray input), cursor not
-/// moved. Appends `rows` `\r\n`s to advance the cursor (`C=1` placement does
-/// not move the cursor; under raw mode a bare `\n` only moves down without a
-/// carriage return, so CR is required).
-pub fn kitty_image_bytes(png: &[u8], cols: usize, rows: usize) -> Vec<u8> {
-    let header = format!("a=T,f=100,q=2,c={cols},r={rows},C=1");
-    let mut out: Vec<u8> = kitty_chunks(png, &header).concat();
-    for _ in 0..rows {
-        out.extend_from_slice(b"\r\n");
-    }
-    out
-}
-
 /// Wrap a payload in tmux's DCS passthrough. tmux forwards the body to the
 /// outer terminal verbatim except that every ESC has to be doubled. Needs
 /// tmux >= 3.3 with `allow-passthrough on`, otherwise the body is dropped.
@@ -360,21 +360,36 @@ fn tmux_passthrough(payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Transmit for the tmux path: same 4096-byte chunking, but each chunk gets its
-/// own passthrough envelope (tmux only forwards whole DCS sequences), and the
-/// placement is virtual (`U=1`) so the actual pixels land where the placeholder
-/// cells are printed. `q=2` silences both OK and error replies, which would
-/// otherwise reach the pane as stray input.
-fn tmux_transmit_bytes(png: &[u8], cols: usize, rows: usize, id: u32) -> Vec<u8> {
+/// Transmit an image for virtual placement: `a=T,U=1`, PNG, the placeholder
+/// grid size in `c`/`r`, all replies silenced (`q=2` — `q=1` still sends
+/// error replies, which reach the event loop as stray input). The transport
+/// only decides the envelope: [`Transport::Tmux`] wraps each chunk in its own
+/// passthrough envelope (tmux only forwards whole DCS sequences).
+///
+/// Transmission is position-independent and order-independent: placeholder
+/// cells already on screen light up when the data arrives, cells painted
+/// later find the data waiting. Nothing here moves the cursor.
+pub fn transmit_bytes(
+    png: &[u8],
+    cols: usize,
+    rows: usize,
+    id: u32,
+    transport: Transport,
+) -> Vec<u8> {
+    let id = normalize_image_id(id);
     let header = format!("a=T,U=1,q=2,f=100,i={id},c={cols},r={rows}");
-    kitty_chunks(png, &header)
-        .iter()
-        .flat_map(|chunk| tmux_passthrough(chunk))
-        .collect()
+    let chunks = kitty_chunks(png, &header);
+    match transport {
+        Transport::Bare => chunks.concat(),
+        Transport::Tmux => chunks
+            .iter()
+            .flat_map(|chunk| tmux_passthrough(chunk))
+            .collect(),
+    }
 }
 
 /// Unicode placeholder character carrying a virtual placement cell.
-const PLACEHOLDER: char = '\u{10EEEE}';
+pub const PLACEHOLDER: char = '\u{10EEEE}';
 
 /// Row/column diacritics for kitty's Unicode placeholders: index `N` encodes
 /// coordinate `N` (0-based, `U+0305` is 0).
@@ -405,36 +420,51 @@ fn normalize_image_id(id: u32) -> u32 {
     }
 }
 
-/// `rows` lines of `cols` placeholder cells, each cell being the placeholder
-/// character plus its row and column diacritic, with the image id carried in
-/// the 24-bit foreground colour. Each line ends with a foreground reset and
-/// `\r\n`, so printing the block advances the cursor by `rows` lines and every
-/// row starts at column 0 — with a bare `\n` under raw mode each row would
-/// start where the previous one ended, shearing the placeholder grid.
-///
-/// `cols`/`rows` are clamped to the diacritic table, which covers the display
-/// box ([`MAX_COLS`] × [`MAX_ROWS`]).
-fn placeholder_rows(cols: usize, rows: usize, id: u32) -> String {
-    let id = normalize_image_id(id);
-    let row_marks = &ROWCOLUMN_DIACRITICS[..rows.min(ROWCOLUMN_DIACRITICS.len())];
+/// One placeholder row of `cols` cells: each cell is the placeholder
+/// character plus the row's and its column's diacritic (`None` when `row` is
+/// beyond the diacritic table; columns are clamped to it). The image id is
+/// not part of the text — the render layer carries it in the cells'
+/// foreground colour ([`image_id_fg`]).
+pub fn placeholder_row_text(row: usize, cols: usize) -> Option<String> {
+    let row_mark = *ROWCOLUMN_DIACRITICS.get(row)?;
     let col_marks = &ROWCOLUMN_DIACRITICS[..cols.min(ROWCOLUMN_DIACRITICS.len())];
-    let fg = format!(
-        "\x1b[38;2;{};{};{}m",
-        (id >> 16) & 0xFF,
-        (id >> 8) & 0xFF,
-        id & 0xFF
-    );
-    let mut out = String::with_capacity(row_marks.len() * (col_marks.len() * 9 + fg.len() + 6));
-    for &row_mark in row_marks {
-        out.push_str(&fg);
-        for &col_mark in col_marks {
-            out.push(PLACEHOLDER);
-            out.push(row_mark);
-            out.push(col_mark);
-        }
-        out.push_str("\x1b[39m\r\n");
+    let mut out = String::with_capacity(col_marks.len() * 9);
+    for &col_mark in col_marks {
+        out.push(PLACEHOLDER);
+        out.push(row_mark);
+        out.push(col_mark);
     }
-    out
+    Some(out)
+}
+
+/// The 24-bit foreground colour that ties placeholder cells to their image id.
+pub fn image_id_fg(id: u32) -> (u8, u8, u8) {
+    let id = normalize_image_id(id);
+    (
+        ((id >> 16) & 0xFF) as u8,
+        ((id >> 8) & 0xFF) as u8,
+        (id & 0xFF) as u8,
+    )
+}
+
+/// Transmit-once bookkeeping: which image ids the rendering terminal already
+/// holds. The terminal's image store outlives frames, so the cache only
+/// resets when the store may have been purged (resize / ctrl+l repaint).
+#[derive(Debug, Default)]
+pub struct Transmits {
+    sent: std::collections::HashSet<u32>,
+}
+
+impl Transmits {
+    /// Whether `id` still needs a transmit (marks it sent).
+    pub fn needs(&mut self, id: u32) -> bool {
+        self.sent.insert(normalize_image_id(id))
+    }
+
+    /// Forget everything (the terminal may have purged its image store).
+    pub fn reset(&mut self) {
+        self.sent.clear();
+    }
 }
 
 /// Stable 24-bit image id for an image url. Reusing one id per image means a
@@ -446,160 +476,6 @@ pub fn image_id_for(url: &str) -> u32 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     url.hash(&mut hasher);
     normalize_image_id((hasher.finish() & 0xFF_FFFF) as u32)
-}
-
-/// One image instance anchored to a screen cell (`row`/`col`, origin =
-/// top-left of the screen). Kitty graphics carry no screen-position keys —
-/// a placement lands at the cursor cell, so the driver parks the cursor
-/// there before the payload goes out ([`crate::tui::term::write_gfx`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Placement {
-    pub id: u32,
-    pub url: String,
-    pub cols: usize,
-    pub rows: usize,
-    pub row: u16,
-    pub col: u16,
-}
-
-/// Stable per-instance placement id: two copies of the same url in one view get
-/// distinct ids (deleting one never touches the other), and the id stays stable
-/// across frames while the block stays at the same document row.
-pub fn placement_id(url: &str, doc_row: usize) -> u32 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    url.hash(&mut hasher);
-    doc_row.hash(&mut hasher);
-    normalize_image_id((hasher.finish() & 0xFF_FFFF) as u32)
-}
-
-/// One write produced by the placement layer: a kitty graphics payload plus
-/// the screen cell `(row, col)` the cursor must sit on while it goes out
-/// (`None` for position-independent deletes). Emitting — cursor movement
-/// included — is [`crate::tui::term::write_gfx`]'s job; payloads never
-/// contain cursor escapes themselves.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GfxWrite {
-    pub at: Option<(u16, u16)>,
-    pub bytes: Vec<u8>,
-}
-
-/// Terminal-side image layer for the live viewport: keeps a diff of the
-/// placements currently on screen. PNG bytes are transmitted once per instance
-/// id; later frames only place, move, or delete.
-#[derive(Debug, Default)]
-pub struct PlacementLayer {
-    active: Vec<Placement>,
-    transmitted: std::collections::HashSet<u32>,
-}
-
-impl PlacementLayer {
-    /// Diff `desired` against the active placements and return the terminal
-    /// writes that converge the screen: deletes for removed instances,
-    /// transmit+place for new ones, place-only for moved ones. Empty when
-    /// nothing changed. Instances whose image is not loaded yet are skipped.
-    pub fn sync(
-        &mut self,
-        images: &std::collections::HashMap<String, std::sync::Arc<crate::ui::ImageMeta>>,
-        desired: &[Placement],
-    ) -> Vec<GfxWrite> {
-        let mut out = Vec::new();
-        let mut next: Vec<Placement> = Vec::with_capacity(desired.len());
-        for placement in desired {
-            let at = Some((placement.row, placement.col));
-            if let Some(prev) = self.active.iter().find(|p| p.id == placement.id) {
-                if prev.row != placement.row || prev.col != placement.col {
-                    out.push(GfxWrite {
-                        at,
-                        bytes: place_only_bytes(placement),
-                    });
-                }
-            } else {
-                let Some(meta) = images.get(&placement.url) else {
-                    continue;
-                };
-                let bytes = if self.transmitted.insert(placement.id) {
-                    transmit_place_bytes(placement.id, &meta.bytes, placement)
-                } else {
-                    place_only_bytes(placement)
-                };
-                out.push(GfxWrite { at, bytes });
-            }
-            next.push(placement.clone());
-        }
-        for prev in &self.active {
-            if !next.iter().any(|p| p.id == prev.id) {
-                out.push(GfxWrite {
-                    at: None,
-                    bytes: delete_bytes(prev.id),
-                });
-                self.transmitted.remove(&prev.id);
-            }
-        }
-        self.active = next;
-        out
-    }
-
-    /// Writes that remove every active placement (called on clear/exit).
-    pub fn clear(&mut self) -> Vec<GfxWrite> {
-        let out = self
-            .active
-            .iter()
-            .map(|placement| GfxWrite {
-                at: None,
-                bytes: delete_bytes(placement.id),
-            })
-            .collect();
-        self.active.clear();
-        self.transmitted.clear();
-        out
-    }
-}
-
-/// Transmit (once per instance) and place at the cursor cell. `p=1` names the
-/// placement, so a later put with the same (image id, placement id) replaces
-/// it — an id-less put would pile up a second copy instead of moving the
-/// first. `C=1` keeps the cursor where the driver parked it. Kitty's `x=`/`y=`
-/// keys are source-crop offsets, not screen coordinates, so they never appear
-/// here: screen position is the cursor cell alone. `q=2` silences error
-/// replies too — `q=1` still answers failures, and those APC replies land in
-/// the event loop as typed input.
-fn transmit_place_bytes(id: u32, png: &[u8], p: &Placement) -> Vec<u8> {
-    let header = format!("a=T,f=100,q=2,i={id},p=1,C=1,c={},r={}", p.cols, p.rows);
-    kitty_chunks(png, &header).concat()
-}
-
-/// Place an already-transmitted image at the cursor cell (same placement-id
-/// replacement and quiet semantics as [`transmit_place_bytes`]).
-fn place_only_bytes(p: &Placement) -> Vec<u8> {
-    format!(
-        "\x1b_Ga=p,q=2,i={},p=1,C=1,c={},r={}\x1b\\",
-        p.id, p.cols, p.rows
-    )
-    .into_bytes()
-}
-
-/// Delete every placement of one instance id. `q=2`: deleting an id the
-/// terminal already purged (resize, clear) must stay silent.
-fn delete_bytes(id: u32) -> Vec<u8> {
-    format!("\x1b_Ga=d,q=2,i={id},d=I\x1b\\").into_bytes()
-}
-
-/// Single exit point: dispatch on `cap.mode` to the complete byte sequence of
-/// "transmit + place + cursor advance".
-///
-/// `id` only matters in placeholder mode, where it ties the transmitted image
-/// to the placeholder cells; it is masked to 24 bits.
-pub fn image_print_bytes(cap: &ImageCap, png: &[u8], cols: usize, rows: usize, id: u32) -> Vec<u8> {
-    match cap.mode {
-        ImageMode::Direct => kitty_image_bytes(png, cols, rows),
-        ImageMode::TmuxPlaceholder => {
-            let id = normalize_image_id(id);
-            let mut out = tmux_transmit_bytes(png, cols, rows, id);
-            out.extend_from_slice(placeholder_rows(cols, rows, id).as_bytes());
-            out
-        }
-    }
 }
 
 /// Load an image from a URL and turn it into a renderer-neutral [`crate::ui::ImageMeta`]:
@@ -769,12 +645,14 @@ mod tests {
     use base64::Engine;
 
     #[test]
-    fn env_kitty_detects_supported_terminals() {
+    fn env_kitty_detects_placeholder_terminals() {
         assert!(env_kitty(Some("ghostty"), None));
-        assert!(env_kitty(Some("WezTerm"), None));
         assert!(env_kitty(Some("kitty"), None));
-        assert!(env_kitty(Some("konsole"), None));
         assert!(env_kitty(None, Some("xterm-kitty")));
+        // WezTerm/Konsole speak the protocol but not Unicode placeholders;
+        // they are excluded in probe_plan, never short-circuited to support.
+        assert!(!env_kitty(Some("WezTerm"), None));
+        assert!(!env_kitty(Some("konsole"), None));
         assert!(!env_kitty(Some("iTerm.app"), None));
         assert!(!env_kitty(Some("Apple_Terminal"), Some("xterm-256color")));
         assert!(!env_kitty(None, None));
@@ -853,18 +731,18 @@ mod tests {
     fn cap_from_pairs_pixels_with_grid() {
         let full = b"\x1b_Gi=31;OK\x1b\\\x1b[?62;c\x1b[4;982;1512t";
         assert_eq!(
-            cap_from(Some(full), Some((189, 60)), ImageMode::Direct),
+            cap_from(Some(full), Some((189, 60)), Transport::Bare),
             ImageCap {
                 cell_w: 8,
                 cell_h: 16,
-                mode: ImageMode::Direct
+                transport: Transport::Bare
             }
         );
-        // Unknown grid size → defaults, mode preserved.
+        // Unknown grid size → defaults, transport preserved.
         assert_eq!(
-            cap_from(Some(full), None, ImageMode::TmuxPlaceholder),
+            cap_from(Some(full), None, Transport::Tmux),
             ImageCap {
-                mode: ImageMode::TmuxPlaceholder,
+                transport: Transport::Tmux,
                 ..ImageCap::default_cells()
             }
         );
@@ -873,12 +751,12 @@ mod tests {
             cap_from(
                 Some(b"\x1b_Gi=31;OK\x1b\\"),
                 Some((189, 60)),
-                ImageMode::Direct
+                Transport::Bare
             ),
             ImageCap::default_cells()
         );
         assert_eq!(
-            cap_from(None, Some((189, 60)), ImageMode::Direct),
+            cap_from(None, Some((189, 60)), Transport::Bare),
             ImageCap::default_cells()
         );
     }
@@ -889,13 +767,13 @@ mod tests {
         let bug = ImageCap {
             cell_w: 1512,
             cell_h: 982,
-            mode: ImageMode::Direct,
+            transport: Transport::Bare,
         };
         assert_eq!(fit_cells(800, 600, &bug, MAX_COLS, MAX_ROWS), (1, 1));
         let fixed = ImageCap {
             cell_w: 8,
             cell_h: 16,
-            mode: ImageMode::Direct,
+            transport: Transport::Bare,
         };
         assert_eq!(fit_cells(800, 600, &fixed, MAX_COLS, MAX_ROWS), (48, 18));
     }
@@ -916,22 +794,21 @@ mod tests {
     }
 
     #[test]
-    fn kitty_sequence_single_chunk() {
-        // Small payload: a single chunk m=0 with the full control data,
-        // ending in rows `\r\n`s.
-        let out = kitty_image_bytes(b"abc", 12, 4);
+    fn transmit_single_chunk_is_virtual_and_cursor_neutral() {
+        let out = transmit_bytes(b"abc", 12, 4, 7, Transport::Bare);
         let s = String::from_utf8(out).unwrap();
-        assert!(s.starts_with("\x1b_Ga=T,f=100,q=2,c=12,r=4,C=1,m=0;"));
-        assert!(s.ends_with("\r\n\r\n\r\n\r\n"));
-        assert!(s.contains("\x1b\\"));
+        assert!(s.starts_with("\x1b_Ga=T,U=1,q=2,f=100,i=7,c=12,r=4,m=0;"));
+        assert!(s.ends_with("\x1b\\"));
         assert_eq!(s.matches("\x1b\\").count(), 1);
+        assert!(!s.contains('\n'), "传输不移动光标");
+        assert!(!s.contains("C=1"), "占位符方案没有光标放置");
     }
 
     #[test]
-    fn kitty_sequence_chunks_at_4096() {
+    fn transmit_chunks_at_4096() {
         // Every 4096 base64 chars = 3072 bytes. 6000 bytes → 2 chunks.
         let png = vec![0u8; 6000];
-        let out = kitty_image_bytes(&png, 10, 2);
+        let out = transmit_bytes(&png, 10, 2, 7, Transport::Bare);
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.matches("\x1b\\").count(), 2);
         assert!(s.contains("m=1;"), "首块 m=1");
@@ -945,15 +822,36 @@ mod tests {
     }
 
     #[test]
+    fn transmit_normalizes_id() {
+        let out = transmit_bytes(b"abc", 1, 1, 0, Transport::Bare);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("i=1,"), "id 0 对 kitty 意为无 id，归一为 1: {s}");
+        let masked = transmit_bytes(b"abc", 1, 1, 0xFF00_0001, Transport::Bare);
+        let s = String::from_utf8(masked).unwrap();
+        assert!(s.contains("i=1,"), "高字节不进 24-bit id: {s}");
+    }
+
+    #[test]
     fn probe_plan_env_matrix() {
-        // No tmux: unchanged behaviour, env_kitty short circuit intact.
+        // No tmux: env_kitty short circuit for placeholder-capable terminals.
         assert_eq!(
             probe_plan(false, Some("ghostty"), None, false, false),
             ProbePlan::Direct { env_kitty: true }
         );
+        // WezTerm/Konsole are excluded outright — inside tmux or not — via
+        // TERM_PROGRAM (reliable outside tmux) or their own env vars: they
+        // answer the query but never render Unicode placeholders.
         assert_eq!(
             probe_plan(false, Some("WezTerm"), None, false, false),
-            ProbePlan::Direct { env_kitty: true }
+            ProbePlan::Unsupported
+        );
+        assert_eq!(
+            probe_plan(false, Some("konsole"), None, false, false),
+            ProbePlan::Unsupported
+        );
+        assert_eq!(
+            probe_plan(false, None, None, true, false),
+            ProbePlan::Unsupported
         );
         assert_eq!(
             probe_plan(
@@ -1000,24 +898,23 @@ mod tests {
             ProbePlan::TmuxProbe,
             "screen does not answer the query, so the probe fails on its own"
         );
-        // WezTerm/Konsole answer the kitty query but lack U=1 placeholders;
-        // they are excluded via env vars the outer terminal sets itself (and
-        // that tmux does not overwrite), never via TERM_PROGRAM.
+        // Inside tmux the exclusion rests on env vars the outer terminal sets
+        // itself (tmux overwrites TERM_PROGRAM in panes).
         assert_eq!(
             probe_plan(true, Some("WezTerm"), None, true, false),
-            ProbePlan::TmuxUnsupported
+            ProbePlan::Unsupported
         );
         assert_eq!(
             probe_plan(true, Some("konsole"), None, false, true),
-            ProbePlan::TmuxUnsupported
+            ProbePlan::Unsupported
         );
         assert_eq!(
             probe_plan(true, None, None, true, false),
-            ProbePlan::TmuxUnsupported
+            ProbePlan::Unsupported
         );
         assert_eq!(
             probe_plan(true, None, None, false, true),
-            ProbePlan::TmuxUnsupported
+            ProbePlan::Unsupported
         );
     }
 
@@ -1045,10 +942,10 @@ mod tests {
     }
 
     #[test]
-    fn tmux_transmit_wraps_every_chunk() {
+    fn tmux_transport_wraps_every_chunk() {
         // 6000 bytes → 8000 base64 chars → 2 chunks, 2 envelopes.
         let png = vec![0u8; 6000];
-        let out = tmux_transmit_bytes(&png, 10, 2, 0x01_0203);
+        let out = transmit_bytes(&png, 10, 2, 0x01_0203, Transport::Tmux);
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.matches("\x1bPtmux;").count(), 2, "one envelope per chunk");
         assert_eq!(s.matches("\x1b_G").count(), 2);
@@ -1064,44 +961,66 @@ mod tests {
         );
         assert!(s.ends_with("\x1b\\"));
         assert!(!s.contains('\n'), "transport alone never moves the cursor");
+        // The transports differ only in the envelope: unwrapping each
+        // envelope (strip the DCS frame, undouble ESC) yields the bare bytes.
+        let bare = String::from_utf8(transmit_bytes(&png, 10, 2, 0x01_0203, Transport::Bare))
+            .unwrap_or_default();
+        let unwrapped: String = s
+            .split("\x1bPtmux;")
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                part.strip_suffix("\x1b\\")
+                    .unwrap_or(part)
+                    .replace("\x1b\x1b", "\x1b")
+            })
+            .collect();
+        assert_eq!(unwrapped, bare);
     }
 
     #[test]
-    fn placeholder_rows_encode_grid_and_id() {
-        let out = placeholder_rows(3, 2, 0x0A_0B0C);
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2, "one line per row");
-        for line in &lines {
-            assert!(
-                line.starts_with("\x1b[38;2;10;11;12m"),
-                "id in the 24-bit fg"
-            );
-            assert!(line.ends_with("\x1b[39m"), "fg reset at end of line");
-            assert_eq!(
-                line.chars().filter(|c| *c == PLACEHOLDER).count(),
-                3,
-                "one placeholder cell per column"
-            );
-        }
-        // Diacritics are row-first then column, 0-based into kitty's table.
-        assert!(lines[0].starts_with(&format!("\x1b[38;2;10;11;12m{PLACEHOLDER}\u{305}\u{305}")));
-        assert!(lines[1].ends_with(&format!("{PLACEHOLDER}\u{30d}\u{30e}\x1b[39m")));
+    fn placeholder_row_text_encodes_coordinates() {
+        let row0 = placeholder_row_text(0, 3).expect("row 0 within table");
         assert_eq!(
-            out.matches("\r\n").count(),
-            2,
-            "each row returns to column 0 and advances (raw mode)"
+            row0,
+            format!(
+                "{PLACEHOLDER}\u{305}\u{305}{PLACEHOLDER}\u{305}\u{30d}{PLACEHOLDER}\u{305}\u{30e}"
+            ),
+            "row diacritic first, then the column's, 0-based into kitty's table"
+        );
+        let row1 = placeholder_row_text(1, 2).expect("row 1 within table");
+        assert_eq!(
+            row1,
+            format!("{PLACEHOLDER}\u{30d}\u{305}{PLACEHOLDER}\u{30d}\u{30d}")
+        );
+        // Beyond the table: rows fail, columns clamp — never panic.
+        assert_eq!(placeholder_row_text(ROWCOLUMN_DIACRITICS.len(), 3), None);
+        let clamped = placeholder_row_text(0, 1000).expect("cols clamp");
+        assert_eq!(
+            clamped.chars().filter(|c| *c == PLACEHOLDER).count(),
+            ROWCOLUMN_DIACRITICS.len()
         );
     }
 
     #[test]
-    fn placeholder_rows_clamps_and_normalizes_id() {
-        // Beyond the diacritic table the block is clamped, never panics.
-        let out = placeholder_rows(1000, 1000, 1);
-        assert_eq!(out.lines().count(), ROWCOLUMN_DIACRITICS.len());
+    fn image_id_fg_normalizes() {
+        assert_eq!(image_id_fg(0x0A_0B0C), (10, 11, 12));
         // id 0 means "no id" to kitty; the high byte never survives the fg.
-        assert!(placeholder_rows(1, 1, 0).starts_with("\x1b[38;2;0;0;1m"));
-        assert!(placeholder_rows(1, 1, 0xFF00_0000).starts_with("\x1b[38;2;0;0;1m"));
-        assert!(placeholder_rows(1, 1, 0x01FF_FFFF).starts_with("\x1b[38;2;255;255;255m"));
+        assert_eq!(image_id_fg(0), (0, 0, 1));
+        assert_eq!(image_id_fg(0xFF00_0000), (0, 0, 1));
+        assert_eq!(image_id_fg(0x01FF_FFFF), (255, 255, 255));
+    }
+
+    #[test]
+    fn transmits_cache_sends_once_until_reset() {
+        let mut transmits = Transmits::default();
+        assert!(transmits.needs(7), "first sight needs a transmit");
+        assert!(!transmits.needs(7), "already in the terminal's store");
+        assert!(transmits.needs(8), "distinct id transmits on its own");
+        // ids 0 and 1 are the same image after normalization.
+        assert!(transmits.needs(0));
+        assert!(!transmits.needs(1));
+        transmits.reset();
+        assert!(transmits.needs(7), "reset forgets the purged store");
     }
 
     #[test]
@@ -1117,26 +1036,6 @@ mod tests {
             ROWCOLUMN_DIACRITICS.windows(2).all(|w| w[0] < w[1]),
             "kitty's table is codepoint-ordered and duplicate-free"
         );
-    }
-
-    #[test]
-    fn image_print_bytes_dispatches_on_mode() {
-        let direct = ImageCap::default_cells();
-        assert_eq!(
-            image_print_bytes(&direct, b"abc", 4, 2, 7),
-            kitty_image_bytes(b"abc", 4, 2),
-            "Direct mode is byte-identical to the plain kitty path"
-        );
-        let tmux = ImageCap {
-            mode: ImageMode::TmuxPlaceholder,
-            ..ImageCap::default_cells()
-        };
-        let out = image_print_bytes(&tmux, b"abc", 4, 2, 7);
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.starts_with("\x1bPtmux;"), "transmit first");
-        assert!(s.contains("i=7,c=4,r=2"));
-        assert!(s.contains(&format!("m{PLACEHOLDER}")), "placement follows");
-        assert_eq!(s.matches("\r\n").count(), 2, "cursor advances rows lines");
     }
 
     #[test]
@@ -1233,141 +1132,6 @@ mod tests {
             &cap,
         ));
         assert!(meta.is_none());
-    }
-
-    fn placement(url: &str, doc_row: usize, row: u16) -> Placement {
-        Placement {
-            id: placement_id(url, doc_row),
-            url: url.to_string(),
-            cols: 4,
-            rows: 2,
-            row,
-            col: 0,
-        }
-    }
-
-    fn text_of(ops: &[GfxWrite]) -> String {
-        ops.iter()
-            .map(|op| String::from_utf8_lossy(&op.bytes).into_owned())
-            .collect()
-    }
-
-    fn image_map(
-        urls: &[&str],
-    ) -> std::collections::HashMap<String, std::sync::Arc<crate::ui::ImageMeta>> {
-        urls.iter()
-            .map(|url| {
-                (
-                    (*url).to_string(),
-                    std::sync::Arc::new(crate::ui::ImageMeta {
-                        cols: 4,
-                        rows: 2,
-                        bytes: b"png".to_vec(),
-                    }),
-                )
-            })
-            .collect()
-    }
-
-    /// First frame transmits+places; an unchanged frame emits nothing; a move
-    /// emits place-only (no retransmit) at the new cell; a removal emits a
-    /// cursor-independent delete.
-    #[test]
-    fn placement_layer_diffs_transmit_move_and_delete() {
-        let images = image_map(&["a.png"]);
-        let mut layer = PlacementLayer::default();
-
-        let first = layer.sync(&images, &[placement("a.png", 3, 5)]);
-        let first_text = text_of(&first);
-        assert!(
-            first_text.contains("a=T"),
-            "首次出现传输+放置: {first_text}"
-        );
-        assert!(first_text.contains("i="));
-        assert_eq!(first[0].at, Some((5, 0)), "放置锚定屏幕单元格");
-
-        let same = layer.sync(&images, &[placement("a.png", 3, 5)]);
-        assert!(same.is_empty(), "未变化不发字节");
-
-        let moved = layer.sync(&images, &[placement("a.png", 3, 7)]);
-        let moved_text = text_of(&moved);
-        assert!(moved_text.contains("a=p"), "移动仅重放置: {moved_text}");
-        assert!(!moved_text.contains("a=T"), "不重复传输: {moved_text}");
-        assert_eq!(moved[0].at, Some((7, 0)), "移动锚定新单元格");
-
-        let removed = layer.sync(&images, &[]);
-        let removed_text = text_of(&removed);
-        assert!(removed_text.contains("a=d"), "移除发删除: {removed_text}");
-        assert_eq!(removed[0].at, None, "删除与光标位置无关");
-    }
-
-    /// Payload byte contract: screen position never rides in the payload
-    /// (kitty `x=`/`y=` are source-crop keys, not coordinates), every put
-    /// names placement `p=1` so a re-put replaces instead of accumulating,
-    /// `C=1` pins the cursor, and every command — puts and deletes alike —
-    /// carries `q=2`: `q=1` still sends error replies, and those APC replies
-    /// arrive on stdin as typed garbage (main saw `ENOENT: image not found`
-    /// flood the input box after a resize purged the terminal's image store).
-    #[test]
-    fn placement_bytes_follow_kitty_placement_semantics() {
-        let p = placement("a.png", 3, 5);
-        let place = String::from_utf8_lossy(&place_only_bytes(&p)).into_owned();
-        assert_eq!(
-            place,
-            format!("\x1b_Ga=p,q=2,i={},p=1,C=1,c=4,r=2\x1b\\", p.id)
-        );
-        let transmit =
-            String::from_utf8_lossy(&transmit_place_bytes(p.id, b"png", &p)).into_owned();
-        let expected_head = format!("\x1b_Ga=T,f=100,q=2,i={},p=1,C=1,c=4,r=2,m=0;", p.id);
-        assert!(transmit.starts_with(&expected_head), "{transmit}");
-        let delete = String::from_utf8_lossy(&delete_bytes(p.id)).into_owned();
-        assert_eq!(delete, format!("\x1b_Ga=d,q=2,i={},d=I\x1b\\", p.id));
-    }
-
-    /// Two copies of the same url get distinct ids; deleting one leaves the
-    /// other; a reappearing instance retransmits (its data was deleted).
-    #[test]
-    fn placement_layer_keeps_same_url_instances_apart() {
-        let images = image_map(&["a.png"]);
-        let mut layer = PlacementLayer::default();
-        let a = placement("a.png", 3, 0);
-        let b = placement("a.png", 9, 40);
-        assert_ne!(a.id, b.id, "同 url 不同位置实例 id 不同");
-
-        layer.sync(&images, &[a.clone(), b.clone()]);
-        let drop_a = layer.sync(&images, std::slice::from_ref(&b));
-        let text = text_of(&drop_a);
-        assert!(text.contains(&format!("i={}", a.id)), "删除 a 实例: {text}");
-        assert!(!text.contains(&format!("i={}", b.id)), "b 不受影响: {text}");
-
-        let re_add = layer.sync(&images, &[a.clone(), b.clone()]);
-        assert!(text_of(&re_add).contains("a=T"), "重新出现需重新传输");
-    }
-
-    /// clear() removes everything and resets the transmit cache.
-    #[test]
-    fn placement_layer_clear_deletes_all() {
-        let images = image_map(&["a.png"]);
-        let mut layer = PlacementLayer::default();
-        layer.sync(&images, &[placement("a.png", 3, 0)]);
-        let clear = layer.clear();
-        assert!(text_of(&clear).contains("a=d"));
-        assert!(
-            !layer.sync(&images, &[placement("a.png", 3, 0)]).is_empty(),
-            "清理后重新出现需重新传输"
-        );
-    }
-
-    /// A placement whose image is not loaded yet is skipped (no bytes).
-    #[test]
-    fn placement_layer_skips_unloaded_images() {
-        let mut layer = PlacementLayer::default();
-        let bytes = layer.sync(
-            &std::collections::HashMap::new(),
-            &[placement("a.png", 0, 0)],
-        );
-        assert!(bytes.is_empty());
-        assert!(layer.active.is_empty());
     }
 
     /// HTTP fetches carry a User-Agent (some CDNs, e.g. Wikimedia, 403

@@ -166,26 +166,25 @@ fn failed_image_lines(theme: &Theme) -> Vec<Line> {
     vec![line]
 }
 
-/// Image block → `rows` lines: the first line holds the placeholder text
-/// (shows `#[image]` during the canvas phase) and every line carries an
-/// [`ImageRef`] (on flush, the first line emits the kitty sequence and
-/// continuation lines are skipped).
+/// Image block → `rows` lines, each carrying an [`ImageRef`] with its row
+/// index. The render layer turns every row into kitty Unicode placeholder
+/// cells; the `#[image]` text on the first row is the fallback shown by
+/// terminals without image support (where no [`ImageRef`] rows exist at all)
+/// and by width-truncated renders.
 fn image_block_lines(url: &str, meta: &ImageMeta, theme: Theme) -> Vec<Line> {
-    let img = ImageRef {
-        url: url.to_string(),
-        cols: meta.cols,
-        rows: meta.rows,
-    };
     let mut out = Vec::with_capacity(meta.rows);
-    let mut first = Line::empty();
-    first.push_styled("#[image]", theme.dim());
-    first.image = Some(img.clone());
-    out.push(first);
-    for _ in 1..meta.rows {
-        out.push(Line {
-            segs: Vec::new(),
-            image: Some(img.clone()),
+    for row in 0..meta.rows {
+        let mut line = Line::empty();
+        if row == 0 {
+            line.push_styled("#[image]", theme.dim());
+        }
+        line.image = Some(ImageRef {
+            url: url.to_string(),
+            cols: meta.cols,
+            rows: meta.rows,
+            row,
         });
+        out.push(line);
     }
     out
 }
@@ -763,10 +762,20 @@ mod tests {
             Some(ImageRef {
                 url: "a.png".into(),
                 cols: 10,
-                rows: 4
+                rows: 4,
+                row: 0
             })
         );
-        assert_eq!(lines[3].image, lines[0].image, "续行携带相同引用");
+        assert_eq!(
+            lines[3].image,
+            Some(ImageRef {
+                url: "a.png".into(),
+                cols: 10,
+                rows: 4,
+                row: 3
+            }),
+            "续行携带自己的行号"
+        );
         assert_eq!(lines[3].plain_text(), "");
     }
 
