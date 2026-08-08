@@ -227,12 +227,14 @@ Example (.bingo/settings.json):
 - **Skills**: built-in `guide` (this guide) + `~/.config/bingo/skills/` and `.bingo/skills/`
   directory skills (same-name disk skills override built-ins); the model invokes them via SkillTool, users run them via `/skill-name`.
 - **Images**: markdown images in model replies (`![alt](path)`, supports `~/`, relative paths/data/http(s))
-  render inline in `--inline` mode on kitty-graphics-capable terminals (Ghostty/kitty/WezTerm etc.);
-  fullscreen and unsupported terminals show a `#[image]` placeholder. Inside tmux, bingo enables
-  passthrough automatically (`tmux set -p allow-passthrough on`) and images render via Unicode
-  placeholders (U=1) when the outer terminal is Ghostty/kitty; an outer WezTerm/Konsole (no U=1)
-  or an unrecognized outer terminal keeps the `#[image]` placeholder with a one-time notice. Images
-  load automatically with the message and render when the message settles — no extra command needed.
+  render on kitty-graphics-capable terminals (Ghostty/kitty/WezTerm etc.) in both modes: fullscreen places
+  them in the live viewport, `--inline` also flushes them into scrollback; unsupported terminals show a
+  `#[image]` placeholder. Inside tmux, bingo enables passthrough automatically
+  (`tmux set -p allow-passthrough on`) and scrollback images render via Unicode placeholders (U=1) when the
+  outer terminal is Ghostty/kitty; an outer WezTerm/Konsole (no U=1) or an unrecognized outer
+  terminal keeps the `#[image]` placeholder with a one-time notice (the live viewport also keeps the
+  placeholder inside tmux). Images load automatically with the message and render when the message
+  settles — no extra command needed.
 - **MCP**: stdio and streamable HTTP (`type: "http"`, with custom headers) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).

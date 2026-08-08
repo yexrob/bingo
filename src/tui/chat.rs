@@ -940,7 +940,7 @@ pub struct Chat {
     processor: MarkdownProcessor,
     renderer: MarkdownRenderer,
     reply_cache: HashMap<String, Vec<Line>>,
-    /// Terminal image capability (kitty protocol; detected in inline mode, None in fullscreen).
+    /// Terminal image capability (kitty protocol; probed for both hosts).
     pub image_cap: Option<ImageCap>,
     /// Loaded image cache (url → PNG bytes + cell dimensions).
     pub images: HashMap<String, Arc<ImageMeta>>,

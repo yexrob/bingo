@@ -64,15 +64,11 @@ pub async fn run_tui_session(
     // （欢迎卡片数据源；失败静默、不阻塞启动）。headless（--print）不经过此路径。
     crate::update::spawn_background_check(session.home.clone());
 
-    // Fullscreen's per-frame diff repaint cannot reliably carry kitty images,
-    // so real image display is only enabled in inline mode (finalized rows
-    // land in scrollback once). This must also happen before raw mode: the
-    // probe uses the same /dev/tty query path.
-    let image_probe = if fullscreen {
-        gfx::ImageProbe::default()
-    } else {
-        gfx::detect_image_cap().await
-    };
+    // Probe the kitty graphics capability for both hosts: inline flushes real
+    // image bytes into scrollback, fullscreen places them in the live viewport
+    // through the placement layer. Must happen before raw mode: the probe uses
+    // the same /dev/tty query path.
+    let image_probe = gfx::detect_image_cap().await;
     let image_cap = image_probe.cap;
     if std::env::var_os("BINGO_DEBUG").is_some() {
         eprintln!(

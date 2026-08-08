@@ -185,13 +185,15 @@ published URL. The equivalent CLI is `bingo share [session] [--public]
 ### Image rendering
 
 Markdown images in model replies (`![alt](path)`, supporting `~/`, relative
-paths, data:, and http(s)) render inline in `--inline` mode on kitty-graphics
-terminals (Ghostty/kitty, etc.); fullscreen and unsupported terminals show a
-`#[image]` placeholder. Inside tmux, bingo enables passthrough automatically
-(`tmux set -p allow-passthrough on`) and the outer terminal must support kitty
-Unicode placeholders (Ghostty/kitty); WezTerm and Konsole speak the graphics
-protocol but not placeholders, so they still show the `#[image]` placeholder
-behind tmux.
+paths, data:, and http(s)) render on kitty-graphics terminals (Ghostty/kitty,
+etc.) in both modes: fullscreen places them in the live viewport, `--inline`
+also flushes them into scrollback. Unsupported terminals show a `#[image]`
+placeholder. Inside tmux, bingo enables passthrough automatically
+(`tmux set -p allow-passthrough on`) and scrollback images render via Unicode
+placeholders (U=1) when the outer terminal is Ghostty/kitty; WezTerm and
+Konsole speak the graphics protocol but not placeholders, so they still show
+the `#[image]` placeholder behind tmux (the live fullscreen/inline viewport
+also keeps the placeholder inside tmux).
 
 ## Configuration (settings.json)
 

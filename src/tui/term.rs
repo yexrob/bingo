@@ -180,6 +180,20 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
         self.size
     }
 
+    /// Absolute screen row of the viewport's top edge.
+    pub fn viewport_top(&self) -> u16 {
+        self.viewport.y
+    }
+
+    /// Write raw bytes at the parked cursor position without touching the
+    /// double buffer (used by the kitty placement layer after the frame draw;
+    /// the control sequences do not move the cursor).
+    pub fn write_raw_bytes(&mut self, bytes: &[u8]) -> Result<(), B::Error> {
+        self.backend.write_raw(bytes)?;
+        Backend::flush(&mut self.backend)?;
+        Ok(())
+    }
+
     /// Accept a new terminal size.
     ///
     /// The viewport height is clamped to the new screen and the viewport stays

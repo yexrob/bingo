@@ -163,11 +163,12 @@ bingo --continue            # 恢复最近一次会话
 ### 图片渲染
 
 模型回复中的 markdown 图片（`![alt](路径)`，支持 `~/`、相对路径、data:、http(s)）
-仅在 `--inline` 模式下于支持 kitty graphics 的终端（Ghostty/kitty 等）内联渲染；
-fullscreen 与不支持该协议的终端显示 `#[image]` 占位。tmux 内 bingo 会自动开启
-passthrough（`tmux set -p allow-passthrough on`），外层终端需支持 kitty Unicode
-占位符（Ghostty/kitty）；WezTerm/Konsole 虽支持 graphics 协议但不支持占位符，
-tmux 下仍显示 `#[image]` 占位。
+在支持 kitty graphics 的终端（Ghostty/kitty 等）两种模式下都渲染真实图片：
+fullscreen 在活动视口内放置图片，`--inline` 还会在内容落盘时写入 scrollback。
+不支持的终端显示 `#[image]` 占位。tmux 内 bingo 会自动开启 passthrough
+（`tmux set -p allow-passthrough on`），落盘图片在 Ghostty/kitty 外层终端下以
+Unicode 占位符（U=1）渲染；WezTerm/Konsole 虽支持 graphics 协议但不支持占位符，
+tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位）。
 
 ## 配置（settings.json）
 

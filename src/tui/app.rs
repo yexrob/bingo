@@ -46,6 +46,8 @@ use crate::tui::chat::{
     Chat, ModelMenu, ProviderMenu, ResumeMenu, Row, SettledMark, SlashSuggestion, ThemeMenu,
     ThinkMenu, model_footer_label,
 };
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 当前激活的选择器菜单（互斥：任一时刻至多一个；渲染按此分组读壳层）。
 #[derive(Clone, Copy, Default)]
@@ -58,7 +60,7 @@ pub(crate) struct Menus<'a> {
 }
 use crate::tui::gfx;
 use crate::tui::line::{Line, SegStyle, text_width};
-use crate::tui::term::{HistoryItem, StdoutTerm};
+use crate::tui::term::{HistoryItem, RawWrite, StdoutTerm};
 use crate::tui::theme::Theme;
 use crate::tui::view;
 
@@ -86,6 +88,11 @@ struct Chrome {
 pub struct Frame {
     pub rows: Vec<Row>,
     pub cursor: Option<(u16, u16)>,
+    /// Document row of the first content row in `rows` (before chrome).
+    pub doc_start: usize,
+    /// Number of leading rows that belong to the transcript content (the rest
+    /// is chrome). Image placements only exist inside this span.
+    pub content_len: usize,
 }
 
 /// Inline tail window: returns (start row, hidden row count). The budget is the terminal height minus
@@ -523,6 +530,8 @@ impl Frame {
             return Self {
                 rows: error_screen_rows(err, &chat.theme),
                 cursor: None,
+                doc_start: 0,
+                content_len: 0,
             };
         }
         let width = size.width as usize;
@@ -569,7 +578,18 @@ impl Frame {
             rows.len(),
             width,
         );
-        Self { rows, cursor }
+        // Map content rows back to document rows for image placement: the
+        // `+N lines` omission hint is not a doc row; dropped rows above the
+        // budget shift the doc start.
+        let hidden_rows = usize::from(hidden > 0);
+        let content_len = tail_len.saturating_sub(dropped);
+        let doc_start = chat.tail_start + dropped.saturating_sub(hidden_rows);
+        Self {
+            rows,
+            cursor,
+            doc_start,
+            content_len,
+        }
     }
 }
 
@@ -654,6 +674,52 @@ fn image_block_head(rows: &[Row], i: usize) -> bool {
         .is_none_or(|prev| prev.line.image.as_ref().map(|p| &p.url) != Some(&img.url))
 }
 
+/// Image blocks fully visible in the frame's content area → absolute screen
+/// placements (pixel coordinates, `origin_row` = the viewport's top screen
+/// row). Partially visible or still-loading blocks stay as `#[image]`
+/// placeholder rows; tmux placeholder mode is not supported in the live
+/// viewport yet, so it gets no placements either.
+fn desired_placements(
+    frame: &Frame,
+    cap: gfx::ImageCap,
+    images: &HashMap<String, Arc<crate::ui::ImageMeta>>,
+    origin_row: u16,
+) -> Vec<gfx::Placement> {
+    if cap.mode != gfx::ImageMode::Direct {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < frame.content_len {
+        let Some(img) = &frame.rows[i].line.image else {
+            i += 1;
+            continue;
+        };
+        if !image_block_head(&frame.rows, i) {
+            i += 1;
+            continue;
+        }
+        let block_rows = img.rows;
+        let end = i + block_rows;
+        if end <= frame.content_len
+            && let Some(meta) = images.get(&img.url)
+        {
+            out.push(gfx::Placement {
+                id: gfx::placement_id(&img.url, frame.doc_start + i),
+                url: img.url.clone(),
+                cols: meta.cols,
+                rows: meta.rows,
+                x: 0,
+                y: u32::from(origin_row)
+                    .saturating_add(i as u32)
+                    .saturating_mul(cap.cell_h),
+            });
+        }
+        i = end;
+    }
+    out
+}
+
 /// Key dispatch. In inline mode ctrl+o toggles expand/collapse (CC non-fullscreen semantics);
 /// neither direction touches the already-printed scrollback: expand = replay the whole transcript and freeze it
 /// into scrollback (readable by scrolling up); collapse = fold back to aggregates, then close up like resize (clear-redraw +
@@ -726,6 +792,7 @@ pub async fn run_inline(
     let mut ticks: u64 = 0;
     let mut expand_open = true;
     let mut dirty = true;
+    let mut layer = gfx::PlacementLayer::default();
     let mut pending_resize: Option<(Size, Instant)> = None;
 
     loop {
@@ -836,6 +903,10 @@ pub async fn run_inline(
         if chat.force_redraw {
             chat.force_redraw = false;
             term.clear_visible()?;
+            let bytes = layer.clear();
+            if !bytes.is_empty() {
+                term.write_raw_bytes(&bytes)?;
+            }
         }
 
         let size = term.size();
@@ -885,11 +956,25 @@ pub async fn run_inline(
             },
             frame.cursor,
         )?;
+
+        // Live-viewport image placements: loaded, fully visible image blocks
+        // render immediately instead of waiting for the scrollback flush.
+        if let Some(cap) = chat.image_cap {
+            let placements = desired_placements(&frame, cap, &chat.images, term.viewport_top());
+            let bytes = layer.sync(&chat.images, &placements);
+            if !bytes.is_empty() {
+                term.write_raw_bytes(&bytes)?;
+            }
+        }
         if chat.exit {
             break;
         }
     }
 
+    let bytes = layer.clear();
+    if !bytes.is_empty() {
+        term.write_raw_bytes(&bytes)?;
+    }
     term.finish()?;
     Ok(())
 }
@@ -903,10 +988,13 @@ fn fullscreen_frame(chat: &Chat, size: Size) -> Frame {
         return Frame {
             rows: error_screen_rows(err, &chat.theme),
             cursor: None,
+            doc_start: 0,
+            content_len: 0,
         };
     }
 
     let chrome = chrome_rows(chat, size.width as usize, true);
+    let chrome_start = (size.height as usize).saturating_sub(chrome.rows.len());
     let viewport = (size.height as usize).saturating_sub(chrome.rows.len());
     let mut rows: Vec<Row> = chat
         .doc
@@ -916,7 +1004,6 @@ fn fullscreen_frame(chat: &Chat, size: Size) -> Frame {
         .take(viewport)
         .cloned()
         .collect();
-    let chrome_start = (size.height as usize).saturating_sub(chrome.rows.len());
     rows.resize_with(chrome_start, || Row::new(Line::plain("")));
     rows.extend(chrome.rows);
     let (row, col) = caret_cell(chat);
@@ -927,7 +1014,12 @@ fn fullscreen_frame(chat: &Chat, size: Size) -> Frame {
         size.height as usize,
         size.width as usize,
     );
-    Frame { rows, cursor }
+    Frame {
+        rows,
+        cursor,
+        doc_start: chat.scroll,
+        content_len: chrome_start,
+    }
 }
 
 /// Fullscreen host: the whole document + in-app scrolling + mouse-click folding, input area pinned to the bottom.
@@ -942,6 +1034,7 @@ pub async fn run_fullscreen(
     let mut ticks: u64 = 0;
     let mut expand_open = true;
     let mut dirty = true;
+    let mut layer = gfx::PlacementLayer::default();
 
     loop {
         tokio::select! {
@@ -1015,6 +1108,10 @@ pub async fn run_fullscreen(
         if chat.force_redraw {
             chat.force_redraw = false;
             terminal.clear()?;
+            let bytes = layer.clear();
+            if !bytes.is_empty() {
+                terminal.backend_mut().write_raw(&bytes)?;
+            }
         }
 
         let size = terminal.size()?;
@@ -1029,9 +1126,23 @@ pub async fn run_fullscreen(
                 terminal_frame.set_cursor_position(position);
             }
         })?;
+
+        // Live-viewport image placements on the alternate screen.
+        if let Some(cap) = chat.image_cap {
+            let placements = desired_placements(&frame, cap, &chat.images, 0);
+            let bytes = layer.sync(&chat.images, &placements);
+            if !bytes.is_empty() {
+                terminal.backend_mut().write_raw(&bytes)?;
+            }
+        }
         if chat.exit {
             break;
         }
+    }
+
+    let bytes = layer.clear();
+    if !bytes.is_empty() {
+        terminal.backend_mut().write_raw(&bytes)?;
     }
     Ok(())
 }
@@ -1968,6 +2079,109 @@ mod tests {
             "全屏错误态不应露出输入框: {text:?}"
         );
         assert!(frame.cursor.is_none(), "全屏错误态隐藏输入光标");
+        assert_eq!(frame.content_len, 0, "错误态无内容区");
+    }
+
+    /// Loaded, fully visible image blocks produce one placement at the right
+    /// screen position; partial blocks, unloaded images, continuation rows and
+    /// tmux mode produce nothing.
+    #[test]
+    fn desired_placements_only_for_fully_visible_loaded_blocks() {
+        use crate::tui::line::ImageRef;
+        let img_line = |url: &str, rows: usize| Line {
+            segs: Vec::new(),
+            image: Some(ImageRef {
+                url: url.to_string(),
+                cols: 4,
+                rows,
+            }),
+        };
+        let cap = crate::tui::gfx::ImageCap::default_cells(); // Direct mode
+        let images = HashMap::from([(
+            "a.png".to_string(),
+            Arc::new(crate::ui::ImageMeta {
+                cols: 4,
+                rows: 2,
+                bytes: b"png".to_vec(),
+            }),
+        )]);
+
+        // Block fully inside content (rows 2..4 of a 6-row content area).
+        let frame = Frame {
+            rows: vec![
+                Row::new(Line::plain("t")),
+                Row::new(Line::plain("t")),
+                Row::new(img_line("a.png", 2)),
+                Row::new(img_line("a.png", 2)),
+                Row::new(Line::plain("t")),
+                Row::new(Line::plain("t")),
+            ],
+            cursor: None,
+            doc_start: 10,
+            content_len: 6,
+        };
+        let placements = desired_placements(&frame, cap, &images, 3);
+        assert_eq!(placements.len(), 1, "恰好一个完整可见块");
+        assert_eq!(placements[0].url, "a.png");
+        assert_eq!(placements[0].y, (3 + 2) * cap.cell_h, "屏幕行换算像素");
+        assert_eq!(
+            placements[0].id,
+            crate::tui::gfx::placement_id("a.png", 10 + 2),
+            "实例 id 锚定 doc 行"
+        );
+
+        // Partially visible (block clipped at the bottom of the content area) → skipped.
+        let clipped = Frame {
+            rows: vec![
+                Row::new(Line::plain("t")),
+                Row::new(Line::plain("t")),
+                Row::new(img_line("a.png", 2)),
+                Row::new(img_line("a.png", 2)),
+            ],
+            cursor: None,
+            doc_start: 0,
+            content_len: 3,
+        };
+        assert!(
+            desired_placements(&clipped, cap, &images, 0).is_empty(),
+            "被裁剪的块不放置"
+        );
+
+        // Unloaded url → skipped.
+        let unloaded = Frame {
+            rows: vec![Row::new(img_line("missing.png", 1))],
+            cursor: None,
+            doc_start: 0,
+            content_len: 1,
+        };
+        assert!(desired_placements(&unloaded, cap, &images, 0).is_empty());
+
+        // tmux placeholder mode → no viewport placements.
+        let tmux = crate::tui::gfx::ImageCap {
+            mode: crate::tui::gfx::ImageMode::TmuxPlaceholder,
+            ..crate::tui::gfx::ImageCap::default_cells()
+        };
+        assert!(
+            desired_placements(&frame, tmux, &images, 3).is_empty(),
+            "tmux 占位模式视口不放置"
+        );
+    }
+
+    /// Fullscreen frames carry the doc row of their first content row so the
+    /// placement layer can anchor instance ids.
+    #[test]
+    fn fullscreen_frame_tracks_doc_start() {
+        let mut chat = chat_at(80, 24);
+        chat.dirty = true;
+        rebuild(&mut chat, size(80, 24), true);
+        chat.scroll = 7;
+        let frame = fullscreen_frame(&chat, size(80, 24));
+        assert_eq!(frame.doc_start, 7);
+        assert_eq!(
+            frame.content_len + chrome_rows(&chat, 80, true).rows.len(),
+            24,
+            "内容区 + chrome = 屏高"
+        );
     }
 
     /// Wheel scrolling and clicks (fullscreen).

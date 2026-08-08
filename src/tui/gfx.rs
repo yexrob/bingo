@@ -447,6 +447,116 @@ pub fn image_id_for(url: &str) -> u32 {
     normalize_image_id((hasher.finish() & 0xFF_FFFF) as u32)
 }
 
+/// One image instance placed at an absolute screen position (pixel
+/// coordinates, origin = top-left of the terminal content area).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    pub id: u32,
+    pub url: String,
+    pub cols: usize,
+    pub rows: usize,
+    pub x: u32,
+    pub y: u32,
+}
+
+/// Stable per-instance placement id: two copies of the same url in one view get
+/// distinct ids (deleting one never touches the other), and the id stays stable
+/// across frames while the block stays at the same document row.
+pub fn placement_id(url: &str, doc_row: usize) -> u32 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    doc_row.hash(&mut hasher);
+    normalize_image_id((hasher.finish() & 0xFF_FFFF) as u32)
+}
+
+/// Terminal-side image layer for the live viewport: keeps a diff of the
+/// placements currently on screen. PNG bytes are transmitted once per instance
+/// id; later frames only place, move, or delete.
+#[derive(Debug, Default)]
+pub struct PlacementLayer {
+    active: Vec<Placement>,
+    transmitted: std::collections::HashSet<u32>,
+}
+
+impl PlacementLayer {
+    /// Diff `desired` against the active placements and return the terminal
+    /// byte sequence that converges the screen: deletes for removed instances,
+    /// transmit+place for new ones, place-only for moved ones. Empty when
+    /// nothing changed. Instances whose image is not loaded yet are skipped.
+    pub fn sync(
+        &mut self,
+        images: &std::collections::HashMap<String, std::sync::Arc<crate::ui::ImageMeta>>,
+        desired: &[Placement],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut next: Vec<Placement> = Vec::with_capacity(desired.len());
+        for placement in desired {
+            if let Some(prev) = self.active.iter().find(|p| p.id == placement.id) {
+                if prev.x != placement.x || prev.y != placement.y {
+                    out.extend_from_slice(&place_only_bytes(placement));
+                }
+            } else {
+                let Some(meta) = images.get(&placement.url) else {
+                    continue;
+                };
+                if self.transmitted.insert(placement.id) {
+                    out.extend_from_slice(&transmit_place_bytes(
+                        placement.id,
+                        &meta.bytes,
+                        placement,
+                    ));
+                } else {
+                    out.extend_from_slice(&place_only_bytes(placement));
+                }
+            }
+            next.push(placement.clone());
+        }
+        for prev in &self.active {
+            if !next.iter().any(|p| p.id == prev.id) {
+                out.extend_from_slice(&delete_bytes(prev.id));
+                self.transmitted.remove(&prev.id);
+            }
+        }
+        self.active = next;
+        out
+    }
+
+    /// Bytes that remove every active placement (called on clear/exit).
+    pub fn clear(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for placement in &self.active {
+            out.extend_from_slice(&delete_bytes(placement.id));
+        }
+        self.active.clear();
+        self.transmitted.clear();
+        out
+    }
+}
+
+/// Transmit (once per instance) and place at the pixel position.
+fn transmit_place_bytes(id: u32, png: &[u8], p: &Placement) -> Vec<u8> {
+    let header = format!(
+        "a=T,f=100,q=1,i={id},c={},r={},x={},y={}",
+        p.cols, p.rows, p.x, p.y
+    );
+    kitty_chunks(png, &header).concat()
+}
+
+/// Place an already-transmitted image at a (possibly new) pixel position.
+fn place_only_bytes(p: &Placement) -> Vec<u8> {
+    format!(
+        "\x1b_Ga=p,q=1,i={},c={},r={},x={},y={}\x1b\\",
+        p.id, p.cols, p.rows, p.x, p.y
+    )
+    .into_bytes()
+}
+
+/// Delete every placement of one instance id.
+fn delete_bytes(id: u32) -> Vec<u8> {
+    format!("\x1b_Ga=d,i={id},d=I\x1b\\").into_bytes()
+}
+
 /// Single exit point: dispatch on `cap.mode` to the complete byte sequence of
 /// "transmit + place + cursor advance".
 ///
@@ -1085,6 +1195,111 @@ mod tests {
             &cap,
         ));
         assert!(meta.is_none());
+    }
+
+    fn placement(url: &str, row: usize, y: u32) -> Placement {
+        Placement {
+            id: placement_id(url, row),
+            url: url.to_string(),
+            cols: 4,
+            rows: 2,
+            x: 0,
+            y,
+        }
+    }
+
+    fn image_map(
+        urls: &[&str],
+    ) -> std::collections::HashMap<String, std::sync::Arc<crate::ui::ImageMeta>> {
+        urls.iter()
+            .map(|url| {
+                (
+                    (*url).to_string(),
+                    std::sync::Arc::new(crate::ui::ImageMeta {
+                        cols: 4,
+                        rows: 2,
+                        bytes: b"png".to_vec(),
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    /// First frame transmits+places; an unchanged frame emits nothing; a move
+    /// emits place-only (no retransmit); a removal emits a delete.
+    #[test]
+    fn placement_layer_diffs_transmit_move_and_delete() {
+        let images = image_map(&["a.png"]);
+        let mut layer = PlacementLayer::default();
+
+        let first = layer.sync(&images, &[placement("a.png", 3, 48)]);
+        assert!(
+            String::from_utf8_lossy(&first).contains("a=T"),
+            "首次出现传输+放置: {:?}",
+            String::from_utf8_lossy(&first)
+        );
+        assert!(String::from_utf8_lossy(&first).contains("i="));
+
+        let same = layer.sync(&images, &[placement("a.png", 3, 48)]);
+        assert!(same.is_empty(), "未变化不发字节");
+
+        let moved = layer.sync(&images, &[placement("a.png", 3, 80)]);
+        let moved_text = String::from_utf8_lossy(&moved);
+        assert!(moved_text.contains("a=p"), "移动仅重放置: {moved_text}");
+        assert!(!moved_text.contains("a=T"), "不重复传输: {moved_text}");
+
+        let removed = layer.sync(&images, &[]);
+        let removed_text = String::from_utf8_lossy(&removed);
+        assert!(removed_text.contains("a=d"), "移除发删除: {removed_text}");
+    }
+
+    /// Two copies of the same url get distinct ids; deleting one leaves the
+    /// other; a reappearing instance retransmits (its data was deleted).
+    #[test]
+    fn placement_layer_keeps_same_url_instances_apart() {
+        let images = image_map(&["a.png"]);
+        let mut layer = PlacementLayer::default();
+        let a = placement("a.png", 3, 0);
+        let b = placement("a.png", 9, 40);
+        assert_ne!(a.id, b.id, "同 url 不同位置实例 id 不同");
+
+        layer.sync(&images, &[a.clone(), b.clone()]);
+        let drop_a = layer.sync(&images, std::slice::from_ref(&b));
+        let text = String::from_utf8_lossy(&drop_a);
+        assert!(text.contains(&format!("i={}", a.id)), "删除 a 实例: {text}");
+        assert!(!text.contains(&format!("i={}", b.id)), "b 不受影响: {text}");
+
+        let re_add = layer.sync(&images, &[a.clone(), b.clone()]);
+        assert!(
+            String::from_utf8_lossy(&re_add).contains("a=T"),
+            "重新出现需重新传输"
+        );
+    }
+
+    /// clear() removes everything and resets the transmit cache.
+    #[test]
+    fn placement_layer_clear_deletes_all() {
+        let images = image_map(&["a.png"]);
+        let mut layer = PlacementLayer::default();
+        layer.sync(&images, &[placement("a.png", 3, 0)]);
+        let clear = layer.clear();
+        assert!(String::from_utf8_lossy(&clear).contains("a=d"));
+        assert!(
+            !layer.sync(&images, &[placement("a.png", 3, 0)]).is_empty(),
+            "清理后重新出现需重新传输"
+        );
+    }
+
+    /// A placement whose image is not loaded yet is skipped (no bytes).
+    #[test]
+    fn placement_layer_skips_unloaded_images() {
+        let mut layer = PlacementLayer::default();
+        let bytes = layer.sync(
+            &std::collections::HashMap::new(),
+            &[placement("a.png", 0, 0)],
+        );
+        assert!(bytes.is_empty());
+        assert!(layer.active.is_empty());
     }
 
     /// A 4×2 solid-colour PNG (for tests).
