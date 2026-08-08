@@ -443,6 +443,7 @@ pub fn derive_share_doc(session: &str, messages: &[Message]) -> ShareDoc {
                             seq,
                             from: "main".to_string(),
                             text: text.to_string(),
+                            at: 0,
                         });
                     }
                 }
@@ -517,6 +518,7 @@ mod tests {
                 seq: 1,
                 from: "scout".into(),
                 text: "大家好".into(),
+                at: 0,
             },
         );
         store
@@ -602,6 +604,7 @@ mod tests {
                 seq: 1,
                 from: "a".into(),
                 text: "t".into(),
+                at: 0,
             },
         );
         let doc = store.snapshot();
@@ -616,6 +619,7 @@ mod tests {
                 seq: 1,
                 from: "x".into(),
                 text: "y".into(),
+                at: 0,
             },
         );
         assert_eq!(store.snapshot().channels.len(), 1);

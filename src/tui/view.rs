@@ -107,6 +107,17 @@ pub fn render_rows(rows: &[Row], default_fg: Color, buf: &mut Buffer, area: Rect
             .width
             .saturating_sub(u16::try_from(row.padding_right).unwrap_or(0));
         buf.set_line(area.x, y, &to_line(&row.line, default_fg), width);
+        // Writing a double-width grapheme makes ratatui `reset()` the cell it
+        // covers, which wipes the background we just painted. Left alone that
+        // punches a hole behind every CJK character on a coloured row, so
+        // repaint whatever came back untouched.
+        if let Some(bg) = row.bg {
+            for x in area.x..area.right() {
+                if buf[(x, y)].bg == Color::Reset {
+                    buf[(x, y)].set_bg(bg);
+                }
+            }
+        }
     }
 }
 
@@ -218,6 +229,19 @@ mod tests {
         render_rows(&rows, Color::White, &mut buf, area);
         for x in 0..10u16 {
             assert_eq!(buf[(x, 0)].bg, theme_bg, "bubble spans the row at x={x}");
+        }
+    }
+
+    #[test]
+    fn render_rows_keeps_the_background_behind_wide_characters() {
+        let bg = Color::Rgb(63, 14, 64);
+        let mut row = Row::new(Line::plain("你好 ok"));
+        row.bg = Some(bg);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 1));
+        let area = buf.area;
+        render_rows(&[row], Color::White, &mut buf, area);
+        for x in 0..12u16 {
+            assert_eq!(buf[(x, 0)].bg, bg, "宽字符不能在背景上打洞 x={x}");
         }
     }
 

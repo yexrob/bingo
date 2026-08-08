@@ -7,6 +7,8 @@
 //! - [`statics`] is the Static region: the transcript as a block list with a
 //!   frozen prefix (write-once scrollback, lazy freezing — Ink `<Static>`).
 //! - [`chrome`] declares every section below the transcript.
+//! - [`slack`] is the Slack-shaped workspace skin (rail / sidebar / message
+//!   pane) that [`entity`] wears when a channel or instance is opened.
 //! - [`chat`] is the state machine and the transcript block builder
 //!   (`build_rows`); [`slash`] owns slash command metadata and pure
 //!   suggestion/help transformations.
@@ -31,6 +33,9 @@ pub mod line;
 pub mod markdown;
 pub mod math;
 pub mod picker;
+pub mod slack;
+#[cfg(test)]
+mod slack_preview;
 pub mod slash;
 pub mod statics;
 pub(crate) mod term;

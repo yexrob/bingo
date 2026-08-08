@@ -990,6 +990,10 @@ pub struct Chat {
     pub entity_focus: Option<usize>,
     /// Entity view pending open (app layer consumes → enters the fullscreen modal).
     pub open_entity: Option<EntityOpen>,
+    /// Slack workspace view state. Lives here rather than in the modal so read
+    /// cursors, the open conversation and collapsed sections survive leaving
+    /// and re-entering the view.
+    pub slack: crate::tui::slack::Workspace,
     /// Interrupt signal: Ctrl+C / Esc while busy → send(true), aborting stream reads in the turn immediately.
     cancel_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -1194,6 +1198,7 @@ impl Chat {
             entities: Vec::new(),
             entity_focus: None,
             open_entity: None,
+            slack: Default::default(),
             interrupted: false,
             cancel_tx: tokio::sync::watch::channel(false).0,
         }

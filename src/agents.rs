@@ -578,6 +578,25 @@ impl AgentRegistry {
         Some(self.lock().get(name)?.acks.clone())
     }
 
+    /// Direct messages still sitting in the inbox, in order. The DM view renders
+    /// them after the history so a message you just sent stays on screen until
+    /// the turn boundary folds it into the transcript.
+    pub fn pending_of(&self, name: &str) -> Vec<String> {
+        self.lock()
+            .get(name)
+            .map(|entry| {
+                entry
+                    .inbox
+                    .iter()
+                    .filter_map(|item| match item {
+                        InboxItem::Direct { text, .. } => Some(text.clone()),
+                        InboxItem::Channel { .. } => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Stop: abort a running turn (abort), no longer accept commands; history is kept
     /// and listable. Returns the watch line of the aborted turn (the caller sets
     /// Cancelled); when idle/already stopped there is no active line, returns None (idempotent).

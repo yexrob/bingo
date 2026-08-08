@@ -245,9 +245,13 @@ Example (.bingo/settings.json):
   free channels allow interleaving. Channels show in the transcript as `◇ #name` rows (expandable to the full group chat);
   over-budget channels auto-freeze and notify the main agent.
   **Bottom entity area**: when instances/channels exist, a one-line summary shows above the input box; Ctrl+G enters selection
-  (↑↓/Enter); an agent opens the fullscreen conversation view (history + streaming live tail, read-only); a channel opens the
-  fullscreen WeChat-style room — others left-aligned with name tags, you (user) right-aligned, the bottom input's Enter speaks
-  directly (same delivery path as Post, members woken normally; rendering = read, serial never bounces you), Esc returns.
+  (↑↓/Enter), and Enter opens the fullscreen **Slack-shaped workspace**: a rail (Home / DMs / Activity), a sidebar listing
+  `#channels` and DM instances with presence dots and unread badges, and a conversation pane rendering a Slack message list
+  (day dividers, avatar + bold sender + timestamp, grouped consecutive messages, an unread divider, tool calls as attachments,
+  a running instance's live tail as a typing indicator). The composer sends: in a channel it posts as `user` (same delivery
+  path as Post, members woken normally; rendering = read, so serial never bounces you), in a DM it queues on the instance and
+  flushes at the turn boundary (shown as a pending message until then). Keys: Tab cycles panes, alt+↑↓ switches conversation,
+  Ctrl+K is the quick switcher, ←→ fold sidebar sections, Esc returns.
 - **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
   `members[{name,agent}]`, members reference AgentDefs) pins multiple roles to one project; started by default at launch
   (`settings.team.autoStart`; `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,
@@ -311,9 +315,13 @@ Example (.bingo/settings.json):
   free 频道允许交叉。频道在 transcript 显示为 `◇ #名字` 行（可展开看完整群聊）；
   预算超限自动冻结频道并通知主 agent。
   **底部实体区**：有实例/频道时输入框上方显示一行摘要，Ctrl+G 进入选择
-  （↑↓/Enter），agent 打开全屏对话视图（历史 + 流式活尾，只读），频道打开
-  全屏微信式房间——他人靠左带名签、你（user）靠右，底部输入 Enter 直接发言
-  （与 Post 同一投递路径，正常唤醒成员；渲染即已读，serial 不会弹你），Esc 返回。
+  （↑↓/Enter），Enter 打开全屏 **Slack 式工作区**：左侧 rail（主页/私信/动态）、
+  侧栏列出 `#频道` 与私信实例（在线点 + 未读徽标）、右侧 Slack 式消息流（日期分隔、
+  头像 + 粗体发件人 + 时间、连发合并、新消息分隔线、工具调用作附件、运行中实例的
+  活尾作「正在输入」）。底部输入框发送：频道以 `user` 身份发言（与 Post 同一投递
+  路径，正常唤醒成员；渲染即已读，serial 不会弹你），私信排进实例收件箱、回合边界
+  投递（投递前显示为待送达）。按键：Tab 切焦点、alt+↑↓ 换会话、Ctrl+K 快速跳转、
+  ←→ 折叠侧栏分组、Esc 返回。
 - **agent team**（项目级编队）：`.bingo/team.json`（camelCase：`name`/`channel{mode,messageLimit}`/
   `members[{name,agent}]`，成员引用 AgentDef）把多名角色固定到一个项目；启动默认拉起
   （`settings.team.autoStart`，`--no-team` 关闭；拉起 ≠ 唤醒——成员 Idle 待命零 token，

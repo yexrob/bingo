@@ -961,6 +961,7 @@ mod tests {
                     seq: 1,
                     from: "scout".into(),
                     text: "大家好".into(),
+                    at: 0,
                 }],
             }],
         }

@@ -93,7 +93,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+g",
-        description: "agents / channels (↑↓ pick · enter open)",
+        description: "agents / channels (↑↓ pick · enter opens the workspace)",
     },
     Binding {
         keys: "ctrl+l",

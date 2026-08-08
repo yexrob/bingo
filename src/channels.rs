@@ -59,6 +59,19 @@ pub struct ChannelMessage {
     pub seq: u64,
     pub from: String,
     pub text: String,
+    /// Wall-clock landing time, unix seconds. `0` = unknown: share documents
+    /// written before D42 carry no clock, and the room renders them without a
+    /// time stamp rather than inventing one.
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// Wall-clock now in unix seconds (0 if the system clock predates the epoch).
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Budgets: freeze on overrun (read from settings.experimental; defaults 500/50).
@@ -354,6 +367,7 @@ impl ChannelRegistry {
                 seq: ch.seq,
                 from: from.to_string(),
                 text: text.to_string(),
+                at: now_unix(),
             };
             ch.log.push(msg.clone());
             self.sync_channel_message(name, &msg);
@@ -389,6 +403,16 @@ impl ChannelRegistry {
                 *cursor = seq;
             }
         }
+    }
+
+    /// How far a member has read (0 = nothing). The sidebar turns this into an
+    /// unread badge for `user`.
+    pub fn seen_of(&self, member: &str, name: &str) -> u64 {
+        self.lock()
+            .channels
+            .get(name)
+            .and_then(|ch| ch.seen.get(member).copied())
+            .unwrap_or(0)
     }
 
     /// Display-row snapshot: (watch_id, detail, tail text of the log).
