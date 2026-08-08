@@ -133,13 +133,16 @@ impl OpenAIProvider {
             AUTHORIZATION,
             HeaderValue::from_str(&bearer).map_err(|e| ClientError::InvalidApiKey(e.to_string()))?,
         );
-        // Codex subscription routing: ChatGPT-Account-Id from JWT claims
-        // (opencode codex.ts); only on the codex variant — no cross-talk.
-        if self.variant() == OpenAiVariant::Codex
-            && let Some(account) = self.oauth_account()
-            && let Ok(value) = HeaderValue::from_str(&account)
-        {
-            headers.insert("ChatGPT-Account-Id", value);
+        // Codex subscription routing: ChatGPT-Account-Id from JWT claims +
+        // originator (opencode codex.ts chat.headers); only on the codex
+        // variant — no cross-talk.
+        if self.variant() == OpenAiVariant::Codex {
+            headers.insert("originator", HeaderValue::from_static("bingo"));
+            if let Some(account) = self.oauth_account()
+                && let Ok(value) = HeaderValue::from_str(&account)
+            {
+                headers.insert("ChatGPT-Account-Id", value);
+            }
         }
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(headers)
@@ -162,18 +165,20 @@ impl OpenAIProvider {
     }
 }
 
-/// NeutralRequest → Responses request body.
+/// NeutralRequest → Responses request body (variant-isolated params).
 fn build_body(request: &NeutralRequest, variant: OpenAiVariant) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": request.model,
-        "max_output_tokens": request.max_tokens,
         "stream": request.stream,
         "input": build_input(&request.messages),
     });
-    // The codex subscription endpoint rejects the default `store: true`
-    // (400 "Store must be set to false"); the public API keeps its default.
     if variant == OpenAiVariant::Codex {
+        // Codex endpoint contract (opencode codex.ts chat.params): the
+        // subscription endpoint rejects max_output_tokens (400 Unsupported
+        // parameter) and the default store:true — both are omitted/overridden.
         body["store"] = serde_json::json!(false);
+    } else {
+        body["max_output_tokens"] = serde_json::json!(request.max_tokens);
     }
     if !request.system.is_empty() {
         // The system prompt is a single `instructions` string; segments are
@@ -826,16 +831,22 @@ mod tests {
         assert_eq!(body["max_output_tokens"], 1024);
     }
 
-    /// main-reported contract: the codex subscription endpoint requires an
-    /// explicit `store: false` (it rejects the default store:true with 400
-    /// "Store must be set to false"); the default variant keeps its behavior.
+    /// Variant-isolated request params (main-reported): the codex endpoint
+    /// rejects max_output_tokens (400 Unsupported parameter — opencode
+    /// codex.ts omits it) and requires store:false; the default variant keeps
+    /// max_output_tokens and the default store. Guarded against regressions.
     #[test]
-    fn codex_body_has_store_false_default_does_not() {
+    fn codex_request_params_isolation() {
         let r = req();
         let codex = build_body(&r, OpenAiVariant::Codex);
+        assert!(codex.get("max_output_tokens").is_none(), "codex 不传 max_output_tokens");
         assert_eq!(codex["store"], serde_json::json!(false), "codex 显式 store:false");
+        assert_eq!(codex["model"], "gpt-5", "其余字段保留");
+        assert_eq!(codex["stream"], true);
+
         let default = build_body(&r, OpenAiVariant::Default);
-        assert!(default.get("store").is_none(), "默认变体不带 store（零行为变化）");
+        assert_eq!(default["max_output_tokens"], 1024, "Default 保留 max_output_tokens");
+        assert!(default.get("store").is_none(), "Default 不带 store（零行为变化）");
     }
 
     /// Tools map input_schema → parameters with the function envelope.
@@ -1250,16 +1261,19 @@ mod codex_variant_tests {
         format!("{header}.{body}.sig")
     }
 
+    /// One captured request (request_line, authorization, account_id, originator).
+    type CapturedRequest = (String, String, String, String);
+
     /// Mock server capturing request lines + relevant headers.
     struct Capture {
         addr: String,
-        requests: Arc<Mutex<Vec<(String, String, String)>>>, // (request_line, authorization, account_id)
+        requests: Arc<Mutex<Vec<CapturedRequest>>>,
         hits: Arc<AtomicUsize>,
     }
 
     async fn spawn_capture() -> Capture {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let requests: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let requests: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
         let hits = Arc::new(AtomicUsize::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1277,6 +1291,7 @@ mod codex_variant_tests {
                 let request_line = lines.next().unwrap_or_default().to_string();
                 let mut authorization = String::new();
                 let mut account_id = String::new();
+                let mut originator = String::new();
                 for line in lines {
                     let lower = line.to_ascii_lowercase();
                     if lower.strip_prefix("authorization:").is_some() {
@@ -1285,8 +1300,11 @@ mod codex_variant_tests {
                     if lower.strip_prefix("chatgpt-account-id:").is_some() {
                         account_id = line.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default();
                     }
+                    if lower.strip_prefix("originator:").is_some() {
+                        originator = line.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+                    }
                 }
-                reqs.lock().unwrap().push((request_line, authorization, account_id));
+                reqs.lock().unwrap().push((request_line, authorization, account_id, originator));
                 hits_c.fetch_add(1, Ordering::SeqCst);
                 // 404 responses endpoint: enough to complete the request.
                 let body = r#"{"error":{"message":"mock"}}"#;
@@ -1355,13 +1373,15 @@ mod codex_variant_tests {
         };
         let _ = provider.stream(&request).await;
         assert_eq!(cap.hits.load(Ordering::SeqCst), 1, "发出一次请求");
-        let (request_line, authorization, account_id) = cap.requests.lock().unwrap()[0].clone();
+        let (request_line, authorization, account_id, originator) =
+            cap.requests.lock().unwrap()[0].clone();
         assert!(
             request_line.starts_with("POST /codex/responses"),
             "codex 变体路径: {request_line}"
         );
         assert!(authorization.starts_with("Bearer "), "bearer 头: {authorization}");
         assert_eq!(account_id, "acc_1", "ChatGPT-Account-Id 来自 JWT claims");
+        assert_eq!(originator, "bingo", "codex 变体带 originator 头");
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 
@@ -1405,12 +1425,14 @@ mod codex_variant_tests {
             thinking: None,
         };
         let _ = provider.stream(&request).await;
-        let (request_line, authorization, account_id) = cap.requests.lock().unwrap()[0].clone();
+        let (request_line, authorization, account_id, originator) =
+            cap.requests.lock().unwrap()[0].clone();
         assert!(
             request_line.starts_with("POST /v1/responses"),
             "默认变体路径: {request_line}"
         );
         assert_eq!(account_id, "", "默认变体不带 ChatGPT-Account-Id");
+        assert_eq!(originator, "", "默认变体不带 originator（防串味）");
         assert!(authorization.starts_with("Bearer sk-oa"), "{authorization}");
     }
 }
