@@ -281,7 +281,11 @@ mod tests {
             "CONFIG_INVALID"
         );
         assert_eq!(
-            SettingsError::Parse(serde_json::from_str::<()>("x").unwrap_err()).error_code(),
+            SettingsError::Parse {
+                path: std::path::PathBuf::from("settings.json"),
+                source: serde_json::from_str::<()>("x").unwrap_err(),
+            }
+            .error_code(),
             "CONFIG_INVALID"
         );
         // TeamError's 3 variants explicitly enumerated (guardrail 5: assert per variant).

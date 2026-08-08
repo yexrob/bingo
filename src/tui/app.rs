@@ -290,28 +290,26 @@ fn dispatch_key(chat: &mut Chat, key: KeyEvent, inline: bool) {
     if key.kind == KeyEventKind::Release {
         return;
     }
-    if inline {
-        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if chat.transcript_fully_expanded() {
-                if chat.collapse_transcript() {
-                    // Cancel the not-yet-rendered replay (pressing twice = net effect of collapse),
-                    // clear the visible screen and redraw by rehydrating to the collapsed height — the expanded
-                    // replay rows on screen stay only in scrollback.
-                    chat.dump_transcript = false;
-                    chat.force_redraw = true;
-                    let chrome_len = chrome_height(chat, chat.width, false);
-                    let budget = chat.height.saturating_sub(2).saturating_sub(chrome_len);
-                    chat.rehydrate(chat.width, budget);
-                }
-            } else {
-                chat.expand_transcript();
+    if inline && key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if chat.transcript_fully_expanded() {
+            if chat.collapse_transcript() {
+                // Cancel the not-yet-rendered replay (pressing twice = net effect of collapse),
+                // clear the visible screen and redraw by rehydrating to the collapsed height — the expanded
+                // replay rows on screen stay only in scrollback.
+                chat.dump_transcript = false;
+                chat.force_redraw = true;
+                let chrome_len = chrome_height(chat, chat.width, false);
+                let budget = chat.height.saturating_sub(2).saturating_sub(chrome_len);
+                chat.rehydrate(chat.width, budget);
             }
-            return;
+        } else {
+            chat.expand_transcript();
         }
-        if chat.ask_key(key.code) {
-            return;
-        }
+        return;
     }
+    // Dialog keys are handled inside on_key (single dispatch order for both
+    // hosts) — the old extra ask_key call here gave inline a different key
+    // priority than fullscreen for the same dialog.
     chat.on_key(key.code, key.modifiers);
 }
 
@@ -544,26 +542,45 @@ fn fullscreen_frame(chat: &Chat, size: Size) -> Frame {
         };
     }
 
-    let chrome = el::render(chrome::chrome(chat, size.width as usize, true));
-    let chrome_start = (size.height as usize).saturating_sub(chrome.rows.len());
+    let width = size.width as usize;
+    let height = size.height as usize;
+    let chrome = el::render(chrome::chrome(chat, width, true));
+    // Chrome taller than the screen (short terminal + a tall picker): drop rows
+    // from the top and keep the bottom — the input box and footer must survive.
+    // Same last line of defense as the inline assembler.
+    let overflow = chrome.rows.len().saturating_sub(height);
+    let mut chrome_rows = chrome.rows;
+    if overflow > 0 {
+        chrome_rows.drain(..overflow);
+    }
+    let chrome_start = height - chrome_rows.len();
+    // #18 error row (Page/Field): pinned right above the input box. The
+    // fullscreen host previously rendered these errors nowhere at all.
+    let error_row = chat
+        .last_error
+        .as_ref()
+        .filter(|err| err.level != crate::error::ErrorLevel::Full)
+        .map(|err| {
+            Row::new(Line::styled(
+                format!("[error] code={} msg={}", err.code, err.msg),
+                SegStyle::fg(chat.theme.error),
+            ))
+        });
+    let content_rows = chrome_start.saturating_sub(usize::from(error_row.is_some()));
     let mut rows: Vec<Row> = chat
         .doc
         .rows
         .iter()
         .skip(chat.scroll)
-        .take(chrome_start)
+        .take(content_rows)
         .cloned()
         .collect();
-    rows.resize_with(chrome_start, || Row::new(Line::plain("")));
-    rows.extend(chrome.rows);
+    rows.resize_with(content_rows, || Row::new(Line::plain("")));
+    rows.extend(error_row);
+    rows.extend(chrome_rows);
     let cursor = chrome.caret.and_then(|(row, col)| {
-        caret_position(
-            chrome_start + row,
-            col,
-            0,
-            size.height as usize,
-            size.width as usize,
-        )
+        let row = row.checked_sub(overflow)?;
+        caret_position(chrome_start + row, col, 0, height, width)
     });
     Frame {
         rows,
@@ -1258,6 +1275,52 @@ mod tests {
             frame.content_len + chrome_height(&chat, 80, true),
             24,
             "内容区 + chrome = 屏高"
+        );
+    }
+
+    /// P0-7 regression: the fullscreen host renders Page/Field error rows
+    /// (pinned above the input box) — it used to render them nowhere.
+    #[test]
+    fn fullscreen_frame_renders_page_error_row() {
+        let mut chat = chat_at(80, 24);
+        chat.last_error = Some(crate::tui::chat::ErrorState {
+            code: "TIMEOUT",
+            msg: "list_models timeout".into(),
+            level: crate::error::ErrorLevel::Page,
+            context: crate::error::ErrorContext::ShortSync,
+        });
+        let frame = fullscreen_frame(&chat, size(80, 24));
+        let text: Vec<String> = frame.rows.iter().map(row_text).collect();
+        let error_at = text
+            .iter()
+            .position(|l| l.contains("[error] code=TIMEOUT"))
+            .expect("错误行可见");
+        assert!(
+            text[error_at + 1].starts_with('╭'),
+            "错误行钉在输入框上方: {:?}",
+            &text[error_at..error_at + 2]
+        );
+    }
+
+    /// Fullscreen last line of defense: chrome taller than a short terminal
+    /// drops rows from the top — the input box and footer must survive
+    /// (the inline assembler has had this guard from day one).
+    #[test]
+    fn fullscreen_tiny_terminal_keeps_the_prompt_and_footer() {
+        let mut chat = chat_at(60, 6);
+        chat.busy = true;
+        chat.push_warning("mcp 连接失败".to_string());
+        chat.help_visible = true;
+        let frame = fullscreen_frame(&chat, size(60, 6));
+        assert!(frame.rows.len() <= 6, "不超过屏高");
+        let text: Vec<String> = frame.rows.iter().map(row_text).collect();
+        assert!(
+            text.iter().any(|l| l.starts_with('╰')),
+            "输入框下边框仍在: {text:?}"
+        );
+        assert!(
+            text.last().is_some_and(|l| l.contains("ctrl+o to expand")),
+            "footer 仍在: {text:?}"
         );
     }
 

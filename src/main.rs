@@ -334,13 +334,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let prompt = if !cli.prompt.is_empty() {
                 cli.prompt.join(" ")
             } else {
+                // A TTY stdin means nothing is piped in: reading would block
+                // forever and look like a hang. Fail fast with usage instead.
+                use std::io::IsTerminal;
+                if std::io::stdin().is_terminal() {
+                    return Err("no prompt provided (pass a prompt argument or pipe stdin)".into());
+                }
                 let mut input = String::new();
                 std::io::stdin().read_to_string(&mut input)?;
                 input.trim().to_string()
             };
             if prompt.is_empty() {
-                eprintln!("no prompt provided");
-                std::process::exit(1);
+                // Propagate instead of eprintln+exit: the non-TTY error contract
+                // (`[error] code=… msg=…`) only holds on the report_error path.
+                return Err("no prompt provided (stdin was empty)".into());
             }
             let mut ui = headless_hooks();
             let outcome =

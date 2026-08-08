@@ -350,7 +350,16 @@ pub fn latest_cached(home: &Path) -> Option<Version> {
     if !cache_fresh(&c) {
         return None;
     }
-    Version::parse(&c.latest_tag)
+    // Only a strictly newer release is an update. Without this comparison the
+    // welcome banner advertised whatever the cache held — including an OLDER
+    // version right after upgrading (run_update writes the current version
+    // into the cache on both "already latest" and "updated" outcomes).
+    let latest = Version::parse(&c.latest_tag)?;
+    if latest > Version::from_pkg() {
+        Some(latest)
+    } else {
+        None
+    }
 }
 
 /// 写缓存（tmp + rename；失败静默——启动路径不因此报错）。
@@ -523,6 +532,30 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The banner only advertises strictly newer releases: a cache holding the
+    /// current or an older version (the post-upgrade state) yields no banner.
+    #[test]
+    fn latest_cached_ignores_current_and_older_versions() {
+        let home = tmp_home();
+        let current = Version::from_pkg();
+
+        write_cache(&home, &format!("v{current}"));
+        assert_eq!(latest_cached(&home), None, "当前版本不提示");
+
+        write_cache(&home, "v0.0.1");
+        assert_eq!(latest_cached(&home), None, "旧版本不提示（升级后缓存态）");
+
+        let newer = format!("v{}.0.0", current.parts.first().copied().unwrap_or(0) + 1);
+        write_cache(&home, &newer);
+        assert_eq!(
+            latest_cached(&home),
+            Version::parse(&newer),
+            "严格更新才提示"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// 构造含 `bingo` 可执行文件的 tar.gz 字节。

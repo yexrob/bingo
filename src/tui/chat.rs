@@ -802,6 +802,10 @@ pub struct Chat {
     pub help_visible: bool,
     /// Bottom transient notice (`Press ctrl-c again to exit` etc.).
     pub notice: Option<&'static str>,
+    /// When the notice stops being true (the paired confirm window / a short
+    /// TTL): the tick loop clears it — a stale "press again" line that outlived
+    /// its window promised a behavior the next key no longer had.
+    pub notice_until: Option<std::time::Instant>,
     /// Time of the most recent Ctrl+C on empty input (a second press within [`CTRL_C_WINDOW`] exits).
     ctrl_c_at: Option<std::time::Instant>,
     /// Time of the most recent Esc (a second press within [`ESC_WINDOW`] clears the input).
@@ -1076,6 +1080,7 @@ impl Chat {
             queued: Vec::new(),
             help_visible: false,
             notice: None,
+            notice_until: None,
             ctrl_c_at: None,
             esc_at: None,
             last_key_at: None,
@@ -1723,8 +1728,15 @@ impl Chat {
                 level,
                 context,
             } => {
-                self.busy = false;
-                self.stream_msg = None;
+                // Only a turn-level failure ends the running turn. Short sync
+                // ops (model list fetch, token counts) can fail while a turn is
+                // still streaming — resetting busy for them stopped the spinner
+                // and re-armed the input while the turn kept running (violated
+                // the v1.21 instant-command contract).
+                if matches!(context, crate::error::ErrorContext::LongTurn) {
+                    self.busy = false;
+                    self.stream_msg = None;
+                }
                 // #18: structured error-state record (code/msg/level/context); the render side uses it to
                 // produce the error row (Page/Field) or the full-screen state (Full) — independent of message-text
                 // replacement and doc-rebuild timing, so nothing renders twice.
@@ -2504,6 +2516,14 @@ impl Chat {
     fn slash_theme(&mut self, arg: &str) {
         if arg.is_empty() {
             self.open_theme_menu();
+            return;
+        }
+        // A typo must not read as success: the old path silently parsed any
+        // junk as auto and announced "✓ 主题已切换: auto".
+        if !matches!(arg.trim(), "auto" | "dark" | "light") {
+            self.push_slash_error(format!(
+                "[error] code=BAD_ARGUMENT msg=未知主题: {arg}。可选 auto | dark | light"
+            ));
             return;
         }
         self.apply_theme(ThemeSetting::parse(Some(arg)));
@@ -3930,12 +3950,18 @@ impl Chat {
     /// `PERMISSION_DENIED` points at the model/subscription (D33 §6.4).
     fn auth_error_hint(session: &Session, code: &str, msg: String) -> String {
         let provider = session.runtime.provider.borrow().clone();
+        // Merge built-in presets: zero-config codex (no settings entry) is the
+        // main preset use case — without this, its expired token produced a
+        // bare 401 with no re-login guidance.
         let oauth = session
             .settings
             .providers
             .get(&provider)
-            .and_then(|c| c.oauth.as_ref())
-            .is_some();
+            .map(|c| c.oauth.is_some())
+            .or_else(|| {
+                crate::api::providers::presets::preset(&provider).map(|p| p.oauth_kind.is_some())
+            })
+            .unwrap_or(false);
         auth_hint_for(oauth, &provider, code, msg)
     }
 
@@ -3951,6 +3977,10 @@ impl Chat {
             group_of: Vec::new(),
         });
         self.busy = true;
+        // Same as start_turn: a fresh turn clears interrupt suppression —
+        // without this, one interrupt followed by only `!` commands kept
+        // background wake-ups suppressed for the rest of the session.
+        self.interrupted = false;
         let session = self.session_for_turn();
         let events = self.events.clone();
         let asks = self.asks.clone();
@@ -3990,10 +4020,19 @@ impl Chat {
     /// Dialog key input (Select semantics):
     /// digits/Enter confirm, ↑/↓ move the focus, Esc cancels; typing goes directly when the focus is on Other.
     /// Returns whether it was consumed.
-    pub fn ask_key(&mut self, code: KeyCode) -> bool {
+    ///
+    /// Modifier-carrying chars are NOT consumed: crossterm reports ctrl+c as
+    /// `Char('c')` + CONTROL, so swallowing them here turned the interrupt (and
+    /// every readline chord) into literal letters inside the Other input.
+    pub fn ask_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let Some((request, _)) = &self.pending_ask else {
             return false;
         };
+        if matches!(code, KeyCode::Char(_))
+            && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            return false;
+        }
         let options_len = request.options.len();
         let free_text = request.free_text;
         let total = options_len + usize::from(free_text);
@@ -4170,7 +4209,7 @@ impl Chat {
         {
             return self.error_screen_key(code, modifiers, now);
         }
-        if self.ask_key(code) {
+        if self.ask_key(code, modifiers) {
             return true;
         }
         // `/model` `/think` selectors take priority over input (↑↓/Enter/Esc fully consumed).
@@ -4356,6 +4395,7 @@ impl Chat {
         }
         self.ctrl_c_at = Some(now);
         self.notice = Some("Press ctrl-c again to exit");
+        self.notice_until = Some(now + CTRL_C_WINDOW);
         true
     }
 
@@ -4363,6 +4403,17 @@ impl Chat {
     fn escape(&mut self, now: std::time::Instant) -> bool {
         if self.busy {
             self.interrupt();
+            return true;
+        }
+        // A Page/Field error row is dismissable like every other overlay —
+        // it used to sit above the prompt until the next turn started.
+        if self
+            .last_error
+            .as_ref()
+            .is_some_and(|e| e.level != crate::error::ErrorLevel::Full)
+        {
+            self.last_error = None;
+            self.dirty = true;
             return true;
         }
         if !self.slash_suggestions.is_empty() {
@@ -4392,6 +4443,7 @@ impl Chat {
         }
         self.esc_at = Some(now);
         self.notice = Some("Press esc again to clear");
+        self.notice_until = Some(now + ESC_WINDOW);
         true
     }
 
@@ -4779,6 +4831,14 @@ impl Chat {
         if self.tick.is_multiple_of(15) {
             self.refresh_entities();
         }
+        // The bottom notice expires with the window it advertises.
+        if let Some(until) = self.notice_until
+            && std::time::Instant::now() >= until
+        {
+            self.notice = None;
+            self.notice_until = None;
+            self.dirty = true;
+        }
         // Slash transient hints expire (operation confirmations leave no permanent placeholder);
         // error/usage rows live longer (G12) — they additionally clear on the next input.
         if let Some(at) = self.slash_at
@@ -4842,6 +4902,7 @@ impl Chat {
         self.has_dynamic_rows()
             || self.slash_at.is_some()
             || self.slash_error_at.is_some()
+            || self.notice_until.is_some()
             || !self.events_rx.is_empty()
             || !self.asks_rx.is_empty()
     }
@@ -5193,6 +5254,7 @@ impl Chat {
             self.refresh_entities();
             if self.entities.is_empty() {
                 self.notice = Some("没有子代理实例或频道（Agent 工具派生后出现）");
+                self.notice_until = Some(std::time::Instant::now() + CTRL_C_WINDOW);
             } else if self.entity_focus.is_some() {
                 self.entity_focus = None;
             } else {
@@ -9828,7 +9890,10 @@ mod tests {
         request.free_text = true;
         chat.pending_ask = Some((request, tx));
         chat.ask_focus = 0;
-        assert!(chat.ask_key(KeyCode::Enter), "Enter 选 A");
+        assert!(
+            chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
+            "Enter 选 A"
+        );
         assert!(chat.pending_ask.is_none(), "对话框已关闭");
 
         // 回答作为一条用户消息进入消息流。
@@ -9859,7 +9924,10 @@ mod tests {
         request.free_text = true;
         chat.pending_ask = Some((request, tx));
         chat.ask_focus = 1;
-        assert!(chat.ask_key(KeyCode::Enter), "Enter 选 B");
+        assert!(
+            chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
+            "Enter 选 B"
+        );
 
         chat.handle(UiEvent::TurnEnd);
         let answer = chat.messages.last().expect("回答消息仍在");
@@ -9895,7 +9963,7 @@ mod tests {
         request.free_text = true;
         chat.pending_ask = Some((request, tx));
         chat.ask_focus = 0;
-        assert!(chat.ask_key(KeyCode::Enter), "选 A");
+        assert!(chat.ask_key(KeyCode::Enter, KeyModifiers::empty()), "选 A");
         assert_eq!(chat.messages.len(), 3, "hi + 流式 assistant + 回答");
 
         // 流式未结束：回答消息与流式消息都不定稿，定稿停在第一条用户消息。
@@ -9929,7 +9997,7 @@ mod tests {
         request.free_text = true;
         chat.pending_ask = Some((request, tx));
         chat.ask_focus = 0;
-        assert!(chat.ask_key(KeyCode::Enter), "选 A");
+        assert!(chat.ask_key(KeyCode::Enter, KeyModifiers::empty()), "选 A");
 
         chat.handle(UiEvent::Error {
             code: "SERVER_ERROR",
@@ -10294,7 +10362,10 @@ mod tests {
         assert!(joined.contains("  更快"), "desc dim row: {joined}");
         assert!(joined.contains("3. Other"), "other option: {joined}");
         assert!(joined.contains("Type something."), "placeholder: {joined}");
-        assert!(chat.ask_key(KeyCode::Char('3')), "digit 3 → Other");
+        assert!(
+            chat.ask_key(KeyCode::Char('3'), KeyModifiers::empty()),
+            "digit 3 → Other"
+        );
         chat.build_rows(100);
         let joined: String = chat
             .doc
@@ -10309,9 +10380,15 @@ mod tests {
             "input hint: {joined}"
         );
         for c in ['s', 'e', 'r', 'd', 'e'] {
-            assert!(chat.ask_key(KeyCode::Char(c)), "type {c}");
+            assert!(
+                chat.ask_key(KeyCode::Char(c), KeyModifiers::empty()),
+                "type {c}"
+            );
         }
-        assert!(chat.ask_key(KeyCode::Enter), "submit");
+        assert!(
+            chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
+            "submit"
+        );
         assert!(chat.pending_ask.is_none(), "dialog closed");
         assert_eq!(rx.try_recv(), Ok(DialogAction::Answer("serde".to_string())));
         // 回答进入消息流：一条普通用户消息（Q&A 回显）。
@@ -10349,7 +10426,10 @@ mod tests {
         request.free_text = true;
         chat.pending_ask = Some((request, tx));
         chat.ask_focus = 2;
-        assert!(chat.ask_key(KeyCode::Enter), "空 Other 提交");
+        assert!(
+            chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
+            "空 Other 提交"
+        );
         assert!(chat.pending_ask.is_none());
         assert_eq!(rx.try_recv(), Ok(DialogAction::Cancel));
         // 拒绝同样进入消息流（一条普通用户消息）。
@@ -10378,15 +10458,24 @@ mod tests {
             PermissionRequest::new("技术选型", "用哪个库？", vec!["A".into(), "B".into()]);
         request.free_text = true;
         chat.pending_ask = Some((request, tx));
-        assert!(chat.ask_key(KeyCode::Down), "↓ 到 B");
+        assert!(chat.ask_key(KeyCode::Down, KeyModifiers::empty()), "↓ 到 B");
         assert_eq!(chat.ask_focus, 1);
-        assert!(chat.ask_key(KeyCode::Down), "↓ 到 Other");
+        assert!(
+            chat.ask_key(KeyCode::Down, KeyModifiers::empty()),
+            "↓ 到 Other"
+        );
         assert_eq!(chat.ask_focus, 2);
-        assert!(chat.ask_key(KeyCode::Down), "↓ 到底部不再移动");
+        assert!(
+            chat.ask_key(KeyCode::Down, KeyModifiers::empty()),
+            "↓ 到底部不再移动"
+        );
         assert_eq!(chat.ask_focus, 2);
-        assert!(chat.ask_key(KeyCode::Up), "↑ 回 B");
+        assert!(chat.ask_key(KeyCode::Up, KeyModifiers::empty()), "↑ 回 B");
         assert_eq!(chat.ask_focus, 1);
-        assert!(chat.ask_key(KeyCode::Enter), "Enter 选 B");
+        assert!(
+            chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
+            "Enter 选 B"
+        );
         assert_eq!(rx.try_recv(), Ok(DialogAction::Confirm(1)));
         let answer = chat.messages.last().expect("回答消息已入流");
         assert_eq!(answer.role, Role::User);
@@ -11735,5 +11824,108 @@ mod tests {
             "真实路径错误行可见: {joined}"
         );
         assert!(!joined.contains("出错了"), "页面级不整屏: {joined}");
+    }
+    /// P0-9 regression: modifier chords in the Other input stay chords —
+    /// ctrl+c must reach the global interrupt, not become a literal letter.
+    #[test]
+    fn ask_other_input_does_not_swallow_modifier_chords() {
+        let mut chat = test_chat();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        chat.pending_ask = Some((
+            crate::ui::PermissionRequest {
+                title: "选择".into(),
+                question: "选一个".into(),
+                options: vec!["A".into()],
+                descriptions: vec![None],
+                free_text: true,
+            },
+            tx,
+        ));
+        chat.ask_focus = 1; // Other 输入位
+        assert!(chat.ask_key(KeyCode::Char('h'), KeyModifiers::empty()));
+        assert_eq!(chat.ask_other, "h");
+        assert!(
+            !chat.ask_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            "ctrl+c 不被对话框吞掉"
+        );
+        assert_eq!(chat.ask_other, "h", "修饰键组合不落入输入");
+    }
+
+    /// P0-7 regression: a short-sync (Page-level) failure must not end the
+    /// running turn — busy/stream stay untouched; only LongTurn errors reset.
+    #[test]
+    fn short_sync_error_keeps_the_running_turn() {
+        let mut chat = test_chat();
+        chat.busy = true;
+        chat.stream_msg = Some(0);
+        chat.handle(UiEvent::Error {
+            code: "TIMEOUT",
+            msg: "list_models timeout".into(),
+            level: crate::error::ErrorLevel::Page,
+            context: crate::error::ErrorContext::ShortSync,
+        });
+        assert!(chat.busy, "短同步失败不打断回合");
+        assert_eq!(chat.stream_msg, Some(0));
+        assert!(chat.last_error.is_some(), "错误行仍记录");
+
+        chat.handle(UiEvent::Error {
+            code: "TIMEOUT",
+            msg: "turn died".into(),
+            level: crate::error::ErrorLevel::Full,
+            context: crate::error::ErrorContext::LongTurn,
+        });
+        assert!(!chat.busy, "回合级失败照常复位");
+    }
+
+    /// Page/Field error rows dismiss with Esc instead of squatting above the
+    /// prompt until the next turn.
+    #[test]
+    fn escape_dismisses_page_level_errors() {
+        let mut chat = test_chat();
+        chat.handle(UiEvent::Error {
+            code: "TIMEOUT",
+            msg: "x".into(),
+            level: crate::error::ErrorLevel::Page,
+            context: crate::error::ErrorContext::ShortSync,
+        });
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(chat.last_error.is_none(), "Esc 清除页面级错误");
+    }
+
+    /// `/theme` with junk reports BAD_ARGUMENT instead of silently switching
+    /// to auto with a success message (slash-command-ux G13).
+    #[test]
+    fn slash_theme_rejects_unknown_names() {
+        let mut chat = test_chat();
+        chat.input = "/theme bogus".to_string();
+        chat.submit();
+        let joined = all_slash_text(&chat);
+        assert!(joined.contains("BAD_ARGUMENT"), "{joined}");
+        assert!(!joined.contains("✓"), "不显示成功回执: {joined}");
+    }
+
+    /// P0-16 regression: a bash-mode turn clears interrupt suppression the
+    /// same way a model turn does.
+    #[tokio::test]
+    async fn bash_turn_resets_interrupted() {
+        let mut chat = test_chat();
+        chat.interrupted = true;
+        chat.bash_mode = true;
+        chat.set_input("echo hi");
+        chat.submit();
+        assert!(!chat.interrupted, "! 回合复位中断抑制");
+    }
+
+    /// The bottom notice expires with its window: an expired "press again"
+    /// promise disappears instead of lying.
+    #[test]
+    fn notice_expires_after_its_window() {
+        let mut chat = test_chat();
+        chat.notice = Some("Press ctrl-c again to exit");
+        chat.notice_until = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        assert!(chat.needs_tick(), "有待过期的 notice 时不允许空转");
+        chat.tick();
+        assert!(chat.notice.is_none(), "过期即清除");
+        assert!(chat.notice_until.is_none());
     }
 }

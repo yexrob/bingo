@@ -9,19 +9,36 @@ use crate::error::ErrorCode;
 pub enum SettingsError {
     #[error("failed to read settings: {0}")]
     Io(#[from] std::io::Error),
-    #[error("failed to parse settings: {0}")]
-    Parse(#[from] serde_json::Error),
+    /// Read failure on a concrete layer file (anything but NotFound): the path
+    /// names which of the three layers is broken.
+    #[error("failed to read settings {path}: {source}")]
+    Read {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    /// Parse failure names the offending layer file — with three layers, a
+    /// bare line/column would leave the user guessing which file to open.
+    #[error("failed to parse settings {path}: {source}")]
+    Parse {
+        path: std::path::PathBuf,
+        source: serde_json::Error,
+    },
+    #[error("failed to encode settings: {0}")]
+    Encode(serde_json::Error),
 }
 
 impl ErrorCode for SettingsError {
     fn error_code(&self) -> &'static str {
         match self {
-            SettingsError::Io(_) | SettingsError::Parse(_) => "CONFIG_INVALID",
+            SettingsError::Io(_)
+            | SettingsError::Read { .. }
+            | SettingsError::Parse { .. }
+            | SettingsError::Encode(_) => "CONFIG_INVALID",
         }
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// API key (`apiKey`): settings win, fall back to ANTHROPIC_API_KEY/DEEPSEEK_API_KEY.
@@ -93,7 +110,7 @@ pub struct Settings {
 }
 
 /// Share publishing settings (`share`): used only when `bingo share --public` uploads.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct ShareSettings {
     /// 官网上传基址（`baseUrl`，缺省 `https://bingo.ruobin.dev`）。
     /// 上传服务公开，无需 token。
@@ -103,7 +120,7 @@ pub struct ShareSettings {
 
 /// Team settings (D31). Responsibility: "whether to start"; the team file
 /// (.bingo/team.json) governs "what to start".
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct TeamSettings {
     /// Auto-start the team on project start (`team.autoStart`). Default true (the
     /// requirement literally reads "start reads by default"); double opt-out: this
@@ -113,7 +130,7 @@ pub struct TeamSettings {
 }
 
 /// Experimental features (all off by default).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct ExperimentalSettings {
     /// Agent channels (`agentChannels`): when enabled, the main session gains
     /// Channel/Post tools and direct subagents gain the Post tool.
@@ -131,7 +148,7 @@ pub struct ExperimentalSettings {
 /// Named provider. v1 = Anthropic-protocol endpoint; v2 adds the optional
 /// `protocol` field (values `anthropic` | `openai`, default `anthropic` —
 /// every existing config parses unchanged, D33).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ProviderConfig {
     /// Static API key (v2: optional — OAuth providers omit it, D33 §5:
     /// apiKey wins over OAuth; both missing is a config error at startup).
@@ -168,7 +185,7 @@ pub struct OauthConfig {
 }
 
 /// Permission rules (settings permissions section).
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PermissionRules {
     pub allow: Vec<String>,
@@ -177,7 +194,7 @@ pub struct PermissionRules {
 }
 
 /// MCP server definition.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct McpServerConfig {
     /// Transport type: stdio (default) | http (streamable HTTP).
     /// sse / ws not implemented yet; configuring them errors at connect time.
@@ -196,7 +213,7 @@ pub struct McpServerConfig {
     pub headers: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct HooksConfig {
     #[serde(rename = "PreToolUse")]
@@ -221,14 +238,14 @@ pub struct HooksConfig {
     pub task_completed: Vec<HookRule>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct HookRule {
     #[serde(default)]
     pub matcher: String,
     pub hooks: Vec<Hook>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Hook {
     #[serde(rename = "type")]
     pub kind: String,
@@ -246,10 +263,18 @@ pub fn load_settings(
         project_dir.join(".bingo").join("settings.json"),
         project_dir.join(".bingo").join("local.json"),
     ] {
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            continue;
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            // Absent layers are normal; any other IO failure (permissions, bad
+            // mount) must not silently degrade to "no config" — the user's API
+            // key and rules would vanish without a trace.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(SettingsError::Read { path, source: e }),
         };
-        let layer: Settings = serde_json::from_str(&raw)?;
+        let layer: Settings = serde_json::from_str(&raw).map_err(|e| SettingsError::Parse {
+            path: path.clone(),
+            source: e,
+        })?;
         merge(&mut settings, layer);
     }
     Ok(settings)
@@ -283,11 +308,17 @@ fn merge(base: &mut Settings, layer: Settings) {
     if let Some(theme) = layer.theme {
         base.theme = Some(theme);
     }
+    if let Some(motion) = layer.motion {
+        base.motion = Some(motion);
+    }
     if let Some(cache) = layer.cache_control {
         base.cache_control = Some(cache);
     }
     if let Some(respond) = layer.respond_to_bash_commands {
         base.respond_to_bash_commands = Some(respond);
+    }
+    if let Some(shell) = layer.shell {
+        base.shell = Some(shell);
     }
     if !layer.hooks.pre_tool_use.is_empty() {
         base.hooks.pre_tool_use = layer.hooks.pre_tool_use;
@@ -372,8 +403,20 @@ pub fn upsert_project_settings(
         }
     }
     std::fs::create_dir_all(&dir)?;
-    let mut file = std::fs::File::create(&path)?;
-    write!(file, "{}", serde_json::to_string_pretty(&root)?)?;
+    // tmp + fsync + rename (same discipline as AuthStore): a kill or full disk
+    // mid-write must never leave a truncated settings.json — a broken file
+    // refuses the next startup.
+    let tmp = dir.join("settings.json.tmp");
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string_pretty(&root).map_err(SettingsError::Encode)?
+        )?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 
@@ -385,6 +428,57 @@ mod tests {
         let path = dir.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, content).unwrap();
+    }
+
+    /// Merge-completeness guard: a layer that sets EVERY field, merged onto the
+    /// default base, must equal the layer itself. A field forgotten in `merge`
+    /// keeps its default and fails the comparison — this is exactly how `shell`
+    /// and `motion` silently stopped working. When adding a Settings field,
+    /// extend this fixture in the same change.
+    #[test]
+    fn merge_covers_every_field() {
+        let full = r#"{
+            "apiKey": "sk-full",
+            "apiBaseUrl": "https://full.example",
+            "providers": {"p": {"apiKey": "sk-p", "apiBaseUrl": "https://p.example",
+                                "protocol": "openai", "oauth": {"kind": "codex"},
+                                "supportsImages": true}},
+            "provider": "p",
+            "model": "model-full",
+            "sendImages": true,
+            "thinkingLevel": "high",
+            "permissionMode": "plan",
+            "theme": "dark",
+            "motion": "off",
+            "cacheControl": true,
+            "respondToBashCommands": false,
+            "shell": "/bin/fish",
+            "hooks": {
+                "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "a"}]}],
+                "PostToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "b"}]}],
+                "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "c"}]}],
+                "PostCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "d"}]}],
+                "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "e"}]}],
+                "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "f"}]}],
+                "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "g"}]}],
+                "SessionEnd": [{"matcher": "", "hooks": [{"type": "command", "command": "h"}]}],
+                "TaskCreated": [{"matcher": "", "hooks": [{"type": "command", "command": "i"}]}],
+                "TaskCompleted": [{"matcher": "", "hooks": [{"type": "command", "command": "j"}]}]
+            },
+            "mcpServers": {"m": {"command": "mcp", "args": ["--x"], "env": {"K": "V"}}},
+            "disabledMcpServers": ["m"],
+            "permissions": {"allow": ["Bash(a:*)"], "deny": ["Bash(b:*)"], "ask": ["Bash(c:*)"]},
+            "experimental": {"agentChannels": true, "channelMessageLimit": 7, "agentMessageLimit": 3},
+            "team": {"autoStart": false},
+            "share": {"baseUrl": "https://share.example"}
+        }"#;
+        let layer: Settings = serde_json::from_str(full).unwrap();
+        let mut merged = Settings::default();
+        merge(&mut merged, layer.clone());
+        assert_eq!(
+            merged, layer,
+            "merge 漏拷字段（新加字段需同步扩展本 fixture）"
+        );
     }
 
     #[test]
