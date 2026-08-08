@@ -1026,7 +1026,12 @@ pub async fn run_query(
     record(
         session,
         &mut messages,
-        user_message_with_images(user_input, images, session.client.supports_images()),
+        user_message_with_images(
+            user_input,
+            images,
+            session.client.supports_images(),
+            &session.client.image_capable_providers(),
+        ),
         ui,
     );
     query_loop(session, messages, ui, &tools, &ctx, cancel).await
@@ -1042,22 +1047,13 @@ fn user_message_with_images(
     text: &str,
     images: &[crate::api::types::ImageAttachment],
     send_images: bool,
+    image_providers: &[String],
 ) -> Message {
     use crate::api::types::{ContentBlock, ImageSource, Role};
     let attaching = send_images && !images.is_empty();
     let mut body = text.to_string();
     if !attaching && crate::api::image::has_marker(text) {
-        body.push_str(if send_images {
-            "\n\n<system-reminder>The `#[image N]` placeholders above have no image attached: \
-             the referenced attachment is not in this session (attachments live in memory, so \
-             markers from a resumed or restored session no longer resolve). Do not go looking \
-             for the file — tell the user the image needs to be attached again.</system-reminder>"
-        } else {
-            "\n\n<system-reminder>The `#[image N]` placeholders above have no image attached: \
-             this endpoint is not configured to receive images. Do not go looking for the file — \
-             tell the user to enable `sendImages` (or set `supportsImages` on the provider) and \
-             resend.</system-reminder>"
-        });
+        body.push_str(&missing_image_note(images.is_empty(), image_providers));
     }
     let mut content = vec![ContentBlock::Text { text: body }];
     if attaching {
@@ -1069,6 +1065,42 @@ fn user_message_with_images(
         role: Role::User,
         content,
     }
+}
+
+/// Explains a placeholder whose image is not attached, and — when the attachment exists and only
+/// this endpoint can't take it — points at the way through instead of the way out: a subagent
+/// forked onto an image-capable provider resolves the same marker against the same session table,
+/// so a text-only main session can still get an image looked at.
+fn missing_image_note(unresolved: bool, image_providers: &[String]) -> String {
+    if unresolved {
+        return "\n\n<system-reminder>The `#[image N]` placeholders above have no image attached: \
+                the referenced attachment is not in this session (attachments live in memory, so \
+                markers from a resumed or restored session no longer resolve). Do not go looking \
+                for the file — tell the user the image needs to be attached again.\
+                </system-reminder>"
+            .to_string();
+    }
+    let route = if image_providers.is_empty() {
+        "No configured provider accepts images, so nothing in this session can look at it: tell \
+         the user to enable `sendImages` (or set `supportsImages` on a provider) and resend."
+            .to_string()
+    } else {
+        format!(
+            "The attachment itself is still held by this session, and a subagent resolves the \
+             same marker against the same table. To get it looked at, spawn one on an \
+             image-capable provider and repeat the marker in its prompt — \
+             Agent(provider: \"<one of: {}>\", model: \"<model on that provider>\", \
+             prompt: \"…#[image N]…\") — it receives the real image and reports back to you. \
+             Crossing providers requires an explicit model, and the provider must already be \
+             keyed or logged in.",
+            image_providers.join(", ")
+        )
+    };
+    format!(
+        "\n\n<system-reminder>The `#[image N]` placeholders above have no image attached: this \
+         endpoint does not accept image blocks. Do not go looking for the file. {route}\
+         </system-reminder>"
+    )
 }
 
 /// Caveat injected before running a local command: `!` command output stays in the
@@ -1345,23 +1377,36 @@ mod tests {
             _ => unreachable!("text block first"),
         };
 
-        // Endpoint cannot take images: point at the setting, not at the filesystem.
-        let msg = user_message_with_images("看图 #[image 1]", &imgs, false);
+        // Endpoint cannot take images and nothing else can either: point at the setting.
+        let msg = user_message_with_images("看图 #[image 1]", &imgs, false, &[]);
         assert_eq!(msg.content.len(), 1, "端点不支持时不发图片块");
         let text = text_of(&msg);
         assert!(text.contains("sendImages"), "{text}");
         assert!(text.contains("Do not go looking"), "{text}");
 
+        // Endpoint cannot take images but a capable provider exists: name the way through
+        // (delegate to a subagent) rather than telling the model to give up.
+        let msg = user_message_with_images(
+            "看图 #[image 1]",
+            &imgs,
+            false,
+            &["road".to_string(), "vision".to_string()],
+        );
+        let text = text_of(&msg);
+        assert!(text.contains("<one of: road, vision>"), "{text}");
+        assert!(text.contains("requires an explicit model"), "{text}");
+        assert!(!text.contains("resend"), "不该劝用户重发：{text}");
+
         // Marker that no longer resolves (resumed session): say the attachment is gone.
-        let msg = user_message_with_images("看图 #[image 9]", &[], true);
+        let msg = user_message_with_images("看图 #[image 9]", &[], true, &[]);
         let text = text_of(&msg);
         assert!(text.contains("not in this session"), "{text}");
 
         // No marker, no note — the reminder is only for a placeholder without its image.
-        let msg = user_message_with_images("随便问问", &[], true);
+        let msg = user_message_with_images("随便问问", &[], true, &[]);
         assert_eq!(text_of(&msg), "随便问问");
         // Images actually attached: text stays verbatim.
-        let msg = user_message_with_images("看图 #[image 1]", &imgs, true);
+        let msg = user_message_with_images("看图 #[image 1]", &imgs, true, &[]);
         assert_eq!(text_of(&msg), "看图 #[image 1]");
     }
 
@@ -1374,7 +1419,7 @@ mod tests {
             media_type: "image/png".into(),
             data: "aGVsbG8=".into(),
         }];
-        let msg = user_message_with_images("看图 #[image 1]", &imgs, true);
+        let msg = user_message_with_images("看图 #[image 1]", &imgs, true, &[]);
         assert_eq!(msg.content.len(), 2);
         assert!(
             matches!(msg.content[0], ContentBlock::Text { ref text } if text == "看图 #[image 1]")
@@ -1383,7 +1428,7 @@ mod tests {
             matches!(&msg.content[1], ContentBlock::Image { source } if source.data == "aGVsbG8=")
         );
 
-        let msg = user_message_with_images("看图 #[image 1]", &imgs, false);
+        let msg = user_message_with_images("看图 #[image 1]", &imgs, false, &[]);
         assert_eq!(msg.content.len(), 1, "不支持时图片块不发送");
         assert!(matches!(msg.content[0], ContentBlock::Text { .. }));
     }

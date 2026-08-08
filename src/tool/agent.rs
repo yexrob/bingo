@@ -60,7 +60,7 @@ pub struct AgentInput {
     /// uses that provider's endpoint and key (independent of the parent session's current provider).
     #[serde(default)]
     #[schemars(
-        description = "Provider for the subagent (optional; the providers section of settings; \"default\" or omitted = shared parent endpoint; specify model when crossing providers)"
+        description = "Provider for the subagent (optional; the providers section of settings; \"default\" or omitted = shared parent endpoint; specify model when crossing providers). Also the way to get an image looked at when this endpoint cannot receive one: fork onto an image-capable provider and repeat the `#[image N]` marker in the prompt — the attachment table is shared, so the subagent receives the real image."
     )]
     provider: Option<String>,
     /// Sub-agent thinking level (optional): off | low | medium | high | xhigh | max.
@@ -1048,6 +1048,18 @@ mod tests {
                 oauth: None,
             },
         );
+        // An image-capable endpoint next to a text-only default: the shape that lets a text-only
+        // session delegate an attachment to a subagent.
+        settings.providers.insert(
+            "vision".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: Some("sk-v".into()),
+                api_base_url: "https://vision.example".into(),
+                supports_images: Some(true),
+                protocol: None,
+                oauth: None,
+            },
+        );
         let client = Arc::new(crate::api::client::Client::from_settings(&settings).unwrap());
         let mut runtime = Runtime::new("parent-model".into(), None, Default::default());
         runtime.mcp = Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
@@ -1527,6 +1539,55 @@ mod tests {
         assert_eq!(prompt, "对比 #[image 1]");
         assert_eq!(carried.len(), 1, "图片随排队指令一同送达");
         assert_eq!(carried[0].data, images[0].data);
+    }
+
+    /// A text-only main session can still get an image looked at: the attachment table is
+    /// session-scoped and independent of endpoint capability, so a subagent forked onto an
+    /// image-capable provider resolves the same `#[image N]` marker and actually receives it.
+    #[test]
+    fn text_only_parent_can_hand_an_image_to_a_vision_subagent() {
+        let (parent, _client) = parent_session();
+        let png = {
+            let img = image::RgbaImage::from_pixel(4, 2, image::Rgba([9u8, 9, 9, 255]));
+            let mut out = Vec::new();
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .unwrap_or_else(|_| unreachable!());
+            out
+        };
+        assert_eq!(parent.attachments.register(&png), Some(1));
+        assert!(
+            !parent.client.supports_images(),
+            "父端点不收图（本用例的前提）"
+        );
+
+        // Markers resolve regardless of what the parent endpoint can carry.
+        let images = parent.attachments.resolve("描述 #[image 1]");
+        assert_eq!(images.len(), 1, "解析不受端点能力影响");
+
+        // Forked onto the vision provider, the sub-session is the one whose capability decides.
+        let sub = build_sub_session(
+            &parent,
+            Some("vision-model".into()),
+            Some("vision".into()),
+            None,
+            None,
+            "looker",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(sub.client.supports_images(), "子会话端点收图");
+        assert!(
+            Arc::ptr_eq(&sub.attachments, &parent.attachments),
+            "附件表共享，子代理复述占位即可命中"
+        );
+        assert!(
+            parent
+                .client
+                .image_capable_providers()
+                .contains(&"vision".to_string()),
+            "提示里指的路是可发现的：{:?}",
+            parent.client.image_capable_providers()
+        );
     }
 
     /// `inherit_system: false` opts back into wholesale replacement; the subagent note is still

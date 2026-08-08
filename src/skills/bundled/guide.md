@@ -212,6 +212,12 @@ Example (.bingo/settings.json):
   A run chain that fails leaves its queued messages in place — the next turn boundary retries them.
   **Images to subagents**: repeat an `#[image N]` marker in the Agent prompt or SendMessage text; the attachment table
   belongs to the session, so the subagent receives the actual image (also carried along if the message has to queue).
+  This also works *out* of a text-only session: when the current endpoint cannot receive images, fork a subagent onto an
+  image-capable provider (`Agent(provider: …, model: …)` — crossing providers requires an explicit model) and repeat the
+  marker; resolution is independent of endpoint capability, so the subagent sees the real image and reports back. A
+  placeholder that arrives without its image now says which case it is (endpoint cannot carry images — with the capable
+  providers listed — versus the attachment being gone from a resumed session) instead of leaving the model to hunt for a
+  file that was never on disk.
   **Named definitions**: `~/.config/bingo/agents/*.md` and `.bingo/agents/*.md` (same-name project layer wins);
   frontmatter `name/description/model/provider/thinking/inherit_system`, body = the subagent's system prompt; referenced by
   the Agent tool's `agent` argument. The body is appended to the parent's system blocks by default; `inherit_system: false`
@@ -284,7 +290,10 @@ Example (.bingo/settings.json):
   或因实例停止而丢弃。stop/delete 会清空信箱并报告有多少条未送达指令随之丢弃；
   运行链失败时消息留在信箱，下一个回合边界重投。
   **给子代理传图**：在 Agent prompt 或 SendMessage 文本里复述 `#[image N]` 占位即可——附件表属于会话，
-  子代理收到的是真图片（消息排队时图片一同携带）。
+  子代理收到的是真图片（消息排队时图片一同携带）。这条路也能从**不收图的会话往外走**：当前端点不接受图片时，
+  把子代理 fork 到支持图片的 provider（`Agent(provider: …, model: …)`，跨 provider 必须显式给 model）并复述占位，
+  解析不受端点能力影响，子代理看得到真图并回报结论。占位符到达而图片不在时会说明是哪种情况
+  （端点不收图——并列出可用 provider——还是恢复会话导致附件已不在），而不是让模型去找一个从未落盘的文件。
   **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`（同名项目层
   优先）；frontmatter `name/description/model/provider/thinking/inherit_system`，正文 = 子代理
   system prompt；Agent 工具的 `agent` 参数引用。

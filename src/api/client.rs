@@ -283,6 +283,23 @@ impl Client {
             .map(|(_, info)| (info.api_key.clone(), info.base_url.clone()))
     }
 
+    /// Named providers whose endpoint accepts image blocks. A text-only session can still put an
+    /// attachment in front of a model by forking a subagent onto one of these, so the list is
+    /// what makes that route discoverable instead of guessable. "default" is excluded: as a
+    /// sub-agent argument it means "share the parent endpoint", which is the one that can't.
+    pub fn image_capable_providers(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .providers
+            .iter()
+            .filter(|(name, (adapter, _))| {
+                name.as_str() != "default" && adapter.capabilities().supports_images
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Wire protocol label of a named provider ("anthropic"/"openai";
     /// the /provider listing). Unknown names return None.
     pub fn provider_protocol(&self, name: &str) -> Option<String> {
