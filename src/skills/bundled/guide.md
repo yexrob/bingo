@@ -164,12 +164,12 @@ Example (.bingo/settings.json):
   for thinking levels, no count_tokens endpoint → local-estimation fallback). The top-level `apiKey`/`apiBaseUrl`
   always form the anthropic "default" provider; subagent cross-provider rules apply across protocols
   (explicit `model` required when forking to a different provider).
-- **Provider auth**: static `apiKey` (settings; wins over OAuth) or OAuth for providers with
-  `oauth: {kind: "codex"}` — `/provider login <name>` runs the Codex/ChatGPT flow (default loopback PKCE
-  opens the browser; `--device-auth` prints URL + one-time code and polls for headless/SSH; `--manual <token>`
-  stores a pasted token without auto-refresh); `/provider logout <name>` revokes and clears. Tokens live in
-  `~/.local/share/bingo/auth.json` (0600, opencode-compatible shape) — never in the committed project settings.
-  The `/provider` listing shows per-provider protocol + auth state (`✓ account` / `○ not logged in`).
+- **Provider OAuth (codex/ChatGPT)**: `oauth: {kind: "codex"}` on a named provider enables subscription login —
+  `/provider login <name>` (default: opens the browser with loopback PKCE; `--device-auth` prints a URL + one-time
+  code and polls for headless/SSH; `--manual <token>` pastes a stored token), `/provider logout <name>` revokes and
+  clears. Tokens live in `~/.local/share/bingo/auth.json` (0600, opencode-compatible shape) — never in the committed
+  settings; `apiKey` in settings wins over OAuth; refresh is automatic (eager 5 min before expiry + on 401),
+  permanent refresh failures clear the login and prompt `/provider login <name>` again.
 - **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
   experience index is injected (≤10 entries, one per line; nothing injected when empty); full text is searched with ExperienceQuery by
   trigger tokens (case-insensitive, shared-prefix tolerant; active first, sorted by adoption count);
