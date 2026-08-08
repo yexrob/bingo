@@ -63,6 +63,53 @@ impl ImageSource {
     }
 }
 
+/// A tool result carrying images: a `content` array of protocol blocks rather than a plain
+/// string. Anthropic accepts this shape verbatim; everywhere else it has to be flattened, which
+/// is what [`tool_result_text`] is for.
+pub fn tool_result_blocks(text: &str, images: &[ImageAttachment]) -> serde_json::Value {
+    let mut blocks = vec![serde_json::json!({"type": "text", "text": text})];
+    blocks.extend(images.iter().map(|img| {
+        serde_json::json!({
+            "type": "image",
+            "source": ImageSource::base64(&img.media_type, &img.data),
+        })
+    }));
+    serde_json::Value::Array(blocks)
+}
+
+/// Tool-result content → plain text, for anywhere that needs to read rather than transmit it
+/// (compaction, memory extraction, endpoints without image tool results). Image blocks collapse
+/// to a size note: serializing them verbatim would paste megabytes of base64 into a prompt.
+pub fn tool_result_text(content: &serde_json::Value) -> String {
+    let serde_json::Value::Array(blocks) = content else {
+        return match content {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+    };
+    blocks
+        .iter()
+        .map(|block| match block.get("type").and_then(|t| t.as_str()) {
+            Some("text") => block
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            Some("image") => {
+                let bytes = block
+                    .get("source")
+                    .and_then(|s| s.get("data"))
+                    .and_then(|d| d.as_str())
+                    .map(|d| d.len())
+                    .unwrap_or(0);
+                format!("[image: {bytes} bytes]")
+            }
+            _ => block.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Image attachment mounted on the input box (base64 data; only built into a
 /// `ContentBlock::Image` when sending).
 #[derive(Debug, Clone)]

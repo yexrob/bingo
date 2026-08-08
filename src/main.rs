@@ -314,6 +314,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         agents: crate::agents::AgentRegistry::new(),
         channels: crate::channels::ChannelRegistry::new(channel_limits),
         instance: None,
+        attachments: crate::api::image::Attachments::new(),
     });
 
     // share 持久化：随会话增量记录子代理/频道快照（`bingo share` 的数据源）。
@@ -395,6 +396,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // (`[error] code=… msg=…`) only holds on the report_error path.
                 return Err("no prompt provided (stdin was empty)".into());
             }
+            // Subagents borrow the same stdin prompt (serialized in the Agent tool), so a
+            // background instance can still ask rather than having the call auto-denied.
+            session.agents.attach_ask(crate::query::stdin_ask());
             let mut ui = headless_hooks();
             let outcome =
                 run_query(&session, initial_messages, &prompt, &[], &mut ui, None).await?;

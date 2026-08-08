@@ -224,6 +224,10 @@ pub struct Session {
     /// This session's instance name (sub-agents = Some(registry name); main session None,
     /// channel member name main).
     pub instance: Option<String>,
+    /// Images the user mounted on the input box, addressed by the `#[image N]` markers left in
+    /// the message text. Sub-sessions share the table, so the hub forwards an image to a
+    /// subagent by repeating its marker.
+    pub attachments: Arc<crate::api::image::Attachments>,
 }
 
 /// Single tool completion event.
@@ -281,6 +285,27 @@ pub struct UiHooks {
     pub ask_question: Arc<AskQuestionFn>,
 }
 
+/// Headless permission prompt (stderr question, stdin answer). Shared by `headless_hooks` and
+/// the subagent prompt surface attached to the registry, so both ask the same way.
+pub fn stdin_ask() -> Arc<AskFn> {
+    Arc::new(|tool_name, reason| {
+        let prompt = format!("允许 {tool_name} 执行吗？({reason}) [y/N] ");
+        Box::pin(async move {
+            eprintln!("{prompt}");
+            let answer = tokio::task::spawn_blocking(move || {
+                let mut line = String::new();
+                if let Err(e) = std::io::stdin().lock().read_line(&mut line) {
+                    eprintln!("[bingo] warning: cannot read answer from stdin: {e}");
+                }
+                line.trim().to_ascii_lowercase()
+            })
+            .await
+            .unwrap_or_default();
+            answer == "y" || answer == "yes"
+        })
+    })
+}
+
 /// Default headless hooks: text deltas to stdout; permissions via stdin interaction.
 pub fn headless_hooks() -> UiHooks {
     UiHooks {
@@ -294,22 +319,7 @@ pub fn headless_hooks() -> UiHooks {
         on_tool_done: Box::new(|_| {}),
         on_round_end: Box::new(|| {}),
         on_warning: Box::new(|message| eprintln!("[bingo] warning: {message}")),
-        ask: Arc::new(|tool_name, reason| {
-            let prompt = format!("允许 {tool_name} 执行吗？({reason}) [y/N] ");
-            Box::pin(async move {
-                eprintln!("{prompt}");
-                let answer = tokio::task::spawn_blocking(move || {
-                    let mut line = String::new();
-                    if let Err(e) = std::io::stdin().lock().read_line(&mut line) {
-                        eprintln!("[bingo] warning: cannot read answer from stdin: {e}");
-                    }
-                    line.trim().to_ascii_lowercase()
-                })
-                .await
-                .unwrap_or_default();
-                answer == "y" || answer == "yes"
-            })
-        }),
+        ask: stdin_ask(),
         ask_question: Arc::new(|title, question, options| {
             Box::pin(async move {
                 eprintln!("[bingo] {title}: {question}");
@@ -529,17 +539,39 @@ impl Session {
 }
 
 fn render_result(result: &ToolResult) -> String {
-    match &result.content {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
+    crate::api::types::tool_result_text(&result.content)
 }
 
 fn result_block(tool_use_id: &str, result: &ToolResult) -> ContentBlock {
+    // Array content is already a list of protocol blocks (text plus images). Pass it through:
+    // stringifying it here is what would turn an image result into a wall of base64 text.
+    if let serde_json::Value::Array(blocks) = &result.content {
+        return ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: serde_json::Value::Array(
+                blocks.iter().map(clip_text_block).collect::<Vec<_>>(),
+            ),
+            is_error: result.is_error,
+        };
+    }
     if result.is_error {
         tool_result_error(tool_use_id, clipped_result(render_result(result)))
     } else {
         tool_result_text(tool_use_id, clipped_result(render_result(result)))
+    }
+}
+
+/// Apply the tool-result length cap to a block's text, leaving image blocks untouched
+/// (they are already bounded by `prepare_image`).
+fn clip_text_block(block: &serde_json::Value) -> serde_json::Value {
+    match (
+        block.get("type").and_then(|t| t.as_str()),
+        block.get("text").and_then(|t| t.as_str()),
+    ) {
+        (Some("text"), Some(text)) => {
+            serde_json::json!({"type": "text", "text": clipped_result(text.to_string())})
+        }
+        _ => block.clone(),
     }
 }
 
@@ -643,6 +675,7 @@ fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContext, QueryErr
         permission_mode: permission_mode_str(session.permission_mode).to_string(),
         expand_tasks: session.expand_tasks.clone(),
         ask_question: ui.ask_question.clone(),
+        instance: session.instance.clone(),
     })
 }
 
@@ -710,11 +743,17 @@ async fn query_loop(
         check_and_compact(session, &mut messages, &mut gate).await;
         // task_reminder: no Task tool for 10 turns + 10 turns since the last reminder.
         maybe_inject_task_reminder(session, &mut messages).await;
+        // Messages queued by the previous step are delivered here, one batch per recipient:
+        // the SendMessage tool only enqueues, so several messages sent in the same step reach
+        // the receiver together instead of one per turn.
+        crate::tool::agent::flush_agent_inbox(session, &ctx.watch);
         // Background task notification injection (dynamic awareness while running): before
         // each reasoning step, pending state-transition notifications (rounds/completion/
         // failure) are injected into the context; anything unconsumed by the end of the
         // turn carries over to the next turn.
-        let notes = session.watch.consume_notifications();
+        let notes = session
+            .watch
+            .consume_notifications(session.instance.as_deref());
         if !notes.is_empty() {
             messages.push(Message::user_text(format!(
                 "<task-notifications>\n{}\n</task-notifications>",
@@ -1217,8 +1256,10 @@ fn normalize_synthetic_bash_calls(messages: &mut Vec<Message>) {
                 _ => String::new(),
             };
             let result_text = match &messages[i + 2].content[0] {
-                ContentBlock::ToolResult { content, .. } => content.as_str().unwrap_or(""),
-                _ => "",
+                ContentBlock::ToolResult { content, .. } => {
+                    crate::api::types::tool_result_text(content)
+                }
+                _ => String::new(),
             };
             messages[i] = Message::user_text(format!("{input_text}\n{result_text}"));
             messages.drain(i + 1..=i + 2);
@@ -1234,6 +1275,43 @@ fn is_cancelled(cancel: &Option<watch::Receiver<bool>>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tool result carrying images must reach the API as protocol blocks. Re-stringifying it
+    /// here is what would turn a screenshot into a wall of base64 text the model can't see.
+    #[test]
+    fn image_tool_results_stay_blocks_while_text_is_still_clipped() {
+        let long = "x".repeat(200_000);
+        let result = ToolResult {
+            content: crate::api::types::tool_result_blocks(
+                &long,
+                &[crate::api::types::ImageAttachment {
+                    media_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                }],
+            ),
+            is_error: false,
+            diff: None,
+        };
+        let ContentBlock::ToolResult { content, .. } = result_block("t1", &result) else {
+            unreachable!("tool result block")
+        };
+        let blocks = content.as_array().unwrap_or_else(|| unreachable!());
+        assert_eq!(blocks[1]["type"], "image", "图片块原样保留");
+        assert_eq!(blocks[1]["source"]["data"], "aGVsbG8=");
+        let text = blocks[0]["text"].as_str().unwrap_or_default();
+        assert!(text.len() < long.len(), "文本仍受截断上限约束");
+
+        // A plain string result keeps the old shape.
+        let plain = ToolResult {
+            content: serde_json::Value::String("ok".into()),
+            is_error: false,
+            diff: None,
+        };
+        let ContentBlock::ToolResult { content, .. } = result_block("t2", &plain) else {
+            unreachable!("tool result block")
+        };
+        assert_eq!(content, serde_json::Value::String("ok".into()));
+    }
 
     /// Image attachments: text block + image blocks when the provider supports them;
     /// text only otherwise.
@@ -1370,6 +1448,7 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         })
     }
 
@@ -1479,6 +1558,7 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         });
         let mut ui = headless_hooks();
         let outcome = run_bash_command(&session, "printf '%s' 'a<b&c>'", Vec::new(), &mut ui, None)
@@ -1719,6 +1799,7 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         });
         let mut ui = headless_hooks();
         let outcome = run_bash_command(&session, "htop", Vec::new(), &mut ui, None)

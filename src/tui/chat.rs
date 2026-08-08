@@ -404,15 +404,6 @@ pub const PASTE_BURST_KEYS: usize = 4;
 /// Pastes longer than this many lines collapse into a placeholder.
 pub const PASTE_COLLAPSE_LINES: usize = 10;
 
-/// Image placeholder reference (`#[image N]` → the Nth attachment, 1-based).
-static IMAGE_MARKER_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"#\[image (\d+)\]").expect("static regex"));
-
-/// Image placeholder text: `#[image N]`.
-fn image_marker(id: usize) -> String {
-    format!("#[image {id}]")
-}
-
 /// Expands a `~` prefix to the home directory (returns unchanged when there is no home).
 fn expand_home(path: &str) -> String {
     if let (Some(rest), Ok(home)) = (path.strip_prefix("~/"), std::env::var("HOME")) {
@@ -843,8 +834,6 @@ pub struct Chat {
     burst_keys: usize,
     /// Collapsed paste blocks: placeholder `[Pasted text #N +M lines]` → real content.
     pastes: Vec<(String, String)>,
-    /// Image attachments mounted in the message box (`#[image N]` placeholder → N = index here + 1).
-    attachments: Vec<crate::api::types::ImageAttachment>,
     /// `!` commands run in this session (prefix completion for Tab in bash mode).
     bash_history: Vec<String>,
     /// ctrl+r reverse search state (None = not active).
@@ -1127,7 +1116,6 @@ impl Chat {
             last_key_at: None,
             burst_keys: 0,
             pastes: Vec::new(),
-            attachments: Vec::new(),
             bash_history: Vec::new(),
             search: None,
             permission_mode,
@@ -1709,7 +1697,7 @@ impl Chat {
                 // settled/flushed with it) — nothing to clean at turn end, they persist with the session.
                 // 用户中断后不再因后台任务完成自动拉起新回合；
                 // 有排队消息时先让用户的消息走（下面统一提交）。
-                if (self.session.watch.has_wake_notifications()
+                if (self.session.watch.has_wake_notifications(None)
                     || self.session.channels.has_hub_mail())
                     && !self.interrupted
                     && self.queued.is_empty()
@@ -2157,7 +2145,11 @@ impl Chat {
             && let Some(id) = self.paste_clipboard_image()
         {
             self.snapshot(EditKind::Bulk);
-            crate::tui::input::insert(&mut self.input, &mut self.cursor, &image_marker(id));
+            crate::tui::input::insert(
+                &mut self.input,
+                &mut self.cursor,
+                &crate::api::image::marker(id),
+            );
             self.after_edit();
             self.dirty = true;
             return;
@@ -2210,7 +2202,7 @@ impl Chat {
                     std::path::PathBuf::from(&cwd).join(&expanded)
                 };
                 if let Some(id) = self.register_image_file(&path_buf) {
-                    out.push(image_marker(id));
+                    out.push(crate::api::image::marker(id));
                     continue;
                 }
             }
@@ -2221,28 +2213,12 @@ impl Chat {
 
     /// Resolves `#[image N]` references in text → attachments (deduped, in order); unknown ids are ignored.
     fn resolve_images(&self, text: &str) -> Vec<crate::api::types::ImageAttachment> {
-        let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for cap in IMAGE_MARKER_RE.captures_iter(text) {
-            if let Ok(n) = cap[1].parse::<usize>()
-                && n >= 1
-                && n <= self.attachments.len()
-                && seen.insert(n)
-            {
-                out.push(self.attachments[n - 1].clone());
-            }
-        }
-        out
+        self.session.attachments.resolve(text)
     }
 
     /// Raw image bytes → compress (within the API limit) → register the attachment → placeholder id.
     fn register_image(&mut self, bytes: &[u8]) -> Option<usize> {
-        let prepared = crate::api::image::prepare_image(bytes)?;
-        self.attachments.push(crate::api::types::ImageAttachment {
-            media_type: prepared.media_type,
-            data: prepared.data,
-        });
-        Some(self.attachments.len())
+        self.session.attachments.register(bytes)
     }
 
     /// Image file → register the attachment (read failure / non-image → None).
@@ -6645,6 +6621,7 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         });
         let mut chat = Chat::new(
             session,
@@ -7321,6 +7298,7 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         });
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
@@ -9898,14 +9876,14 @@ mod tests {
         chat.stream_msg = Some(0);
         chat.busy = true;
         let watch = chat.session.watch.clone();
-        let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new());
+        let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new(), None);
         watch.set_state(
             id,
             crate::watch::WatchState::Done,
             Some("完成".into()),
             None,
         );
-        assert!(watch.has_wake_notifications(), "notification queued");
+        assert!(watch.has_wake_notifications(None), "notification queued");
         chat.drain_events();
         assert!(chat.busy, "still busy, no auto turn mid-turn");
         let _ = chat.events.send(UiEvent::TurnEnd);
@@ -11990,8 +11968,11 @@ mod tests {
             "路径行替换为占位：{}",
             chat.queued[0].text
         );
-        assert_eq!(chat.attachments.len(), 1);
-        assert_eq!(chat.attachments[0].media_type, "image/png");
+        assert_eq!(chat.session.attachments.len(), 1);
+        assert_eq!(
+            chat.session.attachments.get(1).unwrap().media_type,
+            "image/png"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -12011,7 +11992,7 @@ mod tests {
             chat.queued[0].text,
             format!("#[image 1]\n{}", txt.display())
         );
-        assert_eq!(chat.attachments.len(), 1, "txt 不注册");
+        assert_eq!(chat.session.attachments.len(), 1, "txt 不注册");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -12029,8 +12010,14 @@ mod tests {
             format!("看 #[image {id1}] 和 #[image {id2}] 再看 #[image {id1}] 和 #[image 99]");
         let imgs = chat.resolve_images(&text);
         assert_eq!(imgs.len(), 2, "去重 + 越界忽略");
-        assert_eq!(imgs[0].data, chat.attachments[id1 - 1].data);
-        assert_eq!(imgs[1].data, chat.attachments[id2 - 1].data);
+        assert_eq!(
+            imgs[0].data,
+            chat.session.attachments.get(id1).unwrap().data
+        );
+        assert_eq!(
+            imgs[1].data,
+            chat.session.attachments.get(id2).unwrap().data
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

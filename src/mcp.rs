@@ -488,10 +488,17 @@ impl Tool for McpTool {
             .map_err(|e| ToolError::failed(format!("mcp call failed: {e}")))?;
 
         let mut text = String::new();
+        let mut images = Vec::new();
         for block in &result.content {
             if let Some(t) = block.as_text() {
                 text.push_str(&t.text);
             } else if let Some(image) = block.as_image() {
+                // Pass the image through rather than describing it: a server that returns a
+                // screenshot returned it to be looked at.
+                images.push(crate::api::types::ImageAttachment {
+                    media_type: image.mime_type.clone(),
+                    data: image.data.clone(),
+                });
                 text.push_str(&format!("[image: {} bytes]", image.data.len()));
             } else if let Some(resource) = block.as_resource() {
                 // Resource blocks carry a source prefix.
@@ -527,7 +534,11 @@ impl Tool for McpTool {
             text.push('\n');
         }
         Ok(ToolResult {
-            content: serde_json::Value::String(text),
+            content: if images.is_empty() {
+                serde_json::Value::String(text)
+            } else {
+                crate::api::types::tool_result_blocks(&text, &images)
+            },
             is_error: result.is_error.unwrap_or(false),
             diff: None,
         })

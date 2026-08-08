@@ -163,9 +163,11 @@ Example (.bingo/settings.json):
 
 ## Capability map (reference when asked "what can bingo do")
 
-- **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep, Edit/Write, WebFetch/WebSearch,
+- **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep (Read returns image files as
+  viewable images, so screenshots and rendered charts can be inspected), Edit/Write, WebFetch/WebSearch,
   Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
-  the Task family (task tracking), AskUserQuestion, Skill (skill invocation),
+  the Task family (task tracking), AskUserQuestion (main session only — a subagent has no prompt surface),
+  Skill (skill invocation),
   ExperiencePropose/Commit/Query/Outcome/Forget (project experience capture, retrieval, and verified-use feedback).
 - **Provider protocols**: anthropic (Messages API, default — all existing configs) and openai (Responses API,
   per named provider via `protocol: "openai"` in the settings `providers` section; bearer auth, `reasoning.effort`
@@ -201,10 +203,23 @@ Example (.bingo/settings.json):
   the project key is derived from the git remote URL (normalized) → git root → normalized absolute path, stable across directories/machines.
 - **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
   auto-suffix -2/-3), shown in the transcript as `◉ name · task`; history is kept after completion, and the main agent can
-  SendMessage to continue (queued while busy, woken when idle), or manage with AgentControl list/stop/delete.
+  SendMessage to continue, or manage with AgentControl list/messages/stop/delete.
+  **Messaging**: SendMessage returns a `message_id` and only queues — delivery happens at the turn boundary, where
+  every message sent to the same instance in that turn is folded into one prompt (the receiver reads them together
+  rather than one per turn). Queued is not an acknowledgement: `AgentControl(action=messages, agent=…)` reports each
+  message as delivered (with the run it landed in), still queued (with its age), or dropped because the instance was
+  stopped. Stopping or deleting an instance discards its inbox and says how many undelivered messages died with it.
+  A run chain that fails leaves its queued messages in place — the next turn boundary retries them.
+  **Images to subagents**: repeat an `#[image N]` marker in the Agent prompt or SendMessage text; the attachment table
+  belongs to the session, so the subagent receives the actual image (also carried along if the message has to queue).
   **Named definitions**: `~/.config/bingo/agents/*.md` and `.bingo/agents/*.md` (same-name project layer wins);
-  frontmatter `name/description/model/provider/thinking`, body = the subagent's system prompt; referenced by the Agent tool's
-  `agent` argument.
+  frontmatter `name/description/model/provider/thinking/inherit_system`, body = the subagent's system prompt; referenced by
+  the Agent tool's `agent` argument. The body is appended to the parent's system blocks by default; `inherit_system: false`
+  replaces them instead, which also drops the environment info, CLAUDE.md/AGENTS.md and project memory.
+  **What a subagent shares with the main session**: MCP connections and the permission-rule table are shared handles
+  (a subagent gets the same MCP tools; `/permissions` edits reach running instances), and permission prompts are
+  forwarded to the main session's modal — a subagent never has a tool call silently auto-denied. What it does not get:
+  AskUserQuestion, and being woken by background-task notifications (its result goes back to the hub instead).
   **Per-instance model/thinking**: the Agent tool's `model`/`provider`/`thinking` args give a single
   subagent a model, provider (the settings `providers` section; cross-endpoint/cross-key), and thinking level
   (`off/low/medium/high/xhigh/max`); precedence: explicit args > named definition > inherit the parent session's
@@ -246,9 +261,10 @@ Example (.bingo/settings.json):
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
 - **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts.
-- **内置工具**：Bash（经权限门）、Read/Glob/Grep、Edit/Write、WebFetch/WebSearch、
+- **内置工具**：Bash（经权限门）、Read/Glob/Grep（Read 对图片文件返回可看的图像，
+  截图与渲染图表可直接查看）、Edit/Write、WebFetch/WebSearch、
   Agent（子代理）、SendMessage/AgentControl（子代理续话与生命周期，仅主会话）、
-  Task 族（任务追踪）、AskUserQuestion、Skill（技能调用）、
+  Task 族（任务追踪）、AskUserQuestion（仅主会话——子代理没有提问界面）、Skill（技能调用）、
   ExperiencePropose/Commit/Query/Outcome/Forget（项目经验沉淀、检索与验证后反馈）。
 - **经验（Experience）**：跨会话复用可重跑的工作流。会话开始时注入本项目
   active 经验索引（≤10 条，显式观察结果优先于旧重复提交计数，空则不注入），全文用 ExperienceQuery 按 trigger
@@ -261,9 +277,16 @@ Example (.bingo/settings.json):
   项目键取 git remote URL（归一化）→ git 根 → 规范化绝对路径，跨目录/机器稳定。
 - **子代理**：Agent 派生的实例有名字（`name` 参数，缺省取定义名/agent，重名
   自动 -2/-3），transcript 显示为 `◉ 名字 · 任务`；完成后历史保留，主 agent 可
-  SendMessage 续话（忙碌排队、空闲唤醒）、AgentControl list/stop/delete 管理。
+  SendMessage 续话、AgentControl list/messages/stop/delete 管理。
+  **消息机制**：SendMessage 返回 `message_id` 且只入队，投递发生在回合边界——同一回合发给同一实例的
+  多条消息合并成一个 prompt 一次性送达，而不是一条一轮。排队不等于回执：
+  `AgentControl(action=messages, agent=…)` 逐条报告已送达（附落在第几轮）、仍排队（附等待时长）、
+  或因实例停止而丢弃。stop/delete 会清空信箱并报告有多少条未送达指令随之丢弃；
+  运行链失败时消息留在信箱，下一个回合边界重投。
+  **给子代理传图**：在 Agent prompt 或 SendMessage 文本里复述 `#[image N]` 占位即可——附件表属于会话，
+  子代理收到的是真图片（消息排队时图片一同携带）。
   **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`（同名项目层
-  优先）；frontmatter `name/description/model/provider/thinking`，正文 = 子代理
+  优先）；frontmatter `name/description/model/provider/thinking/inherit_system`，正文 = 子代理
   system prompt；Agent 工具的 `agent` 参数引用。
   **逐实例模型/思考**：Agent 工具的 `model`/`provider`/`thinking` 参数可给单个
   子代理指定模型、provider（settings 的 providers 段，跨端点/跨 key）与思考级别

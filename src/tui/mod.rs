@@ -92,6 +92,11 @@ pub async fn run_tui_session(
 
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (asks_tx, asks_rx) = mpsc::unbounded_channel();
+    // Subagents have no modal of their own; point them at this one so their permission
+    // requests reach the user instead of being auto-denied.
+    session
+        .agents
+        .attach_ask(crate::ui::modal_ask(asks_tx.clone()));
     let theme_setting = ThemeSetting::parse(session.settings.theme.as_deref());
     let mut chat = Chat::new(
         session.clone(),

@@ -90,7 +90,7 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
             .filter_map(|block| match block {
                 crate::api::types::ContentBlock::Text { text } => Some(text.clone()),
                 crate::api::types::ContentBlock::ToolResult { content, .. } => {
-                    Some(content.to_string())
+                    Some(crate::api::types::tool_result_text(content))
                 }
                 _ => None,
             })

@@ -183,6 +183,9 @@ pub fn render_markdown(text: &str) -> String {
 fn tool_result_text(content: &serde_json::Value) -> String {
     match content {
         serde_json::Value::String(s) => s.clone(),
+        // Block arrays (tool results carrying images) collapse to text with a size note rather
+        // than pretty-printing megabytes of base64 into the page.
+        serde_json::Value::Array(_) => crate::api::types::tool_result_text(content),
         other => serde_json::to_string_pretty(other).unwrap_or_default(),
     }
 }

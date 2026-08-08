@@ -47,6 +47,7 @@ pub fn test_session() -> Arc<Session> {
         agents: crate::agents::AgentRegistry::new(),
         channels: crate::channels::ChannelRegistry::new(Default::default()),
         instance: None,
+        attachments: crate::api::image::Attachments::new(),
     })
 }
 

@@ -535,6 +535,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: Arc::new(|_t, _q, _o| Box::pin(async { None })),
             home: home.to_path_buf(),
+            instance: None,
         }
     }
 

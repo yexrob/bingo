@@ -50,7 +50,6 @@ pub async fn assemble_tools(
         Box::new(TaskUpdateTool),
         Box::new(TaskGetTool),
         Box::new(TaskListTool),
-        Box::new(AskUserQuestionTool),
         Box::new(SkillTool::new(skills)),
         Box::new(ExperienceProposeTool),
         Box::new(ExperienceCommitTool),
@@ -62,6 +61,10 @@ pub async fn assemble_tools(
     // (subagents don't manage siblings).
     let channels_on = session.settings.experimental.agent_channels;
     if session.depth == 0 {
+        // Only the session that owns the UI can question the user. A subagent's answer
+        // channel is its return value, not a modal — shipping the tool there would just
+        // buy an "unanswered" round trip.
+        tools.push(Box::new(AskUserQuestionTool));
         tools.push(Box::new(SendMessageTool::new(session.clone())));
         tools.push(Box::new(AgentControlTool::new(session.clone())));
         if channels_on {
@@ -82,7 +85,13 @@ pub async fn assemble_tools(
         let mgr = session.runtime.mcp.clone();
         let (tools, warnings, pending) = {
             let mut guard = mgr.lock().await;
-            let warnings = guard.drain_unreported_failures();
+            // The manager is shared with subagents, whose on_warning is a no-op: draining
+            // there would consume the failure report and the user would never see it.
+            let warnings = if session.depth == 0 {
+                guard.drain_unreported_failures()
+            } else {
+                Vec::new()
+            };
             let pending = guard.needs_connect();
             guard.mark_connecting(&pending);
             let tools = guard.tools();
@@ -142,6 +151,7 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         })
     }
 
@@ -181,7 +191,7 @@ mod tests {
             .iter()
             .map(|t| t.name())
             .collect();
-        for expected in ["Agent", "SendMessage", "AgentControl"] {
+        for expected in ["Agent", "SendMessage", "AgentControl", "AskUserQuestion"] {
             assert!(
                 hub.iter().any(|n| n == expected),
                 "missing {expected}: {hub:?}"
@@ -193,7 +203,8 @@ mod tests {
             .map(|t| t.name())
             .collect();
         assert!(sub.iter().any(|n| n == "Agent"), "子代理仍可派生");
-        for absent in ["SendMessage", "AgentControl"] {
+        // AskUserQuestion needs a prompt surface: only the session that owns the UI has one.
+        for absent in ["SendMessage", "AgentControl", "AskUserQuestion"] {
             assert!(
                 !sub.iter().any(|n| n == absent),
                 "{absent} 不应下发: {sub:?}"

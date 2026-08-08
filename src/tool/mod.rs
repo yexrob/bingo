@@ -47,6 +47,9 @@ pub struct ToolContext {
     /// Ask the user multiple-choice questions (AskUserQuestion tool): title + question + options
     /// → option index (None = user skipped/Esc). The TUI reuses the permission prompt modal.
     pub ask_question: std::sync::Arc<crate::query::AskQuestionFn>,
+    /// Instance name of the calling session (None = main session). Watches registered here are
+    /// addressed to it, so its notifications land at its own turn boundary.
+    pub instance: Option<String>,
 }
 
 impl ToolContext {

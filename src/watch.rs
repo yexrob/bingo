@@ -250,6 +250,8 @@ struct Notification {
     detail: Option<String>,
     payload: Option<serde_json::Value>,
     signal: Option<String>,
+    /// Session this notification belongs to (see `Entry::owner`).
+    owner: Option<String>,
 }
 
 struct Entry {
@@ -264,6 +266,10 @@ struct Entry {
     feed_buffer: Vec<String>,
     /// Cumulative fed line count (for the LinesOver condition).
     total_lines: usize,
+    /// Instance name of the session that registered this watch (None = the main session).
+    /// The registry is shared by the hub and every subagent, so notifications are addressed:
+    /// a running subagent must not consume a completion meant for the hub.
+    owner: Option<String>,
 }
 
 struct Inner {
@@ -297,6 +303,7 @@ impl WatchRegistry {
         self: &Arc<Self>,
         watchable: Box<dyn Watchable>,
         conditions: Vec<NotifyCondition>,
+        owner: Option<String>,
     ) -> WatchId {
         let poll = watchable.poll();
         let label = watchable.label();
@@ -317,6 +324,7 @@ impl WatchRegistry {
                     conditions: conditions.into_iter().map(ConditionState::new).collect(),
                     feed_buffer: Vec::new(),
                     total_lines: 0,
+                    owner: owner.clone(),
                 },
             );
             id
@@ -334,6 +342,7 @@ impl WatchRegistry {
                     detail: poll.detail.clone(),
                     payload: poll.payload.clone(),
                     signal: None,
+                    owner,
                 });
         }
         let _ = self.tx.send(WatchEvent {
@@ -430,6 +439,7 @@ impl WatchRegistry {
                 entry.detail = Some(d.clone());
             }
             let entry_detail = entry.detail.clone();
+            let owner = entry.owner.clone();
             inner.notifications.push_back(Notification {
                 id,
                 label: label.clone(),
@@ -437,6 +447,7 @@ impl WatchRegistry {
                 detail,
                 payload: None,
                 signal: Some(signal.clone()),
+                owner,
             });
             (label, kind, state, entry_detail)
         };
@@ -496,6 +507,7 @@ impl WatchRegistry {
             entry.payload = payload.clone();
             let label = entry.label.clone();
             let kind = entry.kind;
+            let owner = entry.owner.clone();
             let notify = state.is_terminal() || state == WatchState::Idle;
             if state.is_terminal() {
                 // After terminal, no more content feeding or condition matching: compact
@@ -511,6 +523,7 @@ impl WatchRegistry {
                     detail: detail.clone(),
                     payload: payload.clone(),
                     signal: None,
+                    owner,
                 });
             }
             if state.is_terminal() {
@@ -561,22 +574,31 @@ impl WatchRegistry {
 
     /// Whether there are unconsumed wake notifications (terminal or signal) — used to
     /// trigger an extra automatic turn after a turn ends.
-    pub fn has_wake_notifications(&self) -> bool {
+    pub fn has_wake_notifications(&self, owner: Option<&str>) -> bool {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
             .notifications
             .iter()
+            .filter(|n| n.owner.as_deref() == owner)
             .any(|n| n.state.is_terminal() || n.signal.is_some())
     }
 
     /// Take out the notifications pending injection into the model (merges adjacent Idle
     /// entries with the same id into one round summary).
-    pub fn consume_notifications(&self) -> Vec<String> {
+    pub fn consume_notifications(&self, owner: Option<&str>) -> Vec<String> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // Only this session's notifications are taken; everyone else's keep their order in
+        // the queue for their own turn boundary.
+        let (mine, others): (VecDeque<Notification>, VecDeque<Notification>) =
+            std::mem::take(&mut inner.notifications)
+                .into_iter()
+                .partition(|n| n.owner.as_deref() == owner);
+        inner.notifications = others;
+        let mut mine = mine;
         let mut out: Vec<String> = Vec::new();
         // (id, label, round count, latest detail)
         let mut pending: Option<(WatchId, String, u32, String)> = None;
-        while let Some(n) = inner.notifications.pop_front() {
+        while let Some(n) = mine.pop_front() {
             if let Some(sig) = n.signal {
                 if let Some((id, label, count, last)) = pending.take() {
                     out.push(format_notification(id, label, count, last));
@@ -706,6 +728,7 @@ mod tests {
                 interval: None,
             }),
             Vec::new(),
+            None,
         );
         let ev = rx.recv().await.unwrap_or_else(|_| unreachable!());
         assert_eq!(ev.id, id);
@@ -729,6 +752,7 @@ mod tests {
                 interval: None,
             }),
             Vec::new(),
+            None,
         );
         reg.set_state(id, WatchState::Running, None, None);
         assert_eq!(reg.snapshot()[0].state, WatchState::Running);
@@ -756,15 +780,16 @@ mod tests {
                 interval: None,
             }),
             Vec::new(),
+            None,
         );
         reg.set_state(id, WatchState::Idle, Some("第 1 轮".into()), None);
         reg.set_state(id, WatchState::Idle, Some("第 2 轮".into()), None);
         reg.set_state(id, WatchState::Done, Some("fin".into()), None);
-        let notes = reg.consume_notifications();
+        let notes = reg.consume_notifications(None);
         assert_eq!(notes.len(), 2, "{notes:?}");
         assert!(notes[0].contains("已完成 2 轮"), "merged: {}", notes[0]);
         assert!(notes[1].contains("fin"), "terminal: {}", notes[1]);
-        assert!(reg.consume_notifications().is_empty(), "consumed");
+        assert!(reg.consume_notifications(None).is_empty(), "consumed");
     }
 
     #[test]
@@ -784,6 +809,7 @@ mod tests {
                 interval: None,
             }),
             Vec::new(),
+            None,
         );
         reg.set_state(id, WatchState::Done, Some("完成".into()), None);
         reg.set_state(id, WatchState::Running, Some("已产出 33 字符".into()), None);
@@ -843,6 +869,7 @@ mod tests {
                 interval: None,
             }),
             vec![NotifyCondition::Contains(vec!["boom".into()])],
+            None,
         );
         reg.feed_content(id, "INFO line");
         assert!(reg.match_conditions(id).is_empty(), "no hit yet");
@@ -852,6 +879,35 @@ mod tests {
         assert!(signals[0].contains("boom"), "{}", signals[0]);
         // Buffer cleared: another match yields no signal
         assert!(reg.match_conditions(id).is_empty(), "buffer drained");
+    }
+
+    /// The registry is shared by the hub and every subagent, so notifications are addressed:
+    /// each session consumes only its own, and everyone else's keep their place in the queue.
+    #[test]
+    fn notifications_are_consumed_by_their_owner_only() {
+        let reg = watch();
+        let hub = reg.register_with_conditions(running_watch("hub task"), Vec::new(), None);
+        let sub = reg.register_with_conditions(
+            running_watch("sub task"),
+            Vec::new(),
+            Some("worker".to_string()),
+        );
+        reg.set_state(hub, WatchState::Done, Some("完成".into()), None);
+        reg.set_state(sub, WatchState::Done, Some("完成".into()), None);
+
+        assert!(reg.has_wake_notifications(None), "hub 有待唤醒通知");
+        assert!(reg.has_wake_notifications(Some("worker")));
+
+        // The subagent's turn boundary takes only its own; the hub's stays queued.
+        let mine = reg.consume_notifications(Some("worker"));
+        assert_eq!(mine.len(), 1, "{mine:?}");
+        assert!(mine[0].contains("sub task"), "{mine:?}");
+        assert!(!reg.has_wake_notifications(Some("worker")), "已消费");
+        assert!(reg.has_wake_notifications(None), "hub 的通知没被抢走");
+
+        let hub_notes = reg.consume_notifications(None);
+        assert_eq!(hub_notes.len(), 1, "{hub_notes:?}");
+        assert!(hub_notes[0].contains("hub task"), "{hub_notes:?}");
     }
 
     fn running_watch(label: &'static str) -> Box<FakeWatch> {
@@ -890,9 +946,9 @@ mod tests {
     #[test]
     fn emit_signal_truncates_long_text() {
         let reg = watch();
-        let id = reg.register_with_conditions(running_watch("noisy"), Vec::new());
+        let id = reg.register_with_conditions(running_watch("noisy"), Vec::new(), None);
         reg.emit_signal(id, "巨".repeat(10_000), None);
-        let notes = reg.consume_notifications();
+        let notes = reg.consume_notifications(None);
         assert!(notes.iter().any(|n| n.contains("[truncated]")), "{notes:?}");
         assert!(
             notes
@@ -906,8 +962,11 @@ mod tests {
     #[test]
     fn feed_buffer_is_bounded_without_drain() {
         let reg = watch();
-        let id =
-            reg.register_with_conditions(running_watch("flood"), vec![NotifyCondition::Errors]);
+        let id = reg.register_with_conditions(
+            running_watch("flood"),
+            vec![NotifyCondition::Errors],
+            None,
+        );
         for i in 0..(MAX_FEED_BUFFER_LINES * 3) {
             reg.feed_content(id, &format!("line {i}\n"));
         }
@@ -935,7 +994,11 @@ mod tests {
     #[test]
     fn terminal_entries_are_compacted_and_pruned() {
         let reg = watch();
-        let id = reg.register_with_conditions(running_watch("done"), vec![NotifyCondition::Errors]);
+        let id = reg.register_with_conditions(
+            running_watch("done"),
+            vec![NotifyCondition::Errors],
+            None,
+        );
         reg.feed_content(id, "some output\n");
         reg.set_state(id, WatchState::Done, Some("ok".into()), None);
         {
@@ -945,7 +1008,7 @@ mod tests {
             assert!(entry.conditions.is_empty(), "终态释放条件");
         }
         for _ in 0..(MAX_TERMINAL_ENTRIES * 2) {
-            let extra = reg.register_with_conditions(running_watch("x"), Vec::new());
+            let extra = reg.register_with_conditions(running_watch("x"), Vec::new(), None);
             reg.set_state(extra, WatchState::Done, Some("ok".into()), None);
         }
         {
@@ -978,6 +1041,7 @@ mod tests {
                 interval: None,
             }),
             Vec::new(),
+            None,
         );
         let _ = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
@@ -993,7 +1057,7 @@ mod tests {
             .unwrap_or_else(|_| unreachable!())
             .unwrap_or_else(|_| unreachable!());
         assert_eq!(ev.signal.as_deref(), Some("发现错误：boom"));
-        let notes = reg.consume_notifications();
+        let notes = reg.consume_notifications(None);
         assert!(
             notes
                 .iter()
@@ -1045,6 +1109,7 @@ mod tests {
                 interval: Some(Duration::from_millis(5)),
             }),
             Vec::new(),
+            None,
         );
         // Initial event + polling events: at least Running → Idle → Done appears.
         let mut seen: Vec<WatchState> = Vec::new();

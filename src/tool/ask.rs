@@ -245,6 +245,7 @@ mod tests {
                 );
                 Box::pin(async { Some(crate::query::AskAnswer::Option(1)) })
             }),
+            instance: None,
         };
         let tool = AskUserQuestionTool;
         let result = tool
@@ -280,6 +281,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| {
                 Box::pin(async { Some(crate::query::AskAnswer::Other("用 serde".to_string())) })
             }),
+            instance: None,
         };
         let tool = AskUserQuestionTool;
         let result = tool
@@ -309,6 +311,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         };
         let tool = AskUserQuestionTool;
         let result = tool
@@ -338,6 +341,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         };
         let tool = AskUserQuestionTool;
         let err = tool
@@ -367,6 +371,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         };
         let ask = AskUserQuestionTool;
         let bash = BashTool::new();
