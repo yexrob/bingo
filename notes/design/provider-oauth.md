@@ -258,9 +258,21 @@ Rules (main's rulings applied):
 
 ### 6.0 Correction to the premise: opencode-go is NOT OAuth
 
-Research result: **opencode-go (like OpenCode Zen) is an API-key subscription, not an OAuth flow.** Per opencode docs: `/connect` → select OpenCode Go → opencode.ai/auth → sign in → **copy API key** → paste. No device flow, no tokens. So "opencode go 订阅" lands in bingo as a **named provider with `protocol: "openai"` (or whatever it exposes) + `apiKey`** — plain API-key provider, zero OAuth code. The OAuth work is driven by **Codex (ChatGPT account)**; opencode-go's protocol/base URL to be verified at implementation time (its docs point to opencode.ai/auth; models are "popular open coding models").
+Research result: **opencode-go (like OpenCode Zen) is an API-key subscription, not an OAuth flow.** Per opencode docs: `/connect` → select OpenCode Go → opencode.ai/auth → sign in → **copy API key** → paste. No device flow, no tokens. So "opencode go 订阅" lands in bingo as a **named provider with `protocol: "openai"` (or whatever it exposes) + `apiKey`** — plain API-key provider, zero OAuth code. The OAuth work is driven by **Codex (ChatGPT account)**.
 
 The `oauth.kind` enum in §5 therefore starts with `"codex"`; `"opencode"` is not needed for the go subscription (main confirmed: opencode-go = `protocol: "openai"` + `apiKey`, zero OAuth code; kept as a future extension point if opencode ever ships an OAuth flow).
+
+**Endpoints verified by main (2026-08, source-level against opencode's go.mdx + provider source):**
+- base: `https://opencode.ai/zen/go/v1/`; models via `GET /v1/models`; auth = API key (bearer).
+- **Model-level protocol mixing (one subscription, three wire protocols):**
+  - `gpt-5.6-luna` → `/v1/responses` (OpenAI Responses — reuses the P1 adapter)
+  - `grok` / `glm` / `kimi` / `deepseek-v4` / `hy3` → `/v1/chat/completions` (no adapter in bingo)
+  - `minimax` / `qwen` series → `/v1/messages` (Anthropic)
+- **bingo v1 consequence**: `protocol` is provider-level, so the pragmatic config is a provider per protocol family:
+  - `opencode-go`: `protocol: "openai"` + `apiBaseUrl: "https://opencode.ai/zen/go"` (adapter appends `/v1/responses`) → usable with `gpt-5.6-luna`; **zero new adapter code** (P3 = a config entry + guide docs).
+  - chat/completions models: **out of scope this round** — recorded as a future adapter candidate (OpenAI Chat Completions adapter), not a P3 blocker.
+  - anthropic-protocol models (minimax/qwen): a separate provider entry with `protocol: "anthropic"` (default) pointing at the same base works through the existing anthropic adapter (path appended per protocol).
+- User's settings already carry an `opencode-go` entry (placeholder key to be replaced).
 
 ### 6.1 Codex / ChatGPT auth flows (the reference implementation)
 
@@ -344,7 +356,7 @@ Command surface (added to the existing `/provider`):
 
 - **P0+P1 — Contract + Anthropic absorption + OpenAI adapter (ONE batch)**: `api::contract` types, `ProviderClient` trait, registry, move client.rs internals into the anthropic adapter; wire mapping + SSE event mapping + accumulator glue + `count_tokens` fallback + `/model` menu + mock-server tests with Responses SSE fixtures. Zero behavior change for anthropic; existing tests must pass unchanged. **P1 acceptance includes verifying whether api.openai.com/v1/responses requires reasoning items attached to function_call_output — if mandatory, pass back a minimal placeholder (main's ruling; decide by actual API behavior).** Commits: `♻️(refactor): extract provider protocol layer (anthropic adapter)` + `✨(feat): openai responses protocol provider`.
 - **P2 — OAuth core (Codex/ChatGPT)**: **0.5-day spike first** — login with a real account, try `api.openai.com/v1/responses` with the OAuth bearer (Path 1, reuses the P1 openai adapter); only if rejected, implement the private `chatgpt.com/backend-api` protocol ("codex" adapter). Then: `TokenProvider` + loopback PKCE + device flow + `/provider login|logout`, auth.json persistence, eager+401 refresh with single-flight, auth status in `/provider`. Commit: `✨(feat): oauth device-flow login (codex)`.
-- **P3 — opencode go provider**: named provider + `protocol: "openai"` + `apiKey` (main's ruling: zero OAuth code); verify protocol/base URL from opencode.ai/auth at implementation time. Commit: `✨(feat): opencode go provider`.
+- **P3 — opencode go provider** (zero new code; verified by main from opencode docs + provider source): subscription base `https://opencode.ai/zen/go` (models via `GET /v1/models`, API key auth). **Model-level protocol mix**: `gpt-5.6-luna` → `/v1/responses` (OpenAI — reuse the P1 adapter with `protocol: "openai"` + `apiBaseUrl: https://opencode.ai/zen/go` + explicit model `gpt-5.6-luna`); grok/glm/kimi/deepseek-v4/hy3 → `/v1/chat/completions` (no adapter — **out of scope, recorded as a future adapter candidate**); minimax/qwen → `/v1/messages` (Anthropic — a separate provider entry). The `/model` menu pulls the subscription's model list and works for the responses models. Commit: `📚(docs): opencode go provider entry (verified endpoint facts)` — no protocol code lands in this phase.
 - **P4 — UX polish**: protocol badge, auth status columns, error copy for expired tokens, guide.md sync (config table + capability map + diagnostics), README tables.
 
 ### 8.1 P1 acceptance checklist (main's requirement #4 — reasoning-return verification, actual API behavior wins)
@@ -399,7 +411,7 @@ Checked against D33 §6 / the codex source:
 
 **Implementation-time verifications (not blocking P0/P1):**
 9. **P2 spike**: does `api.openai.com/v1/responses` accept the ChatGPT OAuth bearer (opencode's path, reuses P1 adapter), or must bingo implement the private `chatgpt.com/backend-api` codex protocol? (§6.1b — 0.5-day spike at P2 start.)
-10. opencode-go protocol/base URL — verify at P3 time (docs point at opencode.ai/auth).
+10. ~~opencode-go protocol/base URL~~ — **resolved by main** (2026-08, opencode go.mdx + provider source): `https://opencode.ai/zen/go/v1/`, model-level protocol mix (gpt-5.6-luna → Responses /v1/responses; grok..hy3 → chat/completions — future adapter candidate; minimax/qwen → anthropic /v1/messages — separate entry).
 
 ## 11. References
 
