@@ -163,13 +163,18 @@ impl OpenAIProvider {
 }
 
 /// NeutralRequest → Responses request body.
-fn build_body(request: &NeutralRequest) -> serde_json::Value {
+fn build_body(request: &NeutralRequest, variant: OpenAiVariant) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": request.model,
         "max_output_tokens": request.max_tokens,
         "stream": request.stream,
         "input": build_input(&request.messages),
     });
+    // The codex subscription endpoint rejects the default `store: true`
+    // (400 "Store must be set to false"); the public API keeps its default.
+    if variant == OpenAiVariant::Codex {
+        body["store"] = serde_json::json!(false);
+    }
     if !request.system.is_empty() {
         // The system prompt is a single `instructions` string; segments are
         // joined (caching breakpoints are a per-protocol concern — anthropic
@@ -561,7 +566,7 @@ impl ProviderClient for OpenAIProvider {
     }
 
     async fn stream(&self, request: &NeutralRequest) -> Result<BoxStream, ClientError> {
-        let body = build_body(request);
+        let body = build_body(request, self.variant());
         let mut attempt = 0;
         let mut auth_refreshed = false;
         let base_url = self.base_url();
@@ -628,7 +633,7 @@ impl ProviderClient for OpenAIProvider {
     }
 
     async fn complete_text(&self, request: &NeutralRequest) -> Result<String, ClientError> {
-        let mut body = build_body(request);
+        let mut body = build_body(request, self.variant());
         body["stream"] = serde_json::json!(false);
         let base_url = self.base_url();
         // OAuth 401 recovery: refresh once and retry (short-sync write; the
@@ -811,7 +816,7 @@ mod tests {
             },
         ];
         r.thinking = Some(ThinkingLevel::High);
-        let body = build_body(&r);
+        let body = build_body(&r, OpenAiVariant::Default);
         assert_eq!(body["instructions"], "role\n\ntools");
         assert_eq!(body["reasoning"], serde_json::json!({"effort": "high"}));
         assert_eq!(
@@ -819,6 +824,18 @@ mod tests {
             serde_json::json!(["reasoning.summary_text"])
         );
         assert_eq!(body["max_output_tokens"], 1024);
+    }
+
+    /// main-reported contract: the codex subscription endpoint requires an
+    /// explicit `store: false` (it rejects the default store:true with 400
+    /// "Store must be set to false"); the default variant keeps its behavior.
+    #[test]
+    fn codex_body_has_store_false_default_does_not() {
+        let r = req();
+        let codex = build_body(&r, OpenAiVariant::Codex);
+        assert_eq!(codex["store"], serde_json::json!(false), "codex 显式 store:false");
+        let default = build_body(&r, OpenAiVariant::Default);
+        assert!(default.get("store").is_none(), "默认变体不带 store（零行为变化）");
     }
 
     /// Tools map input_schema → parameters with the function envelope.
@@ -830,7 +847,7 @@ mod tests {
             "description": "run a command",
             "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}},
         })];
-        let body = build_body(&r);
+        let body = build_body(&r, OpenAiVariant::Default);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "Bash");
         assert_eq!(
