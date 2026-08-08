@@ -1034,16 +1034,33 @@ pub async fn run_query(
 
 /// User input → message: text block first, image blocks after (when the provider supports
 /// them). The text keeps `#[image N]` placeholders so the model senses the images through them.
+///
+/// When a placeholder arrives without its image, say why. A bare dangling marker reads to the
+/// model as an image it merely failed to locate, and it will go looking — through the
+/// transcript, through temp directories — instead of telling the user what is actually wrong.
 fn user_message_with_images(
     text: &str,
     images: &[crate::api::types::ImageAttachment],
     send_images: bool,
 ) -> Message {
     use crate::api::types::{ContentBlock, ImageSource, Role};
-    let mut content = vec![ContentBlock::Text {
-        text: text.to_string(),
-    }];
-    if send_images {
+    let attaching = send_images && !images.is_empty();
+    let mut body = text.to_string();
+    if !attaching && crate::api::image::has_marker(text) {
+        body.push_str(if send_images {
+            "\n\n<system-reminder>The `#[image N]` placeholders above have no image attached: \
+             the referenced attachment is not in this session (attachments live in memory, so \
+             markers from a resumed or restored session no longer resolve). Do not go looking \
+             for the file — tell the user the image needs to be attached again.</system-reminder>"
+        } else {
+            "\n\n<system-reminder>The `#[image N]` placeholders above have no image attached: \
+             this endpoint is not configured to receive images. Do not go looking for the file — \
+             tell the user to enable `sendImages` (or set `supportsImages` on the provider) and \
+             resend.</system-reminder>"
+        });
+    }
+    let mut content = vec![ContentBlock::Text { text: body }];
+    if attaching {
         content.extend(images.iter().map(|img| ContentBlock::Image {
             source: ImageSource::base64(&img.media_type, &img.data),
         }));
@@ -1311,6 +1328,41 @@ mod tests {
             unreachable!("tool result block")
         };
         assert_eq!(content, serde_json::Value::String("ok".into()));
+    }
+
+    /// A placeholder that arrives without its image must say why. Left bare, the model reads it
+    /// as an image it failed to locate and starts hunting through the transcript and temp dirs
+    /// instead of telling the user what is actually wrong.
+    #[test]
+    fn dangling_image_marker_explains_itself() {
+        use crate::api::types::{ContentBlock, ImageAttachment};
+        let imgs = vec![ImageAttachment {
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+        }];
+        let text_of = |msg: &Message| match &msg.content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => unreachable!("text block first"),
+        };
+
+        // Endpoint cannot take images: point at the setting, not at the filesystem.
+        let msg = user_message_with_images("看图 #[image 1]", &imgs, false);
+        assert_eq!(msg.content.len(), 1, "端点不支持时不发图片块");
+        let text = text_of(&msg);
+        assert!(text.contains("sendImages"), "{text}");
+        assert!(text.contains("Do not go looking"), "{text}");
+
+        // Marker that no longer resolves (resumed session): say the attachment is gone.
+        let msg = user_message_with_images("看图 #[image 9]", &[], true);
+        let text = text_of(&msg);
+        assert!(text.contains("not in this session"), "{text}");
+
+        // No marker, no note — the reminder is only for a placeholder without its image.
+        let msg = user_message_with_images("随便问问", &[], true);
+        assert_eq!(text_of(&msg), "随便问问");
+        // Images actually attached: text stays verbatim.
+        let msg = user_message_with_images("看图 #[image 1]", &imgs, true);
+        assert_eq!(text_of(&msg), "看图 #[image 1]");
     }
 
     /// Image attachments: text block + image blocks when the provider supports them;

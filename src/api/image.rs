@@ -30,6 +30,11 @@ pub fn marker(id: usize) -> String {
     format!("#[image {id}]")
 }
 
+/// Whether the text references an attachment at all.
+pub fn has_marker(text: &str) -> bool {
+    MARKER_RE.is_match(text)
+}
+
 /// Session-scoped attachment table. Images the user mounts on the input box live here as
 /// base64; the message text carries only `#[image N]` markers, so the model has a stable
 /// handle it can repeat — including when handing work to a subagent, which is why the table
