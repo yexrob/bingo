@@ -141,15 +141,11 @@ fn suggestion_rows(
     theme: &Theme,
     width: usize,
 ) -> Vec<Row> {
-    let row = |line: String, selected: bool| {
-        let color = if selected {
-            theme.permission
-        } else {
-            theme.inactive
-        };
-        Row::new(Line::styled(line, SegStyle::fg(color)))
-    };
-    if slash.is_empty() {
+    // Menus render before the slash dropdown — the SAME priority as key
+    // dispatch. They used to disagree: a menu stayed keyboard-active while
+    // the screen showed the dropdown, so Enter landed on an invisible
+    // selection.
+    {
         let Some(menu) = menus.model else {
             // `/think` level selector (when the model menu is inactive).
             if let Some(think) = menus.think {
@@ -200,14 +196,18 @@ fn suggestion_rows(
                 }
                 return rows;
             }
-            // G9: a bare `/`-query with zero matches gets one dim hint row.
-            if no_match {
-                return vec![Row::new(Line::styled(
-                    "  （无匹配命令 · 输入 /help 查看可用命令）",
-                    SegStyle::fg(theme.inactive),
-                ))];
+            // No menu open: fall through to the slash dropdown / no-match hint.
+            if slash.is_empty() {
+                // G9: a bare `/`-query with zero matches gets one dim hint row.
+                if no_match {
+                    return vec![Row::new(Line::styled(
+                        "  （无匹配命令 · 输入 /help 查看可用命令）",
+                        SegStyle::fg(theme.inactive),
+                    ))];
+                }
+                return Vec::new();
             }
-            return Vec::new();
+            return slash_rows(slash, slash_selected, theme, width);
         };
         // `/model` two-level selector: level one `provider`（PickerModel 核心渲染，
         // 与 /provider 同源的端点/认证描述列）、level two `model`（同一 Picker
@@ -264,8 +264,27 @@ fn suggestion_rows(
             ),
             SegStyle::fg(theme.inactive),
         )));
-        return rows;
+        rows
     }
+}
+
+/// Slash dropdown rows (the no-menu path): windowed around the selection so
+/// every command stays reachable from a bare `/` (the old hard cap of 5 hid
+/// the rest with no indicator).
+fn slash_rows(
+    slash: &[SlashSuggestion],
+    slash_selected: usize,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Row> {
+    let row = |line: String, selected: bool| {
+        let color = if selected {
+            theme.permission
+        } else {
+            theme.inactive
+        };
+        Row::new(Line::styled(line, SegStyle::fg(color)))
+    };
     let name_col = slash
         .iter()
         .map(|s| s.name.chars().count() + usize::from(!s.hint.is_empty()) + s.hint.chars().count())
@@ -274,25 +293,45 @@ fn suggestion_rows(
         + 2;
     // Available description width = terminal width - padding(2) - "❯ "(2) - name column - separator(2).
     let desc_width = width.saturating_sub(2 + 2 + name_col + 2).max(8);
-    slash
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let selected = i == slash_selected;
-            let cmd = if s.hint.is_empty() {
-                format!("/{}", s.name)
-            } else {
-                format!("/{} {}", s.name, s.hint)
-            };
-            let name_text = format!("{cmd:<name_col$}");
-            let desc = crate::tui::markdown::truncate(&s.description, desc_width);
-            let line = crate::tui::markdown::truncate(
-                &format!("{}{name_text}  {desc}", if selected { "❯ " } else { "  " }),
-                width.saturating_sub(2),
-            );
-            row(line, selected)
-        })
-        .collect()
+    let visible = crate::tui::chat::SLASH_SUGGESTIONS_MAX;
+    let (start, end) = if slash.len() <= visible {
+        (0, slash.len())
+    } else {
+        let start = slash_selected
+            .saturating_sub(visible / 2)
+            .min(slash.len() - visible);
+        (start, start + visible)
+    };
+    let more = |n: usize| {
+        Row::new(Line::styled(
+            crate::tui::markdown::truncate(&format!("  … 还有 {n} 条"), width.saturating_sub(2)),
+            SegStyle::fg(theme.inactive),
+        ))
+    };
+    let mut rows = Vec::new();
+    if start > 0 {
+        rows.push(more(start));
+    }
+    rows.extend(slash[start..end].iter().enumerate().map(|(offset, s)| {
+        let i = start + offset;
+        let selected = i == slash_selected;
+        let cmd = if s.hint.is_empty() {
+            format!("/{}", s.name)
+        } else {
+            format!("/{} {}", s.name, s.hint)
+        };
+        let name_text = format!("{cmd:<name_col$}");
+        let desc = crate::tui::markdown::truncate(&s.description, desc_width);
+        let line = crate::tui::markdown::truncate(
+            &format!("{}{name_text}  {desc}", if selected { "❯ " } else { "  " }),
+            width.saturating_sub(2),
+        );
+        row(line, selected)
+    }));
+    if end < slash.len() {
+        rows.push(more(slash.len() - end));
+    }
+    rows
 }
 
 /// The suggestion area of a chat (dropdown or the active picker menu).
@@ -801,7 +840,8 @@ mod tests {
             crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5,
             "模型菜单优先于 think 菜单"
         );
-        // Slash suggestions take priority over menus.
+        // Menus take priority over slash suggestions — the same order as key
+        // dispatch (they used to disagree: keys went to an invisible menu).
         let slash = vec![SlashSuggestion {
             name: "help".into(),
             hint: String::new(),
@@ -821,6 +861,12 @@ mod tests {
             &theme,
             80,
         );
+        assert!(
+            rows.iter().any(|r| row_text(r).contains("m0")),
+            "菜单可见（渲染与按键同序）"
+        );
+        // 无菜单时下拉照常。
+        let rows = suggestion_rows(&slash, 0, Menus::default(), false, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(
             row_text(&rows[0]).starts_with("❯ /help"),

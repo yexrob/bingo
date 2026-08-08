@@ -70,6 +70,13 @@ pub fn help_lines(commands: &[SlashCommand]) -> Vec<String> {
         };
         lines.push(format!("  {command:<command_width$} — {description}"));
     }
+    // Sub-commands invisible to the dropdown, and the cross-link to the key
+    // panel (the two help surfaces used to be disjoint islands).
+    lines.push(
+        "  /provider login <名称> [--device-auth|--manual <token>] · /provider logout <名称>"
+            .to_string(),
+    );
+    lines.push("快捷键：空输入按 ? 查看全表".to_string());
     lines
 }
 
@@ -138,7 +145,11 @@ mod tests {
     #[test]
     fn help_is_derived_from_registry() {
         let lines = help_lines(COMMANDS);
-        assert_eq!(lines.len(), COMMANDS.len() + 1);
+        assert_eq!(
+            lines.len(),
+            COMMANDS.len() + 3,
+            "标题 + 命令 + 子命令行 + 快捷键互链"
+        );
         assert_eq!(lines[0], "可用命令：");
         for ((name, hint, description), line) in COMMANDS.iter().zip(&lines[1..]) {
             assert!(line.contains(&format!("/{name}")), "命令存在: {line}");

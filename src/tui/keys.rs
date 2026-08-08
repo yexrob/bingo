@@ -40,6 +40,14 @@ pub const BINDINGS: &[Binding] = &[
         description: "start / end of line",
     },
     Binding {
+        keys: "home/end",
+        description: "start / end of line",
+    },
+    Binding {
+        keys: "ctrl+d",
+        description: "delete char after caret",
+    },
+    Binding {
         keys: "alt+b/f",
         description: "move one word",
     },
@@ -53,11 +61,23 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+r",
-        description: "search prompt history",
+        description: "search prompt history (tab adopt · esc cancel)",
+    },
+    Binding {
+        keys: "tab",
+        description: "complete slash / bash history",
+    },
+    Binding {
+        keys: "pgup/pgdn",
+        description: "scroll transcript (fullscreen)",
+    },
+    Binding {
+        keys: "mouse",
+        description: "wheel scroll · click folds (fullscreen)",
     },
     Binding {
         keys: "ctrl+s",
-        description: "stash input · press again to restore",
+        description: "stash input (empty input restores it)",
     },
     Binding {
         keys: "ctrl+_",
@@ -89,7 +109,11 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "! / /",
-        description: "shell mode / commands",
+        description: "shell mode / commands (empty input; esc exits shell)",
+    },
+    Binding {
+        keys: "1-9 · s",
+        description: "picker: jump · session-only apply",
     },
     Binding {
         keys: "?",
@@ -159,6 +183,10 @@ pub fn help_lines(width: usize, max_rows: usize) -> Vec<String> {
     if truncated {
         let shown = out.len() * columns;
         out.push(format!("… +{} more", BINDINGS.len().saturating_sub(shown)));
+    } else {
+        // Cross-link: the two help surfaces reference each other (they used
+        // to be disjoint islands).
+        out.push("commands: /help".to_string());
     }
     out
 }
@@ -171,7 +199,8 @@ mod tests {
     fn help_panel_fits_the_row_budget() {
         for max_rows in 1..30 {
             let lines = help_lines(100, max_rows);
-            assert!(lines.len() <= max_rows, "max_rows={max_rows}");
+            // The /help cross-link row rides along only on untruncated panels.
+            assert!(lines.len() <= max_rows + 1, "max_rows={max_rows}");
         }
         assert!(help_lines(100, 0).is_empty(), "no budget = no panel");
     }
@@ -196,7 +225,7 @@ mod tests {
         let wide = help_lines(200, 40);
         let narrow = help_lines(50, 40);
         assert!(narrow.len() > wide.len(), "narrow stacks into more rows");
-        assert_eq!(narrow.len(), BINDINGS.len());
+        assert_eq!(narrow.len(), BINDINGS.len() + 1, "全部绑定 + /help 互链行");
     }
 
     #[test]

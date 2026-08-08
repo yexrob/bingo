@@ -2315,6 +2315,28 @@ impl Chat {
         self.dirty = true;
     }
 
+    /// Whether any picker menu is open (dispatch and render read the same
+    /// fact — they used to disagree on priority).
+    fn menu_open(&self) -> bool {
+        self.model_menu.is_some()
+            || self.think_menu.is_some()
+            || self.theme_menu.is_some()
+            || self.resume_menu.is_some()
+            || self.provider_menu.is_some()
+    }
+
+    /// The single mutual-exclusion point: every open_* goes through here —
+    /// the old per-open hand-written clears formed an asymmetric triangle
+    /// (newer menus closed older ones, never the reverse).
+    fn close_menus(&mut self) {
+        self.model_menu = None;
+        self.think_menu = None;
+        self.theme_menu = None;
+        self.resume_menu = None;
+        self.provider_menu = None;
+        self.dirty = true;
+    }
+
     /// Clears the slash dropdown and its no-match flag together (single lifecycle).
     fn clear_slash_suggestions(&mut self) {
         self.slash_suggestions.clear();
@@ -2463,6 +2485,7 @@ impl Chat {
     /// Enters the `/model` two-level selector: level one = current endpoint + configured providers
     /// (with the same endpoint/auth descriptions as /provider — it is the same list).
     fn open_model_menu(&mut self) {
+        self.close_menus();
         let providers = self.provider_order();
         let provider_descs = providers.iter().map(|p| self.provider_desc(p)).collect();
         let current = self.session.runtime.provider.borrow().clone();
@@ -2758,8 +2781,7 @@ impl Chat {
         if menu.picker().is_empty() {
             return;
         }
-        self.think_menu = None;
-        self.model_menu = None;
+        self.close_menus();
         self.theme_menu = Some(menu);
         self.clear_slash_suggestions();
     }
@@ -2792,10 +2814,10 @@ impl Chat {
                     && core.jump(n as usize)
                 {
                     menu.selected = core.selected;
-                    true
-                } else {
-                    false
                 }
+                // Swallow even out-of-range digits: a menu is a modal surface —
+                // "4" on a 3-item picker used to type a literal 4 into the input.
+                true
             }
             KeyCode::Enter => {
                 let core = menu.picker();
@@ -2887,9 +2909,7 @@ impl Chat {
         if menu.picker().is_empty() {
             return;
         }
-        self.think_menu = None;
-        self.model_menu = None;
-        self.theme_menu = None;
+        self.close_menus();
         self.resume_menu = Some(menu);
         self.clear_slash_suggestions();
     }
@@ -2922,10 +2942,10 @@ impl Chat {
                     && core.jump(n as usize)
                 {
                     menu.selected = core.selected;
-                    true
-                } else {
-                    false
                 }
+                // Swallow even out-of-range digits: a menu is a modal surface —
+                // "4" on a 3-item picker used to type a literal 4 into the input.
+                true
             }
             KeyCode::Enter => {
                 // 确认动作按 selected 索引取快照（与 items 同序；value≠label 测试锚点）。
@@ -3584,10 +3604,7 @@ impl Chat {
         if menu.picker().is_empty() {
             return;
         }
-        self.think_menu = None;
-        self.model_menu = None;
-        self.theme_menu = None;
-        self.resume_menu = None;
+        self.close_menus();
         self.provider_menu = Some(menu);
         self.clear_slash_suggestions();
     }
@@ -3619,10 +3636,10 @@ impl Chat {
                     && core.jump(n as usize)
                 {
                     menu.selected = core.selected;
-                    true
-                } else {
-                    false
                 }
+                // Swallow even out-of-range digits: a menu is a modal surface —
+                // "4" on a 3-item picker used to type a literal 4 into the input.
+                true
             }
             KeyCode::Char('s') if !modifiers.contains(KeyModifiers::CONTROL) => {
                 let core = menu.picker();
@@ -3987,6 +4004,7 @@ impl Chat {
         if menu.picker().is_empty() {
             return;
         }
+        self.close_menus();
         self.think_menu = Some(menu);
         self.clear_slash_suggestions();
     }
@@ -4020,10 +4038,10 @@ impl Chat {
                     && core.jump(n as usize)
                 {
                     menu.selected = core.selected;
-                    true
-                } else {
-                    false
                 }
+                // Swallow even out-of-range digits: a menu is a modal surface —
+                // "4" on a 3-item picker used to type a literal 4 into the input.
+                true
             }
             KeyCode::Char('s') if !modifiers.contains(KeyModifiers::CONTROL) => {
                 let core = menu.picker();
@@ -4115,7 +4133,9 @@ impl Chat {
             &self.input,
             SLASH_COMMANDS,
             skills,
-            SLASH_SUGGESTIONS_MAX,
+            // Full list: rendering windows around the selection (the old
+            // hard cap made commands 6+ unreachable from a bare `/`).
+            usize::MAX,
         );
         self.slash_suggestions = result.items;
         self.slash_selected = self
@@ -4555,6 +4575,16 @@ impl Chat {
         if self.ask_key(code, modifiers) {
             return true;
         }
+        // A printable key that no menu claims (menus only take ↑↓/Enter/Esc/
+        // digits/s) closes the menu first, then edits normally. Without this,
+        // typing "/theme" over an open /think menu kept feeding a menu the
+        // screen no longer showed — Enter landed on an invisible selection.
+        if self.menu_open()
+            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && matches!(code, KeyCode::Char(c) if !c.is_ascii_digit() && c != 's')
+        {
+            self.close_menus();
+        }
         // `/model` `/think` selectors take priority over input (↑↓/Enter/Esc fully consumed).
         if self.model_menu_key(code, modifiers) {
             return true;
@@ -4761,6 +4791,12 @@ impl Chat {
         }
         if !self.slash_suggestions.is_empty() {
             self.clear_slash_suggestions();
+            // The dropdown only exists for a pure `/`-query — dismissing it
+            // dismisses the query too (the leftover "/th" used to turn the
+            // next command into "//model").
+            if self.input.starts_with('/') {
+                self.set_input("");
+            }
             return true;
         }
         if !self.slash_info_lines.is_empty() {
@@ -4770,6 +4806,13 @@ impl Chat {
         }
         if self.help_visible {
             self.help_visible = false;
+            return true;
+        }
+        // The tasks panel opened with ctrl+t closes with Esc (it used to have
+        // no exit at all — the ? panel closed, this one squatted).
+        if self.tasks_visible && !self.tasks_auto {
+            self.tasks_visible = false;
+            self.dirty = true;
             return true;
         }
         if self.bash_mode && self.input.is_empty() {
@@ -5037,13 +5080,22 @@ impl Chat {
                 self.input = text;
                 self.cursor = cursor.min(self.input.len());
                 self.update_slash_suggestions();
+                self.notice = Some("已恢复暂存");
+                self.notice_until = Some(std::time::Instant::now() + CTRL_C_WINDOW);
             }
             return;
         }
+        let replaced = self.stash.is_some();
         self.stash = Some((std::mem::take(&mut self.input), self.cursor));
         self.cursor = 0;
         self.last_edit = None;
         self.update_slash_suggestions();
+        self.notice = Some(if replaced {
+            "已暂存（覆盖旧暂存）· 空输入时 ctrl+s 恢复"
+        } else {
+            "已暂存 · 空输入时 ctrl+s 恢复"
+        });
+        self.notice_until = Some(std::time::Instant::now() + CTRL_C_WINDOW);
     }
 
     /// Shift+Tab：default → acceptEdits → plan → default。
@@ -5102,6 +5154,7 @@ impl Chat {
 
     /// Ctrl+R: enters reverse history search (an empty query hits the most recent entry first).
     fn open_search(&mut self) {
+        self.close_menus();
         let mut search = HistorySearch::default();
         if let Some((index, hit)) = self.history.search("", None) {
             search.index = Some(index);
@@ -5156,16 +5209,24 @@ impl Chat {
                 self.search = Some(search);
             }
             KeyCode::Enter => {
-                if let Some(hit) = search.hit {
-                    self.set_input(hit);
-                    self.submit();
+                match search.hit {
+                    Some(hit) => {
+                        self.set_input(hit);
+                        self.submit();
+                    }
+                    // No match: keep the search layer open (it used to close
+                    // silently, eating the Enter).
+                    None => self.search = Some(search),
                 }
             }
-            KeyCode::Tab | KeyCode::Esc => {
+            KeyCode::Tab => {
                 if let Some(hit) = search.hit {
                     self.set_input(hit);
                 }
             }
+            // Esc = cancel, like every other layer (it used to ADOPT the hit —
+            // the only place in the app where Esc committed something).
+            KeyCode::Esc => {}
             _ => self.search = Some(search),
         }
         true
@@ -5682,9 +5743,17 @@ impl Chat {
     /// ctrl+r search hint line (`(reverse-i-search)`query': hit`).
     pub fn search_line(&self) -> Option<String> {
         let search = self.search.as_ref()?;
-        let hit = search.hit.as_deref().unwrap_or("");
+        let (prefix, hit) = match search.hit.as_deref() {
+            Some(hit) => ("(reverse-i-search)", hit),
+            // bash shows failure explicitly; silence read as "found nothing? or broken?".
+            None if !search.query.is_empty() => ("(failed reverse-i-search)", ""),
+            None => ("(reverse-i-search)", ""),
+        };
         Some(one_line(
-            &format!("(reverse-i-search)`{}': {hit}", search.query),
+            &format!(
+                "{prefix}`{}': {hit}   — enter 提交 · tab 采纳 · ctrl+r 更旧 · esc 取消",
+                search.query
+            ),
             self.width.saturating_sub(2),
         ))
     }
@@ -8524,12 +8593,19 @@ mod tests {
         let mut chat = test_chat();
         chat.input = "/".to_string();
         chat.update_slash_suggestions();
-        assert_eq!(
-            chat.slash_suggestions.len(),
-            SLASH_SUGGESTIONS_MAX.min(SLASH_COMMANDS.len()),
-            "下拉最多 5 行（OVERLAY_MAX_ITEMS）"
+        assert!(
+            chat.slash_suggestions.len() >= SLASH_COMMANDS.len(),
+            "全量进状态（含技能扩展；渲染层围绕选中开窗，命令 6+ 不再不可达）"
         );
         assert!(chat.slash_suggestions.iter().any(|s| s.name == "model"));
+        // 渲染层窗口：5 可见 + 「还有 N 条」指示。
+        let rows = crate::tui::el::render(crate::tui::chrome::chrome(&chat, 100, false)).rows;
+        let joined: String = rows
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("还有"), "窗口外数量可见: {joined}");
 
         chat.input = "/model deepseek".to_string();
         chat.update_slash_suggestions();
@@ -8595,8 +8671,20 @@ mod tests {
         let mut chat = test_chat();
         chat.run_slash("help");
         let lines: Vec<&str> = chat.slash_info_lines.iter().map(String::as_str).collect();
-        assert_eq!(lines.len(), SLASH_COMMANDS.len() + 1, "标题 + 每命令一行");
+        assert_eq!(
+            lines.len(),
+            SLASH_COMMANDS.len() + 3,
+            "标题 + 每命令一行 + 子命令行 + 快捷键互链"
+        );
         assert_eq!(lines[0], "可用命令：");
+        assert!(
+            lines.iter().any(|l| l.contains("/provider login")),
+            "子命令可发现"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("按 ? 查看全表")),
+            "互链 ? 面板"
+        );
         for ((name, hint, desc), line) in SLASH_COMMANDS.iter().zip(&lines[1..]) {
             let cmd = if hint.is_empty() {
                 format!("/{name}")
@@ -11304,7 +11392,7 @@ mod tests {
         assert!(!chat.slash_suggestions.is_empty());
         chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
         assert!(chat.slash_suggestions.is_empty(), "先关下拉");
-        assert_eq!(chat.input, "/", "输入还在");
+        assert_eq!(chat.input, "", "斜杠查询随下拉一起清（不再残留 //）");
 
         chat.set_input("hello");
         chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
@@ -11812,10 +11900,12 @@ mod tests {
         chat.set_input("keep");
         assert!(ctrl(&mut chat, 'r'));
         assert!(chat.search.is_some(), "进入搜索态");
-        assert_eq!(
-            chat.search_line().as_deref(),
-            Some("(reverse-i-search)`': cargo build")
+        let line = chat.search_line().expect("搜索行");
+        assert!(
+            line.starts_with("(reverse-i-search)`': cargo build"),
+            "{line}"
         );
+        assert!(line.contains("enter 提交"), "键位提示可见: {line}");
         type_text(&mut chat, "cargo");
         assert_eq!(
             chat.search.as_ref().and_then(|s| s.hit.clone()).as_deref(),
