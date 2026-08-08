@@ -543,6 +543,23 @@ mod tests {
         enc.finish().unwrap()
     }
 
+    /// 按当前平台构造可解压的发布归档（Windows → zip，其他 → tar.gz）。
+    fn sample_archive(bin_bytes: &[u8]) -> Vec<u8> {
+        #[cfg(windows)]
+        {
+            use std::io::Write;
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            zip.start_file("bingo.exe", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(bin_bytes).unwrap();
+            zip.finish().unwrap().into_inner()
+        }
+        #[cfg(not(windows))]
+        {
+            sample_tar_gz(bin_bytes)
+        }
+    }
+
     #[test]
     fn version_parse() {
         assert_eq!(Version::parse("0.2.1").unwrap().parts(), &[0, 2, 1]);
@@ -686,9 +703,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_binary_from_tar_gz() {
+    fn extract_binary_from_archive() {
         let bin = b"#!/bin/sh\necho bingo\n";
-        let archive = sample_tar_gz(bin);
+        let archive = sample_archive(bin);
         assert_eq!(extract_binary(&archive, "bingo").unwrap(), bin);
         // 缺条目 → MissingBinary
         assert!(matches!(
@@ -813,7 +830,7 @@ mod tests {
     #[tokio::test]
     async fn perform_update_end_to_end() {
         let bin = b"BINGO-BIN-2026";
-        let (routes, _) = mock_routes("v99.0.0", sample_tar_gz(bin));
+        let (routes, _) = mock_routes("v99.0.0", sample_archive(bin));
         let base = serve(routes).await;
 
         let home = tmp_home();
