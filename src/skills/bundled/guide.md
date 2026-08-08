@@ -163,7 +163,10 @@ Example (.bingo/settings.json):
   per named provider via `protocol: "openai"` in the settings `providers` section; bearer auth, `reasoning.effort`
   for thinking levels, no count_tokens endpoint → local-estimation fallback). The top-level `apiKey`/`apiBaseUrl`
   always form the anthropic "default" provider; subagent cross-provider rules apply across protocols
-  (explicit `model` required when forking to a different provider).
+  (explicit `model` required when forking to a different provider). opencode-go (subscription) lands as
+  `{"protocol": "openai", "apiKey": "<go-key>", "apiBaseUrl": "https://opencode.ai/zen/go"}` — its Responses
+  models (e.g. gpt-5.6-luna) work through the openai adapter; its chat/completions models need an adapter
+  that is not implemented yet; its anthropic-protocol models can be added as a separate provider entry.
 - **Provider OAuth (codex/ChatGPT)**: `oauth: {kind: "codex"}` on a named provider enables subscription login —
   `/provider login <name>` (default: opens the browser with loopback PKCE; `--device-auth` prints a URL + one-time
   code and polls for headless/SSH; `--manual <token>` pastes a stored token), `/provider logout <name>` revokes and
