@@ -313,6 +313,43 @@ impl ThinkMenu {
     }
 }
 
+/// `/theme` 选择器选项表（dark/light/auto；与 ThemeSetting 的映射见 open_theme_menu）。
+pub const THEME_LEVELS: &[(&str, &str)] = &[
+    ("dark", "深色主题"),
+    ("light", "浅色主题"),
+    ("auto", "跟随终端背景"),
+];
+
+/// `/theme` 单级选择器状态（薄壳，同 ThinkMenu：字段公开、逻辑委托 PickerModel）。
+#[derive(Clone)]
+pub struct ThemeMenu {
+    /// Browsed index (❯): moves with ↑↓/1-3, applied only on Enter.
+    pub selected: usize,
+    /// In-effect index at open time (●).
+    pub current: usize,
+}
+
+impl ThemeMenu {
+    pub fn picker(&self) -> crate::tui::picker::PickerModel {
+        crate::tui::picker::PickerModel::new(
+            THEME_LEVELS
+                .iter()
+                .map(|(name, desc)| crate::tui::picker::PickerItem::new(*name, *name, *desc))
+                .collect(),
+            self.selected,
+            Some(self.current),
+        )
+    }
+
+    /// 场景键位配置：无 s（主题持久化是设计）、数字直达 1-3。
+    pub fn keys() -> crate::tui::picker::PickerKeys {
+        crate::tui::picker::PickerKeys {
+            session_only: false,
+            number_jump: true,
+        }
+    }
+}
+
 /// `/think` selector entries: level name + description (everything past off corresponds one-to-one with
 /// THINKING_LEVELS, in the same order; consistency is guaranteed by a test).
 pub const THINK_LEVELS: &[(&str, &str)] = &[
@@ -878,6 +915,10 @@ pub struct Chat {
     pub model_menu: Option<ModelMenu>,
     /// `/think` level selector (None = inactive).
     pub think_menu: Option<ThinkMenu>,
+    /// `/theme` level selector (None = inactive).
+    pub theme_menu: Option<ThemeMenu>,
+    /// 当前生效的主题设置（/theme 菜单 ● 标记的数据源；apply_theme 更新）。
+    pub theme_setting: ThemeSetting,
     /// Menu-level model-list cache (provider → latest `/v1/models` result):
     /// validates `/model <name>` direct sets against the known list; avoids
     /// re-fetching when re-entering level two (P2-G cache, per-session).
@@ -939,6 +980,7 @@ impl Chat {
             .find(|(t, _)| t.elapsed() < Self::WARNING_TTL)
             .map(|(_, w)| w.as_str())
     }
+    #[allow(clippy::too_many_arguments)] // 状态机构造器：显式参数可读性优先（同 tool/agent.rs 惯例）
     pub fn new(
         session: Arc<Session>,
         events: mpsc::UnboundedSender<UiEvent>,
@@ -946,6 +988,7 @@ impl Chat {
         asks: mpsc::UnboundedSender<AskRequest>,
         asks_rx: mpsc::UnboundedReceiver<AskRequest>,
         theme: Theme,
+        theme_setting: ThemeSetting,
         detected_background: Option<bool>,
     ) -> Self {
         // Watchable event forwarding: registry broadcast → UiEvent channel (persists across turns).
@@ -1075,6 +1118,8 @@ impl Chat {
             slash_selected: 0,
             model_menu: None,
             think_menu: None,
+            theme_menu: None,
+            theme_setting,
             models_cache: HashMap::new(),
             tasks_visible: false,
             tasks_auto: false,
@@ -2436,17 +2481,24 @@ impl Chat {
         }
     }
 
+    /// `/theme [dark|light|auto]`：无参打开档位选择器（picker-model.md 提交 B）；
+    /// 带参走快速路径（`/theme auto` 显式快捷保留）。
     fn slash_theme(&mut self, arg: &str) {
-        let setting = if arg.is_empty() {
-            ThemeSetting::Auto
-        } else {
-            ThemeSetting::parse(Some(arg))
-        };
+        if arg.is_empty() {
+            self.open_theme_menu();
+            return;
+        }
+        self.apply_theme(ThemeSetting::parse(Some(arg)));
+    }
+
+    /// 应用主题：重建渲染器/缓存、持久化、更新 theme_setting（菜单 ● 数据源）。
+    fn apply_theme(&mut self, setting: ThemeSetting) {
         let name = match setting {
             ThemeSetting::Dark => "dark",
             ThemeSetting::Light => "light",
             ThemeSetting::Auto => "auto",
         };
+        self.theme_setting = setting;
         self.theme = Theme::for_terminal(setting, self.detected_background);
         // The renderer baked in theme styles and reply_cache holds old-theme rows — rebuild them in sync.
         self.renderer = crate::tui::markdown::MarkdownRenderer::with_theme(
@@ -2461,6 +2513,73 @@ impl Chat {
             &serde_json::json!({ "theme": name }),
         );
         self.push_slash_output(format!("✓ 主题已切换: {name}"));
+    }
+
+    /// 打开 `/theme` 选择器：预选当前档位（theme_setting），互斥关闭其他菜单。
+    fn open_theme_menu(&mut self) {
+        let current = match self.theme_setting {
+            ThemeSetting::Dark => 0,
+            ThemeSetting::Light => 1,
+            ThemeSetting::Auto => 2,
+        };
+        let menu = ThemeMenu {
+            selected: current,
+            current,
+        };
+        // 空表防御（THEME_LEVELS 为 const 非空，防御性分支不可达）。
+        if menu.picker().is_empty() {
+            return;
+        }
+        self.think_menu = None;
+        self.model_menu = None;
+        self.theme_menu = Some(menu);
+        self.clear_slash_suggestions();
+    }
+
+    /// Theme menu keys: ↑↓/1-3 move (delegated to the PickerModel core),
+    /// Enter applies + persists, Esc exits. Returns whether consumed.
+    fn theme_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let Some(menu) = &mut self.theme_menu else {
+            return false;
+        };
+        match code {
+            KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(1);
+                menu.selected = core.selected;
+                true
+            }
+            KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(-1);
+                menu.selected = core.selected;
+                true
+            }
+            // Direct jump: 1 = dark … 3 = auto.
+            KeyCode::Char(c) if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                if let Some(n) = c.to_digit(10)
+                    && core.jump(n as usize)
+                {
+                    menu.selected = core.selected;
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Enter => {
+                let core = menu.picker();
+                let value = core.selected_item().map(|i| i.value.clone()).unwrap_or_default();
+                self.theme_menu = None;
+                self.apply_theme(ThemeSetting::parse(Some(&value)));
+                true
+            }
+            KeyCode::Esc => {
+                self.theme_menu = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     fn slash_rename(&mut self, arg: &str) {
@@ -3598,6 +3717,9 @@ impl Chat {
             return true;
         }
         if self.think_menu_key(code, modifiers) {
+            return true;
+        }
+        if self.theme_menu_key(code, modifiers) {
             return true;
         }
         if self.search.is_some() {
@@ -5299,7 +5421,7 @@ mod tests {
             instance: None,
         });
         let mut chat =
-            Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), None);
+            Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), crate::tui::theme::ThemeSetting::Auto, None);
         chat.cwd = home.display().to_string();
         chat
     }
@@ -5774,7 +5896,7 @@ mod tests {
         });
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
-        let mut chat = Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), None);
+        let mut chat = Chat::new(session, events_tx, events_rx, asks_tx, asks_rx, Theme::dark(), crate::tui::theme::ThemeSetting::Auto, None);
         chat.bash_mode = true;
         chat.input = "echo hello".to_string();
         chat.submit();
@@ -6069,6 +6191,72 @@ mod tests {
         assert_ne!(chat.theme.text, dark_text, "主题已切换");
         let saved = std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap();
         assert!(saved.contains("\"theme\": \"light\""), "{saved}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `/theme` 无参 → 打开档位选择器（picker-model.md 提交 B）：预选当前档、
+    /// ↑↓/1-3 浏览、Enter 应用+持久化、Esc 取消不改状态；`/theme auto` 快捷保留。
+    #[test]
+    fn theme_picker_selects_and_applies() {
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-slash-{}-theme-picker", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut chat = test_chat_home(tmp.join("home"));
+        chat.cwd = tmp.display().to_string();
+
+        // 无参 → 菜单打开，预选当前档（默认 Auto = index 2）。
+        chat.input = "/theme".to_string();
+        chat.submit();
+        let menu = chat.theme_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THEME_LEVELS[menu.selected].0, "auto", "预选当前档 auto");
+        assert_eq!(THEME_LEVELS[menu.current].0, "auto", "● 标当前档");
+        // Esc 取消：状态不变、菜单关闭。
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(chat.theme_menu.is_none(), "Esc 关闭菜单");
+        assert_eq!(
+            chat.theme_setting,
+            crate::tui::theme::ThemeSetting::Auto,
+            "Esc 不改主题"
+        );
+        assert!(
+            !tmp.join(".bingo/settings.json").exists(),
+            "取消不写 settings"
+        );
+
+        // 数字直达 2 = light，Enter 应用 + 持久化 + 关闭。
+        chat.input = "/theme".to_string();
+        chat.submit();
+        assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
+        let menu = chat.theme_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THEME_LEVELS[menu.selected].0, "light", "2 直达 light");
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(chat.theme_menu.is_none(), "Enter 关闭菜单");
+        assert_eq!(
+            chat.theme_setting,
+            crate::tui::theme::ThemeSetting::Light,
+            "Enter 应用主题"
+        );
+        let saved = std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap();
+        assert!(saved.contains("\"theme\": \"light\""), "{saved}");
+
+        // ↑↓ 浏览与数字直达共用核心；重新打开时 ● 跟随新档。
+        chat.input = "/theme".to_string();
+        chat.submit();
+        let menu = chat.theme_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THEME_LEVELS[menu.current].0, "light", "● 跟随生效档");
+        assert!(chat.on_key(KeyCode::Up, KeyModifiers::empty()));
+        let menu = chat.theme_menu.as_ref().expect("菜单已打开");
+        assert_eq!(THEME_LEVELS[menu.selected].0, "dark", "↑ 到 dark");
+        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+
+        // 快捷路径保留：/theme auto 直接切换。
+        chat.input = "/theme auto".to_string();
+        chat.submit();
+        assert_eq!(
+            chat.theme_setting,
+            crate::tui::theme::ThemeSetting::Auto,
+            "显式快捷保留"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
