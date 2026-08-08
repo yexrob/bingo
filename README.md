@@ -116,7 +116,7 @@ bingo -p < prompt.txt       # headless: read the prompt from stdin
 bingo --continue            # resume the most recent session
 ```
 
-Startup fails with an error if no API key is present.
+bingo starts even with no credentials: the welcome card carries onboarding (`/provider login codex` for a ChatGPT subscription, or write `apiKey` in settings); requests fail fast with next-step guidance until credentials exist.
 
 ## Command-line options
 
@@ -164,14 +164,17 @@ Startup fails with an error if no API key is present.
 
 ### Slash commands (full list via `/help`)
 
-`/model [name]` (no argument opens the provider → model picker; the choice
-persists to `.bingo/settings.json`), `/provider [name]` (list/switch among
-multiple providers), `/think [off|low|medium|high|xhigh|max]` (no argument
+`/model [name]` (no argument opens the provider → model picker; provider and
+model persist as one pair), `/provider [name]` (list/switch among multiple
+providers; `/provider login <name> [--device-auth|--manual <token>]` signs in
+to subscription endpoints, `logout` signs out),
+`/think [off|low|medium|high|xhigh|max]` (no argument
 opens the level picker; the choice persists), `/theme`,
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` executes directly), `/context` (usage),
-`/status`, `/compact` (force compaction), `/resume [name]` (resume a past
+`/status`, `/config` (effective config with per-key source layer/env, current
+endpoint, unknown-key hints), `/compact` (force compaction), `/resume [name]` (resume a past
 session), `/rename`, `/share [--public] [--open]`, `/clear`, `/exit`.
 `/share` writes a self-contained HTML file locally by default. `--public` is
 an explicit opt-in to upload it to a link anyone can access; bingo shows the
@@ -197,7 +200,11 @@ also keeps the placeholder inside tmux).
 
 ## Configuration (settings.json)
 
-Three layers are shallow-merged; later layers override earlier ones:
+Three layers are shallow-merged; later layers override earlier ones.
+UI selections (/model /provider /theme /think) persist to the layer where they
+take effect: a layer that already defines the key is updated in place,
+otherwise the user layer — no `.bingo/` is conjured in arbitrary directories
+(`/permissions` and `/mcp disable` are project state and still write there):
 
 1. **user**: `~/.config/bingo/settings.json` (`XDG_CONFIG_HOME` takes precedence)
 2. **project**: `.bingo/settings.json` (committed to the repo — keep secrets out)

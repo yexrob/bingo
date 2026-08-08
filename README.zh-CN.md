@@ -101,7 +101,7 @@ bingo -p < prompt.txt       # headless：从 stdin 读 prompt
 bingo --continue            # 恢复最近一次会话
 ```
 
-启动时缺 API key 会直接报错。
+没有任何凭据也能启动：欢迎卡会给出引导（`/provider login codex` 使用 ChatGPT 订阅，或在 settings 写 `apiKey`），配好凭据前请求会快速失败并提示下一步。
 
 ## 命令行参数
 
@@ -145,12 +145,14 @@ bingo --continue            # 恢复最近一次会话
 
 ### Slash 命令（`/help` 全量清单）
 
-`/model [名]`（无参进入 provider → 模型两级选择器，选择写回
-`.bingo/settings.json`）、`/provider [名称]`（列出/切换多 provider）、
+`/model [名]`（无参进入 provider → 模型两级选择器；provider 与模型作为
+一对持久化）、`/provider [名称]`（列出/切换多 provider；`/provider login
+<名> [--device-auth|--manual <token>]` 登录订阅端点、`logout` 退出）、
 `/think [off|low|medium|high|xhigh|max]`（无参进入等级选择器，选择持久化）、
 `/theme`、`/permissions [allow|deny|ask] [规则]`、
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
 `/skills`（清单，`/技能名` 直接执行）、`/context`（用量）、`/status`、
+`/config`（生效配置与来源：哪个层/环境变量赢了、当前端点、未知配置项提示）、
 `/compact`（强制压缩）、`/resume [名称]`（恢复历史会话）、`/rename`、
 `/share [--public] [--open]`、`/clear`、`/exit`。
 `/share` 默认只在本地生成自包含 HTML；只有显式加 `--public` 才会上传为
@@ -172,7 +174,9 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 
 ## 配置（settings.json）
 
-三层配置浅层合并，后者覆盖前者：
+三层配置浅层合并，后者覆盖前者。UI 内的选择（/model /provider /theme /think）
+写回「生效层」：某层已定义该键则更新该层，否则写 user 层——不会在任意目录凭空创建
+`.bingo/`；`/permissions` 与 `/mcp disable` 属项目级状态，仍写项目层。
 
 1. **user**：`~/.config/bingo/settings.json`（`XDG_CONFIG_HOME` 优先）
 2. **project**：`.bingo/settings.json`（入库，注意别提交密钥）

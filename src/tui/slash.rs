@@ -17,6 +17,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     ),
     ("context", "", "显示上下文用量"),
     ("status", "", "显示会话状态（模型/权限/会话/上下文）"),
+    ("config", "", "显示生效配置与来源（层/环境变量/端点）"),
     (
         "permissions",
         "[allow|deny|ask] [规则]",
@@ -34,7 +35,7 @@ pub const COMMANDS: &[SlashCommand] = &[
 
 /// Slash commands that execute immediately while a model turn is active.
 pub const INSTANT_COMMANDS: &[&str] = &[
-    "think", "model", "provider", "theme", "status", "context", "tasks", "help", "skills",
+    "think", "model", "provider", "theme", "status", "context", "tasks", "help", "skills", "config",
 ];
 
 /// Slash dropdown suggestion item (`/name`, hint, and description).

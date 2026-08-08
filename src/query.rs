@@ -203,6 +203,10 @@ pub struct Session {
     pub depth: usize,
     /// User home (memdir memory location).
     pub home: PathBuf,
+    /// User config dir (`$XDG_CONFIG_HOME` or `~/.config`), resolved once at
+    /// startup: scoped settings writes and /config source display read it
+    /// (re-reading the env in library code would break test hermeticity).
+    pub user_config_dir: PathBuf,
     /// Interactive TUI session: suppress stderr progress prints (to avoid polluting the screen).
     pub quiet: bool,
     /// Consecutive auto-compact failure count (circuit breaker: skip after MAX_COMPACT_FAILURES).
@@ -1357,6 +1361,7 @@ mod tests {
             system: Vec::new(),
             depth: 0,
             home: std::env::temp_dir(),
+            user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
@@ -1465,6 +1470,7 @@ mod tests {
             system: Vec::new(),
             depth: 0,
             home: std::env::temp_dir(),
+            user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
@@ -1704,6 +1710,7 @@ mod tests {
             system: Vec::new(),
             depth: 0,
             home: std::env::temp_dir(),
+            user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch: crate::watch::WatchRegistry::new(),
