@@ -103,9 +103,16 @@ impl OpenAIProvider {
         self.endpoint.read().unwrap_or_else(|p| p.into_inner()).variant
     }
 
-    /// Codex allowlist (opencode codex.ts): the subscription's usable models.
-    pub const CODEX_MODELS: [&'static str; 4] =
-        ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"];
+    /// Codex allowlist: the subscription's usable models. Base snapshot from
+    /// opencode codex.ts, extended with gpt-5.6-luna (main live-tested: the
+    /// endpoint accepts it; opencode's ALLOWED_MODELS is an older snapshot).
+    pub const CODEX_MODELS: [&'static str; 5] = [
+        "gpt-5.5",
+        "gpt-5.6-luna",
+        "gpt-5.3-codex-spark",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+    ];
 
     /// The chat endpoint path for the variant.
     fn api_path(&self) -> &'static str {

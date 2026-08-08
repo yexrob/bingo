@@ -31,6 +31,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         supports_images: true,
         model_allowlist: Some(&[
             "gpt-5.5",
+            "gpt-5.6-luna",
             "gpt-5.3-codex-spark",
             "gpt-5.4",
             "gpt-5.4-mini",
