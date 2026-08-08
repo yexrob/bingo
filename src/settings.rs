@@ -128,17 +128,43 @@ pub struct ExperimentalSettings {
     pub agent_message_limit: Option<u64>,
 }
 
-/// Named provider (Anthropic-protocol endpoint).
+/// Named provider. v1 = Anthropic-protocol endpoint; v2 adds the optional
+/// `protocol` field (values `anthropic` | `openai`, default `anthropic` —
+/// every existing config parses unchanged, D33).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
-    #[serde(rename = "apiKey")]
-    pub api_key: String,
-    #[serde(rename = "apiBaseUrl")]
+    /// Static API key (v2: optional — OAuth providers omit it, D33 §5:
+    /// apiKey wins over OAuth; both missing is a config error at startup).
+    #[serde(rename = "apiKey", default)]
+    pub api_key: Option<String>,
+    /// Endpoint base URL; empty/missing falls back to the protocol default
+    /// (anthropic → api.anthropic.com, openai → api.openai.com).
+    #[serde(rename = "apiBaseUrl", default)]
     pub api_base_url: String,
+    /// Wire protocol: `anthropic` (default) | `openai` (Responses API).
+    #[serde(default)]
+    pub protocol: Option<String>,
+    /// OAuth login config (D33 §6): present means the provider authenticates
+    /// via OAuth when no `apiKey` is set (apiKey wins over OAuth). v1 kind:
+    /// `codex` (ChatGPT subscription).
+    #[serde(default)]
+    pub oauth: Option<OauthConfig>,
     /// Whether this provider's model accepts image content (`supportsImages`;
     /// None/default = don't send images).
     #[serde(rename = "supportsImages", default)]
     pub supports_images: Option<bool>,
+}
+
+/// OAuth provider config (`providers.<name>.oauth`, D33).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OauthConfig {
+    /// Built-in flow kind: `codex` (ChatGPT subscription device flow/PKCE).
+    pub kind: String,
+    /// Optional stored-account selector (multi-account; v1 stores one —
+    /// P2 stores a single account, so the field is parsed but unused yet).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub account: Option<String>,
 }
 
 /// Permission rules (settings permissions section).
@@ -489,6 +515,91 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// D33 settings v2: `protocol` optional (defaults to anthropic behavior),
+    /// `apiBaseUrl` optional (empty = protocol default), both additive — an
+    /// openai provider parses without breaking anthropic-only configs.
+    #[test]
+    fn parses_provider_protocol_v2() {
+        let json = r#"{
+            "providers": {
+                "codex": { "protocol": "openai", "apiKey": "sk-oa", "supportsImages": true },
+                "road": { "apiKey": "sk-road", "apiBaseUrl": "https://sub2apis.ruobin.dev/" }
+            }
+        }"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+        let codex = settings.providers.get("codex").unwrap();
+        assert_eq!(codex.protocol.as_deref(), Some("openai"));
+        assert_eq!(codex.api_base_url, "", "apiBaseUrl 可缺省");
+        assert_eq!(codex.supports_images, Some(true));
+        assert_eq!(codex.api_key.as_deref(), Some("sk-oa"));
+        // v1 config without protocol keeps parsing (anthropic default).
+        let road = settings.providers.get("road").unwrap();
+        assert_eq!(road.protocol, None);
+        assert_eq!(road.api_base_url, "https://sub2apis.ruobin.dev/");
+    }
+
+    /// ① 无 apiKey + oauth 配置解析成功（main 实测 bug 回归，D33 §5）：
+    /// `apiKey` 可缺省，OAuth provider 不带静态 key。
+    #[test]
+    fn parses_oauth_provider_without_api_key() {
+        let json = r#"{
+            "providers": {
+                "codex": { "protocol": "openai", "oauth": { "kind": "codex" } }
+            }
+        }"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+        let codex = settings.providers.get("codex").unwrap();
+        assert_eq!(codex.api_key, None, "无 apiKey 解析成功");
+        assert_eq!(codex.oauth.as_ref().map(|o| o.kind.as_str()), Some("codex"));
+        assert_eq!(codex.protocol.as_deref(), Some("openai"));
+    }
+
+    /// ④ 存量配置零迁移：v1 必填 apiKey 的 provider 原样解析。
+    #[test]
+    fn parses_v1_provider_unchanged() {
+        let json = r#"{
+            "providers": {
+                "deepseek": { "apiKey": "sk-ds", "apiBaseUrl": "https://api.deepseek.com" }
+            }
+        }"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+        let ds = settings.providers.get("deepseek").unwrap();
+        assert_eq!(ds.api_key.as_deref(), Some("sk-ds"));
+        assert_eq!(ds.api_base_url, "https://api.deepseek.com");
+        assert_eq!(ds.protocol, None, "缺省 anthropic");
+        assert_eq!(ds.oauth, None);
+    }
+
+    /// Unknown protocol values are a config error at provider build time
+    /// (surfaced at startup, CONFIG_INVALID).
+    #[test]
+    fn unknown_protocol_is_config_error() {
+        let mut settings = crate::settings::Settings {
+            api_key: Some("sk-main".into()),
+            ..Default::default()
+        };
+        settings.providers.insert(
+            "bogus".to_string(),
+            ProviderConfig {
+                api_key: Some("k".into()),
+                api_base_url: String::new(),
+                protocol: Some("chatgpt".into()),
+                supports_images: None,
+                oauth: None,
+                },
+        );
+        let client = crate::api::client::Client::from_settings_with(&settings, |_| {
+            Err(std::env::VarError::NotPresent)
+        });
+        let err = client.err().unwrap();
+        assert_eq!(
+            crate::error::map_error(&err),
+            "CONFIG_INVALID",
+            "未知 protocol 应落配置错误"
+        );
+        assert!(err.to_string().contains("chatgpt"), "错误文案应点名非法值");
+    }
+
     #[test]
     fn merges_team_auto_start_across_layers() {
         let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-team", std::process::id()));
@@ -530,7 +641,7 @@ mod tests {
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert_eq!(settings.thinking_level.as_deref(), Some("high"));
         let ds = settings.providers.get("deepseek").unwrap();
-        assert_eq!(ds.api_key, "sk-ds");
+        assert_eq!(ds.api_key.as_deref(), Some("sk-ds"));
         assert_eq!(ds.api_base_url, "https://api.deepseek.com");
         assert_eq!(settings.providers.len(), 2);
 

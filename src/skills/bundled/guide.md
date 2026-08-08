@@ -53,7 +53,7 @@ Three config layers, shallow-merged; the later one overrides:
 |---|---|---|
 | `apiKey` | string | API key（settings 优先于 `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`）；建议放 user 层，项目层会入库 |
 | `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
-| `providers` | object | Named providers (Anthropic protocol): `{name: {apiKey, apiBaseUrl}}`, switch via `/provider <name>`; optional `supportsImages: true` means that endpoint's model accepts images |
+| `providers` | object | Named providers: `{name: {protocol?, apiKey, apiBaseUrl?, supportsImages?, oauth?}}`, switch via `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, `Authorization: Bearer`; `apiBaseUrl` defaults to `https://api.openai.com`); an empty/absent `apiBaseUrl` falls back to the protocol default; unknown protocols are a config error at startup. `oauth: {kind: "codex"}` enables OAuth login (apiKey wins over OAuth); the codex flow (device / loopback PKCE) is `chatgpt.com`-subscription auth, tokens stored in `~/.local/share/bingo/auth.json` (0600, never in the committed settings) |
 | `provider` | string | Current provider (persisted by `/provider` and the /model menu; default `"default"` = top-level `apiKey`/`apiBaseUrl`); restored at startup, an invalid name falls back to default with a warning |
 | `sendImages` | bool | Whether the default endpoint sends message-box image attachments to the model (named providers use their own `supportsImages`; by default none are sent) |
 | `thinkingLevel` | string | Thinking level: `off` sends no thinking param (DeepSeek-compatible, default); `low`/`medium`/`high`/`xhigh`/`max` send `{"type":"adaptive"}` adaptive thinking plus `output_config.effort` (the Claude 5 family removed budget_tokens; below `high` saves tokens, `xhigh`/`max` think deeper) |
@@ -77,7 +77,8 @@ Example (.bingo/settings.json):
   "apiBaseUrl": "https://api.anthropic.com",
   "providers": {
     "deepseek": { "apiKey": "sk-ds", "apiBaseUrl": "https://api.deepseek.com" },
-    "local": { "apiKey": "sk-any", "apiBaseUrl": "http://127.0.0.1:11434/v1" }
+    "local": { "apiKey": "sk-any", "apiBaseUrl": "http://127.0.0.1:11434/v1" },
+    "openai": { "protocol": "openai", "apiKey": "sk-...", "apiBaseUrl": "https://api.openai.com" }
   },
   "provider": "deepseek",
   "thinkingLevel": "medium",
@@ -93,7 +94,7 @@ Example (.bingo/settings.json):
 ## Slash command quick reference
 
 `/help` for the full list. Common ones: `/model [name]` (no args: two-level picker — level 1 providers → level 2 model list; with a name: switch directly, validated against the known list when available),
-`/provider [name]` (no args: picker — ● current, s = session-only, Enter persists; with a name: switch directly),
+`/provider [name]` (no args: picker — ● current, s = session-only, Enter persists; with a name: switch directly), `/provider login <name> [--device-auth|--manual <token>]` (OAuth login: default opens the browser; `--device-auth` prints URL + code and polls for headless/SSH; `--manual` stores a pasted token), `/provider logout <name>` (revokes + clears),
 `/think [off|low|medium|high|xhigh|max]`（思考级别，持久化 settings；无参打开档位选择器：●=当前生效、↑↓/1-6 浏览、Enter 确认、Esc 取消）、`/theme [dark|light|auto]`（无参打开档位选择器，`/theme auto` 显式快捷保留）、
 `/permissions [allow|deny|ask] [规则]`、
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
@@ -111,8 +112,9 @@ Example (.bingo/settings.json):
 2. **Model request fails/times out**: `/status` shows the current model; `/model` switches it; with multiple providers use
    `/provider <name>` (the settings `providers` section); `/context` shows usage —
    when close to the context window, `/compact` (auto-compaction threshold = 90% of the effective window
-   (200k − 64k output budget) ≈ 122k, about 61% of the total window). Non-Anthropic endpoints (DeepSeek/ollama) without a
-   count_tokens API automatically fall back to local estimation (characters/4), with a one-time warning on first fallback.
+   (200k − 64k output budget) ≈ 122k, about 61% of the total window). Endpoints without a
+   count_tokens API (DeepSeek/ollama; OpenAI-protocol providers — `count_tokens` is Anthropic-only)
+   automatically fall back to local estimation (characters/4), with a one-time warning on first fallback.
 3. **MCP server not working**: `/mcp` shows status — `✗ failed: <details>` fixes per the details
    (command missing/spawn failure/handshake failure; for http servers also check url reachability and headers auth);
    the stdio server's own error output lives in `~/.local/share/bingo/logs/mcp-<name>.log`
@@ -158,6 +160,28 @@ Example (.bingo/settings.json):
   Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
   the Task family (task tracking), AskUserQuestion, Skill (skill invocation),
   ExperiencePropose/Commit/Query/Forget (project experience capture and retrieval).
+- **Provider protocols**: anthropic (Messages API, default — all existing configs) and openai (Responses API,
+  per named provider via `protocol: "openai"` in the settings `providers` section; bearer auth, `reasoning.effort`
+  for thinking levels, no count_tokens endpoint → local-estimation fallback). The top-level `apiKey`/`apiBaseUrl`
+  always form the anthropic "default" provider; subagent cross-provider rules apply across protocols
+  (explicit `model` required when forking to a different provider). opencode-go (subscription) lands as
+  `{"protocol": "openai", "apiKey": "<go-key>", "apiBaseUrl": "https://opencode.ai/zen/go"}` — its Responses
+  models (e.g. gpt-5.6-luna) work through the openai adapter; its chat/completions models need an adapter
+  that is not implemented yet; its anthropic-protocol models can be added as a separate provider entry.
+- **Built-in provider presets (zero-config)**: official subscriptions ship inside bingo — `codex` (ChatGPT,
+  `protocol: openai` + `oauth.kind: codex` → chatgpt.com/backend-api/codex/responses) and `opencode-go`
+  (`protocol: openai` + apiKey → opencode.ai/zen/go) are visible in `/provider` (内置 badge) and loginable with
+  no settings entry (`/provider login codex` / `opencode-go --manual <key>`); user `providers.<name>` entries
+  override the preset field-by-field (e.g. only `apiBaseUrl` to customize).
+- **Provider OAuth (codex/ChatGPT)**: `oauth: {kind: "codex"}` on a named provider enables subscription login —
+  `/provider login <name>` (default: opens the browser with loopback PKCE; `--device-auth` prints a URL + one-time
+  code and polls for headless/SSH; `--manual <token>` pastes a stored token), `/provider logout <name>` revokes and
+  clears. Tokens live in `~/.local/share/bingo/auth.json` (0600, opencode-compatible shape) — never in the committed
+  settings; `apiKey` in settings wins over OAuth; refresh is automatic (eager 5 min before expiry + on 401),
+  permanent refresh failures clear the login and prompt `/provider login <name>` again. Codex providers route to
+  `https://chatgpt.com/backend-api/codex/responses` (Responses wire format, same adapter; `ChatGPT-Account-Id`
+  header from the JWT claims; `/model` shows the subscription allowlist: gpt-5.5 / gpt-5.3-codex-spark /
+  gpt-5.4 / gpt-5.4-mini).
 - **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
   experience index is injected (≤10 entries, one per line; nothing injected when empty); full text is searched with ExperienceQuery by
   trigger tokens (case-insensitive, shared-prefix tolerant; active first, sorted by adoption count);

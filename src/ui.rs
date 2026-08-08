@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::api::types::StreamEvent;
+use crate::api::contract::StreamEvent;
 use crate::query::{ToolCallDone, UiHooks};
 use crate::tui::activities::WatchStatus;
 

@@ -15,6 +15,7 @@ use crate::transcript::{create as create_transcript, latest as latest_transcript
 
 mod agents;
 mod api;
+mod auth;
 mod budget;
 mod channels;
 mod compact;
@@ -164,7 +165,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // one per line; full entries via Query on demand).
     let experience_index = crate::tool::experience::session_index(&home, &project_dir);
     if !experience_index.is_empty() {
-        system.push(crate::api::types::SystemBlock {
+        system.push(crate::api::contract::SystemBlock {
             text: format!("Project experience (reusable patterns from past sessions):\n{experience_index}\n(Query full details with ExperienceQuery; propose new ones with ExperiencePropose)"),
             cache: settings.cache_control.unwrap_or(false),
         });

@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::api::types::{ContentBlock, Message, Request, SystemBlock};
+use crate::api::contract::{NeutralRequest, SystemBlock};
+use crate::api::types::{ContentBlock, Message};
 use crate::budget::{AUTOCOMPACT_THRESHOLD, MAX_COMPACT_FAILURES, WARNING_THRESHOLD};
 use crate::hooks::{run_post_compact, run_pre_compact};
 use crate::permission::PermissionMode;
@@ -87,7 +88,7 @@ pub async fn maybe_compact(
 
     run_pre_compact(&session.settings.hooks, permission_mode_str(session.permission_mode)).await;
 
-    let request = Request {
+    let request = NeutralRequest {
         model: session.runtime.model.borrow().clone(),
         max_tokens: 1024,
         system: Vec::new(),
@@ -95,7 +96,6 @@ pub async fn maybe_compact(
         tools: Vec::new(),
         stream: false,
         thinking: None,
-        output_config: None,
     };
     let summary = match session.client.complete_text(&request).await {
         Ok(summary) if !summary.trim().is_empty() => {
