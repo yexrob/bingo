@@ -313,13 +313,23 @@ impl<'a> DeviceFlow<'a> {
 fn pkce_verifier() -> String {
     // 48 bytes → 64 URL-safe chars (within the 43..128 range). Seeded from
     // time + pid (no rand dep): adequate for a CLI one-shot verifier.
-    let mut bytes = [0u8; 48];
+    random_urlsafe(48)
+}
+
+/// OAuth `state` nonce (CSRF, opencode codex.ts): random per authorize URL.
+fn oauth_state() -> String {
+    random_urlsafe(16)
+}
+
+/// N URL-safe random bytes (time + pid seeded, no rand dep).
+fn random_urlsafe(len: usize) -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let mut bytes = vec![0u8; len];
     for (i, b) in bytes.iter_mut().enumerate() {
         let mix = now.wrapping_mul(31).wrapping_add(i as u128 * 7) ^ std::process::id() as u128;
         *b = (mix >> (i % 64)) as u8 ^ (now >> (i % 8)) as u8;
     }
-    URL_SAFE_NO_PAD.encode(bytes)
+    URL_SAFE_NO_PAD.encode(&bytes)
 }
 
 fn pkce_challenge(verifier: &str) -> String {
@@ -360,12 +370,17 @@ impl<'a> LoopbackPkce<'a> {
             }
         };
         let redirect_uri = format!("http://localhost:{port}/auth/callback");
+        let state = oauth_state();
+        // Codex/ChatGPT CLI login params (opencode codex.ts buildAuthorizeUrl):
+        // codex_cli_simplified_flow is REQUIRED — its absence makes the
+        // issuer route to the web flow → Authentication Error (main-reported).
         let url = format!(
-            "{}/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid%20profile%20email%20offline_access&code_challenge={}&code_challenge_method=S256&state=bingo",
+            "{}/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid%20profile%20email%20offline_access&code_challenge={}&code_challenge_method=S256&codex_cli_simplified_flow=true&id_token_add_organizations=true&originator=bingo&state={}",
             self.config.issuer,
             self.config.client_id,
             urlencoding(&redirect_uri),
             challenge,
+            state,
         );
         let http = self.http.clone();
         let config = self.config.clone();
@@ -947,6 +962,28 @@ mod tests {
         assert_eq!(jwt_account_id(None), None);
         let t = test_jwt(&serde_json::json!({"sub": "u"}));
         assert_eq!(jwt_account_id(Some(&t)), None, "无 account claims 返回 None");
+    }
+
+    /// 契约：loopback authorize URL 带 codex CLI 参数 + 随机 state（main 实测
+    /// bug 回归——缺 codex_cli_simplified_flow → issuer 走 web 流 →
+    /// Authentication Error）。
+    #[tokio::test]
+    async fn loopback_authorize_url_has_codex_params_and_random_state() {
+        let http = reqwest::Client::new();
+        let config = OauthFlowConfig::codex();
+        let flow = LoopbackPkce::new(&http, &config);
+        let (url, _redirect, _verifier, handle) = flow.authorize_url().await.unwrap();
+        handle.abort();
+        assert!(url.contains("codex_cli_simplified_flow=true"), "简化流参数: {url}");
+        assert!(url.contains("id_token_add_organizations=true"), "组织 claim 参数: {url}");
+        assert!(url.contains("originator=bingo"), "originator: {url}");
+        let state = url.split("state=").nth(1).unwrap_or_default();
+        assert!(!state.is_empty() && state != "bingo", "state 非固定: {state}");
+        // 两次调用 state 不同（CSRF 随机）。
+        let (url2, _r2, _v2, handle2) = flow.authorize_url().await.unwrap();
+        handle2.abort();
+        let state2 = url2.split("state=").nth(1).unwrap_or_default();
+        assert_ne!(state, state2, "state 应随机");
     }
 
     /// Token responses without account_id are backfilled from JWT claims
