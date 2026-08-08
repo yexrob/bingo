@@ -7,8 +7,24 @@
 //! - Default shell: macOS `/bin/zsh`, other Unix `/bin/bash`, Windows `powershell.exe`;
 //!   overridable via `settings.shell` (see `init_shell`).
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+/// Resolve the user home directory. Priority: `HOME` (Unix convention), then
+/// `USERPROFILE` (Windows convention — HOME is often unset there); empty when
+/// neither is set (callers fall back to the current directory).
+pub fn home_dir() -> PathBuf {
+    home_dir_with(&|name| std::env::var_os(name))
+}
+
+/// Pure lookup core (testable without touching the process environment).
+fn home_dir_with(lookup: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
+    lookup("HOME")
+        .map(PathBuf::from)
+        .or_else(|| lookup("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_default()
+}
 
 /// Process-wide shell selection: `settings.shell` wins, otherwise the platform default.
 /// Settled once at startup — the shell never changes mid-process.
@@ -149,6 +165,32 @@ pub fn open_tty() -> Option<Box<dyn TtyIo>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HOME wins over USERPROFILE (Unix convention); without HOME, USERPROFILE is the
+    /// Windows fallback; neither set → empty (callers fall back to the current dir).
+    #[test]
+    fn home_dir_priority_and_fallback() {
+        let lookup = |vars: &[(&str, &str)]| {
+            let map: std::collections::HashMap<String, String> = vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            move |name: &str| map.get(name).map(OsString::from)
+        };
+        assert_eq!(
+            home_dir_with(&lookup(&[("HOME", "/home/u"), ("USERPROFILE", "C:\\Users\\u")])),
+            Path::new("/home/u")
+        );
+        assert_eq!(
+            home_dir_with(&lookup(&[("USERPROFILE", "C:\\Users\\u")])),
+            Path::new("C:\\Users\\u"),
+            "Windows 语义：HOME 缺失时回退 USERPROFILE"
+        );
+        assert!(
+            home_dir_with(&lookup(&[])).as_os_str().is_empty(),
+            "两者皆缺 → 空（调用方回退 cwd）"
+        );
+    }
 
     #[test]
     fn default_shell_is_platform_appropriate() {

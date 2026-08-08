@@ -308,8 +308,11 @@ fn image_marker(id: usize) -> String {
 
 /// Expands a `~` prefix to the home directory (returns unchanged when there is no home).
 fn expand_home(path: &str) -> String {
-    if let (Some(rest), Ok(home)) = (path.strip_prefix("~/"), std::env::var("HOME")) {
-        return format!("{home}/{rest}");
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = crate::platform::home_dir();
+        if !home.as_os_str().is_empty() {
+            return format!("{}/{}", home.display(), rest);
+        }
     }
     path.to_string()
 }

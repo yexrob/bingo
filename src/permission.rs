@@ -138,10 +138,14 @@ fn bash_content_matches(command: &str, content: &str, mode: MatchMode) -> bool {
 fn normalize_path(path: &str) -> String {
     use std::path::{Component, PathBuf};
     let expanded = match path.strip_prefix("~/") {
-        Some(rest) => match std::env::var("HOME") {
-            Ok(home) => format!("{home}/{rest}"),
-            Err(_) => path.to_string(),
-        },
+        Some(rest) => {
+            let home = crate::platform::home_dir();
+            if home.as_os_str().is_empty() {
+                path.to_string()
+            } else {
+                format!("{}/{}", home.display(), rest)
+            }
+        }
         None => path.to_string(),
     };
     let raw = std::path::Path::new(&expanded);

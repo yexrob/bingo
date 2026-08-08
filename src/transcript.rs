@@ -233,4 +233,26 @@ mod tests {
         assert_eq!(slugify("a b/c"), "a_b_c");
         assert_eq!(slugify("你好"), "__");
     }
+
+    /// State landing spot: transcripts always live under the resolved home
+    /// (`~/.local/share/bingo/transcripts`), never in the project directory.
+    #[test]
+    fn transcripts_land_under_home() {
+        let tmp = std::env::temp_dir().join(format!("bingo-transcript-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let project = tmp.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let transcript = create(&home, &project).unwrap();
+        assert!(
+            transcript.path().starts_with(transcripts_dir(&home)),
+            "落点必须是 home 下的 transcripts: {}",
+            transcript.path().display()
+        );
+        assert!(!transcript.path().starts_with(&project), "绝不落在项目目录");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

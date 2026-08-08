@@ -2,3 +2,5 @@
 .DS_Store
 notes/memory.md
 .bingo/
+# State fallback when neither HOME nor USERPROFILE is set (state dirs land in cwd)
+.local/

@@ -361,8 +361,11 @@ fn stderr_sink(name: &str) -> std::process::Stdio {
 }
 
 fn stderr_log_file(name: &str) -> Option<std::fs::File> {
-    let home = std::env::var_os("HOME")?;
-    let path = mcp_log_path(std::path::Path::new(&home), name);
+    let home = crate::platform::home_dir();
+    if home.as_os_str().is_empty() {
+        return None;
+    }
+    let path = mcp_log_path(&home, name);
     std::fs::create_dir_all(path.parent()?).ok()?;
     std::fs::File::create(path).ok()
 }

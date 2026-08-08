@@ -111,15 +111,13 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    let home = match std::env::var("HOME") {
-        Ok(h) => PathBuf::from(h),
-        Err(_) => {
-            if !cli.print {
-                eprintln!("[bingo] warning: HOME is not set; using current dir for state");
-            }
-            PathBuf::new()
-        }
-    };
+    // Home: HOME first (Unix), USERPROFILE fallback (Windows, where HOME is often
+    // unset — without it state used to land in the current directory, polluting the
+    // project repo). Empty only when neither is set.
+    let home = crate::platform::home_dir();
+    if home.as_os_str().is_empty() && !cli.print {
+        eprintln!("[bingo] warning: HOME is not set; using current dir for state");
+    }
     // 子命令快路径：share 只需 home（transcript/shares 目录），不碰 settings/API。
     if let Some(Command::Share { session, output, open }) = cli.command {
         run_share(&home, session.as_deref(), output, open)?;
