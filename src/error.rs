@@ -24,7 +24,7 @@ pub trait ErrorCode {
 /// **The level is decided by the trigger context, not inferred from the code alone**
 /// (e.g. `TIMEOUT` short sync = page-level, long turn = whole-flow-level; §4.4 note
 /// and AC table v1.9.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ErrorLevel {
     /// Field-level: only the erroneous object is flagged (e.g. `CONFIG_INVALID` config validation).
     // Short-operation errors (page/field-level) are wired into `UiEvent::Error`
@@ -45,7 +45,7 @@ pub enum ErrorLevel {
 /// Producers know it when emitting `UiEvent::Error` and carry it explicitly
 /// (devex #81 "the level isn't an intrinsic property of the code"; the rendering layer
 /// doesn't derive it, tests don't duplicate the mapping table).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ErrorContext {
     /// Short synchronous operation (list_models/count_tokens/complete_text) → page-level.
     // Short-operation errors are wired into `UiEvent::Error` when enabled — the

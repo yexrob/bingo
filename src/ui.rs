@@ -1,4 +1,4 @@
-//! Renderer-agnostic contract between the agent core and any front end.
+﻿//! Renderer-agnostic contract between the agent core and any front end.
 //!
 //! Nothing here may depend on a terminal library: [`UiEvent`] and the dialog
 //! transport types are what a TUI, a GUI or a test harness all consume, and
@@ -7,17 +7,45 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::api::types::StreamEvent;
 use crate::query::{ToolCallDone, UiHooks};
 use crate::tui::activities::WatchStatus;
 
+/// Serialized event stream protocol version (UiEventEnvelope). Bump on breaking
+/// wire-format changes; consumers reject unknown versions instead of mis-parsing.
+/// (Protocol API for the future web_hooks adapter; no production consumer yet.)
+#[cfg_attr(not(test), allow(dead_code))]
+pub const UI_EVENT_PROTOCOL_VERSION: u32 = 1;
+
+/// Versioned envelope for serialized UiEvent streams (GUI/WebSocket protocol):
+/// `{"version": 1, "type": "TextDelta", ...}` with the event fields flattened
+/// alongside the version.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Serialize)]
+pub struct UiEventEnvelope {
+    pub version: u32,
+    #[serde(flatten)]
+    pub event: UiEvent,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl UiEventEnvelope {
+    pub fn new(event: UiEvent) -> Self {
+        Self { version: UI_EVENT_PROTOCOL_VERSION, event }
+    }
+}
+
 /// Permission prompt: request + result receipt.
+/// (The request/response halves are what cross the wire: [`PermissionRequest`]
+/// goes to the front end, [`DialogAction`] comes back; the oneshot sender never
+/// serializes.)
 pub type AskRequest = (PermissionRequest, oneshot::Sender<DialogAction>);
 
 /// Permission dialog result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DialogAction {
     /// Option `index` (0-based) confirmed.
     Confirm(usize),
@@ -28,7 +56,7 @@ pub enum DialogAction {
 }
 
 /// Permission/question block to display.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PermissionRequest {
     /// Title, e.g. `Allow Bash` or AskUserQuestion's header.
     pub title: String,
@@ -55,7 +83,10 @@ impl PermissionRequest {
 }
 
 /// Event channel from the agent task to components.
-#[derive(Debug, Clone)]
+/// Serialized for the GUI protocol (see [`UiEventEnvelope`]): `type` tags the
+/// variant, `data` carries the payload (`{"type": "TextDelta", "data": "hi"}`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", content = "data")]
 pub enum UiEvent {
     TurnStart,
     /// All tool calls in a batch finished (one query loop round closed).
@@ -255,5 +286,93 @@ mod tests {
             Some(crate::query::AskAnswer::Other("自定义".to_string())),
             "Other 自由输入回填文本"
         );
+    }
+
+    /// Serialized event stream contract: versioned envelope with the event
+    /// flattened in, `type`-tagged variants (struct variants keep field names,
+    /// newtype variants use `value`).
+    #[test]
+    fn envelope_versions_and_flattens_the_event() {
+        let json = serde_json::to_value(UiEventEnvelope::new(UiEvent::TextDelta("hi".into()))).unwrap();
+        assert_eq!(json["version"], 1);
+        assert_eq!(json["type"], "TextDelta");
+        assert_eq!(json["data"], "hi");
+    }
+
+    #[test]
+    fn struct_variants_serialize_with_field_names() {
+        let json = serde_json::to_value(UiEvent::ToolStart { name: "Bash".into() }).unwrap();
+        assert_eq!(json["type"], "ToolStart");
+        assert_eq!(json["data"]["name"], "Bash");
+
+        let done = UiEvent::ToolDone(crate::query::ToolCallDone {
+            name: "Edit".into(),
+            summary: "edited 1 file".into(),
+            output: String::new(),
+            is_error: false,
+            diff: None,
+            duration_ms: 5,
+        });
+        let json = serde_json::to_value(done).unwrap();
+        assert_eq!(json["type"], "ToolDone");
+        assert_eq!(json["data"]["name"], "Edit");
+        assert_eq!(json["data"]["duration_ms"], 5);
+
+        let json = serde_json::to_value(UiEvent::WatchEvent {
+            label: "watch ls".into(),
+            kind: crate::watch::WatchKind::Command,
+            status: WatchStatus::Running,
+            detail: Some("round 1".into()),
+            duration_ms: 3,
+            payload: None,
+            signal: None,
+        })
+        .unwrap();
+        assert_eq!(json["type"], "WatchEvent");
+        assert_eq!(json["data"]["kind"], "Command");
+        assert_eq!(json["data"]["status"], "Running");
+        assert_eq!(json["data"]["detail"], "round 1");
+
+        let json = serde_json::to_value(UiEvent::Error {
+            code: "TIMEOUT",
+            msg: "timed out".into(),
+            level: crate::error::ErrorLevel::Full,
+            context: crate::error::ErrorContext::LongTurn,
+        })
+        .unwrap();
+        assert_eq!(json["type"], "Error");
+        assert_eq!(json["data"]["code"], "TIMEOUT");
+        assert_eq!(json["data"]["level"], "Full");
+        assert_eq!(json["data"]["context"], "LongTurn");
+
+        let json = serde_json::to_value(UiEvent::ImageReady {
+            url: "img.png".into(),
+            meta: Some(crate::tui::gfx::ImageMeta { cols: 2, rows: 3, bytes: vec![1, 2] }),
+        })
+        .unwrap();
+        assert_eq!(json["type"], "ImageReady");
+        assert_eq!(json["data"]["meta"]["cols"], 2);
+        assert_eq!(json["data"]["meta"]["bytes"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn permission_request_and_dialog_action_serialize() {
+        let request = PermissionRequest {
+            title: "Allow Bash".into(),
+            question: "Run git log?".into(),
+            options: vec!["Allow".into(), "Deny".into()],
+            descriptions: vec![None],
+            free_text: true,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["title"], "Allow Bash");
+        assert_eq!(json["free_text"], true);
+
+        // DialogAction crosses the wire back from the front end: round-trip.
+        for action in [DialogAction::Confirm(2), DialogAction::Answer("x".into()), DialogAction::Cancel] {
+            let json = serde_json::to_value(&action).unwrap();
+            let back: DialogAction = serde_json::from_value(json).unwrap();
+            assert_eq!(back, action);
+        }
     }
 }

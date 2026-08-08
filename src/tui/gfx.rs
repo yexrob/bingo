@@ -77,7 +77,7 @@ pub struct ImageProbe {
 }
 
 /// A loaded image: target cell size + PNG bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ImageMeta {
     pub cols: usize,
     pub rows: usize,

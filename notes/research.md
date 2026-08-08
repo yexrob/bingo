@@ -597,3 +597,11 @@ Requirement (named by the user): ① teams are fixed to a project (committable),
 - **行为变化**：Linux 上 shell 从 zsh 变为 bash（确定性优先）；`interactive_command_reason` REPLS 名单加 `powershell/pwsh/cmd`。
 - **CI/Release**：`.github/workflows/ci.yml` 三平台 matrix（ubuntu/macos/windows-latest，check+clippy+test，无需 API key）；`release.yml` 标签触发，四目标（linux x64 / win x64 / mac arm64 / mac x64 交叉编译），ZIP/tar.gz + `checksums.txt` SHA-256。
 - **验证局限**：macOS 本机 628 测试全绿 + clippy 零告警；Windows 源码交叉检查被 `aws-lc-sys`（C 依赖需 windows.h）阻断，Windows 侧由 CI 原生 runner 验证。
+
+### D33. GUI frontend direction (design doc: [`notes/design/gui-frontend.md`](./design/gui-frontend.md))
+
+- **Decision**: bingo stays a single engine with multiple frontends; the GUI is a second frontend over the existing renderer-agnostic contract in `src/ui.rs` (`UiEvent` / `AskRequest`), not a rewrite. The TUI remains the default frontend.
+- **v1 form**: local web server (`bingo web` — axum + WebSocket + React SPA in the browser), evolved into a Tauri shell later. Rationale: best rendering fidelity for markdown/diff/code, reuses the share-page stack, and terminal-specific problems (kitty graphics, tmux passthrough) disappear in the browser.
+- **Reuse**: query loop / Session / tools / permission gate / MCP / agents / teams / channels / tasks / experience / hooks stay untouched. `web_hooks` mirrors `tui_hooks`; slash commands get extracted from `src/tui/chat.rs` into a renderer-independent core service (GUI prerequisite, overlaps the chat.rs split, issue #8); `UiEvent` / `AskRequest` gain serde + a versioned event envelope.
+- **Red lines**: the TUI's terminal row model is never shipped to the browser (semantic `UiEvent` stream instead, markdown rendered frontend-side); core behavior (permissions, concurrency, compaction, memory) stays harness-owned.
+- **Status**: design only, no implementation.

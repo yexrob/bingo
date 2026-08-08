@@ -220,7 +220,7 @@ pub struct Session {
 }
 
 /// Single tool completion event.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ToolCallDone {
     pub name: String,
     pub summary: String,

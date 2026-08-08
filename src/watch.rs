@@ -32,7 +32,7 @@ impl WatchState {
 
 /// Watchable category: the display layer picks the icon (⏺ command / ◉ subagent / ◇ channel);
 /// doesn't affect the state machine or notification semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub enum WatchKind {
     #[default]
     Command,

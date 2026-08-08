@@ -71,7 +71,7 @@ impl ToolCall {
 }
 
 /// Watchable lifecycle status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum WatchStatus {
     /// Running.
     Running,
