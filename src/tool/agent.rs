@@ -151,26 +151,55 @@ fn ask_gate() -> &'static tokio::sync::Mutex<()> {
 /// progress checks of background agents).
 fn subagent_hooks(
     output: Arc<Mutex<String>>,
+    live: Arc<Mutex<Vec<crate::agents::LiveBlock>>>,
     cell: Arc<AgentCell>,
     watch: Arc<WatchRegistry>,
     id: WatchId,
     instance: String,
     ask: Option<Arc<crate::query::AskFn>>,
 ) -> UiHooks {
+    // `output` stays the flat reply (what the spawn returns and what `spoke` is
+    // judged on); `live` is the same turn as the instance view needs to show it,
+    // with the tool calls and round boundaries the flat string cannot carry.
+    let tool_live = live.clone();
+    let round_live = live.clone();
     UiHooks {
         on_event: Box::new(move |event| {
             if let crate::api::contract::StreamEvent::TextDelta { text, .. } = event
                 && let Ok(mut output) = output.lock()
             {
                 output.push_str(text);
+                if let Ok(mut live) = live.lock() {
+                    crate::agents::LiveBlock::push_text(&mut live, text);
+                }
                 cell.record_chars(text.chars().count());
                 // Feed produced text into the condition engine (notify_on hit → signal notification).
                 watch.feed_content(id, text);
             }
         }),
-        on_tool_ready: Box::new(|_name, _input, _standalone| {}),
+        on_tool_ready: Box::new(move |name, input, _standalone| {
+            let Ok(mut live) = tool_live.lock() else {
+                return;
+            };
+            let glyph = crate::tui::activities::tool_glyph(&name);
+            let shown = crate::tui::activities::display_tool_name(&name);
+            let summary = crate::query::summarize_input(&name, &input);
+            live.push(crate::agents::LiveBlock::Tool(if summary.is_empty() {
+                format!("{glyph}{shown}")
+            } else {
+                format!("{glyph}{shown}({summary})")
+            }));
+        }),
         on_tool_done: Box::new(|_| {}),
-        on_round_end: Box::new(|| {}),
+        // A round boundary closes the open prose block, so the next round's first
+        // sentence does not run into the previous round's last one.
+        on_round_end: Box::new(move || {
+            if let Ok(mut live) = round_live.lock()
+                && matches!(live.last(), Some(crate::agents::LiveBlock::Text(_)))
+            {
+                live.push(crate::agents::LiveBlock::Text(String::new()));
+            }
+        }),
         on_warning: Box::new(|_| {}),
         // A subagent has no prompt surface of its own, so its Ask decisions are forwarded to
         // the session that owns the UI, stamped with the instance name. Auto-denying here
@@ -481,9 +510,11 @@ pub(crate) fn spawn_agent_loop(
         let mut run = (first_id, cell);
         loop {
             let output = Arc::new(Mutex::new(String::new()));
-            loop_registry.set_live(&name, Some(output.clone()));
+            let live = Arc::new(Mutex::new(Vec::new()));
+            loop_registry.set_live(&name, Some(live.clone()));
             let mut ui = subagent_hooks(
                 output.clone(),
+                live.clone(),
                 run.1.clone(),
                 watch.clone(),
                 run.0,
@@ -910,9 +941,11 @@ impl Tool for AgentTool {
         );
         self.session.agents.set_run_watch(&name, id);
         let output = Arc::new(Mutex::new(String::new()));
-        self.session.agents.set_live(&name, Some(output.clone()));
+        let live = Arc::new(Mutex::new(Vec::new()));
+        self.session.agents.set_live(&name, Some(live.clone()));
         let mut ui = subagent_hooks(
             output.clone(),
+            live.clone(),
             cell.clone(),
             ctx.watch.clone(),
             id,
@@ -2230,6 +2263,7 @@ mod tests {
         );
         let ui = subagent_hooks(
             Arc::new(Mutex::new(String::new())),
+            Arc::new(Mutex::new(Vec::new())),
             Arc::new(AgentCell::new()),
             watch.clone(),
             id,
@@ -2245,6 +2279,7 @@ mod tests {
         // Nothing attached (embedded/test path): deny rather than block on a modal nobody shows.
         let ui = subagent_hooks(
             Arc::new(Mutex::new(String::new())),
+            Arc::new(Mutex::new(Vec::new())),
             Arc::new(AgentCell::new()),
             watch,
             id,

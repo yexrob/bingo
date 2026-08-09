@@ -322,7 +322,33 @@ struct Entry {
     watch_id: Option<crate::watch::WatchId>,
     /// Streaming output of the current turn (shares the same Arc with subagent_hooks;
     /// cleared at turn end — the TUI instance view shows the live tail from this).
-    live: Option<Arc<Mutex<String>>>,
+    live: Option<Arc<Mutex<Vec<LiveBlock>>>>,
+}
+
+/// One piece of a running turn, as the instance view sees it while it happens.
+///
+/// A running turn used to reach the view as one flat string of text deltas, which
+/// showed neither the tool calls between rounds nor the boundaries between them —
+/// so a five-round turn read as one wall with sentences butting together
+/// (`…the current state.Now let me verify…`). The finished history has always
+/// carried both; this is what lets the live view say the same thing before the
+/// turn ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveBlock {
+    /// Assistant prose, one block per round.
+    Text(String),
+    /// A tool call, already rendered the way the transcript renders one.
+    Tool(String),
+}
+
+impl LiveBlock {
+    /// Append streamed text, continuing the open prose block or opening one.
+    pub fn push_text(blocks: &mut Vec<LiveBlock>, text: &str) {
+        match blocks.last_mut() {
+            Some(LiveBlock::Text(open)) => open.push_str(text),
+            _ => blocks.push(LiveBlock::Text(text.to_string())),
+        }
+    }
 }
 
 /// Session-level instance registry (Session holds the Arc; shared by child sessions).
@@ -452,20 +478,21 @@ impl AgentRegistry {
     }
 
     /// Streaming output buffer of the current turn (attached at turn start, detached at turn end).
-    pub fn set_live(&self, name: &str, live: Option<Arc<Mutex<String>>>) {
+    pub fn set_live(&self, name: &str, live: Option<Arc<Mutex<Vec<LiveBlock>>>>) {
         if let Some(entry) = self.lock().get_mut(name) {
             entry.live = live;
         }
     }
 
     /// Instance view data: history + live tail + state (None if the instance doesn't exist).
-    pub fn view_of(&self, name: &str) -> Option<(Vec<Message>, Option<String>, AgentState)> {
+    pub fn view_of(&self, name: &str) -> Option<(Vec<Message>, Vec<LiveBlock>, AgentState)> {
         let inner = self.lock();
         let entry = inner.get(name)?;
         let live = entry
             .live
             .as_ref()
-            .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).clone());
+            .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .unwrap_or_default();
         Some((entry.history.clone(), live, entry.state))
     }
 

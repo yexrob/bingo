@@ -314,7 +314,7 @@ fn user_posts(text: &str, me: &str) -> Vec<Post> {
 
 pub fn dm_posts(
     history: &[Message],
-    live: Option<&str>,
+    live: &[crate::agents::LiveBlock],
     pending: &[String],
     who: &str,
     me: &str,
@@ -361,14 +361,48 @@ pub fn dm_posts(
             kind: PostKind::Queued,
         });
     }
-    if let Some(live) = live
-        && !live.trim().is_empty()
-    {
+    // The running turn, shown the way the finished one is: prose per round, tool
+    // calls between them.
+    //
+    // "Typing" means text is arriving *now*, so it belongs to the tail and only
+    // when the tail is prose. When the turn is mid-tool the indicator becomes a
+    // post of its own at the end — otherwise it would sit halfway up the
+    // conversation, above the very tool call the agent is waiting on.
+    let typing_at = match live.last() {
+        Some(crate::agents::LiveBlock::Text(t)) if !t.trim().is_empty() => Some(live.len() - 1),
+        _ => None,
+    };
+    for (i, block) in live.iter().enumerate() {
+        match block {
+            crate::agents::LiveBlock::Text(text) if !text.trim().is_empty() => out.push(Post {
+                from: who.to_string(),
+                you: false,
+                at: 0,
+                text: text.clone(),
+                kind: if Some(i) == typing_at {
+                    PostKind::Typing
+                } else {
+                    PostKind::Said
+                },
+            }),
+            crate::agents::LiveBlock::Tool(head) => out.push(Post {
+                from: who.to_string(),
+                you: false,
+                at: 0,
+                text: head.clone(),
+                kind: PostKind::Tool,
+            }),
+            crate::agents::LiveBlock::Text(_) => {}
+        }
+    }
+    // Mid-tool, or between rounds: still working, and the view should say so rather
+    // than going quiet exactly when it has the most to report.
+    if typing_at.is_none() && !live.is_empty() {
         out.push(Post {
             from: who.to_string(),
             you: false,
             at: 0,
-            text: live.to_string(),
+            text: String::new(),
             kind: PostKind::Typing,
         });
     }
@@ -1253,7 +1287,7 @@ mod tests {
             crate::api::types::Message::user_text(relay),
             crate::api::types::Message::user_text("one thing just for you\nsecond line"),
         ];
-        let posts = dm_posts(&history, None, &[], "devex", "user");
+        let posts = dm_posts(&history, &[], &[], "devex", "user");
         let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
         assert_eq!(
             kinds,
@@ -1529,6 +1563,77 @@ mod tests {
         assert!(t.iter().any(|l| l.contains("▏ ⏺ Bash")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("pending delivery")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("is typing")), "{t:?}");
+    }
+
+    /// A running turn shows its process, and its rounds stay apart. The live tail
+    /// used to reach the view as one flat string of text deltas: no tool calls, and
+    /// nothing between rounds, so a five-round turn read as one wall with sentences
+    /// butting together (`…the current state.Now let me verify…`). Only the last
+    /// prose block is "typing" — that is where text is still arriving.
+    #[test]
+    fn a_running_turn_shows_its_tools_and_keeps_its_rounds_apart() {
+        use crate::agents::LiveBlock;
+        let live = vec![
+            LiveBlock::Text("Let me verify the current state.".into()),
+            LiveBlock::Tool("⏺ Bash($ git status)".into()),
+            LiveBlock::Text("State confirmed. Checking the workflow.".into()),
+            LiveBlock::Tool("⏺ Read(ci.yml)".into()),
+            LiveBlock::Text("The quality job is the one failing.".into()),
+        ];
+        let posts = dm_posts(&[], &live, &[], "deploy", "user");
+        let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                PostKind::Said,
+                PostKind::Tool,
+                PostKind::Said,
+                PostKind::Tool,
+                PostKind::Typing,
+            ],
+            "process interleaved, only the tail typing: {posts:?}"
+        );
+        // The rounds are separate posts, so nothing can run together.
+        assert!(
+            posts
+                .iter()
+                .all(|p| !p.text.contains("state.Now") && !p.text.contains("workflow.The")),
+            "{posts:?}"
+        );
+
+        // Mid-tool the indicator moves to the end rather than sitting above the very
+        // call the agent is waiting on.
+        assert_eq!(
+            dm_posts(&[], &live[..2], &[], "deploy", "user")
+                .iter()
+                .map(|p| p.kind)
+                .collect::<Vec<_>>(),
+            vec![PostKind::Said, PostKind::Tool, PostKind::Typing]
+        );
+        let only_tools = vec![LiveBlock::Tool("⏺ Bash($ git status)".into())];
+        assert_eq!(
+            dm_posts(&[], &only_tools, &[], "deploy", "user")
+                .iter()
+                .map(|p| p.kind)
+                .collect::<Vec<_>>(),
+            vec![PostKind::Tool, PostKind::Typing],
+            "silent tool-only work still says it is working"
+        );
+        // A round that just ended leaves an empty block: still working, not silent.
+        let between = vec![
+            LiveBlock::Text("first round".into()),
+            LiveBlock::Text(String::new()),
+        ];
+        assert_eq!(
+            dm_posts(&[], &between, &[], "deploy", "user")
+                .iter()
+                .map(|p| p.kind)
+                .collect::<Vec<_>>(),
+            vec![PostKind::Said, PostKind::Typing]
+        );
+
+        // Idle: no live blocks, no invented posts.
+        assert!(dm_posts(&[], &[], &[], "deploy", "user").is_empty());
     }
 
     #[test]
