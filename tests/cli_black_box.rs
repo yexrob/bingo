@@ -85,11 +85,10 @@ fn json_events_eof_cancels_active_turn_without_mixing_stdout() {
         .collect();
     assert_eq!(events[0]["type"], "session.ready");
     assert_eq!(events[1]["type"], "turn.started");
-    assert_eq!(
-        events.last().expect("terminal event")["type"],
-        "turn.cancelled"
-    );
-    assert_eq!(events.last().expect("terminal event")["commandId"], "eof");
+    let last = events.last().expect("terminal event");
+    assert_eq!(last["type"], "turn.cancelled");
+    assert_eq!(last["reason"], "stdin-eof");
+    assert_eq!(last["commandId"], serde_json::Value::Null);
 }
 
 #[test]

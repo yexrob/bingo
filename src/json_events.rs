@@ -321,8 +321,9 @@ pub enum CliEvent {
         turn_id: String,
         #[serde(rename = "promptId")]
         prompt_id: String,
-        #[serde(rename = "commandId")]
-        command_id: String,
+        #[serde(rename = "commandId", skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        reason: PromptResolvedReason,
     },
     #[serde(rename = "models.result")]
     ModelsResult {
@@ -358,8 +359,9 @@ pub enum CliEvent {
         base: EventBase,
         #[serde(rename = "turnId")]
         turn_id: String,
-        #[serde(rename = "commandId")]
-        command_id: String,
+        #[serde(rename = "commandId", skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        reason: TurnCancelledReason,
     },
     #[serde(rename = "session.renamed")]
     SessionRenamed {
@@ -465,6 +467,22 @@ pub enum ErrorScope {
     Command,
     Turn,
     Session,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PromptResolvedReason {
+    Responded,
+    TurnCancelled,
+    SessionClosing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TurnCancelledReason {
+    Requested,
+    StdinEof,
+    SessionClosing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -817,7 +835,7 @@ impl<W: Write> JsonSession<W> {
                 true,
             );
         }
-        self.cancel_prompts();
+        self.cancel_prompts(PromptResolvedReason::TurnCancelled);
         cancel.send_replace(true);
         Ok(())
     }
@@ -893,7 +911,8 @@ impl<W: Write> JsonSession<W> {
             base: EventBase::default(),
             turn_id,
             prompt_id,
-            command_id,
+            command_id: Some(command_id),
+            reason: PromptResolvedReason::Responded,
         })
     }
 
@@ -1055,17 +1074,30 @@ impl<W: Write> JsonSession<W> {
                     .as_ref()
                     .is_some_and(|active| active.id == turn_id && *active.cancel.borrow());
                 self.active = None;
-                self.cancel_prompts();
+                self.cancel_prompts(if self.close_command_id.is_some() {
+                    PromptResolvedReason::SessionClosing
+                } else {
+                    PromptResolvedReason::TurnCancelled
+                });
                 if cancelled {
-                    let command_id = self
-                        .cancel_command_id
-                        .take()
-                        .or_else(|| self.close_command_id.clone())
-                        .unwrap_or_else(|| "eof".to_string());
+                    let (command_id, reason) = if self.cancel_command_id.is_some() {
+                        (
+                            self.cancel_command_id.take(),
+                            TurnCancelledReason::Requested,
+                        )
+                    } else if self.close_command_id.is_some() {
+                        (
+                            self.close_command_id.clone(),
+                            TurnCancelledReason::SessionClosing,
+                        )
+                    } else {
+                        (None, TurnCancelledReason::StdinEof)
+                    };
                     self.emit(CliEvent::TurnCancelled {
                         base: EventBase::default(),
                         turn_id,
                         command_id,
+                        reason,
                     })?;
                     if let Some(command_id) = self.close_command_id.take() {
                         self.emit(CliEvent::SessionClosed {
@@ -1077,14 +1109,17 @@ impl<W: Write> JsonSession<W> {
                 }
                 match result {
                     Ok(outcome) if outcome.aborted => {
-                        let command_id = self
-                            .cancel_command_id
-                            .take()
-                            .unwrap_or_else(|| "eof".to_string());
+                        let reason = if self.cancel_command_id.is_some() {
+                            TurnCancelledReason::Requested
+                        } else {
+                            TurnCancelledReason::StdinEof
+                        };
+                        let command_id = self.cancel_command_id.take();
                         self.emit(CliEvent::TurnCancelled {
                             base: EventBase::default(),
                             turn_id,
                             command_id,
+                            reason,
                         })
                     }
                     Ok(_) => self.emit(CliEvent::TurnCompleted {
@@ -1111,7 +1146,7 @@ impl<W: Write> JsonSession<W> {
 
     fn handle_eof(&mut self) -> Result<(), JsonEventsError> {
         if let Some(cancel) = self.active.as_ref().map(|active| active.cancel.clone()) {
-            self.cancel_prompts();
+            self.cancel_prompts(PromptResolvedReason::TurnCancelled);
             cancel.send_replace(true);
             self.closing = true;
         } else {
@@ -1120,8 +1155,9 @@ impl<W: Write> JsonSession<W> {
         Ok(())
     }
 
-    fn cancel_prompts(&mut self) {
-        for prompt in self.prompts.drain(..) {
+    fn cancel_prompts(&mut self, reason: PromptResolvedReason) {
+        let pending: Vec<PendingPrompt> = self.prompts.drain(..).collect();
+        for prompt in pending {
             match prompt.reply {
                 PromptReply::Permission(reply) => {
                     let _ = reply.send(false);
@@ -1130,6 +1166,13 @@ impl<W: Write> JsonSession<W> {
                     let _ = reply.send(None);
                 }
             }
+            let _ = self.emit(CliEvent::PromptResolved {
+                base: EventBase::default(),
+                turn_id: prompt.turn_id,
+                prompt_id: prompt.prompt_id,
+                command_id: None,
+                reason,
+            });
         }
     }
 
