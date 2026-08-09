@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::api::types::Message;
 use crate::query::Session;
@@ -205,10 +205,33 @@ pub struct Ack {
     pub state: AckState,
     /// When the message was accepted (age drives the "still not acknowledged?" check).
     pub queued_at: Instant,
+    /// Wait the sender allowed before the acknowledgement is chased automatically
+    /// (None = no watchdog; the sender never asked for one).
+    pub timeout: Option<Duration>,
+    /// Follow-ups already spent chasing this message (0..=MAX_FOLLOW_UPS).
+    pub follow_ups: u8,
 }
 
 /// Retained delivery records per instance. Bounded: acks are an audit trail, not storage.
 const MAX_ACKS: usize = 64;
+
+/// Follow-up budget per message. Chasing an acknowledgement forever is not a mechanism, it is a
+/// loop: after this many rounds the watchdog stops nudging and reports instead.
+pub const MAX_FOLLOW_UPS: u8 = 3;
+
+/// What chasing one message's acknowledgement found — the same delivery record
+/// `AgentControl(action=messages)` reports, read at the moment the sender's wait elapsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowUp {
+    /// The message left the queue (delivered into a run, or dropped): nothing left to chase.
+    Settled(AckState),
+    /// Still queued, and this round's follow-up is now in the receiver's inbox.
+    Sent { round: u8 },
+    /// Still queued with the follow-up budget spent.
+    Exhausted,
+    /// The instance, or its delivery record, no longer exists.
+    Gone,
+}
 
 /// Inbox item: a direct hub command, or a channel message (injected in batch on wake, in order).
 #[derive(Debug, Clone)]
@@ -225,6 +248,15 @@ pub enum InboxItem {
         from: String,
         text: String,
         seq: u64,
+    },
+    /// Automatic chase for a direct message whose acknowledgement never came. It carries no new
+    /// instruction — only the fact that the hub is still waiting on the message it rides with.
+    FollowUp {
+        original: MsgId,
+        /// 1-based, out of MAX_FOLLOW_UPS.
+        round: u8,
+        excerpt: String,
+        waited: Duration,
     },
 }
 
@@ -521,11 +553,14 @@ impl AgentRegistry {
     /// history and drained inbox needed to continue); error when Stopped/unknown.
     /// Queue a hub command. Returns the message id — the receipt the sender uses to check the
     /// outcome later; delivery itself happens at the next turn boundary (see `flush_pending`).
+    /// `ack_timeout` records the wait the sender allowed before the acknowledgement is chased
+    /// (see `follow_up`); it is a note on the record, not a timer — the caller owns the clock.
     pub fn deliver(
         &self,
         name: &str,
         message: &str,
         images: Vec<crate::api::types::ImageAttachment>,
+        ack_timeout: Option<Duration>,
     ) -> Result<MsgId, String> {
         let id = self.mint_msg_id();
         let mut inner = self.lock();
@@ -554,9 +589,41 @@ impl AgentRegistry {
                 excerpt: first_line(message),
                 state: AckState::Queued,
                 queued_at: Instant::now(),
+                timeout: ack_timeout,
+                follow_ups: 0,
             },
         );
         Ok(id)
+    }
+
+    /// Re-read one message's delivery record and, while it is still queued, put a follow-up in the
+    /// receiver's inbox. Reading and enqueueing happen under the single registry lock, so a flush
+    /// racing the watchdog can never turn a just-delivered message into a pointless nudge.
+    pub fn follow_up(&self, name: &str, id: MsgId) -> FollowUp {
+        let mut inner = self.lock();
+        let Some(entry) = inner.get_mut(name) else {
+            return FollowUp::Gone;
+        };
+        let Some(ack) = entry.acks.iter_mut().find(|a| a.id == id) else {
+            return FollowUp::Gone;
+        };
+        if ack.state != AckState::Queued {
+            return FollowUp::Settled(ack.state.clone());
+        }
+        if ack.follow_ups >= MAX_FOLLOW_UPS {
+            return FollowUp::Exhausted;
+        }
+        ack.follow_ups += 1;
+        let round = ack.follow_ups;
+        let excerpt = ack.excerpt.clone();
+        let waited = ack.queued_at.elapsed();
+        entry.inbox.push(InboxItem::FollowUp {
+            original: id,
+            round,
+            excerpt,
+            waited,
+        });
+        FollowUp::Sent { round }
     }
 
     /// Queue a channel message. A stopped member is silently skipped — a broadcast doesn't fail
@@ -590,7 +657,9 @@ impl AgentRegistry {
                     .iter()
                     .filter_map(|item| match item {
                         InboxItem::Direct { text, .. } => Some(text.clone()),
-                        InboxItem::Channel { .. } => None,
+                        // A follow-up is the harness chasing an acknowledgement, not something
+                        // the sender wrote — rendering it as their pending message would lie.
+                        InboxItem::Channel { .. } | InboxItem::FollowUp { .. } => None,
                     })
                     .collect()
             })
@@ -857,7 +926,7 @@ mod tests {
         reg.insert("scout", None, "调研".into(), test_session());
         // Running: message queued (delivery never happens inside deliver itself).
         let first = reg
-            .deliver("scout", "补充 A", Vec::new())
+            .deliver("scout", "补充 A", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         // Turn finished + inbox non-empty → continues (history saved, inbox drained, ack set).
         let next = reg
@@ -877,7 +946,7 @@ mod tests {
         assert_eq!(reg.list()[0].state, AgentState::Idle);
         // Idle: the message waits for a flush rather than starting a run on the spot.
         let _ = reg
-            .deliver("scout", "再看 B", Vec::new())
+            .deliver("scout", "再看 B", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(reg.list()[0].state, AgentState::Idle, "投递不自行起跑");
         let woken = reg.flush_pending();
@@ -893,7 +962,7 @@ mod tests {
     fn inbox_accumulates_direct_and_channel_items_in_order() {
         let reg = AgentRegistry::new();
         reg.insert("w", None, "w".into(), test_session());
-        let _ = reg.deliver("w", "先做 1", Vec::new());
+        let _ = reg.deliver("w", "先做 1", Vec::new(), None);
         assert!(reg.deposit(
             "w",
             InboxItem::Channel {
@@ -967,9 +1036,9 @@ mod tests {
 
         // 忙碌信箱非空 → finish 后保持 running（Idle 唤醒排空 inbox 给 Start，
         // Running 时才排队；两条指令制造排队场景）。
-        reg.deliver("scout", "再查", Vec::new())
+        reg.deliver("scout", "再查", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
-        reg.deliver("scout", "又查", Vec::new())
+        reg.deliver("scout", "又查", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         reg.finish("scout", Vec::new());
         let doc = store.snapshot();
@@ -1000,7 +1069,7 @@ mod tests {
         reg.insert("w", None, "w".into(), test_session());
         assert!(reg.finish("w", Vec::new()).is_none(), "先转 idle");
         for text in ["先看 A", "再看 B", "最后 C"] {
-            reg.deliver("w", text, Vec::new())
+            reg.deliver("w", text, Vec::new(), None)
                 .unwrap_or_else(|e| panic!("{e}"));
         }
         assert_eq!(reg.list()[0].pending, 3, "全部积压，未逐条起跑");
@@ -1023,7 +1092,7 @@ mod tests {
         let reg = AgentRegistry::new();
         reg.insert("w", None, "w".into(), test_session());
         let id = reg
-            .deliver("w", "还来得及吗", Vec::new())
+            .deliver("w", "还来得及吗", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         let (_, dropped) = reg.stop("w").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(dropped, 1);
@@ -1038,13 +1107,77 @@ mod tests {
         assert_eq!(reg.list()[0].pending, 0, "信箱已清空");
     }
 
+    /// The chase is bounded and self-cancelling: while a message stays queued each round leaves
+    /// one follow-up riding with it, the budget stops at MAX_FOLLOW_UPS, and the delivery that
+    /// finally happens settles every later check.
+    #[test]
+    fn follow_up_chases_a_queued_message_until_the_budget_runs_out() {
+        let reg = AgentRegistry::new();
+        reg.insert("w", None, "w".into(), test_session());
+        let id = reg
+            .deliver("w", "查一下日志", Vec::new(), Some(Duration::from_secs(30)))
+            .unwrap_or_else(|e| panic!("{e}"));
+        for round in 1..=MAX_FOLLOW_UPS {
+            assert_eq!(reg.follow_up("w", id), FollowUp::Sent { round });
+        }
+        assert_eq!(reg.follow_up("w", id), FollowUp::Exhausted, "预算耗尽");
+        let items = reg
+            .finish("w", Vec::new())
+            .unwrap_or_else(|| panic!("排队消息应在回合结束时取出"))
+            .items;
+        assert_eq!(
+            items.len(),
+            1 + MAX_FOLLOW_UPS as usize,
+            "追问与原件同批送达"
+        );
+        assert!(
+            matches!(&items[1], InboxItem::FollowUp { original, round: 1, .. } if *original == id),
+            "追问指向原消息：{:?}",
+            items[1]
+        );
+        let acks = reg.acks_of("w").unwrap_or_else(|| unreachable!());
+        assert_eq!(acks.len(), 1, "追问自身不留回执");
+        assert_eq!(acks[0].follow_ups, MAX_FOLLOW_UPS, "追问次数可供复查");
+        assert_eq!(acks[0].timeout, Some(Duration::from_secs(30)));
+        assert!(
+            matches!(
+                reg.follow_up("w", id),
+                FollowUp::Settled(AckState::Delivered { .. })
+            ),
+            "送达后不再追问"
+        );
+    }
+
+    /// The chase also ends when there is nothing left to chase: a stopped instance drops the
+    /// message, a deleted one takes the record with it. Both are reportable outcomes, not silence.
+    #[test]
+    fn follow_up_settles_on_a_dropped_message_and_a_gone_instance() {
+        let reg = AgentRegistry::new();
+        reg.insert("w", None, "w".into(), test_session());
+        let id = reg
+            .deliver("w", "还来得及吗", Vec::new(), Some(Duration::from_secs(10)))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(reg.follow_up("w", id), FollowUp::Sent { round: 1 });
+        reg.stop("w").unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            matches!(
+                reg.follow_up("w", id),
+                FollowUp::Settled(AckState::Dropped { .. })
+            ),
+            "停止即丢弃"
+        );
+        reg.remove("w").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(reg.follow_up("w", id), FollowUp::Gone);
+        assert_eq!(reg.follow_up("ghost", MsgId(999)), FollowUp::Gone);
+    }
+
     /// A run chain that dies with messages still queued must not strand them: the instance goes
     /// back to Idle and the next boundary flush picks the batch up.
     #[test]
     fn messages_survive_a_failed_run_and_are_retried() {
         let reg = AgentRegistry::new();
         reg.insert("w", None, "w".into(), test_session());
-        reg.deliver("w", "继续", Vec::new())
+        reg.deliver("w", "继续", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         // The run failed (spawn_agent_loop's error branch) — it only marks the instance idle.
         reg.mark_idle("w");
@@ -1069,7 +1202,7 @@ mod tests {
             "幂等"
         );
         assert!(
-            reg.deliver("x", "还在吗", Vec::new()).is_err(),
+            reg.deliver("x", "还在吗", Vec::new(), None).is_err(),
             "停止后拒收"
         );
         // Turn finishing after a stop: history is still archived, no revival.
@@ -1078,7 +1211,10 @@ mod tests {
         reg.remove("x").unwrap_or_else(|e| panic!("{e}"));
         assert!(reg.list().is_empty());
         assert_eq!(reg.claim_name("x"), "x", "删除释放名字");
-        assert!(reg.deliver("x", "hi", Vec::new()).is_err(), "未知实例报错");
+        assert!(
+            reg.deliver("x", "hi", Vec::new(), None).is_err(),
+            "未知实例报错"
+        );
         // Stopping an idle instance: no active line.
         reg.insert("y", None, "y".into(), test_session());
         reg.set_run_watch("y", crate::watch::WatchId(9));
