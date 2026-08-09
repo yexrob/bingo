@@ -221,7 +221,7 @@ fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
             known.join(", ")
         )];
     }
-    match session.agents.deliver(member, message, Vec::new()) {
+    match session.agents.deliver(member, message, Vec::new(), None) {
         Ok(_) => {
             // A slash command has no turn boundary behind it: deliver now, so the user sees the
             // assignment start instead of waiting for the hub's next turn.

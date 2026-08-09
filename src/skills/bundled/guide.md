@@ -213,6 +213,15 @@ Example (.bingo/settings.json):
   message as delivered (with the run it landed in), still queued (with its age), or dropped because the instance was
   stopped. Stopping or deleting an instance discards its inbox and says how many undelivered messages died with it.
   A run chain that fails leaves its queued messages in place — the next turn boundary retries them.
+  **Delivered is not answered**: an instance can read a message and end its turn without a word, which from the outside
+  looks the same as a hang. The acknowledgement is the reply, so `messages` reports four states — queued, delivered but
+  unanswered, answered (naming the run that spoke), dropped — and a turn that produces text answers everything that
+  instance had already read, even messages first read during an earlier silent run.
+  **Chasing a reply**: `SendMessage(ack_timeout: <seconds>)` hands that polling to the harness. Once the wait elapses it
+  re-reads the same record; while you are still owed an answer it puts a follow-up in the receiver's inbox (naming which
+  silence it is, and asking for a reply rather than repeating the instruction) and retries the boundary flush, at most 3
+  rounds. An answer inside the wait is silent; anything else — chased into replying, dropped, or still quiet after the
+  last round — comes back as a task notification.
   **Images to subagents**: repeat an `#[image N]` marker in the Agent prompt or SendMessage text; the attachment table
   belongs to the session, so the subagent receives the actual image (also carried along if the message has to queue).
   This also works *out* of a text-only session: when the current endpoint cannot receive images, fork a subagent onto an
@@ -298,6 +307,12 @@ Example (.bingo/settings.json):
   `AgentControl(action=messages, agent=…)` 逐条报告已送达（附落在第几轮）、仍排队（附等待时长）、
   或因实例停止而丢弃。stop/delete 会清空信箱并报告有多少条未送达指令随之丢弃；
   运行链失败时消息留在信箱，下一个回合边界重投。
+  **送达不等于回复**：实例完全可以读了消息、跑完一轮一声不吭，从外面看和卡死没区别。回执以「回复」为准，
+  所以 `messages` 报四种状态——排队、已读但没回、已回复（标明是第几轮开的口）、已丢弃；某一轮只要产出了文本，
+  就把该实例此前读过的消息一并算作已回复（包括在更早那轮沉默中读到的）。
+  **自动追回复**：`SendMessage(ack_timeout: <秒>)` 把这轮复查交给系统——等待到点后重读同一份回执，
+  只要还欠你一个回复，就往收件人信箱放一条追问（讲明是哪种沉默，且只要回复、不重发原指令）并重试边界投递，
+  最多 3 轮。等待内回复则全程静默；被追问后才开口、被丢弃、或最后一轮仍不吭声，都以任务通知回报主 agent。
   **给子代理传图**：在 Agent prompt 或 SendMessage 文本里复述 `#[image N]` 占位即可——附件表属于会话，
   子代理收到的是真图片（消息排队时图片一同携带）。这条路也能从**不收图的会话往外走**：当前端点不接受图片时，
   把子代理 fork 到支持图片的 provider（`Agent(provider: …, model: …)`，跨 provider 必须显式给 model）并复述占位，

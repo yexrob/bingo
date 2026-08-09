@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::agents::{AgentDef, AgentRegistry, InboxItem};
+use crate::agents::{AgentDef, AgentRegistry, FollowUp, InboxItem, MAX_FOLLOW_UPS, MsgId};
 use crate::api::contract::SystemBlock;
 use crate::api::types::Message;
 use crate::channels::ChannelRegistry;
@@ -53,7 +53,10 @@ Post when you have something only you can supply — a decision someone is block
 disagreement, a result, a question that must be answered before you can continue. Name the person
 you mean.
 
-When you have nothing to add, just stop calling tools. Silence costs nothing and wakes nobody.";
+When you have nothing to add, just stop calling tools. Silence costs nothing and wakes nobody.
+
+This is about the room, not about you. A direct instruction from the hub is still owed an answer —
+finish it and say what came of it. It is broadcast chatter that costs everyone.";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -206,6 +209,125 @@ pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &Arc<WatchRegistr
     }
 }
 
+/// Acknowledgement watchdog for one message: the sender named a wait, so when that wait elapses
+/// this re-reads the very record `AgentControl(action=messages)` reports and, while the message
+/// still has not entered the receiver's context, nudges the receiver and retries the boundary
+/// flush — the automatic form of the poll the hub would otherwise have to run by hand.
+///
+/// What it waits for is an *answer*, not a delivery. Reading a message into a prompt proves
+/// nothing about the receiver: an instance can take the message, run a turn and end it without a
+/// word, which from the sender's side is indistinguishable from a hang. So `Delivered` is chased
+/// exactly like `Queued`, and only `Answered` stops the clock.
+///
+/// Two bounds keep it a mechanism rather than a loop: at most `MAX_FOLLOW_UPS` rounds, and every
+/// outcome except an answer inside the wait is reported back to the sender as a watch line, whose
+/// terminal state reaches the hub's next turn. A chase that never gives up and never speaks would
+/// be worse than no chase at all.
+pub(crate) fn spawn_ack_watchdog(
+    session: Arc<Session>,
+    watch: Arc<WatchRegistry>,
+    agent: String,
+    id: MsgId,
+    timeout: std::time::Duration,
+) {
+    let owner = session.instance.clone();
+    let label = format!("{agent} #{id} 回执");
+    tokio::spawn(async move {
+        // Registered on the first missed deadline, not up front: a message that lands on time
+        // leaves no trace, so the line itself means "this one needed chasing".
+        let mut line: Option<WatchId> = None;
+        let mut sent = 0u8;
+        let report = |state: WatchState, detail: String, line: &mut Option<WatchId>| {
+            let id = *line.get_or_insert_with(|| {
+                watch.register_with_conditions(
+                    Box::new(AckWatch {
+                        label: label.clone(),
+                    }),
+                    Vec::new(),
+                    owner.clone(),
+                )
+            });
+            watch.set_state(id, state, Some(detail), None);
+        };
+        loop {
+            tokio::time::sleep(timeout).await;
+            match session.agents.follow_up(&agent, id) {
+                FollowUp::Settled(crate::agents::AckState::Answered { run }) => {
+                    if sent > 0 {
+                        report(
+                            WatchState::Done,
+                            format!("{sent} 次追问后回复（第 {run} 轮）"),
+                            &mut line,
+                        );
+                    }
+                    return;
+                }
+                FollowUp::Settled(crate::agents::AckState::Dropped { reason }) => {
+                    report(WatchState::Failed, format!("未送达：{reason}"), &mut line);
+                    return;
+                }
+                // The two waiting states are exactly what follow_up chases, never settles on.
+                FollowUp::Settled(
+                    crate::agents::AckState::Queued | crate::agents::AckState::Delivered { .. },
+                ) => return,
+                FollowUp::Gone => {
+                    report(
+                        WatchState::Failed,
+                        "实例已移除，消息未得到回复".to_string(),
+                        &mut line,
+                    );
+                    return;
+                }
+                FollowUp::Sent { round } => {
+                    sent = round;
+                    report(
+                        WatchState::Running,
+                        format!("等待回复，已追问 {round}/{MAX_FOLLOW_UPS}"),
+                        &mut line,
+                    );
+                    flush_agent_inbox(&session, &watch);
+                }
+                FollowUp::Exhausted => {
+                    report(
+                        WatchState::Failed,
+                        format!(
+                            "{MAX_FOLLOW_UPS} 次追问后 {agent} 仍未回复：可 AgentControl(action=messages) 看它卡在排队还是收下不答"
+                        ),
+                        &mut line,
+                    );
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// Watch line for a chased acknowledgement: driven entirely by `spawn_ack_watchdog`, so it
+/// declares no polling interval of its own.
+struct AckWatch {
+    label: String,
+}
+
+impl crate::watch::Watchable for AckWatch {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+    fn poll(&self) -> crate::watch::WatchPoll {
+        crate::watch::WatchPoll {
+            state: WatchState::Running,
+            detail: None,
+            payload: None,
+            signal: None,
+        }
+    }
+    fn check_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
+    fn kind(&self) -> WatchKind {
+        WatchKind::Agent
+    }
+}
+
 /// Single-line excerpt (for labels): cut at newline / 40 characters.
 pub(crate) fn excerpt(text: &str) -> String {
     let line = text.lines().next().unwrap_or_default();
@@ -241,7 +363,7 @@ pub(crate) fn absorb_inbox(
         .iter()
         .filter_map(|item| match item {
             InboxItem::Direct { images, .. } => Some(images.clone()),
-            InboxItem::Channel { .. } => None,
+            InboxItem::Channel { .. } | InboxItem::FollowUp { .. } => None,
         })
         .flatten()
         .collect();
@@ -257,6 +379,27 @@ pub(crate) fn absorb_inbox(
                     text,
                     seq,
                 } => format!("[#{channel} 第{seq}条] {from}: {text}"),
+                InboxItem::FollowUp {
+                    original,
+                    round,
+                    excerpt,
+                    waited,
+                    delivered,
+                } => {
+                    let silence = if *delivered {
+                        "you read it in an earlier turn and ended that turn without saying anything"
+                    } else {
+                        "it sat in your inbox without being picked up"
+                    };
+                    format!(
+                        "[follow-up {round}/{MAX_FOLLOW_UPS}] The hub sent you message \
+                         #{original} (\"{excerpt}\") {}s ago and has had no reply: {silence}. \
+                         Answer it now — if you are still working, say what you are doing and \
+                         what you have so far; if you have nothing to add, say that. Ending a \
+                         turn in silence reads as a hang from the outside.",
+                        waited.as_secs()
+                    )
+                }
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -335,6 +478,7 @@ pub(crate) fn spawn_agent_loop(
             {
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let spoke = !text.trim().is_empty();
                     loop_registry.set_live(&name, None);
                     watch.set_state(
                         run.0,
@@ -342,7 +486,7 @@ pub(crate) fn spawn_agent_loop(
                         Some("完成".to_string()),
                         Some(serde_json::json!(non_empty(text))),
                     );
-                    match loop_registry.finish(&name, outcome.messages) {
+                    match loop_registry.finish(&name, outcome.messages, spoke) {
                         Some(next) => {
                             history = next.history;
                             (prompt, images) = absorb_inbox(&session.channels, &name, &next.items);
@@ -768,7 +912,8 @@ impl Tool for AgentTool {
                 );
                 // On the synchronous path tools run serially, so queued messages never reach here;
                 // if one somehow does, hand it to the background loop (same continuation mechanism).
-                if let Some(next) = self.session.agents.finish(&name, outcome.messages) {
+                let spoke = !content.trim().is_empty();
+                if let Some(next) = self.session.agents.finish(&name, outcome.messages, spoke) {
                     let (prompt, images) = absorb_inbox(&sub_session.channels, &name, &next.items);
                     spawn_agent_loop(
                         self.session.agents.clone(),
@@ -812,7 +957,17 @@ pub struct SendMessageInput {
     agent: String,
     #[schemars(description = "Follow-up instruction/message to send")]
     message: String,
+    /// Reply wait: arms the follow-up watchdog (see `spawn_ack_watchdog`).
+    #[serde(default)]
+    #[schemars(
+        description = "Optional reply wait in seconds (clamped to 5-3600). Set it when silence from this instance would be a problem: once the wait elapses the harness re-checks the same record AgentControl(action=messages) reports, and while you are still owed an answer — the message is queued, or it was read into a turn that ended saying nothing — it sends the receiver a follow-up asking it to reply, at most 3 rounds. Anything other than an answer inside the wait is reported back to you as a task notification. Omit it for fire-and-forget."
+    )]
+    ack_timeout: Option<u64>,
 }
+
+/// Bounds on the reply wait: below the floor the watchdog would fire before the receiver could
+/// plausibly finish a turn; the ceiling keeps a stray task from outliving the day.
+const ACK_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 
 /// Main→sub continuation channel (hub-and-spoke, main session only): an idle instance is woken
 /// with its full history to continue; a busy instance queues the message and it is delivered
@@ -833,7 +988,7 @@ impl Tool for SendMessageTool {
         "SendMessage".to_string()
     }
     fn description(&self) -> String {
-        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id: the message is queued and delivered at the end of this turn, batched with any other message sent to the same instance in this turn, so the receiver reads them together rather than one per turn. Queued is not yet an acknowledgement — AgentControl(action=messages) reports whether it was delivered, is still queued, or was dropped because the instance stopped. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
+        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id: the message is queued and delivered at the end of this turn, batched with any other message sent to the same instance in this turn, so the receiver reads them together rather than one per turn. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing. AgentControl(action=messages) reports which of those it is: queued, delivered but unanswered, answered (with the run that replied), or dropped because the instance stopped. Rather than polling that yourself, set ack_timeout and the harness runs the same check and follows up on the receiver, up to 3 rounds, reporting back if no answer ever comes. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<SendMessageInput>()
@@ -847,22 +1002,45 @@ impl Tool for SendMessageTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: SendMessageInput = parse_input(&input)?;
         let images = self.session.attachments.resolve(&params.message);
+        let timeout = params.ack_timeout.map(|secs| {
+            std::time::Duration::from_secs(
+                secs.clamp(*ACK_TIMEOUT_RANGE.start(), *ACK_TIMEOUT_RANGE.end()),
+            )
+        });
         let id = self
             .session
             .agents
-            .deliver(&params.agent, &params.message, images)
+            .deliver(&params.agent, &params.message, images, timeout)
             .map_err(ToolError::failed)?;
+        let note = match timeout {
+            Some(t) => format!(
+                "本回合结束时与同一收件人的其他消息合并成一批送达；{}s 内没等到回复（含「读了但那轮没吭声」）将自动复查并追问（最多 {MAX_FOLLOW_UPS} 轮），结果以任务通知回报",
+                t.as_secs()
+            ),
+            None => "本回合结束时与同一收件人的其他消息合并成一批送达；\
+                     久未确认可用 AgentControl(action=messages, agent=…) 复查"
+                .to_string(),
+        };
+        if let Some(timeout) = timeout {
+            spawn_ack_watchdog(
+                self.session.clone(),
+                ctx.watch.clone(),
+                params.agent.clone(),
+                id,
+                timeout,
+            );
+        }
         Ok(ToolResult {
             content: serde_json::json!({
                 "status": "queued",
                 "message_id": id.0,
                 "agent": params.agent,
-                "note": "本回合结束时与同一收件人的其他消息合并成一批送达；\
-                         久未确认可用 AgentControl(action=messages, agent=…) 复查",
+                "ack_timeout_secs": timeout.map(|t| t.as_secs()),
+                "note": note,
             })
             .to_string()
             .into(),
@@ -908,6 +1086,19 @@ impl AgentControlTool {
         Self { session }
     }
 
+    /// Watchdog state of a message still owed an answer: empty when the sender armed none, so a
+    /// fire-and-forget listing reads exactly as it did before.
+    fn chase_note(ack: &crate::agents::Ack) -> String {
+        let Some(timeout) = ack.timeout else {
+            return String::new();
+        };
+        let sent = match ack.follow_ups {
+            0 => String::new(),
+            n => format!("，已追问 {n}/{MAX_FOLLOW_UPS}"),
+        };
+        format!("，{}s 未回复即自动复查{sent}", timeout.as_secs())
+    }
+
     fn require_agent(input: &AgentControlInput) -> Result<&str, ToolError> {
         input
             .agent
@@ -923,7 +1114,7 @@ impl Tool for AgentControlTool {
         "AgentControl".to_string()
     }
     fn description(&self) -> String {
-        "Manage subagent instances: list all (name/definition/status/queued-instruction count), check messages sent to one (per-message delivered/queued/dropped plus how long it has been waiting — use this when a SendMessage has gone unacknowledged for a while), stop one (aborts the current run, stops accepting instructions; history kept), delete one (stops and removes it; the name is released).".to_string()
+        "Manage subagent instances: list all (name/definition/status/queued-instruction count), check messages sent to one (per-message queued/delivered-but-unanswered/answered/dropped, how long it has been waiting, and whether SendMessage's ack_timeout is already chasing it — use this when an instance has gone quiet on you), stop one (aborts the current run, stops accepting instructions; history kept), delete one (stops and removes it; the name is released).".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<AgentControlInput>()
@@ -991,11 +1182,16 @@ impl Tool for AgentControlTool {
                         .map(|a| {
                             let detail = match &a.state {
                                 crate::agents::AckState::Queued => format!(
-                                    "queued（等待 {}s，将在下一个回合边界成批送达）",
-                                    a.queued_at.elapsed().as_secs()
+                                    "queued（等待 {}s{}，将在下一个回合边界成批送达）",
+                                    a.queued_at.elapsed().as_secs(),
+                                    Self::chase_note(a)
                                 ),
-                                crate::agents::AckState::Delivered { run } => {
-                                    format!("delivered（第 {run} 轮已进入上下文）")
+                                crate::agents::AckState::Delivered { run } => format!(
+                                    "delivered（第 {run} 轮已读进上下文，但那一轮没有回话{}）",
+                                    Self::chase_note(a)
+                                ),
+                                crate::agents::AckState::Answered { run } => {
+                                    format!("answered（第 {run} 轮已回复）")
                                 }
                                 crate::agents::AckState::Dropped { reason } => {
                                     format!("dropped（{reason}，未送达）")
@@ -1496,18 +1692,11 @@ mod tests {
             .agents
             .insert("worker", None, "干活".into(), session.clone());
         let send = SendMessageTool::new(session.clone());
-        let ctx = crate::tool::ToolContext {
-            home: std::env::temp_dir(),
-            cwd: std::path::PathBuf::from("/tmp"),
-            watch: session.watch.clone(),
-            http: reqwest::Client::new(),
-            tasks: session.tasks.clone(),
-            hooks: crate::settings::HooksConfig::default(),
-            permission_mode: "default".into(),
-            expand_tasks: tokio::sync::watch::channel(false).0,
-            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
-            instance: None,
-        };
+        let ctx = hub_ctx(&session);
+        // The acknowledgement wait is opt-in: omitting it keeps the plain fire-and-forget path.
+        let schema = send.input_schema();
+        assert!(schema["properties"]["ack_timeout"].is_object());
+        assert_eq!(schema["required"], serde_json::json!(["agent", "message"]));
         let out = send
             .call(
                 serde_json::json!({"agent": "worker", "message": "补充"}),
@@ -1530,6 +1719,145 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("worker"), "{err}");
+    }
+
+    fn hub_ctx(session: &Arc<Session>) -> crate::tool::ToolContext {
+        crate::tool::ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::path::PathBuf::from("/tmp"),
+            watch: session.watch.clone(),
+            http: reqwest::Client::new(),
+            tasks: session.tasks.clone(),
+            hooks: crate::settings::HooksConfig::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+        }
+    }
+
+    /// A message that is never picked up is chased on the sender's own clock and then reported:
+    /// three follow-ups ride along with it, and the give-up lands in the hub's notification queue
+    /// rather than staying an unanswered "queued" nobody looks at again.
+    #[tokio::test(start_paused = true)]
+    async fn unacknowledged_message_is_chased_three_times_then_reported() {
+        let (session, _client) = parent_session();
+        // Running: the boundary flush cannot claim it, so the message really does stay queued.
+        session
+            .agents
+            .insert("worker", None, "干活".into(), session.clone());
+        let ctx = hub_ctx(&session);
+        let out = SendMessageTool::new(session.clone())
+            .call(
+                serde_json::json!({"agent": "worker", "message": "查日志", "ack_timeout": 1}),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let receipt: serde_json::Value =
+            serde_json::from_str(out.content.as_str().unwrap_or_default())
+                .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(receipt["ack_timeout_secs"], 5, "低于下限的等待被夹紧");
+
+        // Four deadlines: three follow-ups, then the give-up.
+        tokio::time::sleep(std::time::Duration::from_secs(5 * 5)).await;
+
+        let acks = session
+            .agents
+            .acks_of("worker")
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(acks[0].follow_ups, MAX_FOLLOW_UPS, "追问到预算用尽为止");
+        assert_eq!(
+            session.agents.list()[0].pending,
+            1 + MAX_FOLLOW_UPS as usize,
+            "每轮一条追问，与原件同在信箱"
+        );
+        let notes = session.watch.consume_notifications(None);
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("追问") && n.contains("worker")),
+            "放弃后回报主 agent：{notes:?}"
+        );
+    }
+
+    /// Being read is not being answered: an instance that takes the message and stays quiet is
+    /// chased exactly like one that never picked it up, and the sender hears about it.
+    #[tokio::test(start_paused = true)]
+    async fn a_receiver_that_reads_and_says_nothing_is_still_chased() {
+        let (session, _client) = parent_session();
+        session
+            .agents
+            .insert("mute", None, "沉默".into(), session.clone());
+        let ctx = hub_ctx(&session);
+        SendMessageTool::new(session.clone())
+            .call(
+                serde_json::json!({"agent": "mute", "message": "汇报进度", "ack_timeout": 5}),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        // A turn ends without a word and takes the queued message into the next one: delivered,
+        // unanswered, and still Running — so the flush the watchdog retries stays a no-op here.
+        assert!(session.agents.finish("mute", Vec::new(), false).is_some());
+        assert!(matches!(
+            session
+                .agents
+                .acks_of("mute")
+                .unwrap_or_else(|| unreachable!())[0]
+                .state,
+            crate::agents::AckState::Delivered { .. }
+        ));
+
+        tokio::time::sleep(std::time::Duration::from_secs(5 * 5)).await;
+
+        let acks = session
+            .agents
+            .acks_of("mute")
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(acks[0].follow_ups, MAX_FOLLOW_UPS, "读了不回照样追问到底");
+        assert_eq!(session.agents.list()[0].pending, MAX_FOLLOW_UPS as usize);
+        let notes = session.watch.consume_notifications(None);
+        assert!(
+            notes.iter().any(|n| n.contains("仍未回复")),
+            "沉默最终回报主 agent：{notes:?}"
+        );
+    }
+
+    /// The silent half of the same mechanism: a message answered inside its wait leaves no watch
+    /// line and no notification — the chase only speaks when something went wrong.
+    #[tokio::test(start_paused = true)]
+    async fn an_acknowledged_message_reports_nothing() {
+        let (session, _client) = parent_session();
+        session
+            .agents
+            .insert("worker", None, "干活".into(), session.clone());
+        let ctx = hub_ctx(&session);
+        SendMessageTool::new(session.clone())
+            .call(
+                serde_json::json!({"agent": "worker", "message": "查日志", "ack_timeout": 60}),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        // The receiver picks it up at the boundary, then that run ends with something to say.
+        assert!(session.agents.finish("worker", Vec::new(), true).is_some());
+        assert!(session.agents.finish("worker", Vec::new(), true).is_none());
+        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+        let acks = session
+            .agents
+            .acks_of("worker")
+            .unwrap_or_else(|| unreachable!());
+        assert!(matches!(
+            acks[0].state,
+            crate::agents::AckState::Answered { .. }
+        ));
+        assert_eq!(acks[0].follow_ups, 0, "按时回复不触发追问");
+        assert!(
+            session.watch.consume_notifications(None).is_empty(),
+            "无事发生就不打扰主 agent"
+        );
+        assert!(session.watch.snapshot().is_empty(), "也不留看板行");
     }
 
     /// The hub forwards an image to a subagent by repeating its `#[image N]` marker: the
@@ -1562,9 +1890,9 @@ mod tests {
             .insert("worker", None, "d".into(), sub.clone());
         let id = session
             .agents
-            .deliver("worker", "对比 #[image 1]", images.clone())
+            .deliver("worker", "对比 #[image 1]", images.clone(), None)
             .unwrap_or_else(|e| panic!("{e}"));
-        let (prompt, carried) = match session.agents.finish("worker", Vec::new()) {
+        let (prompt, carried) = match session.agents.finish("worker", Vec::new(), true) {
             Some(next) => absorb_inbox(&sub.channels, "worker", &next.items),
             None => unreachable!("排队消息应在回合结束时取出"),
         };

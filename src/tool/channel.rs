@@ -493,7 +493,7 @@ mod tests {
         assert!(out.content.as_str().unwrap().contains("第 1 条"));
         let items = hub
             .agents
-            .finish("b", Vec::new())
+            .finish("b", Vec::new(), true)
             .unwrap_or_else(|| panic!("b 信箱应有消息"))
             .items;
         assert!(
