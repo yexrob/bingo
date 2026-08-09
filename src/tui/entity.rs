@@ -146,7 +146,7 @@ fn send(session: &Arc<Session>, conv: &Conv, text: &str) -> Option<String> {
                 // With render-as-read this rarely bounces; if it does (same-frame
                 // race), prompt the user to resend.
                 Ok(crate::tool::channel::PostDelivery::Stale { .. }) => {
-                    Some("频道刚有新消息，请看完后重发".to_string())
+                    Some("the channel got new messages; read them and resend".to_string())
                 }
                 Err(e) => Some(e),
             }
@@ -454,7 +454,7 @@ mod tests {
             dms: vec![DmItem {
                 name: "scout".into(),
                 state: AgentState::Idle,
-                description: "侦察".into(),
+                description: "recon".into(),
                 unread: 0,
             }],
         }
@@ -486,11 +486,11 @@ mod tests {
     fn tab_walks_the_two_focuses_and_typing_lands_in_the_composer() {
         let snap = snap();
         let mut ws = Workspace::default();
-        assert_eq!(ws.focus, Focus::Composer, "打开即可打字");
+        assert_eq!(ws.focus, Focus::Composer, "open means ready to type");
         press(&mut ws, &snap, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(ws.focus, Focus::Messages);
         press(&mut ws, &snap, KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(ws.focus, Focus::Composer, "只剩两处焦点");
+        assert_eq!(ws.focus, Focus::Composer, "only two focuses remain");
 
         press(&mut ws, &snap, KeyCode::Char('h'), KeyModifiers::NONE);
         press(&mut ws, &snap, KeyCode::Char('i'), KeyModifiers::NONE);
@@ -510,7 +510,7 @@ mod tests {
         ws.sync(&snap);
         press(&mut ws, &snap, KeyCode::Up, KeyModifiers::NONE);
         press(&mut ws, &snap, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(ws.scroll_up, 2, "输入框里的 ↑↓ 滚消息");
+        assert_eq!(ws.scroll_up, 2, "↑↓ in the composer scroll the messages");
         press(&mut ws, &snap, KeyCode::PageDown, KeyModifiers::NONE);
         assert_eq!(ws.scroll_up, 0);
 
@@ -525,10 +525,10 @@ mod tests {
         assert_eq!(
             ws.open,
             Some(Conv::Channel("dev-room".into())),
-            "从消息区也能换会话"
+            "the messages area can switch conversations too"
         );
         press(&mut ws, &snap, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(ws.scroll_up, 1, "消息区的 ↑ 仍是滚动");
+        assert_eq!(ws.scroll_up, 1, "↑ in the messages area still scrolls");
     }
 
     #[test]
@@ -566,26 +566,29 @@ mod tests {
         session
             .channels
             .create("dev-room", vec!["scout".into()], ChannelMode::Free)
-            .unwrap_or_else(|e| panic!("建频道: {e}"));
+            .unwrap_or_else(|e| panic!("create channel: {e}"));
         assert_eq!(
-            send(&session, &Conv::Channel("dev-room".into()), "都停一下"),
+            send(&session, &Conv::Channel("dev-room".into()), "everyone stop"),
             None
         );
         let log = session.channels.log_of("dev-room");
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].from, USER_NAME);
-        assert!(log[0].at > 0, "落地时间被戳上");
+        assert!(log[0].at > 0, "the landing time is stamped");
 
         // An unknown instance reports rather than silently swallowing the draft.
-        let err = send(&session, &Conv::Dm("nobody".into()), "在吗");
-        assert!(err.is_some_and(|e| e.contains("nobody")), "未知实例要报错");
+        let err = send(&session, &Conv::Dm("nobody".into()), "are you there");
+        assert!(
+            err.is_some_and(|e| e.contains("nobody")),
+            "unknown instances must error"
+        );
     }
 
     #[test]
     fn dm_history_becomes_posts_with_queued_drafts_last() {
         use crate::api::types::{ContentBlock, Message, Role};
         let history = vec![
-            Message::user_text("调研 D27"),
+            Message::user_text("research D27"),
             Message {
                 role: Role::Assistant,
                 content: vec![
@@ -595,15 +598,15 @@ mod tests {
                         input: serde_json::json!({"command": "rg lazy"}),
                     },
                     ContentBlock::Text {
-                        text: "结论：懒落盘正确。".into(),
+                        text: "Conclusion: lazy flush is correct.".into(),
                     },
                 ],
             },
         ];
         let posts = slack::dm_posts(
             &history,
-            Some("正在写第二段"),
-            &["再看一遍".to_string()],
+            Some("writing the second paragraph"),
+            &["read it again".to_string()],
             "scout",
             USER_NAME,
         );

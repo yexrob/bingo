@@ -78,7 +78,7 @@ impl Tool for ReadTool {
             })?;
             let prepared = crate::api::image::prepare_image(&bytes).ok_or_else(|| {
                 ToolError::failed(format!(
-                    "{} 不是可解码的图片（或超出尺寸上限）",
+                    "{} is not a decodable image (or exceeds the size limit)",
                     path.display()
                 ))
             })?;
@@ -194,8 +194,8 @@ mod tests {
     #[tokio::test]
     async fn huge_file_is_partially_read_and_truncated() {
         let path = std::env::temp_dir().join(format!("bingo-read-huge-{}", std::process::id()));
-        // 3-byte-per-char Chinese, far exceeding MAX_READ_BYTES in total.
-        let body = "中".repeat(MAX_READ_CHARS * 3);
+        // 3-byte-per-char non-ASCII, far exceeding MAX_READ_BYTES in total.
+        let body = "❤".repeat(MAX_READ_CHARS * 3);
         std::fs::write(&path, &body).unwrap();
         let text = read(&path).await;
         assert!(
@@ -203,7 +203,7 @@ mod tests {
             "{}",
             &text[..80]
         );
-        let head: String = text.chars().take_while(|c| *c == '中').collect();
+        let head: String = text.chars().take_while(|c| *c == '❤').collect();
         assert_eq!(head.chars().count(), MAX_READ_CHARS);
         std::fs::remove_file(&path).unwrap();
     }
@@ -233,8 +233,8 @@ mod tests {
         let blocks = result
             .content
             .as_array()
-            .unwrap_or_else(|| panic!("图片应返回块数组，实际 {}", result.content));
-        assert_eq!(blocks.len(), 2, "一段说明 + 一张图");
+            .unwrap_or_else(|| panic!("image should return a block array, got {}", result.content));
+        assert_eq!(blocks.len(), 2, "one caption + one image");
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[1]["type"], "image");
         assert_eq!(blocks[1]["source"]["media_type"], "image/png");
@@ -255,8 +255,8 @@ mod tests {
     #[tokio::test]
     async fn small_file_is_returned_verbatim() {
         let path = std::env::temp_dir().join(format!("bingo-read-small-{}", std::process::id()));
-        std::fs::write(&path, "hello 世界\n").unwrap();
-        assert_eq!(read(&path).await, "hello 世界\n");
+        std::fs::write(&path, "hello world\n").unwrap();
+        assert_eq!(read(&path).await, "hello world\n");
         std::fs::remove_file(&path).unwrap();
     }
 }

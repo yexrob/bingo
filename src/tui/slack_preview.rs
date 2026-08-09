@@ -52,19 +52,19 @@ mod preview {
                 DmItem {
                     name: "scout".into(),
                     state: AgentState::Running,
-                    description: "代码侦察".into(),
+                    description: "code reconnaissance".into(),
                     unread: 0,
                 },
                 DmItem {
                     name: "qa".into(),
                     state: AgentState::Idle,
-                    description: "验收".into(),
+                    description: "acceptance".into(),
                     unread: 3,
                 },
                 DmItem {
                     name: "ui-ux".into(),
                     state: AgentState::Stopped,
-                    description: "界面评审".into(),
+                    description: "interface review".into(),
                     unread: 0,
                 },
             ],
@@ -77,15 +77,15 @@ mod preview {
                 from: "scout".into(),
                 you: false,
                 at: now - 90_000,
-                text: "昨天扫了一遍 term.rs，写层只剩一处。".into(),
+                text: "I swept term.rs yesterday; only one spot left in the write layer.".into(),
                 kind: PostKind::Said,
             },
             Post {
                 from: "scout".into(),
                 you: false,
                 at: now - 3600,
-                text: "找到那个回归了：resize 之后 viewport 高度算少了一行，\
-                       所以底部那条 hint 被顶掉。"
+                text: "Found the regression: after a resize the viewport height was one row short,\
+                       so the hint at the bottom got pushed off."
                     .into(),
                 kind: PostKind::Said,
             },
@@ -100,21 +100,21 @@ mod preview {
                 from: "user".into(),
                 you: true,
                 at: now - 3000,
-                text: "先别改，等我看完 D38 再说。".into(),
+                text: "Don't change it yet; wait until I finish reading D38.".into(),
                 kind: PostKind::Said,
             },
             Post {
                 from: "qa".into(),
                 you: false,
                 at: now - 600,
-                text: "80x24 复现了，附上最小步骤。".into(),
+                text: "Reproduced at 80x24; minimal steps attached.".into(),
                 kind: PostKind::Said,
             },
             Post {
                 from: "qa".into(),
                 you: false,
                 at: now - 60,
-                text: "正在补一条回归测试".into(),
+                text: "writing a regression test now".into(),
                 kind: PostKind::Typing,
             },
         ]
@@ -239,7 +239,8 @@ mod preview {
         };
         ws.entered = Some((Conv::Channel("dev-room".into()), 0));
         let typed = Workspace {
-            composer: "那我先把 viewport 的高度算法拉出来单测".into(),
+            composer: "then I'll extract the viewport height algorithm into a unit test first"
+                .into(),
             focus: Focus::Composer,
             ..ws.clone()
         };
@@ -256,12 +257,12 @@ mod preview {
         ));
         body.push_str(&html(
             &frame(100, 30, &typed, &Theme::dark(), now),
-            "100×30 dark · 输入中",
+            "100×30 dark · typing",
             TERM_DARK,
         ));
         body.push_str(&html(
             &frame(100, 30, &dm, &Theme::dark(), now),
-            "100×30 dark · 私信 + 消息区焦点",
+            "100×30 dark · DM + messages focused",
             TERM_DARK,
         ));
         body.push_str(&html(
@@ -283,7 +284,7 @@ mod preview {
         };
         body.push_str(&html(
             &frame(100, 26, &switching, &Theme::dark(), now),
-            "100×26 dark · ctrl+k 快速跳转",
+            "100×26 dark · ctrl+k quick jump",
             TERM_DARK,
         ));
         // Empty workspace: nothing spawned yet.
@@ -298,7 +299,7 @@ mod preview {
                 &mut buf,
                 main,
             );
-            body.push_str(&html(&buf, "100×16 dark · 空工作区", TERM_DARK));
+            body.push_str(&html(&buf, "100×16 dark · empty workspace", TERM_DARK));
         }
         let page = format!(
             "<html><head><meta charset=\"utf-8\"><style>\
@@ -311,7 +312,7 @@ mod preview {
              text-align:left;vertical-align:top}}</style></head><body>{body}</body></html>"
         );
         let path = std::path::Path::new(&dir).join("slack.html");
-        std::fs::write(&path, page).unwrap_or_else(|e| panic!("写预览: {e}"));
+        std::fs::write(&path, page).unwrap_or_else(|e| panic!("write preview: {e}"));
         println!("preview: {}", path.display());
     }
 }

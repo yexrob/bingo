@@ -32,7 +32,7 @@ impl crate::watch::Watchable for ChannelWatch {
     fn poll(&self) -> crate::watch::WatchPoll {
         crate::watch::WatchPoll {
             state: WatchState::Running,
-            detail: Some("0 条".to_string()),
+            detail: Some("0 messages".to_string()),
             payload: None,
             signal: None,
         }
@@ -162,19 +162,19 @@ Every message wakes every other member, so who you are answering matters: when `
             .map_err(ToolError::failed)?
         {
             PostDelivery::Sent { seq } => Ok(ToolResult {
-                content: serde_json::Value::String(format!("已发送（#{channel} 第 {seq} 条）")),
+                content: serde_json::Value::String(format!("sent (#{channel} msg #{seq})")),
                 is_error: false,
                 diff: None,
             }),
             PostDelivery::Stale { missed } => {
                 let lines: Vec<String> = missed
                     .iter()
-                    .map(|m| format!("[#{channel} 第{}条] {}: {}", m.seq, m.from, m.text))
+                    .map(|m| format!("[#{channel} msg #{}] {}: {}", m.seq, m.from, m.text))
                     .collect();
                 Ok(ToolResult {
                     content: serde_json::Value::String(format!(
-                        "未送出——你拟发言期间频道已有新消息：\n{}\n\
-请基于最新内容重新决定：照发（原样重新调用）、修改后再发、或放弃发言。",
+                        "not sent — the channel got new messages while you were drafting:\n{}\n\
+Decide again from the latest content: resend as-is (call again unchanged), edit and resend, or drop the message.",
                         lines.join("\n")
                     )),
                     is_error: false,
@@ -236,7 +236,7 @@ impl ChannelTool {
             .as_deref()
             .map(|c| c.trim_start_matches('#'))
             .filter(|c| !c.is_empty())
-            .ok_or_else(|| ToolError::failed("需要 channel 参数（频道名）"))
+            .ok_or_else(|| ToolError::failed("channel parameter (channel name) is required"))
     }
 
     /// Cohort validation: members must be existing direct sub-agents (depth==1).
@@ -247,10 +247,10 @@ impl ChannelTool {
         match self.session.agents.depth_of(member) {
             Some(1) => Ok(()),
             Some(_) => Err(ToolError::failed(format!(
-                "{member} 不是直接子代理（频道成员限主会话直接派生的实例）"
+                "{member} is not a direct subagent (channel members are limited to instances spawned directly by the main session)"
             ))),
             None => Err(ToolError::failed(format!(
-                "没有名为 {member} 的子代理实例（先用 Agent 派生）"
+                "no subagent instance named {member} (spawn one with Agent first)"
             ))),
         }
     }
@@ -303,7 +303,7 @@ impl Tool for ChannelTool {
                 );
                 self.session.channels.set_watch(&name, id);
                 format!(
-                    "已建频道 #{name}（{}，成员：main{}{}）",
+                    "channel #{name} created ({}, members: main{}{})",
                     mode.label(),
                     if members.is_empty() { "" } else { ", " },
                     members.join(", ")
@@ -315,14 +315,16 @@ impl Tool for ChannelTool {
                     .members
                     .as_deref()
                     .and_then(|m| m.first())
-                    .ok_or_else(|| ToolError::failed("invite 需要 members（目标实例名）"))?
+                    .ok_or_else(|| {
+                        ToolError::failed("invite requires members (target instance names)")
+                    })?
                     .clone();
                 self.validate_member(&member)?;
                 self.session
                     .channels
                     .invite(&name, &member)
                     .map_err(ToolError::failed)?;
-                format!("{member} 已加入 #{name}（从当前消息头开始听）")
+                format!("{member} joined #{name} (listening from the current message head)")
             }
             ChannelAction::Kick => {
                 let name = Self::require_channel(&params)?.to_string();
@@ -330,28 +332,30 @@ impl Tool for ChannelTool {
                     .members
                     .as_deref()
                     .and_then(|m| m.first())
-                    .ok_or_else(|| ToolError::failed("kick 需要 members（目标实例名）"))?
+                    .ok_or_else(|| {
+                        ToolError::failed("kick requires members (target instance names)")
+                    })?
                     .clone();
                 self.session
                     .channels
                     .kick(&name, &member)
                     .map_err(ToolError::failed)?;
-                format!("{member} 已移出 #{name}")
+                format!("{member} removed from #{name}")
             }
             ChannelAction::List => {
                 let statuses = self.session.channels.list();
                 if statuses.is_empty() {
-                    "当前没有频道".to_string()
+                    "no channels right now".to_string()
                 } else {
                     statuses
                         .iter()
                         .map(|s| {
                             format!(
-                                "- #{}（{}，{} 条{}）：{}",
+                                "- #{} ({}, {} messages{}): {}",
                                 s.name,
                                 s.mode.label(),
                                 s.seq,
-                                if s.frozen { "，已冻结" } else { "" },
+                                if s.frozen { ", frozen" } else { "" },
                                 s.members.join(", ")
                             )
                         })
@@ -457,7 +461,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("直接子代理"), "{err}");
+        assert!(err.to_string().contains("direct subagent"), "{err}");
         // list outputs members and mode.
         let out = tool
             .call(serde_json::json!({"action": "list"}), &ctx(&hub))
@@ -486,34 +490,34 @@ mod tests {
         let post_a = PostTool::new(sub_session(&hub, "a"));
         let out = post_a
             .call(
-                serde_json::json!({"channel": "t", "message": "大家好"}),
+                serde_json::json!({"channel": "t", "message": "hello everyone"}),
                 &ctx(&hub),
             )
             .await
             .unwrap();
-        assert!(out.content.as_str().unwrap().contains("第 1 条"));
+        assert!(out.content.as_str().unwrap().contains("msg #1"));
         let items = hub
             .agents
             .finish("b", Vec::new(), true)
-            .unwrap_or_else(|| panic!("b 信箱应有消息"))
+            .unwrap_or_else(|| panic!("b's inbox should have a message"))
             .items;
         assert!(
             matches!(&items[..], [crate::agents::InboxItem::Channel { from, text, .. }]
-                if from == "a" && text == "大家好"),
-            "盖戳为 a"
+                if from == "a" && text == "hello everyone"),
+            "stamped as a"
         );
         // Hub posts: stamped main; hub_mail only receives others' posts.
         let post_hub = PostTool::new(hub.clone());
         let _ = post_hub
             .call(
-                serde_json::json!({"channel": "t", "message": "肃静"}),
+                serde_json::json!({"channel": "t", "message": "quiet"}),
                 &ctx(&hub),
             )
             .await
             .unwrap();
         let mail = hub.channels.drain_hub_mail();
         assert_eq!(mail.len(), 1, "{mail:?}");
-        assert!(mail[0].contains("a: 大家好"));
+        assert!(mail[0].contains("a: hello everyone"));
         // Non-member posts error out.
         let post_c = PostTool::new(sub_session(&hub, "c"));
         let err = post_c
@@ -523,7 +527,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("不是"), "{err}");
+        assert!(err.to_string().contains("is not"), "{err}");
     }
 
     #[tokio::test]
@@ -560,7 +564,7 @@ mod tests {
             .unwrap();
         let text = out.content.as_str().unwrap();
         assert!(!out.is_error);
-        assert!(text.contains("未送出") && text.contains("a: 1"), "{text}");
+        assert!(text.contains("not sent") && text.contains("a: 1"), "{text}");
         // Resend lands (the model changed its message).
         let out = post_b
             .call(
@@ -569,6 +573,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(out.content.as_str().unwrap().contains("第 2 条"));
+        assert!(out.content.as_str().unwrap().contains("msg #2"));
     }
 }

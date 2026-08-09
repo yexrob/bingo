@@ -325,7 +325,7 @@ struct Entry {
 /// so no wakeup is ever lost.
 pub struct AgentRegistry {
     inner: Mutex<HashMap<String, Entry>>,
-    /// share 持久化（Option 语义：不挂接时行为不变；挂接后 insert/finish/stop 同步快照）。
+    /// Share persistence (Option semantics: behavior is unchanged when not attached; once attached, insert/finish/stop sync snapshots).
     share: Mutex<Option<Arc<crate::share::ShareStore>>>,
     /// Permission prompt of the session that owns the UI. Subagents have none of their own, so
     /// they borrow this one; the registry is the single place every spawn path can reach it from
@@ -352,7 +352,7 @@ impl AgentRegistry {
         )
     }
 
-    /// 挂接 share 持久化：之后实例的建/完成/停止事件同步进 share 文档。
+    /// Attach share persistence: instance create/finish/stop events sync into the share document from now on.
     pub fn attach_share(&self, store: Arc<crate::share::ShareStore>) {
         *self.share.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
     }
@@ -366,7 +366,7 @@ impl AgentRegistry {
         self.ask.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// 把某实例的最新快照写入 share 文档（无 store 时 no-op）。
+    /// Write an instance's latest snapshot into the share document (no-op without a store).
     fn sync_share(&self, name: &str) {
         let Some(store) = self.share.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
             return;
@@ -592,14 +592,17 @@ impl AgentRegistry {
         let Some(entry) = inner.get_mut(name) else {
             let known: Vec<String> = inner.keys().cloned().collect();
             return Err(if known.is_empty() {
-                format!("没有名为 {name} 的子代理（当前没有任何实例）")
+                format!("no subagent named {name} (there are no instances right now)")
             } else {
-                format!("没有名为 {name} 的子代理；现有实例：{}", known.join(", "))
+                format!(
+                    "no subagent named {name}; existing instances: {}",
+                    known.join(", ")
+                )
             });
         };
         if entry.state == AgentState::Stopped {
             return Err(format!(
-                "{name} 已停止，不再接收指令（delete 可移除该实例）"
+                "{name} is stopped and no longer accepts instructions (delete removes the instance)"
             ));
         }
         entry.inbox.push(InboxItem::Direct {
@@ -703,14 +706,14 @@ impl AgentRegistry {
         let result = {
             let mut inner = self.lock();
             let Some(entry) = inner.get_mut(name) else {
-                return Err(format!("没有名为 {name} 的子代理"));
+                return Err(format!("no subagent named {name}"));
             };
             if entry.state == AgentState::Stopped {
                 (None, 0)
             } else {
                 let was_running = entry.state == AgentState::Running;
                 entry.state = AgentState::Stopped;
-                let dropped = mark_inbox_dropped(entry, "实例已停止");
+                let dropped = mark_inbox_dropped(entry, "instance stopped");
                 if let Some(abort) = entry.abort.take() {
                     abort.abort();
                 }
@@ -858,27 +861,34 @@ mod tests {
         let project = root.join("project");
         write(
             &home.join(".config/bingo/agents/reviewer.md"),
-            "---\ndescription: user reviewer\nmodel: haiku\n---\n你是评审。\n",
+            "---\ndescription: user reviewer\nmodel: haiku\n---\nYou are the reviewer.\n",
         );
         write(
             &project.join(".bingo/agents/reviewer.md"),
-            "---\ndescription: project reviewer\n---\n你是项目评审。\n",
+            "---\ndescription: project reviewer\n---\nYou are the project reviewer.\n",
         );
-        write(&project.join(".bingo/agents/scout.md"), "调研专用。\n");
+        write(&project.join(".bingo/agents/scout.md"), "For research.\n");
         let defs = load_agent_defs(&home, &project);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, vec!["reviewer", "scout"], "项目层同名覆盖用户层");
+        assert_eq!(
+            names,
+            vec!["reviewer", "scout"],
+            "the project layer overrides the user layer for same names"
+        );
         let reviewer = &defs[0];
         assert_eq!(reviewer.description, "project reviewer");
-        assert!(reviewer.system.contains("项目评审"));
-        assert!(reviewer.model.is_none(), "被覆盖的 user 定义不渗透");
+        assert!(reviewer.system.contains("project reviewer"));
+        assert!(
+            reviewer.model.is_none(),
+            "the overridden user definition does not leak through"
+        );
         assert_eq!(
             reviewer.source,
             AgentDefSource::Project,
-            "跨层同名覆盖 source 取项目层"
+            "a cross-layer same-name override takes the project source"
         );
         // No frontmatter: name comes from the file name, description falls back to the first body line.
-        assert_eq!(defs[1].description, "调研专用。");
+        assert_eq!(defs[1].description, "For research.");
         assert_eq!(defs[1].source, AgentDefSource::Project);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -891,7 +901,7 @@ mod tests {
         let home = root.join("home");
         write(
             &home.join(".config/bingo/agents/only-user.md"),
-            "user 层专用。\n",
+            "User-layer only.\n",
         );
         let defs = load_agent_defs(&home, &root);
         assert_eq!(defs.len(), 1);
@@ -907,17 +917,26 @@ mod tests {
         let home = root.join("home");
         write(
             &home.join(".config/bingo/agents/x.md"),
-            "---\nname: 深潜\ndescription: >-\n  多行\n  描述\nmodel: sub-model\nprovider: ds\nthinking: xhigh\n---\nsystem 正文\n",
+            "---\nname: deep-dive\ndescription: >-\n  multi-line\n  description\nmodel: sub-model\nprovider: ds\nthinking: xhigh\n---\nsystem body\n",
         );
         let defs = load_agent_defs(&home, &root);
         assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "深潜", "frontmatter name 覆盖文件名");
-        assert_eq!(defs[0].description, "多行 描述", "折叠标量");
+        assert_eq!(
+            defs[0].name, "deep-dive",
+            "frontmatter name overrides the file name"
+        );
+        assert_eq!(
+            defs[0].description, "multi-line description",
+            "folded scalar"
+        );
         assert_eq!(defs[0].model.as_deref(), Some("sub-model"));
         assert_eq!(defs[0].provider.as_deref(), Some("ds"));
         assert_eq!(defs[0].thinking.as_deref(), Some("xhigh"));
-        assert_eq!(defs[0].system, "system 正文");
-        assert!(defs[0].inherit_system, "缺省追加到父 system");
+        assert_eq!(defs[0].system, "system body");
+        assert!(
+            defs[0].inherit_system,
+            "defaults to appending to the parent system"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -931,11 +950,11 @@ mod tests {
         let home = root.join("home");
         write(
             &home.join(".config/bingo/agents/lean.md"),
-            "---\nname: lean\ninherit_system: false\n---\n只要人设\n",
+            "---\nname: lean\ninherit_system: false\n---\npersona only\n",
         );
         write(
             &home.join(".config/bingo/agents/keep.md"),
-            "---\nname: keep\ninherit_system: yes\n---\n照常追加\n",
+            "---\nname: keep\ninherit_system: yes\n---\nappended as usual\n",
         );
         let defs = load_agent_defs(&home, &root);
         let by = |n: &str| defs.iter().find(|d| d.name == n).unwrap().inherit_system;
@@ -947,7 +966,7 @@ mod tests {
     #[test]
     fn claim_name_dedupes_and_defaults() {
         let reg = AgentRegistry::new();
-        assert_eq!(reg.claim_name(""), "agent", "空名回落");
+        assert_eq!(reg.claim_name(""), "agent", "empty name falls back");
         assert_eq!(reg.claim_name("reviewer"), "reviewer");
         reg.insert("reviewer", None, "r".into(), test_session());
         assert_eq!(reg.claim_name("reviewer"), "reviewer-2");
@@ -958,19 +977,23 @@ mod tests {
     #[test]
     fn lifecycle_running_idle_queue_and_revive() {
         let reg = AgentRegistry::new();
-        reg.insert("scout", None, "调研".into(), test_session());
+        reg.insert("scout", None, "research".into(), test_session());
         // Running: message queued (delivery never happens inside deliver itself).
         let first = reg
-            .deliver("scout", "补充 A", Vec::new(), None)
+            .deliver("scout", "add A", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         // Turn finished + inbox non-empty → continues (history saved, inbox drained, ack set).
         let next = reg
             .finish("scout", vec![Message::user_text("hi")], true)
-            .unwrap_or_else(|| panic!("应续跑"));
-        assert_eq!(next.history.len(), 1, "续跑携带最新历史");
+            .unwrap_or_else(|| panic!("should continue"));
+        assert_eq!(
+            next.history.len(),
+            1,
+            "the continuation carries the latest history"
+        );
         assert!(
-            matches!(&next.items[..], [InboxItem::Direct { text: m, .. }] if m == "补充 A"),
-            "信箱内容"
+            matches!(&next.items[..], [InboxItem::Direct { text: m, .. }] if m == "add A"),
+            "inbox content"
         );
         assert_eq!(reg.list()[0].state, AgentState::Running);
         let acks = reg.acks_of("scout").unwrap_or_else(|| unreachable!());
@@ -981,44 +1004,51 @@ mod tests {
         assert_eq!(reg.list()[0].state, AgentState::Idle);
         // Idle: the message waits for a flush rather than starting a run on the spot.
         let _ = reg
-            .deliver("scout", "再看 B", Vec::new(), None)
+            .deliver("scout", "look at B again", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(reg.list()[0].state, AgentState::Idle, "投递不自行起跑");
+        assert_eq!(
+            reg.list()[0].state,
+            AgentState::Idle,
+            "delivery does not start a run by itself"
+        );
         let woken = reg.flush_pending();
         assert_eq!(woken.len(), 1);
         assert!(
-            matches!(&woken[0].items[..], [InboxItem::Direct { text: m, .. }] if m == "再看 B")
+            matches!(&woken[0].items[..], [InboxItem::Direct { text: m, .. }] if m == "look at B again")
         );
         assert_eq!(reg.list()[0].state, AgentState::Running);
-        assert!(reg.flush_pending().is_empty(), "已认领的实例不会重复起跑");
+        assert!(
+            reg.flush_pending().is_empty(),
+            "claimed instances do not start twice"
+        );
     }
 
     #[test]
     fn inbox_accumulates_direct_and_channel_items_in_order() {
         let reg = AgentRegistry::new();
         reg.insert("w", None, "w".into(), test_session());
-        let _ = reg.deliver("w", "先做 1", Vec::new(), None);
+        let _ = reg.deliver("w", "do 1 first", Vec::new(), None);
         assert!(reg.deposit(
             "w",
             InboxItem::Channel {
                 channel: "t".into(),
                 from: "a".into(),
-                text: "报数".into(),
+                text: "report".into(),
                 seq: 3,
             },
         ));
         let items = reg
             .finish("w", Vec::new(), true)
-            .unwrap_or_else(|| panic!("续跑"))
+            .unwrap_or_else(|| panic!("continue"))
             .items;
         assert_eq!(items.len(), 2);
         assert!(
-            matches!(&items[0], InboxItem::Direct { text: m, .. } if m == "先做 1"),
-            "同序"
+            matches!(&items[0], InboxItem::Direct { text: m, .. } if m == "do 1 first"),
+            "in order"
         );
         assert!(
             matches!(&items[1], InboxItem::Channel { seq: 3, from, .. } if from == "a"),
-            "频道条目携带 seq/from"
+            "channel entries carry seq/from"
         );
         // Idle: deposit wakes it; Stopped/unknown silently dropped.
         assert!(reg.finish("w", Vec::new(), true).is_none());
@@ -1041,8 +1071,14 @@ mod tests {
             text: "y".into(),
             seq: 5,
         };
-        assert!(!reg.deposit("w", dropped.clone()), "停止的成员不再收件");
-        assert!(!reg.deposit("ghost", dropped), "未知实例静默丢弃");
+        assert!(
+            !reg.deposit("w", dropped.clone()),
+            "stopped members do not receive"
+        );
+        assert!(
+            !reg.deposit("ghost", dropped),
+            "unknown instances are silently dropped"
+        );
     }
 
     #[test]
@@ -1054,36 +1090,41 @@ mod tests {
         let reg = AgentRegistry::new();
         reg.attach_share(store.clone());
 
-        // insert → 建条目（running，空历史）。
-        reg.insert("scout", Some("scout".into()), "调研".into(), test_session());
+        // insert → creates an entry (running, empty history).
+        reg.insert(
+            "scout",
+            Some("scout".into()),
+            "research".into(),
+            test_session(),
+        );
         let doc = store.snapshot();
         assert_eq!(doc.agents.len(), 1);
         assert_eq!(doc.agents[0].state, "running");
         assert_eq!(doc.agents[0].def.as_deref(), Some("scout"));
         assert!(doc.agents[0].history.is_empty());
 
-        // finish → 历史 + 状态（空信箱 → idle）。
+        // finish → history + state (empty inbox → idle).
         reg.finish("scout", vec![Message::user_text("hi")], true);
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "idle");
         assert_eq!(doc.agents[0].history.len(), 1);
         assert_eq!(doc.agents[0].history[0], Message::user_text("hi"));
 
-        // 忙碌信箱非空 → finish 后保持 running（Idle 唤醒排空 inbox 给 Start，
-        // Running 时才排队；两条指令制造排队场景）。
-        reg.deliver("scout", "再查", Vec::new(), None)
+        // A busy non-empty inbox → stays running after finish (Idle wake-up drains the inbox into Start,
+        // while Running queues; two instructions create the queue scenario).
+        reg.deliver("scout", "check again", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
-        reg.deliver("scout", "又查", Vec::new(), None)
+        reg.deliver("scout", "check once more", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         reg.finish("scout", Vec::new(), true);
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "running");
-        // 信箱排空 → idle。
+        // Inbox drained → idle.
         reg.finish("scout", Vec::new(), true);
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "idle");
 
-        // stop → stopped。
+        // stop → stopped.
         reg.stop("scout").unwrap_or_else(|e| panic!("{e}"));
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "stopped");
@@ -1093,7 +1134,11 @@ mod tests {
     #[test]
     fn hub_name_is_reserved() {
         let reg = AgentRegistry::new();
-        assert_eq!(reg.claim_name("main"), "main-2", "main 为 hub 保留");
+        assert_eq!(
+            reg.claim_name("main"),
+            "main-2",
+            "main is reserved for the hub"
+        );
     }
 
     /// Several messages sent before a boundary arrive as one batch: the receiver reads them
@@ -1102,21 +1147,28 @@ mod tests {
     fn messages_sent_in_one_turn_arrive_as_one_batch() {
         let reg = AgentRegistry::new();
         reg.insert("w", None, "w".into(), test_session());
-        assert!(reg.finish("w", Vec::new(), true).is_none(), "先转 idle");
-        for text in ["先看 A", "再看 B", "最后 C"] {
+        assert!(
+            reg.finish("w", Vec::new(), true).is_none(),
+            "turns idle first"
+        );
+        for text in ["look at A first", "look at B again", "and finally C"] {
             reg.deliver("w", text, Vec::new(), None)
                 .unwrap_or_else(|e| panic!("{e}"));
         }
-        assert_eq!(reg.list()[0].pending, 3, "全部积压，未逐条起跑");
+        assert_eq!(
+            reg.list()[0].pending,
+            3,
+            "all queued, none started individually"
+        );
 
         let woken = reg.flush_pending();
-        assert_eq!(woken.len(), 1, "一个实例只起一轮");
-        assert_eq!(woken[0].items.len(), 3, "三条一次性送达");
+        assert_eq!(woken.len(), 1, "one instance runs one round");
+        assert_eq!(woken[0].items.len(), 3, "all three delivered at once");
         let acks = reg.acks_of("w").unwrap_or_else(|| unreachable!());
         assert!(
             acks.iter()
                 .all(|a| a.state == AckState::Delivered { run: woken[0].run }),
-            "三条落在同一轮：{acks:?}"
+            "all three land in one round: {acks:?}"
         );
     }
 
@@ -1127,7 +1179,7 @@ mod tests {
         let reg = AgentRegistry::new();
         reg.insert("w", None, "w".into(), test_session());
         let id = reg
-            .deliver("w", "还来得及吗", Vec::new(), None)
+            .deliver("w", "is it too late", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         let (_, dropped) = reg.stop("w").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(dropped, 1);
@@ -1135,11 +1187,11 @@ mod tests {
         assert_eq!(acks.len(), 1);
         assert_eq!(acks[0].id, id);
         assert!(
-            matches!(&acks[0].state, AckState::Dropped { reason } if reason.contains("停止")),
+            matches!(&acks[0].state, AckState::Dropped { reason } if reason.contains("stopped")),
             "{:?}",
             acks[0].state
         );
-        assert_eq!(reg.list()[0].pending, 0, "信箱已清空");
+        assert_eq!(reg.list()[0].pending, 0, "inbox cleared");
     }
 
     /// The chase is bounded and self-cancelling: while a message goes unanswered each round leaves
@@ -1150,29 +1202,41 @@ mod tests {
         let reg = AgentRegistry::new();
         reg.insert("w", None, "w".into(), test_session());
         let id = reg
-            .deliver("w", "查一下日志", Vec::new(), Some(Duration::from_secs(30)))
+            .deliver(
+                "w",
+                "check the logs",
+                Vec::new(),
+                Some(Duration::from_secs(30)),
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         for round in 1..=MAX_FOLLOW_UPS {
             assert_eq!(reg.follow_up("w", id), FollowUp::Sent { round });
         }
-        assert_eq!(reg.follow_up("w", id), FollowUp::Exhausted, "预算耗尽");
+        assert_eq!(
+            reg.follow_up("w", id),
+            FollowUp::Exhausted,
+            "budget exhausted"
+        );
         let items = reg
             .finish("w", Vec::new(), true)
-            .unwrap_or_else(|| panic!("排队消息应在回合结束时取出"))
+            .unwrap_or_else(|| panic!("queued messages should be picked up at the turn boundary"))
             .items;
         assert_eq!(
             items.len(),
             1 + MAX_FOLLOW_UPS as usize,
-            "追问与原件同批送达"
+            "follow-ups arrive in the same batch as the original"
         );
         assert!(
             matches!(&items[1], InboxItem::FollowUp { original, round: 1, .. } if *original == id),
-            "追问指向原消息：{:?}",
+            "follow-up points at the original message: {:?}",
             items[1]
         );
         let acks = reg.acks_of("w").unwrap_or_else(|| unreachable!());
-        assert_eq!(acks.len(), 1, "追问自身不留回执");
-        assert_eq!(acks[0].follow_ups, MAX_FOLLOW_UPS, "追问次数可供复查");
+        assert_eq!(acks.len(), 1, "the follow-up itself leaves no receipt");
+        assert_eq!(
+            acks[0].follow_ups, MAX_FOLLOW_UPS,
+            "follow-up count is available for review"
+        );
         assert_eq!(acks[0].timeout, Some(Duration::from_secs(30)));
         // Read into a prompt is still not an acknowledgement — only the reply ends the chase.
         assert!(
@@ -1180,15 +1244,18 @@ mod tests {
                 reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
                 AckState::Delivered { .. }
             ),
-            "进上下文还不算回执"
+            "entering the context is not yet a receipt"
         );
-        assert!(reg.finish("w", Vec::new(), true).is_none(), "该轮开口回话");
+        assert!(
+            reg.finish("w", Vec::new(), true).is_none(),
+            "that round answers"
+        );
         assert!(
             matches!(
                 reg.follow_up("w", id),
                 FollowUp::Settled(AckState::Answered { .. })
             ),
-            "回复后不再追问"
+            "no follow-up after a reply"
         );
     }
 
@@ -1198,26 +1265,37 @@ mod tests {
     #[test]
     fn a_turn_that_says_nothing_does_not_acknowledge_what_it_read() {
         let reg = AgentRegistry::new();
-        reg.insert("mute", None, "沉默".into(), test_session());
-        assert!(reg.finish("mute", Vec::new(), true).is_none(), "先转 idle");
+        reg.insert("mute", None, "silent".into(), test_session());
+        assert!(
+            reg.finish("mute", Vec::new(), true).is_none(),
+            "turns idle first"
+        );
         let id = reg
             .deliver(
                 "mute",
-                "汇报进度",
+                "report progress",
                 Vec::new(),
                 Some(Duration::from_secs(30)),
             )
             .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(reg.flush_pending().len(), 1, "空闲实例在边界收件");
+        assert_eq!(
+            reg.flush_pending().len(),
+            1,
+            "idle instances receive at the boundary"
+        );
         // The turn ends producing no text for the hub.
         assert!(reg.finish("mute", Vec::new(), false).is_none());
         let acks = reg.acks_of("mute").unwrap_or_else(|| unreachable!());
         assert!(
             matches!(acks[0].state, AckState::Delivered { run: 1 }),
-            "沉默的一轮不构成回执：{:?}",
+            "a silent round is not a receipt: {:?}",
             acks[0].state
         );
-        assert_eq!(reg.list()[0].unacked, 1, "发件人仍在等回复");
+        assert_eq!(
+            reg.list()[0].unacked,
+            1,
+            "the sender is still waiting for an answer"
+        );
         assert_eq!(reg.follow_up("mute", id), FollowUp::Sent { round: 1 });
         assert!(
             matches!(
@@ -1227,14 +1305,14 @@ mod tests {
                     ..
                 }]
             ),
-            "追问标明是「读了不吭声」而非「没取走」"
+            "the follow-up marks 'read but silent' rather than 'not picked up'"
         );
         // Speaking up answers what it had already read, even though a later run says it.
         assert!(reg.finish("mute", Vec::new(), true).is_none());
         assert_eq!(
             reg.acks_of("mute").unwrap_or_else(|| unreachable!())[0].state,
             AckState::Answered { run: 2 },
-            "开口那一轮补上回执"
+            "the answering round adds the receipt"
         );
         assert_eq!(reg.list()[0].unacked, 0);
     }
@@ -1246,7 +1324,12 @@ mod tests {
         let reg = AgentRegistry::new();
         reg.insert("w", None, "w".into(), test_session());
         let id = reg
-            .deliver("w", "还来得及吗", Vec::new(), Some(Duration::from_secs(10)))
+            .deliver(
+                "w",
+                "is it too late",
+                Vec::new(),
+                Some(Duration::from_secs(10)),
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(reg.follow_up("w", id), FollowUp::Sent { round: 1 });
         reg.stop("w").unwrap_or_else(|e| panic!("{e}"));
@@ -1255,7 +1338,7 @@ mod tests {
                 reg.follow_up("w", id),
                 FollowUp::Settled(AckState::Dropped { .. })
             ),
-            "停止即丢弃"
+            "stopping discards"
         );
         reg.remove("w").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(reg.follow_up("w", id), FollowUp::Gone);
@@ -1268,13 +1351,17 @@ mod tests {
     fn messages_survive_a_failed_run_and_are_retried() {
         let reg = AgentRegistry::new();
         reg.insert("w", None, "w".into(), test_session());
-        reg.deliver("w", "继续", Vec::new(), None)
+        reg.deliver("w", "continue", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         // The run failed (spawn_agent_loop's error branch) — it only marks the instance idle.
         reg.mark_idle("w");
-        assert_eq!(reg.list()[0].pending, 1, "消息还在信箱里");
+        assert_eq!(
+            reg.list()[0].pending,
+            1,
+            "the message is still in the inbox"
+        );
         let woken = reg.flush_pending();
-        assert_eq!(woken.len(), 1, "下一个回合边界重新投递");
+        assert_eq!(woken.len(), 1, "the next turn boundary re-delivers");
         assert_eq!(woken[0].items.len(), 1);
     }
 
@@ -1286,15 +1373,15 @@ mod tests {
         assert_eq!(
             reg.stop("x").unwrap_or_else(|e| panic!("{e}")),
             (Some(crate::watch::WatchId(7)), 0),
-            "运行中停止返回当前 watch 行"
+            "stopping while running returns the current watch line"
         );
         assert!(
             reg.stop("x").unwrap_or_else(|e| panic!("{e}")).0.is_none(),
-            "幂等"
+            "idempotent"
         );
         assert!(
-            reg.deliver("x", "还在吗", Vec::new(), None).is_err(),
-            "停止后拒收"
+            reg.deliver("x", "still there", Vec::new(), None).is_err(),
+            "rejected after stop"
         );
         // Turn finishing after a stop: history is still archived, no revival.
         assert!(
@@ -1304,10 +1391,10 @@ mod tests {
         assert_eq!(reg.list()[0].state, AgentState::Stopped);
         reg.remove("x").unwrap_or_else(|e| panic!("{e}"));
         assert!(reg.list().is_empty());
-        assert_eq!(reg.claim_name("x"), "x", "删除释放名字");
+        assert_eq!(reg.claim_name("x"), "x", "deletion frees the name");
         assert!(
             reg.deliver("x", "hi", Vec::new(), None).is_err(),
-            "未知实例报错"
+            "unknown instance errors"
         );
         // Stopping an idle instance: no active line.
         reg.insert("y", None, "y".into(), test_session());
@@ -1315,7 +1402,7 @@ mod tests {
         assert!(reg.finish("y", Vec::new(), true).is_none());
         assert!(
             reg.stop("y").unwrap_or_else(|e| panic!("{e}")).0.is_none(),
-            "idle 停止不取消已终态的行"
+            "stopping while idle does not cancel a terminal watch line"
         );
     }
 }

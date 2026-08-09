@@ -235,7 +235,7 @@ pub enum AuthSource {
   // v2 additions:
   "protocol": "anthropic" | "openai",  // optional; default "anthropic" (backward compat)
   "oauth": {
-    "kind": "codex",             // v1: "codex" only; "opencode" reserved (go 订阅走 apiKey，§6.0)
+    "kind": "codex",             // v1: "codex" only; "opencode" reserved (the go subscription uses apiKey, §6.0)
     "account": "user@example.com"  // optional: pick a stored account
   },
   "capabilities": {                // optional overrides; default = protocol defaults
@@ -258,7 +258,7 @@ Rules (main's rulings applied):
 
 ### 6.0 Correction to the premise: opencode-go is NOT OAuth
 
-Research result: **opencode-go (like OpenCode Zen) is an API-key subscription, not an OAuth flow.** Per opencode docs: `/connect` → select OpenCode Go → opencode.ai/auth → sign in → **copy API key** → paste. No device flow, no tokens. So "opencode go 订阅" lands in bingo as a **named provider with `protocol: "openai"` (or whatever it exposes) + `apiKey`** — plain API-key provider, zero OAuth code. The OAuth work is driven by **Codex (ChatGPT account)**.
+Research result: **opencode-go (like OpenCode Zen) is an API-key subscription, not an OAuth flow.** Per opencode docs: `/connect` → select OpenCode Go → opencode.ai/auth → sign in → **copy API key** → paste. No device flow, no tokens. So "opencode go subscription" lands in bingo as a **named provider with `protocol: "openai"` (or whatever it exposes) + `apiKey`** — plain API-key provider, zero OAuth code. The OAuth work is driven by **Codex (ChatGPT account)**.
 
 The `oauth.kind` enum in §5 therefore starts with `"codex"`; `"opencode"` is not needed for the go subscription (main confirmed: opencode-go = `protocol: "openai"` + `apiKey`, zero OAuth code; kept as a future extension point if opencode ever ships an OAuth flow).
 
@@ -337,7 +337,7 @@ pub struct Tokens { pub id_token: Option<String>, pub access: String, pub refres
 
 ### 6.4 Auth status model (for /provider listing & /login)
 
-Per provider, three sources of truth merge into one status: `NotConfigured` (absent from settings) · `ApiKey` (static key) · `OAuth(LoggedOut | LoggedIn{account, expires_at})` · `OAuth(Expired)` (refresh failed → prompt re-login). `/provider` lists one line per provider: `● codex ✓ ChatGPT Plus (user@x) · [openai]` / `○ codex 未登录（/provider login codex）· [openai]`.
+Per provider, three sources of truth merge into one status: `NotConfigured` (absent from settings) · `ApiKey` (static key) · `OAuth(LoggedOut | LoggedIn{account, expires_at})` · `OAuth(Expired)` (refresh failed → prompt re-login). `/provider` lists one line per provider: `● codex ✓ ChatGPT Plus (user@x) · [openai]` / `○ codex not logged in (/provider login codex) · [openai]`.
 
 Command surface (added to the existing `/provider`):
 - `/provider login <name>` — default loopback PKCE (opens browser, local callback); `--device-auth` for headless/SSH (print URL + code, poll); `--manual` accepts a pasted token (CI fallback)
@@ -352,30 +352,30 @@ Command surface (added to the existing `/provider`):
 
 | name | display | protocol | variant | base_url (default) | auth | model whitelist (static) |
 |---|---|---|---|---|---|---|
-| `codex` | Codex (ChatGPT 订阅) | openai | `Codex` | `https://chatgpt.com/backend-api` | `oauth.kind: "codex"` | gpt-5.5 / gpt-5.3-codex-spark / gpt-5.4 / gpt-5.4-mini |
-| `opencode-go` | opencode Go (订阅) | openai | `Default` | `https://opencode.ai/zen/go` | apiKey (set via `/provider login` → stored in auth.json `{type:"api"}`) | gpt-5.6-luna |
+| `codex` | Codex (ChatGPT subscription) | openai | `Codex` | `https://chatgpt.com/backend-api` | `oauth.kind: "codex"` | gpt-5.5 / gpt-5.3-codex-spark / gpt-5.4 / gpt-5.4-mini |
+| `opencode-go` | opencode Go (subscription) | openai | `Default` | `https://opencode.ai/zen/go` | apiKey (set via `/provider login` → stored in auth.json `{type:"api"}`) | gpt-5.6-luna |
 
 **Effective config = preset ⊕ user overrides (field-merge at build time)**:
-- User `providers.<name>` fields override the preset **field by field** (protocol / apiBaseUrl / apiKey / oauth / supportsImages); absent or empty fields fall back to the preset default (serde-default-like). E.g. `{"codex": {"apiBaseUrl": "https://custom"}}` keeps protocol/variant/oauth/whitelist from the preset — matches main's "自定义 apiBaseUrl" without restating the template.
+- User `providers.<name>` fields override the preset **field by field** (protocol / apiBaseUrl / apiKey / oauth / supportsImages); absent or empty fields fall back to the preset default (serde-default-like). E.g. `{"codex": {"apiBaseUrl": "https://custom"}}` keeps protocol/variant/oauth/whitelist from the preset — matches main's "custom apiBaseUrl" without restating the template.
 - `settings.providers` stays **user-only** (no pollution); presets are resolved at build time in `Client::from_settings_with` / the registry. A preset name overridden by the user still resolves to the user's protocol when explicitly set (field-merge covers "my own codex with anthropic protocol").
 - apiKey present → wins over OAuth (D33 §5, unchanged); a preset always defines its auth, so double-missing cannot occur for presets — `CONFIG_INVALID` remains for user-configured providers only.
 - **Pre-build all effective providers at startup** (presets ∪ user entries, ~2 extra adapters, zero on-demand complexity): `provider_names` / `provider_endpoint` / `provider_protocol` / `auth_status` / `set_provider` / `with_provider` all work unchanged over the merged table.
 
 **/provider listing** (built-in badge):
 ```
-当前 provider: codex
-● codex @ https://chatgpt.com/backend-api（✓ user@x · openai · 内置）
-  opencode-go @ https://opencode.ai/zen/go（○ 未配置（/provider login opencode-go 设置 key）· openai · 内置）
+Current provider: codex
+● codex @ https://chatgpt.com/backend-api (✓ user@x · openai · built-in)
+  opencode-go @ https://opencode.ai/zen/go (○ not configured (/provider login opencode-go sets the key) · openai · built-in)
   default @ …（key sk-… · anthropic）
   road @ …（key sk-… · anthropic）
 ```
-Order: current first, then built-ins (official subscriptions), then user providers — or keep name-sorted with a 内置 badge; pick at implementation (lean: built-ins first, 内置 badge).
+Order: current first, then built-ins (official subscriptions), then user providers — or keep name-sorted with a built-in badge; pick at implementation (lean: built-ins first, built-in badge).
 
 **Login flow adaptation**:
-- `/provider login <name>` resolves the **effective** config (user ⊕ preset): codex → oauth flow as today (preset supplies `oauth.kind` when the user didn't); `opencode-go` (apiKey preset) → prompt "粘贴 opencode-go API key" → store `{type:"api", key}` in auth.json (existing Api entry; if the user later sets settings apiKey → apiKey wins and the auth.json entry is ignored). `/provider logout` symmetric.
+- `/provider login <name>` resolves the **effective** config (user ⊕ preset): codex → oauth flow as today (preset supplies `oauth.kind` when the user didn't); `opencode-go` (apiKey preset) → prompt "paste the opencode-go API key" → store `{type:"api", key}` in auth.json (existing Api entry; if the user later sets settings apiKey → apiKey wins and the auth.json entry is ignored). `/provider logout` symmetric.
 - `/model` menu: level-1 list includes presets; level-2 = preset whitelist (static) — only usable models appear.
 
-**Landing**: same batch as the codex endpoint variant or immediately after (main's suggestion). Phase **P5 — built-in provider presets**. Tests: field-merge matrix (apiBaseUrl-only override keeps protocol/variant/oauth), provider_names includes presets, listing shows 内置 badge, `/provider login codex` with an empty settings `providers` works, opencode-go login stores the key, settings untouched (no pollution), user protocol override still CONFIG_INVALID on unknown values.
+**Landing**: same batch as the codex endpoint variant or immediately after (main's suggestion). Phase **P5 — built-in provider presets**. Tests: field-merge matrix (apiBaseUrl-only override keeps protocol/variant/oauth), provider_names includes presets, listing shows the built-in badge, `/provider login codex` with an empty settings `providers` works, opencode-go login stores the key, settings untouched (no pollution), user protocol override still CONFIG_INVALID on unknown values.
 
 ## 7. Migration & compatibility
 
@@ -393,7 +393,7 @@ Order: current first, then built-ins (official subscriptions), then user provide
 - **P3 — opencode go provider** (zero new code; verified by main from opencode docs + provider source): subscription base `https://opencode.ai/zen/go` (models via `GET /v1/models`, API key auth). **Model-level protocol mix**: `gpt-5.6-luna` → `/v1/responses` (OpenAI — reuse the P1 adapter with `protocol: "openai"` + `apiBaseUrl: https://opencode.ai/zen/go` + explicit model `gpt-5.6-luna`); grok/glm/kimi/deepseek-v4/hy3 → `/v1/chat/completions` (no adapter — **out of scope, recorded as a future adapter candidate**); minimax/qwen → `/v1/messages` (Anthropic — a separate provider entry). The `/model` menu pulls the subscription's model list and works for the responses models. Commit: `📚(docs): opencode go provider entry (verified endpoint facts)` — no protocol code lands in this phase.
 - **P4 — UX polish**: protocol badge, auth status columns, error copy for expired tokens, guide.md sync (config table + capability map + diagnostics), README tables. *(DONE — 3e411fa/a4b4d51)*
 - **P2 closing — codex endpoint variant** (in progress, main #34 confirmed): `OpenAiVariant{Default,Codex}` + `jwt_account_id()` backfill (§6.1b). Commit: `✨(feat): codex endpoint variant (chatgpt.com backend-api)`.
-- **P5 — built-in provider presets** (§6.5/D34): preset table (codex + opencode-go), field-merge resolution, pre-built effective providers, 内置 badge in /provider, login flows widened, tests. Lands same batch as the codex variant or immediately after (main's suggestion). Commit: `✨(feat): built-in provider presets (zero-config subscriptions)`.
+- **P5 — built-in provider presets** (§6.5/D34): preset table (codex + opencode-go), field-merge resolution, pre-built effective providers, built-in badge in /provider, login flows widened, tests. Lands same batch as the codex variant or immediately after (main's suggestion). Commit: `✨(feat): built-in provider presets (zero-config subscriptions)`.
 
 ### 8.1 P1 acceptance checklist (main's requirement #4 — reasoning-return verification, actual API behavior wins)
 
@@ -417,8 +417,8 @@ Checked against D33 §6 / the codex source:
 - [x] **AuthStore fixes correct** (bugs my P1-auth draft exposed, fixed by dev in 3117d32): `load_unlocked` under the held lock (my draft deadlocked: `set` → lock → `load` re-locks a non-reentrant std Mutex); `accountId` camelCase serde rename for opencode-compatible shape (my `opencode_compatible_shape` test caught it). Both verified in the committed code + tests green.
 - [x] **Device flow matches codex endpoints** (`usercode` → poll 403/404=pending, 15-min cap → exchange server-generated code at `/oauth/token` with `redirect_uri={issuer}/deviceauth/callback`); **loopback PKCE** (port 1455, fallback on conflict, S256, browser open) is the default; `--device-auth` / `--manual` alternates.
 - [x] **TokenProvider**: eager refresh (5-min lead) + 401-triggered refresh + single-flight (8-concurrent assertion test); permanent refresh failures (expired/reused/revoked detected in the error body) → auth cleared + re-login prompt.
-- [x] **/provider surface**: auth column (`✓ account` / `○ 未登录（/provider login）`); `login <name> [--device-auth|--manual <token>]`; `logout <name>` (revoke + clear); apiKey wins over OAuth (settings has apiKey → no OAuth path); not-logged-in requests re-read the store (login picks up without reload).
-- [x] **Error copy taxonomy** (feedback-states): `NotLoggedIn` → "provider X 未登录：/provider login X"; `RefreshPermanent` → "登录已失效（…）：/provider login 重新登录"; `Timeout` for the device-poll cap.
+- [x] **/provider surface**: auth column (`✓ account` / `○ not logged in (/provider login)`); `login <name> [--device-auth|--manual <token>]`; `logout <name>` (revoke + clear); apiKey wins over OAuth (settings has apiKey → no OAuth path); not-logged-in requests re-read the store (login picks up without reload).
+- [x] **Error copy taxonomy** (feedback-states): `NotLoggedIn` → "provider X is not logged in: /provider login X"; `RefreshPermanent` → "Login expired (…): /provider login to re-login"; `Timeout` for the device-poll cap.
 - [x] **guide.md synced** in the same commit (providers row gains `oauth`, login/logout commands in the quick reference).
 - [ ] **P2 spike — OPEN** (needs a real ChatGPT subscription account): Path 1 (`api.openai.com/v1/responses` accepts the subscription bearer → reuse the P1 openai adapter wholesale) vs Path 2 (private `chatgpt.com/backend-api` codex protocol → third adapter). Pending main/user account cooperation; outcome decides the P2 closing shape.
 - Observations (accepted, not blocking): loopback `state=bingo` is a fixed string (no per-session CSRF nonce) — acceptable for a localhost-only callback CLI (same class as many CLIs); `--manual` tokens are stored without refresh (documented in the success copy); scope omits codex's `api.connectors.*` (bingo has no connector tools).
@@ -490,6 +490,6 @@ Checked against D33 §6 / the codex source:
 2. **Field-merge over full-replace**: a user `providers.<name>` entry overrides preset fields field-by-field (protocol / apiBaseUrl / apiKey / oauth / supportsImages); absent fields fall back to the preset. Customizing `apiBaseUrl` must not force restating protocol/variant/auth (matches codex CLI / opencode's config-as-override feel). Whole-preset replacement is not a v1 concept.
 3. **settings.providers stays user-only**; effective providers (presets ∪ user entries, merged) are pre-built at startup in `Client::from_settings_with` — `provider_names`/`set_provider`/`with_provider`/`auth_status` work unchanged over the merged table. apiKey wins over OAuth (D33 §5) unchanged; presets always define auth, so double-missing stays user-config-only.
 4. **Login flows unchanged, resolution widened**: `/provider login <name>` resolves the effective config — codex → the existing OAuth flow (preset supplies oauth.kind); opencode-go (apiKey preset) → paste key prompt, stored in auth.json `{type:"api"}`. `/provider logout` symmetric. `/model` level-1 includes presets; level-2 = preset whitelist (only usable models).
-5. **/provider listing** shows built-ins with a 内置 badge, login state unchanged (`✓ account` / `○ 未登录（/provider login <name>）`); built-ins first, then user providers.
+5. **/provider listing** shows built-ins with a built-in badge, login state unchanged (`✓ account` / `○ not logged in (/provider login <name>)`); built-ins first, then user providers.
 6. **Landing**: same batch as the codex endpoint variant or immediately after (P5); guide.md capability map/config table updated in the same batch (AGENTS.md).
 7. **Tests**: field-merge matrix, preset visibility, empty-settings login works, opencode-go key store, no settings pollution, unknown user protocol still `CONFIG_INVALID`.

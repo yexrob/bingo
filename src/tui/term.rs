@@ -1375,7 +1375,7 @@ mod tests {
         assert_eq!(
             &screen[0..4],
             &["eeee", "", "ffff", "gg"],
-            "空行清掉旧字、短行清掉行尾——diff 面向物理屏，不是空 buffer"
+            "blank lines clear old text, short lines clear line ends — the diff targets the physical screen, not an empty buffer"
         );
     }
 

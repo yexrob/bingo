@@ -41,17 +41,17 @@ pub struct Doc {
     /// "settled prefix row count" handle.
     #[cfg_attr(not(test), allow(dead_code))]
     pub settled: usize,
-    /// 定稿检查点（欢迎卡 / 每条定稿消息各一个，行号递增）：
-    /// 懒落盘按检查点整段冻结，resize 回灌按检查点整段取回。
+    /// Settled checkpoints (one per welcome card / per settled message, increasing row numbers):
+    /// lazy flush freezes whole checkpoints at once; resize refill restores whole checkpoints.
     pub settled_marks: Vec<SettledMark>,
     /// Number of transient rows at the end of the document (slash output, gone after TTL): lazy-flush
     /// window math must exclude them — a transient list shrinking the window is no reason to freeze live content.
     pub transient_rows: usize,
 }
 
-/// 一个定稿检查点：`row_end` 之前的行全部定稿。`segments` 是构建内
-/// 累计值，跨多次 [`crate::tui::chat::Chat::advance_flushed_upto`] 的增量由
-/// `Chat::mark_base` 消化。
+/// A settled checkpoint: every row before `row_end` is settled. `segments` is the
+/// build-internal accumulation; the deltas across multiple [`crate::tui::chat::Chat::advance_flushed_upto`] calls
+/// are consumed by `Chat::mark_base`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SettledMark {
     /// Row count covered by this checkpoint (exclusive end within doc.rows).
@@ -184,7 +184,10 @@ mod tests {
             Block::settled(block_of(&["m2"]), true),
         ]);
         assert_eq!(doc.rows.len(), 5);
-        assert_eq!(doc.settled, 3, "定稿前缀止于首个未定稿块");
+        assert_eq!(
+            doc.settled, 3,
+            "the settled prefix stops before the first unsettled block"
+        );
         assert_eq!(
             doc.settled_marks,
             vec![
@@ -222,7 +225,7 @@ mod tests {
         assert_eq!(
             (doc.click_ranges[0].start, doc.click_ranges[0].end),
             (2, 3),
-            "块内局部行号被摆放偏移修正"
+            "in-block local row numbers are corrected by the layout offset"
         );
     }
 

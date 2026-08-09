@@ -1,14 +1,14 @@
-//! 版本检测 + 自更新（`bingo update`）。
+//! Version check + self-update (`bingo update`).
 //!
-//! 两个消费方：
-//! - **启动检测**（欢迎卡片数据源）：`spawn_background_check` 在 TUI 会话启动时
-//!   异步拉取 GitHub Releases latest 并写入缓存（24h TTL），网络/解析失败静默，
-//!   不阻塞启动；欢迎卡片渲染读取 [`latest_cached`]。
-//! - **`bingo update` 命令**：显式执行时网络/校验失败如实报错（用户主动触发）。
+//! Two consumers:
+//! - **Startup check** (welcome-card data source): `spawn_background_check` runs at TUI session start,
+//!   asynchronously fetches the latest GitHub release and writes a cache (24h TTL); network/parse failures
+//!   are silent and never block startup; the welcome card reads [`latest_cached`].
+//! - **`bingo update` command**: when run explicitly, network/verification failures are reported as-is (the user asked for it).
 //!
-//! 更新流程：解析最新 tag → 对比当前版本 → 下载平台资产（tar.gz / zip）+
-//! `checksums.txt` 校验 SHA-256 → 解压出可执行文件 → tmp + rename 原子替换
-//! [`std::env::current_exe`]（可注入目标路径，测试用）。
+//! Update flow: parse the latest tag → compare with the current version → download the platform asset (tar.gz / zip) +
+//! `checksums.txt` for SHA-256 verification → extract the executable → atomic replace via tmp + rename
+//! of [`std::env::current_exe`] (target path injectable for tests).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -17,27 +17,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorCode;
 
-/// GitHub 仓库（yexrob/bingo）与 API / 下载基址。基址可注入：
-/// 测试指向本地 mock 服务器，生产用默认值。
+/// The GitHub repo (yexrob/bingo) and the API / download base URL. The base is injectable:
+/// tests point at a local mock server, production uses the defaults.
 pub const REPO_OWNER: &str = "yexrob";
 pub const REPO_NAME: &str = "bingo";
 pub const RELEASE_API: &str = "https://api.github.com";
 pub const DOWNLOAD_BASE: &str = "https://github.com";
 
-/// 检测缓存 TTL：24h 内不重复请求 GitHub API（启动路径静默，无流量放大）。
+/// Check-cache TTL: within 24h the GitHub API is not queried again (the startup path is silent; no traffic amplification).
 pub const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
-/// 语义版本：数字段列表（`v0.2.1` / `0.2.1` / `0.2.1-beta.1` 均接受，
-/// 每段取前导数字）。比较时短者补 0（`0.2.1 < 0.2.10`）。
+/// Semver: a list of numeric parts (`v0.2.1` / `0.2.1` / `0.2.1-beta.1` all accepted,
+/// each part takes its leading digits). Shorter versions are zero-padded in comparisons (`0.2.1 < 0.2.10`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
     parts: Vec<u64>,
 }
 
 impl Version {
-    /// 解析形如 `v0.2.1`、`0.2.1`、`0.2.1-beta.1` 的版本串；
-    /// 空段 / 非数字段返回 None。预发布/构建后缀（`-beta.1` / `+build`）
-    /// 忽略——发布 tag 均为正式版，后缀不影响比较。
+    /// Parse a version string like `v0.2.1`, `0.2.1`, or `0.2.1-beta.1`;
+    /// empty / non-numeric parts return None. Pre-release/build suffixes (`-beta.1` / `+build`)
+    /// are ignored — release tags are always stable, suffixes do not affect comparison.
     pub fn parse(s: &str) -> Option<Version> {
         let s = s.trim().trim_start_matches(['v', 'V']);
         let mut parts = Vec::new();
@@ -47,7 +47,7 @@ impl Version {
                 return None;
             }
             parts.push(digits.parse().ok()?);
-            // 该段带后缀（如 `1-beta`）：忽略段内剩余与后续段。
+            // This part carries a suffix (e.g. `1-beta`): ignore the rest of the part and later parts.
             if seg.chars().any(|c| !c.is_ascii_digit()) {
                 break;
             }
@@ -58,12 +58,13 @@ impl Version {
         Some(Version { parts })
     }
 
-    /// 当前二进制版本（Cargo.toml `version`）。
+    /// The current binary's version (Cargo.toml `version`).
     pub fn from_pkg() -> Version {
-        Version::parse(env!("CARGO_PKG_VERSION")).expect("Cargo.toml version 必须是语义版本")
+        Version::parse(env!("CARGO_PKG_VERSION"))
+            .expect("Cargo.toml version must be a semantic version")
     }
 
-    /// 版本数字段（生产只用 Display/比较；测试断言用）。
+    /// The version's numeric parts (production only uses Display/comparison; tests assert on them).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn parts(&self) -> &[u64] {
         &self.parts
@@ -105,9 +106,9 @@ impl Ord for Version {
     }
 }
 
-/// 平台 → 预编译资产名映射：`bingo-<triple>.tar.gz`（非 Windows）/
-/// `bingo-<triple>.zip`（Windows）。`os`/`arch` 取 [`std::env::consts`] 的取值
-/// （macos / linux / windows；aarch64 / x86_64）。
+/// Platform → prebuilt asset name mapping: `bingo-<triple>.tar.gz` (non-Windows) /
+/// `bingo-<triple>.zip` (Windows). `os`/`arch` take the [`std::env::consts`] values
+/// (macos / linux / windows; aarch64 / x86_64).
 pub fn asset_name_for(os: &str, arch: &str) -> Option<String> {
     let triple = match (os, arch) {
         ("macos", "aarch64") => "aarch64-apple-darwin",
@@ -120,12 +121,12 @@ pub fn asset_name_for(os: &str, arch: &str) -> Option<String> {
     Some(format!("bingo-{triple}.{ext}"))
 }
 
-/// 当前平台的资产名（None = 无预编译资产，如 macOS arm64 之外的 aarch64-linux）。
+/// The asset name for the current platform (None = no prebuilt asset, e.g. aarch64-linux outside macOS arm64).
 pub fn current_asset_name() -> Option<String> {
     asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
 }
 
-/// 压缩包内可执行文件名（Windows 带 `.exe`）。
+/// The executable file name inside the archive (`.exe` on Windows).
 pub fn binary_name(os: &str) -> &'static str {
     if os == "windows" {
         "bingo.exe"
@@ -134,8 +135,8 @@ pub fn binary_name(os: &str) -> &'static str {
     }
 }
 
-/// 从 `checksums.txt`（`sha256sum` 输出：`<hash>  <file>` 或 `<file>  <hash>`，
-/// 文件名可带 `*` / `./` 前缀）解析指定资产的期望哈希（小写 hex）。
+/// Resolve the expected hash (lowercase hex) for an asset from `checksums.txt` (`sha256sum` output:
+/// `<hash>  <file>` or `<file>  <hash>`, file names may carry `*` / `./` prefixes).
 pub fn checksum_for(checksums: &str, asset: &str) -> Option<String> {
     for line in checksums.lines() {
         let line = line.trim();
@@ -160,7 +161,7 @@ fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// SHA-256 hex（小写）。
+/// SHA-256 hex (lowercase).
 pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -168,10 +169,10 @@ pub fn sha256_hex(data: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 校验下载内容与 checksums.txt 中对应资产条目一致。
+/// Verify the downloaded content against the matching asset entry in checksums.txt.
 pub fn verify_checksum(data: &[u8], checksums: &str, asset: &str) -> Result<(), UpdateError> {
     let expected = checksum_for(checksums, asset).ok_or_else(|| {
-        UpdateError::ChecksumsUnavailable(format!("checksums.txt 中未找到 {asset}"))
+        UpdateError::ChecksumsUnavailable(format!("{asset} not found in checksums.txt"))
     })?;
     let got = sha256_hex(data);
     if got == expected {
@@ -181,7 +182,7 @@ pub fn verify_checksum(data: &[u8], checksums: &str, asset: &str) -> Result<(), 
     }
 }
 
-/// 从压缩包解出可执行文件字节（tar.gz；Windows 为 zip，见 cfg 分支）。
+/// Extract the executable bytes from the archive (tar.gz; Windows uses zip, see the cfg branches).
 #[cfg(not(windows))]
 fn extract_binary(archive: &[u8], bin_name: &str) -> Result<Vec<u8>, UpdateError> {
     let gz = flate2::read::GzDecoder::new(archive);
@@ -204,7 +205,7 @@ fn extract_binary(archive: &[u8], bin_name: &str) -> Result<Vec<u8>, UpdateError
     Err(UpdateError::MissingBinary(bin_name.to_string()))
 }
 
-/// 从 zip 解出可执行文件（`bingo.exe`；回退到第一个 `.exe` 条目）。
+/// Extract the executable from the zip (`bingo.exe`; falls back to the first `.exe` entry).
 #[cfg(windows)]
 fn extract_binary(archive: &[u8], bin_name: &str) -> Result<Vec<u8>, UpdateError> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))
@@ -222,9 +223,9 @@ fn extract_binary(archive: &[u8], bin_name: &str) -> Result<Vec<u8>, UpdateError
     Err(UpdateError::MissingBinary(bin_name.to_string()))
 }
 
-/// 原子替换可执行文件：写同目录 tmp（同文件系统）+ rename。
-/// Unix 显式置 0o755（tar 内 mode 可能因 umask 丢失）；Windows rename 不能
-/// 覆盖已存在目标，先删旧（尽力而为，非原子——Windows 上由用户承担窗口期）。
+/// Atomically replace the executable: write a tmp file in the same dir (same filesystem) + rename.
+/// Unix sets 0o755 explicitly (the in-tar mode may be lost to umask); Windows rename cannot
+/// overwrite an existing target, so the old file is deleted first (best-effort, non-atomic — on Windows the user bears the window).
 pub fn install_binary(bytes: &[u8], exe: &Path) -> Result<PathBuf, UpdateError> {
     let parent = exe
         .parent()
@@ -248,15 +249,15 @@ pub fn install_binary(bytes: &[u8], exe: &Path) -> Result<PathBuf, UpdateError> 
     Ok(exe.to_path_buf())
 }
 
-/// GitHub 最新 release 信息。
+/// The latest GitHub release info.
 #[derive(Debug, Clone)]
 pub struct ReleaseInfo {
     pub tag: String,
     pub version: Version,
 }
 
-/// 拉取 GitHub Releases latest（`GET {api_base}/repos/{owner}/{repo}/releases/latest`），
-/// 解析 `tag_name`。命令路径调用——网络/解析失败如实报错。
+/// Fetch the latest GitHub release (`GET {api_base}/repos/{owner}/{repo}/releases/latest`),
+/// parse `tag_name`. Called from the command path — network/parse failures are reported as-is.
 pub async fn fetch_latest_release(
     client: &reqwest::Client,
     api_base: &str,
@@ -278,15 +279,15 @@ pub async fn fetch_latest_release(
     let tag = json
         .get("tag_name")
         .and_then(|t| t.as_str())
-        .ok_or_else(|| UpdateError::BadResponse("release 响应缺少 tag_name".into()))?
+        .ok_or_else(|| UpdateError::BadResponse("release response is missing tag_name".into()))?
         .to_string();
     let version = Version::parse(&tag)
-        .ok_or_else(|| UpdateError::BadResponse(format!("无法解析 tag {tag:?}")))?;
+        .ok_or_else(|| UpdateError::BadResponse(format!("cannot parse tag {tag:?}")))?;
     Ok(ReleaseInfo { tag, version })
 }
 
-/// 拉取 + 写缓存；失败静默（启动路径：检测是增强不是契约）。
-/// `api_base` 可注入（测试用 mock 服务器；生产传 [`RELEASE_API`]）。
+/// Fetch + write the cache; failures are silent (startup path: the check is an enhancement, not a contract).
+/// `api_base` is injectable (mock server in tests; production passes [`RELEASE_API`]).
 pub async fn fetch_and_cache(
     client: &reqwest::Client,
     home: &Path,
@@ -301,8 +302,8 @@ pub async fn fetch_and_cache(
     }
 }
 
-/// TUI 会话启动时预热检测：缓存新鲜（24h 内）直接跳过，否则后台拉取 +
-/// 写缓存。不阻塞启动；headless（`--print`）路径不调用。
+/// Warm the check at TUI session start: skip when the cache is fresh (within 24h), otherwise fetch in the background +
+/// write the cache. Never blocks startup; not called on the headless (`--print`) path.
 pub fn spawn_background_check(home: PathBuf) {
     if latest_cached(&home).is_some() {
         return;
@@ -313,10 +314,10 @@ pub fn spawn_background_check(home: PathBuf) {
     });
 }
 
-/// 检测缓存：`~/.local/share/bingo/update-check.json`。
+/// The check cache: `~/.local/share/bingo/update-check.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateCache {
-    /// Unix 秒（检查时间）。
+    /// Unix seconds (when the check ran).
     pub checked_at: u64,
     pub latest_tag: String,
 }
@@ -344,7 +345,7 @@ pub fn cache_fresh(c: &UpdateCache) -> bool {
     now_secs().saturating_sub(c.checked_at) < CACHE_TTL.as_secs()
 }
 
-/// 新鲜缓存中的最新版本（欢迎卡片数据源；缓存缺失/过期/损坏 → None）。
+/// The latest version in a fresh cache (welcome-card data source; missing/stale/corrupt cache → None).
 pub fn latest_cached(home: &Path) -> Option<Version> {
     let c = read_cache(home)?;
     if !cache_fresh(&c) {
@@ -362,7 +363,7 @@ pub fn latest_cached(home: &Path) -> Option<Version> {
     }
 }
 
-/// 写缓存（tmp + rename；失败静默——启动路径不因此报错）。
+/// Write the cache (tmp + rename; failures are silent — the startup path never errors on this).
 pub fn write_cache(home: &Path, tag: &str) {
     let cache = UpdateCache {
         checked_at: now_secs(),
@@ -387,19 +388,19 @@ fn now_nanos() -> u128 {
         .unwrap_or(0)
 }
 
-/// `bingo update` 执行结果。
+/// The `bingo update` outcome.
 #[derive(Debug, Clone)]
 pub enum UpdateOutcome {
-    /// 当前已是最新。
+    /// Already up to date.
     Latest { current: Version },
-    /// `--check`（dry-run）：发现新版本，未下载。
+    /// `--check` (dry-run): a newer version exists; nothing downloaded.
     Available { version: Version, tag: String },
-    /// 已安装新版本到指定路径。
+    /// Installed the new version at the given path.
     Updated { version: Version, exe: PathBuf },
 }
 
-/// 下载 + 校验 + 解压 + 替换核心流程。`api_base`/`download_base`/`exe` 可注入
-/// （测试用 mock 服务器与临时目标文件）；生产由 [`run_update`] 传默认值。
+/// The core download + verify + extract + replace flow. `api_base`/`download_base`/`exe` are injectable
+/// (mock server and temp target file in tests); production passes the defaults via [`run_update`].
 pub async fn perform_update(
     client: &reqwest::Client,
     check_only: bool,
@@ -428,7 +429,7 @@ pub async fn perform_update(
     let archive = download(client, &dl(&asset)).await?;
     let checksums = download(client, &dl("checksums.txt")).await?;
     let checksums = String::from_utf8(checksums)
-        .map_err(|_| UpdateError::ChecksumsUnavailable("checksums.txt 非 UTF-8 文本".into()))?;
+        .map_err(|_| UpdateError::ChecksumsUnavailable("checksums.txt is not UTF-8 text".into()))?;
     verify_checksum(&archive, &checksums, &asset)?;
     let bin = extract_binary(&archive, binary_name(os))?;
     let exe = exe
@@ -452,60 +453,69 @@ async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, Update
     Ok(resp.bytes().await?.to_vec())
 }
 
-/// `bingo update [--check]` 命令入口：成功时顺带写缓存（欢迎卡片不再重复提示）。
+/// The `bingo update [--check]` command entry: also writes the cache on success (so the welcome card stops nagging).
 pub async fn run_update(home: &Path, check_only: bool) -> Result<(), UpdateError> {
     let client = reqwest::Client::new();
     let outcome = perform_update(&client, check_only, RELEASE_API, DOWNLOAD_BASE, None).await?;
     match &outcome {
         UpdateOutcome::Latest { current } => {
             write_cache(home, &format!("v{current}"));
-            println!("bingo 已是最新版本 v{current}");
+            println!("bingo is already the latest version v{current}");
         }
         UpdateOutcome::Available { version, tag } => {
             write_cache(home, tag);
-            println!("发现新版本 v{version}：运行 `bingo update` 安装");
+            println!("a new version v{version} is available: run `bingo update` to install");
         }
         UpdateOutcome::Updated { version, exe } => {
             write_cache(home, &format!("v{version}"));
-            println!("bingo 已更新到 v{version}");
-            println!("安装位置：{}（新版本在下次启动时生效）", exe.display());
+            println!("bingo updated to v{version}");
+            println!(
+                "installed at: {} (the new version takes effect on next launch)",
+                exe.display()
+            );
         }
     }
     Ok(())
 }
 
-/// 更新错误。稳定错误码见 [`ErrorCode`] impl（`src/error.rs` 登记）。
+/// Update errors. Stable error codes live in the [`ErrorCode`] impl (registered in `src/error.rs`).
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
-    #[error("网络错误：{0}（请检查网络连接后重试）")]
+    #[error("network error: {0} (check your connection and retry)")]
     Network(#[from] reqwest::Error),
-    #[error("GitHub 返回 HTTP {status}")]
+    #[error("GitHub returned HTTP {status}")]
     Http { status: u16 },
-    #[error("release 响应异常：{0}")]
+    #[error("malformed release response: {0}")]
     BadResponse(String),
-    #[error("无法校验更新包：{0}")]
+    #[error("cannot verify the update package: {0}")]
     ChecksumsUnavailable(String),
-    #[error("SHA-256 校验失败（期望 {expected}，实际 {got}）：下载可能被篡改，请重试或手动安装")]
+    #[error(
+        "SHA-256 check failed (expected {expected}, got {got}): the download may have been tampered with; retry or install manually"
+    )]
     ChecksumMismatch { expected: String, got: String },
-    #[error("更新包解压失败：{0}")]
+    #[error("failed to unpack the update archive: {0}")]
     ArchiveInvalid(String),
-    #[error("更新包中未找到可执行文件 {0}")]
+    #[error("no executable {0} found in the update archive")]
     MissingBinary(String),
-    #[error("当前平台 {0} 没有预编译资产（bingo update 暂不支持，请手动安装）")]
+    #[error(
+        "no prebuilt asset for the current platform {0} (bingo update does not support it yet; install manually)"
+    )]
     UnsupportedPlatform(String),
-    #[error("更新文件操作失败：{0}（若为权限问题，请用 sudo bingo update 或手动安装）")]
+    #[error(
+        "update file operation failed: {0} (if it is a permission issue, use sudo bingo update or install manually)"
+    )]
     Io(#[from] std::io::Error),
 }
 
-/// 锁定 `Network → OFFLINE` 映射（`reqwest::Error` 无公开构造器，
-/// drift-guard 测试无法枚举该 variant；与 `api::client::transport_offline_code` 同模式）。
+/// Pin the `Network → OFFLINE` mapping (`reqwest::Error` has no public constructor,
+/// so the drift-guard test cannot enumerate that variant; same pattern as `api::client::transport_offline_code`).
 #[doc(hidden)]
 pub fn network_error_code() -> &'static str {
     "OFFLINE"
 }
 
 impl ErrorCode for UpdateError {
-    /// 全 variant 显式映射稳定码（新增 variant 必须补 mapping，无 `_` arm 编译期保证）。
+    /// Every variant maps explicitly to a stable code (new variants must add a mapping; the missing-`_` arm enforces it at compile time).
     fn error_code(&self) -> &'static str {
         match self {
             UpdateError::Network(_) => network_error_code(),
@@ -542,23 +552,31 @@ mod tests {
         let current = Version::from_pkg();
 
         write_cache(&home, &format!("v{current}"));
-        assert_eq!(latest_cached(&home), None, "当前版本不提示");
+        assert_eq!(
+            latest_cached(&home),
+            None,
+            "current version is not advertised"
+        );
 
         write_cache(&home, "v0.0.1");
-        assert_eq!(latest_cached(&home), None, "旧版本不提示（升级后缓存态）");
+        assert_eq!(
+            latest_cached(&home),
+            None,
+            "older versions are not advertised (post-upgrade cache state)"
+        );
 
         let newer = format!("v{}.0.0", current.parts.first().copied().unwrap_or(0) + 1);
         write_cache(&home, &newer);
         assert_eq!(
             latest_cached(&home),
             Version::parse(&newer),
-            "严格更新才提示"
+            "only a strictly newer version is advertised"
         );
 
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// 构造含 `bingo` 可执行文件的 tar.gz 字节。
+    /// Build the tar.gz bytes containing the `bingo` executable.
     fn sample_tar_gz(bin_bytes: &[u8]) -> Vec<u8> {
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         {
@@ -575,7 +593,7 @@ mod tests {
         enc.finish().unwrap()
     }
 
-    /// 按当前平台构造可解压的发布归档（Windows → zip，其他 → tar.gz）。
+    /// Build an extractable release archive for the current platform (Windows → zip, others → tar.gz).
     fn sample_archive(bin_bytes: &[u8]) -> Vec<u8> {
         #[cfg(windows)]
         {
@@ -612,7 +630,7 @@ mod tests {
         assert!(Version::parse("0.2.9").unwrap() < Version::parse("0.2.10").unwrap());
         assert!(Version::parse("0.2.1").unwrap() < Version::parse("0.3.0").unwrap());
         assert!(Version::parse("0.2.1").unwrap() < Version::parse("1.0.0").unwrap());
-        // 短者补 0：比较上 0.2.1 == 0.2.1.0、0.2 == 0.2.0（Eq 逐字段不补零，故用 cmp 断言）
+        // Shorter versions are zero-padded: 0.2.1 == 0.2.1.0 and 0.2 == 0.2.0 in comparisons (Eq compares field-by-field without padding, hence the cmp assertion)
         use std::cmp::Ordering;
         assert_eq!(
             Version::parse("0.2.1")
@@ -627,7 +645,7 @@ mod tests {
             Ordering::Equal
         );
         assert!(Version::parse("0.2").unwrap() > Version::parse("0.1.9").unwrap());
-        // 后缀被忽略：0.2.1-beta.1 == 0.2.1（预发布不区分——发布 tag 均为正式版）
+        // Suffixes are ignored: 0.2.1-beta.1 == 0.2.1 (pre-releases are not distinguished — release tags are always stable)
         assert_eq!(
             Version::parse("0.2.1-beta.1").unwrap(),
             Version::parse("0.2.1").unwrap()
@@ -660,8 +678,11 @@ mod tests {
         assert!(asset_name_for("linux", "aarch64").is_none());
         assert!(asset_name_for("freebsd", "x86_64").is_none());
         assert!(asset_name_for("windows", "arm64").is_none());
-        // 当前平台必须映射到预编译资产之一（bingo 的发布矩阵）。
-        assert!(current_asset_name().is_some(), "当前平台应在发布矩阵内");
+        // The current platform must map to one of the prebuilt assets (bingo's release matrix).
+        assert!(
+            current_asset_name().is_some(),
+            "the current platform must be in the release matrix"
+        );
         assert_eq!(binary_name("windows"), "bingo.exe");
         assert_eq!(binary_name("macos"), "bingo");
     }
@@ -669,13 +690,13 @@ mod tests {
     #[test]
     fn checksum_parse_both_column_orders() {
         let hash = "a".repeat(64);
-        // sha256sum 常规格式：hash + 双空格 + 文件名
+        // sha256sum canonical format: hash + two spaces + file name
         let checksums = format!("{hash}  bingo-aarch64-apple-darwin.tar.gz\n");
         assert_eq!(
             checksum_for(&checksums, "bingo-aarch64-apple-darwin.tar.gz"),
             Some(hash.clone())
         );
-        // 文件名在前（部分发布工具格式）
+        // File name first (some release-tool formats)
         let reverse = format!("bingo-aarch64-apple-darwin.tar.gz  {hash}\n");
         assert_eq!(
             checksum_for(&reverse, "bingo-aarch64-apple-darwin.tar.gz"),
@@ -686,7 +707,7 @@ mod tests {
     #[test]
     fn checksum_parse_prefixes_and_case() {
         let h = "abcdef0123456789".repeat(4); // 64 chars
-        // `*` binary 标记 + `./` 前缀 + 大小写混合
+        // `*` binary marker + `./` prefix + mixed case
         let checksums = format!("{h}  *./bingo-x86_64-apple-darwin.tar.gz\n");
         assert_eq!(
             checksum_for(&checksums, "bingo-x86_64-apple-darwin.tar.gz"),
@@ -698,7 +719,7 @@ mod tests {
             checksum_for(&checksums2, "bingo-x86_64-apple-darwin.tar.gz"),
             Some(h.to_ascii_lowercase())
         );
-        // 注释 / 空行跳过
+        // Comments / blank lines are skipped
         let with_noise = format!("# generated by release tool\n\n{h}  bingo.tar.gz\n");
         assert_eq!(checksum_for(&with_noise, "bingo.tar.gz"), Some(h));
     }
@@ -711,13 +732,13 @@ mod tests {
         let checksums = format!("{good}  {asset}\n");
         assert!(verify_checksum(data, &checksums, asset).is_ok());
 
-        // 哈希不符 → ChecksumMismatch
+        // Hash mismatch → ChecksumMismatch
         let bad = format!("{}  {asset}\n", "f".repeat(64));
         assert!(matches!(
             verify_checksum(data, &bad, asset),
             Err(UpdateError::ChecksumMismatch { .. })
         ));
-        // 条目缺失 → ChecksumsUnavailable
+        // Missing entry → ChecksumsUnavailable
         assert!(matches!(
             verify_checksum(data, &format!("{good}  other.bin\n"), asset),
             Err(UpdateError::ChecksumsUnavailable(_))
@@ -741,8 +762,8 @@ mod tests {
         let bin = b"#!/bin/sh\necho bingo\n";
         let archive = sample_archive(bin);
         assert_eq!(extract_binary(&archive, "bingo").unwrap(), bin);
-        // 缺条目 → MissingBinary（Windows 的 .exe 兜底匹配会命中 bingo.exe，
-        // 需用不含 .exe 条目的归档验证）
+        // Missing entry → MissingBinary (the Windows .exe fallback match would hit bingo.exe,
+        // so verify with an archive that has no .exe entry)
         #[cfg(windows)]
         let no_bin = {
             use std::io::Write;
@@ -758,9 +779,9 @@ mod tests {
             extract_binary(&no_bin, "nope"),
             Err(UpdateError::MissingBinary(_))
         ));
-        // 损坏 → ArchiveInvalid（Windows zip 对任意短字节容错，需构造截断 zip 头）
+        // Corrupt → ArchiveInvalid (Windows zip tolerates arbitrary short bytes, so build a truncated zip header)
         #[cfg(windows)]
-        let corrupt: &[u8] = &[0x50, 0x4B, 0x03, 0x04, 0x00, 0x00]; // zip 局部头+截断
+        let corrupt: &[u8] = &[0x50, 0x4B, 0x03, 0x04, 0x00, 0x00]; // zip local header + truncation
         #[cfg(not(windows))]
         let corrupt: &[u8] = b"not a gzip";
         assert!(matches!(
@@ -777,7 +798,7 @@ mod tests {
         std::fs::write(&exe, b"old").unwrap();
         install_binary(b"new-bytes", &exe).unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), b"new-bytes");
-        // 无残留 tmp 文件
+        // No tmp-file leftovers
         let leftovers: Vec<_> = std::fs::read_dir(home.join("bin"))
             .unwrap()
             .filter_map(|e| e.ok())
@@ -786,37 +807,40 @@ mod tests {
             .collect();
         assert!(
             leftovers.is_empty(),
-            "tmp 文件应被 rename 掉: {leftovers:?}"
+            "tmp files should have been renamed away: {leftovers:?}"
         );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&exe).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o755, "可执行位应保留");
+            assert_eq!(mode & 0o777, 0o755, "the executable bit should be kept");
         }
     }
 
     #[test]
     fn cache_roundtrip_and_ttl() {
         let home = tmp_home();
-        assert!(latest_cached(&home).is_none(), "无缓存 → None");
+        assert!(latest_cached(&home).is_none(), "no cache → None");
         write_cache(&home, "v0.9.9");
         assert_eq!(latest_cached(&home).unwrap().parts(), &[0, 9, 9]);
         assert_eq!(read_cache(&home).unwrap().checked_at, now_secs());
 
-        // 过期缓存（TTL 之前写入）→ None
+        // Stale cache (written before the TTL) → None
         let c = UpdateCache {
             checked_at: now_secs() - CACHE_TTL.as_secs() - 1,
             latest_tag: "v0.9.9".into(),
         };
         std::fs::write(cache_path(&home), serde_json::to_string(&c).unwrap()).unwrap();
-        assert!(latest_cached(&home).is_none(), "过期缓存应视为无检测结果");
-        // 损坏缓存 → None（不 panic）
+        assert!(
+            latest_cached(&home).is_none(),
+            "a stale cache should count as no check result"
+        );
+        // Corrupt cache → None (no panic)
         std::fs::write(cache_path(&home), "not json").unwrap();
         assert!(latest_cached(&home).is_none());
     }
 
-    /// 极简 HTTP mock：按完整路径返回预置响应。
+    /// Minimal HTTP mock: returns a preset response per full path.
     async fn serve(routes: Vec<(&'static str, Vec<u8>)>) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -849,11 +873,11 @@ mod tests {
         format!("http://{addr}")
     }
 
-    /// 构造完整 mock 路由（release JSON + 资产 + checksums.txt）。
-    /// `tag` 为发布 tag；返回 (routes, archive)。
+    /// Build the full mock routes (release JSON + asset + checksums.txt).
+    /// `tag` is the release tag; returns (routes, archive).
     fn mock_routes(tag: &str, archive: Vec<u8>) -> (Vec<(&'static str, Vec<u8>)>, Vec<u8>) {
         let release = format!(r#"{{"tag_name":"{tag}","name":"bingo {tag}","assets":[]}}"#,);
-        let asset = current_asset_name().expect("当前平台在发布矩阵内");
+        let asset = current_asset_name().expect("the current platform is in the release matrix");
         let checksum = sha256_hex(&archive);
         let checksums = format!("{checksum}  {asset}\n");
         (
@@ -887,13 +911,13 @@ mod tests {
         let client = reqwest::Client::new();
         let outcome = perform_update(&client, false, &base, &base, Some(&exe))
             .await
-            .expect("mock 服务器应成功走完全流程");
+            .expect("the mock server should run the whole flow successfully");
         match outcome {
             UpdateOutcome::Updated { version, exe } => {
                 assert_eq!(version.parts(), &[99, 0, 0]);
                 assert_eq!(std::fs::read(&exe).unwrap(), bin);
             }
-            other => panic!("期望 Updated，得到 {other:?}"),
+            other => panic!("expected Updated, got {other:?}"),
         }
     }
 
@@ -904,12 +928,12 @@ mod tests {
         let client = reqwest::Client::new();
         let outcome = perform_update(&client, true, &base, &base, None)
             .await
-            .expect("--check 只解析 release，不应失败");
+            .expect("--check only parses the release; must not fail");
         match outcome {
             UpdateOutcome::Available { version, .. } => {
                 assert_eq!(version.parts(), &[99, 0, 0]);
             }
-            other => panic!("期望 Available，得到 {other:?}"),
+            other => panic!("expected Available, got {other:?}"),
         }
     }
 
@@ -920,12 +944,12 @@ mod tests {
         let client = reqwest::Client::new();
         let outcome = perform_update(&client, false, &base, &base, None)
             .await
-            .expect("旧版本 tag → Latest 不应失败");
+            .expect("an older tag → Latest must not fail");
         match outcome {
             UpdateOutcome::Latest { current } => {
                 assert_eq!(current, Version::from_pkg());
             }
-            other => panic!("期望 Latest，得到 {other:?}"),
+            other => panic!("expected Latest, got {other:?}"),
         }
     }
 
@@ -934,7 +958,7 @@ mod tests {
         let archive = sample_tar_gz(b"x");
         let release = r#"{"tag_name":"v99.0.0","name":"bingo v99.0.0","assets":[]}"#.to_string();
         let asset = current_asset_name().unwrap();
-        // checksums.txt 给错误哈希 → 校验失败，不得替换可执行文件
+        // checksums.txt carries a wrong hash → verification fails, the executable must not be replaced
         let bad_checksum = "f".repeat(64);
         let checksums = format!("{bad_checksum}  {asset}\n");
         let base = serve(vec![
@@ -957,31 +981,31 @@ mod tests {
         let client = reqwest::Client::new();
         let err = perform_update(&client, false, &base, &base, Some(&exe))
             .await
-            .expect_err("校验失败必须报错");
+            .expect_err("verification failure must error");
         assert!(matches!(err, UpdateError::ChecksumMismatch { .. }));
         assert_eq!(
             std::fs::read(&exe).unwrap(),
             b"keep-me",
-            "失败不得触碰现有二进制"
+            "a failure must not touch the existing binary"
         );
         assert_eq!(err.error_code(), "CHECKSUM_MISMATCH");
     }
 
     #[tokio::test]
     async fn perform_update_http_error_propagates() {
-        // 空路由：所有路径返回 404 → release 拉取报 Http{404}
+        // Empty routes: every path returns 404 → the release fetch reports Http{404}
         let base = serve(vec![]).await;
         let client = reqwest::Client::new();
         let err = perform_update(&client, false, &base, &base, None)
             .await
-            .expect_err("404 应报 Http 错误");
+            .expect_err("a 404 should report an Http error");
         assert!(matches!(err, UpdateError::Http { status: 404 }));
         assert_eq!(err.error_code(), "OFFLINE");
     }
 
     #[tokio::test]
     async fn fetch_and_cache_writes_cache_and_silent_failure() {
-        // 成功路径：写缓存（api_base 注入 mock，不打真实 GitHub）
+        // Success path: the cache is written (api_base points at the mock, no real GitHub calls)
         let (routes, _) = mock_routes("v3.1.4", sample_tar_gz(b"x"));
         let base = serve(routes).await;
         let home = tmp_home();
@@ -990,7 +1014,7 @@ mod tests {
         assert!(got.is_some());
         assert_eq!(latest_cached(&home).unwrap().parts(), &[3, 1, 4]);
 
-        // 失败路径：404 → 静默 None（无缓存写入，不 panic）
+        // Failure path: 404 → silent None (no cache write, no panic)
         let dead = serve(vec![]).await;
         let home2 = tmp_home();
         assert!(fetch_and_cache(&client, &home2, &dead).await.is_none());

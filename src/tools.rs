@@ -211,12 +211,15 @@ mod tests {
             .iter()
             .map(|t| t.name())
             .collect();
-        assert!(sub.iter().any(|n| n == "Agent"), "子代理仍可派生");
+        assert!(
+            sub.iter().any(|n| n == "Agent"),
+            "subagents can still be spawned"
+        );
         // AskUserQuestion needs a prompt surface: only the session that owns the UI has one.
         for absent in ["SendMessage", "AgentControl", "AskUserQuestion", "Team"] {
             assert!(
                 !sub.iter().any(|n| n == absent),
-                "{absent} 不应下发: {sub:?}"
+                "{absent} must not be handed down: {sub:?}"
             );
         }
     }
@@ -248,18 +251,21 @@ mod tests {
         let sub = names(assemble_tools(&sub_session, &mut warn).await);
         assert!(
             sub.iter().any(|n| n == "Post"),
-            "cohort 成员可发言: {sub:?}"
+            "cohort members can speak: {sub:?}"
         );
         assert!(
             !sub.iter().any(|n| n == "Channel"),
-            "频道管理仅 hub: {sub:?}"
+            "channel management is hub-only: {sub:?}"
         );
         let deep = std::sync::Arc::new(Session {
             instance: Some("d".into()),
             ..(*session_with(2, true)).clone()
         });
         let deep = names(assemble_tools(&deep, &mut warn).await);
-        assert!(!deep.iter().any(|n| n == "Post"), "深层不入频道: {deep:?}");
+        assert!(
+            !deep.iter().any(|n| n == "Post"),
+            "deep layers get no channel tools: {deep:?}"
+        );
     }
 
     /// MCP connections run in the background: the turn does not wait for
@@ -302,7 +308,10 @@ mod tests {
         };
         let first = assemble_tools(&session, &mut collect).await;
         assert!(!first.iter().any(|t| t.name().starts_with("mcp__")));
-        assert!(snapshot(&warnings).is_empty(), "失败尚未发生");
+        assert!(
+            snapshot(&warnings).is_empty(),
+            "no failure has happened yet"
+        );
 
         // Wait for the background connect failure to settle.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -316,7 +325,7 @@ mod tests {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "后台连接未在期限内完成"
+                "background connect did not finish within the deadline"
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
@@ -333,7 +342,7 @@ mod tests {
         let second = assemble_tools(&session, &mut collect).await;
         assert!(!second.iter().any(|t| t.name().starts_with("mcp__")));
         let reported = snapshot(&warnings);
-        assert_eq!(reported.len(), 1, "只报一次: {reported:?}");
+        assert_eq!(reported.len(), 1, "reported once: {reported:?}");
         assert!(reported[0].contains("files"), "{}", reported[0]);
 
         // Turn 3: no repeat.
@@ -346,7 +355,7 @@ mod tests {
             }
         };
         let third = assemble_tools(&session, &mut collect).await;
-        assert!(snapshot(&warnings).len() == 1, "不再重复");
+        assert!(snapshot(&warnings).len() == 1, "not repeated");
         assert!(!third.iter().any(|t| t.name().starts_with("mcp__")));
     }
 }

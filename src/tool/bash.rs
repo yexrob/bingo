@@ -34,7 +34,9 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         if i >= tokens.len() {
             return match wrapper {
                 // A bare sudo/doas grabs /dev/tty to prompt for a password.
-                "sudo" | "doas" => Some("sudo/doas 需要交互口令（TTY），已拒绝".to_string()),
+                "sudo" | "doas" => Some(
+                    "sudo/doas needs an interactive password prompt (TTY); rejected".to_string(),
+                ),
                 _ => None,
             };
         }
@@ -46,7 +48,9 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
             while let Some(flag) = tokens.get(i).copied().filter(|t| t.starts_with('-')) {
                 i += 1;
                 if matches!(flag, "-i" | "-s") {
-                    return Some(format!("sudo 交互登录 shell（{flag}）需要 TTY，已拒绝"));
+                    return Some(format!(
+                        "sudo interactive login shell ({flag}) needs a TTY; rejected"
+                    ));
                 }
                 // These flags never prompt for a password (-n fails immediately, -k/-K only clear timestamps).
                 if matches!(
@@ -75,8 +79,9 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
                 }
             }
             if i >= tokens.len() {
-                return (!non_prompting)
-                    .then(|| "sudo/doas 需要交互口令（TTY），已拒绝".to_string());
+                return (!non_prompting).then(|| {
+                    "sudo/doas needs an interactive password prompt (TTY); rejected".to_string()
+                });
             }
         } else if wrapper == "env" {
             // env's VAR=value assignments are not commands.
@@ -107,7 +112,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
             .any(|a| matches!(*a, "-b" | "-batch" | "--batch"));
         if !batch {
             return Some(format!(
-                "{name} 是全屏交互监控程序（需要 TTY），已拒绝。一次性快照可用 `{name} -b -n 1`"
+                "{name} is a full-screen interactive monitor (needs a TTY); rejected. A one-shot snapshot works via `{name} -b -n 1`"
             ));
         }
     }
@@ -133,17 +138,26 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         "fzf",
     ];
     if EDITORS.contains(&name) {
-        return Some(format!("{name} 是交互式编辑器（需要 TTY），已拒绝"));
+        return Some(format!(
+            "{name} is an interactive editor (needs a TTY); rejected"
+        ));
     }
     if FILE_MANAGERS.contains(&name) {
-        return Some(format!("{name} 是交互式文件管理器（需要 TTY），已拒绝"));
+        return Some(format!(
+            "{name} is an interactive file manager (needs a TTY); rejected"
+        ));
     }
     if TUI_TOOLS.contains(&name) {
-        return Some(format!("{name} 是交互式 TUI 程序（需要 TTY），已拒绝"));
+        return Some(format!(
+            "{name} is an interactive TUI program (needs a TTY); rejected"
+        ));
     }
     // gdb: without -batch it is an interactive debugger.
     if name == "gdb" && !rest.iter().any(|a| matches!(*a, "-batch" | "--batch")) {
-        return Some("gdb 调试器需要 TTY，已拒绝。批处理可用 `gdb -batch -ex ...`".to_string());
+        return Some(
+            "the gdb debugger needs a TTY; rejected. Batch mode works via `gdb -batch -ex ...`"
+                .to_string(),
+        );
     }
     // Bare shell/REPL: exits immediately without input (pointless); allow when given
     // arguments (bash -c / python x.py). DB clients have separate rules: connection args
@@ -183,7 +197,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
     ];
     if REPLS.contains(&name) && rest.is_empty() {
         return Some(format!(
-            "{name} 是交互式 shell/REPL（需要 TTY），已拒绝。带参数执行（如 `{name} -c '...'`）可以"
+            "{name} is an interactive shell/REPL (needs a TTY); rejected. Running it with arguments (e.g. `{name} -c '...'`) is fine"
         ));
     }
     // Interactive DB clients: without an execution flag (-c/-e/-f/--eval…), stdin redirection,
@@ -220,7 +234,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         };
         if interactive {
             return Some(format!(
-                "{name} 是交互式客户端（需要 TTY），已拒绝。传执行旗标或脚本（如 `{name} -c '...'`）可以"
+                "{name} is an interactive client (needs a TTY); rejected. Pass an execution flag or a script (e.g. `{name} -c '...'`) instead"
             ));
         }
     }
@@ -274,7 +288,7 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
         }
         if tty || (has_host && !has_cmd && !no_cmd_ok) {
             return Some(
-                "ssh 交互会话（占用 /dev/tty 问口令或进入远程 shell），已拒绝。传远程命令（`ssh host 'cmd'`）可以"
+                "ssh interactive session (takes /dev/tty for a password prompt or a remote shell); rejected. Pass a remote command (`ssh host 'cmd'`) instead"
                     .to_string(),
             );
         }
@@ -286,7 +300,9 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
     ) {
         let sub = rest.first().copied().unwrap_or("");
         if sub == "attach" {
-            return Some(format!("{name} attach 是交互会话（需要 TTY），已拒绝"));
+            return Some(format!(
+                "{name} attach is an interactive session (needs a TTY); rejected"
+            ));
         }
         if matches!(sub, "exec" | "run") {
             let interactive = rest
@@ -294,7 +310,9 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
                 .any(|a| matches!(*a, "-it" | "-ti" | "--interactive"))
                 || (rest.contains(&"-i") && rest.contains(&"-t"));
             if interactive {
-                return Some(format!("{name} {sub} -it 是交互会话（需要 TTY），已拒绝"));
+                return Some(format!(
+                    "{name} {sub} -it is an interactive session (needs a TTY); rejected"
+                ));
             }
         }
     }
@@ -302,10 +320,10 @@ pub fn interactive_command_reason(command: &str) -> Option<String> {
     if name == "tmux" {
         let sub = rest.first().copied().unwrap_or("");
         if matches!(sub, "attach" | "a" | "attach-session") {
-            return Some("tmux attach 需要 TTY，已拒绝。`tmux new -d` 脱离会话可以".to_string());
+            return Some("tmux attach needs a TTY; rejected. `tmux new -d` starts a detached session instead".to_string());
         }
         if rest.is_empty() || (matches!(sub, "new" | "new-session") && !rest.contains(&"-d")) {
-            return Some("tmux 前台会话需要 TTY，已拒绝。`tmux new -d` 脱离会话可以".to_string());
+            return Some("a foreground tmux session needs a TTY; rejected. `tmux new -d` starts a detached session instead".to_string());
         }
     }
     None
@@ -532,7 +550,7 @@ async fn launch_background(
                 watch.set_state(
                     id,
                     crate::watch::WatchState::Done,
-                    Some(format!("退出码 {code}")),
+                    Some(format!("exit code {code}")),
                     Some(serde_json::json!(text)),
                 );
             }
@@ -547,7 +565,7 @@ async fn launch_background(
                 "status": "async_launched",
                 "task_id": id.0,
                 "label": label,
-                "note": "周期命令已在后台执行，状态变化与完成通知会到达",
+                "note": "periodic command is now running in the background; state changes and completion notifications will arrive",
             })
             .to_string(),
         ),
@@ -673,7 +691,7 @@ impl BashCell {
             crate::watch::WatchPoll {
                 state: crate::watch::WatchState::Idle,
                 detail: Some(format!(
-                    "第 {rounds} 轮 · 输出 {delta} 行（累计 {total} 行）"
+                    "round {rounds} · {delta} lines output ({total} total)"
                 )),
                 payload: None,
                 signal: None,
@@ -682,7 +700,7 @@ impl BashCell {
             crate::watch::WatchPoll {
                 state: crate::watch::WatchState::Running,
                 detail: Some(format!(
-                    "已运行 {}s · 输出 {total} 行",
+                    "running for {}s · {total} lines output",
                     self.started.elapsed().as_secs()
                 )),
                 payload: None,
@@ -875,7 +893,10 @@ mod tests {
             "gdb ./prog",
         ];
         for cmd in rejected {
-            assert!(interactive_command_reason(cmd).is_some(), "应当拒绝: {cmd}");
+            assert!(
+                interactive_command_reason(cmd).is_some(),
+                "should be rejected: {cmd}"
+            );
         }
 
         let allowed = [
@@ -918,7 +939,11 @@ mod tests {
             "redis-cli --version",
         ];
         for cmd in allowed {
-            assert_eq!(interactive_command_reason(cmd), None, "不应拒绝: {cmd}");
+            assert_eq!(
+                interactive_command_reason(cmd),
+                None,
+                "should not be rejected: {cmd}"
+            );
         }
     }
 
@@ -930,7 +955,7 @@ mod tests {
         for cmd in ["sudo -v", "sudo -u root", "sudo -p prompt", "doas -"] {
             assert!(
                 interactive_command_reason(cmd).is_some(),
-                "应当拒绝且不 panic: {cmd}"
+                "should be rejected without panicking: {cmd}"
             );
         }
         // No password prompt / no base command: allowed without panicking.
@@ -940,7 +965,7 @@ mod tests {
             assert_eq!(
                 interactive_command_reason(cmd),
                 None,
-                "不应拒绝且不 panic: {cmd:?}"
+                "should not be rejected without panicking: {cmd:?}"
             );
         }
     }
@@ -980,7 +1005,7 @@ mod tests {
             .unwrap_or_default()
             .trim()
             .to_string();
-        assert!(!pid.is_empty(), "孙进程应已写下 pid");
+        assert!(!pid.is_empty(), "grandchild should have written its pid");
         let alive = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(format!("kill -0 {pid} 2>/dev/null"))
@@ -988,7 +1013,10 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
         let _ = std::fs::remove_file(&marker);
-        assert!(!alive, "孙进程 {pid} 应随进程组一起被清理");
+        assert!(
+            !alive,
+            "grandchild {pid} should be cleaned up with the process group"
+        );
     }
 
     /// Windows: `taskkill /T` removes the whole process tree. Tested directly against
@@ -1026,7 +1054,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        assert!(!pid.is_empty(), "孙进程应已写下 pid");
+        assert!(!pid.is_empty(), "grandchild should have written its pid");
         crate::platform::kill_process_tree(root_pid).await;
         tokio::time::sleep(Duration::from_millis(800)).await;
         let alive = std::process::Command::new("tasklist")
@@ -1036,7 +1064,10 @@ mod tests {
             .unwrap_or(false);
         let _ = std::fs::remove_file(&marker);
         let _ = child.kill().await;
-        assert!(!alive, "孙进程 {pid} 应随进程树一起被清理");
+        assert!(
+            !alive,
+            "grandchild {pid} should be cleaned up with the process tree"
+        );
     }
 
     /// Regression: background:true (non-periodic) must also drive condition matching;
@@ -1087,7 +1118,10 @@ mod tests {
                 break;
             }
         }
-        assert!(signalled, "notify_on 条件应在后台任务上触发信号");
+        assert!(
+            signalled,
+            "notify_on should fire a signal on background tasks"
+        );
     }
 
     /// Interactive commands are rejected at the Bash tool layer (the model path is covered too).
@@ -1110,6 +1144,9 @@ mod tests {
             .call(serde_json::json!({"command": "htop"}), &ctx)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("TTY"), "拒绝原因说明 TTY: {err}");
+        assert!(
+            err.to_string().contains("TTY"),
+            "rejection reason should mention TTY: {err}"
+        );
     }
 }

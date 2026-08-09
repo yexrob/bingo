@@ -49,13 +49,12 @@ const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400)
 /// Shown once when the tmux passthrough probe gets no answer. Causes: the
 /// outer terminal does not speak the kitty protocol, passthrough could not be
 /// enabled, or the pane was not the focused pane during the probe.
-const TMUX_PASSTHROUGH_HINT: &str = "tmux 下未确认外层终端支持 kitty 图片协议：外层需为 ghostty/kitty（WezTerm/Konsole 不支持占位符）且 bingo 需在焦点窗格启动";
+const TMUX_PASSTHROUGH_HINT: &str = "under tmux the outer terminal's kitty image support is unconfirmed: the outer terminal must be ghostty/kitty (WezTerm/Konsole do not support placeholders) and bingo must start in the focused pane";
 
 /// Shown once on terminals that answer the kitty graphics query but cannot
 /// render Unicode placeholders (WezTerm/Konsole): a probe would pass, the
 /// transmit would succeed, and nothing would ever display.
-const PLACEHOLDER_UNSUPPORTED_HINT: &str =
-    "此终端不支持 kitty Unicode 占位符（WezTerm/Konsole），图片以 #[image] 显示";
+const PLACEHOLDER_UNSUPPORTED_HINT: &str = "this terminal does not support kitty Unicode placeholders (WezTerm/Konsole); images show as #[image]";
 
 /// How transmit chunks reach the terminal that renders the image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -800,8 +799,11 @@ mod tests {
         assert!(s.starts_with("\x1b_Ga=T,U=1,q=2,f=100,i=7,c=12,r=4,m=0;"));
         assert!(s.ends_with("\x1b\\"));
         assert_eq!(s.matches("\x1b\\").count(), 1);
-        assert!(!s.contains('\n'), "传输不移动光标");
-        assert!(!s.contains("C=1"), "占位符方案没有光标放置");
+        assert!(!s.contains('\n'), "transmission does not move the cursor");
+        assert!(
+            !s.contains("C=1"),
+            "the placeholder scheme does no cursor placement"
+        );
     }
 
     #[test]
@@ -811,13 +813,20 @@ mod tests {
         let out = transmit_bytes(&png, 10, 2, 7, Transport::Bare);
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.matches("\x1b\\").count(), 2);
-        assert!(s.contains("m=1;"), "首块 m=1");
-        assert!(s.contains("m=0;"), "末块 m=0");
+        assert!(s.contains("m=1;"), "first block has m=1");
+        assert!(s.contains("m=0;"), "last block has m=0");
         let first = &s[s.find("m=1;").unwrap() + 4..];
-        assert_eq!(first.find("\x1b\\").unwrap(), 4096, "首块 4096 字符");
+        assert_eq!(
+            first.find("\x1b\\").unwrap(),
+            4096,
+            "first block is 4096 chars"
+        );
         // Continuation chunks carry only `m`.
         let second_start = s.find("m=0;").unwrap();
-        assert!(!s[second_start..].contains("a=T"), "续块不含控制数据");
+        assert!(
+            !s[second_start..].contains("a=T"),
+            "continuation blocks carry no control data"
+        );
         assert!(s.contains("\x1b_Gm=0;"));
     }
 
@@ -825,10 +834,16 @@ mod tests {
     fn transmit_normalizes_id() {
         let out = transmit_bytes(b"abc", 1, 1, 0, Transport::Bare);
         let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("i=1,"), "id 0 对 kitty 意为无 id，归一为 1: {s}");
+        assert!(
+            s.contains("i=1,"),
+            "id 0 means no id to kitty; normalized to 1: {s}"
+        );
         let masked = transmit_bytes(b"abc", 1, 1, 0xFF00_0001, Transport::Bare);
         let s = String::from_utf8(masked).unwrap();
-        assert!(s.contains("i=1,"), "高字节不进 24-bit id: {s}");
+        assert!(
+            s.contains("i=1,"),
+            "high bytes do not enter the 24-bit id: {s}"
+        );
     }
 
     #[test]
@@ -1051,16 +1066,16 @@ mod tests {
     #[test]
     fn extract_image_urls_finds_markdown_images() {
         assert_eq!(
-            extract_image_urls("看 ![图](a.png) 和 ![b](https://x.com/i.png) 完"),
+            extract_image_urls("see ![img](a.png) and ![b](https://x.com/i.png) here"),
             vec!["a.png".to_string(), "https://x.com/i.png".to_string()]
         );
         // Angle-bracket-wrapped urls (CommonMark `<...>`) are stripped,
         // consistent with the render layer's key.
         assert_eq!(
-            extract_image_urls("![图](</Users/x/Untitled-1.png>)"),
+            extract_image_urls("![img](</Users/x/Untitled-1.png>)"),
             vec!["/Users/x/Untitled-1.png".to_string()]
         );
-        assert_eq!(extract_image_urls("无图片"), Vec::<String>::new());
+        assert_eq!(extract_image_urls("no images"), Vec::<String>::new());
         assert_eq!(
             extract_image_urls("![alt](has space.png)"),
             Vec::<String>::new()
@@ -1105,11 +1120,15 @@ mod tests {
         );
         // Relative file paths resolve against cwd.
         let rel = runtime.block_on(fetch_bytes("sub/img.png", &tmp));
-        assert_eq!(rel, None, "相对路径缺失时失败");
+        assert_eq!(rel, None, "missing relative paths fail");
         std::fs::create_dir_all(tmp.join("sub")).unwrap();
         std::fs::write(tmp.join("sub/img.png"), b"x").unwrap();
         let rel = runtime.block_on(fetch_bytes("sub/img.png", &tmp));
-        assert_eq!(rel, Some(b"x".to_vec()), "相对路径按 cwd 解析");
+        assert_eq!(
+            rel,
+            Some(b"x".to_vec()),
+            "relative paths resolve against cwd"
+        );
         let home = tmp.join("home");
         std::fs::create_dir_all(home.join("Documents")).unwrap();
         std::fs::write(home.join("Documents/image.png"), b"home").unwrap();
@@ -1118,7 +1137,11 @@ mod tests {
             Path::new("/nonexistent"),
             Some(&home),
         ));
-        assert_eq!(tilde, Some(b"home".to_vec()), "波浪号路径按 HOME 解析");
+        assert_eq!(
+            tilde,
+            Some(b"home".to_vec()),
+            "tilde paths resolve against HOME"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1172,13 +1195,17 @@ mod tests {
 
         let url = format!("http://{addr}/a.png");
         let ok = fetch_bytes_with_home(&url, Path::new("."), None).await;
-        assert_eq!(ok.as_deref(), Some(b"img".as_slice()), "2xx 返回响应体字节");
+        assert_eq!(
+            ok.as_deref(),
+            Some(b"img".as_slice()),
+            "2xx returns the response body bytes"
+        );
         let denied = fetch_bytes_with_home(&url, Path::new("."), None).await;
-        assert!(denied.is_none(), "非 2xx 不得交给图片解码");
+        assert!(denied.is_none(), "non-2xx must not reach image decoding");
         let agents = server.join().unwrap();
         assert!(
             agents.iter().all(|a| a.as_deref() == Some("bingo")),
-            "两次请求都带 User-Agent: {agents:?}"
+            "both requests carry User-Agent: {agents:?}"
         );
     }
 

@@ -49,7 +49,7 @@ pub enum TeamAction {
 #[schemars(deny_unknown_fields)]
 pub struct MemberInput {
     #[schemars(
-        description = "Instance name in the room — how you address this member with SendMessage, and the name shown on its messages, so give it a person's name rather than a role code or a number (\"林夏\", \"Mira\", not \"dev\" or \"member-2\"); unique within the team"
+        description = "Instance name in the room — how you address this member with SendMessage, and the name shown on its messages, so give it a person's name rather than a role code or a number (\"Linh\", \"Mira\", not \"dev\" or \"member-2\"); unique within the team"
     )]
     name: String,
     #[schemars(
@@ -107,14 +107,14 @@ fn project_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_default()
 }
 
-/// `a, b, c 等 5 名` — a confirmation line names the crew, and stops naming it once the
+/// `a, b, c, and 5 total` — a confirmation line names the crew, and stops naming it once the
 /// line would be longer than the decision it describes.
 fn join_names(names: &[String], sep: &str) -> String {
     if names.len() <= MAX_NAMES_IN_REASON {
         return names.join(sep);
     }
     let head = names[..MAX_NAMES_IN_REASON - 1].join(sep);
-    format!("{head}{sep}等 {} 名", names.len())
+    format!("{head}{sep}and {} total", names.len())
 }
 
 fn member_names(def: &TeamDef) -> Vec<String> {
@@ -131,24 +131,24 @@ fn blueprint(project: &Path) -> Option<TeamDef> {
 fn start_reason(project: &Path) -> String {
     match blueprint(project) {
         Some(def) => format!(
-            "拉起 {} · {} 名成员（{}）进入 #{}",
+            "Start {} · {} member(s) ({}) into #{}",
             def.name,
             def.members.len(),
-            join_names(&member_names(&def), "、"),
+            join_names(&member_names(&def), ", "),
             def.name
         ),
-        None => "拉起本项目的 team（.bingo/team.json）".to_string(),
+        None => "Start this project's team (.bingo/team.json)".to_string(),
     }
 }
 
 fn stop_reason(project: &Path) -> String {
     match blueprint(project) {
         Some(def) => format!(
-            "停止 {} · {} 名成员（历史保留，可再拉起）",
+            "Stop {} · {} member(s) (history kept, can start again)",
             def.name,
             def.members.len()
         ),
-        None => "停止本项目的 team（.bingo/team.json）".to_string(),
+        None => "Stop this project's team (.bingo/team.json)".to_string(),
     }
 }
 
@@ -164,9 +164,9 @@ fn save_reason(project: &Path, params: &TeamInput) -> String {
         .collect();
     let Some(old) = blueprint(project) else {
         return format!(
-            "新建 .bingo/team.json · {name} · {} 名成员（{}）",
+            "Create .bingo/team.json · {name} · {} member(s) ({})",
             wanted.len(),
-            join_names(&wanted, "、")
+            join_names(&wanted, ", ")
         );
     };
     let before = member_names(&old);
@@ -182,14 +182,14 @@ fn save_reason(project: &Path, params: &TeamInput) -> String {
         )
         .collect();
     let change = if delta.is_empty() {
-        "成员不变".to_string()
+        "members unchanged".to_string()
     } else {
         join_names(&delta, " ")
     };
     let renamed = if old.name == name {
         String::new()
     } else {
-        format!(" · 队名 {} → {name}", old.name)
+        format!(" · team name {} → {name}", old.name)
     };
     // A whole-document write also carries what it leaves out: an omitted mode reverts the
     // room to serial, which is a change the user is agreeing to and must therefore read.
@@ -198,10 +198,10 @@ fn save_reason(project: &Path, params: &TeamInput) -> String {
     let remode = if old_mode == new_mode {
         String::new()
     } else {
-        format!(" · 频道 {old_mode} → {new_mode}")
+        format!(" · channel {old_mode} → {new_mode}")
     };
     format!(
-        "改写 .bingo/team.json · {name} · {} 名成员（{change}）{renamed}{remode}",
+        "Rewrite .bingo/team.json · {name} · {} member(s) ({change}){renamed}{remode}",
         wanted.len()
     )
 }
@@ -361,7 +361,7 @@ impl TeamTool {
             };
             if let Some(id) = watch {
                 ctx.watch
-                    .set_state(id, WatchState::Cancelled, Some("已停止".to_string()), None);
+                    .set_state(id, WatchState::Cancelled, Some("stopped".to_string()), None);
             }
             stopped.push(m.name.clone());
         }
@@ -581,14 +581,17 @@ mod tests {
     #[tokio::test]
     async fn save_validate_start_chain() {
         let (session, project) = fixture("chain");
-        std::fs::write(project.join(".bingo/agents/qa.md"), "你是 QA。\n").unwrap_or_default();
-        std::fs::write(project.join(".bingo/agents/dev.md"), "你是 Dev。\n").unwrap_or_default();
+        std::fs::write(project.join(".bingo/agents/qa.md"), "You are QA.\n").unwrap_or_default();
+        std::fs::write(project.join(".bingo/agents/dev.md"), "You are Dev.\n").unwrap_or_default();
         let tool = TeamTool::new(session.clone());
         let ctx = ctx(&session, &project);
 
         let out = call(&tool, &ctx, serde_json::json!({"action": "status"})).await;
         assert!(out.contains("no .bingo/team.json"), "{out}");
-        assert!(out.contains("qa") && out.contains("dev"), "定义可见: {out}");
+        assert!(
+            out.contains("qa") && out.contains("dev"),
+            "definitions are visible: {out}"
+        );
 
         let save = serde_json::json!({
             "action": "save",
@@ -605,7 +608,10 @@ mod tests {
         let out = call(&tool, &ctx, serde_json::json!({"action": "start"})).await;
         assert!(out.contains("spawned 2"), "{out}");
         assert_eq!(session.agents.list().len(), 2);
-        assert!(session.channels.info("dev-room").is_some(), "频道已建");
+        assert!(
+            session.channels.info("dev-room").is_some(),
+            "channel was created"
+        );
 
         // Idempotent: a second start reuses rather than duplicating.
         let out = call(&tool, &ctx, serde_json::json!({"action": "start"})).await;
@@ -628,7 +634,7 @@ mod tests {
     #[tokio::test]
     async fn save_rejects_unknown_definition_without_writing() {
         let (session, project) = fixture("badref");
-        std::fs::write(project.join(".bingo/agents/qa.md"), "你是 QA。\n").unwrap_or_default();
+        std::fs::write(project.join(".bingo/agents/qa.md"), "You are QA.\n").unwrap_or_default();
         let tool = TeamTool::new(session.clone());
         let ctx = ctx(&session, &project);
         let err = tool
@@ -646,7 +652,7 @@ mod tests {
         assert!(err.contains("ghost") && err.contains("qa"), "{err}");
         assert!(
             !project.join(crate::team::TEAM_FILE).exists(),
-            "校验失败不落盘"
+            "failed validation must not be persisted"
         );
         let _ = std::fs::remove_dir_all(project.parent().unwrap_or(&project));
     }
@@ -662,7 +668,7 @@ mod tests {
             assert_eq!(
                 decide(&tool, input, PermissionMode::Default).behavior,
                 PermissionBehavior::Allow,
-                "{action} 只读免询问"
+                "{action} is read-only, no ask"
             );
         }
         for action in ["start", "stop", "save"] {
@@ -677,7 +683,7 @@ mod tests {
                 assert_eq!(
                     decide(&tool, input(), mode).behavior,
                     PermissionBehavior::Ask,
-                    "{action} 在 {mode:?} 下仍须用户确认"
+                    "{action} still requires user confirmation under {mode:?}"
                 );
             }
             // An allow rule doesn't pre-authorize it either; only deny outranks it.
@@ -693,7 +699,7 @@ mod tests {
                 )
                 .behavior,
                 PermissionBehavior::Ask,
-                "{action} allow 规则不可免询问"
+                "{action} allow rule must not skip the ask"
             );
             let deny = vec!["Team".to_string()];
             assert_eq!(
@@ -707,7 +713,7 @@ mod tests {
                 )
                 .behavior,
                 PermissionBehavior::Deny,
-                "{action} deny 规则仍然生效"
+                "{action} deny rule still applies"
             );
         }
     }
@@ -738,7 +744,7 @@ mod tests {
         // No file yet: a creation, named in full.
         let reason = save_reason(&project, &params(&["qa", "dev"]));
         assert!(
-            reason.contains("新建") && reason.contains("qa、dev"),
+            reason.contains("Create") && reason.contains("qa, dev"),
             "{reason}"
         );
 
@@ -764,13 +770,16 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
         let reason = save_reason(&project, &params(&["qa", "dev"]));
         assert!(
-            reason.contains("-ui") && reason.contains("+dev") && reason.contains("2 名成员"),
+            reason.contains("-ui") && reason.contains("+dev") && reason.contains("2 member(s)"),
             "{reason}"
         );
         // A no-op rewrite says so rather than implying a change.
         let reason = save_reason(&project, &params(&["qa", "ui"]));
-        assert!(reason.contains("成员不变"), "{reason}");
-        assert!(!reason.contains("频道"), "无变化不提频道: {reason}");
+        assert!(reason.contains("members unchanged"), "{reason}");
+        assert!(
+            !reason.contains("channel"),
+            "no change must not mention the channel: {reason}"
+        );
         // An omitted mode silently reverts a free room to serial — the line says so.
         crate::team::write_team_file(
             &project,
@@ -789,7 +798,7 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let reason = save_reason(&project, &params(&["qa"]));
-        assert!(reason.contains("频道 free → serial"), "{reason}");
+        assert!(reason.contains("channel free → serial"), "{reason}");
         let _ = std::fs::remove_dir_all(&project);
     }
 

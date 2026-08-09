@@ -48,7 +48,7 @@ impl ChannelMode {
         match s {
             "serial" => Ok(Self::Serial),
             "free" => Ok(Self::Free),
-            other => Err(format!("未知模式 {other}（可用：serial / free）")),
+            other => Err(format!("unknown mode {other} (available: serial / free)")),
         }
     }
 }
@@ -159,12 +159,12 @@ struct Inner {
 /// Session-level channel registry (Session holds the Arc; shared by child sessions).
 pub struct ChannelRegistry {
     inner: Mutex<Inner>,
-    /// share 持久化（Option 语义：不挂接时行为不变；挂接后 create/invite/kick/post 同步快照）。
+    /// Share persistence (Option semantics: behavior is unchanged when not attached; once attached, create/invite/kick/post sync snapshots).
     share: Mutex<Option<Arc<crate::share::ShareStore>>>,
 }
 
 fn format_hub_line(channel: &str, msg: &ChannelMessage) -> String {
-    format!("[#{channel} 第{}条] {}: {}", msg.seq, msg.from, msg.text)
+    format!("[#{channel} msg #{}] {}: {}", msg.seq, msg.from, msg.text)
 }
 
 impl ChannelRegistry {
@@ -179,12 +179,12 @@ impl ChannelRegistry {
         })
     }
 
-    /// 挂接 share 持久化：之后频道元数据/消息变更同步进 share 文档。
+    /// Attach share persistence: channel metadata/message changes sync into the share document from now on.
     pub fn attach_share(&self, store: Arc<crate::share::ShareStore>) {
         *self.share.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
     }
 
-    /// 把某频道的最新元数据（模式 + 成员）写入 share 文档（无 store 时 no-op）。
+    /// Write a channel's latest metadata (mode + members) into the share document (no-op without a store).
     fn sync_channel_meta(&self, name: &str) {
         let Some(store) = self.share.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
             return;
@@ -197,7 +197,7 @@ impl ChannelRegistry {
         store.persist();
     }
 
-    /// 把一条已落地的频道消息追加进 share 文档（无 store 时 no-op）。
+    /// Append a landed channel message to the share document (no-op without a store).
     fn sync_channel_message(&self, name: &str, msg: &ChannelMessage) {
         let Some(store) = self.share.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
             return;
@@ -219,12 +219,12 @@ impl ChannelRegistry {
     ) -> Result<(), String> {
         let name = name.trim_start_matches('#');
         if name.is_empty() {
-            return Err("频道名不能为空".to_string());
+            return Err("channel name must not be empty".to_string());
         }
         {
             let mut inner = self.lock();
             if inner.channels.contains_key(name) {
-                return Err(format!("频道 #{name} 已存在"));
+                return Err(format!("channel #{name} already exists"));
             }
             let mut all = vec![HUB_NAME.to_string(), USER_NAME.to_string()];
             for m in members {
@@ -254,11 +254,11 @@ impl ChannelRegistry {
     /// Channel-level total message cap override (D31 team.json channel.messageLimit).
     pub fn set_message_limit(&self, name: &str, limit: u64) -> Result<(), String> {
         if limit == 0 {
-            return Err("messageLimit 必须为正整数".to_string());
+            return Err("messageLimit must be a positive integer".to_string());
         }
         let mut inner = self.lock();
         let Some(ch) = inner.channels.get_mut(name) else {
-            return Err(format!("没有频道 #{name}"));
+            return Err(format!("no channel #{name}"));
         };
         ch.message_limit = Some(limit);
         Ok(())
@@ -274,10 +274,10 @@ impl ChannelRegistry {
         {
             let mut inner = self.lock();
             let Some(ch) = inner.channels.get_mut(name) else {
-                return Err(format!("没有频道 #{name}"));
+                return Err(format!("no channel #{name}"));
             };
             if ch.members.iter().any(|m| m == member) {
-                return Err(format!("{member} 已在 #{name} 中"));
+                return Err(format!("{member} is already in #{name}"));
             }
             ch.members.push(member.to_string());
             // Late joiners don't get backlog replay: they start "listening" from the current
@@ -291,17 +291,19 @@ impl ChannelRegistry {
 
     pub fn kick(&self, name: &str, member: &str) -> Result<(), String> {
         if member == HUB_NAME || member == USER_NAME {
-            return Err(format!("{member} 是保留成员，不可移出频道"));
+            return Err(format!(
+                "{member} is a reserved member and cannot be removed from a channel"
+            ));
         }
         {
             let mut inner = self.lock();
             let Some(ch) = inner.channels.get_mut(name) else {
-                return Err(format!("没有频道 #{name}"));
+                return Err(format!("no channel #{name}"));
             };
             let before = ch.members.len();
             ch.members.retain(|m| m != member);
             if ch.members.len() == before {
-                return Err(format!("{member} 不在 #{name} 中"));
+                return Err(format!("{member} is not in #{name}"));
             }
         }
         self.sync_channel_meta(name);
@@ -325,16 +327,16 @@ impl ChannelRegistry {
         let hub_line;
         let outcome = {
             let Some(ch) = inner.channels.get_mut(name) else {
-                return Err(format!("没有频道 #{name}"));
+                return Err(format!("no channel #{name}"));
             };
             if !ch.members.iter().any(|m| m == from) {
-                return Err(format!("{from} 不是 #{name} 的成员"));
+                return Err(format!("{from} is not a member of #{name}"));
             }
             // Channel-level cap: team override wins, otherwise registry-level.
             let channel_total = ch.message_limit.unwrap_or(limits.channel_total);
             if ch.frozen {
                 return Err(format!(
-                    "#{name} 已冻结（达消息总上限 {channel_total}），不再接收发言"
+                    "#{name} is frozen (hit the {channel_total} total message cap); no more posts"
                 ));
             }
             // Serial commit check: fall behind → bounce back + increments (the bounced
@@ -351,16 +353,18 @@ impl ChannelRegistry {
             let sent = ch.sent.get(from).copied().unwrap_or(0);
             if from != HUB_NAME && from != USER_NAME && sent >= limits.per_agent {
                 return Err(format!(
-                    "你在 #{name} 的发言已达上限 {}（预算闸）",
+                    "your posts in #{name} hit the per-agent cap {} (budget gate)",
                     limits.per_agent
                 ));
             }
             if ch.seq >= channel_total {
                 ch.frozen = true;
                 inner.hub_mail.push(format!(
-                    "⚠ 频道 #{name} 已达消息总上限 {channel_total}，已冻结（后续发言将被拒绝）",
+                    "⚠ channel #{name} hit the {channel_total} total message cap and is now frozen (further posts will be rejected)",
                 ));
-                return Err(format!("#{name} 达消息总上限 {channel_total}，频道已冻结"));
+                return Err(format!(
+                    "#{name} hit the {channel_total} total message cap; the channel is frozen"
+                ));
             }
             ch.seq += 1;
             let msg = ChannelMessage {
@@ -425,17 +429,17 @@ impl ChannelRegistry {
         let ch = inner.channels.get(name)?;
         let detail = match ch.log.last() {
             Some(last) => format!(
-                "{} 条 · 最近 {}: {}",
+                "{} msgs · latest {}: {}",
                 ch.seq,
                 last.from,
                 crate::tool::agent::excerpt(&last.text)
             ),
-            None => "0 条".to_string(),
+            None => "0 msgs".to_string(),
         };
         let skipped = ch.log.len().saturating_sub(TAIL);
         let mut lines: Vec<String> = Vec::new();
         if skipped > 0 {
-            lines.push(format!("…（前 {skipped} 条略）"));
+            lines.push(format!("… ({skipped} earlier msgs skipped)"));
         }
         lines.extend(
             ch.log
@@ -505,7 +509,7 @@ mod tests {
     fn sent(outcome: PostOutcome) -> (u64, Vec<(String, ChannelMessage)>) {
         match outcome {
             PostOutcome::Sent { seq, deliveries } => (seq, deliveries),
-            PostOutcome::Stale { .. } => panic!("应落地"),
+            PostOutcome::Stale { .. } => panic!("should land"),
         }
     }
 
@@ -516,26 +520,32 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(
             reg.create("table", vec![], ChannelMode::Free).is_err(),
-            "重名"
+            "duplicate name"
         );
-        assert!(reg.create("", vec![], ChannelMode::Free).is_err(), "空名");
+        assert!(
+            reg.create("", vec![], ChannelMode::Free).is_err(),
+            "empty name"
+        );
         let st = &reg.list()[0];
         assert_eq!(
             st.members,
             vec!["main", "user", "a", "b"],
-            "hub 与 user 自动入席且排头"
+            "hub and user auto-join and lead the list"
         );
         reg.invite("table", "c").unwrap_or_else(|e| panic!("{e}"));
-        assert!(reg.invite("table", "c").is_err(), "重复邀请");
+        assert!(reg.invite("table", "c").is_err(), "duplicate invite");
         reg.kick("table", "b").unwrap_or_else(|e| panic!("{e}"));
-        assert!(reg.kick("table", "b").is_err(), "不在场");
-        assert!(reg.kick("table", "main").is_err(), "hub 不可移出");
-        assert!(reg.kick("table", "user").is_err(), "user 不可移出");
+        assert!(reg.kick("table", "b").is_err(), "not present");
+        assert!(reg.kick("table", "main").is_err(), "hub cannot be removed");
+        assert!(reg.kick("table", "user").is_err(), "user cannot be removed");
         assert_eq!(reg.list()[0].members, vec!["main", "user", "a", "c"]);
         reg.remove_member_everywhere("a");
         assert_eq!(reg.list()[0].members, vec!["main", "user", "c"]);
         // Single-channel snapshot and full-log accessors.
-        assert_eq!(reg.info("table").unwrap_or_else(|| panic!("有")).seq, 0);
+        assert_eq!(
+            reg.info("table").unwrap_or_else(|| panic!("has one")).seq,
+            0
+        );
         assert!(reg.info("nope").is_none());
         assert!(reg.log_of("table").is_empty());
     }
@@ -550,29 +560,29 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let (seq, deliveries) = sent(
-            reg.post("a", "t", "大家好")
+            reg.post("a", "t", "hello everyone")
                 .unwrap_or_else(|e| panic!("{e}")),
         );
         assert_eq!(seq, 1);
         let names: Vec<&str> = deliveries.iter().map(|(m, _)| m.as_str()).collect();
-        assert_eq!(names, vec!["b", "c"], "不投给发送者与 hub");
+        assert_eq!(names, vec!["b", "c"], "not delivered to the sender or hub");
         assert!(
             deliveries
                 .iter()
-                .all(|(_, m)| m.from == "a" && m.text == "大家好")
+                .all(|(_, m)| m.from == "a" && m.text == "hello everyone")
         );
         // Hub is a member: messages go to hub_mail; the hub's own posts don't.
         assert!(reg.has_hub_mail());
         let mail = reg.drain_hub_mail();
-        assert_eq!(mail, vec!["[#t 第1条] a: 大家好"]);
+        assert_eq!(mail, vec!["[#t msg #1] a: hello everyone"]);
         let _ = sent(
-            reg.post("main", "t", "肃静")
+            reg.post("main", "t", "quiet")
                 .unwrap_or_else(|e| panic!("{e}")),
         );
-        assert!(!reg.has_hub_mail(), "hub 自己的发言不回流");
+        assert!(!reg.has_hub_mail(), "hub's own posts do not flow back");
         // user (a human) is a natural member: can post, hub hears it, doesn't consume the per_agent budget.
         let (_, deliveries) = sent(
-            reg.post("user", "t", "都停一下")
+            reg.post("user", "t", "everyone stop")
                 .unwrap_or_else(|e| panic!("{e}")),
         );
         assert_eq!(
@@ -581,9 +591,9 @@ mod tests {
                 .map(|(m, _)| m.as_str())
                 .collect::<Vec<_>>(),
             vec!["a", "b", "c"],
-            "user 的发言唤醒全部 agent 成员"
+            "user's post wakes all agent members"
         );
-        assert!(reg.drain_hub_mail()[0].contains("user: 都停一下"));
+        assert!(reg.drain_hub_mail()[0].contains("user: everyone stop"));
         // Non-member / unknown channel error.
         assert!(reg.post("ghost", "t", "x").is_err());
         assert!(reg.post("a", "nope", "x").is_err());
@@ -608,14 +618,14 @@ mod tests {
                 assert_eq!(missed[0].from, "a");
                 assert_eq!(missed[0].text, "1");
             }
-            PostOutcome::Sent { .. } => panic!("应弹回"),
+            PostOutcome::Sent { .. } => panic!("should bounce back"),
         }
         // Bounce counts as read: the resend commits (the model says "2" instead).
         let (seq, _) = sent(
             reg.post("b", "count", "2")
                 .unwrap_or_else(|e| panic!("{e}")),
         );
-        assert_eq!(seq, 2, "重试成功，顺序涌现");
+        assert_eq!(seq, 2, "retry lands; ordering emerges");
         // mark_seen: after inbox injection, a's cursor advances, no bounce.
         reg.mark_seen("a", "count", 2);
         let (seq, _) = sent(
@@ -631,11 +641,11 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let _ = sent(
-            reg.post("a", "brainstorm", "想法一")
+            reg.post("a", "brainstorm", "idea one")
                 .unwrap_or_else(|e| panic!("{e}")),
         );
         let _ = sent(
-            reg.post("b", "brainstorm", "想法二")
+            reg.post("b", "brainstorm", "idea two")
                 .unwrap_or_else(|e| panic!("{e}")),
         );
     }
@@ -645,11 +655,14 @@ mod tests {
         let reg = registry();
         reg.create("t", vec!["a".into()], ChannelMode::Serial)
             .unwrap_or_else(|e| panic!("{e}"));
-        let _ = sent(reg.post("a", "t", "旧闻").unwrap_or_else(|e| panic!("{e}")));
+        let _ = sent(
+            reg.post("a", "t", "old news")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
         reg.invite("t", "late").unwrap_or_else(|e| panic!("{e}"));
         // Late joiner's seen = head at join time: no backlog bounce, can post immediately.
         let (seq, _) = sent(
-            reg.post("late", "t", "我来了")
+            reg.post("late", "t", "I'm here")
                 .unwrap_or_else(|e| panic!("{e}")),
         );
         assert_eq!(seq, 2);
@@ -668,7 +681,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         let _ = sent(reg.post("a", "t", "1").unwrap_or_else(|e| panic!("{e}")));
         let err = reg.post("a", "t", "2").unwrap_err();
-        assert!(err.contains("冻结"), "{err}");
+        assert!(err.contains("frozen"), "{err}");
         assert!(reg.list()[0].frozen);
         // 0 is rejected; unknown channel errors.
         assert!(reg.set_message_limit("t", 0).is_err());
@@ -687,18 +700,18 @@ mod tests {
         let _ = sent(reg.post("a", "t", "2").unwrap_or_else(|e| panic!("{e}")));
         // a hits the per_agent cap.
         let err = reg.post("a", "t", "3").unwrap_err();
-        assert!(err.contains("上限 2"), "{err}");
+        assert!(err.contains("cap 2"), "{err}");
         // b triggers the channel total cap: freeze + hub gets one warning.
         let _ = reg.drain_hub_mail();
         let err = reg.post("b", "t", "x").unwrap_err();
-        assert!(err.contains("冻结"), "{err}");
+        assert!(err.contains("frozen"), "{err}");
         assert!(reg.list()[0].frozen);
         let mail = reg.drain_hub_mail();
         assert_eq!(mail.len(), 1, "{mail:?}");
-        assert!(mail[0].contains("已冻结"));
+        assert!(mail[0].contains("now frozen"));
         // Posting after freeze: rejected, no repeated notification.
         let err = reg.post("b", "t", "y").unwrap_err();
-        assert!(err.contains("已冻结"), "{err}");
+        assert!(err.contains("is frozen"), "{err}");
         assert!(!reg.has_hub_mail());
     }
 
@@ -711,7 +724,7 @@ mod tests {
         let reg = ChannelRegistry::new(ChannelLimits::default());
         reg.attach_share(store.clone());
 
-        // create → 频道元数据（模式 + 成员）。
+        // create → channel metadata (mode + members).
         reg.create("t", vec!["a".into()], ChannelMode::Free)
             .unwrap_or_else(|e| panic!("{e}"));
         let doc = store.snapshot();
@@ -720,20 +733,20 @@ mod tests {
         assert_eq!(doc.channels[0].members, vec!["main", "user", "a"]);
         assert!(doc.channels[0].messages.is_empty());
 
-        // invite/kick → 成员更新（消息保留）。
+        // invite/kick → member updates (messages kept).
         reg.invite("t", "b").unwrap_or_else(|e| panic!("{e}"));
         reg.kick("t", "a").unwrap_or_else(|e| panic!("{e}"));
         let doc = store.snapshot();
         assert_eq!(doc.channels[0].members, vec!["main", "user", "b"]);
 
-        // post Sent → 追加消息。
+        // post Sent → message appended.
         let (seq, _) = sent(reg.post("b", "t", "hi").unwrap_or_else(|e| panic!("{e}")));
         assert_eq!(seq, 1);
         let doc = store.snapshot();
         assert_eq!(doc.channels[0].messages.len(), 1);
         assert_eq!(doc.channels[0].messages[0].from, "b");
         assert_eq!(doc.channels[0].messages[0].text, "hi");
-        // 落盘 roundtrip：重载后数据一致。
+        // Disk roundtrip: reloading yields identical data.
         store.persist();
         let reloaded = crate::share::ShareStore::load_or_create(&root.join("s.json"))
             .unwrap_or_else(|e| panic!("{e}"));
@@ -747,19 +760,23 @@ mod tests {
         let reg = registry();
         reg.create("t", vec!["a".into()], ChannelMode::Free)
             .unwrap_or_else(|e| panic!("{e}"));
-        let (_, detail, payload) = reg.row_snapshot("t").unwrap_or_else(|| panic!("有频道"));
-        assert_eq!(detail, "0 条");
+        let (_, detail, payload) = reg
+            .row_snapshot("t")
+            .unwrap_or_else(|| panic!("has channel"));
+        assert_eq!(detail, "0 msgs");
         assert!(payload.is_empty());
         let _ = sent(
-            reg.post("a", "t", "第一句")
+            reg.post("a", "t", "first line")
                 .unwrap_or_else(|e| panic!("{e}")),
         );
-        let (_, detail, payload) = reg.row_snapshot("t").unwrap_or_else(|| panic!("有频道"));
+        let (_, detail, payload) = reg
+            .row_snapshot("t")
+            .unwrap_or_else(|| panic!("has channel"));
         assert!(
-            detail.contains("1 条") && detail.contains("a: 第一句"),
+            detail.contains("1 msgs") && detail.contains("a: first line"),
             "{detail}"
         );
-        assert_eq!(payload, "1. a: 第一句");
+        assert_eq!(payload, "1. a: first line");
         assert!(reg.row_snapshot("nope").is_none());
     }
 }

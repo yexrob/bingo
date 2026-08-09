@@ -114,7 +114,7 @@ mod tests {
             let (text, _) = placeholder(0, row).unwrap_or_else(|| panic!("row {row}"));
             assert_eq!(text_width(&text), COLS, "row {row}: {text:?}");
         }
-        assert!(placeholder(0, ROWS).is_none(), "只有两行");
+        assert!(placeholder(0, ROWS).is_none(), "only two rows");
     }
 
     /// A portrait's two rows address one image, and a name maps to one portrait.
@@ -122,7 +122,7 @@ mod tests {
     fn rows_share_an_id_and_names_are_stable() {
         let (_, top) = placeholder(3, 0).unwrap_or_else(|| panic!("row 0"));
         let (_, bottom) = placeholder(3, 1).unwrap_or_else(|| panic!("row 1"));
-        assert_eq!(top, bottom, "同一张图");
+        assert_eq!(top, bottom, "same image");
         assert_eq!(index_of("scout"), index_of("scout"));
         // Different names generally differ; the set is only eight, so this asserts
         // the mapping is a function of the name, not that it is injective.
@@ -131,7 +131,10 @@ mod tests {
                 .iter()
                 .map(|n| index_of(n))
                 .collect();
-        assert!(spread.len() >= 4, "八个名字至少落到四张脸: {spread:?}");
+        assert!(
+            spread.len() >= 4,
+            "eight names must land on at least four faces: {spread:?}"
+        );
     }
 
     /// Pinning is what makes a crew member's face survive a rename or a reshuffle.
@@ -141,7 +144,11 @@ mod tests {
         for (i, id) in ids().into_iter().enumerate() {
             assert_eq!(index_of_id(id), Some(i), "{id}");
         }
-        assert_eq!(index_of_id("nobody"), None, "未知 id 不认，交给哈希兜底");
+        assert_eq!(
+            index_of_id("nobody"),
+            None,
+            "unknown ids are not recognized; fall back to the hash"
+        );
     }
 
     /// Transmit once per portrait, not once per frame or once per sender.
@@ -150,17 +157,20 @@ mod tests {
         let cap = ImageCap::default_cells();
         let mut sent = Transmits::default();
         let first = transmits(&[0, 1], &cap, &mut sent);
-        assert!(!first.is_empty(), "首帧发送");
-        assert!(first.starts_with(b"\x1b_G"), "kitty 转义开头");
+        assert!(!first.is_empty(), "first frame is sent");
+        assert!(first.starts_with(b"\x1b_G"), "kitty escape prefix");
         assert!(
             transmits(&[0, 1], &cap, &mut sent).is_empty(),
-            "第二帧不重发"
+            "the second frame is not re-sent"
         );
         // Two senders wearing one face cost one transmit, not two.
         assert!(
             transmits(&[0, 0, 1], &cap, &mut sent).is_empty(),
-            "同脸共用一次传输"
+            "same face shares one transmission"
         );
-        assert!(!transmits(&[2], &cap, &mut sent).is_empty(), "新面孔照发");
+        assert!(
+            !transmits(&[2], &cap, &mut sent).is_empty(),
+            "new faces are sent"
+        );
     }
 }

@@ -588,10 +588,10 @@ mod tests {
         let entry = ExperienceEntry::new(
             "key",
             vec!["migration".into(), "db".into()],
-            "迁移数据库三步".into(),
-            vec!["备份".into(), "执行迁移".into()],
+            "migrate the database in three steps".into(),
+            vec!["back up".into(), "run the migration".into()],
             Some("cargo test".into()),
-            Some("会话 2026-08-04".into()),
+            Some("session 2026-08-04".into()),
         );
         let serialized = entry.serialize();
         let parsed = ExperienceEntry::parse(&serialized).unwrap();
@@ -603,16 +603,16 @@ mod tests {
         let mut entry = ExperienceEntry::new(
             "key",
             vec!["migration".into()],
-            "迁移".into(),
-            vec!["备份".into()],
+            "migrate".into(),
+            vec!["back up".into()],
             None,
             None,
         );
         let id = entry.id.clone();
         entry.status = ExperienceStatus::Stale;
-        assert_eq!(entry.content_hash(), id, "status 变更不换 id");
+        assert_eq!(entry.content_hash(), id, "status change keeps the same id");
         entry.hits = 5;
-        assert_eq!(entry.content_hash(), id, "hits 变更不换 id");
+        assert_eq!(entry.content_hash(), id, "hits change keeps the same id");
     }
 
     #[test]
@@ -640,9 +640,9 @@ mod tests {
     fn notes_roundtrip_preserved() {
         let mut entry =
             ExperienceEntry::new("key", vec![], "s".into(), vec!["1".into()], None, None);
-        entry.notes = "手写说明\n第二行".into();
+        entry.notes = "hand-written note\nsecond line".into();
         let parsed = ExperienceEntry::parse(&entry.serialize()).unwrap();
-        assert_eq!(parsed.notes.trim(), "手写说明\n第二行");
+        assert_eq!(parsed.notes.trim(), "hand-written note\nsecond line");
     }
 
     #[test]
@@ -658,7 +658,7 @@ mod tests {
         let entry = ExperienceEntry::new(
             key,
             vec!["build".into()],
-            "构建三步".into(),
+            "build in three steps".into(),
             vec!["cargo build".into(), "cargo test".into()],
             None,
             None,
@@ -682,7 +682,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("bad.md"), "no frontmatter here").unwrap();
         std::fs::write(dir.join("also-bad.md"), "---\nsummary: no id\n---\n").unwrap();
-        assert!(load_entries(&home, key).is_empty(), "损坏条目跳过而非报错");
+        assert!(
+            load_entries(&home, key).is_empty(),
+            "corrupted entries are skipped, not errored"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -721,7 +724,7 @@ mod tests {
         assert_eq!(
             summaries,
             vec!["hot", "cold", "stale one"],
-            "active 优先于 hits"
+            "active ranks above hits"
         );
         let limited = query(&entries, "migration", 2);
         assert_eq!(limited.len(), 2);
@@ -896,7 +899,7 @@ mod tests {
             .collect();
         let index = format_index(&entries);
         let lines: Vec<&str> = index.lines().collect();
-        assert_eq!(lines.len(), 11, "10 条 + 1 行溢出提示");
+        assert_eq!(lines.len(), 11, "10 entries + 1 overflow line");
         assert!(lines[10].contains("2 more"));
         // stale doesn't participate in the index
         let mut entries = entries;

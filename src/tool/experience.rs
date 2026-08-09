@@ -244,7 +244,7 @@ impl Tool for ExperienceCommitTool {
                 "helpful": entry.helpful,
                 "harmful": entry.harmful,
                 "path": path.to_string_lossy(),
-                "confirmation": format!("已沉淀 E{short}: {}（{}）", entry.summary, status_str),
+                "confirmation": format!("consolidated E{short}: {} ({})", entry.summary, status_str),
             }),
             ..Default::default()
         })
@@ -495,9 +495,9 @@ impl Tool for ExperienceForgetTool {
                 "id": args.id,
                 "deleted": existed,
                 "confirmation": if existed {
-                    format!("已遗忘 E{}", args.id.chars().take(4).collect::<String>())
+                    format!("forgotten E{}", args.id.chars().take(4).collect::<String>())
                 } else {
-                    format!("E{} 不存在，无需删除", args.id.chars().take(4).collect::<String>())
+                    format!("E{} does not exist, nothing to delete", args.id.chars().take(4).collect::<String>())
                 },
             }),
             ..Default::default()
@@ -549,10 +549,10 @@ mod tests {
     fn propose_input() -> serde_json::Value {
         json!({
             "trigger": ["migration"],
-            "summary": "迁移数据库三步",
-            "steps": ["备份", "执行迁移", "验证"],
+            "summary": "migrate the database in three steps",
+            "steps": ["back up", "run the migration", "verify"],
             "verify": "cargo test",
-            "evidence": "会话 2026-08-04",
+            "evidence": "session 2026-08-04",
         })
     }
 
@@ -570,7 +570,7 @@ mod tests {
         );
         assert!(
             load_entries(&home, &project_key(&cwd)).is_empty(),
-            "propose 不落盘"
+            "propose does not persist"
         );
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -586,7 +586,7 @@ mod tests {
             first.content["confirmation"]
                 .as_str()
                 .unwrap()
-                .starts_with("已沉淀")
+                .starts_with("consolidated")
         );
         assert_eq!(first.content["hits"], 0);
         let path = first.content["path"].as_str().unwrap().to_string();
@@ -597,7 +597,7 @@ mod tests {
         assert_eq!(second.content["id"].as_str().unwrap(), id);
         assert_eq!(second.content["hits"], 1);
         let entries = load_entries(&home, &project_key(&cwd));
-        assert_eq!(entries.len(), 1, "同 id 覆盖不重复");
+        assert_eq!(entries.len(), 1, "same id overwrites without duplicates");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -644,16 +644,22 @@ mod tests {
         // Mark stale: hits do not increase.
         let stale = json!({
             "trigger": ["migration"],
-            "summary": "迁移数据库三步",
-            "steps": ["备份", "执行迁移", "验证"],
+            "summary": "migrate the database in three steps",
+            "steps": ["back up", "run the migration", "verify"],
             "status": "stale",
         });
         let result = commit.call(stale, &ctx).await.unwrap();
         assert_eq!(result.content["status"], "stale");
-        assert_eq!(result.content["hits"], 0, "写 stale 不采用计数");
+        assert_eq!(
+            result.content["hits"], 0,
+            "writing stale does not count hits"
+        );
 
         // The index excludes stale entries.
-        assert!(session_index(&home, &cwd).is_empty(), "stale 不入注入索引");
+        assert!(
+            session_index(&home, &cwd).is_empty(),
+            "stale entries are excluded from the injection index"
+        );
 
         // Query can still find it (for on-site review).
         let query_tool = ExperienceQueryTool;
@@ -699,8 +705,12 @@ mod tests {
         let mut entry = ExperienceEntry::new(
             &key,
             vec!["migration".into()],
-            "迁移数据库三步".into(),
-            vec!["备份".into(), "执行迁移".into(), "验证".into()],
+            "migrate the database in three steps".into(),
+            vec![
+                "back up".into(),
+                "run the migration".into(),
+                "verify".into(),
+            ],
             Some("cargo test".into()),
             None,
         );
@@ -854,13 +864,13 @@ mod tests {
             .call(json!({"query": "migrate now", "limit": 3}), &ctx)
             .await
             .unwrap();
-        assert_eq!(out.content["matches"][0]["steps"][0], "备份");
+        assert_eq!(out.content["matches"][0]["steps"][0], "back up");
         assert_eq!(out.content["matches"][0]["verify"], "cargo test");
         assert!(
             out.content["matches"][0]["summary"]
                 .as_str()
                 .unwrap()
-                .contains("迁移")
+                .contains("migrate")
         );
         let _ = std::fs::remove_dir_all(&home);
     }

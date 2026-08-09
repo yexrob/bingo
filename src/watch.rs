@@ -117,7 +117,7 @@ fn join_hits(hits: &[&str]) -> String {
     let shown: Vec<&str> = hits.iter().take(MAX_MATCH_HITS).copied().collect();
     let mut text = truncate_chars(&shown.join(" | "), HITS_BUDGET);
     if hits.len() > shown.len() {
-        text.push_str(&format!(" …（共 {} 行命中）", hits.len()));
+        text.push_str(&format!(" … ({} lines matched)", hits.len()));
     }
     text
 }
@@ -147,7 +147,7 @@ impl ConditionState {
                     None
                 } else {
                     Some(format!(
-                        "命中条件 {}：{}",
+                        "condition {} matched: {}",
                         patterns.join("/"),
                         join_hits(&hits)
                     ))
@@ -166,7 +166,10 @@ impl ConditionState {
                 if hits.is_empty() {
                     None
                 } else {
-                    Some(format!("命中条件 /{pattern}/：{}", join_hits(&hits)))
+                    Some(format!(
+                        "condition /{pattern}/ matched: {}",
+                        join_hits(&hits)
+                    ))
                 }
             }
             NotifyCondition::Errors => {
@@ -178,13 +181,15 @@ impl ConditionState {
                 if hits.is_empty() {
                     None
                 } else {
-                    Some(format!("检测到错误行：{}", join_hits(&hits)))
+                    Some(format!("error line detected: {}", join_hits(&hits)))
                 }
             }
             NotifyCondition::LinesOver(n) => {
                 if !self.fired && total_lines > *n {
                     self.fired = true;
-                    Some(format!("输出已超过 {n} 行（当前 {total_lines} 行）"))
+                    Some(format!(
+                        "output exceeded {n} lines (currently {total_lines})"
+                    ))
                 } else {
                     None
                 }
@@ -603,7 +608,7 @@ impl WatchRegistry {
                 if let Some((id, label, count, last)) = pending.take() {
                     out.push(format_notification(id, label, count, last));
                 }
-                out.push(format!("任务 {}（{}）：⚠ {sig}", n.id, n.label));
+                out.push(format!("task {} ({}): ⚠ {sig}", n.id, n.label));
                 continue;
             }
             let is_same_idle =
@@ -672,9 +677,9 @@ fn notification_body(detail: &Option<String>, payload: &Option<serde_json::Value
 
 fn format_notification(id: WatchId, label: String, count: u32, last: String) -> String {
     if count > 1 {
-        format!("任务 {id}（{label}）：已完成 {count} 轮（最近：{last}）")
+        format!("task {id} ({label}): {count} rounds done (latest: {last})")
     } else {
-        format!("任务 {id}（{label}）：{last}")
+        format!("task {id} ({label}): {last}")
     }
 }
 
@@ -756,7 +761,7 @@ mod tests {
         );
         reg.set_state(id, WatchState::Running, None, None);
         assert_eq!(reg.snapshot()[0].state, WatchState::Running);
-        reg.set_state(id, WatchState::Idle, Some("第 1 轮".into()), None);
+        reg.set_state(id, WatchState::Idle, Some("round 1".into()), None);
         assert_eq!(reg.snapshot()[0].state, WatchState::Idle);
         reg.set_state(id, WatchState::Done, Some("ok".into()), None);
         let snaps = reg.snapshot();
@@ -782,12 +787,12 @@ mod tests {
             Vec::new(),
             None,
         );
-        reg.set_state(id, WatchState::Idle, Some("第 1 轮".into()), None);
-        reg.set_state(id, WatchState::Idle, Some("第 2 轮".into()), None);
+        reg.set_state(id, WatchState::Idle, Some("round 1".into()), None);
+        reg.set_state(id, WatchState::Idle, Some("round 2".into()), None);
         reg.set_state(id, WatchState::Done, Some("fin".into()), None);
         let notes = reg.consume_notifications(None);
         assert_eq!(notes.len(), 2, "{notes:?}");
-        assert!(notes[0].contains("已完成 2 轮"), "merged: {}", notes[0]);
+        assert!(notes[0].contains("2 rounds done"), "merged: {}", notes[0]);
         assert!(notes[1].contains("fin"), "terminal: {}", notes[1]);
         assert!(reg.consume_notifications(None).is_empty(), "consumed");
     }
@@ -801,7 +806,7 @@ mod tests {
                 label: "agent",
                 sequence: vec![WatchPoll {
                     state: WatchState::Running,
-                    detail: Some("已产出 33 字符".into()),
+                    detail: Some("produced 33 chars".into()),
                     payload: None,
                     signal: None,
                 }],
@@ -811,8 +816,13 @@ mod tests {
             Vec::new(),
             None,
         );
-        reg.set_state(id, WatchState::Done, Some("完成".into()), None);
-        reg.set_state(id, WatchState::Running, Some("已产出 33 字符".into()), None);
+        reg.set_state(id, WatchState::Done, Some("done".into()), None);
+        reg.set_state(
+            id,
+            WatchState::Running,
+            Some("produced 33 chars".into()),
+            None,
+        );
         assert_eq!(reg.snapshot()[0].state, WatchState::Done, "frozen");
     }
 
@@ -892,18 +902,24 @@ mod tests {
             Vec::new(),
             Some("worker".to_string()),
         );
-        reg.set_state(hub, WatchState::Done, Some("完成".into()), None);
-        reg.set_state(sub, WatchState::Done, Some("完成".into()), None);
+        reg.set_state(hub, WatchState::Done, Some("done".into()), None);
+        reg.set_state(sub, WatchState::Done, Some("done".into()), None);
 
-        assert!(reg.has_wake_notifications(None), "hub 有待唤醒通知");
+        assert!(
+            reg.has_wake_notifications(None),
+            "hub has wake notifications"
+        );
         assert!(reg.has_wake_notifications(Some("worker")));
 
         // The subagent's turn boundary takes only its own; the hub's stays queued.
         let mine = reg.consume_notifications(Some("worker"));
         assert_eq!(mine.len(), 1, "{mine:?}");
         assert!(mine[0].contains("sub task"), "{mine:?}");
-        assert!(!reg.has_wake_notifications(Some("worker")), "已消费");
-        assert!(reg.has_wake_notifications(None), "hub 的通知没被抢走");
+        assert!(!reg.has_wake_notifications(Some("worker")), "consumed");
+        assert!(
+            reg.has_wake_notifications(None),
+            "hub's notification was not taken"
+        );
 
         let hub_notes = reg.consume_notifications(None);
         assert_eq!(hub_notes.len(), 1, "{hub_notes:?}");
@@ -934,12 +950,12 @@ mod tests {
         let signal = cs.match_buffer(&flood, flood.len()).unwrap_or_default();
         assert!(
             signal.chars().count() <= MAX_SIGNAL_CHARS + 32,
-            "信号长度 {} 应受限",
+            "signal length {} should be bounded",
             signal.chars().count()
         );
         assert!(
-            signal.contains("共 5000 行命中"),
-            "标注被截断的总数: {signal}"
+            signal.contains("5000 lines matched"),
+            "truncated total in the annotation: {signal}"
         );
     }
 
@@ -947,14 +963,14 @@ mod tests {
     fn emit_signal_truncates_long_text() {
         let reg = watch();
         let id = reg.register_with_conditions(running_watch("noisy"), Vec::new(), None);
-        reg.emit_signal(id, "巨".repeat(10_000), None);
+        reg.emit_signal(id, "x".repeat(10_000), None);
         let notes = reg.consume_notifications(None);
         assert!(notes.iter().any(|n| n.contains("[truncated]")), "{notes:?}");
         assert!(
             notes
                 .iter()
                 .all(|n| n.chars().count() < MAX_SIGNAL_CHARS + 200),
-            "通知长度受限"
+            "notification length is bounded"
         );
     }
 
@@ -980,7 +996,7 @@ mod tests {
         };
         assert!(
             buffered <= MAX_FEED_BUFFER_LINES,
-            "缓冲 {buffered} 行应受限"
+            "buffer {buffered} lines should be bounded"
         );
         // The cumulative line count is still tracked faithfully (the LinesOver semantics).
         let total = {
@@ -1004,8 +1020,14 @@ mod tests {
         {
             let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
             let entry = inner.entries.get(&id).unwrap_or_else(|| unreachable!());
-            assert!(entry.feed_buffer.is_empty(), "终态释放缓冲");
-            assert!(entry.conditions.is_empty(), "终态释放条件");
+            assert!(
+                entry.feed_buffer.is_empty(),
+                "terminal state releases the buffer"
+            );
+            assert!(
+                entry.conditions.is_empty(),
+                "terminal state releases conditions"
+            );
         }
         for _ in 0..(MAX_TERMINAL_ENTRIES * 2) {
             let extra = reg.register_with_conditions(running_watch("x"), Vec::new(), None);
@@ -1015,13 +1037,16 @@ mod tests {
             let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
             assert!(
                 inner.entries.len() <= MAX_TERMINAL_ENTRIES + 1,
-                "终态条目应被回收，当前 {}",
+                "terminal entries should be reaped, currently {}",
                 inner.entries.len()
             );
         }
         // A reaped entry must stop the polling loop — no idle spinning.
-        assert!(reg.is_terminal(id), "已回收的条目视为终态");
-        assert!(reg.is_terminal(WatchId(999_999)), "不存在的条目视为终态");
+        assert!(reg.is_terminal(id), "a reaped entry counts as terminal");
+        assert!(
+            reg.is_terminal(WatchId(999_999)),
+            "a missing entry counts as terminal"
+        );
     }
 
     #[tokio::test]
@@ -1049,19 +1074,19 @@ mod tests {
             .unwrap_or_else(|_| unreachable!());
         reg.emit_signal(
             id,
-            "发现错误：boom".to_string(),
-            Some("发现 1 个错误".into()),
+            "found error: boom".to_string(),
+            Some("found 1 error".into()),
         );
         let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap_or_else(|_| unreachable!())
             .unwrap_or_else(|_| unreachable!());
-        assert_eq!(ev.signal.as_deref(), Some("发现错误：boom"));
+        assert_eq!(ev.signal.as_deref(), Some("found error: boom"));
         let notes = reg.consume_notifications(None);
         assert!(
             notes
                 .iter()
-                .any(|n| n.contains("发现错误") && n.contains("boom")),
+                .any(|n| n.contains("found error") && n.contains("boom")),
             "{notes:?}"
         );
     }
@@ -1082,13 +1107,13 @@ mod tests {
                     },
                     WatchPoll {
                         state: WatchState::Idle,
-                        detail: Some("第 1 轮".into()),
+                        detail: Some("round 1".into()),
                         payload: None,
                         signal: None,
                     },
                     WatchPoll {
                         state: WatchState::Idle,
-                        detail: Some("第 2 轮".into()),
+                        detail: Some("round 2".into()),
                         payload: None,
                         signal: None,
                     },

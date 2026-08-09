@@ -1,6 +1,6 @@
 # bingo
 
-> **中文版**：[README.zh-CN.md](README.zh-CN.md) — 中文文档见这里。
+> **Chinese version**: [README.zh-CN.md](README.zh-CN.md)
 
 bingo is a local agent CLI (agent harness) written in Rust. It drives large
 language models from your terminal to complete coding and system tasks: tool
@@ -325,8 +325,8 @@ surface.
   change is confirmed by the user in person** — the prompt appears in every
   permission mode, including `bypassPermissions`, and an `allow` rule cannot
   pre-authorize it (only `deny` outranks it). The confirmation line names the
-  change rather than the file (`改写 .bingo/team.json · dev-room · 4 名成员（-ui
-  +qa）`). Hand-editing `.bingo/team.json` with Write/Edit asks the same
+  change rather than the file (`Rewrite .bingo/team.json · dev-room · 4 members
+  (-ui +qa)`). Hand-editing `.bingo/team.json` with Write/Edit asks the same
   question. Dispatch is not part of the tool: `SendMessage` gives a member work.
 
 ## Channels (experimental)

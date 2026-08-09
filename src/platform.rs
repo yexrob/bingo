@@ -182,9 +182,17 @@ mod tests {
     fn init_shell_sets_once_and_ignores_later_calls() {
         init_shell(Some("  "));
         let first = shell();
-        assert_eq!(first, default_shell(), "空白配置回退平台默认");
+        assert_eq!(
+            first,
+            default_shell(),
+            "blank config falls back to the platform default"
+        );
         init_shell(Some("/bin/custom-sh"));
-        assert_eq!(shell(), first, "OnceLock 语义：首次设置后不再变更");
+        assert_eq!(
+            shell(),
+            first,
+            "OnceLock semantics: first set wins, later calls are ignored"
+        );
         init_shell(None);
         assert_eq!(shell(), first);
     }
@@ -203,7 +211,7 @@ mod tests {
         #[cfg(windows)]
         assert!(
             args.iter().any(|a| a == "-Command"),
-            "PowerShell 用 -Command: {args:?}"
+            "PowerShell uses -Command: {args:?}"
         );
         #[cfg(not(windows))]
         assert_eq!(args.first().map(String::as_str), Some("-c"));

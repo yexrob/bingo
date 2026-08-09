@@ -1,32 +1,32 @@
-# bingo share 页面设计（v4.0 · Claude Code app 风格）
+# bingo share page design (v4.0 · Claude Code app style)
 
-> 版本：v4.0 · 状态：定稿（**唯一事实源 = `share-page-template.html` v4.0**，本文件为摘要与契约说明）
-> 定位：`bingo share` 子命令导出的自包含 HTML 分享页。**展现形式参考 Claude Code app（claude.ai/code 桌面应用）**（用户指定方向，替代 v3.x 的 opencode 复刻）。
-> 参考：GitHub issues #48158/#51069 界面描述 + Claude 设计语言 + bingo 既有品牌语义（`--accent:#D77757` 陶土橙同源）。
+> Version: v4.0 · Status: finalized (**the single source of truth = `share-page-template.html` v4.0**; this file is the summary and contract description)
+> Positioning: the self-contained HTML share page exported by the `bingo share` subcommand. **Presentation follows the Claude Code app (claude.ai/code desktop application)** (user-specified direction, replacing the v3.x opencode replica).
+> References: GitHub issues #48158/#51069 interface descriptions + Claude design language + bingo's existing brand semantics (`--accent:#D77757`, terracotta orange, brand-shared).
 
-## 0. 设计原则
+## 0. Design principles
 
-1. **聊天应用观感**：暗色近黑底、消息流居中限宽（800px）、用户右侧暖灰气泡、助手左侧 markdown 流——像一份 Claude Code app 的会话快照，而非终端截图或文档页。
-2. **品牌克制**：陶土橙 `#D77757` 只用于品牌时刻（字标前缀、链接、工具图标、hover、选区）；状态语义用绿/红/橙徽标，不喧宾夺主。
-3. **事实完整**：工具输入 JSON 与结果原样呈现、不截断（PRD A4）；bash 非 command 字段走 `tool-args` 网格。
-4. **无 JS 核心**：数据由 Rust 服务端渲染（全量转义），JS 仅做渐进增强（tab/锚点复制/复制按钮/线程跳转/打印展开）；无 JS 时页面完整可读（折叠内容默认收起但 `<details>` 原生可开）。
-5. **四视图统一**：对话 / Team 线程列表 / 私聊聊天流 / 频道消息流，全部此风格；Team 保持线程列表形态（成员最近消息预览 + 直达私聊）。
+1. **Chat-app look**: dark near-black background, centered width-limited message flow (800px), warm-grey user bubbles on the right, assistant markdown flow on the left — a session snapshot of the Claude Code app, not a terminal screenshot or a doc page.
+2. **Brand restraint**: terracotta `#D77757` only for brand moments (wordmark prefix, links, tool icons, hover, selection); status semantics use green/red/orange badges without stealing the show.
+3. **Factual completeness**: tool input JSON and results render verbatim, never truncated (PRD A4); bash non-command fields go into the `tool-args` grid.
+4. **No-JS core**: data is server-rendered by Rust (fully escaped); JS is progressive enhancement only (tabs/anchor copy/copy buttons/thread jumps/print expand); without JS the page stays fully readable (collapsed content defaults closed but `<details>` opens natively).
+5. **Unified four views**: conversation / Team thread list / DM chat flows / channel message flows, all in this style; Team keeps the thread-list shape (member recent-message preview + jump to DM).
 
-## 1. 视觉锚点
+## 1. Visual anchors
 
-| 锚点 | 决策 |
+| Anchor | Decision |
 |---|---|
-| 底色 | 近黑 `#0D0D0F`；表面 `#151518`（工具卡）；代码块 `#1B1B20`；用户气泡暖灰 `#3A3731` |
-| 消息流 | 居中限宽 `--maxw: 800px`；用户气泡 `--bubble-max: 72%` |
-| 用户消息 | **右侧气泡**：暖灰底、圆角 14px（内角 4px）、`You · 时间` 元信息右对齐 |
-| 助手消息 | **左侧 markdown 流**：无气泡，正文/代码块对比清晰（行内代码橙 tint `#E8B08F`） |
-| 工具调用 | **折叠卡**：图标 + 工具名 + 参数摘要 + **状态徽标**（`✓ done` 绿 / `✗ error` 红 / `◐ running` 橙 + 时长），展开看完整 input/output |
-| thinking | 折叠块：灰色斜体摘要（`∴ Thinking · 88 tokens`），正文灰斜体 |
-| 顶栏 | sticky：品牌 `▸ bingo` + 会话标题 + 元信息（项目/模型/时间/模式）+ 四视图 tabs |
-| 字体 | 正文系统无衬线；代码/工具名/seq/元信息等宽 |
-| 品牌 | 陶土橙 `#D77757` 克制使用；状态绿 `#4EBA65` / 红 `#FF6B80` / 进行中橙 `#F0A05A` |
+| Background | near-black `#0D0D0F`; surface `#151518` (tool cards); code blocks `#1B1B20`; user bubble warm grey `#3A3731` |
+| Message flow | centered width limit `--maxw: 800px`; user bubble `--bubble-max: 72%` |
+| User messages | **bubble on the right**: warm-grey background, 14px radius (4px inner corner), `You · time` meta right-aligned |
+| Assistant messages | **markdown flow on the left**: no bubble, clear contrast between body and code blocks (inline code orange tint `#E8B08F`) |
+| Tool calls | **collapsible card**: icon + tool name + argument summary + **status badge** (`✓ done` green / `✗ error` red / `◐ running` orange + duration), expand to see full input/output |
+| thinking | collapsible block: grey italic summary (`∴ Thinking · 88 tokens`), grey italic body |
+| Top bar | sticky: brand `▸ bingo` + session title + meta info (project/model/time/mode) + four-view tabs |
+| Type | system sans-serif body; monospace for code/tool names/seq/meta |
+| Brand | terracotta `#D77757` used sparingly; status green `#4EBA65` / red `#FF6B80` / in-progress orange `#F0A05A` |
 
-## 2. 令牌（摘要，完整见模板 `:root`）
+## 2. Tokens (summary; full set in the template `:root`)
 
 ```css
 :root {
@@ -35,46 +35,46 @@
   --hairline:#26262B; --hairline-strong:#36363D;
   --text:#EDEBE7; --dim:#A8A39B; --faint:#77726A; --ink:#0D0D0F;
   --accent:#D77757; --green:#4EBA65; --red:#FF6B80; --gold:#FFC107; --running:#F0A05A;
-  --hue-0..5（暗色档成员色）;
+  --hue-0..5 (dark-variant member colors);
   --maxw:800px; --bubble-max:72%;
 }
 ```
-对比度：正文 15.9:1、dim 7.2:1、accent 6.2:1、语义色全 ≥4.5:1（打印模式另行换算）。
+Contrast: body 15.9:1, dim 7.2:1, accent 6.2:1, all semantic colors ≥4.5:1 (print mode recalculates separately).
 
-## 3. 四视图（全部聊天形态）
+## 3. Four views (all chat-shaped)
 
-| 视图 | 形态 |
+| View | Shape |
 |---|---|
-| **Conversation** | 消息流：用户右气泡（`.msg-user > .bubble`）/ 助手左 markdown（`.msg-assistant > .content > .md`）+ thinking 折叠 + 工具折叠卡 |
-| **Team** | 线程列表（`.thread-list > .thread`）：圆形头像（成员色）+ 名 + 状态（●◐✗）+ 消息数 + 最近消息预览 + footer（时间 · def）；整行 `data-jump` 直达私聊 |
-| **DM** | 每代理一个聊天流（`.dm-block`）：头部（头像 + 名 + 状态 + def）+ `.dm-flow` 消息流（代理左 / 用户右气泡，发送者成员色） |
-| **Channels** | 每频道消息流（`.ch-block`）：头部（`◇ #name` + mode chip + 成员 chips）+ `.ch-flow` 消息行（seq + 发送者成员色 + 文本，user 右对齐） |
+| **Conversation** | message flow: user right bubble (`.msg-user > .bubble`) / assistant left markdown (`.msg-assistant > .content > .md`) + thinking collapsible + tool collapsible cards |
+| **Team** | thread list (`.thread-list > .thread`): round avatar (member color) + name + status (●◐✗) + message count + recent-message preview + footer (time · def); the whole row `data-jump`s to the DM |
+| **DM** | one chat flow per agent (`.dm-block`): header (avatar + name + status + def) + `.dm-flow` message flow (agent left / user right bubble, sender member color) |
+| **Channels** | per-channel message flow (`.ch-block`): header (`◇ #name` + mode chip + member chips) + `.ch-flow` message rows (seq + sender member color + text, user right-aligned) |
 
-空态：`— No … —`（`.view-empty`），四视图恒存在。
+Empty state: `— No … —` (`.view-empty`), always present in all four views.
 
-## 4. 交互（渐进增强）
+## 4. Interaction (progressive enhancement)
 
-tab 切换（hash + 1-4 键）、消息锚点复制 `URL#msg-N`（hover 显现 `#`，点击复制变 ✓）、复制按钮（JS 创建于 .code-block/.t-code）、线程行直达私聊、打印展开全部 + 全视图、reduced-motion 全关。
+Tab switching (hash + keys 1-4), message anchor copy `URL#msg-N` (`#` appears on hover, click copies and turns into ✓), copy buttons (created by JS on .code-block/.t-code), thread rows jumping to DM, print expanding everything + all views, reduced-motion off.
 
-## 5. dev 集成契约（Rust 端生成规则）
+## 5. dev integration contract (Rust-side generation rules)
 
-- 输出 `<html lang="en">` + 模板 `<style>` 整段内联 + `<script>` 整段内联（JS 不拼接数据）。
-- 全量转义（`& < > " '`）；代码放 `<pre>`；图片仅 `data:` URI。
-- **消息部件映射**：
-  - user：`<article class="msg msg-user" id="msg-N">` > `.msg-meta`（`who=You` + time + anchor `#`）+ `.bubble`（纯文本）
-  - assistant：`.msg-assistant` > `.msg-meta`（who=Assistant + model + time + anchor）+ `.content`：`.md`（markdown HTML 子集）+ `details.think`（summary=Thinking · N tokens）+ `details.tool`（summary：`.t-icon` svg + `.t-name` + `.t-args` 摘要 + `.t-status.ok|.err|.running` 徽标；body：`.t-code`（input/result pre））
-  - bash A4：非 command 字段 → `[data-component="tool-args"]` 网格（或 v4 用 `.t-args` 摘要 + 完整 input pre 保留——**以模板最终实现为准**，input pre 始终含完整 JSON）
-  - Team/DM/Channels 结构见 §3 与模板样例。
-- markdown 子集：p/ul,ol/h1-h6/strong/em/code/pre/table/blockquote/hr/a——样式内置。
+- Output `<html lang="en">` + the template's `<style>` block inlined wholesale + the `<script>` block inlined wholesale (JS never concatenates data).
+- Full escaping (`& < > " '`); code goes into `<pre>`; images only as `data:` URIs.
+- **Message part mapping**:
+  - user: `<article class="msg msg-user" id="msg-N">` > `.msg-meta` (`who=You` + time + anchor `#`) + `.bubble` (plain text)
+  - assistant: `.msg-assistant` > `.msg-meta` (who=Assistant + model + time + anchor) + `.content`: `.md` (markdown HTML subset) + `details.think` (summary=Thinking · N tokens) + `details.tool` (summary: `.t-icon` svg + `.t-name` + `.t-args` summary + `.t-status.ok|.err|.running` badge; body: `.t-code` (input/result pre))
+  - bash A4: non-command fields → `[data-component="tool-args"]` grid (or in v4 the `.t-args` summary + full input pre retained — **final form per the template**; the input pre always carries the complete JSON)
+  - Team/DM/Channels structure per §3 and the template sample.
+- Markdown subset: p/ul,ol/h1-h6/strong/em/code/pre/table/blockquote/hr/a — styles built in.
 
-## 6. 评审方法
+## 6. Review method
 
-`share-review.js` v4.0：**43 项断言**（令牌/结构/部件/四视图/语言/转义/自包含/a11y/打印/布局契约），模板自检 **43/43 PASS**；headless Chrome DOM 复核（复制按钮数 = .code-block + .t-code 数、气泡/工具卡/线程/消息计数、tab 行为）。
+`share-review.js` v4.0: **43 assertions** (tokens/structure/parts/four views/language/escaping/self-containment/a11y/print/layout contract); the template self-checks **43/43 PASS**; headless Chrome DOM re-verification (copy-button count = .code-block + .t-code count, bubble/tool-card/thread/message counts, tab behavior).
 
-## 7. 变更记录
+## 7. Changelog
 
-| 日期 | 版本 | 说明 |
+| Date | Version | Notes |
 |---|---|---|
-| 2026-08-07 | v4.0 | **Claude Code app 风格**（用户指定，替代 opencode 复刻）：暗色近黑底 + 居中 800px 消息流 + 用户右暖灰气泡 + 助手左 markdown + 工具折叠卡状态徽标 + thinking 灰斜体 + sticky 顶栏 + 四视图聊天形态（Team 线程列表保持）；评审脚本 43 项；模板 MD5 `8c29a17b` |
-| 2026-08-07 | v3.1.1 | opencode 复刻 + A4 契约（已被 v4.0 取代） |
-| 2026-08-07 | v3.1/v3.0 | opencode 完全复刻 + 三视图聊天记录形态（已被 v4.0 取代） |
+| 2026-08-07 | v4.0 | **Claude Code app style** (user-specified, replacing the opencode replica): dark near-black background + centered 800px message flow + user right warm-grey bubbles + assistant left markdown + tool collapsible cards with status badges + grey italic thinking + sticky top bar + four chat-shaped views (Team keeps the thread list); review script 43 items; template MD5 `8c29a17b` |
+| 2026-08-07 | v3.1.1 | opencode replica + A4 contract (superseded by v4.0) |
+| 2026-08-07 | v3.1/v3.0 | full opencode replica + three chat-record views (superseded by v4.0) |

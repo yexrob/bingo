@@ -145,7 +145,11 @@ mod tests {
             .await
             .unwrap();
         let text = result.content.as_str().unwrap();
-        assert_eq!(text.lines().count(), 1, "单行返回，不带全量正文: {text}");
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "single-line return, without the full body: {text}"
+        );
         // Expected pointer renders the helper's base_dir verbatim (separator style per platform).
         let expected = format!(
             "✦ pdf — read {}",
@@ -154,7 +158,7 @@ mod tests {
         assert_eq!(text, expected);
         assert!(
             !text.contains("Follow the {name} procedure."),
-            "不再展开全量正文: {text}"
+            "no longer expands the full body: {text}"
         );
     }
 
@@ -168,12 +172,12 @@ mod tests {
             .await
             .unwrap();
         let text = result.content.as_str().unwrap();
-        assert_eq!(text.lines().count(), 1, "单行返回: {text}");
+        assert_eq!(text.lines().count(), 1, "single-line return: {text}");
         let path = std::path::Path::new(text.strip_prefix("✦ guide — read ").unwrap());
         assert!(path.ends_with("bingo/skills/guide/SKILL.md"), "{text}");
         assert!(
             std::fs::read_to_string(path).is_ok_and(|c| c.contains("Follow the {name} procedure.")),
-            "物化文件内容完整: {path:?}"
+            "materialized file content is complete: {path:?}"
         );
         // Once materialized the model can Read it: the path acts as the base_dir.
         assert!(!text.contains("instructions inline"), "{text}");
@@ -215,11 +219,11 @@ mod tests {
         assert!(desc.contains("Do not guess skill names"));
         assert!(
             desc.contains("✦ name"),
-            "描述需说明 ✦ 标记也是技能引用: {desc}"
+            "description must note that the ✦ marker is also a skill reference: {desc}"
         );
         assert!(
             desc.contains("read that file with Read"),
-            "描述需说明指针 + Read 契约: {desc}"
+            "description must note the pointer + Read contract: {desc}"
         );
 
         let empty = SkillTool::new(vec![]);

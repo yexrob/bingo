@@ -8,36 +8,40 @@
 <title>bingo · Session</title>
 <style>
 /* ══════════════════════════════════════════════════════════════
-   bingo share v4.0 —— Claude Code app 展现风格
-   事实源 = 本文件。暗色近黑底、居中限宽消息流、用户右侧暖灰气泡、
-   助手左侧 markdown 流、工具折叠卡 + 状态徽标、thinking 灰斜体、
-   sticky 顶栏、陶土橙 accent（--accent:#D77757 与 bingo 品牌同源）。
-   四视图（对话 / Team 线程列表 / 私聊 / 频道）统一此风格。
-   单文件自包含、零外部依赖、离线可用、打印友好、渐进增强 JS。
+   bingo share v4.0 — Claude Code app presentation style
+   Source of truth = this file. Near-black dark background, centered
+   width-limited message flow, warm-grey bubbles on the user's right,
+   markdown flow on the assistant's left, collapsible tool cards +
+   status badges, grey italic thinking, sticky top bar, terracotta
+   orange accent (--accent:#D77757, shared with the bingo brand).
+   Four views (conversation / Team thread list / DMs / channels)
+   share this style. Single self-contained file, zero external
+   dependencies, offline-ready, print-friendly, progressively
+   enhanced JS.
    ══════════════════════════════════════════════════════════════ */
 
-/* ─────────── 1. 令牌（Claude Code app 暗色基调 + bingo 语义） ─────────── */
+/* ─────────── 1. Tokens (Claude Code app dark palette + bingo semantics) ─────────── */
 :root {
-  --bg:            #0D0D0F;   /* 页面底（近黑） */
-  --surface:       #151518;   /* 卡片/工具卡底 */
-  --surface-2:     #1B1B20;   /* hover / 代码块底 */
-  --bubble:        #3A3731;   /* 用户气泡（暖灰） */
-  --bubble-text:   #F2F0EC;   /* 气泡内文本 */
-  --hairline:      #26262B;   /* 分隔线 */
+  --bg:            #0D0D0F;   /* page background (near black) */
+  --surface:       #151518;   /* card / tool-card background */
+  --surface-2:     #1B1B20;   /* hover / code-block background */
+  --bubble:        #3A3731;   /* user bubble (warm grey) */
+  --bubble-text:   #F2F0EC;   /* text inside bubbles */
+  --hairline:      #26262B;   /* separators */
   --hairline-strong:#36363D;
 
   --text:      #EDEBE7;   /* 15.9:1 */
-  --dim:       #A8A39B;   /* ~7.2:1 次级 */
-  --faint:     #77726A;   /* ~4.0:1 仅装饰/元信息小字 */
-  --ink:       #0D0D0F;   /* accent 底上的文字色 */
+  --dim:       #A8A39B;   /* ~7.2:1 secondary */
+  --faint:     #77726A;   /* ~4.0:1 decorative/meta small text only */
+  --ink:       #0D0D0F;   /* text color on accent backgrounds */
 
-  --accent:    #D77757;   /* 陶土橙（品牌同源）6.2:1 */
-  --green:     #4EBA65;   /* 成功 */
-  --red:       #FF6B80;   /* 错误 */
-  --gold:      #FFC107;   /* 警告 */
-  --running:   #F0A05A;   /* 进行中（橙）9.1:1 */
+  --accent:    #D77757;   /* terracotta orange (brand-shared) 6.2:1 */
+  --green:     #4EBA65;   /* success */
+  --red:       #FF6B80;   /* error */
+  --gold:      #FFC107;   /* warning */
+  --running:   #F0A05A;   /* in progress (orange) 9.1:1 */
 
-  /* 成员色板（暗色档） */
+  /* member palette (dark variant) */
   --hue-0:#5EEAD4; --hue-1:#A5B4FC; --hue-2:#C4B5FD;
   --hue-3:#FCD34D; --hue-4:#F9A8D4; --hue-5:#86EFAC;
 
@@ -47,8 +51,8 @@
                Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace;
 
   --fs: 15px; --fs-sm: 13.5px; --fs-xs: 12px; --lh: 1.65;
-  --maxw: 800px;                 /* 消息流居中限宽 */
-  --bubble-max: 72%;             /* 用户气泡最大宽 */
+  --maxw: 800px;                 /* centered width limit for the message flow */
+  --bubble-max: 72%;             /* max width of user bubbles */
   --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px; --s7:48px;
   --radius: 8px; --radius-sm: 4px;
 }
@@ -64,7 +68,7 @@ body {
 a { color: var(--accent); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
 
-/* ─────────── 2. topbar（sticky：品牌 + 元信息 + 四视图 tabs） ─────────── */
+/* ─────────── 2. topbar (sticky: brand + meta info + four-view tabs) ─────────── */
 .topbar {
   position: sticky; top: 0; z-index: 20;
   background: rgba(13,13,15,.94); backdrop-filter: blur(8px);
@@ -105,7 +109,7 @@ a { color: var(--accent); }
 .tabs button[aria-selected="true"] .count { color: var(--accent); }
 .tabs .kbd { color: var(--faint); margin-right: var(--s1); font-size: var(--fs-xs); }
 
-/* ─────────── 3. main 布局 ─────────── */
+/* ─────────── 3. main layout ─────────── */
 main { max-width: var(--maxw); margin: 0 auto; padding: var(--s6) var(--s4) var(--s7); }
 .view[data-view] { animation: view-in .12s ease-out; }
 @keyframes view-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
@@ -117,7 +121,7 @@ main { max-width: var(--maxw); margin: 0 auto; padding: var(--s6) var(--s4) var(
 .view h2 .n { color: var(--faint); font-weight: 400; }
 .view-empty { color: var(--faint); padding: var(--s7) 0; text-align: center; }
 
-/* ─────────── 4. 对话视图：消息流 ─────────── */
+/* ─────────── 4. Conversation view: message flow ─────────── */
 .conv { display: flex; flex-direction: column; gap: var(--s5); }
 
 .msg { display: flex; flex-direction: column; }
@@ -141,7 +145,7 @@ main { max-width: var(--maxw); margin: 0 auto; padding: var(--s6) var(--s4) var(
 .msg:hover .msg-meta .anchor, .msg-meta .anchor:focus-visible { opacity: 1; }
 .msg-meta .anchor:hover { color: var(--accent); }
 
-/* 用户消息：右侧暖灰气泡 */
+/* user messages: warm-grey bubble on the right */
 .msg-user .bubble {
   background: var(--bubble); color: var(--bubble-text);
   border-radius: 14px 14px 4px 14px; padding: 0.5rem 0.8rem;
@@ -150,7 +154,7 @@ main { max-width: var(--maxw); margin: 0 auto; padding: var(--s6) var(--s4) var(
 }
 .msg-user .bubble code { background: rgba(255,255,255,.09); }
 
-/* 助手消息：左侧 markdown 流（无气泡） */
+/* assistant messages: markdown flow on the left (no bubble) */
 .msg-assistant .content { width: 100%; display: flex; flex-direction: column; gap: var(--s3); }
 .md { color: var(--text); }
 .md > :first-child { margin-top: 0; }
@@ -170,7 +174,7 @@ main { max-width: var(--maxw); margin: 0 auto; padding: var(--s6) var(--s4) var(
 .md th { background: var(--surface); font-weight: 600; }
 .md del { color: var(--faint); }
 
-/* 代码块 */
+/* code blocks */
 .code-block {
   margin: var(--s3) 0; background: var(--surface-2); border: 1px solid var(--hairline);
   border-radius: var(--radius); position: relative; overflow: hidden;
@@ -192,7 +196,7 @@ main { max-width: var(--maxw); margin: 0 auto; padding: var(--s6) var(--s4) var(
 .code-block:hover .copy-btn, .copy-btn:focus-visible, .t-code:hover .copy-btn { opacity: 1; }
 .copy-btn:hover { color: var(--text); border-color: var(--accent); }
 
-/* thinking：灰色斜体折叠块 */
+/* thinking: grey italic collapsible block */
 details.think {
   border-left: 3px solid var(--hairline-strong); padding-left: var(--s3); margin: var(--s1) 0;
 }
@@ -206,7 +210,7 @@ details.think summary:hover { color: var(--dim); }
 details.think[open] summary { margin-bottom: var(--s2); }
 .think-body { color: var(--dim); font-style: italic; font-size: var(--fs-sm); white-space: pre-wrap; }
 
-/* 工具调用：折叠卡（图标 + 名 + 参数摘要 + 状态徽标） */
+/* tool calls: collapsible card (icon + name + argument summary + status badge) */
 details.tool {
   border: 1px solid var(--hairline); border-radius: var(--radius);
   background: var(--surface); overflow: hidden;
@@ -249,7 +253,7 @@ details.tool .t-body { padding: 0 0.75rem 0.75rem; display: grid; gap: var(--s2)
 .t-code.output.err .t-label { color: var(--red); }
 .t-code pre code { background: none; border: 0; padding: 0; font-size: inherit; color: inherit; }
 
-/* ─────────── 5. Team：线程列表（聊天应用会话列表心智） ─────────── */
+/* ─────────── 5. Team: thread list (chat-app conversation-list mental model) ─────────── */
 .thread-list { display: flex; flex-direction: column; gap: var(--s2); }
 .thread {
   display: flex; align-items: center; gap: var(--s3); text-decoration: none;
@@ -278,7 +282,7 @@ details.tool .t-body { padding: 0 0.75rem 0.75rem; display: grid; gap: var(--s2)
 }
 .t-foot { color: var(--faint); font-size: var(--fs-xs); margin-top: 2px; font-family: var(--font-mono); }
 
-/* ─────────── 6. DM：每子代理聊天流 ─────────── */
+/* ─────────── 6. DM: per-subagent chat flow ─────────── */
 .dm-list { display: flex; flex-direction: column; gap: var(--s6); }
 .dm-block { display: flex; flex-direction: column; gap: var(--s3); }
 .dm-head { display: flex; align-items: center; gap: var(--s2); padding-bottom: var(--s2); border-bottom: 1px solid var(--hairline); }
@@ -293,7 +297,7 @@ details.tool .t-body { padding: 0 0.75rem 0.75rem; display: grid; gap: var(--s2)
 .dm-flow .msg { max-width: var(--maxw); }
 .dm-flow .msg-meta .who { color: var(--from, var(--dim)); }
 
-/* ─────────── 7. Channels：每频道消息流 ─────────── */
+/* ─────────── 7. Channels: per-channel message flow ─────────── */
 .ch-list { display: flex; flex-direction: column; gap: var(--s6); }
 .ch-block { display: flex; flex-direction: column; gap: var(--s3); }
 .ch-head {
@@ -331,7 +335,7 @@ footer { border-top: 1px solid var(--hairline); color: var(--faint); font-size: 
 .foot-inner .mark { color: var(--accent); }
 .foot-warn { color: var(--gold); }
 
-/* ─────────── 9. 窄屏 / 打印 / 减弱动效 ─────────── */
+/* ─────────── 9. Narrow screens / print / reduced motion ─────────── */
 @media (max-width: 640px) {
   .meta-line { display: none; }
   .brand .session { max-width: 40vw; }
@@ -365,7 +369,7 @@ footer { border-top: 1px solid var(--hairline); color: var(--faint); font-size: 
 </head>
 <body>
 
-<!-- ═══ topbar：品牌 + 会话标题 + 元信息 + 四视图 tabs ═══ -->
+<!-- ═══ topbar: brand + session title + meta info + four-view tabs ═══ -->
 <header class="topbar">
   <div class="topbar-inner">
     <div class="brand">
@@ -390,7 +394,7 @@ footer { border-top: 1px solid var(--hairline); color: var(--faint); font-size: 
 
 <main id="main">
 
-  <!-- ═══════════════════ ① Conversation：消息流（用户右气泡 / 助手左 markdown） ═══════════════════ -->
+  <!-- ═══════════════════ ① Conversation: message flow (user right bubble / assistant left markdown) ═══════════════════ -->
   <section class="view" data-view="conv" role="tabpanel" id="view-conv" aria-label="Conversation">
     <h2>Conversation <span class="n">· 4 messages</span></h2>
     <div class="conv">
@@ -529,7 +533,7 @@ footer { border-top: 1px solid var(--hairline); color: var(--faint); font-size: 
     </div>
   </section>
 
-  <!-- ═══════════════════ ② Team：线程列表（点击/锚点直达私聊） ═══════════════════ -->
+  <!-- ═══════════════════ ② Team: thread list (click/anchor jumps to DM) ═══════════════════ -->
   <section class="view" data-view="team" role="tabpanel" id="view-team" aria-label="Team" hidden>
     <h2>Team <span class="n">· 3 threads</span></h2>
     <div class="thread-list">
@@ -576,7 +580,7 @@ footer { border-top: 1px solid var(--hairline); color: var(--faint); font-size: 
     </div>
   </section>
 
-  <!-- ═══════════════════ ③ DM：每子代理聊天流 ═══════════════════ -->
+  <!-- ═══════════════════ ③ DM: per-subagent chat flow ═══════════════════ -->
   <section class="view" data-view="dm" role="tabpanel" id="view-dm" aria-label="Direct messages" hidden>
     <h2>Direct Messages <span class="n">· 3 threads</span></h2>
     <div class="dm-list">
@@ -660,7 +664,7 @@ footer { border-top: 1px solid var(--hairline); color: var(--faint); font-size: 
     </div>
   </section>
 
-  <!-- ═══════════════════ ④ Channels：每频道消息流 ═══════════════════ -->
+  <!-- ═══════════════════ ④ Channels: per-channel message flow ═══════════════════ -->
   <section class="view" data-view="channel" role="tabpanel" id="view-channel" aria-label="Channels" hidden>
     <h2>Channels <span class="n">· 2 rooms</span></h2>
     <div class="ch-list">
@@ -717,18 +721,19 @@ footer { border-top: 1px solid var(--hairline); color: var(--faint); font-size: 
 <noscript><div style="padding:1.5rem;text-align:center;color:var(--faint)">This page is fully readable without JavaScript; only tab switching, copy links and copy buttons are enhanced.</div></noscript>
 
 <!-- ══════════════════════════════════════════════════════════════
-  渐进增强 JS（数据由 Rust 服务端渲染，JS 不拼接任何数据）：
-  1) 四视图 tab 切换（hash 直达 + 1-4 键）
-  2) 消息锚点复制链接（URL + #msg-N）
-  3) 复制按钮
-  4) Team 线程行直达私聊（data-jump）
-  5) 打印：展开全部 details + 显示全部视图
+  Progressive-enhancement JS (data is server-rendered by Rust; JS never
+  concatenates data):
+  1) four-view tab switching (hash deep-link + keys 1-4)
+  2) message anchor copy link (URL + #msg-N)
+  3) copy buttons
+  4) Team thread rows jump to DM (data-jump)
+  5) print: expand all details + show all views
   ══════════════════════════════════════════════════════════════ -->
 <script>
 (function(){
   'use strict';
 
-  /* ---------- 四视图 tab 切换 ---------- */
+  /* ---------- four-view tab switching ---------- */
   function activateTab(name){
     var views = document.querySelectorAll('.view[data-view]');
     for (var i = 0; i < views.length; i++){
@@ -766,7 +771,7 @@ footer { border-top: 1px solid var(--hairline); color: var(--faint); font-size: 
     if (['conv', 'team', 'dm', 'channel'].indexOf(name) >= 0) activateTab(name);
   }
 
-  /* ---------- 消息锚点：复制 URL + #id ---------- */
+  /* ---------- message anchors: copy URL + #id ---------- */
   function bindAnchors(){
     document.addEventListener('click', function(e){
       var anchor = e.target && e.target.closest ? e.target.closest('.msg-meta .anchor') : null;
@@ -788,7 +793,7 @@ footer { border-top: 1px solid var(--hairline); color: var(--faint); font-size: 
     });
   }
 
-  /* ---------- 复制按钮：给 .code-block 与 .t-code 创建（渐进增强） ---------- */
+  /* ---------- copy buttons: created for .code-block and .t-code (progressive enhancement) ---------- */
   function addCopyButtons(){
     var targets = document.querySelectorAll('.code-block, .t-code');
     for (var i = 0; i < targets.length; i++){
@@ -805,7 +810,7 @@ footer { border-top: 1px solid var(--hairline); color: var(--faint); font-size: 
     }
   }
 
-  /* ---------- 复制按钮点击 ---------- */
+  /* ---------- copy button click ---------- */
   function bindCopyButtons(){
     document.addEventListener('click', function(e){
       var btn = e.target && e.target.closest ? e.target.closest('.copy-btn') : null;
@@ -829,7 +834,7 @@ footer { border-top: 1px solid var(--hairline); color: var(--faint); font-size: 
     });
   }
 
-  /* ---------- Team 线程行：直达私聊 ---------- */
+  /* ---------- Team thread rows: jump to DM ---------- */
   function bindThreadRows(){
     document.addEventListener('click', function(e){
       var row = e.target && e.target.closest ? e.target.closest('.thread[data-jump]') : null;
@@ -845,7 +850,7 @@ footer { border-top: 1px solid var(--hairline); color: var(--faint); font-size: 
     });
   }
 
-  /* ---------- 打印：展开全部 details + 显示全部视图 ---------- */
+  /* ---------- print: expand all details + show all views ---------- */
   function bindPrint(){
     var printBtn = document.getElementById('print-btn');
     if (printBtn) printBtn.addEventListener('click', function(){ window.print(); });

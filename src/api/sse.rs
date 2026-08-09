@@ -155,7 +155,7 @@ mod tests {
                 .feed(format!("event: ping\ndata: {{}}{sep}").as_bytes())
                 .unwrap();
             assert_eq!(frames.len(), 1, "{sep:?}");
-            assert!(p.buf.is_empty(), "{sep:?} 残余: {:?}", p.buf);
+            assert!(p.buf.is_empty(), "{sep:?} residual: {:?}", p.buf);
             assert_eq!(p.scanned, 0, "{sep:?}");
         }
     }
@@ -187,7 +187,7 @@ mod tests {
         }
         assert!(
             err.is_some_and(|e| e.contains("without a boundary")),
-            "应报协议错误"
+            "should have reported a protocol error"
         );
     }
 }

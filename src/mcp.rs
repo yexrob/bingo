@@ -142,7 +142,10 @@ impl McpManager {
         let result =
             match tokio::time::timeout(self.connect_timeout, self.connect_one_inner(name)).await {
                 Ok(result) => result,
-                Err(_) => Err(format!("连接超时（{}s）", self.connect_timeout.as_secs())),
+                Err(_) => Err(format!(
+                    "connect timed out ({}s)",
+                    self.connect_timeout.as_secs()
+                )),
             };
         if let Err(detail) = &result {
             self.failures.insert(name.to_string(), detail.clone());
@@ -201,12 +204,12 @@ impl McpManager {
 
     async fn connect_one_inner(&mut self, name: &str) -> Result<(), String> {
         let Some(config) = self.servers.get(name).cloned() else {
-            return Err(format!("未配置的服务器 {name}"));
+            return Err(format!("unconfigured server {name}"));
         };
         let service = match config.kind.as_deref().unwrap_or("stdio") {
             "stdio" => {
                 let Some(command_str) = config.command.as_deref() else {
-                    return Err("stdio 服务器缺少 command".to_string());
+                    return Err("stdio server is missing command".to_string());
                 };
                 let mut command = TokioCommand::new(command_str);
                 command.args(&config.args);
@@ -222,19 +225,19 @@ impl McpManager {
                     .map_err(|e| format!("spawn {command_str}: {e}"))?;
                 serve_client((), transport)
                     .await
-                    .map_err(|e| format!("握手失败: {e}"))?
+                    .map_err(|e| format!("handshake failed: {e}"))?
             }
             // Streamable HTTP (the current standard MCP transport)
             "http" => {
                 let Some(url) = config.url.as_deref() else {
-                    return Err("http 服务器缺少 url".to_string());
+                    return Err("http server is missing url".to_string());
                 };
                 let mut headers = HashMap::new();
                 for (key, value) in &config.headers {
                     let header_name = http::HeaderName::from_bytes(key.as_bytes())
-                        .map_err(|e| format!("http 头名非法 {key}: {e}"))?;
+                        .map_err(|e| format!("invalid http header name {key}: {e}"))?;
                     let header_value = http::HeaderValue::from_str(value)
-                        .map_err(|e| format!("http 头 {key} 值非法: {e}"))?;
+                        .map_err(|e| format!("invalid value for http header {key}: {e}"))?;
                     headers.insert(header_name, header_value);
                 }
                 let transport = StreamableHttpClientTransport::from_config(
@@ -242,18 +245,18 @@ impl McpManager {
                 );
                 serve_client((), transport)
                     .await
-                    .map_err(|e| format!("握手失败: {e}"))?
+                    .map_err(|e| format!("handshake failed: {e}"))?
             }
             other => {
                 return Err(format!(
-                    "不支持的传输类型 {other}（支持 stdio / http；sse / ws 未落地）"
+                    "unsupported transport kind {other} (supported: stdio / http; sse / ws not yet implemented)"
                 ));
             }
         };
         let listed = service
             .list_all_tools()
             .await
-            .map_err(|e| format!("list_tools 失败: {e}"))?;
+            .map_err(|e| format!("list_tools failed: {e}"))?;
         self.connections.insert(
             name.to_string(),
             ServerConnection {
@@ -644,7 +647,7 @@ mod tests {
         assert!(matches!(
             mgr.reconnect("remote").await,
             Err(McpError::Connect { detail, .. })
-                if detail.contains("缺少 url")
+                if detail.contains("missing url")
         ));
     }
 
@@ -718,7 +721,10 @@ mod tests {
 
         mgr.disconnect("web");
         mgr.mark_connecting(&["web".to_string()]);
-        assert!(mgr.needs_connect().is_empty(), "进行中不重复派发");
+        assert!(
+            mgr.needs_connect().is_empty(),
+            "in-flight servers are not dispatched again"
+        );
         mgr.finish_connecting(&["web".to_string()]);
         assert_eq!(mgr.needs_connect(), vec!["web"]);
     }
@@ -732,20 +738,27 @@ mod tests {
         mgr.failures.insert("web".to_string(), "nope".to_string());
 
         let first = mgr.drain_unreported_failures();
-        assert_eq!(first.len(), 2, "两条失败都报告");
+        assert_eq!(first.len(), 2, "both failures are reported");
         assert!(
             first
                 .iter()
                 .any(|w| w.contains("files") && w.contains("boom"))
         );
-        assert!(mgr.drain_unreported_failures().is_empty(), "只报一次");
+        assert!(
+            mgr.drain_unreported_failures().is_empty(),
+            "reported only once"
+        );
 
         // disconnect resets the reported marks: a new failure after
         // reconnect can be reported again.
         mgr.disconnect("files");
         mgr.failures.insert("files".to_string(), "boom".to_string());
         let again = mgr.drain_unreported_failures();
-        assert_eq!(again.len(), 1, "disconnect 后新失败可再报告");
+        assert_eq!(
+            again.len(),
+            1,
+            "after disconnect, new failures can be reported again"
+        );
         assert!(again[0].contains("files"));
     }
 
@@ -777,7 +790,7 @@ mod tests {
         mgr.connect_timeout = std::time::Duration::from_millis(200);
         let results = mgr.connect_all().await;
         assert!(
-            matches!(results.as_slice(), [(name, Err(detail))] if name == "hung" && detail.contains("连接超时"))
+            matches!(results.as_slice(), [(name, Err(detail))] if name == "hung" && detail.contains("connect timed out"))
         );
         assert!(matches!(mgr.status("hung"), McpStatus::Failed { .. }));
     }
@@ -829,7 +842,7 @@ mod tests {
     /// boundary → panic.
     #[test]
     fn mcp_tool_facts_truncates_multibyte_description_on_char_boundary() {
-        for unit in ["中", "🙂", "é"] {
+        for unit in ["❤", "🙂", "é"] {
             let long = unit.repeat(3000);
             let facts = mcp_tool_facts("srv", &tool_model("t", Some(&long), false));
             assert!(facts.description.ends_with("… [truncated]"), "{unit}");
@@ -840,7 +853,7 @@ mod tests {
             );
         }
         // Exactly at the cap: no truncation.
-        let exact = "中".repeat(MAX_MCP_DESCRIPTION_LENGTH);
+        let exact = "❤".repeat(MAX_MCP_DESCRIPTION_LENGTH);
         let facts = mcp_tool_facts("srv", &tool_model("t", Some(&exact), false));
         assert_eq!(facts.description, exact);
     }

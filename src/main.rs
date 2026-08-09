@@ -141,8 +141,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             PathBuf::new()
         }
     };
-    // 子命令快路径：share 只需 home（transcript/shares 目录），update 只需 home（缓存），
-    // 均不碰 settings/API。
+    // Subcommand fast path: share only needs home (transcript/shares dirs), update only needs home (cache),
+    // neither touches settings/API.
     if let Some(Command::Share {
         session,
         public,
@@ -172,7 +172,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         for key in crate::settings::layer_keys(&path) {
             if !crate::settings::KNOWN_KEYS.contains(&key.as_str()) {
                 config_notes.push(format!(
-                    "⚠ {} 含未知配置项 \"{key}\"（拼写错误？不会生效）",
+                    "⚠ {} contains unknown config key \"{key}\" (a typo? it will have no effect)",
                     path.display()
                 ));
             }
@@ -183,14 +183,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         && !crate::api::contract::THINKING_LEVELS.contains(&level)
     {
         config_notes.push(format!(
-            "⚠ thinkingLevel \"{level}\" 非法（可用 off|low|medium|high|xhigh|max），已回落 off"
+            "⚠ thinkingLevel \"{level}\" is invalid (use off|low|medium|high|xhigh|max); fell back to off"
         ));
     }
     if let Some(theme) = settings.theme.as_deref()
         && !matches!(theme, "auto" | "dark" | "light")
     {
         config_notes.push(format!(
-            "⚠ theme \"{theme}\" 非法（可用 auto|dark|light），已回落 auto"
+            "⚠ theme \"{theme}\" is invalid (use auto|dark|light); fell back to auto"
         ));
     }
     for note in &config_notes {
@@ -236,7 +236,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         eprintln!(
                             "[bingo] warning: cannot create transcript (history will not persist): {e}"
                         );
-                        startup_notes.push(format!("⚠ 无法创建 transcript（历史不会持久化）：{e}"));
+                        startup_notes.push(format!(
+                            "⚠ cannot create transcript (history will not persist): {e}"
+                        ));
                     }
                     (None, Vec::new())
                 }
@@ -250,7 +252,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!(
                         "[bingo] warning: cannot create transcript (history will not persist): {e}"
                     );
-                    startup_notes.push(format!("⚠ 无法创建 transcript（历史不会持久化）：{e}"));
+                    startup_notes.push(format!(
+                        "⚠ cannot create transcript (history will not persist): {e}"
+                    ));
                 }
                 (None, Vec::new())
             }
@@ -279,19 +283,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         settings.disabled_mcp_servers.iter().cloned().collect(),
     )));
     let _ = runtime.thinking_tx.send(settings.thinking_level.clone());
-    // provider 恢复：settings.provider（/provider 与 /model 菜单持久化）
-    // 存在且有效则切换；无效名回落 default + warning（不阻断启动）。
+    // Provider restore: settings.provider (persisted by the /provider and /model menus)
+    // switches when present and valid; an invalid name falls back to default + a warning (startup not blocked).
     if let Some(name) = settings.provider.as_deref() {
         match client.set_provider(name) {
             Ok(()) => {
                 let _ = runtime.provider_tx.send(name.to_string());
             }
             Err(e) => {
-                eprintln!("[bingo] warning: provider \"{name}\" 已失效，回落 default: {e}");
+                eprintln!(
+                    "[bingo] warning: provider \"{name}\" is no longer valid, falling back to default: {e}"
+                );
                 // The single most consequential silent fallback: it changes
                 // WHO the session talks to.
                 startup_notes.push(format!(
-                    "⚠ settings 里的 provider \"{name}\" 已失效，已回落 default：{e}"
+                    "⚠ the provider \"{name}\" in settings is no longer valid; fell back to default: {e}"
                 ));
             }
         }
@@ -317,8 +323,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         attachments: crate::api::image::Attachments::new(),
     });
 
-    // share 持久化：随会话增量记录子代理/频道快照（`bingo share` 的数据源）。
-    // 与任务列表同 key = transcript 文件 stem；创建/读取失败只告警（增强不是契约）。
+    // Share persistence: incrementally records subagent/channel snapshots per session (the data source for `bingo share`).
+    // Same key as the task list = transcript file stem; create/read failures only warn (an enhancement, not a contract).
     if let Some(stem) = transcript
         .as_ref()
         .map(|t| t.name())
@@ -331,7 +337,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 session.channels.attach_share(store.clone());
             }
             Err(e) => eprintln!(
-                "[bingo] warning: share store unavailable ({e}); bingo share 将只有对话视图"
+                "[bingo] warning: share store unavailable ({e}); bingo share will have the conversation view only"
             ),
         }
     }
@@ -354,25 +360,25 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let ready = total - summary.failed.len();
                         if summary.failed.is_empty() {
                             eprintln!(
-                                "[team] {} 就绪 · {ready}/{total} 待命（/team status · /team stop）",
+                                "[team] {} ready · {ready}/{total} on standby (/team status · /team stop)",
                                 team.name
                             );
                         } else {
                             eprintln!(
-                                "[team] {} 部分拉起 · {ready}/{total}（失败 {}，/team status 查看）",
+                                "[team] {} partially spawned · {ready}/{total} ({} failed; see /team status)",
                                 team.name,
                                 summary.failed.len()
                             );
                         }
                     }
                     Err(e) => eprintln!(
-                        "[team] {} 校验失败：{e}（修复后 /team start 拉起）",
+                        "[team] {} validation failed: {e} (fix and /team start to spawn)",
                         team.name
                     ),
                 }
             }
             Ok(None) => {}
-            Err(e) => eprintln!("[team] {} 读取失败：{e}", crate::team::TEAM_FILE),
+            Err(e) => eprintln!("[team] {} read failed: {e}", crate::team::TEAM_FILE),
         }
     }
 
@@ -439,12 +445,14 @@ async fn run_share(
     let doc = match crate::share::ShareStore::load_or_create(&share_path) {
         Ok(store) => store.snapshot(),
         Err(e) => {
-            eprintln!("[bingo] warning: 无法读取 share 文档（{e}）；仅生成对话视图");
+            eprintln!(
+                "[bingo] warning: cannot read the share document ({e}); generating the conversation view only"
+            );
             crate::share::ShareDoc::new(stem.clone())
         }
     };
-    // 旧会话回退：share 文档无 agents/channels（进程启动于 share 合入前）时，
-    // 从主 transcript 推导 Team/DM/频道数据。
+    // Legacy-session fallback: when the share document has no agents/channels (the process started before share landed),
+    // derive Team/DM/channel data from the main transcript.
     let doc = if doc.agents.is_empty() && doc.channels.is_empty() {
         crate::share::derive_share_doc(&stem, &messages)
     } else {
@@ -464,7 +472,7 @@ async fn run_share(
             if overwritten { " (overwritten)" } else { "" }
         );
         eprintln!(
-            "[share] 注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。"
+            "[share] note: this file contains the full conversation and tool outputs (possibly sensitive); review it before sharing."
         );
         if open {
             crate::share::open_in_browser(&out.display().to_string())?;
@@ -473,7 +481,9 @@ async fn run_share(
     }
 
     // Safety preflight must be visible before the first upload byte leaves the machine.
-    eprintln!("[share] 警告：即将公开发布；任何人可访问完整对话与工具输出，其中可能含敏感信息。");
+    eprintln!(
+        "[share] warning: about to publish publicly; anyone can access the full conversation and tool outputs, which may contain sensitive information."
+    );
 
     // Public upload uses settings.share.baseUrl (the official service by default).
     let project_dir = std::env::current_dir()?;
@@ -494,8 +504,8 @@ async fn run_share(
             }
         }
         Err(e) => {
-            // 上传失败回退本地文件 + 提示。
-            eprintln!("[bingo] warning: 上传失败（{e}）；回退本地文件。");
+            // Upload failure falls back to a local file + a notice.
+            eprintln!("[bingo] warning: upload failed ({e}); falling back to a local file.");
             let out = output.unwrap_or_else(|| PathBuf::from(format!("{stem}.html")));
             let overwritten = out.exists();
             crate::share::write_html_atomic(&out, &html)?;
@@ -505,7 +515,7 @@ async fn run_share(
                 if overwritten { " (overwritten)" } else { "" }
             );
             eprintln!(
-                "[share] 注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。"
+                "[share] note: this file contains the full conversation and tool outputs (possibly sensitive); review it before sharing."
             );
             if open {
                 crate::share::open_in_browser(&out.display().to_string())?;

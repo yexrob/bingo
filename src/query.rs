@@ -289,7 +289,7 @@ pub struct UiHooks {
 /// the subagent prompt surface attached to the registry, so both ask the same way.
 pub fn stdin_ask() -> Arc<AskFn> {
     Arc::new(|tool_name, reason| {
-        let prompt = format!("允许 {tool_name} 执行吗？({reason}) [y/N] ");
+        let prompt = format!("Allow {tool_name} to run? ({reason}) [y/N] ");
         Box::pin(async move {
             eprintln!("{prompt}");
             let answer = tokio::task::spawn_blocking(move || {
@@ -332,7 +332,7 @@ pub fn headless_hooks() -> UiHooks {
                     }
                 }
                 eprintln!(
-                    "  {}. Other（自定义输入）\n请选择 [1-{}] 或直接输入文本（回车 = 跳过）: ",
+                    "  {}. Other (free text)\nChoose [1-{}] or type text directly (Enter = skip): ",
                     options.len() + 1,
                     options.len() + 1
                 );
@@ -802,7 +802,7 @@ async fn query_loop(
             {
                 stop_hook_fired = true;
                 messages.push(Message::user_text(format!(
-                    "（Stop hook 阻止继续）\n{blocking}"
+                    "(Stop hook blocked continuation)\n{blocking}"
                 )));
                 continue;
             }
@@ -1345,10 +1345,16 @@ mod tests {
             unreachable!("tool result block")
         };
         let blocks = content.as_array().unwrap_or_else(|| unreachable!());
-        assert_eq!(blocks[1]["type"], "image", "图片块原样保留");
+        assert_eq!(
+            blocks[1]["type"], "image",
+            "image blocks pass through unchanged"
+        );
         assert_eq!(blocks[1]["source"]["data"], "aGVsbG8=");
         let text = blocks[0]["text"].as_str().unwrap_or_default();
-        assert!(text.len() < long.len(), "文本仍受截断上限约束");
+        assert!(
+            text.len() < long.len(),
+            "text is still bounded by the truncation cap"
+        );
 
         // A plain string result keeps the old shape.
         let plain = ToolResult {
@@ -1378,8 +1384,12 @@ mod tests {
         };
 
         // Endpoint cannot take images and nothing else can either: point at the setting.
-        let msg = user_message_with_images("看图 #[image 1]", &imgs, false, &[]);
-        assert_eq!(msg.content.len(), 1, "端点不支持时不发图片块");
+        let msg = user_message_with_images("look at #[image 1]", &imgs, false, &[]);
+        assert_eq!(
+            msg.content.len(),
+            1,
+            "no image block sent when the endpoint does not support images"
+        );
         let text = text_of(&msg);
         assert!(text.contains("sendImages"), "{text}");
         assert!(text.contains("Do not go looking"), "{text}");
@@ -1387,7 +1397,7 @@ mod tests {
         // Endpoint cannot take images but a capable provider exists: name the way through
         // (delegate to a subagent) rather than telling the model to give up.
         let msg = user_message_with_images(
-            "看图 #[image 1]",
+            "look at #[image 1]",
             &imgs,
             false,
             &["road".to_string(), "vision".to_string()],
@@ -1395,19 +1405,22 @@ mod tests {
         let text = text_of(&msg);
         assert!(text.contains("<one of: road, vision>"), "{text}");
         assert!(text.contains("requires an explicit model"), "{text}");
-        assert!(!text.contains("resend"), "不该劝用户重发：{text}");
+        assert!(
+            !text.contains("resend"),
+            "must not advise the user to resend: {text}"
+        );
 
         // Marker that no longer resolves (resumed session): say the attachment is gone.
-        let msg = user_message_with_images("看图 #[image 9]", &[], true, &[]);
+        let msg = user_message_with_images("look at #[image 9]", &[], true, &[]);
         let text = text_of(&msg);
         assert!(text.contains("not in this session"), "{text}");
 
         // No marker, no note — the reminder is only for a placeholder without its image.
-        let msg = user_message_with_images("随便问问", &[], true, &[]);
-        assert_eq!(text_of(&msg), "随便问问");
+        let msg = user_message_with_images("just asking", &[], true, &[]);
+        assert_eq!(text_of(&msg), "just asking");
         // Images actually attached: text stays verbatim.
-        let msg = user_message_with_images("看图 #[image 1]", &imgs, true, &[]);
-        assert_eq!(text_of(&msg), "看图 #[image 1]");
+        let msg = user_message_with_images("look at #[image 1]", &imgs, true, &[]);
+        assert_eq!(text_of(&msg), "look at #[image 1]");
     }
 
     /// Image attachments: text block + image blocks when the provider supports them;
@@ -1419,17 +1432,17 @@ mod tests {
             media_type: "image/png".into(),
             data: "aGVsbG8=".into(),
         }];
-        let msg = user_message_with_images("看图 #[image 1]", &imgs, true, &[]);
+        let msg = user_message_with_images("look at #[image 1]", &imgs, true, &[]);
         assert_eq!(msg.content.len(), 2);
         assert!(
-            matches!(msg.content[0], ContentBlock::Text { ref text } if text == "看图 #[image 1]")
+            matches!(msg.content[0], ContentBlock::Text { ref text } if text == "look at #[image 1]")
         );
         assert!(
             matches!(&msg.content[1], ContentBlock::Image { source } if source.data == "aGVsbG8=")
         );
 
-        let msg = user_message_with_images("看图 #[image 1]", &imgs, false, &[]);
-        assert_eq!(msg.content.len(), 1, "不支持时图片块不发送");
+        let msg = user_message_with_images("look at #[image 1]", &imgs, false, &[]);
+        assert_eq!(msg.content.len(), 1, "no image block sent when unsupported");
         assert!(matches!(msg.content[0], ContentBlock::Text { .. }));
     }
 
@@ -1586,15 +1599,15 @@ mod tests {
 
     #[test]
     fn agent_summary_uses_description_to_distinguish_parallel_agents() {
-        let a = serde_json::json!({"background": true, "description": "深挖 TUI", "prompt": "..."});
-        let b = serde_json::json!({"background": true, "description": "核查机制", "prompt": "..."});
+        let a = serde_json::json!({"background": true, "description": "deep dive into TUI", "prompt": "..."});
+        let b = serde_json::json!({"background": true, "description": "audit mechanism", "prompt": "..."});
         let sa = summarize_input("Agent", &a);
         let sb = summarize_input("Agent", &b);
-        assert_eq!(sa, "description=\"深挖 TUI\"");
-        assert_eq!(sb, "description=\"核查机制\"");
+        assert_eq!(sa, "description=\"deep dive into TUI\"");
+        assert_eq!(sb, "description=\"audit mechanism\"");
         assert_ne!(sa, sb, "parallel agents distinguishable");
         // Without a description, fall back to the prompt summary
-        let c = serde_json::json!({"background": true, "prompt": "长任务的提示词内容..."});
+        let c = serde_json::json!({"background": true, "prompt": "long task prompt content..."});
         let sc = summarize_input("Agent", &c);
         assert!(sc.starts_with("prompt=\""), "{sc}");
         assert!(sc.len() < 60, "prompt truncated: {sc}");
@@ -1670,7 +1683,7 @@ mod tests {
         };
         assert!(
             text_of(&outcome.messages[0]).contains("local-command-caveat"),
-            "caveat 前置: {}",
+            "caveat comes first: {}",
             text_of(&outcome.messages[0])
         );
         let merged = text_of(&outcome.messages[1]);
@@ -1679,15 +1692,18 @@ mod tests {
             "{merged}"
         );
         assert!(merged.contains("<bash-stdout>"), "{merged}");
-        assert!(merged.contains("a&lt;b&amp;c&gt;"), "输出已转义: {merged}");
+        assert!(
+            merged.contains("a&lt;b&amp;c&gt;"),
+            "output is escaped: {merged}"
+        );
         let stdout = merged.split("<bash-stdout>").nth(1).unwrap_or("");
         assert!(
             !stdout.contains("a<b&c>"),
-            "stdout 段原始 < > 不得泄漏: {merged}"
+            "raw < > in stdout segments must not leak: {merged}"
         );
         assert!(
             !outcome.messages.iter().any(|m| m.role == Role::Assistant),
-            "不构造合成 assistant 消息（thinking 校验）"
+            "must not fabricate synthetic assistant messages (thinking validation)"
         );
     }
 
@@ -1715,22 +1731,26 @@ mod tests {
         tx.send(true).unwrap();
         let outcome = handle.await.unwrap().unwrap();
 
-        assert!(outcome.aborted, "回合按中断收口");
+        assert!(outcome.aborted, "the turn closes as interrupted");
         let uses = tool_use_ids(&outcome.messages);
-        assert_eq!(uses, vec!["tu_1"], "本轮发出了一个 tool_use");
+        assert_eq!(uses, vec!["tu_1"], "this turn issued one tool_use");
         assert_eq!(
             tool_result_ids(&outcome.messages),
             uses,
-            "每个 tool_use 都配对了 tool_result"
+            "every tool_use has a matching tool_result"
         );
 
         // The transcript must not leave orphan tool_use blocks either (session restore would carry them).
         let saved = transcript.load_messages().unwrap();
-        assert_eq!(tool_use_ids(&saved), uses, "transcript 记录了 tool_use");
+        assert_eq!(
+            tool_use_ids(&saved),
+            uses,
+            "transcript recorded the tool_use"
+        );
         assert_eq!(
             tool_result_ids(&saved),
             uses,
-            "transcript 里 tool_use 也已配对，恢复不会 400"
+            "tool_use in the transcript is paired too; resuming will not 400"
         );
         let ContentBlock::ToolResult { is_error, .. } = &saved
             .last()
@@ -1742,7 +1762,7 @@ mod tests {
         else {
             panic!("tool result");
         };
-        assert!(is_error, "占位结果标为 is_error");
+        assert!(is_error, "placeholder result is marked is_error");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1790,7 +1810,7 @@ mod tests {
         assert_eq!(
             texts[3],
             (Role::Assistant, "done".to_string()),
-            "正常结束的 assistant 也在返回的 messages 里"
+            "a normally finished assistant is also in the returned messages"
         );
     }
 
@@ -1816,15 +1836,15 @@ mod tests {
         let mut messages: Vec<Message> = (0..20).map(|_| assistant(false)).collect();
         messages.push(assistant(true));
         let (since_management, since_reminder) = task_reminder_turn_distances(&messages);
-        assert_eq!(since_management, 1, "距最近一次 Task 工具 1 轮");
+        assert_eq!(since_management, 1, "1 round since the latest Task tool");
         assert_eq!(
             since_reminder,
             TASK_REMINDER_TURNS + 1,
-            "从未提醒过 → 视为超阈值"
+            "never reminded before → treated as over the threshold"
         );
         assert!(
             since_management < TASK_REMINDER_TURNS,
-            "刚用过 Task 工具不该再提醒"
+            "must not remind right after a Task tool"
         );
 
         // Used ten turns ago: distance 11, should remind.
@@ -1869,7 +1889,11 @@ mod tests {
 
         // Running again must not fill duplicates.
         fill_missing_tool_results(&tool_uses, &mut blocks);
-        assert_eq!(blocks.len(), 2, "已配对的不重复补");
+        assert_eq!(
+            blocks.len(),
+            2,
+            "already-paired ones are not backfilled twice"
+        );
     }
 
     /// Interactive/TTY commands like `!top`: rejected directly without the permission
@@ -1903,7 +1927,7 @@ mod tests {
             .await
             .unwrap();
         let ContentBlock::Text { text } = &outcome.messages[1].content[0] else {
-            panic!("拒绝原因以文本消息呈现");
+            panic!("rejection reason is surfaced as a text message");
         };
         assert!(text.contains("interactive command not allowed"), "{text}");
         assert!(text.contains("TTY"), "{text}");
@@ -1931,7 +1955,7 @@ mod tests {
                     "<bash-stdout>a&lt;b</bash-stdout>",
                 )],
             },
-            Message::user_text("普通问题"),
+            Message::user_text("ordinary question"),
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
@@ -1947,7 +1971,7 @@ mod tests {
         ];
         let mut messages = old.clone();
         normalize_synthetic_bash_calls(&mut messages);
-        assert_eq!(messages.len(), 4, "合成三段折叠为一条");
+        assert_eq!(messages.len(), 4, "three synthetic segments fold into one");
         assert_eq!(
             match &messages[0].content[0] {
                 ContentBlock::Text { text } => text.as_str(),
@@ -1956,7 +1980,7 @@ mod tests {
             "<bash-input>ls</bash-input>\n<bash-stdout>a&lt;b</bash-stdout>"
         );
         assert_eq!(messages[1].role, Role::User);
-        // 模型生成的 tool_use 配对保持原样。
+        // Model-generated tool_use pairings stay as-is.
         assert!(matches!(
             &messages[2].content[0],
             ContentBlock::ToolUse { id, .. } if id == "toolu_real"

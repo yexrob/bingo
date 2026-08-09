@@ -24,7 +24,7 @@ struct AskQuestion {
     #[serde(rename = "multiSelect", default)]
     #[schemars(
         rename = "multiSelect",
-        description = "多选（暂不支持，传 true 会报错）"
+        description = "multi-select (not supported yet; passing true errors)"
     )]
     multi_select: Option<bool>,
 }
@@ -98,7 +98,7 @@ impl Tool for AskUserQuestionTool {
         for (i, q) in params.questions.iter().enumerate() {
             if q.multi_select.unwrap_or(false) {
                 return Err(ToolError::failed(
-                    "multiSelect 暂不支持：请拆成单选问题（multiSelect: false 或缺省）",
+                    "multiSelect is not supported: split into single-select questions (multiSelect: false or omitted)",
                 ));
             }
             let labels: Vec<(String, Option<String>)> = q
@@ -109,7 +109,7 @@ impl Tool for AskUserQuestionTool {
             let title = q
                 .header
                 .clone()
-                .unwrap_or_else(|| format!("问题 {}", i + 1));
+                .unwrap_or_else(|| format!("Question {}", i + 1));
             match (ctx.ask_question)(title, q.question.clone(), labels).await {
                 Some(crate::query::AskAnswer::Option(idx)) => {
                     answers.push(format!("\"{}\"=\"{}\"", q.question, q.options[idx].label));
@@ -138,21 +138,21 @@ fn validate(params: &AskUserQuestionInput) -> Result<(), ToolError> {
     let n = params.questions.len();
     if !(1..=MAX_QUESTIONS).contains(&n) {
         return Err(ToolError::failed(format!(
-            "questions 数量须为 1-{MAX_QUESTIONS}（收到 {n}），请拆分后重试"
+            "questions count must be 1-{MAX_QUESTIONS} (received {n}); split and retry"
         )));
     }
     let mut seen = HashSet::new();
     for q in &params.questions {
         if !seen.insert(q.question.trim()) {
             return Err(ToolError::failed(format!(
-                "问题文本必须唯一：{:?} 重复",
+                "question text must be unique: {:?} is duplicated",
                 q.question
             )));
         }
         let m = q.options.len();
         if !(MIN_OPTIONS..=MAX_OPTIONS).contains(&m) {
             return Err(ToolError::failed(format!(
-                "options 数量须为 {MIN_OPTIONS}-{MAX_OPTIONS}（问题 {:?} 收到 {m}）",
+                "options count must be {MIN_OPTIONS}-{MAX_OPTIONS} (question {:?} received {m})",
                 q.question
             )));
         }
@@ -160,7 +160,7 @@ fn validate(params: &AskUserQuestionInput) -> Result<(), ToolError> {
         for o in &q.options {
             if !labels.insert(o.label.trim()) {
                 return Err(ToolError::failed(format!(
-                    "选项 label 必须唯一：{:?} 重复",
+                    "option label must be unique: {:?} is duplicated",
                     o.label
                 )));
             }
@@ -216,7 +216,7 @@ mod tests {
         ];
         for input in cases {
             let params: AskUserQuestionInput = parse_input(&input).unwrap();
-            assert!(validate(&params).is_err(), "应拒绝: {input}");
+            assert!(validate(&params).is_err(), "should be rejected: {input}");
         }
     }
 
@@ -234,13 +234,13 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|title, question, options| {
-                assert_eq!(title, "技术选型");
-                assert_eq!(question, "用哪个库？");
+                assert_eq!(title, "Tech stack");
+                assert_eq!(question, "Which library?");
                 assert_eq!(
                     options,
                     vec![
                         ("A (Recommended)".to_string(), None),
-                        ("B".to_string(), Some("更快".to_string())),
+                        ("B".to_string(), Some("faster".to_string())),
                     ]
                 );
                 Box::pin(async { Some(crate::query::AskAnswer::Option(1)) })
@@ -251,11 +251,11 @@ mod tests {
         let result = tool
             .call(
                 serde_json::json!({"questions": [{
-                    "question": "用哪个库？",
-                    "header": "技术选型",
+                    "question": "Which library?",
+                    "header": "Tech stack",
                     "options": [
                         {"label": "A (Recommended)"},
-                        {"label": "B", "description": "更快"},
+                        {"label": "B", "description": "faster"},
                     ],
                 }]}),
                 &ctx,
@@ -263,7 +263,7 @@ mod tests {
             .await
             .unwrap();
         let text = result.content.as_str().unwrap();
-        assert_eq!(text, "The user answered: \"用哪个库？\"=\"B\"");
+        assert_eq!(text, "The user answered: \"Which library?\"=\"B\"");
     }
 
     /// Other free-form input: the answer is fed back as custom text (the Other option CC provides automatically).
@@ -279,7 +279,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| {
-                Box::pin(async { Some(crate::query::AskAnswer::Other("用 serde".to_string())) })
+                Box::pin(async { Some(crate::query::AskAnswer::Other("use serde".to_string())) })
             }),
             instance: None,
         };
@@ -287,7 +287,7 @@ mod tests {
         let result = tool
             .call(
                 serde_json::json!({"questions": [{
-                    "question": "用哪个库？",
+                    "question": "Which library?",
                     "options": [{"label": "A"}, {"label": "B"}],
                 }]}),
                 &ctx,
@@ -295,7 +295,7 @@ mod tests {
             .await
             .unwrap();
         let text = result.content.as_str().unwrap();
-        assert_eq!(text, "The user answered: \"用哪个库？\"=\"用 serde\"");
+        assert_eq!(text, "The user answered: \"Which library?\"=\"use serde\"");
     }
 
     /// Esc skip (None) → treated as not answered.
@@ -392,7 +392,7 @@ mod tests {
         ];
         let (outcomes, _interrupted) = execute_calls(calls, &ctx, None).await;
         assert_eq!(outcomes.len(), 2);
-        assert!(outcomes[0].result.is_ok(), "ask 串行完成");
-        assert!(outcomes[1].result.is_ok(), "bash 在 ask 之后执行");
+        assert!(outcomes[0].result.is_ok(), "ask completes serially");
+        assert!(outcomes[1].result.is_ok(), "bash runs after ask");
     }
 }

@@ -522,7 +522,7 @@ mod tests {
         acc.push(&StreamEvent::BlockStop { index: 0 }).unwrap();
         assert!(
             acc.push(&StreamEvent::TextStart { index: 0 }).is_err(),
-            "index 复用报错"
+            "index reuse must error"
         );
     }
 }

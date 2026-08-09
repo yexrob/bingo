@@ -24,7 +24,7 @@ pub struct ProviderPreset {
 pub const PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         name: "codex",
-        display: "Codex (ChatGPT 订阅)",
+        display: "Codex (ChatGPT subscription)",
         protocol: "openai",
         base_url: "https://chatgpt.com/backend-api",
         oauth_kind: Some("codex"),
@@ -35,7 +35,7 @@ pub const PRESETS: &[ProviderPreset] = &[
     },
     ProviderPreset {
         name: "opencode-go",
-        display: "opencode Go (订阅)",
+        display: "opencode Go (subscription)",
         protocol: "openai",
         base_url: "https://opencode.ai/zen/go",
         oauth_kind: None,

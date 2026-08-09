@@ -173,7 +173,7 @@ mod tests {
             .decode()
             .unwrap();
         assert_eq!(img.width(), 2000);
-        assert_eq!(img.height(), 1000, "等比缩放");
+        assert_eq!(img.height(), 1000, "proportionally scaled");
     }
 
     #[test]

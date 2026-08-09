@@ -4,33 +4,57 @@
 pub type SlashCommand = (&'static str, &'static str, &'static str);
 
 pub const COMMANDS: &[SlashCommand] = &[
-    ("help", "", "显示可用命令"),
-    ("clear", "", "清空对话，开始新会话（别名 /reset /new）"),
-    ("compact", "", "压缩上下文（旧消息 → 摘要）"),
-    ("model", "[名称]", "显示/切换模型"),
-    ("resume", "[名称或关键词]", "恢复历史会话"),
-    ("rename", "[名称]", "重命名当前会话"),
+    ("help", "", "show available commands"),
+    (
+        "clear",
+        "",
+        "clear the conversation and start a new session (aliases: /reset /new)",
+    ),
+    (
+        "compact",
+        "",
+        "compact the context (old messages → summary)",
+    ),
+    ("model", "[name]", "show/switch the model"),
+    ("resume", "[name or keyword]", "resume a past session"),
+    ("rename", "[name]", "rename the current session"),
     (
         "share",
         "[--public] [--open]",
-        "导出 HTML；--public 才发布公网链接",
+        "export HTML; --public publishes a public link",
     ),
-    ("context", "", "显示上下文用量"),
-    ("status", "", "显示会话状态（模型/权限/会话/上下文）"),
-    ("config", "", "显示生效配置与来源（层/环境变量/端点）"),
+    ("context", "", "show context usage"),
+    (
+        "status",
+        "",
+        "show session status (model/permissions/session/context)",
+    ),
+    (
+        "config",
+        "",
+        "show the effective config and its sources (layer/env vars/endpoint)",
+    ),
     (
         "permissions",
-        "[allow|deny|ask] [规则]",
-        "列出/添加权限规则",
+        "[allow|deny|ask] [rule]",
+        "list/add permission rules",
     ),
-    ("theme", "[dark|light|auto]", "切换主题"),
-    ("mcp", "[enable|disable|reconnect]", "管理 MCP 服务器"),
-    ("provider", "[名称]", "列出/切换 API provider"),
-    ("think", "[off|low|medium|high|xhigh|max]", "设置思考级别"),
-    ("skills", "", "列出可用技能"),
-    ("tasks", "", "列出后台任务"),
-    ("team", "start|status|assign|stop|list", "管理项目团队"),
-    ("exit", "", "退出会话"),
+    ("theme", "[dark|light|auto]", "switch the theme"),
+    ("mcp", "[enable|disable|reconnect]", "manage MCP servers"),
+    ("provider", "[name]", "list/switch API providers"),
+    (
+        "think",
+        "[off|low|medium|high|xhigh|max]",
+        "set the thinking level",
+    ),
+    ("skills", "", "list available skills"),
+    ("tasks", "", "list background tasks"),
+    (
+        "team",
+        "start|status|assign|stop|list",
+        "manage the project team",
+    ),
+    ("exit", "", "exit the session"),
 ];
 
 /// Slash commands that execute immediately while a model turn is active.
@@ -55,7 +79,7 @@ pub struct SlashSuggestions {
 
 /// Formats `/help` directly from the command registry.
 pub fn help_lines(commands: &[SlashCommand]) -> Vec<String> {
-    let mut lines = vec!["可用命令：".to_string()];
+    let mut lines = vec!["available commands:".to_string()];
     let command_width = commands
         .iter()
         .map(|(name, hint, _)| {
@@ -74,10 +98,10 @@ pub fn help_lines(commands: &[SlashCommand]) -> Vec<String> {
     // Sub-commands invisible to the dropdown, and the cross-link to the key
     // panel (the two help surfaces used to be disjoint islands).
     lines.push(
-        "  /provider login <名称> [--device-auth|--manual <token>] · /provider logout <名称>"
+        "  /provider login <name> [--device-auth|--manual <token>] · /provider logout <name>"
             .to_string(),
     );
-    lines.push("快捷键：空输入按 ? 查看全表".to_string());
+    lines.push("keys: press ? on an empty input for the full table".to_string());
     lines
 }
 
@@ -138,9 +162,9 @@ mod tests {
     use super::*;
 
     const COMMANDS: &[SlashCommand] = &[
-        ("help", "", "显示可用命令"),
-        ("model", "[名称]", "显示/切换模型"),
-        ("status", "", "显示会话状态"),
+        ("help", "", "show available commands"),
+        ("model", "[name]", "show/switch the model"),
+        ("status", "", "show session status"),
     ];
 
     #[test]
@@ -149,13 +173,19 @@ mod tests {
         assert_eq!(
             lines.len(),
             COMMANDS.len() + 3,
-            "标题 + 命令 + 子命令行 + 快捷键互链"
+            "title + commands + sub-command line + key cross-link"
         );
-        assert_eq!(lines[0], "可用命令：");
+        assert_eq!(lines[0], "available commands:");
         for ((name, hint, description), line) in COMMANDS.iter().zip(&lines[1..]) {
-            assert!(line.contains(&format!("/{name}")), "命令存在: {line}");
-            assert!(line.contains(hint), "参数提示存在: {line}");
-            assert!(line.ends_with(description), "描述来自注册表: {line}");
+            assert!(
+                line.contains(&format!("/{name}")),
+                "command present: {line}"
+            );
+            assert!(line.contains(hint), "arg hint present: {line}");
+            assert!(
+                line.ends_with(description),
+                "description comes from the registry: {line}"
+            );
         }
     }
 
@@ -164,7 +194,7 @@ mod tests {
         let extras = vec![SlashSuggestion {
             name: "model-check".to_string(),
             hint: String::new(),
-            description: "技能".to_string(),
+            description: "skill".to_string(),
         }];
         let result = suggestions("/mo", COMMANDS, extras, 2);
         assert_eq!(

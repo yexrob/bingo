@@ -476,7 +476,7 @@ mod tests {
         let pdf = skills.iter().find(|s| s.name == "pdf").unwrap();
         assert_eq!(pdf.description, "Converts documents to PDF.");
         assert!(pdf.content.contains("More text."));
-        assert!(pdf.content.find("---").is_none(), "frontmatter 已剥离");
+        assert!(pdf.content.find("---").is_none(), "frontmatter is stripped");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -506,7 +506,7 @@ mod tests {
         assert_eq!(
             names,
             vec!["one", "three", "two", "guide"],
-            "磁盘技能优先 + 内置技能兜底"
+            "disk skills win, bundled skills backfill"
         );
 
         // Same-source files (SKILL.md symlinked into the project layer from the user
@@ -521,7 +521,7 @@ mod tests {
             .unwrap();
             let skills = load_skills(&home, &project);
             let count = skills.iter().filter(|s| s.name == "one").count();
-            assert_eq!(count, 1, "同源文件去重");
+            assert_eq!(count, 1, "same-source files dedup");
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -562,7 +562,7 @@ mod tests {
         assert_eq!(
             desc(&load_skills(&home, &root), "one"),
             "second",
-            "内容改动应失效"
+            "content changes must invalidate"
         );
 
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -572,7 +572,10 @@ mod tests {
             "---\ndescription: added\n---\nbody\n",
         );
         let after = load_skills(&home, &root);
-        assert!(after.iter().any(|s| s.name == "two"), "新增技能应被看到");
+        assert!(
+            after.iter().any(|s| s.name == "two"),
+            "newly added skills must be visible"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -587,8 +590,11 @@ mod tests {
         );
         let skills = load_skills(&home, &root);
         let self_doc = skills.iter().find(|s| s.name == "guide").unwrap();
-        assert_eq!(self_doc.description, "custom guide", "磁盘技能覆盖内置");
-        assert!(!self_doc.content.contains("诊断指南"));
+        assert_eq!(
+            self_doc.description, "custom guide",
+            "disk skill overrides the bundled one"
+        );
+        assert!(!self_doc.content.contains("Diagnostic guide"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -600,7 +606,10 @@ mod tests {
             .unwrap();
         let out = expand_skill(&skill, "");
         assert!(!out.starts_with("Base directory for this skill:"), "{out}");
-        assert!(out.contains("Diagnostic guide"), "内置内容完整");
+        assert!(
+            out.contains("Diagnostic guide"),
+            "bundled content is intact"
+        );
     }
 
     #[test]
@@ -609,7 +618,7 @@ mod tests {
         let out = substitute_arguments(content, "fix bug", &["msg".to_string()]);
         assert_eq!(
             out, "Do fix on bug then fix bug with fix",
-            "named 映射首个位置，$1 与 $ARGUMENTS 按同一语义"
+            "named maps to the first position; $1 and $ARGUMENTS share one semantics"
         );
 
         let no_placeholder = substitute_arguments("plain", "a b", &[]);
@@ -649,10 +658,16 @@ mod tests {
         };
         let long = "x".repeat(300);
         let listing = format_listing(&[skill("a", &long)], 8000);
-        assert!(listing.contains("…"), "单条超 250 字符截断");
+        assert!(
+            listing.contains("…"),
+            "a single entry past 250 chars is truncated"
+        );
 
         let short = format_listing(&[skill("a", "aa"), skill("b", "bb")], 10);
-        assert_eq!(short, "- a: aa", "超预算即停（名字也放不下时）");
+        assert_eq!(
+            short, "- a: aa",
+            "stops once over budget (even a bare name does not fit)"
+        );
     }
 
     /// Budget too small for full entries: skills degrade to bare-name lines;
@@ -675,14 +690,21 @@ mod tests {
         for s in &skills {
             assert!(
                 listing.contains(&format!("- {}", s.name)),
-                "预算不足也不能丢技能名: {}",
+                "a tight budget must not drop skill names: {}",
                 s.name
             );
         }
-        assert!(listing.len() <= 8000, "硬预算仍生效: {}", listing.len());
+        assert!(
+            listing.len() <= 8000,
+            "hard budget still applies: {}",
+            listing.len()
+        );
         // Full-description entries come first, bare-name fallback after.
         let head = listing.lines().next().unwrap();
-        assert!(head.starts_with("- skill-00: "), "完整条目在前: {head}");
+        assert!(
+            head.starts_with("- skill-00: "),
+            "full entries come first: {head}"
+        );
     }
 
     /// Same-dir skills sort by name: readdir order isn't guaranteed, the listing must be deterministic.
@@ -699,7 +721,11 @@ mod tests {
         }
         let skills = load_skills(&home, &root);
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["alpha", "meye", "zeta", "guide"], "按名排序");
+        assert_eq!(
+            names,
+            vec!["alpha", "meye", "zeta", "guide"],
+            "sorted by name"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

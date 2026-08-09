@@ -225,7 +225,11 @@ mod tests {
         let wide = help_lines(200, 40);
         let narrow = help_lines(50, 40);
         assert!(narrow.len() > wide.len(), "narrow stacks into more rows");
-        assert_eq!(narrow.len(), BINDINGS.len() + 1, "全部绑定 + /help 互链行");
+        assert_eq!(
+            narrow.len(),
+            BINDINGS.len() + 1,
+            "all bindings + /help cross-link row"
+        );
     }
 
     #[test]

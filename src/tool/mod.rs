@@ -230,7 +230,7 @@ mod tests {
         let schema = ReadTool::new().input_schema();
         assert!(
             schema.get("$schema").is_none(),
-            "发给模型的形状不含 $schema: {schema}"
+            "schema shape sent to the model must not include $schema: {schema}"
         );
     }
 }

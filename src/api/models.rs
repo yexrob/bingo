@@ -78,15 +78,19 @@ mod tests {
         assert_eq!(context_window("claude-sonnet-5"), 200_000);
         assert_eq!(context_window("gpt-5.6-sol"), 400_000);
         assert_eq!(context_window("deepseek-chat"), 128_000);
-        assert_eq!(context_window("some-unknown-model"), 200_000, "保守默认");
+        assert_eq!(
+            context_window("some-unknown-model"),
+            200_000,
+            "conservative default"
+        );
         assert!(supports_thinking("claude-sonnet-5"));
         assert!(
             !supports_thinking("deepseek-chat"),
-            "DeepSeek 不发 thinking"
+            "DeepSeek does not send thinking"
         );
         assert!(
             supports_thinking("totally-new-model"),
-            "未知默认支持（保持旧行为）"
+            "unknown models keep the default (preserves old behavior)"
         );
     }
 }

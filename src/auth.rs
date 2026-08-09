@@ -169,7 +169,10 @@ mod tests {
     #[test]
     fn missing_file_reads_empty() {
         let store = AuthStore::new(&tmp_home("empty"));
-        assert!(store.load().unwrap().is_empty(), "缺文件读为空");
+        assert!(
+            store.load().unwrap().is_empty(),
+            "missing file reads as empty"
+        );
         assert_eq!(store.get("codex").unwrap(), None);
     }
 
@@ -182,18 +185,18 @@ mod tests {
             .set("deepseek", AuthEntry::Api { key: "sk-1".into() })
             .unwrap();
         let all = store.load().unwrap();
-        assert_eq!(all.len(), 2, "两个 provider 并存");
+        assert_eq!(all.len(), 2, "two providers coexist");
         assert_eq!(
             all.get("codex").unwrap(),
             &oauth("a", "r", 1786000000),
-            "oauth 条目完整回读"
+            "oauth entries read back intact"
         );
         assert_eq!(
             all.get("deepseek").unwrap(),
             &AuthEntry::Api { key: "sk-1".into() }
         );
 
-        // 重新加载（模拟新会话）：磁盘持久化。
+        // Reload (simulating a new session): persisted to disk.
         let store2 = AuthStore::new(&home);
         assert_eq!(
             store2.get("codex").unwrap().unwrap(),
@@ -201,15 +204,18 @@ mod tests {
         );
 
         store2.remove("codex").unwrap();
-        assert!(store2.get("codex").unwrap().is_none(), "删除后为空");
+        assert!(
+            store2.get("codex").unwrap().is_none(),
+            "empty after deletion"
+        );
         assert!(
             store2.get("deepseek").unwrap().is_some(),
-            "其余条目不受影响"
+            "other entries are unaffected"
         );
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// Unix: 文件权限必须是 0600（凭据存储的底线）。
+    /// Unix: the file must be 0600 (the baseline for credential storage).
     #[cfg(unix)]
     #[test]
     fn writes_with_0600_permissions() {
@@ -222,15 +228,15 @@ mod tests {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(mode, 0o600, "auth.json 必须 0600，实际 {mode:o}");
-        // 原子写后（覆盖路径）权限保持不变。
+        assert_eq!(mode, 0o600, "auth.json must be 0600, got {mode:o}");
+        // After an atomic write (overwrite path) the permissions are preserved.
         store.set("codex", oauth("b", "r2", 1786000001)).unwrap();
         let mode = std::fs::metadata(store.path())
             .unwrap()
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(mode, 0o600, "重写后仍 0600，实际 {mode:o}");
+        assert_eq!(mode, 0o600, "still 0600 after rewrite, got {mode:o}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -240,11 +246,14 @@ mod tests {
         let store = AuthStore::new(&home);
         std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
         std::fs::write(store.path(), "{not json").unwrap();
-        assert!(store.load().is_err(), "损坏文件报错而非静默清空");
+        assert!(
+            store.load().is_err(),
+            "a corrupt file errors rather than silently clearing"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// 与 opencode auth.json 的 shape 兼容：同一份 JSON 双向可读。
+    /// Compatible with opencode's auth.json shape: the same JSON reads both ways.
     #[test]
     fn opencode_compatible_shape() {
         let home = tmp_home("opencode");
@@ -254,7 +263,10 @@ mod tests {
             .unwrap();
         let raw = std::fs::read_to_string(store.path()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(parsed["opencode"]["type"], "oauth", "type 判别字段");
+        assert_eq!(
+            parsed["opencode"]["type"], "oauth",
+            "type discriminator field"
+        );
         assert_eq!(parsed["opencode"]["access"], "acc");
         assert_eq!(parsed["opencode"]["refresh"], "ref");
         assert_eq!(parsed["opencode"]["expires"].as_i64(), Some(1730000000000));

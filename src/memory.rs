@@ -132,8 +132,10 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
     }
 
     let path = memory_file(home, cwd);
-    if let Err(e) = std::fs::create_dir_all(path.parent().expect("记忆文件路径必有父目录"))
-    {
+    if let Err(e) = std::fs::create_dir_all(
+        path.parent()
+            .expect("memory file path always has a parent dir"),
+    ) {
         if !session.quiet {
             eprintln!("[bingo] memory: cannot create dir: {e}");
         }
@@ -191,7 +193,7 @@ mod tests {
         let home = Path::new("/tmp/h");
         let a = memory_file(home, Path::new("/work/alpha/web"));
         let b = memory_file(home, Path::new("/work/beta/web"));
-        assert_ne!(a, b, "同名 web 目录应有不同记忆文件");
+        assert_ne!(a, b, "same-named web dirs must have distinct memory files");
         assert!(
             a.file_name()
                 .unwrap_or_default()
@@ -201,7 +203,7 @@ mod tests {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .starts_with("web-"),
-            "仍保留可读的目录名前缀"
+            "keeps a readable dir-name prefix"
         );
     }
 

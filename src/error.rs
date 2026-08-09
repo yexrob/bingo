@@ -73,7 +73,7 @@ pub enum ErrorContext {
 /// function is cfg'd out entirely, so no calls are expected.
 #[cfg(debug_assertions)]
 pub fn missing_code<T: std::fmt::Debug + ?Sized>(err: &T) {
-    eprintln!("[bingo] error: {err:?} 使用 GENERIC（missing stable error code）");
+    eprintln!("[bingo] error: {err:?} uses GENERIC (missing stable error code)");
 }
 
 /// Single exit mapping: both GUI (TUI) and CLI exits must get their code through this
@@ -178,7 +178,7 @@ mod tests {
                 && code
                     .chars()
                     .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
-            "错误码 {code:?} 必须匹配 ^[A-Z][A-Z0-9_]*$"
+            "error code {code:?} must match ^[A-Z][A-Z0-9_]*$"
         );
     }
 
@@ -199,7 +199,7 @@ mod tests {
             assert_screaming_snake(code);
             assert!(
                 is_allowed_generic(path) || code != GENERIC,
-                "{path}: {variant:?} 落 GENERIC 未登记 allowlist"
+                "{path}: {variant:?} falls to GENERIC without an allowlist entry"
             );
         }
     }
@@ -300,7 +300,7 @@ mod tests {
             assert_eq!(
                 v.error_code(),
                 "CONFIG_INVALID",
-                "TeamError 全 variant 落配置错误"
+                "every TeamError variant falls to a config error"
             );
         }
         // TaskError's 5 variants explicitly enumerated (AC-40).
@@ -320,7 +320,7 @@ mod tests {
             assert_eq!(
                 v.error_code(),
                 "STORAGE_ERROR",
-                "TaskError 全 variant 落存储错误"
+                "every TaskError variant falls to a storage error"
             );
         }
         use crate::transcript::TranscriptError;
@@ -332,7 +332,7 @@ mod tests {
             TranscriptError::Parse(serde_json::from_str::<()>("x").unwrap_err()).error_code(),
             "STORAGE_ERROR"
         );
-        // ShareError 全部 6 个 variant 显式枚举（AC-40）。
+        // All 6 ShareError variants explicitly enumerated (AC-40).
         use crate::share::ShareError;
         let share_variants = vec![
             ShareError::Io(std::io::Error::other("x")),
@@ -347,7 +347,7 @@ mod tests {
             assert_eq!(
                 v.error_code(),
                 "STORAGE_ERROR",
-                "ShareError 全 variant 落存储错误"
+                "every ShareError variant falls to a storage error"
             );
         }
         use crate::experience::ExperienceError;
@@ -355,8 +355,8 @@ mod tests {
             ExperienceError::Io(std::io::Error::other("x")).error_code(),
             "STORAGE_ERROR"
         );
-        // UpdateError 全 variant 显式枚举（Network 无公开构造器，由
-        // `update::network_error_code` 锁定映射，与 ClientError::Transport 同模式）。
+        // All UpdateError variants explicitly enumerated (Network has no public constructor; the
+        // `update::network_error_code` mapping pins it, same pattern as ClientError::Transport).
         use crate::update::UpdateError;
         let update_variants = vec![
             UpdateError::Http { status: 503 },
@@ -476,14 +476,14 @@ mod tests {
         assert_eq!(
             samples.len(),
             12,
-            "boxed 出口应有 12 个登记类型：新增实现 ErrorCode 的类型须在 \
-             `downcast_error_code` 宏登记 + 本测试补实例，双处缺一即 CI 红"
+            "the boxed exit should have 12 registered types: new ErrorCode implementors must be \
+             `downcast_error_code` macro registration + an instance in this test; missing either turns CI red"
         );
         for e in &samples {
             let code = error_code_boxed(e.as_ref());
             assert!(
                 code != GENERIC,
-                "boxed 出口落 GENERIC：{e:?} 未在 downcast 宏登记表登记"
+                "boxed exit falls to GENERIC: {e:?} is not in the downcast macro registry"
             );
             assert_screaming_snake(code);
         }
@@ -496,8 +496,8 @@ mod tests {
             crate::error::sanitize_msg("line1\nline2\tline3\rline4"),
             "line1 line2 line3 line4"
         );
-        // AC-32: truncate at 200 chars (character count, not bytes; CJK counted per char).
-        let long = "长".repeat(300);
+        // AC-32: truncate at 200 chars (character count, not bytes; any multibyte char counts once).
+        let long = "❤".repeat(300);
         assert_eq!(crate::error::sanitize_msg(&long).chars().count(), 200);
         let ascii = "x".repeat(250);
         assert_eq!(crate::error::sanitize_msg(&ascii).len(), 200);

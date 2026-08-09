@@ -17,13 +17,13 @@ pub struct Theme {
     pub subtle: Color,
     /// Primary accent (rgb(215,119,87)).
     pub claude: Color,
-    /// 更新提示呼吸 peak（暗色；rgb(232,137,107)，官网 --accent-strong）。
+    /// Update-hint breathing peak (dark; rgb(232,137,107), the site's --accent-strong).
     pub claude_strong: Color,
-    /// 更新提示呼吸 rest（浅色；rgb(176,82,39)，品牌深橙）。
+    /// Update-hint breathing rest (light; rgb(176,82,39), brand deep orange).
     pub claude_deep: Color,
-    /// 更新提示呼吸 peak（浅色；rgb(154,74,36)）。
+    /// Update-hint breathing peak (light; rgb(154,74,36)).
     pub claude_deep_strong: Color,
-    /// 是否暗色主题（更新提示呼吸停止点按此取用：暗色亮橙档 / 浅色深橙档）。
+    /// Whether the theme is dark (the update-hint breathing stop picks the dark bright-orange / light deep-orange step).
     pub is_dark: bool,
     /// Permission-dialog accent (rgb(177,185,249)).
     pub permission: Color,

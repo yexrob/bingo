@@ -37,11 +37,11 @@ pub enum AuthError {
     Http { status: u16, body: String },
     #[error("oauth transport: {0}")]
     Transport(#[from] reqwest::Error),
-    #[error("provider \"{0}\" 未登录：/provider login {0}")]
+    #[error("provider \"{0}\" not logged in: /provider login {0}")]
     NotLoggedIn(String),
     /// Refresh/revoke failed permanently (expired/reused/revoked token) —
     /// the stored auth is cleared and the user must log in again.
-    #[error("登录已失效（{0}）：/provider login 重新登录")]
+    #[error("login has expired ({0}): /provider login to sign in again")]
     RefreshPermanent(String),
     #[error("oauth: {0}")]
     Other(String),
@@ -929,7 +929,7 @@ mod tests {
         assert_eq!(
             provider.access_token().await.unwrap(),
             "at_manual",
-            "manual token 直接可用（不经必败的刷新）"
+            "manual token works directly (skips the doomed refresh)"
         );
         // A fresh instance (restart) reads it back from the store the same way.
         let provider = TokenProvider::new(&home, "codex", codex_at("http://127.0.0.1:9"));
@@ -972,7 +972,7 @@ mod tests {
         assert_eq!(
             mock.poll_calls.load(Ordering::SeqCst),
             2,
-            "一次 pending 后成功"
+            "one pending, then success"
         );
     }
 
@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(
             mock.refresh_calls.load(Ordering::SeqCst),
             0,
-            "新鲜 token 不刷新"
+            "fresh token does not refresh"
         );
 
         // Re-load with expired token → refresh (rotation) → persisted.
@@ -1009,9 +1009,9 @@ mod tests {
                 access, refresh, ..
             } => {
                 assert_eq!(access, "at_2");
-                assert_eq!(refresh, "rt_2", "refresh token 轮换已持久化");
+                assert_eq!(refresh, "rt_2", "refresh token rotation persisted");
             }
-            _ => panic!("应为 oauth 条目"),
+            _ => panic!("expected an oauth entry"),
         }
 
         // 401 force_refresh: clears cache and refreshes once.
@@ -1025,7 +1025,7 @@ mod tests {
         ));
         assert!(
             AuthStore::new(&home).get("codex").unwrap().is_none(),
-            "永久失败后清除存储"
+            "storage cleared after permanent failure"
         );
         assert!(!provider.is_logged_in());
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
@@ -1050,7 +1050,7 @@ mod tests {
         assert_eq!(
             mock.refresh_calls.load(Ordering::SeqCst),
             1,
-            "并发只刷新一次"
+            "concurrent calls refresh only once"
         );
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
@@ -1077,7 +1077,7 @@ mod tests {
         );
         assert!(
             verifier.len() >= 43 && verifier.len() <= 128,
-            "RFC 7636 长度"
+            "RFC 7636 length"
         );
     }
 
@@ -1109,13 +1109,13 @@ mod tests {
         assert_eq!(
             jwt_account_id(Some(&t)),
             None,
-            "无 account claims 返回 None"
+            "no account claims returns None"
         );
     }
 
-    /// 契约：loopback authorize URL 带 codex CLI 参数 + 随机 state（main 实测
-    /// bug 回归——缺 codex_cli_simplified_flow → issuer 走 web 流 →
-    /// Authentication Error）。
+    /// Contract: the loopback authorize URL carries codex CLI params + random state (main-verified
+    /// bug regression — missing codex_cli_simplified_flow → issuer takes the web flow →
+    /// Authentication Error).
     #[tokio::test]
     async fn loopback_authorize_url_has_codex_params_and_random_state() {
         let http = reqwest::Client::new();
@@ -1125,35 +1125,35 @@ mod tests {
         handle.abort();
         assert!(
             url.contains("codex_cli_simplified_flow=true"),
-            "简化流参数: {url}"
+            "simplified-flow param: {url}"
         );
         assert!(
             url.contains("id_token_add_organizations=true"),
-            "组织 claim 参数: {url}"
+            "organizations claim param: {url}"
         );
         assert!(url.contains("originator=bingo"), "originator: {url}");
         let state = url.split("state=").nth(1).unwrap_or_default();
         assert!(
             !state.is_empty() && state != "bingo",
-            "state 非固定: {state}"
+            "state must not be fixed: {state}"
         );
-        // 两次调用 state 不同（CSRF 随机）。
+        // Two calls yield different states (CSRF randomness).
         let (url2, _r2, _v2, handle2) = flow.authorize_url().await.unwrap();
         handle2.abort();
         let state2 = url2.split("state=").nth(1).unwrap_or_default();
-        assert_ne!(state, state2, "state 应随机");
+        assert_ne!(state, state2, "state should be random");
     }
 
-    /// 契约：loopback 回调校验 state（CSRF）——错误 state 拒绝登录；
-    /// 正确 state 通过校验进入 token 交换（本地无真实端点 → 网络错误，
-    /// 而非 state 拒绝）。
+    /// Contract: the loopback callback validates state (CSRF) — a wrong state rejects login;
+    /// the right state passes validation into the token exchange (no real local endpoint → network error,
+    /// not a state rejection).
     #[tokio::test]
     async fn loopback_callback_validates_state() {
         let http = reqwest::Client::new();
         let config = OauthFlowConfig::codex();
         let flow = LoopbackPkce::new(&http, &config);
         let (_url, redirect_uri, _v, handle) = flow.authorize_url().await.unwrap();
-        // 错误 state → 拒绝。
+        // Wrong state → rejected.
         let _ = http
             .get(format!("{redirect_uri}?code=bad&state=WRONG"))
             .send()
@@ -1161,10 +1161,10 @@ mod tests {
         let res = handle.await.unwrap();
         assert!(
             matches!(&res, Err(AuthError::Other(m)) if m.contains("state mismatch")),
-            "错误 state 应拒绝: {res:?}"
+            "wrong state should be rejected: {res:?}"
         );
 
-        // 正确 state → 通过校验（进入交换，真实端点不可达 → 网络错误）。
+        // Right state → passes validation (enters the exchange; unreachable real endpoint → network error).
         let (url2, redirect_uri2, _v2, handle2) = flow.authorize_url().await.unwrap();
         let state2 = url2.split("state=").nth(1).unwrap();
         let _ = http
@@ -1174,9 +1174,12 @@ mod tests {
         let res = handle2.await.unwrap();
         assert!(
             !matches!(&res, Err(AuthError::Other(m)) if m.contains("state mismatch")),
-            "正确 state 不应被拒绝: {res:?}"
+            "right state must not be rejected: {res:?}"
         );
-        assert!(res.is_err(), "进入交换后本地端点不可达应报错: {res:?}");
+        assert!(
+            res.is_err(),
+            "after entering the exchange, an unreachable local endpoint should error: {res:?}"
+        );
     }
 
     /// Token responses without account_id are backfilled from JWT claims
@@ -1197,7 +1200,7 @@ mod tests {
         assert_eq!(
             tokens.account_id.as_deref(),
             Some("acc_jwt"),
-            "JWT 回填 account_id"
+            "JWT backfills account_id"
         );
 
         // Access-token fallback when id_token has no account claim.
@@ -1211,7 +1214,7 @@ mod tests {
         assert_eq!(
             tokens.account_id.as_deref(),
             Some("acc_at"),
-            "access token 回退"
+            "access-token fallback"
         );
 
         // Explicit account_id wins over JWT claims.

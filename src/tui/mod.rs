@@ -78,8 +78,8 @@ pub async fn run_tui_session(
     // reads /dev/tty directly).
     let detected_background = Theme::detect_system_theme().await;
 
-    // 版本检测预热：缓存新鲜（24h）则跳过，否则后台拉取最新 release 写缓存
-    // （欢迎卡片数据源；失败静默、不阻塞启动）。headless（--print）不经过此路径。
+    // Version-check warm-up: skip when the cache is fresh (24h), otherwise fetch the latest release in the background and write the cache
+    // (the welcome-card data source; failures are silent and never block startup). The headless (--print) path never goes through here.
     crate::update::spawn_background_check(session.home.clone());
 
     // Probe the kitty graphics capability for both hosts: inline flushes real

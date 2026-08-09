@@ -10,8 +10,8 @@ An agent CLI implemented in Rust (a local agent harness).
 - Write code the way the surrounding code is written; prefer no comments, self-documenting names; comments explain only the "why".
 - Don't add unneeded dependencies; before reinventing the wheel, check whether a mature wheel already exists on crates.io.
 - Newly added or modified model-facing text must be English: tool input schemas (`#[schemars(description = …)]`), tool `description()` text, model prompts (compaction, memory extraction, etc.), and documentation intended for model consumption.
-- Newly added or modified code comments and English documentation (`notes/`, `README.md`, and AGENTS.md itself) must be English. This is an incremental rule; unrelated legacy text does not need a bulk translation.
-- User-facing UI copy, error messages, and test data/assertion messages may remain Chinese. Preserve the existing audience split when touching strings.
+- Newly added or modified code comments and English documentation (`notes/`, `README.md`, and AGENTS.md itself) must be English.
+- User-facing UI copy, error messages, and test data/assertion messages must be English.
 - `README.zh-CN.md` stays as the Chinese-language documentation entry point.
 
 ## Architecture rules

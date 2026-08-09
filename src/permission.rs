@@ -290,7 +290,9 @@ fn safety_check(tool: &dyn Tool, input: &serde_json::Value) -> Option<String> {
     // same decision the Team tool asks about — and without this, acceptEdits would be the
     // way around that question.
     if path.ends_with(crate::team::TEAM_FILE) {
-        return Some(format!("改写 team 蓝图（谁在这个项目里干活）：{target}"));
+        return Some(format!(
+            "rewrite the team blueprint (who works in this project): {target}"
+        ));
     }
     let sensitive = path.components().any(|c| {
         c.as_os_str()
@@ -688,14 +690,14 @@ mod tests {
             assert_eq!(
                 bash_decision(command, &["Bash(rm)"], &[]).behavior,
                 PermissionBehavior::Deny,
-                "deny 应命中: {command}"
+                "deny should match: {command}"
             );
         }
         // Separators inside quotes aren't operators and must not create false hits.
         assert_eq!(
             bash_decision("echo 'a; b'", &["Bash(b)"], &[]).behavior,
             PermissionBehavior::Ask,
-            "引号内文本不切分为子命令"
+            "quoted text is not split into sub-commands"
         );
     }
 
@@ -718,7 +720,7 @@ mod tests {
             assert_eq!(
                 bash_decision(command, &[], &["Bash(ls)"]).behavior,
                 PermissionBehavior::Ask,
-                "不应免询问放行: {command}"
+                "must not pass without asking: {command}"
             );
         }
         // All sub-commands match → pass.
@@ -730,7 +732,7 @@ mod tests {
         assert_eq!(
             bash_decision("ls \"; rm -rf ~", &[], &["Bash(ls)"]).behavior,
             PermissionBehavior::Ask,
-            "切分不可信时不放行"
+            "untrusted split must not pass"
         );
     }
 
@@ -740,7 +742,7 @@ mod tests {
         assert_eq!(parts, vec!["echo 'a; b'".to_string(), "ls".to_string()]);
         assert!(trusted);
         let (_, trusted) = split_shell_commands("echo \"unterminated");
-        assert!(!trusted, "引号不闭合 → 不可信");
+        assert!(!trusted, "unterminated quote → untrusted");
         let (parts, _) = split_shell_commands("cd /tmp && rm -rf / ; echo done");
         assert_eq!(parts.len(), 3, "{parts:?}");
     }
@@ -832,7 +834,7 @@ mod tests {
         assert_eq!(
             result.behavior,
             PermissionBehavior::Ask,
-            "readOnlyHint 不再免询问"
+            "readOnlyHint no longer skips the ask"
         );
         // An explicit allow rule can still pass.
         let allow = vec!["mcp__srv".to_string()];

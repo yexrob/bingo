@@ -57,15 +57,15 @@ Three config layers, shallow-merged; the later one overrides:
 
 | Setting | Type | Description |
 |---|---|---|
-| `apiKey` | string | API key（settings 优先于 `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`）；建议放 user 层，项目层会入库 |
-| `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
+| `apiKey` | string | API key (settings take precedence over `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`); prefer the user layer — the project layer gets committed to the repo |
+| `apiBaseUrl` | string | API endpoint (settings take precedence over `ANTHROPIC_BASE_URL`; defaults to the official one) |
 | `providers` | object | Named providers: `{name: {protocol?, apiKey, apiBaseUrl?, supportsImages?, oauth?}}`, switch via `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, `Authorization: Bearer`; `apiBaseUrl` defaults to `https://api.openai.com`); an empty/absent `apiBaseUrl` falls back to the protocol default; unknown protocols are a config error at startup. `oauth: {kind: "codex"}` enables OAuth login (apiKey wins over OAuth); the codex flow (device / loopback PKCE) is `chatgpt.com`-subscription auth, tokens stored in `~/.local/share/bingo/auth.json` (0600, never in the committed settings) |
 | `provider` | string | Current provider (persisted by `/provider` and the /model menu; default `"default"` = top-level `apiKey`/`apiBaseUrl`); restored at startup, an invalid name falls back to default with a warning |
 | `sendImages` | bool | Whether the default endpoint sends message-box image attachments to the model (named providers use their own `supportsImages`). Both protocols carry image blocks, so this defaults to **true** — set `false` to opt out an endpoint that speaks the protocol but rejects images (some compat proxies) |
 | `thinkingLevel` | string | Thinking level: `off` sends no thinking param (DeepSeek-compatible, default); `low`/`medium`/`high`/`xhigh`/`max` send `{"type":"adaptive"}` adaptive thinking plus `output_config.effort` (the Claude 5 family removed budget_tokens; below `high` saves tokens, `xhigh`/`max` think deeper) |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto` (follows the terminal background) / `dark` / `light` |
-| `motion` | string | TUI motion: `auto` (default) / `off`——动效（如欢迎卡更新提示呼吸）静止为基色，提示本身保留；env `BINGO_NO_MOTION=1` 等价 |
+| `motion` | string | TUI motion: `auto` (default) / `off` — motion (e.g. the welcome-card update notice breathing) settles to the base color while the notice itself stays; env `BINGO_NO_MOTION=1` is equivalent |
 | `cacheControl` | bool | Send prompt caching; turn off if a non-official endpoint is unstable |
 | `respondToBashCommands` | bool | Whether `!` commands are handed to the model for a response after execution (default true; false = pure execution) |
 | `shell` | string | Shell program for the Bash tool and hooks; default per platform: macOS `/bin/zsh`, other Unix `/bin/bash`, Windows `powershell.exe`. PowerShell-family shells run with `-Command`; other configured shells (e.g. Git Bash `bash.exe`) with `-c` |
@@ -101,14 +101,14 @@ Example (.bingo/settings.json):
 
 `/help` for the full list. Common ones: `/model [name]` (no args: two-level picker — level 1 providers → level 2 model list; with a name: switch directly, validated against the known list when available),
 `/provider [name]` (no args: picker — ● current, s = session-only, Enter persists; with a name: switch directly), `/provider login <name> [--device-auth|--manual <token>]` (OAuth login: default opens the browser; `--device-auth` prints URL + code and polls for headless/SSH; `--manual` stores a pasted token), `/provider logout <name>` (revokes + clears),
-`/think [off|low|medium|high|xhigh|max]`（思考级别，持久化 settings；无参打开档位选择器：●=当前生效、↑↓/1-6 浏览、Enter 确认、Esc 取消）、`/theme [dark|light|auto]`（无参打开档位选择器，`/theme auto` 显式快捷保留）、
-`/permissions [allow|deny|ask] [规则]`、
-`/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
-`/skills`（清单，`/技能名` 直接执行）· `/context`（用量）· `/status` ·
-`/compact`（强制压缩）· `/resume [名称]`（恢复历史会话；无参打开会话选择器，Enter 即恢复）· `/rename` · `/clear` · `/exit`。
-`/team`（项目级编队）：`list`（图纸+运行区同屏）· `start`（拉起/幂等复用）· `status` ·
-`assign <成员> <任务>`（派活）· `stop` · `validate` · `new`（脚手架生成 team.json）·
-`memory list|gc`（跨会话记忆管理）。
+`/think [off|low|medium|high|xhigh|max]` (thinking level, persists to settings; no arg opens the level picker: ●=in effect, ↑↓/1-6 to browse, Enter confirms, Esc cancels), `/theme [dark|light|auto]` (no arg opens the level picker; the `/theme auto` explicit shortcut stays),
+`/permissions [allow|deny|ask] [rule]`,
+`/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
+`/skills` (listing; `/skill-name` runs it directly) · `/context` (usage) · `/status` ·
+`/compact` (force compaction) · `/resume [name]` (restore a past session; no arg opens the session picker, Enter restores) · `/rename` · `/clear` · `/exit`.
+`/team` (project-level crew): `list` (blueprint + runtime on one screen) · `start` (pull up / idempotent reuse) · `status` ·
+`assign <member> <task>` (dispatch work) · `stop` · `validate` · `new` (scaffolds team.json) ·
+`memory list|gc` (cross-session memory management).
 
 ## Diagnostic guide (common problems → troubleshooting paths)
 
@@ -183,7 +183,7 @@ Example (.bingo/settings.json):
   that is not implemented yet; its anthropic-protocol models can be added as a separate provider entry.
 - **Built-in provider presets (zero-config)**: official subscriptions ship inside bingo — `codex` (ChatGPT,
   `protocol: openai` + `oauth.kind: codex` → chatgpt.com/backend-api/codex/responses) and `opencode-go`
-  (`protocol: openai` + apiKey → opencode.ai/zen/go) are visible in `/provider` (内置 badge) and loginable with
+  (`protocol: openai` + apiKey → opencode.ai/zen/go) are visible in `/provider` (built-in badge) and loginable with
   no settings entry (`/provider login codex` / `opencode-go --manual <key>`); user `providers.<name>` entries
   override the preset field-by-field (e.g. only `apiBaseUrl` to customize).
 - **Provider OAuth (codex/ChatGPT)**: `oauth: {kind: "codex"}` on a named provider enables subscription login —
@@ -284,7 +284,7 @@ Example (.bingo/settings.json):
   The model manages the same crew through the **Team tool** (`status`/`validate`/`start`/`stop`/`save`, main session only): reads are free,
   and every change is confirmed by the user in person — the prompt appears in *every* permission mode and an `allow` rule cannot
   pre-authorize it (only `deny` outranks it), because hiring a crew is not something a permission table should be able to consent to on
-  the user's behalf. The confirmation names the change, not the file (`改写 .bingo/team.json · dev-room · 4 名成员（-ui +qa）`).
+  the user's behalf. The confirmation names the change, not the file (`Rewrite .bingo/team.json · dev-room · 4 members (-ui +qa)`).
   `save` writes the whole document, so it takes the complete roster — whoever is left out is removed. Hand-editing `.bingo/team.json`
   with Write/Edit asks the same question. Dispatch is not part of the tool: SendMessage gives a member work.
 - **Skills**: built-in `guide` (this guide) + `~/.config/bingo/skills/` and `.bingo/skills/`
@@ -297,116 +297,120 @@ Example (.bingo/settings.json):
   works when the outer terminal is Ghostty/kitty; the startup probe needs the pane to be focused.
   WezTerm/Konsole (kitty graphics without U=1) and other terminals show the `#[image]` text placeholder
   with a one-time notice. A failed fetch (network error, 4xx/5xx, undecodable data) marks the row as
-  `#[image ✗ 加载失败]` and shows a warning line with the url.
+  `#[image ✗ load failed]` and shows a warning line with the url.
 - **MCP**: stdio and streamable HTTP (`type: "http"`, with custom headers) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
 - **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts.
-- **内置工具**：Bash（经权限门）、Read/Glob/Grep（Read 对图片文件返回可看的图像，
-  截图与渲染图表可直接查看）、Edit/Write、WebFetch/WebSearch、
-  Agent（子代理）、SendMessage/AgentControl（子代理续话与生命周期，仅主会话）、
-  Team（项目编队，仅主会话——读免询问，任何变更都要用户当面确认）、
-  Task 族（任务追踪）、AskUserQuestion（仅主会话——子代理没有提问界面）、Skill（技能调用）、
-  ExperiencePropose/Commit/Query/Outcome/Forget（项目经验沉淀、检索与验证后反馈）。
-- **经验（Experience）**：跨会话复用可重跑的工作流。会话开始时注入本项目
-  active 经验索引（≤10 条，显式观察结果优先于旧重复提交计数，空则不注入），全文用 ExperienceQuery 按 trigger
-  词元检索（大小写不敏感、共享前缀容错、active 优先）；
-  ExperiencePropose 生成候选（不落盘），用户确认后 ExperienceCommit 落盘
-  （同内容稳定 id，重提交更新而非重复；status: stale 标记失效后退出注入但仍可查）。
-  真正采用查询结果后，ExperienceOutcome 经权限确认记录 `helpful` 或 `harmful` 与具体证据；它仅追加结果历史，绝不自动改变生命周期 `status` 或 `verified_at`。
-  ExperienceForget 淘汰（须用户确认）。存储于
-  `~/.config/bingo/experience/<project-key>/entries/`（用户级、不进项目仓库），
-  项目键取 git remote URL（归一化）→ git 根 → 规范化绝对路径，跨目录/机器稳定。
-- **子代理**：Agent 派生的实例有名字（`name` 参数，缺省取定义名/agent，重名
-  自动 -2/-3），transcript 显示为 `◉ 名字 · 任务`；完成后历史保留，主 agent 可
-  SendMessage 续话、AgentControl list/messages/stop/delete 管理。
-  **消息机制**：SendMessage 返回 `message_id` 且只入队，投递发生在回合边界——同一回合发给同一实例的
-  多条消息合并成一个 prompt 一次性送达，而不是一条一轮。排队不等于回执：
-  `AgentControl(action=messages, agent=…)` 逐条报告已送达（附落在第几轮）、仍排队（附等待时长）、
-  或因实例停止而丢弃。stop/delete 会清空信箱并报告有多少条未送达指令随之丢弃；
-  运行链失败时消息留在信箱，下一个回合边界重投。
-  **送达不等于回复**：实例完全可以读了消息、跑完一轮一声不吭，从外面看和卡死没区别。回执以「回复」为准，
-  所以 `messages` 报四种状态——排队、已读但没回、已回复（标明是第几轮开的口）、已丢弃；某一轮只要产出了文本，
-  就把该实例此前读过的消息一并算作已回复（包括在更早那轮沉默中读到的）。
-  **自动追回复**：这轮复查由系统代劳，且**默认开启**——每条 SendMessage 都挂一个 300s 的检查，除非显式关掉。
-  等待到点后重读同一份回执，只要还欠发件人一个回复，就往收件人信箱放一条追问（讲明是哪种沉默，且只要回复、
-  不重发原指令）并重试边界投递，最多 3 轮。等待内回复则全程静默；被追问后才开口、被丢弃、或最后一轮仍不吭声，
-  都以任务通知回报主 agent。`ack_timeout: <秒>` 调整等待（5-3600：正等着它就调短，明知要安静干很久就调长），
-  `ack_timeout: 0` 则对这条消息关闭检查。
-  **给子代理传图**：在 Agent prompt 或 SendMessage 文本里复述 `#[image N]` 占位即可——附件表属于会话，
-  子代理收到的是真图片（消息排队时图片一同携带）。这条路也能从**不收图的会话往外走**：当前端点不接受图片时，
-  把子代理 fork 到支持图片的 provider（`Agent(provider: …, model: …)`，跨 provider 必须显式给 model）并复述占位，
-  解析不受端点能力影响，子代理看得到真图并回报结论。占位符到达而图片不在时会说明是哪种情况
-  （端点不收图——并列出可用 provider——还是恢复会话导致附件已不在），而不是让模型去找一个从未落盘的文件。
-  **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`（同名项目层
-  优先）；frontmatter `name/description/model/provider/thinking/inherit_system`，正文 = 子代理
-  system prompt；Agent 工具的 `agent` 参数引用。
-  **逐实例模型/思考**：Agent 工具的 `model`/`provider`/`thinking` 参数可给单个
-  子代理指定模型、provider（settings 的 providers 段，跨端点/跨 key）与思考级别
-  （`off/low/medium/high/xhigh/max`）；优先级 显式参数 > 具名定义 > 继承父会话
-  当前值（模型/provider/思考各自独立，互不影响父会话）。
-  **频道互发**（实验，`experimental.agentChannels`）：主 agent 用 Channel 工具
-  建频道/进出成员（成员限直接子代理，主 agent 名 `main` 自动入席），成员用 Post
-  发言——消息进全体成员上下文（同序），发件人由运行时盖戳；serial 频道落后
-  发言会被弹回并附新增消息（agent 阅读后自行改口/放弃，报数式顺序由此涌现），
-  free 频道允许交叉。频道在 transcript 显示为 `◇ #名字` 行（可展开看完整群聊）；
-  预算超限自动冻结频道并通知主 agent。**谁在说话决定要不要回**：投递即唤醒全体成员，所以每个派生成员都带一条
-  system prompt 规则（仅在开关打开时注入）——`user`/`main` 对着房间说话时简短答一句，同事说话则不欠回复
-  （除非点名或能解他的堵），**永远不回复「回复」**（回复的回复才是噪声之源）。规则还写明模型推不出来的机制：
-  被频道消息唤醒的那一轮，正文是回给 hub 的，**只有 Post 能把话说进房间**。规则放在 system block 而非唤醒载荷里：compact 重写消息历史但从不碰 system prompt，
-  长跑成员的上下文被摘要掉之后这条规则仍在。
-  **底部实体区**：有实例/频道时输入框上方显示一行摘要，Ctrl+G 进入选择
-  （↑↓/Enter），Enter 打开全屏 **Slack 式工作区**：整屏只有一栏消息流（顶部一行标题
-  给出频道/实例与右端的队名，日期分隔、头像 + 粗体发件人 + 时间、连发合并、新消息
-  分隔线、工具调用作附件、运行中实例的活尾作「正在输入」）。没有 rail 也没有侧栏，
-  视图不画任何自己的底色——透出的是终端本身的背景；换会话靠 Ctrl+K（快速跳转列出
-  全部会话及未读数）与 alt+↑↓。**头像**：能放置 kitty 图片的终端（与内联图片同一能力）
-  为每位发言者分配八张内置动漫风格头像之一，名字左侧 4×2 格；其余终端退回首字母
-  色块，两种皮肤行数一致。team 成员的头像钉在 `.bingo/team.json`（`"avatar": "sora"`），
-  一支队伍就有固定班底；其余实例按名字取脸。运行时注入的唤醒脚手架（频道消息转述、
-  任务提醒）折叠成一行淡色提示，不再当成消息整段引用。底部输入框发送：频道以 `user` 身份发言（与 Post 同一投递
-  路径，正常唤醒成员；渲染即已读，serial 不会弹你），私信排进实例收件箱、回合边界
-  投递（投递前显示为待送达）。按键：Tab 在消息区与输入框之间切换、alt+↑↓ 换会话、
-  Ctrl+K 快速跳转、Esc 返回。
-- **agent team**（项目级编队）：`.bingo/team.json`（camelCase：`name`/`channel{mode,messageLimit}`/
-  `members[{name,agent,avatar?}]`，成员引用 AgentDef；`name` 就是消息上显示的名字，取人名而非角色代号，`avatar` 钉住头像）把多名角色固定到一个项目；启动默认拉起
-  （`settings.team.autoStart`，`--no-team` 关闭；拉起 ≠ 唤醒——成员 Idle 待命零 token，
-  等 `/team assign` 或频道消息才开跑；幂等键 = 实例名，重复 start 复用）。`/team` 命令族
-  管理；team 记忆按「项目路径哈希 + 分支」存 `~/.config/bingo/teams/`（完整历史跨会话恢复 +
-  append-only 决策记录，`/team memory list|gc` 管理）。
-  模型经 **Team 工具**管理同一支队伍（`status`/`validate`/`start`/`stop`/`save`，仅主会话）：读免询问，
-  任何变更都要用户当面确认——询问在**所有权限模式**下都出现，`allow` 规则也不能预授权（只有 `deny` 压得住），
-  因为「雇一支队伍」不该由权限表代替用户点头。确认行给的是变化而非文件
-  （`改写 .bingo/team.json · dev-room · 4 名成员（-ui +qa）`）。`save` 整份覆写，须给完整名单——没列的成员即被移除；
-  用 Write/Edit 手改 `.bingo/team.json` 问同一个问题。派活不在工具里：给成员派活用 SendMessage。
-- **技能**：内置 `guide`（本指南）+ `~/.config/bingo/skills/` 与 `.bingo/skills/`
-  目录技能（同名磁盘技能覆盖内置）；模型经 SkillTool 调用，用户经 `/技能名` 执行。
-- **图片**：模型回复中的 markdown 图片（`![alt](路径)`，支持相对路径/data/http(s)）
-  在支持 kitty graphics 的终端（Ghostty/kitty/WezTerm 等）内联渲染，其余终端显示
-  `#[image]` 占位。tmux 内 bingo 会自动开启 passthrough（`tmux set -p
-  allow-passthrough on`），外层终端为 Ghostty/kitty 时经 Unicode 占位符（U=1）
-  渲染，图片随文本正常滚动；外层为 WezTerm/Konsole（不支持 U=1）或无法识别时
-  显示 `#[image]` 占位并提示一次。图片随消息自动加载并在消息定稿落盘时渲染，
-  不需要额外命令。抓取失败（网络错误、4xx/5xx、数据不可解码）时该行显示
-  `#[image ✗ 加载失败]`，并有警告行给出 url。
-- **MCP**：stdio 与 streamable HTTP（`type: "http"`，可带自定义 headers）服务器工具接入（见上）。
-- **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/`，文件名
-  `<项目名>-<路径哈希>.md`，同名目录不串味）+ 项目 CLAUDE.md（Anthropic 惯例）。
-- **会话**：transcript 持久化（JSONL），`--continue`/`/resume` 恢复，`/compact` 压缩。
-  **分享**：`bingo share [会话]` 默认在当前目录生成自包含 HTML 文件（`--output`
-  指定路径），不会联网。只有显式加 `--public` 才上传官网分享服务并打印
-  `https://bingo.ruobin.dev/share/u/<id>` 公网链接；**任何人可公开访问**，因此
-  bingo 会在上传开始前提示完整对话/工具输出可能含敏感信息。`--open` 打开本地
-  文件或已发布链接。settings `share.baseUrl` 可覆盖服务基址（缺省
-  `https://bingo.ruobin.dev`），上传失败自动回退本地文件。会话内
-  `/share [--public] [--open]` 采用相同安全语义：默认本地，`--public` 才上传。
-  会话 key 与 `/resume` 同语义（transcript stem 或可匹配片段，缺省最近会话）。
-  **更新**：`bingo update` 从 GitHub Releases（yexrob/bingo）拉取最新版并原子替换当前
-  可执行文件——平台资产（`bingo-<triple>.tar.gz` / `.zip`）+ `checksums.txt` SHA-256
-  校验，解压后同目录 tmp + rename 替换（Unix 保留可执行位）；`--check` 只检测不下载。
-  输出：已是最新 / 发现新版本（`--check`）/ 更新成功（新版本号 + 安装位置）；
-  失败给出原因（网络 / 校验失败 / 无权限——提示 sudo 或手动安装）。
-  启动时 TUI 后台异步检测新版本（`~/.local/share/bingo/update-check.json` 24h TTL 缓存，
-  失败静默、不阻塞启动；`--print` headless 不触发），检测到新版本时欢迎卡显示
-  「New version vX.Y.Z available — run bingo update」提示行（版本号与命令两段呼吸
-  9s 后静止常驻，按键可提前静止；`motion: "off"` 或 `BINGO_NO_MOTION=1` 静态显示）。
+- **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep (Read returns image files as
+  viewable images, so screenshots and rendered charts can be inspected), Edit/Write, WebFetch/WebSearch,
+  Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
+  Team (the project crew, main session only — reads are free, every change asks the user in person),
+  the Task family (task tracking), AskUserQuestion (main session only — a subagent has no prompt surface),
+  Skill (skill invocation),
+  ExperiencePropose/Commit/Query/Outcome/Forget (project experience capture, retrieval, and verified-use feedback).
+- **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
+  experience index is injected (≤10 entries, explicit observed outcomes ranked before the legacy commit count, nothing when empty); full text is searched via ExperienceQuery by trigger
+  tokens (case-insensitive, shared-prefix tolerant, active first);
+  ExperiencePropose generates candidates (not persisted); after user confirmation ExperienceCommit persists
+  (same content → stable id, re-committing updates rather than duplicating; `status: stale` marks invalidation,
+  exiting injection but staying queryable).
+  After actually adopting a query result, ExperienceOutcome records a permission-confirmed `helpful` or `harmful`
+  outcome with concrete evidence; it only appends outcome history and never automatically changes the lifecycle `status` or `verified_at`.
+  ExperienceForget evicts (requires user confirmation). Stored in
+  `~/.config/bingo/experience/<project-key>/entries/` (user-level, never in the project repo),
+  the project key comes from the git remote URL (normalized) → git root → normalized absolute path, stable across directories/machines.
+- **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
+  auto-suffix -2/-3), shown in the transcript as `◉ name · task`; history is kept after completion, and the main agent can
+  SendMessage to continue, or manage with AgentControl list/messages/stop/delete.
+  **Messaging**: SendMessage returns a `message_id` and only queues — delivery happens at the turn boundary, and
+  every message sent to the same instance in that turn is folded into one prompt delivered at once, rather than one per turn. Queued is not an acknowledgement:
+  `AgentControl(action=messages, agent=…)` reports each message as delivered (with which run it landed in), still queued (with its wait time),
+  or dropped because the instance was stopped. stop/delete clears the mailbox and reports how many undelivered instructions were dropped with it;
+  when the run chain fails the messages stay in the mailbox and are redelivered at the next turn boundary.
+  **Delivered ≠ replied**: an instance can fully read a message, finish a turn without a word, and look identical to a dead one from outside. The receipt is based on "reply",
+  so `messages` reports four states — queued, read but unanswered, replied (noting which turn opened its mouth), dropped; as soon as a turn produces any text,
+  every message that instance had read before counts as replied (including those read in the silence of an earlier turn).
+  **Automatic reply chase**: this round of checking is done by the system, and it's **on by default** — every SendMessage carries a 300s check unless explicitly disabled.
+  When the wait elapses it re-reads the same receipt; as long as a reply is still owed to the sender, it drops a follow-up into the recipient's mailbox (stating which kind of silence it was, asking only for a reply,
+  not re-sending the original instruction) and retries the boundary delivery, at most 3 rounds. A reply within the wait stays silent throughout; speaking only after being chased, being dropped, or staying silent through the last round
+  are all reported to the main agent as task notifications. `ack_timeout: <seconds>` adjusts the wait (5-3600: shorten it when the reply is expected soon, lengthen it when the work is known to be quiet and long),
+  and `ack_timeout: 0` disables the check for that message.
+  **Sending images to subagents**: restate the `#[image N]` marker in the Agent prompt or SendMessage text — the attachment table belongs to the session,
+  and the subagent receives the real image (the image rides along while the message is queued). This path also works **out of a session that doesn't accept images**: when the current endpoint rejects images,
+  fork the subagent onto an image-capable provider (`Agent(provider: …, model: …)`, cross-provider requires an explicit model) and restate the marker,
+  so resolution is unaffected by endpoint capability, the subagent sees the real image and reports its conclusion. If the marker arrives without the image it explains which situation it is
+  (the endpoint doesn't accept images — listing the usable providers — or the attachment is gone because the session was resumed), rather than having the model hunt for a file that never landed on disk.
+  **Named definitions**: `~/.config/bingo/agents/*.md` and `.bingo/agents/*.md` (project-level wins on
+  same-name clashes); frontmatter `name/description/model/provider/thinking/inherit_system`, body = the subagent
+  system prompt; referenced via the Agent tool's `agent` parameter.
+  **Per-instance model/thinking**: the Agent tool's `model`/`provider`/`thinking` parameters can give a single
+  subagent a specific model, provider (the settings `providers` section, cross-endpoint/cross-key) and thinking level
+  (`off/low/medium/high/xhigh/max`); precedence: explicit parameter > named definition > inheriting the parent session's
+  current value (model/provider/thinking are each independent and never affect the parent session).
+  **Channel messaging** (experimental, `experimental.agentChannels`): the main agent uses the Channel tool
+  to create channels / add and remove members (members are direct subagents; the main agent joins automatically as `main`), members use Post
+  to speak — messages enter every member's context (same order), senders stamped by the runtime; in serial channels a lagging
+  post bounces back with the new messages attached (agents read, then amend or drop — roll-call ordering emerges this way),
+  free channels allow interleaving. Channels appear in the transcript as `◇ #name` rows (expandable to the full group chat);
+  when a budget is exceeded the channel freezes automatically and the main agent is notified. **Who is speaking decides whether to reply**: delivery wakes every member, so every spawned member carries a
+  system-prompt rule (injected only when the toggle is on) — answer briefly when `user`/`main` speaks to the room, owe nothing when a colleague speaks
+  (unless named or you can unblock them), and **never answer an answer** (replies to replies are the source of noise). The rule also spells out the mechanism the model can't infer:
+  in a turn woken by a channel message, the body text goes back to the hub — **only Post can put words in the room**. The rule lives in the system block, not the wake payload: compaction rewrites message history but never touches the system prompt,
+  so the rule survives even after a long-running member's context is summarized away.
+  **Bottom entity area**: when instances/channels exist, a one-line summary shows above the input; Ctrl+G enters the selector
+  (↑↓/Enter), Enter opens the fullscreen **Slack-style workspace**: the whole screen is a single message-flow column (a one-line title at the top
+  giving the channel/instance with the team name at the right edge; date separators, avatar + bold sender + time, consecutive messages merged, new-message
+  dividers, tool calls as attachments, a running instance's live tail as "typing"). No rail and no sidebar,
+  the view paints no background of its own — the terminal's own background shows through; switching conversations is Ctrl+K (quick switcher listing
+  every conversation and its unread count) and alt+↑↓. **Avatars**: terminals that can place kitty images (the same capability behind inline images)
+  assign each speaker one of eight bundled anime-style portraits, 4×2 cells to the left of the name; other terminals fall back to an initial-on-color
+  chip, and both skins keep the same row count. Team members' avatars are pinned in `.bingo/team.json` (`"avatar": "sora"`),
+  so a crew has a fixed cast; other instances get a face by name. Runtime-injected wake scaffolding (channel-message relays,
+  task reminders) collapses into a single dim hint line instead of being quoted as a whole message. Sending from the bottom input box: in a channel you speak as `user` (the same delivery
+  path as Post, waking members normally; rendered counts as read, serial won't bounce you), DMs queue into the instance's inbox and are
+  delivered at the turn boundary (shown as pending before delivery). Keys: Tab switches between the message list and the input box, alt+↑↓ switches conversations,
+  Ctrl+K quick-jumps, Esc returns.
+- **agent team** (project-level crew): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
+  `members[{name,agent,avatar?}]`, members reference AgentDef; `name` is the name shown on the member's messages — give it a person's name, not a role code; `avatar` pins the portrait) fixes several roles to one project; pulled up by default at startup
+  (`settings.team.autoStart`, `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,
+  only `/team assign` or channel messages start them; idempotency key = instance name, repeated start reuses). Managed by the `/team` command family;
+  team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (full history restored across sessions +
+  append-only decision records, managed via `/team memory list|gc`).
+  The model manages the same crew through the **Team tool** (`status`/`validate`/`start`/`stop`/`save`, main session only): reads are free,
+  and every change is confirmed by the user in person — the prompt appears in *every* permission mode and an `allow` rule cannot
+  pre-authorize it (only `deny` outranks it), because "hiring a crew" is not something a permission table should consent to on
+  the user's behalf. The confirmation line names the change, not the file
+  (`Rewrite .bingo/team.json · dev-room · 4 members (-ui +qa)`). `save` writes the whole document, so it takes the complete roster — whoever is left out is removed;
+  hand-editing `.bingo/team.json` with Write/Edit asks the same question. Dispatch is not part of the tool: use SendMessage to give a member work.
+- **Skills**: built-in `guide` (this guide) + `~/.config/bingo/skills/` and `.bingo/skills/`
+  directory skills (same-name disk skills override built-ins); the model invokes them via SkillTool, users run them via `/skill-name`.
+- **Images**: markdown images in model replies (`![alt](path)`, supports relative paths/data/http(s))
+  render inline on terminals that support kitty graphics (Ghostty/kitty/WezTerm etc.); other terminals show
+  the `#[image]` placeholder. Inside tmux, bingo enables passthrough automatically (`tmux set -p
+  allow-passthrough on`), rendering via Unicode placeholders (U=1) when the outer terminal is Ghostty/kitty,
+  so images scroll with the text; when the outer terminal is WezTerm/Konsole (no U=1) or unrecognized it
+  shows the `#[image]` placeholder with a one-time notice. Images load automatically with the message and render when the message settles to disk —
+  no extra command needed. A failed fetch (network error, 4xx/5xx, undecodable data) marks the row as
+  `#[image ✗ load failed]` with a warning line giving the url.
+- **MCP**: stdio and streamable HTTP (`type: "http"`, custom headers allowed) server tools are integrated (see above).
+- **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
+  `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
+- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts.
+  **Sharing**: `bingo share [session]` generates a self-contained HTML file in the current directory by default (`--output`
+  specifies the path), never touching the network. Only an explicit `--public` uploads to the official share service and prints
+  a public `https://bingo.ruobin.dev/share/u/<id>` link; **anyone can access it publicly**, so
+  bingo prompts before upload starts that the full conversation/tool output may contain sensitive information. `--open` opens the local
+  file or the published link. The settings `share.baseUrl` overrides the service base (default
+  `https://bingo.ruobin.dev`); an upload failure automatically falls back to the local file. In-session
+  `/share [--public] [--open]` uses the same safety semantics: local by default, only `--public` uploads.
+  The session key has the same semantics as `/resume` (transcript stem or a matchable fragment, defaulting to the most recent session).
+  **Updates**: `bingo update` pulls the latest release from GitHub Releases (yexrob/bingo) and atomically replaces the current
+  executable — platform assets (`bingo-<triple>.tar.gz` / `.zip`) + `checksums.txt` SHA-256
+  verification, unpacked then replaced via same-directory tmp + rename (Unix keeps the executable bit); `--check` only detects, doesn't download.
+  Output: already latest / new version found (`--check`) / update succeeded (new version + install location);
+  failures give the reason (network / checksum failure / no permission — suggesting sudo or manual install).
+  At startup the TUI checks for new versions asynchronously in the background (`~/.local/share/bingo/update-check.json` 24h TTL cache;
+  failures are silent and never block startup; `--print` headless doesn't trigger it); when a new version is found the welcome card shows
+  a "New version vX.Y.Z available — run bingo update" notice line (the version and command breathe for 9s
+  then settle and stay; a keypress settles it early; `motion: "off"` or `BINGO_NO_MOTION=1` shows it statically).

@@ -264,10 +264,10 @@ mod tests {
                 let cell = &buf[(x, y)];
                 assert!(
                     cell.symbol().starts_with(gfx::PLACEHOLDER),
-                    "({x},{y}) 是占位符单元格: {:?}",
+                    "({x},{y}) is a placeholder cell: {:?}",
                     cell.symbol()
                 );
-                assert_eq!(cell.fg, Color::Rgb(r, g, b), "({x},{y}) 前景色载 id");
+                assert_eq!(cell.fg, Color::Rgb(r, g, b), "({x},{y}) fg carries the id");
             }
         }
         // Row 1 carries the second row diacritic, not row 0's.
@@ -280,7 +280,7 @@ mod tests {
     fn render_rows_writes_top_down_and_honours_wide_chars() {
         let rows = vec![
             Row::new(styled("ab", SegStyle::fg(Color::Red))),
-            Row::new(Line::plain("中文")),
+            Row::new(Line::plain("ＡＢ")),
         ];
         let mut buf = Buffer::empty(Rect::new(0, 0, 6, 3));
         let area = buf.area;
@@ -289,8 +289,8 @@ mod tests {
         assert_eq!(buf[(0, 0)].fg, Color::Red);
         assert_eq!(buf[(1, 0)].symbol(), "b");
         // A double-width grapheme occupies two cells; the second is blanked.
-        assert_eq!(buf[(0, 1)].symbol(), "中");
-        assert_eq!(buf[(2, 1)].symbol(), "文");
+        assert_eq!(buf[(0, 1)].symbol(), "Ａ");
+        assert_eq!(buf[(2, 1)].symbol(), "Ｂ");
         // Third row untouched.
         assert_eq!(buf[(0, 2)].symbol(), " ");
     }
@@ -310,13 +310,17 @@ mod tests {
     #[test]
     fn render_rows_keeps_the_background_behind_wide_characters() {
         let bg = Color::Rgb(63, 14, 64);
-        let mut row = Row::new(Line::plain("你好 ok"));
+        let mut row = Row::new(Line::plain("ＡＢ ok"));
         row.bg = Some(bg);
         let mut buf = Buffer::empty(Rect::new(0, 0, 12, 1));
         let area = buf.area;
         render_rows(&[row], Color::White, &mut buf, area);
         for x in 0..12u16 {
-            assert_eq!(buf[(x, 0)].bg, bg, "宽字符不能在背景上打洞 x={x}");
+            assert_eq!(
+                buf[(x, 0)].bg,
+                bg,
+                "wide chars must not punch holes in the background x={x}"
+            );
         }
     }
 

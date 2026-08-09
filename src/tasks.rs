@@ -394,11 +394,15 @@ mod tests {
             assert_eq!(s1.list().await.unwrap().len(), 1);
             assert!(
                 s2.list().await.unwrap().is_empty(),
-                "新会话列表独立，不继承上一会话 todo"
+                "a new session has its own list, not inheriting the previous session's todo"
             );
             // --continue on the same session: same key restores the same list.
             let s1b = TaskStore::new(&tmp.join("home"), "proj-1700000000");
-            assert_eq!(s1b.list().await.unwrap().len(), 1, "同会话恢复同 todo");
+            assert_eq!(
+                s1b.list().await.unwrap().len(),
+                1,
+                "same session restores the same todo"
+            );
             let _ = std::fs::remove_dir_all(&tmp);
         });
     }
@@ -509,8 +513,12 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(old.status, TaskStatus::Pending, "旧值是 patch 之前的状态");
-            assert_eq!(old.subject, "first", "旧值是 patch 之前的标题");
+            assert_eq!(
+                old.status,
+                TaskStatus::Pending,
+                "old value is the pre-patch status"
+            );
+            assert_eq!(old.subject, "first", "old value is the pre-patch subject");
             let now = store.get(&id).await.unwrap().unwrap();
             assert_eq!(now.status, TaskStatus::InProgress);
             assert_eq!(now.subject, "renamed");
@@ -534,14 +542,17 @@ mod tests {
                 .flatten()
                 .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
                 .count();
-            assert_eq!(leftovers, 0, "rename 后无 .tmp 残留");
+            assert_eq!(leftovers, 0, "no .tmp leftovers after rename");
 
             std::fs::write(store.dir.join(format!("{id}.json")), "{ not json").unwrap();
             assert!(
                 matches!(store.get(&id).await, Err(TaskError::Parse { .. })),
-                "解析失败必须报错"
+                "parse failure must error"
             );
-            assert!(store.list().await.is_err(), "列表也不吞错");
+            assert!(
+                store.list().await.is_err(),
+                "list must not swallow errors either"
+            );
             let _ = std::fs::remove_dir_all(&tmp);
         });
     }

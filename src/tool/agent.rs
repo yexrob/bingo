@@ -243,7 +243,7 @@ pub(crate) fn spawn_ack_watchdog(
     timeout: std::time::Duration,
 ) {
     let owner = session.instance.clone();
-    let label = format!("{agent} #{id} 回执");
+    let label = format!("{agent} #{id} receipt");
     tokio::spawn(async move {
         // Registered on the first missed deadline, not up front: a message that lands on time
         // leaves no trace, so the line itself means "this one needed chasing".
@@ -268,14 +268,18 @@ pub(crate) fn spawn_ack_watchdog(
                     if sent > 0 {
                         report(
                             WatchState::Done,
-                            format!("{sent} 次追问后回复（第 {run} 轮）"),
+                            format!("{sent} follow-ups before the reply (round {run})"),
                             &mut line,
                         );
                     }
                     return;
                 }
                 FollowUp::Settled(crate::agents::AckState::Dropped { reason }) => {
-                    report(WatchState::Failed, format!("未送达：{reason}"), &mut line);
+                    report(
+                        WatchState::Failed,
+                        format!("not delivered: {reason}"),
+                        &mut line,
+                    );
                     return;
                 }
                 // The two waiting states are exactly what follow_up chases, never settles on.
@@ -285,7 +289,7 @@ pub(crate) fn spawn_ack_watchdog(
                 FollowUp::Gone => {
                     report(
                         WatchState::Failed,
-                        "实例已移除，消息未得到回复".to_string(),
+                        "instance removed; the message never got an answer".to_string(),
                         &mut line,
                     );
                     return;
@@ -294,7 +298,7 @@ pub(crate) fn spawn_ack_watchdog(
                     sent = round;
                     report(
                         WatchState::Running,
-                        format!("等待回复，已追问 {round}/{MAX_FOLLOW_UPS}"),
+                        format!("waiting for a reply, chased {round}/{MAX_FOLLOW_UPS}"),
                         &mut line,
                     );
                     flush_agent_inbox(&session, &watch);
@@ -303,7 +307,7 @@ pub(crate) fn spawn_ack_watchdog(
                     report(
                         WatchState::Failed,
                         format!(
-                            "{MAX_FOLLOW_UPS} 次追问后 {agent} 仍未回复：可 AgentControl(action=messages) 看它卡在排队还是收下不答"
+                            "{MAX_FOLLOW_UPS} follow-ups and {agent} still has not replied: use AgentControl(action=messages) to see whether it is stuck queued or read it without answering"
                         ),
                         &mut line,
                     );
@@ -384,13 +388,13 @@ pub(crate) fn absorb_inbox(
         _ => items
             .iter()
             .map(|item| match item {
-                InboxItem::Direct { text, .. } => format!("[追加指令] {text}"),
+                InboxItem::Direct { text, .. } => format!("[follow-up instruction] {text}"),
                 InboxItem::Channel {
                     channel,
                     from,
                     text,
                     seq,
-                } => format!("[#{channel} 第{seq}条] {from}: {text}"),
+                } => format!("[#{channel} msg #{seq}] {from}: {text}"),
                 InboxItem::FollowUp {
                     original,
                     round,
@@ -495,7 +499,7 @@ pub(crate) fn spawn_agent_loop(
                     watch.set_state(
                         run.0,
                         WatchState::Done,
-                        Some("完成".to_string()),
+                        Some("done".to_string()),
                         Some(serde_json::json!(non_empty(text))),
                     );
                     match loop_registry.finish(&name, outcome.messages, spoke) {
@@ -548,10 +552,10 @@ impl AgentTool {
             .ok_or_else(|| {
                 let known: Vec<&str> = self.defs.iter().map(|d| d.name.as_str()).collect();
                 ToolError::failed(if known.is_empty() {
-                    format!("unknown agent definition: {want}（没有任何具名定义）")
+                    format!("unknown agent definition: {want} (no named definitions)")
                 } else {
                     format!(
-                        "unknown agent definition: {want}；可用：{}",
+                        "unknown agent definition: {want}; available: {}",
                         known.join(", ")
                     )
                 })
@@ -615,7 +619,7 @@ impl AgentTool {
                 "status": "async_launched",
                 "name": name,
                 "task_id": id.0,
-                "note": "子代理已在后台执行，完成通知会注入下一轮上下文；SendMessage 可发后续指令，AgentControl 可 list/stop/delete",
+                "note": "subagent is running in the background; a completion notification will be injected into the next turn's context; SendMessage sends follow-up instructions, AgentControl can list/stop/delete",
             })
             .to_string()),
             is_error: false,
@@ -657,7 +661,7 @@ fn normalize_thinking(level: &str) -> Result<Option<String>, String> {
         return Ok(Some(level.to_string()));
     }
     Err(format!(
-        "无效思考级别 \"{level}\"（可用：off/low/medium/high/xhigh/max）"
+        "invalid thinking level \"{level}\" (use: off/low/medium/high/xhigh/max)"
     ))
 }
 
@@ -675,8 +679,8 @@ pub(crate) fn build_sub_session(
     instance: &str,
 ) -> Result<Arc<Session>, ToolError> {
     let model = model.or_else(|| def.and_then(|d| d.model.clone()));
-    // provider："default" 与未指定等价（共享父端点，跟随父切换）；
-    // 仅命名 provider fork 独立端点。未知名字在此报错（即时反馈）。
+    // provider: "default" and unset are equivalent (shared parent endpoint, follows the parent's switches);
+    // only a named provider forks an independent endpoint. Unknown names error here (immediate feedback).
     let named_provider = provider
         .or_else(|| def.and_then(|d| d.provider.clone()))
         .filter(|p| p != "default");
@@ -690,10 +694,10 @@ pub(crate) fn build_sub_session(
     let provider_name = named_provider
         .clone()
         .unwrap_or_else(|| parent.runtime.provider.borrow().clone());
-    // 跨 provider 判定：fork 到与父当前 provider 不同的端点才跨（未指定
-    // provider = 共享父端点，恒同 provider）。跨 provider 时父会话的模型与
-    // 思考级别都不可用——模型名会发到错误端点（如 claude-sonnet-5 发到
-    // DeepSeek 必然 "model not found"），thinking 参数则可能被端点拒绝。
+    // Cross-provider rule: crossing means forking to an endpoint different from the parent's current provider (unset
+    // provider = shared parent endpoint, always the same provider). When crossing, the parent session's model and
+    // thinking level are unusable — the model name would go to the wrong endpoint (e.g. claude-sonnet-5 sent to
+    // DeepSeek would 404 with "model not found"), and the thinking parameter may be rejected by the endpoint.
     let cross_provider = match &named_provider {
         Some(name) => name != parent.runtime.provider.borrow().as_str(),
         None => false,
@@ -703,16 +707,16 @@ pub(crate) fn build_sub_session(
         None if cross_provider => {
             let parent_provider = parent.runtime.provider.borrow().clone();
             return Err(ToolError::failed(format!(
-                "provider \"{}\" 需要 model：跨 provider 不继承父会话模型 \
-                 （当前父 provider = \"{parent_provider}\"），请显式指定 model 或去掉 provider",
+                "provider \"{}\" requires a model: crossing providers does not inherit the parent session's model \
+                 (current parent provider = \"{parent_provider}\"); specify an explicit model or drop the provider",
                 named_provider.as_deref().unwrap_or("")
             )));
         }
         None => parent.runtime.model.borrow().clone(),
     };
-    // 思考级别：显式参数/定义校验（off→不发参数，非法值报错而非静默失效）；
-    // 两者皆无时：跨 provider 缺省 off（不带 thinking 参数，兼容 ds/ollama 端点），
-    // 同 provider 继承父会话当前级别快照（与主会话一致的宽松语义）。
+    // Thinking level: explicit parameter/definition is validated (off→no parameter, invalid values error rather than silently degrading);
+    // when neither is set: crossing providers defaults to off (no thinking parameter, compatible with ds/ollama endpoints),
+    // same-provider inherits a snapshot of the parent session's current level (the same lenient semantics as the main session).
     let thinking = match thinking.or_else(|| def.and_then(|d| d.thinking.clone())) {
         Some(level) => normalize_thinking(&level).map_err(ToolError::failed)?,
         None if cross_provider => None,
@@ -795,7 +799,7 @@ impl AgentCell {
         crate::watch::WatchPoll {
             state: WatchState::Running,
             detail: Some(format!(
-                "已产出 {} 字符",
+                "produced {} chars",
                 self.chars.load(std::sync::atomic::Ordering::SeqCst)
             )),
             payload: None,
@@ -919,7 +923,7 @@ impl Tool for AgentTool {
                 ctx.watch.set_state(
                     id,
                     WatchState::Done,
-                    Some("完成".to_string()),
+                    Some("done".to_string()),
                     Some(serde_json::json!(content.clone())),
                 );
                 // On the synchronous path tools run serially, so queued messages never reach here;
@@ -1040,11 +1044,11 @@ impl Tool for SendMessageTool {
             .map_err(ToolError::failed)?;
         let note = match timeout {
             Some(t) => format!(
-                "本回合结束时与同一收件人的其他消息合并成一批送达；{}s 内没等到回复（含「读了但那轮没吭声」）将自动复查并追问（最多 {MAX_FOLLOW_UPS} 轮），结果以任务通知回报",
+                "delivered in a batch with the recipient's other messages at the end of this turn; if no reply arrives within {}s (including read-but-silent rounds), it is automatically re-checked and chased (up to {MAX_FOLLOW_UPS} rounds); the outcome is reported as a task notification",
                 t.as_secs()
             ),
-            None => "本回合结束时与同一收件人的其他消息合并成一批送达；\
-                     已按 ack_timeout=0 关闭自动追问，需要时自行 AgentControl(action=messages, agent=…) 复查"
+            None => "delivered in a batch with the recipient's other messages at the end of this turn;\
+                      follow-up chasing is off (ack_timeout=0); check yourself with AgentControl(action=messages, agent=…) when needed"
                 .to_string(),
         };
         if let Some(timeout) = timeout {
@@ -1116,9 +1120,12 @@ impl AgentControlTool {
         };
         let sent = match ack.follow_ups {
             0 => String::new(),
-            n => format!("，已追问 {n}/{MAX_FOLLOW_UPS}"),
+            n => format!(", chased {n}/{MAX_FOLLOW_UPS}"),
         };
-        format!("，{}s 未回复即自动复查{sent}", timeout.as_secs())
+        format!(
+            ", auto re-check after {}s without a reply{sent}",
+            timeout.as_secs()
+        )
     }
 
     fn require_agent(input: &AgentControlInput) -> Result<&str, ToolError> {
@@ -1126,7 +1133,11 @@ impl AgentControlTool {
             .agent
             .as_deref()
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| ToolError::failed("messages/stop/delete 需要 agent 参数（实例名）"))
+            .ok_or_else(|| {
+                ToolError::failed(
+                    "messages/stop/delete require the agent parameter (instance name)",
+                )
+            })
     }
 }
 
@@ -1161,7 +1172,7 @@ impl Tool for AgentControlTool {
             AgentAction::List => {
                 let statuses = registry.list();
                 if statuses.is_empty() {
-                    "当前没有子代理实例".to_string()
+                    "no subagent instances right now".to_string()
                 } else {
                     statuses
                         .iter()
@@ -1169,20 +1180,20 @@ impl Tool for AgentControlTool {
                             let def = s
                                 .def
                                 .as_deref()
-                                .map(|d| format!("，定义 {d}"))
+                                .map(|d| format!(", definition {d}"))
                                 .unwrap_or_default();
                             let pending = if s.pending > 0 {
-                                format!("，{} 条指令排队", s.pending)
+                                format!(", {} instructions queued", s.pending)
                             } else {
                                 String::new()
                             };
                             let unacked = if s.unacked > 0 {
-                                format!("，{} 条未确认", s.unacked)
+                                format!(", {} unacknowledged", s.unacked)
                             } else {
                                 String::new()
                             };
                             format!(
-                                "- {}（{}{def}{pending}{unacked}）：{}",
+                                "- {} ({}{def}{pending}{unacked}): {}",
                                 s.name,
                                 s.state.label(),
                                 s.description
@@ -1196,30 +1207,30 @@ impl Tool for AgentControlTool {
                 let name = Self::require_agent(&params)?;
                 let acks = registry
                     .acks_of(name)
-                    .ok_or_else(|| ToolError::failed(format!("没有名为 {name} 的子代理")))?;
+                    .ok_or_else(|| ToolError::failed(format!("no subagent named {name}")))?;
                 if acks.is_empty() {
-                    format!("还没有发给 {name} 的消息")
+                    format!("no messages sent to {name} yet")
                 } else {
                     acks.iter()
                         .map(|a| {
                             let detail = match &a.state {
                                 crate::agents::AckState::Queued => format!(
-                                    "queued（等待 {}s{}，将在下一个回合边界成批送达）",
+                                    "queued (waiting {}s{}, will be delivered in a batch at the next turn boundary)",
                                     a.queued_at.elapsed().as_secs(),
                                     Self::chase_note(a)
                                 ),
                                 crate::agents::AckState::Delivered { run } => format!(
-                                    "delivered（第 {run} 轮已读进上下文，但那一轮没有回话{}）",
+                                    "delivered (read into the context in round {run}, but that round did not answer{})",
                                     Self::chase_note(a)
                                 ),
                                 crate::agents::AckState::Answered { run } => {
-                                    format!("answered（第 {run} 轮已回复）")
+                                    format!("answered (replied in round {run})")
                                 }
                                 crate::agents::AckState::Dropped { reason } => {
-                                    format!("dropped（{reason}，未送达）")
+                                    format!("dropped ({reason}, never delivered)")
                                 }
                             };
-                            format!("- #{} {detail}：{}", a.id, a.excerpt)
+                            format!("- #{} {detail}: {}", a.id, a.excerpt)
                         })
                         .collect::<Vec<_>>()
                         .join("\n")
@@ -1229,7 +1240,7 @@ impl Tool for AgentControlTool {
                 let name = Self::require_agent(&params)?;
                 let (watch_id, dropped) = registry.stop(name).map_err(ToolError::failed)?;
                 let lost = if dropped > 0 {
-                    format!("，{dropped} 条未送达指令已丢弃")
+                    format!(", {dropped} undelivered instructions discarded")
                 } else {
                     String::new()
                 };
@@ -1238,12 +1249,12 @@ impl Tool for AgentControlTool {
                         ctx.watch.set_state(
                             id,
                             WatchState::Cancelled,
-                            Some("已停止".to_string()),
+                            Some("stopped".to_string()),
                             None,
                         );
-                        format!("已停止 {name}（当前回合中止，历史保留{lost}）")
+                        format!("stopped {name} (current run aborted, history kept{lost})")
                     }
-                    None => format!("{name} 已停止（无进行中的回合{lost}）"),
+                    None => format!("{name} stopped (no run in progress{lost})"),
                 }
             }
             AgentAction::Delete => {
@@ -1253,7 +1264,7 @@ impl Tool for AgentControlTool {
                 // The ack trail is removed with the instance, so this count is the sender's
                 // last chance to learn that queued instructions never landed.
                 let lost = if dropped > 0 {
-                    format!("，{dropped} 条未送达指令已丢弃")
+                    format!(", {dropped} undelivered instructions discarded")
                 } else {
                     String::new()
                 };
@@ -1262,12 +1273,12 @@ impl Tool for AgentControlTool {
                         ctx.watch.set_state(
                             id,
                             WatchState::Cancelled,
-                            Some("已删除".to_string()),
+                            Some("deleted".to_string()),
                             None,
                         );
-                        format!("已删除 {name}（回合中止，名字释放{lost}）")
+                        format!("deleted {name} (run aborted, name released{lost})")
                     }
-                    None => format!("已删除 {name}（名字释放{lost}）"),
+                    None => format!("deleted {name} (name released{lost})"),
                 }
             }
         };
@@ -1327,7 +1338,7 @@ mod tests {
             permission_mode: crate::permission::PermissionMode::Default,
             settings,
             system: vec![SystemBlock {
-                text: "父 system".into(),
+                text: "parent system".into(),
                 cache: false,
             }],
             depth: 0,
@@ -1363,17 +1374,17 @@ mod tests {
     fn def(name: &str) -> AgentDef {
         AgentDef {
             name: name.into(),
-            description: format!("{name} 描述"),
+            description: format!("{name} description"),
             model: Some("def-model".into()),
             provider: Some("ds".into()),
             thinking: Some("high".into()),
-            system: "你是评审。".into(),
+            system: "You are the reviewer.".into(),
             inherit_system: true,
             source: crate::agents::AgentDefSource::Unknown,
         }
     }
 
-    /// 提取 build_sub_session 错误文本（Arc<Session> 无 Debug，unwrap_err 不可用）。
+    /// Extract build_sub_session's error text (Arc<Session> has no Debug, so unwrap_err is unavailable).
     fn sub_err(r: Result<Arc<Session>, ToolError>) -> String {
         match r {
             Err(e) => e.to_string(),
@@ -1397,18 +1408,21 @@ mod tests {
                 "https://parent.example".to_string()
             )
         );
-        assert_eq!(sub.system[0].text, "父 system", "无定义时继承父 system");
+        assert_eq!(
+            sub.system[0].text, "parent system",
+            "inherits the parent system when no definition is given"
+        );
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
             Some("medium"),
-            "无显式/定义时继承父会话当前思考级别"
+            "inherits the parent session's current thinking level when neither explicit nor defined"
         );
         // No provider specified: shares the parent endpoint (follows the parent's provider switch).
         client.set_provider("ds").unwrap();
         assert_eq!(
             sub.client.current_endpoint().0.as_deref(),
             Some("sk-ds"),
-            "共享端点跟随父会话切换"
+            "the shared endpoint follows the parent session's switches"
         );
     }
 
@@ -1433,7 +1447,7 @@ mod tests {
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
             Some("xhigh"),
-            "显式思考级别生效"
+            "an explicit thinking level takes effect"
         );
         // Forked independent endpoint: the parent session is unaffected.
         assert_eq!(
@@ -1449,24 +1463,24 @@ mod tests {
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
         // The definition supplies system/model/provider/thinking defaults.
         let sub = tool
-            .build_sub_session(&params("审查"), Some(&d), "sub")
+            .build_sub_session(&params("review"), Some(&d), "sub")
             .unwrap();
-        // Default is append: 父 system + 人设 + 子代理说明块。
+        // Default is append: parent system + persona + the subagent note block.
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(
             texts,
-            ["父 system", "你是评审。", SUBAGENT_NOTE],
-            "具名定义默认追加而非替换"
+            ["parent system", "You are the reviewer.", SUBAGENT_NOTE],
+            "a named definition appends by default rather than replacing"
         );
         assert_eq!(*sub.runtime.model.borrow(), "def-model");
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
             Some("high"),
-            "定义提供思考级别缺省"
+            "the definition provides the thinking-level default"
         );
         // Explicit parameters take precedence over the definition.
-        let mut p = params("审查");
+        let mut p = params("review");
         p.model = Some("explicit".into());
         p.thinking = Some("off".into());
         let sub = tool.build_sub_session(&p, Some(&d), "sub").unwrap();
@@ -1474,7 +1488,7 @@ mod tests {
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
             None,
-            "显式 off 归一化为不发参数"
+            "explicit off normalizes to no parameter"
         );
         // resolve_def: an unknown definition errors out and lists the available ones.
         let mut p = params("x");
@@ -1491,34 +1505,34 @@ mod tests {
         p.provider = Some("nope".into());
         assert!(
             tool.build_sub_session(&p, None, "sub").is_err(),
-            "未知 provider 报错"
+            "unknown provider errors"
         );
     }
 
     #[test]
     fn sub_session_cross_provider_requires_model() {
-        // 父 provider = "default"（parent_session 缺省）。
+        // Parent provider = "default" (the parent_session default).
         let (session, _client) = parent_session();
-        // 仅指定 provider、无 model → 早失败：不继承父模型（避免 claude-sonnet-5
-        // 发到 DeepSeek 端点 "model not found"）。
+        // Only a provider given, no model → fail early: the parent model is not inherited (so claude-sonnet-5 never
+        // lands on a DeepSeek endpoint as "model not found").
         let tool = AgentTool::new(session.clone(), Vec::new());
         let mut p = params("do it");
         p.provider = Some("ds".into());
         let err = sub_err(tool.build_sub_session(&p, None, "sub"));
         assert!(
-            err.contains("需要 model") && err.contains("ds"),
-            "跨 provider 需要显式 model：{err}"
+            err.contains("requires a model") && err.contains("ds"),
+            "crossing providers requires an explicit model: {err}"
         );
-        // 定义提供 provider 但无 model → 同样报错。
+        // The definition provides a provider but no model → errors the same way.
         let mut d = def("reviewer");
         d.model = None;
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
-        let err = sub_err(tool.build_sub_session(&params("审查"), Some(&d), "sub"));
+        let err = sub_err(tool.build_sub_session(&params("review"), Some(&d), "sub"));
         assert!(
-            err.contains("需要 model"),
-            "定义侧跨 provider 同样报错：{err}"
+            err.contains("requires a model"),
+            "the definition-side cross-provider case errors the same way: {err}"
         );
-        // 同 provider（父当前就是 ds）→ 继承模型，不报错。
+        // Same provider (the parent's current is ds) → inherits the model, no error.
         let _ = session.runtime.provider_tx.send("ds".into());
         let tool = AgentTool::new(session.clone(), Vec::new());
         let mut p = params("do it");
@@ -1527,7 +1541,7 @@ mod tests {
         assert_eq!(
             *sub.runtime.model.borrow(),
             "parent-model",
-            "同 provider 继承父模型"
+            "same provider inherits the parent model"
         );
     }
 
@@ -1536,8 +1550,8 @@ mod tests {
         let (session, _client) = parent_session();
         let _ = session.runtime.thinking_tx.send(Some("xhigh".into()));
         let tool = AgentTool::new(session.clone(), Vec::new());
-        // 跨 provider 且无显式/定义 thinking → 缺省 off（不带 thinking 参数，
-        // 兼容 DeepSeek/Ollama 端点）。
+        // Crossing providers with no explicit/defined thinking → defaults to off (no thinking parameter,
+        // compatible with DeepSeek/Ollama endpoints).
         let mut p = params("do it");
         p.provider = Some("ds".into());
         p.model = Some("ds-model".into());
@@ -1545,9 +1559,9 @@ mod tests {
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
             None,
-            "跨 provider 缺省 off"
+            "crossing providers defaults to off"
         );
-        // 跨 provider 显式 thinking 仍生效。
+        // An explicit thinking level still applies when crossing providers.
         let mut p = params("do it");
         p.provider = Some("ds".into());
         p.model = Some("ds-model".into());
@@ -1568,7 +1582,7 @@ mod tests {
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
             Some("xhigh"),
-            "同 provider 维持继承快照"
+            "same provider keeps the inherited snapshot"
         );
     }
 
@@ -1576,7 +1590,7 @@ mod tests {
     fn sub_session_default_provider_aliases_parent_endpoint() {
         let (session, client) = parent_session();
         let tool = AgentTool::new(session.clone(), Vec::new());
-        // 显式 "default"：共享父端点，不 fork、不报错。
+        // Explicit "default": shares the parent endpoint, no fork, no error.
         let mut p = params("do it");
         p.provider = Some("default".into());
         let sub = tool.build_sub_session(&p, None, "sub").unwrap();
@@ -1588,16 +1602,16 @@ mod tests {
                 "https://parent.example".to_string()
             )
         );
-        // 共享端点跟随父切换（"default" 与未指定等价）。
+        // The shared endpoint follows the parent's switches ("default" and unset are equivalent).
         client.set_provider("ds").unwrap();
         let _ = session.runtime.provider_tx.send("ds".into());
         assert_eq!(sub.client.current_endpoint().0.as_deref(), Some("sk-ds"));
-        // AgentDef frontmatter provider: default 同路径（跟随父当前 provider 名）。
+        // AgentDef frontmatter provider: default takes the same path (follows the parent's current provider name).
         let mut d = def("reviewer");
         d.provider = Some("default".into());
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
         let sub = tool
-            .build_sub_session(&params("审查"), Some(&d), "sub")
+            .build_sub_session(&params("review"), Some(&d), "sub")
             .unwrap();
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
     }
@@ -1610,14 +1624,20 @@ mod tests {
             let mut p = params("do it");
             p.thinking = Some(bad.into());
             let err = sub_err(tool.build_sub_session(&p, None, "sub"));
-            assert!(err.contains("无效思考级别"), "非法档位 {bad:?} 报错：{err}");
+            assert!(
+                err.contains("invalid thinking level"),
+                "invalid level {bad:?} should error: {err}"
+            );
         }
-        // 定义侧非法值同样报错。
+        // An invalid definition-side value errors the same way.
         let mut d = def("reviewer");
         d.thinking = Some("bogus".into());
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
-        let err = sub_err(tool.build_sub_session(&params("审查"), Some(&d), "sub"));
-        assert!(err.contains("无效思考级别"), "定义侧非法值报错：{err}");
+        let err = sub_err(tool.build_sub_session(&params("review"), Some(&d), "sub"));
+        assert!(
+            err.contains("invalid thinking level"),
+            "definition-side invalid value should error: {err}"
+        );
     }
 
     #[test]
@@ -1627,19 +1647,20 @@ mod tests {
         let schema = tool.input_schema();
         let props = schema["properties"].as_object().unwrap();
         for key in ["model", "provider", "thinking", "name", "agent"] {
-            assert!(props.contains_key(key), "schema 含 {key}");
+            assert!(props.contains_key(key), "schema contains {key}");
         }
         assert!(
-            tool.description().contains("- reviewer: reviewer 描述"),
-            "描述列出具名定义"
+            tool.description()
+                .contains("- reviewer: reviewer description"),
+            "the description lists the named definitions"
         );
     }
 
     #[test]
     fn excerpt_is_single_line_and_bounded() {
-        assert_eq!(excerpt("短任务"), "短任务");
-        assert_eq!(excerpt("第一行\n第二行"), "第一行…");
-        let long = "长".repeat(50);
+        assert_eq!(excerpt("short task"), "short task");
+        assert_eq!(excerpt("first line\nsecond line"), "first line…");
+        let long = "x".repeat(50);
         let cut = excerpt(&long);
         assert!(cut.chars().count() <= 41, "{cut}");
         assert!(cut.ends_with('…'));
@@ -1650,7 +1671,7 @@ mod tests {
         let (session, _client) = parent_session();
         session
             .agents
-            .insert("scout", None, "调研".into(), session.clone());
+            .insert("scout", None, "research".into(), session.clone());
         let ctl = AgentControlTool::new(session.clone());
         let ctx = crate::tool::ToolContext {
             home: std::env::temp_dir(),
@@ -1679,14 +1700,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(out.content.as_str().unwrap().contains("已停止"), "stop");
+        assert!(out.content.as_str().unwrap().contains("stopped"), "stop");
         // After stopping, SendMessage rejects delivery.
         let send = SendMessageTool::new(session.clone());
         let err = send
             .call(serde_json::json!({"agent": "scout", "message": "hi"}), &ctx)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("已停止"), "{err}");
+        assert!(err.to_string().contains("stopped"), "{err}");
         let out = ctl
             .call(
                 serde_json::json!({"action": "delete", "agent": "scout"}),
@@ -1694,7 +1715,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(out.content.as_str().unwrap().contains("已删除"));
+        assert!(out.content.as_str().unwrap().contains("deleted"));
         assert!(session.agents.list().is_empty());
         // Unknown instance: stop errors out.
         let err = ctl
@@ -1712,7 +1733,7 @@ mod tests {
         let (session, _client) = parent_session();
         session
             .agents
-            .insert("worker", None, "干活".into(), session.clone());
+            .insert("worker", None, "do work".into(), session.clone());
         let send = SendMessageTool::new(session.clone());
         let ctx = hub_ctx(&session);
         // The acknowledgement wait is opt-in: omitting it keeps the plain fire-and-forget path.
@@ -1721,7 +1742,7 @@ mod tests {
         assert_eq!(schema["required"], serde_json::json!(["agent", "message"]));
         let out = send
             .call(
-                serde_json::json!({"agent": "worker", "message": "补充"}),
+                serde_json::json!({"agent": "worker", "message": "add more"}),
                 &ctx,
             )
             .await
@@ -1734,7 +1755,7 @@ mod tests {
         assert_eq!(receipt["message_id"], 1);
         let status = &session.agents.list()[0];
         assert_eq!(status.pending, 1);
-        assert_eq!(status.unacked, 1, "queued 还不是回执");
+        assert_eq!(status.unacked, 1, "queued is not yet a receipt");
         // Unknown instance: the error lists the existing instance names.
         let err = send
             .call(serde_json::json!({"agent": "nobody", "message": "x"}), &ctx)
@@ -1750,7 +1771,7 @@ mod tests {
         let (session, _client) = parent_session();
         session
             .agents
-            .insert("worker", None, "干活".into(), session.clone());
+            .insert("worker", None, "do work".into(), session.clone());
         let send = SendMessageTool::new(session.clone());
         let ctx = hub_ctx(&session);
         let receipt = |out: ToolResult| -> serde_json::Value {
@@ -1760,7 +1781,7 @@ mod tests {
 
         let out = send
             .call(
-                serde_json::json!({"agent": "worker", "message": "默认"}),
+                serde_json::json!({"agent": "worker", "message": "default"}),
                 &ctx,
             )
             .await
@@ -1768,17 +1789,20 @@ mod tests {
         assert_eq!(
             receipt(out)["ack_timeout_secs"],
             DEFAULT_ACK_TIMEOUT_SECS,
-            "没提要求也照看着"
+            "it is watched even without a request"
         );
 
         let out = send
             .call(
-                serde_json::json!({"agent": "worker", "message": "不等回复", "ack_timeout": 0}),
+                serde_json::json!({"agent": "worker", "message": "no wait for a reply", "ack_timeout": 0}),
                 &ctx,
             )
             .await
             .unwrap_or_else(|e| panic!("{e}"));
-        assert!(receipt(out)["ack_timeout_secs"].is_null(), "0 = 显式关闭");
+        assert!(
+            receipt(out)["ack_timeout_secs"].is_null(),
+            "0 = explicitly off"
+        );
 
         let acks = session
             .agents
@@ -1815,11 +1839,11 @@ mod tests {
         // Running: the boundary flush cannot claim it, so the message really does stay queued.
         session
             .agents
-            .insert("worker", None, "干活".into(), session.clone());
+            .insert("worker", None, "do work".into(), session.clone());
         let ctx = hub_ctx(&session);
         let out = SendMessageTool::new(session.clone())
             .call(
-                serde_json::json!({"agent": "worker", "message": "查日志", "ack_timeout": 1}),
+                serde_json::json!({"agent": "worker", "message": "check the logs", "ack_timeout": 1}),
                 &ctx,
             )
             .await
@@ -1827,7 +1851,10 @@ mod tests {
         let receipt: serde_json::Value =
             serde_json::from_str(out.content.as_str().unwrap_or_default())
                 .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(receipt["ack_timeout_secs"], 5, "低于下限的等待被夹紧");
+        assert_eq!(
+            receipt["ack_timeout_secs"], 5,
+            "waits below the lower bound are clamped"
+        );
 
         // Four deadlines: three follow-ups, then the give-up.
         tokio::time::sleep(std::time::Duration::from_secs(5 * 5)).await;
@@ -1836,18 +1863,21 @@ mod tests {
             .agents
             .acks_of("worker")
             .unwrap_or_else(|| unreachable!());
-        assert_eq!(acks[0].follow_ups, MAX_FOLLOW_UPS, "追问到预算用尽为止");
+        assert_eq!(
+            acks[0].follow_ups, MAX_FOLLOW_UPS,
+            "chased until the budget runs out"
+        );
         assert_eq!(
             session.agents.list()[0].pending,
             1 + MAX_FOLLOW_UPS as usize,
-            "每轮一条追问，与原件同在信箱"
+            "one follow-up per round, in the inbox with the original"
         );
         let notes = session.watch.consume_notifications(None);
         assert!(
             notes
                 .iter()
-                .any(|n| n.contains("追问") && n.contains("worker")),
-            "放弃后回报主 agent：{notes:?}"
+                .any(|n| n.contains("follow-ups") && n.contains("worker")),
+            "the hub is told after giving up: {notes:?}"
         );
     }
 
@@ -1858,11 +1888,11 @@ mod tests {
         let (session, _client) = parent_session();
         session
             .agents
-            .insert("mute", None, "沉默".into(), session.clone());
+            .insert("mute", None, "silent".into(), session.clone());
         let ctx = hub_ctx(&session);
         SendMessageTool::new(session.clone())
             .call(
-                serde_json::json!({"agent": "mute", "message": "汇报进度", "ack_timeout": 5}),
+                serde_json::json!({"agent": "mute", "message": "report progress", "ack_timeout": 5}),
                 &ctx,
             )
             .await
@@ -1885,12 +1915,15 @@ mod tests {
             .agents
             .acks_of("mute")
             .unwrap_or_else(|| unreachable!());
-        assert_eq!(acks[0].follow_ups, MAX_FOLLOW_UPS, "读了不回照样追问到底");
+        assert_eq!(
+            acks[0].follow_ups, MAX_FOLLOW_UPS,
+            "read-but-silent is still chased to the end"
+        );
         assert_eq!(session.agents.list()[0].pending, MAX_FOLLOW_UPS as usize);
         let notes = session.watch.consume_notifications(None);
         assert!(
-            notes.iter().any(|n| n.contains("仍未回复")),
-            "沉默最终回报主 agent：{notes:?}"
+            notes.iter().any(|n| n.contains("still has not replied")),
+            "silence is eventually reported to the hub: {notes:?}"
         );
     }
 
@@ -1901,11 +1934,11 @@ mod tests {
         let (session, _client) = parent_session();
         session
             .agents
-            .insert("worker", None, "干活".into(), session.clone());
+            .insert("worker", None, "do work".into(), session.clone());
         let ctx = hub_ctx(&session);
         SendMessageTool::new(session.clone())
             .call(
-                serde_json::json!({"agent": "worker", "message": "查日志", "ack_timeout": 60}),
+                serde_json::json!({"agent": "worker", "message": "check the logs", "ack_timeout": 60}),
                 &ctx,
             )
             .await
@@ -1922,12 +1955,18 @@ mod tests {
             acks[0].state,
             crate::agents::AckState::Answered { .. }
         ));
-        assert_eq!(acks[0].follow_ups, 0, "按时回复不触发追问");
+        assert_eq!(
+            acks[0].follow_ups, 0,
+            "an on-time reply does not trigger chasing"
+        );
         assert!(
             session.watch.consume_notifications(None).is_empty(),
-            "无事发生就不打扰主 agent"
+            "no news, no nagging the hub"
         );
-        assert!(session.watch.snapshot().is_empty(), "也不留看板行");
+        assert!(
+            session.watch.snapshot().is_empty(),
+            "and leaves no board line"
+        );
     }
 
     /// The hub forwards an image to a subagent by repeating its `#[image N]` marker: the
@@ -1947,7 +1986,9 @@ mod tests {
         assert_eq!(session.attachments.register(&png), Some(1));
 
         // Spawn: markers in the prompt resolve against the session table.
-        let images = session.attachments.resolve("看这张 #[image 1] 再判断");
+        let images = session
+            .attachments
+            .resolve("look at this #[image 1] and decide");
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].media_type, "image/png");
         // Sub-sessions share the table, so a nested spawn can resolve the same marker.
@@ -1960,19 +2001,23 @@ mod tests {
             .insert("worker", None, "d".into(), sub.clone());
         let id = session
             .agents
-            .deliver("worker", "对比 #[image 1]", images.clone(), None)
+            .deliver("worker", "compare #[image 1]", images.clone(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         let (prompt, carried) = match session.agents.finish("worker", Vec::new(), true) {
             Some(next) => absorb_inbox(&sub.channels, "worker", &next.items),
-            None => unreachable!("排队消息应在回合结束时取出"),
+            None => unreachable!("queued messages should be picked up at the turn boundary"),
         };
         let acks = session
             .agents
             .acks_of("worker")
             .unwrap_or_else(|| unreachable!());
         assert_eq!(acks[0].id, id);
-        assert_eq!(prompt, "对比 #[image 1]");
-        assert_eq!(carried.len(), 1, "图片随排队指令一同送达");
+        assert_eq!(prompt, "compare #[image 1]");
+        assert_eq!(
+            carried.len(),
+            1,
+            "images arrive with the queued instruction"
+        );
         assert_eq!(carried[0].data, images[0].data);
     }
 
@@ -1993,12 +2038,16 @@ mod tests {
         assert_eq!(parent.attachments.register(&png), Some(1));
         assert!(
             !parent.client.supports_images(),
-            "父端点不收图（本用例的前提）"
+            "the parent endpoint does not accept images (a precondition of this test)"
         );
 
         // Markers resolve regardless of what the parent endpoint can carry.
-        let images = parent.attachments.resolve("描述 #[image 1]");
-        assert_eq!(images.len(), 1, "解析不受端点能力影响");
+        let images = parent.attachments.resolve("describe #[image 1]");
+        assert_eq!(
+            images.len(),
+            1,
+            "resolution is unaffected by the endpoint's capabilities"
+        );
 
         // Forked onto the vision provider, the sub-session is the one whose capability decides.
         let sub = build_sub_session(
@@ -2010,17 +2059,20 @@ mod tests {
             "looker",
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        assert!(sub.client.supports_images(), "子会话端点收图");
+        assert!(
+            sub.client.supports_images(),
+            "the sub-session endpoint accepts images"
+        );
         assert!(
             Arc::ptr_eq(&sub.attachments, &parent.attachments),
-            "附件表共享，子代理复述占位即可命中"
+            "the attachment table is shared; restating the placeholder hits it"
         );
         assert!(
             parent
                 .client
                 .image_capable_providers()
                 .contains(&"vision".to_string()),
-            "提示里指的路是可发现的：{:?}",
+            "the path pointed to in the prompt is discoverable: {:?}",
             parent.client.image_capable_providers()
         );
     }
@@ -2034,10 +2086,10 @@ mod tests {
         d.inherit_system = false;
         let tool = AgentTool::new(session, vec![d.clone()]);
         let sub = tool
-            .build_sub_session(&params("审查"), Some(&d), "sub")
+            .build_sub_session(&params("review"), Some(&d), "sub")
             .unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
-        assert_eq!(texts, ["你是评审。", SUBAGENT_NOTE]);
+        assert_eq!(texts, ["You are the reviewer.", SUBAGENT_NOTE]);
     }
 
     /// Channel etiquette rides in the system prompt, and only when channels are on.
@@ -2049,33 +2101,33 @@ mod tests {
     #[test]
     fn channel_note_is_gated_by_the_flag() {
         let (off, _c1) = parent_session();
-        assert!(!off.settings.experimental.agent_channels, "缺省关");
+        assert!(!off.settings.experimental.agent_channels, "off by default");
         let sub = build_sub_session(&off, None, None, None, None, "solo")
-            .unwrap_or_else(|e| panic!("派生: {e}"));
+            .unwrap_or_else(|e| panic!("spawn: {e}"));
         assert!(
             !sub.system.iter().any(|b| b.text == CHANNEL_NOTE),
-            "频道关闭时不该塞频道礼仪"
+            "channel etiquette must not be injected when channels are off"
         );
 
         let (mut on, _c2) = parent_session();
-        let session = Arc::get_mut(&mut on).unwrap_or_else(|| panic!("独占"));
+        let session = Arc::get_mut(&mut on).unwrap_or_else(|| panic!("exclusive"));
         session.settings.experimental.agent_channels = true;
         let sub = build_sub_session(&on, None, None, None, None, "member")
-            .unwrap_or_else(|e| panic!("派生: {e}"));
+            .unwrap_or_else(|e| panic!("spawn: {e}"));
         assert!(sub.system.iter().any(|b| b.text == CHANNEL_NOTE));
         // Both failure modes have to survive edits to this text: the storm it was written
         // for, and the over-correction where nobody answers the human at all.
         assert!(
             CHANNEL_NOTE.contains("Never answer an answer"),
-            "要点名回复回复这个风暴来源，别只说「保持简洁」"
+            "must name the reply-to-replies storm specifically, not just say \"keep it brief\""
         );
         assert!(
             CHANNEL_NOTE.contains("Only `Post` puts words in the room"),
-            "必须写明回合正文到不了频道——否则成员以为自己已经答过了"
+            "must state that the turn body never reaches the channel — otherwise members think they already answered"
         );
         assert!(
             CHANNEL_NOTE.contains("`user` or `main` addressed the room"),
-            "必须说清「人问话要答」，否则沉默规则会过冲"
+            "must spell out \"answer when a human speaks\", otherwise the silence rule overshoots"
         );
     }
 
@@ -2085,10 +2137,10 @@ mod tests {
         let (session, _client) = parent_session();
         let sub = build_sub_session(&session, None, None, None, None, "worker").unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
-        assert_eq!(texts, ["父 system", SUBAGENT_NOTE]);
+        assert_eq!(texts, ["parent system", SUBAGENT_NOTE]);
         assert!(
             !sub.system.last().map(|b| b.cache).unwrap_or(true),
-            "说明块不占 cache breakpoint"
+            "the note block does not occupy a cache breakpoint"
         );
     }
 
@@ -2100,11 +2152,11 @@ mod tests {
         let sub = build_sub_session(&parent, None, None, None, None, "worker").unwrap();
         assert!(
             Arc::ptr_eq(&sub.runtime.mcp, &parent.runtime.mcp),
-            "MCP 管理器应共享，否则子代理拿不到任何 MCP 工具"
+            "the MCP manager should be shared, otherwise subagents get no MCP tools"
         );
         assert!(
             Arc::ptr_eq(&sub.runtime.permissions, &parent.runtime.permissions),
-            "权限表应共享，否则 spawn 后的 /permissions 改动传不到"
+            "the permission tables should be shared, otherwise /permissions changes after spawn never reach subagents"
         );
     }
 

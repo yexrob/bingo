@@ -730,7 +730,7 @@ mod tests {
             let visible = total - start;
             let frame = visible + usize::from(hidden > 0) + chrome;
             assert!(frame < height, "height={height} frame={frame}");
-            assert_eq!(hidden, total - visible, "省略数 = 未显示行数");
+            assert_eq!(hidden, total - visible, "hidden count = rows not shown");
         }
         // Zero budget (chrome + two-row margin fill it): no tail row is drawn; the hidden count is zero.
         assert_eq!(tail_window(100, 0, 4, 6), (100, 0));
@@ -767,9 +767,9 @@ mod tests {
     fn tiny_terminal_keeps_the_prompt_and_footer() {
         let mut chat = chat_at(60, 6);
         chat.busy = true;
-        chat.push_warning("mcp 连接失败".to_string());
+        chat.push_warning("mcp connection failed".to_string());
         let frame = Frame::assemble(&chat, size(60, 6));
-        assert_eq!(frame.rows.len(), 4, "height-2 上限");
+        assert_eq!(frame.rows.len(), 4, "height-2 cap");
         let text: Vec<String> = frame.rows.iter().map(row_text).collect();
         // The dropped rows are the top ones (status/warning); the input and footer stay.
         assert!(
@@ -778,11 +778,11 @@ mod tests {
         );
         assert!(
             text.iter().any(|l| l.starts_with('╰')),
-            "输入框下边框仍在: {text:?}"
+            "input box bottom border still present: {text:?}"
         );
         assert!(
             text.iter().any(|l| l.starts_with('╭')),
-            "输入框上边框仍在: {text:?}"
+            "input box top border still present: {text:?}"
         );
     }
 
@@ -812,9 +812,13 @@ mod tests {
         ];
         chat.doc.settled = 2;
         let items = flush_items(&chat, 40, chat.doc.settled);
-        assert_eq!(items.len(), 2, "只落定稿前缀");
+        assert_eq!(items.len(), 2, "only the settled prefix lands");
         assert_eq!(history_text(&items[0]), "first");
-        assert_eq!(text_width(&history_text(&items[1])), 40, "气泡满行");
+        assert_eq!(
+            text_width(&history_text(&items[1])),
+            40,
+            "bubble fills the row"
+        );
     }
 
     fn img_row(url: &str, row: usize) -> Line {
@@ -841,16 +845,16 @@ mod tests {
         ];
         chat.doc.settled = 3;
         let items = flush_items(&chat, 40, chat.doc.settled);
-        assert_eq!(items.len(), 3, "图片行逐行落盘");
+        assert_eq!(items.len(), 3, "image rows freeze one per row");
         let head = history_text(&items[0]);
         assert!(
             head.starts_with(crate::tui::gfx::PLACEHOLDER),
-            "占位符单元格: {head:?}"
+            "placeholder cell: {head:?}"
         );
         assert_ne!(
             history_text(&items[0]),
             history_text(&items[1]),
-            "行变音符随行号变化"
+            "row diacritics change with the row index"
         );
         assert_eq!(history_text(&items[2]), "text");
     }
@@ -891,22 +895,32 @@ mod tests {
         ];
         let bytes = image_transmits(cap, &images, &rows, &mut transmits);
         let s = String::from_utf8_lossy(&bytes);
-        assert_eq!(s.matches("a=T,U=1").count(), 2, "每张图恰好一次: {s}");
+        assert_eq!(
+            s.matches("a=T,U=1").count(),
+            2,
+            "each image exactly once: {s}"
+        );
         let id_a = crate::tui::gfx::image_id_for("a.png");
         let id_b = crate::tui::gfx::image_id_for("b.png");
-        assert!(s.contains(&format!("i={id_a}")), "a.png 的 id 在传输里");
-        assert!(s.contains(&format!("i={id_b}")), "b.png 的 id 在传输里");
+        assert!(
+            s.contains(&format!("i={id_a}")),
+            "a.png's id is in the transmission"
+        );
+        assert!(
+            s.contains(&format!("i={id_b}")),
+            "b.png's id is in the transmission"
+        );
 
         // Same rows again: the terminal already holds both images.
         assert!(
             image_transmits(cap, &images, &rows, &mut transmits).is_empty(),
-            "已传输不重复"
+            "already-transmitted images are not repeated"
         );
         // After a reset (resize purged the store) they transmit again.
         transmits.reset();
         assert!(
             !image_transmits(cap, &images, &rows, &mut transmits).is_empty(),
-            "reset 后重传"
+            "re-transmitted after reset"
         );
 
         // The tmux transport wraps every chunk in a passthrough envelope.
@@ -918,7 +932,7 @@ mod tests {
         let wrapped = image_transmits(tmux, &images, &rows, &mut transmits);
         assert!(
             String::from_utf8_lossy(&wrapped).starts_with("\x1bPtmux;"),
-            "tmux 传输走 passthrough"
+            "tmux transmissions go through passthrough"
         );
     }
 
@@ -935,7 +949,7 @@ mod tests {
             .collect();
         assert!(
             text.iter().any(|l| l.contains("Welcome back")),
-            "首帧含欢迎卡: {text:?}"
+            "first frame contains the welcome card: {text:?}"
         );
 
         let items = flush_items(&chat, 80, chat.doc.settled);
@@ -943,7 +957,7 @@ mod tests {
             items
                 .iter()
                 .any(|line| history_text(line).contains("Welcome back")),
-            "欢迎卡进 scrollback"
+            "the welcome card lands in scrollback"
         );
         chat.advance_flushed();
 
@@ -954,11 +968,11 @@ mod tests {
             .collect();
         assert!(
             !text.iter().any(|l| l.contains("Welcome back")),
-            "落盘之后不再重画: {text:?}"
+            "not redrawn after flushing: {text:?}"
         );
         assert!(
             text.iter().any(|l| l.contains("? for shortcuts")),
-            "chrome 仍在"
+            "chrome is still there"
         );
     }
 
@@ -968,7 +982,7 @@ mod tests {
         let mut chat = chat_at(80, 24);
         chat.messages.push(crate::tui::chat::UiMessage {
             role: crate::tui::chat::Role::User,
-            text: "一条足够长的用户消息，宽度变化后折行数会变".repeat(2),
+            text: "a long-enough user message whose wrap count changes with the width".repeat(2),
             activities: Vec::new(),
             insert_points: Vec::new(),
             groups: Vec::new(),
@@ -977,19 +991,22 @@ mod tests {
         chat.dirty = true;
         rebuild(&mut chat, size(80, 24), false);
         let first = flush_items(&chat, 80, chat.doc.settled);
-        assert!(!first.is_empty(), "首轮落盘欢迎卡 + 消息");
+        assert!(
+            !first.is_empty(),
+            "first round flushes the welcome card + the message"
+        );
         chat.advance_flushed();
         // Another round at the same width: no new settled content → zero items.
         assert!(
             flush_items(&chat, 80, chat.doc.settled).is_empty(),
-            "不重复落盘"
+            "no duplicate flush"
         );
         // Narrower rebuild: the segment cursor is unchanged, so still nothing new to flush.
         chat.dirty = true;
         rebuild(&mut chat, size(40, 24), false);
         assert!(
             flush_items(&chat, 40, chat.doc.settled).is_empty(),
-            "宽度变化不会让已落盘的段再打印一次"
+            "a width change never reprints an already-flushed segment"
         );
     }
 
@@ -1006,15 +1023,21 @@ mod tests {
             key(KeyCode::Char('o'), KeyModifiers::CONTROL),
             true,
         );
-        assert_eq!(chat.input, "hi", "ctrl+o 未插入字符");
-        assert!(!chat.dump_transcript, "屏上已是全貌，无需重放");
+        assert_eq!(chat.input, "hi", "ctrl+o does not insert characters");
+        assert!(
+            !chat.dump_transcript,
+            "everything is already on screen; no replay needed"
+        );
 
         // Esc always passes through (menu exits happen inside on_key).
         chat.set_input("/model");
         chat.submit();
-        assert!(chat.model_menu.is_some(), "菜单已打开");
+        assert!(chat.model_menu.is_some(), "menu is open");
         dispatch_key(&mut chat, key(KeyCode::Esc, KeyModifiers::empty()), true);
-        assert!(chat.model_menu.is_none(), "Esc 经 gate 退出菜单");
+        assert!(
+            chat.model_menu.is_none(),
+            "Esc exits the menu through the gate"
+        );
 
         // A message has flushed → ctrl+o requests the replay; simulate the replay frame: rebuild the full doc
         // and freeze everything up to the last checkpoint.
@@ -1033,9 +1056,12 @@ mod tests {
             key(KeyCode::Char('o'), KeyModifiers::CONTROL),
             true,
         );
-        assert!(chat.dump_transcript, "已落盘内容 → 重放");
-        assert!(chat.force_redraw, "重放帧先清可见屏（置顶）");
-        assert!(chat.dirty, "重放帧前必然重建");
+        assert!(chat.dump_transcript, "flushed content → replay");
+        assert!(
+            chat.force_redraw,
+            "the replay frame first clears the visible screen (topmost)"
+        );
+        assert!(chat.dirty, "a rebuild is forced before the replay frame");
         chat.dirty = false;
         chat.build_rows(80);
         let mark = chat
@@ -1043,20 +1069,23 @@ mod tests {
             .settled_marks
             .last()
             .copied()
-            .expect("全量文档有检查点");
+            .expect("the full document has checkpoints");
         let items = flush_items(&chat, 80, mark.row_end);
         let texts: Vec<String> = items.iter().map(history_text).collect();
         assert!(
             texts.iter().any(|l| l.contains("Welcome")),
-            "重放从欢迎卡开始: {texts:?}"
+            "the replay starts at the welcome card: {texts:?}"
         );
         assert!(
             texts.iter().any(|l| l.contains("reply")),
-            "重放含已落盘消息: {texts:?}"
+            "the replay includes flushed messages: {texts:?}"
         );
         chat.advance_flushed_upto(mark);
         chat.build_rows(80);
-        assert!(chat.doc.rows.is_empty(), "重放后活文档只剩动态尾部");
+        assert!(
+            chat.doc.rows.is_empty(),
+            "after the replay the live document holds only the dynamic tail"
+        );
     }
 
     /// Release events do not re-trigger (they occur when the terminal reports enhanced keyboards).
@@ -1079,14 +1108,18 @@ mod tests {
         let mut chat = chat_at(80, 24);
         chat.last_error = Some(ErrorState {
             code: "AUTH_REQUIRED",
-            msg: "登录已失效，请重新配置凭据后重试。".to_string(),
+            msg: "login has expired; reconfigure the credentials and retry.".to_string(),
             level: ErrorLevel::Full,
             context: ErrorContext::LongTurn,
         });
 
         let frame = fullscreen_frame(&chat, size(80, 24));
         let text: Vec<String> = frame.rows.iter().map(row_text).collect();
-        assert!(text.iter().any(|line| line.contains("出错了")), "{text:?}");
+        assert!(
+            text.iter()
+                .any(|line| line.contains("something went wrong")),
+            "{text:?}"
+        );
         assert!(
             text.iter().any(|line| line.contains("code=AUTH_REQUIRED")),
             "{text:?}"
@@ -1095,10 +1128,13 @@ mod tests {
             !text
                 .iter()
                 .any(|line| line.starts_with('╭') || line.starts_with('╰')),
-            "全屏错误态不应露出输入框: {text:?}"
+            "the fullscreen error state must not expose the input box: {text:?}"
         );
-        assert!(frame.cursor.is_none(), "全屏错误态隐藏输入光标");
-        assert_eq!(frame.content_len, 0, "错误态无内容区");
+        assert!(
+            frame.cursor.is_none(),
+            "the fullscreen error state hides the input caret"
+        );
+        assert_eq!(frame.content_len, 0, "the error state has no content area");
     }
 
     /// Feedback loop for "images render live, not as `#[image]`": on the
@@ -1132,7 +1168,10 @@ mod tests {
                 .iter()
                 .filter(|row| row.line.image.is_some())
                 .count();
-            assert_eq!(image_rows, 2, "fullscreen={fullscreen} 图片行在内容区");
+            assert_eq!(
+                image_rows, 2,
+                "fullscreen={fullscreen} image rows live in the content area"
+            );
 
             let mut transmits = crate::tui::gfx::Transmits::default();
             let cap = chat.image_cap.expect("cap set above");
@@ -1140,11 +1179,11 @@ mod tests {
             let s = String::from_utf8_lossy(&bytes);
             assert!(
                 s.contains("a=T,U=1"),
-                "fullscreen={fullscreen} 首帧即传输: {s}"
+                "fullscreen={fullscreen} the first frame transmits: {s}"
             );
             assert!(
                 image_transmits(cap, &chat.images, frame.content(), &mut transmits).is_empty(),
-                "fullscreen={fullscreen} 次帧不重传"
+                "fullscreen={fullscreen} the next frame does not retransmit"
             );
         }
     }
@@ -1161,7 +1200,7 @@ mod tests {
         assert_eq!(
             frame.content_len + chrome_height(&chat, 80, true),
             24,
-            "内容区 + chrome = 屏高"
+            "content area + chrome = screen height"
         );
         assert_eq!(frame.content().len(), frame.content_len);
     }
@@ -1182,10 +1221,10 @@ mod tests {
         let error_at = text
             .iter()
             .position(|l| l.contains("[error] code=TIMEOUT"))
-            .expect("错误行可见");
+            .expect("error row is visible");
         assert!(
             text[error_at + 1].starts_with('╭'),
-            "错误行钉在输入框上方: {:?}",
+            "error row pinned above the input box: {:?}",
             &text[error_at..error_at + 2]
         );
     }
@@ -1197,18 +1236,18 @@ mod tests {
     fn fullscreen_tiny_terminal_keeps_the_prompt_and_footer() {
         let mut chat = chat_at(60, 6);
         chat.busy = true;
-        chat.push_warning("mcp 连接失败".to_string());
+        chat.push_warning("mcp connection failed".to_string());
         chat.help_visible = true;
         let frame = fullscreen_frame(&chat, size(60, 6));
-        assert!(frame.rows.len() <= 6, "不超过屏高");
+        assert!(frame.rows.len() <= 6, "no taller than the screen");
         let text: Vec<String> = frame.rows.iter().map(row_text).collect();
         assert!(
             text.iter().any(|l| l.starts_with('╰')),
-            "输入框下边框仍在: {text:?}"
+            "input box bottom border still present: {text:?}"
         );
         assert!(
             text.last().is_some_and(|l| l.contains("ctrl+o to expand")),
-            "footer 仍在: {text:?}"
+            "footer still present: {text:?}"
         );
     }
 
@@ -1236,13 +1275,16 @@ mod tests {
         let mut chat = chat_at(80, 24);
         chat.dirty = true;
         rebuild(&mut chat, size(80, 24), false);
-        assert!(!chat.doc.settled_marks.is_empty(), "欢迎卡有定稿检查点");
+        assert!(
+            !chat.doc.settled_marks.is_empty(),
+            "the welcome card has settled checkpoints"
+        );
         let chrome_len = chrome_height(&chat, 80, false);
         let (win_start, _) = tail_window(chat.doc.rows.len(), chat.tail_start, chrome_len, 24);
         assert_eq!(
             pick_flush_mark(&chat.doc.settled_marks, chat.tail_start, win_start),
             None,
-            "装得下就不冻结——欢迎卡留在活文档里可重排"
+            "fits in the window → nothing freezes — the welcome card stays in the live document and can re-layout"
         );
     }
 
@@ -1261,7 +1303,7 @@ mod tests {
         let (naive_start, _) = tail_window(total, chat.tail_start, chrome_len, 24);
         assert!(
             pick_flush_mark(&chat.doc.settled_marks, chat.tail_start, naive_start).is_some(),
-            "前提成立：瞬态行确实把窗口挤过了欢迎卡"
+            "precondition holds: the transient rows really squeeze the window past the welcome card"
         );
 
         // The production path excludes transient rows: the welcome card stays live.
@@ -1270,7 +1312,7 @@ mod tests {
         assert_eq!(
             pick_flush_mark(&chat.doc.settled_marks, chat.tail_start, win_start),
             None,
-            "瞬态列表只是暂时盖住内容，不是驱逐"
+            "a transient list only temporarily covers content, it does not evict it"
         );
     }
 
@@ -1282,21 +1324,28 @@ mod tests {
         rebuild(&mut chat, size(80, 24), false);
         let welcome_rows = chat.doc.rows.len();
         chat.advance_flushed();
-        assert_eq!(chat.flushed_segments, 1, "欢迎卡已落盘");
+        assert_eq!(chat.flushed_segments, 1, "the welcome card has flushed");
         chat.dirty = true;
         rebuild(&mut chat, size(80, 24), false);
-        assert!(chat.doc.rows.is_empty(), "落盘后活文档为空");
+        assert!(
+            chat.doc.rows.is_empty(),
+            "the live document is empty after flushing"
+        );
 
         // Budget is enough: pull the welcome card back (users accept the duplicates when scrolling up).
         chat.rehydrate(80, 24);
-        assert_eq!(chat.flushed_segments, 0, "容量够就回灌");
+        assert_eq!(chat.flushed_segments, 0, "enough capacity → pulled back");
         chat.dirty = true;
         rebuild(&mut chat, size(80, 24), false);
-        assert_eq!(chat.doc.rows.len(), welcome_rows, "欢迎卡回到活文档");
+        assert_eq!(
+            chat.doc.rows.len(),
+            welcome_rows,
+            "the welcome card returns to the live document"
+        );
 
         // Not enough budget: rehydration would overflow → roll back, keeping the flushed state.
         chat.advance_flushed();
         chat.rehydrate(80, welcome_rows.saturating_sub(1));
-        assert_eq!(chat.flushed_segments, 1, "装不下就不取回");
+        assert_eq!(chat.flushed_segments, 1, "no room → not pulled back");
     }
 }

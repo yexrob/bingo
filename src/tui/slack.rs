@@ -255,7 +255,7 @@ fn scaffold_note(line: &str) -> Option<String> {
         return Some(format!("#{channel} · {body}"));
     }
     if line.starts_with("[follow-up ") {
-        return Some("追问 · 等待回复".to_string());
+        return Some("follow-up · waiting for a reply".to_string());
     }
     None
 }
@@ -289,7 +289,7 @@ fn user_posts(text: &str, me: &str) -> Vec<Post> {
                 from: me.to_string(),
                 you: true,
                 at: 0,
-                text: "系统提醒 · 任务工具".to_string(),
+                text: "system note · task tools".to_string(),
                 kind: PostKind::Note,
             });
             return out;
@@ -578,7 +578,7 @@ fn hhmm(at: u64) -> String {
         .unwrap_or_default()
 }
 
-/// Day-divider label: 今天 / 昨天 / M月D日. `None` when there is no clock to
+/// Day-divider label: Today / Yesterday / M/D. `None` when there is no clock to
 /// divide by.
 fn day_label(at: u64) -> Option<String> {
     use chrono::TimeZone;
@@ -590,9 +590,9 @@ fn day_label(at: u64) -> Option<String> {
     let day = t.date_naive();
     let delta = (today - day).num_days();
     Some(match delta {
-        0 => "今天".to_string(),
-        1 => "昨天".to_string(),
-        _ => t.format("%-m月%-d日").to_string(),
+        0 => "Today".to_string(),
+        1 => "Yesterday".to_string(),
+        _ => t.format("%-m/%-d").to_string(),
     })
 }
 
@@ -614,24 +614,24 @@ pub fn header_rows(snap: &Snapshot, conv: &Conv, pal: &Palette, width: usize) ->
             Some(c) => (
                 format!(" # {name}"),
                 format!(
-                    "  {} · {} 条 · {} 人{}",
+                    "  {} · {} msgs · {} people{}",
                     c.mode.label(),
                     c.seq,
                     c.members.len(),
-                    if c.frozen { " · 已冻结" } else { "" }
+                    if c.frozen { " · frozen" } else { "" }
                 ),
             ),
-            None => (format!(" # {name}"), "  已不存在".to_string()),
+            None => (format!(" # {name}"), "  no longer exists".to_string()),
         },
         Conv::Dm(name) => match snap.dm(name) {
             Some(d) => {
                 let (glyph, _) = presence(d.state, pal);
                 (
                     format!(" {glyph} {name}"),
-                    format!("  私信 · {} · {}", d.state.label(), d.description),
+                    format!("  DM · {} · {}", d.state.label(), d.description),
                 )
             }
-            None => (format!(" {name}"), "  已不存在".to_string()),
+            None => (format!(" {name}"), "  no longer exists".to_string()),
         },
     };
     // The workspace name sits right, where the member count used to: it is the one
@@ -678,7 +678,7 @@ fn day_divider(label: &str, pal: &Palette, width: usize) -> Row {
 /// Slack's unread marker: the rule itself goes red and the label sits at the
 /// right end, so the eye catches the line before it reads the words.
 fn unread_divider(pal: &Palette, width: usize) -> Row {
-    let label = " 新消息 ";
+    let label = " new messages ";
     let w = text_width(label);
     let rule = width.saturating_sub(w).saturating_sub(1);
     let mut line = Line::styled("─".repeat(rule), SegStyle::fg(pal.unread));
@@ -776,7 +776,7 @@ pub fn message_rows(
         return vec![
             blank(),
             row(Line::styled(
-                "   还没有消息。在下面写第一条。",
+                "   No messages yet. Write the first one below.",
                 SegStyle::fg(pal.main_dim).italic(),
             )),
         ];
@@ -821,7 +821,7 @@ pub fn message_rows(
             rows.push(blank());
             let mut head = gutter_line(&post.from, 0, avatars, pal);
             let shown = if post.you {
-                "你".to_string()
+                "You".to_string()
             } else {
                 post.from.clone()
             };
@@ -871,7 +871,7 @@ pub fn message_rows(
                 if post.kind == PostKind::Queued {
                     let mut line = indent(&mut lead);
                     line.push_styled(
-                        "⧖ 待送达（下一个回合边界注入）",
+                        "⧖ pending delivery (injected at the next turn boundary)",
                         SegStyle::fg(pal.main_dim).italic(),
                     );
                     rows.push(row(line));
@@ -879,7 +879,7 @@ pub fn message_rows(
                 if post.kind == PostKind::Typing {
                     let mut line = indent(&mut lead);
                     line.push_styled(
-                        format!("✻ {} 正在输入…", post.from),
+                        format!("✻ {} is typing…", post.from),
                         SegStyle::fg(pal.accent).italic(),
                     );
                     rows.push(row(line));
@@ -906,8 +906,8 @@ pub fn composer_rows(
     // Box geometry: margin + │ + space + inner + space + │ == width.
     let inner = width.saturating_sub(5).max(4);
     let placeholder = match conv {
-        Conv::Channel(name) => format!("给 #{name} 发消息"),
-        Conv::Dm(name) => format!("给 {name} 发消息"),
+        Conv::Channel(name) => format!("message #{name}"),
+        Conv::Dm(name) => format!("message {name}"),
     };
     let empty = ws.composer.is_empty();
     let text: Vec<String> = if empty {
@@ -955,9 +955,9 @@ pub fn composer_rows(
     }
     rows.push(frame("╰", "╯"));
     let hint = if active {
-        "  enter 发送 · tab 切换焦点 · ctrl+k 切换会话 · alt+↑↓ 上下会话 · esc 返回"
+        "  enter sends · tab switches focus · ctrl+k switches conversation · alt+↑↓ moves up/down · esc back"
     } else {
-        "  tab 回到输入框 · ↑↓ 滚动 · ctrl+k 切换会话 · alt+↑↓ 上下会话 · esc 返回"
+        "  tab returns to the composer · ↑↓ scrolls · ctrl+k switches conversation · alt+↑↓ moves up/down · esc back"
     };
     let foot = Line::styled(
         crate::tui::chat::one_line(hint, width.saturating_sub(2)),
@@ -976,12 +976,18 @@ pub fn composer_rows(
 /// What the view shows when there is nothing to open yet.
 pub fn empty_pane_rows(pal: &Palette, width: usize, height: usize) -> Vec<Row> {
     let lines = [
-        ("这里还没有会话", true),
+        ("No conversations here yet", true),
         ("", false),
-        ("Agent 工具派生的实例会成为一个私信对象，", false),
-        ("Channel 工具建的房间会成为一个频道。", false),
+        (
+            "Instances spawned by the Agent tool become DM entries,",
+            false,
+        ),
+        (
+            "and rooms created by the Channel tool become channels.",
+            false,
+        ),
         ("", false),
-        ("ctrl+k 切换会话 · esc 返回", false),
+        ("ctrl+k switches conversation · esc back", false),
     ];
     let top = height.saturating_sub(lines.len()) / 2;
     let mut rows = vec![blank(); top];
@@ -1032,12 +1038,12 @@ pub fn switcher_rows(
 
     let mut rows = vec![rule("╭", "╮")];
     let query_text = crate::tui::chat::one_line(&sw.query, inner.saturating_sub(5));
-    let mut query = Line::styled("跳转 ", SegStyle::fg(pal.main_dim));
+    let mut query = Line::styled("jump ", SegStyle::fg(pal.main_dim));
     query.push_styled(query_text.clone(), SegStyle::fg(pal.main_text));
     rows.push(boxed_row(query, 5 + text_width(&query_text)));
 
     if matches.is_empty() {
-        let text = "没有匹配的会话";
+        let text = "no matching conversation";
         rows.push(boxed_row(
             Line::styled(text, SegStyle::fg(pal.main_dim).italic()),
             text_width(text),
@@ -1129,13 +1135,13 @@ mod tests {
                 DmItem {
                     name: "scout".into(),
                     state: AgentState::Running,
-                    description: "侦察".into(),
+                    description: "recon".into(),
                     unread: 0,
                 },
                 DmItem {
                     name: "qa".into(),
                     state: AgentState::Idle,
-                    description: "验收".into(),
+                    description: "acceptance".into(),
                     unread: 3,
                 },
             ],
@@ -1166,21 +1172,21 @@ mod tests {
                 from: "scout".into(),
                 you: false,
                 at: base,
-                text: "找到回归了".into(),
+                text: "found the regression".into(),
                 kind: PostKind::Said,
             },
             Post {
                 from: "scout".into(),
                 you: false,
                 at: base + 30,
-                text: "在 term.rs".into(),
+                text: "in term.rs".into(),
                 kind: PostKind::Said,
             },
             Post {
                 from: "user".into(),
                 you: true,
                 at: base + 900,
-                text: "收到".into(),
+                text: "got it".into(),
                 kind: PostKind::Said,
             },
         ];
@@ -1188,34 +1194,37 @@ mod tests {
         let t = texts(&rows);
         // The second scout message is grouped: one name row, not two.
         assert_eq!(t.iter().filter(|l| l.contains("scout")).count(), 1, "{t:?}");
-        // Your own messages are labelled 你.
-        assert!(t.iter().any(|l| l.contains("你")), "{t:?}");
+        // Your own messages are labelled You.
+        assert!(t.iter().any(|l| l.contains("You")), "{t:?}");
         // Unread divider sits before the third post.
-        assert!(t.iter().any(|l| l.contains("新消息")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("new messages")), "{t:?}");
         // Bodies sit in the avatar gutter.
-        assert!(t.iter().any(|l| l.starts_with("    找到回归了")), "{t:?}");
+        assert!(
+            t.iter().any(|l| l.starts_with("    found the regression")),
+            "{t:?}"
+        );
         // Empty log gets the invitation, not a blank pane.
         assert!(
             texts(&message_rows(&[], 0, &pal(), 60, &Avatars::default()))
                 .iter()
-                .any(|l| l.contains("还没有消息"))
+                .any(|l| l.contains("No messages yet"))
         );
     }
 
     /// The runtime writes its own scaffolding into an instance's history — the
     /// relay of a channel message, the task reminder. Quoting those in full put a
-    /// wall of English system text under a "你" name row, as if the user had typed
+    /// wall of English system text under a "You" name row, as if the user had typed
     /// it. They collapse to one dim line each, and what a person actually wrote
     /// stays a message.
     #[test]
     fn wake_up_scaffolding_collapses_to_one_line() {
         let relay = format!(
-            "[#dev-team 第1条] main: 大家好，用户来和团队打个招呼。\n{}\nThe task tools haven't been used recently.",
+            "[#dev-team msg #1] main: hello everyone, the user is greeting the team.\n{}\nThe task tools haven't been used recently.",
             crate::query::TASK_REMINDER_MARKER
         );
         let history = vec![
             crate::api::types::Message::user_text(relay),
-            crate::api::types::Message::user_text("单独交代你一件事\n第二行"),
+            crate::api::types::Message::user_text("one thing just for you\nsecond line"),
         ];
         let posts = dm_posts(&history, None, &[], "devex", "user");
         let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
@@ -1226,12 +1235,12 @@ mod tests {
         );
         assert_eq!(
             posts[0].text,
-            "#dev-team · main: 大家好，用户来和团队打个招呼。"
+            "#dev-team · main: hello everyone, the user is greeting the team."
         );
-        assert_eq!(posts[1].text, "系统提醒 · 任务工具");
+        assert_eq!(posts[1].text, "system note · task tools");
         assert_eq!(
-            posts[2].text, "单独交代你一件事\n第二行",
-            "真人写的原样保留"
+            posts[2].text, "one thing just for you\nsecond line",
+            "what a real person wrote stays verbatim"
         );
 
         // A note owns no name row and no avatar, and does not split the grouping
@@ -1244,9 +1253,12 @@ mod tests {
             .iter()
             .filter(|r| r.line.segs.iter().any(|s| s.style.bg.is_some()))
             .count();
-        assert_eq!(name_rows, 1, "系统行不冒充用户、不占头像: {t:?}");
+        assert_eq!(
+            name_rows, 1,
+            "system rows do not impersonate the user or take an avatar: {t:?}"
+        );
         assert!(t.iter().any(|l| l.contains("▏ #dev-team")), "{t:?}");
-        assert!(t.iter().any(|l| l.contains("▏ 系统提醒")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("▏ system note")), "{t:?}");
     }
 
     /// A crew is a standing cast, so the blueprint's pin wins over the name hash —
@@ -1254,35 +1266,35 @@ mod tests {
     #[test]
     fn the_blueprint_pins_a_face() {
         let mut pinned = std::collections::HashMap::new();
-        let wanted = crate::tui::avatar::index_of_id("sora").unwrap_or_else(|| panic!("有 sora"));
-        pinned.insert("林夏".to_string(), wanted);
+        let wanted = crate::tui::avatar::index_of_id("sora").unwrap_or_else(|| panic!("has sora"));
+        pinned.insert("Linh".to_string(), wanted);
         let avatars = Avatars {
             images: true,
             pinned,
         };
-        assert_eq!(avatars.index_of("林夏"), wanted, "钉住的脸");
+        assert_eq!(avatars.index_of("Linh"), wanted, "pinned face");
         assert_eq!(
-            avatars.index_of("路过的子代理"),
-            crate::tui::avatar::index_of("路过的子代理"),
-            "没钉的仍按名字取"
+            avatars.index_of("passing subagent"),
+            crate::tui::avatar::index_of("passing subagent"),
+            "unpinned ones still resolve by name"
         );
 
         // The pin reaches the rendered gutter: the id colour is the pinned
         // portrait's, not the one the name would have chosen.
         let posts = vec![Post {
-            from: "林夏".into(),
+            from: "Linh".into(),
             you: false,
             at: 0,
-            text: "在".into(),
+            text: "here".into(),
             kind: PostKind::Said,
         }];
         let rows = message_rows(&posts, usize::MAX, &pal(), 60, &avatars);
         let head = rows
             .iter()
-            .find(|r| r.line.plain_text().contains("林夏"))
-            .unwrap_or_else(|| panic!("有名字行"));
-        let (_, want_color) =
-            crate::tui::avatar::placeholder(wanted, 0).unwrap_or_else(|| panic!("有占位行"));
+            .find(|r| r.line.plain_text().contains("Linh"))
+            .unwrap_or_else(|| panic!("has a name row"));
+        let (_, want_color) = crate::tui::avatar::placeholder(wanted, 0)
+            .unwrap_or_else(|| panic!("has a placeholder row"));
         assert_eq!(
             head.line.segs.first().map(|s| s.style.fg),
             Some(Some(want_color))
@@ -1315,7 +1327,7 @@ mod tests {
         for line in texts(&rows) {
             assert!(
                 line.chars().all(|c| !is_pictograph(c)),
-                "象形字符会被字体替换成双宽: {line:?}"
+                "ideographs get font-replaced as double-width: {line:?}"
             );
         }
     }
@@ -1331,7 +1343,7 @@ mod tests {
             from: "scout".into(),
             you: false,
             at: 1_760_000_000,
-            text: "找到回归了".into(),
+            text: "found the regression".into(),
             kind: PostKind::Said,
         }];
         let ws = Workspace::default();
@@ -1347,7 +1359,10 @@ mod tests {
         ));
         all.extend(composer_rows(&ws, &conv, &pal, 60).0);
         all.extend(empty_pane_rows(&pal, 60, 8));
-        assert!(all.iter().all(|r| r.bg.is_none()), "不再有整行底色");
+        assert!(
+            all.iter().all(|r| r.bg.is_none()),
+            "no more full-row background"
+        );
         assert!(blank_row().bg.is_none());
 
         // The overlay is the one exception, and it is an erase rather than a
@@ -1364,7 +1379,7 @@ mod tests {
         .0;
         assert!(
             overlay.iter().all(|r| r.bg == Some(Color::Reset)),
-            "浮层整行擦到终端底色"
+            "the overlay erases the whole row down to the terminal background"
         );
         // The one surviving background is the avatar chip, and only on its cells.
         let chip_cells: Vec<_> = message_rows(&posts, usize::MAX, &pal, 60, &Avatars::default())
@@ -1372,7 +1387,11 @@ mod tests {
             .flat_map(|r| r.line.segs.clone())
             .filter(|s| s.style.bg.is_some())
             .collect();
-        assert_eq!(chip_cells.len(), 1, "只有头像格带底色: {chip_cells:?}");
+        assert_eq!(
+            chip_cells.len(),
+            1,
+            "only the avatar cell carries a background: {chip_cells:?}"
+        );
     }
 
     /// With images the portrait replaces the initial chip and spans two rows —
@@ -1385,7 +1404,7 @@ mod tests {
             from: "scout".into(),
             you: false,
             at: 1_760_000_000,
-            text: "第一行\n第二行".into(),
+            text: "first line\nsecond line".into(),
             kind: PostKind::Said,
         }];
         let plain = message_rows(&posts, usize::MAX, &pal, 60, &Avatars::default());
@@ -1399,7 +1418,11 @@ mod tests {
                 pinned: Default::default(),
             },
         );
-        assert_eq!(plain.len(), imaged.len(), "两种皮肤行数一致");
+        assert_eq!(
+            plain.len(),
+            imaged.len(),
+            "both skins produce the same row count"
+        );
 
         let cells = |rows: &[Row]| -> Vec<String> {
             rows.iter()
@@ -1409,31 +1432,39 @@ mod tests {
         let head = imaged
             .iter()
             .position(|r| r.line.plain_text().contains("scout"))
-            .unwrap_or_else(|| panic!("有名字行: {:?}", cells(&imaged)));
+            .unwrap_or_else(|| panic!("has a name row: {:?}", cells(&imaged)));
         let ph = crate::tui::gfx::PLACEHOLDER;
         assert!(
             imaged[head].line.plain_text().starts_with(ph),
-            "名字行带头像上半"
+            "the name row carries the top avatar half"
         );
         assert!(
             imaged[head + 1].line.plain_text().starts_with(ph),
-            "首个正文行带头像下半"
+            "the first body row carries the bottom half"
         );
         assert!(
             !imaged[head + 2].line.plain_text().starts_with(ph),
-            "第二行正文只缩进"
+            "the second body row is plain indentation"
         );
         // Both halves address one image, and body text starts at the same column
         // whether the gutter holds the portrait or plain indentation.
         let id_of = |i: usize| imaged[i].line.segs.first().map(|s| s.style.fg);
-        assert_eq!(id_of(head), id_of(head + 1), "同一张头像");
+        assert_eq!(id_of(head), id_of(head + 1), "same avatar");
         let body_col = |i: usize| -> usize {
             let segs = &imaged[i].line.segs;
             let body = segs.last().map(|s| s.text.clone()).unwrap_or_default();
             text_width(&imaged[i].line.plain_text()) - text_width(&body)
         };
-        assert_eq!(body_col(head + 1), gutter(true), "首行正文起点");
-        assert_eq!(body_col(head + 2), gutter(true), "次行正文对齐同一列");
+        assert_eq!(
+            body_col(head + 1),
+            gutter(true),
+            "first body row start column"
+        );
+        assert_eq!(
+            body_col(head + 2),
+            gutter(true),
+            "second body row aligns to the same column"
+        );
     }
 
     #[test]
@@ -1450,14 +1481,14 @@ mod tests {
                 from: "user".into(),
                 you: true,
                 at: 0,
-                text: "再查一遍".into(),
+                text: "check again".into(),
                 kind: PostKind::Queued,
             },
             Post {
                 from: "scout".into(),
                 you: false,
                 at: 0,
-                text: "正在写".into(),
+                text: "typing".into(),
                 kind: PostKind::Typing,
             },
         ];
@@ -1469,8 +1500,8 @@ mod tests {
             &Avatars::default(),
         ));
         assert!(t.iter().any(|l| l.contains("▏ ⏺ Bash")), "{t:?}");
-        assert!(t.iter().any(|l| l.contains("待送达")), "{t:?}");
-        assert!(t.iter().any(|l| l.contains("正在输入")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("pending delivery")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("is typing")), "{t:?}");
     }
 
     #[test]
@@ -1479,21 +1510,29 @@ mod tests {
         let conv = Conv::Channel("dev-room".into());
         let (rows, caret) = composer_rows(&ws, &conv, &pal(), 50);
         let t = texts(&rows);
-        assert!(t.iter().any(|l| l.contains("给 #dev-room 发消息")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("message #dev-room")), "{t:?}");
         assert!(t[0].contains('╭') && t.iter().any(|l| l.contains('╰')));
-        assert_eq!(caret.map(|(_, col)| col), Some(3), "空稿的光标贴左边框");
+        assert_eq!(
+            caret.map(|(_, col)| col),
+            Some(3),
+            "an empty draft's caret hugs the left border"
+        );
 
         let typed = Workspace {
-            composer: "先别改".into(),
+            composer: "change".into(),
             ..Workspace::default()
         };
         let (rows, caret) = composer_rows(&typed, &conv, &pal(), 50);
-        assert!(texts(&rows).iter().any(|l| l.contains("先别改")));
-        assert_eq!(caret.map(|(_, col)| col), Some(3 + 6), "光标跟着字宽走");
+        assert!(texts(&rows).iter().any(|l| l.contains("change")));
+        assert_eq!(
+            caret.map(|(_, col)| col),
+            Some(3 + 6),
+            "the caret follows the text width"
+        );
 
         // A DM addresses the instance, not a channel.
         let (rows, _) = composer_rows(&ws, &Conv::Dm("scout".into()), &pal(), 50);
-        assert!(texts(&rows).iter().any(|l| l.contains("给 scout 发消息")));
+        assert!(texts(&rows).iter().any(|l| l.contains("message scout")));
     }
 
     /// One title row plus a rule: the metadata trails the name instead of taking
@@ -1508,16 +1547,22 @@ mod tests {
             &pal(),
             70,
         ));
-        assert_eq!(t.len(), 2, "标题 + 分隔线: {t:?}");
+        assert_eq!(t.len(), 2, "title + divider: {t:?}");
         assert!(t[0].contains("# dev-room"), "{t:?}");
-        assert!(t[0].contains("serial") && t[0].contains("4 条"), "{t:?}");
-        assert!(t[0].contains("3 人"), "{t:?}");
-        assert!(t[0].trim_end().ends_with("bingo"), "工作区名靠右: {t:?}");
+        assert!(t[0].contains("serial") && t[0].contains("4 msgs"), "{t:?}");
+        assert!(t[0].contains("3 people"), "{t:?}");
+        assert!(
+            t[0].trim_end().ends_with("bingo"),
+            "workspace name right-aligned: {t:?}"
+        );
         assert!(t[1].starts_with("─"), "{t:?}");
 
         let t = texts(&header_rows(&snap, &Conv::Dm("qa".into()), &pal(), 70));
         assert!(t[0].contains("○ qa"), "{t:?}");
-        assert!(t[0].contains("idle") && t[0].contains("验收"), "{t:?}");
+        assert!(
+            t[0].contains("idle") && t[0].contains("acceptance"),
+            "{t:?}"
+        );
     }
 
     #[test]
@@ -1543,12 +1588,12 @@ mod tests {
         let (rows, matches) = switcher_rows(&snap, &sw, &pal(), 40);
         assert_eq!(matches, vec![Conv::Dm("qa".into())]);
         assert!(texts(&rows).iter().any(|l| l.contains("@ qa")));
-        // The overlay覆盖在消息列表之上：每行都要写满整宽，否则底下的字会透上来。
+        // The overlay sits on top of the message list: every row must fill the full width, otherwise the text underneath shows through.
         for (i, r) in rows.iter().enumerate() {
             assert_eq!(
                 text_width(&r.line.plain_text()),
                 40,
-                "第 {i} 行没写满: {:?}",
+                "row {i} did not fill the width: {:?}",
                 r.line.plain_text()
             );
         }
@@ -1563,7 +1608,7 @@ mod tests {
             40,
         );
         assert!(matches.is_empty());
-        assert!(texts(&rows).iter().any(|l| l.contains("没有匹配")));
+        assert!(texts(&rows).iter().any(|l| l.contains("no matching")));
         assert!(rows.iter().all(|r| text_width(&r.line.plain_text()) == 40));
     }
 
@@ -1595,7 +1640,7 @@ mod tests {
         let a = Conv::Channel("dev-room".into());
         ws.mark_read(&a, 3);
         ws.mark_read(&a, 1);
-        assert_eq!(ws.read_cursor(&a), 3, "游标只前进");
+        assert_eq!(ws.read_cursor(&a), 3, "the cursor only advances");
         assert_eq!(ws.read_cursor(&Conv::Dm("scout".into())), 0);
     }
 }

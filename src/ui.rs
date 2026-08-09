@@ -152,9 +152,9 @@ pub enum UiEvent {
 pub fn modal_ask(asks: mpsc::UnboundedSender<AskRequest>) -> Arc<crate::query::AskFn> {
     Arc::new(move |tool_name, reason| {
         let request = PermissionRequest::new(
-            format!("允许执行 {tool_name}"),
+            format!("Allow running {tool_name}"),
             reason,
-            vec!["允许".to_string(), "拒绝".to_string()],
+            vec!["Allow".to_string(), "Deny".to_string()],
         );
         let (tx, rx) = oneshot::channel();
         if asks.send((request, tx)).is_err() {
@@ -252,23 +252,26 @@ mod tests {
         let ui = tui_hooks(events_tx, asks_tx);
 
         let fut = (ui.ask_question)(
-            "技术选型".to_string(),
-            "用哪个库？".to_string(),
+            "Tech stack".to_string(),
+            "Which library?".to_string(),
             vec![
                 ("A".to_string(), None),
-                ("B".to_string(), Some("更快".to_string())),
+                ("B".to_string(), Some("faster".to_string())),
             ],
         );
-        let (request, tx) = asks_rx.try_recv().expect("模态请求已发出");
-        assert_eq!(request.title, "技术选型");
-        assert_eq!(request.question, "用哪个库？");
+        let (request, tx) = asks_rx.try_recv().expect("modal request was sent");
+        assert_eq!(request.title, "Tech stack");
+        assert_eq!(request.question, "Which library?");
         assert_eq!(request.options, vec!["A", "B"]);
-        assert!(request.free_text, "AskUserQuestion 请求带 Other 自由输入");
+        assert!(
+            request.free_text,
+            "AskUserQuestion requests carry Other free-text input"
+        );
         tx.send(DialogAction::Confirm(1)).unwrap();
         assert_eq!(
             fut.await,
             Some(crate::query::AskAnswer::Option(1)),
-            "按 2 选中 B"
+            "press 2 selects B"
         );
 
         let fut = (ui.ask_question)(
@@ -276,21 +279,21 @@ mod tests {
             "q?".to_string(),
             vec![("a".to_string(), None)],
         );
-        let (_request, tx) = asks_rx.try_recv().expect("第二个模态请求");
+        let (_request, tx) = asks_rx.try_recv().expect("second modal request");
         tx.send(DialogAction::Cancel).unwrap();
-        assert_eq!(fut.await, None, "Esc 取消 → 未回答");
+        assert_eq!(fut.await, None, "Esc cancels → no answer");
 
         let fut = (ui.ask_question)(
             "t".to_string(),
             "q?".to_string(),
             vec![("a".to_string(), None)],
         );
-        let (_request, tx) = asks_rx.try_recv().expect("第三个模态请求");
-        tx.send(DialogAction::Answer("自定义".into())).unwrap();
+        let (_request, tx) = asks_rx.try_recv().expect("third modal request");
+        tx.send(DialogAction::Answer("custom".into())).unwrap();
         assert_eq!(
             fut.await,
-            Some(crate::query::AskAnswer::Other("自定义".to_string())),
-            "Other 自由输入回填文本"
+            Some(crate::query::AskAnswer::Other("custom".to_string())),
+            "Other free-text answer is backfilled"
         );
     }
 }
