@@ -299,11 +299,20 @@ room reuses the channel machinery, and control stays on the hub-and-spoke
 surface.
 
 - **Definition**: `.bingo/team.json` (camelCase, committed to the repo):
-  `name` + `channel {mode, messageLimit}` + `members [{name, agent, avatar?}]` —
+  `name` + `channel {mode, messageLimit}` +
+  `members [{name, agent, avatar?, model?, provider?, thinking?}]` —
   each member references an AgentDef, so a persona lives in one place
   (`.bingo/agents/<name>.md`) and can join multiple teams. `name` is the name
   shown on the member's messages (give it a person's name, not a role code) and
   `avatar` pins one of the bundled portraits, so a crew is a fixed cast.
+- **Engine per member**: `model`, `provider` and `thinking` pin what a member
+  runs on. Which model does which job is part of the formation, not a per-spawn
+  whim, so it lives in the committed blueprint — a crew can put its reviewer on
+  a cheap fast endpoint and its architect on the expensive one. Each falls back
+  to the agent definition and then to the session, exactly as an `Agent` call's
+  parameters do; a named `provider` other than the session's own needs a `model`
+  too, since a model name means nothing at another endpoint. `/team list` and
+  `AgentControl list` report the engine each running instance is actually on.
 - **Startup pull-up**: with `settings.team.autoStart` (default true) the team
   is pulled up at startup — spawn members and create the room, but do **not**
   wake them (members sit idle at zero token cost until `/team assign` or a

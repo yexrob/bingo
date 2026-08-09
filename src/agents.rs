@@ -168,6 +168,12 @@ pub struct AgentStatus {
     pub pending: usize,
     /// Messages the sender has had no reply to yet — queued, or read and left unanswered.
     pub unacked: usize,
+    /// The engine this instance actually runs on. Worth reporting because it need
+    /// not be the session's: a definition or a team blueprint can pin a different
+    /// one per instance, and "which member is on which model" is otherwise
+    /// invisible until the bill arrives.
+    pub model: String,
+    pub provider: String,
 }
 
 /// Message identifier, unique per registry. Handed back to the sender so it can check later
@@ -745,6 +751,8 @@ impl AgentRegistry {
                 state: e.state,
                 pending: e.inbox.len(),
                 unacked: e.acks.iter().filter(|a| a.state.is_outstanding()).count(),
+                model: e.session.runtime.model.borrow().clone(),
+                provider: e.session.runtime.provider.borrow().clone(),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));

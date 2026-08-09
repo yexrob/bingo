@@ -90,8 +90,14 @@ fn def_zone(def: &crate::team::TeamDef, defs: &[crate::agents::AgentDef]) -> Vec
             crate::agents::AgentDefSource::User => "[user]",
             crate::agents::AgentDefSource::Unknown => "",
         };
+        let engine = def
+            .members
+            .iter()
+            .find(|p| p.name == m.name)
+            .map(crate::team::engine_label)
+            .unwrap_or_default();
         out.push(format!(
-            "  {} → {} {} ({})",
+            "  {} → {} {}{engine} ({})",
             m.name, m.agent, badge, m.description
         ));
     }
@@ -120,7 +126,13 @@ fn list(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     } else {
         out.push(format!("  runtime zone ({} instances)", running.len()));
         for a in &running {
-            out.push(format!("  {} · {}", a.name, state_mark(a.state)));
+            out.push(format!(
+                "  {} · {} · {} @ {}",
+                a.name,
+                state_mark(a.state),
+                a.model,
+                a.provider
+            ));
         }
     }
     out
@@ -282,7 +294,7 @@ fn validate(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
         Ok(x) => x,
         Err(out) => return out,
     };
-    match crate::team::validate(&def, &defs) {
+    match crate::team::validate(&def, &defs, session) {
         Ok(()) => {
             let mode = crate::team::channel_mode(&def).label();
             let limit = def
@@ -360,6 +372,9 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
                 name: d.name.clone(),
                 agent: d.name.clone(),
                 avatar: Some(avatar.to_string()),
+                // Scaffolding pins no engine: a member runs what its definition
+                // (or the session) runs until someone decides otherwise.
+                ..Default::default()
             })
             .collect(),
     };

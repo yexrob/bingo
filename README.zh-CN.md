@@ -264,8 +264,14 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 房间复用频道机制、控制面仍是 hub-and-spoke。
 
 - **定义**：`.bingo/team.json`（camelCase，进版本库）——`name` + `channel{mode,
-  messageLimit}` + `members[{name, agent, avatar?}]`；`name` 即消息上显示的名字（取人名而非角色代号），`avatar` 钉住内置头像之一；成员引用 AgentDef，人格单一事实来源
+  messageLimit}` + `members[{name, agent, avatar?, model?, provider?, thinking?}]`；`name` 即消息上显示的名字（取人名而非角色代号），`avatar` 钉住内置头像之一；成员引用 AgentDef，人格单一事实来源
   仍在 `.bingo/agents/<名>.md`，一人格可入多 team。
+- **逐成员的引擎**：`model` / `provider` / `thinking` 钉住这名成员跑在什么上面。
+  谁用哪个模型是编队的一部分，不是每次派生临时决定的事，所以写进进版本库的图纸——
+  一支队伍可以让评审跑便宜快的端点、让架构跑贵的。三者都是先落回 AgentDef、再落回
+  会话，与 `Agent` 调用的同名参数同一套优先级；`provider` 指到会话之外的端点时必须
+  同时给 `model`（模型名换个端点就不认识了）。`/team list` 与 `AgentControl list`
+  会报出每个在跑实例实际所在的引擎。
 - **启动自动拉起**：`settings.team.autoStart`（缺省 true）时启动即拉起——派生
   成员 + 建房间，但**不唤醒**（成员 Idle 零 token 待命，等 `/team assign` 或
   频道消息才开跑）。opt-out：`--no-team` 或 `team.autoStart: false`。

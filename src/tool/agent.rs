@@ -653,7 +653,7 @@ impl AgentTool {
 /// degrading an invalid value to off would let the user believe thinking is on when it isn't,
 /// so sub-agent spawn must surface it immediately. Inherited values skip this check
 /// (consistent with the main session after `/think`, see [`build_sub_session`]).
-fn normalize_thinking(level: &str) -> Result<Option<String>, String> {
+pub(crate) fn normalize_thinking(level: &str) -> Result<Option<String>, String> {
     if level == "off" {
         return Ok(None);
     }
@@ -1193,9 +1193,11 @@ impl Tool for AgentControlTool {
                                 String::new()
                             };
                             format!(
-                                "- {} ({}{def}{pending}{unacked}): {}",
+                                "- {} ({}{def}{pending}{unacked}, {} @ {}): {}",
                                 s.name,
                                 s.state.label(),
+                                s.model,
+                                s.provider,
                                 s.description
                             )
                         })
