@@ -82,6 +82,7 @@ pub enum UiEvent {
     /// Tool block fully received while streaming (including input): the fold decision point.
     /// standalone=true: non-model tools like the `!` command — summary only, not part of a fold group.
     ToolReady {
+        tool_call_id: String,
         name: String,
         input: serde_json::Value,
         standalone: bool,
@@ -193,8 +194,9 @@ pub fn tui_hooks(
             }
             _ => {}
         }),
-        on_tool_ready: Box::new(move |name, input, standalone| {
+        on_tool_ready: Box::new(move |tool_call_id, name, input, standalone| {
             let _ = ready_events.send(UiEvent::ToolReady {
+                tool_call_id,
                 name,
                 input,
                 standalone,
@@ -202,10 +204,11 @@ pub fn tui_hooks(
         }),
         on_tool_done: Box::new(move |done| {
             let _ = tool_events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                tool_call_id: done.tool_call_id.clone(),
                 name: done.name.clone(),
                 summary: done.summary.clone(),
                 output: done.output.clone(),
-                is_error: done.is_error,
+                status: done.status,
                 diff: done.diff.clone(),
                 duration_ms: done.duration_ms,
             }));

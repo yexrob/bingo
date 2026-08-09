@@ -160,6 +160,7 @@ fn downcast_error_code(err: &(dyn std::error::Error + 'static)) -> Option<&'stat
         crate::transcript::TranscriptError,
         crate::experience::ExperienceError,
         crate::hooks::HookError,
+        crate::json_events::JsonEventsError,
         crate::mcp::McpError,
         crate::share::ShareError,
         crate::update::UpdateError,
@@ -447,6 +448,7 @@ mod tests {
         use crate::api::client::ClientError;
         use crate::experience::ExperienceError;
         use crate::hooks::HookError;
+        use crate::json_events::JsonEventsError;
         use crate::mcp::McpError;
         use crate::query::QueryError;
         use crate::settings::SettingsError;
@@ -466,6 +468,7 @@ mod tests {
             Box::new(TranscriptError::Io(std::io::Error::other("x"))),
             Box::new(ExperienceError::Io(std::io::Error::other("x"))),
             Box::new(HookError::Failed("x".into())),
+            Box::new(JsonEventsError::BadArgument("x".into())),
             Box::new(McpError::Connect {
                 server: "s".into(),
                 detail: "d".into(),
@@ -475,8 +478,8 @@ mod tests {
         ];
         assert_eq!(
             samples.len(),
-            12,
-            "the boxed exit should have 12 registered types: new ErrorCode implementors must be \
+            13,
+            "the boxed exit should have 13 registered types: new ErrorCode implementors must be \
              `downcast_error_code` macro registration + an instance in this test; missing either turns CI red"
         );
         for e in &samples {

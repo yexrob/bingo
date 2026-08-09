@@ -1499,10 +1499,12 @@ impl Chat {
                 }
             }
             UiEvent::ToolReady {
+                tool_call_id,
                 name,
                 input,
                 standalone,
             } => {
+                let _ = tool_call_id;
                 let Some(i) = self.stream_msg else { return };
                 if is_hidden_tool(&name) {
                     return;
@@ -1679,10 +1681,10 @@ impl Chat {
                         && call.name == done.name.as_str()
                         && call.status == ToolStatus::Running
                     {
-                        call.status = if done.is_error {
-                            ToolStatus::Error
-                        } else {
-                            ToolStatus::Done
+                        call.status = match done.status {
+                            crate::query::ToolCallStatus::Done
+                            | crate::query::ToolCallStatus::Interrupted => ToolStatus::Done,
+                            crate::query::ToolCallStatus::Error => ToolStatus::Error,
                         };
                         call.summary = done.summary.clone();
                         call.duration_ms = done.duration_ms;
@@ -7026,6 +7028,7 @@ mod tests {
             });
             chat.drain_events();
             let _ = chat.events.send(UiEvent::ToolReady {
+                tool_call_id: "test-tool".into(),
                 name: "Read".into(),
                 input: json!({"file_path": path}),
                 standalone: false,
@@ -7048,10 +7051,11 @@ mod tests {
             let _ = chat
                 .events
                 .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                    tool_call_id: "test-tool".into(),
                     name: "Read".into(),
                     summary: summary.into(),
                     output: out.into(),
-                    is_error: false,
+                    status: crate::query::ToolCallStatus::Done,
                     duration_ms: 0,
                     diff: None,
                 }));
@@ -7223,6 +7227,7 @@ mod tests {
             let _ = chat.events.send(UiEvent::ToolStart { name: name.into() });
             chat.drain_events();
             let _ = chat.events.send(UiEvent::ToolReady {
+                tool_call_id: "test-tool".into(),
                 name: name.into(),
                 input: json!({}),
                 standalone: false,
@@ -7244,6 +7249,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Bash".into(),
             input: json!({"command": "ls"}),
             standalone: false,
@@ -7574,6 +7580,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Bash".into(),
             input: json!({"command": "ls"}),
             standalone: true,
@@ -7586,10 +7593,11 @@ mod tests {
         let _ = chat
             .events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                tool_call_id: "test-tool".into(),
                 name: "Bash".into(),
                 summary: "$ ls".into(),
                 output: "$ ls\nREADME.md\nsrc\n[Exited with code 0]".into(),
-                is_error: false,
+                status: crate::query::ToolCallStatus::Done,
                 duration_ms: 5,
                 diff: None,
             }));
@@ -7615,6 +7623,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Bash".into(),
             input: json!({"command": "cargo test"}),
             standalone: false,
@@ -9980,6 +9989,7 @@ mod tests {
             });
             chat.drain_events();
             let _ = chat.events.send(UiEvent::ToolReady {
+                tool_call_id: "test-tool".into(),
                 name: "Read".into(),
                 input: json!({"file_path": path}),
                 standalone: false,
@@ -10014,20 +10024,22 @@ mod tests {
         let _ = chat
             .events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                tool_call_id: "test-tool".into(),
                 name: "Read".into(),
                 summary: "Read a.md".into(),
                 output: "l1\nl2\nl3".into(),
-                is_error: false,
+                status: crate::query::ToolCallStatus::Done,
                 duration_ms: 0,
                 diff: None,
             }));
         let _ = chat
             .events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                tool_call_id: "test-tool".into(),
                 name: "Read".into(),
                 summary: "Read b.md".into(),
                 output: "x\ny".into(),
-                is_error: false,
+                status: crate::query::ToolCallStatus::Done,
                 duration_ms: 0,
                 diff: None,
             }));
@@ -10062,6 +10074,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Read".into(),
             input: json!({"file_path": "a.md"}),
             standalone: false,
@@ -10071,6 +10084,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "WebSearch".into(),
             input: json!({"query": "rust"}),
             standalone: false,
@@ -10100,6 +10114,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Read".into(),
             input: json!({"file_path": "a.md"}),
             standalone: false,
@@ -10121,6 +10136,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Read".into(),
             input: json!({"file_path": "a.md"}),
             standalone: false,
@@ -10196,6 +10212,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Skill".into(),
             input: json!({"skill": "pdf", "args": "doc.md"}),
             standalone: false,
@@ -10210,10 +10227,11 @@ mod tests {
         let _ = chat
             .events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                tool_call_id: "test-tool".into(),
                 name: "Skill".into(),
                 summary: "pdf doc.md".into(),
                 output: "✦ pdf — read /tmp/skills/SKILL.md".into(),
-                is_error: false,
+                status: crate::query::ToolCallStatus::Done,
                 diff: None,
                 duration_ms: 3210,
             }));
@@ -10441,6 +10459,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Bash".into(),
             input: json!({"command": "cargo clippy"}),
             standalone: false,
@@ -10463,10 +10482,11 @@ mod tests {
         let _ = chat
             .events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                tool_call_id: "test-tool".into(),
                 name: "Bash".into(),
                 summary: "$ cargo clippy".into(),
                 output: "ok".into(),
-                is_error: false,
+                status: crate::query::ToolCallStatus::Done,
                 diff: None,
                 duration_ms: 3000,
             }));
@@ -10602,6 +10622,7 @@ mod tests {
             let _ = chat.events.send(UiEvent::ToolStart { name: name.into() });
             chat.drain_events();
             let _ = chat.events.send(UiEvent::ToolReady {
+                tool_call_id: "test-tool".into(),
                 name: name.into(),
                 input,
                 standalone: false,
@@ -10629,10 +10650,11 @@ mod tests {
             let _ = chat
                 .events
                 .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                    tool_call_id: "test-tool".into(),
                     name: summary.split(' ').next().unwrap().into(),
                     summary: summary.into(),
                     output: out.into(),
-                    is_error: false,
+                    status: crate::query::ToolCallStatus::Done,
                     diff: None,
                     duration_ms: 1,
                 }));
@@ -10655,6 +10677,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Read".into(),
             input: json!({"file_path": "package.json"}),
             standalone: false,
@@ -10668,10 +10691,11 @@ mod tests {
         let _ = chat
             .events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                tool_call_id: "test-tool".into(),
                 name: "Read".into(),
                 summary: "Read package.json".into(),
                 output: "l1".into(),
-                is_error: false,
+                status: crate::query::ToolCallStatus::Done,
                 diff: None,
                 duration_ms: 3,
             }));
@@ -10696,6 +10720,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Grep".into(),
             input: json!({"pattern": "nomatch"}),
             standalone: false,
@@ -10711,6 +10736,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Grep".into(),
             input: json!({"pattern": "another"}),
             standalone: false,
@@ -10724,6 +10750,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Read".into(),
             input: json!({"file_path": "a.md"}),
             standalone: false,
@@ -10742,6 +10769,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Grep".into(),
             input: json!({"pattern": "post-text"}),
             standalone: false,
@@ -10769,10 +10797,11 @@ mod tests {
             let _ = chat
                 .events
                 .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                    tool_call_id: "test-tool".into(),
                     name: "Read".into(),
                     summary: summary.into(),
                     output: out.into(),
-                    is_error: false,
+                    status: crate::query::ToolCallStatus::Done,
                     duration_ms: 0,
                     diff: None,
                 }));
@@ -10826,10 +10855,11 @@ mod tests {
             let _ = chat
                 .events
                 .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                    tool_call_id: "test-tool".into(),
                     name: "Read".into(),
                     summary: summary.into(),
                     output: out.into(),
-                    is_error: false,
+                    status: crate::query::ToolCallStatus::Done,
                     duration_ms: 0,
                     diff: None,
                 }));
@@ -10918,6 +10948,7 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Bash".into(),
             input: json!({"command": "grep -rn foo \\\n  --include='*.rs' .\nls -la"}),
             standalone: false,
@@ -11382,10 +11413,11 @@ mod tests {
         let _ = chat
             .events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                tool_call_id: "test-tool".into(),
                 name: "Read".into(),
                 summary: "Read a.md".into(),
                 output: "l1\nl2\nl3".into(),
-                is_error: false,
+                status: crate::query::ToolCallStatus::Done,
                 duration_ms: 0,
                 diff: None,
             }));

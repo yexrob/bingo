@@ -233,14 +233,22 @@ pub struct Session {
 /// Single tool completion event.
 #[derive(Debug, Clone)]
 pub struct ToolCallDone {
+    pub tool_call_id: String,
     pub name: String,
     pub summary: String,
     pub output: String,
-    pub is_error: bool,
+    pub status: ToolCallStatus,
     /// Unified diff preview for edit tools (None = no diff).
     pub diff: Option<String>,
     /// Tool execution duration in milliseconds.
     pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallStatus {
+    Done,
+    Error,
+    Interrupted,
 }
 
 /// Async permission prompt callback: tool name + reason → whether allowed.
@@ -273,7 +281,7 @@ pub struct UiHooks {
     /// Callback when a tool block is complete (including input): the fold decision needs
     /// the input (Bash command classification). standalone=true: non-model tools like the
     /// `!` command — summary only, not part of a fold group.
-    pub on_tool_ready: Box<dyn Fn(String, serde_json::Value, bool) + Send>,
+    pub on_tool_ready: Box<dyn Fn(String, String, serde_json::Value, bool) + Send>,
     pub on_tool_done: Box<dyn Fn(&ToolCallDone) + Send>,
     /// One model response and all its tools finished: fold groups close per batch;
     /// the next turn's tools open a new group.
@@ -315,7 +323,7 @@ pub fn headless_hooks() -> UiHooks {
                 let _ = std::io::stdout().flush();
             }
         }),
-        on_tool_ready: Box::new(|_name, _input, _standalone| {}),
+        on_tool_ready: Box::new(|_tool_call_id, _name, _input, _standalone| {}),
         on_tool_done: Box::new(|_| {}),
         on_round_end: Box::new(|| {}),
         on_warning: Box::new(|message| eprintln!("[bingo] warning: {message}")),
@@ -451,7 +459,7 @@ async fn one_turn(
                         name: name.clone(),
                         input: input.clone(),
                     });
-                    (ui.on_tool_ready)(name.clone(), input.clone(), false);
+                    (ui.on_tool_ready)(id.clone(), name.clone(), input.clone(), false);
                 }
             }
             _ => {}
@@ -773,7 +781,9 @@ async fn query_loop(
         if turn.aborted {
             // Interrupted: the whole turn is discarded (assistant incomplete); neither
             // executed nor pending tools are filled back.
-            println!();
+            if !session.quiet {
+                println!();
+            }
             return Ok(QueryOutcome {
                 messages,
                 aborted: true,
@@ -806,7 +816,9 @@ async fn query_loop(
                 )));
                 continue;
             }
-            println!();
+            if !session.quiet {
+                println!();
+            }
             return Ok(QueryOutcome {
                 messages,
                 aborted: false,
@@ -871,10 +883,11 @@ async fn query_loop(
                     // instead of spinning forever.
                     let summary = summarize_input(&name, &input);
                     (ui.on_tool_done)(&ToolCallDone {
+                        tool_call_id: id,
                         name,
                         summary,
                         output: format!("permission denied: {reason}"),
-                        is_error: true,
+                        status: ToolCallStatus::Error,
                         diff: None,
                         duration_ms: 0,
                     });
@@ -900,10 +913,15 @@ async fn query_loop(
             match outcome.result {
                 Ok(result) => {
                     (ui.on_tool_done)(&ToolCallDone {
+                        tool_call_id: outcome.tool_use_id.clone(),
                         name: name.clone(),
                         summary: summarize_input(name, input),
                         output: clipped_result(render_result(&result)),
-                        is_error: result.is_error,
+                        status: if result.is_error {
+                            ToolCallStatus::Error
+                        } else {
+                            ToolCallStatus::Done
+                        },
                         diff: result.diff.clone(),
                         duration_ms: outcome.duration_ms,
                     });
@@ -924,10 +942,11 @@ async fn query_loop(
                     // Failures also need UI closure: otherwise the tool row spins forever
                     // and the user never sees the failure.
                     (ui.on_tool_done)(&ToolCallDone {
+                        tool_call_id: outcome.tool_use_id.clone(),
                         name: name.clone(),
                         summary: summarize_input(name, input),
                         output: e.to_string(),
-                        is_error: true,
+                        status: ToolCallStatus::Error,
                         diff: None,
                         duration_ms: outcome.duration_ms,
                     });
@@ -950,10 +969,11 @@ async fn query_loop(
                     continue;
                 }
                 (ui.on_tool_done)(&ToolCallDone {
+                    tool_call_id: id.clone(),
                     name: name.clone(),
                     summary: summarize_input(name, input),
                     output: "interrupted".to_string(),
-                    is_error: false,
+                    status: ToolCallStatus::Interrupted,
                     diff: None,
                     duration_ms: 0,
                 });
@@ -973,7 +993,9 @@ async fn query_loop(
             ui,
         );
         if interrupted {
-            println!();
+            if !session.quiet {
+                println!();
+            }
             return Ok(QueryOutcome {
                 messages,
                 aborted: true,
@@ -1140,7 +1162,7 @@ pub async fn run_bash_command(
         id: tool_use_id.clone(),
         name: "Bash".to_string(),
     });
-    (ui.on_tool_ready)("Bash".to_string(), input.clone(), true);
+    (ui.on_tool_ready)(tool_use_id.clone(), "Bash".to_string(), input.clone(), true);
 
     let Some(tool) = find_tool(&tools, "Bash") else {
         return Err(QueryError::Protocol("Bash tool not found".to_string()));
@@ -1211,10 +1233,15 @@ pub async fn run_bash_command(
         }
     };
     (ui.on_tool_done)(&ToolCallDone {
+        tool_call_id: tool_use_id,
         name: "Bash".to_string(),
         summary: format!("$ {command}"),
         output: text.clone(),
-        is_error,
+        status: if is_error {
+            ToolCallStatus::Error
+        } else {
+            ToolCallStatus::Done
+        },
         diff: None,
         duration_ms,
     });

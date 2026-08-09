@@ -177,7 +177,7 @@ fn subagent_hooks(
                 watch.feed_content(id, text);
             }
         }),
-        on_tool_ready: Box::new(move |name, input, _standalone| {
+        on_tool_ready: Box::new(move |_tool_call_id, name, input, _standalone| {
             let Ok(mut live) = tool_live.lock() else {
                 return;
             };

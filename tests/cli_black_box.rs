@@ -52,6 +52,213 @@ fn run(root: &TempDir, args: &[&str]) -> Output {
         .expect("bingo process must start")
 }
 
+fn run_with_stdin(root: &TempDir, args: &[&str], stdin: &str) -> Output {
+    let mut child = isolated_command(root)
+        .args(args)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("bingo process must start");
+    {
+        use std::io::Write;
+        let mut pipe = child.stdin.take().expect("stdin pipe");
+        pipe.write_all(stdin.as_bytes()).expect("stdin write");
+    }
+    child.wait_with_output().expect("bingo process must exit")
+}
+
+#[test]
+fn json_events_eof_cancels_active_turn_without_mixing_stdout() {
+    let root = TempDir::new("json-eof-cancel");
+    let command = concat!(
+        r#"{"protocolVersion":1,"type":"turn.start","commandId":"turn-1-command","turnId":"turn-1","prompt":"hello"}"#,
+        "\n"
+    );
+
+    let output = run_with_stdin(&root, &["--json-events", "--no-team"], command);
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).expect("NDJSON output must be UTF-8");
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each stdout line must be JSON"))
+        .collect();
+    assert_eq!(events[0]["type"], "session.ready");
+    assert_eq!(events[1]["type"], "turn.started");
+    assert_eq!(
+        events.last().expect("terminal event")["type"],
+        "turn.cancelled"
+    );
+    assert_eq!(events.last().expect("terminal event")["commandId"], "eof");
+}
+
+#[test]
+fn json_events_rejects_duplicate_command_ids_without_closing() {
+    let root = TempDir::new("json-duplicate-command");
+    let commands = concat!(
+        r#"{"protocolVersion":1,"type":"models.list","commandId":"duplicate-1","provider":"missing"}"#,
+        "\n",
+        r#"{"protocolVersion":1,"type":"models.list","commandId":"duplicate-1","provider":"missing"}"#,
+        "\n",
+        r#"{"protocolVersion":1,"type":"session.close","commandId":"close-1"}"#,
+        "\n"
+    );
+
+    let output = run_with_stdin(&root, &["--json-events", "--no-team"], commands);
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).expect("NDJSON output must be UTF-8");
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each stdout line must be JSON"))
+        .collect();
+    assert!(events.iter().any(|event| {
+        event["type"] == "error"
+            && event["commandId"] == "duplicate-1"
+            && event["msg"] == "commandId must be unique"
+            && event["recoverable"] == true
+    }));
+    assert_eq!(
+        events.last().expect("closed event")["type"],
+        "session.closed"
+    );
+}
+
+#[test]
+fn json_events_session_lifecycle_renames_then_deletes() {
+    let root = TempDir::new("json-lifecycle");
+    let commands = concat!(
+        r#"{"protocolVersion":1,"type":"session.rename","commandId":"rename-1","name":"Named Session"}"#,
+        "\n",
+        r#"{"protocolVersion":1,"type":"session.delete","commandId":"delete-1"}"#,
+        "\n"
+    );
+
+    let output = run_with_stdin(&root, &["--json-events", "--no-team"], commands);
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).expect("NDJSON output must be UTF-8");
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each stdout line must be JSON"))
+        .collect();
+    assert_eq!(events[0]["type"], "session.ready");
+    assert_eq!(events[1]["type"], "session.renamed");
+    assert_eq!(events[1]["commandId"], "rename-1");
+    assert_eq!(events[2]["type"], "session.deleted");
+    assert_eq!(events[2]["commandId"], "delete-1");
+    let path = events[1]["metadata"]["transcriptPath"]
+        .as_str()
+        .expect("renamed transcript path");
+    assert!(!Path::new(path).exists());
+}
+
+#[test]
+fn json_events_exact_session_resumes_without_fragment_matching() {
+    let root = TempDir::new("json-resume");
+    let close = concat!(
+        r#"{"protocolVersion":1,"type":"session.close","commandId":"close-1"}"#,
+        "\n"
+    );
+    let created = run_with_stdin(&root, &["--json-events", "--no-team"], close);
+    let created_stdout = String::from_utf8(created.stdout).expect("NDJSON output must be UTF-8");
+    let ready: serde_json::Value =
+        serde_json::from_str(created_stdout.lines().next().expect("ready line"))
+            .expect("ready event JSON");
+    let session_id = ready["sessionId"].as_str().expect("session id");
+
+    let resumed = run_with_stdin(
+        &root,
+        &["--json-events", "--no-team", "--session", session_id],
+        close,
+    );
+    assert!(resumed.status.success());
+    let resumed_stdout = String::from_utf8(resumed.stdout).expect("NDJSON output must be UTF-8");
+    let resumed_ready: serde_json::Value =
+        serde_json::from_str(resumed_stdout.lines().next().expect("ready line"))
+            .expect("ready event JSON");
+    assert_eq!(resumed_ready["metadata"]["resumed"], true);
+    assert_eq!(resumed_ready["sessionId"], session_id);
+
+    let fragment = &session_id[..session_id.len() - 1];
+    let rejected = run_with_stdin(
+        &root,
+        &["--json-events", "--no-team", "--session", fragment],
+        close,
+    );
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(rejected.stderr.is_empty());
+    let event: serde_json::Value = serde_json::from_slice(&rejected.stdout).expect("fatal JSON");
+    assert_eq!(event["type"], "error");
+    assert_eq!(event["code"], "BAD_ARGUMENT");
+}
+
+#[test]
+fn json_events_close_is_ndjson_only_and_gapless() {
+    let root = TempDir::new("json-close");
+    let command = concat!(
+        r#"{"protocolVersion":1,"type":"session.close","commandId":"close-1"}"#,
+        "\n"
+    );
+
+    let output = run_with_stdin(&root, &["--json-events", "--no-team"], command);
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).expect("NDJSON output must be UTF-8");
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each stdout line must be JSON"))
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["type"], "session.ready");
+    assert_eq!(events[0]["seq"], 1);
+    assert_eq!(events[1]["type"], "session.closed");
+    assert_eq!(events[1]["seq"], 2);
+    assert_eq!(events[1]["commandId"], "close-1");
+}
+
+#[test]
+fn json_events_malformed_command_is_a_fatal_protocol_error() {
+    let root = TempDir::new("json-malformed");
+
+    let output = run_with_stdin(&root, &["--json-events", "--no-team"], "not-json\n");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).expect("NDJSON output must be UTF-8");
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each stdout line must be JSON"))
+        .collect();
+    assert_eq!(events[0]["type"], "session.ready");
+    assert_eq!(events[1]["type"], "error");
+    assert_eq!(events[1]["code"], "BAD_ARGUMENT");
+    assert_eq!(events[1]["recoverable"], false);
+    assert!(!stdout.contains("[error]"));
+}
+
+#[test]
+fn json_events_startup_error_is_one_structured_event() {
+    let root = TempDir::new("json-startup-error");
+    fs::create_dir_all(root.path().join(".bingo")).expect("project config directory");
+    fs::write(root.path().join(".bingo/settings.json"), b"not json")
+        .expect("invalid settings fixture");
+
+    let output = run_with_stdin(&root, &["--json-events", "--no-team"], "");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).expect("NDJSON output must be UTF-8");
+    let event: serde_json::Value = serde_json::from_str(stdout.trim()).expect("fatal event JSON");
+    assert_eq!(event["type"], "error");
+    assert_eq!(event["seq"], 1);
+    assert_eq!(event["sessionId"], serde_json::Value::Null);
+    assert_eq!(event["code"], "CONFIG_INVALID");
+}
+
 #[test]
 fn version_is_a_fast_path_even_with_invalid_settings() {
     let root = TempDir::new("version");
