@@ -300,6 +300,21 @@ fn validate(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     }
 }
 
+/// The portraits a scaffolded crew may wear: every one except the two the hub
+/// and the human already occupy in the transcript.
+fn crew_portraits() -> Vec<&'static str> {
+    let taken = [
+        crate::tui::avatar::index_of(crate::channels::HUB_NAME),
+        crate::tui::avatar::index_of(crate::channels::USER_NAME),
+    ];
+    crate::tui::avatar::ids()
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !taken.contains(i))
+        .map(|(_, id)| id)
+        .collect()
+}
+
 /// Scaffolding: `/team new [name]` — generates .bingo/team.json with members = all
 /// current AgentDefs (all references exist → the output naturally passes validate).
 /// Refuses to overwrite an existing file.
@@ -333,10 +348,14 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
         }),
         // Portraits handed out in roster order rather than by hashing the name:
         // a scaffolded crew should come out with distinct faces, and a hash of
-        // four role names collides more often than not.
+        // four role names collides more often than not. The two the hub and the
+        // human wear are dealt out of the deck (D50) — they are in every room the
+        // crew appears in, so a member sharing one collides on sight. Derived
+        // from the same hash they use rather than named here, so the reservation
+        // follows if either the hash or the portrait list changes.
         members: defs
             .iter()
-            .zip(crate::tui::avatar::ids().into_iter().cycle())
+            .zip(crew_portraits().into_iter().cycle())
             .map(|(d, avatar)| crate::team::TeamMember {
                 name: d.name.clone(),
                 agent: d.name.clone(),
@@ -492,6 +511,51 @@ mod tests {
         assert!(
             s.channels.info("proj").is_some(),
             "channel = team name (defaults to the dir name)"
+        );
+        let _ = std::fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    /// A scaffolded crew never wears the hub's or the human's face: those two are
+    /// in every room the crew shows up in, so a member sharing one collides on
+    /// sight — the very confusion pinning a portrait exists to prevent.
+    #[test]
+    fn scaffolded_crew_avoids_the_hub_and_human_faces() {
+        let (s, project) = session("faces");
+        // More members than there are free portraits, so the deal wraps and any
+        // reserved face would certainly surface.
+        for i in 0..crate::tui::avatar::COUNT + 1 {
+            std::fs::write(
+                project.join(format!(".bingo/agents/a{i}.md")),
+                "You are A.\n",
+            )
+            .unwrap();
+        }
+        let _ = new_team(&s, &project, "wide");
+        let def = crate::team::load_team_file(&project).unwrap().unwrap();
+        let taken = [
+            crate::tui::avatar::index_of(crate::channels::HUB_NAME),
+            crate::tui::avatar::index_of(crate::channels::USER_NAME),
+        ];
+        for m in &def.members {
+            let id = m.avatar.as_deref().unwrap_or_default();
+            let index = crate::tui::avatar::index_of_id(id)
+                .unwrap_or_else(|| panic!("{} wears an unknown portrait {id:?}", m.name));
+            assert!(
+                !taken.contains(&index),
+                "{} took a reserved face ({id})",
+                m.name
+            );
+        }
+        // The remaining portraits are all still dealt — reserving is not thinning.
+        let dealt: std::collections::HashSet<&str> = def
+            .members
+            .iter()
+            .filter_map(|m| m.avatar.as_deref())
+            .collect();
+        assert_eq!(
+            dealt.len(),
+            crate::tui::avatar::COUNT - taken.len(),
+            "every unreserved portrait is used: {dealt:?}"
         );
         let _ = std::fs::remove_dir_all(project.parent().unwrap());
     }

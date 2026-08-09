@@ -742,8 +742,15 @@ fn chip(name: &str, index: usize, pal: &Palette) -> Line {
 /// line, row 1 the first body line — which is why the portrait costs no rows the
 /// layout was not already spending.
 fn gutter_line(name: &str, row: usize, avatars: &Avatars, pal: &Palette) -> Line {
-    let index = avatars.index_of(name);
-    if avatars.images {
+    gutter_cell(avatars.index_of(name), name, row, avatars.images, pal)
+}
+
+/// [`gutter_line`] with the portrait already resolved: the main transcript knows
+/// the index before it knows the name (the hub and the human are not blueprint
+/// members), so it enters here rather than through an [`Avatars`] table it would
+/// have to clone every frame.
+pub fn gutter_cell(index: usize, name: &str, row: usize, images: bool, pal: &Palette) -> Line {
+    if images {
         if let Some((cells, id)) = avatar::placeholder(index, row) {
             let mut line = Line::styled(cells, SegStyle::fg(id));
             line.push_styled(" ", SegStyle::fg(pal.main_text));
@@ -754,10 +761,30 @@ fn gutter_line(name: &str, row: usize, avatars: &Avatars, pal: &Palette) -> Line
         line.push_styled(" ", SegStyle::fg(pal.main_text));
         return line;
     }
-    Line::styled(
-        " ".repeat(gutter(avatars.images)),
-        SegStyle::fg(pal.main_dim),
-    )
+    Line::styled(" ".repeat(gutter(images)), SegStyle::fg(pal.main_dim))
+}
+
+/// A sender band: the portrait beside the name, as the rows a transcript puts
+/// *above* a message rather than beside it. The main chat has no gutter — its
+/// bodies run the full width and its `⏺` markers separate prose from tool rows
+/// inside one message — so the face goes overhead, where it costs two rows once
+/// per message and nothing below it has to move.
+///
+/// One row where the terminal cannot place images: unlike the workspace gutter,
+/// nothing here depends on the two skins having equal height.
+pub fn sender_band(
+    index: usize,
+    name: &str,
+    shown: &str,
+    images: bool,
+    pal: &Palette,
+) -> Vec<Line> {
+    let mut head = gutter_cell(index, name, 0, images, pal);
+    head.push_styled(shown.to_string(), SegStyle::fg(pal.main_text).bold());
+    if !images {
+        return vec![head];
+    }
+    vec![head, gutter_cell(index, name, 1, images, pal)]
 }
 
 /// The message list. Consecutive posts from one sender inside [`GROUP_WINDOW`]

@@ -270,7 +270,11 @@ Example (.bingo/settings.json):
   and alt+↑↓. **Avatars**: on terminals that can place kitty images (the same capability that renders inline images), each
   sender gets one of eight bundled anime-style portraits, 4×2 cells beside the name; elsewhere it falls back to the sender's
   initial on a colour, and the row count is identical either way. A team member's portrait is pinned in `.bingo/team.json`
-  (`"avatar": "sora"`), so a crew keeps a fixed cast; everyone else gets a face derived from their name. Wake-up scaffolding the
+  (`"avatar": "sora"`), so a crew keeps a fixed cast; everyone else gets a face derived from their name. The **main chat** wears
+  the same faces: each message carries a band above it with the speaker's portrait and name (`main` for the hub, `You` for your own),
+  two rows where portraits place and one where they fall back to the chip. Nothing below the band moves — bodies still run the full
+  width. A terminal that purges its image store (a resize) redraws the faces still on screen; ones already in scrollback leave four
+  blank columns with the name intact. Wake-up scaffolding the
   runtime injected (a relayed channel message, the task reminder) collapses to one dim line instead of being quoted as a message. The composer sends: in a channel it posts as `user` (same
   delivery path as Post, members woken normally; rendering = read, so serial never bounces you), in a DM it queues on the
   instance and flushes at the turn boundary (shown as a pending message until then). Keys: Tab switches between the message
@@ -366,7 +370,8 @@ Example (.bingo/settings.json):
   every conversation and its unread count) and alt+↑↓. **Avatars**: terminals that can place kitty images (the same capability behind inline images)
   assign each speaker one of eight bundled anime-style portraits, 4×2 cells to the left of the name; other terminals fall back to an initial-on-color
   chip, and both skins keep the same row count. Team members' avatars are pinned in `.bingo/team.json` (`"avatar": "sora"`),
-  so a crew has a fixed cast; other instances get a face by name. Runtime-injected wake scaffolding (channel-message relays,
+  so a crew has a fixed cast; other instances get a face by name. The **main chat** uses the same faces: every message gets a band
+  above it carrying the speaker's portrait and name (`main` for the hub, `You` for your own); message bodies are unchanged underneath. Runtime-injected wake scaffolding (channel-message relays,
   task reminders) collapses into a single dim hint line instead of being quoted as a whole message. Sending from the bottom input box: in a channel you speak as `user` (the same delivery
   path as Post, waking members normally; rendered counts as read, serial won't bounce you), DMs queue into the instance's inbox and are
   delivered at the turn boundary (shown as pending before delivery). Keys: Tab switches between the message list and the input box, alt+↑↓ switches conversations,

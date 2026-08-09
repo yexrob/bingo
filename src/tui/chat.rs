@@ -892,6 +892,13 @@ pub struct Chat {
     reply_cache: HashMap<String, Vec<Line>>,
     /// Terminal image capability (kitty protocol; probed for both hosts).
     pub image_cap: Option<ImageCap>,
+    /// Portraits the transcript has put on screen. The transmit layer sends each
+    /// one once and, after a store purge, sends exactly these again — recorded by
+    /// the rows that drew them rather than rediscovered by scanning the document,
+    /// which would put an O(messages × activities) sweep on the frame path.
+    /// It only grows: a face whose message has already settled into scrollback
+    /// still has cells out there referring to it.
+    pub faces: HashSet<usize>,
     /// Loaded image cache (url → PNG bytes + cell dimensions).
     pub images: HashMap<String, Arc<ImageMeta>>,
     /// Image urls currently being fetched (prevents duplicate loads).
@@ -1151,6 +1158,7 @@ impl Chat {
             renderer: MarkdownRenderer::with_theme(80, theme.clone()),
             reply_cache: HashMap::new(),
             image_cap: None,
+            faces: HashSet::new(),
             images: HashMap::new(),
             images_pending: HashSet::new(),
             images_failed: HashSet::new(),
@@ -5984,17 +5992,23 @@ impl Chat {
         if skip == 0 {
             blocks.push(Block::settled(self.welcome_el(width, &theme), true));
         }
+        let pal = crate::tui::slack::Palette::new(&theme);
         for (i, &settled) in settled_flags
             .iter()
             .enumerate()
             .skip(skip.saturating_sub(1))
         {
-            let body = match self.messages[i].role {
+            let role = self.messages[i].role;
+            let band = self.sender_band_el(role, &pal);
+            let body = match role {
                 Role::User => El::Rows(user_message_rows(&self.messages[i].text, width, &theme)),
                 Role::Assistant => self.assistant_el(i, width, &theme, settled),
             };
             // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
-            blocks.push(Block::settled(El::col(vec![El::Blank, body]), settled));
+            blocks.push(Block::settled(
+                El::col(vec![El::Blank, band, body]),
+                settled,
+            ));
         }
         if let Some(ask) = self.ask_el(&theme) {
             blocks.push(Block::live(ask));
@@ -6051,6 +6065,31 @@ impl Chat {
             banner,
             !self.session.client.is_configured(&provider),
         ))
+    }
+
+    /// The band above a message: who is speaking, as a portrait and a name.
+    ///
+    /// The names are the room's own — `main` for the hub, and the human's own
+    /// messages read `You` exactly as the workspace already writes them
+    /// ([`crate::tui::slack::message_rows`]). So the name on the band is the name
+    /// that addresses the speaker, and the two views agree without a display-name
+    /// table to keep honest in both.
+    ///
+    /// Neither speaker is a blueprint member, so both faces come from the same
+    /// name hash the workspace falls back to — pinning is for the crew.
+    fn sender_band_el(&mut self, role: Role, pal: &crate::tui::slack::Palette) -> El {
+        let (name, shown) = match role {
+            Role::User => (crate::channels::USER_NAME, "You"),
+            Role::Assistant => (crate::channels::HUB_NAME, crate::channels::HUB_NAME),
+        };
+        let index = crate::tui::avatar::index_of(name);
+        self.faces.insert(index);
+        El::Rows(
+            crate::tui::slack::sender_band(index, name, shown, self.image_cap.is_some(), pal)
+                .into_iter()
+                .map(Row::new)
+                .collect(),
+        )
     }
 
     /// Assistant message: markdown text and activities interleaved in model

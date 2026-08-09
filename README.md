@@ -371,6 +371,16 @@ on a colour; the row count is identical either way, so only the gutter changes.
 - One directory per skill: `<name>/SKILL.md` with YAML frontmatter
   (`description`/`when_to_use`/`arguments`) + markdown body.
 - Invocation: the model calls via `SkillTool` automatically; the user runs
+**In the main chat**, the same faces sit on a band above each message: the
+speaker's portrait beside their name — `main` for the hub, `You` for your own
+messages, the names the room itself uses. Message bodies are untouched
+underneath; they still run the full width, and the `⏺` markers inside a message
+keep separating prose from tool rows. The band is two rows where portraits place
+and one where they fall back to the chip — nothing below it depends on its
+height. One known degradation: a terminal that purges its image store (a resize
+does) gets the faces still on screen redrawn, but messages already in scrollback
+keep four blank columns where the portrait was, with the name intact.
+
   `/skill-name [args]` directly.
 - Bundled `guide`: bingo usage & troubleshooting manual (consult it when
   answering "how to configure / why / it doesn't work").
