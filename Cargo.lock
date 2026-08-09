@@ -197,7 +197,7 @@ checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
 
 [[package]]
 name = "bingo"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "deltae"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5729f5117e208430e437df2f4843f5e5952997175992d1414f94c57d61e270b4"
 
@@ -2264,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "ratatui-widgets"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66e3d19bcc9130ca376277d93b60767ff121ace3be06f5f95f81dd68956407d1"
 dependencies = [
@@ -3684,7 +3684,7 @@ dependencies = [
 
 [[package]]
 name = "windows-collections"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b2d95af1a8a14a3c7367e1ed4fc9c20e0a26e79551b1454d72583c97cc6610"
 dependencies = [
@@ -3706,7 +3706,7 @@ dependencies = [
 
 [[package]]
 name = "windows-future"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1d6f90251fe18a279739e78025bd6ddc52a7e22f921070ccdc67dde84c605cb"
 dependencies = [
