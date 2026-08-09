@@ -19,9 +19,10 @@ use tokio::sync::{mpsc, oneshot};
 use crate::permission::PermissionMode;
 use crate::query::{Session, run_query};
 use crate::tui::activities::{
-    Activity, ActivityKind, Diff, Thinking, ThinkingState, TodoItem, TodoStatus, ToolCall,
-    ToolStatus, WatchCall, activities_path_get_mut, diff_lines, layout_activity,
+    Activity, ActivityKind, Diff, Portrait, Thinking, ThinkingState, TodoItem, TodoStatus,
+    ToolCall, ToolStatus, WatchCall, activities_path_get_mut, diff_lines, layout_activity,
 };
+use crate::tui::avatar;
 use crate::tui::gfx::{self, ImageCap};
 use crate::tui::line::{Line, SegStyle, text_width, wrap_words};
 use crate::tui::markdown::MarkdownRenderer;
@@ -899,6 +900,11 @@ pub struct Chat {
     /// It only grows: a face whose message has already settled into scrollback
     /// still has cells out there referring to it.
     pub faces: HashSet<usize>,
+    /// Portraits the blueprint pins to crew members, read once at startup — the
+    /// answer is a committed file and the crew does not change while you look at
+    /// it, so re-reading it per frame would be waste (the workspace learned the
+    /// same thing in D49).
+    faces_pinned: HashMap<String, usize>,
     /// Loaded image cache (url → PNG bytes + cell dimensions).
     pub images: HashMap<String, Arc<ImageMeta>>,
     /// Image urls currently being fetched (prevents duplicate loads).
@@ -1101,6 +1107,16 @@ impl Chat {
             &session.home,
             std::path::Path::new(&cwd),
         ));
+        // The blueprint's pinned faces, read once: a committed file cannot answer
+        // differently between frames, and the crew does not change while you look.
+        let faces_pinned: HashMap<String, usize> =
+            crate::team::load_team_file(std::path::Path::new(&cwd))
+                .ok()
+                .flatten()
+                .iter()
+                .flat_map(|d| &d.members)
+                .filter_map(|m| Some((m.name.clone(), avatar::index_of_id(m.avatar.as_deref()?)?)))
+                .collect();
         let permission_mode = session.permission_mode;
         // Update-banner (welcome card) data source + motion off: computed before the session moves into Self.
         // Store the bare version (rendering adds the `v` prefix in `banner_segments`).
@@ -1159,6 +1175,7 @@ impl Chat {
             reply_cache: HashMap::new(),
             image_cap: None,
             faces: HashSet::new(),
+            faces_pinned,
             images: HashMap::new(),
             images_pending: HashSet::new(),
             images_failed: HashSet::new(),
@@ -6002,7 +6019,7 @@ impl Chat {
             let band = self.sender_band_el(role, &pal);
             let body = match role {
                 Role::User => El::Rows(user_message_rows(&self.messages[i].text, width, &theme)),
-                Role::Assistant => self.assistant_el(i, width, &theme, settled),
+                Role::Assistant => self.assistant_el(i, width, &theme, settled, &pal),
             };
             // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
             blocks.push(Block::settled(
@@ -6095,7 +6112,60 @@ impl Chat {
     /// Assistant message: markdown text and activities interleaved in model
     /// output order; collapse groups fold runs of read/search tools. `settled`
     /// mirrors the old `message_settled(i)` (prefix-monotone flag).
-    fn assistant_el(&mut self, i: usize, width: usize, theme: &Theme, settled: bool) -> El {
+    /// The portrait each of this message's activities wears, resolved in one pass
+    /// before the rows are built (the row loop holds a read borrow of `messages`,
+    /// and recording a face needs a write).
+    ///
+    /// Only a subagent watch row gets one, and only where the terminal can place
+    /// images: the face is what buys the `⎿` connector's place, so a chip skin —
+    /// which has no face to spend — keeps `◉` and the connector exactly as before.
+    fn watch_portraits(
+        &mut self,
+        i: usize,
+        pal: &crate::tui::slack::Palette,
+    ) -> Vec<Option<Portrait>> {
+        if self.image_cap.is_none() {
+            return Vec::new();
+        }
+        let named: Vec<Option<String>> = self.messages[i]
+            .activities
+            .iter()
+            .map(|act| match &act.kind {
+                ActivityKind::Watch(w) if w.kind == crate::watch::WatchKind::Agent => {
+                    // `{instance} · {description}` — the address is the prefix.
+                    let name = w.label.split(" · ").next().unwrap_or_default().trim();
+                    (!name.is_empty()).then(|| name.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        named
+            .into_iter()
+            .map(|name| {
+                let name = name?;
+                let index = self
+                    .faces_pinned
+                    .get(&name)
+                    .copied()
+                    .unwrap_or_else(|| avatar::index_of(&name));
+                self.faces.insert(index);
+                Some(Portrait {
+                    top: crate::tui::slack::gutter_cell(index, &name, 0, true, pal),
+                    bottom: crate::tui::slack::gutter_cell(index, &name, 1, true, pal),
+                })
+            })
+            .collect()
+    }
+
+    fn assistant_el(
+        &mut self,
+        i: usize,
+        width: usize,
+        theme: &Theme,
+        settled: bool,
+        pal: &crate::tui::slack::Palette,
+    ) -> El {
+        let portraits = self.watch_portraits(i, pal);
         // Thinking completion row (CC SystemTextMessage `✻ Churned for 40s`):
         // rendered at the end of the message (after text and all tools), from the last completed
         // real thinking block (empty placeholder blocks produce no completion row).
@@ -6207,8 +6277,14 @@ impl Chat {
                 }
                 continue;
             }
-            let (lines, local) =
-                layout_activity(act, &[idx], 0, theme, &mut |reply: &str| render(reply));
+            let (lines, local) = layout_activity(
+                act,
+                &[idx],
+                0,
+                theme,
+                portraits.get(idx).and_then(|p| p.as_ref()),
+                &mut |reply: &str| render(reply),
+            );
             let activity = El::Annotated {
                 rows: lines.into_iter().map(Row::new).collect(),
                 clicks: local
@@ -7008,6 +7084,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A subagent's watch row is the one place in the transcript with many named
+    /// speakers, so it wears their faces — the portrait spans the header and the
+    /// result row, which is the height the block already had. The `⎿` connector is
+    /// what it costs, and only where a face is actually drawn: a chip terminal has
+    /// nothing to spend, so it keeps `◉` and the connector untouched.
+    #[test]
+    fn agent_watch_rows_wear_the_instance_face_only_where_images_place() {
+        let watch = |chat: &mut Chat| {
+            chat.messages.push(msg(Role::Assistant, ""));
+            chat.apply_event(UiEvent::WatchEvent {
+                label: "林夏 · UI review".into(),
+                kind: crate::watch::WatchKind::Agent,
+                status: WatchState::Running,
+                detail: Some("produced 200 chars".into()),
+                duration_ms: 0,
+                payload: None,
+                signal: None,
+            });
+            chat.build_rows(80);
+            chat.doc
+                .rows
+                .iter()
+                .map(|r| r.line.plain_text())
+                .collect::<Vec<_>>()
+        };
+
+        let mut chip = test_chat();
+        let rows = watch(&mut chip);
+        assert!(
+            rows.iter().any(|r| r.contains("◉ 林夏 · UI review")),
+            "chip terminals keep the glyph: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("⎿")),
+            "and keep the connector: {rows:?}"
+        );
+        assert!(
+            chip.faces.len() <= 2,
+            "no portrait was claimed for a terminal that cannot draw one"
+        );
+
+        let mut placed = test_chat();
+        placed.image_cap = Some(ImageCap::default_cells());
+        let rows = watch(&mut placed);
+        let header = rows
+            .iter()
+            .find(|r| r.contains("林夏 · UI review"))
+            .unwrap_or_else(|| panic!("watch row present: {rows:?}"));
+        assert!(
+            header.contains(gfx::PLACEHOLDER) && !header.contains('◉'),
+            "the face replaces the glyph: {header:?}"
+        );
+        assert!(
+            placed.faces.contains(&crate::tui::avatar::index_of("林夏")),
+            "the instance's face is recorded for transmission"
+        );
     }
 
     /// The band names the speaker with the name that addresses it: the hub is
