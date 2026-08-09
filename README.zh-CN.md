@@ -235,6 +235,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `WebFetch` / `WebSearch` | 网页抓取与搜索（共享 HTTP 连接池；预批准域名自动放行） |
 | `Agent` | 派生命名子代理（异步执行，完成通知注入上下文；`background:false` 可同步等待） |
 | `SendMessage` / `AgentControl` | 子代理续话与生命周期管理（仅主会话装配） |
+| `Team` | 项目编队（仅主会话装配）：`status`/`validate` 只读免询问，`start`/`stop`/`save` 在任何权限模式下都要用户当面确认 |
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | 任务追踪（磁盘存储，TUI 任务区同源，含生命周期 hook） |
 | `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceOutcome`/`ExperienceForget` | 跨会话经验库（见下） |
 | `AskUserQuestion` | 向用户提选择题（TUI 复用权限询问模态） |
@@ -276,6 +277,12 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 - **跨会话记忆**：成员历史 + append-only 决策记录存
   `~/.config/bingo/teams/<项目哈希>/<分支>/<team>/`——按「项目路径 + 分支」隔离，
   main 与特性 worktree 记忆互不污染；拉起时自动恢复、不唤醒。
+- **`Team` 工具**（仅主会话）把同一套能力给模型：`status`（图纸 + 成员运行态 +
+  可用定义清单）、`validate`、`start`、`stop`、`save`（写图纸，整份覆写，须给完整名单）。
+  读免询问；**任何变更都由用户当面确认**——询问在所有权限模式下都出现（含
+  `bypassPermissions`），`allow` 规则也不能预授权，只有 `deny` 压得住。确认行给的是
+  变化而非文件（`改写 .bingo/team.json · dev-room · 4 名成员（-ui +qa）`）；用
+  Write/Edit 手改 `.bingo/team.json` 问同一个问题。派活不在工具里，用 `SendMessage`。
 
 ## 频道（实验特性）
 
@@ -455,6 +462,7 @@ src/
   tool/agent.rs    Agent / SendMessage / AgentControl 实现
   team.rs          team 解析/校验/拉起编排 + team 记忆（D31）
   team_cmd.rs      /team 命令族
+  tool/team.rs     Team 工具（模型侧，变更须用户确认，D46）
   experience.rs    跨会话经验库
   tool/experience.rs  ExperiencePropose/Commit/Query/Outcome/Forget 工具
   channels.rs      频道注册表（实验特性）

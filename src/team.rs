@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::agents::{AgentDef, AgentDefSource};
@@ -54,30 +54,35 @@ impl TeamError {
 }
 
 /// Room spec (reuses the existing Channel vocabulary; no new concepts invented).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelSpec {
     /// Speaking mode: serial (default) | free.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     /// Total message cap per channel (default 500, see ChannelLimits).
-    #[serde(rename = "messageLimit", default)]
+    #[serde(
+        rename = "messageLimit",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub message_limit: Option<u64>,
 }
 
 /// A single member: `name` (instance name) + `agent` (referenced AgentDef name).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct TeamMember {
     pub name: String,
     pub agent: String,
 }
 
-/// Team definition (blueprint).
-#[derive(Debug, Clone, Deserialize)]
+/// Team definition (blueprint). Parsing and writing share this one struct: the file
+/// format has a single source, so a written blueprint reads back as the same value.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamDef {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ChannelSpec>,
     pub members: Vec<TeamMember>,
 }
@@ -141,6 +146,23 @@ fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
             )));
         }
     }
+    Ok(())
+}
+
+/// Write the blueprint to `.bingo/team.json` (creating `.bingo/` if needed).
+/// Structural validation runs first and shares its source with `load_team_file`:
+/// what this writes must parse back, so a written file can never be one the reader
+/// rejects. Reference validation (`validate`) stays with the caller — it needs the
+/// AgentDef list, which the format itself doesn't carry.
+pub fn write_team_file(project_dir: &Path, def: &TeamDef) -> Result<(), TeamError> {
+    let path = project_dir.join(TEAM_FILE);
+    validate_structure(def, &path)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut json = serde_json::to_string_pretty(def)?;
+    json.push('\n');
+    std::fs::write(&path, json)?;
     Ok(())
 }
 
@@ -535,6 +557,43 @@ mod tests {
         let err = load_team_file(&dir).unwrap_err().to_string();
         assert!(err.contains("channel.mode"), "{err}");
         let _ = path;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Write → read is the identity: the blueprint the tool saves is the blueprint the
+    /// loader returns, and a structurally invalid one never reaches the disk.
+    #[test]
+    fn write_team_file_round_trips_and_rejects_invalid() {
+        let dir = tmp("write");
+        let def = TeamDef {
+            name: "dev-room".into(),
+            channel: Some(ChannelSpec {
+                mode: Some("free".into()),
+                message_limit: Some(80),
+            }),
+            members: vec![TeamMember {
+                name: "qa".into(),
+                agent: "qa".into(),
+            }],
+        };
+        write_team_file(&dir, &def).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(load_team_file(&dir).unwrap().as_ref(), Some(&def));
+        // camelCase is preserved on the way out (the file stays hand-editable).
+        let raw = std::fs::read_to_string(dir.join(TEAM_FILE)).unwrap();
+        assert!(raw.contains("\"messageLimit\": 80"), "{raw}");
+
+        let bad = TeamDef {
+            name: "t".into(),
+            channel: None,
+            members: Vec::new(),
+        };
+        let err = write_team_file(&dir, &bad).unwrap_err().to_string();
+        assert!(err.contains("members"), "{err}");
+        assert_eq!(
+            load_team_file(&dir).unwrap().as_ref(),
+            Some(&def),
+            "拒绝的写入不落盘"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

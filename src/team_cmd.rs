@@ -318,36 +318,30 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
                 .to_string(),
         ];
     }
-    let members: Vec<serde_json::Value> = defs
-        .iter()
-        .map(|d| serde_json::json!({"name": d.name, "agent": d.name}))
-        .collect();
-    let team_json = serde_json::json!({
-        "name": name,
-        "channel": {"mode": "serial"},
-        "members": members,
-    });
-    let dir = cwd.join(".bingo");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return vec![format!("✗ 无法创建 {}：{e}", dir.display())];
-    }
-    let pretty = match serde_json::to_string_pretty(&team_json) {
-        Ok(s) => s,
-        Err(e) => return vec![format!("✗ 序列化失败：{e}")],
+    let def = crate::team::TeamDef {
+        name,
+        channel: Some(crate::team::ChannelSpec {
+            mode: Some("serial".to_string()),
+            message_limit: None,
+        }),
+        members: defs
+            .iter()
+            .map(|d| crate::team::TeamMember {
+                name: d.name.clone(),
+                agent: d.name.clone(),
+            })
+            .collect(),
     };
-    match std::fs::write(&path, pretty) {
-        Ok(()) => {
-            let count = defs.len();
-            vec![
-                format!(
-                    "✓ 已生成 {}（{} 成员 · serial 频道）",
-                    path.display(),
-                    count
-                ),
-                "  产物已通过校验（/team start 拉起 · 手动精简 members 后 /team validate 复查）"
-                    .to_string(),
-            ]
-        }
+    match crate::team::write_team_file(cwd, &def) {
+        Ok(()) => vec![
+            format!(
+                "✓ 已生成 {}（{} 成员 · serial 频道）",
+                path.display(),
+                def.members.len()
+            ),
+            "  产物已通过校验（/team start 拉起 · 手动精简 members 后 /team validate 复查）"
+                .to_string(),
+        ],
         Err(e) => vec![format!("✗ 写入失败：{e}")],
     }
 }

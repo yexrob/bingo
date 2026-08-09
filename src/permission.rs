@@ -276,11 +276,22 @@ fn rule_hits(
 const SENSITIVE_DIRS: &[&str] = &[".git", ".claude", ".vscode", ".idea"];
 
 fn safety_check(tool: &dyn Tool, input: &serde_json::Value) -> Option<String> {
+    // A tool may declare that this particular call is the user's to accept: same standing
+    // as the sensitive-path rule below — modes and allow rules don't reach it.
+    if let Some(reason) = tool.confirm_reason(input) {
+        return Some(reason);
+    }
     if !tool.is_destructive(input) {
         return None;
     }
     let target = input.get("file_path").and_then(|v| v.as_str())?;
     let path = std::path::Path::new(target);
+    // The team blueprint decides who works on this project, so editing it by hand is the
+    // same decision the Team tool asks about — and without this, acceptEdits would be the
+    // way around that question.
+    if path.ends_with(crate::team::TEAM_FILE) {
+        return Some(format!("改写 team 蓝图（谁在这个项目里干活）：{target}"));
+    }
     let sensitive = path.components().any(|c| {
         c.as_os_str()
             .to_str()
@@ -451,6 +462,40 @@ mod tests {
             &[],
         );
         assert_eq!(result.behavior, PermissionBehavior::Allow);
+    }
+
+    /// The Team tool's confirmation must not be routable around: hand-editing the blueprint
+    /// asks the same question, in every mode.
+    #[test]
+    fn team_blueprint_edits_ask_in_every_mode() {
+        let tool = WriteTool;
+        let input = || {
+            serde_json::json!({
+                "file_path": "proj/.bingo/team.json",
+                "content": "{}",
+            })
+        };
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+            PermissionMode::BypassPermissions,
+        ] {
+            let result = decide(&tool as &dyn Tool, input(), mode, &[]);
+            assert_eq!(result.behavior, PermissionBehavior::Ask, "{mode:?}");
+            assert!(result.reason.contains("team"), "{}", result.reason);
+        }
+        // Scope stays tight: a same-named file outside `.bingo/` is an ordinary write.
+        let elsewhere = serde_json::json!({"file_path": "docs/team.json", "content": "{}"});
+        assert_eq!(
+            decide(
+                &tool as &dyn Tool,
+                elsewhere,
+                PermissionMode::AcceptEdits,
+                &[]
+            )
+            .behavior,
+            PermissionBehavior::Allow
+        );
     }
 
     #[test]

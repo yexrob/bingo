@@ -169,6 +169,7 @@ Example (.bingo/settings.json):
 - **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep (Read returns image files as
   viewable images, so screenshots and rendered charts can be inspected), Edit/Write, WebFetch/WebSearch,
   Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
+  Team (the project crew, main session only — reads are free, every change asks the user),
   the Task family (task tracking), AskUserQuestion (main session only — a subagent has no prompt surface),
   Skill (skill invocation),
   ExperiencePropose/Commit/Query/Outcome/Forget (project experience capture, retrieval, and verified-use feedback).
@@ -272,6 +273,12 @@ Example (.bingo/settings.json):
   only `/team assign` or channel messages start them; idempotency key = instance name, repeated start reuses). The `/team` command family
   manages it; team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (full history restored across sessions +
   append-only decision records; `/team memory list|gc` manages it).
+  The model manages the same crew through the **Team tool** (`status`/`validate`/`start`/`stop`/`save`, main session only): reads are free,
+  and every change is confirmed by the user in person — the prompt appears in *every* permission mode and an `allow` rule cannot
+  pre-authorize it (only `deny` outranks it), because hiring a crew is not something a permission table should be able to consent to on
+  the user's behalf. The confirmation names the change, not the file (`改写 .bingo/team.json · dev-room · 4 名成员（-ui +qa）`).
+  `save` writes the whole document, so it takes the complete roster — whoever is left out is removed. Hand-editing `.bingo/team.json`
+  with Write/Edit asks the same question. Dispatch is not part of the tool: SendMessage gives a member work.
 - **Skills**: built-in `guide` (this guide) + `~/.config/bingo/skills/` and `.bingo/skills/`
   directory skills (same-name disk skills override built-ins); the model invokes them via SkillTool, users run them via `/skill-name`.
 - **Images**: markdown images in model replies (`![alt](path)`, supports `~/`, relative paths/data/http(s))
@@ -290,6 +297,7 @@ Example (.bingo/settings.json):
 - **内置工具**：Bash（经权限门）、Read/Glob/Grep（Read 对图片文件返回可看的图像，
   截图与渲染图表可直接查看）、Edit/Write、WebFetch/WebSearch、
   Agent（子代理）、SendMessage/AgentControl（子代理续话与生命周期，仅主会话）、
+  Team（项目编队，仅主会话——读免询问，任何变更都要用户当面确认）、
   Task 族（任务追踪）、AskUserQuestion（仅主会话——子代理没有提问界面）、Skill（技能调用）、
   ExperiencePropose/Commit/Query/Outcome/Forget（项目经验沉淀、检索与验证后反馈）。
 - **经验（Experience）**：跨会话复用可重跑的工作流。会话开始时注入本项目
@@ -352,6 +360,11 @@ Example (.bingo/settings.json):
   等 `/team assign` 或频道消息才开跑；幂等键 = 实例名，重复 start 复用）。`/team` 命令族
   管理；team 记忆按「项目路径哈希 + 分支」存 `~/.config/bingo/teams/`（完整历史跨会话恢复 +
   append-only 决策记录，`/team memory list|gc` 管理）。
+  模型经 **Team 工具**管理同一支队伍（`status`/`validate`/`start`/`stop`/`save`，仅主会话）：读免询问，
+  任何变更都要用户当面确认——询问在**所有权限模式**下都出现，`allow` 规则也不能预授权（只有 `deny` 压得住），
+  因为「雇一支队伍」不该由权限表代替用户点头。确认行给的是变化而非文件
+  （`改写 .bingo/team.json · dev-room · 4 名成员（-ui +qa）`）。`save` 整份覆写，须给完整名单——没列的成员即被移除；
+  用 Write/Edit 手改 `.bingo/team.json` 问同一个问题。派活不在工具里：给成员派活用 SendMessage。
 - **技能**：内置 `guide`（本指南）+ `~/.config/bingo/skills/` 与 `.bingo/skills/`
   目录技能（同名磁盘技能覆盖内置）；模型经 SkillTool 调用，用户经 `/技能名` 执行。
 - **图片**：模型回复中的 markdown 图片（`![alt](路径)`，支持相对路径/data/http(s)）

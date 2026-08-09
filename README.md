@@ -264,6 +264,7 @@ schema from a single source of truth):
 | `WebFetch` / `WebSearch` | web fetching and search (shared HTTP connection pool; pre-approved domains auto-allowed) |
 | `Agent` | spawns a named sub-agent (async by default, completion notification injected into context; `background:false` waits synchronously) |
 | `SendMessage` / `AgentControl` | sub-agent continuation and lifecycle management (main session only) |
+| `Team` | the project crew (main session only): `status`/`validate` read freely, `start`/`stop`/`save` are confirmed by the user in every permission mode |
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | task tracking (disk-backed, same source as the TUI task area, lifecycle hooks) |
 | `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceOutcome`/`ExperienceForget` | cross-session experience library (see below) |
 | `AskUserQuestion` | asks the user multiple-choice questions (reuses the permission prompt modal in the TUI) |
@@ -315,6 +316,16 @@ surface.
   persist to `~/.config/bingo/teams/<project-hash>/<branch>/<team>/` — scoped
   by project path + git branch, so main and a feature worktree never share
   memory. Restored on pull-up without waking the members.
+- **The `Team` tool** (main session only) gives the model the same surface:
+  `status` (blueprint + each member's runtime state + the definitions available
+  to draft with), `validate`, `start`, `stop`, `save` (writes the blueprint;
+  whole-document, so it takes the complete roster). Reads are free; **every
+  change is confirmed by the user in person** — the prompt appears in every
+  permission mode, including `bypassPermissions`, and an `allow` rule cannot
+  pre-authorize it (only `deny` outranks it). The confirmation line names the
+  change rather than the file (`改写 .bingo/team.json · dev-room · 4 名成员（-ui
+  +qa）`). Hand-editing `.bingo/team.json` with Write/Edit asks the same
+  question. Dispatch is not part of the tool: `SendMessage` gives a member work.
 
 ## Channels (experimental)
 
@@ -523,6 +534,7 @@ src/
   tool/agent.rs    Agent / SendMessage / AgentControl implementations
   team.rs          team parsing / validation / spawn + team memory (D31)
   team_cmd.rs      /team slash-command family
+  tool/team.rs     Team tool (model-facing, user-confirmed changes, D46)
   experience.rs    cross-session experience library
   tool/experience.rs  ExperiencePropose/Commit/Query/Outcome/Forget tools
   channels.rs      channel registry (experimental)

@@ -67,6 +67,9 @@ pub async fn assemble_tools(
         tools.push(Box::new(AskUserQuestionTool));
         tools.push(Box::new(SendMessageTool::new(session.clone())));
         tools.push(Box::new(AgentControlTool::new(session.clone())));
+        // The crew is the project's, not a subagent's: a member that could restart or
+        // rewrite the team it belongs to is a loop with the user's consent in the middle.
+        tools.push(Box::new(crate::tool::team::TeamTool::new(session.clone())));
         if channels_on {
             tools.push(Box::new(crate::tool::channel::ChannelTool::new(
                 session.clone(),
@@ -191,7 +194,13 @@ mod tests {
             .iter()
             .map(|t| t.name())
             .collect();
-        for expected in ["Agent", "SendMessage", "AgentControl", "AskUserQuestion"] {
+        for expected in [
+            "Agent",
+            "SendMessage",
+            "AgentControl",
+            "AskUserQuestion",
+            "Team",
+        ] {
             assert!(
                 hub.iter().any(|n| n == expected),
                 "missing {expected}: {hub:?}"
@@ -204,7 +213,7 @@ mod tests {
             .collect();
         assert!(sub.iter().any(|n| n == "Agent"), "子代理仍可派生");
         // AskUserQuestion needs a prompt surface: only the session that owns the UI has one.
-        for absent in ["SendMessage", "AgentControl", "AskUserQuestion"] {
+        for absent in ["SendMessage", "AgentControl", "AskUserQuestion", "Team"] {
             assert!(
                 !sub.iter().any(|n| n == absent),
                 "{absent} 不应下发: {sub:?}"
