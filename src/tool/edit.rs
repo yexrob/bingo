@@ -112,6 +112,7 @@ mod tests {
                     permission_mode: "default".into(),
                     expand_tasks: tokio::sync::watch::channel(false).0,
                     ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+                    instance: None,
                 },
             )
             .await
@@ -145,6 +146,7 @@ mod tests {
                     permission_mode: "default".into(),
                     expand_tasks: tokio::sync::watch::channel(false).0,
                     ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+                    instance: None,
                 },
             )
             .await

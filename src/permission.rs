@@ -276,11 +276,24 @@ fn rule_hits(
 const SENSITIVE_DIRS: &[&str] = &[".git", ".claude", ".vscode", ".idea"];
 
 fn safety_check(tool: &dyn Tool, input: &serde_json::Value) -> Option<String> {
+    // A tool may declare that this particular call is the user's to accept: same standing
+    // as the sensitive-path rule below — modes and allow rules don't reach it.
+    if let Some(reason) = tool.confirm_reason(input) {
+        return Some(reason);
+    }
     if !tool.is_destructive(input) {
         return None;
     }
     let target = input.get("file_path").and_then(|v| v.as_str())?;
     let path = std::path::Path::new(target);
+    // The team blueprint decides who works on this project, so editing it by hand is the
+    // same decision the Team tool asks about — and without this, acceptEdits would be the
+    // way around that question.
+    if path.ends_with(crate::team::TEAM_FILE) {
+        return Some(format!(
+            "rewrite the team blueprint (who works in this project): {target}"
+        ));
+    }
     let sensitive = path.components().any(|c| {
         c.as_os_str()
             .to_str()
@@ -392,6 +405,32 @@ mod tests {
     }
 
     #[test]
+    fn experience_outcome_permission_matrix() {
+        let tool = crate::tool::experience::ExperienceOutcomeTool;
+        let input = serde_json::json!({"id": "full-id", "outcome": "helpful"});
+        assert_eq!(
+            decide(&tool, input.clone(), PermissionMode::Default, &[]).behavior,
+            PermissionBehavior::Ask
+        );
+        assert_eq!(
+            decide(&tool, input.clone(), PermissionMode::AcceptEdits, &[]).behavior,
+            PermissionBehavior::Ask
+        );
+        assert_eq!(
+            decide(&tool, input.clone(), PermissionMode::BypassPermissions, &[]).behavior,
+            PermissionBehavior::Allow
+        );
+        assert_eq!(
+            decide(&tool, input.clone(), PermissionMode::DontAsk, &[]).behavior,
+            PermissionBehavior::Deny
+        );
+        assert_eq!(
+            decide(&tool, input, PermissionMode::Plan, &[]).behavior,
+            PermissionBehavior::Deny
+        );
+    }
+
+    #[test]
     fn read_only_always_allowed() {
         let tool = ReadTool::new();
         let input = serde_json::json!({"file_path": "Cargo.toml"});
@@ -425,6 +464,40 @@ mod tests {
             &[],
         );
         assert_eq!(result.behavior, PermissionBehavior::Allow);
+    }
+
+    /// The Team tool's confirmation must not be routable around: hand-editing the blueprint
+    /// asks the same question, in every mode.
+    #[test]
+    fn team_blueprint_edits_ask_in_every_mode() {
+        let tool = WriteTool;
+        let input = || {
+            serde_json::json!({
+                "file_path": "proj/.bingo/team.json",
+                "content": "{}",
+            })
+        };
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+            PermissionMode::BypassPermissions,
+        ] {
+            let result = decide(&tool as &dyn Tool, input(), mode, &[]);
+            assert_eq!(result.behavior, PermissionBehavior::Ask, "{mode:?}");
+            assert!(result.reason.contains("team"), "{}", result.reason);
+        }
+        // Scope stays tight: a same-named file outside `.bingo/` is an ordinary write.
+        let elsewhere = serde_json::json!({"file_path": "docs/team.json", "content": "{}"});
+        assert_eq!(
+            decide(
+                &tool as &dyn Tool,
+                elsewhere,
+                PermissionMode::AcceptEdits,
+                &[]
+            )
+            .behavior,
+            PermissionBehavior::Allow
+        );
     }
 
     #[test]
@@ -617,14 +690,14 @@ mod tests {
             assert_eq!(
                 bash_decision(command, &["Bash(rm)"], &[]).behavior,
                 PermissionBehavior::Deny,
-                "deny 应命中: {command}"
+                "deny should match: {command}"
             );
         }
         // Separators inside quotes aren't operators and must not create false hits.
         assert_eq!(
             bash_decision("echo 'a; b'", &["Bash(b)"], &[]).behavior,
             PermissionBehavior::Ask,
-            "引号内文本不切分为子命令"
+            "quoted text is not split into sub-commands"
         );
     }
 
@@ -647,7 +720,7 @@ mod tests {
             assert_eq!(
                 bash_decision(command, &[], &["Bash(ls)"]).behavior,
                 PermissionBehavior::Ask,
-                "不应免询问放行: {command}"
+                "must not pass without asking: {command}"
             );
         }
         // All sub-commands match → pass.
@@ -659,7 +732,7 @@ mod tests {
         assert_eq!(
             bash_decision("ls \"; rm -rf ~", &[], &["Bash(ls)"]).behavior,
             PermissionBehavior::Ask,
-            "切分不可信时不放行"
+            "untrusted split must not pass"
         );
     }
 
@@ -669,7 +742,7 @@ mod tests {
         assert_eq!(parts, vec!["echo 'a; b'".to_string(), "ls".to_string()]);
         assert!(trusted);
         let (_, trusted) = split_shell_commands("echo \"unterminated");
-        assert!(!trusted, "引号不闭合 → 不可信");
+        assert!(!trusted, "unterminated quote → untrusted");
         let (parts, _) = split_shell_commands("cd /tmp && rm -rf / ; echo done");
         assert_eq!(parts.len(), 3, "{parts:?}");
     }
@@ -761,7 +834,7 @@ mod tests {
         assert_eq!(
             result.behavior,
             PermissionBehavior::Ask,
-            "readOnlyHint 不再免询问"
+            "readOnlyHint no longer skips the ask"
         );
         // An explicit allow rule can still pass.
         let allow = vec!["mcp__srv".to_string()];

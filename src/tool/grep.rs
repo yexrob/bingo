@@ -202,6 +202,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         }
     }
 
@@ -240,11 +241,14 @@ mod tests {
             .replace('\\', "/");
         assert!(text.contains("src/main.rs"), "{text}");
         assert!(text.contains("notes.md"), "{text}");
-        assert!(!text.contains("target/"), "target 应跳过: {text}");
-        assert!(!text.contains(".git/"), ".git 应跳过: {text}");
+        assert!(
+            !text.contains("target/"),
+            "target should be skipped: {text}"
+        );
+        assert!(!text.contains(".git/"), ".git should be skipped: {text}");
         assert!(
             !text.contains("node_modules"),
-            "node_modules 应跳过: {text}"
+            "node_modules should be skipped: {text}"
         );
         // Searching works as usual when the root is explicitly pointed at.
         let result = GrepTool
@@ -263,7 +267,7 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("build.rs"),
-            "显式指向 target 时不跳过"
+            "explicitly pointing at target must not skip"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -291,7 +295,7 @@ mod tests {
             }
         };
         let text = matched("src/**/*.rs").await;
-        assert!(text.contains("main.rs"), "src/**/*.rs 应命中: {text}");
+        assert!(text.contains("main.rs"), "src/**/*.rs should match: {text}");
         assert!(!text.contains("notes.md"), "{text}");
         // A pattern without `/` matches by file name (ripgrep -g semantics), effective at any depth.
         let text = matched("*.rs").await;

@@ -19,7 +19,7 @@ use crate::tui::el::El;
 use crate::tui::line::{Line, SegStyle, text_width};
 use crate::tui::theme::Theme;
 
-/// 当前激活的选择器菜单（互斥：任一时刻至多一个；渲染按此分组读壳层）。
+/// The currently active selector menu (mutually exclusive: at most one at any time; rendering groups reads of the shell by this).
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Menus<'a> {
     pub model: Option<&'a ModelMenu>,
@@ -149,7 +149,7 @@ fn suggestion_rows(
         let Some(menu) = menus.model else {
             // `/think` level selector (when the model menu is inactive).
             if let Some(think) = menus.think {
-                // 薄壳 → 核心：行渲染与按键提示行统一委托 PickerModel（picker-model.md 提交 A）。
+                // Thin shell → core: row rendering and the key-hint row delegate to PickerModel (picker-model.md commit A).
                 let core = think.picker();
                 let mut rows: Vec<Row> = (0..core.items.len())
                     .map(|i| core.row(i, width, theme))
@@ -157,7 +157,7 @@ fn suggestion_rows(
                 rows.push(core.hint_row(crate::tui::chat::ThinkMenu::keys(), width, theme));
                 return rows;
             }
-            // `/theme` level selector（picker-model.md 提交 B）：同款薄壳渲染。
+            // `/theme` level selector (picker-model.md commit B): the same thin-shell rendering.
             if let Some(theme_menu) = menus.theme {
                 let core = theme_menu.picker();
                 let mut rows: Vec<Row> = (0..core.items.len())
@@ -166,7 +166,7 @@ fn suggestion_rows(
                 rows.push(core.hint_row(crate::tui::chat::ThemeMenu::keys(), width, theme));
                 return rows;
             }
-            // `/provider` selector（picker-model.md 提交 D）：同款薄壳渲染。
+            // `/provider` selector (picker-model.md commit D): the same thin-shell rendering.
             if let Some(provider_menu) = menus.provider {
                 let core = provider_menu.picker();
                 let mut rows: Vec<Row> = (0..core.items.len())
@@ -175,7 +175,7 @@ fn suggestion_rows(
                 rows.push(core.hint_row(crate::tui::chat::ProviderMenu::keys(), width, theme));
                 return rows;
             }
-            // `/resume` session selector（picker-model.md 提交 C）：截断时追加说明行。
+            // `/resume` session selector (picker-model.md commit C): appends a note row when truncated.
             if let Some(resume_menu) = menus.resume {
                 let core = resume_menu.picker();
                 let mut rows: Vec<Row> = (0..core.items.len())
@@ -187,7 +187,7 @@ fn suggestion_rows(
                         format!(
                             "  {}",
                             crate::tui::markdown::truncate(
-                                "（仅显示最近 20 个会话）",
+                                "(only the latest 20 sessions are shown)",
                                 width.saturating_sub(2),
                             )
                         ),
@@ -201,7 +201,7 @@ fn suggestion_rows(
                 // G9: a bare `/`-query with zero matches gets one dim hint row.
                 if no_match {
                     return vec![Row::new(Line::styled(
-                        "  （无匹配命令 · 输入 /help 查看可用命令）",
+                        "  (no matching commands · type /help to see the available commands)",
                         SegStyle::fg(theme.inactive),
                     ))];
                 }
@@ -209,16 +209,16 @@ fn suggestion_rows(
             }
             return slash_rows(slash, slash_selected, theme, width);
         };
-        // `/model` two-level selector: level one `provider`（PickerModel 核心渲染，
-        // 与 /provider 同源的端点/认证描述列）、level two `model`（同一 Picker
-        // 核心：●/❯ 双标记 + 窗口渲染，长列表可达；loading / 失败 / 空各有说明行）。
+        // `/model` two-level selector: level one `provider` (PickerModel core rendering,
+        // with the same endpoint/auth description column as /provider), level two `model` (the same Picker
+        // core: ●/❯ dual markers + windowed rendering for long lists; loading / failure / empty each get a note row).
         let Some(m) = &menu.models else {
             let core = menu.provider_picker();
             let mut rows: Vec<Row> = (0..core.items.len())
                 .map(|i| core.row(i, width, theme))
                 .collect();
             let hint = format!(
-                "↑↓/1-{} 选择 provider · Enter 查看模型 · Esc 退出",
+                "↑↓/1-{} pick a provider · Enter lists models · Esc exits",
                 core.items.len().min(9)
             );
             rows.push(Row::new(Line::styled(
@@ -237,24 +237,24 @@ fn suggestion_rows(
             ))]
         };
         if m.loading {
-            return note(format!("… 正在拉取 {} 的模型列表", m.provider));
+            return note(format!("… fetching {}'s model list", m.provider));
         }
-        // 失败原因如实归因（401 曾被吞成「该端点未返回模型」）。
+        // Failure reasons are attributed honestly (a 401 used to be swallowed as "the endpoint returned no models").
         if let Some(reason) = &m.failed {
             let mut rows = note(reason.clone());
             rows.push(Row::new(Line::styled(
-                "  Esc 返回上一级",
+                "  Esc goes back up",
                 SegStyle::fg(theme.inactive),
             )));
             return rows;
         }
         if m.models.is_empty() {
-            return note("（该端点未返回模型，Esc 返回上一级）".to_string());
+            return note("(the endpoint returned no models; Esc goes back up)".to_string());
         }
         let core = m.picker();
         let mut rows = core.window_rows(crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5, width, theme);
         let hint = format!(
-            "↑↓ 选择 · Enter 确认并保存 · 1-{} 直达 · Esc 返回上一级",
+            "↑↓ select · Enter confirms and saves · 1-{} jumps · Esc goes back up",
             core.items.len().min(9)
         );
         rows.push(Row::new(Line::styled(
@@ -304,7 +304,7 @@ fn slash_rows(
     };
     let more = |n: usize| {
         Row::new(Line::styled(
-            crate::tui::markdown::truncate(&format!("  … 还有 {n} 条"), width.saturating_sub(2)),
+            crate::tui::markdown::truncate(&format!("  … {n} more"), width.saturating_sub(2)),
             SegStyle::fg(theme.inactive),
         ))
     };
@@ -492,14 +492,17 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
 /// Actions are bound at the key layer (chat.rs: Enter=retry, Esc=back on the full-screen state); this function only draws.
 pub(crate) fn error_screen(err: &crate::tui::chat::ErrorState, theme: &Theme) -> El {
     El::Lines(vec![
-        Line::styled("⚠ 出错了", SegStyle::fg(theme.error).bold()),
+        Line::styled("⚠ something went wrong", SegStyle::fg(theme.error).bold()),
         Line::styled(
             format!("[error] code={}", err.code),
             SegStyle::fg(theme.error),
         ),
         Line::plain(err.msg.clone()),
         Line::plain(""),
-        Line::styled("Enter 重试 · Esc 返回", SegStyle::fg(theme.inactive)),
+        Line::styled(
+            "Enter retries · Esc goes back",
+            SegStyle::fg(theme.inactive),
+        ),
     ])
 }
 
@@ -528,7 +531,7 @@ mod tests {
         assert_eq!(base, 4);
 
         chat.busy = true;
-        chat.push_warning("mcp 连接失败".to_string());
+        chat.push_warning("mcp connection failed".to_string());
         let (tx, _rx) = tokio::sync::oneshot::channel();
         chat.pending_ask = Some((
             crate::ui::PermissionRequest::new("t", "q", vec!["a".into()]),
@@ -546,32 +549,35 @@ mod tests {
         let text: Vec<String> = rows.iter().map(row_text).collect();
         assert!(
             text.iter().any(|l| l.contains("esc to interrupt")),
-            "状态行"
+            "status row"
         );
-        assert!(text.iter().any(|l| l.contains("⚠ mcp 连接失败")), "警告行");
-        assert!(text.iter().any(|l| l.contains("shift+tab")), "? 面板");
+        assert!(
+            text.iter().any(|l| l.contains("⚠ mcp connection failed")),
+            "warning row"
+        );
+        assert!(text.iter().any(|l| l.contains("shift+tab")), "? panel");
         assert!(
             text.iter().any(|l| l.contains("(reverse-i-search)")),
-            "搜索行"
+            "search row"
         );
         assert!(
             text.iter().any(|l| l.contains("> queued message")),
-            "队列行"
+            "queue row"
         );
         assert!(
             text.iter().any(|l| l.contains("Press ctrl-c again")),
-            "提示行"
+            "notice row"
         );
         assert!(
             text.iter().any(|l| l.contains("Waiting for permission…")),
-            "ask 行"
+            "ask row"
         );
         assert_eq!(
             text.iter()
                 .filter(|l| l.starts_with('╭') || l.starts_with('╰'))
                 .count(),
             2,
-            "输入框上下边框"
+            "input box top/bottom borders"
         );
         // Every section counts toward the row total: missing one means the frame height is wrong.
         assert_eq!(
@@ -624,11 +630,11 @@ mod tests {
         let no_match = suggestion_rows(&[], 0, Menus::default(), true, &theme, 80);
         assert_eq!(no_match.len(), 1);
         assert!(
-            row_text(&no_match[0]).contains("无匹配命令"),
+            row_text(&no_match[0]).contains("no matching commands"),
             "{}",
             row_text(&no_match[0])
         );
-        // Level one: 2 provider rows + 1 hint row（picker-model.md 提交 E）。
+        // Level one: 2 provider rows + 1 hint row (picker-model.md commit E).
         assert_eq!(
             suggestion_rows(
                 &[],
@@ -707,7 +713,7 @@ mod tests {
             loading: false,
             selected: 0,
             current: None,
-            failed: Some("认证失败：default 凭据无效或未登录（/provider login default）".into()),
+            failed: Some("authentication failed: default credentials invalid or not logged in (/provider login default)".into()),
         });
         let failed_rows = suggestion_rows(
             &[],
@@ -723,9 +729,9 @@ mod tests {
             &theme,
             80,
         );
-        assert_eq!(failed_rows.len(), 2, "原因行 + Esc 提示行");
+        assert_eq!(failed_rows.len(), 2, "reason row + Esc hint row");
         assert!(
-            row_text(&failed_rows[0]).contains("认证失败"),
+            row_text(&failed_rows[0]).contains("authentication failed"),
             "{}",
             row_text(&failed_rows[0])
         );
@@ -778,20 +784,24 @@ mod tests {
             &theme,
             80,
         );
-        assert_eq!(think_rows.len(), THINK_LEVELS.len() + 1, "6 档 + 提示行");
+        assert_eq!(
+            think_rows.len(),
+            THINK_LEVELS.len() + 1,
+            "6 levels + a hint row"
+        );
         assert!(
             row_text(&think_rows[0]).contains("● off"),
-            "● 标当前生效档: {}",
+            "● marks the currently active level: {}",
             row_text(&think_rows[0])
         );
         assert!(
             row_text(&think_rows[1]).starts_with("  ❯"),
-            "❯ 标浏览选中: {}",
+            "❯ marks the browsed selection: {}",
             row_text(&think_rows[1])
         );
         assert!(
             row_text(&think_rows[1]).contains("low"),
-            "选中行名: {}",
+            "selected row name: {}",
             row_text(&think_rows[1])
         );
         // Overlap: ❯ keeps the prefix slot, ● stays in front of the name.
@@ -815,12 +825,12 @@ mod tests {
         );
         assert!(
             row_text(&rows[3]).contains("❯ ● high"),
-            "重叠行双标记: {}",
+            "overlapping rows carry both markers: {}",
             row_text(&rows[3])
         );
         // Hint row (last, dim).
         let hint = row_text(think_rows.last().unwrap());
-        assert!(hint.contains("Esc 取消"), "提示行: {hint}");
+        assert!(hint.contains("Esc cancels"), "hint row: {hint}");
         assert_eq!(
             suggestion_rows(
                 &[],
@@ -838,14 +848,14 @@ mod tests {
             )
             .len(),
             crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5,
-            "模型菜单优先于 think 菜单"
+            "the model menu outranks the think menu"
         );
         // Menus take priority over slash suggestions — the same order as key
         // dispatch (they used to disagree: keys went to an invisible menu).
         let slash = vec![SlashSuggestion {
             name: "help".into(),
             hint: String::new(),
-            description: "显示可用命令".into(),
+            description: "show available commands".into(),
         }];
         let rows = suggestion_rows(
             &slash,
@@ -863,9 +873,9 @@ mod tests {
         );
         assert!(
             rows.iter().any(|r| row_text(r).contains("m0")),
-            "菜单可见（渲染与按键同序）"
+            "menu visible (rendering and key dispatch in the same order)"
         );
-        // 无菜单时下拉照常。
+        // Without a menu the dropdown works as usual.
         let rows = suggestion_rows(&slash, 0, Menus::default(), false, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(
@@ -877,7 +887,7 @@ mod tests {
         let with_hint = vec![SlashSuggestion {
             name: "think".into(),
             hint: "[off|low|medium|high|xhigh|max]".into(),
-            description: "设置思考级别".into(),
+            description: "set the thinking level".into(),
         }];
         let rows = suggestion_rows(&with_hint, 0, Menus::default(), false, &theme, 80);
         assert_eq!(rows.len(), 1);
@@ -937,7 +947,10 @@ mod tests {
             text.contains("✻ Working… (esc to interrupt · 13s)"),
             "{text}"
         );
-        assert!(!text.contains("tokens"), "0 token 省略该段: {text}");
+        assert!(
+            !text.contains("tokens"),
+            "0 tokens omit that segment: {text}"
+        );
 
         let status = crate::tui::chat::RunningStatus {
             verb: "$ cargo test".to_string(),
@@ -961,15 +974,18 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("test-model"), "{text}");
-        assert!(!text.contains("plan mode"), "default 模式无徽标: {text}");
+        assert!(
+            !text.contains("plan mode"),
+            "default mode has no badge: {text}"
+        );
         // 2 columns of padding on each side (CC footer padding): the model name's right edge lands at width-2.
-        assert_eq!(text_width(&text), 78, "模型名右对齐到 width-2");
+        assert_eq!(text_width(&text), 78, "model name right-aligned to width-2");
 
         chat.busy = true;
         let text = row_text(&footer_row(&chat, 80));
         assert!(
             !text.contains("? for shortcuts"),
-            "busy 只留 expand 提示: {text}"
+            "busy keeps only the expand hint: {text}"
         );
         assert!(text.contains("ctrl+o to expand"), "{text}");
 
@@ -994,7 +1010,10 @@ mod tests {
             .send(Some("high".to_string()));
         let text = row_text(&footer_row(&chat, 80));
         assert!(text.contains("test-model · think high"), "{text}");
-        assert!(!text.contains('▸'), "提交态无预览后缀: {text}");
+        assert!(
+            !text.contains('▸'),
+            "committed state has no preview suffix: {text}"
+        );
 
         // Open the picker (preselects high); browse to xhigh → preview shows xhigh ▸.
         chat.input = "/think".to_string();
@@ -1008,7 +1027,7 @@ mod tests {
         let text = row_text(&footer_row(&chat, 80));
         assert!(
             text.contains("test-model · think xhigh ▸"),
-            "预览跟随浏览: {text}"
+            "preview follows the browsed level: {text}"
         );
         // Esc reverts to the committed badge (no suffix).
         chat.on_key(
@@ -1017,7 +1036,7 @@ mod tests {
         );
         let text = row_text(&footer_row(&chat, 80));
         assert!(text.contains("test-model · think high"), "{text}");
-        assert!(!text.contains('▸'), "Esc 后还原: {text}");
+        assert!(!text.contains('▸'), "restored after Esc: {text}");
     }
 
     /// Input box: prefix + `▋` fake caret; the real caret (the tree's Caret
@@ -1027,9 +1046,13 @@ mod tests {
         let mut chat = chat_at(80, 24);
         chat.set_input("hi");
         let out = el::render(prompt(&chat, 80));
-        assert_eq!(out.rows.len(), 3, "上下边框 + 一行输入");
+        assert_eq!(out.rows.len(), 3, "top/bottom borders + one input row");
         assert_eq!(row_text(&out.rows[1]), "❯ hi▋");
-        assert_eq!(out.caret, Some((1, 4)), "光标在 ▋ 处（边框后第一行）");
+        assert_eq!(
+            out.caret,
+            Some((1, 4)),
+            "caret sits on ▋ (the first row after the border)"
+        );
 
         chat.set_input("");
         let out = el::render(prompt(&chat, 80));
@@ -1050,7 +1073,7 @@ mod tests {
         assert_eq!(
             out.rows[0].line.segs[0].style.fg,
             Some(chat.theme.bash_border),
-            "边框换色"
+            "border color swaps"
         );
     }
 }

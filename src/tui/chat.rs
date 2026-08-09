@@ -150,17 +150,17 @@ pub fn model_footer_label(model: &str, thinking: Option<&str>) -> String {
 pub struct ModelMenu {
     /// Level-one list: `default` (top-level config) + settings.providers names.
     pub providers: Vec<String>,
-    /// Level-one descriptions（与 /provider 同源：URL + 认证态 + 协议）。
+    /// Level-one descriptions (same source as /provider: URL + auth state + protocol).
     pub provider_descs: Vec<String>,
     pub provider_selected: usize,
-    /// 当前 provider 在一级列表中的位置（●；picker-model.md 提交 E）。
+    /// The current provider's position in the level-one list (●; picker-model.md commit E).
     pub provider_current: Option<usize>,
     /// Level-two model list (None = still on level one).
     pub models: Option<ModelMenuModels>,
 }
 
 impl ModelMenu {
-    /// 一级列表 → PickerModel 核心（行渲染/键转移共用；两级+异步留在壳层）。
+    /// Level-one list → the PickerModel core (shared row rendering / key dispatch; two-level + async stays in the shell).
     pub fn provider_picker(&self) -> crate::tui::picker::PickerModel {
         crate::tui::picker::PickerModel::new(
             self.providers
@@ -187,15 +187,15 @@ pub struct ModelMenuModels {
     pub models: Vec<String>,
     pub loading: bool,
     pub selected: usize,
-    /// 当前生效模型在列表中的位置（● 标记；载入时计算）。
+    /// The currently active model's position in the list (● marker; computed on load).
     pub current: Option<usize>,
-    /// 拉取失败原因（菜单内展示；None = 成功或未完成）。
+    /// The fetch failure reason (shown in the menu; None = success or not finished).
     pub failed: Option<String>,
 }
 
 impl ModelMenuModels {
-    /// 二级列表 → PickerModel 核心（●/❯ 双标记、窗口渲染、数字直达与
-    /// /provider 等选择器同一套约定——旧的手搓渲染没有这些）。
+    /// Level-two list → the PickerModel core (●/❯ dual markers, windowed rendering, number jump — the same
+    /// conventions as the /provider selectors; the old hand-rolled rendering lacked these).
     pub fn picker(&self) -> crate::tui::picker::PickerModel {
         crate::tui::picker::PickerModel::new(
             self.models
@@ -210,8 +210,8 @@ impl ModelMenuModels {
 
 /// `/think` single-level selector state (level table = off + [`crate::api::contract::THINKING_LEVELS`]).
 ///
-/// 薄壳：状态字段保持公开（测试 API 原样），交互逻辑委托 [`PickerModel`]
-/// （picker-model.md：提交 A 纯重构，行为零变化）。
+/// Thin shell: state fields stay public (the test API is unchanged), interaction logic delegates to [`PickerModel`]
+/// (picker-model.md: commit A, a pure refactor with zero behavior change).
 #[derive(Clone)]
 pub struct ThinkMenu {
     /// Browsed index (❯): moves with ↑↓/1-6, applied only on Enter/s.
@@ -221,7 +221,7 @@ pub struct ThinkMenu {
 }
 
 impl ThinkMenu {
-    /// 薄壳 → 核心：由 selected/current 与 THINK_LEVELS 构造（键转移与渲染共用）。
+    /// Thin shell → core: built from selected/current and THINK_LEVELS (shared by key dispatch and rendering).
     pub fn picker(&self) -> crate::tui::picker::PickerModel {
         crate::tui::picker::PickerModel::new(
             THINK_LEVELS
@@ -233,7 +233,7 @@ impl ThinkMenu {
         )
     }
 
-    /// 场景键位配置（hint 行拼装用）。
+    /// Scene key configuration (for the hint row).
     pub fn keys() -> crate::tui::picker::PickerKeys {
         crate::tui::picker::PickerKeys {
             session_only: true,
@@ -242,14 +242,14 @@ impl ThinkMenu {
     }
 }
 
-/// `/theme` 选择器选项表（dark/light/auto；与 ThemeSetting 的映射见 open_theme_menu）。
+/// `/theme` selector options (dark/light/auto; the ThemeSetting mapping lives in open_theme_menu).
 pub const THEME_LEVELS: &[(&str, &str)] = &[
-    ("dark", "深色主题"),
-    ("light", "浅色主题"),
-    ("auto", "跟随终端背景"),
+    ("dark", "dark theme"),
+    ("light", "light theme"),
+    ("auto", "follow the terminal background"),
 ];
 
-/// `/theme` 单级选择器状态（薄壳，同 ThinkMenu：字段公开、逻辑委托 PickerModel）。
+/// `/theme` single-level selector state (thin shell, like ThinkMenu: fields public, logic delegated to PickerModel).
 #[derive(Clone)]
 pub struct ThemeMenu {
     /// Browsed index (❯): moves with ↑↓/1-3, applied only on Enter.
@@ -270,7 +270,7 @@ impl ThemeMenu {
         )
     }
 
-    /// 场景键位配置：无 s（主题持久化是设计）、数字直达 1-3。
+    /// Scene key configuration: no s (theme persistence is by design), number jump 1-3.
     pub fn keys() -> crate::tui::picker::PickerKeys {
         crate::tui::picker::PickerKeys {
             session_only: false,
@@ -279,20 +279,20 @@ impl ThemeMenu {
     }
 }
 
-/// /resume 选择器选项数上限（devex DX：会话可很多，截断最近 N 个 + 提示行注明）。
+/// /resume selector option cap (devex DX: sessions can be many; truncate to the latest N + a note row).
 pub const RESUME_PICKER_MAX: usize = 20;
 
-/// `/resume` 会话选择器（picker-model.md 提交 C）：动态单级（磁盘快照），
-/// Enter 切换会话；label=展示名、value=会话名，确认按 selected 索引取快照。
+/// `/resume` session selector (picker-model.md commit C): dynamic single-level (disk snapshot),
+/// Enter switches the session; label=display name, value=session name; confirmation takes the snapshot by the selected index.
 #[derive(Clone)]
 pub struct ResumeMenu {
     /// Browsed index (❯): moves with ↑↓/1-20, applied only on Enter.
     pub selected: usize,
-    /// 当前会话在列表中的位置（●；不在列表/未设置则 None）。
+    /// The current session's position in the list (●; None when absent or unset).
     pub current: Option<usize>,
-    /// 会话列表快照（与 items 同序；确认时按 selected 取 Transcript）。
+    /// Session-list snapshot (same order as items; confirmation picks the Transcript by selected).
     pub transcripts: Vec<crate::transcript::Transcript>,
-    /// 列表被截断（超过 RESUME_PICKER_MAX）→ 渲染一行说明。
+    /// The list was truncated (past RESUME_PICKER_MAX) → render a note row.
     pub truncated: bool,
 }
 
@@ -306,7 +306,7 @@ impl ResumeMenu {
                     crate::tui::picker::PickerItem::new(
                         t.name(),
                         t.name(),
-                        format!("{count} 条消息"),
+                        format!("{count} messages"),
                     )
                 })
                 .collect(),
@@ -315,7 +315,7 @@ impl ResumeMenu {
         )
     }
 
-    /// 场景键位配置：无 s（切换会话即意图）、数字直达 1-20。
+    /// Scene key configuration: no s (switching sessions is the intent), number jump 1-20.
     pub fn keys() -> crate::tui::picker::PickerKeys {
         crate::tui::picker::PickerKeys {
             session_only: false,
@@ -324,16 +324,16 @@ impl ResumeMenu {
     }
 }
 
-/// `/provider` 选择器（picker-model.md 提交 D）：静态单级（default + settings
-/// providers 快照），desc 保留信息列（URL + 脱敏 key）；Enter=切换+持久化、
-/// s=仅本次会话（与 /think 一致）。
+/// `/provider` selector (picker-model.md commit D): static single-level (default + a settings
+/// providers snapshot), desc keeps the info column (URL + redacted key); Enter=switch+persist,
+/// s=this session only (consistent with /think).
 #[derive(Clone)]
 pub struct ProviderMenu {
     /// Browsed index (❯): moves with ↑↓/1-N, applied only on Enter/s.
     pub selected: usize,
-    /// 当前 provider 在列表中的位置（●）。
+    /// The current provider's position in the list (●).
     pub current: Option<usize>,
-    /// 选项快照（name, desc）：desc 由 provider_desc 生成（url + key 前 4 字符）。
+    /// Option snapshot (name, desc): desc comes from provider_desc (url + the key's first 4 chars).
     pub options: Vec<(String, String)>,
 }
 
@@ -351,7 +351,7 @@ impl ProviderMenu {
         )
     }
 
-    /// 场景键位配置：s = 仅本次会话（切换不写 settings）、数字直达 1-9。
+    /// Scene key configuration: s = this session only (switching does not write settings), number jump 1-9.
     pub fn keys() -> crate::tui::picker::PickerKeys {
         crate::tui::picker::PickerKeys {
             session_only: true,
@@ -363,15 +363,18 @@ impl ProviderMenu {
 /// `/think` selector entries: level name + description (everything past off corresponds one-to-one with
 /// THINKING_LEVELS, in the same order; consistency is guaranteed by a test).
 pub const THINK_LEVELS: &[(&str, &str)] = &[
-    ("off", "不发 thinking 参数（兼容 DeepSeek 等端点）"),
+    (
+        "off",
+        "no thinking parameter (compatible with DeepSeek etc.)",
+    ),
     ("low", "adaptive thinking · effort low"),
     ("medium", "adaptive thinking · effort medium"),
-    ("high", "adaptive thinking · effort high（推荐档位）"),
+    ("high", "adaptive thinking · effort high (recommended)"),
     (
         "xhigh",
-        "adaptive thinking · effort xhigh（编码/agentic 推荐）",
+        "adaptive thinking · effort xhigh (recommended for coding/agentic work)",
     ),
-    ("max", "adaptive thinking · effort max（最深推理）"),
+    ("max", "adaptive thinking · effort max (deepest reasoning)"),
 ];
 
 /// Max visible rows in the dropdown (OVERLAY_MAX_ITEMS = 5).
@@ -403,15 +406,6 @@ pub const PASTE_BURST_GAP: std::time::Duration = std::time::Duration::from_milli
 pub const PASTE_BURST_KEYS: usize = 4;
 /// Pastes longer than this many lines collapse into a placeholder.
 pub const PASTE_COLLAPSE_LINES: usize = 10;
-
-/// Image placeholder reference (`#[image N]` → the Nth attachment, 1-based).
-static IMAGE_MARKER_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"#\[image (\d+)\]").expect("static regex"));
-
-/// Image placeholder text: `#[image N]`.
-fn image_marker(id: usize) -> String {
-    format!("#[image {id}]")
-}
 
 /// Expands a `~` prefix to the home directory (returns unchanged when there is no home).
 fn expand_home(path: &str) -> String {
@@ -461,7 +455,7 @@ pub const SLASH_OUTPUT_ERROR_TTL: std::time::Duration = std::time::Duration::fro
 /// (Esc / empty Other submit) — an ordinary message, persistent with the flow.
 pub const ASK_DECLINED_TEXT: &str = "User declined to answer questions";
 
-/// Read/Search 类工具判定。
+/// Read/Search-style tool classification.
 pub fn classify_tool(name: &str, input: &serde_json::Value) -> Option<CollapseKind> {
     match name {
         "Read" => input
@@ -601,10 +595,12 @@ fn hint_for(name: &str, input: &serde_json::Value) -> String {
 fn auth_hint_for(oauth: bool, provider: &str, code: &str, msg: String) -> String {
     match code {
         "AUTH_REQUIRED" if oauth && !msg.contains("/provider login") => {
-            format!("{msg}（登录已过期？/provider login {provider} 重新登录）")
+            format!("{msg} (login expired? /provider login {provider} to sign in again)")
         }
         "PERMISSION_DENIED" if !msg.contains("/model") => {
-            format!("{msg}（当前订阅/权限无权使用该模型，/model 切换或检查 apiKey）")
+            format!(
+                "{msg} (the current subscription/permissions cannot use this model; switch with /model or check the apiKey)"
+            )
         }
         _ => msg,
     }
@@ -843,8 +839,6 @@ pub struct Chat {
     burst_keys: usize,
     /// Collapsed paste blocks: placeholder `[Pasted text #N +M lines]` → real content.
     pastes: Vec<(String, String)>,
-    /// Image attachments mounted in the message box (`#[image N]` placeholder → N = index here + 1).
-    attachments: Vec<crate::api::types::ImageAttachment>,
     /// `!` commands run in this session (prefix completion for Tab in bash mode).
     bash_history: Vec<String>,
     /// ctrl+r reverse search state (None = not active).
@@ -891,7 +885,7 @@ pub struct Chat {
     ask_focus: usize,
     /// Buffer for Other free-form input.
     ask_other: String,
-    /// 任务列表磁盘快照缓存（tick 周期刷新）。
+    /// Task-list disk snapshot cache (refreshed each tick).
     tasks_cache: Vec<TodoItem>,
     processor: MarkdownProcessor,
     renderer: MarkdownRenderer,
@@ -925,15 +919,15 @@ pub struct Chat {
     pub theme: Theme,
     /// Detected terminal background color (used by /theme to rebuild the theme).
     detected_background: Option<bool>,
-    /// 更新提示（欢迎卡）：检测到的最新版本号（`vX.Y.Z`；None = 无提示行）。
-    /// 数据源：`crate::update::latest_cached`（24h TTL 缓存，启动预热）。
+    /// Update banner (welcome card): the latest detected version (`vX.Y.Z`; None = no banner row).
+    /// Data source: `crate::update::latest_cached` (24h TTL cache, warmed at startup).
     pub update_banner: Option<String>,
-    /// 呼吸动画起点 tick（窗口 = [`UPDATE_BANNER_FRAMES`] 帧；当前帧号 = tick − start）。
+    /// Breathing animation start tick (window = [`UPDATE_BANNER_FRAMES`] frames; current frame = tick − start).
     update_banner_start: u64,
-    /// 动画已停止（窗口内首次按键触发；提示行保留，只是不再呼吸）。
+    /// Animation stopped (triggered by the first keypress in the window; the banner stays, it just stops breathing).
     update_banner_stopped: bool,
-    /// motion 关停（settings `motion:"off"` 或 `BINGO_NO_MOTION=1`）：呼吸静止为 rest
-    /// 色，提示行保留（update-banner 规格 §2.5「指示器不消失，只是不动」）。
+    /// motion off (settings `motion:"off"` or `BINGO_NO_MOTION=1`): breathing rests at the rest color
+    /// and the banner stays (update-banner spec §2.5 "the indicator does not disappear, it just stops").
     motion_off: bool,
     /// Slash command output lines (/help /status etc.): rendered after messages, settled when idle.
     pub slash_lines: Vec<String>,
@@ -959,13 +953,13 @@ pub struct Chat {
     /// 1+k = welcome card + first k messages. The flush cursor counts by **message boundary**, not row number,
     /// so re-layout after a width change (all row numbers change) never reprints.
     pub flushed_segments: usize,
-    /// inline：当前 doc 中已落盘的行数（canvas 尾部起点）；每次
-    /// build_rows 归零——重建后落盘部分已不在文档里。
+    /// inline: the number of already-flushed rows in the current doc (the canvas tail start); reset
+    /// to zero on each build_rows — after a rebuild the flushed part is no longer in the document.
     pub tail_start: usize,
     /// Baseline that absorbs checkpoint accumulators: prevents double-counting when the
     /// flush cursor advances multiple times within one build (reset by build_rows).
     mark_base: usize,
-    /// slash 下拉建议（输入 `/` 且无参数时非空；组件层渲染）。
+    /// slash dropdown suggestions (non-empty when the input is `/` without arguments; rendered by the component layer).
     pub slash_suggestions: Vec<SlashSuggestion>,
     /// Selected index in the dropdown.
     pub slash_selected: usize,
@@ -985,13 +979,13 @@ pub struct Chat {
     pub resume_menu: Option<ResumeMenu>,
     /// `/provider` selector (None = inactive).
     pub provider_menu: Option<ProviderMenu>,
-    /// 当前生效的主题设置（/theme 菜单 ● 标记的数据源；apply_theme 更新）。
+    /// The currently active theme setting (the ● marker's data source for /theme; updated by apply_theme).
     pub theme_setting: ThemeSetting,
     /// Menu-level model-list cache (provider → latest `/v1/models` result):
     /// validates `/model <name>` direct sets against the known list; avoids
     /// re-fetching when re-entering level two (P2-G cache, per-session).
     pub models_cache: std::collections::HashMap<String, Vec<String>>,
-    /// 任务区展开信号（Task 工具调用 → 展示任务列表）。
+    /// Task-area expand signal (a Task tool call → shows the task list).
     pub tasks_visible: bool,
     /// Whether the task area was auto-opened by TaskCreate (not manually via ctrl+t): hides automatically when everything is done.
     pub tasks_auto: bool,
@@ -1001,6 +995,10 @@ pub struct Chat {
     pub entity_focus: Option<usize>,
     /// Entity view pending open (app layer consumes → enters the fullscreen modal).
     pub open_entity: Option<EntityOpen>,
+    /// Slack workspace view state. Lives here rather than in the modal so read
+    /// cursors, the open conversation and collapsed sections survive leaving
+    /// and re-entering the view.
+    pub slack: crate::tui::slack::Workspace,
     /// Interrupt signal: Ctrl+C / Esc while busy → send(true), aborting stream reads in the turn immediately.
     cancel_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -1049,7 +1047,7 @@ impl Chat {
             .find(|(t, _)| t.elapsed() < Self::WARNING_TTL)
             .map(|(_, w)| w.as_str())
     }
-    #[allow(clippy::too_many_arguments)] // 状态机构造器：显式参数可读性优先（同 tool/agent.rs 惯例）
+    #[allow(clippy::too_many_arguments)] // state-machine constructor: explicit args read better (same convention as tool/agent.rs)
     pub fn new(
         session: Arc<Session>,
         events: mpsc::UnboundedSender<UiEvent>,
@@ -1097,8 +1095,8 @@ impl Chat {
             std::path::Path::new(&cwd),
         ));
         let permission_mode = session.permission_mode;
-        // 更新提示（欢迎卡）数据源 + motion 关停：在 session move 进 Self 前计算。
-        // 存纯版本号（渲染时 `banner_segments` 加 `v` 前缀）。
+        // Update-banner (welcome card) data source + motion off: computed before the session moves into Self.
+        // Store the bare version (rendering adds the `v` prefix in `banner_segments`).
         let update_banner = crate::update::latest_cached(&session.home).map(|v| v.to_string());
         let motion_off = session.settings.motion.as_deref() == Some("off")
             || std::env::var_os("BINGO_NO_MOTION").is_some();
@@ -1127,7 +1125,6 @@ impl Chat {
             last_key_at: None,
             burst_keys: 0,
             pastes: Vec::new(),
-            attachments: Vec::new(),
             bash_history: Vec::new(),
             search: None,
             permission_mode,
@@ -1206,6 +1203,7 @@ impl Chat {
             entities: Vec::new(),
             entity_focus: None,
             open_entity: None,
+            slack: Default::default(),
             interrupted: false,
             cancel_tx: tokio::sync::watch::channel(false).0,
         }
@@ -1264,8 +1262,8 @@ impl Chat {
                     m.models = models;
                     m.loading = false;
                     m.failed = failed;
-                    // P1-F：当前 provider 且当前模型在列表中时预选它——
-                    // 与 /think 菜单预选当前档位对等，避免浏览即误切。
+                    // P1-F: when the current provider and current model are in the list, preselect it —
+                    // the counterpart of /think preselecting the current level; browsing must not switch.
                     let current_provider = self.session.runtime.provider.borrow().clone();
                     let current_model = self.session.runtime.model.borrow().clone();
                     let current = if m.provider == current_provider {
@@ -1287,7 +1285,7 @@ impl Chat {
                     None => {
                         self.images.remove(&url);
                         self.images_failed.insert(url.clone());
-                        self.push_warning(format!("图片加载失败: {url}"));
+                        self.push_warning(format!("image load failed: {url}"));
                     }
                 }
                 // Bump the cache version: the renderer's per-block cache and reply_cache invalidate together.
@@ -1707,9 +1705,9 @@ impl Chat {
                 self.thinking_seg_open = false;
                 // AskUserQuestion answers are ordinary user messages (in the message flow,
                 // settled/flushed with it) — nothing to clean at turn end, they persist with the session.
-                // 用户中断后不再因后台任务完成自动拉起新回合；
-                // 有排队消息时先让用户的消息走（下面统一提交）。
-                if (self.session.watch.has_wake_notifications()
+                // After a user interruption, background-task completion must not auto-start a new turn;
+                // with queued messages, the user's message goes first (submitted together below).
+                if (self.session.watch.has_wake_notifications(None)
                     || self.session.channels.has_hub_mail())
                     && !self.interrupted
                     && self.queued.is_empty()
@@ -2157,7 +2155,11 @@ impl Chat {
             && let Some(id) = self.paste_clipboard_image()
         {
             self.snapshot(EditKind::Bulk);
-            crate::tui::input::insert(&mut self.input, &mut self.cursor, &image_marker(id));
+            crate::tui::input::insert(
+                &mut self.input,
+                &mut self.cursor,
+                &crate::api::image::marker(id),
+            );
             self.after_edit();
             self.dirty = true;
             return;
@@ -2210,7 +2212,7 @@ impl Chat {
                     std::path::PathBuf::from(&cwd).join(&expanded)
                 };
                 if let Some(id) = self.register_image_file(&path_buf) {
-                    out.push(image_marker(id));
+                    out.push(crate::api::image::marker(id));
                     continue;
                 }
             }
@@ -2221,28 +2223,12 @@ impl Chat {
 
     /// Resolves `#[image N]` references in text → attachments (deduped, in order); unknown ids are ignored.
     fn resolve_images(&self, text: &str) -> Vec<crate::api::types::ImageAttachment> {
-        let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for cap in IMAGE_MARKER_RE.captures_iter(text) {
-            if let Ok(n) = cap[1].parse::<usize>()
-                && n >= 1
-                && n <= self.attachments.len()
-                && seen.insert(n)
-            {
-                out.push(self.attachments[n - 1].clone());
-            }
-        }
-        out
+        self.session.attachments.resolve(text)
     }
 
     /// Raw image bytes → compress (within the API limit) → register the attachment → placeholder id.
     fn register_image(&mut self, bytes: &[u8]) -> Option<usize> {
-        let prepared = crate::api::image::prepare_image(bytes)?;
-        self.attachments.push(crate::api::types::ImageAttachment {
-            media_type: prepared.media_type,
-            data: prepared.data,
-        });
-        Some(self.attachments.len())
+        self.session.attachments.register(bytes)
     }
 
     /// Image file → register the attachment (read failure / non-image → None).
@@ -2391,7 +2377,7 @@ impl Chat {
                     return true;
                 }
                 self.push_slash_error(format!(
-                    "[error] code={} msg=未知命令: /{other}。输入 /help 查看可用命令。",
+                    "[error] code={} msg=unknown command: /{other}. Type /help to see the available commands.",
                     crate::error::SLASH_ERROR_UNKNOWN_COMMAND
                 ))
             }
@@ -2413,7 +2399,7 @@ impl Chat {
         self.slash_lines.clear();
         self.warnings.clear();
         self.reset_flushed();
-        self.push_slash_output("✓ 已清空对话，开始新会话。".to_string());
+        self.push_slash_output("✓ conversation cleared; starting a new session.".to_string());
     }
 
     fn slash_model(&mut self, arg: &str) {
@@ -2426,9 +2412,9 @@ impl Chat {
 
     /// Switches the runtime model and persists it as the default (same path as /theme /think: writes the project layer).
     fn set_model(&mut self, model: String) {
-        // P1-E：已知列表校验——当前 provider 有缓存且未命中时附一句提示
-        // （advisory 不阻塞；端点可能刚发布新模型/缓存未拉过，直接输入仍是
-        // 合法路径）。与成功提示合并为单行，避免「⚠ 与 ✓ 并存」观感矛盾。
+        // P1-E: known-list check — when the current provider has a cache and the model is not in it, append a note
+        // (advisory, non-blocking; the endpoint may have just shipped a new model or the cache may never have been pulled — typing it directly is still
+        // a valid path). Merged into one line with the success note, to avoid the jarring "⚠ and ✓ together".
         let provider = self.session.runtime.provider.borrow().clone();
         let unknown = self
             .models_cache
@@ -2441,17 +2427,17 @@ impl Chat {
         // wrote exactly the default-endpoint + foreign-model mismatch the
         // menu path guards against (audit A2).
         let scope = if self.provider_session_only {
-            "（仅本次会话——provider 为会话级）"
+            "(this session only — the provider is session-scoped)"
         } else {
             self.persist_selection(&model, &provider);
             ""
         };
         let out = if unknown {
             format!(
-                "✓ 模型已切换: {model}{scope}（⚠ 不在 {provider} 已知列表，若请求失败用 /model 核对）"
+                "✓ model switched: {model}{scope} (⚠ not in {provider}'s known list; if the request fails, check with /model)"
             )
         } else {
-            format!("✓ 模型已切换: {model}{scope}")
+            format!("✓ model switched: {model}{scope}")
         };
         self.push_slash_output(out);
     }
@@ -2467,9 +2453,9 @@ impl Chat {
         );
     }
 
-    /// Provider 顺序（/provider 与 /model 一级共用一个来源）：default →
-    /// 内置 preset → 用户自定义。两个菜单曾各排各的——「按 3」在两处指向
-    /// 不同端点（audit C3）。
+    /// Provider order (one source shared by /provider and /model's level one): default →
+    /// built-in preset → user-defined. The two menus used to sort independently — "press 3" pointed at
+    /// different endpoints in the two places (audit C3).
     fn provider_order(&self) -> Vec<String> {
         let mut names = vec!["default".to_string()];
         let mut user_names = Vec::new();
@@ -2582,11 +2568,11 @@ impl Chat {
                     // endpoint returned no models".
                     let reason = if code == "AUTH_REQUIRED" {
                         format!(
-                            "认证失败：{} 凭据无效或未登录（/provider login {}）",
+                            "authentication failed: {} credentials invalid or not logged in (/provider login {})",
                             provider_for_spawn, provider_for_spawn
                         )
                     } else {
-                        format!("拉取失败（{code}）")
+                        format!("fetch failed ({code})")
                     };
                     (Vec::new(), Some(reason))
                 }
@@ -2622,12 +2608,12 @@ impl Chat {
         match code {
             KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(m) = &mut menu.models {
-                    // 二级同走 PickerModel 核心（窗口渲染跟随 selected）。
+                    // Level two uses the same PickerModel core (windowed rendering follows selected).
                     let mut core = m.picker();
                     core.move_selection(1);
                     m.selected = core.selected;
                 } else {
-                    // 一级：委托 PickerModel 核心（picker-model.md 提交 E）。
+                    // Level one: delegates to the PickerModel core (picker-model.md commit E).
                     let mut core = menu.provider_picker();
                     core.move_selection(1);
                     menu.provider_selected = core.selected;
@@ -2646,7 +2632,7 @@ impl Chat {
                 }
                 true
             }
-            // 数字直达：两级都适用；越界吞掉（数字漏进输入框曾是半模态边界洞）。
+            // Number jump: applies to both levels; out-of-range is swallowed (digits leaking into the input was once a half-modal boundary bug).
             KeyCode::Char(c)
                 if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
             {
@@ -2696,9 +2682,9 @@ impl Chat {
                     });
                     return true;
                 }
-                // provider+model 是一个原子选择：跨端点确认走同一个
-                // switch_provider（登录警告、busy 守卫、成对持久化都在那里），
-                // 曾经的旁路丢掉全部 provider 侧提示（audit A3）。
+                // provider+model is an atomic selection: confirming across endpoints goes through the same
+                // switch_provider (login warnings, the busy guard, and paired persistence all live there),
+                // the old bypass dropped every provider-side notice (audit A3).
                 self.provider_models.insert(provider.clone(), model.clone());
                 if provider != self.session.runtime.provider.borrow().clone() {
                     self.switch_provider(&provider, true);
@@ -2720,7 +2706,7 @@ impl Chat {
             KeyCode::Esc => {
                 // Level two → back to level one; level one → exit entirely (returns one level at a time).
                 if self.model_menu.as_mut().is_some_and(|m| m.models.is_some()) {
-                    self.model_menu.as_mut().expect("菜单必在").models = None;
+                    self.model_menu.as_mut().expect("menu must exist").models = None;
                 } else {
                     self.model_menu = None;
                 }
@@ -2730,25 +2716,25 @@ impl Chat {
         }
     }
 
-    /// `/theme [dark|light|auto]`：无参打开档位选择器（picker-model.md 提交 B）；
-    /// 带参走快速路径（`/theme auto` 显式快捷保留）。
+    /// `/theme [dark|light|auto]`: no argument opens the level selector (picker-model.md commit B);
+    /// an argument takes the fast path (`/theme auto` keeps the explicit shortcut).
     fn slash_theme(&mut self, arg: &str) {
         if arg.is_empty() {
             self.open_theme_menu();
             return;
         }
         // A typo must not read as success: the old path silently parsed any
-        // junk as auto and announced "✓ 主题已切换: auto".
+        // junk as auto and announced "✓ theme switched: auto".
         if !matches!(arg.trim(), "auto" | "dark" | "light") {
             self.push_slash_error(format!(
-                "[error] code=BAD_ARGUMENT msg=未知主题: {arg}。可选 auto | dark | light"
+                "[error] code=BAD_ARGUMENT msg=unknown theme: {arg}. Choose from auto | dark | light"
             ));
             return;
         }
         self.apply_theme(ThemeSetting::parse(Some(arg)));
     }
 
-    /// 应用主题：重建渲染器/缓存、持久化、更新 theme_setting（菜单 ● 数据源）。
+    /// Apply the theme: rebuild the renderer/cache, persist, update theme_setting (the menu's ● data source).
     fn apply_theme(&mut self, setting: ThemeSetting) {
         let name = match setting {
             ThemeSetting::Dark => "dark",
@@ -2768,10 +2754,10 @@ impl Chat {
             &cwd,
             &serde_json::json!({ "theme": name }),
         );
-        self.push_slash_output(format!("✓ 主题已切换: {name}"));
+        self.push_slash_output(format!("✓ theme switched: {name}"));
     }
 
-    /// 打开 `/theme` 选择器：预选当前档位（theme_setting），互斥关闭其他菜单。
+    /// Open the `/theme` selector: preselect the current level (theme_setting), close other menus exclusively.
     fn open_theme_menu(&mut self) {
         let current = match self.theme_setting {
             ThemeSetting::Dark => 0,
@@ -2782,7 +2768,7 @@ impl Chat {
             selected: current,
             current,
         };
-        // 空表防御（THEME_LEVELS 为 const 非空，防御性分支不可达）。
+        // Empty-table guard (THEME_LEVELS is a non-empty const; this defensive branch is unreachable).
         if menu.picker().is_empty() {
             return;
         }
@@ -2844,33 +2830,33 @@ impl Chat {
 
     fn slash_rename(&mut self, arg: &str) {
         let Some(t) = self.session.runtime.transcript.borrow().clone() else {
-            self.push_slash_error("当前会话无 transcript，无法重命名。".to_string());
+            self.push_slash_error("this session has no transcript; cannot rename.".to_string());
             return;
         };
         match t.rename(arg) {
             Ok(new_t) => {
                 let name = new_t.name();
                 let _ = self.session.runtime.transcript_tx.send(Some(new_t));
-                self.push_slash_output(format!("✓ 会话已重命名: {name}"));
+                self.push_slash_output(format!("✓ session renamed: {name}"));
             }
-            Err(e) => self.push_slash_error(format!("重命名失败: {e}")),
+            Err(e) => self.push_slash_error(format!("rename failed: {e}")),
         }
     }
 
-    /// `/resume [名称或关键词]`：无参打开会话选择器（picker-model.md 提交 C，
-    /// CC 的 /resume 同款 picker）；带参走快速路径（名称/关键词匹配，现状保留）。
+    /// `/resume [name or keyword]`: no argument opens the session selector (picker-model.md commit C,
+    /// the same picker as CC's /resume); an argument takes the fast path (name/keyword match, kept as-is).
     fn slash_resume(&mut self, arg: &str) {
         let home = self.session.home.clone();
         let transcripts = match crate::transcript::list(&home) {
             Ok(t) => t,
             Err(e) => {
-                self.push_slash_error(format!("无法读取会话列表: {e}"));
+                self.push_slash_error(format!("cannot read the session list: {e}"));
                 return;
             }
         };
         if arg.is_empty() {
             if transcripts.is_empty() {
-                self.push_slash_output("没有历史会话。".to_string());
+                self.push_slash_output("no past sessions.".to_string());
                 return;
             }
             self.open_resume_menu(transcripts);
@@ -2879,10 +2865,10 @@ impl Chat {
         self.switch_transcript(transcripts.iter().find(|t| t.name().contains(arg)), arg);
     }
 
-    /// 快速路径切换（带参 /resume）：命中即切换，未命中报错。
+    /// Fast-path switch (argument /resume): a hit switches, a miss errors.
     fn switch_transcript(&mut self, found: Option<&crate::transcript::Transcript>, arg: &str) {
         let Some(found) = found else {
-            self.push_slash_error(format!("未找到包含 '{arg}' 的会话。"));
+            self.push_slash_error(format!("no session contains '{arg}'."));
             return;
         };
         let count = found.load_messages().unwrap_or_default().len();
@@ -2891,13 +2877,13 @@ impl Chat {
         self.slash_lines.clear();
         self.reset_flushed();
         self.push_slash_output(format!(
-            "✓ 已切换到会话 {}（{count} 条消息），下一轮回复使用其历史。",
+            "✓ switched to session {} ({count} messages); the next reply uses its history.",
             found.name()
         ));
     }
 
-    /// 打开 `/resume` 选择器：磁盘快照截断最近 RESUME_PICKER_MAX 个，
-    /// ● 标当前会话（在列表内时），互斥关闭其他菜单。
+    /// Open the `/resume` selector: truncate the disk snapshot to the latest RESUME_PICKER_MAX,
+    /// ● marks the current session (when in the list), other menus close exclusively.
     fn open_resume_menu(&mut self, mut transcripts: Vec<crate::transcript::Transcript>) {
         let truncated = transcripts.len() > RESUME_PICKER_MAX;
         transcripts.truncate(RESUME_PICKER_MAX);
@@ -2938,7 +2924,7 @@ impl Chat {
                 menu.selected = core.selected;
                 true
             }
-            // Direct jump: 1..=min(len, 9)（>9 项时数字直达只覆盖前 9 个）。
+            // Direct jump: 1..=min(len, 9) (past 9 items the number jump only covers the first 9).
             KeyCode::Char(c)
                 if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
             {
@@ -2953,7 +2939,7 @@ impl Chat {
                 true
             }
             KeyCode::Enter => {
-                // 确认动作按 selected 索引取快照（与 items 同序；value≠label 测试锚点）。
+                // The confirm action takes the snapshot by the selected index (same order as items; the value≠label test anchor).
                 let Some(t) = menu.transcripts.get(menu.selected).cloned() else {
                     return false;
                 };
@@ -2965,7 +2951,7 @@ impl Chat {
                 self.slash_lines.clear();
                 self.reset_flushed();
                 self.push_slash_output(format!(
-                    "✓ 已切换到会话 {name}（{count} 条消息），下一轮回复使用其历史。"
+                    "✓ switched to session {name} ({count} messages); the next reply uses its history."
                 ));
                 true
             }
@@ -2983,13 +2969,13 @@ impl Chat {
         let public = parse_share_arg(arg, "--public");
         let open = parse_share_arg(arg, "--open");
         let Some(transcript) = self.session.runtime.transcript.borrow().clone() else {
-            self.push_slash_output("尚无会话可导出（新会话未落盘，先发一条消息）。".to_string());
+            self.push_slash_output("no session to export yet (the new session has not been persisted; send a message first).".to_string());
             return;
         };
         let messages = match transcript.load_messages() {
             Ok(m) => m,
             Err(e) => {
-                self.push_slash_error(format!("读取会话失败: {e}"));
+                self.push_slash_error(format!("failed to read the session: {e}"));
                 return;
             }
         };
@@ -2998,11 +2984,13 @@ impl Chat {
         let doc = match crate::share::ShareStore::load_or_create(&share_path) {
             Ok(store) => store.snapshot(),
             Err(e) => {
-                self.push_slash_error(format!("无法读取 share 文档（{e}）；仅导出对话视图。"));
+                self.push_slash_error(format!(
+                    "cannot read the share document ({e}); exporting the conversation view only."
+                ));
                 crate::share::ShareDoc::new(stem.clone())
             }
         };
-        // 旧会话回退：无 share 文档时从主 transcript 推导 Team/DM/频道数据。
+        // Legacy-session fallback: without a share document, derive Team/DM/channel data from the main transcript.
         let doc = if doc.agents.is_empty() && doc.channels.is_empty() {
             crate::share::derive_share_doc(&stem, &messages)
         } else {
@@ -3015,22 +3003,22 @@ impl Chat {
         if !public {
             let overwritten = out.exists();
             if let Err(e) = crate::share::write_html_atomic(&out, &html) {
-                self.push_slash_error(format!("写入失败: {e}"));
+                self.push_slash_error(format!("write failed: {e}"));
                 return;
             }
             let mut lines = vec![format!(
-                "✓ 已导出: {}{}",
+                "✓ exported: {}{}",
                 out.display(),
-                if overwritten { "（覆盖）" } else { "" }
+                if overwritten { " (overwritten)" } else { "" }
             )];
             if open {
                 match crate::share::open_in_browser(&out.display().to_string()) {
-                    Ok(_) => lines.push("已在浏览器中打开。".to_string()),
-                    Err(e) => lines.push(format!("无法打开浏览器: {e}")),
+                    Ok(_) => lines.push("opened in the browser.".to_string()),
+                    Err(e) => lines.push(format!("cannot open the browser: {e}")),
                 }
             }
             lines.push(
-                "注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。"
+                "note: this file contains the full conversation and tool outputs (possibly sensitive); review it before sharing."
                     .to_string(),
             );
             self.push_slash_info(lines.join("\n"));
@@ -3051,9 +3039,9 @@ impl Chat {
         self.pin_panel(
             "share",
             vec![
-                "⚠ 即将公开发布：任何人可公开访问完整对话与工具输出，其中可能含敏感信息。"
+                "⚠ about to publish publicly: anyone can access the full conversation and tool outputs, which may contain sensitive information."
                     .to_string(),
-                "⏳ 正在发布分享页…".to_string(),
+                "⏳ publishing the share page…".to_string(),
             ],
         );
         tokio::spawn(async move {
@@ -3064,11 +3052,11 @@ impl Chat {
             };
             match crate::share::upload_share(&base, &id, &html).await {
                 Ok(url) => {
-                    let mut lines = vec![format!("✓ 已发布: {url}")];
+                    let mut lines = vec![format!("✓ published: {url}")];
                     if open {
                         match crate::share::open_in_browser(&url) {
-                            Ok(_) => lines.push("已在浏览器中打开。".to_string()),
-                            Err(e) => lines.push(format!("无法打开浏览器: {e}")),
+                            Ok(_) => lines.push("opened in the browser.".to_string()),
+                            Err(e) => lines.push(format!("cannot open the browser: {e}")),
                         }
                     }
                     unpin();
@@ -3076,22 +3064,24 @@ impl Chat {
                     let _ = events.send(UiEvent::SlashInfo(lines.join("\n")));
                 }
                 Err(e) => {
-                    // 上传失败回退本地文件 + 提示（与 bingo share 子命令一致）。
-                    let mut lines = vec![format!("上传失败（{e}）；回退本地文件。")];
+                    // Upload failure falls back to a local file + a notice (consistent with the bingo share subcommand).
+                    let mut lines = vec![format!(
+                        "upload failed ({e}); falling back to a local file."
+                    )];
                     let overwritten = out.exists();
                     match crate::share::write_html_atomic(&out, &html) {
                         Ok(()) => lines.push(format!(
-                            "✓ 已导出: {}{}",
+                            "✓ exported: {}{}",
                             out.display(),
-                            if overwritten { "（覆盖）" } else { "" }
+                            if overwritten { " (overwritten)" } else { "" }
                         )),
-                        Err(write_err) => lines.push(format!("写入失败: {write_err}")),
+                        Err(write_err) => lines.push(format!("write failed: {write_err}")),
                     }
                     if open && crate::share::open_in_browser(&out.display().to_string()).is_ok() {
-                        lines.push("已在浏览器中打开。".to_string());
+                        lines.push("opened in the browser.".to_string());
                     }
                     lines.push(
-                        "注意：此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅。"
+                        "note: this file contains the full conversation and tool outputs (possibly sensitive); review it before sharing."
                             .to_string(),
                     );
                     unpin();
@@ -3106,7 +3096,7 @@ impl Chat {
         let events = self.events.clone();
         // Long operation (a full model call): pinned until the flow resolves —
         // a 2s hint left the rest of the wait silent.
-        self.pin_panel("compact", vec!["⏳ 正在压缩上下文…".to_string()]);
+        self.pin_panel("compact", vec!["⏳ compacting the context…".to_string()]);
         tokio::spawn(async move {
             let unpin = || {
                 let _ = events.send(UiEvent::Unpin {
@@ -3120,7 +3110,9 @@ impl Chat {
             };
             if messages.len() <= 8 {
                 unpin();
-                let _ = events.send(UiEvent::SlashOutput("对话太短，无需压缩。".to_string()));
+                let _ = events.send(UiEvent::SlashOutput(
+                    "the conversation is too short; no compaction needed.".to_string(),
+                ));
                 return;
             }
             let old_len = messages.len();
@@ -3128,7 +3120,7 @@ impl Chat {
             if !compacted {
                 unpin();
                 let _ = events.send(UiEvent::SlashError(
-                    "压缩失败（模型调用异常）。".to_string(),
+                    "compaction failed (model call error).".to_string(),
                 ));
                 return;
             }
@@ -3150,7 +3142,7 @@ impl Chat {
             }
             unpin();
             let _ = events.send(UiEvent::SlashInfo(format!(
-                "✓ 已压缩 {old_len} 条消息 → 摘要 + 最近 8 条。\n摘要: {summary}"
+                "✓ compacted {old_len} messages → summary + the latest 8.\nSummary: {summary}"
             )));
         });
     }
@@ -3159,7 +3151,7 @@ impl Chat {
     fn slash_stats_async(&mut self, format: impl Fn(usize, u64) -> String + Send + 'static) {
         let session = self.session.clone();
         let events = self.events.clone();
-        self.pin_panel("stats", vec!["⏳ 正在统计…".to_string()]);
+        self.pin_panel("stats", vec!["⏳ gathering stats…".to_string()]);
         tokio::spawn(async move {
             let unpin = || {
                 let _ = events.send(UiEvent::Unpin {
@@ -3204,14 +3196,14 @@ impl Chat {
         let transcript_name = transcript
             .as_ref()
             .map(|t| t.name())
-            .unwrap_or_else(|| "无".to_string());
+            .unwrap_or_else(|| "none".to_string());
         let mode = session.permission_mode_str().to_string();
         self.slash_stats_async(move |msg_count, tokens| {
             // Window/percentage measured with the model actually in use — the
             // fixed 200k constant misread every non-Claude endpoint.
             let window = crate::budget::context_window_for(&model).max(1);
             format!(
-                "模型: {model}\nProvider: {provider}\n思考级别: {thinking_shown}\n权限模式: {mode}\n会话: {transcript_name}\n消息数: {msg_count}\n上下文: {tokens} tokens / {window}（{}%）",
+                "Model: {model}\nProvider: {provider}\nThinking: {thinking_shown}\nPermission mode: {mode}\nSession: {transcript_name}\nMessages: {msg_count}\nContext: {tokens} tokens / {window} ({}%)",
                 tokens * 100 / window
             )
         });
@@ -3224,7 +3216,8 @@ impl Chat {
         let cwd = std::path::PathBuf::from(&self.cwd);
         let paths = crate::settings::layer_paths(&self.session.user_config_dir, &cwd);
         let layer_names = ["user", "project", "local"];
-        let mut lines = vec!["配置来源（user < project < local，后层覆盖前层）：".to_string()];
+        let mut lines =
+            vec!["config sources (user < project < local; later layers override):".to_string()];
         let mut layer_values: Vec<Option<serde_json::Value>> = Vec::new();
         for (path, name) in paths.iter().zip(layer_names) {
             let value = std::fs::read_to_string(path)
@@ -3233,9 +3226,9 @@ impl Chat {
             let state = if value.is_some() {
                 "✓"
             } else if path.exists() {
-                "✗ 解析失败"
+                "✗ parse failed"
             } else {
-                "（不存在）"
+                "(does not exist)"
             };
             lines.push(format!("  {name:8} {} {state}", path.display()));
             layer_values.push(value);
@@ -3257,7 +3250,7 @@ impl Chat {
             }
             None
         };
-        lines.push("生效值与来源：".to_string());
+        lines.push("effective values and their sources:".to_string());
         for key in [
             "provider",
             "model",
@@ -3270,18 +3263,18 @@ impl Chat {
             "motion",
         ] {
             let entry = match lookup(key) {
-                Some((value, source)) => format!("  {key:18} = {value}（{source} 层）"),
+                Some((value, source)) => format!("  {key:18} = {value} ({source} layer)"),
                 None => match key {
                     "apiKey" if std::env::var("ANTHROPIC_API_KEY").is_ok() => {
-                        format!("  {key:18} = （env ANTHROPIC_API_KEY）")
+                        format!("  {key:18} = (env ANTHROPIC_API_KEY)")
                     }
                     "apiKey" if std::env::var("DEEPSEEK_API_KEY").is_ok() => {
-                        format!("  {key:18} = （env DEEPSEEK_API_KEY）")
+                        format!("  {key:18} = (env DEEPSEEK_API_KEY)")
                     }
                     "apiBaseUrl" if std::env::var("ANTHROPIC_BASE_URL").is_ok() => {
-                        format!("  {key:18} = （env ANTHROPIC_BASE_URL）")
+                        format!("  {key:18} = (env ANTHROPIC_BASE_URL)")
                     }
-                    _ => format!("  {key:18} = （默认）"),
+                    _ => format!("  {key:18} = (default)"),
                 },
             };
             lines.push(entry);
@@ -3291,15 +3284,15 @@ impl Chat {
         let model = self.session.runtime.model.borrow().clone();
         let (_, url) = self.session.client.current_endpoint();
         lines.push(format!(
-            "当前会话：{provider} · {model} · {url}{}",
+            "current session: {provider} · {model} · {url}{}",
             if self.provider_session_only {
-                "（provider 为会话级）"
+                " (provider is session-scoped)"
             } else {
                 ""
             }
         ));
         lines.push(format!(
-            "凭据存储：{}（/provider 查看各端点登录态）",
+            "credential store: {} (/provider shows each endpoint's login state)",
             crate::auth::AuthStore::new(&self.session.home)
                 .path()
                 .display()
@@ -3310,7 +3303,7 @@ impl Chat {
                 for key in obj.keys() {
                     if !crate::settings::KNOWN_KEYS.contains(&key.as_str()) {
                         lines.push(format!(
-                            "⚠ {} 层未知配置项 \"{key}\"（拼写错误？不会生效）",
+                            "⚠ unknown config key \"{key}\" in the {} layer (a typo? it will have no effect)",
                             layer_names[i]
                         ));
                     }
@@ -3329,7 +3322,7 @@ impl Chat {
             let filled = ((pct as usize * bar_len) / 100).min(bar_len);
             let bar = format!("{}·{}", "#".repeat(filled), "·".repeat(bar_len - filled));
             format!(
-                "上下文: [{bar}] {pct}%\n已用 {tokens} / {window} tokens\n自动压缩阈值: {}%",
+                "context: [{bar}] {pct}%\n{tokens} / {window} tokens used\nauto-compaction threshold: {}%",
                 crate::budget::autocompact_threshold_for(&model) * 100 / window
             )
         });
@@ -3344,14 +3337,14 @@ impl Chat {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         if arg.is_empty() {
-            let mut lines = vec!["权限规则（.bingo/settings.json）：".to_string()];
+            let mut lines = vec!["permission rules (.bingo/settings.json):".to_string()];
             for (name, list) in [
                 ("allow", &rules.allow),
                 ("deny", &rules.deny),
                 ("ask", &rules.ask),
             ] {
                 if list.is_empty() {
-                    lines.push(format!("  {name}: （无）"));
+                    lines.push(format!("  {name}: (none)"));
                 } else {
                     lines.push(format!("  {name}:"));
                     for rule in list {
@@ -3359,16 +3352,16 @@ impl Chat {
                     }
                 }
             }
-            lines.push("用法: /permissions [allow|deny|ask] [规则，如 Skill(review:*)]".into());
+            lines.push("usage: /permissions [allow|deny|ask] [rule, e.g. Skill(review:*)]".into());
             self.push_slash_info(lines.join("\n"));
             return;
         }
         let Some((kind, rule)) = arg.split_once(char::is_whitespace) else {
-            self.push_slash_error("用法: /permissions [allow|deny|ask] [规则]".to_string());
+            self.push_slash_error("usage: /permissions [allow|deny|ask] [rule]".to_string());
             return;
         };
         if !["allow", "deny", "ask"].contains(&kind) || rule.is_empty() {
-            self.push_slash_error("用法: /permissions [allow|deny|ask] [规则]".to_string());
+            self.push_slash_error("usage: /permissions [allow|deny|ask] [rule]".to_string());
             return;
         }
         let mut rules = self
@@ -3402,10 +3395,10 @@ impl Chat {
         });
         match crate::settings::upsert_project_settings(&cwd, &patch) {
             Ok(()) => self.push_slash_output(format!(
-                "✓ 已添加 {kind} 规则: {rule}（运行时生效 + 已写入 .bingo/settings.json）"
+                "✓ added {kind} rule: {rule} (active now + written to .bingo/settings.json)"
             )),
             Err(e) => self.push_slash_output(format!(
-                "✓ 已添加 {kind} 规则: {rule}（运行时生效）；持久化失败: {e}"
+                "✓ added {kind} rule: {rule} (active now); persistence failed: {e}"
             )),
         }
     }
@@ -3419,7 +3412,7 @@ impl Chat {
         let parts: Vec<&str> = arg.split_whitespace().collect();
         match parts.first().copied() {
             None => {
-                self.pin_panel("mcp", vec!["⏳ 正在检查 MCP 服务器…".to_string()]);
+                self.pin_panel("mcp", vec!["⏳ checking MCP servers…".to_string()]);
                 tokio::spawn(async move {
                     let unpin = || {
                         let _ = events.send(UiEvent::Unpin {
@@ -3431,13 +3424,13 @@ impl Chat {
                     if names.is_empty() {
                         unpin();
                         let _ = events.send(UiEvent::SlashInfo(
-                            "未配置 MCP 服务器。\n在 .bingo/settings.json 或 \
-                             ~/.config/bingo/settings.json 的 mcpServers 中添加。"
+                            "no MCP servers configured.\nAdd them under mcpServers in .bingo/settings.json or \
+                             ~/.config/bingo/settings.json."
                                 .to_string(),
                         ));
                         return;
                     }
-                    let mut lines = vec![format!("MCP 服务器（{} 个）：", names.len())];
+                    let mut lines = vec![format!("MCP servers ({}):", names.len())];
                     for name in names {
                         let line = match mgr.status(&name) {
                             McpStatus::Connected { tool_count } => {
@@ -3452,7 +3445,7 @@ impl Chat {
                         lines.push(line);
                     }
                     lines.push(
-                        "用法: /mcp enable|disable [name|all] · /mcp reconnect <name>".into(),
+                        "usage: /mcp enable|disable [name|all] · /mcp reconnect <name>".into(),
                     );
                     unpin();
                     let _ = events.send(UiEvent::SlashInfo(lines.join("\n")));
@@ -3462,8 +3455,8 @@ impl Chat {
                 let target = parts.get(1).copied().unwrap_or("all").to_string();
                 let enabled = action == "enable";
                 self.push_slash_output(format!(
-                    "⏳ 正在{}{target}…",
-                    if enabled { "启用 " } else { "禁用 " }
+                    "⏳ {}{target}…",
+                    if enabled { "enabling " } else { "disabling " }
                 ));
                 tokio::spawn(async move {
                     let mut mgr = session.runtime.mcp.lock().await;
@@ -3475,9 +3468,8 @@ impl Chat {
                         Vec::new()
                     };
                     if targets.is_empty() {
-                        let _ = events.send(UiEvent::SlashError(format!(
-                            "未找到 MCP 服务器 \"{target}\"。"
-                        )));
+                        let _ = events
+                            .send(UiEvent::SlashError(format!("no MCP server \"{target}\".")));
                         return;
                     }
                     for name in &targets {
@@ -3502,9 +3494,9 @@ impl Chat {
                             &serde_json::json!({ "disabledMcpServers": list }),
                         );
                     }
-                    let verb = if enabled { "已启用" } else { "已禁用" };
+                    let verb = if enabled { "enabled" } else { "disabled" };
                     let _ = events.send(UiEvent::SlashOutput(format!(
-                        "{verb} {} 个 MCP 服务器: {}",
+                        "{verb} {} MCP server(s): {}",
                         targets.len(),
                         targets.join(", ")
                     )));
@@ -3512,11 +3504,11 @@ impl Chat {
             }
             Some("reconnect") => {
                 let Some(name) = parts.get(1).copied() else {
-                    self.push_slash_error("用法: /mcp reconnect <服务器名>".to_string());
+                    self.push_slash_error("usage: /mcp reconnect <server name>".to_string());
                     return;
                 };
                 let name = name.to_string();
-                self.pin_panel("mcp", vec![format!("⏳ 正在重连 {name}…")]);
+                self.pin_panel("mcp", vec![format!("⏳ reconnecting {name}…")]);
                 tokio::spawn(async move {
                     let unpin = || {
                         let _ = events.send(UiEvent::Unpin {
@@ -3526,15 +3518,14 @@ impl Chat {
                     let mut mgr = session.runtime.mcp.lock().await;
                     if !mgr.configured().contains(&name) {
                         unpin();
-                        let _ = events.send(UiEvent::SlashError(format!(
-                            "未找到 MCP 服务器 \"{name}\"。"
-                        )));
+                        let _ =
+                            events.send(UiEvent::SlashError(format!("no MCP server \"{name}\".")));
                         return;
                     }
                     if mgr.is_disabled(&name) {
                         unpin();
                         let _ = events.send(UiEvent::SlashError(format!(
-                            "{name} 已禁用，先 /mcp enable {name} 再重连。"
+                            "{name} is disabled; run /mcp enable {name} before reconnecting."
                         )));
                         return;
                     }
@@ -3546,7 +3537,7 @@ impl Chat {
                             };
                             unpin();
                             let _ = events.send(UiEvent::SlashOutput(format!(
-                                "✓ {name} 已重连 · {count} tools"
+                                "✓ {name} reconnected · {count} tools"
                             )));
                         }
                         Err(e) => {
@@ -3557,12 +3548,12 @@ impl Chat {
                 });
             }
             _ => self.push_slash_error(
-                "用法: /mcp [enable|disable [name|all]] · /mcp reconnect <name>".to_string(),
+                "usage: /mcp [enable|disable [name|all]] · /mcp reconnect <name>".to_string(),
             ),
         }
     }
 
-    /// `/provider [名称]`：无参打开选择器（picker-model.md 提交 D）；带参快速路径。
+    /// `/provider [name]`: no argument opens the selector (picker-model.md commit D); an argument takes the fast path.
     fn slash_provider(&mut self, arg: &str) {
         if let Some(rest) = arg.strip_prefix("login ") {
             return self.slash_provider_login(rest.trim());
@@ -3577,18 +3568,18 @@ impl Chat {
         self.switch_provider(arg, true);
     }
 
-    /// 切换 provider：runtime 立即生效；persist=true 写 settings（重启恢复）。
+    /// Switch the provider: takes effect in the runtime immediately; persist=true writes settings (restored on restart).
     ///
-    /// provider+model 是一个原子选择：换端点必须解决模型（本会话上次用的 →
-    /// 端点默认 → 保留 + 警告）——与子代理的跨 provider 校验同一条规则；
-    /// 主会话曾静默保留旧模型，下一条消息在新端点必 404。
+    /// provider+model is an atomic selection: switching endpoints must resolve the model (this session's last-used →
+    /// endpoint default → keep + warn) — the same rule as the subagent cross-provider check;
+    /// the main session used to keep the old model silently, and the next message 404'd on the new endpoint.
     fn switch_provider(&mut self, name: &str, persist: bool) {
         // A mid-turn protocol swap would send this conversation's accumulated
         // thinking/reasoning blocks to the other protocol's endpoint — refuse
         // instead of corrupting the running turn.
         if self.busy {
             self.push_slash_error(
-                "[error] code=BUSY msg=回合进行中无法切换 provider（Esc 中断后重试）".to_string(),
+                "[error] code=BUSY msg=cannot switch providers mid-turn (press Esc to interrupt, then retry)".to_string(),
             );
             return;
         }
@@ -3615,37 +3606,41 @@ impl Chat {
                         format!(" · model {model}")
                     }
                     Some(_) => String::new(),
-                    None => format!(" · ⚠ 模型 {prev_model} 未必在此端点可用（/model 选择）"),
+                    None => format!(
+                        " · ⚠ model {prev_model} may not be available on this endpoint (pick with /model)"
+                    ),
                 };
                 let model_now = session.runtime.model.borrow().clone();
                 self.provider_models.insert(name.clone(), model_now.clone());
                 self.provider_session_only = !persist;
                 if persist {
-                    // 与 /model 菜单同路径：provider+model 成对持久化。
+                    // Same path as the /model menu: provider+model persist as a pair.
                     self.persist_selection(&model_now, &name);
                     self.push_slash_output(format!(
-                        "✓ provider 已切换: {name}（{url}）{model_note}"
+                        "✓ provider switched: {name} ({url}){model_note}"
                     ));
                 } else {
                     self.push_slash_output(format!(
-                        "✓ provider 已切换: {name}（{url}）{model_note}（仅本次会话）"
+                        "✓ provider switched: {name} ({url}){model_note} (this session only)"
                     ));
                 }
-                // 凭据不可用：切换成功但首次请求会失败——提前引导（判据是
-                // 「凭据是否可用」，不再只看认证类型——无 key 的 apiKey 型
-                // preset 曾静默放行）。
+                // Credentials unavailable: the switch succeeds but the first request would fail — guide early (the criterion is
+                // "are credentials available", not just the auth kind — a keyless apiKey-style
+                // preset used to pass silently).
                 match session.client.auth_status(&name) {
                     Some(crate::api::contract::AuthStatus::OAuth { account: None }) => {
-                        self.push_slash_output(format!("⚠ {name} 未登录：/provider login {name}"));
+                        self.push_slash_output(format!(
+                            "⚠ {name} not logged in: /provider login {name}"
+                        ));
                     }
                     Some(crate::api::contract::AuthStatus::StoredKey { configured: false }) => {
                         self.push_slash_output(format!(
-                            "⚠ {name} 未配置 API key：/provider login {name} --manual <key>"
+                            "⚠ {name} has no API key configured: /provider login {name} --manual <key>"
                         ));
                     }
                     Some(crate::api::contract::AuthStatus::Unconfigured) => {
                         self.push_slash_output(
-                            "⚠ default 未配置凭据：settings 写 apiKey 或 /provider login codex"
+                            "⚠ default has no credentials: write apiKey in settings or /provider login codex"
                                 .to_string(),
                         );
                     }
@@ -3656,7 +3651,7 @@ impl Chat {
         }
     }
 
-    /// 选项说明：URL + 脱敏 key（前 4 字符，短 key 不加省略号——沿用现有信息列）。
+    /// Option description: URL + redacted key (first 4 chars; short keys get no ellipsis — following the existing info column).
     fn provider_desc(&self, name: &str) -> String {
         let (key, url) = self
             .session
@@ -3672,7 +3667,7 @@ impl Chat {
             Some(crate::api::contract::AuthStatus::ApiKey) => {
                 let key = key.unwrap_or_default();
                 if key.is_empty() {
-                    format!("○ 未配置（/provider login {name}）")
+                    format!("○ not configured (/provider login {name})")
                 } else {
                     let mut key_shown: String = key.chars().take(4).collect();
                     if key.chars().count() > 4 {
@@ -3681,38 +3676,38 @@ impl Chat {
                     format!("key {key_shown}")
                 }
             }
-            // auth.json 里的 key（--manual）：configured 为实时读——本会话
-            // 登录立即从「未配置」翻到「已配置」。
+            // The key in auth.json (--manual): configured reads live — logging in during this
+            // session immediately flips it from "not configured" to "configured".
             Some(crate::api::contract::AuthStatus::StoredKey { configured: true }) => {
-                "✓ key（auth.json）".to_string()
+                "✓ key (auth.json)".to_string()
             }
             Some(crate::api::contract::AuthStatus::StoredKey { configured: false }) => {
-                format!("○ 未配置（/provider login {name} --manual <key>）")
+                format!("○ not configured (/provider login {name} --manual <key>)")
             }
             Some(crate::api::contract::AuthStatus::OAuth { account: Some(acc) }) => {
                 format!("✓ {acc}")
             }
             Some(crate::api::contract::AuthStatus::OAuth { account: None }) => {
-                format!("○ 未登录（/provider login {name}）")
+                format!("○ not logged in (/provider login {name})")
             }
             Some(crate::api::contract::AuthStatus::Unconfigured) => {
-                "○ 未配置（settings 写 apiKey 或 /provider login codex）".to_string()
+                "○ not configured (write apiKey in settings or /provider login codex)".to_string()
             }
             None => "?".to_string(),
         };
         let badge = if self.session.client.is_preset(name) {
-            " · 内置"
+            " · built-in"
         } else {
             ""
         };
-        format!("{url}（{auth} · {protocol}{badge}）")
+        format!("{url} ({auth} · {protocol}{badge})")
     }
 
-    /// 打开 `/provider` 选择器：default 打头（顶层端点），其后命名 provider；
-    /// ● 标当前 provider，互斥关闭其他菜单。
+    /// Open the `/provider` selector: default first (the top-level endpoint), then named providers;
+    /// ● marks the current provider, other menus close exclusively.
     fn open_provider_menu(&mut self) {
         let current = self.session.runtime.provider.borrow().clone();
-        // 顺序与 /model 一级同源（provider_order）：数字直达在两处含义一致。
+        // Order shares a source with /model's level one (provider_order): the number jump means the same in both places.
         let names = self.provider_order();
         let mut options = Vec::with_capacity(names.len());
         for name in names {
@@ -3800,7 +3795,7 @@ impl Chat {
         let parts: Vec<&str> = arg.split_whitespace().collect();
         let Some(name) = parts.first() else {
             self.push_slash_output(
-                "用法: /provider login <名称> [--device-auth|--manual <token>]".to_string(),
+                "usage: /provider login <name> [--device-auth|--manual <token>]".to_string(),
             );
             return;
         };
@@ -3816,7 +3811,9 @@ impl Chat {
         let preset = crate::api::providers::presets::preset(name);
         let known = session.settings.providers.contains_key(*name) || preset.is_some();
         if !known {
-            self.push_slash_error(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
+            self.push_slash_error(format!(
+                "provider \"{name}\" not found (see /provider for the list)"
+            ));
             return;
         }
         let oauth_kind = session
@@ -3846,11 +3843,11 @@ impl Chat {
                     match store.set(&name, crate::auth::AuthEntry::Api { key: token }) {
                         Ok(()) => {
                             let _ = events.send(UiEvent::SlashOutput(format!(
-                                "✓ 已保存 {name} 的 API key（订阅 key）"
+                                "✓ saved {name}'s API key (subscription key)"
                             )));
                         }
                         Err(e) => {
-                            let _ = events.send(UiEvent::SlashError(format!("✗ 保存失败: {e}")));
+                            let _ = events.send(UiEvent::SlashError(format!("✗ save failed: {e}")));
                         }
                     }
                     return;
@@ -3868,11 +3865,11 @@ impl Chat {
                 match tp.save(&tokens).await {
                     Ok(()) => {
                         let _ = events.send(UiEvent::SlashOutput(format!(
-                            "✓ 已保存 {name} 的登录信息（--manual token 不自动刷新）"
+                            "✓ saved {name}'s login info (a --manual token does not auto-refresh)"
                         )));
                     }
                     Err(e) => {
-                        let _ = events.send(UiEvent::SlashError(format!("✗ 保存失败: {e}")));
+                        let _ = events.send(UiEvent::SlashError(format!("✗ save failed: {e}")));
                     }
                 }
             });
@@ -3882,19 +3879,19 @@ impl Chat {
         // OAuth gate: codex only in v1; apiKey presets guide the key paste.
         let Some(oauth_kind) = oauth_kind else {
             self.push_slash_info(format!(
-                "provider \"{name}\" 需要 API key（订阅 key）：\n  1. 到 opencode.ai/auth 获取\n  2. /provider login {name} --manual <key>"
+                "provider \"{name}\" requires an API key (subscription key):\n  1. get one at opencode.ai/auth\n  2. /provider login {name} --manual <key>"
             ));
             return;
         };
         if oauth_kind != "codex" {
             self.push_slash_error(format!(
-                "不支持的 oauth.kind \"{oauth_kind}\"（v1 仅 codex）"
+                "unsupported oauth.kind \"{oauth_kind}\" (v1 supports only codex)"
             ));
             return;
         }
 
         if device_auth {
-            // headless/SSH：打印 URL + 一次性码，轮询等待授权。
+            // headless/SSH: print the URL + one-time code, poll for authorization.
             let shared_tp = session.client.token_provider(&name);
             tokio::spawn(async move {
                 let flow = crate::api::auth::DeviceFlow::new(&http, &config);
@@ -3906,10 +3903,10 @@ impl Chat {
                         let _ = events.send(UiEvent::PinPanel {
                             id: "login".to_string(),
                             lines: vec![
-                                format!("登录 {name}（设备授权）"),
-                                format!("  1. 打开 {}", prompt.verification_url),
-                                format!("  2. 输入代码 {}（15 分钟内有效）", prompt.user_code),
-                                "⏳ 等待授权…（Esc 不会取消；完成后此面板自动消失）".to_string(),
+                                format!("sign in to {name} (device authorization)"),
+                                format!("  1. open {}", prompt.verification_url),
+                                format!("  2. enter code {} (valid for 15 minutes)", prompt.user_code),
+                                "⏳ waiting for authorization… (Esc will not cancel; the panel disappears when done)".to_string(),
                             ],
                         });
                         let outcome = flow
@@ -3927,30 +3924,32 @@ impl Chat {
                                 });
                                 match tp.save(&tokens).await {
                                     Ok(()) => {
-                                        let _ = events
-                                            .send(UiEvent::SlashOutput(format!("✓ 已登录 {name}")));
+                                        let _ = events.send(UiEvent::SlashOutput(format!(
+                                            "✓ signed in to {name}"
+                                        )));
                                     }
                                     Err(e) => {
-                                        let _ = events
-                                            .send(UiEvent::SlashOutput(format!("✗ 保存失败: {e}")));
+                                        let _ = events.send(UiEvent::SlashOutput(format!(
+                                            "✗ save failed: {e}"
+                                        )));
                                     }
                                 }
                             }
                             Err(e) => {
-                                let _ =
-                                    events.send(UiEvent::SlashOutput(format!("✗ 登录失败: {e}")));
+                                let _ = events
+                                    .send(UiEvent::SlashOutput(format!("✗ sign-in failed: {e}")));
                             }
                         }
                     }
                     Err(e) => {
-                        let _ = events.send(UiEvent::SlashError(format!("✗ 登录失败: {e}")));
+                        let _ = events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
                     }
                 }
             });
             return;
         }
 
-        // 默认：loopback PKCE（本地回调 + 打开浏览器）。
+        // Default: loopback PKCE (local callback + opening the browser).
         let shared_tp = session.client.token_provider(&name);
         tokio::spawn(async move {
             let flow = crate::api::auth::LoopbackPkce::new(&http, &config);
@@ -3958,13 +3957,13 @@ impl Chat {
                 Ok((url, _redirect, _verifier, handle)) => {
                     // Pinned, with the URL itself: on SSH/no-GUI hosts the
                     // browser never opens and this line is the only way
-                    // through (it used to say "已尝试打开" and show nothing).
+                    // through (it used to say "tried to open" and show nothing).
                     let _ = events.send(UiEvent::PinPanel {
                         id: "login".to_string(),
                         lines: vec![
-                            format!("登录 {name}：请在浏览器中完成授权（已尝试自动打开）"),
+                            format!("sign in to {name}: complete the authorization in the browser (tried to open it automatically)"),
                             format!("  {url}"),
-                            format!("  打不开浏览器？/provider login {name} --device-auth"),
+                            format!("  browser did not open? /provider login {name} --device-auth"),
                         ],
                     });
                     let _ = crate::share::open_in_browser(&url);
@@ -3981,25 +3980,28 @@ impl Chat {
                             });
                             match tp.save(&tokens).await {
                                 Ok(()) => {
-                                    let _ = events
-                                        .send(UiEvent::SlashOutput(format!("✓ 已登录 {name}")));
+                                    let _ = events.send(UiEvent::SlashOutput(format!(
+                                        "✓ signed in to {name}"
+                                    )));
                                 }
                                 Err(e) => {
                                     let _ = events
-                                        .send(UiEvent::SlashOutput(format!("✗ 保存失败: {e}")));
+                                        .send(UiEvent::SlashOutput(format!("✗ save failed: {e}")));
                                 }
                             }
                         }
                         Ok(Err(e)) => {
-                            let _ = events.send(UiEvent::SlashError(format!("✗ 登录失败: {e}")));
+                            let _ =
+                                events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
                         }
                         Err(e) => {
-                            let _ = events.send(UiEvent::SlashError(format!("✗ 登录中断: {e}")));
+                            let _ = events
+                                .send(UiEvent::SlashError(format!("✗ sign-in interrupted: {e}")));
                         }
                     }
                 }
                 Err(e) => {
-                    let _ = events.send(UiEvent::SlashError(format!("✗ 登录失败: {e}")));
+                    let _ = events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
                 }
             }
         });
@@ -4008,14 +4010,16 @@ impl Chat {
     fn slash_provider_logout(&mut self, arg: &str) {
         let name = arg.trim();
         if name.is_empty() {
-            self.push_slash_error("用法: /provider logout <名称>".to_string());
+            self.push_slash_error("usage: /provider logout <name>".to_string());
             return;
         }
         let session = self.session.clone();
         let preset = crate::api::providers::presets::preset(name);
         let known = session.settings.providers.contains_key(name) || preset.is_some();
         if !known {
-            self.push_slash_error(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
+            self.push_slash_error(format!(
+                "provider \"{name}\" not found (see /provider for the list)"
+            ));
             return;
         }
         let oauth_kind = session
@@ -4030,15 +4034,15 @@ impl Chat {
         let shared_tp = session.client.token_provider(&name);
         tokio::spawn(async move {
             if oauth_kind.as_deref() != Some("codex") {
-                // apiKey preset（opencode-go）：只清 auth.json 条目。
+                // apiKey preset (opencode-go): only clears the auth.json entry.
                 match crate::auth::AuthStore::new(&home).remove(&name) {
                     Ok(()) => {
                         let _ = events.send(UiEvent::SlashOutput(format!(
-                            "✓ 已退出 {name}（key 已清除）"
+                            "✓ signed out of {name} (key cleared)"
                         )));
                     }
                     Err(e) => {
-                        let _ = events.send(UiEvent::SlashError(format!("✗ 退出失败: {e}")));
+                        let _ = events.send(UiEvent::SlashError(format!("✗ sign-out failed: {e}")));
                     }
                 }
                 return;
@@ -4056,11 +4060,11 @@ impl Chat {
             match tp.logout().await {
                 Ok(()) => {
                     let _ = events.send(UiEvent::SlashOutput(format!(
-                        "✓ 已退出 {name}（凭据已清除）"
+                        "✓ signed out of {name} (credentials cleared)"
                     )));
                 }
                 Err(e) => {
-                    let _ = events.send(UiEvent::SlashError(format!("✗ 退出失败: {e}")));
+                    let _ = events.send(UiEvent::SlashError(format!("✗ sign-out failed: {e}")));
                 }
             }
         });
@@ -4084,7 +4088,7 @@ impl Chat {
             Some(arg.to_string())
         } else {
             self.push_slash_error(format!(
-                "[error] code={} msg=用法: /think [off|low|medium|high|xhigh|max]",
+                "[error] code={} msg=usage: /think [off|low|medium|high|xhigh|max]",
                 crate::error::SLASH_ERROR_BAD_ARGUMENT
             ));
             return;
@@ -4095,7 +4099,7 @@ impl Chat {
         // say so here, or the footer shows a level that never takes effect.
         let model = self.session.runtime.model.borrow().clone();
         let ignored = if level.is_some() && !crate::api::models::supports_thinking(&model) {
-            format!("（⚠ {model} 不支持 thinking，该级别将被忽略）")
+            format!(" (⚠ {model} does not support thinking; the level will be ignored)")
         } else {
             String::new()
         };
@@ -4106,9 +4110,11 @@ impl Chat {
                 &cwd,
                 &serde_json::json!({ "thinkingLevel": saved }),
             );
-            self.push_slash_output(format!("✓ 思考级别已设置: {saved}{ignored}"));
+            self.push_slash_output(format!("✓ thinking level set: {saved}{ignored}"));
         } else {
-            self.push_slash_output(format!("✓ 思考级别已设置: {saved}（仅本次会话）{ignored}"));
+            self.push_slash_output(format!(
+                "✓ thinking level set: {saved} (this session only){ignored}"
+            ));
         }
     }
 
@@ -4124,7 +4130,7 @@ impl Chat {
             selected: current,
             current,
         };
-        // 空表防御（THINK_LEVELS 为 const 非空，防御性分支不可达）：菜单不开。
+        // Empty-table guard (THINK_LEVELS is a non-empty const; this defensive branch is unreachable): the menu stays closed.
         if menu.picker().is_empty() {
             return;
         }
@@ -4201,13 +4207,13 @@ impl Chat {
         let skills = crate::skills::load_skills(&home, &cwd);
         if skills.is_empty() {
             self.push_slash_output(
-                "当前没有可用的技能。\n技能放在 .bingo/skills/<name>/SKILL.md 或 $XDG_CONFIG_HOME/bingo/skills/<name>/SKILL.md。"
+                "no skills available.\nSkills live in .bingo/skills/<name>/SKILL.md or $XDG_CONFIG_HOME/bingo/skills/<name>/SKILL.md."
                     .to_string(),
             );
             return;
         }
         let listing = crate::skills::format_listing(&skills, crate::skills::DEFAULT_CHAR_BUDGET);
-        self.push_slash_info(format!("可用技能：\n{listing}"));
+        self.push_slash_info(format!("available skills:\n{listing}"));
     }
 
     fn slash_tasks(&mut self) {
@@ -4218,7 +4224,7 @@ impl Chat {
         let lines = self.task_lines();
         self.tasks_visible = was_visible;
         if lines.is_empty() {
-            self.push_slash_output("当前没有后台任务。".to_string());
+            self.push_slash_output("no background tasks right now.".to_string());
             return;
         }
         let text: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
@@ -4378,7 +4384,7 @@ impl Chat {
         outcome: &crate::query::QueryOutcome,
     ) {
         if outcome.aborted {
-            let _ = events.send(UiEvent::Warning("回合已中断".to_string()));
+            let _ = events.send(UiEvent::Warning("turn interrupted".to_string()));
         }
         let _ = events.send(UiEvent::TurnEnd);
         let cwd = std::env::current_dir().unwrap_or_default();
@@ -4583,7 +4589,7 @@ impl Chat {
         }
     }
 
-    /// AskUserQuestion 回答消息：header + 一行 `· 问题 → 答案`。作为
+    /// AskUserQuestion answer message: header + one line of `· question → answer`. Treated as
     /// AskUserQuestion answer text: header + one `· question → answer` line. Enters the
     /// message flow as an ordinary user message (no longer a transient block rendered above the input).
     fn ask_answer_text(question: &str, answer: &str) -> String {
@@ -4603,7 +4609,7 @@ impl Chat {
         });
     }
 
-    /// 提交 Other 自由输入（CC SelectInputOption onSubmit：空文本 = 取消）。
+    /// Submitting Other free text (CC SelectInputOption onSubmit: empty text = cancel).
     fn submit_ask_answer(&mut self, text: String) {
         if text.trim().is_empty() {
             let free_text = self.pending_ask.as_ref().is_some_and(|(r, _)| r.free_text);
@@ -4685,8 +4691,8 @@ impl Chat {
         now: std::time::Instant,
     ) -> bool {
         let pasting = self.track_burst(now);
-        // 更新提示呼吸（P1）：窗口内第一次按键 → 立即静止（用户注意力已被输入带走；
-        // 提示行本身保留，只是不再呼吸）。
+        // Update-banner breathing (P1): the first keypress in the window stops it immediately (the user's attention has moved to the input;
+        // the banner itself stays, it just stops breathing).
         if self.update_anim_active() {
             self.update_banner_stopped = true;
         }
@@ -5204,7 +5210,7 @@ impl Chat {
                 self.input = text;
                 self.cursor = cursor.min(self.input.len());
                 self.update_slash_suggestions();
-                self.notice = Some("已恢复暂存");
+                self.notice = Some("draft restored");
                 self.notice_until = Some(std::time::Instant::now() + CTRL_C_WINDOW);
             }
             return;
@@ -5215,14 +5221,14 @@ impl Chat {
         self.last_edit = None;
         self.update_slash_suggestions();
         self.notice = Some(if replaced {
-            "已暂存（覆盖旧暂存）· 空输入时 ctrl+s 恢复"
+            "draft saved (old draft overwritten) · ctrl+s on an empty input restores it"
         } else {
-            "已暂存 · 空输入时 ctrl+s 恢复"
+            "draft saved · ctrl+s on an empty input restores it"
         });
         self.notice_until = Some(std::time::Instant::now() + CTRL_C_WINDOW);
     }
 
-    /// Shift+Tab：default → acceptEdits → plan → default。
+    /// Shift+Tab: default → acceptEdits → plan → default.
     /// bypassPermissions / dontAsk stay in the cycle only when the session started in that mode
     /// (dangerous modes must not be reachable by one mispress).
     fn cycle_permission_mode(&mut self) {
@@ -5404,8 +5410,8 @@ impl Chat {
         }
     }
 
-    /// 更新提示呼吸窗口内的帧号（动画进行中 → Some；无提示 / motion off /
-    /// 已按键停止 / 窗口已过 → None 静止）。窗口 270 帧 = 9s = 3 个呼吸。
+    /// Frame number within the update-banner breathing window (animation running → Some; no banner / motion off /
+    /// stopped by a keypress / window passed → None, resting). The 270-frame window = 9s = 3 breaths.
     fn update_banner_frame(&self) -> Option<u64> {
         if self.update_banner.is_none() || self.motion_off || self.update_banner_stopped {
             return None;
@@ -5414,7 +5420,7 @@ impl Chat {
         (frame < UPDATE_BANNER_FRAMES).then_some(frame)
     }
 
-    /// 更新提示呼吸是否激活（帧循环据此持续置 dirty；窗口外恢复 idle）。
+    /// Whether the update-banner breathing is active (the frame loop keeps dirty set; outside the window it returns to idle).
     fn update_anim_active(&self) -> bool {
         self.update_banner_frame().is_some()
     }
@@ -5487,7 +5493,7 @@ impl Chat {
             self.tasks_visible = false;
             self.tasks_auto = false;
             let total = self.tasks_cache.len();
-            self.push_slash_output(format!("✓ {total}/{total} tasks 完成 · ctrl+t 查看"));
+            self.push_slash_output(format!("✓ {total}/{total} tasks done · ctrl+t to view"));
         }
     }
 
@@ -5738,7 +5744,7 @@ impl Chat {
                 .collect::<Vec<_>>()
                 .join(" · ");
             return vec![Line::styled(
-                one_line(&format!("  {summary} — ctrl+g 查看"), width),
+                one_line(&format!("  {summary} — ctrl+g to view"), width),
                 SegStyle::fg(self.theme.inactive),
             )];
         };
@@ -5755,9 +5761,9 @@ impl Chat {
                     description,
                 } => format!("{} {name} · {state} · {description}", glyph(e)),
                 EntityRow::Channel { name, seq, frozen } => format!(
-                    "{} #{name} · {seq} 条{}",
+                    "{} #{name} · {seq} msgs{}",
                     glyph(e),
-                    if *frozen { " · 已冻结" } else { "" }
+                    if *frozen { " · frozen" } else { "" }
                 ),
             };
             let style = if focused {
@@ -5773,12 +5779,12 @@ impl Chat {
         }
         if self.entities.len() > cap {
             rows.push(Line::styled(
-                format!("  … 共 {} 个", self.entities.len()),
+                format!("  … {} total", self.entities.len()),
                 SegStyle::fg(self.theme.inactive),
             ));
         }
         rows.push(Line::styled(
-            "  ↑↓ 选择 · enter 打开 · esc 关闭".to_string(),
+            "  ↑↓ select · enter opens · esc closes".to_string(),
             SegStyle::fg(self.theme.inactive),
         ));
         rows
@@ -5791,7 +5797,9 @@ impl Chat {
         if code == KeyCode::Char('g') && ctrl {
             self.refresh_entities();
             if self.entities.is_empty() {
-                self.notice = Some("没有子代理实例或频道（Agent 工具派生后出现）");
+                self.notice = Some(
+                    "no subagent instances or channels yet (they appear after the Agent tool spawns one)",
+                );
                 self.notice_until = Some(std::time::Instant::now() + CTRL_C_WINDOW);
             } else if self.entity_focus.is_some() {
                 self.entity_focus = None;
@@ -5875,7 +5883,7 @@ impl Chat {
         };
         Some(one_line(
             &format!(
-                "{prefix}`{}': {hit}   — enter 提交 · tab 采纳 · ctrl+r 更旧 · esc 取消",
+                "{prefix}`{}': {hit}   — enter submits · tab accepts · ctrl+r older · esc cancels",
                 search.query
             ),
             self.width.saturating_sub(2),
@@ -5941,10 +5949,10 @@ impl Chat {
         (i == 0 || self.message_settled(i - 1)) && self.message_static_settled(i)
     }
 
-    /// 构建滚动文档：欢迎卡片 + 消息（text 与活动按插入点交错）+
-    /// 权限请求块。块列表交给 [`crate::tui::statics::layout`] 摆放：
-    /// `doc.settled` / 检查点 = 定稿前缀（欢迎卡片 + 全部已定稿消息；
-    /// 权限请求块永远不定稿）。
+    /// Build the scrolling document: welcome card + messages (text and activities interleaved at their insert points) +
+    /// permission-request blocks. The block list is laid out by [`crate::tui::statics::layout`]:
+    /// `doc.settled` / checkpoints = the settled prefix (welcome card + all settled messages;
+    /// permission-request blocks are never settled).
     ///
     /// In inline mode, segments already flushed ([`Chat::flushed_segments`]) are skipped wholesale:
     /// the doc only covers the dynamic tail, so more flushing means cheaper rebuilds.
@@ -6028,7 +6036,7 @@ impl Chat {
     /// Welcome-card block. It settles at birth but stays in the live doc
     /// (banner breathing, re-wrap on resize) until it crosses the window top.
     fn welcome_el(&self, width: usize, theme: &Theme) -> El {
-        // 新版本提示（update-banner）：窗口内用呼吸色；窗口外/无提示 → 静止 rest 或 None。
+        // New-version banner (update-banner): breathing color inside the window; outside / no banner → resting rest or None.
         let banner = self.update_banner.as_deref().map(|v| {
             let frame = self.update_banner_frame().unwrap_or(UPDATE_BANNER_FRAMES);
             (v, update_color(theme, frame, self.motion_off))
@@ -6402,9 +6410,9 @@ fn text_el(theme: &Theme, reply: Vec<Line>) -> El {
 /// worth knowing, the cwd, and a dim identity line. `bingo` stays `bingo` —
 /// this is homage, not impersonation.
 ///
-/// 新版本提示行（update-banner 规格 v1.1）：位于版本身份行正上方，与 cwd
-/// 之间空一行；三段式（静态 inactive + 版本号/命令两段呼吸色、命令 bold），
-/// 呼吸只作用于提示行两个关键词段，欢迎卡其余一切元素静态。
+/// The new-version banner row (update-banner spec v1.1): sits directly above the version-identity row, one blank
+/// row from cwd; three segments (static inactive + version/command in breathing color, command bold),
+/// breathing only affects the banner's two keyword segments; every other welcome-card element stays static.
 fn welcome_rows(
     theme: &Theme,
     model: &str,
@@ -6434,13 +6442,13 @@ fn welcome_rows(
         rows.push(Line::empty());
         rows.push(Line::styled(
             one_line(
-                "   ⚠ 未配置凭据：/provider login codex（ChatGPT 订阅）或 ~/.config/bingo/settings.json 写 apiKey",
+                "   ⚠ no credentials configured: /provider login codex (ChatGPT subscription) or write apiKey in ~/.config/bingo/settings.json",
                 width,
             ),
             SegStyle::fg(theme.warning),
         ));
     }
-    // 新版本提示行（update-banner 规格 §1.1）：版本身份行正上方，与 cwd 间空一行。
+    // New-version banner row (update-banner spec §1.1): directly above the version-identity row, one blank row from cwd.
     if let Some((v, color)) = banner
         && let Some((pre, ver, mid, cmd)) = banner_segments(v, width)
     {
@@ -6448,7 +6456,7 @@ fn welcome_rows(
         let no_color = std::env::var_os("NO_COLOR").is_some();
         let mut line = Line::styled(&pre, theme.dim());
         if no_color {
-            // 单色/NO_COLOR 降级：静态 bold 行（规格 §2.5）。
+            // Monochrome / NO_COLOR fallback: a static bold row (spec §2.5).
             line.push_styled(ver, theme.dim());
             line.push_styled(mid, theme.dim());
             line.push_styled(cmd, theme.dim().bold());
@@ -6470,7 +6478,7 @@ fn welcome_rows(
 }
 
 /// Welcome card rows (with the ╭╮ border), part of the scrollable content.
-/// `banner` = 新版本提示（版本号 + 当前呼吸色）；None = 无提示行。
+/// `banner` = the new-version hint (version + current breathing color); None = no banner row.
 fn welcome_card_rows(
     theme: &Theme,
     model: &str,
@@ -6501,23 +6509,23 @@ fn welcome_card_rows(
     rows
 }
 
-/// 更新提示呼吸窗口：270 帧 = 9s（3 个呼吸；每周期 90 帧 = 3.0s @30fps）。
-/// 到期后静止在 rest 色，提示行常驻（update-banner 规格 §2.3）。
+/// Update-banner breathing window: 270 frames = 9s (3 breaths; each cycle is 90 frames = 3.0s @30fps).
+/// After the window it rests at the rest color and the banner stays (update-banner spec §2.3).
 pub const UPDATE_BANNER_FRAMES: u64 = 270;
-/// 呼吸周期帧数（30fps 下 3.0s 一个「呼 + 吸」）。
+/// Breathing cycle in frames (one "in + out" every 3.0s at 30fps).
 pub const UPDATE_BANNER_PERIOD: u64 = 90;
 
-/// 提示行截断链（update-banner 规格 §1.3，纯函数可测）：返回
-/// (pre, ver, mid, cmd) 四段——静态段与两呼吸段分开，渲染层据此着色。
+/// Banner truncation chain (update-banner spec §1.3, pure and testable): returns
+/// (pre, ver, mid, cmd) — the static segment and the two breathing segments are separate so the render layer can color them.
 ///
-/// | inner 宽 | 呈现 |
+/// | inner width | shown as |
 /// |---|---|
-/// | ≥50（或完整行放得下） | `   New version vX.Y.Z available — run bingo update` |
+/// | ≥50 (or the full line fits) | `   New version vX.Y.Z available — run bingo update` |
 /// | ≥43 | `   New version vX.Y.Z — run bingo update` |
-/// | ≥15 | `   bingo update`（只留命令，最保底动作入口） |
-/// | <15 | None（隐藏提示行） |
+/// | ≥15 | `   bingo update` (the command alone, the minimal action entry) |
+/// | <15 | None (banner hidden) |
 ///
-/// 任何档位 `bingo update` 可见、不换行、不溢出卡框。
+/// At every tier `bingo update` stays visible, unwrapped, and inside the card.
 pub fn banner_segments(v: &str, width: usize) -> Option<(String, String, String, String)> {
     const PRE: &str = "   New version ";
     const MID_FULL: &str = " available — run ";
@@ -6542,19 +6550,19 @@ pub fn banner_segments(v: &str, width: usize) -> Option<(String, String, String,
     None
 }
 
-/// 提示行完整文本（`banner_segments` 的字符串形态；规格点名的纯函数，测试断言用）。
+/// The banner's full text (the string form of `banner_segments`; the pure function the spec names, used by test assertions).
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn banner_line(v: &str, width: usize) -> Option<String> {
     banner_segments(v, width).map(|(pre, ver, mid, cmd)| format!("{pre}{ver}{mid}{cmd}"))
 }
 
-/// 更新提示呼吸色（update-banner 规格 §2，纯函数可测）：
-/// - `motion_off`（settings `motion:"off"` 或 `BINGO_NO_MOTION`）→ 恒 rest（静态，提示保留）；
-/// - 无 truecolor（主题已 256 色降级）→ 离散两步：60 帧周期，peak 前 12 帧（≥400ms）；
-/// - truecolor → 正弦呼吸：`t = 0.5 − 0.5·cos(2π·phase/90)`，frame 0 = rest（谷）、45 = peak、
-///   90 = 回 rest；sRGB 逐通道线性插值。
+/// Update-banner breathing colors (update-banner spec §2, pure and testable):
+/// - `motion_off` (settings `motion:"off"` or `BINGO_NO_MOTION`) → always rest (static, banner kept);
+/// - no truecolor (theme downgraded to 256 colors) → discrete two-step: 60-frame cycle, peak for the first 12 frames (≥400ms);
+/// - truecolor → sine breathing: `t = 0.5 − 0.5·cos(2π·phase/90)`, frame 0 = rest (trough), 45 = peak,
+///   90 = back to rest; linear interpolation per sRGB channel.
 ///
-/// 停止点：暗色 `#D77757 ↔ #E8896B`（全程 ≥6.24:1）；浅色 `#B05227 ↔ #9A4A24`（全程 ≥4.72:1）。
+/// Stops: dark `#D77757 ↔ #E8896B` (≥6.24:1 throughout); light `#B05227 ↔ #9A4A24` (≥4.72:1 throughout).
 pub fn update_color(theme: &Theme, frame: u64, motion_off: bool) -> Color {
     let rest = if theme.is_dark {
         theme.claude
@@ -6570,7 +6578,7 @@ pub fn update_color(theme: &Theme, frame: u64, motion_off: bool) -> Color {
         theme.claude_deep_strong
     };
     if !matches!(theme.claude_strong, Color::Rgb(..)) {
-        // 离散两步（256 色终端）：60 帧周期，peak 400ms（12 帧）→ rest 1600ms。
+        // Discrete two-step (256-color terminal): 60-frame cycle, peak 400ms (12 frames) → rest 1600ms.
         return if frame % 60 < 12 { peak } else { rest };
     }
     let phase = (frame % UPDATE_BANNER_PERIOD) as f64;
@@ -6578,7 +6586,7 @@ pub fn update_color(theme: &Theme, frame: u64, motion_off: bool) -> Color {
     lerp_color(rest, peak, t)
 }
 
-/// sRGB 逐通道线性插值（两档相近，不做 gamma 校正——规格注明非目标）。
+/// Per-channel sRGB linear interpolation (the two stops are close; no gamma correction — the spec notes it is out of scope).
 fn lerp_color(a: Color, b: Color, t: f64) -> Color {
     let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) else {
         return b;
@@ -6618,9 +6626,9 @@ mod tests {
         chat.doc.settled_marks.last().map_or(0, |m| m.segments)
     }
 
-    /// 自建 home 的 Chat（slash 测试用唯一目录，避免与其他测试共享
-    /// transcript/task 存储）。cwd 同指 home：/model /think /theme 等
-    /// 持久化路径写 `{cwd}/.bingo`，不得污染仓库真实配置。
+    /// A Chat with its own home (the unique dir for slash tests, so transcript/task storage is not
+    /// shared with other tests). cwd points at the same home: the persistence paths of /model /think /theme etc.
+    /// write into `{cwd}/.bingo` and must never pollute the repo's real config.
     fn test_chat_home(home: std::path::PathBuf) -> Chat {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
@@ -6645,6 +6653,7 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         });
         let mut chat = Chat::new(
             session,
@@ -6660,7 +6669,7 @@ mod tests {
         chat
     }
 
-    /// 提示行截断链（update-banner 规格 §1.3）：完整 / 去 available 分句 / 只留命令 / 隐藏。
+    /// Banner truncation chain (update-banner spec §1.3): full / drop the available clause / command only / hidden.
     #[test]
     fn banner_segments_width_tiers() {
         let full = banner_segments("0.3.0", 50).unwrap();
@@ -6668,17 +6677,17 @@ mod tests {
         assert_eq!(full.1, "v0.3.0");
         assert_eq!(full.2, " available — run ");
         assert_eq!(full.3, "bingo update");
-        // 完整行放得下（宽度 <50 但 full_len ≤ width）→ 仍完整
+        // The full line fits (width <50 but full_len ≤ width) → still full
         assert_eq!(banner_segments("0.3.0", 51).unwrap().2, " available — run ");
-        // 43-49：最长版本号 v0.12.34 完整放不下 → 去 available 分句
+        // 43-49: the longest version v0.12.34 does not fit whole → drop the available clause
         let short = banner_segments("0.12.34", 49).unwrap();
         assert_eq!(short.2, " — run ");
         assert_eq!(short.3, "bingo update");
-        // ≥15：只留命令
+        // ≥15: command only
         let cmd_only = banner_segments("0.3.0", 15).unwrap();
         assert!(cmd_only.0.is_empty() && cmd_only.1.is_empty());
         assert_eq!(cmd_only.3, "bingo update");
-        // <15：隐藏
+        // <15: hidden
         assert!(banner_segments("0.3.0", 14).is_none());
     }
 
@@ -6696,41 +6705,45 @@ mod tests {
         assert!(banner_line("0.3.0", 14).is_none());
     }
 
-    /// 呼吸色纯函数（update-banner 规格 §2.3/锚点 2）：phase 0 = rest（谷）、45 = peak、
-    /// 90 = 回 rest；0→45 单调上升、45→90 单调下降；motion off → 恒 rest；浅色走深橙档。
+    /// Breathing-color pure function (update-banner spec §2.3/anchor 2): phase 0 = rest (trough), 45 = peak,
+    /// 90 = back to rest; 0→45 strictly rises, 45→90 strictly falls; motion off → always rest; light theme takes the deep-orange stops.
     #[test]
     fn update_color_breathing_wave() {
         let dark = Theme::dark();
         let rest = Color::Rgb(215, 119, 87);
         let peak = Color::Rgb(232, 137, 107);
-        assert_eq!(update_color(&dark, 0, false), rest, "起步即谷（无突跳）");
+        assert_eq!(
+            update_color(&dark, 0, false),
+            rest,
+            "starts at the trough (no jump)"
+        );
         assert_eq!(
             update_color(&dark, 45, false),
             peak,
-            "phase 45 = peak（t=1 精确）"
+            "phase 45 = peak (exactly t=1)"
         );
         assert_eq!(update_color(&dark, 90, false), rest);
-        assert_eq!(update_color(&dark, 135, false), peak, "周期回绕");
+        assert_eq!(update_color(&dark, 135, false), peak, "cycle wraps around");
         assert_eq!(update_color(&dark, 180, false), rest);
-        // 单调性（红通道）
+        // Monotonicity (red channel)
         let r = |f: u64| -> u8 {
             match update_color(&dark, f, false) {
                 Color::Rgb(r, _, _) => r,
-                _ => panic!("truecolor 主题应返回 Rgb"),
+                _ => panic!("a truecolor theme should return Rgb"),
             }
         };
         assert!(
             r(15) > r(0) && r(30) > r(15) && r(45) > r(30),
-            "0→45 单调上升"
+            "0→45 strictly rises"
         );
         assert!(
             r(60) < r(45) && r(75) < r(60) && r(90) < r(75),
-            "45→90 单调下降"
+            "45→90 strictly falls"
         );
-        // motion off → 恒 rest（指示器保留，只是不动）
+        // motion off → always rest (the indicator stays, it just stops)
         assert_eq!(update_color(&dark, 45, true), rest);
         assert_eq!(update_color(&dark, 999, true), rest);
-        // 浅色 → 深橙档（rest #B05227 / peak #9A4A24），禁用亮橙
+        // Light theme → deep-orange stops (rest #B05227 / peak #9A4A24); the bright orange is disabled
         let light = Theme::light();
         assert_eq!(update_color(&light, 0, false), Color::Rgb(176, 82, 39));
         assert_eq!(update_color(&light, 45, false), Color::Rgb(154, 74, 36));
@@ -6738,35 +6751,35 @@ mod tests {
             assert_ne!(
                 update_color(&light, f, false),
                 Color::Rgb(215, 119, 87),
-                "浅色主题不得出现亮橙档（规格 §2.2）"
+                "the light theme must not use the bright-orange stops (spec §2.2)"
             );
         }
     }
 
-    /// 256 色离散两步（update-banner 规格 §2.4）：60 帧周期，peak 400ms（12 帧）→ rest。
-    /// （`downgrade_to_256` 是 theme.rs 私有方法，测试手动构造 Indexed 主题模拟降级。）
+    /// 256-color discrete two-step (update-banner spec §2.4): 60-frame cycle, peak 400ms (12 frames) → rest.
+    /// (`downgrade_to_256` is a private theme.rs method; the test hand-builds an Indexed theme to simulate the downgrade.)
     #[test]
     fn update_color_256_discrete_two_step() {
         let mut d256 = Theme::dark();
-        d256.claude = Color::Indexed(167); // 暗色 rest 近似
-        d256.claude_strong = Color::Indexed(173); // 暗色 peak 近似
+        d256.claude = Color::Indexed(167); // dark rest approximation
+        d256.claude_strong = Color::Indexed(173); // dark peak approximation
         let f0 = update_color(&d256, 0, false);
         let f11 = update_color(&d256, 11, false);
         let f12 = update_color(&d256, 12, false);
         let f59 = update_color(&d256, 59, false);
         let f60 = update_color(&d256, 60, false);
-        assert_eq!(f0, f11, "peak 相连续（0-11 帧）");
-        assert_eq!(f12, f59, "rest 相连续（12-59 帧）");
-        assert_ne!(f0, f12, "两档不同色");
-        assert_eq!(f60, f0, "60 帧周期回绕");
+        assert_eq!(f0, f11, "peak phase is contiguous (frames 0-11)");
+        assert_eq!(f12, f59, "rest phase is contiguous (frames 12-59)");
+        assert_ne!(f0, f12, "the two stops differ");
+        assert_eq!(f60, f0, "the 60-frame cycle wraps");
         assert!(
             matches!(update_color(&d256, 5, false), Color::Indexed(_)),
-            "256 色降级输出 Indexed"
+            "the 256-color downgrade outputs Indexed"
         );
     }
 
-    /// 欢迎卡渲染（update-banner 锚点 1/6/9）：有提示行（含两段式），无提示行布局回归不变；
-    /// 窄屏只留 `bingo update`。
+    /// Welcome-card rendering (update-banner anchors 1/6/9): with a banner row (including the two-segment form); the no-banner layout regression is unchanged;
+    /// narrow screens keep only `bingo update`.
     #[test]
     fn welcome_card_banner_rendering() {
         let theme = Theme::dark();
@@ -6777,32 +6790,40 @@ mod tests {
             texts
                 .iter()
                 .any(|t| t.contains("New version v0.3.0 available — run bingo update")),
-            "完整档提示行应在卡内: {texts:?}"
+            "the full-tier banner must fit inside the card: {texts:?}"
         );
-        // 提示行在版本身份行正上方（相邻，中间无空行）
+        // The banner sits directly above the version-identity row (adjacent, no blank line between)
         let banner_idx = texts
             .iter()
             .position(|t| t.contains("New version"))
             .unwrap();
         assert!(
             texts[banner_idx + 1].contains("bingo v"),
-            "提示行应紧邻身份行下方"
+            "the banner must sit right below the identity row"
         );
-        // 无提示行 → 布局与现状一致（回归）
+        // No banner → the layout matches the current one (regression)
         let without = welcome_card_rows(&theme, "m", "d", "/cwd", 80, None, false);
-        assert_eq!(with.len(), without.len() + 2, "提示行 + 上方空行 = 2 行");
-        // 窄屏（inner 15）：只留命令，不出现 New version
+        assert_eq!(
+            with.len(),
+            without.len() + 2,
+            "banner + the blank row above = 2 rows"
+        );
+        // Narrow (inner 15): command only; "New version" must not appear
         let narrow = welcome_card_rows(&theme, "m", "d", "/c", 17, Some(("0.3.0", color)), false);
         let narrow_texts: Vec<String> = narrow.iter().map(|r| r.line.plain_text()).collect();
         assert!(narrow_texts.iter().any(|t| t.contains("bingo update")));
         assert!(!narrow_texts.iter().any(|t| t.contains("New version")));
-        // 极窄（inner <15）：提示行隐藏，布局与无提示一致
+        // Very narrow (inner <15): the banner is hidden, layout matches the no-banner one
         let tiny = welcome_card_rows(&theme, "m", "d", "/c", 16, Some(("0.3.0", color)), false);
-        assert_eq!(tiny.len(), without.len(), "inner<15 时提示行隐藏");
+        assert_eq!(
+            tiny.len(),
+            without.len(),
+            "the banner is hidden when inner<15"
+        );
     }
 
-    /// 呼吸窗口（update-banner 锚点 3/5）：270 帧内持续激活（has_dynamic_rows）、
-    /// 窗口外恢复 idle；窗口内按键 → 立即静止；motion off → 从不激活。
+    /// Breathing window (update-banner anchors 3/5): active throughout the 270 frames (has_dynamic_rows),
+    /// idle outside the window; a keypress in the window → stops immediately; motion off → never active.
     #[test]
     fn update_banner_animation_window_and_key_stop() {
         let mut chat = test_chat();
@@ -6810,19 +6831,31 @@ mod tests {
         chat.update_banner_start = 0;
         chat.tick = 0;
         assert!(chat.update_anim_active());
-        assert!(chat.has_dynamic_rows(), "呼吸窗口内帧循环持续置 dirty");
+        assert!(
+            chat.has_dynamic_rows(),
+            "the frame loop keeps dirty set inside the breathing window"
+        );
         chat.tick = 269;
-        assert!(chat.update_anim_active(), "窗口最后一帧仍激活");
+        assert!(
+            chat.update_anim_active(),
+            "still active on the window's last frame"
+        );
         chat.tick = 270;
-        assert!(!chat.update_anim_active(), "窗口外静止");
-        assert!(!chat.has_dynamic_rows(), "窗口外恢复 idle（零写入）");
-        // 窗口内按键 → 立即静止（P1）
+        assert!(!chat.update_anim_active(), "resting outside the window");
+        assert!(
+            !chat.has_dynamic_rows(),
+            "back to idle outside the window (zero writes)"
+        );
+        // A keypress in the window → stops immediately (P1)
         chat.update_banner_start = 0;
         chat.tick = 50;
         assert!(chat.update_anim_active());
         let _ = chat.on_key(KeyCode::Char('x'), KeyModifiers::NONE);
-        assert!(!chat.update_anim_active(), "窗口内首次按键 → 立即静止");
-        // motion off → 从不激活（提示保留静态 rest）
+        assert!(
+            !chat.update_anim_active(),
+            "the first keypress in the window stops it immediately"
+        );
+        // motion off → never active (the banner stays as a static rest)
         let mut chat2 = test_chat();
         chat2.update_banner = Some("0.3.0".into());
         chat2.motion_off = true;
@@ -6939,7 +6972,10 @@ mod tests {
             "hidden tools leave no activities: {:?}",
             chat.messages[0].activities
         );
-        assert!(chat.pending_tools.is_empty(), "pending FIFO 不失配");
+        assert!(
+            chat.pending_tools.is_empty(),
+            "the pending FIFO stays matched"
+        );
         // Visible tools still render normally.
         let _ = chat.events.send(UiEvent::ToolStart {
             name: "Bash".into(),
@@ -6951,7 +6987,11 @@ mod tests {
             standalone: false,
         });
         chat.drain_events();
-        assert_eq!(chat.messages[0].activities.len(), 1, "Bash 正常展示");
+        assert_eq!(
+            chat.messages[0].activities.len(),
+            1,
+            "Bash renders normally"
+        );
     }
 
     #[tokio::test]
@@ -7023,7 +7063,10 @@ mod tests {
         chat.tasks_visible = true;
         chat.tasks_auto = true;
         chat.refresh_tasks();
-        assert!(chat.tasks_visible, "有活动项时自动面板显示");
+        assert!(
+            chat.tasks_visible,
+            "the auto panel shows when there are active items"
+        );
         assert!(!chat.task_lines().is_empty());
 
         store
@@ -7037,24 +7080,33 @@ mod tests {
             .await
             .unwrap();
         chat.refresh_tasks();
-        assert!(!chat.tasks_visible, "自动面板全部完成后隐藏");
+        assert!(
+            !chat.tasks_visible,
+            "the auto panel hides when everything completes"
+        );
         assert!(!chat.tasks_auto);
         assert!(chat.task_lines().is_empty());
         assert!(
             chat.slash_lines
                 .iter()
-                .any(|l| l.contains("✓ 1/1 tasks 完成")),
-            "隐藏瞬间推瞬态行: {:?}",
+                .any(|l| l.contains("✓ 1/1 tasks done")),
+            "a transient row is pushed at the hiding moment: {:?}",
             chat.slash_lines
         );
-        assert!(!chat.has_dynamic_rows(), "隐藏后任务区不驱动 tick");
+        assert!(
+            !chat.has_dynamic_rows(),
+            "after hiding, the task area does not drive the tick"
+        );
 
         // Create another task (the expand signal reopens the panel) → reappears; all done again → hides again.
         let id2 = create_task(&chat, "t2").await;
         chat.tasks_visible = true;
         chat.tasks_auto = true;
         chat.refresh_tasks();
-        assert!(chat.tasks_visible, "新任务后自动面板重现");
+        assert!(
+            chat.tasks_visible,
+            "the auto panel reappears with a new task"
+        );
         store
             .update(
                 &id2,
@@ -7066,7 +7118,10 @@ mod tests {
             .await
             .unwrap();
         chat.refresh_tasks();
-        assert!(!chat.tasks_visible, "再次全完成再次隐藏");
+        assert!(
+            !chat.tasks_visible,
+            "hides again once everything completes again"
+        );
     }
 
     /// Panel opened manually with ctrl+t: kept even when everything is done (the user explicitly wants to see it), no transient line.
@@ -7086,8 +7141,8 @@ mod tests {
             .await
             .unwrap();
         ctrl(&mut chat, 't');
-        assert!(chat.tasks_visible, "手动打开显示");
-        assert!(!chat.tasks_auto, "手动打开非自动");
+        assert!(chat.tasks_visible, "manual open shows it");
+        assert!(!chat.tasks_auto, "manual open is not auto");
         chat.refresh_tasks();
         let lines = chat.task_lines();
         let joined: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
@@ -7095,7 +7150,7 @@ mod tests {
         assert!(joined.iter().any(|l| l.starts_with("☒ ")), "{joined:?}");
         assert!(
             chat.slash_lines.is_empty(),
-            "手动面板常驻即反馈，不推瞬态行: {:?}",
+            "a manual panel is its own feedback; no transient row is pushed: {:?}",
             chat.slash_lines
         );
     }
@@ -7119,7 +7174,7 @@ mod tests {
         chat.slash_tasks();
         let joined = chat.slash_info_lines.join("\n");
         assert!(joined.contains("☒ t1"), "{joined:?}");
-        assert!(!joined.contains("当前没有后台任务"), "{joined:?}");
+        assert!(!joined.contains("no background tasks"), "{joined:?}");
     }
 
     #[test]
@@ -7165,12 +7220,12 @@ mod tests {
     #[test]
     fn running_status_verb_priority() {
         let mut chat = test_chat();
-        assert_eq!(chat.running_status(), None, "空闲无状态行");
+        assert_eq!(chat.running_status(), None, "no status row when idle");
 
         chat.busy = true;
         chat.turn_started = Some(std::time::Instant::now());
         let verb = chat.running_status().expect("busy status").verb;
-        assert_eq!(verb, "Working", "无活动时兜底");
+        assert_eq!(verb, "Working", "fallback when nothing is active");
 
         let mut tool = tool_activity();
         if let ActivityKind::Tool(t) = &mut tool.kind {
@@ -7181,7 +7236,7 @@ mod tests {
             ..msg(Role::Assistant, "")
         });
         let verb = chat.running_status().expect("busy status").verb;
-        assert_eq!(verb, "$ cargo test", "运行中工具 summary 优先");
+        assert_eq!(verb, "$ cargo test", "a running tool's summary wins");
 
         // A running Watch (subagent/background task) verb = its label (CC ActivityIndicator
         // shows the agent activeForm): after tools, before thinking.
@@ -7189,16 +7244,16 @@ mod tests {
         chat.messages[0]
             .activities
             .push(Activity::new(ActivityKind::Watch(WatchCall {
-                label: "scout · 列出桌面目录内容".into(),
+                label: "scout · listing desktop dir contents".into(),
                 kind: crate::watch::WatchKind::Agent,
                 status: WatchState::Running,
-                detail: Some("已产出 43 字符".into()),
+                detail: Some("produced 43 chars".into()),
                 duration_ms: 0,
             })));
         let verb = chat.running_status().expect("busy status").verb;
         assert_eq!(
-            verb, "scout · 列出桌面目录内容",
-            "Watch Running 动词 = label"
+            verb, "scout · listing desktop dir contents",
+            "a Running Watch's verb = its label"
         );
 
         // A Done Watch no longer claims the verb (falls through to thinking/Working).
@@ -7206,7 +7261,10 @@ mod tests {
             w.status = WatchState::Done;
         }
         let verb = chat.running_status().expect("busy status").verb;
-        assert_ne!(verb, "Agent: 列出桌面目录内容", "Done 的 Watch 不占动词");
+        assert_ne!(
+            verb, "Agent: listing desktop dir contents",
+            "a Done Watch does not occupy the verb"
+        );
 
         chat.messages[0].activities.clear();
         chat.apply_turn_start();
@@ -7216,7 +7274,7 @@ mod tests {
             _ => unreachable!(),
         };
         let verb = chat.running_status().expect("busy status").verb;
-        assert_eq!(verb, stage, "thinking 俏皮词");
+        assert_eq!(verb, stage, "thinking quip words");
     }
 
     /// bash-mode toggle: `!` on empty input enters, `!` never enters the input,
@@ -7226,17 +7284,20 @@ mod tests {
         let mut chat = test_chat();
         assert!(!chat.bash_mode);
         assert!(chat.on_key(KeyCode::Char('!'), KeyModifiers::empty()));
-        assert!(chat.bash_mode, "! 进入 bash 模式");
-        assert!(chat.input.is_empty(), "! 本身不插入输入");
+        assert!(chat.bash_mode, "! enters bash mode");
+        assert!(chat.input.is_empty(), "! itself does not insert input");
         assert!(chat.on_key(KeyCode::Char('l'), KeyModifiers::empty()));
         assert_eq!(chat.input, "l");
         assert!(chat.on_key(KeyCode::Char('!'), KeyModifiers::empty()));
-        assert_eq!(chat.input, "l!", "输入非空时 ! 正常插入");
-        assert!(chat.bash_mode, "输入非空不退出 bash 模式");
+        assert_eq!(chat.input, "l!", "with non-empty input, ! inserts normally");
+        assert!(chat.bash_mode, "non-empty input does not exit bash mode");
         assert!(chat.on_key(KeyCode::Backspace, KeyModifiers::empty()));
         assert!(chat.on_key(KeyCode::Backspace, KeyModifiers::empty()));
         assert!(chat.on_key(KeyCode::Backspace, KeyModifiers::empty()));
-        assert!(!chat.bash_mode, "空输入退格退出 bash 模式");
+        assert!(
+            !chat.bash_mode,
+            "backspace on an empty input exits bash mode"
+        );
     }
 
     /// `!` commands (standalone tool activity): not part of collapse groups, expanded by default when done,
@@ -7256,7 +7317,10 @@ mod tests {
             standalone: true,
         });
         chat.drain_events();
-        assert!(chat.messages[0].groups.is_empty(), "standalone 不折叠");
+        assert!(
+            chat.messages[0].groups.is_empty(),
+            "standalone messages do not group"
+        );
         let _ = chat
             .events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
@@ -7269,12 +7333,12 @@ mod tests {
             }));
         chat.drain_events();
         let a = &chat.messages[0].activities[0];
-        assert!(a.expanded, "输出预览默认展开");
+        assert!(a.expanded, "the output preview is expanded by default");
         let text: Vec<String> = a.content.iter().map(|l| l.plain_text()).collect();
         assert_eq!(
             text,
             vec!["README.md", "src"],
-            "预览去掉回显与退出码: {text:?}"
+            "the preview drops the echo and the exit code: {text:?}"
         );
     }
 
@@ -7294,7 +7358,11 @@ mod tests {
             standalone: false,
         });
         chat.drain_events();
-        assert_eq!(chat.messages[0].groups.len(), 1, "模型驱动照常折叠");
+        assert_eq!(
+            chat.messages[0].groups.len(),
+            1,
+            "model-driven messages still group"
+        );
     }
 
     /// bash-mode submit: the user message carries the `!` prefix, the command runs as a tool activity and finishes normally
@@ -7321,6 +7389,7 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         });
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
@@ -7337,34 +7406,43 @@ mod tests {
         chat.bash_mode = true;
         chat.input = "echo hello".to_string();
         chat.submit();
-        assert!(chat.bash_mode, "提交后保持 bash 模式");
+        assert!(chat.bash_mode, "bash mode stays on after submit");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
         loop {
             chat.drain_all();
             if !chat.busy && !chat.messages.is_empty() {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "回合未在超时内结束");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the turn did not end within the timeout"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert_eq!(chat.messages[0].text, "!echo hello", "用户消息带 ! 前缀");
+        assert_eq!(
+            chat.messages[0].text, "!echo hello",
+            "the user message carries the ! prefix"
+        );
         let done_tool = chat.messages[1].activities.iter().any(|a| {
             matches!(&a.kind, ActivityKind::Tool(t)
                 if t.name == "Bash" && t.status == ToolStatus::Done)
         });
-        assert!(done_tool, "Bash 工具活动收口为 Done");
+        assert!(done_tool, "the Bash tool activity closes as Done");
         let preview = &chat.messages[1].activities[0];
-        assert!(preview.expanded, "! 命令输出预览展开");
+        assert!(
+            preview.expanded,
+            "the ! command's output preview is expanded"
+        );
         assert!(
             preview.content.iter().any(|l| l.plain_text() == "hello"),
-            "预览含命令输出: {:?}",
+            "the preview contains the command output: {:?}",
             preview
                 .content
                 .iter()
                 .map(|l| l.plain_text())
                 .collect::<Vec<_>>()
         );
-        assert!(!chat.busy, "回合结束");
+        assert!(!chat.busy, "turn ended");
     }
 
     fn thinking_text(hint: &Activity) -> String {
@@ -7410,7 +7488,7 @@ mod tests {
         let mut chat = test_chat();
         chat.apply_turn_start();
         chat.apply_event(UiEvent::ThinkingDelta("plan".into()));
-        chat.apply_event(UiEvent::TextDelta("正文…".into()));
+        chat.apply_event(UiEvent::TextDelta("body…".into()));
         chat.apply_event(UiEvent::ThinkingDelta("reflect".into()));
 
         let acts = &chat.messages[0].activities;
@@ -7436,7 +7514,7 @@ mod tests {
             t.done_verb = Some("Baked");
         }
         chat.messages[0].activities[0] = done;
-        chat.messages[0].text = "你好！".to_string();
+        chat.messages[0].text = "hello!".to_string();
         chat.apply_event(UiEvent::TurnEnd);
         chat.build_rows(100);
         let joined: Vec<String> = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
@@ -7447,7 +7525,7 @@ mod tests {
             .expect("thinking block header");
         let reply = lines
             .iter()
-            .position(|l| l.contains("你好"))
+            .position(|l| l.contains("hello"))
             .expect("reply text");
         let done_line = lines
             .iter()
@@ -7455,7 +7533,7 @@ mod tests {
             .expect("completion line");
         assert!(
             thinking < reply && reply < done_line,
-            "完成行在消息末尾: {lines:?}"
+            "the completion line sits at the message end: {lines:?}"
         );
 
         // Empty placeholder thinking (no content) → no completion row.
@@ -7476,7 +7554,10 @@ mod tests {
             .map(|r| r.line.plain_text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(!joined2.contains("for 0.4s"), "空占位无完成行: {joined2}");
+        assert!(
+            !joined2.contains("for 0.4s"),
+            "an empty placeholder has no completion line: {joined2}"
+        );
     }
 
     /// The completion row only appears after the turn ends: with thinking Done but tools still running,
@@ -7495,7 +7576,7 @@ mod tests {
             !rows
                 .iter()
                 .any(|l| l.starts_with("✻ ") && l.contains(" for ")),
-            "回合进行中不得有完成行: {rows:?}"
+            "no completion line mid-turn: {rows:?}"
         );
         chat.apply_event(UiEvent::TurnEnd);
         chat.build_rows(100);
@@ -7503,7 +7584,7 @@ mod tests {
         assert!(
             rows.iter()
                 .any(|l| l.starts_with("✻ ") && l.contains(" for ")),
-            "回合结束后应有完成行: {rows:?}"
+            "a completion line must appear after the turn: {rows:?}"
         );
     }
 
@@ -7549,12 +7630,12 @@ mod tests {
         let mut chat = test_chat();
         chat.input = "/help".to_string();
         chat.submit();
-        assert!(!chat.busy, "slash 不启动回合");
+        assert!(!chat.busy, "slash does not start a turn");
         let joined = chat.slash_info_lines.join("\n");
         for cmd in [
             "/clear", "/model", "/resume", "/rename", "/compact", "/exit",
         ] {
-            assert!(joined.contains(cmd), "缺少 {cmd}: {joined}");
+            assert!(joined.contains(cmd), "missing {cmd}: {joined}");
         }
 
         chat.input = "/nope".to_string();
@@ -7562,18 +7643,18 @@ mod tests {
         assert!(
             chat.slash_error_lines
                 .iter()
-                .any(|l| l.contains("未知命令")),
-            "未知命令进错误行: {:?}",
+                .any(|l| l.contains("unknown command")),
+            "unknown commands land in the error rows: {:?}",
             chat.slash_error_lines
         );
     }
 
-    /// picker-model.md 提交 E：/model 一级走 PickerModel 核心——● 标当前 provider、
-    /// 数字直达、二级保持原逻辑（数字不进输入框）。
+    /// picker-model.md commit E: /model's level one goes through the PickerModel core — ● marks the current provider,
+    /// number jump, and level two keeps its logic (digits never reach the input).
     #[tokio::test]
     async fn model_menu_level_one_uses_picker_core() {
         let mut chat = test_chat();
-        // 一级：default + 一个命名 provider。
+        // Level one: default + one named provider.
         let settings = crate::settings::Settings {
             api_key: Some("sk-main".into()),
             ..Default::default()
@@ -7594,31 +7675,38 @@ mod tests {
 
         chat.input = "/model".to_string();
         chat.submit();
-        let menu = chat.model_menu.as_ref().expect("菜单已打开");
-        assert_eq!(menu.provider_current, Some(0), "● 标当前 provider default");
+        let menu = chat.model_menu.as_ref().expect("menu is open");
+        assert_eq!(
+            menu.provider_current,
+            Some(0),
+            "● marks the current provider default"
+        );
         let core = menu.provider_picker();
         assert_eq!(
             core.items.len(),
             4,
-            "default + 内置 presets（codex/opencode-go）+ deepseek"
+            "default + built-in presets (codex/opencode-go) + deepseek"
         );
 
-        // 数字直达 2 = codex（统一顺序：default → 内置 preset → 用户自定义）；
-        // 一级被消费不进输入框。
+        // Number jump 2 = codex (unified order: default → built-in preset → user-defined);
+        // level one consumes it, never reaching the input.
         assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
-        let menu = chat.model_menu.as_ref().expect("菜单已打开");
+        let menu = chat.model_menu.as_ref().expect("menu is open");
         assert_eq!(
             menu.provider_selected, 1,
-            "2 直达 codex（preset 在用户 provider 前）"
+            "2 jumps to codex (presets come before user providers)"
         );
-        assert_eq!(chat.input, "", "一级数字被菜单消费");
+        assert_eq!(chat.input, "", "level-one digits are consumed by the menu");
 
-        // Enter 进二级：数字同样被菜单消费（越界也吞，不漏进输入框）。
+        // Enter into level two: digits are consumed too (out-of-range is swallowed; nothing leaks into the input).
         assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
-        let menu = chat.model_menu.as_ref().expect("菜单已打开");
-        assert!(menu.models.is_some(), "进入二级");
+        let menu = chat.model_menu.as_ref().expect("menu is open");
+        assert!(menu.models.is_some(), "enters level two");
         assert!(chat.on_key(KeyCode::Char('3'), KeyModifiers::empty()));
-        assert_eq!(chat.input, "", "二级数字被菜单消费，不漏进输入框");
+        assert_eq!(
+            chat.input, "",
+            "level-two digits are consumed by the menu; none leak into the input"
+        );
     }
 
     /// /model: with an arg, switch the runtime model (effective next turn) and persist as default; without, open the selector.
@@ -7637,11 +7725,17 @@ mod tests {
             &std::fs::read_to_string(home.join(".config/bingo/settings.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(saved["model"], "deepseek-v4", "选择写回 user settings");
-        assert!(!home.join(".bingo").exists(), "不凭空创建项目层");
+        assert_eq!(
+            saved["model"], "deepseek-v4",
+            "the selection writes back to user settings"
+        );
+        assert!(
+            !home.join(".bingo").exists(),
+            "must not create a project layer out of thin air"
+        );
         chat.input = "/model".to_string();
         chat.submit();
-        assert!(chat.model_menu.is_some(), "无参进入选择器");
+        assert!(chat.model_menu.is_some(), "no argument enters the selector");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -7661,10 +7755,10 @@ mod tests {
         chat.messages.push(msg(Role::User, "hi"));
         chat.input = "/clear".to_string();
         chat.submit();
-        assert!(chat.messages.is_empty(), "UI 消息清空");
+        assert!(chat.messages.is_empty(), "UI messages cleared");
         assert!(
             chat.session.runtime.transcript.borrow().is_some(),
-            "新 transcript"
+            "new transcript"
         );
     }
 
@@ -7678,13 +7772,16 @@ mod tests {
         let dark_text = chat.theme.text;
         chat.input = "/theme light".to_string();
         chat.submit();
-        assert_ne!(chat.theme.text, dark_text, "主题已切换");
-        // theme 是用户级偏好：无任何层定义时写 user 层，不在 cwd 造 .bingo。
+        assert_ne!(chat.theme.text, dark_text, "theme switched");
+        // theme is a user-level preference: with no layer defining it, write the user layer — never create .bingo in cwd.
         let saved = std::fs::read_to_string(tmp.join("home/.config/bingo/settings.json")).unwrap();
         assert!(saved.contains("\"theme\": \"light\""), "{saved}");
-        assert!(!tmp.join(".bingo").exists(), "不凭空创建项目层");
+        assert!(
+            !tmp.join(".bingo").exists(),
+            "must not create a project layer out of thin air"
+        );
 
-        // 项目层已定义 theme 时：写在生效层（项目层），user 层不再被绕过。
+        // When the project layer defines theme: write the effective layer (project), the user layer is no longer bypassed.
         std::fs::create_dir_all(tmp.join(".bingo")).unwrap();
         std::fs::write(
             tmp.join(".bingo/settings.json"),
@@ -7698,8 +7795,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// `/theme` 无参 → 打开档位选择器（picker-model.md 提交 B）：预选当前档、
-    /// ↑↓/1-3 浏览、Enter 应用+持久化、Esc 取消不改状态；`/theme auto` 快捷保留。
+    /// `/theme` with no argument → opens the level selector (picker-model.md commit B): preselects the current level,
+    /// ↑↓/1-3 browses, Enter applies + persists, Esc cancels without changing state; the `/theme auto` shortcut stays.
     #[test]
     fn theme_picker_selects_and_applies() {
         let tmp =
@@ -7708,58 +7805,67 @@ mod tests {
         let mut chat = test_chat_home(tmp.join("home"));
         chat.cwd = tmp.display().to_string();
 
-        // 无参 → 菜单打开，预选当前档（默认 Auto = index 2）。
+        // No argument → the menu opens, preselecting the current level (default Auto = index 2).
         chat.input = "/theme".to_string();
         chat.submit();
-        let menu = chat.theme_menu.as_ref().expect("菜单已打开");
-        assert_eq!(THEME_LEVELS[menu.selected].0, "auto", "预选当前档 auto");
-        assert_eq!(THEME_LEVELS[menu.current].0, "auto", "● 标当前档");
-        // Esc 取消：状态不变、菜单关闭。
+        let menu = chat.theme_menu.as_ref().expect("menu is open");
+        assert_eq!(
+            THEME_LEVELS[menu.selected].0, "auto",
+            "preselects the current level auto"
+        );
+        assert_eq!(
+            THEME_LEVELS[menu.current].0, "auto",
+            "● marks the current level"
+        );
+        // Esc cancels: state unchanged, menu closed.
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
-        assert!(chat.theme_menu.is_none(), "Esc 关闭菜单");
+        assert!(chat.theme_menu.is_none(), "Esc closes the menu");
         assert_eq!(
             chat.theme_setting,
             crate::tui::theme::ThemeSetting::Auto,
-            "Esc 不改主题"
+            "Esc does not change the theme"
         );
         assert!(
             !tmp.join(".bingo/settings.json").exists(),
-            "取消不写 settings"
+            "cancelling does not write settings"
         );
 
-        // 数字直达 2 = light，Enter 应用 + 持久化 + 关闭。
+        // Number jump 2 = light; Enter applies + persists + closes.
         chat.input = "/theme".to_string();
         chat.submit();
         assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
-        let menu = chat.theme_menu.as_ref().expect("菜单已打开");
-        assert_eq!(THEME_LEVELS[menu.selected].0, "light", "2 直达 light");
+        let menu = chat.theme_menu.as_ref().expect("menu is open");
+        assert_eq!(THEME_LEVELS[menu.selected].0, "light", "2 jumps to light");
         assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
-        assert!(chat.theme_menu.is_none(), "Enter 关闭菜单");
+        assert!(chat.theme_menu.is_none(), "Enter closes the menu");
         assert_eq!(
             chat.theme_setting,
             crate::tui::theme::ThemeSetting::Light,
-            "Enter 应用主题"
+            "Enter applies the theme"
         );
         let saved = std::fs::read_to_string(tmp.join("home/.config/bingo/settings.json")).unwrap();
         assert!(saved.contains("\"theme\": \"light\""), "{saved}");
 
-        // ↑↓ 浏览与数字直达共用核心；重新打开时 ● 跟随新档。
+        // ↑↓ browsing and number jump share the core; reopening shows ● on the new level.
         chat.input = "/theme".to_string();
         chat.submit();
-        let menu = chat.theme_menu.as_ref().expect("菜单已打开");
-        assert_eq!(THEME_LEVELS[menu.current].0, "light", "● 跟随生效档");
+        let menu = chat.theme_menu.as_ref().expect("menu is open");
+        assert_eq!(
+            THEME_LEVELS[menu.current].0, "light",
+            "● follows the active level"
+        );
         assert!(chat.on_key(KeyCode::Up, KeyModifiers::empty()));
-        let menu = chat.theme_menu.as_ref().expect("菜单已打开");
-        assert_eq!(THEME_LEVELS[menu.selected].0, "dark", "↑ 到 dark");
+        let menu = chat.theme_menu.as_ref().expect("menu is open");
+        assert_eq!(THEME_LEVELS[menu.selected].0, "dark", "up to dark");
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
 
-        // 快捷路径保留：/theme auto 直接切换。
+        // The shortcut path stays: /theme auto switches directly.
         chat.input = "/theme auto".to_string();
         chat.submit();
         assert_eq!(
             chat.theme_setting,
             crate::tui::theme::ThemeSetting::Auto,
-            "显式快捷保留"
+            "the explicit shortcut stays"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -7799,19 +7905,19 @@ mod tests {
         let name_b = t_b.name();
         chat.input = "/resume".to_string();
         chat.submit();
-        // 无参 → 打开会话选择器（picker-model.md 提交 C）：列表含 b、● 标当前 a。
-        let menu = chat.resume_menu.as_ref().expect("选择器已打开");
+        // No argument → opens the session selector (picker-model.md commit C): the list has b, ● marks the current a.
+        let menu = chat.resume_menu.as_ref().expect("selector is open");
         let core = menu.picker();
         assert!(
             core.items.iter().any(|i| i.label == name_b),
-            "选择器列出会话 b"
+            "the selector lists session b"
         );
         assert_eq!(
             menu.current,
             Some(1),
-            "● 标当前会话（t_a 较旧，位于索引 1）"
+            "● marks the current session (t_a is older, at index 1)"
         );
-        // Esc 取消：当前会话不变。
+        // Esc cancels: the current session stays.
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
         assert!(chat.resume_menu.is_none());
         assert_eq!(
@@ -7823,26 +7929,30 @@ mod tests {
                 .unwrap()
                 .name(),
             t_a.name(),
-            "Esc 不切换"
+            "Esc does not switch"
         );
 
-        // Enter 确认（按 selected 索引取快照，value≠label 锚点）：切换到 b。
+        // Enter confirms (snapshot taken by the selected index, the value≠label anchor): switches to b.
         chat.input = "/resume".to_string();
         chat.submit();
         chat.input = String::new();
         chat.on_key(KeyCode::Char('1'), KeyModifiers::empty());
-        let menu = chat.resume_menu.as_ref().expect("选择器已打开");
-        assert_eq!(menu.selected, 0, "1 直达最新会话");
+        let menu = chat.resume_menu.as_ref().expect("selector is open");
+        assert_eq!(menu.selected, 0, "1 jumps to the newest session");
         assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
-        assert!(chat.resume_menu.is_none(), "Enter 关闭选择器");
+        assert!(chat.resume_menu.is_none(), "Enter closes the selector");
         let current = chat.session.runtime.transcript.borrow().clone().unwrap();
-        assert_eq!(current.name(), name_b, "Enter 切换会话（按索引取快照）");
+        assert_eq!(
+            current.name(),
+            name_b,
+            "Enter switches the session (snapshot by index)"
+        );
 
-        // 带参快速路径保留。
+        // The argument fast path stays.
         chat.input = format!("/resume {}", t_a.name());
         chat.submit();
         let current = chat.session.runtime.transcript.borrow().clone().unwrap();
-        assert_eq!(current.name(), t_a.name(), "带参快速切换保留");
+        assert_eq!(current.name(), t_a.name(), "the argument fast switch stays");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -7868,27 +7978,39 @@ mod tests {
             .unwrap()
             .name();
         let joined = chat.slash_info_lines.join("\n");
-        assert!(joined.contains("已导出"), "{joined}");
-        assert!(joined.contains(&stem), "路径含 stem: {joined}");
-        assert!(joined.contains("注意：此文件包含完整对话"), "隐私警告");
-        // 输出目录 = chat.cwd（test_chat_home 设为 home）。
+        assert!(joined.contains("exported"), "{joined}");
+        assert!(
+            joined.contains(&stem),
+            "the path contains the stem: {joined}"
+        );
+        assert!(
+            joined.contains("note: this file contains the full conversation"),
+            "privacy warning"
+        );
+        // Output dir = chat.cwd (test_chat_home is set to home).
         let out = home.join(format!("{stem}.html"));
-        assert!(out.exists(), "产物存在: {}", out.display());
+        assert!(out.exists(), "artifact exists: {}", out.display());
         let html = std::fs::read_to_string(&out).unwrap_or_else(|e| panic!("{e}"));
-        assert!(html.contains("hi"), "产物含消息文本");
-        assert!(html.contains("data-view=\"conv\""), "产物为 share 页");
-        // 二次导出 → 覆盖提示。
+        assert!(
+            html.contains("hi"),
+            "the artifact contains the message text"
+        );
+        assert!(
+            html.contains("data-view=\"conv\""),
+            "the artifact is a share page"
+        );
+        // Second export → overwrite notice.
         chat.input = "/share".to_string();
         chat.submit();
         assert!(
-            chat.slash_info_lines.join("\n").contains("覆盖"),
-            "覆盖提示: {}",
+            chat.slash_info_lines.join("\n").contains("overwritten"),
+            "overwrite notice: {}",
             chat.slash_info_lines.join("\n")
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// /share：无 transcript（新会话未落盘）时提示不可导出。
+    /// /share: without a transcript (the new session was never persisted), report that nothing can be exported.
     #[test]
     fn slash_share_without_transcript_hints() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-noshare", std::process::id()));
@@ -7897,7 +8019,9 @@ mod tests {
         chat.input = "/share".to_string();
         chat.submit();
         assert!(
-            chat.slash_lines.join("\n").contains("尚无会话可导出"),
+            chat.slash_lines
+                .join("\n")
+                .contains("no session to export yet"),
             "{}",
             chat.slash_lines.join("\n")
         );
@@ -7953,9 +8077,9 @@ mod tests {
         let t = crate::transcript::create(&home, &tmp).unwrap_or_else(|e| panic!("{e}"));
         let _ = t.append(&crate::api::types::Message::user_text("hi"));
         let mut chat = test_chat_home(home.clone());
-        // settings.share.baseUrl → 本地 mock 服务器（会话运行时配置，不依赖磁盘/XDG）。
+        // settings.share.baseUrl → a local mock server (runtime session config; no disk/XDG dependency).
         Arc::get_mut(&mut chat.session)
-            .unwrap_or_else(|| panic!("唯一引用"))
+            .unwrap_or_else(|| panic!("single reference"))
             .settings
             .share
             .base_url = Some(format!("http://{addr}"));
@@ -7969,30 +8093,36 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            preflight.contains("任何人可公开访问"),
-            "上传前公开范围须可见: {preflight}"
+            preflight.contains("anyone can access"),
+            "the public scope must be visible before uploading: {preflight}"
         );
         assert!(
-            preflight.contains("敏感信息"),
-            "上传前敏感内容须可见: {preflight}"
+            preflight.contains("sensitive information"),
+            "the sensitive-content note must be visible before uploading: {preflight}"
         );
-        // 直到 mock 服务器线程完成（收到请求并回应），并行负载下也稳定。
+        // Wait until the mock server thread finishes (it received the request and replied); stable under parallel load too.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         while !handle.is_finished() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(handle.is_finished(), "mock 服务器未收到上传请求");
+        assert!(
+            handle.is_finished(),
+            "the mock server never received the upload request"
+        );
         let (request_line, body) = handle.join().unwrap();
         chat.drain_events();
         let joined = chat.slash_info_lines.join("\n");
-        assert!(joined.contains("已发布"), "{joined}");
+        assert!(joined.contains("published"), "{joined}");
         assert!(
             joined.contains(&format!("http://{addr}/share/u/")),
             "{joined}"
         );
-        assert!(chat.pinned_panels.is_empty(), "上传完成后进度面板解除");
+        assert!(
+            chat.pinned_panels.is_empty(),
+            "the progress panel clears after the upload completes"
+        );
         assert!(request_line.starts_with("POST /share/u/"), "{request_line}");
-        assert!(body.contains("hi"), "上传 body 为完整 HTML");
+        assert!(body.contains("hi"), "the uploaded body is the full HTML");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -8009,8 +8139,8 @@ mod tests {
         chat.input = "/share --local".to_string();
         chat.submit();
         let joined = chat.slash_info_lines.join("\n");
-        assert!(joined.contains("已导出"), "{joined}");
-        assert!(!joined.contains("已发布"), "本地模式不上传");
+        assert!(joined.contains("exported"), "{joined}");
+        assert!(!joined.contains("published"), "local mode does not upload");
         let stem = chat
             .session
             .runtime
@@ -8019,7 +8149,10 @@ mod tests {
             .clone()
             .unwrap()
             .name();
-        assert!(home.join(format!("{stem}.html")).exists(), "本地文件存在");
+        assert!(
+            home.join(format!("{stem}.html")).exists(),
+            "the local file exists"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -8032,7 +8165,7 @@ mod tests {
         chat.cwd = tmp.display().to_string();
         chat.input = "/permissions".to_string();
         chat.submit();
-        assert!(chat.slash_info_lines.join("\n").contains("allow: （无）"));
+        assert!(chat.slash_info_lines.join("\n").contains("allow: (none)"));
 
         chat.input = "/permissions allow Skill(review:*)".to_string();
         chat.submit();
@@ -8084,7 +8217,7 @@ mod tests {
         chat.input = "/tasks".to_string();
         chat.submit();
         let empty = chat.slash_lines.join("\n");
-        assert!(empty.contains("没有后台任务"), "{empty}");
+        assert!(empty.contains("no background tasks"), "{empty}");
 
         let store = chat.session.tasks.clone();
         let id = store
@@ -8119,7 +8252,7 @@ mod tests {
         assert_ne!(
             chat.doc.settled,
             chat.doc.rows.len(),
-            "slash 输出不定稿（不落盘）"
+            "slash output is never settled (not flushed)"
         );
         let joined: Vec<String> = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
         assert!(joined.iter().any(|l| l.contains("/model")), "{joined:?}");
@@ -8129,7 +8262,10 @@ mod tests {
             std::time::Instant::now() - SLASH_OUTPUT_TTL - std::time::Duration::from_millis(1),
         );
         chat.tick();
-        assert!(chat.slash_lines.is_empty(), "超时后 slash 输出消失");
+        assert!(
+            chat.slash_lines.is_empty(),
+            "slash output disappears after the timeout"
+        );
         assert!(chat.slash_at.is_none());
     }
 
@@ -8146,18 +8282,21 @@ mod tests {
             if !chat.busy && !chat.messages.is_empty() {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "技能回合未结束");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the skill turn did not end"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(
             chat.messages[0].text,
             "✦ guide",
-            "只提交 ✦ 标记: {}",
+            "only the ✦ marker is submitted: {}",
             &chat.messages[0].text[..chat.messages[0].text.len().min(80)]
         );
         assert!(
-            !chat.messages[0].text.contains("诊断指南"),
-            "全量正文不再进上下文"
+            !chat.messages[0].text.contains("Diagnostic guide"),
+            "the full body no longer enters the context"
         );
     }
 
@@ -8169,14 +8308,17 @@ mod tests {
         chat.submit();
         let joined = all_slash_text(&chat);
         assert!(
-            joined.contains("未知命令: /nope-skill"),
-            "未知命令指导保留: {joined}"
+            joined.contains("unknown command: /nope-skill"),
+            "the unknown-command guidance is kept: {joined}"
         );
         assert!(
             joined.contains("code=UNKNOWN_COMMAND"),
-            "G13 稳定错误码: {joined}"
+            "G13 stable error code: {joined}"
         );
-        assert!(chat.messages.is_empty(), "未知命令不启动回合");
+        assert!(
+            chat.messages.is_empty(),
+            "unknown commands do not start a turn"
+        );
     }
 
     /// G12 TTL grading: success hints expire after SLASH_OUTPUT_TTL, error/usage rows
@@ -8184,8 +8326,8 @@ mod tests {
     #[test]
     fn slash_error_rows_have_longer_ttl_and_clear_on_input() {
         let mut chat = test_chat();
-        chat.push_slash_output("✓ 完成".to_string());
-        chat.push_slash_error("[error] code=BAD_ARGUMENT msg=用法: /think [...]".to_string());
+        chat.push_slash_output("✓ done".to_string());
+        chat.push_slash_error("[error] code=BAD_ARGUMENT msg=usage: /think [...]".to_string());
         assert_eq!(chat.slash_lines.len(), 1);
         assert_eq!(chat.slash_error_lines.len(), 1);
 
@@ -8194,8 +8336,12 @@ mod tests {
             std::time::Instant::now() - SLASH_OUTPUT_TTL - std::time::Duration::from_millis(1),
         );
         chat.tick();
-        assert!(chat.slash_lines.is_empty(), "成功行 2s 过期");
-        assert_eq!(chat.slash_error_lines.len(), 1, "错误行未到期");
+        assert!(chat.slash_lines.is_empty(), "success rows expire after 2s");
+        assert_eq!(
+            chat.slash_error_lines.len(),
+            1,
+            "error rows have not expired yet"
+        );
 
         // Past the error TTL: both gone.
         chat.slash_error_at = Some(
@@ -8204,12 +8350,18 @@ mod tests {
                 - std::time::Duration::from_millis(1),
         );
         chat.tick();
-        assert!(chat.slash_error_lines.is_empty(), "错误行 8s 过期");
+        assert!(
+            chat.slash_error_lines.is_empty(),
+            "error rows expire after 8s"
+        );
 
         // A fresh error clears on the next real input edit (after_edit path).
-        chat.push_slash_error("用法: /think [...]".to_string());
+        chat.push_slash_error("usage: /think [...]".to_string());
         assert!(chat.on_key(KeyCode::Char('a'), KeyModifiers::empty()));
-        assert!(chat.slash_error_lines.is_empty(), "下次输入清除错误行");
+        assert!(
+            chat.slash_error_lines.is_empty(),
+            "the next input clears the error rows"
+        );
     }
 
     /// G9 no-match hint: a bare `/`-query with zero matches flags the hint; any further
@@ -8220,7 +8372,7 @@ mod tests {
         chat.input = "/zzz".to_string();
         chat.update_slash_suggestions();
         assert!(chat.slash_suggestions.is_empty());
-        assert!(chat.slash_no_match, "/zzz 无匹配显示提示");
+        assert!(chat.slash_no_match, "/zzz with no match shows the hint");
         // Typing further re-filters: still no match, hint stays.
         chat.input = "/zzzx".to_string();
         chat.update_slash_suggestions();
@@ -8229,17 +8381,17 @@ mod tests {
         chat.input = "/th".to_string();
         chat.update_slash_suggestions();
         assert!(!chat.slash_suggestions.is_empty());
-        assert!(!chat.slash_no_match, "有匹配不显示提示");
+        assert!(!chat.slash_no_match, "a match suppresses the hint");
         // Clearing the input (any path that re-runs the filter) removes the hint.
         chat.input = "/zzz".to_string();
         chat.update_slash_suggestions();
         assert!(chat.slash_no_match);
         chat.input = String::new();
         chat.update_slash_suggestions();
-        assert!(!chat.slash_no_match, "空输入不显示提示");
+        assert!(!chat.slash_no_match, "an empty input suppresses the hint");
     }
 
-    /// P1-E：/provider 列表 key 脱敏——短 key（≤4 字符）不追加省略号。
+    /// P1-E: /provider list keys are redacted — short keys (≤4 chars) get no ellipsis.
     #[test]
     fn slash_provider_list_masks_short_keys() {
         let mut chat = test_chat();
@@ -8251,22 +8403,25 @@ mod tests {
             crate::api::client::Client::from_settings(&settings).unwrap();
         chat.input = "/provider".to_string();
         chat.submit();
-        // 无参 → 打开选择器：信息列（URL + 脱敏 key）进入 desc（picker-model.md 提交 D）。
-        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        // No argument → opens the selector: the info column (URL + redacted key) goes into desc (picker-model.md commit D).
+        let menu = chat.provider_menu.as_ref().expect("selector is open");
         let core = menu.picker();
         let desc = core
             .items
             .iter()
             .find(|i| i.label == "default")
             .map(|i| i.description.as_str())
-            .expect("default 选项");
+            .expect("the default option");
         assert!(desc.contains("https://api.anthropic.com"), "{desc}");
-        assert!(desc.contains("key main"), "短 key 无省略号: {desc}");
+        assert!(
+            desc.contains("key main"),
+            "short keys have no ellipsis: {desc}"
+        );
         assert!(!desc.contains("main…"), "{desc}");
     }
 
-    /// P5（D34）：空 settings 下 /provider login codex 走 preset oauth——
-    /// 不报"未找到 provider"，也不报"需要 API key"（codex 是 oauth 型）。
+    /// P5 (D34): with empty settings, /provider login codex takes the preset oauth path —
+    /// it must not say "provider not found" nor "API key required" (codex is an oauth-type preset).
     /// (tokio: the device-auth branch spawns on the runtime.)
     #[tokio::test]
     async fn slash_provider_login_uses_preset_with_empty_settings() {
@@ -8276,24 +8431,24 @@ mod tests {
         chat.input = "/provider login codex --device-auth".to_string();
         chat.submit();
         let out = all_slash_text(&chat);
-        assert!(!out.contains("未找到 provider"), "{out}");
+        assert!(!out.contains("provider not found"), "{out}");
         assert!(
-            !out.contains("需要 API key"),
-            "codex 是 oauth 型 preset: {out}"
+            !out.contains("requires an API key"),
+            "codex is an oauth-type preset: {out}"
         );
-        // opencode-go 是 apiKey 型 preset → 无 --manual 时给 key 引导。
+        // opencode-go is an apiKey-type preset → without --manual it guides toward a key.
         let mut chat = test_chat_home(tmp.join("home2"));
         chat.input = "/provider login opencode-go".to_string();
         chat.submit();
         let out = all_slash_text(&chat);
         assert!(
-            out.contains("需要 API key"),
-            "apiKey 型 preset 引导粘贴 key: {out}"
+            out.contains("requires an API key"),
+            "an apiKey-type preset guides toward pasting a key: {out}"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// P5：opencode-go --manual 存 auth.json `{type:"api"}`（零污染 settings）。
+    /// P5: opencode-go --manual stores auth.json `{type:"api"}` (zero settings pollution).
     #[tokio::test]
     async fn slash_provider_login_opencode_go_manual_stores_api_key() {
         let tmp = std::env::temp_dir().join(format!("bingo-preset-key-{}", std::process::id()));
@@ -8308,20 +8463,20 @@ mod tests {
             if let Ok(Some(entry)) = store.get("opencode-go") {
                 match entry {
                     crate::auth::AuthEntry::Api { key } => {
-                        assert_eq!(key, "sk-og", "opencode-go key 存储");
+                        assert_eq!(key, "sk-og", "opencode-go key storage");
                     }
-                    other => panic!("应为 Api 条目: {other:?}"),
+                    other => panic!("expected an Api entry: {other:?}"),
                 }
                 let _ = std::fs::remove_dir_all(&tmp);
                 return;
             }
         }
         let _ = std::fs::remove_dir_all(&tmp);
-        panic!("opencode-go key 未存储");
+        panic!("opencode-go key was not stored");
     }
 
-    /// P4：切换到未登录的 OAuth provider → 切换成功但带 login 引导；列表
-    /// 显示协议标记 + 未登录态 + apiBaseUrl 缺省→协议默认端点。
+    /// P4: switching to a not-logged-in OAuth provider → the switch succeeds but carries a login hint; the list
+    /// shows the protocol marker + the not-logged-in state, and a missing apiBaseUrl → the protocol default endpoint.
     #[test]
     fn slash_provider_switch_warns_on_oauth_not_logged_in() {
         let tmp = std::env::temp_dir().join(format!("bingo-preset-warn-{}", std::process::id()));
@@ -8354,68 +8509,72 @@ mod tests {
         chat.input = "/provider codex".to_string();
         chat.submit();
         let out = chat.slash_lines.join("\n");
-        assert!(out.contains("✓ provider 已切换: codex"), "{out}");
+        assert!(out.contains("✓ provider switched: codex"), "{out}");
         assert!(
-            out.contains("未登录：/provider login codex"),
-            "未登录引导: {out}"
+            out.contains("not logged in: /provider login codex"),
+            "not-logged-in hint: {out}"
         );
 
         chat.input = "/provider".to_string();
         chat.submit();
-        // 无参 → 选择器：desc 含 preset 端点 + 未登录态 + 协议 + 内置徽标。
-        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        // No argument → selector: desc carries the preset endpoint + not-logged-in state + protocol + built-in badge.
+        let menu = chat.provider_menu.as_ref().expect("selector is open");
         let core = menu.picker();
         let desc = core
             .items
             .iter()
             .find(|i| i.label == "codex")
             .map(|i| i.description.as_str())
-            .expect("codex 选项");
+            .expect("the codex option");
         assert!(
             desc.contains("https://chatgpt.com/backend-api"),
-            "apiBaseUrl 缺省→preset 端点: {desc}"
+            "missing apiBaseUrl → preset endpoint: {desc}"
         );
         assert!(
-            desc.contains("○ 未登录（/provider login codex） · openai · 内置"),
-            "协议标记 + 未登录态 + 内置: {desc}"
+            desc.contains("○ not logged in (/provider login codex) · openai · built-in"),
+            "protocol marker + not-logged-in state + built-in: {desc}"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// P4：turn 级错误文案补 auth 引导——oauth provider 401 → login 引导（带名）；
-    /// 非 oauth 401 不加（apiKey 场景无 login 概念）；403 → 模型/订阅提示；
-    /// 已含引导/无关码原样透传。
+    /// P4: turn-level error text gains auth hints — an oauth provider 401 → a login hint (with the name);
+    /// non-oauth 401 gets none (apiKey scenarios have no login concept); 403 → a model/subscription hint;
+    /// hints already present / unrelated codes pass through verbatim.
     #[test]
     fn auth_error_hint_appends_login_guidance() {
         let base = "API error: HTTP 401: invalid token".to_string();
         let hinted = auth_hint_for(true, "codex", "AUTH_REQUIRED", base.clone());
         assert!(
             hinted.contains("/provider login codex"),
-            "oauth 401 引导带 provider 名: {hinted}"
+            "the oauth 401 hint carries the provider name: {hinted}"
         );
 
-        // 非 oauth provider 的 401：不加 login 引导（apiKey 失效提示检查 key 即可）。
+        // A non-oauth provider's 401: no login hint (an expired apiKey just needs the key checked).
         let api_key_msg = auth_hint_for(false, "deepseek", "AUTH_REQUIRED", base.clone());
-        assert_eq!(api_key_msg, base, "非 oauth 401 原样透传");
+        assert_eq!(api_key_msg, base, "non-oauth 401 passes through verbatim");
 
-        // 已含 login 引导的 AuthError（refresh 永久失败）不重复追加。
-        let already = "登录已失效（refresh_token_expired）：/provider login 重新登录".to_string();
+        // An AuthError that already carries a login hint (permanent refresh failure) is not extended again.
+        let already = "login has expired (refresh_token_expired): /provider login to sign in again"
+            .to_string();
         assert_eq!(
             auth_hint_for(true, "codex", "AUTH_REQUIRED", already.clone()),
             already,
-            "已有引导不重复"
+            "an existing hint is not repeated"
         );
 
-        // 403 → 模型/订阅提示。
+        // 403 → a model/subscription hint.
         let denied = auth_hint_for(
             false,
             "deepseek",
             "PERMISSION_DENIED",
             "API error: HTTP 403: quota".into(),
         );
-        assert!(denied.contains("/model"), "403 引导 /model: {denied}");
+        assert!(
+            denied.contains("/model"),
+            "the 403 hints at /model: {denied}"
+        );
 
-        // 无关错误码原样透传。
+        // Unrelated codes pass through verbatim.
         let rate = "API error: HTTP 429: rate limited".to_string();
         assert_eq!(
             auth_hint_for(true, "codex", "RATE_LIMITED", rate.clone()),
@@ -8430,14 +8589,14 @@ mod tests {
         let mut chat = test_chat();
         chat.input = "/provider".to_string();
         chat.submit();
-        // 无参 → 打开选择器：default 打头、● 标当前。
-        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
-        assert_eq!(menu.current, Some(0), "● 标当前 default");
+        // No argument → opens the selector: default first, ● marks the current.
+        let menu = chat.provider_menu.as_ref().expect("selector is open");
+        assert_eq!(menu.current, Some(0), "● marks the current default");
         let core = menu.picker();
         assert_eq!(
             core.items.first().map(|i| i.label.as_str()),
             Some("default"),
-            "default 打头"
+            "default comes first"
         );
 
         // Configure a named provider, then switch.
@@ -8472,75 +8631,78 @@ mod tests {
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::from_settings(&settings).unwrap();
 
-        // 重新打开选择器：列表含 deepseek；Esc 不改当前。
+        // Reopen the selector: the list has deepseek; Esc does not change the current.
         chat.input = "/provider".to_string();
         chat.submit();
-        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
+        let menu = chat.provider_menu.as_ref().expect("selector is open");
         let core = menu.picker();
         assert!(
             core.items.iter().any(|i| i.label == "deepseek"),
-            "选择器列出 deepseek"
+            "the selector lists deepseek"
         );
-        assert_eq!(menu.current, Some(0), "● 标当前 default");
+        assert_eq!(menu.current, Some(0), "● marks the current default");
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
-        assert!(chat.provider_menu.is_none(), "Esc 关闭选择器");
+        assert!(chat.provider_menu.is_none(), "Esc closes the selector");
         assert_eq!(
             *chat.session.runtime.provider.borrow(),
             "default",
-            "Esc 不改"
+            "Esc does not change"
         );
 
-        // Enter 确认：切换 + 持久化（带参快速路径等价）。
+        // Enter confirms: switch + persist (equivalent to the argument fast path).
         chat.input = "/provider".to_string();
         chat.submit();
-        // 顺序：default(1) → codex(2) → opencode-go(3) → deepseek(4)。
+        // Order: default(1) → codex(2) → opencode-go(3) → deepseek(4).
         assert!(chat.on_key(KeyCode::Char('4'), KeyModifiers::empty()));
-        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
-        assert_eq!(menu.selected, 3, "4 直达 deepseek");
+        let menu = chat.provider_menu.as_ref().expect("selector is open");
+        assert_eq!(menu.selected, 3, "4 jumps to deepseek");
         assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
-        assert!(chat.provider_menu.is_none(), "Enter 关闭选择器");
+        assert!(chat.provider_menu.is_none(), "Enter closes the selector");
         assert_eq!(
             *chat.session.runtime.provider.borrow(),
             "deepseek",
-            "runtime provider 同步"
+            "the runtime provider is synced"
         );
         let out = chat.slash_lines.join("\n");
-        assert!(out.contains("✓ provider 已切换: deepseek"), "{out}");
+        assert!(out.contains("✓ provider switched: deepseek"), "{out}");
 
-        // 带参快速路径保留。
+        // The argument fast path stays.
         chat.input = "/provider deepseek".to_string();
         chat.submit();
         assert_eq!(*chat.session.runtime.provider.borrow(), "deepseek");
         let _ = std::fs::remove_dir_all(&s_tmp);
 
-        // s = 仅本次会话（独立 chat，无先前持久化）：runtime 切换但不写 settings。
+        // s = this session only (a fresh chat, nothing persisted before): runtime switch without writing settings.
         let mut chat = test_chat_home(s_tmp.join("home"));
         chat.cwd = s_tmp.display().to_string();
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::from_settings(&settings).unwrap();
         chat.input = "/provider".to_string();
         chat.submit();
-        let menu = chat.provider_menu.as_ref().expect("选择器已打开");
-        assert_eq!(menu.current, Some(0), "● 标当前 default");
+        let menu = chat.provider_menu.as_ref().expect("selector is open");
+        assert_eq!(menu.current, Some(0), "● marks the current default");
         assert!(chat.on_key(KeyCode::Char('4'), KeyModifiers::empty()));
         assert!(chat.on_key(KeyCode::Char('s'), KeyModifiers::empty()));
         assert_eq!(
             *chat.session.runtime.provider.borrow(),
             "deepseek",
-            "s 切换 runtime"
+            "s switches the runtime"
         );
         let out = chat.slash_lines.join("\n");
-        assert!(out.contains("（仅本次会话）"), "s 标注: {out}");
+        assert!(
+            out.contains("(this session only)"),
+            "the s annotation: {out}"
+        );
         assert!(
             !s_tmp.join(".bingo/settings.json").exists(),
-            "s 不写 settings"
+            "s does not write settings"
         );
 
-        // 未命中报错（走错误桶）。
+        // A miss errors (into the error bucket).
         chat.input = "/provider nope".to_string();
         chat.submit();
         let out = all_slash_text(&chat);
-        assert!(out.contains("未找到 provider"), "{out}");
+        assert!(out.contains("not found"), "{out}");
     }
 
     #[test]
@@ -8553,16 +8715,19 @@ mod tests {
         // No arg → open the level selector (preselects off = first item).
         chat.input = "/think".to_string();
         chat.submit();
-        let menu = chat.think_menu.as_ref().expect("菜单已打开");
-        assert_eq!(THINK_LEVELS[menu.selected].0, "off", "未设置时预选 off");
+        let menu = chat.think_menu.as_ref().expect("menu is open");
+        assert_eq!(
+            THINK_LEVELS[menu.selected].0, "off",
+            "preselects off when unset"
+        );
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
-        assert!(chat.think_menu.is_none(), "Esc 退出菜单");
+        assert!(chat.think_menu.is_none(), "Esc exits the menu");
 
         // New level xhigh: runtime effect + persistence.
         chat.input = "/think xhigh".to_string();
         chat.submit();
         let out = chat.slash_lines.join("\n");
-        assert!(out.contains("✓ 思考级别已设置: xhigh"), "{out}");
+        assert!(out.contains("✓ thinking level set: xhigh"), "{out}");
         assert_eq!(
             chat.session.runtime.thinking.borrow().as_deref(),
             Some("xhigh")
@@ -8576,20 +8741,20 @@ mod tests {
         chat.input = "/think off".to_string();
         chat.submit();
         let out = chat.slash_lines.join("\n");
-        assert!(out.contains("✓ 思考级别已设置: off"), "{out}");
+        assert!(out.contains("✓ thinking level set: off"), "{out}");
         assert_eq!(chat.session.runtime.thinking.borrow().as_deref(), None);
 
         chat.input = "/think bogus".to_string();
         chat.submit();
         let out = chat.slash_error_lines.join("\n");
         assert!(
-            out.contains("用法: /think") && out.contains("code=BAD_ARGUMENT"),
-            "用法行带稳定错误码: {out}"
+            out.contains("usage: /think") && out.contains("code=BAD_ARGUMENT"),
+            "the usage line carries a stable error code: {out}"
         );
         assert_eq!(
             chat.session.runtime.thinking.borrow().as_deref(),
             None,
-            "无效参数不改状态"
+            "an invalid argument does not change the state"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -8617,7 +8782,10 @@ mod tests {
             if !output.is_empty() {
                 return output.join("\n");
             }
-            assert!(std::time::Instant::now() < deadline, "slash 输出超时");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "slash output timed out"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
@@ -8631,7 +8799,7 @@ mod tests {
         chat.input = "/mcp".to_string();
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
-        assert!(out.contains("未配置 MCP 服务器"), "{out}");
+        assert!(out.contains("no MCP servers configured"), "{out}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -8659,13 +8827,13 @@ mod tests {
         chat.input = "/mcp".to_string();
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
-        assert!(out.contains("MCP 服务器（1 个）"), "{out}");
+        assert!(out.contains("MCP servers (1)"), "{out}");
         assert!(out.contains("files"), "{out}");
 
         chat.input = "/mcp disable files".to_string();
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
-        assert!(out.contains("已禁用 1 个 MCP 服务器: files"), "{out}");
+        assert!(out.contains("disabled 1 MCP server(s): files"), "{out}");
         // Persisted to .bingo/settings.json
         let saved: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(tmp.join(".bingo/settings.json")).unwrap(),
@@ -8681,7 +8849,7 @@ mod tests {
         chat.input = "/mcp enable all".to_string();
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
-        assert!(out.contains("已启用 1 个 MCP 服务器: files"), "{out}");
+        assert!(out.contains("enabled 1 MCP server(s): files"), "{out}");
         chat.input = "/mcp".to_string();
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
@@ -8713,13 +8881,16 @@ mod tests {
         chat.input = "/mcp reconnect nope".to_string();
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
-        assert!(out.contains("未找到 MCP 服务器 \"nope\""), "{out}");
+        assert!(out.contains("no MCP server \"nope\""), "{out}");
         // Reconnect a failing server: the failure detail shows through
         chat.input = "/mcp reconnect files".to_string();
         chat.submit();
         let out = slash_mcp_wait(&mut chat).await;
         assert!(out.contains("files"), "{out}");
-        assert!(out.contains("握手失败") || out.contains("✗"), "{out}");
+        assert!(
+            out.contains("handshake failed") || out.contains("✗"),
+            "{out}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -8739,25 +8910,34 @@ mod tests {
         chat.update_slash_suggestions();
         assert!(
             chat.slash_suggestions.len() >= SLASH_COMMANDS.len(),
-            "全量进状态（含技能扩展；渲染层围绕选中开窗，命令 6+ 不再不可达）"
+            "everything lands in state (including skill expansion; the render layer windows around the selection, so commands 6+ are reachable again)"
         );
         assert!(chat.slash_suggestions.iter().any(|s| s.name == "model"));
-        // 渲染层窗口：5 可见 + 「还有 N 条」指示。
+        // Render-layer window: 5 visible + a "N more" indicator.
         let rows = crate::tui::el::render(crate::tui::chrome::chrome(&chat, 100, false)).rows;
         let joined: String = rows
             .iter()
             .map(|r| r.line.plain_text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("还有"), "窗口外数量可见: {joined}");
+        assert!(
+            joined.contains("more"),
+            "the out-of-window count is visible: {joined}"
+        );
 
         chat.input = "/model deepseek".to_string();
         chat.update_slash_suggestions();
-        assert!(chat.slash_suggestions.is_empty(), "带参数不显示");
+        assert!(
+            chat.slash_suggestions.is_empty(),
+            "no suggestions with an argument"
+        );
 
         chat.input = "hi".to_string();
         chat.update_slash_suggestions();
-        assert!(chat.slash_suggestions.is_empty(), "非 / 开头不显示");
+        assert!(
+            chat.slash_suggestions.is_empty(),
+            "no suggestions without a leading /"
+        );
     }
 
     /// Dispatch completeness: every SLASH_COMMANDS entry has a `run_slash` arm, and every
@@ -8798,13 +8978,13 @@ mod tests {
         for name in &table {
             assert!(
                 arms.contains(name),
-                "表内命令 /{name} 缺少 run_slash 分派臂"
+                "the registered command /{name} is missing a run_slash dispatch arm"
             );
         }
         for p in &primaries {
             assert!(
                 table.contains(p),
-                "分派臂主名 /{p} 不在 SLASH_COMMANDS 表内"
+                "the dispatch arm /{p} is not in the SLASH_COMMANDS table"
             );
         }
     }
@@ -8819,16 +8999,18 @@ mod tests {
         assert_eq!(
             lines.len(),
             SLASH_COMMANDS.len() + 3,
-            "标题 + 每命令一行 + 子命令行 + 快捷键互链"
+            "title + one row per command + sub-command line + key cross-link"
         );
-        assert_eq!(lines[0], "可用命令：");
+        assert_eq!(lines[0], "available commands:");
         assert!(
             lines.iter().any(|l| l.contains("/provider login")),
-            "子命令可发现"
+            "sub-commands are discoverable"
         );
         assert!(
-            lines.iter().any(|l| l.contains("按 ? 查看全表")),
-            "互链 ? 面板"
+            lines
+                .iter()
+                .any(|l| l.contains("press ? on an empty input")),
+            "cross-linked to the ? panel"
         );
         for ((name, hint, desc), line) in SLASH_COMMANDS.iter().zip(&lines[1..]) {
             let cmd = if hint.is_empty() {
@@ -8836,8 +9018,14 @@ mod tests {
             } else {
                 format!("/{name} {hint}")
             };
-            assert!(line.contains(&cmd), "行包含命令与参数提示: {line}");
-            assert!(line.ends_with(desc), "行尾为描述: {line}");
+            assert!(
+                line.contains(&cmd),
+                "the row carries the command and its argument hint: {line}"
+            );
+            assert!(
+                line.ends_with(desc),
+                "the row ends with the description: {line}"
+            );
         }
     }
 
@@ -8856,7 +9044,7 @@ mod tests {
         chat.update_slash_suggestions();
         assert!(
             chat.slash_suggestions.iter().any(|s| s.name == "pdf"),
-            "技能并入建议"
+            "skills merge into the suggestions"
         );
 
         chat.input = "/mo".to_string();
@@ -8866,7 +9054,7 @@ mod tests {
             .iter()
             .map(|s| s.name.as_str())
             .collect();
-        assert_eq!(names, vec!["model"], "前缀过滤: {names:?}");
+        assert_eq!(names, vec!["model"], "prefix filtering: {names:?}");
 
         // Overlong descriptions are truncated (MAX_LISTING_DESC_CHARS):
         // a NoWrap overlong row would push the canvas past the terminal width → stale diff residue.
@@ -8879,13 +9067,16 @@ mod tests {
             .iter()
             .find(|s| s.name == "pdf")
             .map(|s| s.description.clone())
-            .expect("pdf 技能在建议中");
+            .expect("the pdf skill is among the suggestions");
         assert!(
             desc.chars().count() <= crate::skills::MAX_LISTING_DESC_CHARS,
-            "描述截断: {} 字符",
+            "description truncated: {} chars",
             desc.chars().count()
         );
-        assert!(desc.ends_with('…'), "截断带省略号: {desc}");
+        assert!(
+            desc.ends_with('…'),
+            "truncation carries an ellipsis: {desc}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -8905,7 +9096,7 @@ mod tests {
         assert_eq!(
             chat.slash_selected,
             chat.slash_suggestions.len() - 1,
-            "顶部回卷"
+            "wraps at the top"
         );
 
         // Tab applies the selection (/help) → `/help ` with suggestions cleared and nothing run.
@@ -8915,7 +9106,7 @@ mod tests {
         assert!(chat.slash_menu_key(KeyCode::Tab, KeyModifiers::empty()));
         assert_eq!(chat.input, "/help ");
         assert!(chat.slash_suggestions.is_empty());
-        assert!(chat.slash_lines.is_empty(), "Tab 不执行");
+        assert!(chat.slash_lines.is_empty(), "Tab does not execute");
 
         // Esc closes.
         chat.input = "/".to_string();
@@ -8933,26 +9124,29 @@ mod tests {
         chat.update_slash_suggestions();
         assert!(
             !chat.slash_suggestions.is_empty(),
-            "输入 /model 时有建议: {:?}",
+            "typing /model shows suggestions: {:?}",
             chat.slash_suggestions
         );
         chat.submit();
         assert!(
             chat.model_menu.is_some(),
-            "/model 进入二级选择器（一级 endpoint 列表）"
+            "/model enters the two-level selector (level one = the endpoint list)"
         );
-        assert!(chat.slash_suggestions.is_empty(), "菜单模式无 slash 建议");
+        assert!(
+            chat.slash_suggestions.is_empty(),
+            "menu mode has no slash suggestions"
+        );
         assert!(!chat.busy);
         // Esc exits the menu.
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
-        assert!(chat.model_menu.is_none(), "Esc 退出菜单");
+        assert!(chat.model_menu.is_none(), "Esc exits the menu");
 
         // Partial prefix `/sta`: Enter applies the selection (status first) and runs it.
         chat.input = "/sta".to_string();
         chat.update_slash_suggestions();
         assert!(
             chat.slash_suggestions.iter().any(|s| s.name == "status"),
-            "有建议: {:?}",
+            "has suggestions: {:?}",
             chat.slash_suggestions
         );
         chat.submit();
@@ -8960,9 +9154,12 @@ mod tests {
             chat.pinned_panels
                 .iter()
                 .any(|(_, l)| l.join("").contains("⏳")),
-            "status 已执行（异步统计提示）"
+            "status ran (async stats hint)"
         );
-        assert!(chat.slash_suggestions.is_empty(), "部分前缀执行后菜单关闭");
+        assert!(
+            chat.slash_suggestions.is_empty(),
+            "the menu closes after a partial-prefix execution"
+        );
     }
 
     /// `/model` two-level selector: Enter opens the menu (level-one endpoint list),
@@ -8973,32 +9170,36 @@ mod tests {
         chat.input = "/model".to_string();
         chat.submit();
         let Some(menu) = &chat.model_menu else {
-            panic!("菜单未打开");
+            panic!("menu did not open");
         };
-        assert_eq!(menu.providers, vec!["default"], "一级列表含当前 endpoint");
-        assert!(menu.models.is_none(), "停在一级");
+        assert_eq!(
+            menu.providers,
+            vec!["default"],
+            "the level-one list contains the current endpoint"
+        );
+        assert!(menu.models.is_none(), "stops at level one");
         assert!(
             chat.on_key(KeyCode::Down, KeyModifiers::empty()),
-            "↓ 移动选中"
+            "↓ moves the selection"
         );
         assert_eq!(
             chat.model_menu.as_ref().unwrap().provider_selected,
             0,
-            "单元素列表循环回 0"
+            "a single-item list wraps back to 0"
         );
         // Enter goes to level two: async fetch in progress (loading).
         assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
         let m = &chat.model_menu.as_ref().unwrap().models;
-        assert!(m.is_some(), "已进入二级");
-        assert!(m.as_ref().unwrap().loading, "拉取中");
+        assert!(m.is_some(), "entered level two");
+        assert!(m.as_ref().unwrap().loading, "fetching");
         // Esc returns level by level: two → one → exit.
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
         assert!(
             chat.model_menu.as_ref().is_some_and(|m| m.models.is_none()),
-            "二级 Esc 回一级"
+            "level-two Esc returns to level one"
         );
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
-        assert!(chat.model_menu.is_none(), "一级 Esc 整体退出");
+        assert!(chat.model_menu.is_none(), "level-one Esc exits entirely");
     }
 
     /// Level-two confirm: the model is picked → switch the runtime model and exit the menu.
@@ -9017,17 +9218,20 @@ mod tests {
         assert_eq!(
             *chat.session.runtime.model.borrow(),
             "deepseek-r1",
-            "选中的模型生效"
+            "the selected model takes effect"
         );
-        assert!(chat.model_menu.is_none(), "确认后关闭菜单");
         assert!(
-            chat.slash_lines.join("\n").contains("模型已切换"),
-            "确认提示"
+            chat.model_menu.is_none(),
+            "closes the menu after confirming"
+        );
+        assert!(
+            chat.slash_lines.join("\n").contains("model switched"),
+            "confirmation hint"
         );
     }
 
-    /// 多 provider 时二级 Esc 回一级：一级 provider 列表与选中必须保留
-    /// （回归：open_model_models 曾把 providers 重建为单元素，Esc 后列表丢失）。
+    /// With multiple providers, level-two Esc returns to level one: the level-one provider list and selection must survive
+    /// (regression: open_model_models used to rebuild providers as a single element, losing the list after Esc).
     #[tokio::test]
     async fn model_menu_esc_back_keeps_provider_list() {
         let home = std::env::temp_dir().join(format!("bingo-model-esc-{}", std::process::id()));
@@ -9061,34 +9265,34 @@ mod tests {
         assert_eq!(
             providers,
             vec!["default", "codex", "opencode-go", "deepseek", "local"],
-            "与 /provider 同一顺序：default → 内置 preset → 用户自定义"
+            "the same order as /provider: default → built-in preset → user-defined"
         );
         assert_eq!(chat.model_menu.as_ref().unwrap().provider_selected, 0);
 
-        // ↓ 两次选中 local → Enter 进二级（loading）→ Esc 回一级。
+        // ↓ twice selects local → Enter into level two (loading) → Esc back to level one.
         chat.on_key(KeyCode::Down, KeyModifiers::empty());
         chat.on_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(chat.model_menu.as_ref().unwrap().provider_selected, 2);
         chat.on_key(KeyCode::Enter, KeyModifiers::empty());
         assert!(
             chat.model_menu.as_ref().unwrap().models.is_some(),
-            "进入二级"
+            "enters level two"
         );
         chat.on_key(KeyCode::Esc, KeyModifiers::empty());
-        let menu = chat.model_menu.as_ref().expect("一级仍在");
+        let menu = chat.model_menu.as_ref().expect("level one is still there");
         assert_eq!(
             menu.providers,
             vec!["default", "codex", "opencode-go", "deepseek", "local"],
-            "列表保留"
+            "the list is kept"
         );
-        assert_eq!(menu.provider_selected, 2, "选中保留");
-        assert!(menu.models.is_none(), "回到一级");
+        assert_eq!(menu.provider_selected, 2, "the selection is kept");
+        assert!(menu.models.is_none(), "back at level one");
 
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// P0-A：/provider <名> 持久化 provider；/model 菜单确认时
-    /// provider + model 一并写入 `.bingo/settings.json`（重启恢复同端点模型）。
+    /// P0-A: /provider <name> persists the provider; confirming in the /model menu
+    /// writes provider + model together into `.bingo/settings.json` (restart restores the same endpoint and model).
     #[tokio::test]
     async fn provider_switch_persists_provider_and_model_menu_persists_both() {
         let tmp =
@@ -9113,24 +9317,27 @@ mod tests {
         Arc::get_mut(&mut chat.session).unwrap().client =
             crate::api::client::Client::from_settings(&settings).unwrap();
 
-        // /provider deepseek：切换 + 持久化。
+        // /provider deepseek: switch + persist.
         chat.input = "/provider deepseek".to_string();
         chat.submit();
         let saved: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(tmp.join("home/.config/bingo/settings.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(saved["provider"], "deepseek", "provider 持久化（user 层）");
+        assert_eq!(
+            saved["provider"], "deepseek",
+            "the provider is persisted (user layer)"
+        );
         assert_eq!(*chat.session.runtime.provider.borrow(), "deepseek");
 
-        // /model 菜单：当前 provider=deepseek（预选）→ 二级确认模型
-        // → provider + model 一并持久化。
+        // /model menu: current provider=deepseek (preselected) → level-two confirms the model
+        // → provider + model persist together.
         chat.input = "/model".to_string();
         chat.submit();
         assert_eq!(
             chat.model_menu.as_ref().unwrap().provider_selected,
             3,
-            "一级预选当前 provider（统一顺序：default, codex, opencode-go, deepseek）"
+            "level one preselects the current provider (unified order: default, codex, opencode-go, deepseek)"
         );
         chat.on_key(KeyCode::Enter, KeyModifiers::empty());
         if let Some(m) = &mut chat.model_menu.as_mut().unwrap().models {
@@ -9138,33 +9345,39 @@ mod tests {
             m.loading = false;
         }
         chat.on_key(KeyCode::Enter, KeyModifiers::empty());
-        assert!(chat.model_menu.is_none(), "确认后关闭菜单");
+        assert!(
+            chat.model_menu.is_none(),
+            "closes the menu after confirming"
+        );
         let saved: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(tmp.join("home/.config/bingo/settings.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(saved["model"], "deepseek-v4", "模型持久化");
-        assert_eq!(saved["provider"], "deepseek", "provider 随模型一并持久化");
+        assert_eq!(saved["model"], "deepseek-v4", "the model is persisted");
+        assert_eq!(
+            saved["provider"], "deepseek",
+            "the provider persists with the model"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// P1-E：/model <名> 直接设置——有缓存且未命中 → 提示不阻塞；
-    /// 无缓存/未拉过 → 直接切换不提示。
+    /// P1-E: /model <name> sets directly — with a cache and no hit → a non-blocking hint;
+    /// no cache / never fetched → switches directly with no hint.
     #[test]
     fn slash_model_validates_against_cached_list() {
         let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-modelval", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let mut chat = test_chat_home(tmp.clone());
 
-        // 无缓存：直接切换，无校验提示。
+        // No cache: switch directly, no validation hint.
         chat.input = "/model custom-new".to_string();
         chat.submit();
         let out = chat.slash_lines.join("\n");
-        assert!(out.contains("✓ 模型已切换: custom-new"), "{out}");
-        assert!(!out.contains("不在"), "{out}");
+        assert!(out.contains("✓ model switched: custom-new"), "{out}");
+        assert!(!out.contains("not in"), "{out}");
 
-        // 当前 provider 有缓存且模型不在其中：成功提示内附一句 ⚠ 提示，
-        // 单行输出（advisory 不阻塞，仍切换）。
+        // The current provider has a cache and the model is not in it: the success note carries a ⚠ hint,
+        // one line (advisory, non-blocking; it still switches).
         chat.slash_lines.clear();
         chat.models_cache.insert(
             "default".to_string(),
@@ -9174,49 +9387,53 @@ mod tests {
         chat.submit();
         let out = chat.slash_lines.join("\n");
         assert!(
-            out.contains("✓ 模型已切换: unknown-xyz（⚠ 不在 default 已知列表"),
+            out.contains("✓ model switched: unknown-xyz (⚠ not in default's known list"),
             "{out}"
         );
-        assert_eq!(out.lines().count(), 1, "单行输出，⚠ 与 ✓ 不并存");
+        assert_eq!(
+            out.lines().count(),
+            1,
+            "one-line output; ⚠ and ✓ do not coexist"
+        );
         assert_eq!(*chat.session.runtime.model.borrow(), "unknown-xyz");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// P1-F：ModelsLoaded 后当前 provider 的当前模型被预选（与 /think 菜单
-    /// 预选当前档位对等），避免浏览即误切；当前模型不在列表时回 0；结果
-    /// 写入 models_cache（/model <名> 校验用）。
+    /// P1-F: after ModelsLoaded, the current provider's current model is preselected (the counterpart of /think
+    /// preselecting the current level), so browsing cannot accidentally switch; a model missing from the list falls back to 0; the result
+    /// is written into models_cache (used by /model <name> validation).
     #[tokio::test]
     async fn models_loaded_preselects_current_model_and_caches() {
         let mut chat = test_chat();
         chat.input = "/model".to_string();
         chat.submit();
         chat.on_key(KeyCode::Enter, KeyModifiers::empty());
-        // 当前 provider=default，当前模型=test-model（test_chat 初始值）。
+        // Current provider=default, current model=test-model (test_chat's initial value).
         chat.handle(UiEvent::ModelsLoaded {
             provider: "default".into(),
             models: vec!["m0".into(), "test-model".into(), "m2".into()],
             failed: None,
         });
         let m = chat.model_menu.as_ref().unwrap().models.as_ref().unwrap();
-        assert_eq!(m.selected, 1, "预选当前模型");
+        assert_eq!(m.selected, 1, "preselects the current model");
         assert_eq!(m.models[m.selected], "test-model");
         assert_eq!(
             chat.models_cache.get("default").map(Vec::as_slice),
             Some(&["m0".to_string(), "test-model".to_string(), "m2".to_string()][..]),
-            "加载结果入缓存"
+            "the load result lands in the cache"
         );
 
-        // 当前模型不在列表中：选中回 0。
+        // The current model is not in the list: the selection falls back to 0.
         chat.handle(UiEvent::ModelsLoaded {
             provider: "default".into(),
             models: vec!["m0".into(), "m1".into()],
             failed: None,
         });
         let m = chat.model_menu.as_ref().unwrap().models.as_ref().unwrap();
-        assert_eq!(m.selected, 0, "未命中回 0");
+        assert_eq!(m.selected, 0, "a miss falls back to 0");
     }
 
-    /// /think 无参进入等级选择器：预选当前档位，↑↓ 移动，Enter 确认，Esc 退出。
+    /// /think with no argument enters the level selector: preselects the current level, ↑↓ moves, Enter confirms, Esc exits.
     #[test]
     fn think_menu_navigates_and_confirms() {
         let home = std::env::temp_dir().join(format!("bingo-think-menu-{}", std::process::id()));
@@ -9225,12 +9442,18 @@ mod tests {
         let _ = chat.session.runtime.thinking_tx.send(Some("high".into()));
         chat.input = "/think".to_string();
         chat.submit();
-        let menu = chat.think_menu.as_ref().expect("菜单已打开");
-        assert_eq!(THINK_LEVELS[menu.selected].0, "high", "预选当前档位");
+        let menu = chat.think_menu.as_ref().expect("menu is open");
+        assert_eq!(
+            THINK_LEVELS[menu.selected].0, "high",
+            "preselects the current level"
+        );
         // ↑ to medium, Enter confirms: runtime effect + persistence + menu closes.
         assert!(chat.on_key(KeyCode::Up, KeyModifiers::empty()));
         assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
-        assert!(chat.think_menu.is_none(), "确认后关闭菜单");
+        assert!(
+            chat.think_menu.is_none(),
+            "closes the menu after confirming"
+        );
         assert_eq!(
             chat.session.runtime.thinking.borrow().as_deref(),
             Some("medium")
@@ -9239,18 +9462,21 @@ mod tests {
             &std::fs::read_to_string(home.join(".config/bingo/settings.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(saved["thinkingLevel"], "medium", "选择持久化");
+        assert_eq!(
+            saved["thinkingLevel"], "medium",
+            "the selection is persisted"
+        );
         // Reopen the menu: Esc exits directly; off clears the level.
         chat.input = "/think".to_string();
         chat.submit();
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
-        assert!(chat.think_menu.is_none(), "Esc 退出");
+        assert!(chat.think_menu.is_none(), "Esc exits");
         chat.input = "/think off".to_string();
         chat.submit();
         assert_eq!(
             chat.session.runtime.thinking.borrow().as_deref(),
             None,
-            "off 清空等级"
+            "off clears the level"
         );
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -9273,22 +9499,25 @@ mod tests {
         let _ = chat.session.runtime.thinking_tx.send(Some("off".into()));
         chat.input = "/think".to_string();
         chat.submit();
-        let menu = chat.think_menu.as_ref().expect("菜单已打开");
-        assert_eq!(menu.current, 0, "● 记录打开时的生效档");
+        let menu = chat.think_menu.as_ref().expect("menu is open");
+        assert_eq!(menu.current, 0, "● records the active level at open time");
         // '3' jumps to medium (off=1, low=2, medium=3); digits are consumed, not typed.
         assert!(chat.on_key(KeyCode::Char('3'), KeyModifiers::empty()));
-        let menu = chat.think_menu.as_ref().expect("菜单已打开");
-        assert_eq!(THINK_LEVELS[menu.selected].0, "medium", "3 直达 medium");
-        assert_eq!(chat.input, "", "数字键被菜单消费，不进输入框");
+        let menu = chat.think_menu.as_ref().expect("menu is open");
+        assert_eq!(THINK_LEVELS[menu.selected].0, "medium", "3 jumps to medium");
+        assert_eq!(
+            chat.input, "",
+            "digit keys are consumed by the menu, never reaching the input"
+        );
         // '6' wraps-jumps to max; Enter persists.
         assert!(chat.on_key(KeyCode::Char('6'), KeyModifiers::empty()));
-        let menu = chat.think_menu.as_ref().expect("菜单已打开");
-        assert_eq!(THINK_LEVELS[menu.selected].0, "max", "6 直达 max");
+        let menu = chat.think_menu.as_ref().expect("menu is open");
+        assert_eq!(THINK_LEVELS[menu.selected].0, "max", "6 jumps to max");
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
         assert_eq!(
             chat.session.runtime.thinking.borrow().as_deref(),
             Some("off"),
-            "Esc 不改状态"
+            "Esc does not change the state"
         );
 
         // `s`: session-only — runtime switches, no settings write.
@@ -9296,20 +9525,23 @@ mod tests {
         chat.submit();
         assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
         assert!(chat.on_key(KeyCode::Char('s'), KeyModifiers::empty()));
-        assert!(chat.think_menu.is_none(), "s 确认后关闭菜单");
+        assert!(
+            chat.think_menu.is_none(),
+            "s closes the menu after confirming"
+        );
         assert_eq!(
             chat.session.runtime.thinking.borrow().as_deref(),
             Some("low"),
-            "s 切换 runtime"
+            "s switches the runtime"
         );
         let out = chat.slash_lines.join("\n");
         assert!(
-            out.contains("（仅本次会话）"),
-            "s 输出标注仅本次会话: {out}"
+            out.contains("(this session only)"),
+            "the s output is annotated this-session-only: {out}"
         );
         assert!(
             !home.join(".bingo/settings.json").exists(),
-            "s 不写 settings.json"
+            "s does not write settings.json"
         );
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -9727,21 +9959,33 @@ mod tests {
         let joined = visible(&mut chat, 120, 30);
         // CC two-line form: elapsed time merges into the result row, and only slow commands (>2s) show it.
         // Skill uses the ✦ icon (category icons: ⏺ built-in / ◆ MCP / ✦ Skill).
-        assert!(joined.contains("✦ Skill(pdf doc.md)"), "头行: {joined}");
-        assert!(joined.contains("✦ pdf"), "结果行只显示 ✦ 技能名: {joined}");
+        assert!(
+            joined.contains("✦ Skill(pdf doc.md)"),
+            "header row: {joined}"
+        );
+        assert!(
+            joined.contains("✦ pdf"),
+            "the result row shows only the ✦ skill name: {joined}"
+        );
         assert!(
             !joined.contains("read /tmp/skills/SKILL.md"),
-            "指针路径不进 TUI 结果行: {joined}"
+            "the pointer path never enters the TUI result row: {joined}"
         );
-        assert!(joined.contains("Ran in 3.2s"), "结果行带耗时: {joined}");
-        assert!(!joined.contains("3210ms"), "毫秒不再进头行: {joined}");
+        assert!(
+            joined.contains("Ran in 3.2s"),
+            "the result row carries the duration: {joined}"
+        );
+        assert!(
+            !joined.contains("3210ms"),
+            "milliseconds no longer enter the header row: {joined}"
+        );
     }
 
     /// Agent aligns with Task renderToolUseMessage=null: ToolStart creates no tool activity row,
     /// the message area is carried solely by the Watch progress row (the only display, updated in place).
     #[test]
     fn agent_tool_start_creates_no_tool_activity() {
-        assert!(is_hidden_tool("Agent"), "Agent 是隐藏工具");
+        assert!(is_hidden_tool("Agent"), "Agent is a hidden tool");
         let mut chat = test_chat();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
@@ -9754,7 +9998,7 @@ mod tests {
                 .activities
                 .iter()
                 .all(|a| !matches!(a.kind, ActivityKind::Tool(_))),
-            "Agent 不创建 Tool 活动: {:?}",
+            "Agent creates no Tool activity: {:?}",
             chat.messages[0]
                 .activities
                 .iter()
@@ -9764,10 +10008,10 @@ mod tests {
 
         // The Watch activity row is created normally (the only Agent display).
         let _ = chat.events.send(UiEvent::WatchEvent {
-            label: "Agent: 列出桌面目录内容".into(),
+            label: "Agent: listing desktop dir contents".into(),
             kind: crate::watch::WatchKind::Agent,
             status: WatchState::Running,
-            detail: Some("已产出 0 字符".into()),
+            detail: Some("produced 0 chars".into()),
             duration_ms: 0,
             payload: None,
             signal: None,
@@ -9778,14 +10022,14 @@ mod tests {
             .iter()
             .filter(|a| matches!(a.kind, ActivityKind::Watch(_)))
             .count();
-        assert_eq!(watch_rows, 1, "Watch 行唯一");
+        assert_eq!(watch_rows, 1, "a single Watch row");
 
         // Later events with the same label update in place, creating no new row.
         let _ = chat.events.send(UiEvent::WatchEvent {
-            label: "Agent: 列出桌面目录内容".into(),
+            label: "Agent: listing desktop dir contents".into(),
             kind: crate::watch::WatchKind::Agent,
             status: WatchState::Running,
-            detail: Some("已产出 43 字符".into()),
+            detail: Some("produced 43 chars".into()),
             duration_ms: 0,
             payload: None,
             signal: None,
@@ -9796,7 +10040,7 @@ mod tests {
             .iter()
             .filter(|a| matches!(a.kind, ActivityKind::Watch(_)))
             .count();
-        assert_eq!(watch_rows, 1, "同 label 事件不新建行");
+        assert_eq!(watch_rows, 1, "same-label events do not create new rows");
         let detail = chat.messages[0]
             .activities
             .iter()
@@ -9804,7 +10048,11 @@ mod tests {
                 ActivityKind::Watch(w) => w.detail.clone(),
                 _ => None,
             });
-        assert_eq!(detail.as_deref(), Some("已产出 43 字符"), "原地更新 detail");
+        assert_eq!(
+            detail.as_deref(),
+            Some("produced 43 chars"),
+            "the detail updates in place"
+        );
     }
 
     #[tokio::test]
@@ -9813,7 +10061,7 @@ mod tests {
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
         let _ = chat.events.send(UiEvent::WatchEvent {
-            label: "Agent: 长任务".into(),
+            label: "Agent: long task".into(),
             kind: crate::watch::WatchKind::Agent,
             status: WatchState::Running,
             detail: None,
@@ -9824,12 +10072,12 @@ mod tests {
         chat.drain_events();
         assert!(!chat.busy);
         let _ = chat.events.send(UiEvent::WatchEvent {
-            label: "Agent: 长任务".into(),
+            label: "Agent: long task".into(),
             kind: crate::watch::WatchKind::Agent,
             status: WatchState::Done,
-            detail: Some("完成".into()),
+            detail: Some("done".into()),
             duration_ms: 30000,
-            payload: Some(serde_json::json!("结果")),
+            payload: Some(serde_json::json!("result")),
             signal: None,
         });
         chat.drain_events();
@@ -9842,7 +10090,7 @@ mod tests {
     #[tokio::test]
     async fn signal_triggers_auto_turn_even_while_typing() {
         let mut chat = test_chat();
-        chat.input = "我还在打字".to_string();
+        chat.input = "still typing".to_string();
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
         let _ = chat.events.send(UiEvent::WatchEvent {
@@ -9859,16 +10107,16 @@ mod tests {
             label: "tail -f app.log".into(),
             kind: crate::watch::WatchKind::Command,
             status: WatchState::Running,
-            detail: Some("发现 1 个错误".into()),
+            detail: Some("found 1 error".into()),
             duration_ms: 12000,
             payload: None,
-            signal: Some("发现错误：ERROR boom".into()),
+            signal: Some("found error: ERROR boom".into()),
         });
         chat.drain_events();
         tokio::task::yield_now().await;
         chat.drain_events();
         assert!(chat.busy, "signal wakes despite typing");
-        assert_eq!(chat.input, "我还在打字", "input preserved");
+        assert_eq!(chat.input, "still typing", "input preserved");
     }
 
     /// Test watchable: state always Running.
@@ -9898,14 +10146,14 @@ mod tests {
         chat.stream_msg = Some(0);
         chat.busy = true;
         let watch = chat.session.watch.clone();
-        let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new());
+        let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new(), None);
         watch.set_state(
             id,
             crate::watch::WatchState::Done,
-            Some("完成".into()),
+            Some("done".into()),
             None,
         );
-        assert!(watch.has_wake_notifications(), "notification queued");
+        assert!(watch.has_wake_notifications(None), "notification queued");
         chat.drain_events();
         assert!(chat.busy, "still busy, no auto turn mid-turn");
         let _ = chat.events.send(UiEvent::TurnEnd);
@@ -9920,7 +10168,7 @@ mod tests {
     async fn draw_with_long_cjk_stream_and_activities_does_not_panic() {
         let mut chat = test_chat();
         chat.apply_turn_start();
-        let big = "clippy 基线在后台跑（任务 2）。以下是汇总与优化清单。\n\n---\n\n## 项目概览（子代理汇总）\n\n**bingo** 是 Rust 实现的本地 agent CLI。\n\n- **两种运行方式**：交互式 TUI 与 headless `--print`\n- **9 个内置工具** + MCP（stdio）适配；权限门五模式\n- **核心分层**：`api/`、`tool/`、`query.rs`、`tui.rs`\n- **watch 机制**：后台命令/子代理状态机\n";
+        let big = "the clippy baseline is running in the background (task 2). Here is the summary and optimization list.\n\n---\n\n## Project overview (subagent summary)\n\n**bingo** is a local agent CLI implemented in Rust.\n\n- **Two run modes**: interactive TUI and headless `--print`\n- **9 built-in tools** + MCP (stdio) adapters; five permission-gate modes\n- **Core layering**: `api/`, `tool/`, `query.rs`, `tui.rs`\n- **watch mechanism**: background command / subagent state machines\n";
         for chunk in big.chars().collect::<Vec<_>>().chunks(120) {
             let t: String = chunk.iter().collect();
             let _ = chat.events.send(UiEvent::TextDelta(t));
@@ -9937,18 +10185,18 @@ mod tests {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::WatchEvent {
-            label: "Agent: 核查".into(),
+            label: "Agent: review".into(),
             kind: crate::watch::WatchKind::Agent,
             status: WatchState::Running,
-            detail: Some("已产出 100 字符".into()),
+            detail: Some("produced 100 chars".into()),
             duration_ms: 5000,
             payload: None,
             signal: None,
         });
         chat.drain_events();
-        let _ = chat
-            .events
-            .send(UiEvent::TextDelta("后续正文，还有中文，继续。".into()));
+        let _ = chat.events.send(UiEvent::TextDelta(
+            "more body text, with more CJK, continuing.".into(),
+        ));
         chat.drain_events();
         let _ = chat
             .events
@@ -9964,10 +10212,10 @@ mod tests {
         let _ = chat.events.send(UiEvent::TurnEnd);
         chat.drain_events();
         let _ = chat.events.send(UiEvent::WatchEvent {
-            label: "Agent: 核查".into(),
+            label: "Agent: review".into(),
             kind: crate::watch::WatchKind::Agent,
             status: WatchState::Done,
-            detail: Some("完成".into()),
+            detail: Some("done".into()),
             duration_ms: 30000,
             payload: None,
             signal: None,
@@ -9983,7 +10231,7 @@ mod tests {
         chat.messages.push(msg(Role::Assistant, ""));
         chat.stream_msg = Some(0);
         let _ = chat.events.send(UiEvent::WatchEvent {
-            label: "Agent: 探索".into(),
+            label: "Agent: explore".into(),
             kind: crate::watch::WatchKind::Agent,
             status: WatchState::Running,
             detail: None,
@@ -9998,10 +10246,10 @@ mod tests {
         chat.stream_msg = None;
         chat.messages.push(msg(Role::Assistant, ""));
         let _ = chat.events.send(UiEvent::WatchEvent {
-            label: "Agent: 探索".into(),
+            label: "Agent: explore".into(),
             kind: crate::watch::WatchKind::Agent,
             status: WatchState::Done,
-            detail: Some("完成".into()),
+            detail: Some("done".into()),
             duration_ms: 40000,
             payload: None,
             signal: None,
@@ -10025,7 +10273,7 @@ mod tests {
             label: "watch ls".into(),
             kind: crate::watch::WatchKind::Command,
             status: WatchState::Idle,
-            detail: Some("第 1 轮".into()),
+            detail: Some("round 1".into()),
             duration_ms: 5000,
             payload: None,
             signal: None,
@@ -10055,7 +10303,7 @@ mod tests {
             label: "watch -n 2 ls".into(),
             kind: crate::watch::WatchKind::Command,
             status: WatchState::Idle,
-            detail: Some("第 2 轮".into()),
+            detail: Some("round 2".into()),
             duration_ms: 4000,
             payload: None,
             signal: None,
@@ -10073,7 +10321,7 @@ mod tests {
         assert_eq!(chat.messages[0].activities.len(), 1, "updates in place");
         let joined = visible(&mut chat, 120, 30);
         assert!(joined.contains("⏺ watch -n 2 ls"), "header: {joined}");
-        assert!(joined.contains("  ⎿  第 2 轮"), "结果行: {joined}");
+        assert!(joined.contains("  ⎿  round 2"), "result row: {joined}");
         assert!(chat.toggle_transcript());
         let joined = visible(&mut chat, 120, 30);
         assert!(joined.contains("done output"), "expanded: {joined}");
@@ -10225,7 +10473,7 @@ mod tests {
             "same-group Read joins group"
         );
         // Text appears: the group closes and later tools open a new one.
-        let _ = chat.events.send(UiEvent::TextDelta("结论…".into()));
+        let _ = chat.events.send(UiEvent::TextDelta("conclusion…".into()));
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolStart {
             name: "Grep".into(),
@@ -10363,12 +10611,12 @@ mod tests {
             .push(msg(Role::User, "first line\nsecond line\nthird"));
         chat.build_rows(40);
         let bubbles: Vec<&Row> = chat.doc.rows.iter().filter(|r| r.bg.is_some()).collect();
-        assert_eq!(bubbles.len(), 3, "每行一个气泡 Row");
+        assert_eq!(bubbles.len(), 3, "one bubble Row per line");
         for row in &bubbles {
             for seg in &row.line.segs {
                 assert!(
                     !seg.text.contains(['\n', '\r']),
-                    "Row 必须单行: {:?}",
+                    "a Row must be a single line: {:?}",
                     seg.text
                 );
             }
@@ -10386,12 +10634,12 @@ mod tests {
         chat.messages.push(msg(Role::User, text.trim()));
         chat.build_rows(30);
         let bubbles: Vec<&Row> = chat.doc.rows.iter().filter(|r| r.bg.is_some()).collect();
-        assert!(bubbles.len() > 1, "长消息折成多行");
+        assert!(bubbles.len() > 1, "a long message wraps into multiple rows");
         for row in bubbles {
             // 2 prefix columns + body ≤ width-1 (1 column of right padding inside the bubble).
             assert!(
                 text_width(&row.line.plain_text()) <= 29,
-                "行宽超限: {:?}",
+                "row width exceeded: {:?}",
                 row.line.plain_text()
             );
         }
@@ -10420,41 +10668,58 @@ mod tests {
             .iter()
             .find(|r| r.line.plain_text().contains('⎿'))
             .expect("hint row rendered");
-        assert!(!hint.line.plain_text().contains('\n'), "hint 单行化");
-        assert!(text_width(&hint.line.plain_text()) <= 60, "hint 按宽截断");
+        assert!(
+            !hint.line.plain_text().contains('\n'),
+            "the hint is single-lined"
+        );
+        assert!(
+            text_width(&hint.line.plain_text()) <= 60,
+            "the hint truncates by width"
+        );
     }
 
     /// The flush cursor counts by message boundary: re-layout after a width change (all row numbers change) never re-flushes.
     #[test]
     fn flush_cursor_survives_width_change() {
         let mut chat = test_chat();
-        chat.messages.push(msg(Role::User, "第一条消息"));
-        chat.messages.push(msg(Role::Assistant, "回复正文"));
+        chat.messages.push(msg(Role::User, "first message"));
+        chat.messages.push(msg(Role::Assistant, "reply body"));
         chat.build_rows(100);
-        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "空闲全部定稿");
-        assert_eq!(settled_segments(&chat), 3, "欢迎卡 + 2 条消息 = 3 段");
+        assert_eq!(
+            chat.doc.settled,
+            chat.doc.rows.len(),
+            "everything settles when idle"
+        );
+        assert_eq!(
+            settled_segments(&chat),
+            3,
+            "welcome card + 2 messages = 3 segments"
+        );
         chat.advance_flushed();
         assert_eq!(chat.flushed_segments, 3);
         assert_eq!(chat.tail_start, chat.doc.rows.len());
 
         // Rebuild after a width change: already-flushed segments no longer appear in the doc.
         chat.build_rows(40);
-        assert_eq!(chat.tail_start, 0, "重建后尾部从头算");
-        assert!(chat.doc.rows.is_empty(), "已落盘内容不重复构建");
+        assert_eq!(
+            chat.tail_start, 0,
+            "the tail restarts from zero after a rebuild"
+        );
+        assert!(chat.doc.rows.is_empty(), "flushed content is not rebuilt");
         let text: String = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
-        assert!(!text.contains("第一条消息"), "不重复打印");
+        assert!(!text.contains("first message"), "not printed again");
 
         // A new message only builds its own segment.
-        chat.messages.push(msg(Role::User, "第二条"));
+        chat.messages.push(msg(Role::User, "second message"));
         chat.build_rows(40);
         assert!(
             chat.doc
                 .rows
                 .iter()
-                .any(|r| r.line.plain_text().contains("第二条")),
-            "新消息进入文档"
+                .any(|r| r.line.plain_text().contains("second message")),
+            "the new message enters the document"
         );
-        assert_eq!(settled_segments(&chat), 1, "只新增 1 段");
+        assert_eq!(settled_segments(&chat), 1, "only 1 new segment");
     }
 
     /// Streaming (unsettled) content is not flushed: a full markdown re-parse rewrites earlier rows,
@@ -10465,21 +10730,35 @@ mod tests {
         chat.build_rows(80);
         chat.advance_flushed();
         let welcome_segments = chat.flushed_segments;
-        assert_eq!(welcome_segments, 1, "欢迎卡是第 0 段");
+        assert_eq!(welcome_segments, 1, "the welcome card is segment 0");
 
         chat.handle(UiEvent::TurnStart);
         chat.handle(UiEvent::TextDelta("| a | b |".into()));
         chat.build_rows(80);
-        assert_eq!(chat.doc.settled, 0, "流式内容不定稿");
-        assert!(!chat.doc.rows.is_empty(), "但仍渲染在动态尾部");
+        assert_eq!(chat.doc.settled, 0, "streaming content is not settled");
+        assert!(
+            !chat.doc.rows.is_empty(),
+            "but still renders in the dynamic tail"
+        );
         chat.advance_flushed();
-        assert_eq!(chat.flushed_segments, welcome_segments, "游标不动");
+        assert_eq!(
+            chat.flushed_segments, welcome_segments,
+            "the cursor does not move"
+        );
 
         chat.handle(UiEvent::TurnEnd);
         chat.build_rows(80);
-        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "回合结束后定稿");
+        assert_eq!(
+            chat.doc.settled,
+            chat.doc.rows.len(),
+            "everything settles after the turn ends"
+        );
         chat.advance_flushed();
-        assert_eq!(chat.flushed_segments, welcome_segments + 1, "消息落盘");
+        assert_eq!(
+            chat.flushed_segments,
+            welcome_segments + 1,
+            "the message is flushed"
+        );
     }
 
     /// `/clear` (and `/resume`) replace the message set wholesale → segment numbers become invalid, so the flush
@@ -10493,78 +10772,103 @@ mod tests {
         assert!(chat.flushed_segments > 0);
         chat.input = "/clear".to_string();
         chat.submit();
-        assert_eq!(chat.flushed_segments, 0, "游标复位");
-        assert!(chat.dirty, "复位后重建");
+        assert_eq!(chat.flushed_segments, 0, "the cursor resets");
+        assert!(chat.dirty, "a rebuild after the reset");
         chat.build_rows(80);
         assert!(
             chat.doc
                 .rows
                 .iter()
                 .any(|r| r.line.plain_text().contains("bingo")),
-            "欢迎卡重新出现"
+            "the welcome card reappears"
         );
     }
 
-    /// AskUserQuestion 回答是普通用户消息：进入消息流、按普通消息定稿
-    /// 落盘（段数推进），不再是指渲染在输入框上方的瞬态块。
+    /// An AskUserQuestion answer is an ordinary user message: it enters the message flow, settles like a normal message,
+    /// and flushes (the segment count advances) — no longer a transient block rendered above the input box.
     #[test]
     fn ask_answer_message_flushes_like_normal_message() {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::User, "hi"));
         chat.build_rows(80);
         chat.advance_flushed();
-        assert_eq!(chat.flushed_segments, 2, "欢迎卡 + 用户输入");
+        assert_eq!(chat.flushed_segments, 2, "welcome card + the user's input");
 
-        // 回答一条问题（走真实事件路径）。
+        // Answer one question (through the real event path).
         let (tx, _rx) = oneshot::channel();
         let mut request =
-            PermissionRequest::new("技术选型", "用哪个库？", vec!["A".into(), "B".into()]);
+            PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
         request.free_text = true;
         chat.pending_ask = Some((request, tx));
         chat.ask_focus = 0;
         assert!(
             chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
-            "Enter 选 A"
+            "Enter selects A"
         );
-        assert!(chat.pending_ask.is_none(), "对话框已关闭");
+        assert!(chat.pending_ask.is_none(), "the dialog closed");
 
-        // 回答作为一条用户消息进入消息流。
-        let answer = chat.messages.last().expect("回答消息已入流");
-        assert_eq!(answer.role, Role::User, "回答是用户消息");
+        // The answer enters the message flow as a user message.
+        let answer = chat
+            .messages
+            .last()
+            .expect("the answer message entered the flow");
+        assert_eq!(answer.role, Role::User, "the answer is a user message");
         assert!(
             answer.text.contains("User answered the questions:"),
             "{}",
             answer.text
         );
-        assert!(answer.text.contains("· 用哪个库？ → A"), "{}", answer.text);
-        // 与普通消息一样定稿与落盘：游标按消息段推进。
+        assert!(
+            answer.text.contains("· Which library? → A"),
+            "{}",
+            answer.text
+        );
+        // Settles and flushes like a normal message: the cursor advances by message segment.
         chat.build_rows(80);
-        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "回答消息已定稿");
+        assert_eq!(
+            chat.doc.settled,
+            chat.doc.rows.len(),
+            "the answer message is settled"
+        );
         chat.advance_flushed();
-        assert_eq!(chat.flushed_segments, 3, "欢迎卡 + hi + 回答消息全部落盘");
+        assert_eq!(
+            chat.flushed_segments, 3,
+            "the welcome card + hi + the answer message all flush"
+        );
     }
 
-    /// 回答消息随会话持久：TurnEnd 不再清除（此前是回合内瞬态块，
-    /// 回合结束即消失；现在是消息流的一部分）。
+    /// Answer messages persist with the session: TurnEnd no longer clears them (they used to be in-turn transient blocks,
+    /// vanishing at the turn end; now they are part of the message flow).
     #[test]
     fn ask_answer_message_persists_across_turn_end() {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::User, "hi"));
         let (tx, _rx) = oneshot::channel();
         let mut request =
-            PermissionRequest::new("技术选型", "用哪个库？", vec!["A".into(), "B".into()]);
+            PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
         request.free_text = true;
         chat.pending_ask = Some((request, tx));
         chat.ask_focus = 1;
         assert!(
             chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
-            "Enter 选 B"
+            "Enter selects B"
         );
 
         chat.handle(UiEvent::TurnEnd);
-        let answer = chat.messages.last().expect("回答消息仍在");
-        assert_eq!(answer.role, Role::User, "回合结束不清除回答消息");
-        assert!(answer.text.contains("· 用哪个库？ → B"), "{}", answer.text);
+        let answer = chat
+            .messages
+            .last()
+            .expect("the answer message is still there");
+        assert_eq!(
+            answer.role,
+            Role::User,
+            "the turn end does not clear the answer message"
+        );
+        assert!(
+            answer.text.contains("· Which library? → B"),
+            "{}",
+            answer.text
+        );
         chat.build_rows(80);
         let joined: String = chat
             .doc
@@ -10575,72 +10879,102 @@ mod tests {
             .join("\n");
         assert!(
             joined.contains("User answered the questions:"),
-            "回答仍渲染在消息流: {joined}"
+            "the answer still renders in the message flow: {joined}"
         );
     }
 
-    /// 回合中回答的消息排在流式 assistant 消息之后：顺序守卫——流式
-    /// 未结束前回答消息不得定稿（否则落盘会越过流式行把中间态打进
-    /// scrollback）；回合结束后两者一并定稿落盘。
+    /// An answer given mid-turn lands after the streaming assistant message: an ordering guard — while streaming
+    /// has not ended, the answer must not settle (otherwise flushing would cross the streaming rows and push the intermediate state into
+    /// scrollback); once the turn ends, both settle and flush together.
     #[test]
     fn ask_answer_after_streaming_message_settles_only_after_turn_end() {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::User, "hi"));
         chat.handle(UiEvent::TurnStart);
-        chat.handle(UiEvent::TextDelta("思考中…".into()));
+        chat.handle(UiEvent::TextDelta("thinking…".into()));
 
-        // 回合中回答（模型提问 → 用户回答，模型仍在流式）。
+        // An answer mid-turn (model asks → user answers, the model is still streaming).
         let (tx, _rx) = oneshot::channel();
-        let mut request = PermissionRequest::new("技术选型", "用哪个库？", vec!["A".into()]);
+        let mut request = PermissionRequest::new("Tech stack", "Which library?", vec!["A".into()]);
         request.free_text = true;
         chat.pending_ask = Some((request, tx));
         chat.ask_focus = 0;
-        assert!(chat.ask_key(KeyCode::Enter, KeyModifiers::empty()), "选 A");
-        assert_eq!(chat.messages.len(), 3, "hi + 流式 assistant + 回答");
+        assert!(
+            chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
+            "select A"
+        );
+        assert_eq!(chat.messages.len(), 3, "hi + streaming assistant + answer");
 
-        // 流式未结束：回答消息与流式消息都不定稿，定稿停在第一条用户消息。
+        // Streaming not finished: neither the answer nor the streaming message settles; settling stops at the first user message.
         chat.build_rows(80);
-        assert!(chat.message_settled(0), "前置用户消息已定稿");
-        assert!(!chat.message_settled(1), "流式消息不定稿");
-        assert!(!chat.message_settled(2), "回答消息在流式结束前不定稿");
-        assert_eq!(chat.doc.settled_marks.len(), 2, "欢迎卡 + 第一条用户消息");
+        assert!(
+            chat.message_settled(0),
+            "the leading user message is settled"
+        );
+        assert!(
+            !chat.message_settled(1),
+            "the streaming message is not settled"
+        );
+        assert!(
+            !chat.message_settled(2),
+            "the answer does not settle before the streaming ends"
+        );
+        assert_eq!(
+            chat.doc.settled_marks.len(),
+            2,
+            "welcome card + the first user message"
+        );
 
-        // 回合结束：全部定稿并落盘（含回答消息，顺序正确）。
+        // Turn ended: everything settles and flushes (including the answer, in the right order).
         chat.handle(UiEvent::TurnEnd);
         chat.build_rows(80);
-        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "回合结束后全部定稿");
+        assert_eq!(
+            chat.doc.settled,
+            chat.doc.rows.len(),
+            "everything settles after the turn ends"
+        );
         chat.advance_flushed();
         assert_eq!(
             chat.flushed_segments, 4,
-            "欢迎卡 + hi + 流式 + 回答全部落盘"
+            "the welcome card + hi + streaming + answer all flush"
         );
     }
 
-    /// 错误路径不经过 TurnEnd（start_turn 的 `Err(e)` 只发 UiEvent::Error）：
-    /// 回答消息仍在消息流中——旧瞬态块在错误路径下无人清理、悬挂到
-    /// /clear（24ba4d9 前旧 bug 的回归路径）；普通消息无状态可清，天然修复。
+    /// The error path never reaches TurnEnd (start_turn's `Err(e)` only emits UiEvent::Error):
+    /// the answer message stays in the message flow — the old transient block was never cleaned up on the error path and hung until
+    /// /clear (the regression path of a pre-24ba4d9 bug); an ordinary message has no state to clear, so it is fixed by design.
     #[test]
     fn ask_answer_message_survives_error_path() {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::User, "hi"));
         let (tx, _rx) = oneshot::channel();
         let mut request =
-            PermissionRequest::new("技术选型", "用哪个库？", vec!["A".into(), "B".into()]);
+            PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
         request.free_text = true;
         chat.pending_ask = Some((request, tx));
         chat.ask_focus = 0;
-        assert!(chat.ask_key(KeyCode::Enter, KeyModifiers::empty()), "选 A");
+        assert!(
+            chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
+            "select A"
+        );
 
         chat.handle(UiEvent::Error {
             code: "SERVER_ERROR",
-            msg: "回合失败".to_string(),
+            msg: "turn failed".to_string(),
             level: crate::error::ErrorLevel::Full,
             context: crate::error::ErrorContext::LongTurn,
         });
-        // 回答消息仍在消息流中且照常渲染。
-        let answer = chat.messages.last().expect("回答消息仍在");
+        // The answer message stays in the flow and renders as usual.
+        let answer = chat
+            .messages
+            .last()
+            .expect("the answer message is still there");
         assert_eq!(answer.role, Role::User);
-        assert!(answer.text.contains("· 用哪个库？ → A"), "{}", answer.text);
+        assert!(
+            answer.text.contains("· Which library? → A"),
+            "{}",
+            answer.text
+        );
         chat.build_rows(80);
         let joined: String = chat
             .doc
@@ -10651,12 +10985,12 @@ mod tests {
             .join("\n");
         assert!(
             joined.contains("User answered the questions:"),
-            "错误后回答仍渲染: {joined}"
+            "the answer still renders after the error: {joined}"
         );
     }
 
-    /// 顺序守卫必须是线性的：全量定稿（数百条消息）下 build_rows 的
-    /// 定稿判定不得指数爆炸（回归：逐前缀递归求值在 ~40 条时即卡死）。
+    /// The ordering guard must be linear: build_rows' settling decision under full settling (hundreds of messages)
+    /// must not blow up exponentially (regression: a per-prefix recursive evaluation froze at ~40 messages).
     #[test]
     fn message_settled_guard_is_linear_for_large_settled_sessions() {
         let mut chat = test_chat();
@@ -10664,11 +10998,11 @@ mod tests {
             chat.messages.push(msg(Role::User, "hi"));
             chat.messages.push(msg(Role::Assistant, "ok"));
         }
-        // 全量静态定稿：build_rows 会对每条消息做定稿判定。
+        // Fully static settling: build_rows decides settling for every message.
         chat.build_rows(80);
-        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "全部定稿");
+        assert_eq!(chat.doc.settled, chat.doc.rows.len(), "everything settles");
         for i in 0..chat.messages.len() {
-            assert!(chat.message_settled(i), "消息 {i} 定稿");
+            assert!(chat.message_settled(i), "message {i} settles");
         }
     }
 
@@ -10691,23 +11025,24 @@ mod tests {
         let mut printed = Vec::new();
         flush_frame(&mut chat, 100, &mut printed);
         let welcome = printed.len();
-        assert!(welcome > 0, "欢迎卡落盘");
+        assert!(welcome > 0, "the welcome card flushes");
 
-        chat.messages.push(msg(Role::User, "请解释一下这段代码"));
+        chat.messages
+            .push(msg(Role::User, "please explain this code"));
         flush_frame(&mut chat, 100, &mut printed);
         chat.handle(UiEvent::TurnStart);
         for chunk in [
-            "第一段文字。\n\n",
-            "## 标题\n\n",
-            "- 列表项一\n",
-            "- 列表项二\n",
+            "First paragraph.\n\n",
+            "## Heading\n\n",
+            "- item one\n",
+            "- item two\n",
         ] {
             chat.handle(UiEvent::TextDelta(chunk.into()));
             flush_frame(&mut chat, 100, &mut printed);
         }
         // Mid-turn resize: all row numbers change after re-layout.
         flush_frame(&mut chat, 60, &mut printed);
-        chat.handle(UiEvent::TextDelta("结尾。".into()));
+        chat.handle(UiEvent::TextDelta("ending.".into()));
         chat.handle(UiEvent::TurnEnd);
         flush_frame(&mut chat, 60, &mut printed);
         // Idling a few frames must print nothing more.
@@ -10715,7 +11050,7 @@ mod tests {
         for _ in 0..3 {
             flush_frame(&mut chat, 60, &mut printed);
         }
-        assert_eq!(printed.len(), after, "无新增落盘");
+        assert_eq!(printed.len(), after, "no new flushes");
 
         // The welcome card itself has repeated padded rows; deduping by content would false-positive — check only the message part.
         let mut seen: HashMap<&str, usize> = HashMap::new();
@@ -10726,12 +11061,18 @@ mod tests {
             *seen.entry(line.as_str()).or_default() += 1;
         }
         for (line, count) in &seen {
-            assert_eq!(*count, 1, "行重复落盘 {count} 次: {line:?}");
+            assert_eq!(*count, 1, "row flushed {count} times: {line:?}");
         }
         let joined = printed.join("\n");
-        assert!(joined.contains("请解释一下这段代码"), "用户消息落盘");
-        assert!(joined.contains("结尾。"), "定稿正文落盘");
-        assert!(chat.doc.rows.is_empty(), "全部落盘后尾部为空");
+        assert!(
+            joined.contains("please explain this code"),
+            "the user message is flushed"
+        );
+        assert!(joined.contains("ending."), "settled body flushes");
+        assert!(
+            chat.doc.rows.is_empty(),
+            "the tail is empty after everything flushes"
+        );
     }
 
     /// inline ctrl+o replay: a no-op with nothing new; with flushed content or expandable items,
@@ -10746,14 +11087,20 @@ mod tests {
 
         // After a message flushed → replay: the cursor rewinds and the rebuilt doc contains all segments;
         // clear the screen first, then write (top-aligned, same as resize).
-        chat.messages.push(msg(Role::Assistant, "回复"));
+        chat.messages.push(msg(Role::Assistant, "reply"));
         chat.build_rows(80);
         chat.advance_flushed();
         chat.build_rows(80);
-        assert!(chat.doc.rows.is_empty(), "全部落盘后尾部为空");
+        assert!(
+            chat.doc.rows.is_empty(),
+            "the tail is empty after everything flushes"
+        );
         assert!(chat.expand_transcript());
         assert!(chat.dump_transcript);
-        assert!(chat.force_redraw, "重放帧先清可见屏");
+        assert!(
+            chat.force_redraw,
+            "the replay frame first clears the visible screen"
+        );
         chat.build_rows(80);
         let text: String = chat
             .doc
@@ -10762,7 +11109,10 @@ mod tests {
             .map(|row| row.line.plain_text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("回复"), "重放文档含已落盘消息: {text}");
+        assert!(
+            text.contains("reply"),
+            "the replay document includes flushed messages: {text}"
+        );
 
         // Historical messages with collapse groups → everything expands before the replay.
         chat.dump_transcript = false;
@@ -10785,7 +11135,7 @@ mod tests {
                 .iter()
                 .flat_map(|m| &m.groups)
                 .all(|g| g.expanded || g.activities.is_empty()),
-            "全部折叠组已展开"
+            "all fold groups expanded"
         );
 
         // Fully expanded → the second press goes the collapse direction: back to aggregates (the app layer
@@ -10797,10 +11147,16 @@ mod tests {
                 .iter()
                 .flat_map(|m| &m.groups)
                 .all(|g| !g.expanded),
-            "折叠组全部闭合"
+            "all fold groups closed"
         );
-        assert!(!chat.transcript_fully_expanded(), "闭合后回到展开方向");
-        assert!(!chat.collapse_transcript(), "已全闭合，再闭合无变化");
+        assert!(
+            !chat.transcript_fully_expanded(),
+            "after closing, it returns to the expand direction"
+        );
+        assert!(
+            !chat.collapse_transcript(),
+            "already fully closed; closing again changes nothing"
+        );
     }
 
     /// The tick does not set dirty when idle (no doc rebuild); it does when dynamic elements exist.
@@ -10809,23 +11165,23 @@ mod tests {
         let mut chat = test_chat();
         chat.dirty = false;
         chat.tick();
-        assert!(!chat.dirty, "空闲不重建");
-        assert!(!chat.needs_tick(), "空闲不唤醒组件");
+        assert!(!chat.dirty, "no rebuild when idle");
+        assert!(!chat.needs_tick(), "idle does not wake components");
         chat.busy = true;
         chat.tick();
-        assert!(chat.dirty, "busy 时重建（spinner/耗时行）");
+        assert!(chat.dirty, "rebuilds while busy (spinner/duration row)");
         assert!(chat.needs_tick());
         // Pending events must also wake it up (otherwise they would never drain).
         chat.busy = false;
         chat.dirty = false;
         let _ = chat.events.send(UiEvent::Warning("w".into()));
-        assert!(chat.needs_tick(), "有待处理事件需唤醒");
+        assert!(chat.needs_tick(), "pending events need a wake-up");
 
         let mut slash_error = test_chat();
-        slash_error.push_slash_error("未知命令，请输入 /help。".to_string());
+        slash_error.push_slash_error("unknown command; type /help.".to_string());
         assert!(
             slash_error.needs_tick(),
-            "空闲时 slash 错误仍需驱动 tick，才能按错误 TTL 自动消失"
+            "even when idle, a slash error must drive the tick so the error TTL auto-expires it"
         );
         slash_error.slash_error_at = Some(
             std::time::Instant::now()
@@ -10835,9 +11191,12 @@ mod tests {
         slash_error.tick();
         assert!(
             slash_error.slash_error_lines.is_empty(),
-            "错误 TTL 到期后清除"
+            "cleared after the error TTL expires"
         );
-        assert!(!slash_error.needs_tick(), "清除后主机回到真正空闲");
+        assert!(
+            !slash_error.needs_tick(),
+            "after clearing, the host returns to true idle"
+        );
     }
 
     #[test]
@@ -10914,7 +11273,7 @@ mod tests {
         // A permission block appears → the boundary stays put (ask blocks never settle).
         let (tx, _rx) = tokio::sync::oneshot::channel();
         chat.pending_ask = Some((
-            PermissionRequest::new("允许执行 Bash", "cargo build", vec!["允许".into()]),
+            PermissionRequest::new("Allow running Bash", "cargo build", vec!["Allow".into()]),
             tx,
         ));
         chat.build_rows(100);
@@ -10936,9 +11295,9 @@ mod tests {
         let (tx, _rx) = oneshot::channel();
         chat.pending_ask = Some((
             PermissionRequest::new(
-                "允许执行 Bash",
+                "Allow running Bash",
                 "cargo build",
-                vec!["允许".into(), "拒绝".into()],
+                vec!["Allow".into(), "Deny".into()],
             ),
             tx,
         ));
@@ -10950,12 +11309,12 @@ mod tests {
             .map(|r| r.line.plain_text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("允许执行 Bash"), "title: {joined}");
+        assert!(joined.contains("Allow running Bash"), "title: {joined}");
         assert!(
-            joined.contains("❯ 1. 允许"),
+            joined.contains("❯ 1. Allow"),
             "focused first option: {joined}"
         );
-        assert!(joined.contains("2. 拒绝"), "option row: {joined}");
+        assert!(joined.contains("2. Deny"), "option row: {joined}");
         assert!(
             joined.contains("enter to select · ↑/↓ to navigate · esc to cancel"),
             "hint: {joined}"
@@ -10977,9 +11336,9 @@ mod tests {
         let mut chat = test_chat();
         let (tx, mut rx) = oneshot::channel();
         let mut request =
-            PermissionRequest::new("技术选型", "用哪个库？", vec!["A".into(), "B".into()]);
+            PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
         request.free_text = true;
-        request.descriptions = vec![None, Some("更快".to_string())];
+        request.descriptions = vec![None, Some("faster".to_string())];
         chat.pending_ask = Some((request, tx));
         chat.build_rows(100);
         let joined: String = chat
@@ -10991,7 +11350,7 @@ mod tests {
             .join("\n");
         assert!(joined.contains("1. A"), "option: {joined}");
         assert!(joined.contains("2. B"), "option: {joined}");
-        assert!(joined.contains("  更快"), "desc dim row: {joined}");
+        assert!(joined.contains("  faster"), "desc dim row: {joined}");
         assert!(joined.contains("3. Other"), "other option: {joined}");
         assert!(joined.contains("Type something."), "placeholder: {joined}");
         assert!(
@@ -11023,12 +11382,15 @@ mod tests {
         );
         assert!(chat.pending_ask.is_none(), "dialog closed");
         assert_eq!(rx.try_recv(), Ok(DialogAction::Answer("serde".to_string())));
-        // 回答进入消息流：一条普通用户消息（Q&A 回显）。
-        let answer = chat.messages.last().expect("回答消息已入流");
+        // The answer enters the message flow: an ordinary user message (Q&A echo).
+        let answer = chat
+            .messages
+            .last()
+            .expect("the answer message entered the flow");
         assert_eq!(answer.role, Role::User);
         assert_eq!(
             answer.text,
-            "User answered the questions:\n  · 用哪个库？ → serde"
+            "User answered the questions:\n  · Which library? → serde"
         );
         chat.build_rows(100);
         let joined: String = chat
@@ -11043,10 +11405,13 @@ mod tests {
             "result header: {joined}"
         );
         assert!(
-            joined.contains("· 用哪个库？ → serde"),
+            joined.contains("· Which library? → serde"),
             "result line: {joined}"
         );
-        assert!(joined.contains("❯ "), "回答以用户气泡渲染: {joined}");
+        assert!(
+            joined.contains("❯ "),
+            "the answer renders as a user bubble: {joined}"
+        );
     }
 
     #[test]
@@ -11054,18 +11419,21 @@ mod tests {
         let mut chat = test_chat();
         let (tx, mut rx) = oneshot::channel();
         let mut request =
-            PermissionRequest::new("技术选型", "用哪个库？", vec!["A".into(), "B".into()]);
+            PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
         request.free_text = true;
         chat.pending_ask = Some((request, tx));
         chat.ask_focus = 2;
         assert!(
             chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
-            "空 Other 提交"
+            "empty Other submit"
         );
         assert!(chat.pending_ask.is_none());
         assert_eq!(rx.try_recv(), Ok(DialogAction::Cancel));
-        // 拒绝同样进入消息流（一条普通用户消息）。
-        let declined = chat.messages.last().expect("拒绝消息已入流");
+        // A decline also enters the message flow (an ordinary user message).
+        let declined = chat
+            .messages
+            .last()
+            .expect("the decline message entered the flow");
         assert_eq!(declined.role, Role::User);
         assert_eq!(declined.text, ASK_DECLINED_TEXT);
         chat.build_rows(100);
@@ -11087,33 +11455,39 @@ mod tests {
         let mut chat = test_chat();
         let (tx, mut rx) = oneshot::channel();
         let mut request =
-            PermissionRequest::new("技术选型", "用哪个库？", vec!["A".into(), "B".into()]);
+            PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
         request.free_text = true;
         chat.pending_ask = Some((request, tx));
-        assert!(chat.ask_key(KeyCode::Down, KeyModifiers::empty()), "↓ 到 B");
+        assert!(chat.ask_key(KeyCode::Down, KeyModifiers::empty()), "↓ to B");
         assert_eq!(chat.ask_focus, 1);
         assert!(
             chat.ask_key(KeyCode::Down, KeyModifiers::empty()),
-            "↓ 到 Other"
+            "↓ to Other"
         );
         assert_eq!(chat.ask_focus, 2);
         assert!(
             chat.ask_key(KeyCode::Down, KeyModifiers::empty()),
-            "↓ 到底部不再移动"
+            "↓ at the bottom stops moving"
         );
         assert_eq!(chat.ask_focus, 2);
-        assert!(chat.ask_key(KeyCode::Up, KeyModifiers::empty()), "↑ 回 B");
+        assert!(
+            chat.ask_key(KeyCode::Up, KeyModifiers::empty()),
+            "↑ back to B"
+        );
         assert_eq!(chat.ask_focus, 1);
         assert!(
             chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
-            "Enter 选 B"
+            "Enter selects B"
         );
         assert_eq!(rx.try_recv(), Ok(DialogAction::Confirm(1)));
-        let answer = chat.messages.last().expect("回答消息已入流");
+        let answer = chat
+            .messages
+            .last()
+            .expect("the answer message entered the flow");
         assert_eq!(answer.role, Role::User);
         assert!(
-            answer.text.contains("· 用哪个库？ → B"),
-            "选项文本作为回答: {}",
+            answer.text.contains("· Which library? → B"),
+            "the option text is the answer: {}",
             answer.text
         );
     }
@@ -11126,12 +11500,12 @@ mod tests {
         chat.busy = true;
         assert!(
             chat.on_key(KeyCode::Esc, KeyModifiers::empty()),
-            "busy Esc 中断"
+            "busy Esc interrupts"
         );
-        assert!(chat.interrupted, "Esc 置 interrupted");
+        assert!(chat.interrupted, "Esc sets interrupted");
         assert!(
             *chat.cancel_tx.borrow(),
-            "中断信号已发送（send_replace 无条件生效）"
+            "the interrupt signal was sent (send_replace applies unconditionally)"
         );
         chat.busy = false;
         chat.interrupted = false;
@@ -11141,7 +11515,7 @@ mod tests {
         chat.cancel_tx.send_replace(false);
         assert!(
             !*cancel_rx.borrow(),
-            "新一轮开始前复位：receiver 读到 false"
+            "reset before a new turn starts: the receiver reads false"
         );
         drop(cancel_rx);
     }
@@ -11157,7 +11531,7 @@ mod tests {
         chat.cancel_tx.send_replace(false);
         assert!(
             !*cancel_rx.borrow(),
-            "receiver 全 drop 后 send_replace 仍复位（send 则失效）"
+            "after all receivers drop, send_replace still resets (send would fail)"
         );
     }
 
@@ -11175,19 +11549,28 @@ mod tests {
             url: "a.png".to_string(),
             meta: Some(meta.clone()),
         });
-        assert!(chat.images.contains_key("a.png"), "加载成功写入缓存");
+        assert!(
+            chat.images.contains_key("a.png"),
+            "a successful load lands in the cache"
+        );
         assert_eq!(chat.images["a.png"].cols, 5);
-        assert_eq!(chat.images_version, 2, "版本递增（初始 1）");
-        assert!(chat.reply_cache.is_empty(), "reply_cache 失效");
+        assert_eq!(
+            chat.images_version, 2,
+            "the version increments (starts at 1)"
+        );
+        assert!(chat.reply_cache.is_empty(), "reply_cache invalidated");
 
         chat.handle(UiEvent::ImageReady {
             url: "a.png".to_string(),
             meta: None,
         });
-        assert!(!chat.images.contains_key("a.png"), "失败移除缓存");
+        assert!(
+            !chat.images.contains_key("a.png"),
+            "a failure removes the cache entry"
+        );
         assert!(
             chat.warnings.iter().any(|(_, w)| w.contains("a.png")),
-            "警告提示"
+            "warning hint"
         );
     }
 
@@ -11196,10 +11579,10 @@ mod tests {
         let mut chat = test_chat();
         chat.apply_turn_start();
         chat.handle(UiEvent::TextDelta(
-            "![图](https://example.com/i.png)".to_string(),
+            "![img](https://example.com/i.png)".to_string(),
         ));
         chat.handle(UiEvent::TurnEnd);
-        assert!(chat.images.is_empty(), "无能力不加载");
+        assert!(chat.images.is_empty(), "no capability → not loaded");
         assert!(chat.images_pending.is_empty());
     }
 
@@ -11214,7 +11597,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&png)
         );
         chat.apply_turn_start();
-        chat.handle(UiEvent::TextDelta(format!("![图]({url})")));
+        chat.handle(UiEvent::TextDelta(format!("![img]({url})")));
         chat.handle(UiEvent::TurnEnd);
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
         while !chat.images.contains_key(&url) {
@@ -11225,7 +11608,10 @@ mod tests {
             chat.drain_all();
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert!(chat.images_pending.is_empty(), "在途集合已清空");
+        assert!(
+            chat.images_pending.is_empty(),
+            "the in-flight set is cleared"
+        );
         chat.build_rows(100);
         let image_rows = chat
             .doc
@@ -11233,9 +11619,9 @@ mod tests {
             .iter()
             .filter(|r| r.line.image.is_some())
             .count();
-        assert!(image_rows > 0, "文档出现图片块行");
+        assert!(image_rows > 0, "image-block rows appear in the document");
         let meta = &chat.images[&url];
-        assert_eq!(image_rows, meta.rows, "块行数 = meta.rows");
+        assert_eq!(image_rows, meta.rows, "block rows = meta.rows");
     }
 
     /// A message with images still loading never settles — otherwise the `#[image]` fallback rows would flush
@@ -11249,14 +11635,14 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(tiny_png())
         );
         chat.messages
-            .push(msg(Role::Assistant, &format!("![图]({url})")));
+            .push(msg(Role::Assistant, &format!("![img]({url})")));
         // Load in flight (the effect of load_message_images).
         chat.images_pending.insert(url.clone());
         chat.build_rows(100);
         assert_eq!(
             settled_segments(&chat),
             1,
-            "只有欢迎卡定稿，含在途图片的消息不定稿"
+            "only the welcome card settles; a message with in-flight images does not"
         );
 
         // Load succeeds → the message settles, and flushed rows carry an ImageRef (the block head emits the kitty sequence).
@@ -11270,7 +11656,11 @@ mod tests {
             meta: Some(meta),
         });
         chat.build_rows(100);
-        assert_eq!(settled_segments(&chat), 2, "图片就绪后消息定稿");
+        assert_eq!(
+            settled_segments(&chat),
+            2,
+            "the message settles once the image is ready"
+        );
         let image_rows: Vec<&Row> = chat
             .doc
             .rows
@@ -11278,7 +11668,7 @@ mod tests {
             .take(chat.doc.settled)
             .filter(|r| r.line.image.is_some())
             .collect();
-        assert!(!image_rows.is_empty(), "定稿行里有图片块");
+        assert!(!image_rows.is_empty(), "settled rows contain image blocks");
     }
 
     /// A failed load (including None from a timeout) also releases the block:
@@ -11289,16 +11679,24 @@ mod tests {
         let mut chat = test_chat();
         chat.image_cap = Some(ImageCap::default_cells());
         chat.messages
-            .push(msg(Role::Assistant, "![图](missing.png)"));
+            .push(msg(Role::Assistant, "![img](missing.png)"));
         chat.images_pending.insert("missing.png".to_string());
         chat.build_rows(100);
-        assert_eq!(settled_segments(&chat), 1, "在途时不定稿");
+        assert_eq!(
+            settled_segments(&chat),
+            1,
+            "does not settle while in flight"
+        );
         chat.handle(UiEvent::ImageReady {
             url: "missing.png".to_string(),
             meta: None,
         });
         chat.build_rows(100);
-        assert_eq!(settled_segments(&chat), 2, "失败后照常定稿");
+        assert_eq!(
+            settled_segments(&chat),
+            2,
+            "settles normally after a failure"
+        );
         let text: String = chat
             .doc
             .rows
@@ -11306,17 +11704,24 @@ mod tests {
             .map(|r| r.line.plain_text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("#[image ✗ 加载失败]"), "失败标记落稿: {text}");
+        assert!(
+            text.contains("#[image ✗ load failed]"),
+            "the failure marker lands in the settled text: {text}"
+        );
     }
 
     /// Without image capability, nothing enters the in-flight set and messages settle immediately (unchanged behavior).
     #[test]
     fn without_image_capability_messages_settle_immediately() {
         let mut chat = test_chat();
-        chat.messages.push(msg(Role::Assistant, "![图](a.png)"));
+        chat.messages.push(msg(Role::Assistant, "![img](a.png)"));
         chat.build_rows(100);
         assert!(chat.images_pending.is_empty());
-        assert_eq!(settled_segments(&chat), 2, "无能力不等图片");
+        assert_eq!(
+            settled_segments(&chat),
+            2,
+            "no capability → does not wait for images"
+        );
     }
 
     // ---- Interactions (CC feel): caret editing / history / multiline / double-press semantics / queueing ----
@@ -11369,20 +11774,20 @@ mod tests {
         type_text(&mut chat, "hello world");
         assert_eq!(chat.cursor, chat.input.len());
         assert!(ctrl(&mut chat, 'a'));
-        assert_eq!(chat.cursor, 0, "ctrl+a 行首");
+        assert_eq!(chat.cursor, 0, "ctrl+a to the line start");
         assert!(press(&mut chat, KeyCode::Right));
         press(&mut chat, KeyCode::Char('i'));
-        assert_eq!(chat.input, "hiello world", "插入在光标处");
+        assert_eq!(chat.input, "hiello world", "inserts at the cursor");
         assert!(ctrl(&mut chat, 'e'));
-        assert_eq!(chat.cursor, chat.input.len(), "ctrl+e 行尾");
+        assert_eq!(chat.cursor, chat.input.len(), "ctrl+e to the line end");
         assert!(alt(&mut chat, 'b'));
-        assert_eq!(chat.cursor, "hiello ".len(), "alt+b 退一个词");
+        assert_eq!(chat.cursor, "hiello ".len(), "alt+b back one word");
         assert!(alt(&mut chat, 'f'));
-        assert_eq!(chat.cursor, chat.input.len(), "alt+f 前进一个词");
+        assert_eq!(chat.cursor, chat.input.len(), "alt+f forward one word");
         // CJK moves by character and renders by display width.
-        chat.set_input("中文");
+        chat.set_input("ＡＢ");
         press(&mut chat, KeyCode::Left);
-        assert_eq!(chat.cursor, 3, "一次退一个汉字（3 字节）");
+        assert_eq!(chat.cursor, 3, "one char back at a time (3 bytes)");
     }
 
     /// ctrl+k/u/w delete into the kill buffer, ctrl+y pastes back; ctrl+d deletes after the caret.
@@ -11393,18 +11798,18 @@ mod tests {
         assert!(ctrl(&mut chat, 'w'));
         assert_eq!(chat.input, "alpha ");
         assert!(ctrl(&mut chat, 'y'));
-        assert_eq!(chat.input, "alpha beta", "ctrl+y 粘回");
+        assert_eq!(chat.input, "alpha beta", "ctrl+y pastes back");
         assert!(ctrl(&mut chat, 'a'));
         assert!(ctrl(&mut chat, 'k'));
-        assert_eq!(chat.input, "", "ctrl+k 删到行尾");
+        assert_eq!(chat.input, "", "ctrl+k deletes to the line end");
         assert!(ctrl(&mut chat, 'y'));
         assert_eq!(chat.input, "alpha beta");
         assert!(ctrl(&mut chat, 'u'));
-        assert_eq!(chat.input, "", "ctrl+u 删到行首");
+        assert_eq!(chat.input, "", "ctrl+u deletes to the line start");
         chat.set_input("abc");
         chat.cursor = 1;
         assert!(ctrl(&mut chat, 'd'));
-        assert_eq!(chat.input, "ac", "ctrl+d 删光标后字符");
+        assert_eq!(chat.input, "ac", "ctrl+d deletes the char after the cursor");
     }
 
     /// History: submitted entries go into history and persist; ↑/↓ navigate, back at the bottom restores the draft;
@@ -11418,7 +11823,7 @@ mod tests {
         assert_eq!(
             chat.history.entries(),
             ["first", "second"],
-            "连续重复只记一条"
+            "consecutive repeats record once"
         );
         // Persisted: a new session with the same home + cwd can read it.
         let reloaded =
@@ -11433,7 +11838,7 @@ mod tests {
         press(&mut chat, KeyCode::Down);
         assert_eq!(chat.input, "second");
         press(&mut chat, KeyCode::Down);
-        assert_eq!(chat.input, "draft", "回到底部恢复 draft");
+        assert_eq!(chat.input, "draft", "back at the bottom, draft is restored");
         let _ = std::fs::remove_dir_all(&chat.session.home);
     }
 
@@ -11444,24 +11849,33 @@ mod tests {
         let mut chat = chat_with_history("multiline");
         chat.width = 80;
         type_text(&mut chat, "first\\");
-        assert!(press(&mut chat, KeyCode::Enter), "\\+Enter 换行");
+        assert!(press(&mut chat, KeyCode::Enter), "\\+Enter newline");
         type_text(&mut chat, "second");
-        assert!(ctrl(&mut chat, 'j'), "ctrl+j 换行");
+        assert!(ctrl(&mut chat, 'j'), "ctrl+j newline");
         type_text(&mut chat, "third");
         assert_eq!(chat.input, "first\nsecond\nthird");
         let rows = chat.prompt_lines();
-        assert_eq!(rows.len(), 3, "三行输入 = 三个 Row");
+        assert_eq!(rows.len(), 3, "three lines of input = three Rows");
         for row in &rows {
-            assert!(!row.plain_text().contains('\n'), "行内不含换行");
+            assert!(!row.plain_text().contains('\n'), "rows contain no newline");
         }
-        assert!(rows[2].plain_text().contains('▋'), "光标画在末行");
+        assert!(
+            rows[2].plain_text().contains('▋'),
+            "the caret is drawn on the last row"
+        );
         // ↑ moves along visual rows within a multi-line input before switching history.
         chat.record_history("older");
         press(&mut chat, KeyCode::Up);
-        assert_eq!(chat.input, "first\nsecond\nthird", "行内移动不动文本");
+        assert_eq!(
+            chat.input, "first\nsecond\nthird",
+            "in-line movement does not touch the text"
+        );
         press(&mut chat, KeyCode::Up);
         press(&mut chat, KeyCode::Up);
-        assert_eq!(chat.input, "older", "到首行才切历史");
+        assert_eq!(
+            chat.input, "older",
+            "history switches only at the first line"
+        );
         let _ = std::fs::remove_dir_all(&chat.session.home);
     }
 
@@ -11487,14 +11901,14 @@ mod tests {
         let t0 = std::time::Instant::now();
         chat.busy = true;
         chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
-        assert!(chat.interrupted, "busy → 中断");
+        assert!(chat.interrupted, "busy → interrupt");
         assert!(!chat.exit);
 
         chat.busy = false;
         chat.set_input("draft");
         chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
-        assert_eq!(chat.input, "", "有文本先清空");
-        assert!(!chat.exit, "清空不退出");
+        assert_eq!(chat.input, "", "non-empty input clears first");
+        assert!(!chat.exit, "clearing does not exit");
         assert_eq!(
             chat.history.entries().last().map(String::as_str),
             Some("draft")
@@ -11502,13 +11916,13 @@ mod tests {
 
         chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
         assert_eq!(chat.notice, Some("Press ctrl-c again to exit"));
-        assert!(!chat.exit, "第一次只提示");
+        assert!(!chat.exit, "the first time only hints");
         chat.on_key_at(
             KeyCode::Char('c'),
             KeyModifiers::CONTROL,
             t0 + CTRL_C_WINDOW,
         );
-        assert!(chat.exit, "窗口内第二次退出");
+        assert!(chat.exit, "the second press inside the window exits");
 
         // The counter restarts after the window expires.
         let mut chat = chat_with_history("ctrlc2");
@@ -11518,7 +11932,7 @@ mod tests {
             KeyModifiers::CONTROL,
             t0 + CTRL_C_WINDOW + std::time::Duration::from_millis(1),
         );
-        assert!(!chat.exit, "超窗不退出，只重新提示");
+        assert!(!chat.exit, "outside the window: no exit, just a new hint");
         assert_eq!(chat.notice, Some("Press ctrl-c again to exit"));
         let _ = std::fs::remove_dir_all(&chat.session.home);
     }
@@ -11530,21 +11944,27 @@ mod tests {
         let t0 = std::time::Instant::now();
         chat.busy = true;
         chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
-        assert!(chat.interrupted, "busy → 中断");
+        assert!(chat.interrupted, "busy → interrupt");
 
         chat.busy = false;
         chat.set_input("/");
         assert!(!chat.slash_suggestions.is_empty());
         chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
-        assert!(chat.slash_suggestions.is_empty(), "先关下拉");
-        assert_eq!(chat.input, "", "斜杠查询随下拉一起清（不再残留 //）");
+        assert!(
+            chat.slash_suggestions.is_empty(),
+            "the dropdown closes first"
+        );
+        assert_eq!(
+            chat.input, "",
+            "the slash query clears with the dropdown (no more leftover //)"
+        );
 
         chat.set_input("hello");
         chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
-        assert_eq!(chat.input, "hello", "第一次只预备");
+        assert_eq!(chat.input, "hello", "the first press only arms it");
         assert_eq!(chat.notice, Some("Press esc again to clear"));
         chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
-        assert_eq!(chat.input, "", "双击清空");
+        assert_eq!(chat.input, "", "double-press clears");
         assert_eq!(
             chat.history.entries().last().map(String::as_str),
             Some("hello")
@@ -11562,12 +11982,16 @@ mod tests {
         assert_eq!(
             chat.permission_mode_label(),
             "acceptEdits",
-            "footer 徽标同源"
+            "the footer badge shares a source"
         );
         press(&mut chat, KeyCode::BackTab);
         assert_eq!(chat.permission_mode, PermissionMode::Plan);
         press(&mut chat, KeyCode::BackTab);
-        assert_eq!(chat.permission_mode, PermissionMode::Default, "循环回默认");
+        assert_eq!(
+            chat.permission_mode,
+            PermissionMode::Default,
+            "cycles back to default"
+        );
         // The turn's Session carries the current mode (Session is immutable in Arc → derive a copy).
         press(&mut chat, KeyCode::BackTab);
         assert_eq!(
@@ -11577,7 +12001,7 @@ mod tests {
         assert_eq!(
             chat.session.permission_mode,
             PermissionMode::Default,
-            "原 Session 不变"
+            "the original Session is unchanged"
         );
 
         // A session started in bypass only toggles between bypass ↔ default (never introduces a new dangerous mode).
@@ -11606,7 +12030,7 @@ mod tests {
                 is_slash: false
             }]
         );
-        assert_eq!(chat.input, "", "入队后输入清空");
+        assert_eq!(chat.input, "", "the input clears after enqueueing");
         chat.set_input("second queued");
         chat.submit();
         assert_eq!(chat.queued.len(), 2);
@@ -11619,7 +12043,7 @@ mod tests {
         assert_eq!(chat.queued.len(), 1);
     }
 
-    /// Busy dispatch (契约 §4.2): instant commands run immediately and never reset
+    /// Busy dispatch (contract §4.2): instant commands run immediately and never reset
     /// `busy`; other slash commands queue with the slash marker; plain messages queue.
     #[test]
     fn busy_dispatch_runs_instant_and_queues_the_rest() {
@@ -11635,12 +12059,12 @@ mod tests {
         assert_eq!(
             chat.session.runtime.thinking.borrow().as_deref(),
             Some("xhigh"),
-            "忙时白名单命令立即生效"
+            "whitelisted commands apply immediately while busy"
         );
-        assert!(chat.busy, "白名单路径不重置 busy");
-        assert!(chat.queued.is_empty(), "白名单命令不入队");
+        assert!(chat.busy, "the whitelist path does not reset busy");
+        assert!(chat.queued.is_empty(), "whitelisted commands do not queue");
         let out = chat.slash_lines.join("\n");
-        assert!(out.contains("✓ 思考级别已设置: xhigh"), "{out}");
+        assert!(out.contains("✓ thinking level set: xhigh"), "{out}");
 
         // Non-instant slash: queued with the slash marker (never sent as a prompt).
         chat.set_input("/clear");
@@ -11651,7 +12075,7 @@ mod tests {
                 text: "/clear".into(),
                 is_slash: true
             }],
-            "非白名单 slash 命令带标记入队"
+            "non-whitelisted slash commands queue with a marker"
         );
 
         // Plain message: queued without the marker.
@@ -11689,20 +12113,20 @@ mod tests {
         assert_eq!(
             chat.session.runtime.thinking.borrow().as_deref(),
             Some("low"),
-            "队列中的 slash 命令按命令执行"
+            "queued slash commands run as commands"
         );
         let out = all_slash_text(&chat);
         assert!(
-            out.contains("未知命令: /nope") && out.contains("code=UNKNOWN_COMMAND"),
-            "未知命令走指导而非发模型: {out}"
+            out.contains("unknown command: /nope") && out.contains("code=UNKNOWN_COMMAND"),
+            "unknown commands get guidance instead of the model: {out}"
         );
-        assert!(chat.busy, "最后一条普通消息开新回合");
+        assert!(chat.busy, "the last plain message starts a new turn");
         assert_eq!(chat.messages.last().map(|m| m.role), Some(Role::User));
         assert!(
             chat.messages
                 .last()
                 .is_some_and(|m| m.text == "the message"),
-            "普通消息经 start_turn 发给模型"
+            "plain messages reach the model via start_turn"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -11716,12 +12140,12 @@ mod tests {
         // No entities: takes no rows; ctrl+g shows a hint.
         assert!(chat.entity_rows(80).is_empty());
         assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
-        assert!(chat.notice.is_some(), "空态提示");
+        assert!(chat.notice.is_some(), "empty-state hint");
         assert!(chat.entity_focus.is_none());
         // Create one agent instance + one channel.
         chat.session
             .agents
-            .insert("scout", None, "调研".into(), chat.session.clone());
+            .insert("scout", None, "research".into(), chat.session.clone());
         chat.session
             .channels
             .create("table", vec![], crate::channels::ChannelMode::Serial)
@@ -11746,7 +12170,7 @@ mod tests {
             joined
                 .last()
                 .unwrap_or(&String::new())
-                .contains("enter 打开")
+                .contains("enter opens")
         );
         // ↓ to the channel, Enter opens it.
         assert!(chat.on_key(KeyCode::Down, KeyModifiers::empty()));
@@ -11754,9 +12178,9 @@ mod tests {
         assert_eq!(
             chat.open_entity,
             Some(EntityOpen::Channel("table".into())),
-            "选中频道"
+            "channel selected"
         );
-        assert!(chat.entity_focus.is_none(), "打开后退出聚焦");
+        assert!(chat.entity_focus.is_none(), "focus exits after opening");
         // After refocusing, Esc only closes the selector (does not trigger global Esc semantics).
         let _ = chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL);
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
@@ -11789,14 +12213,14 @@ mod tests {
         chat.height = 40;
         press(&mut chat, KeyCode::Char('?'));
         assert!(chat.help_visible);
-        assert!(!chat.help_lines().is_empty(), "面板有内容");
-        assert!(chat.input.is_empty(), "? 不入输入");
+        assert!(!chat.help_lines().is_empty(), "the panel has content");
+        assert!(chat.input.is_empty(), "? does not enter the input");
         press(&mut chat, KeyCode::Char('?'));
-        assert!(!chat.help_visible, "再按关闭");
+        assert!(!chat.help_visible, "pressed again, closes");
         assert!(chat.help_lines().is_empty());
         type_text(&mut chat, "why");
         press(&mut chat, KeyCode::Char('?'));
-        assert_eq!(chat.input, "why?", "有文本时是普通字符");
+        assert_eq!(chat.input, "why?", "with text present it is a plain char");
         assert!(!chat.help_visible);
     }
 
@@ -11810,10 +12234,19 @@ mod tests {
         let tall = chat.help_lines().len();
         chat.height = 14;
         let short = chat.help_lines().len();
-        assert!(short < tall, "矮终端面板更短: {short} vs {tall}");
-        assert!(short + 9 <= 14, "面板 + 其余 chrome 不超过终端高度");
+        assert!(
+            short < tall,
+            "short terminals get a shorter panel: {short} vs {tall}"
+        );
+        assert!(
+            short + 9 <= 14,
+            "the panel + remaining chrome fit within the terminal height"
+        );
         chat.height = 6;
-        assert!(chat.help_lines().is_empty(), "极矮终端不显示面板");
+        assert!(
+            chat.help_lines().is_empty(),
+            "very short terminals show no panel"
+        );
     }
 
     /// ctrl+s stash/restore (with the caret), ctrl+_ undo, ctrl+t task area, ctrl+l repaint.
@@ -11823,12 +12256,12 @@ mod tests {
         type_text(&mut chat, "stashed");
         chat.cursor = 3;
         assert!(ctrl(&mut chat, 's'));
-        assert_eq!(chat.input, "", "ctrl+s 暂存并清空");
+        assert_eq!(chat.input, "", "ctrl+s stashes and clears");
         assert!(ctrl(&mut chat, 's'));
         assert_eq!(
             (chat.input.as_str(), chat.cursor),
             ("stashed", 3),
-            "恢复含光标"
+            "the restore includes the caret"
         );
 
         // Undo: a bulk edit (kill) steps back one.
@@ -11836,17 +12269,17 @@ mod tests {
         chat.cursor = chat.input.len();
         assert!(ctrl(&mut chat, 'w'));
         assert_eq!(chat.input, "undo ");
-        assert!(ctrl(&mut chat, '7'), "ctrl+_ 到达时是 ctrl+7");
-        assert_eq!(chat.input, "undo me", "撤销回到删除前");
+        assert!(ctrl(&mut chat, '7'), "ctrl+_ arrives as ctrl+7");
+        assert_eq!(chat.input, "undo me", "undo returns to before the deletion");
 
         assert!(!chat.tasks_visible);
         assert!(ctrl(&mut chat, 't'));
-        assert!(chat.tasks_visible, "ctrl+t 显示任务区");
+        assert!(chat.tasks_visible, "ctrl+t shows the task area");
         assert!(ctrl(&mut chat, 't'));
         assert!(!chat.tasks_visible);
 
         assert!(ctrl(&mut chat, 'l'));
-        assert!(chat.force_redraw, "ctrl+l 请求整屏重画");
+        assert!(chat.force_redraw, "ctrl+l requests a full-screen redraw");
     }
 
     /// bash mode: empty-input Esc/backspace/ctrl+u exit; Tab completes from this session's `!` history.
@@ -11857,14 +12290,14 @@ mod tests {
         press(&mut chat, KeyCode::Char('!'));
         assert!(chat.bash_mode);
         press(&mut chat, KeyCode::Esc);
-        assert!(!chat.bash_mode, "空输入 Esc 退出 shell 模式");
+        assert!(!chat.bash_mode, "empty input + Esc exits shell mode");
         press(&mut chat, KeyCode::Char('!'));
         assert!(ctrl(&mut chat, 'u'));
-        assert!(!chat.bash_mode, "空输入 ctrl+u 退出");
+        assert!(!chat.bash_mode, "empty input + ctrl+u exits");
         press(&mut chat, KeyCode::Char('!'));
         type_text(&mut chat, "cargo");
         press(&mut chat, KeyCode::Tab);
-        assert_eq!(chat.input, "cargo test --all", "Tab 前缀补全");
+        assert_eq!(chat.input, "cargo test --all", "Tab prefix completion");
     }
 
     /// Paste burst: Enter inside a burst is a newline, not send; ≥10 lines fold into a placeholder,
@@ -11883,16 +12316,16 @@ mod tests {
             now += fast;
             chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now);
         }
-        assert!(!chat.busy, "粘贴中的 Enter 不发送");
+        assert!(!chat.busy, "Enter during a paste does not send");
         assert!(
             chat.input.starts_with("[Pasted text #1 +"),
-            "占位符: {}",
+            "placeholder: {}",
             chat.input
         );
         assert_eq!(chat.pastes.len(), 1);
         assert!(
             chat.expand_pastes(&chat.input).contains("line11"),
-            "提交时展开真实内容"
+            "the real content expands on submit"
         );
 
         // Normal typing (wide intervals): Enter submits as usual instead of inserting a newline.
@@ -11906,7 +12339,7 @@ mod tests {
         }
         now += slow;
         chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now);
-        assert_eq!(chat.input, "", "Enter 提交而不是换行");
+        assert_eq!(chat.input, "", "Enter submits instead of a newline");
         assert_eq!(
             chat.queued,
             vec![QueuedInput {
@@ -11924,16 +12357,16 @@ mod tests {
         chat.set_input("ab");
         chat.cursor = 1;
         chat.on_paste("X");
-        assert_eq!(chat.input, "aXb", "插在光标处");
+        assert_eq!(chat.input, "aXb", "inserts at the cursor");
         assert_eq!(chat.cursor, 2);
         chat.undo_edit();
-        assert_eq!(chat.input, "ab", "一次粘贴 = 一步撤销");
+        assert_eq!(chat.input, "ab", "one paste = one undo step");
 
         // Short chunks do not fold (below the threshold).
         let mut chat = chat_with_history("paste-short");
         chat.on_paste("line1\nline2");
         assert_eq!(chat.input, "line1\nline2");
-        assert!(chat.pastes.is_empty(), "未到阈值不折叠");
+        assert!(chat.pastes.is_empty(), "below the threshold, no folding");
 
         // ≥ PASTE_COLLAPSE_LINES lines fold; CR and CRLF both count as newlines.
         let mut chat = chat_with_history("paste-fold");
@@ -11943,15 +12376,18 @@ mod tests {
         chat.on_paste(&body);
         assert!(
             chat.input.starts_with("[Pasted text #1 +"),
-            "占位符: {}",
+            "placeholder: {}",
             chat.input
         );
         assert_eq!(chat.cursor, chat.input.len());
         assert!(
             chat.expand_pastes(&chat.input).contains("line9"),
-            "提交时展开真实内容"
+            "the real content expands on submit"
         );
-        assert!(!chat.expand_pastes(&chat.input).contains('\r'), "CR 已归一");
+        assert!(
+            !chat.expand_pastes(&chat.input).contains('\r'),
+            "CR is normalized"
+        );
 
         // An empty paste does nothing (no undo-stack write).
         let mut chat = chat_with_history("paste-empty");
@@ -11980,18 +12416,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bingo-img-dir-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let png = test_png_path(&dir, "a.png", 8, 8);
-        chat.set_input(format!("看一下这张图\n{}", png.display()));
-        chat.busy = true; // 走排队路径：不需要 tokio runtime
+        chat.set_input(format!("take a look at this image\n{}", png.display()));
+        chat.busy = true; // take the queue path: no tokio runtime needed
         chat.submit();
         assert_eq!(chat.queued.len(), 1);
         assert_eq!(
             chat.queued[0].text,
-            format!("看一下这张图\n#[image 1]"),
-            "路径行替换为占位：{}",
+            format!("take a look at this image\n#[image 1]"),
+            "the path line becomes a placeholder: {}",
             chat.queued[0].text
         );
-        assert_eq!(chat.attachments.len(), 1);
-        assert_eq!(chat.attachments[0].media_type, "image/png");
+        assert_eq!(chat.session.attachments.len(), 1);
+        assert_eq!(
+            chat.session.attachments.get(1).unwrap().media_type,
+            "image/png"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -12004,14 +12443,14 @@ mod tests {
         let png = test_png_path(&dir, "b.png", 4, 4);
         let txt = dir.join("note.txt");
         std::fs::write(&txt, "hi").unwrap();
-        chat.set_input(format!("![图]({})\n{}", png.display(), txt.display()));
+        chat.set_input(format!("![img]({})\n{}", png.display(), txt.display()));
         chat.busy = true;
         chat.submit();
         assert_eq!(
             chat.queued[0].text,
             format!("#[image 1]\n{}", txt.display())
         );
-        assert_eq!(chat.attachments.len(), 1, "txt 不注册");
+        assert_eq!(chat.session.attachments.len(), 1, "txt is not registered");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -12025,12 +12464,19 @@ mod tests {
         let b = test_png_path(&dir, "b.png", 6, 6);
         let id1 = chat.register_image_file(&a).unwrap();
         let id2 = chat.register_image_file(&b).unwrap();
-        let text =
-            format!("看 #[image {id1}] 和 #[image {id2}] 再看 #[image {id1}] 和 #[image 99]");
+        let text = format!(
+            "look at #[image {id1}] and #[image {id2}], then #[image {id1}] and #[image 99]"
+        );
         let imgs = chat.resolve_images(&text);
-        assert_eq!(imgs.len(), 2, "去重 + 越界忽略");
-        assert_eq!(imgs[0].data, chat.attachments[id1 - 1].data);
-        assert_eq!(imgs[1].data, chat.attachments[id2 - 1].data);
+        assert_eq!(imgs.len(), 2, "dedup + out-of-range ignored");
+        assert_eq!(
+            imgs[0].data,
+            chat.session.attachments.get(id1).unwrap().data
+        );
+        assert_eq!(
+            imgs[1].data,
+            chat.session.attachments.get(id2).unwrap().data
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -12044,19 +12490,19 @@ mod tests {
         }
         chat.set_input("keep");
         assert!(ctrl(&mut chat, 'r'));
-        assert!(chat.search.is_some(), "进入搜索态");
-        let line = chat.search_line().expect("搜索行");
+        assert!(chat.search.is_some(), "enters search mode");
+        let line = chat.search_line().expect("search row");
         assert!(
             line.starts_with("(reverse-i-search)`': cargo build"),
             "{line}"
         );
-        assert!(line.contains("enter 提交"), "键位提示可见: {line}");
+        assert!(line.contains("enter submit"), "key hints visible: {line}");
         type_text(&mut chat, "cargo");
         assert_eq!(
             chat.search.as_ref().and_then(|s| s.hit.clone()).as_deref(),
             Some("cargo build")
         );
-        assert!(ctrl(&mut chat, 'r'), "再按取更旧命中");
+        assert!(ctrl(&mut chat, 'r'), "pressing again finds an older match");
         assert_eq!(
             chat.search.as_ref().and_then(|s| s.hit.clone()).as_deref(),
             Some("cargo test")
@@ -12064,15 +12510,15 @@ mod tests {
         // In search mode, the input row shows the hit.
         assert_eq!(chat.prompt_lines()[0].plain_text(), "cargo test");
         press(&mut chat, KeyCode::Tab);
-        assert!(chat.search.is_none(), "Tab 采纳并退出搜索");
+        assert!(chat.search.is_none(), "Tab accepts and exits search");
         assert_eq!(chat.input, "cargo test");
 
         // ctrl+c cancels: the input restores to its pre-search content.
         chat.set_input("keep");
         ctrl(&mut chat, 'r');
         ctrl(&mut chat, 'c');
-        assert!(chat.search.is_none(), "ctrl+c 退出搜索");
-        assert_eq!(chat.input, "keep", "取消不改输入");
+        assert!(chat.search.is_none(), "ctrl+c exits search");
+        assert_eq!(chat.input, "keep", "cancelling does not change the input");
         let _ = std::fs::remove_dir_all(&chat.session.home);
     }
 
@@ -12086,12 +12532,16 @@ mod tests {
             .thinking_tx
             .send(Some("high".to_string()));
         alt(&mut chat, 't');
-        assert_eq!(*chat.session.runtime.thinking.borrow(), None, "关闭思考");
+        assert_eq!(
+            *chat.session.runtime.thinking.borrow(),
+            None,
+            "thinking turned off"
+        );
         alt(&mut chat, 't');
         assert_eq!(
             chat.session.runtime.thinking.borrow().as_deref(),
             Some("high"),
-            "恢复上次等级"
+            "restores the last level"
         );
     }
 
@@ -12130,8 +12580,15 @@ mod tests {
             .find(|l| l.plain_text() == "☒ done one")
             .and_then(|l| l.segs.last())
             .expect("done seg");
-        assert!(done_text.style.strikethrough, "已完成项带删除线语义");
-        assert_eq!(done_text.style.fg, Some(chat.theme.inactive), "并弱化呈现");
+        assert!(
+            done_text.style.strikethrough,
+            "done items carry strikethrough semantics"
+        );
+        assert_eq!(
+            done_text.style.fg,
+            Some(chat.theme.inactive),
+            "and render dimmed"
+        );
     }
 
     /// Empty-input placeholder hint (CC placeholder); gone once there is input.
@@ -12148,7 +12605,7 @@ mod tests {
         assert_eq!(text, format!("▋{}", rest.as_str()), "{text}");
         chat.set_input("x");
         let text = chat.prompt_lines()[0].plain_text();
-        assert_eq!(text, "x▋", "有输入即无占位");
+        assert_eq!(text, "x▋", "with input there is no placeholder");
     }
 
     /// A 4×2 solid-color PNG (for tests).
@@ -12177,10 +12634,13 @@ mod tests {
         let fx = error_fixtures()
             .into_iter()
             .find(|f| f.code == "AUTH_REQUIRED")
-            .expect("FX-04 在清单中");
+            .expect("FX-04 is in the fixture list");
         fx.inject(&chat.events);
         chat.drain_events();
-        let err = chat.last_error.as_ref().expect("错误态已记录");
+        let err = chat
+            .last_error
+            .as_ref()
+            .expect("the error state was recorded");
         assert_eq!(err.code, "AUTH_REQUIRED");
         assert_eq!(err.level, ErrorLevel::Full);
         let frame = Frame::assemble(&chat, Size::new(80, 24));
@@ -12190,16 +12650,22 @@ mod tests {
             .map(|r| r.line.plain_text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("出错了"), "整屏错误态标题: {joined}");
+        assert!(
+            joined.contains("something went wrong"),
+            "fullscreen error-state title: {joined}"
+        );
         assert!(
             joined.contains("code=AUTH_REQUIRED"),
-            "稳定码可见: {joined}"
+            "stable code visible: {joined}"
         );
-        assert!(joined.contains("重试"), "首要动作提示: {joined}");
-        assert!(frame.cursor.is_none(), "整屏态输入光标隐藏");
+        assert!(joined.contains("retries"), "primary-action hint: {joined}");
+        assert!(
+            frame.cursor.is_none(),
+            "the fullscreen state hides the input caret"
+        );
         // Esc returns: not a dead end.
         chat.on_key(KeyCode::Esc, KeyModifiers::empty());
-        assert!(chat.last_error.is_none(), "Esc 返回清除错误态");
+        assert!(chat.last_error.is_none(), "Esc back clears the error state");
     }
 
     /// #18 page-level error-row highlight: inject a Page-level fixture → the `[error]` row uses the error color
@@ -12215,7 +12681,7 @@ mod tests {
         let fx = error_fixtures()
             .into_iter()
             .find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::ShortSync)
-            .expect("FX-01 在清单中");
+            .expect("FX-01 is in the fixture list");
         fx.inject(&chat.events);
         chat.drain_events();
         assert_eq!(chat.last_error.as_ref().unwrap().level, ErrorLevel::Page);
@@ -12224,14 +12690,14 @@ mod tests {
             .rows
             .iter()
             .find(|r| r.line.plain_text().starts_with("[error]"))
-            .expect("错误行存在");
+            .expect("the error row exists");
         assert!(
             error_row
                 .line
                 .segs
                 .iter()
                 .any(|s| s.style.fg == Some(Color::Rgb(255, 107, 128))),
-            "错误行高亮用 error 色 (255,107,128): {:?}",
+            "the error row highlights with the error color (255,107,128): {:?}",
             error_row.line.segs
         );
     }
@@ -12243,17 +12709,17 @@ mod tests {
         use crate::tui::test_util::error_fixtures;
         use crossterm::event::{KeyCode, KeyModifiers};
         let mut chat = test_chat();
-        chat.last_prompt = "为什么天是蓝的".into();
+        chat.last_prompt = "why is the sky blue".into();
         let fx = error_fixtures()
             .into_iter()
             .find(|f| f.code == "PERMISSION_DENIED")
-            .expect("FX-05 在清单中");
+            .expect("FX-05 is in the fixture list");
         fx.inject(&chat.events);
         chat.drain_events();
         assert_eq!(chat.last_error.as_ref().unwrap().level, ErrorLevel::Full);
         chat.on_key(KeyCode::Enter, KeyModifiers::empty());
-        assert!(chat.last_error.is_none(), "Enter 清除错误态");
-        assert!(chat.busy, "Enter 重试启动新回合");
+        assert!(chat.last_error.is_none(), "Enter clears the error state");
+        assert!(chat.busy, "Enter retries and starts a new turn");
     }
 
     // ---- QA assertion side (delivery 3/3): AC-53 / AC-29 / presentation styling ----
@@ -12273,15 +12739,18 @@ mod tests {
         let fx = error_fixtures()
             .into_iter()
             .find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::LongTurn)
-            .expect("FX-11 在清单中");
+            .expect("FX-11 is in the fixture list");
         fx.inject(&chat.events);
         chat.drain_events();
-        let err = chat.last_error.as_ref().expect("错误态已记录");
+        let err = chat
+            .last_error
+            .as_ref()
+            .expect("the error state was recorded");
         assert_eq!(err.code, "TIMEOUT");
         assert_eq!(
             err.level,
             ErrorLevel::Full,
-            "长回合 TIMEOUT 升级全流程级（AC-53）"
+            "a long-turn TIMEOUT escalates to the full-flow level (AC-53)"
         );
         let frame = Frame::assemble(&chat, Size::new(80, 24));
         let joined: String = frame
@@ -12290,18 +12759,24 @@ mod tests {
             .map(|r| r.line.plain_text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("code=TIMEOUT"), "整屏态含稳定码: {joined}");
         assert!(
-            joined.contains("重试") || joined.contains("返回"),
-            "AC-53 含「可重试或返回」路径: {joined}"
+            joined.contains("code=TIMEOUT"),
+            "the fullscreen state carries the stable code: {joined}"
         );
-        assert!(frame.cursor.is_none(), "整屏态输入光标隐藏");
+        assert!(
+            joined.contains("retry") || joined.contains("back"),
+            "AC-53 includes the \"retry or back\" path: {joined}"
+        );
+        assert!(
+            frame.cursor.is_none(),
+            "the fullscreen state hides the input caret"
+        );
         // Same code, short sync (FX-01) → page-level error row, not full-screen — the two TIMEOUT levels are told apart by context.
         let mut short = test_chat();
         let fx_short = error_fixtures()
             .into_iter()
             .find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::ShortSync)
-            .expect("FX-01 在清单中");
+            .expect("FX-01 is in the fixture list");
         fx_short.inject(&short.events);
         short.drain_events();
         let frame_short = Frame::assemble(&short, Size::new(80, 24));
@@ -12313,11 +12788,11 @@ mod tests {
             .join("\n");
         assert!(
             joined_short.contains("[error] code=TIMEOUT"),
-            "短同步 TIMEOUT = 页面级错误行: {joined_short}"
+            "short-sync TIMEOUT = a page-level error row: {joined_short}"
         );
         assert!(
-            !joined_short.contains("出错了"),
-            "短同步不整屏: {joined_short}"
+            !joined_short.contains("something went wrong"),
+            "short-sync does not go fullscreen: {joined_short}"
         );
     }
 
@@ -12334,11 +12809,14 @@ mod tests {
             let mut chat = test_chat();
             fx.inject(&chat.events);
             chat.drain_events();
-            let err = chat.last_error.as_ref().expect("错误态已记录");
-            assert_eq!(err.code, fx.code, "错误码已记录: {}", fx.code);
+            let err = chat
+                .last_error
+                .as_ref()
+                .expect("the error state was recorded");
+            assert_eq!(err.code, fx.code, "error code recorded: {}", fx.code);
             assert_eq!(
                 err.level, fx.level,
-                "级别由生产者显式携带（不复制映射表）: {}",
+                "the level is carried explicitly by the producer (no copied mapping table): {}",
                 fx.code
             );
             let frame = Frame::assemble(&chat, Size::new(80, 24));
@@ -12351,26 +12829,30 @@ mod tests {
             match fx.level {
                 ErrorLevel::Full => {
                     assert!(
-                        joined.contains("出错了"),
-                        "全流程级整屏态标题: {} / {joined}",
+                        joined.contains("something went wrong"),
+                        "full-flow fullscreen-state title: {} / {joined}",
                         fx.code
                     );
                     assert!(
                         joined.contains(&format!("code={}", fx.code)),
-                        "整屏态含稳定码: {} / {joined}",
+                        "the fullscreen state carries the stable code: {} / {joined}",
                         fx.code
                     );
-                    assert!(frame.cursor.is_none(), "整屏态光标隐藏: {}", fx.code);
+                    assert!(
+                        frame.cursor.is_none(),
+                        "the fullscreen state hides the caret: {}",
+                        fx.code
+                    );
                 }
                 ErrorLevel::Page | ErrorLevel::Field => {
                     assert!(
                         joined.contains(&format!("[error] code={}", fx.code)),
-                        "页面/字段级错误行含稳定码: {} / {joined}",
+                        "page/field-level error rows carry the stable code: {} / {joined}",
                         fx.code
                     );
                     assert!(
-                        !joined.contains("出错了"),
-                        "页面/字段级不整屏: {} / {joined}",
+                        !joined.contains("something went wrong"),
+                        "page/field-level does not go fullscreen: {} / {joined}",
                         fx.code
                     );
                 }
@@ -12393,7 +12875,7 @@ mod tests {
         let fx = error_fixtures()
             .into_iter()
             .find(|f| f.code == "TIMEOUT" && f.context == ErrorContext::ShortSync)
-            .expect("FX-01 在清单中");
+            .expect("FX-01 is in the fixture list");
         fx.inject(&chat.events);
         chat.drain_events();
         let frame = Frame::assemble(&chat, Size::new(80, 24));
@@ -12405,7 +12887,7 @@ mod tests {
             (0..buf.area.height).any(|y| (0..buf.area.width).any(|x| buf[(x, y)].fg == err_color));
         assert!(
             has_err_color,
-            "错误行真实渲染 error 色 (255,107,128) 到 cell"
+            "the error row really renders the error color (255,107,128) into the cell"
         );
         // Text anchor (assertions only anchor on the code).
         let joined: String = frame
@@ -12416,7 +12898,7 @@ mod tests {
             .join("\n");
         assert!(
             joined.contains("[error] code=TIMEOUT"),
-            "错误行文本含稳定码: {joined}"
+            "the error-row text carries the stable code: {joined}"
         );
     }
 
@@ -12434,24 +12916,34 @@ mod tests {
         use ratatui::layout::Size;
         let _guard = test_hooks::hang_guard(60_000); // hangs list_models for 60s, > the 10s read timeout
         let mut chat = test_chat();
-        // 触发真实生产拉取路径（fork "default" —— 未知名现在如实报错而非
-        // 静默回落当前端点，不再是本测试的路径）。
+        // Exercise the real production fetch path (fork "default" — unknown names now error honestly instead of
+        // silently falling back to the current endpoint, so that is no longer this test's path).
         chat.open_model_models(
             "default".into(),
             vec!["default".into()],
             vec![String::new()],
             0,
         );
-        // 先让 spawn 任务启动并注册超时 timer（start_paused 下需 poll 才推进）。
+        // Let the spawned task start and register its timeout timer first (under start_paused it only advances when polled).
         tokio::task::yield_now().await;
         // The 10s read timeout fires → emits UiEvent::Error (page-level).
         tokio::time::advance(std::time::Duration::from_secs(11)).await;
         tokio::task::yield_now().await; // let the spawned task finish sending the event
         chat.drain_events();
-        let err = chat.last_error.as_ref().expect("生产发射源已记录错误态");
-        assert_eq!(err.code, "TIMEOUT", "list_models 读超时落 TIMEOUT");
-        assert_eq!(err.level, ErrorLevel::Page, "短同步=页面级（真实路径）");
-        assert_eq!(err.context, ErrorContext::ShortSync, "上下文=短同步");
+        let err = chat
+            .last_error
+            .as_ref()
+            .expect("the production emitter recorded the error state");
+        assert_eq!(
+            err.code, "TIMEOUT",
+            "a list_models read timeout lands on TIMEOUT"
+        );
+        assert_eq!(
+            err.level,
+            ErrorLevel::Page,
+            "short-sync = page level (the real path)"
+        );
+        assert_eq!(err.context, ErrorContext::ShortSync, "context = short-sync");
         // Render: the page-level error row is visible, non-full-screen (degraded behavior preserved).
         let frame = Frame::assemble(&chat, Size::new(80, 24));
         let joined: String = frame
@@ -12462,9 +12954,12 @@ mod tests {
             .join("\n");
         assert!(
             joined.contains("[error] code=TIMEOUT"),
-            "真实路径错误行可见: {joined}"
+            "the real-path error row is visible: {joined}"
         );
-        assert!(!joined.contains("出错了"), "页面级不整屏: {joined}");
+        assert!(
+            !joined.contains("something went wrong"),
+            "page level does not go fullscreen: {joined}"
+        );
     }
     /// Info tier: /help output persists (no TTL) until the next input or Esc
     /// — the old 2s TTL burned it before anyone could read.
@@ -12473,20 +12968,23 @@ mod tests {
         let mut chat = test_chat();
         chat.input = "/help".to_string();
         chat.submit();
-        assert!(!chat.slash_info_lines.is_empty(), "/help 落 info 桶");
+        assert!(
+            !chat.slash_info_lines.is_empty(),
+            "/help lands in the info bucket"
+        );
         chat.tick();
         assert!(
             !chat.slash_info_lines.is_empty(),
-            "tick 不清 info（无 TTL）"
+            "the tick does not clear info (no TTL)"
         );
-        // 打字即清（读完即行动）。
+        // Typing clears it (read then act).
         chat.on_key(KeyCode::Char('h'), KeyModifiers::empty());
-        assert!(chat.slash_info_lines.is_empty(), "输入清 info");
+        assert!(chat.slash_info_lines.is_empty(), "input clears info");
 
         chat.input = "/help".to_string();
         chat.submit();
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
-        assert!(chat.slash_info_lines.is_empty(), "Esc 清 info");
+        assert!(chat.slash_info_lines.is_empty(), "Esc clears info");
     }
 
     /// Pinned panels survive ticks and render in the chrome until unpinned.
@@ -12496,23 +12994,30 @@ mod tests {
         chat.pin_panel(
             "login",
             vec![
-                "登录 codex（设备授权）".to_string(),
-                "  输入代码 ABCD-EFGH".to_string(),
+                "sign in to codex (device authorization)".to_string(),
+                "  enter code ABCD-EFGH".to_string(),
             ],
         );
         chat.tick();
-        assert_eq!(chat.pinned_panels.len(), 1, "tick 不清 pinned");
+        assert_eq!(
+            chat.pinned_panels.len(),
+            1,
+            "the tick does not clear pinned"
+        );
         let rows = crate::tui::el::render(crate::tui::chrome::chrome(&chat, 80, false)).rows;
         let joined: String = rows
             .iter()
             .map(|r| r.line.plain_text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("ABCD-EFGH"), "面板可见: {joined}");
+        assert!(
+            joined.contains("ABCD-EFGH"),
+            "the panel is visible: {joined}"
+        );
         chat.handle(UiEvent::Unpin {
             id: "login".to_string(),
         });
-        assert!(chat.pinned_panels.is_empty(), "unpin 即消失");
+        assert!(chat.pinned_panels.is_empty(), "unpin makes it disappear");
     }
 
     /// Batch-2 invariant: switching providers resolves the model atomically —
@@ -12542,11 +13047,11 @@ mod tests {
             .unwrap();
         let _ = chat.session.runtime.model_tx.send("claude-sonnet-5".into());
 
-        // anthropic 协议端点：默认模型兜底（claude-sonnet-5 本就在用 → 不变）。
+        // An anthropic-protocol endpoint: default model fallback (claude-sonnet-5 is already in use → unchanged).
         chat.input = "/provider deepseek".to_string();
         chat.submit();
         assert_eq!(*chat.session.runtime.provider.borrow(), "deepseek");
-        // 会话内换模型 → 切走再切回，恢复该端点上次用的模型。
+        // Switch models mid-session → away and back restores the model that endpoint last used.
         chat.input = "/model deepseek-v4".to_string();
         chat.submit();
         chat.input = "/provider default".to_string();
@@ -12554,14 +13059,14 @@ mod tests {
         assert_eq!(
             *chat.session.runtime.model.borrow(),
             "claude-sonnet-5",
-            "回 default 恢复其上次模型"
+            "back to default restores its last model"
         );
         chat.input = "/provider deepseek".to_string();
         chat.submit();
         assert_eq!(
             *chat.session.runtime.model.borrow(),
             "deepseek-v4",
-            "回 deepseek 恢复其上次模型"
+            "back to deepseek restores its last model"
         );
     }
 
@@ -12573,7 +13078,11 @@ mod tests {
         chat.busy = true;
         chat.input = "/provider codex".to_string();
         chat.submit();
-        assert_eq!(*chat.session.runtime.provider.borrow(), "default", "未切换");
+        assert_eq!(
+            *chat.session.runtime.provider.borrow(),
+            "default",
+            "not switched"
+        );
         assert!(
             chat.slash_error_lines.join("\n").contains("BUSY"),
             "{:?}",
@@ -12589,22 +13098,25 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         chat.pending_ask = Some((
             crate::ui::PermissionRequest {
-                title: "选择".into(),
-                question: "选一个".into(),
+                title: "choose".into(),
+                question: "pick one".into(),
                 options: vec!["A".into()],
                 descriptions: vec![None],
                 free_text: true,
             },
             tx,
         ));
-        chat.ask_focus = 1; // Other 输入位
+        chat.ask_focus = 1; // the Other input slot
         assert!(chat.ask_key(KeyCode::Char('h'), KeyModifiers::empty()));
         assert_eq!(chat.ask_other, "h");
         assert!(
             !chat.ask_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            "ctrl+c 不被对话框吞掉"
+            "ctrl+c is not swallowed by the dialog"
         );
-        assert_eq!(chat.ask_other, "h", "修饰键组合不落入输入");
+        assert_eq!(
+            chat.ask_other, "h",
+            "modified keys do not leak into the input"
+        );
     }
 
     /// P0-7 regression: a short-sync (Page-level) failure must not end the
@@ -12620,9 +13132,12 @@ mod tests {
             level: crate::error::ErrorLevel::Page,
             context: crate::error::ErrorContext::ShortSync,
         });
-        assert!(chat.busy, "短同步失败不打断回合");
+        assert!(
+            chat.busy,
+            "a short-sync failure does not interrupt the turn"
+        );
         assert_eq!(chat.stream_msg, Some(0));
-        assert!(chat.last_error.is_some(), "错误行仍记录");
+        assert!(chat.last_error.is_some(), "the error row is still recorded");
 
         chat.handle(UiEvent::Error {
             code: "TIMEOUT",
@@ -12630,7 +13145,7 @@ mod tests {
             level: crate::error::ErrorLevel::Full,
             context: crate::error::ErrorContext::LongTurn,
         });
-        assert!(!chat.busy, "回合级失败照常复位");
+        assert!(!chat.busy, "a turn-level failure resets as usual");
     }
 
     /// Page/Field error rows dismiss with Esc instead of squatting above the
@@ -12645,7 +13160,7 @@ mod tests {
             context: crate::error::ErrorContext::ShortSync,
         });
         assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
-        assert!(chat.last_error.is_none(), "Esc 清除页面级错误");
+        assert!(chat.last_error.is_none(), "Esc clears a page-level error");
     }
 
     /// `/theme` with junk reports BAD_ARGUMENT instead of silently switching
@@ -12657,7 +13172,7 @@ mod tests {
         chat.submit();
         let joined = all_slash_text(&chat);
         assert!(joined.contains("BAD_ARGUMENT"), "{joined}");
-        assert!(!joined.contains("✓"), "不显示成功回执: {joined}");
+        assert!(!joined.contains("✓"), "no success receipt shown: {joined}");
     }
 
     /// P0-16 regression: a bash-mode turn clears interrupt suppression the
@@ -12669,7 +13184,10 @@ mod tests {
         chat.bash_mode = true;
         chat.set_input("echo hi");
         chat.submit();
-        assert!(!chat.interrupted, "! 回合复位中断抑制");
+        assert!(
+            !chat.interrupted,
+            "! suppresses the interrupt on turn reset"
+        );
     }
 
     /// The bottom notice expires with its window: an expired "press again"
@@ -12679,9 +13197,12 @@ mod tests {
         let mut chat = test_chat();
         chat.notice = Some("Press ctrl-c again to exit");
         chat.notice_until = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
-        assert!(chat.needs_tick(), "有待过期的 notice 时不允许空转");
+        assert!(
+            chat.needs_tick(),
+            "with an expiring notice, idling is not allowed"
+        );
         chat.tick();
-        assert!(chat.notice.is_none(), "过期即清除");
+        assert!(chat.notice.is_none(), "cleared once expired");
         assert!(chat.notice_until.is_none());
     }
 }

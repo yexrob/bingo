@@ -144,7 +144,7 @@ impl OpenAIProvider {
                 Some(key) => format!("Bearer {key}"),
                 None => {
                     return Err(ClientError::Auth(format!(
-                        "provider \"{}\" 未配置 API key：/provider login {} --manual <key>",
+                        "provider \"{}\" has no API key configured: /provider login {} --manual <key>",
                         stored.provider(),
                         stored.provider()
                     )));
@@ -361,10 +361,7 @@ fn tool_output_wire(content: &serde_json::Value, is_error: bool) -> String {
     if is_error {
         serde_json::json!({ "is_error": true, "content": content }).to_string()
     } else {
-        match content {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        }
+        crate::api::types::tool_result_text(content)
     }
 }
 
@@ -962,39 +959,39 @@ mod tests {
         let codex = build_body(&r, OpenAiVariant::Codex);
         assert!(
             codex.get("max_output_tokens").is_none(),
-            "codex 不传 max_output_tokens"
+            "codex must not send max_output_tokens"
         );
         assert_eq!(
             codex["include"],
             serde_json::json!(["reasoning.encrypted_content"]),
-            "codex 用 encrypted_content include（main 实测 200）"
+            "codex uses the encrypted_content include (verified 200 on main)"
         );
         assert_eq!(
             codex["store"],
             serde_json::json!(false),
-            "codex 显式 store:false"
+            "codex explicitly sends store:false"
         );
-        assert_eq!(codex["model"], "gpt-5", "其余字段保留");
-        assert_eq!(codex["stream"], true, "codex 强制流式");
+        assert_eq!(codex["model"], "gpt-5", "other fields are preserved");
+        assert_eq!(codex["stream"], true, "codex forces streaming");
         assert_eq!(
             codex["reasoning"],
             serde_json::json!({"effort": "high"}),
-            "reasoning 保留"
+            "reasoning is preserved"
         );
 
         let default = build_body(&r, OpenAiVariant::Default);
         assert_eq!(
             default["max_output_tokens"], 1024,
-            "Default 保留 max_output_tokens"
+            "default keeps max_output_tokens"
         );
         assert_eq!(
             default["include"],
             serde_json::json!(["reasoning.summary_text"]),
-            "Default 保留 reasoning include"
+            "default keeps the reasoning include"
         );
         assert!(
             default.get("store").is_none(),
-            "Default 不带 store（零行为变化）"
+            "default sends no store (zero behavior change)"
         );
     }
 
@@ -1537,19 +1534,25 @@ mod codex_variant_tests {
             thinking: None,
         };
         let _ = provider.stream(&request).await;
-        assert_eq!(cap.hits.load(Ordering::SeqCst), 1, "发出一次请求");
+        assert_eq!(cap.hits.load(Ordering::SeqCst), 1, "one request issued");
         let (request_line, authorization, account_id, originator) =
             cap.requests.lock().unwrap()[0].clone();
         assert!(
             request_line.starts_with("POST /codex/responses"),
-            "codex 变体路径: {request_line}"
+            "codex variant path: {request_line}"
         );
         assert!(
             authorization.starts_with("Bearer "),
-            "bearer 头: {authorization}"
+            "bearer header: {authorization}"
         );
-        assert_eq!(account_id, "acc_1", "ChatGPT-Account-Id 来自 JWT claims");
-        assert_eq!(originator, "bingo", "codex 变体带 originator 头");
+        assert_eq!(
+            account_id, "acc_1",
+            "ChatGPT-Account-Id comes from the JWT claims"
+        );
+        assert_eq!(
+            originator, "bingo",
+            "codex variant sends the originator header"
+        );
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 
@@ -1575,7 +1578,7 @@ mod codex_variant_tests {
             None,
         );
         let models = provider.list_models().await.unwrap();
-        assert_eq!(models.len(), 9, "动态列表 9 模型");
+        assert_eq!(models.len(), 9, "dynamic list of 9 models");
         assert!(models.contains(&"gpt-5.6-sol".to_string()));
         assert!(models.contains(&"codex-auto-review".to_string()));
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
@@ -1641,7 +1644,7 @@ mod codex_variant_tests {
         assert_eq!(
             models,
             OpenAIProvider::CODEX_MODELS.to_vec(),
-            "fallback 静态 9 模型"
+            "fallback static 9-model list"
         );
         assert_eq!(models.len(), 9);
         assert!(models.contains(&"gpt-5.6-luna".to_string()));
@@ -1684,7 +1687,7 @@ mod codex_variant_tests {
             thinking: None,
         };
         let text = provider.complete_text(&request).await.unwrap();
-        assert_eq!(text, "Hello", "流式聚合输出文本");
+        assert_eq!(text, "Hello", "streaming aggregates the output text");
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 
@@ -1739,10 +1742,16 @@ mod codex_variant_tests {
             cap.requests.lock().unwrap()[0].clone();
         assert!(
             request_line.starts_with("POST /v1/responses"),
-            "默认变体路径: {request_line}"
+            "default variant path: {request_line}"
         );
-        assert_eq!(account_id, "", "默认变体不带 ChatGPT-Account-Id");
-        assert_eq!(originator, "", "默认变体不带 originator（防串味）");
+        assert_eq!(
+            account_id, "",
+            "default variant sends no ChatGPT-Account-Id"
+        );
+        assert_eq!(
+            originator, "",
+            "default variant sends no originator (no cross-talk)"
+        );
         assert!(authorization.starts_with("Bearer sk-oa"), "{authorization}");
     }
 }

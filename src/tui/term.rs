@@ -32,7 +32,7 @@ const SYNC_END: &[u8] = b"\x1b[?2026l";
 /// Raw byte access on top of a [`Backend`].
 ///
 /// Two concerns need bytes the `Backend` trait cannot express: synchronized-update bracketing and
-/// [`HistoryItem::Raw`] payloads (terminal graphics escape sequences). Backends opt in by
+/// image transmit payloads (terminal graphics escape sequences). Backends opt in by
 /// implementing this trait; the bytes are written verbatim at the current cursor position.
 pub trait RawWrite: Backend {
     /// Write `bytes` to the terminal verbatim, without interpretation.
@@ -74,64 +74,16 @@ impl<W: IoWrite> RawWrite for CrosstermBackend<W> {
     }
 }
 
-/// Emit graphics writes as one synchronized-update batch: save the cursor
-/// (DECSC), for each op move to its cell (CUP) when it has one and append the
-/// payload, restore the cursor (DECRC), flush once. The cursor ends exactly
-/// where it started, so callers' cursor bookkeeping stays valid. Payloads are
-/// trusted to contain no cursor escapes of their own
-/// ([`crate::tui::gfx::GfxWrite`]'s contract).
-pub fn write_gfx<B: RawWrite>(
-    backend: &mut B,
-    ops: &[crate::tui::gfx::GfxWrite],
-) -> Result<(), B::Error> {
-    if ops.is_empty() {
+/// Write image transmit bytes and flush. The payload is position-independent
+/// by contract ([`crate::tui::gfx::transmit_bytes`] moves no cursor and
+/// paints no cells), so no cursor bookkeeping and no synchronized-update
+/// bracket are needed.
+pub fn write_transmits<B: RawWrite>(backend: &mut B, bytes: &[u8]) -> Result<(), B::Error> {
+    if bytes.is_empty() {
         return Ok(());
     }
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(SYNC_BEGIN);
-    bytes.extend_from_slice(b"\x1b7");
-    for op in ops {
-        if let Some((row, col)) = op.at {
-            let cup = format!("\x1b[{};{}H", u32::from(row) + 1, u32::from(col) + 1);
-            bytes.extend_from_slice(cup.as_bytes());
-        }
-        bytes.extend_from_slice(&op.bytes);
-    }
-    bytes.extend_from_slice(b"\x1b8");
-    bytes.extend_from_slice(SYNC_END);
-    backend.write_raw(&bytes)?;
+    backend.write_raw(bytes)?;
     Backend::flush(backend)
-}
-
-/// One unit of scrollback output.
-#[derive(Debug, Clone)]
-pub enum HistoryItem {
-    /// Exactly one pre-wrapped terminal row.
-    ///
-    /// The display width is expected to be at most the viewport width; the driver truncates on
-    /// display width as a safety net and never wraps.
-    Line(Line<'static>),
-    /// Raw bytes written verbatim with the cursor at column 0 of the current insertion row.
-    ///
-    /// `rows` is how many terminal rows the payload occupies after being written (0 = occupies
-    /// none, e.g. a kitty `a=T` transmission with no placement; N = e.g. a `C=1` kitty image that
-    /// advances N rows). Those rows are reserved but never cleared by the driver.
-    Raw {
-        /// Escape sequence payload.
-        bytes: Vec<u8>,
-        /// Terminal rows consumed by the payload.
-        rows: u16,
-    },
-}
-
-impl HistoryItem {
-    /// Terminal rows this item occupies once written.
-    fn rows(&self) -> u16 {
-        match self {
-            Self::Line(_) => 1,
-            Self::Raw { rows, .. } => *rows,
-        }
-    }
 }
 
 /// A bottom-anchored inline viewport driver.
@@ -209,15 +161,9 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
         self.size
     }
 
-    /// Absolute screen row of the viewport's top edge.
-    pub fn viewport_top(&self) -> u16 {
-        self.viewport.y
-    }
-
-    /// Emit cursor-positioned graphics writes for the placement layer; see
-    /// [`write_gfx`].
-    pub fn write_gfx(&mut self, ops: &[crate::tui::gfx::GfxWrite]) -> Result<(), B::Error> {
-        write_gfx(&mut self.backend, ops)
+    /// Emit image transmit bytes; see [`write_transmits`].
+    pub fn write_transmits(&mut self, bytes: &[u8]) -> Result<(), B::Error> {
+        write_transmits(&mut self.backend, bytes)
     }
 
     /// Accept a new terminal size.
@@ -286,7 +232,7 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
     /// band behind.
     pub fn frame(
         &mut self,
-        items: Vec<HistoryItem>,
+        items: Vec<Line<'static>>,
         height: u16,
         render: impl FnOnce(&mut Buffer),
         cursor: Option<(u16, u16)>,
@@ -311,12 +257,11 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
     /// bottom, the region above the viewport is scrolled up, which is what pushes rows into the
     /// terminal's scrollback; insertions larger than the space above the viewport are chunked.
     ///
-    /// [`HistoryItem::Line`] rows are written through the backend at explicit positions with a
-    /// clear-to-end-of-line after the last non-blank cell. [`HistoryItem::Raw`] payloads are
-    /// written verbatim at column 0 of their row and the rows they occupy are reserved but never
-    /// cleared. The cursor is restored to its parked position afterwards.
+    /// Rows are written through the backend at explicit positions with a
+    /// clear-to-end-of-line after the last non-blank cell. The cursor is
+    /// restored to its parked position afterwards.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn insert_history(&mut self, items: Vec<HistoryItem>) -> Result<(), B::Error> {
+    pub fn insert_history(&mut self, items: Vec<Line<'static>>) -> Result<(), B::Error> {
         if items.is_empty() {
             return Ok(());
         }
@@ -327,7 +272,7 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
     }
 
     /// Body of [`Self::insert_history`], usable inside an already-open batch.
-    fn insert_items(&mut self, items: Vec<HistoryItem>) -> Result<(), B::Error> {
+    fn insert_items(&mut self, items: Vec<Line<'static>>) -> Result<(), B::Error> {
         if items.is_empty() {
             return Ok(());
         }
@@ -337,31 +282,17 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
         // Rows `[gap, viewport.top())` are vacated and writable; rows banked
         // by a previous viewport shrink are already blank and count first.
         let mut gap = self.viewport.top().saturating_sub(self.gap_above);
-        let mut remaining = items
-            .iter()
-            .map(HistoryItem::rows)
-            .fold(0u16, u16::saturating_add);
-        for item in items {
-            let rows = item.rows();
-            let row = if rows == 0 {
-                // A payload that occupies no rows prints nothing, so it needs no vacated row
-                // of its own; it only needs a defined cursor row above the viewport.
-                gap.min(self.viewport.top().saturating_sub(1))
-            } else {
-                gap = self.make_room(gap, rows, remaining)?;
-                remaining = remaining.saturating_sub(rows);
-                if gap >= self.viewport.top() {
-                    // No room could be made; dropping output is better than painting over the
-                    // viewport. Unreachable while the viewport cannot fill the screen.
-                    continue;
-                }
-                gap
-            };
-            match item {
-                HistoryItem::Line(line) => self.write_history_line(row, line)?,
-                HistoryItem::Raw { bytes, .. } => self.write_history_raw(row, &bytes)?,
+        let mut remaining = u16::try_from(items.len()).unwrap_or(u16::MAX);
+        for line in items {
+            gap = self.make_room(gap, 1, remaining)?;
+            remaining = remaining.saturating_sub(1);
+            if gap >= self.viewport.top() {
+                // No room could be made; dropping output is better than painting over the
+                // viewport. Unreachable while the viewport cannot fill the screen.
+                continue;
             }
-            gap = gap.saturating_add(rows);
+            self.write_history_line(gap, line)?;
+            gap = gap.saturating_add(1);
         }
         // Whatever the batch did not fill stays banked for the next round.
         self.gap_above = self.viewport.top().saturating_sub(gap);
@@ -714,14 +645,6 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
         Ok(())
     }
 
-    /// Write a raw payload at column 0 of absolute screen row `row`.
-    fn write_history_raw(&mut self, row: u16, bytes: &[u8]) -> Result<(), B::Error> {
-        self.backend.set_cursor_position(Position::new(0, row))?;
-        self.backend.write_raw(bytes)?;
-        self.cursor_synced = false;
-        Ok(())
-    }
-
     /// Degenerate path for a viewport that fills the whole screen (a one-row terminal).
     ///
     /// There is no space above the viewport, so the top row is borrowed: each item is drawn over
@@ -729,18 +652,12 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
     /// committed frame. This mirrors ratatui's full-screen `insert_before` path.
     fn insert_history_borrowing_top_row(
         &mut self,
-        items: Vec<HistoryItem>,
+        items: Vec<Line<'static>>,
     ) -> Result<(), B::Error> {
-        for item in items {
-            let rows = item.rows().max(1);
-            match item {
-                HistoryItem::Line(line) => self.write_history_line(0, line)?,
-                HistoryItem::Raw { bytes, .. } => self.write_history_raw(0, &bytes)?,
-            }
-            for _ in 0..rows {
-                self.backend.scroll_into_scrollback(1, 1)?;
-                self.cursor_synced = false;
-            }
+        for line in items {
+            self.write_history_line(0, line)?;
+            self.backend.scroll_into_scrollback(1, 1)?;
+            self.cursor_synced = false;
         }
         {
             let previous = 1 - self.current;
@@ -861,27 +778,18 @@ mod tests {
         InlineTerm::new(backend).unwrap()
     }
 
-    /// write_gfx: empty ops write nothing; otherwise one synchronized batch,
-    /// DECSC/DECRC bracket, CUP (1-based) only before positioned payloads.
+    /// write_transmits: empty bytes write nothing; otherwise the payload goes
+    /// out verbatim — no cursor bracket, no CUP (transmits are
+    /// position-independent by contract).
     #[test]
-    fn write_gfx_positions_in_one_batch_and_restores_the_cursor() {
+    fn write_transmits_is_verbatim_and_skips_empty() {
         let mut backend = Recorder::new(20, 6);
-        write_gfx(&mut backend, &[]).unwrap();
-        assert!(backend.raw.is_empty(), "empty ops are a no-op");
+        write_transmits(&mut backend, &[]).unwrap();
+        assert!(backend.raw.is_empty(), "empty bytes are a no-op");
 
-        let ops = [
-            crate::tui::gfx::GfxWrite {
-                at: Some((2, 0)),
-                bytes: b"P1".to_vec(),
-            },
-            crate::tui::gfx::GfxWrite {
-                at: None,
-                bytes: b"D1".to_vec(),
-            },
-        ];
-        write_gfx(&mut backend, &ops).unwrap();
+        write_transmits(&mut backend, b"\x1b_Ga=T\x1b\\").unwrap();
         let raw = String::from_utf8_lossy(&backend.raw);
-        assert_eq!(raw, "\x1b[?2026h\x1b7\x1b[3;1HP1D1\x1b8\x1b[?2026l");
+        assert_eq!(raw, "\x1b_Ga=T\x1b\\");
     }
 
     /// Fill the viewport buffer with `rows`, top-down.
@@ -897,11 +805,8 @@ mod tests {
         }
     }
 
-    fn lines(texts: &[String]) -> Vec<HistoryItem> {
-        texts
-            .iter()
-            .map(|text| HistoryItem::Line(Line::from(text.clone())))
-            .collect()
+    fn lines(texts: &[String]) -> Vec<Line<'static>> {
+        texts.iter().map(|text| Line::from(text.clone())).collect()
     }
 
     fn sync_only(raw: &[u8]) -> bool {
@@ -1117,60 +1022,12 @@ mod tests {
     }
 
     #[test]
-    fn insert_history_raw_row_accounting() {
-        let mut term = term(6, 8, 7);
-        term.draw(1, paint(&["v0"]), None).unwrap();
-        assert_eq!(term.viewport(), Rect::new(0, 7, 6, 1));
-
-        term.backend_mut().reset_counters();
-        term.insert_history(vec![
-            HistoryItem::Line(Line::from("a")),
-            HistoryItem::Raw {
-                bytes: b"\x1b_Gq=2;PAYLOAD\x1b\\".to_vec(),
-                rows: 0,
-            },
-            HistoryItem::Line(Line::from("b")),
-        ])
-        .unwrap();
-
-        assert_eq!(
-            term.backend().screen(),
-            vec!["", "", "", "", "", "a", "b", "v0"],
-            "a zero-row payload consumes no rows"
-        );
-
-        term.backend_mut().reset_counters();
-        term.insert_history(vec![
-            HistoryItem::Raw {
-                bytes: b"\x1b_Gq=2,C=1;IMG\x1b\\".to_vec(),
-                rows: 2,
-            },
-            HistoryItem::Line(Line::from("c")),
-        ])
-        .unwrap();
-
-        assert_eq!(
-            term.backend().screen(),
-            vec!["", "", "a", "b", "", "", "c", "v0"],
-            "a two-row payload reserves two rows and they are never cleared"
-        );
-        let raw = &term.backend().raw;
-        assert!(
-            raw.windows(3).any(|window| window == b"IMG"),
-            "raw payload written verbatim"
-        );
-        assert!(raw.starts_with(SYNC_BEGIN) && raw.ends_with(SYNC_END));
-    }
-
-    #[test]
     fn insert_history_truncates_overlong_rows() {
         let mut term = term(6, 5, 4);
         term.draw(1, paint(&["v0"]), None).unwrap();
 
-        term.insert_history(vec![HistoryItem::Line(Line::from(
-            "0123456789abcdef".to_string(),
-        ))])
-        .unwrap();
+        term.insert_history(vec![Line::from("0123456789abcdef".to_string())])
+            .unwrap();
 
         assert_eq!(
             term.backend().screen()[3],
@@ -1185,7 +1042,7 @@ mod tests {
         term.draw(1, paint(&["v0"]), None).unwrap();
 
         let line = Line::from(Span::styled("hey", Style::default().fg(Color::Green)));
-        term.insert_history(vec![HistoryItem::Line(line)]).unwrap();
+        term.insert_history(vec![line]).unwrap();
 
         let cell = &term.backend().inner.buffer()[(0, 3)];
         assert_eq!(cell.symbol(), "h");
@@ -1518,7 +1375,7 @@ mod tests {
         assert_eq!(
             &screen[0..4],
             &["eeee", "", "ffff", "gg"],
-            "空行清掉旧字、短行清掉行尾——diff 面向物理屏，不是空 buffer"
+            "blank lines clear old text, short lines clear line ends — the diff targets the physical screen, not an empty buffer"
         );
     }
 

@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::error::ErrorCode;
@@ -31,6 +33,15 @@ impl ExperienceStatus {
     }
 }
 
+/// One explicit observation recorded after applying an experience.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperienceOutcomeRecord {
+    pub outcome: String,
+    pub recorded_at: String,
+    pub evidence: String,
+    pub evidence_hash: String,
+}
+
 /// A distilled operational experience (Markdown entry: frontmatter + free-form body).
 /// Stored at `~/.config/bingo/experience/<project-key>/entries/<id>.md`;
 /// no on-disk index — rebuilt from scanning entries/ each time (entries/ is the single
@@ -49,8 +60,13 @@ pub struct ExperienceEntry {
     pub verify: Option<String>,
     pub evidence: Option<String>,
     pub verified_at: Option<String>,
-    /// Adoption count (+1 when Commit updates an existing entry).
+    /// Legacy commit count (+1 when Commit updates an existing entry).
     pub hits: u64,
+    /// Explicit outcome counters. For maintained data these equal counts in outcome_history.
+    pub helpful: u64,
+    pub harmful: u64,
+    /// Append-only observations, in recording order.
+    pub outcome_history: Vec<ExperienceOutcomeRecord>,
     pub created_at: String,
     /// Free-form body after the frontmatter (hand-written notes, preserved verbatim).
     pub notes: String,
@@ -79,6 +95,9 @@ impl ExperienceEntry {
             evidence,
             verified_at: None,
             hits: 0,
+            helpful: 0,
+            harmful: 0,
+            outcome_history: Vec::new(),
             created_at: unix_to_date(now_secs()),
             notes: String::new(),
         };
@@ -127,9 +146,14 @@ impl ExperienceEntry {
         if let Some(t) = &self.verified_at {
             fm.push_str(&format!("verified_at: {t}\n"));
         }
+        if !self.outcome_history.is_empty() {
+            let history =
+                serde_json::to_string(&self.outcome_history).unwrap_or_else(|_| "[]".into());
+            fm.push_str(&format!("outcome_history: {history}\n"));
+        }
         fm.push_str(&format!(
-            "hits: {}\ncreated_at: {}\n---",
-            self.hits, self.created_at
+            "hits: {}\nhelpful: {}\nharmful: {}\ncreated_at: {}\n---",
+            self.hits, self.helpful, self.harmful, self.created_at
         ));
         let notes = self.notes.trim();
         if !notes.is_empty() {
@@ -173,6 +197,16 @@ impl ExperienceEntry {
             })
             .unwrap_or_default();
         let hits = get("hits").and_then(|h| h.parse().ok()).unwrap_or(0);
+        let outcome_history: Vec<ExperienceOutcomeRecord> = get("outcome_history")
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        // History is authoritative whenever present. Legacy entries without history start
+        // at empty/zero, even if an earlier experimental format wrote standalone counters.
+        let (helpful, harmful) = if outcome_history.is_empty() {
+            (0, 0)
+        } else {
+            outcome_counts(&outcome_history)
+        };
         Some(Self {
             id,
             project_key,
@@ -184,6 +218,9 @@ impl ExperienceEntry {
             evidence: get("evidence"),
             verified_at: get("verified_at"),
             hits,
+            helpful,
+            harmful,
+            outcome_history,
             created_at: get("created_at").unwrap_or_default(),
             notes: body.to_string(),
         })
@@ -349,6 +386,65 @@ pub fn save_entry(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExperienceOutcome {
+    Helpful,
+    Harmful,
+}
+
+impl ExperienceOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Helpful => "helpful",
+            Self::Harmful => "harmful",
+        }
+    }
+}
+
+fn outcome_counts(history: &[ExperienceOutcomeRecord]) -> (u64, u64) {
+    history.iter().fold((0, 0), |(helpful, harmful), record| {
+        if record.evidence.trim().is_empty()
+            || record.evidence_hash != evidence_hash(&record.evidence)
+        {
+            return (helpful, harmful);
+        }
+        match record.outcome.as_str() {
+            "helpful" => (helpful.saturating_add(1), harmful),
+            "harmful" => (helpful, harmful.saturating_add(1)),
+            _ => (helpful, harmful),
+        }
+    })
+}
+
+fn evidence_hash(evidence: &str) -> String {
+    format!("{:x}", Sha256::digest(evidence.as_bytes()))
+}
+
+pub fn record_outcome(
+    home: &Path,
+    project_key: &str,
+    id: &str,
+    outcome: ExperienceOutcome,
+    evidence: String,
+) -> Result<Option<ExperienceEntry>, ExperienceError> {
+    let Some(mut entry) = load_entries(home, project_key)
+        .into_iter()
+        .find(|entry| entry.id == id)
+    else {
+        return Ok(None);
+    };
+    let evidence_hash = evidence_hash(&evidence);
+    entry.outcome_history.push(ExperienceOutcomeRecord {
+        outcome: outcome.as_str().to_string(),
+        recorded_at: unix_to_rfc3339(now_secs()),
+        evidence,
+        evidence_hash,
+    });
+    (entry.helpful, entry.harmful) = outcome_counts(&entry.outcome_history);
+    save_entry(home, project_key, &entry)?;
+    Ok(Some(entry))
+}
+
 /// Delete an entry; a missing one counts as success.
 pub fn delete_entry(home: &Path, project_key: &str, id: &str) -> Result<(), ExperienceError> {
     let path = entries_dir(home, project_key).join(format!("{id}.md"));
@@ -367,7 +463,7 @@ fn shared_prefix_len(a: &str, b: &str) -> usize {
 /// Token matching: lowercased query contains any trigger keyword, or some query token
 /// (≥3 chars) shares a ≥4-char prefix with a trigger ("migrate now" hits trigger
 /// "migration").
-/// Results sort by hits desc, active first.
+/// Results sort by lifecycle status, explicit observed outcomes, then legacy hits.
 pub fn query<'a>(
     entries: &'a [ExperienceEntry],
     text: &str,
@@ -393,20 +489,32 @@ pub fn query<'a>(
     matched.sort_by(|a, b| {
         let a_active = a.status == ExperienceStatus::Active;
         let b_active = b.status == ExperienceStatus::Active;
-        b_active.cmp(&a_active).then_with(|| b.hits.cmp(&a.hits))
+        b_active
+            .cmp(&a_active)
+            .then_with(|| b.helpful.cmp(&a.helpful))
+            .then_with(|| a.harmful.cmp(&b.harmful))
+            .then_with(|| b.hits.cmp(&a.hits))
+            .then_with(|| a.id.cmp(&b.id))
     });
     matched.truncate(limit);
     matched
 }
 
-/// Resident injection index: active entries one per line (≤10) + overflow hint; empty
-/// string when none.
+/// Resident injection index: active entries ranked by observed outcomes, then legacy hits
+/// (≤10) + overflow hint; empty string when none.
 pub fn format_index(entries: &[ExperienceEntry]) -> String {
     const MAX_INDEX: usize = 10;
-    let active: Vec<&ExperienceEntry> = entries
+    let mut active: Vec<&ExperienceEntry> = entries
         .iter()
         .filter(|e| e.status == ExperienceStatus::Active)
         .collect();
+    active.sort_by(|a, b| {
+        b.helpful
+            .cmp(&a.helpful)
+            .then_with(|| a.harmful.cmp(&b.harmful))
+            .then_with(|| b.hits.cmp(&a.hits))
+            .then_with(|| a.id.cmp(&b.id))
+    });
     if active.is_empty() {
         return String::new();
     }
@@ -414,8 +522,8 @@ pub fn format_index(entries: &[ExperienceEntry]) -> String {
     for entry in active.iter().take(MAX_INDEX) {
         let short = entry.id.chars().take(4).collect::<String>();
         lines.push(format!(
-            "- E{short}: {} (hits {})",
-            entry.summary, entry.hits
+            "- E{short}: {} (helpful {}, harmful {}, hits {})",
+            entry.summary, entry.helpful, entry.harmful, entry.hits
         ));
     }
     if active.len() > MAX_INDEX {
@@ -432,6 +540,16 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn unix_to_rfc3339(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let seconds_in_day = secs % 86_400;
+    let hour = seconds_in_day / 3_600;
+    let minute = (seconds_in_day % 3_600) / 60;
+    let second = seconds_in_day % 60;
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// unix seconds → `YYYY-MM-DD` (Gregorian, no date dependency).
@@ -470,10 +588,10 @@ mod tests {
         let entry = ExperienceEntry::new(
             "key",
             vec!["migration".into(), "db".into()],
-            "迁移数据库三步".into(),
-            vec!["备份".into(), "执行迁移".into()],
+            "migrate the database in three steps".into(),
+            vec!["back up".into(), "run the migration".into()],
             Some("cargo test".into()),
-            Some("会话 2026-08-04".into()),
+            Some("session 2026-08-04".into()),
         );
         let serialized = entry.serialize();
         let parsed = ExperienceEntry::parse(&serialized).unwrap();
@@ -485,16 +603,16 @@ mod tests {
         let mut entry = ExperienceEntry::new(
             "key",
             vec!["migration".into()],
-            "迁移".into(),
-            vec!["备份".into()],
+            "migrate".into(),
+            vec!["back up".into()],
             None,
             None,
         );
         let id = entry.id.clone();
         entry.status = ExperienceStatus::Stale;
-        assert_eq!(entry.content_hash(), id, "status 变更不换 id");
+        assert_eq!(entry.content_hash(), id, "status change keeps the same id");
         entry.hits = 5;
-        assert_eq!(entry.content_hash(), id, "hits 变更不换 id");
+        assert_eq!(entry.content_hash(), id, "hits change keeps the same id");
     }
 
     #[test]
@@ -522,9 +640,9 @@ mod tests {
     fn notes_roundtrip_preserved() {
         let mut entry =
             ExperienceEntry::new("key", vec![], "s".into(), vec!["1".into()], None, None);
-        entry.notes = "手写说明\n第二行".into();
+        entry.notes = "hand-written note\nsecond line".into();
         let parsed = ExperienceEntry::parse(&entry.serialize()).unwrap();
-        assert_eq!(parsed.notes.trim(), "手写说明\n第二行");
+        assert_eq!(parsed.notes.trim(), "hand-written note\nsecond line");
     }
 
     #[test]
@@ -540,7 +658,7 @@ mod tests {
         let entry = ExperienceEntry::new(
             key,
             vec!["build".into()],
-            "构建三步".into(),
+            "build in three steps".into(),
             vec!["cargo build".into(), "cargo test".into()],
             None,
             None,
@@ -564,7 +682,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("bad.md"), "no frontmatter here").unwrap();
         std::fs::write(dir.join("also-bad.md"), "---\nsummary: no id\n---\n").unwrap();
-        assert!(load_entries(&home, key).is_empty(), "损坏条目跳过而非报错");
+        assert!(
+            load_entries(&home, key).is_empty(),
+            "corrupted entries are skipped, not errored"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -603,12 +724,170 @@ mod tests {
         assert_eq!(
             summaries,
             vec!["hot", "cold", "stale one"],
-            "active 优先于 hits"
+            "active ranks above hits"
         );
         let limited = query(&entries, "migration", 2);
         assert_eq!(limited.len(), 2);
         // Non-matching tokens → empty
         assert!(query(&entries, "nothing-here", 10).is_empty());
+    }
+
+    #[test]
+    fn explicit_outcomes_roundtrip_and_preserve_policy_fields() {
+        let root = tmp_root("outcome");
+        let home = root.join("home");
+        let key = "k";
+        let mut entry = ExperienceEntry::new(
+            key,
+            vec!["build".into()],
+            "build safely".into(),
+            vec!["cargo test".into()],
+            None,
+            None,
+        );
+        entry.status = ExperienceStatus::Degraded;
+        entry.verified_at = Some("2025-01-02".into());
+        save_entry(&home, key, &entry).unwrap();
+
+        let helpful = record_outcome(
+            &home,
+            key,
+            &entry.id,
+            ExperienceOutcome::Helpful,
+            "focused test passed".into(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((helpful.helpful, helpful.harmful), (1, 0));
+        assert_eq!(helpful.status, ExperienceStatus::Degraded);
+        assert_eq!(helpful.verified_at.as_deref(), Some("2025-01-02"));
+        assert_eq!(helpful.outcome_history.len(), 1);
+        assert_eq!(helpful.outcome_history[0].outcome, "helpful");
+        assert_eq!(helpful.outcome_history[0].evidence, "focused test passed");
+        assert_eq!(
+            helpful.outcome_history[0].evidence_hash,
+            evidence_hash("focused test passed")
+        );
+        assert_eq!(helpful.outcome_history[0].recorded_at.len(), 20);
+        assert_eq!(helpful.outcome_history[0].recorded_at.as_bytes()[4], b'-');
+        assert_eq!(helpful.outcome_history[0].recorded_at.as_bytes()[7], b'-');
+        assert_eq!(helpful.outcome_history[0].recorded_at.as_bytes()[10], b'T');
+        assert_eq!(helpful.outcome_history[0].recorded_at.as_bytes()[13], b':');
+        assert_eq!(helpful.outcome_history[0].recorded_at.as_bytes()[16], b':');
+        assert!(helpful.outcome_history[0].recorded_at.ends_with('Z'));
+
+        let harmful = record_outcome(
+            &home,
+            key,
+            &entry.id,
+            ExperienceOutcome::Harmful,
+            "user reported a regression".into(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((harmful.helpful, harmful.harmful), (1, 1));
+        assert_eq!(harmful.status, ExperienceStatus::Degraded);
+        assert_eq!(harmful.verified_at, helpful.verified_at);
+        assert_eq!(harmful.outcome_history.len(), 2);
+        assert_eq!(harmful.outcome_history[1].outcome, "harmful");
+        assert_eq!(
+            harmful.outcome_history[1].evidence,
+            "user reported a regression"
+        );
+        assert_eq!(load_entries(&home, key), vec![harmful]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn outcome_for_unknown_exact_id_is_noop() {
+        let root = tmp_root("missing-outcome");
+        let home = root.join("home");
+        let key = "k";
+        let entry = ExperienceEntry::new(
+            key,
+            vec!["build".into()],
+            "build safely".into(),
+            vec!["cargo test".into()],
+            None,
+            None,
+        );
+        let path = save_entry(&home, key, &entry).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let short_id = entry.id.chars().take(4).collect::<String>();
+
+        let result = record_outcome(
+            &home,
+            key,
+            &short_id,
+            ExperienceOutcome::Harmful,
+            "counterexample".into(),
+        )
+        .unwrap();
+        assert!(result.is_none());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "missing id must not mutate storage"
+        );
+        assert_eq!(load_entries(&home, key), vec![entry]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_entry_defaults_outcomes_to_empty_and_zero() {
+        let legacy = "---\nid: legacy-full-id\nproject_key: k\nstatus: stale\ntrigger: build\nsummary: old entry\nsteps: |-\n  cargo test\nverified_at: 2024-01-02\nhits: 7\nhelpful: 99\nharmful: 88\ncreated_at: 2024-01-01\n---\nnotes\n";
+        let parsed = ExperienceEntry::parse(legacy).unwrap();
+        assert_eq!((parsed.helpful, parsed.harmful), (0, 0));
+        assert!(parsed.outcome_history.is_empty());
+        assert_eq!(parsed.status, ExperienceStatus::Stale);
+        assert_eq!(parsed.verified_at.as_deref(), Some("2024-01-02"));
+        assert_eq!(parsed.hits, 7);
+    }
+
+    #[test]
+    fn evidence_less_history_does_not_affect_counters() {
+        let raw = "---\nid: evidence-less\nproject_key: k\nstatus: active\ntrigger: build\nsummary: malformed history\noutcome_history: [{\"outcome\":\"helpful\",\"recorded_at\":\"2026-08-08T00:00:00Z\"},{\"outcome\":\"harmful\",\"recorded_at\":\"2026-08-08T00:00:01Z\",\"evidence\":\"   \"}]\nhits: 0\nhelpful: 99\nharmful: 88\ncreated_at: 2026-08-08\n---\n";
+        let parsed = ExperienceEntry::parse(raw).unwrap();
+        assert_eq!((parsed.helpful, parsed.harmful), (0, 0));
+        assert!(parsed.outcome_history.is_empty());
+    }
+
+    #[test]
+    fn query_prefers_observed_outcomes_before_legacy_hits() {
+        let mut observed = ExperienceEntry::new(
+            "k",
+            vec!["migration".into()],
+            "observed".into(),
+            vec![],
+            None,
+            None,
+        );
+        observed.helpful = 1;
+        observed.outcome_history.push(ExperienceOutcomeRecord {
+            outcome: "helpful".into(),
+            recorded_at: "2026-08-08T00:00:00Z".into(),
+            evidence: "verification passed".into(),
+            evidence_hash: evidence_hash("verification passed"),
+        });
+        let mut legacy = ExperienceEntry::new(
+            "k",
+            vec!["migration".into()],
+            "legacy".into(),
+            vec![],
+            None,
+            None,
+        );
+        legacy.hits = 100;
+        let entries = vec![legacy, observed];
+        let results = query(&entries, "migration", 10);
+        assert_eq!(results[0].summary, "observed");
+        let index = format_index(&entries);
+        assert!(
+            index
+                .lines()
+                .next()
+                .is_some_and(|line| line.contains("observed"))
+        );
     }
 
     #[test]
@@ -620,7 +899,7 @@ mod tests {
             .collect();
         let index = format_index(&entries);
         let lines: Vec<&str> = index.lines().collect();
-        assert_eq!(lines.len(), 11, "10 条 + 1 行溢出提示");
+        assert_eq!(lines.len(), 11, "10 entries + 1 overflow line");
         assert!(lines[10].contains("2 more"));
         // stale doesn't participate in the index
         let mut entries = entries;

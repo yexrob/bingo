@@ -23,7 +23,7 @@ pub fn run(session: &Arc<Session>, cwd: &Path, arg: &str) -> Vec<String> {
         "new" => new_team(session, cwd, parts.next().unwrap_or("")),
         "memory" => memory(session, cwd, parts.next().unwrap_or("")),
         other => {
-            let mut out = vec![format!("未知子命令: /team {other}"), String::new()];
+            let mut out = vec![format!("unknown subcommand: /team {other}"), String::new()];
             out.extend(usage());
             out
         }
@@ -32,15 +32,17 @@ pub fn run(session: &Arc<Session>, cwd: &Path, arg: &str) -> Vec<String> {
 
 fn usage() -> Vec<String> {
     vec![
-        "用法: /team <list|start|status|assign|stop|validate|new|memory>".to_string(),
-        "  list       定义区（图纸）+ 运行区（工地）同屏".to_string(),
-        "  start      拉起 team（成员待命 · 幂等复用）".to_string(),
-        "  status     成员状态（●待命 ◐忙碌 ✗异常 ○离线）".to_string(),
-        "  assign     派任务给成员（/team assign <成员> <任务>）".to_string(),
-        "  stop       停止 team（成员不再接收指令）".to_string(),
-        "  validate   校验 team.json（与 start 同源）".to_string(),
-        "  new        脚手架：生成 .bingo/team.json（产物必过 validate）".to_string(),
-        "  memory     记忆管理（list 查看 / gc 清理）".to_string(),
+        "usage: /team <list|start|status|assign|stop|validate|new|memory>".to_string(),
+        "  list       definition zone (blueprint) + runtime zone (worksite) side by side"
+            .to_string(),
+        "  start      bring up the team (members on standby · idempotent reuse)".to_string(),
+        "  status     member states (●standby ◐busy ✗failed ○offline)".to_string(),
+        "  assign     assign a task to a member (/team assign <member> <task>)".to_string(),
+        "  stop       stop the team (members stop receiving instructions)".to_string(),
+        "  validate   validate team.json (same source as start)".to_string(),
+        "  new        scaffold: generate .bingo/team.json (the output must pass validate)"
+            .to_string(),
+        "  memory     memory management (list to view / gc to clean)".to_string(),
     ]
 }
 
@@ -78,18 +80,18 @@ fn def_zone(def: &crate::team::TeamDef, defs: &[crate::agents::AgentDef]) -> Vec
     let view = crate::team::view(def, defs);
     let mode = crate::team::channel_mode(def).label();
     let mut out = vec![format!(
-        "▸ {} · {} 成员 · {mode} 频道",
+        "▸ {} · {} members · {mode} channel",
         view.def.name,
         view.members.len()
     )];
     for m in &view.members {
         let badge = match m.source {
-            crate::agents::AgentDefSource::Project => "[项目]",
-            crate::agents::AgentDefSource::User => "[用户]",
+            crate::agents::AgentDefSource::Project => "[project]",
+            crate::agents::AgentDefSource::User => "[user]",
             crate::agents::AgentDefSource::Unknown => "",
         };
         out.push(format!(
-            "  {} → {} {}（{}）",
+            "  {} → {} {} ({})",
             m.name, m.agent, badge, m.description
         ));
     }
@@ -100,7 +102,7 @@ fn list(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     let (def, defs) = match load_or_no_team(
         session,
         cwd,
-        "没有 .bingo/team.json（team 未固定到本项目；/team new 创建）。",
+        "no .bingo/team.json (the team is not pinned to this project; /team new creates it).",
     ) {
         Ok(x) => x,
         Err(out) => return out,
@@ -114,9 +116,9 @@ fn list(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
         .filter(|a| def.members.iter().any(|m| m.name == a.name))
         .collect();
     if running.is_empty() {
-        out.push("  运行区：未拉起（/team start 拉起）".to_string());
+        out.push("  runtime zone: not up (/team start to bring it up)".to_string());
     } else {
-        out.push(format!("  运行区（{} 实例）", running.len()));
+        out.push(format!("  runtime zone ({} instances)", running.len()));
         for a in &running {
             out.push(format!("  {} · {}", a.name, state_mark(a.state)));
         }
@@ -126,9 +128,9 @@ fn list(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
 
 fn state_mark(state: AgentState) -> &'static str {
     match state {
-        AgentState::Idle => "● 待命",
-        AgentState::Running => "◐ 忙碌",
-        AgentState::Stopped => "✗ 异常",
+        AgentState::Idle => "● standby",
+        AgentState::Running => "◐ busy",
+        AgentState::Stopped => "✗ failed",
     }
 }
 
@@ -136,7 +138,7 @@ fn start(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     let (def, defs) = match load_or_no_team(
         session,
         cwd,
-        "没有 .bingo/team.json（/team new 创建后 /team start）。",
+        "no .bingo/team.json (/team new first, then /team start).",
     ) {
         Ok(x) => x,
         Err(out) => return out,
@@ -150,12 +152,12 @@ fn start(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
             if !summary.spawned.is_empty() {
                 let names = summary.spawned.join(" · ");
                 out.push(format!(
-                    "[team] {} 拉起 · {ready}/{total} 待命（{names}）",
+                    "[team] {} up · {ready}/{total} on standby ({names})",
                     def.name
                 ));
             } else if !summary.reused.is_empty() {
                 out.push(format!(
-                    "[team] {} 已在运行 · 复用现有实例（{ready}/{total} 待命）",
+                    "[team] {} already running · reusing existing instances ({ready}/{total} on standby)",
                     def.name
                 ));
             }
@@ -164,17 +166,19 @@ fn start(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
             }
             for (member, reason) in &summary.failed {
                 out.push(format!(
-                    "[team] ✗ {member} 拉起失败：{reason}（修复后 /team start 单独重试）"
+                    "[team] ✗ failed to spawn {member}: {reason} (fix and /team start to retry it alone)"
                 ));
             }
             if out.is_empty() {
-                out.push(format!("[team] {} 无变化", def.name));
+                out.push(format!("[team] {} no change", def.name));
             }
-            out.push("（/team status 查看 · /team assign <成员> <任务> 派活）".to_string());
+            out.push(
+                "(/team status to check · /team assign <member> <task> to delegate)".to_string(),
+            );
             out
         }
         Err(e) => vec![format!(
-            "[team] {} 校验失败：{e}（修复后重试；/team validate 预检）",
+            "[team] {} validation failed: {e} (fix and retry; /team validate to pre-check)",
             def.name
         )],
     }
@@ -184,17 +188,17 @@ fn status(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     let (def, _defs) = match load_or_no_team(
         session,
         cwd,
-        "没有 .bingo/team.json（/team start 需先固定 team）。",
+        "no .bingo/team.json (the team must be pinned before /team start).",
     ) {
         Ok(x) => x,
         Err(out) => return out,
     };
     let instances = session.agents.list();
-    let mut out = vec![format!("▸ {} 状态", def.name)];
+    let mut out = vec![format!("▸ {} status", def.name)];
     for m in &def.members {
         let mark = match instances.iter().find(|a| a.name == m.name) {
             Some(a) => state_mark(a.state),
-            None => "○ 离线",
+            None => "○ offline",
         };
         out.push(format!("  {mark}  {}", m.name));
     }
@@ -202,8 +206,11 @@ fn status(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
 }
 
 fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
-    let (def, _defs) = match load_or_no_team(session, cwd, "没有 .bingo/team.json（team 未固定）。")
-    {
+    let (def, _defs) = match load_or_no_team(
+        session,
+        cwd,
+        "no .bingo/team.json (the team is not pinned).",
+    ) {
         Ok(x) => x,
         Err(out) => return out,
     };
@@ -211,18 +218,21 @@ fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
     let member = parts.next().unwrap_or("").trim();
     let message = parts.next().unwrap_or("").trim();
     if member.is_empty() || message.is_empty() {
-        return vec!["用法: /team assign <成员> <任务>".to_string()];
+        return vec!["usage: /team assign <member> <task>".to_string()];
     }
     if !def.members.iter().any(|m| m.name == member) {
         let known: Vec<&str> = def.members.iter().map(|m| m.name.as_str()).collect();
         return vec![format!(
-            "{member} 不是 {} 的成员；成员：{}",
+            "{member} is not a member of {}; members: {}",
             def.name,
             known.join(", ")
         )];
     }
-    match session.agents.deliver(member, message) {
+    match session.agents.deliver(member, message, Vec::new(), None) {
         Ok(_) => {
+            // A slash command has no turn boundary behind it: deliver now, so the user sees the
+            // assignment start instead of waiting for the hub's next turn.
+            crate::tool::agent::flush_agent_inbox(session, &session.watch);
             // Dispatch audit: append-only decision record (zero model cost).
             crate::team::append_decision(
                 &session.home,
@@ -234,15 +244,15 @@ fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
                 &[member],
             );
             vec![format!(
-                "✓ 已派给 {member} · 完成后通知（/team status 查看状态）"
+                "✓ assigned to {member} · notified on completion (/team status to check)"
             )]
         }
-        Err(e) => vec![format!("✗ 派发失败：{e}")],
+        Err(e) => vec![format!("✗ assignment failed: {e}")],
     }
 }
 
 fn stop(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
-    let (def, _defs) = match load_or_no_team(session, cwd, "没有 .bingo/team.json。") {
+    let (def, _defs) = match load_or_no_team(session, cwd, "no .bingo/team.json.") {
         Ok(x) => x,
         Err(out) => return out,
     };
@@ -253,10 +263,10 @@ fn stop(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
         }
     }
     if stopped.is_empty() {
-        vec![format!("[team] {} 没有运行中的成员", def.name)]
+        vec![format!("[team] {} has no running members", def.name)]
     } else {
         vec![format!(
-            "[team] {} 已停止 · {} 成员（历史保留，/team start 可再拉起）",
+            "[team] {} stopped · {} members (history kept; /team start brings it back)",
             def.name,
             stopped.len()
         )]
@@ -267,7 +277,7 @@ fn validate(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     let (def, defs) = match load_or_no_team(
         session,
         cwd,
-        "没有 .bingo/team.json（/team new 创建后 validate）。",
+        "no .bingo/team.json (/team new first, then validate).",
     ) {
         Ok(x) => x,
         Err(out) => return out,
@@ -279,14 +289,14 @@ fn validate(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
                 .channel
                 .as_ref()
                 .and_then(|s| s.message_limit)
-                .map(|l| format!(" · 预算 {l}"))
+                .map(|l| format!(" · budget {l}"))
                 .unwrap_or_default();
             vec![format!(
-                "✓ team.json 通过校验（{} 成员 · {mode} 频道{limit}）",
+                "✓ team.json passes validation ({} members · {mode} channel{limit})",
                 def.members.len()
             )]
         }
-        Err(e) => vec![format!("✗ 校验失败：{e}")],
+        Err(e) => vec![format!("✗ validation failed: {e}")],
     }
 }
 
@@ -297,7 +307,7 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
     let path = cwd.join(crate::team::TEAM_FILE);
     if path.exists() {
         return vec![format!(
-            "✗ {} 已存在（不覆盖；手改或删除后重来）",
+            "✗ {} already exists (not overwritten; edit or delete it and start over)",
             path.display()
         )];
     }
@@ -311,41 +321,40 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
     let defs = crate::agents::load_agent_defs(&session.home, cwd);
     if defs.is_empty() {
         return vec![
-            "✗ 没有任何 AgentDef 可入队（先在 .bingo/agents/ 或 ~/.config/bingo/agents/ 建角色）。"
+            "✗ no AgentDef available to enlist (create roles in .bingo/agents/ or ~/.config/bingo/agents/ first)."
                 .to_string(),
         ];
     }
-    let members: Vec<serde_json::Value> = defs
-        .iter()
-        .map(|d| serde_json::json!({"name": d.name, "agent": d.name}))
-        .collect();
-    let team_json = serde_json::json!({
-        "name": name,
-        "channel": {"mode": "serial"},
-        "members": members,
-    });
-    let dir = cwd.join(".bingo");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return vec![format!("✗ 无法创建 {}：{e}", dir.display())];
-    }
-    let pretty = match serde_json::to_string_pretty(&team_json) {
-        Ok(s) => s,
-        Err(e) => return vec![format!("✗ 序列化失败：{e}")],
+    let def = crate::team::TeamDef {
+        name,
+        channel: Some(crate::team::ChannelSpec {
+            mode: Some("serial".to_string()),
+            message_limit: None,
+        }),
+        // Portraits handed out in roster order rather than by hashing the name:
+        // a scaffolded crew should come out with distinct faces, and a hash of
+        // four role names collides more often than not.
+        members: defs
+            .iter()
+            .zip(crate::tui::avatar::ids().into_iter().cycle())
+            .map(|(d, avatar)| crate::team::TeamMember {
+                name: d.name.clone(),
+                agent: d.name.clone(),
+                avatar: Some(avatar.to_string()),
+            })
+            .collect(),
     };
-    match std::fs::write(&path, pretty) {
-        Ok(()) => {
-            let count = defs.len();
-            vec![
-                format!(
-                    "✓ 已生成 {}（{} 成员 · serial 频道）",
-                    path.display(),
-                    count
-                ),
-                "  产物已通过校验（/team start 拉起 · 手动精简 members 后 /team validate 复查）"
-                    .to_string(),
-            ]
-        }
-        Err(e) => vec![format!("✗ 写入失败：{e}")],
+    match crate::team::write_team_file(cwd, &def) {
+        Ok(()) => vec![
+            format!(
+                "✓ generated {} ({} members · serial channel)",
+                path.display(),
+                def.members.len()
+            ),
+            "  output passes validation (/team start to bring up · /team validate to re-check after trimming members)"
+                .to_string(),
+        ],
+        Err(e) => vec![format!("✗ write failed: {e}")],
     }
 }
 
@@ -354,7 +363,7 @@ fn memory(session: &Arc<Session>, cwd: &Path, sub: &str) -> Vec<String> {
     let (def, _defs) = match load_or_no_team(
         session,
         cwd,
-        "没有 .bingo/team.json（记忆按 team 命名空间存储）。",
+        "no .bingo/team.json (memory is namespaced per team).",
     ) {
         Ok(x) => x,
         Err(out) => return out,
@@ -365,12 +374,12 @@ fn memory(session: &Arc<Session>, cwd: &Path, sub: &str) -> Vec<String> {
         "" | "list" | "ls" => {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 return vec![format!(
-                    "暂无 {} 的记忆（{} 分支下没有落盘内容）",
+                    "no memory for {} yet (nothing persisted under the {} branch)",
                     def.name, branch
                 )];
             };
             let mut out = vec![format!(
-                "▸ {} 记忆 · {} 分支 · {}",
+                "▸ {} memory · {} branch · {}",
                 def.name,
                 branch,
                 dir.display()
@@ -392,7 +401,7 @@ fn memory(session: &Arc<Session>, cwd: &Path, sub: &str) -> Vec<String> {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             let Ok(entries) = std::fs::read_dir(&dir) else {
-                return vec!["没有可清理的记忆。".to_string()];
+                return vec!["no memory to clean.".to_string()];
             };
             let mut removed = 0;
             for e in entries.flatten() {
@@ -409,13 +418,18 @@ fn memory(session: &Arc<Session>, cwd: &Path, sub: &str) -> Vec<String> {
                 }
             }
             if removed == 0 {
-                vec![format!("{} 的记忆无过时文件（TTL 30 天）", def.name)]
+                vec![format!(
+                    "no stale memory files for {} (TTL 30 days)",
+                    def.name
+                )]
             } else {
-                vec![format!("✓ 已清理 {removed} 个过时记忆文件（TTL 30 天）")]
+                vec![format!(
+                    "✓ cleaned {removed} stale memory files (TTL 30 days)"
+                )]
             }
         }
         other => vec![format!(
-            "未知记忆子命令: /team memory {other}（可用 list / gc）"
+            "unknown memory subcommand: /team memory {other} (available: list / gc)"
         )],
     }
 }
@@ -447,6 +461,7 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         });
         (s, project)
     }
@@ -456,27 +471,27 @@ mod tests {
     #[test]
     fn scaffold_validate_start_chain() {
         let (s, project) = session("scaffold");
-        std::fs::write(project.join(".bingo/agents/qa.md"), "你是 QA。\n").unwrap();
-        std::fs::write(project.join(".bingo/agents/dev.md"), "你是 Dev。\n").unwrap();
+        std::fs::write(project.join(".bingo/agents/qa.md"), "You are QA.\n").unwrap();
+        std::fs::write(project.join(".bingo/agents/dev.md"), "You are Dev.\n").unwrap();
 
         // 1. /team new: generates the artifact.
         let out = new_team(&s, &project, "");
-        assert!(out[0].contains("已生成"), "{out:?}");
+        assert!(out[0].contains("generated"), "{out:?}");
         assert!(project.join(crate::team::TEAM_FILE).exists());
 
         // 2. validate passes.
         let out = validate(&s, &project);
-        assert!(out[0].contains("通过校验"), "{out:?}");
+        assert!(out[0].contains("passes validation"), "{out:?}");
 
         // 3. start doesn't fail on config; members standby + channel built.
         let out = start(&s, &project);
-        assert!(!out.iter().any(|l| l.contains("失败")), "{out:?}");
+        assert!(!out.iter().any(|l| l.contains("failed")), "{out:?}");
         let instances = s.agents.list();
-        assert_eq!(instances.len(), 2, "qa + dev 两个成员");
+        assert_eq!(instances.len(), 2, "qa + dev, two members");
         assert!(instances.iter().all(|a| a.state == AgentState::Idle));
         assert!(
             s.channels.info("proj").is_some(),
-            "频道 = team 名（缺省取目录名）"
+            "channel = team name (defaults to the dir name)"
         );
         let _ = std::fs::remove_dir_all(project.parent().unwrap());
     }
@@ -485,17 +500,17 @@ mod tests {
     #[test]
     fn status_and_assign() {
         let (s, project) = session("status");
-        std::fs::write(project.join(".bingo/agents/qa.md"), "你是 QA。\n").unwrap();
+        std::fs::write(project.join(".bingo/agents/qa.md"), "You are QA.\n").unwrap();
         let _ = new_team(&s, &project, "qt");
 
         let out = status(&s, &project);
         assert!(
-            out.iter().any(|l| l.contains("○ 离线")),
-            "未拉起成员为离线: {out:?}"
+            out.iter().any(|l| l.contains("○ offline")),
+            "unspawned members show as offline: {out:?}"
         );
 
-        let out = assign(&s, &project, "ghost 干点活".to_string());
-        assert!(out[0].contains("不是 qt 的成员"), "{out:?}");
+        let out = assign(&s, &project, "ghost do some work".to_string());
+        assert!(out[0].contains("is not a member of qt"), "{out:?}");
         let _ = std::fs::remove_dir_all(project.parent().unwrap());
     }
 
@@ -506,7 +521,10 @@ mod tests {
         std::fs::create_dir_all(project.join(".bingo")).unwrap();
         std::fs::write(project.join(crate::team::TEAM_FILE), "{not json").unwrap();
         let out = list(&s, &project);
-        assert!(out[0].contains("✗") && out[0].contains("解析"), "{out:?}");
+        assert!(
+            out[0].contains("✗") && out[0].contains("parse failed"),
+            "{out:?}"
+        );
         let _ = std::fs::remove_dir_all(project.parent().unwrap());
     }
 }

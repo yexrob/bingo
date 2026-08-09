@@ -1,6 +1,6 @@
 # bingo
 
-> **中文版**：[README.zh-CN.md](README.zh-CN.md) — 中文文档见这里。
+> **Chinese version**: [README.zh-CN.md](README.zh-CN.md)
 
 bingo is a local agent CLI (agent harness) written in Rust. It drives large
 language models from your terminal to complete coding and system tasks: tool
@@ -27,8 +27,8 @@ produces intent; side effects are gated by the harness.
   idle at zero token cost) and managed via `/team`; cross-session memory is
   scoped by project path + git branch.
 - **Experience library**: agents accumulate reusable operational experience
-  per project (trigger/summary/steps/verify), shared across sessions via
-  Propose/Commit/Query/Forget tools.
+  per project (trigger/summary/steps/verify), share it across sessions, and
+  record verified helpful/harmful outcomes without automatic self-promotion.
 - **TUI**: ratatui dual-mode (default fullscreen alternate-screen canvas;
   `--inline` keeps finalized output in terminal scrollback and enables
   kitty-graphics image rendering), reverse history search, and a slash-command
@@ -264,8 +264,9 @@ schema from a single source of truth):
 | `WebFetch` / `WebSearch` | web fetching and search (shared HTTP connection pool; pre-approved domains auto-allowed) |
 | `Agent` | spawns a named sub-agent (async by default, completion notification injected into context; `background:false` waits synchronously) |
 | `SendMessage` / `AgentControl` | sub-agent continuation and lifecycle management (main session only) |
+| `Team` | the project crew (main session only): `status`/`validate` read freely, `start`/`stop`/`save` are confirmed by the user in every permission mode |
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | task tracking (disk-backed, same source as the TUI task area, lifecycle hooks) |
-| `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceForget` | cross-session experience library (see below) |
+| `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceOutcome`/`ExperienceForget` | cross-session experience library (see below) |
 | `AskUserQuestion` | asks the user multiple-choice questions (reuses the permission prompt modal in the TUI) |
 | `Skill` | skill invocation (see below) |
 | `mcp__<server>__<tool>` | tools exposed via MCP (see below) |
@@ -298,9 +299,11 @@ room reuses the channel machinery, and control stays on the hub-and-spoke
 surface.
 
 - **Definition**: `.bingo/team.json` (camelCase, committed to the repo):
-  `name` + `channel {mode, messageLimit}` + `members [{name, agent}]` — each
-  member references an AgentDef, so a persona lives in one place
-  (`.bingo/agents/<name>.md`) and can join multiple teams.
+  `name` + `channel {mode, messageLimit}` + `members [{name, agent, avatar?}]` —
+  each member references an AgentDef, so a persona lives in one place
+  (`.bingo/agents/<name>.md`) and can join multiple teams. `name` is the name
+  shown on the member's messages (give it a person's name, not a role code) and
+  `avatar` pins one of the bundled portraits, so a crew is a fixed cast.
 - **Startup pull-up**: with `settings.team.autoStart` (default true) the team
   is pulled up at startup — spawn members and create the room, but do **not**
   wake them (members sit idle at zero token cost until `/team assign` or a
@@ -315,6 +318,16 @@ surface.
   persist to `~/.config/bingo/teams/<project-hash>/<branch>/<team>/` — scoped
   by project path + git branch, so main and a feature worktree never share
   memory. Restored on pull-up without waking the members.
+- **The `Team` tool** (main session only) gives the model the same surface:
+  `status` (blueprint + each member's runtime state + the definitions available
+  to draft with), `validate`, `start`, `stop`, `save` (writes the blueprint;
+  whole-document, so it takes the complete roster). Reads are free; **every
+  change is confirmed by the user in person** — the prompt appears in every
+  permission mode, including `bypassPermissions`, and an `allow` rule cannot
+  pre-authorize it (only `deny` outranks it). The confirmation line names the
+  change rather than the file (`Rewrite .bingo/team.json · dev-room · 4 members
+  (-ui +qa)`). Hand-editing `.bingo/team.json` with Write/Edit asks the same
+  question. Dispatch is not part of the tool: `SendMessage` gives a member work.
 
 ## Channels (experimental)
 
@@ -328,8 +341,26 @@ With `settings.experimental.agentChannels: true`:
   channels allow interleaving.
 - Budget overflows freeze the channel and notify the main agent
   (`channelMessageLimit`/`agentMessageLimit` gates).
-- Channels appear as `◇ #name` rows in the transcript; Ctrl+G opens a fullscreen
-  room where you can post as the user.
+- Channels appear as `◇ #name` rows in the transcript; Ctrl+G opens the
+  fullscreen workspace, where you can post as the user.
+
+## Workspace view (Ctrl+G)
+
+A single conversation pane, full width: a header naming the channel or instance
+(with the team's name at the right edge), the message list, and the composer.
+No rail, no sidebar, and no background of its own — the terminal's own
+background shows through. Navigation is **Ctrl+K** (the quick switcher, listing
+every conversation with its unread count) and **alt+↑↓**; Tab moves between the
+message list and the composer, Esc returns.
+
+**Avatars**: on terminals that can place kitty images — the same capability
+behind inline image rendering (Ghostty/kitty, and tmux with passthrough) — each
+sender wears one of eight bundled [anime-style portraits](assets/avatars/), 4×2
+cells beside the name, transmitted once per portrait and placed by Unicode
+placeholder cells. A team member's portrait is pinned in `.bingo/team.json`
+(`"avatar": "sora"`) so a crew keeps a fixed cast; everyone else gets a face
+derived from their name. Terminals without that capability keep the sender's initial
+on a colour; the row count is identical either way, so only the gutter changes.
 
 ## Skills
 
@@ -353,7 +384,9 @@ later query reusable experience — the value compounds over sessions.
 - **Storage**: `~/.config/bingo/experience/<project-key>/entries/<id>.md`
   (user-global, never touches the project workspace); per-project isolation.
 - **Entry shape**: `trigger` (keywords), `summary`, `steps`, `verify`,
-  `evidence` (where it came from) — frontmatter + free-form body.
+  `evidence` (where it came from), plus explicit helpful/harmful outcome counters
+  and append-only outcome history with SHA-256-bound evidence — frontmatter +
+  free-form body.
 - **Tools**:
   - `ExperiencePropose` — generates a candidate with a stable id; writes nothing.
   - `ExperienceCommit` — persists an entry (goes through the permission gate);
@@ -361,7 +394,13 @@ later query reusable experience — the value compounds over sessions.
     duplicating; `status: stale` stops injection into new sessions but stays
     queryable.
   - `ExperienceQuery` — matches on any trigger keyword (case-insensitive
-    substring); active entries rank above stale/degraded, then by hit count.
+    substring); active entries rank above stale/degraded, then explicit observed
+    outcomes rank before the legacy commit count; results include outcome
+    counters and history.
+  - `ExperienceOutcome` — after actually applying a queried entry, records a
+    permission-confirmed `helpful` or `harmful` result with concrete evidence;
+    it appends history and never changes lifecycle `status` or `verified_at`
+    automatically.
   - `ExperienceForget` — deletes an entry.
 - **Status lifecycle**: `active` → `degraded` → `stale`; active entries are
   injected into new sessions, stale ones are only queryable.
@@ -515,8 +554,9 @@ src/
   tool/agent.rs    Agent / SendMessage / AgentControl implementations
   team.rs          team parsing / validation / spawn + team memory (D31)
   team_cmd.rs      /team slash-command family
+  tool/team.rs     Team tool (model-facing, user-confirmed changes, D46)
   experience.rs    cross-session experience library
-  tool/experience.rs  ExperiencePropose/Commit/Query/Forget tools
+  tool/experience.rs  ExperiencePropose/Commit/Query/Outcome/Forget tools
   channels.rs      channel registry (experimental)
   tasks.rs         task store (Task tool family)
   skills.rs        skill loading / frontmatter / argument substitution

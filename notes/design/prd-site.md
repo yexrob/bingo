@@ -1,102 +1,102 @@
-# PRD: bingo 官网（项目门面站点）
+# PRD: bingo website (project showcase site)
 
-> 状态：v1 定义稿
-> 关联任务：新建站点推送 yexrob 公开仓库 → dokploy nginx 部署
+> Status: v1 definition draft
+> Related task: push the new site to a public yexrob repository → deploy via dokploy nginx
 
-## 1. 目标
+## 1. Goal
 
-官网是 bingo 的门面，服务两类访客：
+The website is bingo's public face, serving two kinds of visitors:
 
-- **潜在用户**：30 秒内看懂「bingo 是什么、能干什么、怎么装」；看完愿意 `cargo install` 试试。
-- **潜在贡献者**：快速理解项目理念与架构（harness 心智模型），找到仓库与贡献入口。
+- **Potential users**: understand "what is bingo, what does it do, how do I install it" within 30 seconds; leave willing to try `cargo install`.
+- **Potential contributors**: quickly grasp the project's philosophy and architecture (the harness mental model), find the repository and contribution entry points.
 
-**一句话定位（Hero 锚点）**：bingo is a local agent CLI written in Rust — the model produces intent, the harness gates every side effect.
+**One-line positioning (Hero anchor)**: bingo is a local agent CLI written in Rust — the model produces intent, the harness gates every side effect.
 
-**成功量尺**：访客能从首页导航到仓库 / README / 安装命令，完成「理解 → 尝试」的最小闭环。
+**Success metric**: visitors can navigate from the homepage to the repo / README / install command, completing the minimal "understand → try" loop.
 
-## 2. 内容结构（栏目清单）
+## 2. Content structure (section list)
 
-站内导航（顶部固定，8 项以内）：
+In-site navigation (fixed at top, no more than 8 items):
 
-| # | 栏目 | 要点 |
+| # | Section | Key points |
 |---|---|---|
-| 1 | **Hero（首屏）** | 一句话定位 + 安装命令（`cargo install --git https://github.com/yexrob/bingo --locked`）+ 两个 CTA：GitHub 仓库 / 快速开始 |
-| 2 | **Features** | 8 张特性卡，每张一句话 + 一个具体行为示例：流式主循环、统一权限门、工具集（Tool trait）、子代理团队（hub-and-spoke）、serial 频道、slash 命令、Hooks 扩展点、Experience 复用机制、MCP、Skills（选 8-10 项，卡面克制：图标 + 标题 + 1-2 行） |
-| 3 | **How it works（理念）** | 一段话讲透 harness 心智模型：「模型只产出意图；权限、并行、副作用、压缩、记忆与 UI 由本地 harness 负责」+ 简化架构图（文本/SVG，无 JS） |
-| 4 | **Quick start** | 3 步：配置 API key → `bingo` 启动 → 第一条指令；附 `--print` headless 示例；链接 README 全文 |
-| 5 | **Share 样例**（`/share/`） | 展示 `bingo share` 产出的会话 HTML（单文件、离线可用，天然适合静态站内嵌）。v1 用**真实感的会话样例**（含子代理/频道活动，手工构造或节选真实会话），占位诚实标注；CLI 团队产出真实 `bingo share` 产物后可整体替换 |
-| 6 | **Docs / 文档入口** | 指向 GitHub README、README.zh-CN、设计文档（error code 契约、feedback-states）；不在站内复制全文，静态站只做索引 |
-| 7 | **Contributing** | 项目理念（Rust 2024、无 unsafe、默认做减法）+ worktree 工作流 + 验证命令（build/clippy/test）+ 提交规范；链接仓库 CONTRIBUTING 或 AGENTS.md |
-| 8 | **Footer** | 仓库链接、License（MIT？以仓库为准）、致谢/参考（goose、iocraft 等） |
+| 1 | **Hero (above the fold)** | one-line positioning + install command (`cargo install --git https://github.com/yexrob/bingo --locked`) + two CTAs: GitHub repo / quick start |
+| 2 | **Features** | 8 feature cards, each with one sentence + one concrete behavior example: streaming main loop, unified permission gate, tool set (Tool trait), sub-agent teams (hub-and-spoke), serial channels, slash commands, Hooks extension points, Experience reuse mechanism, MCP, Skills (pick 8-10 items; restrained cards: icon + title + 1-2 lines) |
+| 3 | **How it works (philosophy)** | one paragraph nailing the harness mental model: "the model only produces intent; permissions, parallelism, side effects, compaction, memory and UI are handled by the local harness" + a simplified architecture diagram (text/SVG, no JS) |
+| 4 | **Quick start** | 3 steps: configure an API key → launch `bingo` → first instruction; plus a `--print` headless example; link to the full README |
+| 5 | **Share sample** (`/share/`) | showcase the session HTML produced by `bingo share` (single file, offline-ready, naturally embeddable in a static site). v1 uses a **realistic session sample** (with sub-agent/channel activity, hand-built or excerpted from a real session), honestly labeled as a placeholder; can be wholesale-replaced once the CLI team produces real `bingo share` output |
+| 6 | **Docs / documentation entry** | point to the GitHub README, README.zh-CN, and design docs (error-code contract, feedback-states); do not duplicate full text on the site — the static site only indexes |
+| 7 | **Contributing** | project philosophy (Rust 2024, no unsafe, subtract by default) + the worktree workflow + verification commands (build/clippy/test) + commit conventions; link to the repo's CONTRIBUTING or AGENTS.md |
+| 8 | **Footer** | repo link, License (MIT? per the repo), acknowledgements/references (goose, iocraft, etc.) |
 
-## 3. 文案基调
+## 3. Copy tone
 
-**建议：英文主站 + 中文节选页（`/zh/` 或单页中文摘要）**，而非全站双语。
+**Suggestion: an English main site + a Chinese excerpt page (`/zh/` or a single-page Chinese summary)**, not site-wide bilingualism.
 
-理由：
+Rationale:
 
-1. **目标受众**：GitHub 开源项目，潜在用户与贡献者以英文生态为主；README 主体已是英文，站英文与仓库一致，维护成本最低。
-2. **既有资产**：README.zh-CN.md 已存在且质量高——中文节选页直接节译/链接该文件，不重复造。
-3. **中文社区是真实的第二受众**（项目文档有中文版、issue 有中文讨论），提供中文节选是低成本高诚意的信号。
-4. **纯静态约束**：全站双语需要语言切换机制（URL 前缀或 JS 切换），v1 做减法——英文为主站、`/zh/` 单页放中文摘要 + 链接中文 README。
+1. **Target audience**: a GitHub open-source project — potential users and contributors are mostly in the English ecosystem; the README body is already English, so an English site stays consistent with the repo at the lowest maintenance cost.
+2. **Existing assets**: README.zh-CN.md already exists and is high quality — the Chinese excerpt page can directly excerpt/translate/link that file instead of reinventing it.
+3. **The Chinese community is a real secondary audience** (the docs have a Chinese version, issues have Chinese discussion), so offering a Chinese excerpt is a low-cost, high-goodwill signal.
+4. **Pure-static constraint**: site-wide bilingualism needs a language-switching mechanism (URL prefix or JS toggle); v1 subtracts — English as the main site, a single `/zh/` page with a Chinese summary + link to the Chinese README.
 
-文案风格：短句、具体、避免营销腔；技术名词不翻译（harness、permission gate、sub-agent）。
+Copy style: short sentences, concrete, no marketing-speak; technical terms are not translated (harness, permission gate, sub-agent).
 
-## 4. 技术约束
+## 4. Technical constraints
 
-- **纯静态**：HTML + CSS + 少量原生 JS（可选，最好零 JS）；无构建步骤、无框架、无包管理器——仓库里直接是静态文件，改完即部署。
-- **部署**：dokploy nginx 静态服务；文件结构 `public/`（或根目录）直接映射站点根。
-- **响应式**：移动端可读（终端工具站点的用户可能在手机上看 README）。
-- **可扩展**：share 样例（单 HTML 文件）直接放入站点 `/share/` 目录作为独立页面（main 定案：v1 用真实感样例，CLI 产物可替换）；站点结构已预留 `/share/` 路径。
-- **无外部依赖**：不引 CDN 字体/库（离线可看、加载快、无追踪）。图标用内联 SVG。
-- **视觉实现**：dev 按 `site-visual-direction.md`（token 表 + 组件清单）严格实现；`/share/` 样例页与 CLI 分享页同源同令牌（参考 `share-page-design.md` / `share-page-template.html`）。
+- **Pure static**: HTML + CSS + minimal vanilla JS (optional, preferably zero JS); no build step, no framework, no package manager — static files live directly in the repo, edit and deploy.
+- **Deployment**: dokploy nginx static serving; the `public/` directory (or repo root) maps directly to the site root.
+- **Responsive**: readable on mobile (users of a terminal tool may read the README on their phone).
+- **Extensible**: share samples (single HTML files) drop straight into the site's `/share/` directory as standalone pages (main's ruling: v1 uses realistic samples, replaceable by CLI output); the site structure already reserves the `/share/` path.
+- **No external dependencies**: no CDN fonts/libraries (works offline, loads fast, no tracking). Inline SVG for icons.
+- **Visual implementation**: dev implements strictly per `site-visual-direction.md` (token table + component list); the `/share/` sample page shares the same source and tokens as the CLI share page (see `share-page-design.md` / `share-page-template.html`).
 
-## 5. 验收标准
+## 5. Acceptance criteria
 
-### A. 内容完整性
-- A1. 八个栏目全部实现，Hero 含安装命令与两个 CTA。
-- A2. 特性卡覆盖产品形态：流式主循环、Tool 协议、统一权限门、Hooks、子代理（hub-and-spoke）、serial 频道、slash 命令、错误码契约、Experience 机制——每项一句话 + 一个行为示例（从 README 提炼，不照抄）。
-- A3. 「How it works」含一句话心智模型与简化架构图。
-- A4. Quick start 三步可独立完成，所有链接（仓库、README、README.zh-CN）有效（验收时逐一点击）。
-- A5. `/share/` 样例页存在：含四视图（对话/子代理/频道/任务）或至少对话 + 子代理 + 频道活动，内容真实感（不编造华丽假数据）；页面结构可被真实 `bingo share` 产物整体替换而不改站点布局。
+### A. Content completeness
+- A1. All eight sections implemented; Hero carries the install command and two CTAs.
+- A2. Feature cards cover the product shape: streaming main loop, Tool protocol, unified permission gate, Hooks, sub-agents (hub-and-spoke), serial channels, slash commands, error-code contract, Experience mechanism — each with one sentence + one behavior example (distilled from the README, not copied).
+- A3. "How it works" contains a one-sentence mental model and a simplified architecture diagram.
+- A4. The three Quick start steps are independently completable; all links (repo, README, README.zh-CN) resolve (click each one during acceptance).
+- A5. The `/share/` sample page exists: it shows the four views (conversation/sub-agents/channels/tasks) or at least conversation + sub-agent + channel activity, with realistic content (no fabricated flashy fake data); the page structure can be wholesale-replaced by a real `bingo share` product without changing the site layout.
 
-### B. 响应式
-- B1. 375px（手机）与 1440px（桌面）宽度下：无横向滚动、无文字溢出、CTA 可点。
-- B2. 导航在窄屏折叠为可用的菜单形式（或简化为单列堆叠）。
+### B. Responsive
+- B1. At 375px (phone) and 1440px (desktop): no horizontal scroll, no text overflow, CTAs clickable.
+- B2. Navigation collapses to a usable menu form on narrow screens (or simplifies to a single-column stack).
 
-### C. 加载
-- C1. 无外部资源请求（断网打开页面除字体图标外完整可读）；CSS/内联 SVG 内嵌或同域。
-- C2. 首屏（Hero）无阻塞资源；总页面体量克制（< 200KB 文本内容为佳）。
+### C. Loading
+- C1. No external resource requests (the page opens fully readable offline except font icons); CSS/inline SVG embedded or same-domain.
+- C2. No render-blocking resources above the fold (Hero); restrained total page size (ideally < 200KB of text content).
 
-### D. SEO 基础
-- D1. `<title>` + `<meta description>` + Open Graph（og:title/og:description/og:image 可省略或占位）。
-- D2. 语义化 HTML（`<header>/<main>/<nav>/<h1-h3>/<footer>`），正文为真实文本（非图片）。
-- D3. `robots.txt` 与 `sitemap.xml`（域名定稿后补，含站点 URL）。
+### D. SEO basics
+- D1. `<title>` + `<meta description>` + Open Graph (og:title/og:description/og:image may be omitted or placeholders).
+- D2. Semantic HTML (`<header>/<main>/<nav>/<h1-h3>/<footer>`), body text as real text (not images).
+- D3. `robots.txt` and `sitemap.xml` (add once the domain is finalized, containing the site URL).
 
-### E. 部署
-- E1. dokploy 部署后：`bingo.ruobin.dev` 可访问、HTTP 200、静态资源同域加载、404 页不丑陋（nginx 默认可接受，P2 再自写）。
-- E2. 仓库推送 yexrob 公开仓库（与 bingo 主仓库分离，站点独立仓库）。
-- E3. **License（main 定案 2026-08-07）**：License = MIT——官网 footer 标 MIT；官网仓库含 LICENSE 文件（MIT 全文）；主仓库 LICENSE 由 CLI 侧处理。推送前必须补上。
-- E4. **部署域名（main 定案）**：`bingo.ruobin.dev`（已解析到 dokploy，后续可改）；sitemap.xml / OG 的占位域名 `bingo.example.com` 部署前替换为正式域名。
+### E. Deployment
+- E1. After dokploy deployment: `bingo.ruobin.dev` reachable, HTTP 200, static assets load same-domain, the 404 page is not ugly (nginx default acceptable; write our own in P2).
+- E2. Push the repo to a public yexrob repository (separate from the main bingo repo; the site is its own repo).
+- E3. **License (main's ruling 2026-08-07)**: License = MIT — the site footer marks MIT; the site repo contains a LICENSE file (full MIT text); the main repo's LICENSE is handled by the CLI side. Must be added before pushing.
+- E4. **Deployment domain (main's ruling)**: `bingo.ruobin.dev` (already resolved to dokploy; changeable later); the placeholder domain `bingo.example.com` in sitemap.xml / OG is replaced with the official domain before deployment.
 
-### F. 质量
-- F1. 站点仓库有 README 说明「这是官网，内容在 X，部署走 dokploy nginx」。
-- F2. HTML 通过基础校验（w3c validator 无 error 级问题，或人工抽查无未闭合标签）。
+### F. Quality
+- F1. The site repo has a README stating "this is the website; content lives at X; deployment goes through dokploy nginx".
+- F2. HTML passes basic validation (w3c validator with no error-level issues, or a manual spot-check for unclosed tags).
 
-## 6. 优先级
+## 6. Priorities
 
-| 优先级 | 内容 |
+| Priority | Content |
 |---|---|
-| **P0**（首版必须） | Hero、Features（≥8 卡）、How it works、Quick start、Footer、导航；响应式基础；SEO title/description/OG；无外部资源；推送公开仓库；dokploy 部署可达 |
-| **P1**（紧随） | Contributing 栏目、Docs 索引（链接 README 中英）、`/share/` 样例页（真实感会话样例，含子代理/频道活动）、`/zh/` 中文节选页、sitemap/robots、404 页 |
-| **P2**（有真实需求再做） | 用真实 `bingo share` CLI 产物替换 `/share/` 样例、主题切换、博客/变更日志、更多语言 |
+| **P0** (must for v1) | Hero, Features (≥8 cards), How it works, Quick start, Footer, navigation; responsive basics; SEO title/description/OG; no external resources; push to a public repo; dokploy deployment reachable |
+| **P1** (immediately after) | Contributing section, Docs index (linking the EN/CN README), `/share/` sample page (realistic session sample with sub-agent/channel activity), `/zh/` Chinese excerpt page, sitemap/robots, 404 page |
+| **P2** (only when there's a real need) | replace `/share/` samples with real `bingo share` CLI output, theme switching, blog/changelog, more languages |
 
-## 7. 依赖与顺序
+## 7. Dependencies and order
 
-1. 域名/部署目标确认（dokploy 上建站点 → 拿到 URL）→ 2. 内容与页面（P0 先行）→ 3. 推送公开仓库 → 4. dokploy 部署 + 验收（A/E 组）→ 5. P1 补全。
+1. Confirm the domain/deployment target (create the site on dokploy → get the URL) → 2. content and pages (P0 first) → 3. push to a public repo → 4. dokploy deployment + acceptance (groups A/E) → 5. P1 completion.
 
-## 8. 风险与未决项
+## 8. Risks and open items
 
-- **域名已定**：`bingo.ruobin.dev`（main 定案 2026-08-07，已解析到 dokploy）；sitemap/OG 占位域名部署前替换。
-- **License 已定**：MIT（main 定案 2026-08-07）；官网仓库推送前补 LICENSE 文件 + footer 标 MIT。
-- **站点与仓库分离**：官网独立仓库（如 `yexrob/bingo-site`），避免官网改动污染主仓库提交史。
+- **Domain settled**: `bingo.ruobin.dev` (main's ruling 2026-08-07, already resolved to dokploy); the sitemap/OG placeholder domain is replaced before deployment.
+- **License settled**: MIT (main's ruling 2026-08-07); add the LICENSE file + MIT footer before pushing the site repo.
+- **Site and repo separated**: the site is its own repo (e.g. `yexrob/bingo-site`), so site changes never pollute the main repo's commit history.

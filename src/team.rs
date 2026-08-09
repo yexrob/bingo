@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::agents::{AgentDef, AgentDefSource};
@@ -31,9 +31,9 @@ const TEAM_MEMORY_ROOT: &str = "teams";
 
 #[derive(Debug, Error)]
 pub enum TeamError {
-    #[error("team.json 读取失败: {0}")]
+    #[error("team.json read failed: {0}")]
     Io(#[from] std::io::Error),
-    #[error("team.json 解析失败: {0}")]
+    #[error("team.json parse failed: {0}")]
     Parse(#[from] serde_json::Error),
     #[error("{0}")]
     Invalid(String),
@@ -54,30 +54,40 @@ impl TeamError {
 }
 
 /// Room spec (reuses the existing Channel vocabulary; no new concepts invented).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelSpec {
     /// Speaking mode: serial (default) | free.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     /// Total message cap per channel (default 500, see ChannelLimits).
-    #[serde(rename = "messageLimit", default)]
+    #[serde(
+        rename = "messageLimit",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub message_limit: Option<u64>,
 }
 
-/// A single member: `name` (instance name) + `agent` (referenced AgentDef name).
-#[derive(Debug, Clone, Deserialize)]
+/// A single member: `name` (instance name) + `agent` (referenced AgentDef name),
+/// plus the portrait it wears. The face is part of the blueprint because a crew is
+/// a standing cast: pinned here, a member keeps one face across sessions instead of
+/// whatever a hash of its instance name happens to land on.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct TeamMember {
     pub name: String,
     pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
 }
 
-/// Team definition (blueprint).
-#[derive(Debug, Clone, Deserialize)]
+/// Team definition (blueprint). Parsing and writing share this one struct: the file
+/// format has a single source, so a written blueprint reads back as the same value.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamDef {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ChannelSpec>,
     pub members: Vec<TeamMember>,
 }
@@ -101,12 +111,12 @@ fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
     let file = path.display();
     if def.name.trim().is_empty() {
         return Err(TeamError::invalid(format!(
-            "{file}: name: 不能为空（team 需要名字以区分）"
+            "{file}: name: must not be empty (a team needs a name to be distinguishable)"
         )));
     }
     if def.members.is_empty() {
         return Err(TeamError::invalid(format!(
-            "{file}: members: 不能为空（空 team 没有意义；单成员 team 合法）"
+            "{file}: members: must not be empty (an empty team is meaningless; a single-member team is fine)"
         )));
     }
     if let Some(spec) = &def.channel {
@@ -118,7 +128,7 @@ fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
             && limit == 0
         {
             return Err(TeamError::invalid(format!(
-                "{file}: channel.messageLimit: 必须为正整数"
+                "{file}: channel.messageLimit: must be a positive integer"
             )));
         }
     }
@@ -126,21 +136,38 @@ fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
     for (i, m) in def.members.iter().enumerate() {
         if m.name.trim().is_empty() {
             return Err(TeamError::invalid(format!(
-                "{file}: members[{i}].name: 不能为空"
+                "{file}: members[{i}].name: must not be empty"
             )));
         }
         if m.agent.trim().is_empty() {
             return Err(TeamError::invalid(format!(
-                "{file}: members[{i}].agent: 不能为空（需引用一个 AgentDef）"
+                "{file}: members[{i}].agent: must not be empty (must reference an AgentDef)"
             )));
         }
         if !seen.insert(m.name.as_str()) {
             return Err(TeamError::invalid(format!(
-                "{file}: members[{i}].name: 配置内重名 \"{}\"（成员名须唯一）",
+                "{file}: members[{i}].name: duplicate \"{}\" within the config (member names must be unique)",
                 m.name
             )));
         }
     }
+    Ok(())
+}
+
+/// Write the blueprint to `.bingo/team.json` (creating `.bingo/` if needed).
+/// Structural validation runs first and shares its source with `load_team_file`:
+/// what this writes must parse back, so a written file can never be one the reader
+/// rejects. Reference validation (`validate`) stays with the caller — it needs the
+/// AgentDef list, which the format itself doesn't carry.
+pub fn write_team_file(project_dir: &Path, def: &TeamDef) -> Result<(), TeamError> {
+    let path = project_dir.join(TEAM_FILE);
+    validate_structure(def, &path)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut json = serde_json::to_string_pretty(def)?;
+    json.push('\n');
+    std::fs::write(&path, json)?;
     Ok(())
 }
 
@@ -153,13 +180,13 @@ pub fn validate(def: &TeamDef, defs: &[AgentDef]) -> Result<(), TeamError> {
         if !by_name.contains_key(m.agent.as_str()) {
             let known: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
             let hint = if known.is_empty() {
-                "没有任何 AgentDef（项目层 `.bingo/agents/*.md` 或 user 层 `~/.config/bingo/agents/*.md`）"
+                "no AgentDef available (project-level `.bingo/agents/*.md` or user-level `~/.config/bingo/agents/*.md`)"
                     .to_string()
             } else {
-                format!("可用：{}", known.join(", "))
+                format!("available: {}", known.join(", "))
             };
             return Err(TeamError::invalid(format!(
-                "{TEAM_FILE}: members[{i}].agent: 引用不存在的 AgentDef \"{}\"；{hint}",
+                "{TEAM_FILE}: members[{i}].agent: references a non-existent AgentDef \"{}\"; {hint}",
                 m.agent
             )));
         }
@@ -199,7 +226,7 @@ pub fn view(def: &TeamDef, defs: &[AgentDef]) -> TeamView {
                     agent: m.agent.clone(),
                     description: agent
                         .map(|a| a.description.clone())
-                        .unwrap_or_else(|| "（缺失定义）".to_string()),
+                        .unwrap_or_else(|| "(missing definition)".to_string()),
                     source: agent.map(|a| a.source).unwrap_or(AgentDefSource::Unknown),
                 }
             })
@@ -263,7 +290,7 @@ pub fn current_branch(project_dir: &Path) -> String {
 }
 
 /// Memory directory of a team under a project + branch:
-/// `~/.config/bingo/teams/<project_key>/<branch>/<team>/`。
+/// `~/.config/bingo/teams/<project_key>/<branch>/<team>/`.
 pub fn team_memory_dir(home: &Path, project_dir: &Path, branch: &str, team: &str) -> PathBuf {
     team_memory_root(home)
         .join(project_key(project_dir))
@@ -363,7 +390,7 @@ pub fn spawn_team(
         let Some(agent_def) = by_name.get(member.agent.as_str()) else {
             summary.failed.push((
                 member.name.clone(),
-                format!("引用不存在的 AgentDef \"{}\"", member.agent),
+                format!("references a non-existent AgentDef \"{}\"", member.agent),
             ));
             continue;
         };
@@ -519,14 +546,20 @@ mod tests {
         // Empty members.
         let path = write_team(&dir, r#"{"name":"t","members":[]}"#);
         let err = load_team_file(&dir).unwrap_err().to_string();
-        assert!(err.contains("members") && err.contains("不能为空"), "{err}");
+        assert!(
+            err.contains("members") && err.contains("must not be empty"),
+            "{err}"
+        );
         // Duplicate names within the config.
         write_team(
             &dir,
             r#"{"name":"t","members":[{"name":"a","agent":"x"},{"name":"a","agent":"y"}]}"#,
         );
         let err = load_team_file(&dir).unwrap_err().to_string();
-        assert!(err.contains("重名") && err.contains("members[1]"), "{err}");
+        assert!(
+            err.contains("duplicate") && err.contains("members[1]"),
+            "{err}"
+        );
         // Invalid channel mode.
         write_team(
             &dir,
@@ -535,6 +568,44 @@ mod tests {
         let err = load_team_file(&dir).unwrap_err().to_string();
         assert!(err.contains("channel.mode"), "{err}");
         let _ = path;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Write → read is the identity: the blueprint the tool saves is the blueprint the
+    /// loader returns, and a structurally invalid one never reaches the disk.
+    #[test]
+    fn write_team_file_round_trips_and_rejects_invalid() {
+        let dir = tmp("write");
+        let def = TeamDef {
+            name: "dev-room".into(),
+            channel: Some(ChannelSpec {
+                mode: Some("free".into()),
+                message_limit: Some(80),
+            }),
+            members: vec![TeamMember {
+                name: "qa".into(),
+                agent: "qa".into(),
+                avatar: Some("sora".into()),
+            }],
+        };
+        write_team_file(&dir, &def).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(load_team_file(&dir).unwrap().as_ref(), Some(&def));
+        // camelCase is preserved on the way out (the file stays hand-editable).
+        let raw = std::fs::read_to_string(dir.join(TEAM_FILE)).unwrap();
+        assert!(raw.contains("\"messageLimit\": 80"), "{raw}");
+
+        let bad = TeamDef {
+            name: "t".into(),
+            channel: None,
+            members: Vec::new(),
+        };
+        let err = write_team_file(&dir, &bad).unwrap_err().to_string();
+        assert!(err.contains("members"), "{err}");
+        assert_eq!(
+            load_team_file(&dir).unwrap().as_ref(),
+            Some(&def),
+            "rejected writes are not persisted"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -547,11 +618,12 @@ mod tests {
             members: vec![TeamMember {
                 name: "a".into(),
                 agent: "ghost".into(),
+                avatar: None,
             }],
         };
         let err = validate(&def, &[]).unwrap_err().to_string();
         assert!(
-            err.contains("ghost") && err.contains("没有任何 AgentDef"),
+            err.contains("ghost") && err.contains("no AgentDef available"),
             "{err}"
         );
         let known = AgentDef {
@@ -561,6 +633,7 @@ mod tests {
             provider: None,
             thinking: None,
             system: "s".into(),
+            inherit_system: true,
             source: AgentDefSource::Project,
         };
         let ok = TeamDef {
@@ -569,6 +642,7 @@ mod tests {
             members: vec![TeamMember {
                 name: "a".into(),
                 agent: "real".into(),
+                avatar: None,
             }],
         };
         assert!(validate(&ok, &[known]).is_ok());
@@ -580,7 +654,7 @@ mod tests {
         let home = std::path::Path::new("/tmp/home");
         let a = team_memory_dir(home, std::path::Path::new("/work/alpha"), "main", "dev");
         let b = team_memory_dir(home, std::path::Path::new("/work/beta"), "main", "dev");
-        assert_ne!(a, b, "不同项目隔离");
+        assert_ne!(a, b, "different projects are isolated");
         // Same project, different branches are isolated (worktree scenario).
         let c = team_memory_dir(
             home,
@@ -588,7 +662,7 @@ mod tests {
             "agent-team",
             "dev",
         );
-        assert_ne!(a, c, "不同分支隔离");
+        assert_ne!(a, c, "different branches are isolated");
         assert!(a.starts_with(team_memory_root(home)));
         assert!(a.to_string_lossy().contains("dev"), "{a:?}");
     }
@@ -596,22 +670,23 @@ mod tests {
     #[test]
     fn project_key_is_stable_and_path_scoped() {
         let p = std::path::Path::new("/tmp/h/proj");
-        assert_eq!(project_key(p), project_key(p), "稳定");
+        assert_eq!(project_key(p), project_key(p), "stable");
         assert!(
             project_key(std::path::Path::new("/a/web"))
                 != project_key(std::path::Path::new("/b/web")),
-            "同名目录不同项目不碰撞"
+            "same-named dirs of different projects do not collide"
         );
     }
 
     fn def(name: &str) -> AgentDef {
         AgentDef {
             name: name.into(),
-            description: format!("{name} 描述"),
+            description: format!("{name} description"),
             model: None,
             provider: None,
             thinking: None,
-            system: format!("你是 {name}。"),
+            system: format!("You are {name}."),
+            inherit_system: true,
             source: AgentDefSource::Project,
         }
     }
@@ -625,6 +700,7 @@ mod tests {
                 .map(|(n, a)| TeamMember {
                     name: n.to_string(),
                     agent: a.to_string(),
+                    avatar: None,
                 })
                 .collect(),
         }
@@ -648,6 +724,7 @@ mod tests {
             agents: AgentRegistry::new(),
             channels: ChannelRegistry::new(ChannelLimits::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         })
     }
 
@@ -679,7 +756,7 @@ mod tests {
         let ch = s
             .channels
             .info("dev-room")
-            .unwrap_or_else(|| panic!("频道应存在"));
+            .unwrap_or_else(|| panic!("channel should exist"));
         assert_eq!(ch.members, vec!["main", "user", "dev-ex", "ui", "dev"]);
 
         // Repeated start: everything is reused, nothing re-spawned.
@@ -687,7 +764,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(second.spawned.is_empty());
         assert_eq!(second.reused.len(), 3, "{second:?}");
-        assert_eq!(s.agents.list().len(), 3, "不产生重复实例");
+        assert_eq!(s.agents.list().len(), 3, "no duplicate instances");
         std::fs::remove_dir_all(&mem_home).unwrap();
     }
 
@@ -699,7 +776,9 @@ mod tests {
         let mem_home = tmp("spawn-restore");
         let defs = vec![def("qa")];
         let team = team_def("t", &[("qa", "qa")]);
-        let msgs = vec![crate::api::types::Message::user_text("上一轮结论")];
+        let msgs = vec![crate::api::types::Message::user_text(
+            "last round's conclusion",
+        )];
         save_member_history(&mem_home, &mem_home, "main", "t", "qa", &msgs);
 
         spawn_team(&s, &team, &defs, &mem_home, &mem_home, "main")
@@ -707,9 +786,13 @@ mod tests {
         let (history, _, state) = s
             .agents
             .view_of("qa")
-            .unwrap_or_else(|| panic!("实例应存在"));
-        assert_eq!(history.len(), 1, "历史已预载");
-        assert_eq!(state, crate::agents::AgentState::Idle, "恢复不唤醒");
+            .unwrap_or_else(|| panic!("instance should exist"));
+        assert_eq!(history.len(), 1, "history is preloaded");
+        assert_eq!(
+            state,
+            crate::agents::AgentState::Idle,
+            "restore does not wake"
+        );
         std::fs::remove_dir_all(&mem_home).unwrap();
     }
 
@@ -724,7 +807,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("nope"), "{err}");
-        assert!(s.agents.list().is_empty(), "校验失败不产生副作用");
+        assert!(
+            s.agents.list().is_empty(),
+            "failed validation has no side effects"
+        );
         std::fs::remove_dir_all(&mem_home).unwrap();
     }
 
@@ -735,12 +821,12 @@ mod tests {
         let branch = "agent-team";
         let team = "dev-room";
         let msgs = vec![
-            crate::api::types::Message::user_text("第一轮"),
-            crate::api::types::Message::user_text("第二轮"),
+            crate::api::types::Message::user_text("round one"),
+            crate::api::types::Message::user_text("round two"),
         ];
         save_member_history(&home, &project, branch, team, "dev", &msgs);
         let loaded = load_member_history(&home, &project, branch, team, "dev");
-        assert_eq!(loaded.len(), 2, "roundtrip 等值");
+        assert_eq!(loaded.len(), 2, "roundtrip equality");
         assert_eq!(loaded[0].content, msgs[0].content);
         // Missing/corrupt falls back to empty.
         assert!(load_member_history(&home, &project, branch, team, "ghost").is_empty());
@@ -751,7 +837,7 @@ mod tests {
             branch,
             team,
             "decision",
-            "用 JSON 不用 YAML",
+            "JSON, not YAML",
             &["dev", "qa"],
         );
         append_decision(
@@ -760,15 +846,19 @@ mod tests {
             branch,
             team,
             "decision",
-            "第二案",
+            "second case",
             &["ui/ux"],
         );
         let raw = std::fs::read_to_string(decisions_path(&team_memory_dir(
             &home, &project, branch, team,
         )))
         .unwrap();
-        assert_eq!(raw.matches("type: decision").count(), 2, "追加两条");
-        assert!(raw.contains("sources: dev|qa"), "管道分隔 sources");
+        assert_eq!(
+            raw.matches("type: decision").count(),
+            2,
+            "two entries appended"
+        );
+        assert!(raw.contains("sources: dev|qa"), "pipe-separated sources");
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

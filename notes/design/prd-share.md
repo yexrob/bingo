@@ -1,118 +1,118 @@
-# PRD: `bingo share` 子命令（HTML 会话分享页）
+# PRD: `bingo share` subcommand (HTML session share page)
 
-> 状态：v1.3 修订稿（验收锚点 + 范围边界；正文视图集/数据源由 dev 定案版更新，本版由 pm 收口）
-> **v1.3 修订（pm，2025-08-07）**：main 裁决 **share 页 v4.0（Claude Code app 风格，用户指定方向，替代 v3.x opencode 复刻）纳入本次合并**——验收锚点切换为 **v4.0 模板（MD5 8c29a17b，评审断言 43 项）**；V 组由 uiux 按 43 项断言评审，A/C/E/F/G 数据层验收逻辑复用（纯视觉/交互换代，数据源契约不变，Bash 非 command 字段 tool-args 网格契约保留）；产物断言按 design.md v4.0 §5 结构更新（用户右气泡 .msg-user>.bubble / 助手左 markdown 流 / 工具折叠卡状态徽标 / thinking 灰斜体 / sticky 顶栏 / Team 线程列表等）；v3.1 锚点的验收结论（4d9b616+1b28a39）由 v4.0 回归结果替代。
-> **v1.2 修订（pm，2025-08-07）**：main 裁决 v3.1 纳入合并（三视图聊天记录 + opencode 复刻），锚点 c626cdfb→fa153a2b→e79b37aa；V 组 51 项断言。
-> **v1.1 修订（pm，2025-08-07）**：① 视图集与数据源已按用户指令定案（四视图 = 对话 / Team 名册 / 私聊 / 频道，ShareStore 增量持久化）；② 界面语言按 uiux-share 决策（#team-share #8）跟模板走英文：lang="en"、UI 标签英文、数据内容原样；③ 视觉验收锚点 = share-page-template.html（唯一事实源）；④ 图片内嵌 data: URI 为必验收项（B2）。
-> 关联：`bingo share` 已合入 dev（e689af5，v2.2）；v3.1/v4.0 迭代在 dev 分支进行
-> 视觉实现：dev 按 [share-page-design.md](./share-page-design.md)（HTML 生成契约）+ `share-page-template.html`（唯一事实源，MD5 8c29a17b）输出，本文只定义验收与范围
+> Status: v1.3 revision (acceptance anchors + scope boundaries; the body's view set/data sources updated to the version dev finalized; this version wrapped up by pm)
+> **v1.3 revision (pm, 2025-08-07)**: main ruled **share page v4.0 (Claude Code app style, user-specified direction, replacing the v3.x opencode replica) into this merge** — acceptance anchor switched to the **v4.0 template (MD5 8c29a17b, 43 review assertions)**; group V reviewed by uiux against the 43 assertions, groups A/C/E/F/G data-layer acceptance logic reused (a pure visual/interaction generation change; the data-source contract is unchanged; the Bash non-command-field tool-args grid contract is kept); artifact assertions updated per design.md v4.0 §5 structure (user right bubble .msg-user>.bubble / assistant left markdown flow / tool collapsible cards with status badges / grey italic thinking / sticky top bar / Team thread list, etc.); the v3.1 anchor's acceptance results (4d9b616+1b28a39) are replaced by the v4.0 regression results.
+> **v1.2 revision (pm, 2025-08-07)**: main ruled v3.1 into the merge (three chat-record views + opencode replica), anchors c626cdfb→fa153a2b→e79b37aa; group V has 51 assertions.
+> **v1.1 revision (pm, 2025-08-07)**: ① the view set and data sources finalized per user instruction (four views = conversation / Team roster / DMs / channels, ShareStore incremental persistence); ② interface language follows the template per the uiux-share decision (#team-share #8): lang="en", English UI labels, data content verbatim; ③ visual acceptance anchor = share-page-template.html (single source of truth); ④ images embedded as data: URIs is a mandatory acceptance item (B2).
+> Related: `bingo share` already merged into dev (e689af5, v2.2); the v3.1/v4.0 iterations run on the dev branch
+> Visual implementation: dev outputs per [share-page-design.md](./share-page-design.md) (HTML generation contract) + `share-page-template.html` (single source of truth, MD5 8c29a17b); this document only defines acceptance and scope
 
-## 1. 目标与用户场景
+## 1. Goal and user scenarios
 
-**一句话**：`bingo share` 把一次会话导出为单个离线可打开的 HTML 文件，让没装 bingo 的人也能读对话。
+**One sentence**: `bingo share` exports a session into a single HTML file openable offline, so people without bingo can still read the conversation.
 
-**用户场景**：
+**User scenarios**:
 
-1. **复盘**：用户跑完一次复杂任务（多轮工具调用 + 子代理协作），导出 HTML 存档或回看。
-2. **协作/评审**：把会话发给同事/朋友（不装 bingo、不碰终端），对方浏览器打开即读。
-3. **上报 bug / 演示**：把失败的排查过程发给维护者，或演示 bingo 的团队协作能力（对话 + Team 名册 + 私聊 + 频道四视图同页呈现）。
+1. **Retrospective**: after a complex task (multi-round tool calls + sub-agent collaboration), the user exports the session as an archive or for review.
+2. **Collaboration/review**: send the session to a colleague/friend (no bingo installed, no terminal); they open it in a browser and read.
+3. **Bug report / demo**: send a failed debugging process to a maintainer, or demo bingo's team-collaboration ability (conversation + Team roster + DMs + channels, four views on one page).
 
-**非目标**：不做在线托管、不做实时协作、不做回放执行——分享的是**已发生的事实**。
+**Non-goals**: no online hosting, no real-time collaboration, no replay execution — the share is of **what actually happened**.
 
-## 2. 范围边界（v1 明确不做）
+## 2. Scope boundaries (v1 explicitly does not do)
 
-| 不做 | 理由 |
+| Not doing | Reason |
 |---|---|
-| 多会话对比/合并导出 | 单会话单文件，组合需求尚无真实用户 |
-| 在线托管/上传、生成可分享链接 | 需要服务器与账号体系，v1 纯本地生成 |
-| 权限控制（密码/过期/阅后即焚） | 文件即公开；v1 只在输出时警告「含敏感信息请自行判断传播」 |
-| 敏感信息自动脱敏/红action | 无法可靠识别语义敏感内容；由用户自行把关 |
-| 任务视图 | 用户指令定案 v1 视图集 = 对话/Team/私聊/频道；任务视图不在 v1（模板 §9：如需扩展可追加面板） |
-| 交互式过滤/搜索/主题切换 | 静态页做减法；P2 若有必要再加轻量 JS |
-| 多语言页面 | v1 界面英文（lang="en"，UI 标签与空态英文，与模板一致；数据内容原文）；不做国际化 |
+| Multi-session comparison/merged export | one session, one file; no real user yet for combination needs |
+| Online hosting/upload, shareable-link generation | needs servers and an account system; v1 is purely local generation |
+| Access control (password/expiry/burn-after-reading) | the file is public as-is; v1 only warns at output time "may contain sensitive information; judge before sharing" |
+| Automatic sensitive-information redaction | semantic sensitivity can't be reliably recognized; left to the user's judgment |
+| Tasks view | the user's instruction finalized the v1 view set = conversation/Team/DMs/channels; the tasks view isn't in v1 (template §9: a panel can be appended if extended) |
+| Interactive filtering/search/theme switching | static page, subtract by default; add light JS in P2 only if needed |
+| Multi-language pages | v1 interface English (lang="en", UI labels and empty states in English, consistent with the template; data content verbatim); no internationalization |
 
-## 3. CLI 接口
+## 3. CLI interface
 
 ```
-bingo share [会话名] [--output <路径>] [--open]
+bingo share [session name] [--output <path>] [--open]
 ```
 
-| 参数 | 说明 |
+| Argument | Description |
 |---|---|
-| `[会话名]` | 位置参数，可选。与 `/resume` 同一命名体系（`{slug}-{ts}` 或 rename 后的 `{slug}-{ts}-{name}`）。缺省 = 最近会话 |
-| `--output <路径>` | 输出文件路径。缺省 = 当前目录下 `<会话名>.html`；已存在则直接覆盖并提示 |
-| `--open` | 生成后用系统默认浏览器打开（`open` / `xdg-open`） |
+| `[session name]` | positional, optional. Same naming scheme as `/resume` (`{slug}-{ts}` or renamed `{slug}-{ts}-{name}`). Default = the most recent session |
+| `--output <path>` | output file path. Default = `<session name>.html` in the current directory; if it already exists, overwrite directly with a hint |
+| `--open` | open with the system default browser after generation (`open` / `xdg-open`) |
 
-**默认行为**：选择会话 → 读取并解析 → 生成单 HTML 文件 → 打印输出路径（与 bingo 现有 headless 输出风格一致，非 TTY 下输出 `[share] wrote <路径>` 单行可 grep 格式）。会话不存在 / 文件解析失败 → 走统一错误码出口（`STORAGE_ERROR` 等既有契约，见 `src/error.rs`）。
+**Default behavior**: pick a session → read and parse → generate a single HTML file → print the output path (consistent with bingo's existing headless output style; under non-TTY prints the greppable single-line `[share] wrote <path>` format). Session missing / file parse failure → unified error-code exit (`STORAGE_ERROR` etc., existing contract in `src/error.rs`).
 
-**错误信息**：会话名不匹配时列出相近的可用会话（沿用 `/resume` 的列表演示风格）。
+**Error message**: when the session name doesn't match, list the similar available sessions (reusing `/resume`'s list-presentation style).
 
-## 4. 数据源与四视图
+## 4. Data sources and the four views
 
-**实现方案（dev 已落地，main 定案）**：会话运行时经 `ShareStore` 把子代理实例（含完整 history）与频道日志**增量持久化**到 `~/.local/share/bingo/shares/<session-stem>.json`（单文件 JSON，原子写 tmp+rename，损坏备份重建；存储失败只告警、不阻塞会话——share 是增强不是契约）。`bingo share` 读取该文档 + transcript 生成 HTML。
+**Implementation (dev landed it; main's ruling)**: during the session, the runtime **incrementally persists** sub-agent instances (with full history) and channel logs through `ShareStore` into `~/.local/share/bingo/shares/<session-stem>.json` (a single JSON file, atomic write via tmp+rename, corrupt backups rebuilt; storage failures only warn, never block the session — share is an enhancement, not a contract). `bingo share` reads that document + the transcript to generate the HTML.
 
-| 视图 | 内容 | 数据源 | 可得性 |
+| View | Content | Data source | Availability |
 |---|---|---|---|
-| **对话视图** | 主会话消息流：user/assistant 文本、thinking（折叠）、工具调用（折叠：输入 JSON + 结果）、图片 | transcript JSONL（`~/.local/share/bingo/transcripts/<slug>-<ts>.jsonl`） | 必然可得（share 文档缺失时回落空文档，仅此视图） |
-| **Team 名册** | 子代理实例总览（name / def / state / history 条数 / description） | ShareDoc `agents[]`（运行时 upsert：insert/finish/stop 事件同步） | 会话运行时记录；无则空态 |
-| **私聊视图** | 每实例完整私聊历史（SendMessage 续话即该实例的 history） | ShareDoc `agents[].history` | 会话运行时记录；无则空态 |
-| **频道视图** | 频道元数据（模式/成员）+ 消息流（serial 顺序） | ShareDoc `channels[]`（create/invite/kick/post 事件同步） | 会话运行时记录；无则空态 |
+| **Conversation view** | the main session message flow: user/assistant text, thinking (collapsed), tool calls (collapsed: input JSON + result), images | transcript JSONL (`~/.local/share/bingo/transcripts/<slug>-<ts>.jsonl`) | always available (falls back to an empty document when the share doc is missing; this view only) |
+| **Team roster** | sub-agent instance overview (name / def / state / history count / description) | ShareDoc `agents[]` (runtime upsert: insert/finish/stop events synced) | recorded during the session; empty state otherwise |
+| **DM view** | each instance's full private history (SendMessage continuation is that instance's history) | ShareDoc `agents[].history` | recorded during the session; empty state otherwise |
+| **Channel view** | channel metadata (mode/members) + message flow (serial order) | ShareDoc `channels[]` (create/invite/kick/post events synced) | recorded during the session; empty state otherwise |
 
-**视图定义以 `share-page-design.md` v4.0 / `share-page-template.html` 为唯一事实源**（main 裁决 v4.0 纳入：Claude Code app 风格——暗色近黑底 + 居中 800px 消息流 + 用户右暖灰气泡 / 助手左 markdown 流 + 工具折叠卡状态徽标 + thinking 灰斜体 + sticky 顶栏；四视图聊天形态：Team = 线程列表、私聊 = 每代理聊天流、频道 = 每频道消息流；交互为 tab + hash + 1-4 键，JS 只切显示不碰数据，无 JS 时默认对话面板）。PRD 只验收不定义视觉。
+**The view definitions' single source of truth = `share-page-design.md` v4.0 / `share-page-template.html`** (main ruled v4.0 in: Claude Code app style — near-black dark background + centered 800px message flow + user right warm-grey bubbles / assistant left markdown flow + tool collapsible cards with status badges + grey italic thinking + sticky top bar; four chat-shaped views: Team = thread list, DMs = per-agent chat flows, channels = per-channel message flows; interaction = tabs + hash + keys 1-4; JS only switches display, never touches data; without JS the conversation panel is the default). The PRD accepts, doesn't define visuals.
 
-**界面语言**：跟模板走英文——`lang="en"`，UI 标签（Conversation/Team/DM/Channels/Thinking/Show result/Print 等）与空态（`No …`）英文；数据内容（会话文本、工具输入/输出）原样不动。
+**Interface language**: English, following the template — `lang="en"`, UI labels (Conversation/Team/DM/Channels/Thinking/Show result/Print etc.) and empty states (`No …`) in English; data content (session text, tool input/output) verbatim.
 
-## 5. 验收标准（每项可验证）
+## 5. Acceptance criteria (each verifiable)
 
-### A. 数据完整性
-- A1. transcript 中每条消息都出现在对话视图，顺序与文件一致（逐条比对，含 thinking / tool_use / tool_result / image 块）。
-- A2. 坏行跳过语义与 `Transcript::load_messages` 一致：单行损坏不导致整个导出失败，好行全出，且输出 warning 到 stderr。
-- A3. 空会话（0 条消息）与仅一条消息的会话都能产出合法 HTML，不 panic、不产出空文件。
-- A4. 工具调用的输入 JSON 与结果**原样呈现**（转义后），不截断不丢失（与 TUI 折叠「+N lines」的截断不同——导出页是完整事实记录）。
+### A. Data completeness
+- A1. Every message in the transcript appears in the conversation view, in file order (compared one by one, including thinking / tool_use / tool_result / image blocks).
+- A2. Bad-line skip semantics consistent with `Transcript::load_messages`: a single corrupt line doesn't fail the whole export; good lines all render; a warning goes to stderr.
+- A3. Empty sessions (0 messages) and single-message sessions both produce valid HTML, no panic, no empty output file.
+- A4. Tool-call input JSON and results render **verbatim** (escaped), never truncated or lost (unlike the TUI collapse's "+N lines" truncation — the export page is the complete factual record).
 
-### B. 四视图内容
-- B1. 对话视图含 thinking 折叠块（灰斜体 `∴ Thinking`）与工具调用折叠卡（图标 + 工具名 + 参数摘要 + 状态徽标 ✓ done 绿 / ✗ error 红 / ◐ running 橙 + 时长），默认收起、可展开。
-- B2. 含图片块的消息按模板契约内嵌渲染：`<img src="data:{media_type};base64,{data}" alt="">`（media_type 校验 `image/*`、data 转义，仅 data: URI，离线可见）。
-- B3. Team 视图（线程列表形态）：含子代理的会话显示每成员 thread-row（头像/名/状态/最近消息预览 + `data-jump` 直达私聊锚点）；无子代理显示空态（非报错）。
-- B4. 私聊视图：每个有 history 的实例呈现完整对话历史（聊天流 `.dm-flow`，代理左/用户右气泡）；无 history 显示占位；无实例显示空态。
-- B5. 频道视图：含频道消息的会话按序呈现（`◇ #name` + mode chip + 成员 chips；每条消息含发送者/seq，user 右对齐）；无频道活动显示空态。
-- B6. 空态不破坏页面结构（四面板恒存在，无数据时显示英文 `No …` 占位；tab 交互下无 JS 时默认对话面板、其余 hidden）。
+### B. Four-view content
+- B1. The conversation view contains thinking collapsible blocks (grey italic `∴ Thinking`) and tool collapsible cards (icon + tool name + argument summary + status badge ✓ done green / ✗ error red / ◐ running orange + duration), collapsed by default, expandable.
+- B2. Messages with image blocks render embedded per the template contract: `<img src="data:{media_type};base64,{data}" alt="">` (media_type validated `image/*`, data escaped, data: URI only, visible offline).
+- B3. Team view (thread-list shape): sessions with sub-agents show a thread-row per member (avatar/name/status/recent-message preview + `data-jump` to the DM anchor); no sub-agents → empty state (not an error).
+- B4. DM view: every instance with history presents its complete conversation history (chat flow `.dm-flow`, agent left / user right bubble); no history → placeholder; no instances → empty state.
+- B5. Channel view: sessions with channel messages render in order (`◇ #name` + mode chip + member chips; each message carries sender/seq, user right-aligned); no channel activity → empty state.
+- B6. Empty states don't break the page structure (the four panels always exist; no data → English `No …` placeholder; under tab interaction without JS the conversation panel is the default, the rest hidden).
 
-### V. 视觉与结构（模板对齐，v1.3 更新）
-- V1. 产物结构与 `share-page-template.html`（唯一事实源，MD5 8c29a17b）一致：Claude Code app 风格——近黑底 #0D0D0F / 居中 800px 消息流 / 用户右暖灰气泡 `.msg-user > .bubble`（圆角 14/4）/ 助手左 markdown 流（无气泡，行内代码橙 tint #E8B08F）/ 陶土橙 #D77757 克制使用（品牌、工具图标、hover、选区）/ 令牌全在案。
-- V2. 部件与四视图在产物中可用：sticky 顶栏（品牌 + 会话标题 + 元信息 + 四视图 tabs）、thinking 灰斜体折叠（∴ Thinking · N tokens）、工具折叠卡（图标 + 名 + 参数摘要 + 状态徽标 + 展开完整 input/output，Bash 非 command 字段 tool-args 网格保留）、Team 线程列表（头像/名/状态/预览 + data-jump）、私聊聊天流（代理左/用户右）、频道消息流（◇ #name + mode chip + 成员 chips + seq）；渐进增强 JS（tab/锚点复制 URL#msg-N/复制按钮/线程跳转/打印展开），无 JS 完整可读。
-- V3. 以 design.md v4.0 的评审脚本 `share-review.js`（43 项断言）为机械评审方法（uiux 执行对照评审，任一 FAIL 打回附差异行），评审通过为 V 组验收通过的证据。
+### V. Visual and structural (template alignment, v1.3 update)
+- V1. The artifact's structure matches `share-page-template.html` (single source of truth, MD5 8c29a17b): Claude Code app style — near-black background #0D0D0F / centered 800px message flow / user right warm-grey bubble `.msg-user > .bubble` (14/4 radius) / assistant left markdown flow (no bubble, inline code orange tint #E8B08F) / terracotta #D77757 used sparingly (brand, tool icons, hover, selection) / all tokens present.
+- V2. The parts and four views are usable in the artifact: sticky top bar (brand + session title + meta info + four-view tabs), grey italic thinking collapsible (∴ Thinking · N tokens), tool collapsible cards (icon + name + argument summary + status badge + expanded full input/output, Bash non-command fields keep the tool-args grid), Team thread list (avatar/name/status/preview + data-jump), DM chat flows (agent left / user right), channel message flows (◇ #name + mode chip + member chips + seq); progressive-enhancement JS (tabs/anchor copy URL#msg-N/copy buttons/thread jumps/print expand), fully readable without JS.
+- V3. The mechanical review method is the design.md v4.0 review script `share-review.js` (43 assertions) (uiux runs the comparative review; any FAIL is bounced back with the diff line); a passed review is the evidence for group V acceptance.
 
-### C. 转义安全
-- C1. 所有动态文本（用户输入、模型输出、工具输入/输出、会话名、频道名、成员名、实例名/描述）经 HTML 转义；构造含 `<script>`、`<img onerror=...>`、`&"<>'` 的测试会话，导出 HTML 中数据部分**无未转义注入**（grep 断言无 `<script>` 标签、无 `onerror=` 出自数据）。
-- C2. 工具输入 JSON 以 `<pre>` + 转义呈现（不解析为 HTML）。
-- C3. 图片仅允许 `data:` URI（由 base64 块构造），不透传任何外部 URL 或 html 内容。
+### C. Escaping safety
+- C1. All dynamic text (user input, model output, tool input/output, session names, channel names, member names, instance names/descriptions) is HTML-escaped; construct test sessions containing `<script>`, `<img onerror=...>`, `&"<>'` — the exported HTML's data sections have **no unescaped injection** (grep asserts no `<script>` tags, no `onerror=` originating from data).
+- C2. Tool input JSON renders as `<pre>` + escaped (not parsed as HTML).
+- C3. Images only allow `data:` URIs (built from base64 blocks); no external URL or html content passes through.
 
-### D. 离线可用
-- D1. 产物为**单个** HTML 文件：无外部 CDN、无外链 CSS/JS/字体、无 `<iframe>` 外部内容；`file://` 协议直接打开完整渲染（断网可验证）。
-- D2. 在无网络环境用浏览器打开产物，四面板、图片、折叠均正常（Network 面板 0 请求）。
-- D3. 无 JS 时页面仍完整：对话面板默认可见，其余面板 hidden（JS 仅做面板切换增强，不拼数据）。
+### D. Offline usability
+- D1. The artifact is a **single** HTML file: no external CDN, no external CSS/JS/fonts, no `<iframe>` external content; opens via `file://` and renders completely (verifiable offline).
+- D2. Open the artifact in a browser in a no-network environment: the four panels, images, and collapses all work (Network panel shows 0 requests).
+- D3. Without JS the page is still complete: the conversation panel visible by default, the others hidden (JS only enhances panel switching, never concatenates data).
 
-### E. 旧会话兼容
-- E1. 对**没有任何**子代理/频道/任务数据、且无 share 相关元数据的旧 transcript，仍产出完整对话页（这是 v1 的主路径，非降级路径）。
-- E2. 字段缺失容错：thinking 无 signature、tool_result 无 content、role 之外的未知块类型——跳过该块不 panic，页面其余部分完整。
+### E. Legacy-session compatibility
+- E1. Old transcripts with **no** sub-agent/channel/task data and no share-related metadata still produce a complete conversation page (this is v1's main path, not a degraded path).
+- E2. Missing-field tolerance: thinking without signature, tool_result without content, unknown block types beyond role — skip that block without panicking; the rest of the page stays complete.
 
-### F. CLI 行为
-- F1. 无参会话名 → 取最近会话（与 `--continue` 同一来源 `Transcript::latest`）；`--output` 生效；`--open` 调用系统 opener。
-- F2. 会话名不存在 → 非零退出 + 统一错误码输出 + 相近会话列表提示。
-- F3. `--output` 指向不可写路径 → 清晰报错，非零退出。
-- F4. `bingo share --help` 文档化全部参数。
+### F. CLI behavior
+- F1. No session name → most recent session (same `Transcript::latest` source as `--continue`); `--output` takes effect; `--open` calls the system opener.
+- F2. Nonexistent session name → nonzero exit + unified error-code output + similar-session list hint.
+- F3. `--output` pointing to an unwritable path → clear error, nonzero exit.
+- F4. `bingo share --help` documents all arguments.
 
-### G. 质量门槛
-- G1. `cargo build`、`cargo clippy -- -D warnings`、`cargo test` 全绿；相关逻辑带单测（解析/转义/视图提取至少各一组）。
-- G2. 用户可见行为（新子命令、错误信息）同步内置技能 `src/skills/bundled/guide.md`。
+### G. Quality gate
+- G1. `cargo build`, `cargo clippy -- -D warnings`, `cargo test` all green; related logic carries unit tests (at least one set each for parsing/escaping/view extraction).
+- G2. User-visible behavior (the new subcommand, error messages) synced into the built-in skill `src/skills/bundled/guide.md`.
 
-## 6. 验收顺序建议（依赖关系）
+## 6. Suggested acceptance order (dependencies)
 
-1. 数据层（transcript 解析 + 四视图提取）→ 2. HTML 生成与转义 → 3. CLI 装配与错误路径 → 4. 兼容性（E 组）与安全（C 组）→ 5. 文档与 guide 同步。
+1. Data layer (transcript parsing + four-view extraction) → 2. HTML generation and escaping → 3. CLI assembly and error paths → 4. compatibility (group E) and security (group C) → 5. docs and guide sync.
 
-## 7. 风险与未决项
+## 7. Risks and open items
 
-- **ShareDoc 与 transcript 的一致性**：share 文档是运行期增量快照（增强不是契约），若会话中途崩溃/存储失败，子代理/频道视图可能缺尾部数据——v1 接受（文档化：分享页的对话视图始终完整，团队/频道视图以运行期快照为准）。
-- **大文件性能**：数百条消息 + 大量 base64 图片可能产出 MB 级 HTML；v1 不做流式分页，但解析须 O(n) 单遍（P2 再考虑图片降采样）。
-- **隐私警告**：导出时向 stderr 打印「此文件包含完整对话与工具输出（可能含敏感信息），分享前请自行审阅」。
+- **ShareDoc vs transcript consistency**: the share doc is an incremental runtime snapshot (an enhancement, not a contract); if the session crashes midway / storage fails, the sub-agent/channel views may lack tail data — accepted for v1 (documented: the share page's conversation view is always complete; the team/channel views follow the runtime snapshot).
+- **Large-file performance**: hundreds of messages + many base64 images can produce MB-scale HTML; v1 does no streaming pagination, but parsing must be a single O(n) pass (image downsampling considered in P2).
+- **Privacy warning**: at export time print to stderr "this file contains the full conversation and tool output (may include sensitive information); review before sharing".

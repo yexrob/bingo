@@ -248,6 +248,7 @@ mod tests {
                 permission_mode: "default".into(),
                 expand_tasks: tokio::sync::watch::channel(false).0,
                 ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+                instance: None,
             },
             None,
         )
@@ -300,6 +301,7 @@ mod tests {
                 permission_mode: "default".into(),
                 expand_tasks: tokio::sync::watch::channel(false).0,
                 ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+                instance: None,
             },
             None,
         )
@@ -373,6 +375,7 @@ mod tests {
                 permission_mode: "default".into(),
                 expand_tasks: tokio::sync::watch::channel(false).0,
                 ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+                instance: None,
             },
             None,
         )
@@ -393,6 +396,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         }
     }
 
@@ -430,9 +434,16 @@ mod tests {
         }
         tx.send(true).unwrap();
         let (done, aborted) = handle.await.unwrap();
-        assert!(aborted, "中断后返回 aborted");
-        assert_eq!(done, 0, "执行中的工具被取消，无完成结果");
-        assert_eq!(counter.load(Ordering::SeqCst), 0, "没有任何工具跑完");
+        assert!(aborted, "returns aborted after interruption");
+        assert_eq!(
+            done, 0,
+            "in-flight tools are cancelled, no completion results"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "no tool ran to completion"
+        );
     }
 
     #[tokio::test]
@@ -471,7 +482,7 @@ mod tests {
         assert_eq!(
             outcomes.len(),
             1,
-            "已完成的保留，执行中的取消，未开始的跳过"
+            "completed kept, in-flight cancelled, not-started skipped"
         );
         assert_eq!(outcomes[0].tool_use_id, "tu_0");
         assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -524,10 +535,18 @@ mod tests {
         tx.send(true).unwrap();
         let (outcomes, aborted) = handle.await.unwrap();
 
-        assert!(aborted, "中断后返回 aborted");
+        assert!(aborted, "returns aborted after interruption");
         let ids: Vec<&str> = outcomes.iter().map(|o| o.tool_use_id.as_str()).collect();
-        assert_eq!(ids, vec!["fast_0", "fast_2"], "已完成的按入队顺序保留");
-        assert_eq!(counter.load(Ordering::SeqCst), 2, "只有两个跑完");
+        assert_eq!(
+            ids,
+            vec!["fast_0", "fast_2"],
+            "completed kept in enqueue order"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "only two ran to completion"
+        );
     }
 
     /// A receiver subscribed after send_replace(false): changed() becomes ready immediately,
@@ -561,7 +580,7 @@ mod tests {
             },
         ];
         let (outcomes, aborted) = execute_calls(calls, &test_ctx(), Some(&mut rx)).await;
-        assert!(!aborted, "假信号不得判定中断");
+        assert!(!aborted, "a false signal must not count as interruption");
         assert_eq!(outcomes.len(), 2);
     }
 
@@ -591,9 +610,9 @@ mod tests {
             execute_calls(calls, &test_ctx(), Some(&mut rx)),
         )
         .await
-        .expect("sender drop 后不得空转");
+        .expect("must not spin after sender drop");
         assert!(!aborted);
-        assert_eq!(outcomes.len(), 1, "工具照常跑完");
+        assert_eq!(outcomes.len(), 1, "tools still run to completion");
     }
 
     /// Cancel was already set before entering execution: when borrowing to clear the version,
@@ -617,7 +636,7 @@ mod tests {
             input: serde_json::json!({}),
         }];
         let (outcomes, aborted) = execute_calls(calls, &test_ctx(), Some(&mut rx)).await;
-        assert!(aborted, "已置位的取消必须生效");
+        assert!(aborted, "a set cancel must take effect");
         assert!(outcomes.is_empty());
     }
 }

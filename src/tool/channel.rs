@@ -14,10 +14,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::agents::DepositOutcome;
 use crate::channels::{ChannelMode, HUB_NAME, PostOutcome};
 use crate::query::Session;
-use crate::tool::agent::{absorb_inbox, excerpt, spawn_agent_loop};
+use crate::tool::agent::flush_agent_inbox;
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 use crate::watch::{WatchKind, WatchState};
 
@@ -33,7 +32,7 @@ impl crate::watch::Watchable for ChannelWatch {
     fn poll(&self) -> crate::watch::WatchPoll {
         crate::watch::WatchPoll {
             state: WatchState::Running,
-            detail: Some("0 条".to_string()),
+            detail: Some("0 messages".to_string()),
             payload: None,
             signal: None,
         }
@@ -88,34 +87,20 @@ pub(crate) fn deliver_post(
     match session.channels.post(from, channel, text)? {
         PostOutcome::Sent { seq, deliveries } => {
             refresh_channel_row(session, channel);
-            // Delivery wake-up: idle members start a run immediately; busy members accumulate in their inbox.
+            // Deposit only: idle members are started by the turn-boundary flush, so a burst of
+            // posts reaches a member as one batch rather than one run per message.
             for (member, msg) in deliveries {
-                let item = crate::agents::InboxItem::Channel {
-                    channel: channel.to_string(),
-                    from: msg.from.clone(),
-                    text: msg.text.clone(),
-                    seq: msg.seq,
-                };
-                if let DepositOutcome::Start {
-                    session: sub,
-                    history,
-                    items,
-                } = session.agents.deposit(&member, item)
-                {
-                    let prompt = absorb_inbox(&sub.channels, &member, &items);
-                    let n = session.agents.next_run(&member);
-                    spawn_agent_loop(
-                        session.agents.clone(),
-                        watch.clone(),
-                        member.clone(),
-                        sub,
-                        history,
-                        prompt.clone(),
-                        format!("{member} #{n} · {}", excerpt(&prompt)),
-                        Vec::new(),
-                    );
-                }
+                session.agents.deposit(
+                    &member,
+                    crate::agents::InboxItem::Channel {
+                        channel: channel.to_string(),
+                        from: msg.from.clone(),
+                        text: msg.text.clone(),
+                        seq: msg.seq,
+                    },
+                );
             }
+            flush_agent_inbox(session, watch);
             Ok(PostDelivery::Sent { seq })
         }
         PostOutcome::Stale { missed } => Ok(PostDelivery::Stale { missed }),
@@ -150,9 +135,10 @@ impl Tool for PostTool {
     fn description(&self) -> String {
         let who = sender_of(&self.session);
         format!(
-            "Speak in an agent channel. Your name in the channel is {who} (the sender is stamped by the runtime and cannot be forged).\
-Channel messages enter every member's context (in the same order); in a serial channel, if you are behind the latest message the send bounces back with the new content attached — read it, then decide to resend, amend, or drop.\
-When you have nothing to say, simply don't call this tool (silence costs nothing and wakes nobody)."
+            "Speak in an agent channel. Your name in the channel is {who} (the sender is stamped by the runtime and cannot be forged). \
+This tool is the only way to put words in the room: the text you write as your turn result goes to the hub, not to the channel, so deciding to answer means calling this. \
+Channel messages enter every member's context (in the same order); in a serial channel, if you are behind the latest message the send bounces back with the new content attached — read it, then decide to resend, amend, or drop. \
+Every message wakes every other member, so who you are answering matters: when `user` or `main` addresses the room, answer once, briefly, the way a person answers the room they are in; when another member speaks you owe nothing unless they named you or you can unblock them; never answer an answer — that is what floods a room. When you have nothing to add, simply don't call this tool (silence costs nothing and wakes nobody)."
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -176,19 +162,19 @@ When you have nothing to say, simply don't call this tool (silence costs nothing
             .map_err(ToolError::failed)?
         {
             PostDelivery::Sent { seq } => Ok(ToolResult {
-                content: serde_json::Value::String(format!("已发送（#{channel} 第 {seq} 条）")),
+                content: serde_json::Value::String(format!("sent (#{channel} msg #{seq})")),
                 is_error: false,
                 diff: None,
             }),
             PostDelivery::Stale { missed } => {
                 let lines: Vec<String> = missed
                     .iter()
-                    .map(|m| format!("[#{channel} 第{}条] {}: {}", m.seq, m.from, m.text))
+                    .map(|m| format!("[#{channel} msg #{}] {}: {}", m.seq, m.from, m.text))
                     .collect();
                 Ok(ToolResult {
                     content: serde_json::Value::String(format!(
-                        "未送出——你拟发言期间频道已有新消息：\n{}\n\
-请基于最新内容重新决定：照发（原样重新调用）、修改后再发、或放弃发言。",
+                        "not sent — the channel got new messages while you were drafting:\n{}\n\
+Decide again from the latest content: resend as-is (call again unchanged), edit and resend, or drop the message.",
                         lines.join("\n")
                     )),
                     is_error: false,
@@ -250,7 +236,7 @@ impl ChannelTool {
             .as_deref()
             .map(|c| c.trim_start_matches('#'))
             .filter(|c| !c.is_empty())
-            .ok_or_else(|| ToolError::failed("需要 channel 参数（频道名）"))
+            .ok_or_else(|| ToolError::failed("channel parameter (channel name) is required"))
     }
 
     /// Cohort validation: members must be existing direct sub-agents (depth==1).
@@ -261,10 +247,10 @@ impl ChannelTool {
         match self.session.agents.depth_of(member) {
             Some(1) => Ok(()),
             Some(_) => Err(ToolError::failed(format!(
-                "{member} 不是直接子代理（频道成员限主会话直接派生的实例）"
+                "{member} is not a direct subagent (channel members are limited to instances spawned directly by the main session)"
             ))),
             None => Err(ToolError::failed(format!(
-                "没有名为 {member} 的子代理实例（先用 Agent 派生）"
+                "no subagent instance named {member} (spawn one with Agent first)"
             ))),
         }
     }
@@ -313,10 +299,11 @@ impl Tool for ChannelTool {
                         label: format!("#{name}"),
                     }),
                     Vec::new(),
+                    ctx.instance.clone(),
                 );
                 self.session.channels.set_watch(&name, id);
                 format!(
-                    "已建频道 #{name}（{}，成员：main{}{}）",
+                    "channel #{name} created ({}, members: main{}{})",
                     mode.label(),
                     if members.is_empty() { "" } else { ", " },
                     members.join(", ")
@@ -328,14 +315,16 @@ impl Tool for ChannelTool {
                     .members
                     .as_deref()
                     .and_then(|m| m.first())
-                    .ok_or_else(|| ToolError::failed("invite 需要 members（目标实例名）"))?
+                    .ok_or_else(|| {
+                        ToolError::failed("invite requires members (target instance names)")
+                    })?
                     .clone();
                 self.validate_member(&member)?;
                 self.session
                     .channels
                     .invite(&name, &member)
                     .map_err(ToolError::failed)?;
-                format!("{member} 已加入 #{name}（从当前消息头开始听）")
+                format!("{member} joined #{name} (listening from the current message head)")
             }
             ChannelAction::Kick => {
                 let name = Self::require_channel(&params)?.to_string();
@@ -343,28 +332,30 @@ impl Tool for ChannelTool {
                     .members
                     .as_deref()
                     .and_then(|m| m.first())
-                    .ok_or_else(|| ToolError::failed("kick 需要 members（目标实例名）"))?
+                    .ok_or_else(|| {
+                        ToolError::failed("kick requires members (target instance names)")
+                    })?
                     .clone();
                 self.session
                     .channels
                     .kick(&name, &member)
                     .map_err(ToolError::failed)?;
-                format!("{member} 已移出 #{name}")
+                format!("{member} removed from #{name}")
             }
             ChannelAction::List => {
                 let statuses = self.session.channels.list();
                 if statuses.is_empty() {
-                    "当前没有频道".to_string()
+                    "no channels right now".to_string()
                 } else {
                     statuses
                         .iter()
                         .map(|s| {
                             format!(
-                                "- #{}（{}，{} 条{}）：{}",
+                                "- #{} ({}, {} messages{}): {}",
                                 s.name,
                                 s.mode.label(),
                                 s.seq,
-                                if s.frozen { "，已冻结" } else { "" },
+                                if s.frozen { ", frozen" } else { "" },
                                 s.members.join(", ")
                             )
                         })
@@ -404,6 +395,7 @@ mod tests {
             agents: AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         })
     }
 
@@ -427,6 +419,7 @@ mod tests {
             permission_mode: "default".into(),
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
         }
     }
 
@@ -468,7 +461,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("直接子代理"), "{err}");
+        assert!(err.to_string().contains("direct subagent"), "{err}");
         // list outputs members and mode.
         let out = tool
             .call(serde_json::json!({"action": "list"}), &ctx(&hub))
@@ -497,33 +490,34 @@ mod tests {
         let post_a = PostTool::new(sub_session(&hub, "a"));
         let out = post_a
             .call(
-                serde_json::json!({"channel": "t", "message": "大家好"}),
+                serde_json::json!({"channel": "t", "message": "hello everyone"}),
                 &ctx(&hub),
             )
             .await
             .unwrap();
-        assert!(out.content.as_str().unwrap().contains("第 1 条"));
-        let (_, items) = hub
+        assert!(out.content.as_str().unwrap().contains("msg #1"));
+        let items = hub
             .agents
-            .finish("b", Vec::new())
-            .unwrap_or_else(|| panic!("b 信箱应有消息"));
+            .finish("b", Vec::new(), true)
+            .unwrap_or_else(|| panic!("b's inbox should have a message"))
+            .items;
         assert!(
             matches!(&items[..], [crate::agents::InboxItem::Channel { from, text, .. }]
-                if from == "a" && text == "大家好"),
-            "盖戳为 a"
+                if from == "a" && text == "hello everyone"),
+            "stamped as a"
         );
         // Hub posts: stamped main; hub_mail only receives others' posts.
         let post_hub = PostTool::new(hub.clone());
         let _ = post_hub
             .call(
-                serde_json::json!({"channel": "t", "message": "肃静"}),
+                serde_json::json!({"channel": "t", "message": "quiet"}),
                 &ctx(&hub),
             )
             .await
             .unwrap();
         let mail = hub.channels.drain_hub_mail();
         assert_eq!(mail.len(), 1, "{mail:?}");
-        assert!(mail[0].contains("a: 大家好"));
+        assert!(mail[0].contains("a: hello everyone"));
         // Non-member posts error out.
         let post_c = PostTool::new(sub_session(&hub, "c"));
         let err = post_c
@@ -533,7 +527,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("不是"), "{err}");
+        assert!(err.to_string().contains("is not"), "{err}");
     }
 
     #[tokio::test]
@@ -570,7 +564,7 @@ mod tests {
             .unwrap();
         let text = out.content.as_str().unwrap();
         assert!(!out.is_error);
-        assert!(text.contains("未送出") && text.contains("a: 1"), "{text}");
+        assert!(text.contains("not sent") && text.contains("a: 1"), "{text}");
         // Resend lands (the model changed its message).
         let out = post_b
             .call(
@@ -579,6 +573,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(out.content.as_str().unwrap().contains("第 2 条"));
+        assert!(out.content.as_str().unwrap().contains("msg #2"));
     }
 }

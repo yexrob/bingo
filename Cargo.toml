@@ -30,15 +30,16 @@ base64 = "0.22"
 sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 ratatui = { version = "0.30.2", features = ["scrolling-regions"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 flate2 = "1"
 tar = "0.4"
 
-# zune-jpeg 0.5.15（image 的 jpeg 后端，约束 ^0.5.5）在 rustc ≥1.96 下编译失败
-# （`warn!` 尾分号 lint 升级为 error：macro expansion ends with an incomplete expression）。
-# 上游 dev 分支已修复且 version 字段未 bump（仍 0.5.15）——git patch 无版本号替换，
-# 满足 image 的 ^0.5.5 约束且编译通过。zune-core 必须同步 patch（同一 rev）：
-# dev 分支的 zune-jpeg 引用 git 内 zune-core，两源类型不统一会导致 image 编译失败。
-# 0.5.16 正式发布后移除本 patch 段。
+# zune-jpeg 0.5.15 (image's jpeg backend, constrained ^0.5.5) fails to build on rustc ≥1.96
+# (the `warn!` trailing-semicolon lint was upgraded to an error: macro expansion ends with an incomplete expression).
+# The upstream dev branch fixed it without bumping the version field (still 0.5.15) — a git patch has no version substitution,
+# satisfies image's ^0.5.5 constraint and compiles. zune-core must be patched in sync (same rev):
+# the dev-branch zune-jpeg references the in-git zune-core; mismatched sources would break the image build.
+# Remove this patch block once 0.5.16 ships.
 [patch.crates-io]
 zune-core = { git = "https://github.com/etemesi254/zune-image", rev = "0346b875169ed528e206441c97899d99002e17ca" }
 zune-jpeg = { git = "https://github.com/etemesi254/zune-image", rev = "0346b875169ed528e206441c97899d99002e17ca" }

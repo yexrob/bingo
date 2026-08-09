@@ -1,33 +1,33 @@
-# 欢迎卡片「新版本提示」视觉规格（Update Banner）
+# Welcome-card "new version notice" visual spec (Update Banner)
 
-> 版本：v1.1 · 状态：草案（供 dev 实现 #53「版本检测 + 欢迎卡片提示 + bingo update 命令」）
-> 范围：**TUI 欢迎卡片内的版本更新提示行**——布局、文案、颜色呼吸动效规格、ratatui 可实现方案、可验收锚点。
-> 关联文档：`site-visual-direction.md`（品牌色/对比度纪律）、`feedback-states.md`（反馈状态规范/动效纪律，本规格是其「信息提示」形态在欢迎卡场景的具体化）、`prd-update.md`（PM 的 PRD——视觉呈现以本规格为唯一事实源，见 §6 对齐表）。
-> v1.1（用户方向澄清）：特效范围定为**提示行文字内的两个关键词段**（版本号 + `bingo update`）同相位呼吸；行内其余文字与欢迎卡其余全部静态。
+> Version: v1.1 · Status: draft (for dev implementing #53 "version check + welcome-card notice + bingo update command")
+> Scope: **the version-update notice line inside the TUI welcome card** — layout, copy, the color-breathing motion spec, the ratatui-implementable approach, and acceptance anchors.
+> Related docs: `site-visual-direction.md` (brand colors/contrast discipline), `feedback-states.md` (feedback-state spec/motion discipline — this spec is its "informational notice" shape concretized in the welcome-card scenario), `prd-update.md` (pm's PRD — the visual presentation uses this spec as the single source of truth, see the §6 alignment table).
+> v1.1 (user-direction clarification): the effect scope is fixed as **the two keyword segments inside the notice-line text** (the version + `bingo update`) breathing in phase; the rest of the line's text and the rest of the welcome card are fully static.
 
-## 0. 一句话目标
+## 0. One-sentence goal
 
-**欢迎卡里出现一行克制的橙色提示：「New version vX.Y.Z available — run `bingo update`」——动效只作用于这行文字里的两个关键词（版本号与命令），像 Claude Code 思考时那样柔和呼吸；欢迎卡其余一切元素保持静态。**
+**A restrained orange notice line appears on the welcome card: "New version vX.Y.Z available — run `bingo update`" — the motion applies only to the two keywords in that line (the version and the command), breathing softly like Claude Code thinking; every other element of the welcome card stays static.**
 
-设计决策摘要（细目见后文）：
+Design-decision summary (details below):
 
-| 决策点 | 结论 |
+| Decision point | Conclusion |
 |---|---|
-| 动画类型 | **正弦呼吸**（颜色亮度在品牌橙两档间平滑振荡），不是硬闪烁、不是扫光 |
-| **特效范围（v1.1 定稿）** | **仅提示行文字内的两个关键词段**：版本号 `vX.Y.Z` 与命令 `bingo update`（同相位呼吸）；行内其余文字静态 dim；欢迎卡其余（✻ 问候、╭╮ 边框、/help、cwd、身份行）**全部静态** |
-| 位置 | 欢迎卡底部、版本身份行正上方（`bingo vX.Y.Z · …` 上一行） |
-| 色板 | 暗色 `#D77757 ↔ #E8896B`（全程 ≥6.2:1）；浅色 `#B05227 ↔ #9A4A24`（全程 ≥4.7:1） |
-| 参数 | 周期 3.0s（90 帧 @30fps）· 时长 9s（3 个呼吸）· 之后静止在基色 |
-| 降级链 | 无 truecolor → 离散两步；`motion: off` / `NO_COLOR` → 静态（提示保留不消失）；用户输入 → 提前停止 |
-| 实现方案 | 帧循环逐帧插值（复用 TICK 33ms + `tick()` 相位），**不碰已落盘 scrollback**；ANSI 闪烁码明确不用 |
+| Animation type | **sinusoidal breathing** (color brightness oscillating smoothly between the two brand-orange stops), not hard blinking, not a sweep |
+| **Effect scope (v1.1 finalized)** | **only the two keyword segments in the notice line**: the version `vX.Y.Z` and the command `bingo update` (in-phase breathing); the rest of the line's text static dim; the rest of the welcome card (✻ greeting, ╭╮ border, /help, cwd, identity line) **fully static** |
+| Position | bottom of the welcome card, directly above the version identity line (the row above `bingo vX.Y.Z · …`) |
+| Palette | dark `#D77757 ↔ #E8896B` (≥6.2:1 throughout); light `#B05227 ↔ #9A4A24` (≥4.7:1 throughout) |
+| Parameters | period 3.0s (90 frames @30fps) · duration 9s (3 breaths) · then settles at the base color |
+| Degradation chain | no truecolor → discrete two-step; `motion: off` / `NO_COLOR` → static (the notice stays, never disappears); user input → stop early |
+| Implementation approach | frame-loop per-frame interpolation (reusing the TICK 33ms + `tick()` phase), **never touching the settled scrollback**; ANSI blink codes explicitly not used |
 
 ---
 
-## 1. 提示行布局
+## 1. Notice-line layout
 
-### 1.1 位置
+### 1.1 Position
 
-欢迎卡当前结构（`src/tui/chat.rs` `welcome_card_rows`）：
+The welcome card's current structure (`src/tui/chat.rs` `welcome_card_rows`):
 
 ```
 ╭────────────────────────────────────────╮
@@ -36,11 +36,11 @@
 │   /help for help · /status for …       │
 │                                        │
 │   cwd: /path/to/project                │
-│   bingo v0.1.0 · claude · default      │   ← 版本身份行
+│   bingo v0.1.0 · claude · default      │   ← version identity line
 ╰────────────────────────────────────────╯
 ```
 
-新版本提示行插在**版本身份行正上方**（同区块、不空行），与上方 cwd 之间保留一个空行（沿用卡内「内容组之间一个空行」的既有节奏）：
+The new-version notice line is inserted **directly above the version identity line** (same block, no blank between), keeping one blank line from the cwd above it (following the card's existing "one blank line between content groups" rhythm):
 
 ```
 ╭────────────────────────────────────────╮
@@ -50,224 +50,224 @@
 │                                        │
 │   cwd: /path/to/project                │
 │                                        │
-│   New version v0.3.0 available — …     │   ← 呼吸行（唯一动态元素）
-│   bingo v0.1.0 · claude · default      │   ← 版本身份行（原样保留）
+│   New version v0.3.0 available — …     │   ← breathing line (the only dynamic element)
+│   bingo v0.1.0 · claude · default      │   ← version identity line (kept as-is)
 ╰────────────────────────────────────────╯
 ```
 
-理由：
-- 两行版本信息相邻构成一个「旧 vs 新」的对照块，一眼扫完，语义最顺；
-- 提示在卡内**最底部**而非抢在问候语下方——欢迎卡主体（问候 + 帮助引导）不被挤压，符合「不喧宾夺主」；
-- 与 Claude Code 欢迎框把更新提示放底部的习惯一致。
+Rationale:
+- the two version lines sit adjacent as an "old vs new" contrast block, read in one glance, the most natural semantics;
+- the notice sits at the **bottom** of the card rather than grabbing a spot under the greeting — the card's main body (greeting + help guidance) isn't squeezed, honoring "don't upstage";
+- consistent with Claude Code's welcome box putting the update notice at the bottom.
 
-### 1.2 文案（英文界面）
+### 1.2 Copy (English interface)
 
-- 完整行：`   New version vX.Y.Z available — run bingo update`
-- **行内样式（v1.1，三个语义段）**：
-  - 静态段：`New version ` 与 ` available — run ` → `theme.inactive`（灰，与卡内其余信息行同色，不参与动画）；
-  - 呼吸段①：`vX.Y.Z`（版本号）→ 呼吸色（§2）；
-  - 呼吸段②：`bingo update`（命令）→ 呼吸色 + **bold**（命令 = 可执行动作，加粗强化动作入口；与呼吸段①同相位）。
-- 终端里不渲染反引号（`bingo update` 的 code 样式 = 呼吸色 + bold 即可，不叠加 theme.code() 的黄色——一行里混第三种色相会破坏呼吸的纯净感）。
-- `X.Y.Z` 来自版本检测结果；**版本身份行 `bingo v0.1.0` 目前是硬编码**（`welcome_rows`），实现 #53 时应一并改为 `env!("CARGO_PKG_VERSION")`——提示行与身份行并存时若身份行版本号是假的，会显得功能是假的。
-- 非英文：欢迎卡文案当前全英文，提示行保持英文；翻译不在本规格范围。
+- Full line: `   New version vX.Y.Z available — run bingo update`
+- **In-line styling (v1.1, three semantic segments)**:
+  - static segments: `New version ` and ` available — run ` → `theme.inactive` (grey, same color as the card's other info lines, not part of the animation);
+  - breathing segment ①: `vX.Y.Z` (the version) → the breathing color (§2);
+  - breathing segment ②: `bingo update` (the command) → the breathing color + **bold** (the command = an executable action; bold strengthens the action entry; in phase with breathing segment ①).
+- The backticks aren't rendered in the terminal (`bingo update`'s code style = breathing color + bold only; don't layer theme.code()'s yellow on top — mixing a third hue into one line would break the breathing's purity).
+- `X.Y.Z` comes from the version-check result; **the identity line `bingo v0.1.0` is currently hardcoded** (`welcome_rows`) — implementing #53 should also switch it to `env!("CARGO_PKG_VERSION")`; if the notice and the identity line coexist and the identity line's version is fake, the feature looks fake.
+- Non-English: the welcome-card copy is all English today; the notice line stays English; translation is out of this spec's scope.
 
-### 1.3 宽度与截断链（窄屏降级）
+### 1.3 Width and truncation chain (narrow-screen degradation)
 
-现有 `one_line`/`truncate` 是**尾部截断**——会把句尾的 `bingo update` 命令截掉，不可用。提示行需要一条**保持命令可见**的截断链（新增 `banner_line(v: &str, width) -> String`，纯函数可测）：
+The existing `one_line`/`truncate` do **tail truncation** — they'd cut off the `bingo update` command at the end of the sentence, unusable. The notice line needs a truncation chain that **keeps the command visible** (a new `banner_line(v: &str, width) -> String`, pure and testable):
 
-| 条件（inner_w = 卡内宽 = 终端宽 − 2） | 呈现 |
+| Condition (inner_w = card inner width = terminal width − 2) | Presentation |
 |---|---|
-| `inner_w ≥ 50` | `New version v0.3.0 available — run bingo update`（完整；阈值按最长版本号 v0.12.34 计：3 缩进 + 47 文本 = 50） |
-| `inner_w ≥ 43` | `New version v0.3.0 — run bingo update`（去掉 available 分句；3 + 11 + 8 + 21 = 43） |
-| `inner_w ≥ 15` | `bingo update`（只留命令，最保底动作入口） |
-| `inner_w < 15`（终端 <17 列，实际不会发生） | 隐藏提示行 |
+| `inner_w ≥ 50` | `New version v0.3.0 available — run bingo update` (full; threshold computed on the longest version v0.12.34: 3 indent + 47 text = 50) |
+| `inner_w ≥ 43` | `New version v0.3.0 — run bingo update` (drop the "available" clause; 3 + 11 + 8 + 21 = 43) |
+| `inner_w ≥ 15` | `bingo update` (command only, the most minimal action entry) |
+| `inner_w < 15` (terminal <17 columns, practically impossible) | hide the notice line |
 
-统一前缀 `   `（3 列缩进，与卡内其余信息行对齐）；任何档位都不换行、不溢出卡框（每行仍是单行 Row）。
+Uniform `   ` prefix (3-column indent, aligned with the card's other info lines); no tier wraps or overflows the card frame (every tier is still a single-line Row).
 
 ---
 
-## 2. 颜色闪动特效规格
+## 2. Color-flash effect spec
 
-### 2.0 特效范围（v1.1 定稿，用户方向澄清）
+### 2.0 Effect scope (v1.1 finalized, user-direction clarification)
 
-**动效只作用于提示行文字内的两个关键词段：版本号 `vX.Y.Z` 与命令 `bingo update`，两者同相位正弦呼吸。** 行内其余文字（`New version`、` available — run `）静态 `theme.inactive`。欢迎卡其余一切元素——` ✻ ` 问候、`╭╮` 边框、`/help` 行、`cwd` 行、版本身份行——**全部静态**，任何一帧都不参与动画。
+**The motion applies only to the two keyword segments in the notice-line text: the version `vX.Y.Z` and the command `bingo update`, both breathing in phase (sinusoidal).** The rest of the line's text (`New version`, ` available — run `) is static `theme.inactive`. Every other element of the welcome card — the ` ✻ ` greeting, the `╭╮` border, the `/help` line, the `cwd` line, the version identity line — is **fully static** and participates in no animation on any frame.
 
-- 不做整卡闪动、不做卡片边框/问候的同步呼吸；
-- **不做入场动画**：检测结果到达后提示行静默出现（无闪入/淡入）；欢迎卡在启动期增高 1 行由卡内吸收，用户无感；
-- 退化备选：若逐段呼吸的实现成本过高，允许**退化为整行呼吸**（范围扩大、参数与停止点完全不变）——默认实现按关键词呼吸交付。
+- No whole-card flashing, no synchronized breathing of the card border/greeting;
+- **No entrance animation**: when the check result arrives, the notice line appears silently (no flash-in/fade-in); the card growing by one row during startup is absorbed internally, invisible to the user;
+- Degradation fallback: if per-segment breathing is too costly to implement, **degrading to whole-line breathing is allowed** (broader scope, parameters and stop points completely unchanged) — the default implementation delivers per-keyword breathing.
 
-### 2.1 动画类型：正弦呼吸（Breathing），不是闪烁/扫光
+### 2.1 Animation type: sinusoidal breathing, not blinking/sweeping
 
-| 候选 | 判定 | 理由 |
+| Candidate | Verdict | Reason |
 |---|---|---|
-| **正弦呼吸**（亮度平滑振荡） | ✅ **采用** | 最接近 Claude Code thinking 的「柔和光晕」；无硬跳变，天然不刺眼 |
-| 硬闪烁（on/off 交替） | ❌ | 报警语义（缺文件/崩溃才闪）；文字闪动有 WCAG 2.3.1 闪烁阈值风险 |
-| 扫光（文字上移动的光带） | ❌ | 需要逐字符相位差，TUI 里像打字机/跑马灯，违背「不做无意义动效」 |
-| ANSI 闪烁码 `\e[5m` | ❌ | 见 §3.4，终端支持不一致且用户无法关停 |
+| **Sinusoidal breathing** (smooth brightness oscillation) | ✅ **adopted** | closest to Claude Code thinking's "soft glow"; no hard jumps, naturally non-harsh |
+| Hard blink (on/off alternation) | ❌ | alarm semantics (blink only for missing files/crashes); text flashing risks the WCAG 2.3.1 flash threshold |
+| Sweep (a light band moving across the text) | ❌ | needs per-character phase offsets; in a TUI it reads as typewriter/marquee, violating "no meaningless motion" |
+| ANSI blink code `\e[5m` | ❌ | see §3.4; terminal support is inconsistent and the user can't turn it off |
 
-### 2.2 色板与停止点（对比度已核算）
+### 2.2 Palette and stop points (contrast already computed)
 
-呼吸在两档品牌橙之间振荡（trough=rest，peak=strong），**全程每一帧都满足对比度**，不做中间灰、不做掉到深橙以下的谷（深橙 `#B05227` 在暗底仅 3.82:1，瞬态帧也不值得冒低对比度截图的险）。
+The breathing oscillates between two brand-orange stops (trough=rest, peak=strong); **every frame of the whole cycle satisfies contrast**; no intermediate grey, no trough below the deep orange (deep orange `#B05227` on a dark background is only 3.82:1 — even a transient frame isn't worth the low-contrast screenshot risk).
 
-| 主题 | rest（静止/谷） | peak（峰） | 对比度范围（对主题背景） |
+| Theme | rest (settled/trough) | peak | contrast range (against the theme background) |
 |---|---|---|---|
-| 暗色（背景 ~`#0B0B0D`） | `#D77757`（6.24:1 ✓） | `#E8896B`（7.70:1 ✓） | **全程 ≥ 6.24:1** |
-| 浅色（背景 ~`#F5F5F5`） | `#B05227`（4.72:1 ✓） | `#9A4A24`（5.70:1 ✓） | **全程 ≥ 4.72:1（AA）** |
+| Dark (background ~`#0B0B0D`) | `#D77757` (6.24:1 ✓) | `#E8896B` (7.70:1 ✓) | **≥ 6.24:1 throughout** |
+| Light (background ~`#F5F5F5`) | `#B05227` (4.72:1 ✓) | `#9A4A24` (5.70:1 ✓) | **≥ 4.72:1 (AA) throughout** |
 
-> 注意：品牌橙 `#D77757` 在浅底只有 2.89:1，**浅色主题不得用亮橙档**，必须整体落到深橙档（`#B05227`/`#9A4A24`）——这是与官网 token 表（`--accent-strong #E8896B`、品牌橙 `#D77757/#B05227`）同源、按背景深浅取用的做法。
-> 与 `theme.rs` 现状的关系：`claude` 令牌两主题都保持 `#D77757`（装饰用没问题）；提示行是**承载文字**的元素，浅色下必须深橙。
+> Note: the brand orange `#D77757` is only 2.89:1 on a light background — **the light theme must never use the bright-orange stop**; it must fall entirely into the deep-orange stops (`#B05227`/`#9A4A24`) — same-source as the website token table (`--accent-strong #E8896B`, brand orange `#D77757/#B05227`), taken per background lightness.
+> Relationship to `theme.rs` today: the `claude` token stays `#D77757` in both themes (fine for decoration); the notice line **carries text**, so under light it must be deep orange.
 
-### 2.3 动画参数（暗色/浅色共用参数，仅停止点不同）
+### 2.3 Animation parameters (shared between dark/light; only the stop points differ)
 
-| 参数 | 值 | 说明 |
+| Parameter | Value | Notes |
 |---|---|---|
-| 帧率 | 30fps（TICK_MS = 33，`app.rs` 既有） | 复用现有帧循环，不加新时钟 |
-| 周期 | **3.0s = 90 帧** | 一个「呼」+ 一个「吸」；低于 2s 会像焦虑，高于 5s 会让人以为坏了 |
-| 相位函数 | `t = 0.5 − 0.5·cos(2π · phase/90)`，`phase = tick % 90` | 余弦式：phase 0 → t=0 = rest（起步即谷，无突跳）；phase 45 → t=1 = peak；phase 90 → 回 rest |
-| 颜色 | `color = lerp(rest, peak, t)`（sRGB 逐通道线性插值），**作用于版本号与 `bingo update` 两段（同相位）** | 90 帧的 RGB 渐变；不做 gamma 校正（两档相近，感知差异可忽略，注明为非目标） |
-| 动画总时长 | **9s = 270 帧 = 3 个呼吸** | 之后静止在 rest 色，帧循环回到 idle（零写入不变量恢复） |
-| 静止态 | 版本号与命令段静止在 rest 色（命令段保持 bold）；行内静态段维持 inactive | 提示**永久保留**在欢迎卡，只是不再动 |
-| 提前停止 | 动画窗口内用户第一次按键（输入焦点转移）→ 立即静止 | 用户注意力已被输入带走，呼吸该停；可选 P1 |
+| Frame rate | 30fps (TICK_MS = 33, existing in `app.rs`) | reuse the existing frame loop, no new clock |
+| Period | **3.0s = 90 frames** | one "breathe out" + one "breathe in"; below 2s reads anxious, above 5s reads broken |
+| Phase function | `t = 0.5 − 0.5·cos(2π · phase/90)`, `phase = tick % 90` | cosine-style: phase 0 → t=0 = rest (starts at the trough, no jump); phase 45 → t=1 = peak; phase 90 → back to rest |
+| Color | `color = lerp(rest, peak, t)` (sRGB per-channel linear interpolation), **applied to both the version and `bingo update` segments (in phase)** | 90-frame RGB gradient; no gamma correction (the two stops are close; perceptual difference negligible, noted as a non-goal) |
+| Total animation duration | **9s = 270 frames = 3 breaths** | then settles at the rest color, the frame loop returns to idle (the zero-writes invariant resumes) |
+| Settled state | the version and command segments settle at the rest color (the command segment keeps bold); the in-line static segments stay inactive | the notice **stays permanently** on the welcome card, it just stops moving |
+| Early stop | the first user keypress inside the animation window (input focus moves) → settle immediately | the user's attention has been taken by input; the breathing should stop; optional P1 |
 
-### 2.4 离散降级（无 truecolor / 256 色终端）
+### 2.4 Discrete degradation (no truecolor / 256-color terminals)
 
-256 色无平滑渐变（`downgrade_to_256` 把 RGB 映射到索引色），插值无意义。降级为**两步离散呼吸**（同架构，仅相位量化）：
+256-color has no smooth gradient (`downgrade_to_256` maps RGB to indexed colors), interpolation is meaningless. Degrade to a **two-step discrete breathing** (same architecture, only phase quantization):
 
-| 参数 | 值 |
+| Parameter | Value |
 |---|---|
-| 周期 | 2.0s（peak 400ms = 12 帧 · rest 1600ms = 48 帧） |
-| 停止点 | 同上表（用 256 色近似值：暗色 `Indexed(173)/…`，由 `downgrade_to_256` 统一映射） |
-| 时长 | 9s 后静止 rest |
-| 要点 | peak 相 ≥ 400ms，避免频闪（< 3Hz，安全）；两档都 ≥4.5:1 |
+| Period | 2.0s (peak 400ms = 12 frames · rest 1600ms = 48 frames) |
+| Stop points | as the table above (using the 256-color approximations: dark `Indexed(173)/…`, uniformly mapped by `downgrade_to_256`) |
+| Duration | settles at rest after 9s |
+| Key point | peak phase ≥ 400ms, avoiding flicker (< 3Hz, safe); both stops ≥4.5:1 |
 
-### 2.5 Reduced-motion 降级（静态显示）
+### 2.5 Reduced-motion degradation (static display)
 
-TUI 无 `prefers-reduced-motion`（feedback-states §5 映射表口径），降级通过配置与终端能力**自动**触发，原则继承 §5「指示器本身永不消失，只是不动」：
+The TUI has no `prefers-reduced-motion` (feedback-states §5 mapping-table stance); degradation triggers **automatically** via configuration and terminal capability, inheriting §5's principle "the indicator itself never disappears, it just stops moving":
 
-| 触发条件 | 行为 |
+| Trigger | Behavior |
 |---|---|
-| 设置 `motion: "off"`（settings.json 新增键，或 env `BINGO_NO_MOTION=1`） | 从 t=0 即静态 rest 色（提示行照常显示） |
-| 终端不支持 truecolor | 走 §2.4 离散降级（仍是「动」，但已是最小档） |
-| 终端为单色 / `NO_COLOR` 存在 | 静态 **bold** 行（无颜色时靠加粗维持可见性） |
-| 测试 / CI / 非 TTY | 静态 rest（TUI 之外本就不渲染欢迎卡，规则仅为确定性） |
+| Setting `motion: "off"` (new settings.json key, or env `BINGO_NO_MOTION=1`) | static rest color from t=0 (the notice line still shows) |
+| Terminal without truecolor | goes through the §2.4 discrete degradation (still "moving", but the minimum tier) |
+| Monochrome terminal / `NO_COLOR` present | static **bold** line (bold maintains visibility without color) |
+| Tests / CI / non-TTY | static rest (the welcome card isn't rendered outside the TUI anyway; the rule is just determinism) |
 
-`motion` 设置与 `theme` 设置同层（`Settings.theme` 先例），默认 `auto`；这是 bingo 第一个动效开关，同时服务「用户关停」与「测试确定性」两个目的。
+The `motion` setting sits at the same layer as `theme` (the `Settings.theme` precedent), default `auto`; this is bingo's first motion switch, serving both "user opt-out" and "test determinism".
 
 ---
 
-## 3. TUI 实现约束与方案（ratatui 无 CSS 动画）
+## 3. TUI implementation constraints and approach (ratatui has no CSS animation)
 
-### 3.1 现状事实（决定方案边界）
+### 3.1 Current facts (they bound the approach)
 
-- 渲染模型：`Chat::build_rows` 产出样式化 `Row` 文档 → view 层映射到终端行。**样式在构建时静态决定**，`Line/SegStyle` 无时间变量——动效只能在每次重建时换颜色。
-- 帧循环：`app.rs` TICK_MS=33ms（30fps），`chat.tick()` 只在 `has_dynamic_rows()` 时置 dirty 并重建；空闲时**零字节写入**（不变量）。
-- spinner 先例：`activities.rs` 用 `tick % N` 取帧号驱动字符动画——逐帧重建已是既有模式。
-- **欢迎卡在视口内 = 活文档行**：视口渲染的是 doc.rows 尾部，欢迎卡尚未滚出时每帧都随 doc 重绘（inline 模式「只重绘底部视口」覆盖它）。**滚出视口后才落盘进 scrollback，且「视口以上永不重绘」**（app.rs 不变量）。落盘由 `pick_flush_mark` 在内容越过窗口顶部时触发——欢迎卡通常在几条消息之后才落盘。
+- Render model: `Chat::build_rows` produces styled `Row` documents → the view layer maps them to terminal rows. **Styles are decided statically at build time**; `Line/SegStyle` has no time variable — motion can only change colors on each rebuild.
+- Frame loop: `app.rs` TICK_MS=33ms (30fps); `chat.tick()` only sets dirty and rebuilds while `has_dynamic_rows()`; at idle there are **zero bytes written** (invariant).
+- Spinner precedent: `activities.rs` uses `tick % N` frame numbers to drive character animation — per-frame rebuilds are an existing pattern.
+- **The welcome card inside the viewport = a live document row**: the viewport renders the tail of doc.rows, and while the welcome card hasn't scrolled out it redraws with the doc every frame (inline mode's "only redraw the bottom viewport" covers it). **It only settles into scrollback after scrolling out of the viewport, and "never redraw above the viewport"** (app.rs invariant). Persistence is triggered by `pick_flush_mark` when content crosses the window top — the welcome card usually settles after a few messages.
 
-### 3.2 方案 A（采用）：帧插值呼吸，动画窗口内保持欢迎卡为活行
+### 3.2 Option A (adopted): frame-interpolated breathing, keeping the welcome card a live row during the animation window
 
-思路：**把动画约束在「欢迎卡还在视口里」的窗口期**——窗口 9s 远早于正常落盘时机，动画结束时该行自然以静止色落盘，**全程不触碰 scrollback**。
+Idea: **constrain the animation to the window where "the welcome card is still in the viewport"** — the 9s window ends well before the normal settle-to-disk moment, so the line settles into the scrollback at the rest color naturally, **never touching scrollback**.
 
-接线点（对 dev）：
+Wiring points (for dev):
 
 ```
-1. Chat 持有 UpdateBanner { latest: String, anim_until_tick: u64, phase 由 tick 派生 }
-2. has_dynamic_rows() 增加: || self.update_anim_active()   // 动画窗口内帧循环不睡
-3. tick() 内: 窗口到期 → update_anim_active = false（静止态，不再置 dirty）
+1. Chat holds UpdateBanner { latest: String, anim_until_tick: u64, phase derived from tick }
+2. has_dynamic_rows() gains: || self.update_anim_active()   // frame loop doesn't sleep inside the animation window
+3. inside tick(): window expiry → update_anim_active = false (settled state, no more dirty)
 4. build_rows → welcome_card_rows(..., update: Option<&str>, phase: u8)
-   → banner_line + update_color(theme, is_dark, phase) 纯函数
-5. on_key（可选 P1）: 动画窗口内首次按键 → update_anim_active = false
-6. motion:"off" / NO_COLOR → update_color 恒返回 rest / bold，且 update_anim_active 恒 false
+   → banner_line + update_color(theme, is_dark, phase) pure functions
+5. on_key (optional P1): first keypress inside the animation window → update_anim_active = false
+6. motion:"off" / NO_COLOR → update_color always returns rest / bold, and update_anim_active is always false
 ```
 
 ```
-update_color(theme, dark, phase) -> Color:   // 返回的 Color 同时应用于版本号与 bingo update 两段（同相位）
-  if 无 truecolor: 离散两步（phase 量化到 12/48 帧）
+update_color(theme, dark, phase) -> Color:   // the returned Color applies to both the version and bingo update segments (in phase)
+  if no truecolor: discrete two-step (phase quantized to 12/48 frames)
   stops = dark ? (rest #D77757, peak #E8896B) : (rest #B05227, peak #9A4A24)
-  t = 0.5 − 0.5·cos(2π · phase/90)   // phase 0 = rest（谷），45 = peak，90 = rest
+  t = 0.5 − 0.5·cos(2π · phase/90)   // phase 0 = rest (trough), 45 = peak, 90 = rest
   lerp(rest, peak, t)
 ```
 
-成本与边界：
-- 9s × 30fps 的小文档重建，与工具运行期间 spinner 的开销同量级，且有界（到期即停）；
-- resize 窗口期内 rehydrate 把欢迎卡拉回活文档 → 仍在动画相位内继续，无重复动画副本，不变量完好；
-- 测试：`update_color` 是纯函数（phase→Color），相位 0/22/45 的取值可直接断言，无需运行 TUI。
+Cost and boundaries:
+- a small document rebuild at 9s × 30fps, same order as the spinner's cost during tool runs, and bounded (stops on expiry);
+- a resize inside the window rehydrates the welcome card back into the live document → continues within the animation phase, no duplicate animation copies, invariants intact;
+- testing: `update_color` is a pure function (phase→Color); the values at phases 0/22/45 can be asserted directly without running the TUI.
 
-### 3.3 方案 B（256 色降级）：两步离散循环
+### 3.3 Option B (256-color degradation): two-step discrete loop
 
-同架构，`update_color` 无 truecolor 分支返回离散两步（§2.4 参数）。不是另一个方案，是方案 A 的降级档——实现上共用一个函数。
+Same architecture; `update_color`'s no-truecolor branch returns the discrete two steps (§2.4 parameters). Not a separate option — it's the degradation tier of option A; one function implements both.
 
-### 3.4 方案 C：ANSI 闪烁码 `\e[5m` —— 明确不用
+### 3.4 Option C: ANSI blink code `\e[5m` — explicitly not used
 
-| 维度 | 问题 |
+| Dimension | Problem |
 |---|---|
-| 一致性 | 终端支持不一（部分忽略、部分渲染成高亮、tmux/kitty 表现不同），无法保证「每个用户看到的相同」——违反 feedback-states 总原则 1「反馈不依赖环境」 |
-| 可控性 | 用户无法关停；`motion: off` 无从实现；无法提前停止/降级 |
-| 语义 | 闪烁是终端最强的告警信号（错误/就绪提示），用于版本提示过重，违背「不喧宾夺主」 |
-| 工程 | `SegStyle` 无 blink 位、ratatui `Cell` 无闪烁 modifier——绕开整个样式系统裸嵌 ESC，破坏样式组合与测试口径 |
-| 可测 | 无法在单元层断言「闪了」，验收只能靠肉眼 |
+| Consistency | terminal support varies (some ignore it, some render it as highlight, tmux/kitty differ) — can't guarantee "every user sees the same", violating feedback-states general principle 1 "feedback must not depend on the environment" |
+| Controllability | the user can't turn it off; `motion: off` is unimplementable; no early stop/degradation |
+| Semantics | blinking is the terminal's strongest alarm signal (errors/ready notices); too heavy for a version notice, violating "don't upstage" |
+| Engineering | `SegStyle` has no blink bit; ratatui `Cell` has no blink modifier — escaping the whole style system to embed raw ESC breaks style composition and the test story |
+| Testability | "it blinked" can't be asserted at the unit layer; acceptance would be eyeball-only |
 
-结论：**不用**。同理，不引入任何逐字符相位差（扫光）、整卡背景渐变呼吸（一行文字足够）。
+Conclusion: **not used**. Likewise, no per-character phase offsets (sweep) and no whole-card background-gradient breathing (one line of text is enough).
 
-### 3.5 明确不做（防蔓延）
+### 3.5 Explicitly not doing (anti-creep)
 
-- 不重绘/改写已落盘 scrollback（不变量保持）；
-- **不动欢迎卡任何其他元素**（✻ 问候、╭╮ 边框、/help、cwd、身份行）——动效只此一行内的两个关键词段；
-- 不做「闪烁 N 次后消失」——提示在欢迎卡期间**常驻**（用户需要随时看到入口），只是停止呼吸；
-- 不做入场动画（提示行静默插入，无闪入/淡入）；
-- 不响应鼠标 hover（无此交互模型）。
-
----
-
-## 4. 主题令牌与代码落点
-
-- `Theme` 新增 3 个令牌（与官网 `--accent-strong`/品牌深橙同值，保持全项目色板同源）：
-  - `claude_strong: #E8896B`（暗色 peak）
-  - `claude_deep: #B05227`（浅色 rest）
-  - `claude_deep_strong: #9A4A24`（浅色 peak）
-  - `downgrade_to_256` 一并映射 + 现有 `rgb_downgrades_to_ansi256` 测试模式扩展；
-- `Theme` 需能回答「暗色还是浅色」：建议加 `is_dark: bool`（`dark()`/`light()` 构造置位），`update_color` 据此选停止点（dev 若倾向在 Chat 层持有 `ThemeSetting` 传递亦可，停止点值不变）；
-- 纯函数与测试：`banner_line(v, width)`（截断链）、`update_color(theme, phase)`（相位边界/周期回绕/静止态/降级分支）——不依赖运行时，直接单测；
-- 版本身份行 `bingo v0.1.0` 硬编码改为 `env!("CARGO_PKG_VERSION")`（同 PR 顺手修）；
-- Settings 新增 `motion: Option<String>`（"auto"/"off"，默认 auto），`BINGO_NO_MOTION=1` 等价。
+- no redrawing/rewriting the settled scrollback (invariant kept);
+- **no touching any other welcome-card element** (✻ greeting, ╭╮ border, /help, cwd, identity line) — the motion is only the two keyword segments inside this one line;
+- no "blink N times then disappear" — the notice **stays** for the welcome card's lifetime (the user needs the entry visible at all times), it just stops breathing;
+- no entrance animation (the notice line inserts silently, no flash-in/fade-in);
+- no mouse-hover response (no such interaction model).
 
 ---
 
-## 5. 可验收锚点（qa）
+## 4. Theme tokens and code touchpoints
 
-1. **出现条件**：检测到新版本 → 欢迎卡出现提示行（文案 = `New version {v} available — run bingo update`，三段样式：静态段 inactive、版本号与 `bingo update` 呼吸色且命令 bold）；无新版本 → 欢迎卡布局与现状逐行一致（回归）。
-2. **呼吸正确性**：truecolor 下 `update_color(theme, phase)` 纯函数——phase 0 = rest、phase 45 ≈ peak（±1/255）、phase 90 = rest；相位 0→45 单调上升、45→90 单调下降（单测断言）；**版本号段与命令段在同一 phase 取相同 Color（同相位）**；行内静态段恒为 `theme.inactive`（任意 phase 不变）；帧循环在窗口内持续置 dirty、窗口外恢复 idle（零写入）。
-3. **窗口**：9s（270 帧）后静止 rest 色；`needs_tick()` 恢复 false。
-4. **降级**：`motion: off` / `BINGO_NO_MOTION=1` → 全程静态 rest，提示行仍在（指示器不消失）；无 truecolor → 离散两步（peak 400ms/rest 1600ms）不崩溃；`NO_COLOR` → 静态 bold。
-5. **提前停止**（若实现）：窗口内按键 → 立即静止。
-6. **窄屏**：按 §1.3 截断链逐档核对（50/43/15 列边界），任何档位 `bingo update` 可见（<17 列除外）、不溢出卡框。
-7. **对比度**：暗色每帧 ≥6.24:1、浅色每帧 ≥4.72:1（停驻帧 = rest，可截图/取色核对）；浅色主题不得出现 `#D77757` 亮橙档。
-8. **scrollback 不变量**：欢迎卡落盘后为静止 rest 色；窗口内 resize → rehydrate 后动画继续、无重复动画副本、视口以上零重绘（回归 `flush_items` 测试族）。
-9. **特效范围（v1.1）**：任意两帧渲染中，欢迎卡其余行（✻ 问候/╭╮ 边框//help/cwd/身份行）完全一致（可对 doc.rows 静态行快照断言）；提示行出现无入场动画（静默插入，无闪入）。
-10. **无 ANSI 闪烁**：输出不含 `\e[5m`（可 grep 断言）。
-11. **身份行**：`bingo v{X.Y.Z}` 与 `CARGO_PKG_VERSION` 一致（不再硬编码 v0.1.0）。
+- `Theme` gains 3 tokens (same values as the website's `--accent-strong`/brand deep orange, keeping the project-wide palette same-source):
+  - `claude_strong: #E8896B` (dark peak)
+  - `claude_deep: #B05227` (light rest)
+  - `claude_deep_strong: #9A4A24` (light peak)
+  - `downgrade_to_256` maps them too + the existing `rgb_downgrades_to_ansi256` test pattern extends;
+- `Theme` must be able to answer "dark or light": suggest adding `is_dark: bool` (set by the `dark()`/`light()` constructors); `update_color` picks the stop points from it (if dev prefers carrying a `ThemeSetting` in the Chat layer, fine — the stop-point values stay the same);
+- Pure functions and tests: `banner_line(v, width)` (truncation chain), `update_color(theme, phase)` (phase boundaries/period wrap/settled state/degradation branches) — no runtime dependency, unit-tested directly;
+- the version identity line `bingo v0.1.0` hardcode switches to `env!("CARGO_PKG_VERSION")` (incidental fix in the same PR);
+- Settings gains `motion: Option<String>` ("auto"/"off", default auto), `BINGO_NO_MOTION=1` equivalent.
 
 ---
 
-## 6. 与 prd-update.md 的对齐（v1.1）
+## 5. Acceptable anchors (qa)
 
-视觉呈现以本规格为**唯一事实源**（团队约定：PRD C 组只验收不定义）；下表供 pm 同步 C 组锚点、dev 实现时对照，逐项裁定：
+1. **Appearance condition**: a new version detected → the welcome card shows the notice line (copy = `New version {v} available — run bingo update`, three-segment styling: static segments inactive, the version and `bingo update` in the breathing color with the command bold); no new version → the welcome-card layout is line-for-line identical to today (regression).
+2. **Breathing correctness**: under truecolor the `update_color(theme, phase)` pure function — phase 0 = rest, phase 45 ≈ peak (±1/255), phase 90 = rest; phases 0→45 monotonically rising, 45→90 monotonically falling (unit-test assertions); **the version segment and the command segment take the same Color at the same phase (in phase)**; the in-line static segments are always `theme.inactive` (unchanged at any phase); the frame loop stays dirty inside the window, returns to idle outside (zero writes).
+3. **Window**: settles at the rest color after 9s (270 frames); `needs_tick()` returns false.
+4. **Degradation**: `motion: off` / `BINGO_NO_MOTION=1` → static rest throughout, the notice line stays (the indicator never disappears); no truecolor → discrete two-step (peak 400ms/rest 1600ms) without crashing; `NO_COLOR` → static bold.
+5. **Early stop** (if implemented): a keypress inside the window → settle immediately.
+6. **Narrow screens**: verify the §1.3 truncation chain tier by tier (50/43/15 column boundaries); `bingo update` is visible in every tier (except <17 columns) and never overflows the card frame.
+7. **Contrast**: dark ≥6.24:1 per frame, light ≥4.72:1 per frame (settled frame = rest; checkable via screenshot/color picker); the light theme must never show the `#D77757` bright-orange stop.
+8. **Scrollback invariant**: after the welcome card settles, it's the static rest color; a resize inside the window → the animation continues after rehydrate, no duplicate animation copies, zero redraws above the viewport (regression on the `flush_items` test family).
+9. **Effect scope (v1.1)**: across any two rendered frames, the welcome card's other rows (✻ greeting / ╭╮ border / /help / cwd / identity line) are completely identical (assertable against a static-row snapshot of doc.rows); the notice line appears with no entrance animation (silent insertion, no flash-in).
+10. **No ANSI blink**: the output contains no `\e[5m` (grep-assertable).
+11. **Identity line**: `bingo v{X.Y.Z}` matches `CARGO_PKG_VERSION` (no more hardcoded v0.1.0).
 
-| 项 | PRD（pm） | 本规格（事实源） | 裁定 |
+---
+
+## 6. Alignment with prd-update.md (v1.1)
+
+The visual presentation uses this spec as the **single source of truth** (team convention: PRD group C only accepts, doesn't define); the table below is for pm to sync the C-group anchors and for dev to cross-check during implementation, item by item:
+
+| Item | PRD (pm) | This spec (source of truth) | Ruling |
 |---|---|---|---|
-| 位置 | `/help` 行之下、版本行之上 | 版本身份行正上方（cwd 与提示行间空行，版本对照块） | **一致**（都在版本行之上）；空行节奏以本规格为准 |
-| 文案 | `✦ v0.3.0 available — run 'bingo update'` | `New version v0.3.0 available — run bingo update` | **以本规格为准**（用户方向澄清引用的文案；✦ 前缀与命令引号不加） |
-| 行内样式 | 版本号着色 | 三段式：静态段 inactive + 版本号/命令两段呼吸色（命令 bold） | 以本规格为准 |
-| 动效范围 | C3：仅版本号着色 | 版本号 + `bingo update` 两段同相位呼吸 | 以本规格为准（PRD 关键词的超集，幅度一致克制）；**pm 需将 C3 同步为「版本号与 bingo update 两段同相位」** |
-| 出现方式 | 结果到达后插入/更新该行 | 静默插入，无入场动画 | 以本规格为准（补充细节） |
-| 降级 | C4：`NO_COLOR=1`/非彩色 → 静态 | 一致 + `motion: off` / `BINGO_NO_MOTION` | **一致**，本规格多一个主动关停途径 |
-| 落盘后 | C4：flush 后动画停止、静态着色保留 | 同（静止 rest 色） | **一致** |
+| Position | below the `/help` line, above the version line | directly above the version identity line (blank between cwd and the notice; version contrast block) | **consistent** (both above the version line); blank-line rhythm per this spec |
+| Copy | `✦ v0.3.0 available — run 'bingo update'` | `New version v0.3.0 available — run bingo update` | **per this spec** (the copy the user-direction clarification referenced; no ✦ prefix, no quotes around the command) |
+| In-line styling | version colored | three-segment: static segments inactive + the version/command two segments in the breathing color (command bold) | per this spec |
+| Motion scope | C3: only the version colored | the version + `bingo update` two segments breathing in phase | per this spec (a superset of the PRD keyword, equally restrained); **pm must sync C3 to "the version and bingo update two segments in phase"** |
+| Appearance | insert/update the line when the result arrives | silent insertion, no entrance animation | per this spec (added detail) |
+| Degradation | C4: `NO_COLOR=1`/non-color → static | consistent + `motion: off` / `BINGO_NO_MOTION` | **consistent**; this spec adds an explicit opt-out path |
+| After settling | C4: animation stops after flush, static coloring kept | same (static rest color) | **consistent** |
 
 ---
 
-## 7. 变更记录
+## 7. Changelog
 
-| 日期 | 版本 | 说明 |
+| Date | Version | Notes |
 |---|---|---|
-| 2026-08-07 | v1.1 | 按用户方向澄清定稿特效范围：**仅提示行文字内版本号与 `bingo update` 两段同相位呼吸**，行内其余文字静态 inactive、欢迎卡其余全部静态；增加「无入场动画」；锚点补特效范围断言（第 9 条）；新增与 prd-update.md 的对齐表（§6，pm 需同步 C3） |
-| 2026-08-07 | v1.0 | 初稿：布局/文案/截断链、正弦呼吸规格（暗色 `#D77757↔#E8896B`、浅色 `#B05227↔#9A4A24`，全程对比度达标）、ratatui 帧插值方案 + 离散降级 + ANSI 闪烁码否决、motion 开关、qa 锚点 |
+| 2026-08-07 | v1.1 | effect scope finalized per the user-direction clarification: **only the version and `bingo update` segments inside the notice-line text breathe in phase**, the rest of the line's text static inactive, everything else on the welcome card static; added "no entrance animation"; anchors gain the effect-scope assertion (#9); added the alignment table with prd-update.md (§6, pm must sync C3) |
+| 2026-08-07 | v1.0 | first draft: layout/copy/truncation chain, sinusoidal-breathing spec (dark `#D77757↔#E8896B`, light `#B05227↔#9A4A24`, contrast-compliant throughout), ratatui frame-interpolation approach + discrete degradation + ANSI blink code rejected, the motion switch, qa anchors |

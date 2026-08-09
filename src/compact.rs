@@ -55,7 +55,9 @@ fn summary_prompt(old: &[Message]) -> String {
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.clone()),
-                ContentBlock::ToolResult { content, .. } => Some(content.to_string()),
+                ContentBlock::ToolResult { content, .. } => {
+                    Some(crate::api::types::tool_result_text(content))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -316,13 +318,13 @@ mod tests {
         ];
         // Hard split point 2 would cut the tool_use/tool_result pair.
         let split = safe_split(&messages, 2);
-        assert_eq!(split, 3, "推进到 tool_result 之后");
+        assert_eq!(split, 3, "advances to just after tool_result");
         assert!(
             !messages[split]
                 .content
                 .iter()
                 .any(|b| matches!(b, ContentBlock::ToolResult { .. })),
-            "保留侧首条不是 tool_result"
+            "kept side must not start with a tool_result"
         );
     }
 
@@ -362,7 +364,7 @@ mod tests {
             cache: false,
         }];
         let empty = estimate_tokens(&system, &[]);
-        assert_eq!(empty, 100, "400 字符 ≈ 100 token");
+        assert_eq!(empty, 100, "400 chars ≈ 100 tokens");
 
         let messages = vec![text(Role::User, &"x".repeat(4_000))];
         let with_message = estimate_tokens(&system, &messages);
@@ -379,15 +381,25 @@ mod tests {
     #[test]
     fn token_gate_throttles_exact_counts() {
         let mut gate = TokenGate::new();
-        assert!(gate.wants_exact(1_000), "回合开始必测");
+        assert!(
+            gate.wants_exact(1_000),
+            "the first turn of a round always measures"
+        );
         gate.record_exact(5_000, 1_000);
 
-        assert!(!gate.wants_exact(1_100), "小增长不再实测");
-        assert_eq!(gate.project(1_100), 5_100, "按估算增量外推");
+        assert!(
+            !gate.wants_exact(1_100),
+            "small growth does not trigger a measure"
+        );
+        assert_eq!(
+            gate.project(1_100),
+            5_100,
+            "extrapolated from the estimated delta"
+        );
 
         assert!(
             gate.wants_exact(1_000 + COUNT_TOKENS_GROWTH),
-            "估算涨过阈值就提前实测"
+            "estimate crossing the threshold triggers an early measure"
         );
 
         let mut gate = TokenGate::new();
@@ -395,6 +407,6 @@ mod tests {
         for _ in 0..COUNT_TOKENS_INTERVAL {
             gate.project(1_000);
         }
-        assert!(gate.wants_exact(1_000), "满 N 轮必测");
+        assert!(gate.wants_exact(1_000), "always measures after N rounds");
     }
 }

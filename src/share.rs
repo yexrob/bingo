@@ -1,8 +1,8 @@
-//! share 数据源：会话的持久化快照（`bingo share` 的输入）。
+//! Share data source: the session's persisted snapshot (the input for `bingo share`).
 //!
-//! 会话运行时把子代理实例与频道日志增量写入 `ShareDoc`（JSON，单文件，
-//! 原子写：tmp + rename），`bingo share` 读取该文档 + transcript 生成
-//! 自包含 HTML 页面。share 是增强不是契约：存储失败只告警，不阻塞会话。
+//! At runtime the session incrementally writes subagent instances and channel logs into `ShareDoc` (JSON, single file,
+//! atomic write: tmp + rename); `bingo share` reads that document + the transcript to generate
+//! a self-contained HTML page. Share is an enhancement, not a contract: storage failures only warn and never block the session.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -47,34 +47,34 @@ impl ErrorCode for ShareError {
     }
 }
 
-/// 一个子代理实例的共享快照（history = 续话完整历史，即私聊视图数据）。
+/// A shared snapshot of a subagent instance (history = the full resume history, i.e. the DM view).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentShare {
     pub name: String,
-    /// 具名定义（AgentDef 名；无名实例 None）。
+    /// Named definition (AgentDef name; None for unnamed instances).
     pub def: Option<String>,
     pub description: String,
-    /// 实例状态（AgentState 的字符串形态：running / idle / stopped）。
+    /// Instance state (AgentState in string form: running / idle / stopped).
     pub state: String,
     pub history: Vec<Message>,
 }
 
-/// 一个频道的共享快照。
+/// A shared snapshot of a channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelShare {
     pub name: String,
-    /// 发言模式（ChannelMode 的字符串形态：serial / free）。
+    /// Speak mode (ChannelMode in string form: serial / free).
     pub mode: String,
     pub members: Vec<String>,
     pub messages: Vec<ChannelMessage>,
 }
 
-/// 整个会话的共享文档（JSON 单文件）。
+/// The whole session's shared document (single JSON file).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShareDoc {
-    /// 会话 key（transcript 文件名 stem `{slug}-{ts}`）。
+    /// Session key (transcript file-name stem `{slug}-{ts}`).
     pub session: String,
-    /// 首次创建时间（unix 秒）。
+    /// First-created time (unix seconds).
     pub created_at: u64,
     pub agents: Vec<AgentShare>,
     pub channels: Vec<ChannelShare>,
@@ -95,7 +95,7 @@ impl ShareDoc {
     }
 }
 
-/// shares 目录：~/.local/share/bingo/shares（与 transcripts 同级）。
+/// The shares dir: ~/.local/share/bingo/shares (sibling of transcripts).
 pub fn shares_dir(home: &Path) -> PathBuf {
     home.join(".local")
         .join("share")
@@ -103,15 +103,15 @@ pub fn shares_dir(home: &Path) -> PathBuf {
         .join("shares")
 }
 
-/// 会话级共享文档存储（Session 持有 Arc，子会话经 registry 共享）。
+/// Per-session shared-document store (Session holds an Arc; sub-sessions share it via the registry).
 pub struct ShareStore {
     path: PathBuf,
     inner: Mutex<ShareDoc>,
 }
 
 impl ShareStore {
-    /// 读取既有文档；不存在则按路径 stem 新建空文档。
-    /// 损坏文件不阻塞会话：备份为 `<stem>.json.bak` 后从头开始。
+    /// Read an existing document; when missing, create an empty one keyed by the path stem.
+    /// A corrupt file must not block the session: back it up as `<stem>.json.bak` and start fresh.
     pub fn load_or_create(path: &Path) -> Result<Arc<Self>, ShareError> {
         let session = path
             .file_stem()
@@ -139,12 +139,12 @@ impl ShareStore {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 当前文档快照（bingo share 读取用）。
+    /// Snapshot of the current document (for `bingo share` reads).
     pub fn snapshot(&self) -> ShareDoc {
         self.lock().clone()
     }
 
-    /// 建/更新一个子代理实例条目（history 与 state 以最新为准）。
+    /// Create/update a subagent instance entry (history and state follow the latest).
     pub fn upsert_agent(
         &self,
         name: &str,
@@ -171,7 +171,7 @@ impl ShareStore {
         }
     }
 
-    /// 建/更新一个频道条目（模式与成员以最新为准；消息保留）。
+    /// Create/update a channel entry (mode and members follow the latest; messages are kept).
     pub fn upsert_channel_meta(&self, name: &str, mode: ChannelMode, members: Vec<String>) {
         let mut doc = self.lock();
         match doc.channels.iter_mut().find(|c| c.name == name) {
@@ -188,14 +188,14 @@ impl ShareStore {
         }
     }
 
-    /// 追加一条频道消息（频道不存在时忽略——元数据先于消息落地）。
+    /// Append a channel message (ignored when the channel does not exist — metadata lands before messages).
     pub fn append_channel_message(&self, name: &str, msg: ChannelMessage) {
         if let Some(c) = self.lock().channels.iter_mut().find(|c| c.name == name) {
             c.messages.push(msg);
         }
     }
 
-    /// 原子写盘：tmp 文件 + rename（读侧要么看到旧文档要么看到新文档）。
+    /// Atomic write: tmp file + rename (readers see either the old or the new document).
     pub fn save(&self) -> Result<(), ShareError> {
         let json = serde_json::to_string_pretty(&*self.lock())?;
         if let Some(parent) = self.path.parent()
@@ -209,7 +209,7 @@ impl ShareStore {
         Ok(())
     }
 
-    /// 写盘并吞掉错误（share 是增强不是契约：失败只告警一次）。
+    /// Write to disk and swallow errors (share is an enhancement, not a contract: a failure warns once).
     pub fn persist(&self) {
         if let Err(e) = self.save() {
             eprintln!("[bingo] warning: share save failed: {e}");
@@ -217,7 +217,7 @@ impl ShareStore {
     }
 }
 
-/// 原子写文件（tmp + rename；share 输出统一入口，CLI 与 /share 共用）。
+/// Atomic file write (tmp + rename; the unified share-output entry, shared by the CLI and /share).
 pub fn write_html_atomic(path: &Path, content: &str) -> Result<(), ShareError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -230,11 +230,11 @@ pub fn write_html_atomic(path: &Path, content: &str) -> Result<(), ShareError> {
     Ok(())
 }
 
-/// 官网上传服务缺省基址（settings.share.baseUrl 可覆盖）。
+/// Default base URL of the official upload service (overridable via settings.share.baseUrl).
 pub const DEFAULT_SHARE_BASE: &str = "https://bingo.ruobin.dev";
 
-/// 分享 id：会话 stem 的 ts 部分 + 6 位随机 [a-z0-9]（无 rand 依赖，
-/// splitmix64 混合时间与计数器）。
+/// Share id: the session stem's ts part + 6 random [a-z0-9] chars (no rand dependency;
+/// splitmix64 mixes time and a counter).
 pub fn share_id(stem: &str) -> String {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
@@ -269,8 +269,8 @@ pub fn share_id(stem: &str) -> String {
     format!("{ts}{suffix}")
 }
 
-/// 上传 HTML 到官网分享服务（公开，无需 token）：
-/// POST `{base}/share/u/{id}`，body = HTML。
+/// Upload HTML to the official share service (public, no token):
+/// POST `{base}/share/u/{id}`, body = HTML.
 pub async fn upload_share(base: &str, id: &str, html: &str) -> Result<String, ShareError> {
     let url = format!("{base}/share/u/{id}");
     let resp = reqwest::Client::new()
@@ -286,7 +286,7 @@ pub async fn upload_share(base: &str, id: &str, html: &str) -> Result<String, Sh
     Ok(url)
 }
 
-/// 用系统默认浏览器打开目标（文件路径或 URL；macOS open / Linux xdg-open / Windows cmd start）。
+/// Open the target in the system default browser (file path or URL; macOS open / Linux xdg-open / Windows cmd start).
 pub fn open_in_browser(target: &str) -> Result<(), ShareError> {
     let mut cmd = if cfg!(target_os = "macos") {
         let mut c = std::process::Command::new("open");
@@ -305,16 +305,16 @@ pub fn open_in_browser(target: &str) -> Result<(), ShareError> {
     Ok(())
 }
 
-/// 从主 transcript 消息推导 agents/channels（旧会话回退：进程启动于 share
-/// 功能合入前、无 share 文档时，导出仍含 Team/DM/频道视图，而非空态）。
+/// Derive agents/channels from the main transcript's messages (legacy-session fallback: when the process started before share
+/// landed and no share document exists, the export still contains the Team/DM/channel views instead of an empty state).
 ///
-/// 推导规则（尽力而为，发送者身份从 transcript 不可精确还原）：
-/// - `Agent` tool_use → AgentShare 条目（name=实例名或 agent 定义名，
-///   description 取 description 或 prompt 摘要，state=idle，history 空）
-/// - `SendMessage` → 向该 agent 的 history 追加 user 消息
+/// Derivation rules (best-effort; sender identity cannot be recovered exactly from the transcript):
+/// - `Agent` tool_use → an AgentShare entry (name = instance name or agent-definition name,
+///   description = the description or a prompt excerpt, state=idle, history empty)
+/// - `SendMessage` → appends a user message to that agent's history
 /// - `AgentControl stop/delete` → state=stopped
-/// - `Channel create` → ChannelShare 元数据（members 含 main/user）
-/// - `Post` → 频道消息（from=main，seq 递增）
+/// - `Channel create` → ChannelShare metadata (members include main/user)
+/// - `Post` → a channel message (from=main, seq increments)
 pub fn derive_share_doc(session: &str, messages: &[Message]) -> ShareDoc {
     let mut doc = ShareDoc::new(session.to_string());
     let mut agent_index: HashMap<String, usize> = HashMap::new();
@@ -443,6 +443,7 @@ pub fn derive_share_doc(session: &str, messages: &[Message]) -> ShareDoc {
                             seq,
                             from: "main".to_string(),
                             text: text.to_string(),
+                            at: 0,
                         });
                     }
                 }
@@ -453,8 +454,8 @@ pub fn derive_share_doc(session: &str, messages: &[Message]) -> ShareDoc {
     doc
 }
 
-/// 按会话 key 解析 transcript（/resume 语义：子串匹配，最新优先）；
-/// 无 key 取最新会话。未命中时错误信息附可用会话列表（前 5 个，防刷屏）。
+/// Resolve the transcript by session key (/resume semantics: substring match, newest first);
+/// without a key, take the newest session. On a miss, the error lists the available sessions (first 5, to avoid spam).
 pub fn resolve_transcript(home: &Path, key: Option<&str>) -> Result<Transcript, ShareError> {
     let all = crate::transcript::list(home)?;
     match key {
@@ -470,7 +471,7 @@ pub fn resolve_transcript(home: &Path, key: Option<&str>) -> Result<Transcript, 
                         let shown: Vec<&str> = names.iter().map(String::as_str).take(5).collect();
                         let suffix = if names.len() > 5 { "…" } else { "" };
                         ShareError::SessionNotFound(format!(
-                            "{key}；可用会话：{}{suffix}",
+                            "{key}; available sessions: {}{suffix}",
                             shown.join(", ")
                         ))
                     }
@@ -502,7 +503,7 @@ mod tests {
         store.upsert_agent(
             "scout",
             Some("scout".to_string()),
-            "调研".to_string(),
+            "research".to_string(),
             AgentState::Idle,
             vec![msg("hi")],
         );
@@ -516,7 +517,8 @@ mod tests {
             ChannelMessage {
                 seq: 1,
                 from: "scout".into(),
-                text: "大家好".into(),
+                text: "hello everyone".into(),
+                at: 0,
             },
         );
         store
@@ -544,7 +546,7 @@ mod tests {
         assert_eq!(doc.channels[0].messages.len(), 1);
         assert_eq!(doc.channels[0].messages[0].seq, 1);
         assert_eq!(doc.channels[0].messages[0].from, "scout");
-        assert_eq!(doc.channels[0].messages[0].text, "大家好");
+        assert_eq!(doc.channels[0].messages[0].text, "hello everyone");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -556,7 +558,7 @@ mod tests {
         assert_eq!(store.snapshot().session, "proj-1700000000");
         assert!(store.snapshot().agents.is_empty());
         assert!(store.snapshot().channels.is_empty());
-        assert!(!path.exists(), "仅读不落盘");
+        assert!(!path.exists(), "read-only, nothing written");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -568,8 +570,14 @@ mod tests {
         std::fs::write(&path, "not json {{{").unwrap();
         let store = ShareStore::load_or_create(&path).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(store.snapshot().session, "bingo-1");
-        assert!(store.snapshot().agents.is_empty(), "损坏文件从头开始");
-        assert!(path.with_extension("json.bak").exists(), "损坏文件备份保留");
+        assert!(
+            store.snapshot().agents.is_empty(),
+            "corrupt file starts fresh"
+        );
+        assert!(
+            path.with_extension("json.bak").exists(),
+            "corrupt file backup is kept"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -578,18 +586,34 @@ mod tests {
         let root = temp_dir("upsert");
         let path = root.join("shares").join("bingo-1.json");
         let store = ShareStore::load_or_create(&path).unwrap_or_else(|e| panic!("{e}"));
-        store.upsert_agent("a", None, "初版".into(), AgentState::Running, Vec::new());
-        store.upsert_agent("a", None, "新版".into(), AgentState::Idle, vec![msg("x")]);
+        store.upsert_agent(
+            "a",
+            None,
+            "first version".into(),
+            AgentState::Running,
+            Vec::new(),
+        );
+        store.upsert_agent(
+            "a",
+            None,
+            "new version".into(),
+            AgentState::Idle,
+            vec![msg("x")],
+        );
         store.upsert_agent(
             "b",
             None,
-            "另一个人".into(),
+            "another person".into(),
             AgentState::Stopped,
             Vec::new(),
         );
         let doc = store.snapshot();
-        assert_eq!(doc.agents.len(), 2, "同名更新不重复建条目");
-        assert_eq!(doc.agents[0].description, "新版");
+        assert_eq!(
+            doc.agents.len(),
+            2,
+            "same-name updates do not create duplicate entries"
+        );
+        assert_eq!(doc.agents[0].description, "new version");
         assert_eq!(doc.agents[0].state, "idle");
         assert_eq!(doc.agents[0].history.len(), 1);
         assert_eq!(doc.agents[1].state, "stopped");
@@ -602,20 +626,26 @@ mod tests {
                 seq: 1,
                 from: "a".into(),
                 text: "t".into(),
+                at: 0,
             },
         );
         let doc = store.snapshot();
-        assert_eq!(doc.channels.len(), 1, "同名频道更新不重复");
+        assert_eq!(
+            doc.channels.len(),
+            1,
+            "same-name channel updates do not duplicate"
+        );
         assert_eq!(doc.channels[0].mode, "free");
         assert_eq!(doc.channels[0].members, vec!["main", "a"]);
         assert_eq!(doc.channels[0].messages.len(), 1);
-        // 元数据未落地前消息不建频道（create 先于 post 是调用方契约）。
+        // Messages do not create a channel before metadata lands (create-before-post is the caller's contract).
         store.append_channel_message(
             "ghost",
             ChannelMessage {
                 seq: 1,
                 from: "x".into(),
                 text: "y".into(),
+                at: 0,
             },
         );
         assert_eq!(store.snapshot().channels.len(), 1);
@@ -632,7 +662,7 @@ mod tests {
         store.save().unwrap_or_else(|e| panic!("{e}"));
         assert!(path.exists());
         let tmp = path.with_extension("json.tmp");
-        assert!(!tmp.exists(), "两次保存不留 tmp 残留");
+        assert!(!tmp.exists(), "two saves leave no tmp leftovers");
         let content = std::fs::read_to_string(&path).unwrap();
         let parsed: ShareDoc = serde_json::from_str(&content).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(parsed.agents.len(), 1);
@@ -641,8 +671,8 @@ mod tests {
 
     #[test]
     fn derive_share_doc_from_transcript_tools() {
-        // 构造含 Agent/SendMessage/AgentControl/Channel/Post 的 transcript，
-        // 断言旧会话回退推导出 Team/DM/频道数据。
+        // Build a transcript containing Agent/SendMessage/AgentControl/Channel/Post,
+        // and assert the legacy-session fallback derives Team/DM/channel data.
         let msgs = vec![Message {
             role: Role::Assistant,
             content: vec![
@@ -652,14 +682,14 @@ mod tests {
                     input: serde_json::json!({
                         "name": "scout",
                         "agent": "scout",
-                        "description": "调研",
-                        "prompt": "去调研一下"
+                        "description": "research",
+                        "prompt": "go research it"
                     }),
                 },
                 ContentBlock::ToolUse {
                     id: "t2".into(),
                     name: "SendMessage".into(),
-                    input: serde_json::json!({"agent": "scout", "message": "再看 B"}),
+                    input: serde_json::json!({"agent": "scout", "message": "look at B again"}),
                 },
                 ContentBlock::ToolUse {
                     id: "t3".into(),
@@ -674,7 +704,7 @@ mod tests {
                 ContentBlock::ToolUse {
                     id: "t4".into(),
                     name: "Post".into(),
-                    input: serde_json::json!({"channel": "table", "message": "大家好"}),
+                    input: serde_json::json!({"channel": "table", "message": "hello everyone"}),
                 },
                 ContentBlock::ToolUse {
                     id: "t5".into(),
@@ -685,12 +715,12 @@ mod tests {
         }];
         let doc = derive_share_doc("proj-1700000000", &msgs);
         assert_eq!(doc.session, "proj-1700000000");
-        // Agent 条目：name/def/description/state。
+        // Agent entries: name/def/description/state.
         assert_eq!(doc.agents.len(), 1);
         assert_eq!(doc.agents[0].name, "scout");
         assert_eq!(doc.agents[0].def.as_deref(), Some("scout"));
-        assert_eq!(doc.agents[0].description, "调研");
-        // SendMessage → history 追加 user 消息。
+        assert_eq!(doc.agents[0].description, "research");
+        // SendMessage → appends a user message to history.
         assert_eq!(doc.agents[0].history.len(), 1);
         assert!(matches!(
             &doc.agents[0].history[0],
@@ -699,35 +729,35 @@ mod tests {
                 ..
             }
         ));
-        // AgentControl stop → stopped（send 之后）。
+        // AgentControl stop → stopped (after the send).
         assert_eq!(doc.agents[0].state, "stopped");
-        // Channel create → 元数据（main/user 自动入席）。
+        // Channel create → metadata (main/user auto-join).
         assert_eq!(doc.channels.len(), 1);
         assert_eq!(doc.channels[0].name, "table");
         assert_eq!(doc.channels[0].mode, "free");
         assert_eq!(doc.channels[0].members, vec!["main", "user", "scout"]);
-        // Post → 频道消息（from=main，seq 递增）。
+        // Post → a channel message (from=main, seq increments).
         assert_eq!(doc.channels[0].messages.len(), 1);
         assert_eq!(doc.channels[0].messages[0].seq, 1);
         assert_eq!(doc.channels[0].messages[0].from, "main");
-        assert_eq!(doc.channels[0].messages[0].text, "大家好");
+        assert_eq!(doc.channels[0].messages[0].text, "hello everyone");
     }
 
     #[test]
     fn derive_share_doc_handles_duplicates_and_unknowns() {
-        // 重复 Agent 派生不重复建条目；Post 到未知频道/未知 agent 静默。
+        // Duplicate Agent spawns do not create duplicate entries; Post to unknown channels / SendMessage to unknown agents are silent.
         let msgs = vec![Message {
             role: Role::Assistant,
             content: vec![
                 ContentBlock::ToolUse {
                     id: "t1".into(),
                     name: "Agent".into(),
-                    input: serde_json::json!({"name": "w", "prompt": "干活"}),
+                    input: serde_json::json!({"name": "w", "prompt": "do work"}),
                 },
                 ContentBlock::ToolUse {
                     id: "t2".into(),
                     name: "Agent".into(),
-                    input: serde_json::json!({"name": "w", "prompt": "再干"}),
+                    input: serde_json::json!({"name": "w", "prompt": "do more"}),
                 },
                 ContentBlock::ToolUse {
                     id: "t3".into(),
@@ -742,18 +772,21 @@ mod tests {
             ],
         }];
         let doc = derive_share_doc("s", &msgs);
-        assert_eq!(doc.agents.len(), 1, "重名派生不重复");
+        assert_eq!(doc.agents.len(), 1, "same-name spawns do not duplicate");
         assert_eq!(doc.agents[0].name, "w");
         assert_eq!(
-            doc.agents[0].description, "干活",
-            "description 回落 prompt 摘要"
+            doc.agents[0].description, "do work",
+            "description falls back to a prompt excerpt"
         );
         assert!(
             doc.agents[0].history.is_empty(),
-            "未知 agent 的 SendMessage 静默"
+            "SendMessage to an unknown agent is silent"
         );
-        assert!(doc.channels.is_empty(), "未知频道的 Post 静默");
-        // 无 name/agent 的派生 → 自动编号 agent-1。
+        assert!(
+            doc.channels.is_empty(),
+            "Post to an unknown channel is silent"
+        );
+        // A spawn without name/agent → auto-numbered agent-1.
         let msgs = vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
@@ -776,14 +809,14 @@ mod tests {
             suffix
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
-            "后缀 [a-z0-9]: {id}"
+            "suffix is [a-z0-9]: {id}"
         );
-        // 同 stem 两次生成不同（计数器混合）。
+        // Two generations from the same stem differ (counter mixed in).
         assert_ne!(share_id("proj-1786092819"), share_id("proj-1786092819"));
     }
 
-    /// mock 上传：本地 TCP 服务器接收 POST，断言请求行/body/无 token 头
-    /// 与返回的链接（服务公开）。
+    /// Mock upload: a local TCP server receives the POST and asserts the request line / body / no-token-header
+    /// as well as the returned link (the service is public).
     #[tokio::test]
     async fn upload_share_posts_html_without_token() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -830,12 +863,12 @@ mod tests {
             !headers
                 .iter()
                 .any(|h| h.to_ascii_lowercase().starts_with("x-share-token")),
-            "公开服务无 token 头: {headers:?}"
+            "public service must not require a token header: {headers:?}"
         );
         assert!(body.contains("<html>hi</html>"), "{body}");
     }
 
-    /// 上传失败（HTTP 500）→ Err。
+    /// Upload failure (HTTP 500) → Err.
     #[tokio::test]
     async fn upload_share_reports_server_error() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -859,22 +892,22 @@ mod tests {
     fn resolve_transcript_matches_like_resume() {
         let root = temp_dir("resolve");
         let home = root.join("home");
-        // create 只建目录，文件首条 append 才落盘（与 transcript 测试同约定）。
+        // create only makes the dir; the file lands on the first append (same convention as the transcript tests).
         let t_a = crate::transcript::create(&home, &root).unwrap_or_else(|e| panic!("{e}"));
         let _ = t_a.append(&msg("a"));
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let t_b = crate::transcript::create(&home, &root).unwrap_or_else(|e| panic!("{e}"));
         let _ = t_b.append(&msg("b"));
-        // 无 key：取最新（b 后建，较新）。
+        // No key: take the newest (b was created later, so it is newer).
         let latest = resolve_transcript(&home, None).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(latest.name(), t_b.name());
-        // 子串匹配（/resume 同语义：list 按 mtime 新→旧，find 取第一个命中）。
+        // Substring match (/resume semantics: list is newest-first by mtime; find takes the first hit).
         let hit = resolve_transcript(&home, Some(&t_a.name())).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(hit.name(), t_a.name());
         let fragment =
             resolve_transcript(&home, Some(&t_b.name()[..8])).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(fragment.name(), t_b.name());
-        // 未命中报错。
+        // A miss errors.
         assert!(matches!(
             resolve_transcript(&home, Some("nope")),
             Err(ShareError::SessionNotFound(_))

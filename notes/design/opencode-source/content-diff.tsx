@@ -211,13 +211,13 @@ export function ContentDiff(props: Props) {
 // -	tab indented
 // -trailing spaces
 // -very long line that will definitely wrap in most editors and cause potential alignment issues when displayed in a two column diff view
-// -unicode content: 🚀 ✨ 中文
+// -unicode content: 🚀 ✨ café
 // -mixed	content with	tabs and spaces
 // +    space indented
 // +no trailing spaces
 // +short line
 // +very long replacement line that will also wrap and test how the diff viewer handles long line additions after short line removals
-// +different unicode: 🎉 💻 日本語
+// +different unicode: 🎉 💻 naïve
 // +normalized content with consistent spacing
 // +newline to content
 //

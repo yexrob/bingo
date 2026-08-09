@@ -48,9 +48,9 @@
 - **Single source**: `SLASH_COMMANDS: &[(&str, &str)]` in `src/tui/chat.rs` (18 built-ins);
   consumed by `slash_help()`, `update_slash_suggestions()` (merges skills), and the
   Enter-completion check in `submit()`. Descriptions embed the arg hint as text
-  (`（/model [名称]）`) — **not structured** (G1).
+  (`(/model [name])`) — **not structured** (G1).
 - **Dispatch**: `submit()` → `/`-prefixed → `run_slash(line)` splits `(cmd, arg)` →
-  match → `slash_*`. Unknown → skills (`✦ name [args]` marker) → `未知命令` output.
+  match → `slash_*`. Unknown → skills (`✦ name [args]` marker) → `unknown command` output.
   Output via `push_slash_output` (transient TTL rows above the input, never flushed).
   Dropdown hidden when the query has args (`/think xhigh` = fast path).
 - **Thinking chain**: settings key `thinkingLevel` (user/project/local merge; `/think`
@@ -86,7 +86,7 @@
 |---|---|---|---|---|
 | G1 | arg hint not structured | row = `/model [alias\|name]` + purpose | `SLASH_COMMANDS` → `(name, hint, desc)`; hint renders in grey after the name (`/mcp [enable\|disable\|reconnect]`), desc in the second column; skills entries hint = `""` | chat.rs const + `update_slash_suggestions` + `suggestion_rows` + `slash_help` + tests |
 | G2 | current level not visually marked | picker marks current | **`●` marker in front of the in-effect row** (ui/ux) — the `❯` row is the browse selection; two separate marks (§3.4) | `suggestion_rows` think arm |
-| G3 | no key hints | rows carry shortcuts | one dim hint row at the list tail: `↑↓ 选择 · Enter 确认并保存 · s 仅本次会话 · 1-6 直达 · Esc 取消` | `suggestion_rows` think arm |
+| G3 | no key hints | rows carry shortcuts | one dim hint row at the list tail: `↑↓ select · Enter confirm and save · s session-only · 1-6 jump · Esc cancel` | `suggestion_rows` think arm |
 | G4 | `/think` always persists | Enter=save, `s`=session-only | `set_think_level(level, persist: bool)`; Enter=persist=true (status quo), `s`=persist=false (no settings write). **P2: this round optional** (devex suggests defer; CC precedent + low cost, dev's call) | `think_menu_key` + `slash_think` |
 | G5 | guide.md level drift | — | `/think [off\|low\|medium\|high\|xhigh\|max]` + one line on the picker | guide.md |
 | G6 | state machine only in comments | — | this spec §3.1 is the single explanation; `on_key` priority untouched | doc |
@@ -94,9 +94,9 @@
 | G8 | no live preview while browsing | picker rewrites the prompt (WYSIWYG) | footer badge previews the browsed level: `think xhigh ▸` (`▸` = preview state), committed badge has no suffix (§3.5) | `footer_row` |
 | G9 | no feedback on empty match | — | one dim hint row for `/zzz`-style no-match (§4.1) | `update_slash_suggestions` / render |
 | G10 | no direct jump | — | `1..6` jumps to off=1 … max=6 (fixed 6-item table, one keystroke) | `think_menu_key` |
-| G11 | doc "default" contradiction (P0) | — | guide.md states `thinkingLevel` default = off/no param; `high` row drops the `默认档位` wording (or becomes `推荐档位`); Alt+T default level written into guide — one consistent story (§4.3) | guide.md |
+| G11 | doc "default" contradiction (P0) | — | guide.md states `thinkingLevel` default = off/no param; `high` row drops the `default level` wording (or becomes `recommended level`); Alt+T default level written into guide — one consistent story (§4.3) | guide.md |
 | G12 | slash output TTL not graded | errors stay readable | **in scope (main ruling)** — success rows keep 2s TTL; error/usage rows ≥8s (preferred: stay until the next input; 8s is the floor) (§4.4) | `push_slash_output` TTL param |
-| G13 | slash errors have no stable code | — | **in scope (main ruling)** — `未知命令` → `[error] code=UNKNOWN_COMMAND msg=…`; bad arg → `code=BAD_ARGUMENT` (feedback-states §4.1 format; qa asserts on code) (§4.5) | `push_slash_output` / error path |
+| G13 | slash errors have no stable code | — | **in scope (main ruling)** — `unknown command` → `[error] code=UNKNOWN_COMMAND msg=…`; bad arg → `code=BAD_ARGUMENT` (feedback-states §4.1 format; qa asserts on code) (§4.5) | `push_slash_output` / error path |
 | G14 | dispatch completeness untested (P1) | — | test: every `SLASH_COMMANDS` name has a handler and every handler name is in the table (§7) | chat.rs tests |
 
 **Explicitly NOT doing** (over-engineering guard, both drafts agree):
@@ -120,7 +120,7 @@ Idle ─────────────────────────
                                                         current = runtime.thinking or "off"
 PickerOpen ── ↑/↓ ──▶ PickerOpen {selected = (selected ± 1) mod 6}     (wrap)
 PickerOpen ── 1..6 ─▶ PickerOpen {selected = n - 1}                    (direct jump, G10)
-PickerOpen ── Enter ─▶ apply(persist=true) ──▶ Idle                    (set + save + "✓ 思考级别已设置: X")
+PickerOpen ── Enter ─▶ apply(persist=true) ──▶ Idle                    (set + save + "✓ Thinking level set: X")
 PickerOpen ── s ────▶ apply(persist=false) ──▶ Idle                    (session-only, no settings write, G4)
 PickerOpen ── Esc ──▶ Idle                                             (cancel; state unchanged)
 Idle ── `/think <level>` + Enter ──▶ apply(persist=true) ──▶ Idle      (fast path, status quo)
@@ -141,7 +141,7 @@ Idle ── `/think <invalid>` ──▶ usage line ──▶ Idle              
 | `↑` / `↓` | cycle selection, wraps at both ends | existing |
 | `1`..`6` | jump to off=1 … max=6 | G10, new |
 | `s` | apply **session-only** (no settings write), close | G4, new (CC precedent) |
-| `Enter` | apply + persist + close, `✓ 思考级别已设置: {level}` | existing |
+| `Enter` | apply + persist + close, `✓ Thinking level set: {level}` | existing |
 | `Esc` | cancel: close, state unchanged | existing, test-covered |
 | `Tab` | n/a — menu is modal; consumed, no-op | avoids confusion with dropdown Tab |
 
@@ -150,13 +150,13 @@ Idle ── `/think <invalid>` ──▶ usage line ──▶ Idle              
 ### 3.3 Layout (inline chrome, below the input; fullscreen above it — unchanged placement)
 
 ```text
-  ● off       不发 thinking 参数（兼容 DeepSeek 等端点）
+  ● off       sends no thinking param (DeepSeek-compatible endpoints, etc.)
   ❯ low       adaptive thinking · effort low
     medium    adaptive thinking · effort medium
-    high      adaptive thinking · effort high（推荐档位）
-    xhigh     adaptive thinking · effort xhigh（编码/agentic 推荐）
-    max       adaptive thinking · effort max（最深推理）
-  ↑↓ 选择 · Enter 确认并保存 · s 仅本次会话 · 1-6 直达 · Esc 取消     ← G3 hint row (dim)
+    high      adaptive thinking · effort high (recommended level)
+    xhigh     adaptive thinking · effort xhigh (recommended for coding/agentic work)
+    max       adaptive thinking · effort max (deepest reasoning)
+  ↑↓ select · Enter confirm and save · s session-only · 1-6 jump · Esc cancel     ← G3 hint row (dim)
 ```
 
 Columns: marker(2) · name (left-aligned, width = max name width) · 2 · description
@@ -215,7 +215,7 @@ state instead of the committed one:
 - Hint participates in rendering only, not in matching.
 - `slash_help` renders `/{name} {hint}  {desc}`.
 - **No-match hint**: when the query yields zero suggestions (`/zzz`), show one dim
-  row `（无匹配命令 · 输入 /help 查看可用命令）` instead of an empty gap. Triggered
+  row `(no matching command · type /help to see available commands)` instead of an empty gap. Triggered
   only when input starts with `/`, has no args, and the filter is empty. It is a hint
   row (chrome), not an error: no `[error]`, no level, no focus transfer — this is not
   a failed operation. Disappears on the next keystroke (same refresh path).
@@ -223,10 +223,10 @@ state instead of the committed one:
 ### 4.3 Doc "default" story unified (G11, P0)
 
 Three places currently contradict each other: `thinkingLevel` doc default = off /
-no param; `high` row says `默认档位`; Alt+T (guide line 35) implies a default level.
+no param; `high` row says `default level`; Alt+T (guide line 35) implies a default level.
 Unified story for guide.md + code:
 - settings absence = `off` (no param sent) — unchanged;
-- **`THINK_LEVELS` high description drops `（默认档位）`** (one-line change, zero
+- **`THINK_LEVELS` high description drops `(default level)`** (one-line change, zero
   risk; there is no single default level — the label misleads);
 - guide.md: `thinkingLevel` default = off / no param; **Alt+T restores the last
   non-off level, defaulting to `medium` when none is recorded**;
@@ -239,7 +239,7 @@ Today every transient slash output row shares one 2s TTL — an error or usage l
 gone before the user can read "what happened + what you can do" (feedback-states §3).
 Grading:
 - **success rows** (`✓ …`): keep 2s (status quo);
-- **error/usage rows** (`未知命令…`, `用法: …`, `未找到 provider…` etc.): **≥8s,
+- **error/usage rows** (`unknown command…`, `usage: …`, `provider not found…` etc.): **≥8s,
   preferred: stay until the next input** (dev evaluates the cost of a
   "clear on next input" lifecycle; 8s is the floor — the user needs time to act);
 - implementation: `push_slash_output` gains a TTL parameter (or a success/error
@@ -249,8 +249,8 @@ Grading:
 
 Slash errors are plain text today; qa cannot assert on them. Landing (feedback-states
 §4.1 format, same single-line contract as the CLI side):
-- unknown command → `[error] code=UNKNOWN_COMMAND msg=未知命令: /xxx。输入 /help 查看可用命令。`
-- bad argument (`/think bogus`, `/theme bogus`, …) → `[error] code=BAD_ARGUMENT msg=用法: …`
+- unknown command → `[error] code=UNKNOWN_COMMAND msg=unknown command: /xxx. Type /help to see available commands.`
+- bad argument (`/think bogus`, `/theme bogus`, …) → `[error] code=BAD_ARGUMENT msg=usage: …`
 - rendered as a transient row in the error color (existing error styling); qa asserts
   on `code=` only, copy stays changeable.
 
@@ -272,7 +272,7 @@ Slash errors are plain text today; qa cannot assert on them. Landing (feedback-s
 ## 5. `/model` picker (deferred)
 
 - Cost confirmation when the conversation has prior output — **deferred**: no
-  prompt-cache contract; "✓ 模型已切换" already reports the result.
+  prompt-cache contract; "✓ Model switched" already reports the result.
 - `s` session-only for `/model` — **deferred**: `/model` persists by design (and the
   `/think` `s` proves the pattern first).
 - `←/→` effort adjust inside the model menu — **deferred**: thinking has its own
@@ -299,7 +299,7 @@ the `▸` preview appears/disappears with the badge redraw. No fade, no displace
    - `1`..`6` selects the right row; **while the picker is open, `1..6` are consumed by
      the menu and never enter the input buffer** (other digits/letters fall through to
      the input, consistent with the menu's existing non-strictly-modal edit semantics;
-     devex review wording: "1-6 不进输入框"); `s` applies session-only (settings.json
+     devex review wording: "1-6 don't enter the input box"); `s` applies session-only (settings.json
      **not** written, runtime switched); Enter still persists (regression);
    - footer shows `▸` while the picker is open, clears after Enter/Esc; **↑/↓ during
      preview does not dirty the document — only the footer data source switches**
@@ -318,7 +318,7 @@ the `▸` preview appears/disappears with the badge redraw. No fade, no displace
    - every existing slash test keeps passing.
 8. Docs: guide.md `/think` → 6 levels + one picker line (G5); guide.md default story
    unified (G11, §4.3: absence = off, Alt+T restores last non-off / defaults medium,
-   `THINK_LEVELS` high drops `（默认档位）`); feedback-states.md changelog backfill
+   `THINK_LEVELS` high drops `(default level)`); feedback-states.md changelog backfill
    (transient `✓` line semantics unchanged; `s` path same transient line; error/usage
    rows now carry stable codes — new error-level-free code lines, qa asserts on code).
 9. Verification: `cargo build`, `cargo clippy -- -D warnings`, `cargo test --bin bingo`
@@ -329,7 +329,7 @@ the `▸` preview appears/disappears with the badge redraw. No fade, no displace
 
 - State machine discipline: picker open/apply/cancel is a pure state machine with full
   reset; no stuck intermediate state.
-- Success: `✓ 思考级别已设置: {level}` (existing) — granular per action.
+- Success: `✓ Thinking level set: {level}` (existing) — granular per action.
 - Errors: invalid arg → usage line with `[error] code=BAD_ARGUMENT` (§4.5); unknown
   command → `code=UNKNOWN_COMMAND`; error/usage rows outlive success rows (§4.4);
   the no-match hint is not an error level (no code, no focus transfer).

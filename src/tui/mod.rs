@@ -7,6 +7,8 @@
 //! - [`statics`] is the Static region: the transcript as a block list with a
 //!   frozen prefix (write-once scrollback, lazy freezing — Ink `<Static>`).
 //! - [`chrome`] declares every section below the transcript.
+//! - [`slack`] is the Slack-shaped workspace skin (rail / sidebar / message
+//!   pane) that [`entity`] wears when a channel or instance is opened.
 //! - [`chat`] is the state machine and the transcript block builder
 //!   (`build_rows`); [`slash`] owns slash command metadata and pure
 //!   suggestion/help transformations.
@@ -19,6 +21,7 @@
 
 pub mod activities;
 mod app;
+pub mod avatar;
 pub mod chat;
 mod chrome;
 pub mod el;
@@ -31,6 +34,9 @@ pub mod line;
 pub mod markdown;
 pub mod math;
 pub mod picker;
+pub mod slack;
+#[cfg(test)]
+mod slack_preview;
 pub mod slash;
 pub mod statics;
 pub(crate) mod term;
@@ -72,8 +78,8 @@ pub async fn run_tui_session(
     // reads /dev/tty directly).
     let detected_background = Theme::detect_system_theme().await;
 
-    // 版本检测预热：缓存新鲜（24h）则跳过，否则后台拉取最新 release 写缓存
-    // （欢迎卡片数据源；失败静默、不阻塞启动）。headless（--print）不经过此路径。
+    // Version-check warm-up: skip when the cache is fresh (24h), otherwise fetch the latest release in the background and write the cache
+    // (the welcome-card data source; failures are silent and never block startup). The headless (--print) path never goes through here.
     crate::update::spawn_background_check(session.home.clone());
 
     // Probe the kitty graphics capability for both hosts: inline flushes real
@@ -92,6 +98,11 @@ pub async fn run_tui_session(
 
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (asks_tx, asks_rx) = mpsc::unbounded_channel();
+    // Subagents have no modal of their own; point them at this one so their permission
+    // requests reach the user instead of being auto-denied.
+    session
+        .agents
+        .attach_ask(crate::ui::modal_ask(asks_tx.clone()));
     let theme_setting = ThemeSetting::parse(session.settings.theme.as_deref());
     let mut chat = Chat::new(
         session.clone(),

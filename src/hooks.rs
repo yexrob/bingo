@@ -197,7 +197,7 @@ pub async fn run_pre_tool_use(
         };
         let (code, output, stderr) = match run_hook(
             command,
-            &serde_json::to_value(hook_input).expect("HookInput 序列化不可失败"),
+            &serde_json::to_value(hook_input).expect("HookInput serialization must not fail"),
         )
         .await
         {
@@ -628,7 +628,7 @@ mod tests {
             ),
         )
         .await;
-        let (behavior, _, _) = done.unwrap_or_else(|_| unreachable!("hook stdin 写入死锁"));
+        let (behavior, _, _) = done.unwrap_or_else(|_| unreachable!("hook stdin write deadlock"));
         assert_eq!(behavior, PermissionBehavior::Allow);
     }
 
@@ -644,7 +644,10 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(HookError::Failed(ref m)) if m.contains("timed out")));
-        assert!(started.elapsed() < Duration::from_secs(5), "超时应立即返回");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timeout must return immediately"
+        );
     }
 
     /// matcher is a whole-string-anchored regex: `Edit|Write`, `mcp__.*` work instead

@@ -22,6 +22,7 @@ pub mod grep;
 pub mod read;
 pub mod skill;
 pub mod task;
+pub mod team;
 pub mod webfetch;
 pub mod websearch;
 pub mod write;
@@ -47,6 +48,9 @@ pub struct ToolContext {
     /// Ask the user multiple-choice questions (AskUserQuestion tool): title + question + options
     /// → option index (None = user skipped/Esc). The TUI reuses the permission prompt modal.
     pub ask_question: std::sync::Arc<crate::query::AskQuestionFn>,
+    /// Instance name of the calling session (None = main session). Watches registered here are
+    /// addressed to it, so its notifications land at its own turn boundary.
+    pub instance: Option<String>,
 }
 
 impl ToolContext {
@@ -107,6 +111,16 @@ pub trait Tool: Send + Sync {
     /// asked as usual otherwise.
     fn is_edit_tool(&self, _input: &serde_json::Value) -> bool {
         false
+    }
+    /// A call whose consequence is the user's to accept in person: `Some(reason)` forces
+    /// the permission prompt no matter the mode, and no allow rule can pre-authorize it
+    /// (same standing as the sensitive-path safety check). Only a deny rule outranks it.
+    ///
+    /// Reserve it for decisions a permission table can't express — changing the shape of
+    /// the project's crew, not writing another file. The reason is user-facing copy shown
+    /// in the modal: one short line naming what is about to change.
+    fn confirm_reason(&self, _input: &serde_json::Value) -> Option<String> {
+        None
     }
     async fn call(
         &self,
@@ -216,7 +230,7 @@ mod tests {
         let schema = ReadTool::new().input_schema();
         assert!(
             schema.get("$schema").is_none(),
-            "发给模型的形状不含 $schema: {schema}"
+            "schema shape sent to the model must not include $schema: {schema}"
         );
     }
 }

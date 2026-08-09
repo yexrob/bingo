@@ -466,7 +466,7 @@ mod tests {
         let url = chunked_server(MAX_CONTENT_BYTES as usize + 512 * 1024).await;
         let err = fetch(&reqwest::Client::new(), &url, 0)
             .await
-            .expect_err("超限应报错");
+            .expect_err("over-limit should error");
         assert!(err.to_string().contains("too large"), "{err}");
     }
 

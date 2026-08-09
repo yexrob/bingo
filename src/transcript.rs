@@ -234,7 +234,7 @@ mod tests {
         transcript.append(&good).unwrap();
 
         let messages = transcript.load_messages().unwrap();
-        assert_eq!(messages.len(), 2, "坏行跳过，好行全留");
+        assert_eq!(messages.len(), 2, "bad lines skipped, good lines kept");
         assert_eq!(messages[0], good);
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -243,6 +243,6 @@ mod tests {
     fn slugifies_odd_names() {
         assert_eq!(slugify("bingo"), "bingo");
         assert_eq!(slugify("a b/c"), "a_b_c");
-        assert_eq!(slugify("你好"), "__");
+        assert_eq!(slugify("café"), "caf_");
     }
 }

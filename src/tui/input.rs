@@ -247,9 +247,9 @@ mod tests {
 
     #[test]
     fn char_motion_is_cjk_aware() {
-        let text = "a中b";
+        let text = "aＡb";
         assert_eq!(next_char(text, 0), 1);
-        assert_eq!(next_char(text, 1), 4, "中 is 3 bytes");
+        assert_eq!(next_char(text, 1), 4, "Ａ is 3 bytes");
         assert_eq!(prev_char(text, 4), 1);
         assert_eq!(prev_char(text, 0), 0, "clamped at start");
         assert_eq!(next_char(text, text.len()), text.len(), "clamped at end");
@@ -324,11 +324,11 @@ mod tests {
                 text: "cd".into()
             }
         );
-        // Hard wrap by display width; CJK counts two columns.
-        let lines = visual_lines("中文换行", 4);
+        // Hard wrap by display width; wide glyphs count two columns.
+        let lines = visual_lines("ＡＢＣＤ", 4);
         assert_eq!(
             lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
-            vec!["中文", "换行"]
+            vec!["ＡＢ", "ＣＤ"]
         );
         // Empty text still yields one row (the prompt always has a caret row).
         assert_eq!(visual_lines("", 10).len(), 1);
@@ -344,12 +344,12 @@ mod tests {
         assert_eq!(cursor_cell(text, &lines, 2), (0, 2), "end of first row");
         assert_eq!(cursor_cell(text, &lines, 3), (1, 0), "start of second row");
         assert_eq!(cursor_cell(text, &lines, 5), (1, 2));
-        let text = "中文";
+        let text = "ＡＢ";
         let lines = visual_lines(text, 10);
         assert_eq!(
             cursor_cell(text, &lines, 3),
             (0, 2),
-            "one CJK glyph = 2 cols"
+            "one wide glyph = 2 cols"
         );
     }
 

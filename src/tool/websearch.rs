@@ -158,7 +158,7 @@ static RESULT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
         r#"(?s)class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</a>"#,
     )
-    .expect("静态结果正则必须可编译")
+    .expect("static result regex must compile")
 });
 
 /// Parse DDG HTML result blocks.
@@ -357,7 +357,11 @@ mod tests {
                 blocked_domains: Vec::new(),
             },
         );
-        assert_eq!(allowed.len(), 1, "allowed_domains 不再恒过滤为空");
+        assert_eq!(
+            allowed.len(),
+            1,
+            "allowed_domains no longer always filters to empty"
+        );
         assert_eq!(allowed[0].url, "https://docs.rs/x");
         let unblocked = filter_hits(
             parse_results(html),
@@ -367,7 +371,11 @@ mod tests {
                 blocked_domains: vec!["spam.example".into()],
             },
         );
-        assert_eq!(unblocked.len(), 1, "blocked_domains 不再恒失效");
+        assert_eq!(
+            unblocked.len(),
+            1,
+            "blocked_domains no longer always ineffective"
+        );
         assert_eq!(unblocked[0].url, "https://docs.rs/x");
     }
 

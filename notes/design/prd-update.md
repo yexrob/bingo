@@ -1,171 +1,171 @@
-# PRD: 版本检测 + 欢迎卡片提示 + `bingo update` 命令
+# PRD: version check + welcome-card notice + `bingo update` command
 
-> 状态：v1.2（pm 定稿稿，2026-08-09）
-> **v1.2 修订（pm，2026-08-09）**：main 裁决差异 2-6 全部接受实现（#team-update 第 10 条）——① D2 输出契约改为实现的中文输出（人类可读优先，错误路径已有 `[error] code=` 契约兜底）；② B2 失败限频取消：失败不写缓存、每次启动后台重试一次（异步静默）；③ 欢迎卡提示为缓存数据源模型：本次启动读缓存渲染、后台预热写缓存供下次启动（提示延迟一次启动，接受）；④ 错误码采用实际码表（复用通用码 OFFLINE/SERVER_ERROR/STORAGE_ERROR + 短码，无 UPDATE_* 前缀）；⑤ F10 updateCheck 开关维持 P1 未实现。差异项全部闭环。
-> **v1.1 修订（pm，2026-08-09）**：uiux 视觉规格 `update-banner.md` v1.1 已定稿（commit 607c353）——C 组视觉锚点整体切换为以该规格为唯一事实源（PRD C 组只验收不定义）：文案改 `New version {v} available — run bingo update`（无 ✦ 前缀/命令引号）；动效范围 = **版本号与 `bingo update` 两段同相位正弦呼吸**（C3 同步）；降级链补充 `motion: off` / `BINGO_NO_MOTION` 主动关停；新增截断链（50/43/15）与特效范围断言（欢迎卡其余行任意两帧一致）；身份行硬编码修正（E3 保留）。
-> 现状锚点：bingo v0.2.1（Cargo.toml）；GitHub Releases `yexrob/bingo`，资产 = `bingo-<target-triple>.tar.gz/.zip` × 4 平台 + `checksums.txt`，latest 指向最新 tag。
-> 欢迎卡片实现位置：`src/tui/chat.rs:4998` `welcome_rows`（注意：版本行硬编码 `bingo v0.1.0`，本次应改用编译期版本 `CARGO_PKG_VERSION`，与检测对比同源）。
-> 视觉事实源：[`update-banner.md`](./update-banner.md) v1.1（布局/文案/动效/降级/锚点 11 条——本文 C 组只验收不定义）。
-> CLI 结构：clap 子命令（`src/main.rs:84` `Command` enum，现有 `share` 快路径模式可复用）。
-> 网络：`reqwest`（rustls）已在依赖中，无需新增 HTTP 依赖。
+> Status: v1.2 (pm's finalized draft, 2026-08-09)
+> **v1.2 revision (pm, 2026-08-09)**: main accepted all of differences 2-6 (#team-update item #10) — ① D2's output contract becomes the implemented Chinese output (human-readable first; the error paths already have the `[error] code=` contract as a floor); ② B2 failure rate-limiting dropped: failures don't write the cache, one background retry per startup (async, silent); ③ the welcome-card notice uses a cached-data-source model: this startup renders from the cache, the background pre-warm writes the cache for the next startup (the notice lags one startup; accepted); ④ error codes use the actual code table (reusing the generic codes OFFLINE/SERVER_ERROR/STORAGE_ERROR + short codes, no `UPDATE_*` prefix); ⑤ the F10 updateCheck toggle stays P1, not implemented. All differences closed.
+> **v1.1 revision (pm, 2026-08-09)**: uiux's visual spec `update-banner.md` v1.1 is finalized (commit 607c353) — group C's visual anchors switch wholesale to that spec as the single source of truth (PRD group C only accepts, doesn't define): copy becomes `New version {v} available — run bingo update` (no ✦ prefix / no quotes around the command); motion scope = **the version and `bingo update` segments breathing in-phase** (C3 synced); the degradation chain gains `motion: off` / `BINGO_NO_MOTION` explicit opt-outs; a truncation chain (50/43/15) and a motion-scope assertion (any two frames of the rest of the welcome card are identical) were added; the identity line hardcode fix is kept (E3).
+> Current anchors: bingo v0.2.1 (Cargo.toml); GitHub Releases `yexrob/bingo`, assets = `bingo-<target-triple>.tar.gz/.zip` × 4 platforms + `checksums.txt`, latest points at the newest tag.
+> Welcome-card implementation location: `src/tui/chat.rs:4998` `welcome_rows` (note: the version line hardcodes `bingo v0.1.0`; this round should switch to the compile-time version `CARGO_PKG_VERSION`, same source as the check's comparison).
+> Visual source of truth: [`update-banner.md`](./update-banner.md) v1.1 (layout/copy/motion/degradation/11 anchors — group C of this PRD only accepts, doesn't define).
+> CLI structure: clap subcommand (`src/main.rs:84` `Command` enum; the existing `share` fast-path pattern can be reused).
+> Network: `reqwest` (rustls) is already a dependency; no new HTTP dependency needed.
 
-## 1. 目标与用户场景
+## 1. Goal and user scenarios
 
-**一句话**：用户启动 bingo 时异步知晓新版本（欢迎卡片提示），`bingo update` 一条命令自动下载、校验、替换，离线/失败时安静降级、绝不阻塞。
+**One sentence**: the user learns about a new version asynchronously at bingo startup (welcome-card notice); `bingo update` downloads, verifies, and replaces in one command; offline/failure degrade silently and never block.
 
-**用户场景**：
+**User scenarios**:
 
-1. **发现**：用户日常启动 TUI，欢迎卡片上出现一行克制的提示 `✦ v0.3.0 available — run 'bingo update'`（版本号着色、轻微闪动），不影响任何操作。
-2. **主动检查**：`bingo update --check` 输出当前版本 vs latest（`发现新版本 v0.3.0：运行 bingo update 安装` / `bingo 已是最新版本 v0.2.1`，中文人类可读；错误路径走 `[error] code=...` 契约）。
-3. **更新**：`bingo update` 自动完成 下载 → sha256 校验 → 原子替换 → 提示重启生效。
-4. **失败/离线**：断网或 GitHub 不可达 → 检测静默跳过（有 TTL，不反复重试）；`bingo update` 失败 → 明确错误码 + 手动下载指引。
+1. **Discovery**: the user starts the TUI on a normal day; a restrained notice line appears on the welcome card `✦ v0.3.0 available — run 'bingo update'` (version colored, slight breathing), without affecting any operation.
+2. **Active check**: `bingo update --check` prints the current version vs latest (`New version v0.3.0 found: run bingo update to install` / `bingo is already the latest version v0.2.1`, human-readable Chinese; error paths go through the `[error] code=...` contract).
+3. **Update**: `bingo update` automatically does download → sha256 verification → atomic replacement → restart-to-take-effect notice.
+4. **Failure/offline**: no network or GitHub unreachable → the check silently skips (with a TTL, no repeated retries); `bingo update` failure → clear error code + manual-download guidance.
 
-**非目标**：不做自动安装（只提示不更新）、不做签名验证（v1 checksum 即可）、不做回滚命令、不做安装器。
+**Non-goals**: no auto-install (only a notice, no update), no signature verification (v1 checksum suffices), no rollback command, no installer.
 
-## 2. 范围边界（v1 明确不做）
+## 2. Scope boundaries (v1 explicitly does not do)
 
-| 不做 | 理由 |
+| Not doing | Reason |
 |---|---|
-| 自动更新推送（后台静默安装） | 用户需知情与控制；v1 只提示 + 显式命令 |
-| 签名验证（notarization / Authenticode / sigstore） | 发布流程尚无签名链；checksum 已防损坏与篡改（传输中），签名留 v2 |
-| 更新回滚命令（`--rollback` / 备份保留） | 原子替换保证无半更新态；失败即回退到旧版本，无需回滚功能 |
-| Windows 安装器（MSI/NSIS） | v1 仅 zip 资产 + 原位替换（exe 占用则给手动指引） |
-| 增量/断点续传、多线程下载 | 单文件几十 MB 级，直下即可 |
-| `--target` 手动指定平台资产 | 自动探测即可；交叉下载留 P2 |
-| 预发布/旧版渠道选择 | 只跟 `releases/latest` 稳定版 |
-| Homebrew/包管理器集成 | 无 formula；P2 若有 brew 渠道再议 |
-| 欢迎卡提示的持久化 dismiss | TTL 缓存已限频；加 dismiss 状态是额外持久化，需求未证实 |
+| Auto-update push (silent background install) | the user needs awareness and control; v1 only notifies + explicit command |
+| Signature verification (notarization / Authenticode / sigstore) | the release process has no signing chain yet; checksums already guard against corruption and tampering (in transit); signing is v2 |
+| Update rollback command (`--rollback` / backup retention) | atomic replacement guarantees no half-updated state; failure falls back to the old version, no rollback feature needed |
+| Windows installer (MSI/NSIS) | v1 only zip assets + in-place replacement (manual guidance when the exe is locked) |
+| Incremental/resume downloads, multi-threaded download | single files are tens of MB; just download straight |
+| `--target` manual platform-asset selection | auto-detection suffices; cross-downloads are P2 |
+| Pre-release/old-channel selection | only track the `releases/latest` stable |
+| Homebrew/package-manager integration | no formula; reconsider in P2 if a brew channel exists |
+| Persistent dismiss for the welcome-card notice | the TTL cache already rate-limits; a dismiss state is extra persistence with unproven demand |
 
-## 3. 功能清单
+## 3. Feature list
 
-| # | 功能 | 描述 | 优先级 |
+| # | Feature | Description | Priority |
 |---|---|---|---|
-| F1 | 启动异步版本检测 | TUI 启动后异步请求 `releases/latest`，不阻塞首帧渲染与任何输入 | P0 |
-| F2 | 检测结果 TTL 缓存 | `~/.local/share/bingo/update-check.json`：成功 TTL 24h 内不再发请求；失败不写缓存 | P0 |
-| F3 | 检测失败静默 | 超时/连接失败/解析失败 → 不提示、不报错、不阻塞；失败不写缓存，下次启动后台重试一次 | P0 |
-| F4 | 欢迎卡片提示行 | 有新版时欢迎卡片新增提示行（文案/样式/位置以 `update-banner.md` v1.1 为准） | P0 |
-| F5 | 提示行动效 | 版本号与 `bingo update` 两段同相位正弦呼吸（类 Claude Code thinking，随 TUI tick 驱动；视觉规格见 `update-banner.md` §2） | P0 |
-| F6 | 动效降级 | `motion: off` / `BINGO_NO_MOTION` → 静态 rest；无 truecolor → 离散两步；`NO_COLOR` → 静态 bold（提示保留不消失） | P0 |
-| F7 | `bingo update` 命令 | 下载当前平台资产 → checksum 校验 → 解压 → 原子替换 → 提示重启 | P0 |
-| F8 | `bingo update --check` | 只检查打印结果，不下载不替换；headless 可用 | P0 |
-| F9 | 错误码契约 | 复用通用码（OFFLINE/SERVER_ERROR/STORAGE_ERROR）+ 短码（CHECKSUMS_UNAVAILABLE/CHECKSUM_MISMATCH/ARCHIVE_INVALID/UNSUPPORTED_PLATFORM）登记 `src/error.rs` + 防漂移测试 | P0 |
-| F10 | settings 开关 `updateCheck` | 总开关（默认 true），敏感/离线环境可关闭检测。**v1.2 定案：维持 P1 未实现** | P1 |
-| F11 | 内置技能同步 | guide.md 命令速查 + 诊断指南更新 | P0 |
+| F1 | startup async version check | after TUI startup, asynchronously request `releases/latest`, never blocking the first frame or any input | P0 |
+| F2 | check-result TTL cache | `~/.local/share/bingo/update-check.json`: within a 24h success TTL no request is sent; failures don't write the cache | P0 |
+| F3 | silent check failure | timeout/connection failure/parse failure → no notice, no error, no blocking; failure doesn't write the cache, one background retry per startup | P0 |
+| F4 | welcome-card notice line | when a new version exists, the welcome card gains a notice line (copy/style/position per `update-banner.md` v1.1) | P0 |
+| F5 | notice-line motion | the version and `bingo update` segments breathe in-phase (Claude-Code-thinking-like, driven by the existing TUI tick; visual spec in `update-banner.md` §2) | P0 |
+| F6 | motion degradation | `motion: off` / `BINGO_NO_MOTION` → static rest; no truecolor → discrete two-step; `NO_COLOR` → static bold (the notice stays, never disappears) | P0 |
+| F7 | `bingo update` command | download the current platform asset → checksum verification → extract → atomic replace → restart notice | P0 |
+| F8 | `bingo update --check` | only check and print the result, no download or replace; usable headless | P0 |
+| F9 | error-code contract | reuse the generic codes (OFFLINE/SERVER_ERROR/STORAGE_ERROR) + short codes (CHECKSUMS_UNAVAILABLE/CHECKSUM_MISMATCH/ARCHIVE_INVALID/UNSUPPORTED_PLATFORM) registered in `src/error.rs` + drift-guard tests | P0 |
+| F10 | settings toggle `updateCheck` | master switch (default true) so sensitive/offline environments can disable the check. **v1.2 ruling: stays P1, not implemented** | P1 |
+| F11 | built-in skill sync | guide.md command quick reference + diagnostic guide updated | P0 |
 
-## 4. 方案要点
+## 4. Design points
 
-### 4.1 检测策略
+### 4.1 Check strategy
 
-- **时机**：TUI 启动后 spawn 异步任务（Tokio `spawn`），结果经 channel 送达 UI；`--print`/headless 与 `share` 等子命令快路径**不检测**（脚本场景不被打扰）。
-- **数据源**：`GET https://api.github.com/repos/yexrob/bingo/releases/latest`（须带 User-Agent），取 `tag_name`。API 限频 60/h 无认证——TTL 24h 已充分保护；实现可备选「跟 302 到 /releases/latest 从 Location 取 tag」的无 API 方案。
-- **版本对比**：semver 比较（tag 去 `v` 前缀；解析失败视为无新版，静默）。`0.2.1 < 0.2.10`、`0.2.1 < 0.3.0`、预发布 tag（`-rc`/`-beta`）不与正式版混排，解析不出合法 semver 一律忽略。
-- **缓存**：`update-check.json` = `{ checked_at: epoch_secs, latest_tag }`。启动时读缓存，TTL（24h）内直接用缓存结果（有新版仍提示，但不再发请求）；TTL 过期才异步重检。失败不写缓存——下次启动后台重试一次（异步静默，启动 N 次 = N 次请求，GitHub 60/h 限频下日常使用无风险）。
-- **接入点（v1.2 定案：缓存数据源模型）**：欢迎卡渲染时读缓存（`latest_cached`），本次启动内检测结果**不实时插入**（避免重绘已渲染欢迎卡/触碰 scrollback 不变量）；后台预热（`spawn_background_check`）写缓存供**下次启动**显示——首次启动（无缓存）无提示、第二次启动显示，延迟一次启动为预期行为。
+- **Timing**: after TUI startup, spawn an async task (Tokio `spawn`); the result arrives via a channel; `--print`/headless and subcommand fast paths like `share` **don't check** (scripted scenarios stay unbothered).
+- **Data source**: `GET https://api.github.com/repos/yexrob/bingo/releases/latest` (must send a User-Agent), take `tag_name`. The API rate limit is 60/h unauthenticated — the 24h TTL protects it amply; the implementation may alternatively follow the 302 to `/releases/latest` and read the tag from `Location` (an API-free option).
+- **Version comparison**: semver (strip the `v` prefix from the tag; parse failure = no new version, silent). `0.2.1 < 0.2.10`, `0.2.1 < 0.3.0`; pre-release tags (`-rc`/`-beta`) never mix with stable; anything that doesn't parse as valid semver is ignored.
+- **Cache**: `update-check.json` = `{ checked_at: epoch_secs, latest_tag }`. At startup read the cache; within the TTL (24h) use the cached result directly (still show the notice when there's a new version, but no request); only after the TTL expires re-check asynchronously. Failures don't write the cache — one background retry per startup (async, silent; N startups = N requests, no risk under GitHub's 60/h limit for daily use).
+- **Touchpoint (v1.2 ruling: cached-data-source model)**: the welcome card renders by reading the cache (`latest_cached`); the in-this-startup check result is **not inserted live** (avoids redrawing an already-rendered welcome card / touching the scrollback invariant); the background pre-warm (`spawn_background_check`) writes the cache for the **next startup** — the first startup (no cache) shows nothing, the second shows it; a one-startup lag is expected behavior.
 
-### 4.2 欢迎卡片提示
+### 4.2 Welcome-card notice
 
-**视觉唯一事实源 = [`update-banner.md`](./update-banner.md) v1.1**（commit 607c353）——布局、文案、动效、降级、实现方案全部以该规格为准，本文只定义验收与出现条件。规格要点：
+**The single visual source of truth = [`update-banner.md`](./update-banner.md) v1.1** (commit 607c353) — layout, copy, motion, degradation, and implementation approach all follow that spec; this PRD only defines acceptance and the appearance conditions. Spec essentials:
 
-- **位置**：版本身份行（`bingo vX.Y.Z · …`）正上方、cwd 行之下（空行节奏：cwd 与提示行之间一个空行，与身份行相邻构成「旧 vs 新」对照块）。
-- **文案**：`New version v0.3.0 available — run bingo update`（无 ✦ 前缀、无命令引号）。三段样式：静态段（`New version ` / ` available — run `）`theme.inactive`；呼吸段①版本号 `vX.Y.Z` 呼吸色；呼吸段②`bingo update` 呼吸色 + bold（与①同相位）。
-- **动效**：正弦呼吸（不是硬闪烁/扫光/ANSI 闪烁码），两档品牌橙间 sRGB 线性插值——暗色 `#D77757 ↔ #E8896B`（全程 ≥6.24:1）、浅色 `#B05227 ↔ #9A4A24`（全程 ≥4.72:1）；周期 3.0s（90 帧 @30fps，复用既有 TICK），总时长 9s（3 个呼吸）后静止在 rest 色；相位函数 `t = 0.5 − 0.5·cos(2π·phase/90)`（phase 0 = rest，无突跳）。**特效范围仅此一行内两个关键词段，欢迎卡其余一切元素任何一帧不参与动画；无入场动画（静默插入）**。
-- **降级链**：`motion: "off"`（settings 新增键，默认 auto）/ `BINGO_NO_MOTION=1` → 静态 rest（提示保留不消失）；无 truecolor → 离散两步（2s 周期、peak 400ms，不崩溃）；`NO_COLOR`/单色 → 静态 bold；用户输入 → 提前停止（P1）。
-- **窄屏截断链**（`banner_line(v, width)` 纯函数）：inner_w ≥50 完整行 / ≥43 去 available 分句 / ≥15 只留 `bingo update` / <15 隐藏；任何档位命令可见（<17 列除外）、不溢出卡框。
-- **可忽略性**：提示只是卡片上一行，无交互、无阻塞、不抢焦点；TTL 保证一天最多提示一次。不引入 dismiss 持久化（v1 减法）。
-- **实现约束**（规格 §3.2 方案 A）：动画窗口 9s 远早于欢迎卡落盘时机，窗口内保持欢迎卡为活文档行、到期静止后以 rest 色自然落盘——全程不触碰 scrollback（视口以上永不重绘不变量保持）。接线：`Chat` 持有 `UpdateBanner { latest, anim_until_tick }`，`has_dynamic_rows()` 在动画窗口内持续置 dirty，`update_color(theme, phase)` 为纯函数可直接单测。
+- **Position**: directly above the version identity line (`bingo vX.Y.Z · …`), below the cwd line (blank-line rhythm: one blank between cwd and the notice, adjacent to the identity line forming an "old vs new" contrast block).
+- **Copy**: `New version v0.3.0 available — run bingo update` (no ✦ prefix, no quotes around the command). Three styled segments: the static segments (`New version ` / ` available — run `) `theme.inactive`; breathing segment ① the version `vX.Y.Z` in the breathing color; breathing segment ② `bingo update` in the breathing color + bold (in phase with ①).
+- **Motion**: sinusoidal breathing (not hard blink / sweep / ANSI blink codes), sRGB linear interpolation between two brand-orange stops — dark `#D77757 ↔ #E8896B` (≥6.24:1 throughout), light `#B05227 ↔ #9A4A24` (≥4.72:1 throughout); period 3.0s (90 frames @30fps, reusing the existing TICK), 9s total (3 breaths) then settling at the rest color; phase function `t = 0.5 − 0.5·cos(2π·phase/90)` (phase 0 = rest, no jump). **The motion scope is exactly the two keyword segments on this one line; every other element of the welcome card participates in no animation on any frame; no entrance animation (silent insertion)**.
+- **Degradation chain**: `motion: "off"` (new settings key, default auto) / `BINGO_NO_MOTION=1` → static rest (the notice stays, never disappears); no truecolor → discrete two-step (2s period, 400ms peak, no crash); `NO_COLOR`/monochrome → static bold; user input → stop early (P1).
+- **Narrow-screen truncation chain** (`banner_line(v, width)` pure function): inner_w ≥50 full line / ≥43 drop the "available" clause / ≥15 keep only `bingo update` / <15 hidden; the command is visible in every tier (except <17 columns) and never overflows the card frame.
+- **Ignorability**: the notice is just one line on the card — no interaction, no blocking, no focus stealing; the TTL caps it at once a day. No dismiss persistence (v1 subtracts).
+- **Implementation constraints** (spec §3.2 option A): the 9s animation window ends well before the welcome card's settle-to-disk moment; within the window the card stays a live document row, and after expiry it settles at the rest color and persists naturally — never touching scrollback (the never-redraw-above-viewport invariant holds). Wiring: `Chat` holds `UpdateBanner { latest, anim_until_tick }`; `has_dynamic_rows()` stays dirty during the animation window; `update_color(theme, phase)` is a pure function directly unit-testable.
 
-### 4.3 `bingo update` 命令
+### 4.3 `bingo update` command
 
 ```
 bingo update [--check]
 ```
 
-| 参数 | 说明 |
+| Argument | Description |
 |---|---|
-| `--check` | 只检测并打印结果，不下载不替换 |
+| `--check` | only check and print the result, no download or replace |
 
-**流程**（`bingo update`，无 `--check`）：
+**Flow** (`bingo update`, without `--check`):
 
-1. 请求 latest tag；若当前已是最新 → 输出 `bingo 已是最新版本 v0.2.1`，exit 0，不发下载请求。
-2. 平台资产映射（`std::env::consts` 探测）：
+1. Request the latest tag; if the current version is already latest → output `bingo is already the latest version v0.2.1`, exit 0, no download request.
+2. Platform-asset mapping (`std::env::consts` detection):
 
-   | 平台 | 资产 |
+   | Platform | Asset |
    |---|---|
-   | `aarch64-apple-darwin`（Apple Silicon） | `bingo-aarch64-apple-darwin.tar.gz` |
-   | `x86_64-apple-darwin`（Intel Mac） | `bingo-x86_64-apple-darwin.tar.gz` |
+   | `aarch64-apple-darwin` (Apple Silicon) | `bingo-aarch64-apple-darwin.tar.gz` |
+   | `x86_64-apple-darwin` (Intel Mac) | `bingo-x86_64-apple-darwin.tar.gz` |
    | `x86_64-pc-windows-msvc` | `bingo-x86_64-pc-windows-msvc.zip` |
    | `x86_64-unknown-linux-gnu` | `bingo-x86_64-unknown-linux-gnu.tar.gz` |
-   | 其他 | 明确报错 `UNSUPPORTED_PLATFORM` |
+   | other | clear error `UNSUPPORTED_PLATFORM` |
 
-3. 下载资产 + `checksums.txt`；sha256 与 `checksums.txt` 中对应文件名行比对（两列序/`*`/`./` 前缀容错解析），**不匹配 → 拒绝安装**、非零退出（`CHECKSUM_MISMATCH`）。`checksums.txt` 缺失或行缺失同样拒绝（安全优先，`CHECKSUMS_UNAVAILABLE`）。
-4. 解压（`tar` + `flate2` / `zip`），取二进制（`bingo` / `bingo.exe`）。
-5. **原子替换**：目标 = `std::env::current_exe()`。写同目录 tmp（同文件系统）+ rename 原子替换（Unix 显式置 0o755；Windows 先删旧，非原子由用户承担窗口期）。替换成功 → 输出 `bingo 已更新到 v0.3.0` + `安装位置：<path>（新版本在下次启动时生效）`，exit 0。
-6. **权限失败**：文件操作失败（如 `/usr/local/bin` 只读）→ 报 `STORAGE_ERROR`，msg 含安装路径 + 指引（`sudo bingo update` 或手动安装）。
-7. **解压失败/资产损坏** → 报错（`ARCHIVE_INVALID`）、非零退出。
-8. Windows 上运行中 exe 无法原位替换 → 报错 + 手动替换指引（v1 不做安装器）。
+3. Download the asset + `checksums.txt`; compare the sha256 against the line for the matching file name in `checksums.txt` (tolerate two-column order / `*` / `./` prefixes), **mismatch → refuse to install**, nonzero exit (`CHECKSUM_MISMATCH`). A missing `checksums.txt` or missing line also refuses (safety first, `CHECKSUMS_UNAVAILABLE`).
+4. Extract (`tar` + `flate2` / `zip`), take the binary (`bingo` / `bingo.exe`).
+5. **Atomic replacement**: target = `std::env::current_exe()`. Write a same-directory tmp (same filesystem) + rename for atomic replacement (Unix explicitly sets 0o755; Windows deletes the old first, the non-atomic window is the user's accepted risk). On success → output `bingo updated to v0.3.0` + `Install location: <path> (the new version takes effect at the next startup)`, exit 0.
+6. **Permission failure**: file-operation failure (e.g. `/usr/local/bin` read-only) → report `STORAGE_ERROR`, msg carries the install path + guidance (`sudo bingo update` or manual install).
+7. **Extraction failure / corrupt asset** → report the error (`ARCHIVE_INVALID`), nonzero exit.
+8. On Windows a running exe can't be replaced in place → report + manual-replacement guidance (v1 has no installer).
 
-**输出契约**（v1.2 定案：中文人类可读，main 裁决；错误路径仍走统一契约）：
-- `bingo 已是最新版本 v0.2.1` — 已最新（exit 0）
-- `发现新版本 v0.3.0：运行 bingo update 安装` — `--check` 有新版（exit 0）
-- `bingo 已更新到 v0.3.0` + `安装位置：…（新版本在下次启动时生效）` — 更新成功（exit 0）
-- `[error] code=... msg=...` — 失败，非零退出（统一错误码出口；成功路径不强制单行可 grep）
+**Output contract** (v1.2 ruling: Chinese, human-readable, main's decision; error paths still use the unified contract):
+- `bingo is already the latest version v0.2.1` — already latest (exit 0)
+- `New version v0.3.0 found: run bingo update to install` — `--check` with a new version (exit 0)
+- `bingo updated to v0.3.0` + `Install location: … (the new version takes effect at the next startup)` — update succeeded (exit 0)
+- `[error] code=... msg=...` — failure, nonzero exit (unified error-code exit; success paths aren't forced into the single-line greppable format)
 
-**错误码**（v1.2 定案：复用通用码 + 短码，main 裁决；登记 `src/error.rs`，SCREAMING_SNAKE、只增不改）：`OFFLINE`（网络/HTTP 非 2xx）、`SERVER_ERROR`（release 响应异常）、`CHECKSUMS_UNAVAILABLE`、`CHECKSUM_MISMATCH`、`ARCHIVE_INVALID`（解压失败/缺二进制）、`UNSUPPORTED_PLATFORM`、`STORAGE_ERROR`（文件操作/权限，msg 含 sudo 指引）。
+**Error codes** (v1.2 ruling: reuse generic codes + short codes, main's decision; registered in `src/error.rs`, SCREAMING_SNAKE, add-only): `OFFLINE` (network / HTTP non-2xx), `SERVER_ERROR` (abnormal release response), `CHECKSUMS_UNAVAILABLE`, `CHECKSUM_MISMATCH`, `ARCHIVE_INVALID` (extraction failure / missing binary), `UNSUPPORTED_PLATFORM`, `STORAGE_ERROR` (file operations/permissions, msg carries sudo guidance).
 
-**macOS 风险提示**：非公证二进制经下载会带 quarantine 属性，Gatekeeper 可能拦截首次运行——更新成功提示语后追加一行指引（`xattr -d com.apple.quarantine <path>`），v1 不自动清除（安全考虑，留给用户判断）。
+**macOS risk note**: a downloaded non-notarized binary carries the quarantine attribute, and Gatekeeper may block the first run — after the update-success message append a guidance line (`xattr -d com.apple.quarantine <path>`); v1 doesn't clear it automatically (safety consideration, left to the user's judgment).
 
-## 5. 验收标准（每项可验证）
+## 5. Acceptance criteria (each verifiable)
 
-### A. 版本检测逻辑
-- A1. semver 对比正确：`0.2.1 < 0.2.10`、`0.2.1 < 0.3.0`、`0.3.0` vs `0.3.0` 视为已最新；tag 带 `v` 前缀可解析（单测）。
-- A2. tag 解析失败（非 semver / 空）→ 静默视为无新版，不提示不报错。
-- A3. 检测到新版 → 缓存与提示同源（提示行版本号 = 检测结果版本号）。
+### A. Version-check logic
+- A1. semver comparison correct: `0.2.1 < 0.2.10`, `0.2.1 < 0.3.0`; `0.3.0` vs `0.3.0` counts as already latest; tags with the `v` prefix parse (unit tests).
+- A2. Tag parse failure (non-semver / empty) → silently treated as no new version, no notice, no error.
+- A3. A detected new version → cache and notice share the same source (the notice line's version = the check result's version).
 
-### B. 缓存与异步
-- B1. TTL 生效：首次检查写缓存后，24h 内再启动不发网络请求（注入时钟/缓存路径可测；mock 服务器计数断言请求数=1）。
-- B2. 失败不写缓存：网络失败 → 无缓存写入、不提示不报错；下次启动后台重试一次（v1.2 定案：取消 1h 失败限频，接受实现）。
-- B3. 首帧不阻塞：mock 网络延迟下 TUI 首帧照常渲染，无等待（欢迎卡渲染只读缓存，不触网）。
-- B4. `--print` / 子命令快路径（`share`/`update` 等）：不触发检测、不输出任何 update 相关行。
+### B. Cache and async
+- B1. TTL effective: after the first check writes the cache, a restart within 24h sends no network request (injectable clock/cache path for testing; mock server counts requests = 1).
+- B2. Failure doesn't write the cache: network failure → no cache write, no notice, no error; one background retry per startup (v1.2 ruling: the 1h failure rate-limit is dropped, implementation accepted).
+- B3. First frame unblocked: with mocked network latency the TUI's first frame still renders, no waiting (welcome-card rendering only reads the cache, no network).
+- B4. `--print` / subcommand fast paths (`share`/`update` etc.): no check triggered, no update-related output lines.
 
-### C. 欢迎卡片提示（视觉以 `update-banner.md` v1.1 为唯一事实源，锚点 1-11 条为完整断言；本组为 PRD 层合并项）
-- C1. 有新版（缓存或实时检测结果）→ 欢迎卡片出现提示行，文案 = `New version {v} available — run bingo update`（三段样式：静态段 inactive、版本号与 `bingo update` 呼吸色且命令 bold）；无新版 → 欢迎卡布局与现状逐行一致（回归）。
-- C2. 检测失败 / 缓存无结果 → 欢迎卡片与现状完全一致，无提示行。
-- C3. 动效范围（特效范围断言）：任意两帧渲染中，欢迎卡其余行（✻ 问候/╭╮ 边框//help/cwd/身份行）完全一致（对 doc.rows 静态行快照断言）；提示行出现无入场动画（静默插入）。
-- C4. 呼吸正确性（纯函数 `update_color`）：truecolor 下 phase 0 = rest、phase 45 ≈ peak（±1/255）、phase 90 = rest，0→45 单调上升、45→90 单调下降；**版本号段与命令段在同一 phase 取相同 Color（同相位）**；行内静态段恒为 `theme.inactive`（任意 phase 不变）；帧循环动画窗口内持续置 dirty、窗口外恢复 idle（零写入）。
-- C5. 窗口与停止：9s（270 帧）后静止 rest 色，`needs_tick()` 恢复 false；欢迎卡落盘后为静止 rest 色（scrollback 不变量）；窗口内 resize → rehydrate 后动画继续、无重复动画副本、视口以上零重绘。
-- C6. 降级链：`motion: "off"` / `BINGO_NO_MOTION=1` → 全程静态 rest、提示行仍在；无 truecolor → 离散两步（peak 400ms / rest 1600ms）不崩溃；`NO_COLOR` → 静态 bold。用户输入提前停止（若实现 P1）。
-- C7. 窄屏截断链：inner_w 50/43/15 边界逐档核对（`banner_line` 纯函数），任何档位 `bingo update` 可见（<17 列除外）、不溢出卡框、不换行。
-- C8. 对比度：暗色每帧 ≥6.24:1、浅色每帧 ≥4.72:1（停驻帧 = rest）；浅色主题不得出现 `#D77757` 亮橙档。
-- C9. 布局稳定与不阻塞：提示行与卡片边框对齐（`│` 包裹内），重排/滚动/落盘不闪屏、不截断；出现期间输入、命令、滚动全部正常（无焦点抢占）。
-- C10. 无 ANSI 闪烁：输出不含 `\e[5m`（grep 断言）。
+### C. Welcome-card notice (visuals per `update-banner.md` v1.1 as the single source of truth; anchors 1-11 are the complete assertions; this group merges at the PRD level)
+- C1. New version (cache or live check result) → the welcome card shows the notice line, copy = `New version {v} available — run bingo update` (three-segment styling: static segments inactive, version and `bingo update` in the breathing color with the command bold); no new version → the welcome-card layout is line-for-line identical to today (regression).
+- C2. Check failure / no cached result → the welcome card is exactly as today, no notice line.
+- C3. Motion scope (effect-scope assertion): across any two rendered frames, the welcome card's other rows (✻ greeting / ╭╮ border / /help / cwd / identity line) are completely identical (assert against a static-row snapshot of doc.rows); the notice line appears with no entrance animation (silent insertion).
+- C4. Breathing correctness (pure function `update_color`): under truecolor phase 0 = rest, phase 45 ≈ peak (±1/255), phase 90 = rest, 0→45 monotonically rising, 45→90 monotonically falling; **the version segment and the command segment take the same Color at the same phase (in phase)**; the in-line static segments are always `theme.inactive` (unchanged at any phase); during the frame-loop animation window it stays dirty, outside the window idle returns (zero writes).
+- C5. Window and stop: after 9s (270 frames) it settles at the rest color, `needs_tick()` returns false; after the welcome card persists it's the static rest color (scrollback invariant); a resize within the window → the animation continues after rehydrate, no duplicate animation copies, zero redraws above the viewport.
+- C6. Degradation chain: `motion: "off"` / `BINGO_NO_MOTION=1` → static rest throughout, the notice line stays; no truecolor → discrete two-step (400ms peak / 1600ms rest) without crashing; `NO_COLOR` → static bold. User input stops it early (if P1 is implemented).
+- C7. Narrow-screen truncation chain: the 50/43/15 inner_w boundaries checked tier by tier (`banner_line` pure function); `bingo update` is visible in every tier (except <17 columns), never overflows the card frame, never wraps.
+- C8. Contrast: dark ≥6.24:1 on every frame, light ≥4.72:1 on every frame (settled frame = rest); the light theme must never show the `#D77757` bright-orange stop.
+- C9. Layout stability and no blocking: the notice line aligns with the card border (inside the `│` wrapper); no flicker/truncation on reflow/scroll/persist; input, commands, and scrolling all work normally while it appears (no focus stealing).
+- C10. No ANSI blink: the output contains no `\e[5m` (grep assertion).
 
 ### D. `bingo update`
-- D1. 平台资产映射：四平台探测各自命中正确文件名（单测：`aarch64-apple-darwin` → `.tar.gz` 等）；未知平台 → `UNSUPPORTED_PLATFORM`。
-- D2. 输出契约（v1.2 定案）：`--check` 有新版 `发现新版本 v0.3.0：运行 bingo update 安装` exit 0；已最新 `bingo 已是最新版本 v0.2.1` exit 0；网络失败 `[error] code=OFFLINE ...` 非零退出。
-- D3. 已最新时执行 `bingo update`：不下载任何资产，输出已是最新，exit 0。
-- D4. 更新成功：mock 服务器验证「下载 → sha256 匹配 → 解压 → 替换」全链路，替换后 `current_exe` 为新版二进制（测试用伪造二进制 + 临时安装目录），输出含新版本号与安装位置，exit 0。
-- D5. checksum 不匹配：拒绝安装、现有二进制不被触碰、非零退出 + `CHECKSUM_MISMATCH`（mock 服务器返回篡改资产）。
-- D6. `checksums.txt` 缺失 / 无对应资产行：同样拒绝安装（安全优先，`CHECKSUMS_UNAVAILABLE`），明确报错。
-- D7. 权限不足（安装目录只读）：报 `STORAGE_ERROR`，msg 含安装路径 + sudo/手动指引，现有二进制不被触碰。
-- D8. 解压失败 / 资产损坏 / 包内缺二进制：报 `ARCHIVE_INVALID`，非零退出。
-- D9. 替换失败（如模拟 rename 失败）：tmp 残留可清理、旧二进制保持可用，报 `STORAGE_ERROR`，非零退出。
-- D10. 所有更新错误走统一错误码出口（TUI/CLI 双出口一致），exit=1 + `[error] code=...` 单行格式。
+- D1. Platform-asset mapping: the four platforms each detect the correct file name (unit test: `aarch64-apple-darwin` → `.tar.gz` etc.); unknown platform → `UNSUPPORTED_PLATFORM`.
+- D2. Output contract (v1.2 ruling): `--check` with a new version prints `New version v0.3.0 found: run bingo update to install` exit 0; already latest prints `bingo is already the latest version v0.2.1` exit 0; network failure prints `[error] code=OFFLINE ...` nonzero exit.
+- D3. `bingo update` when already latest: downloads nothing, prints already-latest, exit 0.
+- D4. Update success: the mock server verifies the whole chain "download → sha256 match → extract → replace"; after replacement `current_exe` is the new binary (test with a fake binary + temporary install directory), output carries the new version and install location, exit 0.
+- D5. Checksum mismatch: refuses to install, the existing binary is untouched, nonzero exit + `CHECKSUM_MISMATCH` (mock server returns a tampered asset).
+- D6. Missing `checksums.txt` / no matching asset line: same refusal to install (safety first, `CHECKSUMS_UNAVAILABLE`), clear error.
+- D7. Insufficient permissions (install directory read-only): report `STORAGE_ERROR`, msg carries the install path + sudo/manual guidance, the existing binary is untouched.
+- D8. Extraction failure / corrupt asset / missing binary in the package: report `ARCHIVE_INVALID`, nonzero exit.
+- D9. Replacement failure (e.g. mocked rename failure): tmp residue cleanable, the old binary stays usable, report `STORAGE_ERROR`, nonzero exit.
+- D10. All update errors go through the unified error-code exit (TUI/CLI dual-exit consistent), exit=1 + `[error] code=...` single-line format.
 
-### E. 质量与契约
-- E1. `cargo build`、`cargo clippy -- -D warnings`、`cargo test` 全绿；检测/缓存/映射/校验逻辑带内联单测。
-- E2. `src/error.rs` 登记实际码表（OFFLINE/SERVER_ERROR/CHECKSUMS_UNAVAILABLE/CHECKSUM_MISMATCH/ARCHIVE_INVALID/UNSUPPORTED_PLATFORM/STORAGE_ERROR）+ 防漂移单测（枚举每个 variant）。
-- E3. 欢迎卡版本行改用编译期版本（`CARGO_PKG_VERSION`），与检测对比同源（顺手修正 v0.1.0 硬编码）。
-- E4. 内置技能 `src/skills/bundled/guide.md` 同步：`bingo update [--check]` 命令速查、`motion` 配置表（auto/off + BINGO_NO_MOTION）、能力地图「更新」条目（检测/提示/更新全流程）。
-- E5. 新增依赖仅 `tar`/`flate2`/`zip` 三件（解压用），不加其他。
+### E. Quality and contracts
+- E1. `cargo build`, `cargo clippy -- -D warnings`, `cargo test` all green; check/cache/mapping/verification logic carries inline unit tests.
+- E2. `src/error.rs` registers the actual code table (OFFLINE/SERVER_ERROR/CHECKSUMS_UNAVAILABLE/CHECKSUM_MISMATCH/ARCHIVE_INVALID/UNSUPPORTED_PLATFORM/STORAGE_ERROR) + drift-guard unit tests (every variant enumerated).
+- E3. The welcome-card version line switches to the compile-time version (`CARGO_PKG_VERSION`), same source as the check's comparison (incidentally fixing the v0.1.0 hardcode).
+- E4. The built-in skill `src/skills/bundled/guide.md` syncs: `bingo update [--check]` command quick reference, the `motion` config row (auto/off + BINGO_NO_MOTION), the capability map's "updates" item (check/notice/update full flow).
+- E5. New dependencies only the three `tar`/`flate2`/`zip` (for extraction), nothing else.
 
-## 6. 验收顺序建议（依赖关系）
+## 6. Suggested acceptance order (dependencies)
 
-1. 检测核心（semver 对比 + TTL 缓存，纯函数可先测）→ 2. 异步接线（spawn + 不阻塞首帧）→ 3. 欢迎卡片提示行（静态 → 动效/降级，按 `update-banner.md` §5 锚点）→ 4. `bingo update`（映射/下载/校验/替换/权限）→ 5. 错误码 + 文档（guide.md）收口。
+1. Check core (semver comparison + TTL cache; pure functions testable first) → 2. async wiring (spawn + unblocked first frame) → 3. welcome-card notice line (static → motion/degradation, per `update-banner.md` §5 anchors) → 4. `bingo update` (mapping/download/verify/replace/permissions) → 5. error codes + docs (guide.md) wrap-up.
 
-## 7. 风险与未决项
+## 7. Risks and open items
 
-- **动效与文档模型冲突**（已解）：欢迎卡 flush 进 scrollback 后动画停止、静态落盘——uiux 规格 §3.2 方案 A 已给出接线（9s 动画窗口远早于正常落盘时机，窗口内保持活行、到期静止后自然落盘，不碰 scrollback）；实现按规格执行即可，不再需要降级预案。
-- **GitHub 可达性**（限频/地区网络）：TTL + 静默失败 + `--check` 手动入口三重缓解；update 失败报错里附手动下载 URL。
-- **checksums.txt 维护**：发布流程手工维护，缺失/滞后会导致 update 拒绝安装——这是安全优先的预期行为，发布 checklist 需保证 checksums 同步（发布者责任）。
-- **macOS Gatekeeper**：v1 不做签名，quarantine 拦截风险以更新成功后的指引提示处理；如用户反馈频繁，v2 评估签名。
-- **`sudo bingo update` 场景**：以 root 运行 update 会替换 root 拥有的安装目录文件，但缓存/临时区仍在用户 home——实现注意权限边界，root 下写入用户缓存需显式处理（P2 细究）。
+- **Motion vs document-model conflict (resolved)**: after the welcome card flushes into scrollback the animation stops and settles statically — uiux spec §3.2 option A gives the wiring (the 9s animation window ends well before the normal settle-to-disk moment; within the window it stays a live row, after expiry it settles statically and persists, never touching scrollback); implement per the spec, no degradation plan needed.
+- **GitHub reachability (rate limit / regional network)**: triple mitigation via TTL + silent failure + the `--check` manual entry; update failures append the manual-download URL to the error.
+- **checksums.txt maintenance**: manually maintained by the release process; a missing/stale file makes update refuse to install — that's the expected safety-first behavior; the release checklist must keep the checksums in sync (publisher's responsibility).
+- **macOS Gatekeeper**: v1 does no signing; the quarantine-block risk is handled by the post-success guidance line; if users report it often, v2 evaluates signing.
+- **`sudo bingo update` scenario**: running update as root replaces files in the root-owned install directory, but the cache/tmp area is still in the user's home — the implementation must mind the permission boundary; writing the user cache as root needs explicit handling (P2 detail).

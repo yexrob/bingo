@@ -1,22 +1,22 @@
-//! share 页面的 HTML 渲染（`bingo share` 输出 · v4.0 Claude Code app 风格）。
+//! HTML rendering of the share page (`bingo share` output · v4.0 Claude Code app style).
 //!
-//! 产物是自包含单文件：CSS/JS 内嵌、零外部依赖、离线可用。展现形式参考
-//! Claude Code app（用户指定方向，替代 v3.x opencode 复刻）：暗色近黑底、
-//! 居中限宽消息流、用户右侧暖灰气泡、助手左侧 markdown 流、工具折叠卡
-//! （状态徽标）、陶土橙 accent。事实源 = `share-page-template.html` v4.0
-//! （MD5 8c29a17b）。
+//! The output is a self-contained single file: inline CSS/JS, zero external dependencies, offline-capable. The look follows
+//! the Claude Code app (user-directed, replacing the v3.x opencode clone): near-black dark background,
+//! centered width-limited message stream, warm-gray user bubbles on the right, assistant markdown flow on the left, collapsible tool cards
+//! (with status badges), terracotta accent. Source of truth = `share-page-template.html` v4.0
+//! (MD5 8c29a17b).
 //!
-//! 数据由 Rust 服务端渲染：所有动态文本先经 [`escape`]（`& < > " '` 全量转义）
-//! 再拼进 HTML；JS 只做渐进增强（tab/锚点复制/复制按钮/线程跳转/打印），
-//! 不拼接任何数据——无脚本注入面。文本块走最小 markdown→HTML（标题/粗体/
-//! 行内代码/代码块/列表），不做完整 md 引擎。
+//! Data is server-rendered in Rust: every dynamic text passes through [`escape`] (full escaping of `& < > " '`)
+//! before being spliced into the HTML; JS is only progressive enhancement (tabs / anchor copy / copy buttons / thread jumps / print),
+//! and never splices data — no script-injection surface. Text blocks go through minimal markdown→HTML (headings/bold/
+//! inline code/code blocks/lists), not a full md engine.
 
 use std::collections::HashMap;
 
 use crate::api::types::{ContentBlock, ImageSource, Message, Role};
 use crate::share::{AgentShare, ChannelShare, ShareDoc};
 
-/// HTML 转义（属性与文本上下文通用：`&` 先转，防二次转义错位）。
+/// HTML escaping (shared by attribute and text contexts: `&` first, to avoid double-escape misalignment).
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -25,7 +25,7 @@ fn escape(text: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// 行内格式：`code` 与 **bold**（输入须已转义；code 内容不再二次转义）。
+/// Inline formatting: `code` and **bold** (input must already be escaped; code content is not double-escaped).
 fn inline_bold(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
@@ -82,7 +82,7 @@ fn inline_md(s: &str) -> String {
     out
 }
 
-/// 标题行（1-3 级）：`# ` / `## ` / `### `。
+/// Heading lines (levels 1-3): `# ` / `## ` / `### `.
 fn heading_level(line: &str) -> Option<usize> {
     let trimmed = line.trim_start();
     let hashes = trimmed.chars().take_while(|c| *c == '#').count();
@@ -93,7 +93,7 @@ fn heading_level(line: &str) -> Option<usize> {
     }
 }
 
-/// 列表项：(是否有序, 内容)。无序 `- `/`* `，有序 `N. `。
+/// List item: (ordered?, content). Unordered `- `/`* `, ordered `N. `.
 fn list_item(line: &str) -> Option<(bool, &str)> {
     let trimmed = line.trim_start();
     if let Some(rest) = trimmed
@@ -109,8 +109,8 @@ fn list_item(line: &str) -> Option<(bool, &str)> {
     None
 }
 
-/// 最小 markdown → HTML（design.md v4.0 §5 安全子集）。逐行渲染，
-/// 代码块为 `figure.code-block`（v4.0 模板样式依赖）。
+/// Minimal markdown → HTML (the safe subset from design.md v4.0 §5). Rendered line by line;
+/// code blocks become `figure.code-block` (a v4.0 template style dependency).
 pub fn render_markdown(text: &str) -> String {
     let mut out = String::new();
     let mut lines = text.lines().peekable();
@@ -183,11 +183,14 @@ pub fn render_markdown(text: &str) -> String {
 fn tool_result_text(content: &serde_json::Value) -> String {
     match content {
         serde_json::Value::String(s) => s.clone(),
+        // Block arrays (tool results carrying images) collapse to text with a size note rather
+        // than pretty-printing megabytes of base64 into the page.
+        serde_json::Value::Array(_) => crate::api::types::tool_result_text(content),
         other => serde_json::to_string_pretty(other).unwrap_or_default(),
     }
 }
 
-/// 截断到 60 字符（超长加省略号；工具卡 t-args 摘要用）。
+/// Clip to 60 chars (an ellipsis is added when longer; used for the tool-card t-args summary).
 fn clip(text: &str) -> String {
     let cut: String = text.chars().take(60).collect();
     if cut.chars().count() < text.chars().count() {
@@ -197,7 +200,7 @@ fn clip(text: &str) -> String {
     }
 }
 
-/// 工具目标参数摘要（工具卡 t-args）：命令/文件路径/pattern 等首值。
+/// Tool-target parameter summary (tool-card t-args): the first value among command / file path / pattern etc.
 fn tool_target(name: &str, input: &serde_json::Value) -> String {
     let picked = match name {
         "Bash" => input.get("command"),
@@ -226,7 +229,7 @@ fn tool_target(name: &str, input: &serde_json::Value) -> String {
     }
 }
 
-/// tool_use_id → (工具名, 目标摘要)，供 ToolResult 还原工具语义与图标。
+/// tool_use_id → (tool name, target summary), so ToolResult can recover the tool semantics and icon.
 fn build_tool_map(messages: &[Message]) -> HashMap<String, (String, String)> {
     let mut map = HashMap::new();
     for msg in messages {
@@ -239,7 +242,7 @@ fn build_tool_map(messages: &[Message]) -> HashMap<String, (String, String)> {
     map
 }
 
-// ── 工具图标（15px，折叠卡 t-icon）──
+// ── Tool icons (15px, t-icon on collapsible cards) ──
 
 const ICON_TERMINAL: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 5l4 4-4 4M10 13h4"/></svg>"#;
 const ICON_DOC: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 2.5h6l3 3V15.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><path d="M11 2.5V6h3.5"/></svg>"#;
@@ -251,7 +254,7 @@ const ICON_LIST: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill=
 const ICON_GLOBE: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="6"/><path d="M3 9h12M9 3a8.5 8.5 0 0 1 0 12M9 3a8.5 8.5 0 0 0 0 12"/></svg>"#;
 const ICON_SPARKLE: &str = r#"<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M9 3l1.6 3.9 3.9 1.6-3.9 1.6L9 14 7.4 10.1 3.5 8.5l3.9-1.6z"/></svg>"#;
 
-/// 工具名 → 折叠卡图标。
+/// Tool name → collapsible-card icon.
 fn tool_icon(name: &str) -> &'static str {
     match name {
         "Bash" => ICON_TERMINAL,
@@ -266,7 +269,7 @@ fn tool_icon(name: &str) -> &'static str {
     }
 }
 
-/// 成员取色（v4.0）：main 恒 accent，user 恒 text，其余按名字 FNV 哈希取 hue。
+/// Member colors (v4.0): main is always accent, user is always text, the rest take a hue from an FNV hash of the name.
 fn member_color(name: &str) -> &'static str {
     match name {
         "main" | "assistant" => "var(--accent)",
@@ -290,7 +293,7 @@ fn member_color(name: &str) -> &'static str {
     }
 }
 
-/// 状态字形：idle ● / running ◐ / stopped ✗。
+/// State glyphs: idle ● / running ◐ / stopped ✗.
 fn state_glyph(state: &str) -> &'static str {
     match state {
         "running" => "◐",
@@ -299,7 +302,7 @@ fn state_glyph(state: &str) -> &'static str {
     }
 }
 
-/// HTML id 安全化（team/dm/channel 锚点用）。
+/// Make an HTML id safe (for team/dm/channel anchors).
 fn id_slug(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -318,7 +321,7 @@ fn id_slug(name: &str) -> String {
     }
 }
 
-/// 名字首字母（头像用）。
+/// First letter of a name (for avatars).
 fn initial(name: &str) -> String {
     name.chars()
         .next()
@@ -326,7 +329,7 @@ fn initial(name: &str) -> String {
         .unwrap_or_default()
 }
 
-/// 消息首段文本（Team 线程预览 / DM 行用）。
+/// First text of a message (for Team thread previews / DM rows).
 fn first_text(messages: &[Message]) -> String {
     for m in messages.iter().rev() {
         for block in &m.content {
@@ -340,7 +343,7 @@ fn first_text(messages: &[Message]) -> String {
     String::new()
 }
 
-/// thinking 折叠块（灰斜体；无 token 计数——不展示该字段）。
+/// Thinking collapsible block (gray italic; no token count — the field is not shown).
 fn think_card(thinking: &str) -> String {
     format!(
         "<details class=\"think\"><summary>Thinking</summary><div class=\"think-body\">{}</div></details>",
@@ -348,8 +351,8 @@ fn think_card(thinking: &str) -> String {
     )
 }
 
-/// tool_use 折叠卡：图标 + 名 + 参数摘要 + 状态徽标；input pre = 完整 JSON
-/// （A4 不丢失，含 bash 非 command 字段）。
+/// tool_use collapsible card: icon + name + arg summary + status badge; the input pre = full JSON
+/// (A4: nothing dropped, including bash non-command fields).
 fn tool_use_card(name: &str, input: &serde_json::Value) -> String {
     let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
     let target = tool_target(name, input);
@@ -362,7 +365,7 @@ fn tool_use_card(name: &str, input: &serde_json::Value) -> String {
     )
 }
 
-/// tool_result 折叠卡：输出 pre + 状态徽标（error 红）。
+/// tool_result collapsible card: output pre + status badge (error in red).
 fn tool_result_card(
     tool_use_id: &str,
     content: &serde_json::Value,
@@ -388,7 +391,7 @@ fn tool_result_card(
     )
 }
 
-/// 图片块：data: URI 内嵌（仅 base64，不透传外部 URL）。
+/// Image block: embedded as a data: URI (base64 only; external URLs are never passed through).
 fn image_html(source: &ImageSource) -> String {
     let media = escape(&source.media_type);
     let alt = format!("image ({media})");
@@ -398,7 +401,7 @@ fn image_html(source: &ImageSource) -> String {
     )
 }
 
-/// 单条主对话消息：user 右侧气泡 / assistant 左侧 markdown 流 + 工具折叠卡。
+/// A single main-conversation message: user bubble on the right / assistant markdown flow on the left + collapsible tool cards.
 fn render_message(msg: &Message, index: usize, map: &HashMap<String, (String, String)>) -> String {
     let id = format!("msg-{index}");
     match msg.role {
@@ -463,7 +466,7 @@ fn render_message(msg: &Message, index: usize, map: &HashMap<String, (String, St
     }
 }
 
-/// 对话视图：消息流（空态 view-empty）。
+/// Conversation view: message stream (empty state = view-empty).
 fn render_conv(messages: &[Message], map: &HashMap<String, (String, String)>) -> String {
     if messages.is_empty() {
         return "<div class=\"view-empty\">— No messages —</div>".to_string();
@@ -476,7 +479,7 @@ fn render_conv(messages: &[Message], map: &HashMap<String, (String, String)>) ->
     out
 }
 
-/// Team 视图：线程列表（点击/锚点直达私聊）。
+/// Team view: thread list (click/anchor jumps to the DM).
 fn render_team(agents: &[AgentShare]) -> String {
     if agents.is_empty() {
         return "<div class=\"view-empty\">— No agents —</div>".to_string();
@@ -507,7 +510,7 @@ fn render_team(agents: &[AgentShare]) -> String {
     format!("<div class=\"thread-list\">{rows}</div>")
 }
 
-/// 私聊视图：每代理一个聊天流（代理左 / 用户右气泡）。
+/// DM view: one chat flow per agent (agent left / user bubbles right).
 fn render_private(agents: &[AgentShare]) -> String {
     if agents.is_empty() {
         return "<div class=\"view-empty\">— No agents —</div>".to_string();
@@ -577,7 +580,7 @@ fn render_private(agents: &[AgentShare]) -> String {
     out
 }
 
-/// 频道视图：每频道消息流（seq + 发送者 + 文本，user 右对齐）。
+/// Channels view: one message stream per channel (seq + sender + text; user aligned right).
 fn render_channels(channels: &[ChannelShare]) -> String {
     if channels.is_empty() {
         return "<div class=\"view-empty\">— No channels —</div>".to_string();
@@ -622,7 +625,7 @@ fn render_channels(channels: &[ChannelShare]) -> String {
     out
 }
 
-/// epoch 秒 → "Mon D, YYYY HH:MM UTC"（无 chrono 依赖，civil-from-days 算法）。
+/// epoch seconds → "Mon D, YYYY HH:MM UTC" (no chrono dependency; civil-from-days algorithm).
 fn format_epoch(secs: u64) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -651,7 +654,7 @@ fn format_epoch(secs: u64) -> String {
     )
 }
 
-/// 生成自包含 HTML 文档（conversation 来自主 transcript，其余来自 ShareDoc）。
+/// Generate the self-contained HTML document (conversation from the main transcript, the rest from ShareDoc).
 pub fn render(doc: &ShareDoc, messages: &[Message]) -> String {
     let session = escape(&doc.session);
     let created = format_epoch(doc.created_at);
@@ -666,7 +669,7 @@ pub fn render(doc: &ShareDoc, messages: &[Message]) -> String {
     out.push_str("<style>\n");
     out.push_str(CSS);
     out.push_str("</style>\n</head>\n<body>\n");
-    // 顶栏：品牌 + 会话标题 + 元信息 + 四视图 tabs。
+    // Top bar: brand + session title + meta + the four view tabs.
     out.push_str("<header class=\"topbar\"><div class=\"topbar-inner\"><div class=\"brand\">");
     out.push_str("<span class=\"mark\">▸</span><span class=\"name\">bingo</span>");
     out.push_str(&format!("<span class=\"session\">{session}</span>"));
@@ -688,32 +691,32 @@ pub fn render(doc: &ShareDoc, messages: &[Message]) -> String {
         doc.channels.len()
     ));
     out.push_str("</nav></div></header>\n<main id=\"main\">\n");
-    // ① 对话。
+    // 1) Conversation.
     out.push_str(&format!(
         "<section class=\"view\" data-view=\"conv\" role=\"tabpanel\" id=\"view-conv\" aria-label=\"Conversation\"><h2>Conversation <span class=\"n\">· {} messages</span></h2>{}</section>\n",
         messages.len(),
         render_conv(messages, &tool_map)
     ));
-    // ② Team。
+    // 2) Team.
     out.push_str(&format!(
         "<section class=\"view\" data-view=\"team\" role=\"tabpanel\" id=\"view-team\" aria-label=\"Team\" hidden><h2>Team <span class=\"n\">· {} threads</span></h2>{}</section>\n",
         doc.agents.len(),
         render_team(&doc.agents)
     ));
-    // ③ DM。
+    // 3) DM.
     out.push_str(&format!(
         "<section class=\"view\" data-view=\"dm\" role=\"tabpanel\" id=\"view-dm\" aria-label=\"Direct messages\" hidden><h2>Direct Messages <span class=\"n\">· {} threads</span></h2>{}</section>\n",
         doc.agents.len(),
         render_private(&doc.agents)
     ));
-    // ④ 频道。
+    // 4) Channels.
     out.push_str(&format!(
         "<section class=\"view\" data-view=\"channel\" role=\"tabpanel\" id=\"view-channel\" aria-label=\"Channels\" hidden><h2>Channels <span class=\"n\">· {} rooms</span></h2>{}</section>\n",
         doc.channels.len(),
         render_channels(&doc.channels)
     ));
     out.push_str("</main>\n");
-    // 页脚 + noscript + JS。
+    // Footer + noscript + JS.
     out.push_str("<footer><div class=\"foot-inner\"><span><span class=\"mark\">▸</span> bingo · Rust agent CLI</span><span>generated ");
     out.push_str(&created);
     out.push_str(" by bingo share</span><span class=\"foot-warn\">contains full conversation &amp; tool output — review before sharing</span></div></footer>\n");
@@ -724,12 +727,12 @@ pub fn render(doc: &ShareDoc, messages: &[Message]) -> String {
     out
 }
 
-/// 内嵌样式：与 share-page-template.html v4.0（MD5 8c29a17b）原样一致
-/// （Claude Code app 风格：暗色近黑底、用户右气泡、助手左流、工具折叠卡）。
+/// Inline styles: byte-identical to share-page-template.html v4.0 (MD5 8c29a17b)
+/// (Claude Code app style: near-black background, user bubbles right, assistant flow left, collapsible tool cards).
 const CSS: &str = include_str!("../notes/design/share-page-template.css");
 
-/// 渐进增强 JS（与模板同源）：tab 切换、锚点复制、复制按钮、线程跳转、打印。
-/// 不拼接任何会话数据（防注入）。
+/// Progressive-enhancement JS (same source as the template): tab switching, anchor copy, copy buttons, thread jumps, print.
+/// Never splices any session data (injection-proof).
 const JS: &str = r#"
 (function(){
   'use strict';
@@ -888,20 +891,20 @@ mod tests {
         }
     }
 
-    /// 富消息：thinking + tool_use(bash 多字段) + tool_result + 错误结果 + text。
+    /// A rich message: thinking + tool_use (bash with many fields) + tool_result + error result + text.
     fn rich_messages() -> Vec<Message> {
         vec![
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::Text {
-                    text: "你好".into(),
+                    text: "hello".into(),
                 }],
             },
             Message {
                 role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
-                        thinking: "深入思考一下".into(),
+                        thinking: "think it through".into(),
                         signature: "sig".into(),
                     },
                     ContentBlock::ToolUse {
@@ -929,7 +932,7 @@ mod tests {
                         is_error: true,
                     },
                     ContentBlock::Text {
-                        text: "**完成**了，`OK`".into(),
+                        text: "**Done**, `OK`".into(),
                     },
                 ],
             },
@@ -943,11 +946,11 @@ mod tests {
             agents: vec![AgentShare {
                 name: "scout".into(),
                 def: Some("scout".into()),
-                description: "调研".into(),
+                description: "research".into(),
                 state: "running".into(),
                 history: vec![
-                    text_msg(Role::User, "查一下"),
-                    text_msg(Role::Assistant, "**结论**：`ok`"),
+                    text_msg(Role::User, "check it"),
+                    text_msg(Role::Assistant, "**Conclusion**: `ok`"),
                 ],
             }],
             channels: vec![ChannelShare {
@@ -957,7 +960,8 @@ mod tests {
                 messages: vec![crate::channels::ChannelMessage {
                     seq: 1,
                     from: "scout".into(),
-                    text: "大家好".into(),
+                    text: "hello everyone".into(),
+                    at: 0,
                 }],
             }],
         }
@@ -969,7 +973,7 @@ mod tests {
             escape("<script>alert('xss')</script> & \"quoted\""),
             "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt; &amp; &quot;quoted&quot;"
         );
-        // 注入内容经 render 全链路不出现可执行脚本/未转义标签（C1 全字符集）。
+        // The injected content must not surface as executable scripts / unescaped tags anywhere in the render chain (C1, full charset).
         let html = render(
             &doc(),
             &[text_msg(
@@ -977,10 +981,13 @@ mod tests {
                 "<script>alert(1)</script><img src=x onerror=alert(2)>&\"'",
             )],
         );
-        assert!(!html.contains("<script>alert(1)"), "注入脚本不得原样出现");
+        assert!(
+            !html.contains("<script>alert(1)"),
+            "injected script must not appear verbatim"
+        );
         assert!(
             !html.contains("<img src=x onerror"),
-            "注入 img 标签不得原样出现"
+            "injected img tag must not appear verbatim"
         );
         assert!(html.contains("&lt;script&gt;alert(1)"));
         assert!(html.contains("&lt;img src=x onerror"));
@@ -991,32 +998,35 @@ mod tests {
 
     #[test]
     fn markdown_headings_bold_code_lists_and_fences() {
-        let md = "# 标题\n## 二级\n### 三级\n\n**粗体** 与 `code`\n\n- a\n- b\n\n1. 一\n2. 二\n\n```rust\nfn main() { println!(\"<hi>\"); }\n```\n";
+        let md = "# Title\n## Second\n### Third\n\n**Bold** and `code`\n\n- a\n- b\n\n1. one\n2. two\n\n```rust\nfn main() { println!(\"<hi>\"); }\n```\n";
         let html = render_markdown(md);
-        assert!(html.contains("<h1>标题</h1>"), "{html}");
-        assert!(html.contains("<h2>二级</h2>"));
-        assert!(html.contains("<h3>三级</h3>"));
-        assert!(html.contains("<strong>粗体</strong>"));
+        assert!(html.contains("<h1>Title</h1>"), "{html}");
+        assert!(html.contains("<h2>Second</h2>"));
+        assert!(html.contains("<h3>Third</h3>"));
+        assert!(html.contains("<strong>Bold</strong>"));
         assert!(html.contains("<code>code</code>"));
         assert!(html.contains("<ul><li>a</li><li>b</li></ul>"));
-        assert!(html.contains("<ol><li>一</li><li>二</li></ol>"));
-        assert!(html.contains("<figure class=\"code-block\">"), "代码块容器");
+        assert!(html.contains("<ol><li>one</li><li>two</li></ol>"));
+        assert!(
+            html.contains("<figure class=\"code-block\">"),
+            "code-block container"
+        );
         assert!(html.contains("<figcaption>rust</figcaption>"));
         assert!(html.contains("class=\"language-rust\""));
-        assert!(html.contains("&lt;hi&gt;"), "代码块内容转义");
+        assert!(html.contains("&lt;hi&gt;"), "code-block content escaped");
         assert!(html.contains("println"));
     }
 
     #[test]
     fn markdown_escapes_before_formatting() {
-        let html = render_markdown("**<b>粗</b>** 与 `<i>x</i>`");
+        let html = render_markdown("**<b>Bold</b>** and `<i>x</i>`");
         assert!(
-            html.contains("<strong>&lt;b&gt;粗&lt;/b&gt;</strong>"),
+            html.contains("<strong>&lt;b&gt;Bold&lt;/b&gt;</strong>"),
             "{html}"
         );
         assert!(
             html.contains("<code>&lt;i&gt;x&lt;/i&gt;</code>"),
-            "行内代码内容转义"
+            "inline-code content escaped"
         );
     }
 
@@ -1039,13 +1049,16 @@ mod tests {
                 .into_iter()
                 .map(member_color)
                 .collect();
-        assert!(colors.len() >= 4, "成员色应分散：{colors:?}");
+        assert!(
+            colors.len() >= 4,
+            "member colors should spread out: {colors:?}"
+        );
     }
 
     #[test]
     fn renders_all_four_views_with_cc_style() {
         let html = render(&doc(), &rich_messages());
-        // 顶栏 + 四视图 data-view（v4.0 conv 也是 .view section）。
+        // Top bar + the four views' data-view (v4.0: conv is a .view section too).
         assert!(html.contains("class=\"topbar\"") && html.contains("class=\"brand\""));
         assert!(html.contains("class=\"session\"") && html.contains("class=\"meta-line\""));
         assert!(html.contains("class=\"tabs\""));
@@ -1055,42 +1068,42 @@ mod tests {
             "data-view=\"dm\"",
             "data-view=\"channel\"",
         ] {
-            assert!(html.contains(view), "缺视图 {view}");
+            assert!(html.contains(view), "missing view {view}");
         }
-        // 消息部件：user 气泡 / assistant markdown 流。
+        // Message parts: user bubble / assistant markdown flow.
         assert!(html.contains("class=\"msg msg-user\""));
         assert!(html.contains("class=\"bubble\""));
         assert!(html.contains("class=\"msg msg-assistant\""));
         assert!(html.contains("class=\"md\""));
         assert!(html.contains("id=\"msg-1\""));
         assert!(html.contains("<a class=\"anchor\" href=\"#msg-1\""));
-        // Team 线程列表。
+        // Team thread list.
         assert!(html.contains("class=\"thread-list\"") && html.contains("class=\"thread\""));
         assert!(html.contains("data-jump=\"#dm-scout\"") && html.contains("href=\"#dm-scout\""));
         assert!(html.contains("class=\"t-avatar\""));
         assert!(html.contains("2 msgs"));
-        // DM 聊天流。
+        // DM chat flows.
         assert!(html.contains("class=\"dm-block\"") && html.contains("class=\"dm-flow\""));
         assert!(html.contains("id=\"dm-scout\""));
-        // 频道消息流。
+        // Channel message streams.
         assert!(html.contains("class=\"ch-block\"") && html.contains("class=\"ch-flow\""));
         assert!(html.contains("class=\"ch-msg\""));
         assert!(html.contains("<h3 class=\"ch-name\">◇ #table</h3>"));
         assert!(html.contains("class=\"ch-mode free\""));
         assert!(html.contains("<span class=\"ch-seq\">#0001</span>"));
         assert!(html.contains("class=\"m-chip\""));
-        assert!(html.contains("大家好"));
+        assert!(html.contains("hello everyone"));
     }
 
     #[test]
     fn thinking_and_tool_cards_use_cc_components() {
         let html = render(&doc(), &rich_messages());
-        // thinking 折叠块。
+        // Thinking collapsible block.
         assert!(html.contains("<details class=\"think\">"));
         assert!(html.contains("<summary>Thinking</summary>"));
         assert!(html.contains("class=\"think-body\""));
-        assert!(html.contains("深入思考一下"));
-        // 工具折叠卡：t-icon + t-name + t-args + 状态徽标。
+        assert!(html.contains("think it through"));
+        // Tool collapsible cards: t-icon + t-name + t-args + status badge.
         assert!(html.contains("<details class=\"tool\" data-status=\"ok\">"));
         assert!(html.contains("<details class=\"tool\" data-status=\"err\">"));
         assert!(html.contains("<span class=\"t-icon\">"));
@@ -1102,25 +1115,25 @@ mod tests {
         assert!(html.contains("<span class=\"t-label\">input</span>"));
         assert!(html.contains("<span class=\"t-label\">result</span>"));
         assert!(html.contains("result · error"));
-        // 折叠默认收起（无 open 属性）。
+        // Collapsed by default (no open attribute).
         assert!(!html.contains("<details class=\"tool\" data-status=\"ok\" open"));
     }
 
     #[test]
     fn bash_input_full_json_preserved() {
-        // A4（v4.0 契约）：bash input pre 始终含完整 JSON（含非 command 字段）。
+        // A4 (v4.0 contract): the bash input pre always carries the full JSON (including non-command fields).
         let html = render(&doc(), &rich_messages());
         assert!(
             html.contains("&quot;background&quot;: true"),
-            "background 保留"
+            "background kept"
         );
-        assert!(html.contains("&quot;timeout&quot;: 30"), "timeout 保留");
-        assert!(html.contains("&quot;command&quot;"), "command 键保留");
+        assert!(html.contains("&quot;timeout&quot;: 30"), "timeout kept");
+        assert!(html.contains("&quot;command&quot;"), "command key kept");
         assert!(
             html.contains("ls &lt;unsafe&gt; &amp; echo"),
-            "command 值实体化呈现"
+            "command value is entity-rendered"
         );
-        assert!(!html.contains("<img src=x onerror"), "无未转义标签");
+        assert!(!html.contains("<img src=x onerror"), "no unescaped tags");
     }
 
     #[test]
@@ -1136,7 +1149,7 @@ mod tests {
         assert!(html.contains("alt=\"image (image/png)\""));
         assert!(
             !html.contains("http://") && !html.contains("https://"),
-            "仅 data: URI"
+            "data: URI only"
         );
     }
 
@@ -1144,7 +1157,7 @@ mod tests {
     fn empty_views_show_hints() {
         let html = render(&ShareDoc::new("s".into()), &[]);
         let empty_count = html.matches("— No ").count();
-        assert_eq!(empty_count, 4, "四视图空态：{html}");
+        assert_eq!(empty_count, 4, "four views in empty state: {html}");
         assert!(html.contains("class=\"view-empty\""));
     }
 
@@ -1153,20 +1166,23 @@ mod tests {
         let html = render(&doc(), &rich_messages());
         assert!(
             !html.contains("http://") && !html.contains("https://"),
-            "无外链"
+            "no external links"
         );
-        assert!(!html.contains("<link"), "无外部样式表");
+        assert!(!html.contains("<link"), "no external stylesheet");
         assert!(
             !html.contains("src=\""),
-            "无外部脚本/图片（data: URI 除外）"
+            "no external scripts/images (data: URIs aside)"
         );
-        assert!(!html.contains("@import"), "无 CSS import");
-        assert!(!html.contains("<iframe"), "无 iframe");
+        assert!(!html.contains("@import"), "no CSS import");
+        assert!(!html.contains("<iframe"), "no iframe");
         assert!(html.contains("@media print"));
         assert!(html.contains("prefers-reduced-motion"));
         assert!(html.contains("lang=\"en\""));
         assert!(html.contains("<noscript>"));
-        assert!(html.contains("addCopyButtons"), "复制按钮创建逻辑存在");
+        assert!(
+            html.contains("addCopyButtons"),
+            "copy-button creation logic exists"
+        );
     }
 
     #[test]

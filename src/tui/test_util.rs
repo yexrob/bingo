@@ -47,6 +47,7 @@ pub fn test_session() -> Arc<Session> {
         agents: crate::agents::AgentRegistry::new(),
         channels: crate::channels::ChannelRegistry::new(Default::default()),
         instance: None,
+        attachments: crate::api::image::Attachments::new(),
     })
 }
 
@@ -154,8 +155,14 @@ impl Recorder {
             };
             fg_ok && bg_ok
         });
-        assert!(styled, "row {y} 无匹配样式 fg={fg:?} bg={bg:?}：{row:?}");
-        assert!(row.contains(contains), "row {y} 不含 {contains:?}：{row:?}");
+        assert!(
+            styled,
+            "row {y} has no matching style fg={fg:?} bg={bg:?}: {row:?}"
+        );
+        assert!(
+            row.contains(contains),
+            "row {y} does not contain {contains:?}: {row:?}"
+        );
     }
 
     /// Viewport row lookup (B-area "scrolled into the visible region"
@@ -335,101 +342,101 @@ pub fn error_fixtures() -> Vec<ErrorFixture> {
         // FX-01 short-sync read timeout → page level
         ErrorFixture {
             code: "TIMEOUT",
-            msg: "请求超时，可重试",
+            msg: "request timed out; retry",
             context: ShortSync,
             level: Page,
-            action: "重试",
+            action: "retry",
             expect_style: ERR,
         },
         // FX-02 server error → page level
         ErrorFixture {
             code: "SERVER_ERROR",
-            msg: "服务端错误，稍后重试",
+            msg: "server error; retry later",
             context: ShortSync,
             level: Page,
-            action: "稍后重试",
+            action: "retry later",
             expect_style: ERR,
         },
         // FX-03 no network → page level
         ErrorFixture {
             code: "OFFLINE",
-            msg: "无网络连接，请检查网络后重试",
+            msg: "no network connection; check the network and retry",
             context: ShortSync,
             level: Page,
-            action: "检查网络后重试",
+            action: "check the network and retry",
             expect_style: ERR,
         },
         // FX-04 login expired / missing key → full-flow level
         ErrorFixture {
             code: "AUTH_REQUIRED",
-            msg: "登录已过期或缺少 API key，请重新登录或配置 key",
+            msg: "login expired or API key missing; sign in again or configure a key",
             context: ShortSync,
             level: Full,
-            action: "重新登录",
+            action: "sign in again",
             expect_style: ERR,
         },
         // FX-05 no permission → full-flow level
         ErrorFixture {
             code: "PERMISSION_DENIED",
-            msg: "无权限执行此操作，请返回或申请权限",
+            msg: "no permission for this action; go back or request permission",
             context: ShortSync,
             level: Full,
-            action: "返回/申请权限",
+            action: "go back / request permission",
             expect_style: ERR,
         },
         // FX-06 config validation failed → field level (marks only the error object)
         ErrorFixture {
             code: "CONFIG_INVALID",
-            msg: "配置校验失败，请修正配置",
+            msg: "config validation failed; fix the config",
             context: ShortSync,
             level: Field,
-            action: "修正配置",
+            action: "fix the config",
             expect_style: ERR,
         },
         // FX-07 rate limited / 429 → page level
         ErrorFixture {
             code: "RATE_LIMITED",
-            msg: "请求过于频繁，请稍后重试",
+            msg: "too many requests; retry later",
             context: ShortSync,
             level: Page,
-            action: "稍后重试",
+            action: "retry later",
             expect_style: ERR,
         },
         // FX-08 tool execution failed → page level
         ErrorFixture {
             code: "TOOL_FAILED",
-            msg: "工具执行失败，请查看输出后重试",
+            msg: "tool execution failed; check the output and retry",
             context: ShortSync,
             level: Page,
-            action: "查看输出后重试",
+            action: "check the output and retry",
             expect_style: ERR,
         },
         // FX-09 hook execution failed → page level
         ErrorFixture {
             code: "HOOK_FAILED",
-            msg: "hook 执行失败，请检查 hook 配置",
+            msg: "hook execution failed; check the hook config",
             context: ShortSync,
             level: Page,
-            action: "检查 hook 配置",
+            action: "check the hook config",
             expect_style: ERR,
         },
         // FX-10 local storage failed → page level
         ErrorFixture {
             code: "STORAGE_ERROR",
-            msg: "本地存储失败，请检查磁盘或权限",
+            msg: "local storage failed; check the disk or permissions",
             context: ShortSync,
             level: Page,
-            action: "检查磁盘/权限",
+            action: "check the disk / permissions",
             expect_style: ERR,
         },
         // FX-11 long-turn transport timeout → full-flow level (AC-53, shares
         // the TIMEOUT code with FX-01, level told apart by context)
         ErrorFixture {
             code: "TIMEOUT",
-            msg: "长回合中断，可重试或返回",
+            msg: "long turn interrupted; retry or go back",
             context: LongTurn,
             level: Full,
-            action: "可重试或返回",
+            action: "retry or go back",
             expect_style: ERR,
         },
     ]
@@ -495,10 +502,13 @@ mod tests {
             "TIMEOUT",
             "TOOL_FAILED",
         ];
-        assert_eq!(codes, expect, "fixture 覆盖 §4.4 全部 10 个可注入稳定码");
+        assert_eq!(
+            codes, expect,
+            "the fixture covers all 10 injectable stable codes in §4.4"
+        );
         assert!(
             !fxs.iter().any(|f| f.code == "GENERIC"),
-            "GENERIC 不进 fixture（无实际返回点）"
+            "GENERIC stays out of the fixture (it has no real return site)"
         );
         for f in &fxs {
             assert!(
@@ -510,7 +520,7 @@ mod tests {
                     && f.code
                         .chars()
                         .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
-                "fixture 码必须 SCREAMING_SNAKE：{:?}",
+                "fixture codes must be SCREAMING_SNAKE: {:?}",
                 f.code
             );
         }
@@ -524,12 +534,12 @@ mod tests {
         assert_eq!(
             short.map(|f| f.level),
             Some(ErrorLevel::Page),
-            "短同步 TIMEOUT = 页面级"
+            "short-sync TIMEOUT = page level"
         );
         assert_eq!(
             long.map(|f| f.level),
             Some(ErrorLevel::Full),
-            "长回合 TIMEOUT = 全流程级"
+            "long-turn TIMEOUT = full-flow level"
         );
     }
 

@@ -19,8 +19,8 @@ Rust 实现的本地 agent CLI（agent harness）。在终端里驱动大模型�
   拉起（成员零 token 待命），`/team` 命令族管理；跨会话记忆按「项目路径 +
   分支」隔离。
 - **经验库（Experience）**：agent 按项目沉淀可复用的操作经验
-  （trigger/summary/steps/verify），跨会话复利，Propose/Commit/Query/Forget
-  工具维护。
+  （trigger/summary/steps/verify），跨会话复利，并记录经验证的 helpful/harmful
+  结果，但不会自行晋升或降级。
 - **TUI**：ratatui 双模式（默认 fullscreen 备用屏 canvas，`--inline` 将已完成
   内容保留在终端 scrollback 并启用 kitty graphics 图片渲染），历史反向搜索，
   slash 命令菜单。
@@ -137,7 +137,7 @@ bingo --continue            # 恢复最近一次会话
 | `Ctrl+C` | busy 中断 / 有文本清空 / 空输入连按两次退出 |
 | `Ctrl+T` | 显隐任务区 |
 | `Ctrl+O` | 展开/闭合切换：展开 = 重放完整 transcript 供上滑翻看 |
-| `Ctrl+G` | agent / 频道选择器（agent 视图看实例完整对话，频道视图微信式群聊房间） |
+| `Ctrl+G` | agent / 频道选择器 → Slack 式工作区（整屏一栏消息流 + 输入框；Ctrl+K 换会话、alt+↑↓ 上下会话） |
 | `Ctrl+L` | 清屏重画 |
 | `Shift+Tab` | 循环权限模式（default → acceptEdits → plan） |
 | `Alt+T` | 思考开关 |
@@ -235,8 +235,9 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `WebFetch` / `WebSearch` | 网页抓取与搜索（共享 HTTP 连接池；预批准域名自动放行） |
 | `Agent` | 派生命名子代理（异步执行，完成通知注入上下文；`background:false` 可同步等待） |
 | `SendMessage` / `AgentControl` | 子代理续话与生命周期管理（仅主会话装配） |
+| `Team` | 项目编队（仅主会话装配）：`status`/`validate` 只读免询问，`start`/`stop`/`save` 在任何权限模式下都要用户当面确认 |
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | 任务追踪（磁盘存储，TUI 任务区同源，含生命周期 hook） |
-| `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceForget` | 跨会话经验库（见下） |
+| `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceOutcome`/`ExperienceForget` | 跨会话经验库（见下） |
 | `AskUserQuestion` | 向用户提选择题（TUI 复用权限询问模态） |
 | `Skill` | 技能调用（见下） |
 | `mcp__<server>__<tool>` | MCP 接入的工具（见下） |
@@ -263,7 +264,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 房间复用频道机制、控制面仍是 hub-and-spoke。
 
 - **定义**：`.bingo/team.json`（camelCase，进版本库）——`name` + `channel{mode,
-  messageLimit}` + `members[{name, agent}]`；成员引用 AgentDef，人格单一事实来源
+  messageLimit}` + `members[{name, agent, avatar?}]`；`name` 即消息上显示的名字（取人名而非角色代号），`avatar` 钉住内置头像之一；成员引用 AgentDef，人格单一事实来源
   仍在 `.bingo/agents/<名>.md`，一人格可入多 team。
 - **启动自动拉起**：`settings.team.autoStart`（缺省 true）时启动即拉起——派生
   成员 + 建房间，但**不唤醒**（成员 Idle 零 token 待命，等 `/team assign` 或
@@ -276,6 +277,12 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 - **跨会话记忆**：成员历史 + append-only 决策记录存
   `~/.config/bingo/teams/<项目哈希>/<分支>/<team>/`——按「项目路径 + 分支」隔离，
   main 与特性 worktree 记忆互不污染；拉起时自动恢复、不唤醒。
+- **`Team` 工具**（仅主会话）把同一套能力给模型：`status`（图纸 + 成员运行态 +
+  可用定义清单）、`validate`、`start`、`stop`、`save`（写图纸，整份覆写，须给完整名单）。
+  读免询问；**任何变更都由用户当面确认**——询问在所有权限模式下都出现（含
+  `bypassPermissions`），`allow` 规则也不能预授权，只有 `deny` 压得住。确认行给的是
+  变化而非文件（`改写 .bingo/team.json · dev-room · 4 名成员（-ui +qa）`）；用
+  Write/Edit 手改 `.bingo/team.json` 问同一个问题。派活不在工具里，用 `SendMessage`。
 
 ## 频道（实验特性）
 
@@ -286,8 +293,22 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 - `serial` 频道落后发言被弹回并附新增消息（agent 阅读后自行改口，报数式顺序
   由此涌现）；`free` 频道允许交叉。
 - 超限自动冻结频道并通知主 agent（`channelMessageLimit`/`agentMessageLimit` 预算闸）。
-- 频道在 transcript 显示为 `◇ #名字` 行；Ctrl+G 可打开全屏群聊房间直接以
+- 频道在 transcript 显示为 `◇ #名字` 行；Ctrl+G 打开全屏工作区，直接以
   user 身份发言。
+
+## 工作区视图（Ctrl+G）
+
+整屏只有一栏会话：顶部一行标题（频道或实例名，右端是队名）、消息流、输入框。
+没有 rail、没有侧栏，也不画任何自己的底色——透出的是终端本身的背景。换会话靠
+**Ctrl+K**（快速跳转，列出全部会话及未读数）与 **alt+↑↓**；Tab 在消息区与输入框
+之间切换，Esc 返回。
+
+**头像**：能放置 kitty 图片的终端（与内联图片同一能力：Ghostty/kitty，以及开了
+passthrough 的 tmux）为每位发言者分配八张内置
+[动漫风格头像](assets/avatars/)之一，名字左侧 4×2 格——每张图只传输一次，靠
+Unicode 占位符格子定位。team 成员的头像钉在 `.bingo/team.json`（`"avatar": "sora"`），
+一支队伍就有固定班底；其余实例按名字取脸。不支持的终端保留首字母色块；两种皮肤行数一致，只有装订线
+不同。
 
 ## 技能（Skills）
 
@@ -307,13 +328,18 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 - **存储**：`~/.config/bingo/experience/<项目键>/entries/<id>.md`
   （user 全局，绝不触碰项目工作区）；按项目隔离。
 - **条目结构**：`trigger`（关键词）、`summary`、`steps`、`verify`、`evidence`
-  （来源）——frontmatter + 自由正文。
+  （来源），以及显式 helpful/harmful 结果计数和用 SHA-256 绑定证据的仅追加结果历史——
+  frontmatter + 自由正文。
 - **工具**：
   - `ExperiencePropose`——生成带稳定 id 的候选条目；不写盘。
   - `ExperienceCommit`——持久化条目（过权限门）；相同内容映射同一 id，重复提交
     是更新而非重复；`status: stale` 标记失效后不再注入新会话但仍可查询。
   - `ExperienceQuery`——按任一 trigger 关键词子串匹配（不区分大小写）；
-    active 排在 stale/degraded 之前，再按命中次数。
+    active 排在 stale/degraded 之前，再按显式观察结果排序，旧的重复提交计数作为
+    最后的兼容信号；结果暴露 outcome 计数和历史。
+  - `ExperienceOutcome`——真正采用查询到的经验后，经权限确认记录 `helpful` 或
+    `harmful` 与具体证据；它仅追加历史，不会自动改变生命周期 `status` 或
+    `verified_at`。
   - `ExperienceForget`——删除条目。
 - **状态生命周期**：`active` → `degraded` → `stale`；active 条目注入新会话，
   stale 仅可查询。
@@ -450,8 +476,9 @@ src/
   tool/agent.rs    Agent / SendMessage / AgentControl 实现
   team.rs          team 解析/校验/拉起编排 + team 记忆（D31）
   team_cmd.rs      /team 命令族
+  tool/team.rs     Team 工具（模型侧，变更须用户确认，D46）
   experience.rs    跨会话经验库
-  tool/experience.rs  ExperiencePropose/Commit/Query/Forget 工具
+  tool/experience.rs  ExperiencePropose/Commit/Query/Outcome/Forget 工具
   channels.rs      频道注册表（实验特性）
   tasks.rs         任务存储（Task 工具族）
   skills.rs        技能加载 / frontmatter / 参数替换

@@ -96,7 +96,7 @@ pub fn build_provider(
     match protocol.unwrap_or("anthropic") {
         "anthropic" => {
             let Some(api_key) = api_key else {
-                return Err("anthropic provider 缺少 apiKey".into());
+                return Err("anthropic provider is missing apiKey".into());
             };
             let base_url = if base_url.is_empty() {
                 anthropic::API_BASE.to_string()
@@ -135,7 +135,7 @@ pub fn build_provider(
                     None if stored_key => (AuthSource::StoredKey(StoredKey::new(home, name)), None),
                     None => {
                         return Err(
-                            "provider 缺少 apiKey 或 oauth 配置（/provider login 或补 apiKey）"
+                            "provider is missing apiKey or oauth config (run /provider login or add an apiKey)"
                                 .into(),
                         );
                     }
@@ -159,7 +159,7 @@ pub fn build_provider(
             })
         }
         other => Err(format!(
-            "未知 protocol \"{other}\"（可用：anthropic / openai）"
+            "unknown protocol \"{other}\" (available: anthropic / openai)"
         )),
     }
 }
@@ -173,7 +173,7 @@ fn build_oauth(name: &str, cfg: &OauthConfig, home: &Path) -> Result<Arc<TokenPr
             name,
             OauthFlowConfig::codex(),
         ))),
-        other => Err(format!("未知 oauth.kind \"{other}\"（可用：codex）")),
+        other => Err(format!("unknown oauth.kind \"{other}\" (available: codex)")),
     }
 }
 

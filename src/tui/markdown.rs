@@ -162,30 +162,29 @@ fn image_paragraph(block: &Block) -> Option<&str> {
 /// carries the url).
 fn failed_image_lines(theme: &Theme) -> Vec<Line> {
     let mut line = Line::empty();
-    line.push_styled("#[image ✗ 加载失败]", theme.dim());
+    line.push_styled("#[image ✗ load failed]", theme.dim());
     vec![line]
 }
 
-/// Image block → `rows` lines: the first line holds the placeholder text
-/// (shows `#[image]` during the canvas phase) and every line carries an
-/// [`ImageRef`] (on flush, the first line emits the kitty sequence and
-/// continuation lines are skipped).
+/// Image block → `rows` lines, each carrying an [`ImageRef`] with its row
+/// index. The render layer turns every row into kitty Unicode placeholder
+/// cells; the `#[image]` text on the first row is the fallback shown by
+/// terminals without image support (where no [`ImageRef`] rows exist at all)
+/// and by width-truncated renders.
 fn image_block_lines(url: &str, meta: &ImageMeta, theme: Theme) -> Vec<Line> {
-    let img = ImageRef {
-        url: url.to_string(),
-        cols: meta.cols,
-        rows: meta.rows,
-    };
     let mut out = Vec::with_capacity(meta.rows);
-    let mut first = Line::empty();
-    first.push_styled("#[image]", theme.dim());
-    first.image = Some(img.clone());
-    out.push(first);
-    for _ in 1..meta.rows {
-        out.push(Line {
-            segs: Vec::new(),
-            image: Some(img.clone()),
+    for row in 0..meta.rows {
+        let mut line = Line::empty();
+        if row == 0 {
+            line.push_styled("#[image]", theme.dim());
+        }
+        line.image = Some(ImageRef {
+            url: url.to_string(),
+            cols: meta.cols,
+            rows: meta.rows,
+            row,
         });
+        out.push(line);
     }
     out
 }
@@ -648,7 +647,7 @@ pub fn plain_text(inlines: &[Inline]) -> String {
     out
 }
 
-/// 行内 run 的显示宽度。
+/// Display width of an inline run.
 pub fn plain_width(inlines: &[Inline]) -> usize {
     plain_text(inlines).width()
 }
@@ -688,11 +687,11 @@ mod tests {
 
     #[test]
     fn paragraph_wraps_cjk() {
-        let lines = render_to_plain("一二三四五六七八九十", 6);
-        assert_eq!(lines[0], "一二三");
-        assert_eq!(lines[1], "四五六");
-        assert_eq!(lines[2], "七八九");
-        assert_eq!(lines[3], "十");
+        let lines = render_to_plain("ＡＢＣＤＥＦＧＨＩＪ", 6);
+        assert_eq!(lines[0], "ＡＢＣ");
+        assert_eq!(lines[1], "ＤＥＦ");
+        assert_eq!(lines[2], "ＧＨＩ");
+        assert_eq!(lines[3], "Ｊ");
     }
 
     #[test]
@@ -726,7 +725,7 @@ mod tests {
     fn truncate_adds_ellipsis() {
         assert_eq!(truncate("hello", 3), "he…");
         assert_eq!(truncate("hi", 3), "hi");
-        assert_eq!(truncate("中文", 3), "中…");
+        assert_eq!(truncate("ＡＢ", 3), "Ａ…");
     }
 
     #[test]
@@ -737,8 +736,8 @@ mod tests {
 
     #[test]
     fn image_inline_placeholder_mid_paragraph() {
-        let lines = render_to_plain("前 ![a](a.png) 后", 40);
-        assert_eq!(lines[0], "前 #[image] 后");
+        let lines = render_to_plain("front ![a](a.png) back", 40);
+        assert_eq!(lines[0], "front #[image] back");
     }
 
     #[test]
@@ -756,17 +755,27 @@ mod tests {
         let doc = processor.process_static("![alt](a.png)");
         renderer.render(&doc);
         let lines = renderer.lines().to_vec();
-        assert_eq!(lines.len(), 4, "块占 4 行");
+        assert_eq!(lines.len(), 4, "block occupies 4 rows");
         assert_eq!(lines[0].plain_text(), "#[image]");
         assert_eq!(
             lines[0].image,
             Some(ImageRef {
                 url: "a.png".into(),
                 cols: 10,
-                rows: 4
+                rows: 4,
+                row: 0
             })
         );
-        assert_eq!(lines[3].image, lines[0].image, "续行携带相同引用");
+        assert_eq!(
+            lines[3].image,
+            Some(ImageRef {
+                url: "a.png".into(),
+                cols: 10,
+                rows: 4,
+                row: 3
+            }),
+            "continuation rows carry their own row index"
+        );
         assert_eq!(lines[3].plain_text(), "");
     }
 
@@ -781,8 +790,11 @@ mod tests {
         renderer.set_images(Some(ImageCap::default_cells()), &HashMap::new(), &failed, 1);
         let doc = processor.process_static("![alt](a.png)");
         renderer.render(&doc);
-        assert_eq!(renderer.lines()[0].plain_text(), "#[image ✗ 加载失败]");
-        assert!(renderer.lines()[0].image.is_none(), "失败行不携带图片引用");
+        assert_eq!(renderer.lines()[0].plain_text(), "#[image ✗ load failed]");
+        assert!(
+            renderer.lines()[0].image.is_none(),
+            "failed rows carry no image reference"
+        );
     }
 
     #[test]
@@ -813,7 +825,10 @@ mod tests {
         );
         let doc = processor.process_static("![alt](a.png)");
         renderer.render(&doc);
-        assert!(renderer.lines()[0].image.is_none(), "未加载 → 占位行");
+        assert!(
+            renderer.lines()[0].image.is_none(),
+            "not loaded → placeholder row"
+        );
 
         let meta = Arc::new(ImageMeta {
             cols: 10,
@@ -826,7 +841,7 @@ mod tests {
         renderer.render(&doc);
         assert!(
             renderer.lines()[0].image.is_some(),
-            "版本变化后重建为图片块"
+            "rebuilt as an image block after the version changes"
         );
     }
 }

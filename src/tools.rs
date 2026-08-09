@@ -7,7 +7,8 @@ use crate::tool::ask::AskUserQuestionTool;
 use crate::tool::bash::BashTool;
 use crate::tool::edit::EditTool;
 use crate::tool::experience::{
-    ExperienceCommitTool, ExperienceForgetTool, ExperienceProposeTool, ExperienceQueryTool,
+    ExperienceCommitTool, ExperienceForgetTool, ExperienceOutcomeTool, ExperienceProposeTool,
+    ExperienceQueryTool,
 };
 use crate::tool::glob::GlobTool;
 use crate::tool::grep::GrepTool;
@@ -49,19 +50,26 @@ pub async fn assemble_tools(
         Box::new(TaskUpdateTool),
         Box::new(TaskGetTool),
         Box::new(TaskListTool),
-        Box::new(AskUserQuestionTool),
         Box::new(SkillTool::new(skills)),
         Box::new(ExperienceProposeTool),
         Box::new(ExperienceCommitTool),
         Box::new(ExperienceQueryTool),
+        Box::new(ExperienceOutcomeTool),
         Box::new(ExperienceForgetTool),
     ];
     // hub-and-spoke: continuation and lifecycle management only on the main session
     // (subagents don't manage siblings).
     let channels_on = session.settings.experimental.agent_channels;
     if session.depth == 0 {
+        // Only the session that owns the UI can question the user. A subagent's answer
+        // channel is its return value, not a modal — shipping the tool there would just
+        // buy an "unanswered" round trip.
+        tools.push(Box::new(AskUserQuestionTool));
         tools.push(Box::new(SendMessageTool::new(session.clone())));
         tools.push(Box::new(AgentControlTool::new(session.clone())));
+        // The crew is the project's, not a subagent's: a member that could restart or
+        // rewrite the team it belongs to is a loop with the user's consent in the middle.
+        tools.push(Box::new(crate::tool::team::TeamTool::new(session.clone())));
         if channels_on {
             tools.push(Box::new(crate::tool::channel::ChannelTool::new(
                 session.clone(),
@@ -80,7 +88,13 @@ pub async fn assemble_tools(
         let mgr = session.runtime.mcp.clone();
         let (tools, warnings, pending) = {
             let mut guard = mgr.lock().await;
-            let warnings = guard.drain_unreported_failures();
+            // The manager is shared with subagents, whose on_warning is a no-op: draining
+            // there would consume the failure report and the user would never see it.
+            let warnings = if session.depth == 0 {
+                guard.drain_unreported_failures()
+            } else {
+                Vec::new()
+            };
             let pending = guard.needs_connect();
             guard.mark_connecting(&pending);
             let tools = guard.tools();
@@ -140,7 +154,21 @@ mod tests {
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
             instance: None,
+            attachments: crate::api::image::Attachments::new(),
         })
+    }
+
+    #[tokio::test]
+    async fn assembles_experience_outcome_exactly_once() {
+        let mut warn = |_: String| {};
+        let tools = assemble_tools(&session_at_depth(0), &mut warn).await;
+        assert_eq!(
+            tools
+                .iter()
+                .filter(|tool| tool.name() == "ExperienceOutcome")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -166,7 +194,13 @@ mod tests {
             .iter()
             .map(|t| t.name())
             .collect();
-        for expected in ["Agent", "SendMessage", "AgentControl"] {
+        for expected in [
+            "Agent",
+            "SendMessage",
+            "AgentControl",
+            "AskUserQuestion",
+            "Team",
+        ] {
             assert!(
                 hub.iter().any(|n| n == expected),
                 "missing {expected}: {hub:?}"
@@ -177,11 +211,15 @@ mod tests {
             .iter()
             .map(|t| t.name())
             .collect();
-        assert!(sub.iter().any(|n| n == "Agent"), "子代理仍可派生");
-        for absent in ["SendMessage", "AgentControl"] {
+        assert!(
+            sub.iter().any(|n| n == "Agent"),
+            "subagents can still be spawned"
+        );
+        // AskUserQuestion needs a prompt surface: only the session that owns the UI has one.
+        for absent in ["SendMessage", "AgentControl", "AskUserQuestion", "Team"] {
             assert!(
                 !sub.iter().any(|n| n == absent),
-                "{absent} 不应下发: {sub:?}"
+                "{absent} must not be handed down: {sub:?}"
             );
         }
     }
@@ -213,18 +251,21 @@ mod tests {
         let sub = names(assemble_tools(&sub_session, &mut warn).await);
         assert!(
             sub.iter().any(|n| n == "Post"),
-            "cohort 成员可发言: {sub:?}"
+            "cohort members can speak: {sub:?}"
         );
         assert!(
             !sub.iter().any(|n| n == "Channel"),
-            "频道管理仅 hub: {sub:?}"
+            "channel management is hub-only: {sub:?}"
         );
         let deep = std::sync::Arc::new(Session {
             instance: Some("d".into()),
             ..(*session_with(2, true)).clone()
         });
         let deep = names(assemble_tools(&deep, &mut warn).await);
-        assert!(!deep.iter().any(|n| n == "Post"), "深层不入频道: {deep:?}");
+        assert!(
+            !deep.iter().any(|n| n == "Post"),
+            "deep layers get no channel tools: {deep:?}"
+        );
     }
 
     /// MCP connections run in the background: the turn does not wait for
@@ -267,7 +308,10 @@ mod tests {
         };
         let first = assemble_tools(&session, &mut collect).await;
         assert!(!first.iter().any(|t| t.name().starts_with("mcp__")));
-        assert!(snapshot(&warnings).is_empty(), "失败尚未发生");
+        assert!(
+            snapshot(&warnings).is_empty(),
+            "no failure has happened yet"
+        );
 
         // Wait for the background connect failure to settle.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -281,7 +325,7 @@ mod tests {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "后台连接未在期限内完成"
+                "background connect did not finish within the deadline"
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
@@ -298,7 +342,7 @@ mod tests {
         let second = assemble_tools(&session, &mut collect).await;
         assert!(!second.iter().any(|t| t.name().starts_with("mcp__")));
         let reported = snapshot(&warnings);
-        assert_eq!(reported.len(), 1, "只报一次: {reported:?}");
+        assert_eq!(reported.len(), 1, "reported once: {reported:?}");
         assert!(reported[0].contains("files"), "{}", reported[0]);
 
         // Turn 3: no repeat.
@@ -311,7 +355,7 @@ mod tests {
             }
         };
         let third = assemble_tools(&session, &mut collect).await;
-        assert!(snapshot(&warnings).len() == 1, "不再重复");
+        assert!(snapshot(&warnings).len() == 1, "not repeated");
         assert!(!third.iter().any(|t| t.name().starts_with("mcp__")));
     }
 }

@@ -57,11 +57,12 @@ pub struct Settings {
     /// `/provider` and `/model` menu switches; restored at startup (an invalid
     /// name falls back to default with a warning).
     pub provider: Option<String>,
-    /// 默认模型（`model`）：`/model` 选择持久化于此。
-    /// 优先级 `--model` > settings（user < project < local）> 内置默认。
+    /// Default model (`model`): persisted here by /model selections.
+    /// Precedence: `--model` > settings (user < project < local) > built-in default.
     pub model: Option<String>,
     /// Whether the default provider sends image attachments to the model (`sendImages`).
-    /// Named providers use their own `supportsImages`; None = don't send.
+    /// Named providers use their own `supportsImages`. None = send: both protocols carry image
+    /// blocks, so this is an opt-out for endpoints that speak the protocol but reject them.
     #[serde(rename = "sendImages", default)]
     pub send_images: Option<bool>,
     /// Thinking level (`thinkingLevel`): off | low | medium | high | xhigh | max.
@@ -74,9 +75,9 @@ pub struct Settings {
     pub permission_mode: Option<String>,
     /// TUI theme: auto (follow terminal background) / dark / light. Default auto.
     pub theme: Option<String>,
-    /// TUI motion: auto (default) / off。`off` 或 env `BINGO_NO_MOTION=1`：
-    /// 动效（欢迎卡更新提示呼吸等）静止为基色，提示本身不消失。
-    /// 这是 bingo 第一个动效开关，同时服务「用户关停」与「测试确定性」。
+    /// TUI motion: auto (default) / off. `off` or env `BINGO_NO_MOTION=1`:
+    /// motion effects (welcome-card update hints breathing etc.) rest at the base color; the hints themselves stay.
+    /// This is bingo's first motion toggle, serving both user opt-out and test determinism.
     pub motion: Option<String>,
     /// Send cache_control (prompt caching). Off by default: non-official endpoints
     /// handle it unreliably.
@@ -112,8 +113,8 @@ pub struct Settings {
 /// Share publishing settings (`share`): used only when `bingo share --public` uploads.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct ShareSettings {
-    /// 官网上传基址（`baseUrl`，缺省 `https://bingo.ruobin.dev`）。
-    /// 上传服务公开，无需 token。
+    /// Official upload base URL (`baseUrl`; defaults to `https://bingo.ruobin.dev`).
+    /// The upload service is public; no token needed.
     #[serde(rename = "baseUrl", default)]
     pub base_url: Option<String>,
 }
@@ -167,7 +168,7 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub oauth: Option<OauthConfig>,
     /// Whether this provider's model accepts image content (`supportsImages`;
-    /// None/default = don't send images).
+    /// None/default = send — set false to opt an endpoint out).
     #[serde(rename = "supportsImages", default)]
     pub supports_images: Option<bool>,
 }
@@ -568,9 +569,12 @@ mod tests {
             std::fs::read_to_string(&user_file)
                 .unwrap()
                 .contains("dark"),
-            "user 层承接未定义键"
+            "user layer carries undefined keys"
         );
-        assert!(!project.join(".bingo").exists(), "不凭空创建项目层");
+        assert!(
+            !project.join(".bingo").exists(),
+            "must not create a project layer out of thin air"
+        );
 
         // Project defines model → the pair splits: model updates in project,
         // provider (undefined) goes to user.
@@ -585,7 +589,7 @@ mod tests {
         assert!(proj_raw.contains("\"model\": \"new\""), "{proj_raw}");
         assert!(
             !proj_raw.contains("provider"),
-            "未定义键不进项目层: {proj_raw}"
+            "undefined keys must not reach the project layer: {proj_raw}"
         );
         let user_raw = std::fs::read_to_string(&user_file).unwrap();
         assert!(user_raw.contains("\"provider\": \"p\""), "{user_raw}");
@@ -616,7 +620,7 @@ mod tests {
         assert_eq!(
             merged.disabled_mcp_servers,
             vec!["keep".to_string()],
-            "跨层清除后合并结果不再复活"
+            "clearing across layers must not resurrect the merged result"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -668,11 +672,11 @@ mod tests {
         merge(&mut merged, layer.clone());
         assert_eq!(
             merged, layer,
-            "merge 漏拷字段（新加字段需同步扩展本 fixture）"
+            "merge drops a field (new fields must extend this fixture in sync)"
         );
 
-        // KNOWN_KEYS 与结构体同步：fixture 的每个键都必须被识别，
-        // 反向 KNOWN_KEYS 里没有 fixture 外的臆造键。
+        // KNOWN_KEYS stays in sync with the struct: every fixture key must be recognized,
+        // and conversely KNOWN_KEYS must not contain invented keys outside the fixture.
         let value: serde_json::Value = serde_json::from_str(full).unwrap();
         let fixture_keys: Vec<&str> = value
             .as_object()
@@ -681,10 +685,13 @@ mod tests {
             .map(String::as_str)
             .collect();
         for key in &fixture_keys {
-            assert!(KNOWN_KEYS.contains(key), "KNOWN_KEYS 缺 {key}");
+            assert!(KNOWN_KEYS.contains(key), "KNOWN_KEYS is missing {key}");
         }
         for key in KNOWN_KEYS {
-            assert!(fixture_keys.contains(key), "KNOWN_KEYS 有多余键 {key}");
+            assert!(
+                fixture_keys.contains(key),
+                "KNOWN_KEYS has an extra key {key}"
+            );
         }
     }
 
@@ -745,7 +752,7 @@ mod tests {
         assert_eq!(
             settings.cache_control,
             Some(true),
-            "user 层 cacheControl 生效"
+            "user-layer cacheControl takes effect"
         );
 
         // Project layer overrides user layer.
@@ -820,7 +827,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("bingo-settings-{}-model", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
-        assert_eq!(settings.model, None, "缺省不配置模型");
+        assert_eq!(settings.model, None, "no model configured by default");
 
         write(
             &tmp,
@@ -832,7 +839,7 @@ mod tests {
         assert_eq!(
             settings.model.as_deref(),
             Some("claude-opus-5"),
-            "project 覆盖 user"
+            "project overrides user"
         );
 
         write(&tmp, ".bingo/local.json", r#"{"model":"deepseek-v4"}"#);
@@ -840,20 +847,20 @@ mod tests {
         assert_eq!(
             settings.model.as_deref(),
             Some("deepseek-v4"),
-            "local 覆盖 project"
+            "local overrides project"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// provider 逐层合并：后层胜出，缺省 None（运行时回落 "default"）。
+    /// Provider merged per layer: later layers win; the default is None (runtime falls back to "default").
     #[test]
     fn merges_provider() {
         let tmp =
             std::env::temp_dir().join(format!("bingo-settings-{}-provsel", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
-        assert_eq!(settings.provider, None, "缺省不配置 provider");
+        assert_eq!(settings.provider, None, "no provider configured by default");
 
         write(
             &tmp,
@@ -865,7 +872,7 @@ mod tests {
         assert_eq!(
             settings.provider.as_deref(),
             Some("local"),
-            "project 覆盖 user"
+            "project overrides user"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -885,7 +892,7 @@ mod tests {
         let settings: Settings = serde_json::from_str(json).unwrap();
         let codex = settings.providers.get("codex").unwrap();
         assert_eq!(codex.protocol.as_deref(), Some("openai"));
-        assert_eq!(codex.api_base_url, "", "apiBaseUrl 可缺省");
+        assert_eq!(codex.api_base_url, "", "apiBaseUrl may be omitted");
         assert_eq!(codex.supports_images, Some(true));
         assert_eq!(codex.api_key.as_deref(), Some("sk-oa"));
         // v1 config without protocol keeps parsing (anthropic default).
@@ -894,8 +901,8 @@ mod tests {
         assert_eq!(road.api_base_url, "https://sub2apis.ruobin.dev/");
     }
 
-    /// ① 无 apiKey + oauth 配置解析成功（main 实测 bug 回归，D33 §5）：
-    /// `apiKey` 可缺省，OAuth provider 不带静态 key。
+    /// An apiKey-less oauth config parses successfully (main-verified bug regression, D33 §5):
+    /// `apiKey` may be omitted; OAuth providers carry no static key.
     #[test]
     fn parses_oauth_provider_without_api_key() {
         let json = r#"{
@@ -905,12 +912,12 @@ mod tests {
         }"#;
         let settings: Settings = serde_json::from_str(json).unwrap();
         let codex = settings.providers.get("codex").unwrap();
-        assert_eq!(codex.api_key, None, "无 apiKey 解析成功");
+        assert_eq!(codex.api_key, None, "no apiKey parses successfully");
         assert_eq!(codex.oauth.as_ref().map(|o| o.kind.as_str()), Some("codex"));
         assert_eq!(codex.protocol.as_deref(), Some("openai"));
     }
 
-    /// ④ 存量配置零迁移：v1 必填 apiKey 的 provider 原样解析。
+    /// 4) Existing configs need zero migration: v1 providers that required apiKey parse as-is.
     #[test]
     fn parses_v1_provider_unchanged() {
         let json = r#"{
@@ -922,7 +929,7 @@ mod tests {
         let ds = settings.providers.get("deepseek").unwrap();
         assert_eq!(ds.api_key.as_deref(), Some("sk-ds"));
         assert_eq!(ds.api_base_url, "https://api.deepseek.com");
-        assert_eq!(ds.protocol, None, "缺省 anthropic");
+        assert_eq!(ds.protocol, None, "defaults to anthropic");
         assert_eq!(ds.oauth, None);
     }
 
@@ -951,9 +958,12 @@ mod tests {
         assert_eq!(
             crate::error::map_error(&err),
             "CONFIG_INVALID",
-            "未知 protocol 应落配置错误"
+            "unknown protocol should land on a config error"
         );
-        assert!(err.to_string().contains("chatgpt"), "错误文案应点名非法值");
+        assert!(
+            err.to_string().contains("chatgpt"),
+            "the error text should name the invalid value"
+        );
     }
 
     #[test]
@@ -975,7 +985,11 @@ mod tests {
         write(&tmp, ".bingo/settings.json", r#"{"permissionMode":"plan"}"#);
         write(&tmp, ".bingo/local.json", r#"{"team":{"autoStart":false}}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
-        assert_eq!(settings.team.auto_start, Some(false), "local 覆盖 user");
+        assert_eq!(
+            settings.team.auto_start,
+            Some(false),
+            "local overrides user"
+        );
         // Unknown fields (older versions without a team section) must be ignored, not
         // error: clear local's override and re-check.
         write(&tmp, ".bingo/local.json", r#"{"permissionMode":"plan"}"#);
@@ -985,7 +999,11 @@ mod tests {
             r#"{"team":{"autoStart":true,"futureField":1}}"#,
         );
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
-        assert_eq!(settings.team.auto_start, Some(true), "未知字段忽略");
+        assert_eq!(
+            settings.team.auto_start,
+            Some(true),
+            "unknown fields are ignored"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1015,7 +1033,7 @@ mod tests {
         assert_eq!(
             settings.thinking_level.as_deref(),
             Some("high"),
-            "project 覆盖 user"
+            "project overrides user"
         );
         assert!(settings.providers.contains_key("deepseek"));
         assert!(settings.providers.contains_key("custom"));
@@ -1037,13 +1055,13 @@ mod tests {
         assert_eq!(settings.providers["road"].supports_images, Some(true));
         assert_eq!(
             settings.providers["ds"].supports_images, None,
-            "缺省不发图片"
+            "no images sent by default"
         );
 
         // Cross-layer override: project-layer sendImages overrides user layer (later wins).
         write(&tmp, "user/bingo/settings.json", r#"{"sendImages":false}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
-        assert_eq!(settings.send_images, Some(true), "project 覆盖 user");
+        assert_eq!(settings.send_images, Some(true), "project overrides user");
         // Only the user layer present: its value takes effect.
         write(&tmp, ".bingo/settings.json", r#"{"model":"m"}"#);
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();

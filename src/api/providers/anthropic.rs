@@ -188,7 +188,7 @@ fn wire_thinking(level: Option<ThinkingLevel>) -> Option<serde_json::Value> {
     level.map(|_| serde_json::json!({ "type": "adaptive" }))
 }
 
-/// Thinking level → request `output_config` parameter (`{"effort": <level>}`)。
+/// Thinking level → request `output_config` parameter (`{"effort": <level>}`).
 ///
 /// Same gating as [`wire_thinking`]: None sends no parameter; the level is
 /// the effort level (a GA parameter of the Claude 5 family — below `high`
@@ -776,7 +776,7 @@ mod tests {
         let res = handle.await.unwrap();
         assert!(
             matches!(res, Err(ClientError::Timeout)),
-            "读超时应落 TIMEOUT"
+            "read timeout should land on TIMEOUT"
         );
     }
 
@@ -806,13 +806,13 @@ mod tests {
         // AC-14: a write does not fire before 14s (the read tier's 10s
         // already passed and must not trip the write tier).
         tokio::time::advance(Duration::from_secs(14)).await;
-        assert!(!handle.is_finished(), "写操作 14s 前不应超时");
+        assert!(!handle.is_finished(), "write must not time out before 14s");
         // At 16s the write tier fires.
         tokio::time::advance(Duration::from_secs(2)).await;
         let res = handle.await.unwrap();
         assert!(
             matches!(res, Err(ClientError::Timeout)),
-            "写超时应落 TIMEOUT"
+            "write timeout should land on TIMEOUT"
         );
     }
 
@@ -870,7 +870,7 @@ mod tests {
         assert_eq!(
             next_with_idle(&mut live, idle).await.unwrap(),
             None,
-            "流结束返回 None 而不是超时"
+            "stream end returns None instead of timing out"
         );
     }
 
@@ -893,14 +893,18 @@ mod tests {
             );
             assert!(
                 param.get("budget_tokens").is_none(),
-                "{level:?} 不得带 budget"
+                "{level:?} must not carry budget"
             );
         }
     }
 
     #[test]
     fn wire_thinking_omitted_when_off_or_unset() {
-        assert_eq!(wire_thinking(None), None, "未配置不发参数");
+        assert_eq!(
+            wire_thinking(None),
+            None,
+            "unset thinking must not emit a parameter"
+        );
     }
 
     /// Levels map to effort levels; None suppresses both.
@@ -925,10 +929,13 @@ mod tests {
             thinking: None,
         };
         let json = serde_json::to_value(WireRequest::from_neutral(&req)).unwrap();
-        assert!(json.get("thinking").is_none(), "无 thinking 不序列化");
+        assert!(
+            json.get("thinking").is_none(),
+            "no thinking must not be serialized"
+        );
         assert!(
             json.get("output_config").is_none(),
-            "无 output_config 不序列化"
+            "no output_config must not be serialized"
         );
         req.thinking = Some(ThinkingLevel::Xhigh);
         let json = serde_json::to_value(WireRequest::from_neutral(&req)).unwrap();

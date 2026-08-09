@@ -60,7 +60,7 @@ pub struct Client {
     /// stored under the reserved key "default").
     providers: HashMap<String, (Arc<dyn ProviderClient>, EndpointInfo)>,
     /// Names coming from the built-in preset registry (D34): the /provider
-    /// listing shows them with a 内置 badge.
+    /// listing shows them with a built-in badge.
     preset_names: Vec<String>,
 }
 
@@ -188,7 +188,10 @@ impl Client {
                 protocol,
                 cfg.api_key.clone(),
                 base_url.clone(),
-                cfg.supports_images.unwrap_or(false),
+                // Both protocols define image content blocks: the capability is the
+                // baseline, and `supportsImages: false` is the opt-out for an endpoint that
+                // speaks the protocol but rejects them (some compat proxies).
+                cfg.supports_images.unwrap_or(true),
                 cfg.oauth.as_ref(),
                 home,
                 None,
@@ -213,16 +216,16 @@ impl Client {
                 ),
             );
         }
-        // default 端点也入 providers 表（key "default"）：set_provider /
-        // with_provider("default") 走通（含「切回 default」），/model 二级
-        // 对 default 拉列表用顶层端点、标签与内容一致（P0-C）。default 为
-        // 保留名：顶层配置优先（后插入覆盖用户同名的 providers 定义）。
+        // The default endpoint also enters the providers table (key "default"): set_provider /
+        // with_provider("default") works (including switching back to default); the /model
+        // secondary list uses the top-level endpoint for default; label and content match (P0-C). default is a
+        // reserved name: the top-level config wins (later inserts override a same-named user providers entry).
         let default_adapter = match &api_key {
             Some(key) => providers::anthropic(
                 http.clone(),
                 key.clone(),
                 base_url.clone(),
-                settings.send_images.unwrap_or(false),
+                settings.send_images.unwrap_or(true),
             ),
             None => providers::unconfigured(),
         };
@@ -283,6 +286,23 @@ impl Client {
             .map(|(_, info)| (info.api_key.clone(), info.base_url.clone()))
     }
 
+    /// Named providers whose endpoint accepts image blocks. A text-only session can still put an
+    /// attachment in front of a model by forking a subagent onto one of these, so the list is
+    /// what makes that route discoverable instead of guessable. "default" is excluded: as a
+    /// sub-agent argument it means "share the parent endpoint", which is the one that can't.
+    pub fn image_capable_providers(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .providers
+            .iter()
+            .filter(|(name, (adapter, _))| {
+                name.as_str() != "default" && adapter.capabilities().supports_images
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Wire protocol label of a named provider ("anthropic"/"openai";
     /// the /provider listing). Unknown names return None.
     pub fn provider_protocol(&self, name: &str) -> Option<String> {
@@ -291,7 +311,7 @@ impl Client {
             .map(|(_, info)| info.protocol.clone())
     }
 
-    /// 当前生效的 provider 端点（key/url 引用）。
+    /// The currently active provider endpoint (key/url reference).
     pub fn current_endpoint(&self) -> (Option<String>, String) {
         let current = self.endpoint.read().unwrap_or_else(|p| p.into_inner());
         (current.1.api_key.clone(), current.1.base_url.clone())
@@ -312,7 +332,9 @@ impl Client {
     /// top-level endpoint, always switchable back to).
     pub fn set_provider(&self, name: &str) -> Result<(), String> {
         let Some((adapter, info)) = self.providers.get(name).cloned() else {
-            return Err(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
+            return Err(format!(
+                "provider \"{name}\" not found (see /provider for the list)"
+            ));
         };
         *self.endpoint.write().unwrap_or_else(|p| p.into_inner()) = (adapter, info);
         Ok(())
@@ -325,7 +347,9 @@ impl Client {
     /// switches).
     pub fn with_provider(&self, name: &str) -> Result<Client, String> {
         let Some((adapter, info)) = self.providers.get(name).cloned() else {
-            return Err(format!("未找到 provider \"{name}\"（/provider 查看列表）"));
+            return Err(format!(
+                "provider \"{name}\" not found (see /provider for the list)"
+            ));
         };
         Ok(Client {
             http: self.http.clone(),
@@ -363,7 +387,7 @@ impl Client {
     }
 
     /// Whether the provider comes from the built-in preset registry (D34) —
-    /// the /provider listing shows a 内置 badge.
+    /// the /provider listing shows a built-in badge.
     pub fn is_preset(&self, name: &str) -> bool {
         self.preset_names.iter().any(|p| p == name)
     }
@@ -516,14 +540,17 @@ mod tests {
         assert_eq!(
             client.provider_names(),
             vec!["codex", "deepseek", "local", "opencode-go"],
-            "presets 与用户 provider 合并"
+            "presets and user providers are merged"
         );
 
         client.set_provider("deepseek").unwrap();
         assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-ds"));
         assert_eq!(client.current_endpoint().1, "https://api.deepseek.com");
 
-        assert!(client.set_provider("nope").is_err(), "未知 provider 报错");
+        assert!(
+            client.set_provider("nope").is_err(),
+            "unknown provider errors"
+        );
         // An unknown provider does not affect the current endpoint.
         assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-ds"));
     }
@@ -550,11 +577,11 @@ mod tests {
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
         let client = Client::from_settings_with(&settings, env).unwrap();
-        // default 不出现在命名列表（调用方显式补出）。
+        // default does not appear in the named list (callers add it explicitly).
         assert_eq!(
             client.provider_names(),
             vec!["codex", "deepseek", "opencode-go"],
-            "presets 可见"
+            "presets are visible"
         );
         assert_eq!(
             client.provider_endpoint("default"),
@@ -569,24 +596,24 @@ mod tests {
         );
         assert_eq!(client.provider_endpoint("nope"), None);
 
-        // 切到 deepseek 再切回 default：顶层端点恢复（含 supports_images）。
+        // Switch to deepseek and back to default: the top-level endpoint is restored (including supports_images).
         client.set_provider("deepseek").unwrap();
         assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-ds"));
         client.set_provider("default").unwrap();
         assert_eq!(client.current_endpoint().0.as_deref(), Some("sk-main"));
         assert_eq!(client.current_endpoint().1, "https://main.example");
 
-        // with_provider("default") fork 出顶层端点（/model 二级对 default
-        // 拉列表用，标签与内容一致）。
+        // with_provider("default") forks the top-level endpoint (the /model secondary list
+        // uses it for default; label and content match).
         let fork = client.with_provider("default").unwrap();
         assert_eq!(fork.current_endpoint().0.as_deref(), Some("sk-main"));
     }
 
-    /// ② apiKey 优先 + ③ 双缺失报 CONFIG_INVALID（main 实测 bug 回归，
-    /// D33 §5：apiKey wins over OAuth；both missing → config error）。
+    /// apiKey wins; with both missing → CONFIG_INVALID (main-verified bug regression;
+    /// D33 §5: apiKey wins over OAuth, both missing → config error).
     #[test]
     fn oauth_config_resolution() {
-        // ② 同时配置 apiKey + oauth → ApiKey 生效。
+        // 2) Both apiKey and oauth configured → ApiKey wins.
         let mut settings = crate::settings::Settings {
             api_key: Some("sk-main".into()),
             ..Default::default()
@@ -611,10 +638,10 @@ mod tests {
                 client.auth_status("codex"),
                 Some(crate::api::contract::AuthStatus::ApiKey)
             ),
-            "apiKey 优先于 oauth"
+            "apiKey wins over oauth"
         );
 
-        // ③ 无 apiKey 无 oauth → CONFIG_INVALID（启动即报）。
+        // 3) No apiKey and no oauth → CONFIG_INVALID (reported at startup).
         let mut settings = crate::settings::Settings {
             api_key: Some("sk-main".into()),
             ..Default::default()
@@ -633,11 +660,11 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(crate::error::map_error(&err), "CONFIG_INVALID");
-        assert!(err.to_string().contains("缺少 apiKey 或 oauth"), "{err}");
+        assert!(err.to_string().contains("missing apiKey or oauth"), "{err}");
     }
 
-    /// P5（D34）：空 settings 下内置 presets 可见、端点/认证正确；apiKey 型
-    /// preset（opencode-go）未配置 key 时 auth 为空串（401 引导）。
+    /// P5 (D34): with empty settings the built-in presets are visible with correct endpoints/auth; an apiKey-style
+    /// preset (opencode-go) with no key configured gets an empty auth string (leading to a 401).
     #[test]
     fn preset_visibility_zero_config() {
         let tmp = std::env::temp_dir().join(format!("bingo-preset-vis-{}", std::process::id()));
@@ -652,26 +679,26 @@ mod tests {
         assert_eq!(
             client.provider_names(),
             vec!["codex", "opencode-go"],
-            "presets 零配置可见"
+            "presets visible with zero config"
         );
         assert!(client.is_preset("codex"));
         assert!(client.is_preset("opencode-go"));
         assert!(!client.is_preset("default"));
-        // codex：preset 端点 + OAuth（未登录）。
+        // codex: preset endpoint + OAuth (not logged in).
         assert_eq!(
             client.provider_endpoint("codex").unwrap().1,
             "https://chatgpt.com/backend-api",
-            "codex preset 端点"
+            "codex preset endpoint"
         );
         assert!(
             matches!(
                 client.auth_status("codex"),
                 Some(crate::api::contract::AuthStatus::OAuth { account: None })
             ),
-            "隔离 home 下 codex preset 未登录"
+            "codex preset not logged in under an isolated home"
         );
-        // opencode-go：apiKey 型，未配置 → StoredKey（auth.json 实时读，
-        // 本会话登录立即翻到已配置）。
+        // opencode-go: apiKey-style; not configured → StoredKey (auth.json read live,
+        // logging in this session immediately flips it to configured).
         assert_eq!(
             client.provider_endpoint("opencode-go").unwrap().1,
             "https://opencode.ai/zen/go"
@@ -683,7 +710,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// P5 merge 矩阵：用户仅覆盖 apiBaseUrl → protocol/oauth/白名单回落 preset。
+    /// P5 merge matrix: the user only overrides apiBaseUrl → protocol/oauth/allowlist fall back to the preset.
     #[test]
     fn preset_field_merge_keeps_template() {
         let mut settings = crate::settings::Settings {
@@ -705,23 +732,23 @@ mod tests {
         assert_eq!(
             client.provider_endpoint("codex").unwrap().1,
             "https://custom.example",
-            "apiBaseUrl 用户覆盖"
+            "user overrides apiBaseUrl"
         );
         assert!(
             matches!(
                 client.auth_status("codex"),
                 Some(crate::api::contract::AuthStatus::OAuth { .. })
             ),
-            "oauth 回落 preset（无需重述）"
+            "oauth falls back to the preset (no need to restate)"
         );
         assert_eq!(
             client.provider_protocol("codex").as_deref(),
             Some("openai"),
-            "protocol 回落 preset"
+            "protocol falls back to the preset"
         );
     }
 
-    /// P5 零污染：presets 不写回 settings（用户配置文件保持原样）。
+    /// P5 zero pollution: presets are not written back to settings (the user config file stays untouched).
     #[test]
     fn presets_do_not_pollute_settings() {
         let settings = crate::settings::Settings {
@@ -732,12 +759,12 @@ mod tests {
             Client::from_settings_with(&settings, |_| Err(std::env::VarError::NotPresent)).unwrap();
         assert!(
             settings.providers.is_empty(),
-            "presets 是运行时概念，settings 保持用户私有"
+            "presets are a runtime concept; settings stay user-private"
         );
     }
 
-    /// supports_images：default 读顶层 sendImages；命名 provider 读各自
-    /// supportsImages；切换端点时跟随。
+    /// supports_images: default reads the top-level sendImages; named providers read their own
+    /// supportsImages; it follows the endpoint switch.
     #[test]
     fn supports_images_follows_endpoint_switch() {
         let mut settings = crate::settings::Settings {
@@ -767,11 +794,14 @@ mod tests {
         );
         let env = |_name: &str| Err(std::env::VarError::NotPresent);
         let client = Client::from_settings_with(&settings, env).unwrap();
-        assert!(client.supports_images(), "default 读顶层 sendImages");
+        assert!(
+            client.supports_images(),
+            "default reads the top-level sendImages"
+        );
 
         client.set_provider("text-only").unwrap();
-        assert!(!client.supports_images(), "显式 false 覆盖");
+        assert!(!client.supports_images(), "explicit false overrides");
         client.set_provider("vision").unwrap();
-        assert!(client.supports_images(), "supportsImages=true 生效");
+        assert!(client.supports_images(), "supportsImages=true takes effect");
     }
 }

@@ -516,7 +516,7 @@ fn fold_tail(act: &Activity) -> Option<String> {
     match &act.kind {
         ActivityKind::Thinking(t) => {
             let mut tail = if t.segments > 1 {
-                format!("· {} 段", t.segments)
+                format!("· {} segments", t.segments)
             } else {
                 format!("… +{} lines", act.content.len())
             };
@@ -681,7 +681,7 @@ mod tests {
             t.segments = 3;
         }
         let lines = render_lines(&h);
-        assert_eq!(text(&lines[0]), "✻ Thinking · 3 段");
+        assert_eq!(text(&lines[0]), "✻ Thinking · 3 segments");
         let single = thinking("understand", ThinkingState::Done);
         let lines = render_lines(&single);
         assert_eq!(text(&lines[0]), "✻ Thinking … +1 lines");
@@ -732,13 +732,17 @@ mod tests {
         assert_eq!(
             text(&lines[1]),
             "  ⎿  54 passed (ctrl+o to expand)",
-            "结果行带展开提示，快命令不显示耗时"
+            "result rows carry an expand hint; quick commands show no timing"
         );
         assert_eq!(lines.len(), 2, "collapsed: header + result");
 
         h.toggle();
         let lines = render_lines(&h);
-        assert_eq!(text(&lines[1]), "  ⎿  54 passed", "展开后不再提示");
+        assert_eq!(
+            text(&lines[1]),
+            "  ⎿  54 passed",
+            "no longer hints after expansion"
+        );
         assert!(text(&lines[2]).starts_with("     $ cargo test -p core"));
         assert!(text(&lines[3]).contains("54 passed; 0 failed"));
     }
@@ -785,7 +789,7 @@ mod tests {
         assert_eq!(lines[1].segs[0].style.fg, Some(Theme::dark().error));
     }
 
-    /// Edit/Write：`⏺ Update(path)` + `  ⎿  Updated path with N additions…`。
+    /// Edit/Write: `⏺ Update(path)` + `  ⎿  Updated path with N additions…`.
     #[test]
     fn diff_renders_update_header_and_result() {
         let diff =
@@ -841,7 +845,7 @@ mod tests {
         assert_eq!(
             text(&render_lines(&mcp)[0]),
             "◆ dokploy:application-deploy(applicationId=\"x\")",
-            "MCP 全名显示为 server:tool"
+            "MCP full names show as server:tool"
         );
         // The status colour stays on the icon: Done turns green.
         assert_eq!(
@@ -860,7 +864,7 @@ mod tests {
         assert_eq!(text(&render_lines(&skill)[0]), "✦ Skill(review doc.md)");
 
         let agent_watch = Activity::new(ActivityKind::Watch(WatchCall {
-            label: "reviewer · 整理笔记".into(),
+            label: "reviewer · organizing notes".into(),
             kind: crate::watch::WatchKind::Agent,
             status: WatchState::Running,
             detail: None,
@@ -868,19 +872,19 @@ mod tests {
         }));
         assert_eq!(
             text(&render_lines(&agent_watch)[0]),
-            "◉ reviewer · 整理笔记"
+            "◉ reviewer · organizing notes"
         );
 
         let channel_watch = Activity::new(ActivityKind::Watch(WatchCall {
             label: "#table".into(),
             kind: crate::watch::WatchKind::Channel,
             status: WatchState::Running,
-            detail: Some("3 条 · 最近 a: 报数".into()),
+            detail: Some("3 msgs · latest a: report".into()),
             duration_ms: 0,
         }));
         let lines = render_lines(&channel_watch);
         assert_eq!(text(&lines[0]), "◇ #table");
-        assert_eq!(text(&lines[1]), "  ⎿  3 条 · 最近 a: 报数");
+        assert_eq!(text(&lines[1]), "  ⎿  3 msgs · latest a: report");
     }
 
     #[test]
@@ -889,12 +893,12 @@ mod tests {
             label: "watch -n 2 ls".into(),
             kind: crate::watch::WatchKind::Command,
             status: WatchState::Done,
-            detail: Some("第 2 轮".into()),
+            detail: Some("round 2".into()),
             duration_ms: 9000,
         };
         let h = Activity::new(ActivityKind::Watch(w));
         let lines = render_lines(&h);
         assert_eq!(text(&lines[0]), "⏺ watch -n 2 ls");
-        assert_eq!(text(&lines[1]), "  ⎿  第 2 轮 · Ran in 9.0s");
+        assert_eq!(text(&lines[1]), "  ⎿  round 2 · Ran in 9.0s");
     }
 }

@@ -1,4 +1,4 @@
-# cargo 的 libgit2 不识别全局 git 的 url.*.insteadof（https→git@github.com: SSH 改写），
-# 走 HTTPS 代理时认证失败。改用 git CLI 拉取 git 依赖。
+# cargo's libgit2 does not honor global git url.*.insteadof rewrites (https→git@github.com: SSH),
+# so auth fails through an HTTPS proxy. Fetch git dependencies with the git CLI instead.
 [net]
 git-fetch-with-cli = true
