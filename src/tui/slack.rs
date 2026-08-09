@@ -26,8 +26,7 @@ use crate::tui::chat::Row;
 use crate::tui::line::{Line, SegStyle, text_width, wrap_words};
 use crate::tui::theme::Theme;
 
-/// Rail width: an icon centred in a 5-cell column, with a two-glyph label under
-/// it (Slack's icon-over-label rail).
+/// Rail width: a focus bar plus a two-glyph label.
 const RAIL_W: u16 = 5;
 /// Below this width the rail is dropped; the sidebar carries navigation alone.
 const RAIL_MIN_TOTAL: u16 = 64;
@@ -44,9 +43,9 @@ const COMPOSER_MAX_ROWS: usize = 5;
 /// Matches the quick switcher lists at once.
 const SWITCHER_ROWS: usize = 8;
 
-/// The Slack skin. Aubergine is kept in both terminal themes — it is the single
-/// most recognisable thing about the product — while the conversation pane
-/// follows the terminal so a dark terminal doesn't get a white slab.
+/// The workspace skin: Slack's *layout*, bingo's colours. Slack's aubergine was
+/// tried first and cut — a saturated purple slab is a brand costume, and in a
+/// terminal it reads as muddy next to everything else the app draws.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
     pub rail_bg: Color,
@@ -69,44 +68,55 @@ pub struct Palette {
     pub avatars: [Color; 6],
 }
 
+const fn rgb(hex: u32) -> Color {
+    Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
 impl Palette {
+    /// Accents come from the terminal theme, so the workspace moves with the
+    /// rest of the app instead of pinning a second brand on top of it. Only the
+    /// chrome greys are literal: they are warm neutrals chosen to sit under the
+    /// theme's orange without turning muddy, and the terminal theme has no
+    /// vocabulary for "sidebar".
     pub fn new(theme: &Theme) -> Self {
-        let base = Self {
-            rail_bg: Color::Rgb(0x35, 0x0D, 0x36),
-            rail_active_bg: Color::Rgb(0x6C, 0x38, 0x6E),
-            side_bg: Color::Rgb(0x3F, 0x0E, 0x40),
-            side_text: Color::Rgb(0xC9, 0xB8, 0xCA),
-            side_strong: Color::Rgb(0xFF, 0xFF, 0xFF),
-            side_active_bg: Color::Rgb(0x11, 0x64, 0xA3),
-            badge_bg: Color::Rgb(0xCD, 0x25, 0x53),
-            badge_fg: Color::Rgb(0xFF, 0xFF, 0xFF),
-            presence_on: Color::Rgb(0x2B, 0xAC, 0x76),
-            presence_off: Color::Rgb(0x8D, 0x7A, 0x8E),
-            main_bg: Color::Rgb(0x1A, 0x1D, 0x21),
-            main_text: Color::Rgb(0xD1, 0xD2, 0xD3),
-            main_dim: Color::Rgb(0x9A, 0x9B, 0x9D),
-            divider: Color::Rgb(0x35, 0x37, 0x3B),
-            accent: Color::Rgb(0x1D, 0x9B, 0xD1),
-            unread: Color::Rgb(0xE0, 0x1E, 0x5A),
-            send: Color::Rgb(0x00, 0x7A, 0x5A),
+        let base = Palette {
+            rail_bg: rgb(0x14110E),
+            rail_active_bg: rgb(0x332A23),
+            side_bg: rgb(0x1E1A16),
+            side_text: rgb(0xA89C90),
+            side_strong: rgb(0xF2ECE6),
+            side_active_bg: theme.claude_deep,
+            badge_bg: theme.claude_deep_strong,
+            badge_fg: rgb(0xFFFFFF),
+            presence_on: theme.success,
+            presence_off: rgb(0x776C62),
+            main_bg: rgb(0x1A1816),
+            main_text: theme.text,
+            main_dim: theme.inactive,
+            divider: rgb(0x38332D),
+            accent: theme.claude,
+            unread: theme.claude_strong,
+            send: theme.success,
             avatars: [
-                Color::Rgb(0x36, 0xC5, 0xF0),
-                Color::Rgb(0x2E, 0xB6, 0x7D),
-                Color::Rgb(0xEC, 0xB2, 0x2E),
-                Color::Rgb(0xE0, 0x1E, 0x5A),
-                Color::Rgb(0x12, 0x64, 0xA3),
-                Color::Rgb(0xDE, 0x7C, 0x33),
+                rgb(0x4C9AE0),
+                rgb(0x3FA96B),
+                rgb(0xC9922E),
+                rgb(0xCB5A74),
+                rgb(0x7C6BD0),
+                rgb(0xC1743C),
             ],
         };
+        // The sidebar stays dark in a light terminal (Slack's own default does
+        // the same); only the conversation pane turns over.
         let pal = if theme.is_dark {
             base
         } else {
             Palette {
-                main_bg: Color::Rgb(0xFF, 0xFF, 0xFF),
-                main_text: Color::Rgb(0x1D, 0x1C, 0x1D),
-                main_dim: Color::Rgb(0x61, 0x60, 0x61),
-                divider: Color::Rgb(0xDD, 0xDD, 0xDD),
-                accent: Color::Rgb(0x12, 0x64, 0xA3),
+                main_bg: rgb(0xFFFFFF),
+                main_text: rgb(0x1D1C1D),
+                main_dim: rgb(0x616061),
+                divider: rgb(0xDDDDDD),
+                accent: theme.claude_deep,
                 ..base
             }
         };
@@ -177,14 +187,6 @@ pub enum Tab {
 
 impl Tab {
     const ALL: [Tab; 3] = [Tab::Home, Tab::Dms, Tab::Activity];
-
-    fn icon(self) -> &'static str {
-        match self {
-            Tab::Home => "⌂",
-            Tab::Dms => "✉",
-            Tab::Activity => "◍",
-        }
-    }
 
     fn label(self) -> &'static str {
         match self {
@@ -676,7 +678,7 @@ fn day_label(at: u64) -> Option<String> {
     })
 }
 
-/// Rail: workspace chip on top, tab icons beneath it, each with its label.
+/// Rail: workspace chip on top, then one text label per tab.
 pub fn rail_rows(snap: &Snapshot, ws: &Workspace, pal: &Palette, height: usize) -> Vec<Row> {
     let w = RAIL_W as usize;
     let initial = snap
@@ -704,21 +706,18 @@ pub fn rail_rows(snap: &Snapshot, ws: &Workspace, pal: &Palette, height: usize) 
         } else {
             (pal.side_text, pal.rail_bg)
         };
+        // The label is the whole tab. Pictographic icons were tried and cut:
+        // at one cell they are unreadable, and the terminal picks whichever
+        // glyph the font happens to carry — often an emoji.
         let bar = if focused && active { "▎" } else { " " };
-        let mut icon = Line::styled(bar, SegStyle::fg(pal.side_strong).with_bg(pal.rail_bg));
-        icon.push_styled(boxed(tab.icon(), w - 1), SegStyle::fg(fg).with_bg(bg));
-        rows.push(row(icon, pal.rail_bg));
-        rows.push(row(
-            Line::styled(
-                boxed(tab.label(), w),
-                if active {
-                    SegStyle::fg(pal.side_strong).bold()
-                } else {
-                    SegStyle::fg(pal.side_text)
-                },
-            ),
-            pal.rail_bg,
-        ));
+        let mut line = Line::styled(bar, SegStyle::fg(pal.side_strong).with_bg(pal.rail_bg));
+        let style = if active {
+            SegStyle::fg(pal.side_strong).with_bg(bg).bold()
+        } else {
+            SegStyle::fg(fg).with_bg(bg)
+        };
+        line.push_styled(boxed(tab.label(), w - 1), style);
+        rows.push(row(line, pal.rail_bg));
         rows.push(blank(pal.rail_bg));
     }
     pad(rows, height, pal.rail_bg)
@@ -728,7 +727,7 @@ fn presence(state: AgentState, pal: &Palette) -> (&'static str, Color) {
     match state {
         AgentState::Running => ("●", pal.presence_on),
         AgentState::Idle => ("○", pal.presence_off),
-        AgentState::Stopped => ("⊘", pal.presence_off),
+        AgentState::Stopped => ("·", pal.presence_off),
     }
 }
 
@@ -844,7 +843,7 @@ pub fn sidebar_rows(
             pal.side_bg,
         ),
         row(
-            Line::styled(" ⌕ 跳转 (ctrl+k)", SegStyle::fg(pal.side_text)),
+            Line::styled(" 跳转  ctrl+k", SegStyle::fg(pal.side_text)),
             pal.side_bg,
         ),
         blank(pal.side_bg),
@@ -1170,13 +1169,10 @@ pub fn composer_rows(
     } else {
         "  tab 回到输入框 · ↑↓ 滚动 · alt+↑↓ 换会话 · esc 返回"
     };
-    let mut foot = Line::styled(
+    let foot = Line::styled(
         crate::tui::chat::one_line(hint, width.saturating_sub(2)),
         SegStyle::fg(pal.main_dim),
     );
-    if active && !empty {
-        foot.push_styled("  ➤", SegStyle::fg(pal.send).bold());
-    }
     rows.push(row(foot, pal.main_bg));
     if let Some(flash) = &ws.flash {
         rows.push(row(
@@ -1247,10 +1243,10 @@ pub fn switcher_rows(
     };
 
     let mut rows = vec![rule("╭", "╮")];
-    let query_text = crate::tui::chat::one_line(&sw.query, inner.saturating_sub(2));
-    let mut query = Line::styled("⌕ ", SegStyle::fg(pal.main_dim));
+    let query_text = crate::tui::chat::one_line(&sw.query, inner.saturating_sub(5));
+    let mut query = Line::styled("跳转 ", SegStyle::fg(pal.main_dim));
     query.push_styled(query_text.clone(), SegStyle::fg(pal.main_text));
-    rows.push(boxed_row(query, 2 + text_width(&query_text)));
+    rows.push(boxed_row(query, 5 + text_width(&query_text)));
 
     if matches.is_empty() {
         let text = "没有匹配的会话";
@@ -1347,6 +1343,18 @@ mod tests {
 
     fn texts(rows: &[Row]) -> Vec<String> {
         rows.iter().map(|r| r.line.plain_text()).collect()
+    }
+
+    /// Emoji and other pictographs: a terminal picks whichever glyph its font
+    /// carries, which is how a house icon turns into a colour emoji two cells
+    /// wide. The chrome is built from text and box-drawing only.
+    fn is_pictograph(c: char) -> bool {
+        matches!(c as u32,
+            0x1F300..=0x1FAFF   // emoji blocks
+            | 0x2190..=0x21FF   // arrows
+            | 0x2300..=0x23FF   // misc technical (⌂ ⌕ ⏺)
+            | 0x2600..=0x27BF   // misc symbols + dingbats (✉ ✻ ➤)
+            | 0x2B00..=0x2BFF)
     }
 
     #[test]
@@ -1736,11 +1744,15 @@ mod tests {
         let rows = rail_rows(&snap, &ws, &pal(), 20);
         let t = texts(&rows);
         assert!(t.iter().any(|l| l.contains('B')), "工作区首字母: {t:?}");
-        assert!(t.iter().any(|l| l.contains("私信")));
+        // Labels only — no pictographic icons to get substituted by an emoji.
+        assert!(
+            t.iter().all(|l| l.chars().all(|c| !is_pictograph(c))),
+            "{t:?}"
+        );
         let active = rows
             .iter()
-            .find(|r| r.line.plain_text().contains('✉'))
-            .unwrap_or_else(|| panic!("有私信图标行"));
+            .find(|r| r.line.plain_text().contains("私信"))
+            .unwrap_or_else(|| panic!("有私信行"));
         assert!(
             active
                 .line

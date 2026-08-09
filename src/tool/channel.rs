@@ -137,7 +137,7 @@ impl Tool for PostTool {
         format!(
             "Speak in an agent channel. Your name in the channel is {who} (the sender is stamped by the runtime and cannot be forged).\
 Channel messages enter every member's context (in the same order); in a serial channel, if you are behind the latest message the send bounces back with the new content attached — read it, then decide to resend, amend, or drop.\
-When you have nothing to say, simply don't call this tool (silence costs nothing and wakes nobody)."
+Every message you send wakes every other member, so post only when it changes what someone else will do. Never post to greet, acknowledge, agree, or say you understood — that is what floods a room. When you have nothing to add, simply don't call this tool (silence costs nothing and wakes nobody)."
         )
     }
     fn input_schema(&self) -> serde_json::Value {

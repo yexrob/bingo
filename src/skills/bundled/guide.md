@@ -243,7 +243,10 @@ Example (.bingo/settings.json):
   via Post — messages enter every member's context (same order), the sender is stamped by the runtime; in serial channels, a stale
   post is bounced back with the new messages attached (the agent reads them, then re-decides/abandons; count-based ordering emerges this way);
   free channels allow interleaving. Channels show in the transcript as `◇ #name` rows (expandable to the full group chat);
-  over-budget channels auto-freeze and notify the main agent.
+  over-budget channels auto-freeze and notify the main agent. **Silence is the default**: because delivery wakes every member, each
+  spawned member carries a system-prompt rule (only when the flag is on) forbidding greetings, acknowledgements and "got it" posts —
+  they are what turns one message into a room-wide storm. It lives in the system block on purpose: compaction rewrites the history
+  but never touches the system prompt, so the rule survives a long-running member's context being summarised away.
   **Bottom entity area**: when instances/channels exist, a one-line summary shows above the input box; Ctrl+G enters selection
   (↑↓/Enter), and Enter opens the fullscreen **Slack-shaped workspace**: a rail (Home / DMs / Activity), a sidebar listing
   `#channels` and DM instances with presence dots and unread badges, and a conversation pane rendering a Slack message list
@@ -312,7 +315,10 @@ Example (.bingo/settings.json):
   发言——消息进全体成员上下文（同序），发件人由运行时盖戳；serial 频道落后
   发言会被弹回并附新增消息（agent 阅读后自行改口/放弃，报数式顺序由此涌现），
   free 频道允许交叉。频道在 transcript 显示为 `◇ #名字` 行（可展开看完整群聊）；
-  预算超限自动冻结频道并通知主 agent。
+  预算超限自动冻结频道并通知主 agent。**默认沉默**：投递即唤醒全体成员，所以每个派生成员都带一条
+  system prompt 规则（仅在开关打开时注入）——禁止发问候、寒暄、「收到」这类消息，正是它们把一条消息
+  滚成满屋噪声。规则放在 system block 而非唤醒载荷里：compact 重写消息历史但从不碰 system prompt，
+  长跑成员的上下文被摘要掉之后这条规则仍在。
   **底部实体区**：有实例/频道时输入框上方显示一行摘要，Ctrl+G 进入选择
   （↑↓/Enter），Enter 打开全屏 **Slack 式工作区**：左侧 rail（主页/私信/动态）、
   侧栏列出 `#频道` 与私信实例（在线点 + 未读徽标）、右侧 Slack 式消息流（日期分隔、

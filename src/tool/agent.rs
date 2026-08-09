@@ -29,6 +29,32 @@ const SUBAGENT_NOTE: &str = "\
   you afterwards. Finish what needs finishing within this turn, or state what is still
   pending — the hub can resume you with a follow-up message.";
 
+/// Appended when agent channels are on. Delivery wakes every member, so a room of polite agents
+/// deadlocks into acknowledging each other's acknowledgements — one greeting turns into a dozen
+/// "got it" messages, each of which wakes everyone again. The Post tool's description already
+/// says silence is free; that was not enough, because the model's default social reflex is to
+/// answer whatever just arrived. This states the failure mode by name.
+///
+/// It lives in the system prompt rather than in the wake-up payload deliberately: compaction
+/// rewrites the message history but never touches `Session::system`, so the rule is still there
+/// on turn fifty, when a long-running member has forgotten everything else about the room.
+const CHANNEL_NOTE: &str = "\
+# Speaking in a channel
+
+Every channel message is delivered to every member, and delivery wakes them. So silence is the
+default, not a failure — post only when your message changes what someone else will do.
+
+Do NOT post to greet, introduce yourself, acknowledge, agree, say you understood, or restate the
+plan. Each of those wakes every other member, who then feel the same pull to answer, and the room
+fills with courtesies while the work stands still. A useful test: if your draft would be just as
+true before you read the message you are answering, don't send it.
+
+Post when you have something only you can supply — a decision someone is blocked on, a
+disagreement, a result, a question that must be answered before you can continue. Name the person
+you mean.
+
+When you have nothing to add, just stop calling tools. Silence costs nothing and wakes nobody.";
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AgentInput {
@@ -558,6 +584,14 @@ pub(crate) fn build_sub_session(
         text: SUBAGENT_NOTE.to_string(),
         cache: false,
     });
+    // Only when the feature is on: channel etiquette is noise for a solo subagent that will
+    // never see a room.
+    if parent.settings.experimental.agent_channels {
+        system.push(SystemBlock {
+            text: CHANNEL_NOTE.to_string(),
+            cache: false,
+        });
+    }
     let mut runtime = crate::query::Runtime::new(model, None, Default::default());
     // Share the parent's permission table and MCP connections rather than snapshotting them:
     // `/permissions` edits reach instances that are already running, and a subagent reuses the
@@ -1606,6 +1640,35 @@ mod tests {
             .unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, ["你是评审。", SUBAGENT_NOTE]);
+    }
+
+    /// Channel etiquette rides in the system prompt, and only when channels are on.
+    ///
+    /// The placement is the point: it outlives compaction. That is not asserted here because it
+    /// cannot fail — `compact::maybe_compact` takes `&Session`, so the borrow checker forbids it
+    /// from touching `Session::system` at all; it splices `messages` and builds its summary
+    /// request with `system: Vec::new()`. A test that re-stated that would prove nothing.
+    #[test]
+    fn channel_note_is_gated_by_the_flag() {
+        let (off, _c1) = parent_session();
+        assert!(!off.settings.experimental.agent_channels, "缺省关");
+        let sub = build_sub_session(&off, None, None, None, None, "solo")
+            .unwrap_or_else(|e| panic!("派生: {e}"));
+        assert!(
+            !sub.system.iter().any(|b| b.text == CHANNEL_NOTE),
+            "频道关闭时不该塞频道礼仪"
+        );
+
+        let (mut on, _c2) = parent_session();
+        let session = Arc::get_mut(&mut on).unwrap_or_else(|| panic!("独占"));
+        session.settings.experimental.agent_channels = true;
+        let sub = build_sub_session(&on, None, None, None, None, "member")
+            .unwrap_or_else(|e| panic!("派生: {e}"));
+        assert!(sub.system.iter().any(|b| b.text == CHANNEL_NOTE));
+        assert!(
+            CHANNEL_NOTE.contains("wakes them") && CHANNEL_NOTE.contains("acknowledge"),
+            "规则要点名那个失败模式，别只说「保持简洁」"
+        );
     }
 
     /// No named definition: the parent's system carries over, plus the note.
