@@ -41,6 +41,10 @@ An agent CLI implemented in Rust (a local agent harness).
 - Conventional Commits, imperative mood, short. Write the body and issue footnotes only when they carry real information.
 - Write commit messages in English.
 - Commit only what the user asked for; never commit secrets.
+- Every commit made by or on behalf of bingo appends the co-author trailer `Co-authored-by: bingo <EMAIL>`
+  so GitHub renders bingo's avatar next to the author. EMAIL is the dedicated bingo GitHub account's
+  `<id>+bingo@users.noreply.github.com` address — register that account, upload the avatar, then use its
+  noreply email here (single source of truth for the trailer).
 
 ## Forbidden
 
