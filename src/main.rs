@@ -64,6 +64,14 @@ struct Cli {
     #[arg(long, requires = "json_events")]
     session: Option<String>,
 
+    /// Side-effect-free capability probe in JSON-events mode (protocol.ready, then exit 0)
+    #[arg(
+        long,
+        requires = "json_events",
+        conflicts_with_all = ["session", "model", "permission_mode", "no_team"]
+    )]
+    probe: bool,
+
     /// Fullscreen mode (default): alternate-screen canvas, input pinned at the
     /// bottom, and in-app scrolling. Retained as an explicit compatibility flag.
     #[arg(long, conflicts_with = "inline")]
@@ -150,6 +158,10 @@ async fn main() {
 
 /// The actual main flow (formerly the `main` body). Errors propagate upward and exit through [`main`].
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if cli.json_events && cli.probe {
+        crate::json_events::probe_event(std::io::stdout().lock())?;
+        return Ok(());
+    }
     let fullscreen = cli.fullscreen_mode();
 
     let home = match std::env::var("HOME") {

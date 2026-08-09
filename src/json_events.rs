@@ -226,6 +226,13 @@ pub struct CliSessionMetadata {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProbeMetadata {
+    pub bingo_version: String,
+    pub protocol_version: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromptOption {
     pub id: String,
     pub label: String,
@@ -241,6 +248,12 @@ pub enum CliEvent {
         #[serde(flatten)]
         base: EventBase,
         metadata: CliSessionMetadata,
+    },
+    #[serde(rename = "protocol.ready")]
+    ProtocolReady {
+        #[serde(flatten)]
+        base: EventBase,
+        metadata: ProbeMetadata,
     },
     #[serde(rename = "turn.started")]
     TurnStarted {
@@ -394,6 +407,7 @@ impl CliEvent {
     fn set_base(&mut self, base: EventBase) {
         match self {
             Self::SessionReady { base: slot, .. }
+            | Self::ProtocolReady { base: slot, .. }
             | Self::TurnStarted { base: slot, .. }
             | Self::TextDelta { base: slot, .. }
             | Self::ToolReady { base: slot, .. }
@@ -1347,6 +1361,20 @@ pub fn fatal_event<W: Write>(
         msg: sanitize_msg(&error.to_string()),
         level: EventErrorLevel::Flow,
         recoverable: false,
+    })
+}
+
+/// Side-effect-free capability probe: emits exactly one `protocol.ready`
+/// record with the bingo and protocol versions, then returns so the process
+/// exits 0. Never loads providers, hooks, teams, transcripts, or stdin.
+pub fn probe_event<W: Write>(mut writer: W) -> Result<(), JsonEventsError> {
+    let mut event_writer = EventWriter::new(&mut writer);
+    event_writer.emit(CliEvent::ProtocolReady {
+        base: EventBase::default(),
+        metadata: ProbeMetadata {
+            bingo_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: PROTOCOL_VERSION,
+        },
     })
 }
 
