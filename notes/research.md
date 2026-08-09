@@ -696,7 +696,7 @@ Requirement (named by the user): ① teams are fixed to a project (committable),
 - **Superseded**: D30's WeChat-style bubble room and read-only agent view. The ctrl+g bottom entity selector is unchanged — it is still the way in.
 - **Acceptance**: 819 tests pass with fmt/check/clippy `-D warnings` clean. Focused coverage: responsive layout shedding, full-column painting (rail/sidebar/badge, asserted against a real `Buffer`), section collapse removing rows from navigation, message grouping and divider placement, tool/queued/typing post kinds, composer geometry and caret, switcher filtering and opacity, key routing, and channel-vs-DM sending. A `#[cfg(test)]` preview harness (`slack_preview.rs`, opt-in via `BINGO_PREVIEW_DIR`) renders frames to HTML for screenshot review — the visual round that produced both bugs above.
 
-### D44. Channel silence is a prompt, in the system block: stopping the acknowledgement storm
+### D45. Channel silence is a prompt, in the system block: stopping the acknowledgement storm
 
 - **Trigger** (reported by the user with a screenshot): one `你好` posted into a team room produced thirteen messages and no work. Every member answered the greeting; every answer woke every other member; each of those then answered the answers — "早上好，X 已就位" → "收到，角色已齐" → "收到，届时 QA 会…" — a room of agents being polite at each other while the task sat untouched.
 - **Mechanism**: D29's primitive 3 (wake-up follows delivery) is doing exactly what it promises. A post reaches every member's inbox and `flush_agent_inbox` starts a turn for each. The engine is not at fault; what was missing is that the model's default social reflex is to answer whatever just arrived, and nothing told it that here, answering is the expensive act.
