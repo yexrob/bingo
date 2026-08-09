@@ -1,13 +1,12 @@
 //! Full-screen workspace view (opened from the ctrl+g picker), wearing the
-//! Slack shape defined in [`crate::tui::slack`] (D43, superseding D30's
-//! single-conversation modal):
+//! Slack shape defined in [`crate::tui::slack`] (D43, narrowed to one pane by
+//! D47): a channel log or an instance's history as a Slack message list, with a
+//! composer that speaks as `user` into a channel and as the hub into a DM.
 //!
-//! - the **rail** switches between 主页 / 私信 / 动态;
-//! - the **sidebar** lists 频道 (channels) and 私信 (subagent instances) with
-//!   presence dots and unread badges;
-//! - the **conversation pane** renders either a channel log or an instance's
-//!   history as a Slack message list, with a composer that speaks as `user`
-//!   into a channel and as the hub into a DM.
+//! There is no rail and no sidebar. Navigation is the ctrl+K switcher and
+//! alt+↑/↓ — a list of conversations is worth less than the columns it costs when
+//! ctrl+K reaches any of them in two keystrokes, and the view paints no surface
+//! colours of its own, so the terminal's own background shows through.
 //!
 //! This module owns the terminal and the state machine; every row on screen is
 //! built by the pure functions in [`crate::tui::slack`]. It runs on the
@@ -31,9 +30,9 @@ use crate::channels::USER_NAME;
 use crate::query::Session;
 use crate::tui::chat::{Chat, EntityOpen, Row};
 use crate::tui::slack::{
-    self, ChannelItem, Conv, DmItem, Focus, Palette, Post, Snapshot, Switcher, Tab, Workspace,
+    self, ChannelItem, Conv, DmItem, Focus, Palette, Post, Snapshot, Switcher, Workspace,
 };
-use crate::tui::view;
+use crate::tui::{avatar, gfx, view};
 
 /// Sample everything the view needs from the session. Instances seen for the
 /// first time are seeded as read: a workspace you have never opened shouldn't
@@ -179,8 +178,8 @@ async fn modal_loop(
     let mut ticker = tokio::time::interval(Duration::from_millis(33));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    // The workspace state lives on Chat so read cursors, the open conversation
-    // and the collapsed sections survive leaving and re-entering the view.
+    // The workspace state lives on Chat so read cursors and the open
+    // conversation survive leaving and re-entering the view.
     let mut ws = std::mem::take(&mut chat.slack);
     ws.select(match open {
         EntityOpen::Agent(name) => Conv::Dm(name),
@@ -189,9 +188,10 @@ async fn modal_loop(
     ws.focus = Focus::Composer;
     ws.switcher = None;
 
-    // Pane presence drives the Tab cycle; refreshed from the last frame.
-    let mut has_rail = true;
-    let mut has_sidebar = true;
+    // Avatars are ordinary kitty images: transmitted once per portrait, then
+    // placed by the cells the message list paints.
+    let image_cap = chat.image_cap;
+    let mut transmits = gfx::Transmits::default();
 
     loop {
         let session = chat.session.clone();
@@ -199,7 +199,7 @@ async fn modal_loop(
             event = events.next() => match event {
                 Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
                     let snap = snapshot(&session, &mut ws);
-                    if !handle_key(&session, &mut ws, &snap, key, has_rail, has_sidebar) {
+                    if !handle_key(&session, &mut ws, &snap, key) {
                         break;
                     }
                 }
@@ -209,6 +209,9 @@ async fn modal_loop(
                         None => ws.composer.push_str(&text),
                     }
                 }
+                // A resize may purge the terminal's image store, so the avatars
+                // have to go out again with the repainted placeholder cells.
+                Some(Ok(Event::Resize(_, _))) => transmits.reset(),
                 Some(Ok(_)) => {}
                 Some(Err(_)) | None => break,
             },
@@ -236,26 +239,23 @@ async fn modal_loop(
             ws.mark_read(&conv, seq);
         }
 
-        let panes = slack::layout(terminal.get_frame().area());
-        has_rail = panes.rail.is_some();
-        has_sidebar = panes.sidebar.is_some();
+        // Portraits for everyone the open conversation shows, sent before the
+        // frame that places them (order does not matter to the protocol, but a
+        // transmit that never happens shows an empty chip).
+        if let Some(cap) = image_cap
+            && let Some(conv) = ws.open.clone()
+        {
+            let (posts, _, _) = conversation(&session, &ws, &conv);
+            let senders: Vec<String> = posts.iter().map(|p| p.from.clone()).collect();
+            let bytes = avatar::transmits(&senders, &cap, &mut transmits);
+            let _ = crate::tui::term::write_transmits(terminal.backend_mut(), &bytes);
+        }
 
         terminal.draw(|frame| {
-            let area = frame.area();
-            let panes = slack::layout(area);
-            let height = area.height as usize;
+            let main = slack::layout(frame.area());
+            let height = main.height as usize;
             let buf = frame.buffer_mut();
             let fg = pal.main_text;
-
-            if let Some(rail) = panes.rail {
-                view::render_rows(&slack::rail_rows(&snap, &ws, &pal, height), fg, buf, rail);
-            }
-            if let Some(side) = panes.sidebar {
-                let rows = slack::sidebar_rows(&snap, &ws, &pal, side.width as usize, height);
-                view::render_rows(&rows, fg, buf, side);
-            }
-
-            let main = panes.main;
             let width = main.width as usize;
             let Some(conv) = ws.open.clone() else {
                 view::render_rows(&slack::empty_pane_rows(&pal, width, height), fg, buf, main);
@@ -269,7 +269,7 @@ async fn modal_loop(
                 .saturating_sub(composer.len())
                 .max(1);
             let (posts, _, divider) = conversation(&session, &ws, &conv);
-            let content = slack::message_rows(&posts, divider, &pal, width);
+            let content = slack::message_rows(&posts, divider, &pal, width, image_cap.is_some());
 
             // Bottom-anchored + scroll offset (clamped so it can't run past the top).
             let max_up = content.len().saturating_sub(viewport);
@@ -277,7 +277,7 @@ async fn modal_loop(
             let start = content.len().saturating_sub(viewport + up);
             let mut slice: Vec<Row> = content.iter().skip(start).take(viewport).cloned().collect();
             while slice.len() < viewport {
-                slice.push(slack::blank_row(&pal));
+                slice.push(slack::blank_row());
             }
 
             view::render_rows(&header, fg, buf, main);
@@ -340,8 +340,6 @@ fn handle_key(
     ws: &mut Workspace,
     snap: &Snapshot,
     key: crossterm::event::KeyEvent,
-    has_rail: bool,
-    has_sidebar: bool,
 ) -> bool {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -389,24 +387,10 @@ fn handle_key(
     }
     match key.code {
         KeyCode::Esc => return false,
-        KeyCode::Tab => ws.focus = ws.focus.next(has_rail, has_sidebar),
+        KeyCode::Tab => ws.focus = ws.focus.next(),
         KeyCode::PageUp => ws.scroll_up = ws.scroll_up.saturating_add(10),
         KeyCode::PageDown => ws.scroll_up = ws.scroll_up.saturating_sub(10),
         _ => match ws.focus {
-            Focus::Rail => match key.code {
-                KeyCode::Up => ws.tab = prev_tab(ws.tab),
-                KeyCode::Down => ws.tab = next_tab(ws.tab),
-                KeyCode::Enter => ws.focus = Focus::Sidebar,
-                _ => {}
-            },
-            Focus::Sidebar => match key.code {
-                KeyCode::Up => ws.step(snap, -1),
-                KeyCode::Down => ws.step(snap, 1),
-                KeyCode::Left => ws.fold_section(snap, true),
-                KeyCode::Right => ws.fold_section(snap, false),
-                KeyCode::Enter => ws.focus = Focus::Composer,
-                _ => {}
-            },
             Focus::Messages => match key.code {
                 KeyCode::Up => ws.scroll_up = ws.scroll_up.saturating_add(1),
                 KeyCode::Down => ws.scroll_up = ws.scroll_up.saturating_sub(1),
@@ -433,22 +417,6 @@ fn handle_key(
         },
     }
     true
-}
-
-fn next_tab(tab: Tab) -> Tab {
-    match tab {
-        Tab::Home => Tab::Dms,
-        Tab::Dms => Tab::Activity,
-        Tab::Activity => Tab::Home,
-    }
-}
-
-fn prev_tab(tab: Tab) -> Tab {
-    match tab {
-        Tab::Home => Tab::Activity,
-        Tab::Dms => Tab::Home,
-        Tab::Activity => Tab::Dms,
-    }
 }
 
 #[cfg(test)]
@@ -484,8 +452,6 @@ mod tests {
             ws,
             snap,
             KeyEvent::new(code, mods),
-            true,
-            true,
         )
     }
 
@@ -503,18 +469,14 @@ mod tests {
     }
 
     #[test]
-    fn tab_walks_the_panes_and_typing_lands_in_the_composer() {
+    fn tab_walks_the_two_focuses_and_typing_lands_in_the_composer() {
         let snap = snap();
         let mut ws = Workspace::default();
         assert_eq!(ws.focus, Focus::Composer, "打开即可打字");
         press(&mut ws, &snap, KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(ws.focus, Focus::Rail);
-        press(&mut ws, &snap, KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(ws.focus, Focus::Sidebar);
-        press(&mut ws, &snap, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(ws.focus, Focus::Messages);
         press(&mut ws, &snap, KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(ws.focus, Focus::Composer);
+        assert_eq!(ws.focus, Focus::Composer, "只剩两处焦点");
 
         press(&mut ws, &snap, KeyCode::Char('h'), KeyModifiers::NONE);
         press(&mut ws, &snap, KeyCode::Char('i'), KeyModifiers::NONE);
@@ -523,14 +485,12 @@ mod tests {
         assert_eq!(ws.composer, "h");
         press(&mut ws, &snap, KeyCode::Char('u'), KeyModifiers::CONTROL);
         assert!(ws.composer.is_empty());
-
-        // A narrow terminal drops the panes it can't show out of the cycle.
-        assert_eq!(Focus::Composer.next(false, false), Focus::Messages);
-        assert_eq!(Focus::Messages.next(false, false), Focus::Composer);
     }
 
+    /// With the sidebar gone, alt+↑/↓ is the only key-based way between
+    /// conversations, so it has to reach every one of them from either focus.
     #[test]
-    fn arrows_scroll_from_the_composer_and_navigate_from_the_sidebar() {
+    fn arrows_scroll_and_alt_arrows_walk_every_conversation() {
         let snap = snap();
         let mut ws = Workspace::default();
         ws.sync(&snap);
@@ -546,13 +506,15 @@ mod tests {
         assert_eq!(ws.open, Some(Conv::Dm("scout".into())));
         assert_eq!(ws.scroll_up, 0);
 
-        ws.focus = Focus::Sidebar;
+        ws.focus = Focus::Messages;
+        press(&mut ws, &snap, KeyCode::Up, KeyModifiers::ALT);
+        assert_eq!(
+            ws.open,
+            Some(Conv::Channel("dev-room".into())),
+            "从消息区也能换会话"
+        );
         press(&mut ws, &snap, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(ws.open, Some(Conv::Channel("dev-room".into())));
-        press(&mut ws, &snap, KeyCode::Left, KeyModifiers::NONE);
-        assert_eq!(ws.collapsed, [true, false], "← 折叠所在分组");
-        press(&mut ws, &snap, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(ws.focus, Focus::Composer);
+        assert_eq!(ws.scroll_up, 1, "消息区的 ↑ 仍是滚动");
     }
 
     #[test]
@@ -579,21 +541,6 @@ mod tests {
         press(&mut ws, &snap, KeyCode::Char('k'), KeyModifiers::CONTROL);
         assert!(press(&mut ws, &snap, KeyCode::Esc, KeyModifiers::NONE));
         assert!(ws.switcher.is_none());
-    }
-
-    #[test]
-    fn the_rail_cycles_tabs() {
-        let snap = snap();
-        let mut ws = Workspace {
-            focus: Focus::Rail,
-            ..Workspace::default()
-        };
-        press(&mut ws, &snap, KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(ws.tab, Tab::Dms);
-        press(&mut ws, &snap, KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(ws.tab, Tab::Activity);
-        press(&mut ws, &snap, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(ws.tab, Tab::Dms);
     }
 
     /// The composer is the one place a human can speak into the runtime from

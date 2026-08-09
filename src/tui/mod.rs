@@ -21,6 +21,7 @@
 
 pub mod activities;
 mod app;
+pub mod avatar;
 pub mod chat;
 mod chrome;
 pub mod el;

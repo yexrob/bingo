@@ -137,7 +137,7 @@ bingo --continue            # 恢复最近一次会话
 | `Ctrl+C` | busy 中断 / 有文本清空 / 空输入连按两次退出 |
 | `Ctrl+T` | 显隐任务区 |
 | `Ctrl+O` | 展开/闭合切换：展开 = 重放完整 transcript 供上滑翻看 |
-| `Ctrl+G` | agent / 频道选择器 → Slack 式工作区（侧栏 + 频道/私信消息流 + 输入框；Ctrl+K 快速跳转） |
+| `Ctrl+G` | agent / 频道选择器 → Slack 式工作区（整屏一栏消息流 + 输入框；Ctrl+K 换会话、alt+↑↓ 上下会话） |
 | `Ctrl+L` | 清屏重画 |
 | `Shift+Tab` | 循环权限模式（default → acceptEdits → plan） |
 | `Alt+T` | 思考开关 |
@@ -293,8 +293,21 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 - `serial` 频道落后发言被弹回并附新增消息（agent 阅读后自行改口，报数式顺序
   由此涌现）；`free` 频道允许交叉。
 - 超限自动冻结频道并通知主 agent（`channelMessageLimit`/`agentMessageLimit` 预算闸）。
-- 频道在 transcript 显示为 `◇ #名字` 行；Ctrl+G 可打开全屏群聊房间直接以
+- 频道在 transcript 显示为 `◇ #名字` 行；Ctrl+G 打开全屏工作区，直接以
   user 身份发言。
+
+## 工作区视图（Ctrl+G）
+
+整屏只有一栏会话：顶部一行标题（频道或实例名，右端是队名）、消息流、输入框。
+没有 rail、没有侧栏，也不画任何自己的底色——透出的是终端本身的背景。换会话靠
+**Ctrl+K**（快速跳转，列出全部会话及未读数）与 **alt+↑↓**；Tab 在消息区与输入框
+之间切换，Esc 返回。
+
+**头像**：能放置 kitty 图片的终端（与内联图片同一能力：Ghostty/kitty，以及开了
+passthrough 的 tmux）为每位发言者分配八张内置
+[Notion 风格头像](assets/avatars/)之一，名字左侧 4×2 格——每张图只传输一次，靠
+Unicode 占位符格子定位。不支持的终端保留首字母色块；两种皮肤行数一致，只有装订线
+不同。
 
 ## 技能（Skills）
 

@@ -124,32 +124,22 @@ mod preview {
         let pal = Palette::new(theme);
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
-        let panes = layout(area);
+        let main = layout(area);
         let snap = snap();
         let h = height as usize;
-        if let Some(rail) = panes.rail {
-            view::render_rows(
-                &rail_rows(&snap, ws, &pal, h),
-                pal.main_text,
-                &mut buf,
-                rail,
-            );
-        }
-        if let Some(side) = panes.sidebar {
-            let rows = sidebar_rows(&snap, ws, &pal, side.width as usize, h);
-            view::render_rows(&rows, pal.main_text, &mut buf, side);
-        }
-        let main = panes.main;
         let w = main.width as usize;
         let conv = ws.open.clone().unwrap_or(Conv::Channel("dev-room".into()));
         let header = header_rows(&snap, &conv, &pal, w);
         let (composer, _) = composer_rows(ws, &conv, &pal, w);
         let viewport = h.saturating_sub(header.len() + composer.len()).max(1);
-        let content = message_rows(&posts(now), 4, &pal, w);
+        // The text chip, not the portrait: a browser screenshot cannot show a
+        // kitty placement, and a preview that silently dropped the gutter would
+        // be measuring a layout the terminal never draws.
+        let content = message_rows(&posts(now), 4, &pal, w, false);
         let start = content.len().saturating_sub(viewport);
         let mut slice: Vec<_> = content.iter().skip(start).cloned().collect();
         while slice.len() < viewport {
-            slice.push(blank_row(&pal));
+            slice.push(blank_row());
         }
         view::render_rows(&header, pal.main_text, &mut buf, main);
         let at = |buf: &mut Buffer, rows: &[crate::tui::chat::Row], off: u16| {
@@ -170,12 +160,20 @@ mod preview {
         buf
     }
 
-    fn hex(c: Color) -> String {
+    /// A cell colour, with `Reset` resolved to what the terminal would put there.
+    /// This matters more than it looks: the view paints no background of its own
+    /// any more, so almost every cell is `Reset` and a preview that invented a
+    /// grey for it would be judging contrast against a colour no terminal shows.
+    fn hex(c: Color, reset: &str) -> String {
         match c {
             Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
-            _ => "#888888".into(),
+            _ => reset.to_string(),
         }
     }
+
+    /// Stand-in terminal backgrounds: a warm dark and a plain light one.
+    const TERM_DARK: (&str, &str) = ("#1a1816", "#e6e0d8");
+    const TERM_LIGHT: (&str, &str) = ("#faf8f5", "#1d1c1d");
 
     fn esc(s: &str) -> String {
         s.replace('&', "&amp;")
@@ -186,8 +184,12 @@ mod preview {
     /// One buffer → an HTML block with per-run colours (screenshotted for
     /// visual review; the terminal is the real target but a browser is the only
     /// thing here that can be photographed).
-    fn html(buf: &Buffer, title: &str) -> String {
-        let mut out = format!("<h2>{}</h2><div class=\"scr\">", esc(title));
+    fn html(buf: &Buffer, title: &str, term: (&str, &str)) -> String {
+        let (bg, fg) = term;
+        let mut out = format!(
+            "<h2>{}</h2><div class=\"scr\" style=\"background:{bg}\">",
+            esc(title)
+        );
         for y in buf.area.top()..buf.area.bottom() {
             out.push_str("<div class=\"r\">");
             let mut x = buf.area.left();
@@ -199,8 +201,8 @@ mod preview {
                 // invents misalignment the terminal grid never has.
                 out.push_str(&format!(
                     "<i style=\"width:{w}ch;color:{};background:{}{}{}\">{}</i>",
-                    hex(cell.fg),
-                    hex(cell.bg),
+                    hex(cell.fg, fg),
+                    hex(cell.bg, bg),
                     if cell.modifier.contains(ratatui::style::Modifier::BOLD) {
                         ";font-weight:700"
                     } else {
@@ -243,29 +245,34 @@ mod preview {
         };
         let dm = Workspace {
             open: Some(Conv::Dm("qa".into())),
-            focus: Focus::Sidebar,
+            focus: Focus::Messages,
             ..ws.clone()
         };
         let mut body = String::new();
         body.push_str(&html(
             &frame(100, 30, &ws, &Theme::dark(), now),
             "100×30 dark",
+            TERM_DARK,
         ));
         body.push_str(&html(
             &frame(100, 30, &typed, &Theme::dark(), now),
             "100×30 dark · 输入中",
+            TERM_DARK,
         ));
         body.push_str(&html(
             &frame(100, 30, &dm, &Theme::dark(), now),
-            "100×30 dark · DM + 侧栏焦点",
+            "100×30 dark · 私信 + 消息区焦点",
+            TERM_DARK,
         ));
         body.push_str(&html(
             &frame(100, 30, &ws, &Theme::light(), now),
             "100×30 light",
+            TERM_LIGHT,
         ));
         body.push_str(&html(
             &frame(72, 24, &ws, &Theme::dark(), now),
             "72×24 dark",
+            TERM_DARK,
         ));
         let switching = Workspace {
             switcher: Some(Switcher {
@@ -277,41 +284,21 @@ mod preview {
         body.push_str(&html(
             &frame(100, 26, &switching, &Theme::dark(), now),
             "100×26 dark · ctrl+k 快速跳转",
+            TERM_DARK,
         ));
         // Empty workspace: nothing spawned yet.
         {
             let pal = Palette::new(&Theme::dark());
             let area = Rect::new(0, 0, 100, 16);
             let mut buf = Buffer::empty(area);
-            let panes = layout(area);
-            let empty = Snapshot {
-                workspace: "bingo".into(),
-                ..Snapshot::default()
-            };
-            let blank_ws = Workspace::default();
-            if let Some(rail) = panes.rail {
-                view::render_rows(
-                    &rail_rows(&empty, &blank_ws, &pal, 16),
-                    pal.main_text,
-                    &mut buf,
-                    rail,
-                );
-            }
-            if let Some(side) = panes.sidebar {
-                view::render_rows(
-                    &sidebar_rows(&empty, &blank_ws, &pal, side.width as usize, 16),
-                    pal.main_text,
-                    &mut buf,
-                    side,
-                );
-            }
+            let main = layout(area);
             view::render_rows(
-                &empty_pane_rows(&pal, panes.main.width as usize, 16),
+                &empty_pane_rows(&pal, main.width as usize, 16),
                 pal.main_text,
                 &mut buf,
-                panes.main,
+                main,
             );
-            body.push_str(&html(&buf, "100×16 dark · 空工作区"));
+            body.push_str(&html(&buf, "100×16 dark · 空工作区", TERM_DARK));
         }
         let page = format!(
             "<html><head><meta charset=\"utf-8\"><style>\

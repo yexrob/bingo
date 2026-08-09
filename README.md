@@ -339,8 +339,24 @@ With `settings.experimental.agentChannels: true`:
   channels allow interleaving.
 - Budget overflows freeze the channel and notify the main agent
   (`channelMessageLimit`/`agentMessageLimit` gates).
-- Channels appear as `◇ #name` rows in the transcript; Ctrl+G opens a fullscreen
-  room where you can post as the user.
+- Channels appear as `◇ #name` rows in the transcript; Ctrl+G opens the
+  fullscreen workspace, where you can post as the user.
+
+## Workspace view (Ctrl+G)
+
+A single conversation pane, full width: a header naming the channel or instance
+(with the team's name at the right edge), the message list, and the composer.
+No rail, no sidebar, and no background of its own — the terminal's own
+background shows through. Navigation is **Ctrl+K** (the quick switcher, listing
+every conversation with its unread count) and **alt+↑↓**; Tab moves between the
+message list and the composer, Esc returns.
+
+**Avatars**: on terminals that can place kitty images — the same capability
+behind inline image rendering (Ghostty/kitty, and tmux with passthrough) — each
+sender wears one of eight bundled [Notion-style portraits](assets/avatars/), 4×2
+cells beside the name, transmitted once per portrait and placed by Unicode
+placeholder cells. Terminals without that capability keep the sender's initial
+on a colour; the row count is identical either way, so only the gutter changes.
 
 ## Skills
 

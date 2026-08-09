@@ -12,9 +12,15 @@
 //!
 //! Everything here is a pure function of a [`Snapshot`] (what the session holds
 //! right now) plus [`Workspace`] (where the eye is). The host loop in
-//! [`crate::tui::entity`] owns the terminal, polls the snapshot each frame and
-//! paints the three panes into their own `Rect`s — the row model itself stays
-//! renderer-agnostic and testable, exactly like the rest of the display layer.
+//! [`crate::tui::entity`] owns the terminal and polls the snapshot each frame —
+//! the row model itself stays renderer-agnostic and testable, exactly like the
+//! rest of the display layer.
+//!
+//! D47 cut the rail and the sidebar: the conversation is the whole view, and
+//! nothing here paints a surface. Rows carry foregrounds and let the terminal's
+//! own background show through, so the only backgrounds left are marks — the
+//! avatar chip, the switcher's selected row — plus the explicit erase [`opaque`]
+//! needs to keep an overlay from being see-through.
 
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -22,18 +28,13 @@ use ratatui::style::Color;
 use crate::agents::AgentState;
 use crate::api::types::{ContentBlock, Message, Role};
 use crate::channels::{ChannelMessage, ChannelMode};
+use crate::tui::avatar;
 use crate::tui::chat::Row;
 use crate::tui::line::{Line, SegStyle, text_width, wrap_words};
 use crate::tui::theme::Theme;
 
-/// Rail width: a focus bar plus a two-glyph label.
-const RAIL_W: u16 = 5;
-/// Below this width the rail is dropped; the sidebar carries navigation alone.
-const RAIL_MIN_TOTAL: u16 = 64;
-/// Below this width the sidebar is dropped too and the conversation goes
-/// full-bleed (Slack's own narrow-window behaviour).
-const SIDEBAR_MIN_TOTAL: u16 = 44;
-/// Left gutter of the message list: `avatar` + one space.
+/// Left gutter of the message list when the avatar is a text chip: ` X ` plus one
+/// space. With image avatars it is [`avatar::COLS`] plus one — see [`gutter`].
 const GUTTER: usize = 4;
 /// Consecutive messages from one sender inside this window are grouped under a
 /// single name row (Slack groups on a 5-minute window).
@@ -43,28 +44,22 @@ const COMPOSER_MAX_ROWS: usize = 5;
 /// Matches the quick switcher lists at once.
 const SWITCHER_ROWS: usize = 8;
 
-/// The workspace skin: Slack's *layout*, bingo's colours. Slack's aubergine was
-/// tried first and cut — a saturated purple slab is a brand costume, and in a
-/// terminal it reads as muddy next to everything else the app draws.
+/// The conversation skin. Slack's *layout*, bingo's colours — and, since the rail
+/// and sidebar were cut, no surface colours at all: the view paints foregrounds and
+/// lets the terminal's own background show through. The only backgrounds left are
+/// marks that mean something (the avatar chip, the switcher's selected row), never
+/// chrome.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
-    pub rail_bg: Color,
-    pub rail_active_bg: Color,
-    pub side_bg: Color,
-    pub side_text: Color,
-    pub side_strong: Color,
-    pub side_active_bg: Color,
     pub badge_bg: Color,
     pub badge_fg: Color,
     pub presence_on: Color,
     pub presence_off: Color,
-    pub main_bg: Color,
     pub main_text: Color,
     pub main_dim: Color,
     pub divider: Color,
     pub accent: Color,
     pub unread: Color,
-    pub send: Color,
     pub avatars: [Color; 6],
 }
 
@@ -73,30 +68,19 @@ const fn rgb(hex: u32) -> Color {
 }
 
 impl Palette {
-    /// Accents come from the terminal theme, so the workspace moves with the
-    /// rest of the app instead of pinning a second brand on top of it. Only the
-    /// chrome greys are literal: they are warm neutrals chosen to sit under the
-    /// theme's orange without turning muddy, and the terminal theme has no
-    /// vocabulary for "sidebar".
+    /// Accents come from the terminal theme, so the workspace moves with the rest
+    /// of the app instead of pinning a second brand on top of it.
     pub fn new(theme: &Theme) -> Self {
         let base = Palette {
-            rail_bg: rgb(0x14110E),
-            rail_active_bg: rgb(0x332A23),
-            side_bg: rgb(0x1E1A16),
-            side_text: rgb(0xA89C90),
-            side_strong: rgb(0xF2ECE6),
-            side_active_bg: theme.claude_deep,
             badge_bg: theme.claude_deep_strong,
             badge_fg: rgb(0xFFFFFF),
             presence_on: theme.success,
             presence_off: rgb(0x776C62),
-            main_bg: rgb(0x1A1816),
             main_text: theme.text,
             main_dim: theme.inactive,
             divider: rgb(0x38332D),
             accent: theme.claude,
             unread: theme.claude_strong,
-            send: theme.success,
             avatars: [
                 rgb(0x4C9AE0),
                 rgb(0x3FA96B),
@@ -106,13 +90,10 @@ impl Palette {
                 rgb(0xC1743C),
             ],
         };
-        // The sidebar stays dark in a light terminal (Slack's own default does
-        // the same); only the conversation pane turns over.
         let pal = if theme.is_dark {
             base
         } else {
             Palette {
-                main_bg: rgb(0xFFFFFF),
                 main_text: rgb(0x1D1C1D),
                 main_dim: rgb(0x616061),
                 divider: rgb(0xDDDDDD),
@@ -132,23 +113,15 @@ impl Palette {
     fn downgrade_to_256(self) -> Self {
         let f = crate::tui::theme::to_ansi256;
         Palette {
-            rail_bg: f(self.rail_bg),
-            rail_active_bg: f(self.rail_active_bg),
-            side_bg: f(self.side_bg),
-            side_text: f(self.side_text),
-            side_strong: f(self.side_strong),
-            side_active_bg: f(self.side_active_bg),
             badge_bg: f(self.badge_bg),
             badge_fg: f(self.badge_fg),
             presence_on: f(self.presence_on),
             presence_off: f(self.presence_off),
-            main_bg: f(self.main_bg),
             main_text: f(self.main_text),
             main_dim: f(self.main_dim),
             divider: f(self.divider),
             accent: f(self.accent),
             unread: f(self.unread),
-            send: f(self.send),
             avatars: self.avatars.map(f),
         }
     }
@@ -177,27 +150,7 @@ impl Conv {
     }
 }
 
-/// Rail tab: which slice of the workspace the sidebar lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
-    Home,
-    Dms,
-    Activity,
-}
-
-impl Tab {
-    const ALL: [Tab; 3] = [Tab::Home, Tab::Dms, Tab::Activity];
-
-    fn label(self) -> &'static str {
-        match self {
-            Tab::Home => "主页",
-            Tab::Dms => "私信",
-            Tab::Activity => "动态",
-        }
-    }
-}
-
-/// One channel as the sidebar sees it.
+/// One channel as the view sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelItem {
     pub name: String,
@@ -208,7 +161,7 @@ pub struct ChannelItem {
     pub members: Vec<String>,
 }
 
-/// One subagent instance as the sidebar sees it (a DM correspondent).
+/// One subagent instance as the view sees it (a DM correspondent).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DmItem {
     pub name: String,
@@ -361,37 +314,20 @@ pub fn dm_posts(
     out
 }
 
-/// Which pane the keyboard is aimed at. Tab walks them left to right, skipping
-/// whatever the terminal is too narrow to show.
+/// What the keyboard is aimed at. With the sidebar gone there are two places to
+/// be: reading the transcript, or writing into it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
-    Rail,
-    Sidebar,
     Messages,
     Composer,
 }
 
 impl Focus {
-    pub fn next(self, has_rail: bool, has_sidebar: bool) -> Focus {
-        let order: Vec<Focus> = [
-            Focus::Rail,
-            Focus::Sidebar,
-            Focus::Messages,
-            Focus::Composer,
-        ]
-        .into_iter()
-        .filter(|f| match f {
-            Focus::Rail => has_rail,
-            Focus::Sidebar => has_sidebar,
-            _ => true,
-        })
-        .collect();
-        let i = order
-            .iter()
-            .position(|f| *f == self)
-            .map(|i| (i + 1) % order.len())
-            .unwrap_or(order.len() - 1);
-        order[i]
+    pub fn next(self) -> Focus {
+        match self {
+            Focus::Messages => Focus::Composer,
+            Focus::Composer => Focus::Messages,
+        }
     }
 }
 
@@ -406,9 +342,8 @@ pub struct Switcher {
 /// reads it and never writes it.
 #[derive(Debug, Clone)]
 pub struct Workspace {
-    pub tab: Tab,
     pub open: Option<Conv>,
-    /// Selection index into `conversations(tab)`.
+    /// Selection index into the conversation list (what alt+↑/↓ walks).
     pub sel: usize,
     pub focus: Focus,
     /// Rows scrolled up from the bottom (0 = pinned to the latest).
@@ -416,8 +351,6 @@ pub struct Workspace {
     pub composer: String,
     pub switcher: Option<Switcher>,
     pub flash: Option<String>,
-    /// Collapsed sections, in `[channels, dms]` order.
-    pub collapsed: [bool; 2],
     /// Read cursor per conversation, advanced while it is on screen.
     pub read: Vec<(Conv, u64)>,
     /// Read cursor captured the moment the open conversation was entered. The
@@ -429,7 +362,6 @@ pub struct Workspace {
 impl Default for Workspace {
     fn default() -> Self {
         Self {
-            tab: Tab::Home,
             open: None,
             sel: 0,
             focus: Focus::Composer,
@@ -437,7 +369,6 @@ impl Default for Workspace {
             composer: String::new(),
             switcher: None,
             flash: None,
-            collapsed: [false, false],
             read: Vec::new(),
             entered: None,
         }
@@ -474,57 +405,11 @@ impl Workspace {
         }
     }
 
-    /// The sidebar's sections for the current tab: title, section index, items.
-    /// The Activity tab lists what is unread *plus* whatever is open, so
-    /// reading a conversation doesn't yank it out from under the cursor.
-    pub fn sections(&self, snap: &Snapshot) -> Vec<(&'static str, usize, Vec<Conv>)> {
-        let channels: Vec<Conv> = snap
-            .channels
-            .iter()
-            .map(|c| Conv::Channel(c.name.clone()))
-            .collect();
-        let dms: Vec<Conv> = snap.dms.iter().map(|d| Conv::Dm(d.name.clone())).collect();
-        match self.tab {
-            Tab::Home => vec![("频道", 0, channels), ("私信", 1, dms)],
-            Tab::Dms => vec![("私信", 1, dms)],
-            Tab::Activity => vec![(
-                "未读",
-                0,
-                snap.all()
-                    .into_iter()
-                    .filter(|c| snap.unread_of(c) > 0 || self.open.as_ref() == Some(c))
-                    .collect(),
-            )],
-        }
-    }
-
-    /// Conversations you can actually land on: the tab's sections minus the
-    /// collapsed ones.
-    pub fn visible(&self, snap: &Snapshot) -> Vec<Conv> {
-        self.sections(snap)
-            .into_iter()
-            .filter(|(_, idx, _)| !self.collapsed[*idx])
-            .flat_map(|(_, _, items)| items)
-            .collect()
-    }
-
-    /// Collapse or expand the section holding the current selection.
-    pub fn fold_section(&mut self, snap: &Snapshot, collapsed: bool) {
-        let Some(open) = self.open.clone() else {
-            return;
-        };
-        if let Some((_, idx, _)) = self
-            .sections(snap)
-            .into_iter()
-            .find(|(_, _, items)| items.contains(&open))
-        {
-            self.collapsed[idx] = collapsed;
-        }
-    }
-
-    /// Move the sidebar selection and open what it lands on (Slack's alt+↑/↓).
+    /// Step to the next/previous conversation and open it (Slack's alt+↑/↓).
+    /// With no sidebar this and the ctrl+K switcher are the whole of navigation,
+    /// so it walks every conversation there is, channels before DMs.
     pub fn step(&mut self, snap: &Snapshot, delta: isize) {
-        let convs = self.visible(snap);
+        let convs = snap.all();
         if convs.is_empty() {
             return;
         }
@@ -558,82 +443,54 @@ impl Workspace {
             return;
         }
         if self.open.as_ref().is_none_or(|o| !all.contains(o)) {
-            let fallback = self.visible(snap).first().cloned();
-            self.open = fallback.or_else(|| all.first().cloned());
+            self.open = all.first().cloned();
         }
         self.sel = self
             .open
             .as_ref()
-            .and_then(|o| self.visible(snap).iter().position(|c| c == o))
+            .and_then(|o| all.iter().position(|c| c == o))
             .unwrap_or(0);
     }
 }
 
-/// The three panes. `rail`/`sidebar` disappear as the terminal narrows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Panes {
-    pub rail: Option<Rect>,
-    pub sidebar: Option<Rect>,
-    pub main: Rect,
+/// The conversation gets the whole terminal. The rail and sidebar this view used
+/// to carry were cut: navigation lives in the ctrl+K switcher and alt+↑/↓, and
+/// two columns of chrome are two columns not spent on the conversation.
+pub fn layout(area: Rect) -> Rect {
+    area
 }
 
-pub fn layout(area: Rect) -> Panes {
-    let rail_w = if area.width >= RAIL_MIN_TOTAL {
-        RAIL_W
-    } else {
-        0
-    };
-    let side_w = if area.width >= SIDEBAR_MIN_TOTAL {
-        (area.width / 4).clamp(18, 26)
-    } else {
-        0
-    };
-    let mut x = area.x;
-    let rail = (rail_w > 0).then(|| {
-        let r = Rect::new(x, area.y, rail_w, area.height);
-        x += rail_w;
-        r
-    });
-    let sidebar = (side_w > 0).then(|| {
-        let r = Rect::new(x, area.y, side_w, area.height);
-        x += side_w;
-        r
-    });
-    let main = Rect::new(
-        x,
-        area.y,
-        area.width.saturating_sub(x - area.x),
-        area.height,
-    );
-    Panes {
-        rail,
-        sidebar,
-        main,
-    }
+fn row(line: Line) -> Row {
+    Row::new(line)
 }
 
-fn row(line: Line, bg: Color) -> Row {
+fn blank() -> Row {
+    row(Line::empty())
+}
+
+/// An empty conversation row, for padding a short message list down to the
+/// composer.
+pub fn blank_row() -> Row {
+    blank()
+}
+
+/// A row that erases the full width before it draws. `Color::Reset` is not a
+/// colour the view chose — it is the terminal's own background — but it has to be
+/// stated: ratatui *patches* styles, so a span carrying no background leaves the
+/// cell's old one in place, and an overlay row of spaces would let whatever it
+/// covers (an avatar chip, most visibly) glow through from underneath.
+fn opaque(line: Line) -> Row {
     let mut r = Row::new(line);
-    r.bg = Some(bg);
+    r.bg = Some(Color::Reset);
     r
 }
 
-fn blank(bg: Color) -> Row {
-    row(Line::empty(), bg)
-}
-
-/// An empty conversation-pane row, for padding a short message list out to the
-/// viewport so the pane's background reaches the composer.
-pub fn blank_row(pal: &Palette) -> Row {
-    blank(pal.main_bg)
-}
-
-/// Pad a pane out to its full height so its background covers the column
-/// instead of stopping where the content does.
-fn pad(mut rows: Vec<Row>, height: usize, bg: Color) -> Vec<Row> {
+/// Pad rows out to `height` so what follows them lands where it was measured to
+/// land.
+fn pad(mut rows: Vec<Row>, height: usize) -> Vec<Row> {
     rows.truncate(height);
     while rows.len() < height {
-        rows.push(blank(bg));
+        rows.push(blank());
     }
     rows
 }
@@ -678,51 +535,6 @@ fn day_label(at: u64) -> Option<String> {
     })
 }
 
-/// Rail: workspace chip on top, then one text label per tab.
-pub fn rail_rows(snap: &Snapshot, ws: &Workspace, pal: &Palette, height: usize) -> Vec<Row> {
-    let w = RAIL_W as usize;
-    let initial = snap
-        .workspace
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_else(|| "·".to_string());
-    let focused = ws.focus == Focus::Rail;
-    let mut rows = vec![
-        blank(pal.rail_bg),
-        row(
-            Line::styled(
-                boxed(&format!(" {initial} "), w),
-                SegStyle::fg(pal.side_strong).with_bg(pal.side_bg).bold(),
-            ),
-            pal.rail_bg,
-        ),
-        blank(pal.rail_bg),
-    ];
-    for tab in Tab::ALL {
-        let active = tab == ws.tab;
-        let (fg, bg) = if active {
-            (pal.side_strong, pal.rail_active_bg)
-        } else {
-            (pal.side_text, pal.rail_bg)
-        };
-        // The label is the whole tab. Pictographic icons were tried and cut:
-        // at one cell they are unreadable, and the terminal picks whichever
-        // glyph the font happens to carry — often an emoji.
-        let bar = if focused && active { "▎" } else { " " };
-        let mut line = Line::styled(bar, SegStyle::fg(pal.side_strong).with_bg(pal.rail_bg));
-        let style = if active {
-            SegStyle::fg(pal.side_strong).with_bg(bg).bold()
-        } else {
-            SegStyle::fg(fg).with_bg(bg)
-        };
-        line.push_styled(boxed(tab.label(), w - 1), style);
-        rows.push(row(line, pal.rail_bg));
-        rows.push(blank(pal.rail_bg));
-    }
-    pad(rows, height, pal.rail_bg)
-}
-
 fn presence(state: AgentState, pal: &Palette) -> (&'static str, Color) {
     match state {
         AgentState::Running => ("●", pal.presence_on),
@@ -731,221 +543,60 @@ fn presence(state: AgentState, pal: &Palette) -> (&'static str, Color) {
     }
 }
 
-/// One sidebar conversation row: prefix glyph, name, unread badge. Active rows
-/// take the blue bar, unread rows go bold white, read rows stay lavender.
-fn conv_row(
-    snap: &Snapshot,
-    conv: &Conv,
-    active: bool,
-    focused: bool,
-    pal: &Palette,
-    width: usize,
-) -> Row {
-    let unread = snap.unread_of(conv);
-    let bg = if active {
-        pal.side_active_bg
-    } else {
-        pal.side_bg
-    };
-    let (glyph, glyph_fg) = match conv {
-        Conv::Channel(_) => (
-            "#".to_string(),
-            if active || unread > 0 {
-                pal.side_strong
-            } else {
-                pal.side_text
-            },
-        ),
-        Conv::Dm(name) => {
-            let state = snap
-                .dm(name)
-                .map(|d| d.state)
-                .unwrap_or(AgentState::Stopped);
-            let (g, c) = presence(state, pal);
-            (g.to_string(), c)
-        }
-    };
-    // Active and unread both read as "loud"; everything else is lavender.
-    let loud = active || unread > 0;
-    let name_style = if loud {
-        SegStyle::fg(pal.side_strong).with_bg(bg).bold()
-    } else {
-        SegStyle::fg(pal.side_text).with_bg(bg)
-    };
-    // A frozen channel is struck through rather than given a glyph of its own:
-    // it costs no columns and can't misalign on an ambiguous-width terminal.
-    let name_style = match conv {
-        Conv::Channel(name) if snap.channel(name).is_some_and(|c| c.frozen) => {
-            name_style.strikethrough()
-        }
-        _ => name_style,
-    };
-    let badge = if unread > 0 {
-        format!(" {unread} ")
-    } else {
-        String::new()
-    };
-    let cursor = if focused && active { "▎" } else { " " };
-    let head = format!("{cursor} {glyph} ");
-    let room = width
-        .saturating_sub(text_width(&head))
-        .saturating_sub(text_width(&badge));
-    let name = crate::tui::chat::one_line(conv.name(), room.max(1));
-    let mut line = Line::styled(cursor, SegStyle::fg(pal.side_strong).with_bg(bg));
-    line.push_styled(" ", SegStyle::fg(glyph_fg).with_bg(bg));
-    line.push_styled(glyph, SegStyle::fg(glyph_fg).with_bg(bg));
-    line.push_styled(" ", SegStyle::fg(glyph_fg).with_bg(bg));
-    line.push_styled(name.clone(), name_style);
-    if !badge.is_empty() {
-        let used = text_width(&head) + text_width(&name);
-        let gap = width
-            .saturating_sub(used)
-            .saturating_sub(text_width(&badge));
-        line.push_styled(" ".repeat(gap), SegStyle::fg(pal.side_text).with_bg(bg));
-        line.push_styled(
-            badge,
-            SegStyle::fg(pal.badge_fg).with_bg(pal.badge_bg).bold(),
-        );
-    }
-    row(line, bg)
-}
-
-fn section_row(title: &str, collapsed: bool, pal: &Palette) -> Row {
-    let chevron = if collapsed { "▸" } else { "▾" };
-    row(
-        Line::styled(
-            format!(" {chevron} {title}"),
-            SegStyle::fg(pal.side_text).bold(),
-        ),
-        pal.side_bg,
-    )
-}
-
-/// Sidebar: workspace header, quick-switcher hint, then the sections the
-/// current tab shows.
-pub fn sidebar_rows(
-    snap: &Snapshot,
-    ws: &Workspace,
-    pal: &Palette,
-    width: usize,
-    height: usize,
-) -> Vec<Row> {
-    let focused = ws.focus == Focus::Sidebar;
-    let mut rows = vec![
-        row(
-            Line::styled(
-                format!(
-                    " {}",
-                    crate::tui::chat::one_line(&snap.workspace, width.saturating_sub(4))
-                ),
-                SegStyle::fg(pal.side_strong).bold(),
-            ),
-            pal.side_bg,
-        ),
-        row(
-            Line::styled(" 跳转  ctrl+k", SegStyle::fg(pal.side_text)),
-            pal.side_bg,
-        ),
-        blank(pal.side_bg),
-    ];
-
-    let mut body: Vec<Row> = Vec::new();
-    for (title, idx, items) in ws.sections(snap) {
-        if items.is_empty() {
-            continue;
-        }
-        body.push(section_row(title, ws.collapsed[idx], pal));
-        if ws.collapsed[idx] {
-            continue;
-        }
-        for conv in items {
-            let active = ws.open.as_ref() == Some(&conv);
-            body.push(conv_row(snap, &conv, active, focused, pal, width));
-        }
-    }
-    if body.is_empty() {
-        body.push(row(
-            Line::styled(
-                match ws.tab {
-                    Tab::Activity => " 没有未读",
-                    _ => " 还没有频道或实例",
-                },
-                SegStyle::fg(pal.side_text).italic(),
-            ),
-            pal.side_bg,
-        ));
-    }
-
-    // Keep the open conversation visible when the list outgrows the pane.
-    let room = height.saturating_sub(rows.len());
-    if body.len() > room {
-        let anchor = body
-            .iter()
-            .position(|r| r.bg == Some(pal.side_active_bg))
-            .unwrap_or(0);
-        let start = anchor
-            .saturating_sub(room.saturating_sub(2))
-            .min(body.len().saturating_sub(room));
-        body = body.into_iter().skip(start).collect();
-    }
-    rows.extend(body);
-    pad(rows, height, pal.side_bg)
-}
-
-/// Conversation header: name, then a metadata line, then a rule.
+/// Conversation header: who you are looking at, what it is, and a rule under it.
+/// Two rows, not three — with no sidebar left to name the workspace, the team's
+/// name moves here, and the metadata that had a line of its own now trails the
+/// title, where it reads as a subtitle instead of a second heading.
 pub fn header_rows(snap: &Snapshot, conv: &Conv, pal: &Palette, width: usize) -> Vec<Row> {
-    let (title, meta, right) = match conv {
+    let (title, meta) = match conv {
         Conv::Channel(name) => match snap.channel(name) {
             Some(c) => (
                 format!(" # {name}"),
                 format!(
-                    "   {} · {} 条{}",
+                    "  {} · {} 条 · {} 人{}",
                     c.mode.label(),
                     c.seq,
+                    c.members.len(),
                     if c.frozen { " · 已冻结" } else { "" }
                 ),
-                format!("{} 人 ", c.members.len()),
             ),
-            None => (
-                format!(" # {name}"),
-                "   已不存在".to_string(),
-                String::new(),
-            ),
+            None => (format!(" # {name}"), "  已不存在".to_string()),
         },
         Conv::Dm(name) => match snap.dm(name) {
             Some(d) => {
                 let (glyph, _) = presence(d.state, pal);
                 (
                     format!(" {glyph} {name}"),
-                    format!("   {} · {}", d.state.label(), d.description),
-                    "私信 ".to_string(),
+                    format!("  私信 · {} · {}", d.state.label(), d.description),
                 )
             }
-            None => (format!(" {name}"), "   已不存在".to_string(), String::new()),
+            None => (format!(" {name}"), "  已不存在".to_string()),
         },
     };
+    // The workspace name sits right, where the member count used to: it is the one
+    // piece of context the cut sidebar was carrying that nothing else says.
+    let right = format!("{} ", snap.workspace);
+    let room = width.saturating_sub(text_width(&right));
     let mut head = Line::styled(
-        crate::tui::chat::one_line(&title, width.saturating_sub(text_width(&right))),
+        crate::tui::chat::one_line(&title, room),
         SegStyle::fg(pal.main_text).bold(),
     );
+    let meta = crate::tui::chat::one_line(
+        &meta,
+        room.saturating_sub(text_width(&head.plain_text())).max(1),
+    );
+    head.push_styled(meta, SegStyle::fg(pal.main_dim));
     let gap = width
         .saturating_sub(text_width(&head.plain_text()))
         .saturating_sub(text_width(&right));
     head.push_styled(" ".repeat(gap), SegStyle::fg(pal.main_dim));
     head.push_styled(right, SegStyle::fg(pal.main_dim));
     vec![
-        row(head, pal.main_bg),
-        row(
-            Line::styled(
-                crate::tui::chat::one_line(&meta, width),
-                SegStyle::fg(pal.main_dim),
-            ),
-            pal.main_bg,
-        ),
-        row(
-            Line::styled("─".repeat(width.min(500)), SegStyle::fg(pal.divider)),
-            pal.main_bg,
-        ),
+        row(head),
+        row(Line::styled(
+            "─".repeat(width.min(500)),
+            SegStyle::fg(pal.divider),
+        )),
     ]
 }
 
@@ -960,7 +611,7 @@ fn day_divider(label: &str, pal: &Palette, width: usize) -> Row {
         "─".repeat(width.saturating_sub(side + w)),
         SegStyle::fg(pal.divider),
     );
-    row(line, pal.main_bg)
+    row(line)
 }
 
 /// Slack's unread marker: the rule itself goes red and the label sits at the
@@ -971,11 +622,17 @@ fn unread_divider(pal: &Palette, width: usize) -> Row {
     let rule = width.saturating_sub(w).saturating_sub(1);
     let mut line = Line::styled("─".repeat(rule), SegStyle::fg(pal.unread));
     line.push_styled(label, SegStyle::fg(pal.unread).bold());
-    row(line, pal.main_bg)
+    row(line)
 }
 
-/// Avatar chip: the sender's initial on a per-sender colour.
-fn avatar(name: &str, pal: &Palette) -> Line {
+/// Message gutter: wide enough for whichever avatar the terminal can draw.
+fn gutter(images: bool) -> usize {
+    if images { avatar::COLS + 1 } else { GUTTER }
+}
+
+/// Avatar chip for terminals that cannot place images: the sender's initial on a
+/// per-sender colour, occupying the same gutter the portrait would.
+fn chip(name: &str, pal: &Palette) -> Line {
     let initial = name
         .chars()
         .next()
@@ -994,22 +651,47 @@ fn avatar(name: &str, pal: &Palette) -> Line {
     )
 }
 
+/// The `row`-th gutter cell of a message block: the avatar's own rows when the
+/// terminal can place images, blank indentation otherwise. Row 0 rides the name
+/// line, row 1 the first body line — which is why the portrait costs no rows the
+/// layout was not already spending.
+fn gutter_line(name: &str, row: usize, images: bool, pal: &Palette) -> Line {
+    if images {
+        if let Some((cells, id)) = avatar::placeholder(name, row) {
+            let mut line = Line::styled(cells, SegStyle::fg(id));
+            line.push_styled(" ", SegStyle::fg(pal.main_text));
+            return line;
+        }
+    } else if row == 0 {
+        let mut line = chip(name, pal);
+        line.push_styled(" ", SegStyle::fg(pal.main_text));
+        return line;
+    }
+    Line::styled(" ".repeat(gutter(images)), SegStyle::fg(pal.main_dim))
+}
+
 /// The message list. Consecutive posts from one sender inside [`GROUP_WINDOW`]
 /// share a name row; the day changes and the first unread message get dividers.
-pub fn message_rows(posts: &[Post], unread_from: usize, pal: &Palette, width: usize) -> Vec<Row> {
+/// `images` says whether the terminal can place the portrait avatars; the row
+/// count is the same either way, so only the gutter changes.
+pub fn message_rows(
+    posts: &[Post],
+    unread_from: usize,
+    pal: &Palette,
+    width: usize,
+    images: bool,
+) -> Vec<Row> {
     if posts.is_empty() {
         return vec![
-            blank(pal.main_bg),
-            row(
-                Line::styled(
-                    "   还没有消息。在下面写第一条。",
-                    SegStyle::fg(pal.main_dim).italic(),
-                ),
-                pal.main_bg,
-            ),
+            blank(),
+            row(Line::styled(
+                "   还没有消息。在下面写第一条。",
+                SegStyle::fg(pal.main_dim).italic(),
+            )),
         ];
     }
-    let body_w = width.saturating_sub(GUTTER + 1).max(8);
+    let gutter_w = gutter(images);
+    let body_w = width.saturating_sub(gutter_w + 1).max(8);
     let mut rows: Vec<Row> = Vec::new();
     let mut prev: Option<(&str, u64)> = None;
     let mut prev_day: Option<String> = None;
@@ -1017,13 +699,13 @@ pub fn message_rows(posts: &[Post], unread_from: usize, pal: &Palette, width: us
         if let Some(label) = day_label(post.at)
             && prev_day.as_deref() != Some(label.as_str())
         {
-            rows.push(blank(pal.main_bg));
+            rows.push(blank());
             rows.push(day_divider(&label, pal, width));
             prev_day = Some(label);
             prev = None;
         }
         if i == unread_from && unread_from < posts.len() {
-            rows.push(blank(pal.main_bg));
+            rows.push(blank());
             rows.push(unread_divider(pal, width));
             prev = None;
         }
@@ -1033,32 +715,39 @@ pub fn message_rows(posts: &[Post], unread_from: usize, pal: &Palette, width: us
                 && (post.at == 0 || at == 0 || post.at.saturating_sub(at) <= GROUP_WINDOW)
         });
         if !grouped {
-            rows.push(blank(pal.main_bg));
-            let mut head = avatar(&post.from, pal);
-            head.push_styled(" ", SegStyle::fg(pal.main_text));
+            rows.push(blank());
+            let mut head = gutter_line(&post.from, 0, images, pal);
             let shown = if post.you {
                 "你".to_string()
             } else {
                 post.from.clone()
             };
             head.push_styled(shown, SegStyle::fg(pal.main_text).bold());
-            if !post.you {
-                head.push_styled(" AGENT ", SegStyle::fg(pal.main_dim).with_bg(pal.divider));
-            }
             let time = hhmm(post.at);
             if !time.is_empty() {
                 head.push_styled(format!("  {time}"), SegStyle::fg(pal.main_dim));
             }
-            rows.push(row(head, pal.main_bg));
+            rows.push(row(head));
         }
-        let indent = " ".repeat(GUTTER);
+        // The first body row of an ungrouped post carries the bottom half of the
+        // portrait; every other row is plain indentation.
+        let mut lead = 0usize;
+        let indent = |lead: &mut usize| -> Line {
+            let line = if *lead == 0 && !grouped {
+                gutter_line(&post.from, 1, images, pal)
+            } else {
+                Line::styled(" ".repeat(gutter_w), SegStyle::fg(pal.main_dim))
+            };
+            *lead += 1;
+            line
+        };
         match post.kind {
             PostKind::Tool => {
                 let text = crate::tui::chat::one_line(&post.text, body_w);
-                let mut line = Line::styled(indent.clone(), SegStyle::fg(pal.main_dim));
+                let mut line = indent(&mut lead);
                 line.push_styled("▏", SegStyle::fg(pal.accent));
                 line.push_styled(format!(" {text}"), SegStyle::fg(pal.main_dim));
-                rows.push(row(line, pal.main_bg));
+                rows.push(row(line));
             }
             _ => {
                 let style = match post.kind {
@@ -1068,34 +757,35 @@ pub fn message_rows(posts: &[Post], unread_from: usize, pal: &Palette, width: us
                 for para in post.text.lines() {
                     let wrapped = wrap_words(para, body_w);
                     if wrapped.is_empty() {
-                        rows.push(blank(pal.main_bg));
+                        rows.push(row(indent(&mut lead)));
                     }
                     for l in wrapped {
-                        rows.push(row(
-                            Line::styled(format!("{indent}{l}"), style),
-                            pal.main_bg,
-                        ));
+                        let mut line = indent(&mut lead);
+                        line.push_styled(l, style);
+                        rows.push(row(line));
                     }
                 }
                 if post.kind == PostKind::Queued {
-                    rows.push(row(
-                        Line::styled(
-                            format!("{indent}⧖ 待送达（下一个回合边界注入）"),
-                            SegStyle::fg(pal.main_dim).italic(),
-                        ),
-                        pal.main_bg,
-                    ));
+                    let mut line = indent(&mut lead);
+                    line.push_styled(
+                        "⧖ 待送达（下一个回合边界注入）",
+                        SegStyle::fg(pal.main_dim).italic(),
+                    );
+                    rows.push(row(line));
                 }
                 if post.kind == PostKind::Typing {
-                    rows.push(row(
-                        Line::styled(
-                            format!("{indent}✻ {} 正在输入…", post.from),
-                            SegStyle::fg(pal.accent).italic(),
-                        ),
-                        pal.main_bg,
-                    ));
+                    let mut line = indent(&mut lead);
+                    line.push_styled(
+                        format!("✻ {} 正在输入…", post.from),
+                        SegStyle::fg(pal.accent).italic(),
+                    );
+                    rows.push(row(line));
                 }
             }
+        }
+        // A post with no body at all still owes the portrait its second row.
+        if lead == 0 && !grouped {
+            rows.push(row(gutter_line(&post.from, 1, images, pal)));
         }
         prev = Some((&post.from, post.at));
     }
@@ -1134,13 +824,10 @@ pub fn composer_rows(
     let active = ws.focus == Focus::Composer;
     let border = if active { pal.accent } else { pal.divider };
     let frame = |left: &str, right: &str| {
-        row(
-            Line::styled(
-                format!(" {left}{}{right}", "─".repeat(inner + 2)),
-                SegStyle::fg(border),
-            ),
-            pal.main_bg,
-        )
+        row(Line::styled(
+            format!(" {left}{}{right}", "─".repeat(inner + 2)),
+            SegStyle::fg(border),
+        ))
     };
     let mut rows = vec![frame("╭", "╮")];
     let mut caret = None;
@@ -1161,55 +848,54 @@ pub fn composer_rows(
         if i + 1 == shown.len() {
             caret = Some((rows.len(), if empty { 3 } else { 3 + used.min(inner) }));
         }
-        rows.push(row(line, pal.main_bg));
+        rows.push(row(line));
     }
     rows.push(frame("╰", "╯"));
     let hint = if active {
-        "  enter 发送 · tab 切换焦点 · ctrl+k 跳转 · esc 返回"
+        "  enter 发送 · tab 切换焦点 · ctrl+k 切换会话 · alt+↑↓ 上下会话 · esc 返回"
     } else {
-        "  tab 回到输入框 · ↑↓ 滚动 · alt+↑↓ 换会话 · esc 返回"
+        "  tab 回到输入框 · ↑↓ 滚动 · ctrl+k 切换会话 · alt+↑↓ 上下会话 · esc 返回"
     };
     let foot = Line::styled(
         crate::tui::chat::one_line(hint, width.saturating_sub(2)),
         SegStyle::fg(pal.main_dim),
     );
-    rows.push(row(foot, pal.main_bg));
+    rows.push(row(foot));
     if let Some(flash) = &ws.flash {
-        rows.push(row(
-            Line::styled(
-                crate::tui::chat::one_line(&format!("  ⚠ {flash}"), width),
-                SegStyle::fg(pal.unread),
-            ),
-            pal.main_bg,
-        ));
+        rows.push(row(Line::styled(
+            crate::tui::chat::one_line(&format!("  ⚠ {flash}"), width),
+            SegStyle::fg(pal.unread),
+        )));
     }
     (rows, caret)
 }
 
-/// What the conversation pane shows when there is nothing to open yet.
+/// What the view shows when there is nothing to open yet.
 pub fn empty_pane_rows(pal: &Palette, width: usize, height: usize) -> Vec<Row> {
     let lines = [
         ("这里还没有会话", true),
         ("", false),
-        ("Agent 工具派生实例后会出现在「私信」，", false),
-        ("Channel 工具建的房间会出现在「频道」。", false),
+        ("Agent 工具派生的实例会成为一个私信对象，", false),
+        ("Channel 工具建的房间会成为一个频道。", false),
         ("", false),
-        ("esc 返回", false),
+        ("ctrl+k 切换会话 · esc 返回", false),
     ];
     let top = height.saturating_sub(lines.len()) / 2;
-    let mut rows = vec![blank(pal.main_bg); top];
+    let mut rows = vec![blank(); top];
     for (text, strong) in lines {
         let style = if strong {
             SegStyle::fg(pal.main_text).bold()
         } else {
             SegStyle::fg(pal.main_dim)
         };
-        rows.push(row(Line::styled(boxed(text, width), style), pal.main_bg));
+        rows.push(row(Line::styled(boxed(text, width), style)));
     }
-    pad(rows, height, pal.main_bg)
+    pad(rows, height)
 }
 
-/// Quick-switcher overlay rows and the matches they list (ctrl+K).
+/// Quick-switcher overlay rows and the matches they list (ctrl+K). With the
+/// sidebar gone this is the main way to change conversation, so it opens on the
+/// full list rather than waiting for a query.
 pub fn switcher_rows(
     snap: &Snapshot,
     sw: &Switcher,
@@ -1219,9 +905,9 @@ pub fn switcher_rows(
     let matches = switcher_matches(snap, &sw.query);
     // Same box geometry as the composer: margin + │ + space + inner + space + │.
     let inner = width.saturating_sub(5).max(8);
-    // The overlay sits on top of the message list, so every row has to be
-    // opaque across the full pane — repainting only the background would leave
-    // the glyphs underneath showing through.
+    // The overlay sits on top of the message list, so every row is padded out to
+    // the full width *and* marked opaque: spaces erase the glyphs underneath,
+    // `opaque` erases their colours.
     let boxed_row = |content: Line, used: usize| {
         let mut line = Line::styled(" │ ", SegStyle::fg(pal.accent));
         line.segs.extend(content.segs);
@@ -1230,16 +916,15 @@ pub fn switcher_rows(
             SegStyle::fg(pal.main_text),
         );
         line.push_styled("│", SegStyle::fg(pal.accent));
-        row(line, pal.main_bg)
+        opaque(line)
     };
+    // Margin + ╭ + inner+2 + ╮ == width, so the rule covers the same span as
+    // every other overlay row.
     let rule = |left: &str, right: &str| {
-        row(
-            Line::styled(
-                format!(" {left}{}{right}", "─".repeat(inner + 2)),
-                SegStyle::fg(pal.accent),
-            ),
-            pal.main_bg,
-        )
+        opaque(Line::styled(
+            format!(" {left}{}{right}", "─".repeat(inner + 2)),
+            SegStyle::fg(pal.accent),
+        ))
     };
 
     let mut rows = vec![rule("╭", "╮")];
@@ -1261,23 +946,36 @@ pub fn switcher_rows(
             Conv::Channel(n) => format!("# {n}"),
             Conv::Dm(n) => format!("@ {n}"),
         };
-        let label = crate::tui::chat::one_line(&label, inner);
+        // The unread count the sidebar badge used to carry. This list is now the
+        // only place the whole workspace is visible at once, so it is the only
+        // place that can say where something new arrived.
+        let unread = snap.unread_of(conv);
+        let badge = if unread > 0 {
+            format!(" {unread} ")
+        } else {
+            String::new()
+        };
+        let label = crate::tui::chat::one_line(&label, inner.saturating_sub(text_width(&badge)));
         let style = if sel {
-            SegStyle::fg(pal.badge_fg)
-                .with_bg(pal.side_active_bg)
-                .bold()
+            SegStyle::fg(pal.badge_fg).with_bg(pal.badge_bg).bold()
         } else {
             SegStyle::fg(pal.main_text)
         };
         // The selection bar runs the width of the row, Slack-style, so pad
         // inside the highlighted segment rather than after it.
-        let used = text_width(&label);
-        let line = if sel {
-            Line::styled(format!("{label}{}", " ".repeat(inner - used)), style)
+        let used = text_width(&label) + text_width(&badge);
+        let gap = inner.saturating_sub(used);
+        let mut line = if sel {
+            Line::styled(format!("{label}{}", " ".repeat(gap)), style)
         } else {
-            Line::styled(label, style)
+            let mut l = Line::styled(label, style);
+            l.push_styled(" ".repeat(gap), SegStyle::fg(pal.main_dim));
+            l
         };
-        rows.push(boxed_row(line, inner.min(if sel { inner } else { used })));
+        if !badge.is_empty() {
+            line.push_styled(badge, SegStyle::fg(pal.unread).bold());
+        }
+        rows.push(boxed_row(line, inner));
     }
     rows.push(rule("╰", "╯"));
     (rows, matches)
@@ -1358,179 +1056,6 @@ mod tests {
     }
 
     #[test]
-    fn layout_sheds_panes_as_the_terminal_narrows() {
-        let wide = layout(Rect::new(0, 0, 120, 30));
-        assert_eq!(wide.rail.map(|r| r.width), Some(RAIL_W));
-        assert_eq!(wide.sidebar.map(|r| r.width), Some(26));
-        assert_eq!(wide.main.x, RAIL_W + 26);
-        assert_eq!(wide.main.width, 120 - RAIL_W - 26);
-
-        // Rail drops first, sidebar survives.
-        let mid = layout(Rect::new(0, 0, 50, 30));
-        assert!(mid.rail.is_none());
-        assert_eq!(mid.sidebar.map(|r| r.width), Some(18));
-        assert_eq!(mid.main.width, 50 - 18);
-
-        // Narrow: the conversation goes full-bleed.
-        let narrow = layout(Rect::new(0, 0, 40, 30));
-        assert!(narrow.rail.is_none() && narrow.sidebar.is_none());
-        assert_eq!(narrow.main.width, 40);
-    }
-
-    #[test]
-    fn sidebar_lists_sections_with_unread_and_active_styling() {
-        let snap = snap();
-        let mut ws = Workspace {
-            open: Some(Conv::Channel("dev-room".into())),
-            focus: Focus::Sidebar,
-            ..Workspace::default()
-        };
-        ws.sync(&snap);
-        let rows = sidebar_rows(&snap, &ws, &pal(), 24, 20);
-        let t = texts(&rows);
-        assert!(t.iter().any(|l| l.starts_with(" bingo")), "{t:?}");
-        assert!(t.iter().any(|l| l.contains("▾ 频道")));
-        assert!(t.iter().any(|l| l.contains("▾ 私信")));
-        // Channels carry #, DMs a presence dot keyed to the instance state.
-        assert!(t.iter().any(|l| l.contains("# dev-room")));
-        assert!(t.iter().any(|l| l.contains("# design")));
-        assert!(t.iter().any(|l| l.contains("● scout")));
-        assert!(t.iter().any(|l| l.contains("○ qa")));
-        // A frozen channel is struck through, costing no columns.
-        let frozen = rows
-            .iter()
-            .find(|r| r.line.plain_text().contains("design"))
-            .unwrap_or_else(|| panic!("有 design 行"));
-        assert!(frozen.line.segs.iter().any(|s| s.style.strikethrough));
-        // Unread badges ride the right edge.
-        assert!(t.iter().any(|l| l.contains("dev-room") && l.contains("2")));
-        assert!(t.iter().any(|l| l.contains("qa") && l.contains("3")));
-        // The open conversation takes the blue bar.
-        let active = rows
-            .iter()
-            .find(|r| r.line.plain_text().contains("dev-room"))
-            .unwrap_or_else(|| panic!("有 dev-room 行"));
-        assert_eq!(active.bg, Some(pal().side_active_bg));
-        // Every row paints the column so the aubergine reaches the bottom.
-        assert_eq!(rows.len(), 20);
-        assert!(rows.iter().all(|r| r.bg.is_some()));
-    }
-
-    /// Every pane paints its own column edge to edge. Without this the
-    /// aubergine would hug the glyphs and the terminal's own background would
-    /// show through the gaps — the one thing that would give the skin away.
-    #[test]
-    fn panes_paint_their_full_column() {
-        use ratatui::buffer::Buffer;
-        let snap = snap();
-        let mut ws = Workspace {
-            open: Some(Conv::Channel("dev-room".into())),
-            ..Workspace::default()
-        };
-        ws.sync(&snap);
-        let pal = pal();
-        let area = Rect::new(0, 0, 80, 12);
-        let panes = layout(area);
-        let mut buf = Buffer::empty(area);
-        let side = panes.sidebar.unwrap_or_else(|| panic!("有侧栏"));
-        crate::tui::view::render_rows(
-            &sidebar_rows(&snap, &ws, &pal, side.width as usize, 12),
-            pal.main_text,
-            &mut buf,
-            side,
-        );
-        crate::tui::view::render_rows(
-            &rail_rows(&snap, &ws, &pal, 12),
-            pal.main_text,
-            &mut buf,
-            panes.rail.unwrap_or_else(|| panic!("有 rail")),
-        );
-        // The active row is blue from its first cell to its last, badge included.
-        let y = (0..12)
-            .find(|y| {
-                (side.x..side.right())
-                    .any(|x| buf[(x, *y)].bg == pal.side_active_bg && buf[(x, *y)].symbol() == "d")
-            })
-            .unwrap_or_else(|| panic!("找得到 dev-room 行"));
-        for x in side.x..side.right() {
-            let bg = buf[(x, y)].bg;
-            assert!(
-                bg == pal.side_active_bg || bg == pal.badge_bg,
-                "x={x} 上的背景断了: {bg:?}"
-            );
-        }
-        // Rail and sidebar own every cell of their columns, on every row.
-        for y in 0..12 {
-            for x in panes.rail.iter().flat_map(|r| r.x..r.right()) {
-                assert_ne!(
-                    buf[(x, y)].bg,
-                    ratatui::style::Color::Reset,
-                    "rail ({x},{y})"
-                );
-            }
-            for x in side.x..side.right() {
-                assert_ne!(
-                    buf[(x, y)].bg,
-                    ratatui::style::Color::Reset,
-                    "侧栏 ({x},{y})"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn activity_tab_lists_unread_plus_whatever_is_open() {
-        let snap = snap();
-        let ws = Workspace {
-            tab: Tab::Activity,
-            ..Workspace::default()
-        };
-        assert_eq!(
-            ws.visible(&snap),
-            vec![Conv::Channel("dev-room".into()), Conv::Dm("qa".into())]
-        );
-        // Reading a conversation must not yank it out from under the cursor.
-        let reading = Workspace {
-            open: Some(Conv::Channel("design".into())),
-            ..ws.clone()
-        };
-        assert!(
-            reading
-                .visible(&snap)
-                .contains(&Conv::Channel("design".into()))
-        );
-
-        let dms = Workspace {
-            tab: Tab::Dms,
-            ..Workspace::default()
-        };
-        assert_eq!(dms.visible(&snap).len(), 2);
-        assert_eq!(Workspace::default().visible(&snap).len(), 4);
-    }
-
-    #[test]
-    fn collapsing_a_section_takes_its_rows_out_of_navigation() {
-        let snap = snap();
-        let mut ws = Workspace {
-            open: Some(Conv::Channel("dev-room".into())),
-            ..Workspace::default()
-        };
-        ws.fold_section(&snap, true);
-        assert_eq!(ws.collapsed, [true, false]);
-        assert_eq!(
-            ws.visible(&snap),
-            vec![Conv::Dm("scout".into()), Conv::Dm("qa".into())],
-            "折叠的频道段不再参与 ↑↓"
-        );
-        // The header row survives with a ▸ chevron; its members are gone.
-        let t = texts(&sidebar_rows(&snap, &ws, &pal(), 24, 20));
-        assert!(t.iter().any(|l| l.contains("▸ 频道")), "{t:?}");
-        assert!(!t.iter().any(|l| l.contains("dev-room")), "{t:?}");
-        ws.fold_section(&snap, false);
-        assert_eq!(ws.visible(&snap).len(), 4);
-    }
-
-    #[test]
     fn messages_group_by_sender_and_break_on_unread() {
         let base = 1_760_000_000u64;
         let posts = vec![
@@ -1556,32 +1081,154 @@ mod tests {
                 kind: PostKind::Said,
             },
         ];
-        let rows = message_rows(&posts, 2, &pal(), 60);
+        let rows = message_rows(&posts, 2, &pal(), 60, false);
         let t = texts(&rows);
         // The second scout message is grouped: one name row, not two.
-        assert_eq!(
-            t.iter()
-                .filter(|l| l.contains("scout") && l.contains("AGENT"))
-                .count(),
-            1,
-            "{t:?}"
-        );
-        // Your own messages are labelled 你 and carry no AGENT badge.
-        let mine = t
-            .iter()
-            .find(|l| l.contains("你"))
-            .unwrap_or_else(|| panic!("有你的名字行"));
-        assert!(!mine.contains("AGENT"), "{mine:?}");
+        assert_eq!(t.iter().filter(|l| l.contains("scout")).count(), 1, "{t:?}");
+        // Your own messages are labelled 你.
+        assert!(t.iter().any(|l| l.contains("你")), "{t:?}");
         // Unread divider sits before the third post.
         assert!(t.iter().any(|l| l.contains("新消息")), "{t:?}");
         // Bodies sit in the avatar gutter.
         assert!(t.iter().any(|l| l.starts_with("    找到回归了")), "{t:?}");
         // Empty log gets the invitation, not a blank pane.
         assert!(
-            texts(&message_rows(&[], 0, &pal(), 60))
+            texts(&message_rows(&[], 0, &pal(), 60, false))
                 .iter()
                 .any(|l| l.contains("还没有消息"))
         );
+    }
+
+    /// Chrome whose columns are computed stays text and box-drawing only: a
+    /// terminal substitutes whatever glyph its font carries for a pictograph,
+    /// which is how one icon becomes a two-cell emoji and shears a padded row.
+    /// The composer's key hints are exempt — `↑↓` there *names a key*, and it
+    /// sits on a line nothing is aligned against.
+    #[test]
+    fn aligned_chrome_avoids_pictographs() {
+        let snap = snap();
+        let pal = pal();
+        let mut rows = header_rows(&snap, &Conv::Channel("dev-room".into()), &pal, 60);
+        rows.extend(empty_pane_rows(&pal, 60, 10));
+        rows.extend(
+            switcher_rows(
+                &snap,
+                &Switcher {
+                    query: String::new(),
+                    sel: 0,
+                },
+                &pal,
+                60,
+            )
+            .0,
+        );
+        for line in texts(&rows) {
+            assert!(
+                line.chars().all(|c| !is_pictograph(c)),
+                "象形字符会被字体替换成双宽: {line:?}"
+            );
+        }
+    }
+
+    /// The view paints no surface of its own any more: the terminal's background
+    /// is the background. Only genuine marks may carry one, and never as a whole
+    /// row — a row-level background is exactly the slab that was cut.
+    #[test]
+    fn nothing_paints_a_surface() {
+        let snap = snap();
+        let pal = pal();
+        let posts = vec![Post {
+            from: "scout".into(),
+            you: false,
+            at: 1_760_000_000,
+            text: "找到回归了".into(),
+            kind: PostKind::Said,
+        }];
+        let ws = Workspace::default();
+        let conv = Conv::Channel("dev-room".into());
+        let mut all: Vec<Row> = Vec::new();
+        all.extend(header_rows(&snap, &conv, &pal, 60));
+        all.extend(message_rows(&posts, usize::MAX, &pal, 60, false));
+        all.extend(composer_rows(&ws, &conv, &pal, 60).0);
+        all.extend(empty_pane_rows(&pal, 60, 8));
+        assert!(all.iter().all(|r| r.bg.is_none()), "不再有整行底色");
+        assert!(blank_row().bg.is_none());
+
+        // The overlay is the one exception, and it is an erase rather than a
+        // colour: without it the avatar chip underneath glows through the box.
+        let overlay = switcher_rows(
+            &snap,
+            &Switcher {
+                query: String::new(),
+                sel: 0,
+            },
+            &pal,
+            60,
+        )
+        .0;
+        assert!(
+            overlay.iter().all(|r| r.bg == Some(Color::Reset)),
+            "浮层整行擦到终端底色"
+        );
+        // The one surviving background is the avatar chip, and only on its cells.
+        let chip_cells: Vec<_> = message_rows(&posts, usize::MAX, &pal, 60, false)
+            .iter()
+            .flat_map(|r| r.line.segs.clone())
+            .filter(|s| s.style.bg.is_some())
+            .collect();
+        assert_eq!(chip_cells.len(), 1, "只有头像格带底色: {chip_cells:?}");
+    }
+
+    /// With images the portrait replaces the initial chip and spans two rows —
+    /// the name row and the first body row — so the body still lines up under
+    /// itself and the message costs no extra rows.
+    #[test]
+    fn image_avatars_occupy_the_gutter_without_costing_rows() {
+        let pal = pal();
+        let posts = vec![Post {
+            from: "scout".into(),
+            you: false,
+            at: 1_760_000_000,
+            text: "第一行\n第二行".into(),
+            kind: PostKind::Said,
+        }];
+        let plain = message_rows(&posts, usize::MAX, &pal, 60, false);
+        let imaged = message_rows(&posts, usize::MAX, &pal, 60, true);
+        assert_eq!(plain.len(), imaged.len(), "两种皮肤行数一致");
+
+        let cells = |rows: &[Row]| -> Vec<String> {
+            rows.iter()
+                .map(|r| r.line.plain_text().chars().take(5).collect())
+                .collect()
+        };
+        let head = imaged
+            .iter()
+            .position(|r| r.line.plain_text().contains("scout"))
+            .unwrap_or_else(|| panic!("有名字行: {:?}", cells(&imaged)));
+        let ph = crate::tui::gfx::PLACEHOLDER;
+        assert!(
+            imaged[head].line.plain_text().starts_with(ph),
+            "名字行带头像上半"
+        );
+        assert!(
+            imaged[head + 1].line.plain_text().starts_with(ph),
+            "首个正文行带头像下半"
+        );
+        assert!(
+            !imaged[head + 2].line.plain_text().starts_with(ph),
+            "第二行正文只缩进"
+        );
+        // Both halves address one image, and body text starts at the same column
+        // whether the gutter holds the portrait or plain indentation.
+        let id_of = |i: usize| imaged[i].line.segs.first().map(|s| s.style.fg);
+        assert_eq!(id_of(head), id_of(head + 1), "同一张头像");
+        let body_col = |i: usize| -> usize {
+            let segs = &imaged[i].line.segs;
+            let body = segs.last().map(|s| s.text.clone()).unwrap_or_default();
+            text_width(&imaged[i].line.plain_text()) - text_width(&body)
+        };
+        assert_eq!(body_col(head + 1), gutter(true), "首行正文起点");
+        assert_eq!(body_col(head + 2), gutter(true), "次行正文对齐同一列");
     }
 
     #[test]
@@ -1609,7 +1256,7 @@ mod tests {
                 kind: PostKind::Typing,
             },
         ];
-        let t = texts(&message_rows(&posts, usize::MAX, &pal(), 60));
+        let t = texts(&message_rows(&posts, usize::MAX, &pal(), 60, false));
         assert!(t.iter().any(|l| l.contains("▏ ⏺ Bash")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("待送达")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("正在输入")), "{t:?}");
@@ -1638,21 +1285,28 @@ mod tests {
         assert!(texts(&rows).iter().any(|l| l.contains("给 scout 发消息")));
     }
 
+    /// One title row plus a rule: the metadata trails the name instead of taking
+    /// a heading of its own, and the workspace name rides the right edge — the
+    /// one thing the cut sidebar was carrying that nothing else says.
     #[test]
-    fn header_reports_mode_members_and_presence() {
+    fn header_is_one_row_carrying_name_metadata_and_workspace() {
         let snap = snap();
         let t = texts(&header_rows(
             &snap,
             &Conv::Channel("dev-room".into()),
             &pal(),
-            60,
+            70,
         ));
+        assert_eq!(t.len(), 2, "标题 + 分隔线: {t:?}");
         assert!(t[0].contains("# dev-room"), "{t:?}");
+        assert!(t[0].contains("serial") && t[0].contains("4 条"), "{t:?}");
         assert!(t[0].contains("3 人"), "{t:?}");
-        assert!(t[1].contains("serial") && t[1].contains("4 条"));
-        let t = texts(&header_rows(&snap, &Conv::Dm("qa".into()), &pal(), 60));
+        assert!(t[0].trim_end().ends_with("bingo"), "工作区名靠右: {t:?}");
+        assert!(t[1].starts_with("─"), "{t:?}");
+
+        let t = texts(&header_rows(&snap, &Conv::Dm("qa".into()), &pal(), 70));
         assert!(t[0].contains("○ qa"), "{t:?}");
-        assert!(t[1].contains("idle") && t[1].contains("验收"));
+        assert!(t[0].contains("idle") && t[0].contains("验收"), "{t:?}");
     }
 
     #[test]
@@ -1732,34 +1386,5 @@ mod tests {
         ws.mark_read(&a, 1);
         assert_eq!(ws.read_cursor(&a), 3, "游标只前进");
         assert_eq!(ws.read_cursor(&Conv::Dm("scout".into())), 0);
-    }
-
-    #[test]
-    fn rail_marks_the_active_tab() {
-        let snap = snap();
-        let ws = Workspace {
-            tab: Tab::Dms,
-            ..Workspace::default()
-        };
-        let rows = rail_rows(&snap, &ws, &pal(), 20);
-        let t = texts(&rows);
-        assert!(t.iter().any(|l| l.contains('B')), "工作区首字母: {t:?}");
-        // Labels only — no pictographic icons to get substituted by an emoji.
-        assert!(
-            t.iter().all(|l| l.chars().all(|c| !is_pictograph(c))),
-            "{t:?}"
-        );
-        let active = rows
-            .iter()
-            .find(|r| r.line.plain_text().contains("私信"))
-            .unwrap_or_else(|| panic!("有私信行"));
-        assert!(
-            active
-                .line
-                .segs
-                .iter()
-                .any(|s| s.style.bg == Some(pal().rail_active_bg))
-        );
-        assert_eq!(rows.len(), 20);
     }
 }
