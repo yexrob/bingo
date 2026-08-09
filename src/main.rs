@@ -72,6 +72,14 @@ struct Cli {
     )]
     probe: bool,
 
+    /// Side-effect-free settings inspection in JSON-events mode (no transcript)
+    #[arg(
+        long,
+        requires = "json_events",
+        conflicts_with_all = ["session", "probe"]
+    )]
+    inspect: bool,
+
     /// Fullscreen mode (default): alternate-screen canvas, input pinned at the
     /// bottom, and in-app scrolling. Retained as an explicit compatibility flag.
     #[arg(long, conflicts_with = "inline")]
@@ -238,6 +246,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
 
     let client = Client::from_settings(&settings)?;
+    if cli.json_events && cli.inspect {
+        let reader = std::io::BufReader::new(std::io::stdin());
+        let writer = std::io::BufWriter::new(std::io::stdout());
+        let exit_code = crate::json_events::run_inspect(client, reader, writer).await?;
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+        return Ok(());
+    }
     let mut system = build_system(
         &load_memory(&home, &project_dir),
         load_project_memory(&home, &project_dir),

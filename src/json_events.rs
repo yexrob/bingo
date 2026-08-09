@@ -77,6 +77,13 @@ pub enum ClientCommand {
         command_id: String,
         provider: String,
     },
+    #[serde(rename = "providers.list")]
+    ProvidersList {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+    },
     #[serde(rename = "session.rename")]
     SessionRename {
         #[serde(rename = "protocolVersion")]
@@ -116,6 +123,9 @@ impl ClientCommand {
             | Self::ModelsList {
                 protocol_version, ..
             }
+            | Self::ProvidersList {
+                protocol_version, ..
+            }
             | Self::SessionRename {
                 protocol_version, ..
             }
@@ -134,6 +144,7 @@ impl ClientCommand {
             | Self::TurnCancel { command_id, .. }
             | Self::PromptRespond { command_id, .. }
             | Self::ModelsList { command_id, .. }
+            | Self::ProvidersList { command_id, .. }
             | Self::SessionRename { command_id, .. }
             | Self::SessionDelete { command_id, .. }
             | Self::SessionClose { command_id, .. } => command_id,
@@ -229,6 +240,57 @@ pub struct CliSessionMetadata {
 pub struct ProbeMetadata {
     pub bingo_version: String,
     pub protocol_version: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderInfo {
+    pub name: String,
+    pub protocol: String,
+    pub api_base_url: String,
+    pub supports_images: bool,
+    pub credential_configured: bool,
+    pub builtin: bool,
+}
+
+/// Provider inventory for `providers.result`, in the same order as the /provider
+/// listing: default → built-in preset → user-defined (shared oracle for AC-F4-1).
+pub fn provider_inventory(client: &crate::api::client::Client) -> Vec<ProviderInfo> {
+    let mut names = vec!["default".to_string()];
+    let mut user_names = Vec::new();
+    for name in client.provider_names() {
+        if client.is_preset(&name) {
+            names.push(name);
+        } else {
+            user_names.push(name);
+        }
+    }
+    names.extend(user_names);
+    let image_capable = client.image_capable_providers();
+    names
+        .into_iter()
+        .map(|name| {
+            let (api_key, api_base_url) = client
+                .provider_endpoint(&name)
+                .unwrap_or_else(|| (None, String::new()));
+            let protocol = client.provider_protocol(&name).unwrap_or_default();
+            let supports_images = if name == "default" {
+                client.supports_images()
+            } else {
+                image_capable.contains(&name)
+            };
+            let credential_configured = api_key.is_some_and(|key| !key.is_empty());
+            let builtin = client.is_preset(&name);
+            ProviderInfo {
+                name,
+                protocol,
+                api_base_url,
+                supports_images,
+                credential_configured,
+                builtin,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -334,6 +396,20 @@ pub enum CliEvent {
         provider: String,
         models: Vec<String>,
     },
+    #[serde(rename = "providers.result")]
+    ProvidersResult {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        providers: Vec<ProviderInfo>,
+    },
+    #[serde(rename = "inspection.ready")]
+    InspectionReady {
+        #[serde(flatten)]
+        base: EventBase,
+        metadata: ProbeMetadata,
+    },
     #[serde(rename = "warning")]
     Warning {
         #[serde(flatten)]
@@ -410,6 +486,7 @@ impl CliEvent {
         match self {
             Self::SessionReady { base: slot, .. }
             | Self::ProtocolReady { base: slot, .. }
+            | Self::InspectionReady { base: slot, .. }
             | Self::TurnStarted { base: slot, .. }
             | Self::TextDelta { base: slot, .. }
             | Self::ToolReady { base: slot, .. }
@@ -417,6 +494,7 @@ impl CliEvent {
             | Self::PromptRequest { base: slot, .. }
             | Self::PromptResolved { base: slot, .. }
             | Self::ModelsResult { base: slot, .. }
+            | Self::ProvidersResult { base: slot, .. }
             | Self::Warning { base: slot, .. }
             | Self::TurnCompleted { base: slot, .. }
             | Self::TurnCancelled { base: slot, .. }
@@ -740,6 +818,7 @@ impl<W: Write> JsonSession<W> {
                 provider,
                 ..
             } => self.list_models(command_id, provider).await,
+            ClientCommand::ProvidersList { command_id, .. } => self.list_providers(command_id),
             ClientCommand::SessionRename {
                 command_id, name, ..
             } => self.rename_session(command_id, &name),
@@ -952,6 +1031,15 @@ impl<W: Write> JsonSession<W> {
                 true,
             ),
         }
+    }
+
+    fn list_providers(&mut self, command_id: String) -> Result<(), JsonEventsError> {
+        let providers = provider_inventory(&self.session.client);
+        self.emit(CliEvent::ProvidersResult {
+            base: EventBase::default(),
+            command_id,
+            providers,
+        })
     }
 
     fn rename_session(&mut self, command_id: String, name: &str) -> Result<(), JsonEventsError> {
@@ -1419,6 +1507,106 @@ pub fn probe_event<W: Write>(mut writer: W) -> Result<(), JsonEventsError> {
             protocol_version: PROTOCOL_VERSION,
         },
     })
+}
+
+/// Side-effect-free settings inspection transport: emits `inspection.ready`
+/// (sessionId=null), then serves only `providers.list`, `models.list`, and
+/// `session.close` over NDJSON. Never creates a transcript or runs hooks/teams.
+pub async fn run_inspect<R: BufRead, W: Write>(
+    client: crate::api::client::Client,
+    reader: R,
+    mut writer: W,
+) -> Result<i32, JsonEventsError> {
+    let mut event_writer = EventWriter::new(&mut writer);
+    event_writer.emit(CliEvent::InspectionReady {
+        base: EventBase::default(),
+        metadata: ProbeMetadata {
+            bingo_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: PROTOCOL_VERSION,
+        },
+    })?;
+    let mut seen_command_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in reader.lines() {
+        let line = line?;
+        let command = parse_command_line(line.as_bytes())?;
+        let command_id = command.command_id().to_string();
+        if !seen_command_ids.insert(command_id.clone()) {
+            event_writer.emit(CliEvent::Error {
+                base: EventBase::default(),
+                scope: ErrorScope::Command,
+                command_id: Some(command_id),
+                turn_id: None,
+                code: "BAD_ARGUMENT".to_string(),
+                msg: "commandId must be unique".to_string(),
+                level: EventErrorLevel::Field,
+                recoverable: true,
+            })?;
+            continue;
+        }
+        match command {
+            ClientCommand::ProvidersList { .. } => {
+                let providers = provider_inventory(&client);
+                event_writer.emit(CliEvent::ProvidersResult {
+                    base: EventBase::default(),
+                    command_id,
+                    providers,
+                })?;
+            }
+            ClientCommand::ModelsList { provider, .. } => {
+                let models = match client.with_provider(&provider) {
+                    Ok(provider_client) => match provider_client.list_models().await {
+                        Ok(models) => models,
+                        Err(error) => {
+                            event_writer.emit(CliEvent::Error {
+                                base: EventBase::default(),
+                                scope: ErrorScope::Command,
+                                command_id: Some(command_id),
+                                turn_id: None,
+                                code: error.error_code().to_string(),
+                                msg: sanitize_msg(&error.to_string()),
+                                level: EventErrorLevel::Page,
+                                recoverable: true,
+                            })?;
+                            continue;
+                        }
+                    },
+                    Err(error) => {
+                        event_writer.emit(CliEvent::Error {
+                            base: EventBase::default(),
+                            scope: ErrorScope::Command,
+                            command_id: Some(command_id),
+                            turn_id: None,
+                            code: "CONFIG_INVALID".to_string(),
+                            msg: sanitize_msg(&error),
+                            level: EventErrorLevel::Page,
+                            recoverable: true,
+                        })?;
+                        continue;
+                    }
+                };
+                event_writer.emit(CliEvent::ModelsResult {
+                    base: EventBase::default(),
+                    command_id,
+                    provider,
+                    models,
+                })?;
+            }
+            ClientCommand::SessionClose { .. } => {
+                event_writer.emit(CliEvent::SessionClosed {
+                    base: EventBase::default(),
+                    command_id,
+                })?;
+                return Ok(0);
+            }
+            _ => {
+                return Err(JsonEventsError::BadArgument(
+                    "command is not allowed in inspect mode (only providers.list, models.list, session.close)"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Ok(0)
 }
 
 #[cfg(test)]
