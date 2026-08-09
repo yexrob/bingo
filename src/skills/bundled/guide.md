@@ -261,15 +261,14 @@ Example (.bingo/settings.json):
 - **Skills**: built-in `guide` (this guide) + `~/.config/bingo/skills/` and `.bingo/skills/`
   directory skills (same-name disk skills override built-ins); the model invokes them via SkillTool, users run them via `/skill-name`.
 - **Images**: markdown images in model replies (`![alt](path)`, supports `~/`, relative paths/data/http(s))
-  render on kitty-graphics-capable terminals (Ghostty/kitty/WezTerm etc.) in both modes: fullscreen places
-  them in the live viewport, `--inline` also flushes them into scrollback; unsupported terminals show a
-  `#[image]` placeholder. Inside tmux, bingo enables passthrough automatically
-  (`tmux set -p allow-passthrough on`) and scrollback images render via Unicode placeholders (U=1) when the
-  outer terminal is Ghostty/kitty; an outer WezTerm/Konsole (no U=1) or an unrecognized outer
-  terminal keeps the `#[image]` placeholder with a one-time notice (the live viewport also keeps the
-  placeholder inside tmux). Images load automatically with the message and render when the message
-  settles — no extra command needed. A failed fetch (network error, 4xx/5xx, undecodable data) marks
-  the row as `#[image ✗ 加载失败]` and shows a warning line with the url.
+  render via kitty Unicode placeholders (U=1) on terminals that support them (Ghostty/kitty), in both
+  modes and everywhere at once: the live viewport, fullscreen, and `--inline` scrollback all paint the
+  same placeholder cells the moment the image loads — no waiting for the message to settle. Inside tmux,
+  bingo enables passthrough automatically (`tmux set -p allow-passthrough on`) and the same rendering
+  works when the outer terminal is Ghostty/kitty; the startup probe needs the pane to be focused.
+  WezTerm/Konsole (kitty graphics without U=1) and other terminals show the `#[image]` text placeholder
+  with a one-time notice. A failed fetch (network error, 4xx/5xx, undecodable data) marks the row as
+  `#[image ✗ 加载失败]` and shows a warning line with the url.
 - **MCP**: stdio and streamable HTTP (`type: "http"`, with custom headers) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
