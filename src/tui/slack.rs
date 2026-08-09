@@ -1,4 +1,4 @@
-//! Slack-shaped workspace view (D42): the skin the entity modal wears.
+//! Slack-shaped workspace view (D43): the skin the entity modal wears.
 //!
 //! The mapping is one-to-one with what the runtime already has, so nothing new
 //! had to be invented to make the shape fit:

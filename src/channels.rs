@@ -60,7 +60,7 @@ pub struct ChannelMessage {
     pub from: String,
     pub text: String,
     /// Wall-clock landing time, unix seconds. `0` = unknown: share documents
-    /// written before D42 carry no clock, and the room renders them without a
+    /// written before D43 carry no clock, and the room renders them without a
     /// time stamp rather than inventing one.
     #[serde(default)]
     pub at: u64,

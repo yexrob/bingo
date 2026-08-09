@@ -1,5 +1,5 @@
 //! Full-screen workspace view (opened from the ctrl+g picker), wearing the
-//! Slack shape defined in [`crate::tui::slack`] (D42, superseding D30's
+//! Slack shape defined in [`crate::tui::slack`] (D43, superseding D30's
 //! single-conversation modal):
 //!
 //! - the **rail** switches between 主页 / 私信 / 动态;
