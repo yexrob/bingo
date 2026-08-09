@@ -923,7 +923,7 @@ pub struct SendMessageInput {
     /// Reply wait: arms the follow-up watchdog (see `spawn_ack_watchdog`).
     #[serde(default)]
     #[schemars(
-        description = "Optional reply wait in seconds (clamped to 5-3600). Set it when silence from this instance would be a problem: once the wait elapses the harness re-checks the same record AgentControl(action=messages) reports, and while you are still owed an answer — the message is queued, or it was read into a turn that ended saying nothing — it sends the receiver a follow-up asking it to reply, at most 3 rounds. Anything other than an answer inside the wait is reported back to you as a task notification. Omit it for fire-and-forget."
+        description = "Reply wait in seconds, defaulting to 300 when omitted — the check is on by default, since a message nobody ever answers is the failure you would otherwise find out about last. Once the wait elapses the harness re-checks the same record AgentControl(action=messages) reports, and while you are still owed an answer — the message is queued, or it was read into a turn that ended saying nothing — it sends the receiver a follow-up asking it to reply, at most 3 rounds; anything other than an answer inside the wait comes back to you as a task notification. Shorten it when you are actively waiting on this instance, lengthen it for a long task that will be quiet for a while (clamped to 5-3600), or pass 0 to switch the check off for a message you need no answer to."
     )]
     ack_timeout: Option<u64>,
 }
@@ -931,6 +931,13 @@ pub struct SendMessageInput {
 /// Bounds on the reply wait: below the floor the watchdog would fire before the receiver could
 /// plausibly finish a turn; the ceiling keeps a stray task from outliving the day.
 const ACK_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
+
+/// Reply wait when the sender names none. The check is on by default because leaving it opt-in
+/// would put the correctness of the whole thing back where it does not belong — on the model
+/// remembering to ask for it, which is the exact failure this mechanism exists to remove.
+/// Five minutes is long enough that an instance genuinely working does not get chased for being
+/// quiet, and short enough that a hang is not discovered by the user an hour later.
+const DEFAULT_ACK_TIMEOUT_SECS: u64 = 300;
 
 /// Main→sub continuation channel (hub-and-spoke, main session only): an idle instance is woken
 /// with its full history to continue; a busy instance queues the message and it is delivered
@@ -951,7 +958,7 @@ impl Tool for SendMessageTool {
         "SendMessage".to_string()
     }
     fn description(&self) -> String {
-        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id: the message is queued and delivered at the end of this turn, batched with any other message sent to the same instance in this turn, so the receiver reads them together rather than one per turn. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing. AgentControl(action=messages) reports which of those it is: queued, delivered but unanswered, answered (with the run that replied), or dropped because the instance stopped. Rather than polling that yourself, set ack_timeout and the harness runs the same check and follows up on the receiver, up to 3 rounds, reporting back if no answer ever comes. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
+        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id: the message is queued and delivered at the end of this turn, batched with any other message sent to the same instance in this turn, so the receiver reads them together rather than one per turn. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing. AgentControl(action=messages) reports which of those it is: queued, delivered but unanswered, answered (with the run that replied), or dropped because the instance stopped. You do not have to poll that yourself: the harness runs the same check five minutes after sending (tune with ack_timeout) and follows up on the receiver, up to 3 rounds, reporting back if no answer ever comes. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<SendMessageInput>()
@@ -969,11 +976,14 @@ impl Tool for SendMessageTool {
     ) -> Result<ToolResult, ToolError> {
         let params: SendMessageInput = parse_input(&input)?;
         let images = self.session.attachments.resolve(&params.message);
-        let timeout = params.ack_timeout.map(|secs| {
-            std::time::Duration::from_secs(
+        let timeout = match params.ack_timeout {
+            // The one way to opt out: an explicit "I am not waiting for an answer to this".
+            Some(0) => None,
+            Some(secs) => Some(std::time::Duration::from_secs(
                 secs.clamp(*ACK_TIMEOUT_RANGE.start(), *ACK_TIMEOUT_RANGE.end()),
-            )
-        });
+            )),
+            None => Some(std::time::Duration::from_secs(DEFAULT_ACK_TIMEOUT_SECS)),
+        };
         let id = self
             .session
             .agents
@@ -985,7 +995,7 @@ impl Tool for SendMessageTool {
                 t.as_secs()
             ),
             None => "本回合结束时与同一收件人的其他消息合并成一批送达；\
-                     久未确认可用 AgentControl(action=messages, agent=…) 复查"
+                     已按 ack_timeout=0 关闭自动追问，需要时自行 AgentControl(action=messages, agent=…) 复查"
                 .to_string(),
         };
         if let Some(timeout) = timeout {
@@ -1682,6 +1692,54 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("worker"), "{err}");
+    }
+
+    /// The chase protects a sender who never thought to ask for it — that is the whole point of a
+    /// default. Opting out has to be said out loud.
+    #[tokio::test]
+    async fn the_reply_check_is_on_by_default_and_zero_turns_it_off() {
+        let (session, _client) = parent_session();
+        session
+            .agents
+            .insert("worker", None, "干活".into(), session.clone());
+        let send = SendMessageTool::new(session.clone());
+        let ctx = hub_ctx(&session);
+        let receipt = |out: ToolResult| -> serde_json::Value {
+            serde_json::from_str(out.content.as_str().unwrap_or_default())
+                .unwrap_or_else(|e| panic!("{e}"))
+        };
+
+        let out = send
+            .call(
+                serde_json::json!({"agent": "worker", "message": "默认"}),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            receipt(out)["ack_timeout_secs"],
+            DEFAULT_ACK_TIMEOUT_SECS,
+            "没提要求也照看着"
+        );
+
+        let out = send
+            .call(
+                serde_json::json!({"agent": "worker", "message": "不等回复", "ack_timeout": 0}),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(receipt(out)["ack_timeout_secs"].is_null(), "0 = 显式关闭");
+
+        let acks = session
+            .agents
+            .acks_of("worker")
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            acks[0].timeout,
+            Some(std::time::Duration::from_secs(DEFAULT_ACK_TIMEOUT_SECS))
+        );
+        assert_eq!(acks[1].timeout, None);
     }
 
     fn hub_ctx(session: &Arc<Session>) -> crate::tool::ToolContext {
