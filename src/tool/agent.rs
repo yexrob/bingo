@@ -151,26 +151,55 @@ fn ask_gate() -> &'static tokio::sync::Mutex<()> {
 /// progress checks of background agents).
 fn subagent_hooks(
     output: Arc<Mutex<String>>,
+    live: Arc<Mutex<Vec<crate::agents::LiveBlock>>>,
     cell: Arc<AgentCell>,
     watch: Arc<WatchRegistry>,
     id: WatchId,
     instance: String,
     ask: Option<Arc<crate::query::AskFn>>,
 ) -> UiHooks {
+    // `output` stays the flat reply (what the spawn returns and what `spoke` is
+    // judged on); `live` is the same turn as the instance view needs to show it,
+    // with the tool calls and round boundaries the flat string cannot carry.
+    let tool_live = live.clone();
+    let round_live = live.clone();
     UiHooks {
         on_event: Box::new(move |event| {
             if let crate::api::contract::StreamEvent::TextDelta { text, .. } = event
                 && let Ok(mut output) = output.lock()
             {
                 output.push_str(text);
+                if let Ok(mut live) = live.lock() {
+                    crate::agents::LiveBlock::push_text(&mut live, text);
+                }
                 cell.record_chars(text.chars().count());
                 // Feed produced text into the condition engine (notify_on hit → signal notification).
                 watch.feed_content(id, text);
             }
         }),
-        on_tool_ready: Box::new(|_name, _input, _standalone| {}),
+        on_tool_ready: Box::new(move |name, input, _standalone| {
+            let Ok(mut live) = tool_live.lock() else {
+                return;
+            };
+            let glyph = crate::tui::activities::tool_glyph(&name);
+            let shown = crate::tui::activities::display_tool_name(&name);
+            let summary = crate::query::summarize_input(&name, &input);
+            live.push(crate::agents::LiveBlock::Tool(if summary.is_empty() {
+                format!("{glyph}{shown}")
+            } else {
+                format!("{glyph}{shown}({summary})")
+            }));
+        }),
         on_tool_done: Box::new(|_| {}),
-        on_round_end: Box::new(|| {}),
+        // A round boundary closes the open prose block, so the next round's first
+        // sentence does not run into the previous round's last one.
+        on_round_end: Box::new(move || {
+            if let Ok(mut live) = round_live.lock()
+                && matches!(live.last(), Some(crate::agents::LiveBlock::Text(_)))
+            {
+                live.push(crate::agents::LiveBlock::Text(String::new()));
+            }
+        }),
         on_warning: Box::new(|_| {}),
         // A subagent has no prompt surface of its own, so its Ask decisions are forwarded to
         // the session that owns the UI, stamped with the instance name. Auto-denying here
@@ -481,9 +510,11 @@ pub(crate) fn spawn_agent_loop(
         let mut run = (first_id, cell);
         loop {
             let output = Arc::new(Mutex::new(String::new()));
-            loop_registry.set_live(&name, Some(output.clone()));
+            let live = Arc::new(Mutex::new(Vec::new()));
+            loop_registry.set_live(&name, Some(live.clone()));
             let mut ui = subagent_hooks(
                 output.clone(),
+                live.clone(),
                 run.1.clone(),
                 watch.clone(),
                 run.0,
@@ -644,6 +675,9 @@ impl AgentTool {
             params.thinking.clone(),
             def,
             instance,
+            // An ad-hoc subagent has no past on disk: memory belongs to a crew
+            // member, which is the thing a blueprint keeps across sessions.
+            None,
         )
     }
 }
@@ -653,7 +687,7 @@ impl AgentTool {
 /// degrading an invalid value to off would let the user believe thinking is on when it isn't,
 /// so sub-agent spawn must surface it immediately. Inherited values skip this check
 /// (consistent with the main session after `/think`, see [`build_sub_session`]).
-fn normalize_thinking(level: &str) -> Result<Option<String>, String> {
+pub(crate) fn normalize_thinking(level: &str) -> Result<Option<String>, String> {
     if level == "off" {
         return Ok(None);
     }
@@ -670,6 +704,9 @@ fn normalize_thinking(level: &str) -> Result<Option<String>, String> {
 /// take precedence over the definition, which takes precedence over inheritance. A named provider
 /// forks an independent-endpoint client so the parent session is unaffected; "default" or no
 /// provider shares the parent endpoint and follows the parent session's switches.
+///
+/// `memory` is the pointer a team member gets to its own past on disk (D51) — a
+/// system block rather than a message, because nobody said it.
 pub(crate) fn build_sub_session(
     parent: &Arc<Session>,
     model: Option<String>,
@@ -677,6 +714,7 @@ pub(crate) fn build_sub_session(
     thinking: Option<String>,
     def: Option<&AgentDef>,
     instance: &str,
+    memory: Option<String>,
 ) -> Result<Arc<Session>, ToolError> {
     let model = model.or_else(|| def.and_then(|d| d.model.clone()));
     // provider: "default" and unset are equivalent (shared parent endpoint, follows the parent's switches);
@@ -749,6 +787,13 @@ pub(crate) fn build_sub_session(
     if parent.settings.experimental.agent_channels {
         system.push(SystemBlock {
             text: CHANNEL_NOTE.to_string(),
+            cache: false,
+        });
+    }
+    // Where this instance's own past lives, for the instances that have one.
+    if let Some(memory) = memory {
+        system.push(SystemBlock {
+            text: memory,
             cache: false,
         });
     }
@@ -896,9 +941,11 @@ impl Tool for AgentTool {
         );
         self.session.agents.set_run_watch(&name, id);
         let output = Arc::new(Mutex::new(String::new()));
-        self.session.agents.set_live(&name, Some(output.clone()));
+        let live = Arc::new(Mutex::new(Vec::new()));
+        self.session.agents.set_live(&name, Some(live.clone()));
         let mut ui = subagent_hooks(
             output.clone(),
+            live.clone(),
             cell.clone(),
             ctx.watch.clone(),
             id,
@@ -1193,9 +1240,11 @@ impl Tool for AgentControlTool {
                                 String::new()
                             };
                             format!(
-                                "- {} ({}{def}{pending}{unacked}): {}",
+                                "- {} ({}{def}{pending}{unacked}, {} @ {}): {}",
                                 s.name,
                                 s.state.label(),
+                                s.model,
+                                s.provider,
                                 s.description
                             )
                         })
@@ -1992,7 +2041,7 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].media_type, "image/png");
         // Sub-sessions share the table, so a nested spawn can resolve the same marker.
-        let sub = build_sub_session(&session, None, None, None, None, "worker").unwrap();
+        let sub = build_sub_session(&session, None, None, None, None, "worker", None).unwrap();
         assert_eq!(sub.attachments.resolve("#[image 1]").len(), 1);
 
         // Follow-up: a queued instruction keeps its images until it is delivered.
@@ -2057,6 +2106,7 @@ mod tests {
             None,
             None,
             "looker",
+            None,
         )
         .unwrap_or_else(|e| panic!("{e}"));
         assert!(
@@ -2102,7 +2152,7 @@ mod tests {
     fn channel_note_is_gated_by_the_flag() {
         let (off, _c1) = parent_session();
         assert!(!off.settings.experimental.agent_channels, "off by default");
-        let sub = build_sub_session(&off, None, None, None, None, "solo")
+        let sub = build_sub_session(&off, None, None, None, None, "solo", None)
             .unwrap_or_else(|e| panic!("spawn: {e}"));
         assert!(
             !sub.system.iter().any(|b| b.text == CHANNEL_NOTE),
@@ -2112,7 +2162,7 @@ mod tests {
         let (mut on, _c2) = parent_session();
         let session = Arc::get_mut(&mut on).unwrap_or_else(|| panic!("exclusive"));
         session.settings.experimental.agent_channels = true;
-        let sub = build_sub_session(&on, None, None, None, None, "member")
+        let sub = build_sub_session(&on, None, None, None, None, "member", None)
             .unwrap_or_else(|e| panic!("spawn: {e}"));
         assert!(sub.system.iter().any(|b| b.text == CHANNEL_NOTE));
         // Both failure modes have to survive edits to this text: the storm it was written
@@ -2131,11 +2181,41 @@ mod tests {
         );
     }
 
+    /// A crew member's memory arrives as a system block, not as history and not as
+    /// a message: nobody said it, and the whole point of D51 is that the past stays
+    /// on disk until the member decides to fetch it. An ad-hoc subagent has no past
+    /// and is told nothing.
+    #[test]
+    fn memory_note_rides_the_system_prompt_when_there_is_one() {
+        let (parent, _c) = parent_session();
+        let note = "your past is at /tmp/qa.md".to_string();
+        let sub = build_sub_session(&parent, None, None, None, None, "qa", Some(note.clone()))
+            .unwrap_or_else(|e| panic!("spawn: {e}"));
+        assert!(
+            sub.system.iter().any(|b| b.text == note),
+            "the pointer is in the system prompt"
+        );
+        assert!(
+            sub.system.iter().all(|b| !b.cache),
+            "a per-member tail block must not open another cache breakpoint"
+        );
+
+        let solo = build_sub_session(&parent, None, None, None, None, "solo", None)
+            .unwrap_or_else(|e| panic!("spawn: {e}"));
+        assert!(
+            !solo
+                .system
+                .iter()
+                .any(|b| b.text.contains("your past is at")),
+            "an ad-hoc subagent is told nothing about a past it does not have"
+        );
+    }
+
     /// No named definition: the parent's system carries over, plus the note.
     #[test]
     fn plain_subagent_inherits_parent_system_plus_note() {
         let (session, _client) = parent_session();
-        let sub = build_sub_session(&session, None, None, None, None, "worker").unwrap();
+        let sub = build_sub_session(&session, None, None, None, None, "worker", None).unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, ["parent system", SUBAGENT_NOTE]);
         assert!(
@@ -2149,7 +2229,7 @@ mod tests {
     #[test]
     fn sub_session_shares_parent_mcp_and_permissions() {
         let (parent, _) = parent_session();
-        let sub = build_sub_session(&parent, None, None, None, None, "worker").unwrap();
+        let sub = build_sub_session(&parent, None, None, None, None, "worker", None).unwrap();
         assert!(
             Arc::ptr_eq(&sub.runtime.mcp, &parent.runtime.mcp),
             "the MCP manager should be shared, otherwise subagents get no MCP tools"
@@ -2183,6 +2263,7 @@ mod tests {
         );
         let ui = subagent_hooks(
             Arc::new(Mutex::new(String::new())),
+            Arc::new(Mutex::new(Vec::new())),
             Arc::new(AgentCell::new()),
             watch.clone(),
             id,
@@ -2198,6 +2279,7 @@ mod tests {
         // Nothing attached (embedded/test path): deny rather than block on a modal nobody shows.
         let ui = subagent_hooks(
             Arc::new(Mutex::new(String::new())),
+            Arc::new(Mutex::new(Vec::new())),
             Arc::new(AgentCell::new()),
             watch,
             id,

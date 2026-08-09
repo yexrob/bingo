@@ -122,14 +122,14 @@ fn conversation(session: &Arc<Session>, ws: &Workspace, conv: &Conv) -> (Vec<Pos
         Conv::Dm(name) => {
             let (history, live, _) = session.agents.view_of(name).unwrap_or((
                 Vec::new(),
-                None,
+                Vec::new(),
                 crate::agents::AgentState::Stopped,
             ));
             let pending = session.agents.pending_of(name);
             let seq = history.len() as u64;
             let read_upto = (cursor as usize).min(history.len());
-            let divider = slack::dm_posts(&history[..read_upto], None, &[], name, USER_NAME).len();
-            let posts = slack::dm_posts(&history, live.as_deref(), &pending, name, USER_NAME);
+            let divider = slack::dm_posts(&history[..read_upto], &[], &[], name, USER_NAME).len();
+            let posts = slack::dm_posts(&history, &live, &pending, name, USER_NAME);
             (posts, seq, divider)
         }
     }
@@ -605,7 +605,9 @@ mod tests {
         ];
         let posts = slack::dm_posts(
             &history,
-            Some("writing the second paragraph"),
+            &[crate::agents::LiveBlock::Text(
+                "writing the second paragraph".into(),
+            )],
             &["read it again".to_string()],
             "scout",
             USER_NAME,

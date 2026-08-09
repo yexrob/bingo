@@ -270,16 +270,22 @@ Example (.bingo/settings.json):
   and alt+↑↓. **Avatars**: on terminals that can place kitty images (the same capability that renders inline images), each
   sender gets one of eight bundled anime-style portraits, 4×2 cells beside the name; elsewhere it falls back to the sender's
   initial on a colour, and the row count is identical either way. A team member's portrait is pinned in `.bingo/team.json`
-  (`"avatar": "sora"`), so a crew keeps a fixed cast; everyone else gets a face derived from their name. Wake-up scaffolding the
+  (`"avatar": "sora"`), so a crew keeps a fixed cast; everyone else gets a face derived from their name. The **main chat** wears
+  the same faces: each message carries a band above it with the speaker's portrait and name (`main` for the hub, `You` for your own),
+  two rows where portraits place and one where they fall back to the chip. Nothing below the band moves — bodies still run the full
+  width. A terminal that purges its image store (a resize) redraws the faces still on screen; ones already in scrollback leave four
+  blank columns with the name intact. Wake-up scaffolding the
   runtime injected (a relayed channel message, the task reminder) collapses to one dim line instead of being quoted as a message. The composer sends: in a channel it posts as `user` (same
   delivery path as Post, members woken normally; rendering = read, so serial never bounces you), in a DM it queues on the
   instance and flushes at the turn boundary (shown as a pending message until then). Keys: Tab switches between the message
   list and the composer, alt+↑↓ switches conversation, Ctrl+K is the quick switcher, Esc returns.
 - **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
-  `members[{name,agent,avatar?}]`, members reference AgentDefs; `name` is the name shown on the member's messages, so make it a person's name, and `avatar` pins one of the bundled portraits) pins multiple roles to one project; started by default at launch
+  `members[{name,agent,avatar?,model?,provider?,thinking?}]`, members reference AgentDefs; `name` is the name shown on the member's messages, so make it a person's name, and `avatar` pins one of the bundled portraits.
+  `model`/`provider`/`thinking` pin the member's engine — which model does which job is part of the formation, so a crew can mix a cheap fast reviewer with a stronger designer; each falls back to the agent definition and then to the session, and a named `provider` other than the session's needs a `model` too.
+  `/team validate` checks the engine against this session's providers, so a blueprint that passes still starts) pins multiple roles to one project; started by default at launch
   (`settings.team.autoStart`; `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,
   only `/team assign` or channel messages start them; idempotency key = instance name, repeated start reuses). The `/team` command family
-  manages it; team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (full history restored across sessions +
+  manages it; team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (each member gets a readable `<name>.md` transcript beside the exact `<name>.json` record; a spawning member is *told where its transcript is* and starts with an empty context rather than having the history preloaded — that file is unbounded and monotonic, so loading it charged a growing invisible toll on the first turn for relevance that decays fast; read it when the task depends on what was already decided, not speculatively +
   append-only decision records; `/team memory list|gc` manages it).
   The model manages the same crew through the **Team tool** (`status`/`validate`/`start`/`stop`/`save`, main session only): reads are free,
   and every change is confirmed by the user in person — the prompt appears in *every* permission mode and an `allow` rule cannot
@@ -366,16 +372,19 @@ Example (.bingo/settings.json):
   every conversation and its unread count) and alt+↑↓. **Avatars**: terminals that can place kitty images (the same capability behind inline images)
   assign each speaker one of eight bundled anime-style portraits, 4×2 cells to the left of the name; other terminals fall back to an initial-on-color
   chip, and both skins keep the same row count. Team members' avatars are pinned in `.bingo/team.json` (`"avatar": "sora"`),
-  so a crew has a fixed cast; other instances get a face by name. Runtime-injected wake scaffolding (channel-message relays,
+  so a crew has a fixed cast; other instances get a face by name. The **main chat** uses the same faces: every message gets a band
+  above it carrying the speaker's portrait and name (`main` for the hub, `You` for your own); message bodies are unchanged underneath. Runtime-injected wake scaffolding (channel-message relays,
   task reminders) collapses into a single dim hint line instead of being quoted as a whole message. Sending from the bottom input box: in a channel you speak as `user` (the same delivery
   path as Post, waking members normally; rendered counts as read, serial won't bounce you), DMs queue into the instance's inbox and are
   delivered at the turn boundary (shown as pending before delivery). Keys: Tab switches between the message list and the input box, alt+↑↓ switches conversations,
   Ctrl+K quick-jumps, Esc returns.
 - **agent team** (project-level crew): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
-  `members[{name,agent,avatar?}]`, members reference AgentDef; `name` is the name shown on the member's messages — give it a person's name, not a role code; `avatar` pins the portrait) fixes several roles to one project; pulled up by default at startup
+  `members[{name,agent,avatar?,model?,provider?,thinking?}]`, members reference AgentDef; `name` is the name shown on the member's messages — give it a person's name, not a role code; `avatar` pins the portrait.
+  `model`/`provider`/`thinking` pin the member's engine, each falling back to the agent definition and then to the session; a named `provider` other than the session's needs a `model` too, and `/team validate` checks all of it, so a blueprint that passes still starts.
+  `/team list` and `AgentControl list` report the engine each running instance is actually on) fixes several roles to one project; pulled up by default at startup
   (`settings.team.autoStart`, `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,
   only `/team assign` or channel messages start them; idempotency key = instance name, repeated start reuses). Managed by the `/team` command family;
-  team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (full history restored across sessions +
+  team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (each member gets a readable `<name>.md` transcript beside the exact `<name>.json` record; a spawning member is *told where its transcript is* and starts with an empty context rather than having the history preloaded — that file is unbounded and monotonic, so loading it charged a growing invisible toll on the first turn for relevance that decays fast; read it when the task depends on what was already decided, not speculatively +
   append-only decision records, managed via `/team memory list|gc`).
   The model manages the same crew through the **Team tool** (`status`/`validate`/`start`/`stop`/`save`, main session only): reads are free,
   and every change is confirmed by the user in person — the prompt appears in *every* permission mode and an `allow` rule cannot

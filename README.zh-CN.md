@@ -264,8 +264,14 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 房间复用频道机制、控制面仍是 hub-and-spoke。
 
 - **定义**：`.bingo/team.json`（camelCase，进版本库）——`name` + `channel{mode,
-  messageLimit}` + `members[{name, agent, avatar?}]`；`name` 即消息上显示的名字（取人名而非角色代号），`avatar` 钉住内置头像之一；成员引用 AgentDef，人格单一事实来源
+  messageLimit}` + `members[{name, agent, avatar?, model?, provider?, thinking?}]`；`name` 即消息上显示的名字（取人名而非角色代号），`avatar` 钉住内置头像之一；成员引用 AgentDef，人格单一事实来源
   仍在 `.bingo/agents/<名>.md`，一人格可入多 team。
+- **逐成员的引擎**：`model` / `provider` / `thinking` 钉住这名成员跑在什么上面。
+  谁用哪个模型是编队的一部分，不是每次派生临时决定的事，所以写进进版本库的图纸——
+  一支队伍可以让评审跑便宜快的端点、让架构跑贵的。三者都是先落回 AgentDef、再落回
+  会话，与 `Agent` 调用的同名参数同一套优先级；`provider` 指到会话之外的端点时必须
+  同时给 `model`（模型名换个端点就不认识了）。`/team list` 与 `AgentControl list`
+  会报出每个在跑实例实际所在的引擎。
 - **启动自动拉起**：`settings.team.autoStart`（缺省 true）时启动即拉起——派生
   成员 + 建房间，但**不唤醒**（成员 Idle 零 token 待命，等 `/team assign` 或
   频道消息才开跑）。opt-out：`--no-team` 或 `team.autoStart: false`。
@@ -276,7 +282,13 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
   `memory list|gc`。
 - **跨会话记忆**：成员历史 + append-only 决策记录存
   `~/.config/bingo/teams/<项目哈希>/<分支>/<team>/`——按「项目路径 + 分支」隔离，
-  main 与特性 worktree 记忆互不污染；拉起时自动恢复、不唤醒。
+  main 与特性 worktree 记忆互不污染。每个成员一份 `<名>.md`（可读转录）
+  和一份 `<名>.json`（精确记录）。
+- **只告诉位置，不预载**：成员以空上下文启动，只多一行说明自己的转录在哪儿，
+  需要之前的结论时自己去读。预载的做法是在成员的第一轮上收一笔不断增长又看不见的
+  税——那个文件无界且单调增长，每个 session 追加、没有任何东西修剪——换来的是
+  衰减很快的相关性。hub 自己每个 session 也是干净启动的，crew 成员没有理由例外。
+  `/team memory list` 看磁盘上有什么，`.md` 直接打开就能读。
 - **`Team` 工具**（仅主会话）把同一套能力给模型：`status`（图纸 + 成员运行态 +
   可用定义清单）、`validate`、`start`、`stop`、`save`（写图纸，整份覆写，须给完整名单）。
   读免询问；**任何变更都由用户当面确认**——询问在所有权限模式下都出现（含
@@ -309,6 +321,12 @@ passthrough 的 tmux）为每位发言者分配八张内置
 Unicode 占位符格子定位。team 成员的头像钉在 `.bingo/team.json`（`"avatar": "sora"`），
 一支队伍就有固定班底；其余实例按名字取脸。不支持的终端保留首字母色块；两种皮肤行数一致，只有装订线
 不同。
+
+**主聊天**用同一批脸：每条消息上面多一条带子，头像挨着名字——hub 是 `main`，你自己
+的消息是 `You`，都是房间里本来就用的名字。带子底下的正文一列没动，仍按整个终端宽度
+排版，消息内部的 `⏺` 也仍然负责把正文和工具行分开。能放图的终端给两行带子，退化时
+一行，带子底下没有东西依赖它的高度。一处已知退化：终端清空图片存储时（resize 会），
+还在屏幕上的脸会重画，已经滚进 scrollback 的消息则留下 4 列空白，名字还在。
 
 ## 技能（Skills）
 

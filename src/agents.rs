@@ -168,6 +168,12 @@ pub struct AgentStatus {
     pub pending: usize,
     /// Messages the sender has had no reply to yet — queued, or read and left unanswered.
     pub unacked: usize,
+    /// The engine this instance actually runs on. Worth reporting because it need
+    /// not be the session's: a definition or a team blueprint can pin a different
+    /// one per instance, and "which member is on which model" is otherwise
+    /// invisible until the bill arrives.
+    pub model: String,
+    pub provider: String,
 }
 
 /// Message identifier, unique per registry. Handed back to the sender so it can check later
@@ -316,7 +322,33 @@ struct Entry {
     watch_id: Option<crate::watch::WatchId>,
     /// Streaming output of the current turn (shares the same Arc with subagent_hooks;
     /// cleared at turn end — the TUI instance view shows the live tail from this).
-    live: Option<Arc<Mutex<String>>>,
+    live: Option<Arc<Mutex<Vec<LiveBlock>>>>,
+}
+
+/// One piece of a running turn, as the instance view sees it while it happens.
+///
+/// A running turn used to reach the view as one flat string of text deltas, which
+/// showed neither the tool calls between rounds nor the boundaries between them —
+/// so a five-round turn read as one wall with sentences butting together
+/// (`…the current state.Now let me verify…`). The finished history has always
+/// carried both; this is what lets the live view say the same thing before the
+/// turn ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveBlock {
+    /// Assistant prose, one block per round.
+    Text(String),
+    /// A tool call, already rendered the way the transcript renders one.
+    Tool(String),
+}
+
+impl LiveBlock {
+    /// Append streamed text, continuing the open prose block or opening one.
+    pub fn push_text(blocks: &mut Vec<LiveBlock>, text: &str) {
+        match blocks.last_mut() {
+            Some(LiveBlock::Text(open)) => open.push_str(text),
+            _ => blocks.push(LiveBlock::Text(text.to_string())),
+        }
+    }
 }
 
 /// Session-level instance registry (Session holds the Arc; shared by child sessions).
@@ -445,28 +477,22 @@ impl AgentRegistry {
         self.sync_share(name);
     }
 
-    /// Inject an instance's initial/restored history (D31 team memory restore: no wake-up, only preloads continuation context).
-    pub fn set_history(&self, name: &str, history: Vec<Message>) {
-        if let Some(entry) = self.lock().get_mut(name) {
-            entry.history = history;
-        }
-    }
-
     /// Streaming output buffer of the current turn (attached at turn start, detached at turn end).
-    pub fn set_live(&self, name: &str, live: Option<Arc<Mutex<String>>>) {
+    pub fn set_live(&self, name: &str, live: Option<Arc<Mutex<Vec<LiveBlock>>>>) {
         if let Some(entry) = self.lock().get_mut(name) {
             entry.live = live;
         }
     }
 
     /// Instance view data: history + live tail + state (None if the instance doesn't exist).
-    pub fn view_of(&self, name: &str) -> Option<(Vec<Message>, Option<String>, AgentState)> {
+    pub fn view_of(&self, name: &str) -> Option<(Vec<Message>, Vec<LiveBlock>, AgentState)> {
         let inner = self.lock();
         let entry = inner.get(name)?;
         let live = entry
             .live
             .as_ref()
-            .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).clone());
+            .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .unwrap_or_default();
         Some((entry.history.clone(), live, entry.state))
     }
 
@@ -745,6 +771,8 @@ impl AgentRegistry {
                 state: e.state,
                 pending: e.inbox.len(),
                 unacked: e.acks.iter().filter(|a| a.state.is_outstanding()).count(),
+                model: e.session.runtime.model.borrow().clone(),
+                provider: e.session.runtime.provider.borrow().clone(),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));

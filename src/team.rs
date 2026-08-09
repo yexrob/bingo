@@ -6,7 +6,8 @@
 //! (validate and start share the same source: if validate passes, start must
 //! succeed), `spawn_team` orchestration (reuses the existing Agent spawn +
 //! ChannelRegistry; idempotency key = instance name), and team memory (key =
-//! project-path hash + branch, restored across sessions).
+//! project-path hash + branch, persisted across sessions and *pointed at* rather
+//! than preloaded — see [`member_memory_note`], D51).
 //!
 //! Members reference AgentDefs rather than inlining personas — the single source
 //! of truth for a persona stays in `.bingo/agents/<name>.md`; the team is only a
@@ -73,12 +74,25 @@ pub struct ChannelSpec {
 /// plus the portrait it wears. The face is part of the blueprint because a crew is
 /// a standing cast: pinned here, a member keeps one face across sessions instead of
 /// whatever a hash of its instance name happens to land on.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+///
+/// The engine is pinned here for the same reason. Which model does which job is a
+/// property of the formation — the reviewer on a cheap fast endpoint, the architect
+/// on the expensive one — so it belongs in the committed blueprint rather than being
+/// re-decided at every spawn. All three are optional and, when absent, defer to the
+/// agent definition and then to the parent session, exactly as an explicit `Agent`
+/// call's parameters do (see [`crate::tool::agent::build_sub_session`]).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct TeamMember {
     pub name: String,
     pub agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 /// Team definition (blueprint). Parsing and writing share this one struct: the file
@@ -172,12 +186,21 @@ pub fn write_team_file(project_dir: &Path, def: &TeamDef) -> Result<(), TeamErro
 }
 
 /// Reference validation: each member's agent must exist in the definition list
-/// (project + user layers). Shared by `/team validate` and `spawn_team` (same source:
+/// (project + user layers), and the engine it pins must be one this session can
+/// actually start. Shared by `/team validate` and `spawn_team` (same source:
 /// if validate passes, start must succeed).
-pub fn validate(def: &TeamDef, defs: &[AgentDef]) -> Result<(), TeamError> {
+///
+/// The engine checks mirror [`crate::tool::agent::build_sub_session`] instead of
+/// inventing a stricter rule of their own, because that function is what `start`
+/// runs: a blueprint accepted here that then failed to spawn would leave the
+/// invariant a slogan. They are judged against the session's *current* endpoint,
+/// so switching provider afterwards can change the verdict — exactly as it
+/// changes what `start` would do.
+pub fn validate(def: &TeamDef, defs: &[AgentDef], session: &Session) -> Result<(), TeamError> {
     let by_name: HashMap<&str, &AgentDef> = defs.iter().map(|d| (d.name.as_str(), d)).collect();
+    let current = session.runtime.provider.borrow().clone();
     for (i, m) in def.members.iter().enumerate() {
-        if !by_name.contains_key(m.agent.as_str()) {
+        let Some(agent_def) = by_name.get(m.agent.as_str()) else {
             let known: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
             let hint = if known.is_empty() {
                 "no AgentDef available (project-level `.bingo/agents/*.md` or user-level `~/.config/bingo/agents/*.md`)"
@@ -189,6 +212,31 @@ pub fn validate(def: &TeamDef, defs: &[AgentDef]) -> Result<(), TeamError> {
                 "{TEAM_FILE}: members[{i}].agent: references a non-existent AgentDef \"{}\"; {hint}",
                 m.agent
             )));
+        };
+        let field = |name: &str| format!("{TEAM_FILE}: members[{i}].{name}");
+        // Absent and "default" both mean the session's own endpoint, so only a
+        // named one is looked up — the same filter build_sub_session applies.
+        if let Some(provider) = m
+            .provider
+            .as_deref()
+            .or(agent_def.provider.as_deref())
+            .filter(|p| *p != "default")
+        {
+            if let Err(e) = session.client.with_provider(provider) {
+                return Err(TeamError::invalid(format!("{}: {e}", field("provider"))));
+            }
+            if provider != current && m.model.is_none() && agent_def.model.is_none() {
+                return Err(TeamError::invalid(format!(
+                    "{}: provider \"{provider}\" needs a model: a cross-provider member does not \
+                     inherit the session's (current provider = \"{current}\") — add model, or drop provider",
+                    field("model")
+                )));
+            }
+        }
+        if let Some(level) = m.thinking.as_deref().or(agent_def.thinking.as_deref())
+            && let Err(e) = crate::tool::agent::normalize_thinking(level)
+        {
+            return Err(TeamError::invalid(format!("{}: {e}", field("thinking"))));
         }
     }
     Ok(())
@@ -232,6 +280,28 @@ pub fn view(def: &TeamDef, defs: &[AgentDef]) -> TeamView {
             })
             .collect(),
     }
+}
+
+/// What a member's blueprint pins about its engine, as a display suffix. Empty
+/// when it pins nothing — the common case, where the member runs whatever its
+/// agent definition or the session runs.
+///
+/// Only what the file holds is reported. An inherited engine is deliberately not
+/// named: it is whatever the session happens to be on when the member spawns, so
+/// printing today's value would read as a pin the blueprint does not have.
+pub fn engine_label(m: &TeamMember) -> String {
+    let parts: Vec<String> = [
+        m.provider.as_deref().map(|p| format!("provider {p}")),
+        m.model.as_deref().map(|m| format!("model {m}")),
+        m.thinking.as_deref().map(|t| format!("thinking {t}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!(" · {}", parts.join(" · "))
 }
 
 /// Channel mode parsing (defaults to serial).
@@ -298,9 +368,16 @@ pub fn team_memory_dir(home: &Path, project_dir: &Path, branch: &str, team: &str
         .join(team)
 }
 
-/// Member history file (full message history persisted for cross-session restore).
+/// Member history record (the exact messages, so the choice not to preload them
+/// stays reversible and `/team memory` has something lossless to work from).
 pub fn member_history_path(dir: &Path, member: &str) -> PathBuf {
     dir.join(format!("{}.json", sanitize_name(member)))
+}
+
+/// Member transcript: the readable view of the record beside it, and the file a
+/// spawning member is pointed at.
+pub fn member_transcript_path(dir: &Path, member: &str) -> PathBuf {
+    dir.join(format!("{}.md", sanitize_name(member)))
 }
 
 /// Decision log file (append-only, `sources` pipe-separated, reuses the frontmatter convention).
@@ -362,7 +439,7 @@ pub fn spawn_team(
     project_dir: &Path,
     branch: &str,
 ) -> Result<SpawnSummary, TeamError> {
-    validate(def, defs)?;
+    validate(def, defs, session)?;
     let mut summary = SpawnSummary::default();
 
     // Channel idempotency: create-if-not-exists.
@@ -395,13 +472,18 @@ pub fn spawn_team(
             continue;
         };
         let name = session.agents.claim_name(&member.name);
+        // Memory is a pointer, not a preload (D51): the member is told where its
+        // past is and starts with an empty context.
+        ensure_transcript(home, project_dir, branch, &def.name, &name);
+        let memory = member_memory_note(home, project_dir, branch, &def.name, &name);
         let sub = match crate::tool::agent::build_sub_session(
             session,
-            None,
-            None,
-            None,
+            member.model.clone(),
+            member.provider.clone(),
+            member.thinking.clone(),
             Some(agent_def),
             &name,
+            memory,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -413,12 +495,6 @@ pub fn spawn_team(
         session
             .agents
             .insert(&name, Some(member.agent.clone()), description, sub);
-        // Memory restore: persisted history is preloaded (no wake-up; automatically
-        // carried when SendMessage resumes).
-        let history = load_member_history(home, project_dir, branch, &def.name, &name);
-        if !history.is_empty() {
-            session.agents.set_history(&name, history);
-        }
         // Spawn ≠ wake: mark Idle after insert (zero-token standby; the turn only starts with SendMessage).
         session.agents.mark_idle(&name);
         // Join the channel (late joiners get no backlog; they listen from the current head).
@@ -430,7 +506,11 @@ pub fn spawn_team(
 
 // ---- memory read/write (cross-session restore) ----
 
-/// Save a member's full message history (JSON on disk; failures are silent — memory is an enhancement, not a contract).
+/// Save a member's history: the JSON record plus the readable transcript beside
+/// it. One writer for both, so the two can never drift — the JSON is the data the
+/// runtime wrote, the transcript is the view of it a reader is pointed at
+/// ([`member_memory_note`]). Failures are silent — memory is an enhancement, not
+/// a contract.
 pub fn save_member_history(
     home: &Path,
     project_dir: &Path,
@@ -443,10 +523,147 @@ pub fn save_member_history(
     let Ok(_) = std::fs::create_dir_all(&dir) else {
         return;
     };
-    let path = member_history_path(&dir, member);
     if let Ok(json) = serde_json::to_string_pretty(history) {
-        let _ = std::fs::write(path, json);
+        let _ = std::fs::write(member_history_path(&dir, member), json);
     }
+    let _ = std::fs::write(
+        member_transcript_path(&dir, member),
+        transcript(member, history),
+    );
+}
+
+/// A history as prose. Pointing a reader at serialized `Message` structs — content
+/// blocks, tool_use/tool_result envelopes, base64 image payloads — would be a
+/// promise that fails on contact, so the thing the note names is written for
+/// reading: who said what, with tool calls as one line each and image payloads
+/// named rather than inlined.
+pub fn transcript(member: &str, history: &[crate::api::types::Message]) -> String {
+    use crate::api::types::{ContentBlock, Role};
+    let mut out = format!(
+        "# {member} — {} messages\n\nWritten by bingo when the session ended. \
+         Prose is verbatim; tool calls are summarized to one line.\n",
+        history.len()
+    );
+    for (i, message) in history.iter().enumerate() {
+        let who = match message.role {
+            Role::User => "user",
+            Role::Assistant => member,
+        };
+        out.push_str(&format!("\n## {}. {who}\n\n", i + 1));
+        for block in &message.content {
+            match block {
+                ContentBlock::Text { text } if !text.trim().is_empty() => {
+                    out.push_str(text.trim_end());
+                    out.push_str("\n\n");
+                }
+                ContentBlock::Text { .. } => {}
+                ContentBlock::Thinking { .. } => {
+                    // Reasoning is not a decision and does not survive as one.
+                    out.push_str("_(thinking)_\n\n");
+                }
+                ContentBlock::ToolUse { name, input, .. } => {
+                    out.push_str(&format!(
+                        "- called `{name}` — {}\n",
+                        one_line_json(input, 160)
+                    ));
+                }
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    let mark = if *is_error { "failed" } else { "returned" };
+                    out.push_str(&format!("  - {mark}: {}\n", one_line_json(content, 200)));
+                }
+                ContentBlock::Image { source } => {
+                    out.push_str(&format!(
+                        "- image ({}, {} bytes of base64, not stored here)\n",
+                        source.media_type,
+                        source.data.len()
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A JSON value as one clipped line: tool inputs and results are for orientation
+/// here, not replay — the record next to it holds the exact bytes.
+fn one_line_json(value: &serde_json::Value, max: usize) -> String {
+    let raw = match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let flat: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    // A nested value arrives already escaped, so its line breaks are the two
+    // characters `\` and `n` rather than control characters — flattening only the
+    // real ones would leave the noise this function exists to remove.
+    let flat = flat
+        .replace("\\n", " ")
+        .replace("\\t", " ")
+        .replace("\\r", " ");
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > max {
+        format!("{}…", flat.chars().take(max).collect::<String>())
+    } else {
+        flat
+    }
+}
+
+/// Render the transcript from the record when it is missing. Histories written
+/// before D51 are JSON only, and a note pointing at a file that does not exist is
+/// worse than no note — so the readable view materializes the first time a member
+/// with an older past spawns.
+pub fn ensure_transcript(home: &Path, project_dir: &Path, branch: &str, team: &str, member: &str) {
+    let dir = team_memory_dir(home, project_dir, branch, team);
+    let path = member_transcript_path(&dir, member);
+    if path.exists() {
+        return;
+    }
+    let history = load_member_history(home, project_dir, branch, team, member);
+    if history.is_empty() {
+        return;
+    }
+    let _ = std::fs::write(path, transcript(member, &history));
+}
+
+/// What a spawning member is told about its own past, or `None` when it has none.
+///
+/// The history is deliberately *not* loaded into the member's context (D51). It is
+/// unbounded and monotonic — every session appends and nothing prunes — so
+/// preloading it charged a growing, invisible toll on the member's first turn, for
+/// relevance that decays fast. The member is a capable reader with file tools:
+/// telling it where its past is costs a couple of dozen tokens and lets it decide
+/// whether the past is worth the read.
+pub fn member_memory_note(
+    home: &Path,
+    project_dir: &Path,
+    branch: &str,
+    team: &str,
+    member: &str,
+) -> Option<String> {
+    let dir = team_memory_dir(home, project_dir, branch, team);
+    let path = member_transcript_path(&dir, member);
+    let meta = std::fs::metadata(&path).ok()?;
+    if meta.len() == 0 {
+        return None;
+    }
+    let count = load_member_history(home, project_dir, branch, team, member).len();
+    let scale = if count == 0 {
+        String::new()
+    } else {
+        format!(" ({count} messages)")
+    };
+    Some(format!(
+        "Your earlier work with this crew on branch \"{branch}\" is on disk at \
+         {}{scale}. It is NOT in this conversation — you are starting fresh on \
+         purpose. Read that file when you need what was already decided, tried or \
+         ruled out; do not re-litigate it from memory, and do not read it \
+         speculatively when the task in front of you does not depend on it.",
+        path.display()
+    ))
 }
 
 /// Load member history (missing/corrupt → empty, silently fall back).
@@ -586,6 +803,9 @@ mod tests {
                 name: "qa".into(),
                 agent: "qa".into(),
                 avatar: Some("sora".into()),
+                model: Some("sub-model".into()),
+                provider: Some("ds".into()),
+                thinking: Some("xhigh".into()),
             }],
         };
         write_team_file(&dir, &def).unwrap_or_else(|e| panic!("{e}"));
@@ -618,10 +838,10 @@ mod tests {
             members: vec![TeamMember {
                 name: "a".into(),
                 agent: "ghost".into(),
-                avatar: None,
+                ..Default::default()
             }],
         };
-        let err = validate(&def, &[]).unwrap_err().to_string();
+        let err = validate(&def, &[], &session()).unwrap_err().to_string();
         assert!(
             err.contains("ghost") && err.contains("no AgentDef available"),
             "{err}"
@@ -642,11 +862,67 @@ mod tests {
             members: vec![TeamMember {
                 name: "a".into(),
                 agent: "real".into(),
-                avatar: None,
+                ..Default::default()
             }],
         };
-        assert!(validate(&ok, &[known]).is_ok());
+        assert!(validate(&ok, &[known], &session()).is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The file the note names has to be worth opening: prose verbatim, tool calls
+    /// as one line, and image payloads named rather than inlined. Pointing a reader
+    /// at serialized content blocks would be a promise that fails on contact.
+    #[test]
+    fn transcript_is_written_for_reading() {
+        use crate::api::types::{ContentBlock, Message, Role};
+        let history = vec![
+            Message::user_text("ship the release"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "long private reasoning".into(),
+                        signature: "sig".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "Cutting v0.3.3 now.".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "1".into(),
+                        name: "Bash".into(),
+                        input: serde_json::json!({"command": "cargo test\n--locked"}),
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "1".into(),
+                    content: serde_json::json!("all green"),
+                    is_error: false,
+                }],
+            },
+        ];
+        let out = transcript("deploy", &history);
+        assert!(out.starts_with("# deploy — 3 messages"), "{out}");
+        assert!(out.contains("## 1. user"), "{out}");
+        assert!(
+            out.contains("## 2. deploy"),
+            "the member speaks under its own name: {out}"
+        );
+        assert!(out.contains("Cutting v0.3.3 now."), "prose verbatim: {out}");
+        assert!(out.contains("called `Bash`"), "{out}");
+        assert!(
+            out.contains("cargo test --locked"),
+            "a multi-line command flattens to one line: {out}"
+        );
+        assert!(out.contains("returned: all green"), "{out}");
+        assert!(
+            !out.contains("long private reasoning"),
+            "reasoning is not a decision and does not survive as one: {out}"
+        );
+        // Nothing in it is JSON envelope noise.
+        assert!(!out.contains("tool_use_id"), "{out}");
     }
 
     #[test]
@@ -700,7 +976,7 @@ mod tests {
                 .map(|(n, a)| TeamMember {
                     name: n.to_string(),
                     agent: a.to_string(),
-                    avatar: None,
+                    ..Default::default()
                 })
                 .collect(),
         }
@@ -768,10 +1044,152 @@ mod tests {
         std::fs::remove_dir_all(&mem_home).unwrap();
     }
 
-    /// Memory restore: persisted history is preloaded into the instance at spawn (no
-    /// wake-up; carried when SendMessage resumes).
+    /// The model a member pins is the model its instance ends up running, and a
+    /// member pinning nothing keeps the session's. This is the wiring assertion:
+    /// were the blueprint's fields dropped on the way to `build_sub_session`,
+    /// every member would report the session's model and nothing else would fail.
     #[test]
-    fn spawn_team_restores_member_history() {
+    fn spawn_team_applies_the_member_engine() {
+        let s = session();
+        let mem_home = tmp("spawn-engine");
+        let defs = vec![def("qa"), def("dev")];
+        let team = TeamDef {
+            name: "t".into(),
+            channel: None,
+            members: vec![
+                TeamMember {
+                    name: "qa".into(),
+                    agent: "qa".into(),
+                    model: Some("pinned-model".into()),
+                    ..Default::default()
+                },
+                TeamMember {
+                    name: "dev".into(),
+                    agent: "dev".into(),
+                    ..Default::default()
+                },
+            ],
+        };
+        spawn_team(&s, &team, &defs, &mem_home, &mem_home, "main")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let engine = |who: &str| {
+            s.agents
+                .list()
+                .into_iter()
+                .find(|a| a.name == who)
+                .map(|a| a.model)
+                .unwrap_or_default()
+        };
+        assert_eq!(engine("qa"), "pinned-model", "the pin reaches the instance");
+        assert_eq!(engine("dev"), "m", "no pin keeps the session's model");
+        std::fs::remove_dir_all(&mem_home).unwrap();
+    }
+
+    /// An engine this session could not actually start is a config error, caught
+    /// before anything spawns rather than per member at spawn: `validate` and
+    /// `start` share one source, so the invariant "validate passes ⇒ start
+    /// succeeds" has to hold for the engine too, not just for agent references.
+    #[test]
+    fn validate_rejects_an_engine_the_session_cannot_start() {
+        let s = session();
+        let defs = vec![def("qa")];
+        let member = |m: TeamMember| TeamDef {
+            name: "t".into(),
+            channel: None,
+            members: vec![m],
+        };
+        let base = || TeamMember {
+            name: "qa".into(),
+            agent: "qa".into(),
+            ..Default::default()
+        };
+
+        let err = validate(
+            &member(TeamMember {
+                provider: Some("nope".into()),
+                model: Some("m".into()),
+                ..base()
+            }),
+            &defs,
+            &s,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("nope") && err.contains("members[0].provider"),
+            "{err}"
+        );
+
+        let err = validate(
+            &member(TeamMember {
+                thinking: Some("bogus".into()),
+                ..base()
+            }),
+            &defs,
+            &s,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("bogus") && err.contains("members[0].thinking"),
+            "{err}"
+        );
+
+        // Pinning nothing is the common case and stays valid; so does a model on
+        // its own, which needs no endpoint of its own to be startable.
+        assert!(validate(&member(base()), &defs, &s).is_ok());
+        assert!(
+            validate(
+                &member(TeamMember {
+                    model: Some("other".into()),
+                    thinking: Some("high".into()),
+                    ..base()
+                }),
+                &defs,
+                &s
+            )
+            .is_ok()
+        );
+    }
+
+    /// A rejected blueprint spawns nothing at all — the whole point of catching it
+    /// in validate rather than letting members fail one by one.
+    #[test]
+    fn spawn_team_refuses_a_blueprint_with_a_bad_engine() {
+        let s = session();
+        let mem_home = tmp("spawn-bad-engine");
+        let defs = vec![def("qa"), def("dev")];
+        let team = TeamDef {
+            name: "t".into(),
+            channel: None,
+            members: vec![
+                TeamMember {
+                    name: "qa".into(),
+                    agent: "qa".into(),
+                    ..Default::default()
+                },
+                TeamMember {
+                    name: "dev".into(),
+                    agent: "dev".into(),
+                    thinking: Some("bogus".into()),
+                    ..Default::default()
+                },
+            ],
+        };
+        let err = spawn_team(&s, &team, &defs, &mem_home, &mem_home, "main")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bogus"), "{err}");
+        assert!(s.agents.list().is_empty(), "no member is left half-spawned");
+        std::fs::remove_dir_all(&mem_home).unwrap();
+    }
+
+    /// Memory is a pointer, not a preload (D51): a member spawns with an empty
+    /// context and a note saying where its past is. The old behaviour charged a
+    /// growing, invisible toll on the member's first turn — unbounded, monotonic,
+    /// and mostly stale — for a file the member can read when it actually needs it.
+    #[test]
+    fn spawn_team_points_at_memory_instead_of_loading_it() {
         let s = session();
         let mem_home = tmp("spawn-restore");
         let defs = vec![def("qa")];
@@ -787,12 +1205,43 @@ mod tests {
             .agents
             .view_of("qa")
             .unwrap_or_else(|| panic!("instance should exist"));
-        assert_eq!(history.len(), 1, "history is preloaded");
+        assert!(
+            history.is_empty(),
+            "the past is not in the context: {history:?}"
+        );
         assert_eq!(
             state,
             crate::agents::AgentState::Idle,
-            "restore does not wake"
+            "spawning still does not wake"
         );
+
+        // What it gets instead: the file, named, with what is in it.
+        let note = member_memory_note(&mem_home, &mem_home, "main", "t", "qa")
+            .unwrap_or_else(|| panic!("a member with a past gets a note"));
+        let path =
+            member_transcript_path(&team_memory_dir(&mem_home, &mem_home, "main", "t"), "qa");
+        assert!(note.contains(&path.display().to_string()), "{note}");
+        assert!(note.contains("1 message"), "{note}");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .contains("last round's conclusion"),
+            "the file it points at is readable and holds the history"
+        );
+
+        // A member with no past is told nothing at all.
+        assert!(
+            member_memory_note(&mem_home, &mem_home, "main", "t", "ghost").is_none(),
+            "no past, no note"
+        );
+
+        // A history written before D51 is JSON only; the note would otherwise name
+        // a file that does not exist, so the transcript materializes on spawn.
+        std::fs::remove_file(&path).unwrap_or_else(|e| panic!("{e}"));
+        assert!(member_memory_note(&mem_home, &mem_home, "main", "t", "qa").is_none());
+        ensure_transcript(&mem_home, &mem_home, "main", "t", "qa");
+        assert!(path.exists(), "an older record renders on first sight");
+        assert!(member_memory_note(&mem_home, &mem_home, "main", "t", "qa").is_some());
         std::fs::remove_dir_all(&mem_home).unwrap();
     }
 

@@ -299,11 +299,20 @@ room reuses the channel machinery, and control stays on the hub-and-spoke
 surface.
 
 - **Definition**: `.bingo/team.json` (camelCase, committed to the repo):
-  `name` + `channel {mode, messageLimit}` + `members [{name, agent, avatar?}]` —
+  `name` + `channel {mode, messageLimit}` +
+  `members [{name, agent, avatar?, model?, provider?, thinking?}]` —
   each member references an AgentDef, so a persona lives in one place
   (`.bingo/agents/<name>.md`) and can join multiple teams. `name` is the name
   shown on the member's messages (give it a person's name, not a role code) and
   `avatar` pins one of the bundled portraits, so a crew is a fixed cast.
+- **Engine per member**: `model`, `provider` and `thinking` pin what a member
+  runs on. Which model does which job is part of the formation, not a per-spawn
+  whim, so it lives in the committed blueprint — a crew can put its reviewer on
+  a cheap fast endpoint and its architect on the expensive one. Each falls back
+  to the agent definition and then to the session, exactly as an `Agent` call's
+  parameters do; a named `provider` other than the session's own needs a `model`
+  too, since a model name means nothing at another endpoint. `/team list` and
+  `AgentControl list` report the engine each running instance is actually on.
 - **Startup pull-up**: with `settings.team.autoStart` (default true) the team
   is pulled up at startup — spawn members and create the room, but do **not**
   wake them (members sit idle at zero token cost until `/team assign` or a
@@ -317,7 +326,16 @@ surface.
 - **Cross-session memory**: member history and append-only decision records
   persist to `~/.config/bingo/teams/<project-hash>/<branch>/<team>/` — scoped
   by project path + git branch, so main and a feature worktree never share
-  memory. Restored on pull-up without waking the members.
+  memory. Each member gets `<name>.md` (the readable transcript) beside
+  `<name>.json` (the exact record).
+- **Pointed at, not preloaded**: a member spawns with an empty context and one
+  line telling it where its own transcript is, so it can read what was decided
+  before when the task depends on it. Loading the history instead charged a
+  growing, invisible toll on the member's first turn — the file is unbounded
+  and monotonic, every session appends and nothing prunes — for relevance that
+  decays fast. The hub starts each session clean too; a crew member should not
+  be the exception. `/team memory list` shows what is on disk; open a `.md` to
+  read it yourself.
 - **The `Team` tool** (main session only) gives the model the same surface:
   `status` (blueprint + each member's runtime state + the definitions available
   to draft with), `validate`, `start`, `stop`, `save` (writes the blueprint;
@@ -361,6 +379,16 @@ placeholder cells. A team member's portrait is pinned in `.bingo/team.json`
 (`"avatar": "sora"`) so a crew keeps a fixed cast; everyone else gets a face
 derived from their name. Terminals without that capability keep the sender's initial
 on a colour; the row count is identical either way, so only the gutter changes.
+
+**In the main chat**, the same faces sit on a band above each message: the
+speaker's portrait beside their name — `main` for the hub, `You` for your own
+messages, the names the room itself uses. Message bodies are untouched
+underneath; they still run the full width, and the `⏺` markers inside a message
+keep separating prose from tool rows. The band is two rows where portraits place
+and one where they fall back to the chip — nothing below it depends on its
+height. One known degradation: a terminal that purges its image store (a resize
+does) gets the faces still on screen redrawn, but messages already in scrollback
+keep four blank columns where the portrait was, with the name intact.
 
 ## Skills
 

@@ -45,7 +45,7 @@ pub enum TeamAction {
     Save,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct MemberInput {
     #[schemars(
@@ -61,6 +61,21 @@ pub struct MemberInput {
         description = "Portrait this member wears, pinned so it survives across sessions: one of the ids status lists. Give every member a different one; omitted means a portrait picked from the name, which can collide"
     )]
     avatar: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Model this member runs on. Omit to use the agent definition's model, falling back to the session's — set it only when this member's job wants a different engine from the rest of the crew (a cheap fast one for a reviewer, a stronger one for a designer)"
+    )]
+    model: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Provider endpoint this member runs against: a name from the configured providers. Omit to share the session's endpoint and follow its switches. A named provider other than the session's own requires model as well, since a model name means nothing at another endpoint"
+    )]
+    provider: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Thinking level for this member: off/low/medium/high/xhigh/max. Omit to use the agent definition's, falling back to the session's current level"
+    )]
+    thinking: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -119,6 +134,17 @@ fn join_names(names: &[String], sep: &str) -> String {
 
 fn member_names(def: &TeamDef) -> Vec<String> {
     def.members.iter().map(|m| m.name.clone()).collect()
+}
+
+/// An optional field as the blueprint should hold it: whitespace-only is the same
+/// as absent, so a field the model filled with a blank never reaches the file and
+/// starts reading as an override that overrides nothing.
+fn trimmed(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 /// Blueprint on disk, or None when there is no team file / it is unreadable. The
@@ -267,23 +293,27 @@ impl TeamTool {
             crate::team::channel_mode(&def).label(),
             def.members.len()
         )];
-        let pinned: std::collections::HashMap<&str, &str> = def
-            .members
-            .iter()
-            .filter_map(|m| Some((m.name.as_str(), m.avatar.as_deref()?)))
-            .collect();
+        let pinned: std::collections::HashMap<&str, &TeamMember> =
+            def.members.iter().map(|m| (m.name.as_str(), m)).collect();
         for m in &view.members {
             let state = instances
                 .iter()
                 .find(|a| a.name == m.name)
                 .map(|a| a.state.label())
                 .unwrap_or("offline");
-            let face = pinned
-                .get(m.name.as_str())
+            let member = pinned.get(m.name.as_str());
+            let face = member
+                .and_then(|p| p.avatar.as_deref())
                 .map(|a| format!(" · portrait {a}"))
                 .unwrap_or_default();
+            // Only what the blueprint pins is reported. An inherited engine is not
+            // named here on purpose: it is whatever the session is on at spawn, so
+            // printing today's value would read as a pin the file does not hold.
+            let engine = member
+                .map(|p| crate::team::engine_label(p))
+                .unwrap_or_default();
             out.push(format!(
-                "- {} -> agent \"{}\"{} · {state}{face} · {}",
+                "- {} -> agent \"{}\"{} · {state}{face}{engine} · {}",
                 m.name,
                 m.agent,
                 source_badge(m.source),
@@ -299,7 +329,7 @@ impl TeamTool {
         let Some(def) = self.load(cwd)? else {
             return Ok("no .bingo/team.json in this project — nothing to validate.".to_string());
         };
-        match crate::team::validate(&def, defs) {
+        match crate::team::validate(&def, defs, &self.session) {
             Ok(()) => Ok(format!(
                 "ok: .bingo/team.json passes ({} members · {} channel). action=start brings it up.",
                 def.members.len(),
@@ -413,18 +443,17 @@ impl TeamTool {
                 .map(|m| TeamMember {
                     name: m.name.trim().to_string(),
                     agent: m.agent.trim().to_string(),
-                    avatar: m
-                        .avatar
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|a| !a.is_empty())
-                        .map(str::to_string),
+                    avatar: trimmed(&m.avatar),
+                    model: trimmed(&m.model),
+                    provider: trimmed(&m.provider),
+                    thinking: trimmed(&m.thinking),
                 })
                 .collect(),
         };
         // Reference check before the write: `validate` and `start` share one source, so a
         // blueprint that lands on disk is one that can be brought up.
-        crate::team::validate(&def, defs).map_err(|e| ToolError::failed(e.to_string()))?;
+        crate::team::validate(&def, defs, &self.session)
+            .map_err(|e| ToolError::failed(e.to_string()))?;
         crate::team::write_team_file(cwd, &def).map_err(|e| ToolError::failed(e.to_string()))?;
         Ok(format!(
             "wrote {} — {name} · {} members ({}) · {} channel. It passes validation; action=start brings it up.\n\
@@ -734,7 +763,7 @@ mod tests {
                     .map(|n| MemberInput {
                         name: n.to_string(),
                         agent: n.to_string(),
-                        avatar: None,
+                        ..Default::default()
                     })
                     .collect(),
             ),
@@ -757,12 +786,12 @@ mod tests {
                     TeamMember {
                         name: "qa".into(),
                         agent: "qa".into(),
-                        avatar: None,
+                        ..Default::default()
                     },
                     TeamMember {
                         name: "ui".into(),
                         agent: "ui".into(),
-                        avatar: None,
+                        ..Default::default()
                     },
                 ],
             },
@@ -792,7 +821,7 @@ mod tests {
                 members: vec![TeamMember {
                     name: "qa".into(),
                     agent: "qa".into(),
-                    avatar: None,
+                    ..Default::default()
                 }],
             },
         )
