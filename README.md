@@ -371,15 +371,6 @@ placeholder cells. A team member's portrait is pinned in `.bingo/team.json`
 derived from their name. Terminals without that capability keep the sender's initial
 on a colour; the row count is identical either way, so only the gutter changes.
 
-## Skills
-
-- Load order (highest priority first): user `~/.config/bingo/skills/` →
-  project `.bingo/skills/` (walked upward from cwd, nearest first) → bundled
-  `guide` (compiled into the binary, fallback only); same-name disk skills
-  override the bundled one.
-- One directory per skill: `<name>/SKILL.md` with YAML frontmatter
-  (`description`/`when_to_use`/`arguments`) + markdown body.
-- Invocation: the model calls via `SkillTool` automatically; the user runs
 **In the main chat**, the same faces sit on a band above each message: the
 speaker's portrait beside their name — `main` for the hub, `You` for your own
 messages, the names the room itself uses. Message bodies are untouched
@@ -390,6 +381,15 @@ height. One known degradation: a terminal that purges its image store (a resize
 does) gets the faces still on screen redrawn, but messages already in scrollback
 keep four blank columns where the portrait was, with the name intact.
 
+## Skills
+
+- Load order (highest priority first): user `~/.config/bingo/skills/` →
+  project `.bingo/skills/` (walked upward from cwd, nearest first) → bundled
+  `guide` (compiled into the binary, fallback only); same-name disk skills
+  override the bundled one.
+- One directory per skill: `<name>/SKILL.md` with YAML frontmatter
+  (`description`/`when_to_use`/`arguments`) + markdown body.
+- Invocation: the model calls via `SkillTool` automatically; the user runs
   `/skill-name [args]` directly.
 - Bundled `guide`: bingo usage & troubleshooting manual (consult it when
   answering "how to configure / why / it doesn't work").

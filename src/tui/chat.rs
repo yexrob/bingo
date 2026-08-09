@@ -6119,7 +6119,7 @@ impl Chat {
                 if let Some(lines) = cache.get(reply) {
                     return lines.clone();
                 }
-                renderer.set_width(width);
+                renderer.set_width(width.saturating_sub(2));
                 // Image cache version changed → sync the renderer (clears its per-block cache).
                 if renderer.images_version() != images_version {
                     renderer.set_images(image_cap, images, images_failed, images_version);
@@ -6981,6 +6981,95 @@ mod tests {
                 }));
         }
         chat.drain_events();
+    }
+
+    /// No transcript row is wider than the width it was built for. The reply
+    /// marker is prepended *after* the markdown is wrapped, so rendering the text
+    /// at the full width made every filled first line `width + 2`: the viewport
+    /// clipped the overhang (two characters gone with no sign they existed) and
+    /// scrollback would have wrapped it onto a second physical row, breaking the
+    /// one-document-row-per-terminal-row invariant the whole write-once design
+    /// rests on.
+    #[test]
+    fn no_row_overflows_the_build_width() {
+        for width in [40usize, 80, 100] {
+            let mut chat = test_chat();
+            // Long enough that some line must fill the width exactly.
+            let long = "lockfile pins rewritten alongside the version bump ".repeat(8);
+            chat.messages.push(msg(Role::User, &long));
+            chat.messages.push(msg(Role::Assistant, &long));
+            chat.build_rows(width);
+            for (i, row) in chat.doc.rows.iter().enumerate() {
+                let w = text_width(&row.line.plain_text());
+                assert!(
+                    w <= width,
+                    "row {i} is {w} wide at width {width}: {:?}",
+                    row.line.plain_text()
+                );
+            }
+        }
+    }
+
+    /// The band names the speaker with the name that addresses it: the hub is
+    /// `main` in the room and on the band, and the human's own messages read
+    /// `You`, exactly as the workspace already writes them. Both faces are
+    /// recorded — the transmit layer sends what the rows drew, so a portrait no
+    /// row asked for is never sent and one a row used is never missed.
+    #[test]
+    fn sender_band_names_the_speaker_and_records_its_face() {
+        let mut chat = test_chat();
+        chat.messages.push(msg(Role::User, "hi"));
+        chat.messages.push(msg(Role::Assistant, "hello"));
+        chat.build_rows(80);
+        let rows: Vec<String> = chat
+            .doc
+            .rows
+            .iter()
+            .map(|r| r.line.plain_text().trim().to_string())
+            .collect();
+        assert!(
+            rows.iter().any(|r| r.ends_with("You")),
+            "the human's own band reads You: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.ends_with(crate::channels::HUB_NAME)),
+            "the hub's band reads its room name: {rows:?}"
+        );
+        let expected: HashSet<usize> = [
+            crate::tui::avatar::index_of(crate::channels::USER_NAME),
+            crate::tui::avatar::index_of(crate::channels::HUB_NAME),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(chat.faces, expected, "both faces recorded for transmission");
+    }
+
+    /// The two skins differ in height here and only here: the portrait needs a
+    /// second row, the chip does not. Nothing below the band depends on it —
+    /// unlike the workspace gutter, where unequal heights would shear the body.
+    #[test]
+    fn sender_band_costs_a_second_row_only_where_portraits_place() {
+        let build = |cap: Option<ImageCap>| -> (usize, bool) {
+            let mut chat = test_chat();
+            chat.image_cap = cap;
+            chat.messages.push(msg(Role::User, "hi"));
+            chat.build_rows(80);
+            let placed = chat
+                .doc
+                .rows
+                .iter()
+                .any(|r| r.line.plain_text().contains(gfx::PLACEHOLDER));
+            (chat.doc.rows.len(), placed)
+        };
+        let (chip_rows, chip_placed) = build(None);
+        let (portrait_rows, portrait_placed) = build(Some(ImageCap::default_cells()));
+        assert_eq!(
+            portrait_rows,
+            chip_rows + 1,
+            "the portrait's second row is the whole difference"
+        );
+        assert!(portrait_placed, "image terminals get placeholder cells");
+        assert!(!chip_placed, "the chip skin places no image");
     }
 
     /// Task-family / AskUserQuestion calls are not shown in the transcript
