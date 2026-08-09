@@ -166,7 +166,7 @@ pub struct AgentStatus {
     pub state: AgentState,
     /// Messages waiting in the inbox for the next turn boundary.
     pub pending: usize,
-    /// Messages accepted but not yet folded into a prompt (the sender's outstanding acks).
+    /// Messages the sender has had no reply to yet — queued, or read and left unanswered.
     pub unacked: usize,
 }
 
@@ -181,19 +181,34 @@ impl std::fmt::Display for MsgId {
     }
 }
 
-/// What became of a sent message. `Queued` is not an acknowledgement: it only means the message
-/// is sitting in the inbox. Only `Delivered` proves it entered the receiver's context.
+/// What became of a sent message. Two of these look like success and are not: `Queued` only means
+/// the message is sitting in the inbox, and `Delivered` only means it was read into the receiver's
+/// prompt — a receiver that takes a message and says nothing leaves it there. `Answered` is the
+/// acknowledgement: the run that carried the message ended with something to say back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AckState {
     Queued,
-    /// Folded into the prompt of the instance's run #N.
+    /// Folded into the prompt of the instance's run #N, with nothing back from that run yet.
     Delivered {
+        run: u64,
+    },
+    /// Run #N ended with a reply for the hub, which answers this message (not necessarily the run
+    /// that first read it: a message read during a silent run is answered by the one that speaks).
+    Answered {
         run: u64,
     },
     /// Never delivered, and never will be (instance stopped or removed).
     Dropped {
         reason: String,
     },
+}
+
+impl AckState {
+    /// Whether the sender is still owed something. Both waiting states — nobody picked the message
+    /// up, and somebody did but stayed silent — are the same thing from the sender's side.
+    pub fn is_outstanding(&self) -> bool {
+        matches!(self, Self::Queued | Self::Delivered { .. })
+    }
 }
 
 /// One message's delivery record, kept after the fact so the sender can audit it.
@@ -249,14 +264,17 @@ pub enum InboxItem {
         text: String,
         seq: u64,
     },
-    /// Automatic chase for a direct message whose acknowledgement never came. It carries no new
-    /// instruction — only the fact that the hub is still waiting on the message it rides with.
+    /// Automatic chase for a direct message the hub never got an answer to. It carries no new
+    /// instruction — only the fact that the sender is still waiting.
     FollowUp {
         original: MsgId,
         /// 1-based, out of MAX_FOLLOW_UPS.
         round: u8,
         excerpt: String,
         waited: Duration,
+        /// Whether the message had already been read into a prompt. The two silences need
+        /// different words: nobody picked it up, versus you read it and said nothing.
+        delivered: bool,
     },
 }
 
@@ -484,11 +502,18 @@ impl AgentRegistry {
     /// Turn finished: store the latest history. Inbox non-empty → stay Running and
     /// return (history copy, drained inbox); empty → switch to Idle.
     /// Stopped (stopped mid-turn) never revives and never returns a continuation.
-    pub fn finish(&self, name: &str, history: Vec<Message>) -> Option<Continuation> {
+    ///
+    /// `spoke` is whether the turn produced any text for the hub. Only then are the messages this
+    /// run carried acknowledged: a turn that ends in silence is the case the sender most needs to
+    /// hear about, so it must not look like one that answered.
+    pub fn finish(&self, name: &str, history: Vec<Message>, spoke: bool) -> Option<Continuation> {
         let result = {
             let mut inner = self.lock();
             let entry = inner.get_mut(name)?;
             entry.history = history;
+            if spoke {
+                answer_acks(entry);
+            }
             if entry.state == AgentState::Stopped {
                 None
             } else if entry.inbox.is_empty() {
@@ -596,9 +621,9 @@ impl AgentRegistry {
         Ok(id)
     }
 
-    /// Re-read one message's delivery record and, while it is still queued, put a follow-up in the
-    /// receiver's inbox. Reading and enqueueing happen under the single registry lock, so a flush
-    /// racing the watchdog can never turn a just-delivered message into a pointless nudge.
+    /// Re-read one message's record and, while the sender is still owed an answer, put a follow-up
+    /// in the receiver's inbox. Reading and enqueueing happen under the single registry lock, so a
+    /// turn ending mid-check can never turn a just-answered message into a pointless nudge.
     pub fn follow_up(&self, name: &str, id: MsgId) -> FollowUp {
         let mut inner = self.lock();
         let Some(entry) = inner.get_mut(name) else {
@@ -607,7 +632,7 @@ impl AgentRegistry {
         let Some(ack) = entry.acks.iter_mut().find(|a| a.id == id) else {
             return FollowUp::Gone;
         };
-        if ack.state != AckState::Queued {
+        if !ack.state.is_outstanding() {
             return FollowUp::Settled(ack.state.clone());
         }
         if ack.follow_ups >= MAX_FOLLOW_UPS {
@@ -617,11 +642,13 @@ impl AgentRegistry {
         let round = ack.follow_ups;
         let excerpt = ack.excerpt.clone();
         let waited = ack.queued_at.elapsed();
+        let delivered = matches!(ack.state, AckState::Delivered { .. });
         entry.inbox.push(InboxItem::FollowUp {
             original: id,
             round,
             excerpt,
             waited,
+            delivered,
         });
         FollowUp::Sent { round }
     }
@@ -714,11 +741,7 @@ impl AgentRegistry {
                 description: e.description.clone(),
                 state: e.state,
                 pending: e.inbox.len(),
-                unacked: e
-                    .acks
-                    .iter()
-                    .filter(|a| a.state == AckState::Queued)
-                    .count(),
+                unacked: e.acks.iter().filter(|a| a.state.is_outstanding()).count(),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -726,7 +749,19 @@ impl AgentRegistry {
     }
 }
 
-/// Take the whole inbox in one pass and acknowledge every direct message in it: being folded
+/// A turn that produced text answers every message the instance has read so far — replying is a
+/// turn-level act, not a per-message one, and a message first read in a silent run is answered by
+/// the run that finally speaks. Anything still queued is untouched: it has not been read yet.
+fn answer_acks(entry: &mut Entry) {
+    let run = entry.runs;
+    for ack in entry.acks.iter_mut() {
+        if matches!(ack.state, AckState::Delivered { .. }) {
+            ack.state = AckState::Answered { run };
+        }
+    }
+}
+
+/// Take the whole inbox in one pass and mark every direct message in it delivered: being folded
 /// into the next prompt is exactly the moment a message enters the receiver's context.
 fn drain_inbox(entry: &mut Entry) -> Vec<InboxItem> {
     let items = std::mem::take(&mut entry.inbox);
@@ -930,7 +965,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         // Turn finished + inbox non-empty → continues (history saved, inbox drained, ack set).
         let next = reg
-            .finish("scout", vec![Message::user_text("hi")])
+            .finish("scout", vec![Message::user_text("hi")], true)
             .unwrap_or_else(|| panic!("应续跑"));
         assert_eq!(next.history.len(), 1, "续跑携带最新历史");
         assert!(
@@ -942,7 +977,7 @@ mod tests {
         assert_eq!(acks[0].id, first);
         assert_eq!(acks[0].state, AckState::Delivered { run: next.run });
         // Finish again with an empty inbox → Idle.
-        assert!(reg.finish("scout", Vec::new()).is_none());
+        assert!(reg.finish("scout", Vec::new(), true).is_none());
         assert_eq!(reg.list()[0].state, AgentState::Idle);
         // Idle: the message waits for a flush rather than starting a run on the spot.
         let _ = reg
@@ -973,7 +1008,7 @@ mod tests {
             },
         ));
         let items = reg
-            .finish("w", Vec::new())
+            .finish("w", Vec::new(), true)
             .unwrap_or_else(|| panic!("续跑"))
             .items;
         assert_eq!(items.len(), 2);
@@ -986,7 +1021,7 @@ mod tests {
             "频道条目携带 seq/from"
         );
         // Idle: deposit wakes it; Stopped/unknown silently dropped.
-        assert!(reg.finish("w", Vec::new()).is_none());
+        assert!(reg.finish("w", Vec::new(), true).is_none());
         assert!(reg.deposit(
             "w",
             InboxItem::Channel {
@@ -1028,7 +1063,7 @@ mod tests {
         assert!(doc.agents[0].history.is_empty());
 
         // finish → 历史 + 状态（空信箱 → idle）。
-        reg.finish("scout", vec![Message::user_text("hi")]);
+        reg.finish("scout", vec![Message::user_text("hi")], true);
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "idle");
         assert_eq!(doc.agents[0].history.len(), 1);
@@ -1040,11 +1075,11 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         reg.deliver("scout", "又查", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
-        reg.finish("scout", Vec::new());
+        reg.finish("scout", Vec::new(), true);
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "running");
         // 信箱排空 → idle。
-        reg.finish("scout", Vec::new());
+        reg.finish("scout", Vec::new(), true);
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "idle");
 
@@ -1067,7 +1102,7 @@ mod tests {
     fn messages_sent_in_one_turn_arrive_as_one_batch() {
         let reg = AgentRegistry::new();
         reg.insert("w", None, "w".into(), test_session());
-        assert!(reg.finish("w", Vec::new()).is_none(), "先转 idle");
+        assert!(reg.finish("w", Vec::new(), true).is_none(), "先转 idle");
         for text in ["先看 A", "再看 B", "最后 C"] {
             reg.deliver("w", text, Vec::new(), None)
                 .unwrap_or_else(|e| panic!("{e}"));
@@ -1107,9 +1142,9 @@ mod tests {
         assert_eq!(reg.list()[0].pending, 0, "信箱已清空");
     }
 
-    /// The chase is bounded and self-cancelling: while a message stays queued each round leaves
-    /// one follow-up riding with it, the budget stops at MAX_FOLLOW_UPS, and the delivery that
-    /// finally happens settles every later check.
+    /// The chase is bounded and self-cancelling: while a message goes unanswered each round leaves
+    /// one follow-up riding with it, the budget stops at MAX_FOLLOW_UPS, and the reply that finally
+    /// comes settles every later check.
     #[test]
     fn follow_up_chases_a_queued_message_until_the_budget_runs_out() {
         let reg = AgentRegistry::new();
@@ -1122,7 +1157,7 @@ mod tests {
         }
         assert_eq!(reg.follow_up("w", id), FollowUp::Exhausted, "预算耗尽");
         let items = reg
-            .finish("w", Vec::new())
+            .finish("w", Vec::new(), true)
             .unwrap_or_else(|| panic!("排队消息应在回合结束时取出"))
             .items;
         assert_eq!(
@@ -1139,13 +1174,69 @@ mod tests {
         assert_eq!(acks.len(), 1, "追问自身不留回执");
         assert_eq!(acks[0].follow_ups, MAX_FOLLOW_UPS, "追问次数可供复查");
         assert_eq!(acks[0].timeout, Some(Duration::from_secs(30)));
+        // Read into a prompt is still not an acknowledgement — only the reply ends the chase.
+        assert!(
+            matches!(
+                reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
+                AckState::Delivered { .. }
+            ),
+            "进上下文还不算回执"
+        );
+        assert!(reg.finish("w", Vec::new(), true).is_none(), "该轮开口回话");
         assert!(
             matches!(
                 reg.follow_up("w", id),
-                FollowUp::Settled(AckState::Delivered { .. })
+                FollowUp::Settled(AckState::Answered { .. })
             ),
-            "送达后不再追问"
+            "回复后不再追问"
         );
+    }
+
+    /// The silence the sender actually cares about: the receiver took the message and ended its
+    /// turn without a word. Delivery looks like success and is not, so the chase must continue —
+    /// and the follow-up has to name which silence it is, since the two need different words.
+    #[test]
+    fn a_turn_that_says_nothing_does_not_acknowledge_what_it_read() {
+        let reg = AgentRegistry::new();
+        reg.insert("mute", None, "沉默".into(), test_session());
+        assert!(reg.finish("mute", Vec::new(), true).is_none(), "先转 idle");
+        let id = reg
+            .deliver(
+                "mute",
+                "汇报进度",
+                Vec::new(),
+                Some(Duration::from_secs(30)),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(reg.flush_pending().len(), 1, "空闲实例在边界收件");
+        // The turn ends producing no text for the hub.
+        assert!(reg.finish("mute", Vec::new(), false).is_none());
+        let acks = reg.acks_of("mute").unwrap_or_else(|| unreachable!());
+        assert!(
+            matches!(acks[0].state, AckState::Delivered { run: 1 }),
+            "沉默的一轮不构成回执：{:?}",
+            acks[0].state
+        );
+        assert_eq!(reg.list()[0].unacked, 1, "发件人仍在等回复");
+        assert_eq!(reg.follow_up("mute", id), FollowUp::Sent { round: 1 });
+        assert!(
+            matches!(
+                reg.flush_pending()[0].items[..],
+                [InboxItem::FollowUp {
+                    delivered: true,
+                    ..
+                }]
+            ),
+            "追问标明是「读了不吭声」而非「没取走」"
+        );
+        // Speaking up answers what it had already read, even though a later run says it.
+        assert!(reg.finish("mute", Vec::new(), true).is_none());
+        assert_eq!(
+            reg.acks_of("mute").unwrap_or_else(|| unreachable!())[0].state,
+            AckState::Answered { run: 2 },
+            "开口那一轮补上回执"
+        );
+        assert_eq!(reg.list()[0].unacked, 0);
     }
 
     /// The chase also ends when there is nothing left to chase: a stopped instance drops the
@@ -1206,7 +1297,10 @@ mod tests {
             "停止后拒收"
         );
         // Turn finishing after a stop: history is still archived, no revival.
-        assert!(reg.finish("x", vec![Message::user_text("h")]).is_none());
+        assert!(
+            reg.finish("x", vec![Message::user_text("h")], true)
+                .is_none()
+        );
         assert_eq!(reg.list()[0].state, AgentState::Stopped);
         reg.remove("x").unwrap_or_else(|e| panic!("{e}"));
         assert!(reg.list().is_empty());
@@ -1218,7 +1312,7 @@ mod tests {
         // Stopping an idle instance: no active line.
         reg.insert("y", None, "y".into(), test_session());
         reg.set_run_watch("y", crate::watch::WatchId(9));
-        assert!(reg.finish("y", Vec::new()).is_none());
+        assert!(reg.finish("y", Vec::new(), true).is_none());
         assert!(
             reg.stop("y").unwrap_or_else(|e| panic!("{e}")).0.is_none(),
             "idle 停止不取消已终态的行"
