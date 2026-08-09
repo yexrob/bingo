@@ -55,7 +55,7 @@ const MAX_TOKENS_RESUME_PROMPT: &str =
 
 /// Task reminder thresholds (TURNS_SINCE_WRITE / TURNS_BETWEEN_REMINDERS).
 const TASK_REMINDER_TURNS: u64 = 10;
-const TASK_REMINDER_MARKER: &str = "[SYSTEM NOTIFICATION - TASK REMINDER]";
+pub(crate) const TASK_REMINDER_MARKER: &str = "[SYSTEM NOTIFICATION - TASK REMINDER]";
 
 /// Turn distance calculation: count assistant turns backward from the end of the messages,
 /// stopping at a turn containing a TaskCreate/TaskUpdate tool_use (or a reminder message).

@@ -255,9 +255,11 @@ Example (.bingo/settings.json):
   via Post — messages enter every member's context (same order), the sender is stamped by the runtime; in serial channels, a stale
   post is bounced back with the new messages attached (the agent reads them, then re-decides/abandons; count-based ordering emerges this way);
   free channels allow interleaving. Channels show in the transcript as `◇ #name` rows (expandable to the full group chat);
-  over-budget channels auto-freeze and notify the main agent. **Silence is the default**: because delivery wakes every member, each
-  spawned member carries a system-prompt rule (only when the flag is on) forbidding greetings, acknowledgements and "got it" posts —
-  they are what turns one message into a room-wide storm. It lives in the system block on purpose: compaction rewrites the history
+  over-budget channels auto-freeze and notify the main agent. **Who spoke decides whether a reply is owed**: because delivery wakes every member, each
+  spawned member carries a system-prompt rule (only when the flag is on) — answer `user`/`main` once and briefly when they address
+  the room, owe another member nothing unless named or unblocked, and never answer an answer (replies to replies are what turn one
+  message into a room-wide storm). The rule also states the mechanism the model cannot infer: a turn woken by a channel message
+  reports to the hub, so **only Post puts words in the room** — a reply written as turn text reaches nobody in the channel. It lives in the system block on purpose: compaction rewrites the history
   but never touches the system prompt, so the rule survives a long-running member's context being summarised away.
   **Bottom entity area**: when instances/channels exist, a one-line summary shows above the input box; Ctrl+G enters selection
   (↑↓/Enter), and Enter opens the fullscreen **Slack-shaped workspace**: one conversation pane, full width, rendering a Slack
@@ -266,13 +268,15 @@ Example (.bingo/settings.json):
   typing indicator). There is no rail and no sidebar, and the view paints no background of its own — the terminal's own
   background shows through. Navigation is Ctrl+K (the quick switcher, which lists every conversation with its unread count)
   and alt+↑↓. **Avatars**: on terminals that can place kitty images (the same capability that renders inline images), each
-  sender gets one of eight bundled Notion-style portraits, 4×2 cells beside the name; elsewhere it falls back to the sender's
-  initial on a colour, and the row count is identical either way. The composer sends: in a channel it posts as `user` (same
+  sender gets one of eight bundled anime-style portraits, 4×2 cells beside the name; elsewhere it falls back to the sender's
+  initial on a colour, and the row count is identical either way. A team member's portrait is pinned in `.bingo/team.json`
+  (`"avatar": "sora"`), so a crew keeps a fixed cast; everyone else gets a face derived from their name. Wake-up scaffolding the
+  runtime injected (a relayed channel message, the task reminder) collapses to one dim line instead of being quoted as a message. The composer sends: in a channel it posts as `user` (same
   delivery path as Post, members woken normally; rendering = read, so serial never bounces you), in a DM it queues on the
   instance and flushes at the turn boundary (shown as a pending message until then). Keys: Tab switches between the message
   list and the composer, alt+↑↓ switches conversation, Ctrl+K is the quick switcher, Esc returns.
 - **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
-  `members[{name,agent}]`, members reference AgentDefs) pins multiple roles to one project; started by default at launch
+  `members[{name,agent,avatar?}]`, members reference AgentDefs; `name` is the name shown on the member's messages, so make it a person's name, and `avatar` pins one of the bundled portraits) pins multiple roles to one project; started by default at launch
   (`settings.team.autoStart`; `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,
   only `/team assign` or channel messages start them; idempotency key = instance name, repeated start reuses). The `/team` command family
   manages it; team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (full history restored across sessions +
@@ -346,9 +350,10 @@ Example (.bingo/settings.json):
   发言——消息进全体成员上下文（同序），发件人由运行时盖戳；serial 频道落后
   发言会被弹回并附新增消息（agent 阅读后自行改口/放弃，报数式顺序由此涌现），
   free 频道允许交叉。频道在 transcript 显示为 `◇ #名字` 行（可展开看完整群聊）；
-  预算超限自动冻结频道并通知主 agent。**默认沉默**：投递即唤醒全体成员，所以每个派生成员都带一条
-  system prompt 规则（仅在开关打开时注入）——禁止发问候、寒暄、「收到」这类消息，正是它们把一条消息
-  滚成满屋噪声。规则放在 system block 而非唤醒载荷里：compact 重写消息历史但从不碰 system prompt，
+  预算超限自动冻结频道并通知主 agent。**谁在说话决定要不要回**：投递即唤醒全体成员，所以每个派生成员都带一条
+  system prompt 规则（仅在开关打开时注入）——`user`/`main` 对着房间说话时简短答一句，同事说话则不欠回复
+  （除非点名或能解他的堵），**永远不回复「回复」**（回复的回复才是噪声之源）。规则还写明模型推不出来的机制：
+  被频道消息唤醒的那一轮，正文是回给 hub 的，**只有 Post 能把话说进房间**。规则放在 system block 而非唤醒载荷里：compact 重写消息历史但从不碰 system prompt，
   长跑成员的上下文被摘要掉之后这条规则仍在。
   **底部实体区**：有实例/频道时输入框上方显示一行摘要，Ctrl+G 进入选择
   （↑↓/Enter），Enter 打开全屏 **Slack 式工作区**：整屏只有一栏消息流（顶部一行标题
@@ -356,13 +361,15 @@ Example (.bingo/settings.json):
   分隔线、工具调用作附件、运行中实例的活尾作「正在输入」）。没有 rail 也没有侧栏，
   视图不画任何自己的底色——透出的是终端本身的背景；换会话靠 Ctrl+K（快速跳转列出
   全部会话及未读数）与 alt+↑↓。**头像**：能放置 kitty 图片的终端（与内联图片同一能力）
-  为每位发言者分配八张内置 Notion 风格头像之一，名字左侧 4×2 格；其余终端退回首字母
-  色块，两种皮肤行数一致。底部输入框发送：频道以 `user` 身份发言（与 Post 同一投递
+  为每位发言者分配八张内置动漫风格头像之一，名字左侧 4×2 格；其余终端退回首字母
+  色块，两种皮肤行数一致。team 成员的头像钉在 `.bingo/team.json`（`"avatar": "sora"`），
+  一支队伍就有固定班底；其余实例按名字取脸。运行时注入的唤醒脚手架（频道消息转述、
+  任务提醒）折叠成一行淡色提示，不再当成消息整段引用。底部输入框发送：频道以 `user` 身份发言（与 Post 同一投递
   路径，正常唤醒成员；渲染即已读，serial 不会弹你），私信排进实例收件箱、回合边界
   投递（投递前显示为待送达）。按键：Tab 在消息区与输入框之间切换、alt+↑↓ 换会话、
   Ctrl+K 快速跳转、Esc 返回。
 - **agent team**（项目级编队）：`.bingo/team.json`（camelCase：`name`/`channel{mode,messageLimit}`/
-  `members[{name,agent}]`，成员引用 AgentDef）把多名角色固定到一个项目；启动默认拉起
+  `members[{name,agent,avatar?}]`，成员引用 AgentDef；`name` 就是消息上显示的名字，取人名而非角色代号，`avatar` 钉住头像）把多名角色固定到一个项目；启动默认拉起
   （`settings.team.autoStart`，`--no-team` 关闭；拉起 ≠ 唤醒——成员 Idle 待命零 token，
   等 `/team assign` 或频道消息才开跑；幂等键 = 实例名，重复 start 复用）。`/team` 命令族
   管理；team 记忆按「项目路径哈希 + 分支」存 `~/.config/bingo/teams/`（完整历史跨会话恢复 +

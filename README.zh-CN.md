@@ -264,7 +264,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 房间复用频道机制、控制面仍是 hub-and-spoke。
 
 - **定义**：`.bingo/team.json`（camelCase，进版本库）——`name` + `channel{mode,
-  messageLimit}` + `members[{name, agent}]`；成员引用 AgentDef，人格单一事实来源
+  messageLimit}` + `members[{name, agent, avatar?}]`；`name` 即消息上显示的名字（取人名而非角色代号），`avatar` 钉住内置头像之一；成员引用 AgentDef，人格单一事实来源
   仍在 `.bingo/agents/<名>.md`，一人格可入多 team。
 - **启动自动拉起**：`settings.team.autoStart`（缺省 true）时启动即拉起——派生
   成员 + 建房间，但**不唤醒**（成员 Idle 零 token 待命，等 `/team assign` 或
@@ -305,8 +305,9 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 
 **头像**：能放置 kitty 图片的终端（与内联图片同一能力：Ghostty/kitty，以及开了
 passthrough 的 tmux）为每位发言者分配八张内置
-[Notion 风格头像](assets/avatars/)之一，名字左侧 4×2 格——每张图只传输一次，靠
-Unicode 占位符格子定位。不支持的终端保留首字母色块；两种皮肤行数一致，只有装订线
+[动漫风格头像](assets/avatars/)之一，名字左侧 4×2 格——每张图只传输一次，靠
+Unicode 占位符格子定位。team 成员的头像钉在 `.bingo/team.json`（`"avatar": "sora"`），
+一支队伍就有固定班底；其余实例按名字取脸。不支持的终端保留首字母色块；两种皮肤行数一致，只有装订线
 不同。
 
 ## 技能（Skills）

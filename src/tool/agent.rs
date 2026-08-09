@@ -29,11 +29,15 @@ const SUBAGENT_NOTE: &str = "\
   you afterwards. Finish what needs finishing within this turn, or state what is still
   pending — the hub can resume you with a follow-up message.";
 
-/// Appended when agent channels are on. Delivery wakes every member, so a room of polite agents
-/// deadlocks into acknowledging each other's acknowledgements — one greeting turns into a dozen
-/// "got it" messages, each of which wakes everyone again. The Post tool's description already
-/// says silence is free; that was not enough, because the model's default social reflex is to
-/// answer whatever just arrived. This states the failure mode by name.
+/// Appended when agent channels are on. Two failure modes pull in opposite directions and the
+/// note has to hold both: a room of polite agents acknowledging each other's acknowledgements
+/// (D45), and a room so afraid of chatter that nobody answers the human at all (D48).
+///
+/// The rule that separates them is *who spoke*, not how the message reads — a person answers
+/// their manager and ignores their colleagues' hellos — plus the mechanical fact the model
+/// cannot infer: a turn woken by a channel message reports back to the hub, so a reply written
+/// as turn text never reaches the room. Without that sentence the model believes it has already
+/// answered and stays silent on purpose.
 ///
 /// It lives in the system prompt rather than in the wake-up payload deliberately: compaction
 /// rewrites the message history but never touches `Session::system`, so the rule is still there
@@ -41,22 +45,30 @@ const SUBAGENT_NOTE: &str = "\
 const CHANNEL_NOTE: &str = "\
 # Speaking in a channel
 
-Every channel message is delivered to every member, and delivery wakes them. So silence is the
-default, not a failure — post only when your message changes what someone else will do.
+**Only `Post` puts words in the room.** The text you write in a turn woken by a channel message
+goes back to the hub as your result — nobody in the channel sees it. Writing \"standing by, no
+channel reply needed\" as your turn text is not an answer to the room; it is a private note to
+your manager, and from the room it is indistinguishable from ignoring the message. If you decide
+to answer, call Post.
 
-Do NOT post to greet, introduce yourself, acknowledge, agree, say you understood, or restate the
-plan. Each of those wakes every other member, who then feel the same pull to answer, and the room
-fills with courtesies while the work stands still. A useful test: if your draft would be just as
-true before you read the message you are answering, don't send it.
+**Who spoke decides whether you owe a reply** — not how the message is worded.
 
-Post when you have something only you can supply — a decision someone is blocked on, a
-disagreement, a result, a question that must be answered before you can continue. Name the person
-you mean.
+- **`user` or `main` addressed the room**: answer once, briefly, with Post. When the person
+  running the room greets the team, asks who is around, or puts a question to everyone, a human
+  answers — silence reads as absence, not as discipline. One short line, in your own voice, then
+  stop.
+- **Another member spoke**: you owe them nothing. Post only if they named you, you can unblock
+  them, you disagree, or you are holding the result they are waiting on.
+- **Never answer an answer.** A room does not flood because members reply to the human; it floods
+  because they reply to each other's replies. Your line is the end of that thread — do not
+  acknowledge, thank, agree with, or restate what a colleague just said.
 
-When you have nothing to add, just stop calling tools. Silence costs nothing and wakes nobody.
+Beyond that first line, post only what changes what someone else will do: a decision someone is
+blocked on, a disagreement, a result, a question you cannot continue without. Name the person you
+mean. When you have nothing to add, stop calling tools — silence costs nothing and wakes nobody.
 
-This is about the room, not about you. A direct instruction from the hub is still owed an answer —
-finish it and say what came of it. It is broadcast chatter that costs everyone.";
+A direct instruction sent to you alone is a different thing: it is not channel traffic, and your
+turn text is exactly where the hub is listening for the answer.";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -2051,9 +2063,19 @@ mod tests {
         let sub = build_sub_session(&on, None, None, None, None, "member")
             .unwrap_or_else(|e| panic!("派生: {e}"));
         assert!(sub.system.iter().any(|b| b.text == CHANNEL_NOTE));
+        // Both failure modes have to survive edits to this text: the storm it was written
+        // for, and the over-correction where nobody answers the human at all.
         assert!(
-            CHANNEL_NOTE.contains("wakes them") && CHANNEL_NOTE.contains("acknowledge"),
-            "规则要点名那个失败模式，别只说「保持简洁」"
+            CHANNEL_NOTE.contains("Never answer an answer"),
+            "要点名回复回复这个风暴来源，别只说「保持简洁」"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("Only `Post` puts words in the room"),
+            "必须写明回合正文到不了频道——否则成员以为自己已经答过了"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("`user` or `main` addressed the room"),
+            "必须说清「人问话要答」，否则沉默规则会过冲"
         );
     }
 

@@ -30,14 +30,14 @@ use crate::channels::USER_NAME;
 use crate::query::Session;
 use crate::tui::chat::{Chat, EntityOpen, Row};
 use crate::tui::slack::{
-    self, ChannelItem, Conv, DmItem, Focus, Palette, Post, Snapshot, Switcher, Workspace,
+    self, Avatars, ChannelItem, Conv, DmItem, Focus, Palette, Post, Snapshot, Switcher, Workspace,
 };
 use crate::tui::{avatar, gfx, view};
 
 /// Sample everything the view needs from the session. Instances seen for the
 /// first time are seeded as read: a workspace you have never opened shouldn't
 /// greet you with an unread badge for every turn that already happened.
-fn snapshot(session: &Arc<Session>, ws: &mut Workspace) -> Snapshot {
+fn snapshot(session: &Arc<Session>, ws: &mut Workspace, workspace: &str) -> Snapshot {
     let channels: Vec<ChannelItem> = session
         .channels
         .list()
@@ -68,22 +68,35 @@ fn snapshot(session: &Arc<Session>, ws: &mut Workspace) -> Snapshot {
         });
     }
     Snapshot {
-        workspace: workspace_name(session),
+        workspace: workspace.to_string(),
         channels,
         dms,
     }
 }
 
-/// Workspace name: the team's, falling back to the project directory.
-fn workspace_name(session: &Arc<Session>) -> String {
+/// The blueprint's contribution to the view: what the workspace is called, and
+/// which portrait each crew member wears. Read once when the view opens rather
+/// than per frame — a file read at 30fps to answer a question whose answer is a
+/// committed file is waste, and the crew does not change while you are looking at
+/// it.
+fn blueprint(session: &Arc<Session>, images: bool) -> (String, Avatars) {
     let cwd = std::env::current_dir().unwrap_or_default();
-    if let Ok(Some(def)) = crate::team::load_team_file(&cwd) {
-        return def.name;
-    }
+    let def = crate::team::load_team_file(&cwd).ok().flatten();
+    let name = def
+        .as_ref()
+        .map(|d| d.name.clone())
+        .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "bingo".to_string());
+    let pinned = def
+        .iter()
+        .flat_map(|d| &d.members)
+        .filter_map(|m| {
+            let id = m.avatar.as_deref()?;
+            Some((m.name.clone(), avatar::index_of_id(id)?))
+        })
+        .collect();
     let _ = session;
-    cwd.file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "bingo".to_string())
+    (name, Avatars { images, pinned })
 }
 
 /// Read cursor unit for a DM: completed history messages.
@@ -192,13 +205,14 @@ async fn modal_loop(
     // placed by the cells the message list paints.
     let image_cap = chat.image_cap;
     let mut transmits = gfx::Transmits::default();
+    let (workspace, avatars) = blueprint(&chat.session, image_cap.is_some());
 
     loop {
         let session = chat.session.clone();
         tokio::select! {
             event = events.next() => match event {
                 Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
-                    let snap = snapshot(&session, &mut ws);
+                    let snap = snapshot(&session, &mut ws, &workspace);
                     if !handle_key(&session, &mut ws, &snap, key) {
                         break;
                     }
@@ -226,7 +240,7 @@ async fn modal_loop(
 
         let theme = chat.theme.clone();
         let pal = Palette::new(&theme);
-        let snap = snapshot(&session, &mut ws);
+        let snap = snapshot(&session, &mut ws, &workspace);
         ws.sync(&snap);
         // Rendering counts as read, for channels the same way it always has
         // (serial validation goes by what's on screen) and for instances so the
@@ -246,8 +260,8 @@ async fn modal_loop(
             && let Some(conv) = ws.open.clone()
         {
             let (posts, _, _) = conversation(&session, &ws, &conv);
-            let senders: Vec<String> = posts.iter().map(|p| p.from.clone()).collect();
-            let bytes = avatar::transmits(&senders, &cap, &mut transmits);
+            let faces: Vec<usize> = posts.iter().map(|p| avatars.index_of(&p.from)).collect();
+            let bytes = avatar::transmits(&faces, &cap, &mut transmits);
             let _ = crate::tui::term::write_transmits(terminal.backend_mut(), &bytes);
         }
 
@@ -269,7 +283,7 @@ async fn modal_loop(
                 .saturating_sub(composer.len())
                 .max(1);
             let (posts, _, divider) = conversation(&session, &ws, &conv);
-            let content = slack::message_rows(&posts, divider, &pal, width, image_cap.is_some());
+            let content = slack::message_rows(&posts, divider, &pal, width, &avatars);
 
             // Bottom-anchored + scroll offset (clamped so it can't run past the top).
             let max_up = content.len().saturating_sub(viewport);

@@ -49,13 +49,18 @@ pub enum TeamAction {
 #[schemars(deny_unknown_fields)]
 pub struct MemberInput {
     #[schemars(
-        description = "Instance name in the room — how you address this member with SendMessage; unique within the team"
+        description = "Instance name in the room — how you address this member with SendMessage, and the name shown on its messages, so give it a person's name rather than a role code or a number (\"林夏\", \"Mira\", not \"dev\" or \"member-2\"); unique within the team"
     )]
     name: String,
     #[schemars(
         description = "Agent definition the member plays: a name from status's \"available agent definitions\" (.bingo/agents/<name>.md or ~/.config/bingo/agents/<name>.md)"
     )]
     agent: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Portrait this member wears, pinned so it survives across sessions: one of the ids status lists. Give every member a different one; omitted means a portrait picked from the name, which can collide"
+    )]
+    avatar: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -209,6 +214,15 @@ fn source_badge(source: AgentDefSource) -> &'static str {
     }
 }
 
+/// The portraits a blueprint may pin, so the model drafts with real ids rather
+/// than inventing one.
+fn available_portraits() -> String {
+    format!(
+        "available portraits: {} (pin one per member so the crew has distinct faces)",
+        crate::tui::avatar::ids().join(", ")
+    )
+}
+
 fn available_defs(defs: &[AgentDef]) -> String {
     if defs.is_empty() {
         return "available agent definitions: none — write .bingo/agents/<name>.md first (frontmatter description + the persona as the body)".to_string();
@@ -231,9 +245,11 @@ impl TeamTool {
     fn status(&self, cwd: &Path, defs: &[AgentDef]) -> Result<String, ToolError> {
         let Some(def) = self.load(cwd)? else {
             return Ok(format!(
-                "no .bingo/team.json in this project — no crew is pinned here.\n{}\n\
-                 Draft one with action=save (the user confirms it before anything is written).",
-                available_defs(defs)
+                "no .bingo/team.json in this project — no crew is pinned here.\n{}\n{}\n\
+                 Draft one with action=save (the user confirms it before anything is written); \
+                 give each member a person's name, not a role code.",
+                available_defs(defs),
+                available_portraits()
             ));
         };
         let view = crate::team::view(&def, defs);
@@ -251,14 +267,23 @@ impl TeamTool {
             crate::team::channel_mode(&def).label(),
             def.members.len()
         )];
+        let pinned: std::collections::HashMap<&str, &str> = def
+            .members
+            .iter()
+            .filter_map(|m| Some((m.name.as_str(), m.avatar.as_deref()?)))
+            .collect();
         for m in &view.members {
             let state = instances
                 .iter()
                 .find(|a| a.name == m.name)
                 .map(|a| a.state.label())
                 .unwrap_or("offline");
+            let face = pinned
+                .get(m.name.as_str())
+                .map(|a| format!(" · portrait {a}"))
+                .unwrap_or_default();
             out.push(format!(
-                "- {} -> agent \"{}\"{} · {state} · {}",
+                "- {} -> agent \"{}\"{} · {state}{face} · {}",
                 m.name,
                 m.agent,
                 source_badge(m.source),
@@ -266,6 +291,7 @@ impl TeamTool {
             ));
         }
         out.push(available_defs(defs));
+        out.push(available_portraits());
         Ok(out.join("\n"))
     }
 
@@ -387,6 +413,12 @@ impl TeamTool {
                 .map(|m| TeamMember {
                     name: m.name.trim().to_string(),
                     agent: m.agent.trim().to_string(),
+                    avatar: m
+                        .avatar
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|a| !a.is_empty())
+                        .map(str::to_string),
                 })
                 .collect(),
         };
@@ -696,6 +728,7 @@ mod tests {
                     .map(|n| MemberInput {
                         name: n.to_string(),
                         agent: n.to_string(),
+                        avatar: None,
                     })
                     .collect(),
             ),
@@ -718,10 +751,12 @@ mod tests {
                     TeamMember {
                         name: "qa".into(),
                         agent: "qa".into(),
+                        avatar: None,
                     },
                     TeamMember {
                         name: "ui".into(),
                         agent: "ui".into(),
+                        avatar: None,
                     },
                 ],
             },
@@ -748,6 +783,7 @@ mod tests {
                 members: vec![TeamMember {
                     name: "qa".into(),
                     agent: "qa".into(),
+                    avatar: None,
                 }],
             },
         )

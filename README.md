@@ -299,9 +299,11 @@ room reuses the channel machinery, and control stays on the hub-and-spoke
 surface.
 
 - **Definition**: `.bingo/team.json` (camelCase, committed to the repo):
-  `name` + `channel {mode, messageLimit}` + `members [{name, agent}]` — each
-  member references an AgentDef, so a persona lives in one place
-  (`.bingo/agents/<name>.md`) and can join multiple teams.
+  `name` + `channel {mode, messageLimit}` + `members [{name, agent, avatar?}]` —
+  each member references an AgentDef, so a persona lives in one place
+  (`.bingo/agents/<name>.md`) and can join multiple teams. `name` is the name
+  shown on the member's messages (give it a person's name, not a role code) and
+  `avatar` pins one of the bundled portraits, so a crew is a fixed cast.
 - **Startup pull-up**: with `settings.team.autoStart` (default true) the team
   is pulled up at startup — spawn members and create the room, but do **not**
   wake them (members sit idle at zero token cost until `/team assign` or a
@@ -353,9 +355,11 @@ message list and the composer, Esc returns.
 
 **Avatars**: on terminals that can place kitty images — the same capability
 behind inline image rendering (Ghostty/kitty, and tmux with passthrough) — each
-sender wears one of eight bundled [Notion-style portraits](assets/avatars/), 4×2
+sender wears one of eight bundled [anime-style portraits](assets/avatars/), 4×2
 cells beside the name, transmitted once per portrait and placed by Unicode
-placeholder cells. Terminals without that capability keep the sender's initial
+placeholder cells. A team member's portrait is pinned in `.bingo/team.json`
+(`"avatar": "sora"`) so a crew keeps a fixed cast; everyone else gets a face
+derived from their name. Terminals without that capability keep the sender's initial
 on a colour; the row count is identical either way, so only the gutter changes.
 
 ## Skills

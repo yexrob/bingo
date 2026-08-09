@@ -26,19 +26,35 @@ pub const COLS: usize = 4;
 pub const ROWS: usize = 2;
 
 /// The bundled portraits (`assets/avatars`, CC0 — see that directory's README).
-const PORTRAITS: [&[u8]; 8] = [
-    include_bytes!("../../assets/avatars/00.png"),
-    include_bytes!("../../assets/avatars/01.png"),
-    include_bytes!("../../assets/avatars/02.png"),
-    include_bytes!("../../assets/avatars/03.png"),
-    include_bytes!("../../assets/avatars/04.png"),
-    include_bytes!("../../assets/avatars/05.png"),
-    include_bytes!("../../assets/avatars/06.png"),
-    include_bytes!("../../assets/avatars/07.png"),
+/// The name is the id `.bingo/team.json` pins with, so a crew member keeps one face
+/// across sessions instead of whatever a hash of its instance name lands on.
+const PORTRAITS: [(&str, &[u8]); 8] = [
+    ("emi", include_bytes!("../../assets/avatars/emi.png")),
+    ("kenji", include_bytes!("../../assets/avatars/kenji.png")),
+    ("sora", include_bytes!("../../assets/avatars/sora.png")),
+    ("mika", include_bytes!("../../assets/avatars/mika.png")),
+    ("taro", include_bytes!("../../assets/avatars/taro.png")),
+    ("jin", include_bytes!("../../assets/avatars/jin.png")),
+    ("kai", include_bytes!("../../assets/avatars/kai.png")),
+    ("rio", include_bytes!("../../assets/avatars/rio.png")),
 ];
 
-/// Which portrait a sender wears. Same hash the colour chip uses, so a member keeps
-/// one identity whether or not the terminal can draw pictures.
+/// Every portrait id, in order — the vocabulary a blueprint may pin.
+pub fn ids() -> [&'static str; COUNT] {
+    PORTRAITS.map(|(id, _)| id)
+}
+
+/// The number of distinct portraits, so a roster can hand out different ones.
+pub const COUNT: usize = PORTRAITS.len();
+
+/// A pinned id → its portrait. Unknown ids fall through to the hash, so a typo in
+/// team.json costs a face, not a crash.
+pub fn index_of_id(id: &str) -> Option<usize> {
+    PORTRAITS.iter().position(|(name, _)| *name == id)
+}
+
+/// Which portrait a sender wears when nothing pinned one. Same hash the colour chip
+/// uses, so a member keeps one identity whether or not the terminal draws pictures.
 pub fn index_of(name: &str) -> usize {
     let hash = name
         .bytes()
@@ -46,33 +62,34 @@ pub fn index_of(name: &str) -> usize {
     hash as usize % PORTRAITS.len()
 }
 
-/// The image key a sender's portrait is transmitted and addressed under. Keyed by
-/// portrait rather than by sender: two members sharing a face share one transmit.
-fn key_of(name: &str) -> String {
-    format!("bingo://avatar/{}", index_of(name))
+/// The image key a portrait is transmitted and addressed under. Keyed by portrait
+/// rather than by sender: two members sharing a face share one transmit.
+fn key_of(index: usize) -> String {
+    format!("bingo://avatar/{}", index % PORTRAITS.len())
 }
 
-/// One row of a sender's avatar: the placeholder cells plus the colour carrying the
-/// image id. `None` past the avatar's own height — the caller pads with spaces.
-pub fn placeholder(name: &str, row: usize) -> Option<(String, Color)> {
+/// One row of a portrait: the placeholder cells plus the colour carrying the image
+/// id. `None` past the avatar's own height — the caller pads with spaces.
+pub fn placeholder(index: usize, row: usize) -> Option<(String, Color)> {
     if row >= ROWS {
         return None;
     }
     let text = gfx::placeholder_row_text(row, COLS)?;
-    let (r, g, b) = gfx::image_id_fg(gfx::image_id_for(&key_of(name)));
+    let (r, g, b) = gfx::image_id_fg(gfx::image_id_for(&key_of(index)));
     Some((text, Color::Rgb(r, g, b)))
 }
 
-/// Transmit payload for every sender in `names` whose portrait the terminal does not
-/// hold yet. Empty when there is nothing new to send, so the caller can write it
+/// Transmit payload for every portrait in `indices` the terminal does not hold yet.
+/// Empty when there is nothing new to send, so the caller can write it
 /// unconditionally.
-pub fn transmits(names: &[String], cap: &ImageCap, sent: &mut Transmits) -> Vec<u8> {
+pub fn transmits(indices: &[usize], cap: &ImageCap, sent: &mut Transmits) -> Vec<u8> {
     let mut out = Vec::new();
-    for name in names {
-        let id = gfx::image_id_for(&key_of(name));
+    for index in indices {
+        let index = index % PORTRAITS.len();
+        let id = gfx::image_id_for(&key_of(index));
         if sent.needs(id) {
             out.extend_from_slice(&gfx::transmit_bytes(
-                PORTRAITS[index_of(name)],
+                PORTRAITS[index].1,
                 COLS,
                 ROWS,
                 id,
@@ -94,17 +111,17 @@ mod tests {
     #[test]
     fn a_placeholder_row_measures_exactly_the_chip() {
         for row in 0..ROWS {
-            let (text, _) = placeholder("scout", row).unwrap_or_else(|| panic!("row {row}"));
+            let (text, _) = placeholder(0, row).unwrap_or_else(|| panic!("row {row}"));
             assert_eq!(text_width(&text), COLS, "row {row}: {text:?}");
         }
-        assert!(placeholder("scout", ROWS).is_none(), "只有两行");
+        assert!(placeholder(0, ROWS).is_none(), "只有两行");
     }
 
-    /// A sender keeps one face, and the two rows address one image.
+    /// A portrait's two rows address one image, and a name maps to one portrait.
     #[test]
     fn rows_share_an_id_and_names_are_stable() {
-        let (_, top) = placeholder("scout", 0).unwrap_or_else(|| panic!("row 0"));
-        let (_, bottom) = placeholder("scout", 1).unwrap_or_else(|| panic!("row 1"));
+        let (_, top) = placeholder(3, 0).unwrap_or_else(|| panic!("row 0"));
+        let (_, bottom) = placeholder(3, 1).unwrap_or_else(|| panic!("row 1"));
         assert_eq!(top, bottom, "同一张图");
         assert_eq!(index_of("scout"), index_of("scout"));
         // Different names generally differ; the set is only eight, so this asserts
@@ -117,28 +134,33 @@ mod tests {
         assert!(spread.len() >= 4, "八个名字至少落到四张脸: {spread:?}");
     }
 
+    /// Pinning is what makes a crew member's face survive a rename or a reshuffle.
+    #[test]
+    fn ids_pin_a_portrait_and_unknown_ones_fall_through() {
+        assert_eq!(ids().len(), COUNT);
+        for (i, id) in ids().into_iter().enumerate() {
+            assert_eq!(index_of_id(id), Some(i), "{id}");
+        }
+        assert_eq!(index_of_id("nobody"), None, "未知 id 不认，交给哈希兜底");
+    }
+
     /// Transmit once per portrait, not once per frame or once per sender.
     #[test]
     fn transmits_are_sent_once_per_portrait() {
         let cap = ImageCap::default_cells();
         let mut sent = Transmits::default();
-        let names = vec!["scout".to_string(), "qa".to_string()];
-        let first = transmits(&names, &cap, &mut sent);
+        let first = transmits(&[0, 1], &cap, &mut sent);
         assert!(!first.is_empty(), "首帧发送");
         assert!(first.starts_with(b"\x1b_G"), "kitty 转义开头");
         assert!(
-            transmits(&names, &cap, &mut sent).is_empty(),
+            transmits(&[0, 1], &cap, &mut sent).is_empty(),
             "第二帧不重发"
         );
-        // A sender wearing an already-sent face costs nothing either.
-        let twin = (0..PORTRAITS.len() * 4)
-            .map(|i| format!("m{i}"))
-            .find(|n| index_of(n) == index_of("scout"));
-        if let Some(twin) = twin {
-            assert!(
-                transmits(&[twin], &cap, &mut sent).is_empty(),
-                "同脸共用一次传输"
-            );
-        }
+        // Two senders wearing one face cost one transmit, not two.
+        assert!(
+            transmits(&[0, 0, 1], &cap, &mut sent).is_empty(),
+            "同脸共用一次传输"
+        );
+        assert!(!transmits(&[2], &cap, &mut sent).is_empty(), "新面孔照发");
     }
 }

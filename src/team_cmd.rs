@@ -324,11 +324,16 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
             mode: Some("serial".to_string()),
             message_limit: None,
         }),
+        // Portraits handed out in roster order rather than by hashing the name:
+        // a scaffolded crew should come out with distinct faces, and a hash of
+        // four role names collides more often than not.
         members: defs
             .iter()
-            .map(|d| crate::team::TeamMember {
+            .zip(crate::tui::avatar::ids().into_iter().cycle())
+            .map(|(d, avatar)| crate::team::TeamMember {
                 name: d.name.clone(),
                 agent: d.name.clone(),
+                avatar: Some(avatar.to_string()),
             })
             .collect(),
     };

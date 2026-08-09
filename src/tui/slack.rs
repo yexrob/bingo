@@ -125,14 +125,6 @@ impl Palette {
             avatars: self.avatars.map(f),
         }
     }
-
-    /// Stable per-sender avatar colour (Slack assigns one per member).
-    fn avatar_of(&self, name: &str) -> Color {
-        let hash = name
-            .bytes()
-            .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-        self.avatars[hash as usize % self.avatars.len()]
-    }
 }
 
 /// Which conversation is open.
@@ -215,6 +207,11 @@ pub enum PostKind {
     Queued,
     /// The streaming tail of a running turn (Slack's "…is typing").
     Typing,
+    /// Wake-up scaffolding the runtime wrote into the instance's history — a
+    /// relayed channel message, a follow-up chase, the task reminder. Nobody
+    /// typed it, so it gets one dim line instead of a quoted block with a name
+    /// and an avatar over it.
+    Note,
 }
 
 /// One rendered message.
@@ -245,6 +242,76 @@ pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
 /// Subagent history → posts. User turns are yours, assistant text is theirs, and
 /// tool calls become attachments; tool results and thinking stay out (the main
 /// transcript is where that detail lives).
+/// One line of runtime scaffolding → how it reads collapsed, or `None` for text
+/// a person actually wrote. The shapes are the ones `absorb_inbox` and the task
+/// reminder compose, so this stays in step with them by construction: anything
+/// the runtime wraps in its own brackets is not a message from the user.
+fn scaffold_note(line: &str) -> Option<String> {
+    let line = line.trim_end();
+    if let Some(rest) = line.strip_prefix("[#")
+        && let Some((head, body)) = rest.split_once("] ")
+        && let Some((channel, _)) = head.split_once(' ')
+    {
+        return Some(format!("#{channel} · {body}"));
+    }
+    if line.starts_with("[follow-up ") {
+        return Some("追问 · 等待回复".to_string());
+    }
+    None
+}
+
+/// A user-role message → posts. Runtime scaffolding collapses to [`PostKind::Note`]
+/// lines; whatever a person actually wrote stays a message.
+fn user_posts(text: &str, me: &str) -> Vec<Post> {
+    let mut out = Vec::new();
+    let mut plain: Vec<&str> = Vec::new();
+    let flush = |plain: &mut Vec<&str>, out: &mut Vec<Post>| {
+        let joined = plain.join("\n");
+        plain.clear();
+        if joined.trim().is_empty() {
+            return;
+        }
+        out.push(Post {
+            from: me.to_string(),
+            you: true,
+            at: 0,
+            text: joined,
+            kind: PostKind::Said,
+        });
+    };
+    for line in text.lines() {
+        // The task reminder is a block, not a line: its marker heads a paragraph
+        // of instructions and the current task list, and everything after it in
+        // this message belongs to it.
+        if line.starts_with(crate::query::TASK_REMINDER_MARKER) {
+            flush(&mut plain, &mut out);
+            out.push(Post {
+                from: me.to_string(),
+                you: true,
+                at: 0,
+                text: "系统提醒 · 任务工具".to_string(),
+                kind: PostKind::Note,
+            });
+            return out;
+        }
+        match scaffold_note(line) {
+            Some(note) => {
+                flush(&mut plain, &mut out);
+                out.push(Post {
+                    from: me.to_string(),
+                    you: true,
+                    at: 0,
+                    text: note,
+                    kind: PostKind::Note,
+                });
+            }
+            None => plain.push(line),
+        }
+    }
+    flush(&mut plain, &mut out);
+    out
+}
+
 pub fn dm_posts(
     history: &[Message],
     live: Option<&str>,
@@ -256,13 +323,7 @@ pub fn dm_posts(
     for msg in history {
         for block in &msg.content {
             match (msg.role, block) {
-                (Role::User, ContentBlock::Text { text }) => out.push(Post {
-                    from: me.to_string(),
-                    you: true,
-                    at: 0,
-                    text: text.clone(),
-                    kind: PostKind::Said,
-                }),
+                (Role::User, ContentBlock::Text { text }) => out.extend(user_posts(text, me)),
                 (Role::Assistant, ContentBlock::Text { text }) => out.push(Post {
                     from: who.to_string(),
                     you: false,
@@ -625,14 +686,39 @@ fn unread_divider(pal: &Palette, width: usize) -> Row {
     row(line)
 }
 
+/// How a sender's face is chosen: whether the terminal can place a portrait at
+/// all, plus the ones the blueprint pinned. A crew is a standing cast, so its
+/// faces come from `.bingo/team.json` rather than from hashing an instance name —
+/// which collides often across four role names, and changes the moment a member
+/// is renamed. `default()` is the text skin: no portraits, no pins.
+#[derive(Debug, Clone, Default)]
+pub struct Avatars {
+    /// The terminal can place kitty images.
+    pub images: bool,
+    /// Instance name → portrait index, from the team blueprint.
+    pub pinned: std::collections::HashMap<String, usize>,
+}
+
+impl Avatars {
+    /// The portrait a sender wears — pinned if the blueprint says so, otherwise
+    /// derived from the name so a passing subagent still gets a stable face.
+    pub fn index_of(&self, sender: &str) -> usize {
+        self.pinned
+            .get(sender)
+            .copied()
+            .unwrap_or_else(|| avatar::index_of(sender))
+    }
+}
+
 /// Message gutter: wide enough for whichever avatar the terminal can draw.
 fn gutter(images: bool) -> usize {
     if images { avatar::COLS + 1 } else { GUTTER }
 }
 
 /// Avatar chip for terminals that cannot place images: the sender's initial on a
-/// per-sender colour, occupying the same gutter the portrait would.
-fn chip(name: &str, pal: &Palette) -> Line {
+/// colour, occupying the same gutter the portrait would. The colour is keyed to
+/// the same portrait index, so a pinned member keeps one identity in both skins.
+fn chip(name: &str, index: usize, pal: &Palette) -> Line {
     let initial = name
         .chars()
         .next()
@@ -646,7 +732,7 @@ fn chip(name: &str, pal: &Palette) -> Line {
     Line::styled(
         format!(" {cell}"),
         SegStyle::fg(pal.badge_fg)
-            .with_bg(pal.avatar_of(name))
+            .with_bg(pal.avatars[index % pal.avatars.len()])
             .bold(),
     )
 }
@@ -655,31 +741,36 @@ fn chip(name: &str, pal: &Palette) -> Line {
 /// terminal can place images, blank indentation otherwise. Row 0 rides the name
 /// line, row 1 the first body line — which is why the portrait costs no rows the
 /// layout was not already spending.
-fn gutter_line(name: &str, row: usize, images: bool, pal: &Palette) -> Line {
-    if images {
-        if let Some((cells, id)) = avatar::placeholder(name, row) {
+fn gutter_line(name: &str, row: usize, avatars: &Avatars, pal: &Palette) -> Line {
+    let index = avatars.index_of(name);
+    if avatars.images {
+        if let Some((cells, id)) = avatar::placeholder(index, row) {
             let mut line = Line::styled(cells, SegStyle::fg(id));
             line.push_styled(" ", SegStyle::fg(pal.main_text));
             return line;
         }
     } else if row == 0 {
-        let mut line = chip(name, pal);
+        let mut line = chip(name, index, pal);
         line.push_styled(" ", SegStyle::fg(pal.main_text));
         return line;
     }
-    Line::styled(" ".repeat(gutter(images)), SegStyle::fg(pal.main_dim))
+    Line::styled(
+        " ".repeat(gutter(avatars.images)),
+        SegStyle::fg(pal.main_dim),
+    )
 }
 
 /// The message list. Consecutive posts from one sender inside [`GROUP_WINDOW`]
 /// share a name row; the day changes and the first unread message get dividers.
-/// `images` says whether the terminal can place the portrait avatars; the row
-/// count is the same either way, so only the gutter changes.
+/// `avatars` says whether the terminal can place portraits and which ones the
+/// blueprint pinned; the row count is the same either way, so only the gutter
+/// changes.
 pub fn message_rows(
     posts: &[Post],
     unread_from: usize,
     pal: &Palette,
     width: usize,
-    images: bool,
+    avatars: &Avatars,
 ) -> Vec<Row> {
     if posts.is_empty() {
         return vec![
@@ -690,7 +781,7 @@ pub fn message_rows(
             )),
         ];
     }
-    let gutter_w = gutter(images);
+    let gutter_w = gutter(avatars.images);
     let body_w = width.saturating_sub(gutter_w + 1).max(8);
     let mut rows: Vec<Row> = Vec::new();
     let mut prev: Option<(&str, u64)> = None;
@@ -709,6 +800,18 @@ pub fn message_rows(
             rows.push(unread_divider(pal, width));
             prev = None;
         }
+        // Scaffolding belongs to nobody: one dim line, no name row, no avatar,
+        // and it does not break the grouping of the messages around it.
+        if post.kind == PostKind::Note {
+            let mut line = Line::styled(" ".repeat(gutter_w), SegStyle::fg(pal.main_dim));
+            line.push_styled("▏", SegStyle::fg(pal.divider));
+            line.push_styled(
+                format!(" {}", crate::tui::chat::one_line(&post.text, body_w)),
+                SegStyle::fg(pal.main_dim).italic(),
+            );
+            rows.push(row(line));
+            continue;
+        }
         let grouped = prev.is_some_and(|(from, at)| {
             from == post.from
                 && post.kind != PostKind::Typing
@@ -716,7 +819,7 @@ pub fn message_rows(
         });
         if !grouped {
             rows.push(blank());
-            let mut head = gutter_line(&post.from, 0, images, pal);
+            let mut head = gutter_line(&post.from, 0, avatars, pal);
             let shown = if post.you {
                 "你".to_string()
             } else {
@@ -734,7 +837,7 @@ pub fn message_rows(
         let mut lead = 0usize;
         let indent = |lead: &mut usize| -> Line {
             let line = if *lead == 0 && !grouped {
-                gutter_line(&post.from, 1, images, pal)
+                gutter_line(&post.from, 1, avatars, pal)
             } else {
                 Line::styled(" ".repeat(gutter_w), SegStyle::fg(pal.main_dim))
             };
@@ -785,7 +888,7 @@ pub fn message_rows(
         }
         // A post with no body at all still owes the portrait its second row.
         if lead == 0 && !grouped {
-            rows.push(row(gutter_line(&post.from, 1, images, pal)));
+            rows.push(row(gutter_line(&post.from, 1, avatars, pal)));
         }
         prev = Some((&post.from, post.at));
     }
@@ -1081,7 +1184,7 @@ mod tests {
                 kind: PostKind::Said,
             },
         ];
-        let rows = message_rows(&posts, 2, &pal(), 60, false);
+        let rows = message_rows(&posts, 2, &pal(), 60, &Avatars::default());
         let t = texts(&rows);
         // The second scout message is grouped: one name row, not two.
         assert_eq!(t.iter().filter(|l| l.contains("scout")).count(), 1, "{t:?}");
@@ -1093,9 +1196,96 @@ mod tests {
         assert!(t.iter().any(|l| l.starts_with("    找到回归了")), "{t:?}");
         // Empty log gets the invitation, not a blank pane.
         assert!(
-            texts(&message_rows(&[], 0, &pal(), 60, false))
+            texts(&message_rows(&[], 0, &pal(), 60, &Avatars::default()))
                 .iter()
                 .any(|l| l.contains("还没有消息"))
+        );
+    }
+
+    /// The runtime writes its own scaffolding into an instance's history — the
+    /// relay of a channel message, the task reminder. Quoting those in full put a
+    /// wall of English system text under a "你" name row, as if the user had typed
+    /// it. They collapse to one dim line each, and what a person actually wrote
+    /// stays a message.
+    #[test]
+    fn wake_up_scaffolding_collapses_to_one_line() {
+        let relay = format!(
+            "[#dev-team 第1条] main: 大家好，用户来和团队打个招呼。\n{}\nThe task tools haven't been used recently.",
+            crate::query::TASK_REMINDER_MARKER
+        );
+        let history = vec![
+            crate::api::types::Message::user_text(relay),
+            crate::api::types::Message::user_text("单独交代你一件事\n第二行"),
+        ];
+        let posts = dm_posts(&history, None, &[], "devex", "user");
+        let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![PostKind::Note, PostKind::Note, PostKind::Said],
+            "{posts:?}"
+        );
+        assert_eq!(
+            posts[0].text,
+            "#dev-team · main: 大家好，用户来和团队打个招呼。"
+        );
+        assert_eq!(posts[1].text, "系统提醒 · 任务工具");
+        assert_eq!(
+            posts[2].text, "单独交代你一件事\n第二行",
+            "真人写的原样保留"
+        );
+
+        // A note owns no name row and no avatar, and does not split the grouping
+        // of the messages around it.
+        let rows = message_rows(&posts, usize::MAX, &pal(), 60, &Avatars::default());
+        let t = texts(&rows);
+        // The avatar chip is the only segment carrying a background, so counting
+        // them counts name rows: the two notes get none, the real message gets one.
+        let name_rows = rows
+            .iter()
+            .filter(|r| r.line.segs.iter().any(|s| s.style.bg.is_some()))
+            .count();
+        assert_eq!(name_rows, 1, "系统行不冒充用户、不占头像: {t:?}");
+        assert!(t.iter().any(|l| l.contains("▏ #dev-team")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("▏ 系统提醒")), "{t:?}");
+    }
+
+    /// A crew is a standing cast, so the blueprint's pin wins over the name hash —
+    /// in both skins, so a member's identity does not change with the terminal.
+    #[test]
+    fn the_blueprint_pins_a_face() {
+        let mut pinned = std::collections::HashMap::new();
+        let wanted = crate::tui::avatar::index_of_id("sora").unwrap_or_else(|| panic!("有 sora"));
+        pinned.insert("林夏".to_string(), wanted);
+        let avatars = Avatars {
+            images: true,
+            pinned,
+        };
+        assert_eq!(avatars.index_of("林夏"), wanted, "钉住的脸");
+        assert_eq!(
+            avatars.index_of("路过的子代理"),
+            crate::tui::avatar::index_of("路过的子代理"),
+            "没钉的仍按名字取"
+        );
+
+        // The pin reaches the rendered gutter: the id colour is the pinned
+        // portrait's, not the one the name would have chosen.
+        let posts = vec![Post {
+            from: "林夏".into(),
+            you: false,
+            at: 0,
+            text: "在".into(),
+            kind: PostKind::Said,
+        }];
+        let rows = message_rows(&posts, usize::MAX, &pal(), 60, &avatars);
+        let head = rows
+            .iter()
+            .find(|r| r.line.plain_text().contains("林夏"))
+            .unwrap_or_else(|| panic!("有名字行"));
+        let (_, want_color) =
+            crate::tui::avatar::placeholder(wanted, 0).unwrap_or_else(|| panic!("有占位行"));
+        assert_eq!(
+            head.line.segs.first().map(|s| s.style.fg),
+            Some(Some(want_color))
         );
     }
 
@@ -1148,7 +1338,13 @@ mod tests {
         let conv = Conv::Channel("dev-room".into());
         let mut all: Vec<Row> = Vec::new();
         all.extend(header_rows(&snap, &conv, &pal, 60));
-        all.extend(message_rows(&posts, usize::MAX, &pal, 60, false));
+        all.extend(message_rows(
+            &posts,
+            usize::MAX,
+            &pal,
+            60,
+            &Avatars::default(),
+        ));
         all.extend(composer_rows(&ws, &conv, &pal, 60).0);
         all.extend(empty_pane_rows(&pal, 60, 8));
         assert!(all.iter().all(|r| r.bg.is_none()), "不再有整行底色");
@@ -1171,7 +1367,7 @@ mod tests {
             "浮层整行擦到终端底色"
         );
         // The one surviving background is the avatar chip, and only on its cells.
-        let chip_cells: Vec<_> = message_rows(&posts, usize::MAX, &pal, 60, false)
+        let chip_cells: Vec<_> = message_rows(&posts, usize::MAX, &pal, 60, &Avatars::default())
             .iter()
             .flat_map(|r| r.line.segs.clone())
             .filter(|s| s.style.bg.is_some())
@@ -1192,8 +1388,17 @@ mod tests {
             text: "第一行\n第二行".into(),
             kind: PostKind::Said,
         }];
-        let plain = message_rows(&posts, usize::MAX, &pal, 60, false);
-        let imaged = message_rows(&posts, usize::MAX, &pal, 60, true);
+        let plain = message_rows(&posts, usize::MAX, &pal, 60, &Avatars::default());
+        let imaged = message_rows(
+            &posts,
+            usize::MAX,
+            &pal,
+            60,
+            &Avatars {
+                images: true,
+                pinned: Default::default(),
+            },
+        );
         assert_eq!(plain.len(), imaged.len(), "两种皮肤行数一致");
 
         let cells = |rows: &[Row]| -> Vec<String> {
@@ -1256,7 +1461,13 @@ mod tests {
                 kind: PostKind::Typing,
             },
         ];
-        let t = texts(&message_rows(&posts, usize::MAX, &pal(), 60, false));
+        let t = texts(&message_rows(
+            &posts,
+            usize::MAX,
+            &pal(),
+            60,
+            &Avatars::default(),
+        ));
         assert!(t.iter().any(|l| l.contains("▏ ⏺ Bash")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("待送达")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("正在输入")), "{t:?}");

@@ -69,11 +69,16 @@ pub struct ChannelSpec {
     pub message_limit: Option<u64>,
 }
 
-/// A single member: `name` (instance name) + `agent` (referenced AgentDef name).
+/// A single member: `name` (instance name) + `agent` (referenced AgentDef name),
+/// plus the portrait it wears. The face is part of the blueprint because a crew is
+/// a standing cast: pinned here, a member keeps one face across sessions instead of
+/// whatever a hash of its instance name happens to land on.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct TeamMember {
     pub name: String,
     pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
 }
 
 /// Team definition (blueprint). Parsing and writing share this one struct: the file
@@ -574,6 +579,7 @@ mod tests {
             members: vec![TeamMember {
                 name: "qa".into(),
                 agent: "qa".into(),
+                avatar: Some("sora".into()),
             }],
         };
         write_team_file(&dir, &def).unwrap_or_else(|e| panic!("{e}"));
@@ -606,6 +612,7 @@ mod tests {
             members: vec![TeamMember {
                 name: "a".into(),
                 agent: "ghost".into(),
+                avatar: None,
             }],
         };
         let err = validate(&def, &[]).unwrap_err().to_string();
@@ -629,6 +636,7 @@ mod tests {
             members: vec![TeamMember {
                 name: "a".into(),
                 agent: "real".into(),
+                avatar: None,
             }],
         };
         assert!(validate(&ok, &[known]).is_ok());
@@ -686,6 +694,7 @@ mod tests {
                 .map(|(n, a)| TeamMember {
                     name: n.to_string(),
                     agent: a.to_string(),
+                    avatar: None,
                 })
                 .collect(),
         }

@@ -135,7 +135,7 @@ mod preview {
         // The text chip, not the portrait: a browser screenshot cannot show a
         // kitty placement, and a preview that silently dropped the gutter would
         // be measuring a layout the terminal never draws.
-        let content = message_rows(&posts(now), 4, &pal, w, false);
+        let content = message_rows(&posts(now), 4, &pal, w, &Avatars::default());
         let start = content.len().saturating_sub(viewport);
         let mut slice: Vec<_> = content.iter().skip(start).cloned().collect();
         while slice.len() < viewport {
