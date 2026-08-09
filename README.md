@@ -326,7 +326,16 @@ surface.
 - **Cross-session memory**: member history and append-only decision records
   persist to `~/.config/bingo/teams/<project-hash>/<branch>/<team>/` — scoped
   by project path + git branch, so main and a feature worktree never share
-  memory. Restored on pull-up without waking the members.
+  memory. Each member gets `<name>.md` (the readable transcript) beside
+  `<name>.json` (the exact record).
+- **Pointed at, not preloaded**: a member spawns with an empty context and one
+  line telling it where its own transcript is, so it can read what was decided
+  before when the task depends on it. Loading the history instead charged a
+  growing, invisible toll on the member's first turn — the file is unbounded
+  and monotonic, every session appends and nothing prunes — for relevance that
+  decays fast. The hub starts each session clean too; a crew member should not
+  be the exception. `/team memory list` shows what is on disk; open a `.md` to
+  read it yourself.
 - **The `Team` tool** (main session only) gives the model the same surface:
   `status` (blueprint + each member's runtime state + the definitions available
   to draft with), `validate`, `start`, `stop`, `save` (writes the blueprint;

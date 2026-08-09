@@ -418,14 +418,25 @@ fn memory(session: &Arc<Session>, cwd: &Path, sub: &str) -> Vec<String> {
                 branch,
                 dir.display()
             )];
-            for e in entries.flatten() {
-                let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                out.push(format!(
-                    "  {} · {} B",
-                    e.file_name().to_string_lossy(),
-                    size
-                ));
+            let mut files: Vec<(String, u64)> = entries
+                .flatten()
+                .map(|e| {
+                    (
+                        e.file_name().to_string_lossy().to_string(),
+                        e.metadata().map(|m| m.len()).unwrap_or(0),
+                    )
+                })
+                .collect();
+            files.sort();
+            for (name, size) in files {
+                out.push(format!("  {name} · {size} B"));
             }
+            // Nobody should have to read the code to learn that this is not loaded.
+            out.push(
+                "  (.md is the readable transcript, .json the exact record; members are told \
+                 where these are, not given them — open one to read it yourself)"
+                    .to_string(),
+            );
             out
         }
         "gc" => {

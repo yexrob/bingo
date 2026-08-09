@@ -285,7 +285,7 @@ Example (.bingo/settings.json):
   `/team validate` checks the engine against this session's providers, so a blueprint that passes still starts) pins multiple roles to one project; started by default at launch
   (`settings.team.autoStart`; `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,
   only `/team assign` or channel messages start them; idempotency key = instance name, repeated start reuses). The `/team` command family
-  manages it; team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (full history restored across sessions +
+  manages it; team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (each member gets a readable `<name>.md` transcript beside the exact `<name>.json` record; a spawning member is *told where its transcript is* and starts with an empty context rather than having the history preloaded — that file is unbounded and monotonic, so loading it charged a growing invisible toll on the first turn for relevance that decays fast; read it when the task depends on what was already decided, not speculatively +
   append-only decision records; `/team memory list|gc` manages it).
   The model manages the same crew through the **Team tool** (`status`/`validate`/`start`/`stop`/`save`, main session only): reads are free,
   and every change is confirmed by the user in person — the prompt appears in *every* permission mode and an `allow` rule cannot
@@ -384,7 +384,7 @@ Example (.bingo/settings.json):
   `/team list` and `AgentControl list` report the engine each running instance is actually on) fixes several roles to one project; pulled up by default at startup
   (`settings.team.autoStart`, `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,
   only `/team assign` or channel messages start them; idempotency key = instance name, repeated start reuses). Managed by the `/team` command family;
-  team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (full history restored across sessions +
+  team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (each member gets a readable `<name>.md` transcript beside the exact `<name>.json` record; a spawning member is *told where its transcript is* and starts with an empty context rather than having the history preloaded — that file is unbounded and monotonic, so loading it charged a growing invisible toll on the first turn for relevance that decays fast; read it when the task depends on what was already decided, not speculatively +
   append-only decision records, managed via `/team memory list|gc`).
   The model manages the same crew through the **Team tool** (`status`/`validate`/`start`/`stop`/`save`, main session only): reads are free,
   and every change is confirmed by the user in person — the prompt appears in *every* permission mode and an `allow` rule cannot

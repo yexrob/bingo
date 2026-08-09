@@ -451,13 +451,6 @@ impl AgentRegistry {
         self.sync_share(name);
     }
 
-    /// Inject an instance's initial/restored history (D31 team memory restore: no wake-up, only preloads continuation context).
-    pub fn set_history(&self, name: &str, history: Vec<Message>) {
-        if let Some(entry) = self.lock().get_mut(name) {
-            entry.history = history;
-        }
-    }
-
     /// Streaming output buffer of the current turn (attached at turn start, detached at turn end).
     pub fn set_live(&self, name: &str, live: Option<Arc<Mutex<String>>>) {
         if let Some(entry) = self.lock().get_mut(name) {
