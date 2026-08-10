@@ -1575,6 +1575,30 @@ mod tests {
         ])
     }
 
+    fn unclosed_text_turn(text: &str, stop_reason: &str) -> String {
+        sse(&[
+            (
+                "message_start",
+                r#"{"message":{"id":"m_1","model":"m"}}"#.into(),
+            ),
+            (
+                "content_block_start",
+                r#"{"index":0,"content_block":{"type":"text","text":""}}"#.into(),
+            ),
+            (
+                "content_block_delta",
+                format!(r#"{{"index":0,"delta":{{"type":"text_delta","text":"{text}"}}}}"#),
+            ),
+            (
+                "message_delta",
+                format!(
+                    r#"{{"delta":{{"stop_reason":"{stop_reason}"}},"usage":{{"output_tokens":5}}}}"#
+                ),
+            ),
+            ("message_stop", "{}".into()),
+        ])
+    }
+
     fn unclosed_thinking_turn(thinking: &str) -> String {
         sse(&[
             (
@@ -1907,6 +1931,47 @@ mod tests {
 
     /// M2: on max_tokens truncation recovery, the truncated assistant content must already
     /// be in the request history — otherwise the model has nothing to continue from.
+    #[tokio::test]
+    async fn unclosed_text_max_tokens_recovers_with_truncated_history() {
+        let base_url = spawn_api(vec![
+            unclosed_text_turn("partial answer", "max_tokens"),
+            text_turn("done", "end_turn"),
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap();
+
+        let texts: Vec<(Role, String)> = outcome
+            .messages
+            .iter()
+            .map(|m| {
+                let text = m
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                (m.role, text)
+            })
+            .filter(|(_, text)| !text.starts_with(TASK_REMINDER_MARKER))
+            .collect();
+
+        assert_eq!(
+            texts.len(),
+            4,
+            "two assistant messages prove the recovery request occurred: {texts:?}"
+        );
+        assert_eq!(texts[1], (Role::Assistant, "partial answer".to_string()));
+        assert_eq!(texts[2], (Role::User, MAX_TOKENS_RESUME_PROMPT.to_string()));
+        assert_eq!(texts[3], (Role::Assistant, "done".to_string()));
+    }
+
     #[tokio::test]
     async fn max_tokens_recovery_keeps_truncated_assistant_in_history() {
         let base_url = spawn_api(vec![

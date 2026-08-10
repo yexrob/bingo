@@ -430,7 +430,9 @@ impl AssistantAccumulator {
         if let Some(block) = block {
             self.content.push(block);
         }
-        self.stop_reason = Some("truncated".to_string());
+        if matches!(self.stop_reason.as_deref(), None | Some("end_turn")) {
+            self.stop_reason = Some("truncated".to_string());
+        }
         true
     }
 
@@ -534,6 +536,31 @@ mod tests {
         .unwrap();
         acc.push(&StreamEvent::BlockStop { index: 0 }).unwrap();
         assert!(matches!(&acc.content[0], ContentBlock::ToolUse { input, .. } if input.is_null()));
+    }
+
+    #[test]
+    fn finish_preserves_max_tokens_for_unclosed_text() {
+        let mut acc = AssistantAccumulator::new();
+        acc.push(&StreamEvent::TextStart { index: 0 }).unwrap();
+        acc.push(&StreamEvent::TextDelta {
+            index: 0,
+            text: "partial answer".into(),
+        })
+        .unwrap();
+        acc.push(&StreamEvent::StopReason {
+            stop_reason: Some("max_tokens".into()),
+            output_tokens: Some(4),
+        })
+        .unwrap();
+
+        assert!(acc.finish());
+        assert_eq!(acc.stop_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(
+            acc.content,
+            vec![ContentBlock::Text {
+                text: "partial answer".into(),
+            }]
+        );
     }
 
     #[test]
