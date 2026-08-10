@@ -27,6 +27,10 @@ use crate::query::Session;
 
 /// Team config file (project-level `.bingo/team.json`, checked into version control).
 pub const TEAM_FILE: &str = ".bingo/team.json";
+/// The crew's working agreement (project-level `.bingo/team-norms.md`, checked into
+/// version control beside the blueprint). Prose rather than a schema on purpose: it is
+/// read by models and reviewed by people, and neither wants a config format (D53).
+pub const NORMS_FILE: &str = ".bingo/team-norms.md";
 /// Memory root directory: `~/.config/bingo/teams/`.
 const TEAM_MEMORY_ROOT: &str = "teams";
 
@@ -313,6 +317,131 @@ pub fn channel_mode(def: &TeamDef) -> ChannelMode {
         .unwrap_or(ChannelMode::Serial)
 }
 
+// ---- team norms: the crew's working agreement (D53) ----
+
+/// The starter agreement `/team new` writes beside a fresh blueprint. A norms file
+/// nobody writes is a feature that never runs, and an empty template is one nobody
+/// edits — so the scaffold ships with rules worth keeping and a header saying they
+/// are meant to be rewritten.
+pub const NORMS_TEMPLATE: &str = "\
+# Team norms
+
+The working agreement for this project's crew. Every member carries it from the moment
+it spawns, and so does anyone hired for a single task. Edit it — this file is a starting
+point, not a standard.
+
+## Working agreement
+
+- Report outcomes as they are. Say what you ran, what passed, what you did not check.
+  Unverified work is not finished work.
+- Stay inside the task you were given. Something else that needs doing is worth naming
+  in your reply, not fixing on the way past.
+- Say it once, to the person who needs it. Do not restate a colleague's conclusion, and
+  do not report progress nobody is blocked on.
+- When you are stuck, say what you tried and what you need. Silence reads as a hang.
+- Follow the shape of the code and the docs already here before introducing your own.
+";
+
+/// The crew's working agreement, or None when this project has not written one.
+/// Whitespace-only counts as absent: a file of blank lines is not an agreement, and
+/// injecting it would spend context saying nothing.
+pub fn load_norms(project_dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(project_dir.join(NORMS_FILE)).ok()?;
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Write the starter agreement, leaving an existing one alone. Returns whether it wrote.
+pub fn write_norms_template(project_dir: &Path) -> Result<bool, TeamError> {
+    let path = project_dir.join(NORMS_FILE);
+    if path.exists() {
+        return Ok(false);
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, NORMS_TEMPLATE)?;
+    Ok(true)
+}
+
+/// The agreement as the system block every member carries.
+///
+/// It lives in the system prompt rather than in the wake-up payload for the reason
+/// `CHANNEL_NOTE` gives (D48): compaction rewrites the message history and never touches
+/// `Session::system`, so the norms are still there on turn fifty.
+///
+/// The precedence line is the load-bearing part. Norms that outrank an instruction
+/// would make the crew unusable, and norms an instruction silently voids are
+/// decoration — so the block says exactly which one wins, and that everything the
+/// instruction did not speak to still holds.
+pub fn norms_block(team: &str, norms: &str) -> String {
+    format!(
+        "# Team norms ({team})\n\n\
+         The crew's working agreement, from {NORMS_FILE} in this project. It applies to \
+         every turn you take here without being repeated to you.\n\n\
+         A direct instruction outranks it: when the task you are given says otherwise, do \
+         what the task says. That exception is narrow — it covers the point the instruction \
+         actually makes, and every other norm still holds. Nothing here licenses ignoring \
+         the agreement because it is inconvenient.\n\n{norms}"
+    )
+}
+
+/// What the hub is told about the crew standing behind it: who is on it, and the rule
+/// that decides between giving a member work and hiring someone new.
+///
+/// Without this the crew is invisible at the moment it matters. The hub sees a list of
+/// *agent definitions* in the Agent tool's description and spawns from it, so a pinned
+/// crew — already spawned, already carrying this branch's memory, already paid for —
+/// sits idle while a fresh subagent redoes what a member knows.
+pub fn crew_note(def: &TeamDef, defs: &[AgentDef], has_norms: bool) -> String {
+    let view = view(def, defs);
+    let roster: String = view
+        .members
+        .iter()
+        .map(|m| format!("- {} — {}\n", m.name, m.description))
+        .collect();
+    let norms = if has_norms {
+        format!(
+            " The crew works to the agreement in {NORMS_FILE}, which every member carries; \
+             read it before you overrule it."
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "# This project has a standing crew\n\n\
+         `{}` is pinned to this project in {TEAM_FILE}. Its members share the #{} channel and \
+         stand by idle at zero tokens once the crew is up — which happens at startup unless it \
+         was turned off, and the Team tool's `start` brings it up either way. They are the \
+         workforce here, not a fallback.{norms}\n\n{roster}\n\
+         - **Give the work to a member first.** Match the job to the roster above and send it \
+         with SendMessage. A member wakes with its own persona, its own engine and its own \
+         memory of this branch; spawning a fresh subagent for work a member covers leaves the \
+         crew idle and throws that away.\n\
+         - **Hire from outside only for what no member covers.** A hire serves the one task: \
+         it never enters {TEAM_FILE}, it does not join the room, and it is released once its \
+         result is in. When you hire, say in your reply which member's scope the work fell \
+         outside of.\n\
+         - **Who is on the crew is the user's decision.** Propose a change and let the Team \
+         tool ask; do not route around it by hiring a permanent-looking stand-in.",
+        def.name, def.name
+    )
+}
+
+/// What a temporary hire is told about its own standing. The crew note tells the hub how
+/// to treat a hire; this tells the hire, so "temporary" is a fact it can plan against
+/// rather than a bookkeeping detail it never learns.
+pub fn hire_note(team: &str) -> String {
+    format!(
+        "# You are a temporary hire\n\n\
+         This project has a standing crew ({team}) and you are not on it. You were brought in \
+         for one task because no member covered it: you are not written into {TEAM_FILE}, you \
+         are not in the crew's channel, and you are released once your result is in and the hub \
+         has had its chance to follow up. Put everything worth keeping in your final text — \
+         there is no next session in which you are asked again."
+    )
+}
+
 // ---- team memory (key = project-path hash + branch) ----
 
 /// Memory root directory: `~/.config/bingo/teams/` (user level, not in version control by default).
@@ -456,6 +585,10 @@ pub fn spawn_team(
         let _ = session.channels.set_message_limit(channel_name, limit);
     }
 
+    // Read once for the whole crew: the agreement is one file and every member carries the
+    // same block, so re-reading it per member would only add ways for them to disagree.
+    let norms = load_norms(project_dir).map(|n| norms_block(&def.name, &n));
+
     let by_name: HashMap<&str, &AgentDef> = defs.iter().map(|d| (d.name.as_str(), d)).collect();
     for member in &def.members {
         // Idempotency key = instance name: already exists (Idle/Running) → reuse, no re-spawn.
@@ -475,7 +608,11 @@ pub fn spawn_team(
         // Memory is a pointer, not a preload (D51): the member is told where its
         // past is and starts with an empty context.
         ensure_transcript(home, project_dir, branch, &def.name, &name);
-        let memory = member_memory_note(home, project_dir, branch, &def.name, &name);
+        let context = crate::tool::agent::MemberContext {
+            memory: member_memory_note(home, project_dir, branch, &def.name, &name),
+            norms: norms.clone(),
+            standing: None,
+        };
         let sub = match crate::tool::agent::build_sub_session(
             session,
             member.model.clone(),
@@ -483,7 +620,7 @@ pub fn spawn_team(
             member.thinking.clone(),
             Some(agent_def),
             &name,
-            memory,
+            context,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -492,9 +629,13 @@ pub fn spawn_team(
             }
         };
         let description = agent_def.description.clone();
-        session
-            .agents
-            .insert(&name, Some(member.agent.clone()), description, sub);
+        session.agents.insert(
+            &name,
+            crate::agents::AgentKind::Crew,
+            Some(member.agent.clone()),
+            description,
+            sub,
+        );
         // Spawn ≠ wake: mark Idle after insert (zero-token standby; the turn only starts with SendMessage).
         session.agents.mark_idle(&name);
         // Join the channel (late joiners get no backlog; they listen from the current head).
@@ -1243,6 +1384,106 @@ mod tests {
         assert!(path.exists(), "an older record renders on first sight");
         assert!(member_memory_note(&mem_home, &mem_home, "main", "t", "qa").is_some());
         std::fs::remove_dir_all(&mem_home).unwrap();
+    }
+
+    /// The agreement reaches every member's system prompt at spawn (D53), carrying the one
+    /// clause that makes it usable: a direct instruction outranks it, and everything the
+    /// instruction did not speak to still holds. Were the block dropped on the way to
+    /// `build_sub_session`, the crew would simply behave as it did before and no other
+    /// assertion would notice.
+    #[test]
+    fn spawn_team_gives_every_member_the_working_agreement() {
+        let s = session();
+        let project = tmp("norms-spawn");
+        std::fs::create_dir_all(project.join(".bingo")).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            project.join(NORMS_FILE),
+            "# Team norms\n\n- Report outcomes as they are.\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let defs = vec![def("qa"), def("dev")];
+        let team = team_def("crew", &[("qa", "qa"), ("dev", "dev")]);
+        spawn_team(&s, &team, &defs, &project, &project, "main").unwrap_or_else(|e| panic!("{e}"));
+
+        for who in ["qa", "dev"] {
+            let sub = s
+                .agents
+                .session_of(who)
+                .unwrap_or_else(|| panic!("{who} should exist"));
+            let block = sub
+                .system
+                .iter()
+                .find(|b| b.text.starts_with("# Team norms"))
+                .unwrap_or_else(|| panic!("{who} carries no agreement: {:?}", sub.system));
+            assert!(
+                block.text.contains("Report outcomes as they are."),
+                "the file's own text is what is carried: {}",
+                block.text
+            );
+            assert!(
+                block.text.contains("A direct instruction outranks it"),
+                "the precedence rule travels with it: {}",
+                block.text
+            );
+            assert!(
+                block.text.contains(NORMS_FILE),
+                "and it says where it came from, so it can be changed: {}",
+                block.text
+            );
+        }
+        std::fs::remove_dir_all(&project).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// No file, or a file of blank lines, is not an agreement: a member gets nothing rather
+    /// than a block that spends context saying nothing.
+    #[test]
+    fn an_empty_agreement_is_no_agreement() {
+        let project = tmp("norms-empty");
+        std::fs::create_dir_all(project.join(".bingo")).unwrap_or_else(|e| panic!("{e}"));
+        assert!(load_norms(&project).is_none(), "no file, no agreement");
+        std::fs::write(project.join(NORMS_FILE), "  \n\n\t\n").unwrap_or_else(|e| panic!("{e}"));
+        assert!(load_norms(&project).is_none(), "blank lines are not rules");
+
+        // And the scaffold never overwrites one that is already there.
+        std::fs::write(project.join(NORMS_FILE), "mine\n").unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            !write_norms_template(&project).unwrap_or_else(|e| panic!("{e}")),
+            "an existing agreement is left alone"
+        );
+        assert_eq!(load_norms(&project).as_deref(), Some("mine"));
+        std::fs::remove_dir_all(&project).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// What the hub is told: who is on the crew, and the rule that sends work to a member
+    /// before it spawns a stand-in for one.
+    #[test]
+    fn the_crew_note_names_the_roster_and_the_routing_rule() {
+        let defs = vec![def("qa"), def("dev")];
+        let team = team_def("dev-room", &[("Mira", "qa"), ("Linh", "dev")]);
+        let note = crew_note(&team, &defs, false);
+        assert!(note.contains("dev-room"), "{note}");
+        assert!(
+            note.contains("Mira — qa description") && note.contains("Linh — dev description"),
+            "each member is named with what it is for: {note}"
+        );
+        assert!(
+            note.contains("SendMessage"),
+            "how to hand work over: {note}"
+        );
+        assert!(
+            note.contains("Hire from outside only for what no member covers"),
+            "{note}"
+        );
+        assert!(
+            note.contains(TEAM_FILE) && note.contains("never enters"),
+            "a hire does not become a member: {note}"
+        );
+        assert!(
+            !note.contains(NORMS_FILE),
+            "a crew with no written agreement is not pointed at one: {note}"
+        );
+        assert!(crew_note(&team, &defs, true).contains(NORMS_FILE));
     }
 
     /// Config validation failure (all references missing) → Err, nothing is spawned

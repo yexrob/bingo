@@ -747,13 +747,34 @@ async fn query_loop(
         // the SendMessage tool only enqueues, so several messages sent in the same step reach
         // the receiver together instead of one per turn.
         crate::tool::agent::flush_agent_inbox(session, &ctx.watch);
+        // Temporary hires are released once their task is done (D53) — after the flush, so a
+        // follow-up sent in the previous round has already refilled the inbox and renewed the
+        // lease. Only fires in a project whose crew is up; elsewhere the sweep is a no-op.
+        //
+        // The hub sweeps, and only the hub: every instance shares this registry, so letting a
+        // subagent's own loop run it would have hires releasing each other — and themselves.
+        let released = if session.instance.is_none() {
+            session.agents.release_hires()
+        } else {
+            Vec::new()
+        };
         // Background task notification injection (dynamic awareness while running): before
         // each reasoning step, pending state-transition notifications (rounds/completion/
         // failure) are injected into the context; anything unconsumed by the end of the
         // turn carries over to the next turn.
-        let notes = session
+        let mut notes = session
             .watch
             .consume_notifications(session.instance.as_deref());
+        // Named rather than swept silently: without this the hub's next SendMessage to a
+        // released hire fails with "no subagent named …", which reads as a bug rather than
+        // as the lifetime it agreed to.
+        if !released.is_empty() {
+            notes.push(format!(
+                "released temporary hire(s) {} — their task is done and their result is in. \
+                 Hire again if more of that work comes up; the crew is unaffected.",
+                released.join(", ")
+            ));
+        }
         if !notes.is_empty() {
             messages.push(Message::user_text(format!(
                 "<task-notifications>\n{}\n</task-notifications>",

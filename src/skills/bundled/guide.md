@@ -107,8 +107,8 @@ Example (.bingo/settings.json):
 `/skills` (listing; `/skill-name` runs it directly) · `/context` (usage) · `/status` ·
 `/compact` (force compaction) · `/resume [name]` (restore a past session; no arg opens the session picker, Enter restores) · `/rename` · `/clear` · `/exit`.
 `/team` (project-level crew): `list` (blueprint + runtime on one screen) · `start` (pull up / idempotent reuse) · `status` ·
-`assign <member> <task>` (dispatch work) · `stop` · `validate` · `new` (scaffolds team.json) ·
-`memory list|gc` (cross-session memory management).
+`assign <member> <task>` (dispatch work) · `stop` · `validate` · `new` (scaffolds team.json + team-norms.md) ·
+`norms` (the crew's working agreement) · `memory list|gc` (cross-session memory management).
 
 ## Diagnostic guide (common problems → troubleshooting paths)
 
@@ -295,6 +295,16 @@ Example (.bingo/settings.json):
   the user's behalf. The confirmation names the change, not the file (`Rewrite .bingo/team.json · dev-room · 4 members (-ui +qa)`).
   `save` writes the whole document, so it takes the complete roster — whoever is left out is removed. Hand-editing `.bingo/team.json`
   with Write/Edit asks the same question. Dispatch is not part of the tool: SendMessage gives a member work.
+- **crew first, hires temporary** (D53): where a crew is pinned, it is the default workforce — work goes to a member by SendMessage,
+  and the Agent tool is for what no member covers. An Agent-tool spawn is a *temporary hire*: it never enters `.bingo/team.json`,
+  it is listed apart from the crew (`/team list`, Team `status`, and a `crew`/`hire` prefix on every `AgentControl list` row), it is
+  recorded in the crew's `decisions.md` under `type: hire`, and it is released once its task is done — idle, inbox empty, nothing
+  still owed an answer, with one hub round left to follow up in. The sweep only runs while a crew is actually up; in a project with
+  no crew, ad-hoc subagents live exactly as long as they always did.
+- **team norms** (`.bingo/team-norms.md`, committed beside the blueprint): prose, not a schema — the crew's working agreement.
+  It reaches every member and every hire as a system block, so it applies without being restated, and it carries its own precedence
+  rule: a direct instruction outranks it on the point that instruction makes, and every other norm still holds. `/team new` scaffolds
+  a starter agreement (never overwriting one that exists); `/team norms` prints what is on disk.
 - **Skills**: built-in `guide` (this guide) + `~/.config/bingo/skills/` and `.bingo/skills/`
   directory skills (same-name disk skills override built-ins); the model invokes them via SkillTool, users run them via `/skill-name`.
 - **Images**: markdown images in model replies (`![alt](path)`, supports `~/`, relative paths/data/http(s))

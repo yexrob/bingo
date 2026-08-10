@@ -21,6 +21,7 @@ pub fn run(session: &Arc<Session>, cwd: &Path, arg: &str) -> Vec<String> {
         "stop" | "down" => stop(session, cwd),
         "validate" | "check" => validate(session, cwd),
         "new" => new_team(session, cwd, parts.next().unwrap_or("")),
+        "norms" => norms(cwd),
         "memory" => memory(session, cwd, parts.next().unwrap_or("")),
         other => {
             let mut out = vec![format!("unknown subcommand: /team {other}"), String::new()];
@@ -32,7 +33,7 @@ pub fn run(session: &Arc<Session>, cwd: &Path, arg: &str) -> Vec<String> {
 
 fn usage() -> Vec<String> {
     vec![
-        "usage: /team <list|start|status|assign|stop|validate|new|memory>".to_string(),
+        "usage: /team <list|start|status|assign|stop|validate|new|norms|memory>".to_string(),
         "  list       definition zone (blueprint) + runtime zone (worksite) side by side"
             .to_string(),
         "  start      bring up the team (members on standby · idempotent reuse)".to_string(),
@@ -42,6 +43,7 @@ fn usage() -> Vec<String> {
         "  validate   validate team.json (same source as start)".to_string(),
         "  new        scaffold: generate .bingo/team.json (the output must pass validate)"
             .to_string(),
+        "  norms      the crew's working agreement (.bingo/team-norms.md)".to_string(),
         "  memory     memory management (list to view / gc to clean)".to_string(),
     ]
 }
@@ -119,7 +121,7 @@ fn list(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     let instances = session.agents.list();
     let running: Vec<&crate::agents::AgentStatus> = instances
         .iter()
-        .filter(|a| def.members.iter().any(|m| m.name == a.name))
+        .filter(|a| a.kind == crate::agents::AgentKind::Crew)
         .collect();
     if running.is_empty() {
         out.push("  runtime zone: not up (/team start to bring it up)".to_string());
@@ -132,6 +134,29 @@ fn list(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
                 state_mark(a.state),
                 a.model,
                 a.provider
+            ));
+        }
+    }
+    // Hires are listed apart from the crew, never among it: they are not in the blueprint,
+    // they leave when their task does, and a listing that mixed the two would be the exact
+    // confusion the distinction exists to prevent (D53).
+    let hires: Vec<&crate::agents::AgentStatus> = instances
+        .iter()
+        .filter(|a| a.kind == crate::agents::AgentKind::Hire)
+        .collect();
+    if !hires.is_empty() {
+        out.push(String::new());
+        out.push(format!(
+            "  temporary hires ({}) · not in {} · released when their task is done",
+            hires.len(),
+            crate::team::TEAM_FILE
+        ));
+        for a in &hires {
+            out.push(format!(
+                "  {} · {} · {}",
+                a.name,
+                state_mark(a.state),
+                a.description
             ));
         }
     }
@@ -379,16 +404,61 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
             .collect(),
     };
     match crate::team::write_team_file(cwd, &def) {
-        Ok(()) => vec![
+        Ok(()) => {
+            let mut out = vec![
+                format!(
+                    "✓ generated {} ({} members · serial channel)",
+                    path.display(),
+                    def.members.len()
+                ),
+                "  output passes validation (/team start to bring up · /team validate to re-check after trimming members)"
+                    .to_string(),
+            ];
+            // A blueprint without an agreement is a crew with no shared rules, and an
+            // agreement nobody scaffolds is a file nobody writes. An existing one is left
+            // alone — the starter text is a starting point, not a reset.
+            match crate::team::write_norms_template(cwd) {
+                Ok(true) => out.push(format!(
+                    "✓ generated {} (starter working agreement — edit it; every member carries it)",
+                    cwd.join(crate::team::NORMS_FILE).display()
+                )),
+                Ok(false) => out.push(format!(
+                    "  {} already exists · kept as it is (/team norms to read it)",
+                    crate::team::NORMS_FILE
+                )),
+                Err(e) => out.push(format!("⚠ {} not written: {e}", crate::team::NORMS_FILE)),
+            }
+            out
+        }
+        Err(e) => vec![format!("✗ write failed: {e}")],
+    }
+}
+
+/// `/team norms`: the working agreement as it is on disk, so the thing every member is
+/// carrying can be read without leaving the session. No editing here — it is a project file
+/// under version control, and an editor is where a file like that is changed.
+fn norms(cwd: &Path) -> Vec<String> {
+    let path = cwd.join(crate::team::NORMS_FILE);
+    match crate::team::load_norms(cwd) {
+        Some(text) => {
+            let mut out = vec![
+                format!("▸ team norms · {}", path.display()),
+                "  carried by every member and every hire; a direct instruction outranks it"
+                    .to_string(),
+                String::new(),
+            ];
+            out.extend(text.lines().map(|l| format!("  {l}")));
+            out
+        }
+        None => vec![
             format!(
-                "✓ generated {} ({} members · serial channel)",
-                path.display(),
-                def.members.len()
+                "no {} (this crew has no written agreement)",
+                crate::team::NORMS_FILE
             ),
-            "  output passes validation (/team start to bring up · /team validate to re-check after trimming members)"
+            "  /team new scaffolds one beside a fresh blueprint; or write the file yourself — \
+             it is prose, read by members and reviewed by people."
                 .to_string(),
         ],
-        Err(e) => vec![format!("✗ write failed: {e}")],
     }
 }
 
@@ -601,6 +671,72 @@ mod tests {
 
         let out = assign(&s, &project, "ghost do some work".to_string());
         assert!(out[0].contains("is not a member of qt"), "{out:?}");
+        let _ = std::fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    /// A blueprint without an agreement is a crew with no shared rules, and an agreement
+    /// nobody scaffolds is a file nobody writes — so `/team new` produces both, and `/team
+    /// norms` reads back what every member is carrying.
+    #[test]
+    fn scaffolding_writes_the_agreement_and_norms_reads_it_back() {
+        let (s, project) = session("norms");
+        std::fs::write(project.join(".bingo/agents/qa.md"), "You are QA.\n").unwrap();
+
+        let out = norms(&project);
+        assert!(out[0].contains("no .bingo/team-norms.md"), "{out:?}");
+
+        let out = new_team(&s, &project, "crew");
+        assert!(
+            out.iter().any(|l| l.contains("team-norms.md")),
+            "the scaffold says it wrote the agreement: {out:?}"
+        );
+        assert!(project.join(crate::team::NORMS_FILE).exists());
+
+        let out = norms(&project);
+        assert!(out[0].contains("team norms"), "{out:?}");
+        assert!(
+            out.iter()
+                .any(|l| l.contains("a direct instruction outranks it")),
+            "the precedence rule is stated where it is read: {out:?}"
+        );
+        assert!(
+            out.iter()
+                .any(|l| l.contains("Report outcomes as they are")),
+            "the file's own text is shown: {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    /// Hires are listed apart from the crew, never among it (D53): the roster is the
+    /// blueprint's, and someone hired for one task is not on it.
+    #[test]
+    fn list_separates_temporary_hires_from_the_crew() {
+        let (s, project) = session("hires");
+        std::fs::write(project.join(".bingo/agents/qa.md"), "You are QA.\n").unwrap();
+        let _ = new_team(&s, &project, "crew");
+        let _ = start(&s, &project);
+        s.agents.insert(
+            "temp",
+            crate::agents::AgentKind::Hire,
+            None,
+            "one-off audit".into(),
+            s.clone(),
+        );
+
+        let out = list(&s, &project);
+        let text = out.join("\n");
+        assert!(text.contains("runtime zone (1 instances)"), "{text}");
+        assert!(
+            text.contains("temporary hires (1)") && text.contains("one-off audit"),
+            "a hire is shown, in its own section: {text}"
+        );
+        assert!(
+            text.contains("released when their task is done"),
+            "and the section says what makes it different: {text}"
+        );
+        // The blueprint section is the crew's alone.
+        let roster_end = text.find("runtime zone").unwrap_or(text.len());
+        assert!(!text[..roster_end].contains("temp"), "{text}");
         let _ = std::fs::remove_dir_all(project.parent().unwrap());
     }
 
