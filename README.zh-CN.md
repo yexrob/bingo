@@ -269,16 +269,33 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 - **定义**：`.bingo/team.json`（camelCase，进版本库）——`name` + `channel{mode,
   messageLimit}` + `members[{name, agent, avatar?, model?, provider?, thinking?}]`；`name` 即消息上显示的名字（取人名而非角色代号），`avatar` 钉住内置头像之一；成员引用 AgentDef，人格单一事实来源
   仍在 `.bingo/agents/<名>.md`，一人格可入多 team。
+- **一个 team 多个房间**：`channels[{name, mode?, messageLimit?, members?}]` 声明这支
+  队伍开哪些房间，各房间成员可以不一样——像一个部门有站会、有发布群、有设计评审，
+  同一个人在其中一些里、不在另一些里。`members` 省略即全队；写了 `channels` 就以它
+  为准，不再另建一个以 team 命名的大房间（没人要的房间就是没人读的房间）。什么都不
+  写时仍是老样子：一个叫 team 名、装全体成员的房间，旧文件不用改。
+- **多层 team（部门制）**：`teams[{name?, path}]` 声明子队伍的图纸在哪儿，可递归到
+  任意深度（上限 8 层）。`path` 相对于本 team 自己的目录（拒绝绝对路径——进了版本库
+  的组织架构得跟着仓库走），可以指目录，也可以直接指那份 `team.json`。每个 team 都以
+  **自己的目录**为根：角色定义、团队规范、git 分支、记忆分区全都取自那里——所以从根
+  会话进到某个部门，和直接在那个目录开会话拿到的是同一支队伍；子树也因此能单独成立。
+  队名、成员名、房间名在整棵树内唯一，于是 `SendMessage("Linh")` 不带前缀就能点到三
+  层之下的人。房间的成员只能取自本 team 及其子树——上级可以召集自己这一摊，平级不能
+  征调别的部门。子树里的成员会在系统块里被告知自己团队的目录（工具路径是相对**会话**
+  的工作目录解析的，不是相对它的团队）。`/team status|start|stop|validate|memory`
+  与 `Team` 工具的各动作都作用于整棵树。
 - **逐成员的引擎**：`model` / `provider` / `thinking` 钉住这名成员跑在什么上面。
   谁用哪个模型是编队的一部分，不是每次派生临时决定的事，所以写进进版本库的图纸——
   一支队伍可以让评审跑便宜快的端点、让架构跑贵的。三者都是先落回 AgentDef、再落回
   会话，与 `Agent` 调用的同名参数同一套优先级；`provider` 指到会话之外的端点时必须
   同时给 `model`（模型名换个端点就不认识了）。`/team list` 与 `AgentControl list`
   会报出每个在跑实例实际所在的引擎。
-- **启动自动拉起**：`settings.team.autoStart`（缺省 true）时启动即拉起——派生
-  成员 + 建房间，但**不唤醒**（成员 Idle 零 token 待命，等 `/team assign` 或
+- **启动自动拉起**：`settings.team.autoStart`（缺省 true）时启动即拉起**整棵树**——
+  先派生全树成员，再开所有房间（两段分明：上级的房间可能装着下级的人，人没起就开房，
+  房里会缺人），但**不唤醒**（成员 Idle 零 token 待命，等 `/team assign` 或
   频道消息才开跑）。opt-out：`--no-team` 或 `team.autoStart: false`。
-  幂等：以实例名为键，重复 `/team start` 复用不重派。
+  幂等：以实例名为键，重复 `/team start` 复用不重派。整树校验先跑：树里任何一处引用
+  有问题，一个成员也不派。
 - **命令**：`/team list`（图纸+运行区同屏）、`start`、`status`
   （●待命 ◐忙碌 ✗异常 ○离线）、`assign`、`stop`、`validate`（与 start 同源
   校验：validate 能过 start 必成）、`new`（脚手架，产物必过 validate，并附一份
@@ -313,6 +330,10 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
   `bypassPermissions`），`allow` 规则也不能预授权，只有 `deny` 压得住。确认行给的是
   变化而非文件（`改写 .bingo/team.json · dev-room · 4 名成员（-ui +qa）`）；用
   Write/Edit 手改 `.bingo/team.json` 问同一个问题。派活不在工具里，用 `SendMessage`。
+  整份覆写有一个例外：`teams`（组织架构）每次 save 原样带过——它指向别的目录、是人手
+  搭起来的，改名册不构成重新决定组织架构的理由，确认行会写明「保留 N 个子 team」。
+  房间可以改：给了 `channels` 就整体替换，不给就保留；对一支已声明 `channels` 的队伍
+  再传 `mode`/`message_limit` 会被拒绝而不是猜——照做就会删掉它描述不了的那些房间。
 
 ## 频道（实验特性）
 

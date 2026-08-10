@@ -281,7 +281,7 @@ Example (.bingo/settings.json):
   delivery path as Post, members woken normally; rendering = read, so serial never bounces you), in a DM it queues on the
   instance and flushes at the turn boundary (shown as a pending message until then). Keys: Tab switches between the message
   list and the composer, alt+↑↓ switches conversation, Ctrl+K is the quick switcher, Esc returns.
-- **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
+- **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/`channels[{name,mode?,messageLimit?,members?}]`/`teams[{name?,path}]`/
   `members[{name,agent,avatar?,model?,provider?,thinking?}]`, members reference AgentDefs; `name` is the name shown on the member's messages, so make it a person's name, and `avatar` pins one of the bundled portraits.
   `model`/`provider`/`thinking` pin the member's engine — which model does which job is part of the formation, so a crew can mix a cheap fast reviewer with a stronger designer; each falls back to the agent definition and then to the session, and a named `provider` other than the session's needs a `model` too.
   `/team validate` checks the engine against this session's providers, so a blueprint that passes still starts) pins multiple roles to one project; started by default at launch
@@ -293,8 +293,19 @@ Example (.bingo/settings.json):
   and every change is confirmed by the user in person — the prompt appears in *every* permission mode and an `allow` rule cannot
   pre-authorize it (only `deny` outranks it), because hiring a crew is not something a permission table should be able to consent to on
   the user's behalf. The confirmation names the change, not the file (`Rewrite .bingo/team.json · dev-room · 4 members (-ui +qa)`).
-  `save` writes the whole document, so it takes the complete roster — whoever is left out is removed. Hand-editing `.bingo/team.json`
-  with Write/Edit asks the same question. Dispatch is not part of the tool: SendMessage gives a member work.
+  `save` writes the whole document, so it takes the complete roster — whoever is left out is removed, with one exception: `teams` (the org
+  chart) is carried across every save, because it points at other directories and a roster edit is no reason to re-decide it. Hand-editing
+  `.bingo/team.json` with Write/Edit asks the same question. Dispatch is not part of the tool: SendMessage gives a member work.
+- **rooms and the team tree** (D54): a team declares its rooms in `channels[]`, each with its own mode, budget and roster — a department
+  has a standup, a release channel and a design review, and the same person is in some and not others. A team that declares none gets one
+  room named after it holding everybody (the `channel{mode,messageLimit}` shorthand, unchanged); a team that declares rooms gets *only*
+  those. A blueprint may name child blueprints in `teams[{name?,path}]`, recursively: `path` is relative to that team's own directory
+  (absolute is refused) and names either the directory holding a blueprint or the file itself. Each team keeps its own agent definitions,
+  working agreement, git branch and memory partition, rooted at its own directory — so reaching a department from the root gives the same
+  crew as opening a session inside it, and a member of one is told in a system block where its directory is (tool paths resolve against the
+  *session's* cwd, not its team's). Teams, members and rooms are unique across the whole tree, which is what lets `SendMessage("Linh")`
+  reach a member three levels down with no team prefix. A room reaches its own team and the teams below it, never a parent or a sibling.
+  `/team status|start|stop|validate|memory` and the Team tool's actions all span the chart; `autoStart` brings the whole thing up.
 - **crew first, hires temporary** (D53): where a crew is pinned, it is the default workforce — work goes to a member by SendMessage,
   and the Agent tool is for what no member covers. An Agent-tool spawn is a *temporary hire*: it never enters `.bingo/team.json`,
   it is listed apart from the crew (`/team list`, Team `status`, and a `crew`/`hire` prefix on every `AgentControl list` row), it is

@@ -81,16 +81,19 @@ fn snapshot(session: &Arc<Session>, ws: &mut Workspace, workspace: &str) -> Snap
 /// it.
 fn blueprint(session: &Arc<Session>, images: bool) -> (String, Avatars) {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let def = crate::team::load_team_file(&cwd).ok().flatten();
-    let name = def
+    let tree = crate::team::load_team_tree(&cwd).ok().flatten();
+    let name = tree
         .as_ref()
-        .map(|d| d.name.clone())
+        .map(|t| t.root().def.name.clone())
         .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| "bingo".to_string());
-    let pinned = def
+    // Every team in the chart, not just the root: a member's face is pinned in its own
+    // blueprint, and a face that only resolves for the root team is a face missing from
+    // exactly the rooms a chart exists to hold.
+    let pinned = tree
         .iter()
-        .flat_map(|d| &d.members)
-        .filter_map(|m| {
+        .flat_map(|t| t.members())
+        .filter_map(|(_, m)| {
             let id = m.avatar.as_deref()?;
             Some((m.name.clone(), avatar::index_of_id(id)?))
         })

@@ -1116,12 +1116,14 @@ impl Chat {
         // The blueprint's pinned faces, read once: a committed file cannot answer
         // differently between frames, and the crew does not change while you look.
         let faces_pinned: HashMap<String, usize> =
-            crate::team::load_team_file(std::path::Path::new(&cwd))
+            crate::team::load_team_tree(std::path::Path::new(&cwd))
                 .ok()
                 .flatten()
                 .iter()
-                .flat_map(|d| &d.members)
-                .filter_map(|m| Some((m.name.clone(), avatar::index_of_id(m.avatar.as_deref()?)?)))
+                .flat_map(|t| t.members())
+                .filter_map(|(_, m)| {
+                    Some((m.name.clone(), avatar::index_of_id(m.avatar.as_deref()?)?))
+                })
                 .collect();
         let permission_mode = session.permission_mode;
         // Update-banner (welcome card) data source + motion off: computed before the session moves into Self.
