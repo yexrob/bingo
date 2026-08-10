@@ -212,15 +212,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // The crew pinned to this project, and the rule that decides between giving a member
     // work and hiring someone new (D53). A system block rather than a tool description:
     // compaction rewrites the message history and leaves `Session::system` alone, so the
-    // routing rule is still there on turn fifty, when the roster matters most.
-    if let Ok(Some(team)) = crate::team::load_team_file(&project_dir) {
-        let defs = crate::agents::load_agent_defs(&home, &project_dir);
+    // routing rule is still there on turn fifty, when the roster matters most. The whole
+    // tree is named (D54) — a department the hub cannot see is one it will re-hire.
+    if let Ok(Some(tree)) = crate::team::load_team_tree(&project_dir) {
         system.push(crate::api::contract::SystemBlock {
-            text: crate::team::crew_note(
-                &team,
-                &defs,
-                crate::team::load_norms(&project_dir).is_some(),
-            ),
+            text: crate::team::crew_note(&tree, &home),
             cache: settings.cache_control.unwrap_or(false),
         });
     }
@@ -361,34 +357,37 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     crate::hooks::run_session_start(&session.settings.hooks, mode_str).await;
 
     // D31 startup default: project-bound team with autoStart (default true) → spawn it.
+    // The whole tree, not just the root (D54): a chart declared in one file is one
+    // formation, and a half-started org is worse than none.
     // Double opt-out: settings `team.autoStart:false` + `--no-team`.
     if !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
-        let branch = crate::team::current_branch(&project_dir);
-        let defs = crate::agents::load_agent_defs(&home, &project_dir);
-        match crate::team::load_team_file(&project_dir) {
-            Ok(Some(team)) => {
-                match crate::team::spawn_team(&session, &team, &defs, &home, &project_dir, &branch)
-                {
+        match crate::team::load_team_tree(&project_dir) {
+            Ok(Some(tree)) => {
+                let name = tree.root().def.name.clone();
+                let teams = tree.nodes().len();
+                match crate::team::spawn_tree(&session, &tree, &home) {
                     Ok(summary) => {
                         let total =
                             summary.spawned.len() + summary.reused.len() + summary.failed.len();
                         let ready = total - summary.failed.len();
+                        let scope = if teams > 1 {
+                            format!(" across {teams} teams")
+                        } else {
+                            String::new()
+                        };
                         if summary.failed.is_empty() {
                             eprintln!(
-                                "[team] {} ready · {ready}/{total} on standby (/team status · /team stop)",
-                                team.name
+                                "[team] {name} ready · {ready}/{total} on standby{scope} (/team status · /team stop)"
                             );
                         } else {
                             eprintln!(
-                                "[team] {} partially spawned · {ready}/{total} ({} failed; see /team status)",
-                                team.name,
+                                "[team] {name} partially spawned · {ready}/{total}{scope} ({} failed; see /team status)",
                                 summary.failed.len()
                             );
                         }
                     }
                     Err(e) => eprintln!(
-                        "[team] {} validation failed: {e} (fix and /team start to spawn)",
-                        team.name
+                        "[team] {name} validation failed: {e} (fix and /team start to spawn)"
                     ),
                 }
             }
@@ -562,25 +561,29 @@ fn report_error(err: &(dyn std::error::Error + 'static)) {
     eprintln!("[error] code={code} msg={msg}");
 }
 
-/// Persist the latest message history of all team members (only members with content;
-/// failures are silent — memory is an enhancement, not a contract).
+/// Persist the latest message history of every member in the tree (only members with
+/// content; failures are silent — memory is an enhancement, not a contract). Each
+/// member's history is filed under its own team's directory and branch, so a
+/// department in another repo keeps its memory with that repo.
 fn persist_team_memory(session: &Arc<Session>, home: &Path, project_dir: &std::path::Path) {
-    let Ok(Some(team)) = crate::team::load_team_file(project_dir) else {
+    let Ok(Some(tree)) = crate::team::load_team_tree(project_dir) else {
         return;
     };
-    let branch = crate::team::current_branch(project_dir);
-    for m in &team.members {
-        if let Some((history, _, _)) = session.agents.view_of(&m.name)
-            && !history.is_empty()
-        {
-            crate::team::save_member_history(
-                home,
-                project_dir,
-                &branch,
-                &team.name,
-                &m.name,
-                &history,
-            );
+    for node in tree.nodes() {
+        let branch = crate::team::current_branch(&node.dir);
+        for m in &node.def.members {
+            if let Some((history, _, _)) = session.agents.view_of(&m.name)
+                && !history.is_empty()
+            {
+                crate::team::save_member_history(
+                    home,
+                    &node.dir,
+                    &branch,
+                    &node.def.name,
+                    &m.name,
+                    &history,
+                );
+            }
         }
     }
 }
