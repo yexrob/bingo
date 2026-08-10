@@ -1492,6 +1492,14 @@ mod tests {
         (session, client)
     }
 
+    /// A project directory with no crew pinned. Never the ambient cwd: these tests assert
+    /// the exact system blocks a sub-session gets, and running them inside a repo that has
+    /// its own `.bingo/team.json` would add the hire's blocks and fail them for a reason
+    /// that has nothing to do with what they check.
+    fn crewless() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("bingo-crewless-{}", std::process::id()))
+    }
+
     fn params(prompt: &str) -> AgentInput {
         AgentInput {
             prompt: prompt.into(),
@@ -1643,7 +1651,7 @@ mod tests {
         let _ = session.runtime.thinking_tx.send(Some("medium".into()));
         let tool = AgentTool::new(session.clone(), Vec::new());
         let sub = tool
-            .build_sub_session(&params("do it"), None, "sub", std::path::Path::new("."))
+            .build_sub_session(&params("do it"), None, "sub", &crewless())
             .unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "parent-model");
         assert_eq!(
@@ -1680,7 +1688,7 @@ mod tests {
         p.provider = Some("ds".into());
         p.thinking = Some("xhigh".into());
         let sub = tool
-            .build_sub_session(&p, None, "sub", std::path::Path::new("."))
+            .build_sub_session(&p, None, "sub", &crewless())
             .unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "sub-model");
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
@@ -1710,12 +1718,7 @@ mod tests {
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
         // The definition supplies system/model/provider/thinking defaults.
         let sub = tool
-            .build_sub_session(
-                &params("review"),
-                Some(&d),
-                "sub",
-                std::path::Path::new("."),
-            )
+            .build_sub_session(&params("review"), Some(&d), "sub", &crewless())
             .unwrap();
         // Default is append: parent system + persona + the subagent note block.
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
@@ -1736,7 +1739,7 @@ mod tests {
         p.model = Some("explicit".into());
         p.thinking = Some("off".into());
         let sub = tool
-            .build_sub_session(&p, Some(&d), "sub", std::path::Path::new("."))
+            .build_sub_session(&p, Some(&d), "sub", &crewless())
             .unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "explicit");
         assert_eq!(
@@ -1758,7 +1761,7 @@ mod tests {
         let mut p = params("do it");
         p.provider = Some("nope".into());
         assert!(
-            tool.build_sub_session(&p, None, "sub", std::path::Path::new("."))
+            tool.build_sub_session(&p, None, "sub", &crewless())
                 .is_err(),
             "unknown provider errors"
         );
@@ -1773,7 +1776,7 @@ mod tests {
         let tool = AgentTool::new(session.clone(), Vec::new());
         let mut p = params("do it");
         p.provider = Some("ds".into());
-        let err = sub_err(tool.build_sub_session(&p, None, "sub", std::path::Path::new(".")));
+        let err = sub_err(tool.build_sub_session(&p, None, "sub", &crewless()));
         assert!(
             err.contains("requires a model") && err.contains("ds"),
             "crossing providers requires an explicit model: {err}"
@@ -1782,12 +1785,7 @@ mod tests {
         let mut d = def("reviewer");
         d.model = None;
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
-        let err = sub_err(tool.build_sub_session(
-            &params("review"),
-            Some(&d),
-            "sub",
-            std::path::Path::new("."),
-        ));
+        let err = sub_err(tool.build_sub_session(&params("review"), Some(&d), "sub", &crewless()));
         assert!(
             err.contains("requires a model"),
             "the definition-side cross-provider case errors the same way: {err}"
@@ -1798,7 +1796,7 @@ mod tests {
         let mut p = params("do it");
         p.provider = Some("ds".into());
         let sub = tool
-            .build_sub_session(&p, None, "sub", std::path::Path::new("."))
+            .build_sub_session(&p, None, "sub", &crewless())
             .unwrap();
         assert_eq!(
             *sub.runtime.model.borrow(),
@@ -1818,7 +1816,7 @@ mod tests {
         p.provider = Some("ds".into());
         p.model = Some("ds-model".into());
         let sub = tool
-            .build_sub_session(&p, None, "sub", std::path::Path::new("."))
+            .build_sub_session(&p, None, "sub", &crewless())
             .unwrap();
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
@@ -1831,7 +1829,7 @@ mod tests {
         p.model = Some("ds-model".into());
         p.thinking = Some("high".into());
         let sub = tool
-            .build_sub_session(&p, None, "sub", std::path::Path::new("."))
+            .build_sub_session(&p, None, "sub", &crewless())
             .unwrap();
         assert_eq!(sub.runtime.thinking.borrow().as_deref(), Some("high"));
     }
@@ -1845,7 +1843,7 @@ mod tests {
         let mut p = params("do it");
         p.provider = Some("ds".into());
         let sub = tool
-            .build_sub_session(&p, None, "sub", std::path::Path::new("."))
+            .build_sub_session(&p, None, "sub", &crewless())
             .unwrap();
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
@@ -1862,7 +1860,7 @@ mod tests {
         let mut p = params("do it");
         p.provider = Some("default".into());
         let sub = tool
-            .build_sub_session(&p, None, "sub", std::path::Path::new("."))
+            .build_sub_session(&p, None, "sub", &crewless())
             .unwrap();
         assert_eq!(sub.runtime.provider.borrow().as_str(), "default");
         assert_eq!(
@@ -1881,12 +1879,7 @@ mod tests {
         d.provider = Some("default".into());
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
         let sub = tool
-            .build_sub_session(
-                &params("review"),
-                Some(&d),
-                "sub",
-                std::path::Path::new("."),
-            )
+            .build_sub_session(&params("review"), Some(&d), "sub", &crewless())
             .unwrap();
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
     }
@@ -1898,7 +1891,7 @@ mod tests {
         for bad in ["auto", "super", "HIGH"] {
             let mut p = params("do it");
             p.thinking = Some(bad.into());
-            let err = sub_err(tool.build_sub_session(&p, None, "sub", std::path::Path::new(".")));
+            let err = sub_err(tool.build_sub_session(&p, None, "sub", &crewless()));
             assert!(
                 err.contains("invalid thinking level"),
                 "invalid level {bad:?} should error: {err}"
@@ -1908,12 +1901,7 @@ mod tests {
         let mut d = def("reviewer");
         d.thinking = Some("bogus".into());
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
-        let err = sub_err(tool.build_sub_session(
-            &params("review"),
-            Some(&d),
-            "sub",
-            std::path::Path::new("."),
-        ));
+        let err = sub_err(tool.build_sub_session(&params("review"), Some(&d), "sub", &crewless()));
         assert!(
             err.contains("invalid thinking level"),
             "definition-side invalid value should error: {err}"
@@ -2400,12 +2388,7 @@ mod tests {
         d.inherit_system = false;
         let tool = AgentTool::new(session, vec![d.clone()]);
         let sub = tool
-            .build_sub_session(
-                &params("review"),
-                Some(&d),
-                "sub",
-                std::path::Path::new("."),
-            )
+            .build_sub_session(&params("review"), Some(&d), "sub", &crewless())
             .unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, ["You are the reviewer.", SUBAGENT_NOTE]);
