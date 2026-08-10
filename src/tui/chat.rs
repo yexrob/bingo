@@ -4418,6 +4418,25 @@ impl Chat {
     ) {
         if outcome.aborted {
             let _ = events.send(UiEvent::Warning("turn interrupted".to_string()));
+        } else {
+            match outcome.end_reason {
+                crate::query::QueryEndReason::EmptyResponseRetried => {
+                    let _ = events.send(UiEvent::Warning(
+                        "model returned an empty response and was retried".to_string(),
+                    ));
+                }
+                crate::query::QueryEndReason::EmptyResponse => {
+                    let _ = events.send(UiEvent::Error {
+                        code: "SERVER_ERROR",
+                        msg: "The model returned no response after the stream ended; retry the turn or go back."
+                            .to_string(),
+                        level: crate::error::ErrorLevel::Full,
+                        context: crate::error::ErrorContext::LongTurn,
+                    });
+                    return;
+                }
+                crate::query::QueryEndReason::Completed => {}
+            }
         }
         let _ = events.send(UiEvent::TurnEnd);
         let cwd = std::env::current_dir().unwrap_or_default();

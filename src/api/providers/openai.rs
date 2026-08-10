@@ -37,14 +37,14 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const MAX_RETRIES: u32 = 5;
 
-/// thinking level → Responses `reasoning.effort`. OpenAI accepts
-/// minimal/low/medium/high; bingo's xhigh/max converge to high (depth beyond
-/// the public effort ladder is a Claude-5 concept).
+/// thinking level → Responses `reasoning.effort`.
 fn effort_for(level: ThinkingLevel) -> &'static str {
     match level {
         ThinkingLevel::Low => "low",
         ThinkingLevel::Medium => "medium",
-        ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => "high",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::Xhigh => "xhigh",
+        ThinkingLevel::Max => "max",
     }
 }
 
@@ -946,6 +946,16 @@ mod tests {
             serde_json::json!(["reasoning.summary_text"])
         );
         assert_eq!(body["max_output_tokens"], 1024);
+    }
+
+    #[test]
+    fn body_preserves_extended_thinking_effort() {
+        let mut r = req();
+        for (level, effort) in [(ThinkingLevel::Xhigh, "xhigh"), (ThinkingLevel::Max, "max")] {
+            r.thinking = Some(level);
+            let body = build_body(&r, OpenAiVariant::Default);
+            assert_eq!(body["reasoning"]["effort"], effort);
+        }
     }
 
     /// Variant-isolated request params (main-reported live matrix): the codex
