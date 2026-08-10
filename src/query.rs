@@ -1343,10 +1343,14 @@ fn normalize_synthetic_bash_calls(messages: &mut Vec<Message>) {
     use crate::api::types::{ContentBlock, Role};
     let mut i = 0;
     while i < messages.len() {
-        let is_bash_input = matches!(
-            &messages[i].content[0],
-            ContentBlock::Text { text } if text.contains("<bash-input>")
-        ) && messages[i].role == Role::User;
+        // Every block lookup goes through `first()`: a content-free message is a shape the
+        // transcript really carries (a model turn that streamed nothing), and indexing it
+        // panicked the whole turn inside the spawned task, latching the TUI as busy forever.
+        let is_bash_input = messages[i].role == Role::User
+            && matches!(
+                messages[i].content.first(),
+                Some(ContentBlock::Text { text }) if text.contains("<bash-input>")
+            );
         let synthetic = is_bash_input
             && messages.get(i + 1).is_some_and(|m| {
                 m.role == Role::Assistant
@@ -1358,18 +1362,18 @@ fn normalize_synthetic_bash_calls(messages: &mut Vec<Message>) {
             && messages.get(i + 2).is_some_and(|m| {
                 m.role == Role::User
                     && matches!(
-                        &m.content[0],
-                        ContentBlock::ToolResult { tool_use_id, .. }
+                        m.content.first(),
+                        Some(ContentBlock::ToolResult { tool_use_id, .. })
                             if tool_use_id.starts_with("bash-")
                     )
             });
         if synthetic {
-            let input_text = match &messages[i].content[0] {
-                ContentBlock::Text { text } => text.clone(),
+            let input_text = match messages[i].content.first() {
+                Some(ContentBlock::Text { text }) => text.clone(),
                 _ => String::new(),
             };
-            let result_text = match &messages[i + 2].content[0] {
-                ContentBlock::ToolResult { content, .. } => {
+            let result_text = match messages[i + 2].content.first() {
+                Some(ContentBlock::ToolResult { content, .. }) => {
                     crate::api::types::tool_result_text(content)
                 }
                 _ => String::new(),
@@ -2225,5 +2229,46 @@ mod tests {
             &messages[3].content[0],
             ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "toolu_real"
         ));
+    }
+
+    /// A model turn that streamed no block is persisted as `content: []`. Indexing it
+    /// panicked the whole turn inside the spawned task — the TUI then stayed latched as
+    /// busy, with interrupt and quit both gated on that flag.
+    #[test]
+    fn normalization_walks_past_a_content_free_message() {
+        let mut messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: Vec::new(),
+            },
+            Message::user_text("<bash-input>ls</bash-input>"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "bash-1".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({ "command": "ls" }),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![tool_result_text("bash-1", "<bash-stdout>ok</bash-stdout>")],
+            },
+        ];
+
+        normalize_synthetic_bash_calls(&mut messages);
+
+        assert_eq!(messages.len(), 2, "the bash triple still folds around it");
+        assert!(
+            messages[0].content.is_empty(),
+            "the empty turn is left alone"
+        );
+        assert_eq!(
+            match &messages[1].content[0] {
+                ContentBlock::Text { text } => text.as_str(),
+                _ => "",
+            },
+            "<bash-input>ls</bash-input>\n<bash-stdout>ok</bash-stdout>"
+        );
     }
 }

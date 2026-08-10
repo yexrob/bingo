@@ -20,6 +20,9 @@ pub const GENERIC: &str = "GENERIC";
 pub const SLASH_ERROR_UNKNOWN_COMMAND: &str = "UNKNOWN_COMMAND";
 /// Invalid slash argument (usage line shown, state unchanged).
 pub const SLASH_ERROR_BAD_ARGUMENT: &str = "BAD_ARGUMENT";
+/// The turn's task ended without reporting an outcome (a panic inside the spawn).
+/// Distinct from `SERVER_ERROR`: nothing was wrong upstream, the harness lost the turn.
+pub const TURN_LOST: &str = "TURN_LOST";
 
 /// Stable error code: `SCREAMING_SNAKE` (e.g. `CONFIG_INVALID`).
 pub trait ErrorCode {

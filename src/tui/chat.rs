@@ -391,6 +391,11 @@ pub const ENTITY_ROWS_MAX: usize = 6;
 pub const UNDO_MAX: usize = 20;
 /// Exit-confirmation window between two Ctrl+C presses.
 pub const CTRL_C_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How long a requested interrupt may go unhonoured before Ctrl+C force-quits instead.
+/// A live turn acknowledges cancellation well inside this; a turn whose task died never
+/// will, and `busy` gates every other way out.
+pub const INTERRUPT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 /// Clear-confirmation window between two Esc presses.
 pub const ESC_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 /// Paste-burst detection: key intervals shorter than this count as one batch of input.
@@ -833,6 +838,9 @@ pub struct Chat {
     pub notice_until: Option<std::time::Instant>,
     /// Time of the most recent Ctrl+C on empty input (a second press within [`CTRL_C_WINDOW`] exits).
     ctrl_c_at: Option<std::time::Instant>,
+    /// Time the running turn was first asked to stop; cleared when the next turn starts.
+    /// Ctrl+C force-quits once it is older than [`INTERRUPT_GRACE`] and the turn is still busy.
+    interrupt_at: Option<std::time::Instant>,
     /// Time of the most recent Esc (a second press within [`ESC_WINDOW`] clears the input).
     esc_at: Option<std::time::Instant>,
     /// Time of the last key press and the count of consecutive "fast" keys (paste-burst heuristic).
@@ -1153,6 +1161,7 @@ impl Chat {
             notice: None,
             notice_until: None,
             ctrl_c_at: None,
+            interrupt_at: None,
             esc_at: None,
             last_key_at: None,
             burst_keys: 0,
@@ -1335,6 +1344,7 @@ impl Chat {
                 self.thinking_buf.clear();
                 self.thinking_seg_open = false;
                 self.pending_tools_clear();
+                self.interrupt_at = None;
                 self.turn_started = Some(std::time::Instant::now());
                 self.messages.push(UiMessage {
                     role: Role::Assistant,
@@ -4435,6 +4445,23 @@ impl Chat {
         crate::memory::extract_memory(session, &outcome.messages, &session.home, &cwd).await;
     }
 
+    /// A turn task that dies without reporting an outcome (a panic inside the spawn) leaves
+    /// `busy` latched, and every interrupt and quit route is gated on `busy` — the session
+    /// then answers only to `kill`. Watching the handle turns a lost turn back into the
+    /// ordinary long-turn error state, which releases `busy` and offers retry / go back.
+    fn supervise_turn(events: mpsc::UnboundedSender<UiEvent>, handle: tokio::task::JoinHandle<()>) {
+        tokio::spawn(async move {
+            if handle.await.is_err() {
+                let _ = events.send(UiEvent::Error {
+                    code: crate::error::TURN_LOST,
+                    msg: "The turn ended unexpectedly; retry or go back.".to_string(),
+                    level: crate::error::ErrorLevel::Full,
+                    context: crate::error::ErrorContext::LongTurn,
+                });
+            }
+        });
+    }
+
     fn start_turn(&mut self, text: String, show_user: bool) {
         if show_user {
             self.messages.push(UiMessage {
@@ -4457,7 +4484,7 @@ impl Chat {
         // fail (the value stays true) and the new turn would be misread as interrupted during connection.
         let cancel_rx = self.cancel_tx.subscribe();
         self.cancel_tx.send_replace(false);
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
             let mut ui = crate::ui::tui_hooks(events.clone(), asks);
             let history = Self::load_history(&session, &mut ui.on_warning);
@@ -4479,6 +4506,7 @@ impl Chat {
                 }
             }
         });
+        Self::supervise_turn(self.events.clone(), handle);
     }
 
     /// Turn-level error message with auth guidance for the current provider:
@@ -4524,7 +4552,7 @@ impl Chat {
         // Same as start_turn: subscribe first, then reset (send does not update with no receivers).
         let cancel_rx = self.cancel_tx.subscribe();
         self.cancel_tx.send_replace(false);
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
             let mut ui = crate::ui::tui_hooks(events.clone(), asks);
             let history = Self::load_history(&session, &mut ui.on_warning);
@@ -4552,6 +4580,7 @@ impl Chat {
                 }
             }
         });
+        Self::supervise_turn(self.events.clone(), handle);
     }
 
     /// Dialog key input (Select semantics):
@@ -4924,7 +4953,19 @@ impl Chat {
     /// first press on idle empty input shows a hint, a second press within [`CTRL_C_WINDOW`] quits.
     fn ctrl_c(&mut self, now: std::time::Instant) -> bool {
         if self.busy {
-            self.interrupt();
+            // The quit path below is gated on `busy`, so a turn that never clears it (its
+            // task died) used to leave `kill` as the only way out. An interrupt the turn
+            // has ignored for [`INTERRUPT_GRACE`] hands Ctrl+C back its exit meaning.
+            if self
+                .interrupt_at
+                .is_some_and(|at| now.duration_since(at) >= INTERRUPT_GRACE)
+            {
+                self.exit = true;
+                return true;
+            }
+            self.interrupt(now);
+            self.notice = Some("Interrupting… press ctrl-c again to force quit");
+            self.notice_until = Some(now + CTRL_C_WINDOW);
             return true;
         }
         if !self.input.is_empty() {
@@ -4949,7 +4990,7 @@ impl Chat {
     /// Esc: interrupts when busy; closes menus/suggestions; double-press with text while idle clears (into history).
     fn escape(&mut self, now: std::time::Instant) -> bool {
         if self.busy {
-            self.interrupt();
+            self.interrupt(now);
             return true;
         }
         // A Page/Field error row is dismissable like every other overlay —
@@ -5012,9 +5053,11 @@ impl Chat {
         true
     }
 
-    /// Interrupts the current turn (Esc / Ctrl+C while busy).
-    fn interrupt(&mut self) {
+    /// Interrupts the current turn (Esc / Ctrl+C while busy). The first request is stamped
+    /// so Ctrl+C can tell "the turn is stopping" from "the turn is never going to answer".
+    fn interrupt(&mut self, now: std::time::Instant) {
         self.interrupted = true;
+        self.interrupt_at.get_or_insert(now);
         self.cancel_tx.send_replace(true);
     }
 
@@ -12264,6 +12307,87 @@ mod tests {
         assert!(!chat.exit, "outside the window: no exit, just a new hint");
         assert_eq!(chat.notice, Some("Press ctrl-c again to exit"));
         let _ = std::fs::remove_dir_all(&chat.session.home);
+    }
+
+    /// A turn whose task died never clears `busy`, and every quit route is gated on `busy` —
+    /// the session used to answer only to `kill`. An interrupt left unhonoured past
+    /// [`INTERRUPT_GRACE`] gives Ctrl+C its exit meaning back.
+    #[test]
+    fn ctrl_c_force_quits_a_turn_that_never_stops() {
+        let mut chat = chat_with_history("wedged");
+        let t0 = std::time::Instant::now();
+        chat.busy = true;
+
+        chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
+        assert!(chat.interrupted, "the first press asks the turn to stop");
+        assert!(
+            !chat.exit,
+            "a turn that may still be stopping is not killed"
+        );
+
+        chat.on_key_at(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            t0 + INTERRUPT_GRACE - std::time::Duration::from_millis(1),
+        );
+        assert!(!chat.exit, "inside the grace it stays an interrupt");
+
+        chat.on_key_at(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            t0 + INTERRUPT_GRACE,
+        );
+        assert!(chat.exit, "still busy past the grace → exit");
+        let _ = std::fs::remove_dir_all(&chat.session.home);
+    }
+
+    /// The escape hatch must not fire on a healthy interrupt: the next turn clears the
+    /// stamp, so Ctrl+C during it hints and interrupts exactly as before.
+    #[test]
+    fn a_new_turn_rearms_the_ordinary_interrupt() {
+        let mut chat = chat_with_history("rearm");
+        let t0 = std::time::Instant::now();
+        chat.busy = true;
+        chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
+        assert!(chat.interrupt_at.is_some());
+
+        chat.apply_event(UiEvent::TurnStart);
+        assert_eq!(
+            chat.interrupt_at, None,
+            "a fresh turn is owed a fresh grace"
+        );
+
+        chat.on_key_at(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            t0 + INTERRUPT_GRACE * 10,
+        );
+        assert!(!chat.exit, "the new turn's first press only interrupts");
+        let _ = std::fs::remove_dir_all(&chat.session.home);
+    }
+
+    /// A panic inside the turn task is swallowed by tokio (nothing joins the handle) and the
+    /// terminal repaints over its message, so the only visible symptom was a session stuck
+    /// on "Working…" forever. The supervisor turns it into the ordinary long-turn error.
+    #[tokio::test]
+    async fn a_lost_turn_reports_itself_instead_of_latching_busy() {
+        let (events, mut rx) = mpsc::unbounded_channel();
+        // The panic below prints its own backtrace line; that noise is the point — in the
+        // TUI it lands on the alternate screen and is repainted away within a frame.
+        let handle = tokio::spawn(async { panic!("turn task died") });
+
+        Chat::supervise_turn(events, handle);
+
+        let event = rx.recv().await;
+        assert!(
+            matches!(
+                event,
+                Some(UiEvent::Error { code, context, .. })
+                    if code == crate::error::TURN_LOST
+                        && context == crate::error::ErrorContext::LongTurn
+            ),
+            "a lost turn reports itself: {event:?}"
+        );
     }
 
     /// Esc: interrupts when busy; closes suggestions/panels layer by layer; double-press with text clears and saves to history.
