@@ -422,13 +422,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut ui = headless_hooks();
             let outcome =
                 run_query(&session, initial_messages, &prompt, &[], &mut ui, None).await?;
-            if outcome.end_reason == crate::query::QueryEndReason::EmptyResponse {
-                return Err(crate::query::QueryError::Protocol(
-                    "the model returned no response after the stream ended; retry the turn"
-                        .to_string(),
-                )
-                .into());
-            }
             extract_memory(&session, &outcome.messages, &home, &project_dir).await;
         } else {
             drop(initial_messages); // in interactive mode, --continue history is reused by later turns

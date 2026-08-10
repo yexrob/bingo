@@ -430,7 +430,7 @@ impl AssistantAccumulator {
         if let Some(block) = block {
             self.content.push(block);
         }
-        if matches!(self.stop_reason.as_deref(), None | Some("end_turn")) {
+        if self.stop_reason.as_deref() != Some("max_tokens") {
             self.stop_reason = Some("truncated".to_string());
         }
         true
@@ -561,6 +561,25 @@ mod tests {
                 text: "partial answer".into(),
             }]
         );
+    }
+
+    #[test]
+    fn finish_marks_unclosed_block_truncated_for_non_recoverable_stop_reason() {
+        let mut acc = AssistantAccumulator::new();
+        acc.push(&StreamEvent::TextStart { index: 0 }).unwrap();
+        acc.push(&StreamEvent::TextDelta {
+            index: 0,
+            text: "partial answer".into(),
+        })
+        .unwrap();
+        acc.push(&StreamEvent::StopReason {
+            stop_reason: Some("stop_sequence".into()),
+            output_tokens: Some(4),
+        })
+        .unwrap();
+
+        assert!(acc.finish());
+        assert_eq!(acc.stop_reason.as_deref(), Some("truncated"));
     }
 
     #[test]

@@ -4427,16 +4427,6 @@ impl Chat {
                         "model returned an empty response and was retried".to_string(),
                     ));
                 }
-                crate::query::QueryEndReason::EmptyResponse => {
-                    let _ = events.send(UiEvent::Error {
-                        code: "SERVER_ERROR",
-                        msg: "The model returned no response after the stream ended; retry the turn or go back."
-                            .to_string(),
-                        level: crate::error::ErrorLevel::Full,
-                        context: crate::error::ErrorContext::LongTurn,
-                    });
-                    return;
-                }
                 crate::query::QueryEndReason::Completed => {}
             }
         }

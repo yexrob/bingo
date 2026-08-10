@@ -37,14 +37,15 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const MAX_RETRIES: u32 = 5;
 
-/// thinking level → Responses `reasoning.effort`.
-fn effort_for(level: ThinkingLevel) -> &'static str {
+/// thinking level → Responses `reasoning.effort`; GPT-5.6 adds xhigh/max.
+fn effort_for(model: &str, level: ThinkingLevel) -> &'static str {
     match level {
         ThinkingLevel::Low => "low",
         ThinkingLevel::Medium => "medium",
         ThinkingLevel::High => "high",
-        ThinkingLevel::Xhigh => "xhigh",
-        ThinkingLevel::Max => "max",
+        ThinkingLevel::Xhigh if model.starts_with("gpt-5.6") => "xhigh",
+        ThinkingLevel::Max if model.starts_with("gpt-5.6") => "max",
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => "high",
     }
 }
 
@@ -272,7 +273,7 @@ fn build_body(request: &NeutralRequest, variant: OpenAiVariant) -> serde_json::V
         );
     }
     if let Some(level) = request.thinking {
-        body["reasoning"] = serde_json::json!({ "effort": effort_for(level) });
+        body["reasoning"] = serde_json::json!({ "effort": effort_for(&request.model, level) });
         // Reasoning include per endpoint: the public API takes the summary
         // (thinking UI affordance); the codex endpoint accepts only
         // reasoning.encrypted_content (main-tested 200; summary_text → 400).
@@ -949,12 +950,20 @@ mod tests {
     }
 
     #[test]
-    fn body_preserves_extended_thinking_effort() {
+    fn body_scopes_extended_thinking_effort_to_gpt_5_6() {
         let mut r = req();
+        r.model = "gpt-5.6-sol".into();
         for (level, effort) in [(ThinkingLevel::Xhigh, "xhigh"), (ThinkingLevel::Max, "max")] {
             r.thinking = Some(level);
             let body = build_body(&r, OpenAiVariant::Default);
             assert_eq!(body["reasoning"]["effort"], effort);
+        }
+
+        r.model = "gpt-5".into();
+        for level in [ThinkingLevel::Xhigh, ThinkingLevel::Max] {
+            r.thinking = Some(level);
+            let body = build_body(&r, OpenAiVariant::Default);
+            assert_eq!(body["reasoning"]["effort"], "high");
         }
     }
 

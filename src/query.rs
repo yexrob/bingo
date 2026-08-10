@@ -44,7 +44,6 @@ impl ErrorCode for QueryError {
 pub enum QueryEndReason {
     Completed,
     EmptyResponseRetried,
-    EmptyResponse,
 }
 
 /// Result of a query.
@@ -820,17 +819,14 @@ async fn query_loop(
         if turn.tool_uses.is_empty() && empty_assistant {
             if empty_retry_count == 0 {
                 empty_retry_count = 1;
-                if session.quiet {
+                if !session.quiet {
                     (ui.on_warning)("model returned an empty response; retrying once".to_string());
                 }
                 continue;
             }
-            println!();
-            return Ok(QueryOutcome {
-                messages,
-                end_reason: QueryEndReason::EmptyResponse,
-                aborted: false,
-            });
+            return Err(QueryError::Protocol(
+                "the model returned no response after the stream ended; retry the turn".to_string(),
+            ));
         }
         // The assistant message must enter history before branching: max_tokens recovery
         // and the Stop hook both need the model to see the truncated content, and a normal
@@ -1046,7 +1042,11 @@ async fn query_loop(
         if stop_after_tools || is_cancelled(&cancel_rx) {
             return Ok(QueryOutcome {
                 messages,
-                end_reason: QueryEndReason::Completed,
+                end_reason: if empty_retry_count > 0 {
+                    QueryEndReason::EmptyResponseRetried
+                } else {
+                    QueryEndReason::Completed
+                },
                 aborted: is_cancelled(&cancel_rx),
             });
         }
@@ -1879,6 +1879,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn content_free_completed_turn_retries_without_recording_it() {
+        let base_url = spawn_api(vec![
+            text_turn("", "end_turn"),
+            text_turn("recovered", "end_turn"),
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.end_reason, QueryEndReason::EmptyResponseRetried);
+        assert_eq!(
+            outcome
+                .messages
+                .iter()
+                .filter(|message| message.role == Role::Assistant)
+                .count(),
+            1,
+            "the content-free attempt is not recorded"
+        );
+    }
+
+    #[tokio::test]
     async fn unclosed_thinking_empty_turn_retries_without_recording_it() {
         let base_url = spawn_api(vec![
             unclosed_thinking_turn("cut off"),
@@ -1907,26 +1932,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_empty_turn_is_reported_and_not_silent() {
+    async fn repeated_empty_turn_returns_server_error_without_recording_assistant() {
+        let home = std::env::temp_dir().join(format!("bingo-empty-turn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let transcript = crate::transcript::create(&home, &home).unwrap();
         let base_url = spawn_api(vec![
             unclosed_thinking_turn("first"),
             unclosed_thinking_turn("second"),
         ])
         .await;
-        let session = test_session(base_url, None);
+        let session = test_session(base_url, Some(transcript.clone()));
         let mut ui = headless_hooks();
-        let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+        let error = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(outcome.end_reason, QueryEndReason::EmptyResponse);
+        assert_eq!(error.error_code(), "SERVER_ERROR");
+        assert!(error.to_string().contains("no response"));
         assert!(
-            outcome
-                .messages
+            transcript
+                .load_messages()
+                .unwrap()
                 .iter()
                 .all(|message| message.role != Role::Assistant),
-            "empty assistant attempts must not enter history"
+            "empty assistant attempts must not enter the transcript"
         );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// M2: on max_tokens truncation recovery, the truncated assistant content must already
