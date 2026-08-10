@@ -160,6 +160,56 @@ mod preview {
         buf
     }
 
+    /// The main transcript, for the sender bands (D50). Rendered in the chip skin
+    /// for the same reason the workspace frames are: a browser cannot show a kitty
+    /// placement, and faking one would be judging a layout the terminal never
+    /// draws. What this *can* judge is the rest of the band — where the name sits,
+    /// how the band reads against the user bubble below it and against the `⏺`
+    /// markers inside a message.
+    fn transcript_frame(width: u16, height: u16, theme: &Theme) -> Buffer {
+        use crate::tui::activities::{Activity, ActivityKind, ToolCall, ToolStatus};
+        use crate::tui::chat::{Role, UiMessage};
+
+        let mut chat = crate::tui::test_util::chat_at(width as usize, height as usize);
+        chat.theme = theme.clone();
+        let msg = |role: Role, text: &str| UiMessage {
+            role,
+            text: text.to_string(),
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        };
+        chat.messages
+            .push(msg(Role::User, "why is the release workflow failing?"));
+        let head = "The quality job fails before it reports a step: the lockfile carries \
+                    four dependency pins that were rewritten alongside the version bump.";
+        let tail = "Restoring them from the merge commit and letting cargo sync only the \
+                    root version puts it back.";
+        let mut assistant = msg(Role::Assistant, &format!("{head}\n\n{tail}"));
+        // A tool between two prose segments: the shape the band has to coexist
+        // with, and the reason `⏺` stayed — the second segment needs its own
+        // marker or it reads as more tool output.
+        let mut tool = Activity::new(ActivityKind::Tool(ToolCall::running(
+            "Bash",
+            "$ cargo metadata --locked",
+        )));
+        if let ActivityKind::Tool(t) = &mut tool.kind {
+            t.status = ToolStatus::Done;
+            t.result_summary = Some("4 pins restored".to_string());
+        }
+        assistant.activities.push(tool);
+        assistant.insert_points.push(head.chars().count() + 2);
+        assistant.group_of.push(None);
+        chat.messages.push(assistant);
+        chat.build_rows(width as usize);
+
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        view::render_rows(&chat.doc.rows, theme.text, &mut buf, area);
+        buf
+    }
+
     /// A cell colour, with `Reset` resolved to what the terminal would put there.
     /// This matters more than it looks: the view paints no background of its own
     /// any more, so almost every cell is `Reset` and a preview that invented a
@@ -274,6 +324,16 @@ mod preview {
             &frame(72, 24, &ws, &Theme::dark(), now),
             "72×24 dark",
             TERM_DARK,
+        ));
+        body.push_str(&html(
+            &transcript_frame(100, 22, &Theme::dark()),
+            "100×22 dark · main transcript, sender bands (chip skin)",
+            TERM_DARK,
+        ));
+        body.push_str(&html(
+            &transcript_frame(100, 22, &Theme::light()),
+            "100×22 light · main transcript, sender bands (chip skin)",
+            TERM_LIGHT,
         ));
         let switching = Workspace {
             switcher: Some(Switcher {

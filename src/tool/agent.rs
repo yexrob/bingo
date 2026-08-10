@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::agents::{AgentDef, AgentRegistry, FollowUp, InboxItem, MAX_FOLLOW_UPS, MsgId};
+use crate::agents::{
+    AgentDef, AgentKind, AgentRegistry, FollowUp, InboxItem, MAX_FOLLOW_UPS, MsgId,
+};
 use crate::api::contract::SystemBlock;
 use crate::api::types::Message;
 use crate::channels::ChannelRegistry;
@@ -130,11 +132,22 @@ pub struct AgentInput {
 pub struct AgentTool {
     session: Arc<Session>,
     defs: Vec<AgentDef>,
+    /// The crew pinned to this project, if there is one — read once at construction so
+    /// `description` names it without touching the disk on every request.
+    crew: Option<String>,
 }
 
 impl AgentTool {
     pub fn new(session: Arc<Session>, defs: Vec<AgentDef>) -> Self {
-        Self { session, defs }
+        let crew = crate::team::load_team_file(&std::env::current_dir().unwrap_or_default())
+            .ok()
+            .flatten()
+            .map(|t| t.name);
+        Self {
+            session,
+            defs,
+            crew,
+        }
     }
 }
 
@@ -151,26 +164,55 @@ fn ask_gate() -> &'static tokio::sync::Mutex<()> {
 /// progress checks of background agents).
 fn subagent_hooks(
     output: Arc<Mutex<String>>,
+    live: Arc<Mutex<Vec<crate::agents::LiveBlock>>>,
     cell: Arc<AgentCell>,
     watch: Arc<WatchRegistry>,
     id: WatchId,
     instance: String,
     ask: Option<Arc<crate::query::AskFn>>,
 ) -> UiHooks {
+    // `output` stays the flat reply (what the spawn returns and what `spoke` is
+    // judged on); `live` is the same turn as the instance view needs to show it,
+    // with the tool calls and round boundaries the flat string cannot carry.
+    let tool_live = live.clone();
+    let round_live = live.clone();
     UiHooks {
         on_event: Box::new(move |event| {
             if let crate::api::contract::StreamEvent::TextDelta { text, .. } = event
                 && let Ok(mut output) = output.lock()
             {
                 output.push_str(text);
+                if let Ok(mut live) = live.lock() {
+                    crate::agents::LiveBlock::push_text(&mut live, text);
+                }
                 cell.record_chars(text.chars().count());
                 // Feed produced text into the condition engine (notify_on hit → signal notification).
                 watch.feed_content(id, text);
             }
         }),
-        on_tool_ready: Box::new(|_name, _input, _standalone| {}),
+        on_tool_ready: Box::new(move |name, input, _standalone| {
+            let Ok(mut live) = tool_live.lock() else {
+                return;
+            };
+            let glyph = crate::tui::activities::tool_glyph(&name);
+            let shown = crate::tui::activities::display_tool_name(&name);
+            let summary = crate::query::summarize_input(&name, &input);
+            live.push(crate::agents::LiveBlock::Tool(if summary.is_empty() {
+                format!("{glyph}{shown}")
+            } else {
+                format!("{glyph}{shown}({summary})")
+            }));
+        }),
         on_tool_done: Box::new(|_| {}),
-        on_round_end: Box::new(|| {}),
+        // A round boundary closes the open prose block, so the next round's first
+        // sentence does not run into the previous round's last one.
+        on_round_end: Box::new(move || {
+            if let Ok(mut live) = round_live.lock()
+                && matches!(live.last(), Some(crate::agents::LiveBlock::Text(_)))
+            {
+                live.push(crate::agents::LiveBlock::Text(String::new()));
+            }
+        }),
         on_warning: Box::new(|_| {}),
         // A subagent has no prompt surface of its own, so its Ask decisions are forwarded to
         // the session that owns the UI, stamped with the instance name. Auto-denying here
@@ -481,9 +523,11 @@ pub(crate) fn spawn_agent_loop(
         let mut run = (first_id, cell);
         loop {
             let output = Arc::new(Mutex::new(String::new()));
-            loop_registry.set_live(&name, Some(output.clone()));
+            let live = Arc::new(Mutex::new(Vec::new()));
+            loop_registry.set_live(&name, Some(live.clone()));
             let mut ui = subagent_hooks(
                 output.clone(),
+                live.clone(),
                 run.1.clone(),
                 watch.clone(),
                 run.0,
@@ -568,6 +612,7 @@ impl AgentTool {
         &self,
         params: &AgentInput,
         def: Option<&AgentDef>,
+        cwd: &std::path::Path,
     ) -> Result<(String, String, Arc<Session>), ToolError> {
         let base = params
             .name
@@ -575,17 +620,21 @@ impl AgentTool {
             .or_else(|| def.map(|d| d.name.clone()))
             .unwrap_or_else(|| "agent".to_string());
         let name = self.session.agents.claim_name(&base);
-        let sub_session = self.build_sub_session(params, def, &name)?;
+        let sub_session = self.build_sub_session(params, def, &name, cwd)?;
         let description = params
             .description
             .clone()
             .unwrap_or_else(|| excerpt(&params.prompt));
+        // Every spawn from this tool is a hire, never a member: the blueprint is the only
+        // thing that makes a crew, and it is written by the user's confirmation alone (D53).
         self.session.agents.insert(
             &name,
+            AgentKind::Hire,
             def.map(|d| d.name.clone()),
             description.clone(),
             sub_session.clone(),
         );
+        record_hire(&self.session, cwd, &name, &description);
         Ok((name, description, sub_session))
     }
 
@@ -595,7 +644,7 @@ impl AgentTool {
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let def = self.resolve_def(params)?;
-        let (name, description, sub_session) = self.spawn_instance(params, def)?;
+        let (name, description, sub_session) = self.spawn_instance(params, def, &ctx.cwd)?;
         let _ = self.session.agents.next_run(&name);
         let conditions = params
             .notify_on
@@ -636,6 +685,7 @@ impl AgentTool {
         params: &AgentInput,
         def: Option<&AgentDef>,
         instance: &str,
+        cwd: &std::path::Path,
     ) -> Result<Arc<Session>, ToolError> {
         build_sub_session(
             &self.session,
@@ -644,7 +694,68 @@ impl AgentTool {
             params.thinking.clone(),
             def,
             instance,
+            hire_context(cwd),
         )
+    }
+}
+
+/// What a fresh ad-hoc spawn carries about the project's crew: the agreement it works to,
+/// and the fact that this spawn is a hire rather than a member.
+///
+/// Empty when no crew is pinned here — an ordinary subagent in a project with no crew is
+/// not temporary relative to anything, and telling it otherwise would be a lie about a
+/// team that does not exist. Memory stays empty either way: a past on disk belongs to a
+/// crew member, which is the thing a blueprint keeps across sessions (D51).
+/// Record a hire in the crew's decision log — the same append-only file `/team assign`
+/// writes to, so "who was brought in from outside, and for what" is reviewable after the
+/// fact rather than being a thing that only ever happened in a context window. No-op in a
+/// project with no crew: there is nothing for the hire to be outside of.
+fn record_hire(session: &Arc<Session>, cwd: &std::path::Path, name: &str, description: &str) {
+    let Some(team) = crate::team::load_team_file(cwd).ok().flatten() else {
+        return;
+    };
+    crate::team::append_decision(
+        &session.home,
+        cwd,
+        &crate::team::current_branch(cwd),
+        &team.name,
+        "hire",
+        description,
+        &[name],
+    );
+}
+
+fn hire_context(cwd: &std::path::Path) -> MemberContext {
+    let Some(team) = crate::team::load_team_file(cwd).ok().flatten() else {
+        return MemberContext::default();
+    };
+    MemberContext {
+        memory: None,
+        norms: crate::team::load_norms(cwd).map(|n| crate::team::norms_block(&team.name, &n)),
+        standing: Some(crate::team::hire_note(&team.name)),
+    }
+}
+
+/// The system blocks an instance carries beyond its persona: where its own past on disk is
+/// (D51), the agreement the project's crew works to, and — for a hire — the fact that it is
+/// not on that crew (D53). All three are system blocks rather than messages, because nobody
+/// said them, and because compaction rewrites messages and leaves `Session::system` alone.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct MemberContext {
+    /// Pointer to this instance's own transcript, for the instances that have one.
+    pub memory: Option<String>,
+    /// The crew's working agreement (`.bingo/team-norms.md`), already wrapped with its
+    /// precedence rule by [`crate::team::norms_block`].
+    pub norms: Option<String>,
+    /// Where this instance stands relative to the crew — set only for a temporary hire.
+    pub standing: Option<String>,
+}
+
+impl MemberContext {
+    fn blocks(self) -> impl Iterator<Item = String> {
+        [self.norms, self.standing, self.memory]
+            .into_iter()
+            .flatten()
     }
 }
 
@@ -653,7 +764,7 @@ impl AgentTool {
 /// degrading an invalid value to off would let the user believe thinking is on when it isn't,
 /// so sub-agent spawn must surface it immediately. Inherited values skip this check
 /// (consistent with the main session after `/think`, see [`build_sub_session`]).
-fn normalize_thinking(level: &str) -> Result<Option<String>, String> {
+pub(crate) fn normalize_thinking(level: &str) -> Result<Option<String>, String> {
     if level == "off" {
         return Ok(None);
     }
@@ -670,6 +781,9 @@ fn normalize_thinking(level: &str) -> Result<Option<String>, String> {
 /// take precedence over the definition, which takes precedence over inheritance. A named provider
 /// forks an independent-endpoint client so the parent session is unaffected; "default" or no
 /// provider shares the parent endpoint and follows the parent session's switches.
+///
+/// `context` carries what this instance knows beyond its persona — its own past on disk,
+/// the crew's agreement, its standing on that crew (see [`MemberContext`]).
 pub(crate) fn build_sub_session(
     parent: &Arc<Session>,
     model: Option<String>,
@@ -677,6 +791,7 @@ pub(crate) fn build_sub_session(
     thinking: Option<String>,
     def: Option<&AgentDef>,
     instance: &str,
+    context: MemberContext,
 ) -> Result<Arc<Session>, ToolError> {
     let model = model.or_else(|| def.and_then(|d| d.model.clone()));
     // provider: "default" and unset are equivalent (shared parent endpoint, follows the parent's switches);
@@ -751,6 +866,10 @@ pub(crate) fn build_sub_session(
             text: CHANNEL_NOTE.to_string(),
             cache: false,
         });
+    }
+    // The agreement, the standing, the past — whichever of them this instance has.
+    for text in context.blocks() {
+        system.push(SystemBlock { text, cache: false });
     }
     let mut runtime = crate::query::Runtime::new(model, None, Default::default());
     // Share the parent's permission table and MCP connections rather than snapshotting them:
@@ -838,6 +957,17 @@ impl Tool for AgentTool {
     fn description(&self) -> String {
         let mut desc = "Spawn a subagent for an independent task (depth-limited). Async by default: returns the instance name and task id immediately without waiting; a completion notification is injected when the subagent finishes; background:false waits synchronously for the result; notify_on also notifies when the subagent's output matches. The instance name is addressable: SendMessage sends follow-up instructions (context preserved), AgentControl manages (list/stop/delete). The `agent` argument uses a named definition (preset system prompt and model); model/provider/thinking can be set per instance (defaulting to the named definition or parent session)."
             .to_string();
+        // The crew is the reason not to reach for this tool, so it is named here and not
+        // only in the system prompt: this description is where the list of definitions
+        // tempts a second `dev` into existence beside the `dev` already standing by.
+        if let Some(crew) = &self.crew {
+            desc.push_str(&format!(
+                "\n\nThis project has a standing crew ({crew}, see the system prompt's roster): \
+                 give the work to a member with SendMessage first, and spawn here only for what \
+                 no member covers. A spawn is a temporary hire — it never enters .bingo/team.json \
+                 and is released once its task is done."
+            ));
+        }
         if !self.defs.is_empty() {
             desc.push_str("\n\nAvailable named definitions:");
             for def in &self.defs {
@@ -877,7 +1007,7 @@ impl Tool for AgentTool {
         }
 
         let def = self.resolve_def(&params)?;
-        let (name, description, sub_session) = self.spawn_instance(&params, def)?;
+        let (name, description, sub_session) = self.spawn_instance(&params, def, &ctx.cwd)?;
         let _ = self.session.agents.next_run(&name);
 
         // Foreground sub-agents can also be watched: Running (characters produced) → Done/Failed.
@@ -896,9 +1026,11 @@ impl Tool for AgentTool {
         );
         self.session.agents.set_run_watch(&name, id);
         let output = Arc::new(Mutex::new(String::new()));
-        self.session.agents.set_live(&name, Some(output.clone()));
+        let live = Arc::new(Mutex::new(Vec::new()));
+        self.session.agents.set_live(&name, Some(live.clone()));
         let mut ui = subagent_hooks(
             output.clone(),
+            live.clone(),
             cell.clone(),
             ctx.watch.clone(),
             id,
@@ -1193,9 +1325,12 @@ impl Tool for AgentControlTool {
                                 String::new()
                             };
                             format!(
-                                "- {} ({}{def}{pending}{unacked}): {}",
+                                "- {} ({} {}{def}{pending}{unacked}, {} @ {}): {}",
                                 s.name,
+                                s.kind.label(),
                                 s.state.label(),
+                                s.model,
+                                s.provider,
                                 s.description
                             )
                         })
@@ -1357,6 +1492,14 @@ mod tests {
         (session, client)
     }
 
+    /// A project directory with no crew pinned. Never the ambient cwd: these tests assert
+    /// the exact system blocks a sub-session gets, and running them inside a repo that has
+    /// its own `.bingo/team.json` would add the hire's blocks and fail them for a reason
+    /// that has nothing to do with what they check.
+    fn crewless() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("bingo-crewless-{}", std::process::id()))
+    }
+
     fn params(prompt: &str) -> AgentInput {
         AgentInput {
             prompt: prompt.into(),
@@ -1392,13 +1535,123 @@ mod tests {
         }
     }
 
+    /// A project directory with a pinned crew and a written agreement.
+    fn crewed_project(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("bingo-hire-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".bingo")).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            dir.join(crate::team::TEAM_FILE),
+            r#"{"name":"dev-room","members":[{"name":"Mira","agent":"qa"}]}"#,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            dir.join(crate::team::NORMS_FILE),
+            "# Team norms\n\n- Report outcomes as they are.\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        dir
+    }
+
+    /// A spawn in a crewed project is a hire and is told so (D53): it carries the crew's
+    /// agreement, and it knows it is not on the crew. Without the second block "temporary"
+    /// would be bookkeeping the instance itself never learns, and it would plan as if there
+    /// were a next session in which it is asked again.
+    #[test]
+    fn a_spawn_beside_a_crew_is_a_hire_and_knows_it() {
+        let (session, _client) = parent_session();
+        let project = crewed_project("standing");
+        let tool = AgentTool::new(session.clone(), Vec::new());
+        let sub = tool
+            .build_sub_session(&params("one job"), None, "temp", &project)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let has = |head: &str| sub.system.iter().any(|b| b.text.starts_with(head));
+        assert!(has("# Team norms (dev-room)"), "{:?}", sub.system);
+        assert!(has("# You are a temporary hire"), "{:?}", sub.system);
+        let standing = sub
+            .system
+            .iter()
+            .find(|b| b.text.starts_with("# You are a temporary hire"))
+            .unwrap_or_else(|| panic!("expected the standing block"));
+        assert!(
+            standing.text.contains(crate::team::TEAM_FILE)
+                && standing.text.contains("not written into"),
+            "it is told it never joins the blueprint: {}",
+            standing.text
+        );
+        std::fs::remove_dir_all(&project).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// With no crew pinned, an ad-hoc subagent is the ordinary way to work: telling it that
+    /// it is temporary relative to a team that does not exist would be a lie, and it is the
+    /// same session it has always been.
+    #[test]
+    fn a_spawn_with_no_crew_is_told_nothing_about_one() {
+        let (session, _client) = parent_session();
+        let empty = std::env::temp_dir().join(format!("bingo-nocrew-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).unwrap_or_else(|e| panic!("{e}"));
+        let tool = AgentTool::new(session.clone(), Vec::new());
+        let sub = tool
+            .build_sub_session(&params("do it"), None, "solo", &empty)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            !sub.system
+                .iter()
+                .any(|b| b.text.contains("temporary hire") || b.text.starts_with("# Team norms")),
+            "{:?}",
+            sub.system
+        );
+        std::fs::remove_dir_all(&empty).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// The acceptance criterion in one assertion: hiring leaves the blueprint byte-identical.
+    /// A hire that could edit `.bingo/team.json` would make the crew something the model
+    /// grows on its own, which is exactly the decision the user keeps.
+    #[tokio::test]
+    async fn hiring_never_touches_the_blueprint() {
+        let (session, _client) = parent_session();
+        let project = crewed_project("blueprint");
+        let path = project.join(crate::team::TEAM_FILE);
+        let before = std::fs::read(&path).unwrap_or_else(|e| panic!("{e}"));
+        let tool = AgentTool::new(session.clone(), Vec::new());
+        let ctx = ToolContext {
+            cwd: project.clone(),
+            ..hub_ctx(&session)
+        };
+        let out = tool
+            .call(
+                serde_json::json!({"prompt": "look at one thing", "description": "one job"}),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            out.content.as_str().unwrap_or_default().contains("name"),
+            "the spawn returns an addressable instance"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap_or_else(|e| panic!("{e}")),
+            before,
+            "the blueprint is byte-identical before and after a hire"
+        );
+        let listed = session.agents.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].kind,
+            AgentKind::Hire,
+            "an Agent-tool spawn is never a crew member"
+        );
+        std::fs::remove_dir_all(&project).unwrap_or_else(|e| panic!("{e}"));
+    }
+
     #[test]
     fn sub_session_inherits_model_and_shared_endpoint() {
         let (session, client) = parent_session();
         let _ = session.runtime.thinking_tx.send(Some("medium".into()));
         let tool = AgentTool::new(session.clone(), Vec::new());
         let sub = tool
-            .build_sub_session(&params("do it"), None, "sub")
+            .build_sub_session(&params("do it"), None, "sub", &crewless())
             .unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "parent-model");
         assert_eq!(
@@ -1434,7 +1687,9 @@ mod tests {
         p.model = Some("sub-model".into());
         p.provider = Some("ds".into());
         p.thinking = Some("xhigh".into());
-        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, None, "sub", &crewless())
+            .unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "sub-model");
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
         assert_eq!(
@@ -1463,7 +1718,7 @@ mod tests {
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
         // The definition supplies system/model/provider/thinking defaults.
         let sub = tool
-            .build_sub_session(&params("review"), Some(&d), "sub")
+            .build_sub_session(&params("review"), Some(&d), "sub", &crewless())
             .unwrap();
         // Default is append: parent system + persona + the subagent note block.
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
@@ -1483,7 +1738,9 @@ mod tests {
         let mut p = params("review");
         p.model = Some("explicit".into());
         p.thinking = Some("off".into());
-        let sub = tool.build_sub_session(&p, Some(&d), "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, Some(&d), "sub", &crewless())
+            .unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "explicit");
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
@@ -1504,7 +1761,8 @@ mod tests {
         let mut p = params("do it");
         p.provider = Some("nope".into());
         assert!(
-            tool.build_sub_session(&p, None, "sub").is_err(),
+            tool.build_sub_session(&p, None, "sub", &crewless())
+                .is_err(),
             "unknown provider errors"
         );
     }
@@ -1518,7 +1776,7 @@ mod tests {
         let tool = AgentTool::new(session.clone(), Vec::new());
         let mut p = params("do it");
         p.provider = Some("ds".into());
-        let err = sub_err(tool.build_sub_session(&p, None, "sub"));
+        let err = sub_err(tool.build_sub_session(&p, None, "sub", &crewless()));
         assert!(
             err.contains("requires a model") && err.contains("ds"),
             "crossing providers requires an explicit model: {err}"
@@ -1527,7 +1785,7 @@ mod tests {
         let mut d = def("reviewer");
         d.model = None;
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
-        let err = sub_err(tool.build_sub_session(&params("review"), Some(&d), "sub"));
+        let err = sub_err(tool.build_sub_session(&params("review"), Some(&d), "sub", &crewless()));
         assert!(
             err.contains("requires a model"),
             "the definition-side cross-provider case errors the same way: {err}"
@@ -1537,7 +1795,9 @@ mod tests {
         let tool = AgentTool::new(session.clone(), Vec::new());
         let mut p = params("do it");
         p.provider = Some("ds".into());
-        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, None, "sub", &crewless())
+            .unwrap();
         assert_eq!(
             *sub.runtime.model.borrow(),
             "parent-model",
@@ -1555,7 +1815,9 @@ mod tests {
         let mut p = params("do it");
         p.provider = Some("ds".into());
         p.model = Some("ds-model".into());
-        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, None, "sub", &crewless())
+            .unwrap();
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
             None,
@@ -1566,7 +1828,9 @@ mod tests {
         p.provider = Some("ds".into());
         p.model = Some("ds-model".into());
         p.thinking = Some("high".into());
-        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, None, "sub", &crewless())
+            .unwrap();
         assert_eq!(sub.runtime.thinking.borrow().as_deref(), Some("high"));
     }
 
@@ -1578,7 +1842,9 @@ mod tests {
         let tool = AgentTool::new(session.clone(), Vec::new());
         let mut p = params("do it");
         p.provider = Some("ds".into());
-        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, None, "sub", &crewless())
+            .unwrap();
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
             Some("xhigh"),
@@ -1593,7 +1859,9 @@ mod tests {
         // Explicit "default": shares the parent endpoint, no fork, no error.
         let mut p = params("do it");
         p.provider = Some("default".into());
-        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, None, "sub", &crewless())
+            .unwrap();
         assert_eq!(sub.runtime.provider.borrow().as_str(), "default");
         assert_eq!(
             sub.client.current_endpoint(),
@@ -1611,7 +1879,7 @@ mod tests {
         d.provider = Some("default".into());
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
         let sub = tool
-            .build_sub_session(&params("review"), Some(&d), "sub")
+            .build_sub_session(&params("review"), Some(&d), "sub", &crewless())
             .unwrap();
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
     }
@@ -1623,7 +1891,7 @@ mod tests {
         for bad in ["auto", "super", "HIGH"] {
             let mut p = params("do it");
             p.thinking = Some(bad.into());
-            let err = sub_err(tool.build_sub_session(&p, None, "sub"));
+            let err = sub_err(tool.build_sub_session(&p, None, "sub", &crewless()));
             assert!(
                 err.contains("invalid thinking level"),
                 "invalid level {bad:?} should error: {err}"
@@ -1633,7 +1901,7 @@ mod tests {
         let mut d = def("reviewer");
         d.thinking = Some("bogus".into());
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
-        let err = sub_err(tool.build_sub_session(&params("review"), Some(&d), "sub"));
+        let err = sub_err(tool.build_sub_session(&params("review"), Some(&d), "sub", &crewless()));
         assert!(
             err.contains("invalid thinking level"),
             "definition-side invalid value should error: {err}"
@@ -1669,9 +1937,13 @@ mod tests {
     #[tokio::test]
     async fn agent_control_list_stop_delete() {
         let (session, _client) = parent_session();
-        session
-            .agents
-            .insert("scout", None, "research".into(), session.clone());
+        session.agents.insert(
+            "scout",
+            AgentKind::Hire,
+            None,
+            "research".into(),
+            session.clone(),
+        );
         let ctl = AgentControlTool::new(session.clone());
         let ctx = crate::tool::ToolContext {
             home: std::env::temp_dir(),
@@ -1731,9 +2003,13 @@ mod tests {
     #[tokio::test]
     async fn send_message_queues_on_running_instance() {
         let (session, _client) = parent_session();
-        session
-            .agents
-            .insert("worker", None, "do work".into(), session.clone());
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        );
         let send = SendMessageTool::new(session.clone());
         let ctx = hub_ctx(&session);
         // The acknowledgement wait is opt-in: omitting it keeps the plain fire-and-forget path.
@@ -1769,9 +2045,13 @@ mod tests {
     #[tokio::test]
     async fn the_reply_check_is_on_by_default_and_zero_turns_it_off() {
         let (session, _client) = parent_session();
-        session
-            .agents
-            .insert("worker", None, "do work".into(), session.clone());
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        );
         let send = SendMessageTool::new(session.clone());
         let ctx = hub_ctx(&session);
         let receipt = |out: ToolResult| -> serde_json::Value {
@@ -1837,9 +2117,13 @@ mod tests {
     async fn unacknowledged_message_is_chased_three_times_then_reported() {
         let (session, _client) = parent_session();
         // Running: the boundary flush cannot claim it, so the message really does stay queued.
-        session
-            .agents
-            .insert("worker", None, "do work".into(), session.clone());
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        );
         let ctx = hub_ctx(&session);
         let out = SendMessageTool::new(session.clone())
             .call(
@@ -1886,9 +2170,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_receiver_that_reads_and_says_nothing_is_still_chased() {
         let (session, _client) = parent_session();
-        session
-            .agents
-            .insert("mute", None, "silent".into(), session.clone());
+        session.agents.insert(
+            "mute",
+            AgentKind::Hire,
+            None,
+            "silent".into(),
+            session.clone(),
+        );
         let ctx = hub_ctx(&session);
         SendMessageTool::new(session.clone())
             .call(
@@ -1932,9 +2220,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_acknowledged_message_reports_nothing() {
         let (session, _client) = parent_session();
-        session
-            .agents
-            .insert("worker", None, "do work".into(), session.clone());
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        );
         let ctx = hub_ctx(&session);
         SendMessageTool::new(session.clone())
             .call(
@@ -1992,13 +2284,22 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].media_type, "image/png");
         // Sub-sessions share the table, so a nested spawn can resolve the same marker.
-        let sub = build_sub_session(&session, None, None, None, None, "worker").unwrap();
+        let sub = build_sub_session(
+            &session,
+            None,
+            None,
+            None,
+            None,
+            "worker",
+            MemberContext::default(),
+        )
+        .unwrap();
         assert_eq!(sub.attachments.resolve("#[image 1]").len(), 1);
 
         // Follow-up: a queued instruction keeps its images until it is delivered.
         session
             .agents
-            .insert("worker", None, "d".into(), sub.clone());
+            .insert("worker", AgentKind::Hire, None, "d".into(), sub.clone());
         let id = session
             .agents
             .deliver("worker", "compare #[image 1]", images.clone(), None)
@@ -2057,6 +2358,7 @@ mod tests {
             None,
             None,
             "looker",
+            MemberContext::default(),
         )
         .unwrap_or_else(|e| panic!("{e}"));
         assert!(
@@ -2086,7 +2388,7 @@ mod tests {
         d.inherit_system = false;
         let tool = AgentTool::new(session, vec![d.clone()]);
         let sub = tool
-            .build_sub_session(&params("review"), Some(&d), "sub")
+            .build_sub_session(&params("review"), Some(&d), "sub", &crewless())
             .unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, ["You are the reviewer.", SUBAGENT_NOTE]);
@@ -2102,8 +2404,16 @@ mod tests {
     fn channel_note_is_gated_by_the_flag() {
         let (off, _c1) = parent_session();
         assert!(!off.settings.experimental.agent_channels, "off by default");
-        let sub = build_sub_session(&off, None, None, None, None, "solo")
-            .unwrap_or_else(|e| panic!("spawn: {e}"));
+        let sub = build_sub_session(
+            &off,
+            None,
+            None,
+            None,
+            None,
+            "solo",
+            MemberContext::default(),
+        )
+        .unwrap_or_else(|e| panic!("spawn: {e}"));
         assert!(
             !sub.system.iter().any(|b| b.text == CHANNEL_NOTE),
             "channel etiquette must not be injected when channels are off"
@@ -2112,8 +2422,16 @@ mod tests {
         let (mut on, _c2) = parent_session();
         let session = Arc::get_mut(&mut on).unwrap_or_else(|| panic!("exclusive"));
         session.settings.experimental.agent_channels = true;
-        let sub = build_sub_session(&on, None, None, None, None, "member")
-            .unwrap_or_else(|e| panic!("spawn: {e}"));
+        let sub = build_sub_session(
+            &on,
+            None,
+            None,
+            None,
+            None,
+            "member",
+            MemberContext::default(),
+        )
+        .unwrap_or_else(|e| panic!("spawn: {e}"));
         assert!(sub.system.iter().any(|b| b.text == CHANNEL_NOTE));
         // Both failure modes have to survive edits to this text: the storm it was written
         // for, and the over-correction where nobody answers the human at all.
@@ -2131,11 +2449,69 @@ mod tests {
         );
     }
 
+    /// A crew member's memory arrives as a system block, not as history and not as
+    /// a message: nobody said it, and the whole point of D51 is that the past stays
+    /// on disk until the member decides to fetch it. An ad-hoc subagent has no past
+    /// and is told nothing.
+    #[test]
+    fn memory_note_rides_the_system_prompt_when_there_is_one() {
+        let (parent, _c) = parent_session();
+        let note = "your past is at /tmp/qa.md".to_string();
+        let sub = build_sub_session(
+            &parent,
+            None,
+            None,
+            None,
+            None,
+            "qa",
+            MemberContext {
+                memory: Some(note.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("spawn: {e}"));
+        assert!(
+            sub.system.iter().any(|b| b.text == note),
+            "the pointer is in the system prompt"
+        );
+        assert!(
+            sub.system.iter().all(|b| !b.cache),
+            "a per-member tail block must not open another cache breakpoint"
+        );
+
+        let solo = build_sub_session(
+            &parent,
+            None,
+            None,
+            None,
+            None,
+            "solo",
+            MemberContext::default(),
+        )
+        .unwrap_or_else(|e| panic!("spawn: {e}"));
+        assert!(
+            !solo
+                .system
+                .iter()
+                .any(|b| b.text.contains("your past is at")),
+            "an ad-hoc subagent is told nothing about a past it does not have"
+        );
+    }
+
     /// No named definition: the parent's system carries over, plus the note.
     #[test]
     fn plain_subagent_inherits_parent_system_plus_note() {
         let (session, _client) = parent_session();
-        let sub = build_sub_session(&session, None, None, None, None, "worker").unwrap();
+        let sub = build_sub_session(
+            &session,
+            None,
+            None,
+            None,
+            None,
+            "worker",
+            MemberContext::default(),
+        )
+        .unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, ["parent system", SUBAGENT_NOTE]);
         assert!(
@@ -2149,7 +2525,16 @@ mod tests {
     #[test]
     fn sub_session_shares_parent_mcp_and_permissions() {
         let (parent, _) = parent_session();
-        let sub = build_sub_session(&parent, None, None, None, None, "worker").unwrap();
+        let sub = build_sub_session(
+            &parent,
+            None,
+            None,
+            None,
+            None,
+            "worker",
+            MemberContext::default(),
+        )
+        .unwrap();
         assert!(
             Arc::ptr_eq(&sub.runtime.mcp, &parent.runtime.mcp),
             "the MCP manager should be shared, otherwise subagents get no MCP tools"
@@ -2183,6 +2568,7 @@ mod tests {
         );
         let ui = subagent_hooks(
             Arc::new(Mutex::new(String::new())),
+            Arc::new(Mutex::new(Vec::new())),
             Arc::new(AgentCell::new()),
             watch.clone(),
             id,
@@ -2198,6 +2584,7 @@ mod tests {
         // Nothing attached (embedded/test path): deny rather than block on a modal nobody shows.
         let ui = subagent_hooks(
             Arc::new(Mutex::new(String::new())),
+            Arc::new(Mutex::new(Vec::new())),
             Arc::new(AgentCell::new()),
             watch,
             id,

@@ -25,7 +25,10 @@ produces intent; side effects are gated by the harness.
 - **Agent teams (project-scoped)**: a `.bingo/team.json` fixes a roster of
   roles to a project; the team is pulled up automatically at startup (members
   idle at zero token cost) and managed via `/team`; cross-session memory is
-  scoped by project path + git branch.
+  scoped by project path + git branch. Where a crew is pinned it is the default
+  workforce — work routes to a member, and a subagent spawned beside it is a
+  temporary hire that never joins the roster. `.bingo/team-norms.md` is the
+  crew's working agreement, carried by every member.
 - **Experience library**: agents accumulate reusable operational experience
   per project (trigger/summary/steps/verify), share it across sessions, and
   record verified helpful/harmful outcomes without automatic self-promotion.
@@ -183,7 +186,8 @@ published URL. The equivalent CLI is `bingo share [session] [--public]
 [--open] [-o path]`.
 `/team` (project teams): `list` (roster + runtime), `start` (pull up / reuse),
 `status`, `assign <member> <task>`, `stop`, `validate`, `new` (scaffold
-`team.json`), `memory list|gc`.
+`team.json` + `team-norms.md`), `norms` (the working agreement),
+`memory list|gc`.
 
 ### Image rendering
 
@@ -225,7 +229,7 @@ otherwise the user layer — no `.bingo/` is conjured in arbitrary directories
 | `mcpServers` | object | see MCP below |
 | `disabledMcpServers` | string[] | disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`, rule syntax under Permission system below |
-| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50) |
+| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50), `chatAvatars` (default false = no faces in the main chat; the workspace views keep theirs either way) |
 | `team` | object | team startup behavior: `{"autoStart": true}` (default true = auto-pull the project team at startup; `--no-team` or false disables) |
 | `hooks` | object | per-event hooks, see Hooks below |
 
@@ -299,11 +303,20 @@ room reuses the channel machinery, and control stays on the hub-and-spoke
 surface.
 
 - **Definition**: `.bingo/team.json` (camelCase, committed to the repo):
-  `name` + `channel {mode, messageLimit}` + `members [{name, agent, avatar?}]` —
+  `name` + `channel {mode, messageLimit}` +
+  `members [{name, agent, avatar?, model?, provider?, thinking?}]` —
   each member references an AgentDef, so a persona lives in one place
   (`.bingo/agents/<name>.md`) and can join multiple teams. `name` is the name
   shown on the member's messages (give it a person's name, not a role code) and
   `avatar` pins one of the bundled portraits, so a crew is a fixed cast.
+- **Engine per member**: `model`, `provider` and `thinking` pin what a member
+  runs on. Which model does which job is part of the formation, not a per-spawn
+  whim, so it lives in the committed blueprint — a crew can put its reviewer on
+  a cheap fast endpoint and its architect on the expensive one. Each falls back
+  to the agent definition and then to the session, exactly as an `Agent` call's
+  parameters do; a named `provider` other than the session's own needs a `model`
+  too, since a model name means nothing at another endpoint. `/team list` and
+  `AgentControl list` report the engine each running instance is actually on.
 - **Startup pull-up**: with `settings.team.autoStart` (default true) the team
   is pulled up at startup — spawn members and create the room, but do **not**
   wake them (members sit idle at zero token cost until `/team assign` or a
@@ -312,12 +325,42 @@ surface.
 - **Slash commands**: `/team list` (roster + runtime in one screen),
   `start`, `status` (● idle / ◐ busy / ✗ error / ○ offline), `assign`,
   `stop`, `validate` (same checks as start — if validate passes, start
-  succeeds), `new` (interactive scaffold that always produces a valid file),
+  succeeds), `new` (interactive scaffold that always produces a valid file,
+  plus a starter working agreement), `norms` (read the agreement),
   `memory list|gc`.
+- **The crew is the default workforce**: where a team is pinned, the hub sees
+  the roster in its system prompt along with the rule that goes with it — give
+  the work to a member with `SendMessage`, and spawn a subagent only for what
+  no member covers. Spawning a stand-in for a member that is already idle
+  wastes a crew you are paying for and throws away the memory it holds.
+- **A hire is temporary**: an Agent-tool spawn beside a pinned crew is a hire,
+  not a member. It never enters `.bingo/team.json`; it is listed apart from the
+  crew in `/team list` and `AgentControl list` (`crew` / `hire`); it is recorded
+  in the crew's `decisions.md` under `type: hire`; and it is released once its
+  task is done — idle, inbox empty, nothing still owed an answer, with one hub
+  round left to send a follow-up in. The sweep runs only while a crew is
+  actually up: in a project with no team, ad-hoc subagents live as long as they
+  always did.
+- **Team norms**: `.bingo/team-norms.md`, committed beside the blueprint, is the
+  crew's working agreement — prose, not a schema, because it is read by models
+  and reviewed by people. It reaches every member and every hire as a system
+  block, so it applies without being restated, and it carries its own precedence
+  rule: a direct instruction outranks it on the point that instruction makes,
+  and every other norm still holds. `/team new` scaffolds one (never overwriting
+  an existing file); `/team norms` prints what is on disk.
 - **Cross-session memory**: member history and append-only decision records
   persist to `~/.config/bingo/teams/<project-hash>/<branch>/<team>/` — scoped
   by project path + git branch, so main and a feature worktree never share
-  memory. Restored on pull-up without waking the members.
+  memory. Each member gets `<name>.md` (the readable transcript) beside
+  `<name>.json` (the exact record).
+- **Pointed at, not preloaded**: a member spawns with an empty context and one
+  line telling it where its own transcript is, so it can read what was decided
+  before when the task depends on it. Loading the history instead charged a
+  growing, invisible toll on the member's first turn — the file is unbounded
+  and monotonic, every session appends and nothing prunes — for relevance that
+  decays fast. The hub starts each session clean too; a crew member should not
+  be the exception. `/team memory list` shows what is on disk; open a `.md` to
+  read it yourself.
 - **The `Team` tool** (main session only) gives the model the same surface:
   `status` (blueprint + each member's runtime state + the definitions available
   to draft with), `validate`, `start`, `stop`, `save` (writes the blueprint;
@@ -361,6 +404,20 @@ placeholder cells. A team member's portrait is pinned in `.bingo/team.json`
 (`"avatar": "sora"`) so a crew keeps a fixed cast; everyone else gets a face
 derived from their name. Terminals without that capability keep the sender's initial
 on a colour; the row count is identical either way, so only the gutter changes.
+
+**In the main chat**, behind `experimental.chatAvatars` (off by default), the
+same faces sit on a band above each message: the
+speaker's portrait beside their name — `main` for the hub, `You` for your own
+messages, the names the room itself uses. Message bodies are untouched
+underneath; they still run the full width, and the `⏺` markers inside a message
+keep separating prose from tool rows. The band is two rows where portraits place
+and one where they fall back to the chip — nothing below it depends on its
+height. One known degradation: a terminal that purges its image store (a resize
+does) gets the faces still on screen redrawn, but messages already in scrollback
+keep four blank columns where the portrait was, with the name intact. Switched
+off, the transcript carries no band and a subagent's watch row keeps its `◉`;
+the switch governs the main chat only — DM, channel and team views wear their
+faces regardless, where the portrait sits in a gutter the layout already spends.
 
 ## Skills
 

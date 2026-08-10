@@ -157,6 +157,37 @@ impl AgentState {
     }
 }
 
+/// What an instance is to this project (D53): a standing member of the crew pinned in
+/// `.bingo/team.json`, or someone hired for one task because no member covered it.
+///
+/// The distinction is not cosmetic. A member is a commitment the user made in a committed
+/// file and outlives every task; a hire is spawned by the model, never enters that file,
+/// and is released once its task is done — so the two cannot be the same row in a listing
+/// or the same lifetime in the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKind {
+    /// Spawned from the blueprint by `spawn_team`.
+    Crew,
+    /// Spawned ad hoc by the Agent tool for a single task.
+    Hire,
+}
+
+impl AgentKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Crew => "crew",
+            Self::Hire => "hire",
+        }
+    }
+}
+
+/// Sweeps a finished hire survives before it is released. One is not enough: a hire that
+/// finishes during hub round N has its result reported in round N+1, which is the round
+/// the hub can first act on it — releasing at the end of N+1's own sweep would take the
+/// instance away in the same round its result arrived. Two gives the hub exactly one round
+/// to send a follow-up (which refills the inbox and resets the count) before the name goes.
+const HIRE_LEASE: u8 = 2;
+
 /// Snapshot for list.
 #[derive(Debug, Clone)]
 pub struct AgentStatus {
@@ -164,10 +195,18 @@ pub struct AgentStatus {
     pub def: Option<String>,
     pub description: String,
     pub state: AgentState,
+    /// Crew member or temporary hire (D53).
+    pub kind: AgentKind,
     /// Messages waiting in the inbox for the next turn boundary.
     pub pending: usize,
     /// Messages the sender has had no reply to yet — queued, or read and left unanswered.
     pub unacked: usize,
+    /// The engine this instance actually runs on. Worth reporting because it need
+    /// not be the session's: a definition or a team blueprint can pin a different
+    /// one per instance, and "which member is on which model" is otherwise
+    /// invisible until the bill arrives.
+    pub model: String,
+    pub provider: String,
 }
 
 /// Message identifier, unique per registry. Handed back to the sender so it can check later
@@ -301,6 +340,10 @@ struct Entry {
     def: Option<String>,
     description: String,
     state: AgentState,
+    kind: AgentKind,
+    /// Sweeps a finished hire has left before release, refilled whenever it has work
+    /// again. Meaningless for a crew member, which no sweep touches.
+    lease: u8,
     /// Full message history since the last completed turn (continuation context).
     history: Vec<Message>,
     /// Inbox accumulated since the last drain (commands + channel messages, injected as one
@@ -316,7 +359,33 @@ struct Entry {
     watch_id: Option<crate::watch::WatchId>,
     /// Streaming output of the current turn (shares the same Arc with subagent_hooks;
     /// cleared at turn end — the TUI instance view shows the live tail from this).
-    live: Option<Arc<Mutex<String>>>,
+    live: Option<Arc<Mutex<Vec<LiveBlock>>>>,
+}
+
+/// One piece of a running turn, as the instance view sees it while it happens.
+///
+/// A running turn used to reach the view as one flat string of text deltas, which
+/// showed neither the tool calls between rounds nor the boundaries between them —
+/// so a five-round turn read as one wall with sentences butting together
+/// (`…the current state.Now let me verify…`). The finished history has always
+/// carried both; this is what lets the live view say the same thing before the
+/// turn ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveBlock {
+    /// Assistant prose, one block per round.
+    Text(String),
+    /// A tool call, already rendered the way the transcript renders one.
+    Tool(String),
+}
+
+impl LiveBlock {
+    /// Append streamed text, continuing the open prose block or opening one.
+    pub fn push_text(blocks: &mut Vec<LiveBlock>, text: &str) {
+        match blocks.last_mut() {
+            Some(LiveBlock::Text(open)) => open.push_str(text),
+            _ => blocks.push(LiveBlock::Text(text.to_string())),
+        }
+    }
 }
 
 /// Session-level instance registry (Session holds the Arc; shared by child sessions).
@@ -422,6 +491,7 @@ impl AgentRegistry {
     pub fn insert(
         &self,
         name: &str,
+        kind: AgentKind,
         def: Option<String>,
         description: String,
         session: Arc<Session>,
@@ -432,6 +502,8 @@ impl AgentRegistry {
                 def,
                 description,
                 state: AgentState::Running,
+                kind,
+                lease: HIRE_LEASE,
                 history: Vec::new(),
                 inbox: Vec::new(),
                 acks: Vec::new(),
@@ -445,34 +517,82 @@ impl AgentRegistry {
         self.sync_share(name);
     }
 
-    /// Inject an instance's initial/restored history (D31 team memory restore: no wake-up, only preloads continuation context).
-    pub fn set_history(&self, name: &str, history: Vec<Message>) {
-        if let Some(entry) = self.lock().get_mut(name) {
-            entry.history = history;
+    /// Release the hires whose task is done, returning the names taken away.
+    ///
+    /// Only fires while a crew member is actually up: a hire is "temporary" relative to a
+    /// standing crew, and in a project with none, an ad-hoc subagent is the ordinary way to
+    /// work — sweeping those would delete instances the hub still expects to address.
+    ///
+    /// Done means the instance is idle with nothing waiting: no inbox, no message the hub is
+    /// still owed an answer to, and at least one run behind it (a hire the loop has not
+    /// picked up yet is not finished, it is unstarted). A hire the hub stopped is released on
+    /// the spot — it will never run again, and holding the name serves nobody.
+    pub fn release_hires(&self) -> Vec<String> {
+        let mut inner = self.lock();
+        if !inner
+            .values()
+            .any(|e| e.kind == AgentKind::Crew && e.state != AgentState::Stopped)
+        {
+            return Vec::new();
         }
+        let mut released = Vec::new();
+        inner.retain(|name, e| {
+            if e.kind != AgentKind::Hire {
+                return true;
+            }
+            if e.state == AgentState::Stopped {
+                released.push(name.clone());
+                return false;
+            }
+            let waiting = e.state == AgentState::Running
+                || !e.inbox.is_empty()
+                || e.acks.iter().any(|a| a.state.is_outstanding())
+                || e.runs == 0;
+            if waiting {
+                e.lease = HIRE_LEASE;
+                return true;
+            }
+            e.lease = e.lease.saturating_sub(1);
+            if e.lease > 0 {
+                return true;
+            }
+            released.push(name.clone());
+            false
+        });
+        released.sort();
+        released
     }
 
     /// Streaming output buffer of the current turn (attached at turn start, detached at turn end).
-    pub fn set_live(&self, name: &str, live: Option<Arc<Mutex<String>>>) {
+    pub fn set_live(&self, name: &str, live: Option<Arc<Mutex<Vec<LiveBlock>>>>) {
         if let Some(entry) = self.lock().get_mut(name) {
             entry.live = live;
         }
     }
 
     /// Instance view data: history + live tail + state (None if the instance doesn't exist).
-    pub fn view_of(&self, name: &str) -> Option<(Vec<Message>, Option<String>, AgentState)> {
+    pub fn view_of(&self, name: &str) -> Option<(Vec<Message>, Vec<LiveBlock>, AgentState)> {
         let inner = self.lock();
         let entry = inner.get(name)?;
         let live = entry
             .live
             .as_ref()
-            .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).clone());
+            .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .unwrap_or_default();
         Some((entry.history.clone(), live, entry.state))
     }
 
     /// Instance depth (channel cohort check: only direct subagents with depth==1 may join a channel).
     pub fn depth_of(&self, name: &str) -> Option<usize> {
         self.lock().get(name).map(|e| e.session.depth)
+    }
+
+    /// The session an instance runs on. Test-only: everything in production reaches a
+    /// session through the entry that already holds it, and handing the whole session out
+    /// would be a wider door than any caller needs.
+    #[cfg(test)]
+    pub fn session_of(&self, name: &str) -> Option<Arc<Session>> {
+        self.lock().get(name).map(|e| e.session.clone())
     }
 
     pub fn set_abort(&self, name: &str, abort: tokio::task::AbortHandle) {
@@ -743,8 +863,11 @@ impl AgentRegistry {
                 def: e.def.clone(),
                 description: e.description.clone(),
                 state: e.state,
+                kind: e.kind,
                 pending: e.inbox.len(),
                 unacked: e.acks.iter().filter(|a| a.state.is_outstanding()).count(),
+                model: e.session.runtime.model.borrow().clone(),
+                provider: e.session.runtime.provider.borrow().clone(),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -968,16 +1091,227 @@ mod tests {
         let reg = AgentRegistry::new();
         assert_eq!(reg.claim_name(""), "agent", "empty name falls back");
         assert_eq!(reg.claim_name("reviewer"), "reviewer");
-        reg.insert("reviewer", None, "r".into(), test_session());
+        reg.insert(
+            "reviewer",
+            AgentKind::Hire,
+            None,
+            "r".into(),
+            test_session(),
+        );
         assert_eq!(reg.claim_name("reviewer"), "reviewer-2");
-        reg.insert("reviewer-2", None, "r".into(), test_session());
+        reg.insert(
+            "reviewer-2",
+            AgentKind::Hire,
+            None,
+            "r".into(),
+            test_session(),
+        );
         assert_eq!(reg.claim_name("reviewer"), "reviewer-3");
+    }
+
+    /// A hire serves one task and goes (D53): once it is idle with nothing waiting, the
+    /// lease runs out and the name is released. The crew is never touched, and the hub gets
+    /// one round to follow up before the instance disappears under it.
+    #[test]
+    fn a_finished_hire_is_released_and_the_crew_is_not() {
+        let reg = AgentRegistry::new();
+        reg.insert(
+            "dev",
+            AgentKind::Crew,
+            None,
+            "member".into(),
+            test_session(),
+        );
+        reg.insert(
+            "temp",
+            AgentKind::Hire,
+            None,
+            "one job".into(),
+            test_session(),
+        );
+        // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
+        // and a hire with no run behind it is unstarted, not finished.
+        let _ = reg.next_run("temp");
+
+        // Running: nothing is released, however many sweeps run.
+        assert!(reg.release_hires().is_empty());
+        assert!(reg.release_hires().is_empty());
+        assert_eq!(reg.list().len(), 2, "a working hire keeps its name");
+
+        // Finished: idle, empty inbox, nothing owed. One sweep is not enough — that would
+        // take the instance away in the very round its result reaches the hub.
+        assert!(reg.finish("temp", Vec::new(), true).is_none());
+        assert!(
+            reg.release_hires().is_empty(),
+            "the hub still has a round to follow up in"
+        );
+        assert_eq!(reg.release_hires(), vec!["temp".to_string()]);
+        let left = reg.list();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].name, "dev", "the crew member is untouched");
+        assert_eq!(left[0].kind, AgentKind::Crew);
+    }
+
+    /// A follow-up renews the lease: the hire the hub is still talking to is not swept out
+    /// from under the conversation.
+    #[test]
+    fn a_hire_with_work_waiting_keeps_its_name() {
+        let reg = AgentRegistry::new();
+        reg.insert(
+            "dev",
+            AgentKind::Crew,
+            None,
+            "member".into(),
+            test_session(),
+        );
+        reg.insert(
+            "temp",
+            AgentKind::Hire,
+            None,
+            "one job".into(),
+            test_session(),
+        );
+        // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
+        // and a hire with no run behind it is unstarted, not finished.
+        let _ = reg.next_run("temp");
+        assert!(reg.finish("temp", Vec::new(), true).is_none());
+        assert!(reg.release_hires().is_empty());
+
+        // A queued follow-up is work waiting: the count goes back to full.
+        let _ = reg
+            .deliver("temp", "one more thing", Vec::new(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(reg.release_hires().is_empty());
+        assert!(reg.release_hires().is_empty(), "the lease was renewed");
+
+        // Read into a run and answered, with nothing left waiting → released as before.
+        let woken = reg.flush_pending();
+        assert_eq!(woken.len(), 1);
+        assert!(reg.finish("temp", Vec::new(), true).is_none());
+        assert!(reg.release_hires().is_empty());
+        assert_eq!(reg.release_hires(), vec!["temp".to_string()]);
+    }
+
+    /// A message the hire never answered is not a finished task. Releasing there would
+    /// destroy the record the sender uses to find out it was left hanging.
+    #[test]
+    fn a_hire_still_owing_an_answer_is_not_released() {
+        let reg = AgentRegistry::new();
+        reg.insert(
+            "dev",
+            AgentKind::Crew,
+            None,
+            "member".into(),
+            test_session(),
+        );
+        reg.insert(
+            "temp",
+            AgentKind::Hire,
+            None,
+            "one job".into(),
+            test_session(),
+        );
+        // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
+        // and a hire with no run behind it is unstarted, not finished.
+        let _ = reg.next_run("temp");
+        assert!(reg.finish("temp", Vec::new(), true).is_none());
+        let _ = reg.deliver("temp", "answer me", Vec::new(), None);
+        assert_eq!(
+            reg.flush_pending().len(),
+            1,
+            "the idle hire takes the message"
+        );
+        // The run that read it ended saying nothing: delivered, unanswered, inbox empty.
+        assert!(reg.finish("temp", Vec::new(), false).is_none());
+        let owed = |reg: &AgentRegistry| {
+            reg.list()
+                .into_iter()
+                .find(|a| a.name == "temp")
+                .map(|a| a.unacked)
+                .unwrap_or_default()
+        };
+        assert_eq!(owed(&reg), 1);
+        for _ in 0..4 {
+            assert!(
+                reg.release_hires().is_empty(),
+                "an outstanding message holds the instance open"
+            );
+        }
+    }
+
+    /// Without a crew there is nothing for a hire to be temporary *relative to*: an ad-hoc
+    /// subagent is the ordinary way to work in such a project, and sweeping it would delete
+    /// instances the hub still expects to address.
+    #[test]
+    fn hires_are_not_swept_in_a_project_with_no_crew() {
+        let reg = AgentRegistry::new();
+        reg.insert(
+            "temp",
+            AgentKind::Hire,
+            None,
+            "one job".into(),
+            test_session(),
+        );
+        // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
+        // and a hire with no run behind it is unstarted, not finished.
+        let _ = reg.next_run("temp");
+        assert!(reg.finish("temp", Vec::new(), true).is_none());
+        for _ in 0..4 {
+            assert!(reg.release_hires().is_empty());
+        }
+        assert_eq!(reg.list().len(), 1);
+
+        // A crew that has been stopped is not a crew either.
+        reg.insert(
+            "dev",
+            AgentKind::Crew,
+            None,
+            "member".into(),
+            test_session(),
+        );
+        let _ = reg.stop("dev");
+        for _ in 0..4 {
+            assert!(reg.release_hires().is_empty());
+        }
+    }
+
+    /// A stopped hire will never run again, so it goes on the spot rather than waiting out
+    /// a lease that measures a follow-up window it can no longer receive.
+    #[test]
+    fn a_stopped_hire_is_released_immediately() {
+        let reg = AgentRegistry::new();
+        reg.insert(
+            "dev",
+            AgentKind::Crew,
+            None,
+            "member".into(),
+            test_session(),
+        );
+        reg.insert(
+            "temp",
+            AgentKind::Hire,
+            None,
+            "one job".into(),
+            test_session(),
+        );
+        // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
+        // and a hire with no run behind it is unstarted, not finished.
+        let _ = reg.next_run("temp");
+        let _ = reg.stop("temp");
+        assert_eq!(reg.release_hires(), vec!["temp".to_string()]);
+        assert_eq!(reg.list().len(), 1);
     }
 
     #[test]
     fn lifecycle_running_idle_queue_and_revive() {
         let reg = AgentRegistry::new();
-        reg.insert("scout", None, "research".into(), test_session());
+        reg.insert(
+            "scout",
+            AgentKind::Hire,
+            None,
+            "research".into(),
+            test_session(),
+        );
         // Running: message queued (delivery never happens inside deliver itself).
         let first = reg
             .deliver("scout", "add A", Vec::new(), None)
@@ -1026,7 +1360,7 @@ mod tests {
     #[test]
     fn inbox_accumulates_direct_and_channel_items_in_order() {
         let reg = AgentRegistry::new();
-        reg.insert("w", None, "w".into(), test_session());
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         let _ = reg.deliver("w", "do 1 first", Vec::new(), None);
         assert!(reg.deposit(
             "w",
@@ -1093,6 +1427,7 @@ mod tests {
         // insert → creates an entry (running, empty history).
         reg.insert(
             "scout",
+            AgentKind::Hire,
             Some("scout".into()),
             "research".into(),
             test_session(),
@@ -1146,7 +1481,7 @@ mod tests {
     #[test]
     fn messages_sent_in_one_turn_arrive_as_one_batch() {
         let reg = AgentRegistry::new();
-        reg.insert("w", None, "w".into(), test_session());
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         assert!(
             reg.finish("w", Vec::new(), true).is_none(),
             "turns idle first"
@@ -1177,7 +1512,7 @@ mod tests {
     #[test]
     fn stop_records_undelivered_messages_as_dropped() {
         let reg = AgentRegistry::new();
-        reg.insert("w", None, "w".into(), test_session());
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         let id = reg
             .deliver("w", "is it too late", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
@@ -1200,7 +1535,7 @@ mod tests {
     #[test]
     fn follow_up_chases_a_queued_message_until_the_budget_runs_out() {
         let reg = AgentRegistry::new();
-        reg.insert("w", None, "w".into(), test_session());
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         let id = reg
             .deliver(
                 "w",
@@ -1265,7 +1600,13 @@ mod tests {
     #[test]
     fn a_turn_that_says_nothing_does_not_acknowledge_what_it_read() {
         let reg = AgentRegistry::new();
-        reg.insert("mute", None, "silent".into(), test_session());
+        reg.insert(
+            "mute",
+            AgentKind::Hire,
+            None,
+            "silent".into(),
+            test_session(),
+        );
         assert!(
             reg.finish("mute", Vec::new(), true).is_none(),
             "turns idle first"
@@ -1322,7 +1663,7 @@ mod tests {
     #[test]
     fn follow_up_settles_on_a_dropped_message_and_a_gone_instance() {
         let reg = AgentRegistry::new();
-        reg.insert("w", None, "w".into(), test_session());
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         let id = reg
             .deliver(
                 "w",
@@ -1350,7 +1691,7 @@ mod tests {
     #[test]
     fn messages_survive_a_failed_run_and_are_retried() {
         let reg = AgentRegistry::new();
-        reg.insert("w", None, "w".into(), test_session());
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         reg.deliver("w", "continue", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         // The run failed (spawn_agent_loop's error branch) — it only marks the instance idle.
@@ -1368,7 +1709,7 @@ mod tests {
     #[test]
     fn stop_and_delete_semantics() {
         let reg = AgentRegistry::new();
-        reg.insert("x", None, "x".into(), test_session());
+        reg.insert("x", AgentKind::Hire, None, "x".into(), test_session());
         reg.set_run_watch("x", crate::watch::WatchId(7));
         assert_eq!(
             reg.stop("x").unwrap_or_else(|e| panic!("{e}")),
@@ -1397,7 +1738,7 @@ mod tests {
             "unknown instance errors"
         );
         // Stopping an idle instance: no active line.
-        reg.insert("y", None, "y".into(), test_session());
+        reg.insert("y", AgentKind::Hire, None, "y".into(), test_session());
         reg.set_run_watch("y", crate::watch::WatchId(9));
         assert!(reg.finish("y", Vec::new(), true).is_none());
         assert!(

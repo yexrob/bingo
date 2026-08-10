@@ -448,24 +448,31 @@ fn tool_result(t: &ToolCall, act: &Activity, theme: &Theme) -> Line {
 /// `⏺ watch -n 2 ls` — same shape as a tool, driven by the watch lifecycle.
 /// A subagent's watch row (`WatchKind::Agent`) uses `◉`: a core inside a
 /// ring, a session inside a session.
-fn watch_header(w: &WatchCall, theme: &Theme) -> Line {
+fn watch_header(w: &WatchCall, theme: &Theme, portrait: Option<&Portrait>) -> Line {
     let style = match w.status {
         WatchState::Running | WatchState::Idle => theme.dim(),
         WatchState::Done => theme.tool_done(),
         WatchState::Failed => theme.tool_error(),
         WatchState::Cancelled => theme.dim(),
     };
-    let glyph = match w.kind {
-        crate::watch::WatchKind::Agent => "◉ ",
-        crate::watch::WatchKind::Channel => "◇ ",
-        crate::watch::WatchKind::Command => "⏺ ",
+    // A subagent's row names a speaker, so it wears that speaker's face where one
+    // can be drawn; a channel and a command are not people and keep their glyph.
+    let mut line = match portrait {
+        Some(p) => p.top.clone(),
+        None => {
+            let glyph = match w.kind {
+                crate::watch::WatchKind::Agent => "◉ ",
+                crate::watch::WatchKind::Channel => "◇ ",
+                crate::watch::WatchKind::Command => "⏺ ",
+            };
+            Line::styled(glyph, style)
+        }
     };
-    let mut line = Line::styled(glyph, style);
     line.push_styled(w.label.clone(), theme.text());
     line
 }
 
-fn watch_result(w: &WatchCall, act: &Activity, theme: &Theme) -> Line {
+fn watch_result(w: &WatchCall, act: &Activity, theme: &Theme, portrait: Option<&Portrait>) -> Line {
     let mut body = match (&w.detail, w.status) {
         (Some(detail), _) => detail.clone(),
         (None, WatchState::Running) => "Running…".to_string(),
@@ -482,19 +489,28 @@ fn watch_result(w: &WatchCall, act: &Activity, theme: &Theme) -> Line {
     } else {
         theme.dim()
     };
-    let mut line = Line::styled(format!("{RESULT_CONNECTOR}{body}"), style);
+    // The portrait's second row stands in for the `⎿` connector: it occupies the
+    // same gutter columns, so the body still hangs where the eye expects it.
+    let mut line = match portrait {
+        Some(p) => {
+            let mut line = p.bottom.clone();
+            line.push_styled(body, style);
+            line
+        }
+        None => Line::styled(format!("{RESULT_CONNECTOR}{body}"), style),
+    };
     if let Some(hint) = expand_hint(act) {
         line.push_styled(format!(" ({hint})"), theme.dim());
     }
     line
 }
 
-fn header_for(h: &Activity, theme: &Theme) -> Line {
+fn header_for(h: &Activity, theme: &Theme, portrait: Option<&Portrait>) -> Line {
     match &h.kind {
         ActivityKind::Thinking(_) => thinking_header(theme),
         ActivityKind::Tool(t) => tool_header(t, theme),
         ActivityKind::Diff(d) => diff_header(d, theme),
-        ActivityKind::Watch(w) => watch_header(w, theme),
+        ActivityKind::Watch(w) => watch_header(w, theme, portrait),
     }
 }
 
@@ -529,6 +545,19 @@ fn fold_tail(act: &Activity) -> Option<String> {
     }
 }
 
+/// The two gutter cells a named speaker's portrait occupies, already built by the
+/// caller. This module stays free of palettes and image capabilities: it is handed
+/// finished cells, exactly as it is handed a finished markdown renderer.
+///
+/// A watch row is a header plus a result row, which is the height a portrait wants,
+/// so the face fits the block it already had. The cost is the `⎿` connector on
+/// those rows — the portrait spans both and says the same thing by other means.
+#[derive(Debug, Clone)]
+pub struct Portrait {
+    pub top: Line,
+    pub bottom: Line,
+}
+
 /// The clickable row range of one activity (document coordinates).
 #[derive(Debug, Clone)]
 pub struct ActivityRowRange {
@@ -556,9 +585,10 @@ pub fn layout_activity(
     path: &[usize],
     base_row: u16,
     theme: &Theme,
+    portrait: Option<&Portrait>,
     render_reply: &mut dyn FnMut(&str) -> Vec<Line>,
 ) -> (Vec<Line>, Vec<ActivityRowRange>) {
-    let mut header = header_for(act, theme);
+    let mut header = header_for(act, theme, portrait);
     if let Some(tail) = fold_tail(act) {
         header.push_styled(format!(" {tail}"), theme.dim());
     }
@@ -568,7 +598,7 @@ pub fn layout_activity(
     match &act.kind {
         ActivityKind::Tool(t) => rows.push(tool_result(t, act, theme)),
         ActivityKind::Diff(d) => rows.push(diff_result(d, theme)),
-        ActivityKind::Watch(w) => rows.push(watch_result(w, act, theme)),
+        ActivityKind::Watch(w) => rows.push(watch_result(w, act, theme, portrait)),
         ActivityKind::Thinking(_) => {}
     }
     let thinking = matches!(act.kind, ActivityKind::Thinking(_));
@@ -634,8 +664,12 @@ mod tests {
     }
 
     fn render_lines(h: &Activity) -> Vec<Line> {
+        render_lines_with(h, None)
+    }
+
+    fn render_lines_with(h: &Activity, portrait: Option<&Portrait>) -> Vec<Line> {
         let mut render = |_: &str| Vec::new();
-        let (rows, _) = layout_activity(h, &[0], 0, &Theme::dark(), &mut render);
+        let (rows, _) = layout_activity(h, &[0], 0, &Theme::dark(), portrait, &mut render);
         rows
     }
 

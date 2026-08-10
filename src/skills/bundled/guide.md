@@ -72,7 +72,7 @@ Three config layers, shallow-merged; the later one overrides:
 | `mcpServers` | object | `{name: {type?, command, args, env}}` (stdio, default) or `{name: {type: "http", url, headers?}}` (streamable HTTP) |
 | `disabledMcpServers` | string[] | List of disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`; rule syntax `Tool(content)`, `:*` is a prefix wildcard (e.g. `Bash(git push:*)`); Bash rules match per subcommand segment; path rules normalize before matching (see diagnostics 4) |
-| `experimental` | object | Experimental features: `{"agentChannels": true}` enables agent channel messaging (the main session gets the Channel/Post tools, direct subagents get Post); `channelMessageLimit` (default 500, freezes the channel when exceeded) / `agentMessageLimit` (default 50) are budget gates |
+| `experimental` | object | Experimental features: `{"agentChannels": true}` enables agent channel messaging (the main session gets the Channel/Post tools, direct subagents get Post); `channelMessageLimit` (default 500, freezes the channel when exceeded) / `agentMessageLimit` (default 50) are budget gates; `{"chatAvatars": true}` puts faces in the main chat (default false — no sender band, no portrait on a watch row; the workspace views wear theirs regardless) |
 | `team` | object | agent team startup behavior: `{"autoStart": true}` (default true = when a project-bound team exists, start it automatically at launch; members stand by Idle at zero tokens; `--no-team` or false turns it off) |
 | `hooks` | object | PreToolUse/PostToolUse/PreCompact/PostCompact/UserPromptSubmit/Stop/SessionStart/SessionEnd/TaskCreated/TaskCompleted, matcher + command; the matcher is a whole-string anchored regex (`Edit\|Write`, `mcp__.*`); invalid regexes fall back to exact matching |
 
@@ -107,8 +107,8 @@ Example (.bingo/settings.json):
 `/skills` (listing; `/skill-name` runs it directly) · `/context` (usage) · `/status` ·
 `/compact` (force compaction) · `/resume [name]` (restore a past session; no arg opens the session picker, Enter restores) · `/rename` · `/clear` · `/exit`.
 `/team` (project-level crew): `list` (blueprint + runtime on one screen) · `start` (pull up / idempotent reuse) · `status` ·
-`assign <member> <task>` (dispatch work) · `stop` · `validate` · `new` (scaffolds team.json) ·
-`memory list|gc` (cross-session memory management).
+`assign <member> <task>` (dispatch work) · `stop` · `validate` · `new` (scaffolds team.json + team-norms.md) ·
+`norms` (the crew's working agreement) · `memory list|gc` (cross-session memory management).
 
 ## Diagnostic guide (common problems → troubleshooting paths)
 
@@ -125,6 +125,9 @@ Example (.bingo/settings.json):
    (200k − 64k output budget) ≈ 122k, about 61% of the total window). Endpoints without a
    count_tokens API (DeepSeek/ollama; OpenAI-protocol providers — `count_tokens` is Anthropic-only)
    automatically fall back to local estimation (characters/4), with a one-time warning on first fallback.
+   If an upstream response completes without assistant content or tool calls (including an unclosed thinking block),
+   bingo treats it as malformed and retries the side-effect-free attempt once instead of ending silently; if the retry
+   is also empty, the turn shows the normal full-flow retry/back error.
 3. **MCP server not working**: `/mcp` shows status — `✗ failed: <details>` fixes per the details
    (command missing/spawn failure/handshake failure; for http servers also check url reachability and headers auth);
    the stdio server's own error output lives in `~/.local/share/bingo/logs/mcp-<name>.log`
@@ -270,23 +273,52 @@ Example (.bingo/settings.json):
   and alt+↑↓. **Avatars**: on terminals that can place kitty images (the same capability that renders inline images), each
   sender gets one of eight bundled anime-style portraits, 4×2 cells beside the name; elsewhere it falls back to the sender's
   initial on a colour, and the row count is identical either way. A team member's portrait is pinned in `.bingo/team.json`
-  (`"avatar": "sora"`), so a crew keeps a fixed cast; everyone else gets a face derived from their name. Wake-up scaffolding the
+  (`"avatar": "sora"`), so a crew keeps a fixed cast; everyone else gets a face derived from their name. The **main chat** wears
+  the same faces behind `experimental.chatAvatars` (off by default): each message carries a band above it with the speaker's
+  portrait and name (`main` for the hub, `You` for your own),
+  two rows where portraits place and one where they fall back to the chip. Nothing below the band moves — bodies still run the full
+  width. A terminal that purges its image store (a resize) redraws the faces still on screen; ones already in scrollback leave four
+  blank columns with the name intact. Switched off, the transcript has no band and a subagent's watch row keeps its `◉` — the
+  switch governs the main chat only, never these workspace views. Wake-up scaffolding the
   runtime injected (a relayed channel message, the task reminder) collapses to one dim line instead of being quoted as a message. The composer sends: in a channel it posts as `user` (same
   delivery path as Post, members woken normally; rendering = read, so serial never bounces you), in a DM it queues on the
   instance and flushes at the turn boundary (shown as a pending message until then). Keys: Tab switches between the message
   list and the composer, alt+↑↓ switches conversation, Ctrl+K is the quick switcher, Esc returns.
-- **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
-  `members[{name,agent,avatar?}]`, members reference AgentDefs; `name` is the name shown on the member's messages, so make it a person's name, and `avatar` pins one of the bundled portraits) pins multiple roles to one project; started by default at launch
+- **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/`channels[{name,mode?,messageLimit?,members?}]`/`teams[{name?,path}]`/
+  `members[{name,agent,avatar?,model?,provider?,thinking?}]`, members reference AgentDefs; `name` is the name shown on the member's messages, so make it a person's name, and `avatar` pins one of the bundled portraits.
+  `model`/`provider`/`thinking` pin the member's engine — which model does which job is part of the formation, so a crew can mix a cheap fast reviewer with a stronger designer; each falls back to the agent definition and then to the session, and a named `provider` other than the session's needs a `model` too.
+  `/team validate` checks the engine against this session's providers, so a blueprint that passes still starts) pins multiple roles to one project; started by default at launch
   (`settings.team.autoStart`; `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,
   only `/team assign` or channel messages start them; idempotency key = instance name, repeated start reuses). The `/team` command family
-  manages it; team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (full history restored across sessions +
+  manages it; team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (each member gets a readable `<name>.md` transcript beside the exact `<name>.json` record; a spawning member is *told where its transcript is* and starts with an empty context rather than having the history preloaded — that file is unbounded and monotonic, so loading it charged a growing invisible toll on the first turn for relevance that decays fast; read it when the task depends on what was already decided, not speculatively +
   append-only decision records; `/team memory list|gc` manages it).
   The model manages the same crew through the **Team tool** (`status`/`validate`/`start`/`stop`/`save`, main session only): reads are free,
   and every change is confirmed by the user in person — the prompt appears in *every* permission mode and an `allow` rule cannot
   pre-authorize it (only `deny` outranks it), because hiring a crew is not something a permission table should be able to consent to on
   the user's behalf. The confirmation names the change, not the file (`Rewrite .bingo/team.json · dev-room · 4 members (-ui +qa)`).
-  `save` writes the whole document, so it takes the complete roster — whoever is left out is removed. Hand-editing `.bingo/team.json`
-  with Write/Edit asks the same question. Dispatch is not part of the tool: SendMessage gives a member work.
+  `save` writes the whole document, so it takes the complete roster — whoever is left out is removed, with one exception: `teams` (the org
+  chart) is carried across every save, because it points at other directories and a roster edit is no reason to re-decide it. Hand-editing
+  `.bingo/team.json` with Write/Edit asks the same question. Dispatch is not part of the tool: SendMessage gives a member work.
+- **rooms and the team tree** (D54): a team declares its rooms in `channels[]`, each with its own mode, budget and roster — a department
+  has a standup, a release channel and a design review, and the same person is in some and not others. A team that declares none gets one
+  room named after it holding everybody (the `channel{mode,messageLimit}` shorthand, unchanged); a team that declares rooms gets *only*
+  those. A blueprint may name child blueprints in `teams[{name?,path}]`, recursively: `path` is relative to that team's own directory
+  (absolute is refused) and names either the directory holding a blueprint or the file itself. Each team keeps its own agent definitions,
+  working agreement, git branch and memory partition, rooted at its own directory — so reaching a department from the root gives the same
+  crew as opening a session inside it, and a member of one is told in a system block where its directory is (tool paths resolve against the
+  *session's* cwd, not its team's). Teams, members and rooms are unique across the whole tree, which is what lets `SendMessage("Linh")`
+  reach a member three levels down with no team prefix. A room reaches its own team and the teams below it, never a parent or a sibling.
+  `/team status|start|stop|validate|memory` and the Team tool's actions all span the chart; `autoStart` brings the whole thing up.
+- **crew first, hires temporary** (D53): where a crew is pinned, it is the default workforce — work goes to a member by SendMessage,
+  and the Agent tool is for what no member covers. An Agent-tool spawn is a *temporary hire*: it never enters `.bingo/team.json`,
+  it is listed apart from the crew (`/team list`, Team `status`, and a `crew`/`hire` prefix on every `AgentControl list` row), it is
+  recorded in the crew's `decisions.md` under `type: hire`, and it is released once its task is done — idle, inbox empty, nothing
+  still owed an answer, with one hub round left to follow up in. The sweep only runs while a crew is actually up; in a project with
+  no crew, ad-hoc subagents live exactly as long as they always did.
+- **team norms** (`.bingo/team-norms.md`, committed beside the blueprint): prose, not a schema — the crew's working agreement.
+  It reaches every member and every hire as a system block, so it applies without being restated, and it carries its own precedence
+  rule: a direct instruction outranks it on the point that instruction makes, and every other norm still holds. `/team new` scaffolds
+  a starter agreement (never overwriting one that exists); `/team norms` prints what is on disk.
 - **Skills**: built-in `guide` (this guide) + `~/.config/bingo/skills/` and `.bingo/skills/`
   directory skills (same-name disk skills override built-ins); the model invokes them via SkillTool, users run them via `/skill-name`.
 - **Images**: markdown images in model replies (`![alt](path)`, supports `~/`, relative paths/data/http(s))
@@ -366,16 +398,20 @@ Example (.bingo/settings.json):
   every conversation and its unread count) and alt+↑↓. **Avatars**: terminals that can place kitty images (the same capability behind inline images)
   assign each speaker one of eight bundled anime-style portraits, 4×2 cells to the left of the name; other terminals fall back to an initial-on-color
   chip, and both skins keep the same row count. Team members' avatars are pinned in `.bingo/team.json` (`"avatar": "sora"`),
-  so a crew has a fixed cast; other instances get a face by name. Runtime-injected wake scaffolding (channel-message relays,
+  so a crew has a fixed cast; other instances get a face by name. The **main chat** uses the same faces behind `experimental.chatAvatars` (off by default): every message gets a band
+  above it carrying the speaker's portrait and name (`main` for the hub, `You` for your own); message bodies are unchanged underneath.
+  Off, the transcript has no band and a subagent's watch row keeps its `◉`; the switch governs the main chat only. Runtime-injected wake scaffolding (channel-message relays,
   task reminders) collapses into a single dim hint line instead of being quoted as a whole message. Sending from the bottom input box: in a channel you speak as `user` (the same delivery
   path as Post, waking members normally; rendered counts as read, serial won't bounce you), DMs queue into the instance's inbox and are
   delivered at the turn boundary (shown as pending before delivery). Keys: Tab switches between the message list and the input box, alt+↑↓ switches conversations,
   Ctrl+K quick-jumps, Esc returns.
 - **agent team** (project-level crew): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
-  `members[{name,agent,avatar?}]`, members reference AgentDef; `name` is the name shown on the member's messages — give it a person's name, not a role code; `avatar` pins the portrait) fixes several roles to one project; pulled up by default at startup
+  `members[{name,agent,avatar?,model?,provider?,thinking?}]`, members reference AgentDef; `name` is the name shown on the member's messages — give it a person's name, not a role code; `avatar` pins the portrait.
+  `model`/`provider`/`thinking` pin the member's engine, each falling back to the agent definition and then to the session; a named `provider` other than the session's needs a `model` too, and `/team validate` checks all of it, so a blueprint that passes still starts.
+  `/team list` and `AgentControl list` report the engine each running instance is actually on) fixes several roles to one project; pulled up by default at startup
   (`settings.team.autoStart`, `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,
   only `/team assign` or channel messages start them; idempotency key = instance name, repeated start reuses). Managed by the `/team` command family;
-  team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (full history restored across sessions +
+  team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (each member gets a readable `<name>.md` transcript beside the exact `<name>.json` record; a spawning member is *told where its transcript is* and starts with an empty context rather than having the history preloaded — that file is unbounded and monotonic, so loading it charged a growing invisible toll on the first turn for relevance that decays fast; read it when the task depends on what was already decided, not speculatively +
   append-only decision records, managed via `/team memory list|gc`).
   The model manages the same crew through the **Team tool** (`status`/`validate`/`start`/`stop`/`save`, main session only): reads are free,
   and every change is confirmed by the user in person — the prompt appears in *every* permission mode and an `allow` rule cannot

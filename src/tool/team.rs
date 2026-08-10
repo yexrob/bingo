@@ -12,7 +12,12 @@
 //! `save` is whole-document, matching the file it writes: the blueprint has one shape on
 //! disk and one in the tool call, and a partial-merge dialect would be a second format to
 //! keep honest. The confirmation line carries the delta so the user reviews the change,
-//! not the document.
+//! not the document. The one thing it does not rewrite is the org chart (`teams`): child
+//! teams live in other directories, are set up by hand, and a roster edit is no reason to
+//! re-decide them — they are carried across every save unchanged (D54).
+//!
+//! Reads and actions span the whole tree: `status` shows every team under this one,
+//! `start` brings all of them up, `stop` takes all of them down.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,7 +27,7 @@ use serde::Deserialize;
 
 use crate::agents::{AgentDef, AgentDefSource};
 use crate::query::Session;
-use crate::team::{ChannelSpec, TeamDef, TeamMember};
+use crate::team::{ChannelDef, ChannelSpec, TeamDef, TeamMember, TeamTree};
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 use crate::watch::WatchState;
 
@@ -45,7 +50,7 @@ pub enum TeamAction {
     Save,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct MemberInput {
     #[schemars(
@@ -61,6 +66,43 @@ pub struct MemberInput {
         description = "Portrait this member wears, pinned so it survives across sessions: one of the ids status lists. Give every member a different one; omitted means a portrait picked from the name, which can collide"
     )]
     avatar: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Model this member runs on. Omit to use the agent definition's model, falling back to the session's — set it only when this member's job wants a different engine from the rest of the crew (a cheap fast one for a reviewer, a stronger one for a designer)"
+    )]
+    model: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Provider endpoint this member runs against: a name from the configured providers. Omit to share the session's endpoint and follow its switches. A named provider other than the session's own requires model as well, since a model name means nothing at another endpoint"
+    )]
+    provider: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Thinking level for this member: off/low/medium/high/xhigh/max. Omit to use the agent definition's, falling back to the session's current level"
+    )]
+    thinking: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ChannelInput {
+    #[schemars(
+        description = "Room name — how it is addressed as #name; unique across the whole team tree"
+    )]
+    name: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Speaking mode: serial (a member must have read the latest message before speaking; default) or free (interleaving allowed)"
+    )]
+    mode: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "The room freezes past this many messages (default 500)")]
+    message_limit: Option<u64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Who is in this room: member names from this team or from a team below it in the tree. Omit to put the whole team in"
+    )]
+    members: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -71,7 +113,9 @@ pub struct TeamInput {
     )]
     action: TeamAction,
     #[serde(default)]
-    #[schemars(description = "Team name (save only): also the channel name the crew talks in")]
+    #[schemars(
+        description = "Team name (save only): also the name of its one room, when the team declares no channels of its own"
+    )]
     name: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -80,12 +124,17 @@ pub struct TeamInput {
     members: Option<Vec<MemberInput>>,
     #[serde(default)]
     #[schemars(
-        description = "Channel mode (save only): serial (a member must have read the latest message before speaking; default) or free (interleaving allowed)"
+        description = "The team's rooms (save only): a team may hold several, each with its own roster, so the same person is in some and not others. Sending this replaces every room the team has. Omit to keep the rooms it already has — and when it has none, the team gets one room named after it holding everybody"
+    )]
+    channels: Option<Vec<ChannelInput>>,
+    #[serde(default)]
+    #[schemars(
+        description = "Channel mode (save only) for the one room a team with no declared channels gets: serial (default) or free"
     )]
     mode: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Channel message budget (save only): the channel freezes past this many messages (default 500)"
+        description = "Channel message budget (save only) for that same one room: it freezes past this many messages (default 500)"
     )]
     message_limit: Option<u64>,
 }
@@ -117,8 +166,28 @@ fn join_names(names: &[String], sep: &str) -> String {
     format!("{head}{sep}and {} total", names.len())
 }
 
-fn member_names(def: &TeamDef) -> Vec<String> {
-    def.members.iter().map(|m| m.name.clone()).collect()
+/// Every member in the tree, in chart order — what `start` and `stop` actually act on.
+fn member_names(tree: &TeamTree) -> Vec<String> {
+    tree.members().map(|(_, m)| m.name.clone()).collect()
+}
+
+/// `· across 3 teams` when the blueprint roots a chart, nothing when it is one team.
+fn scope_of(tree: &TeamTree) -> String {
+    match tree.nodes().len() {
+        0 | 1 => String::new(),
+        n => format!(" across {n} teams"),
+    }
+}
+
+/// An optional field as the blueprint should hold it: whitespace-only is the same
+/// as absent, so a field the model filled with a blank never reaches the file and
+/// starts reading as an override that overrides nothing.
+fn trimmed(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 /// Blueprint on disk, or None when there is no team file / it is unreadable. The
@@ -128,25 +197,37 @@ fn blueprint(project: &Path) -> Option<TeamDef> {
     crate::team::load_team_file(project).ok().flatten()
 }
 
+/// The org chart on disk, on the same terms: a chart that will not load is still a
+/// reason to ask, just with less to say about it.
+fn chart(project: &Path) -> Option<TeamTree> {
+    crate::team::load_team_tree(project).ok().flatten()
+}
+
 fn start_reason(project: &Path) -> String {
-    match blueprint(project) {
-        Some(def) => format!(
-            "Start {} · {} member(s) ({}) into #{}",
-            def.name,
-            def.members.len(),
-            join_names(&member_names(&def), ", "),
-            def.name
-        ),
+    match chart(project) {
+        Some(tree) => {
+            let names = member_names(&tree);
+            let rooms: Vec<String> = tree.rooms().map(|(_, r)| format!("#{}", r.name)).collect();
+            format!(
+                "Start {} · {} member(s) ({}){} into {}",
+                tree.root().def.name,
+                names.len(),
+                join_names(&names, ", "),
+                scope_of(&tree),
+                join_names(&rooms, ", ")
+            )
+        }
         None => "Start this project's team (.bingo/team.json)".to_string(),
     }
 }
 
 fn stop_reason(project: &Path) -> String {
-    match blueprint(project) {
-        Some(def) => format!(
-            "Stop {} · {} member(s) (history kept, can start again)",
-            def.name,
-            def.members.len()
+    match chart(project) {
+        Some(tree) => format!(
+            "Stop {} · {} member(s){} (history kept, can start again)",
+            tree.root().def.name,
+            member_names(&tree).len(),
+            scope_of(&tree)
         ),
         None => "Stop this project's team (.bingo/team.json)".to_string(),
     }
@@ -169,7 +250,7 @@ fn save_reason(project: &Path, params: &TeamInput) -> String {
             join_names(&wanted, ", ")
         );
     };
-    let before = member_names(&old);
+    let before: Vec<String> = old.members.iter().map(|m| m.name.clone()).collect();
     let delta: Vec<String> = before
         .iter()
         .filter(|n| !wanted.contains(n))
@@ -192,16 +273,48 @@ fn save_reason(project: &Path, params: &TeamInput) -> String {
         format!(" · team name {} → {name}", old.name)
     };
     // A whole-document write also carries what it leaves out: an omitted mode reverts the
-    // room to serial, which is a change the user is agreeing to and must therefore read.
-    let old_mode = crate::team::channel_mode(&old).label();
-    let new_mode = params.mode.as_deref().unwrap_or("serial");
-    let remode = if old_mode == new_mode {
+    // one-room shorthand to serial, which is a change the user is agreeing to and must
+    // therefore read. It is only reported for a team that has that room to revert — one
+    // declaring its own channels does not have a `mode` to lose.
+    let remode = if old.channels.is_empty() && params.channels.is_none() {
+        let old_mode = crate::team::channel_mode(&old).label();
+        let new_mode = params.mode.as_deref().unwrap_or("serial");
+        if old_mode == new_mode {
+            String::new()
+        } else {
+            format!(" · channel {old_mode} → {new_mode}")
+        }
+    } else {
+        String::new()
+    };
+    let rerooms = match &params.channels {
+        None => String::new(),
+        Some(rooms) => {
+            let before: Vec<String> = crate::team::rooms(&old)
+                .into_iter()
+                .map(|r| r.name)
+                .collect();
+            let after: Vec<String> = rooms.iter().map(|c| c.name.trim().to_string()).collect();
+            if before == after {
+                format!(" · {} room(s) unchanged", after.len())
+            } else {
+                format!(
+                    " · rooms {} → {}",
+                    join_names(&before, ", "),
+                    join_names(&after, ", ")
+                )
+            }
+        }
+    };
+    // The org chart is carried, never rewritten here — say so, so its absence from the
+    // roster the user is reading is not mistaken for its removal.
+    let kept = if old.teams.is_empty() {
         String::new()
     } else {
-        format!(" · channel {old_mode} → {new_mode}")
+        format!(" · {} child team(s) kept", old.teams.len())
     };
     format!(
-        "Rewrite .bingo/team.json · {name} · {} member(s) ({change}){renamed}{remode}",
+        "Rewrite .bingo/team.json · {name} · {} member(s) ({change}){renamed}{remode}{rerooms}{kept}",
         wanted.len()
     )
 }
@@ -235,15 +348,15 @@ fn available_defs(defs: &[AgentDef]) -> String {
 }
 
 impl TeamTool {
-    fn load(&self, cwd: &Path) -> Result<Option<TeamDef>, ToolError> {
-        crate::team::load_team_file(cwd).map_err(|e| ToolError::failed(e.to_string()))
+    fn tree(&self, cwd: &Path) -> Result<Option<TeamTree>, ToolError> {
+        crate::team::load_team_tree(cwd).map_err(|e| ToolError::failed(e.to_string()))
     }
 
-    /// Blueprint + room in one read. The runtime half comes from the registry, so a member
-    /// that was never spawned (or was deleted out from under the blueprint) reads `offline`
-    /// rather than going missing.
+    /// Blueprint + rooms + runtime in one read, over the whole chart. The runtime half
+    /// comes from the registry, so a member that was never spawned (or was deleted out
+    /// from under the blueprint) reads `offline` rather than going missing.
     fn status(&self, cwd: &Path, defs: &[AgentDef]) -> Result<String, ToolError> {
-        let Some(def) = self.load(cwd)? else {
+        let Some(tree) = self.tree(cwd)? else {
             return Ok(format!(
                 "no .bingo/team.json in this project — no crew is pinned here.\n{}\n{}\n\
                  Draft one with action=save (the user confirms it before anything is written); \
@@ -252,79 +365,141 @@ impl TeamTool {
                 available_portraits()
             ));
         };
-        let view = crate::team::view(&def, defs);
         let instances = self.session.agents.list();
-        let limit = def
-            .channel
-            .as_ref()
-            .and_then(|c| c.message_limit)
-            .map(|l| format!(" · message limit {l}"))
-            .unwrap_or_default();
-        let mut out = vec![format!(
-            "team {} · #{} channel ({}){limit} · {} members",
-            def.name,
-            def.name,
-            crate::team::channel_mode(&def).label(),
-            def.members.len()
-        )];
-        let pinned: std::collections::HashMap<&str, &str> = def
-            .members
-            .iter()
-            .filter_map(|m| Some((m.name.as_str(), m.avatar.as_deref()?)))
-            .collect();
-        for m in &view.members {
-            let state = instances
-                .iter()
-                .find(|a| a.name == m.name)
-                .map(|a| a.state.label())
-                .unwrap_or("offline");
-            let face = pinned
-                .get(m.name.as_str())
-                .map(|a| format!(" · portrait {a}"))
-                .unwrap_or_default();
+        let mut out = Vec::new();
+        for node in tree.nodes() {
+            let def = &node.def;
+            let node_defs = crate::agents::load_agent_defs(&self.session.home, &node.dir);
+            let view = crate::team::view(def, &node_defs);
+            let norms = match crate::team::load_norms(&node.dir) {
+                Some(_) => format!(
+                    " · working agreement in {} (every member and every hire carries it)",
+                    crate::team::NORMS_FILE
+                ),
+                None => String::new(),
+            };
+            let rooms: Vec<String> = crate::team::rooms(def)
+                .into_iter()
+                .map(|r| {
+                    let limit = r
+                        .message_limit
+                        .map(|l| format!(", limit {l}"))
+                        .unwrap_or_default();
+                    format!(
+                        "#{} ({}{limit}): {}",
+                        r.name,
+                        r.mode.label(),
+                        r.members.join(", ")
+                    )
+                })
+                .collect();
+            let at = if node.depth == 0 {
+                String::new()
+            } else {
+                format!(" · rooted at {}", node.dir.display())
+            };
             out.push(format!(
-                "- {} -> agent \"{}\"{} · {state}{face} · {}",
-                m.name,
-                m.agent,
-                source_badge(m.source),
-                m.description
+                "team {} · {} members{at}{norms}\nrooms: {}",
+                def.name,
+                def.members.len(),
+                rooms.join(" · ")
             ));
+            let pinned: std::collections::HashMap<&str, &TeamMember> =
+                def.members.iter().map(|m| (m.name.as_str(), m)).collect();
+            for m in &view.members {
+                let state = instances
+                    .iter()
+                    .find(|a| a.name == m.name)
+                    .map(|a| a.state.label())
+                    .unwrap_or("offline");
+                let member = pinned.get(m.name.as_str());
+                let face = member
+                    .and_then(|p| p.avatar.as_deref())
+                    .map(|a| format!(" · portrait {a}"))
+                    .unwrap_or_default();
+                // Only what the blueprint pins is reported. An inherited engine is not
+                // named here on purpose: it is whatever the session is on at spawn, so
+                // printing today's value would read as a pin the file does not hold.
+                let engine = member
+                    .map(|p| crate::team::engine_label(p))
+                    .unwrap_or_default();
+                out.push(format!(
+                    "- {} -> agent \"{}\"{} · {state}{face}{engine} · {}",
+                    m.name,
+                    m.agent,
+                    source_badge(m.source),
+                    m.description
+                ));
+            }
+        }
+        if tree.nodes().len() > 1 {
+            out.push(format!(
+                "{} teams in this chart; every member is addressed by its bare name with SendMessage, from here, with no team prefix.",
+                tree.nodes().len()
+            ));
+        }
+        // Hires listed apart from the crew: they are not in the blueprint, they leave when
+        // their task does, and reading them as members is what this section prevents (D53).
+        let hires: Vec<&crate::agents::AgentStatus> = instances
+            .iter()
+            .filter(|a| a.kind == crate::agents::AgentKind::Hire)
+            .collect();
+        if !hires.is_empty() {
+            out.push(format!(
+                "temporary hires ({}) — not in {}, released once their task is done:",
+                hires.len(),
+                crate::team::TEAM_FILE
+            ));
+            for a in hires {
+                out.push(format!(
+                    "- {} · {} · {}",
+                    a.name,
+                    a.state.label(),
+                    a.description
+                ));
+            }
         }
         out.push(available_defs(defs));
         out.push(available_portraits());
         Ok(out.join("\n"))
     }
 
-    fn validate(&self, cwd: &Path, defs: &[AgentDef]) -> Result<String, ToolError> {
-        let Some(def) = self.load(cwd)? else {
+    fn validate(&self, cwd: &Path) -> Result<String, ToolError> {
+        let Some(tree) = self.tree(cwd)? else {
             return Ok("no .bingo/team.json in this project — nothing to validate.".to_string());
         };
-        match crate::team::validate(&def, defs) {
-            Ok(()) => Ok(format!(
-                "ok: .bingo/team.json passes ({} members · {} channel). action=start brings it up.",
-                def.members.len(),
-                crate::team::channel_mode(&def).label()
-            )),
+        match crate::team::validate_tree(&tree, &self.session, &self.session.home) {
+            Ok(()) => {
+                let rooms: Vec<String> = tree
+                    .rooms()
+                    .map(|(_, r)| format!("#{} ({})", r.name, r.mode.label()))
+                    .collect();
+                Ok(format!(
+                    "ok: .bingo/team.json passes ({} team(s) · {} members · {}). action=start brings it up.",
+                    tree.nodes().len(),
+                    tree.members().count(),
+                    rooms.join(" · ")
+                ))
+            }
             Err(e) => Err(ToolError::failed(e.to_string())),
         }
     }
 
-    fn start(&self, cwd: &Path, defs: &[AgentDef]) -> Result<String, ToolError> {
-        let Some(def) = self.load(cwd)? else {
+    fn start(&self, cwd: &Path) -> Result<String, ToolError> {
+        let Some(tree) = self.tree(cwd)? else {
             return Err(ToolError::failed(
                 "no .bingo/team.json in this project — write a blueprint with action=save first",
             ));
         };
-        let branch = crate::team::current_branch(cwd);
-        let summary =
-            crate::team::spawn_team(&self.session, &def, defs, &self.session.home, cwd, &branch)
-                .map_err(|e| ToolError::failed(e.to_string()))?;
+        let summary = crate::team::spawn_tree(&self.session, &tree, &self.session.home)
+            .map_err(|e| ToolError::failed(e.to_string()))?;
+        let rooms: Vec<String> = tree.rooms().map(|(_, r)| format!("#{}", r.name)).collect();
         let mut out = Vec::new();
         if !summary.spawned.is_empty() {
             out.push(format!(
-                "spawned {} into #{}: {}",
+                "spawned {} into {}: {}",
                 summary.spawned.len(),
-                def.name,
+                rooms.join(", "),
                 summary.spawned.join(", ")
             ));
         }
@@ -349,13 +524,13 @@ impl TeamTool {
     }
 
     fn stop(&self, cwd: &Path, ctx: &ToolContext) -> Result<String, ToolError> {
-        let Some(def) = self.load(cwd)? else {
+        let Some(tree) = self.tree(cwd)? else {
             return Err(ToolError::failed(
                 "no .bingo/team.json in this project — nothing to stop",
             ));
         };
         let mut stopped = Vec::new();
-        for m in &def.members {
+        for (_, m) in tree.members() {
             let Ok((watch, _dropped)) = self.session.agents.stop(&m.name) else {
                 continue;
             };
@@ -365,16 +540,14 @@ impl TeamTool {
             }
             stopped.push(m.name.clone());
         }
+        let name = &tree.root().def.name;
         if stopped.is_empty() {
-            return Ok(format!(
-                "{}: no member is spawned — nothing to stop.",
-                def.name
-            ));
+            return Ok(format!("{name}: no member is spawned — nothing to stop."));
         }
         Ok(format!(
-            "stopped {} of {}: {}. Histories are kept — action=start brings them back where they left off.",
+            "stopped {} of {name}{}: {}. Histories are kept — action=start brings them back where they left off.",
             stopped.len(),
-            def.name,
+            scope_of(&tree),
             stopped.join(", ")
         ))
     }
@@ -400,35 +573,89 @@ impl TeamTool {
         if let Some(mode) = &params.mode {
             crate::channels::ChannelMode::parse(mode).map_err(ToolError::failed)?;
         }
-        let channel =
-            (params.mode.is_some() || params.message_limit.is_some()).then(|| ChannelSpec {
-                mode: params.mode.clone(),
-                message_limit: params.message_limit,
-            });
+        let old = blueprint(cwd);
+        let had_rooms = old.as_ref().is_some_and(|d| !d.channels.is_empty());
+        // Rooms come from the call, or are carried from disk. Configuring the one-room
+        // shorthand on a team that declares its own rooms would silently delete them, so
+        // it is refused rather than guessed at.
+        let (channel, channels) = match &params.channels {
+            Some(rooms) => (
+                None,
+                rooms
+                    .iter()
+                    .map(|c| ChannelDef {
+                        name: c.name.trim().to_string(),
+                        mode: trimmed(&c.mode),
+                        message_limit: c.message_limit,
+                        members: c
+                            .members
+                            .as_ref()
+                            .map(|m| m.iter().map(|n| n.trim().to_string()).collect::<Vec<_>>()),
+                    })
+                    .collect(),
+            ),
+            None if had_rooms => {
+                if params.mode.is_some() || params.message_limit.is_some() {
+                    return Err(ToolError::failed(format!(
+                        "{name} declares its own rooms in `channels`, so it has no single channel for mode/message_limit to configure — send the complete `channels` list to change them, or drop those two fields to keep the rooms as they are",
+                    )));
+                }
+                (
+                    None,
+                    old.as_ref().map(|d| d.channels.clone()).unwrap_or_default(),
+                )
+            }
+            None => (
+                (params.mode.is_some() || params.message_limit.is_some()).then(|| ChannelSpec {
+                    mode: params.mode.clone(),
+                    message_limit: params.message_limit,
+                }),
+                Vec::new(),
+            ),
+        };
         let def = TeamDef {
             name: name.to_string(),
             channel,
+            channels,
             members: members
                 .iter()
                 .map(|m| TeamMember {
                     name: m.name.trim().to_string(),
                     agent: m.agent.trim().to_string(),
-                    avatar: m
-                        .avatar
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|a| !a.is_empty())
-                        .map(str::to_string),
+                    avatar: trimmed(&m.avatar),
+                    model: trimmed(&m.model),
+                    provider: trimmed(&m.provider),
+                    thinking: trimmed(&m.thinking),
                 })
                 .collect(),
+            // The org chart is the user's: set up by hand across directories, pointing at
+            // other repos, and no business of a roster edit. It travels every save intact.
+            teams: old.map(|d| d.teams).unwrap_or_default(),
         };
         // Reference check before the write: `validate` and `start` share one source, so a
-        // blueprint that lands on disk is one that can be brought up.
-        crate::team::validate(&def, defs).map_err(|e| ToolError::failed(e.to_string()))?;
+        // blueprint that lands on disk is one that can be brought up. The chart it would
+        // root is checked with it — a rewrite that breaks a child's room is refused rather
+        // than persisted and then complained about.
+        crate::team::build_tree(def.clone(), cwd).map_err(|e| ToolError::failed(e.to_string()))?;
+        crate::team::validate(&def, defs, &self.session)
+            .map_err(|e| ToolError::failed(e.to_string()))?;
         crate::team::write_team_file(cwd, &def).map_err(|e| ToolError::failed(e.to_string()))?;
+        let rooms: Vec<String> = crate::team::rooms(&def)
+            .into_iter()
+            .map(|r| format!("#{} ({})", r.name, r.mode.label()))
+            .collect();
+        let kept = if def.teams.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n{} child team(s) in this chart are unchanged — edit {} in the other directories to change the org chart.",
+                def.teams.len(),
+                crate::team::TEAM_FILE
+            )
+        };
         Ok(format!(
-            "wrote {} — {name} · {} members ({}) · {} channel. It passes validation; action=start brings it up.\n\
-             Running instances are untouched: members you dropped keep running until AgentControl stops them.",
+            "wrote {} — {name} · {} members ({}) · rooms {}. It passes validation; action=start brings it up.\n\
+             Running instances are untouched: members you dropped keep running until AgentControl stops them.{kept}",
             crate::team::TEAM_FILE,
             def.members.len(),
             def.members
@@ -436,7 +663,7 @@ impl TeamTool {
                 .map(|m| format!("{} -> {}", m.name, m.agent))
                 .collect::<Vec<_>>()
                 .join(", "),
-            crate::team::channel_mode(&def).label()
+            rooms.join(", ")
         ))
     }
 }
@@ -449,15 +676,18 @@ impl Tool for TeamTool {
 
     fn description(&self) -> String {
         "Manage the project's agent team — the crew pinned to this repo in .bingo/team.json, whose members are \
-         named instances of agent definitions sharing one channel. status reads the blueprint, each member's \
-         runtime state and the definitions available to draft with; validate checks the file against them; \
-         start creates the channel and spawns every member (idempotent — members already up are reused, and each \
-         one restores its memory for this project and branch); stop takes them down keeping their histories; \
-         save writes the blueprint (whole document: send the complete roster, since whoever you leave out is \
-         removed). Every action except status and validate is a change the user confirms in person before it \
-         happens, so propose it in your reply first and say why — do not call save/start/stop speculatively or \
-         in a loop. Spawning is not waking: members stand by at zero tokens until you SendMessage one (that is \
-         how you give a member work — this tool does not dispatch tasks) or they are addressed in the channel."
+         named instances of agent definitions talking in named rooms. A blueprint may declare child teams in \
+         other directories, so one session manages a whole org chart; every action here spans it. status reads \
+         every team's blueprint, rooms, member runtime states and the definitions available to draft with; \
+         validate checks the chart against them; start opens the rooms and spawns every member in the tree \
+         (idempotent — members already up are reused, and each one restores its memory for its own team's \
+         directory and branch); stop takes them down keeping their histories; save writes this directory's \
+         blueprint (whole document: send the complete roster, since whoever you leave out is removed — child \
+         teams are the exception and are always carried unchanged). Every action except status and validate is a \
+         change the user confirms in person before it happens, so propose it in your reply first and say why — \
+         do not call save/start/stop speculatively or in a loop. Spawning is not waking: members stand by at \
+         zero tokens until you SendMessage one by its bare name, from anywhere in the chart (that is how you \
+         give a member work — this tool does not dispatch tasks) or they are addressed in a room."
             .to_string()
     }
 
@@ -499,8 +729,8 @@ impl Tool for TeamTool {
         let defs = crate::agents::load_agent_defs(&self.session.home, &cwd);
         let text = match params.action {
             TeamAction::Status => self.status(&cwd, &defs)?,
-            TeamAction::Validate => self.validate(&cwd, &defs)?,
-            TeamAction::Start => self.start(&cwd, &defs)?,
+            TeamAction::Validate => self.validate(&cwd)?,
+            TeamAction::Start => self.start(&cwd)?,
             TeamAction::Stop => self.stop(&cwd, ctx)?,
             TeamAction::Save => self.save(&cwd, &defs, &params)?,
         };
@@ -657,6 +887,159 @@ mod tests {
         let _ = std::fs::remove_dir_all(project.parent().unwrap_or(&project));
     }
 
+    /// A roster edit must not quietly dissolve the org chart. `save` writes this
+    /// directory's blueprint whole, but the child teams it declares travel across it
+    /// untouched — they live in other directories and are no business of a roster
+    /// change. The confirmation line says so, so their absence from the call is not
+    /// read as their removal.
+    #[tokio::test]
+    async fn save_carries_the_org_chart_across_a_roster_edit() {
+        let (session, project) = fixture("chart-save");
+        std::fs::write(project.join(".bingo/agents/qa.md"), "You are QA.\n").unwrap_or_default();
+        std::fs::write(project.join(".bingo/agents/dev.md"), "You are Dev.\n").unwrap_or_default();
+        let child = project.join("repos/dept");
+        std::fs::create_dir_all(child.join(".bingo/agents")).unwrap_or_default();
+        std::fs::write(child.join(".bingo/agents/sre.md"), "You are SRE.\n").unwrap_or_default();
+        std::fs::write(
+            child.join(crate::team::TEAM_FILE),
+            r#"{"name":"dept","members":[{"name":"Kai","agent":"sre"}]}"#,
+        )
+        .unwrap_or_default();
+        std::fs::write(
+            project.join(crate::team::TEAM_FILE),
+            r#"{"name":"hq","members":[{"name":"Mira","agent":"qa"}],"teams":[{"path":"repos/dept"}]}"#,
+        )
+        .unwrap_or_default();
+
+        let tool = TeamTool::new(session.clone());
+        let ctx = ctx(&session, &project);
+        let save = serde_json::json!({
+            "action": "save",
+            "name": "hq",
+            "members": [{"name": "Mira", "agent": "qa"}, {"name": "Linh", "agent": "dev"}],
+        });
+        // The user reads the delta, and the chart is part of what is at stake.
+        let reason = save_reason(
+            &project,
+            &parse_input::<TeamInput>(&save).unwrap_or_else(|e| panic!("{e}")),
+        );
+        assert!(
+            reason.contains("+Linh") && reason.contains("1 child team(s) kept"),
+            "{reason}"
+        );
+
+        let out = call(&tool, &ctx, save).await;
+        assert!(out.contains("wrote .bingo/team.json"), "{out}");
+        let after = crate::team::load_team_file(&project)
+            .unwrap_or_default()
+            .unwrap_or_else(|| panic!("blueprint should exist"));
+        assert_eq!(after.teams.len(), 1, "the child team survived the rewrite");
+        assert_eq!(after.teams[0].path, "repos/dept");
+
+        // And the chart still loads, with the department under it.
+        let out = call(&tool, &ctx, serde_json::json!({"action": "status"})).await;
+        assert!(out.contains("team dept") && out.contains("Kai"), "{out}");
+        assert!(out.contains("2 teams in this chart"), "{out}");
+        let _ = std::fs::remove_dir_all(project.parent().unwrap_or(&project));
+    }
+
+    /// A team may hold several rooms with different rosters. `save` writes them, and
+    /// then refuses to configure a single channel that no longer exists — the field
+    /// pair that would otherwise silently delete every room it cannot describe.
+    #[tokio::test]
+    async fn save_writes_rooms_and_refuses_to_flatten_them_by_accident() {
+        let (session, project) = fixture("chart-rooms");
+        for role in ["qa", "dev"] {
+            std::fs::write(
+                project.join(format!(".bingo/agents/{role}.md")),
+                format!("You are {role}.\n"),
+            )
+            .unwrap_or_default();
+        }
+        let tool = TeamTool::new(session.clone());
+        let ctx = ctx(&session, &project);
+
+        let out = call(
+            &tool,
+            &ctx,
+            serde_json::json!({
+                "action": "save",
+                "name": "hq",
+                "members": [{"name": "Mira", "agent": "qa"}, {"name": "Linh", "agent": "dev"}],
+                "channels": [
+                    {"name": "standup", "members": ["Mira", "Linh"]},
+                    {"name": "review", "mode": "free", "members": ["Linh"]},
+                ],
+            }),
+        )
+        .await;
+        assert!(
+            out.contains("#standup (serial)") && out.contains("#review (free)"),
+            "{out}"
+        );
+        let after = crate::team::load_team_file(&project)
+            .unwrap_or_default()
+            .unwrap_or_else(|| panic!("blueprint should exist"));
+        assert_eq!(after.channels.len(), 2);
+        assert_eq!(
+            after.channels[1].members.as_deref(),
+            Some(&["Linh".to_string()][..])
+        );
+
+        // Omitting channels keeps them; sending mode alongside them is refused rather
+        // than guessed at.
+        let out = call(
+            &tool,
+            &ctx,
+            serde_json::json!({
+                "action": "save",
+                "name": "hq",
+                "members": [{"name": "Mira", "agent": "qa"}, {"name": "Linh", "agent": "dev"}],
+            }),
+        )
+        .await;
+        assert!(out.contains("#standup") && out.contains("#review"), "{out}");
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "action": "save",
+                    "name": "hq",
+                    "members": [{"name": "Mira", "agent": "qa"}],
+                    "mode": "free",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("declares its own rooms"), "{err}");
+        assert_eq!(
+            crate::team::load_team_file(&project)
+                .unwrap_or_default()
+                .map(|d| d.channels.len()),
+            Some(2),
+            "a refused save changes nothing"
+        );
+
+        // A room naming someone who is not in this team's reach is refused too.
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "action": "save",
+                    "name": "hq",
+                    "members": [{"name": "Mira", "agent": "qa"}],
+                    "channels": [{"name": "standup", "members": ["Mira", "Ghost"]}],
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Ghost"), "{err}");
+        let _ = std::fs::remove_dir_all(project.parent().unwrap_or(&project));
+    }
+
     /// The permission contract: reads pass, changes ask — and the ask survives the modes
     /// that wave everything else through.
     #[test]
@@ -734,10 +1117,11 @@ mod tests {
                     .map(|n| MemberInput {
                         name: n.to_string(),
                         agent: n.to_string(),
-                        avatar: None,
+                        ..Default::default()
                     })
                     .collect(),
             ),
+            channels: None,
             mode: None,
             message_limit: None,
         };
@@ -752,19 +1136,19 @@ mod tests {
             &project,
             &TeamDef {
                 name: "dev-room".into(),
-                channel: None,
                 members: vec![
                     TeamMember {
                         name: "qa".into(),
                         agent: "qa".into(),
-                        avatar: None,
+                        ..Default::default()
                     },
                     TeamMember {
                         name: "ui".into(),
                         agent: "ui".into(),
-                        avatar: None,
+                        ..Default::default()
                     },
                 ],
+                ..Default::default()
             },
         )
         .unwrap_or_else(|e| panic!("{e}"));
@@ -792,8 +1176,9 @@ mod tests {
                 members: vec![TeamMember {
                     name: "qa".into(),
                     agent: "qa".into(),
-                    avatar: None,
+                    ..Default::default()
                 }],
+                ..Default::default()
             },
         )
         .unwrap_or_else(|e| panic!("{e}"));

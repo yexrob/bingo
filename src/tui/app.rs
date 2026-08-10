@@ -42,7 +42,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Size;
 
 use crate::tui::chat::{Chat, Row};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::tui::chrome;
@@ -229,6 +229,21 @@ fn image_transmits(
         }
     }
     out
+}
+
+/// The portrait data behind the sender bands' placeholder cells. Driven by the
+/// set the row builders recorded rather than by scanning rows: a portrait is
+/// composed *beside* text on its line (`gutter_cell`), so unlike a full-width
+/// image block it carries no [`crate::tui::line::ImageRef`] for a sweep to find.
+/// After a store purge this resends exactly the faces still referenced, in
+/// scrollback as well as on screen.
+fn avatar_transmits(
+    cap: gfx::ImageCap,
+    faces: &HashSet<usize>,
+    transmits: &mut gfx::Transmits,
+) -> Vec<u8> {
+    let indices: Vec<usize> = faces.iter().copied().collect();
+    crate::tui::avatar::transmits(&indices, &cap, transmits)
 }
 
 /// Chrome height, measured by rendering the tree (never predicted — the same
@@ -487,6 +502,7 @@ pub async fn run_inline(
                     &mut transmits,
                 ));
             }
+            bytes.extend_from_slice(&avatar_transmits(cap, &chat.faces, &mut transmits));
             term.write_transmits(&bytes)?;
         }
         if chat.exit {
@@ -669,7 +685,8 @@ pub async fn run_fullscreen(
 
         // The image data behind the frame's placeholder cells.
         if let Some(cap) = chat.image_cap {
-            let bytes = image_transmits(cap, &chat.images, frame.content(), &mut transmits);
+            let mut bytes = image_transmits(cap, &chat.images, frame.content(), &mut transmits);
+            bytes.extend_from_slice(&avatar_transmits(cap, &chat.faces, &mut transmits));
             write_transmits(terminal.backend_mut(), &bytes)?;
         }
         if chat.exit {

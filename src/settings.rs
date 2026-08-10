@@ -144,6 +144,13 @@ pub struct ExperimentalSettings {
     /// Per-agent per-channel message cap (`agentMessageLimit`, default 50).
     #[serde(rename = "agentMessageLimit")]
     pub agent_message_limit: Option<u64>,
+    /// Faces in the main transcript (`chatAvatars`): when enabled, every message
+    /// gets a sender band (portrait + name) and a subagent watch row wears the
+    /// instance's portrait. Off = the transcript carries no portraits at all.
+    /// The workspace views (DM, channel, team) are not governed by this switch —
+    /// there the portrait sits in a gutter the layout already spends.
+    #[serde(rename = "chatAvatars", default)]
+    pub chat_avatars: bool,
 }
 
 /// Named provider. v1 = Anthropic-protocol endpoint; v2 adds the optional
@@ -356,6 +363,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     }
     if let Some(v) = layer.experimental.agent_message_limit {
         base.experimental.agent_message_limit = Some(v);
+    }
+    if layer.experimental.chat_avatars {
+        base.experimental.chat_avatars = true;
     }
     // team: autoStart overridden by later layers (user → project → local).
     if let Some(v) = layer.team.auto_start {
@@ -663,7 +673,8 @@ mod tests {
             "mcpServers": {"m": {"command": "mcp", "args": ["--x"], "env": {"K": "V"}}},
             "disabledMcpServers": ["m"],
             "permissions": {"allow": ["Bash(a:*)"], "deny": ["Bash(b:*)"], "ask": ["Bash(c:*)"]},
-            "experimental": {"agentChannels": true, "channelMessageLimit": 7, "agentMessageLimit": 3},
+            "experimental": {"agentChannels": true, "channelMessageLimit": 7, "agentMessageLimit": 3,
+                             "chatAvatars": true},
             "team": {"autoStart": false},
             "share": {"baseUrl": "https://share.example"}
         }"#;
@@ -807,13 +818,15 @@ mod tests {
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert!(!settings.experimental.agent_channels);
         assert!(settings.experimental.channel_message_limit.is_none());
+        assert!(!settings.experimental.chat_avatars);
         write(
             &tmp,
             ".bingo/settings.json",
-            r#"{"experimental":{"agentChannels":true,"channelMessageLimit":100,"agentMessageLimit":10}}"#,
+            r#"{"experimental":{"agentChannels":true,"channelMessageLimit":100,"agentMessageLimit":10,"chatAvatars":true}}"#,
         );
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert!(settings.experimental.agent_channels);
+        assert!(settings.experimental.chat_avatars);
         let limits = crate::channels::ChannelLimits::from_settings(&settings);
         assert_eq!(limits.channel_total, 100);
         assert_eq!(limits.per_agent, 10);
