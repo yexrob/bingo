@@ -16,7 +16,10 @@ Rust 实现的本地 agent CLI（agent harness）。在终端里驱动大模型�
 - **子代理（hub-and-spoke）**：主 agent 派生命名子代理，异步执行、完成通知自动
   注入上下文；SendMessage 续话、AgentControl 管理生命周期。
 - **Agent 团队（项目级）**：`.bingo/team.json` 把一组角色固定到项目，启动自动
-  拉起（成员零 token 待命），`/team` 命令族管理；跨会话记忆按「项目路径 +
+  拉起（成员零 token 待命），`/team` 命令族管理；钉了团队的项目里，团队就是默认
+  用工对象——活先派给队内成员，另派的子代理只是不进队的临时工；
+  `.bingo/team-norms.md` 是这支队伍的协作约定，每个成员随启动带着它。
+  跨会话记忆按「项目路径 +
   分支」隔离。
 - **经验库（Experience）**：agent 按项目沉淀可复用的操作经验
   （trigger/summary/steps/verify），跨会话复利，并记录经验证的 helpful/harmful
@@ -160,7 +163,7 @@ bingo --continue            # 恢复最近一次会话
 或已发布链接。等价 CLI 为 `bingo share [会话] [--public] [--open] [-o 路径]`。
 `/team`（项目团队）：`list`（图纸+运行区同屏）、`start`（拉起/幂等复用）、
 `status`、`assign <成员> <任务>`（派活）、`stop`、`validate`、`new`
-（脚手架生成 team.json）、`memory list|gc`。
+（脚手架生成 team.json + team-norms.md）、`norms`（团队规范）、`memory list|gc`。
 
 ### 图片渲染
 
@@ -278,8 +281,23 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
   幂等：以实例名为键，重复 `/team start` 复用不重派。
 - **命令**：`/team list`（图纸+运行区同屏）、`start`、`status`
   （●待命 ◐忙碌 ✗异常 ○离线）、`assign`、`stop`、`validate`（与 start 同源
-  校验：validate 能过 start 必成）、`new`（脚手架，产物必过 validate）、
-  `memory list|gc`。
+  校验：validate 能过 start 必成）、`new`（脚手架，产物必过 validate，并附一份
+  团队规范初稿）、`norms`（读团队规范）、`memory list|gc`。
+- **固定团队优先用工**：项目钉了团队，hub 的系统提示里就带着这份名册和随之而来的
+  规矩——活先用 `SendMessage` 交给队内匹配的成员，只有队里没人覆盖的工作才另派
+  子代理。给一个正闲着的成员再派一个替身，既浪费你在付钱养的队伍，也丢掉了它
+  已经攒下的记忆。
+- **临时招募不进队**：有固定团队时，Agent 工具派生出来的是「临时工」而非成员。
+  它不会写进 `.bingo/team.json`；在 `/team list` 与 `AgentControl list` 里与队伍
+  分开列（`crew` / `hire`）；会以 `type: hire` 记进队伍的 `decisions.md`；任务
+  完成即回收——空闲、收件箱为空、没有欠着的回复，并留给 hub 一轮追问的窗口。
+  这一回收只在队伍确实起着时才跑：没有团队的项目里，临时子代理的生命周期和过去
+  一模一样。
+- **团队规范**：`.bingo/team-norms.md`，与图纸并列进版本库，是这支队伍的协作约定
+  ——写成散文而非 schema，因为它既要被模型读，也要被人评审。它随启动进入每个成员
+  以及每个临时工的系统块，无需每次口头重申，并且自带优先级条款：显式指令在它所
+  针对的那一点上压过规范，其余规范照旧生效。`/team new` 会生成一份初稿（已存在
+  则不覆盖），`/team norms` 打印磁盘上的内容。
 - **跨会话记忆**：成员历史 + append-only 决策记录存
   `~/.config/bingo/teams/<项目哈希>/<分支>/<team>/`——按「项目路径 + 分支」隔离，
   main 与特性 worktree 记忆互不污染。每个成员一份 `<名>.md`（可读转录）
