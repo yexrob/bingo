@@ -583,6 +583,10 @@ fn clip_text_block(block: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// What an action-shaped tool call is aimed at, in the order the tools name it
+/// (`AgentControl.agent`, `Channel.channel`, `Team.name`).
+const TARGET_KEYS: &[&str] = &["agent", "channel", "name"];
+
 pub(crate) fn summarize_input(tool_name: &str, input: &serde_json::Value) -> String {
     match (tool_name, input) {
         // Bash summary shows the command directly
@@ -633,6 +637,26 @@ pub(crate) fn summarize_input(tool_name: &str, input: &serde_json::Value) -> Str
             .and_then(|q| q.as_str())
             .map(|q| format!("{q:?}"))
             .unwrap_or_else(|| "AskUserQuestion".to_string()),
+        // Action-shaped tools (AgentControl/Channel/Team): the k=v fallback below takes the
+        // map's first key, and serde_json orders keys alphabetically — `action` always wins and
+        // the target never shows, so three rows aimed at three different instances read
+        // identically. Name the action and who it is aimed at instead.
+        (_, serde_json::Value::Object(map))
+            if map.get("action").and_then(|a| a.as_str()).is_some() =>
+        {
+            let action = map
+                .get("action")
+                .and_then(|a| a.as_str())
+                .unwrap_or_default();
+            match TARGET_KEYS
+                .iter()
+                .find_map(|k| map.get(*k).and_then(|v| v.as_str()))
+                .filter(|t| !t.is_empty())
+            {
+                Some(target) => format!("{action} {target}"),
+                None => action.to_string(),
+            }
+        }
         (_, serde_json::Value::Object(map)) => map
             .iter()
             .take(1)
@@ -1738,6 +1762,47 @@ mod tests {
         // Missing skill name (malformed call): empty summary → the header row shows only the tool name.
         let missing = serde_json::json!({"args": "doc.md"});
         assert_eq!(summarize_input("Skill", &missing), "");
+    }
+
+    /// The k=v fallback takes the map's first key and serde_json orders them alphabetically, so
+    /// every action-shaped tool showed `action=…` and hid what the call was aimed at: three rows
+    /// aimed at three different instances were indistinguishable.
+    #[test]
+    fn action_tools_summarize_as_action_plus_target() {
+        assert_eq!(
+            summarize_input(
+                "AgentControl",
+                &serde_json::json!({"action": "messages", "agent": "scout"})
+            ),
+            "messages scout"
+        );
+        assert_eq!(
+            summarize_input("AgentControl", &serde_json::json!({"action": "list"})),
+            "list"
+        );
+        assert_eq!(
+            summarize_input(
+                "Channel",
+                &serde_json::json!({"action": "add", "channel": "#table", "members": ["scout"]})
+            ),
+            "add #table"
+        );
+        assert_eq!(
+            summarize_input(
+                "Team",
+                &serde_json::json!({"action": "start", "name": "review-crew"})
+            ),
+            "start review-crew"
+        );
+        // Non-string action, or none at all: the old k=v fallback still applies.
+        assert_eq!(
+            summarize_input("Weird", &serde_json::json!({"action": 3})),
+            "action=3"
+        );
+        assert_eq!(
+            summarize_input("Weird", &serde_json::json!({"zeta": "z"})),
+            "zeta=\"z\""
+        );
     }
 
     #[test]
