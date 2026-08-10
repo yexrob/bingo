@@ -40,10 +40,17 @@ impl ErrorCode for QueryError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryEndReason {
+    Completed,
+    EmptyResponseRetried,
+}
+
 /// Result of a query.
 #[derive(Debug)]
 pub struct QueryOutcome {
     pub messages: Vec<Message>,
+    pub end_reason: QueryEndReason,
     /// Turn aborted by the user (stream stopped; tools that already ran finish normally).
     pub aborted: bool,
 }
@@ -457,6 +464,7 @@ async fn one_turn(
             _ => {}
         }
     }
+    acc.finish();
     Ok(Turn {
         assistant: acc.message(),
         tool_uses,
@@ -736,6 +744,7 @@ async fn query_loop(
     mut cancel_rx: Option<watch::Receiver<bool>>,
 ) -> Result<QueryOutcome, QueryError> {
     let mut recovery_count = 0u32;
+    let mut empty_retry_count = 0u32;
     let mut stop_hook_fired = false;
     let mut gate = TokenGate::new();
     normalize_synthetic_bash_calls(&mut messages);
@@ -797,8 +806,27 @@ async fn query_loop(
             println!();
             return Ok(QueryOutcome {
                 messages,
+                end_reason: QueryEndReason::Completed,
                 aborted: true,
             });
+        }
+        let empty_assistant = turn.assistant.content.iter().all(|block| match block {
+            ContentBlock::Text { text } => text.trim().is_empty(),
+            ContentBlock::Thinking { .. } => true,
+            ContentBlock::ToolUse { .. } => false,
+            ContentBlock::ToolResult { .. } | ContentBlock::Image { .. } => true,
+        });
+        if turn.tool_uses.is_empty() && empty_assistant {
+            if empty_retry_count == 0 {
+                empty_retry_count = 1;
+                if !session.quiet {
+                    (ui.on_warning)("model returned an empty response; retrying once".to_string());
+                }
+                continue;
+            }
+            return Err(QueryError::Protocol(
+                "the model returned no response after the stream ended; retry the turn".to_string(),
+            ));
         }
         // The assistant message must enter history before branching: max_tokens recovery
         // and the Stop hook both need the model to see the truncated content, and a normal
@@ -828,8 +856,14 @@ async fn query_loop(
                 continue;
             }
             println!();
+            let end_reason = if empty_retry_count > 0 {
+                QueryEndReason::EmptyResponseRetried
+            } else {
+                QueryEndReason::Completed
+            };
             return Ok(QueryOutcome {
                 messages,
+                end_reason,
                 aborted: false,
             });
         }
@@ -997,6 +1031,7 @@ async fn query_loop(
             println!();
             return Ok(QueryOutcome {
                 messages,
+                end_reason: QueryEndReason::Completed,
                 aborted: true,
             });
         }
@@ -1007,6 +1042,11 @@ async fn query_loop(
         if stop_after_tools || is_cancelled(&cancel_rx) {
             return Ok(QueryOutcome {
                 messages,
+                end_reason: if empty_retry_count > 0 {
+                    QueryEndReason::EmptyResponseRetried
+                } else {
+                    QueryEndReason::Completed
+                },
                 aborted: is_cancelled(&cancel_rx),
             });
         }
@@ -1039,6 +1079,7 @@ pub async fn run_query(
     {
         return Ok(QueryOutcome {
             messages: initial_messages,
+            end_reason: QueryEndReason::Completed,
             aborted: false,
         });
     }
@@ -1212,6 +1253,7 @@ pub async fn run_bash_command(
                     let Some(outcome) = outcomes.into_iter().next().filter(|_| !interrupted) else {
                         return Ok(QueryOutcome {
                             messages,
+                            end_reason: QueryEndReason::Completed,
                             aborted: true,
                         });
                     };
@@ -1281,6 +1323,7 @@ pub async fn run_bash_command(
     if !respond {
         return Ok(QueryOutcome {
             messages,
+            end_reason: QueryEndReason::Completed,
             aborted: is_cancelled(&cancel),
         });
     }
@@ -1527,6 +1570,54 @@ mod tests {
                 format!(
                     r#"{{"delta":{{"stop_reason":"{stop_reason}"}},"usage":{{"output_tokens":5}}}}"#
                 ),
+            ),
+            ("message_stop", "{}".into()),
+        ])
+    }
+
+    fn unclosed_text_turn(text: &str, stop_reason: &str) -> String {
+        sse(&[
+            (
+                "message_start",
+                r#"{"message":{"id":"m_1","model":"m"}}"#.into(),
+            ),
+            (
+                "content_block_start",
+                r#"{"index":0,"content_block":{"type":"text","text":""}}"#.into(),
+            ),
+            (
+                "content_block_delta",
+                format!(r#"{{"index":0,"delta":{{"type":"text_delta","text":"{text}"}}}}"#),
+            ),
+            (
+                "message_delta",
+                format!(
+                    r#"{{"delta":{{"stop_reason":"{stop_reason}"}},"usage":{{"output_tokens":5}}}}"#
+                ),
+            ),
+            ("message_stop", "{}".into()),
+        ])
+    }
+
+    fn unclosed_thinking_turn(thinking: &str) -> String {
+        sse(&[
+            (
+                "message_start",
+                r#"{"message":{"id":"m_1","model":"m"}}"#.into(),
+            ),
+            (
+                "content_block_start",
+                r#"{"index":0,"content_block":{"type":"thinking","thinking":""}}"#.into(),
+            ),
+            (
+                "content_block_delta",
+                format!(
+                    r#"{{"index":0,"delta":{{"type":"thinking_delta","thinking":"{thinking}"}}}}"#
+                ),
+            ),
+            (
+                "message_delta",
+                r#"{"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#.into(),
             ),
             ("message_stop", "{}".into()),
         ])
@@ -1787,8 +1878,132 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[tokio::test]
+    async fn content_free_completed_turn_retries_without_recording_it() {
+        let base_url = spawn_api(vec![
+            text_turn("", "end_turn"),
+            text_turn("recovered", "end_turn"),
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.end_reason, QueryEndReason::EmptyResponseRetried);
+        assert_eq!(
+            outcome
+                .messages
+                .iter()
+                .filter(|message| message.role == Role::Assistant)
+                .count(),
+            1,
+            "the content-free attempt is not recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn unclosed_thinking_empty_turn_retries_without_recording_it() {
+        let base_url = spawn_api(vec![
+            unclosed_thinking_turn("cut off"),
+            text_turn("recovered", "end_turn"),
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.end_reason, QueryEndReason::EmptyResponseRetried);
+        let assistants = outcome
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .collect::<Vec<_>>();
+        assert_eq!(assistants.len(), 1, "the empty attempt is not recorded");
+        assert_eq!(
+            assistants[0].content,
+            vec![ContentBlock::Text {
+                text: "recovered".into(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_empty_turn_returns_server_error_without_recording_assistant() {
+        let home = std::env::temp_dir().join(format!("bingo-empty-turn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let transcript = crate::transcript::create(&home, &home).unwrap();
+        let base_url = spawn_api(vec![
+            unclosed_thinking_turn("first"),
+            unclosed_thinking_turn("second"),
+        ])
+        .await;
+        let session = test_session(base_url, Some(transcript.clone()));
+        let mut ui = headless_hooks();
+        let error = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_code(), "SERVER_ERROR");
+        assert!(error.to_string().contains("no response"));
+        assert!(
+            transcript
+                .load_messages()
+                .unwrap()
+                .iter()
+                .all(|message| message.role != Role::Assistant),
+            "empty assistant attempts must not enter the transcript"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// M2: on max_tokens truncation recovery, the truncated assistant content must already
     /// be in the request history — otherwise the model has nothing to continue from.
+    #[tokio::test]
+    async fn unclosed_text_max_tokens_recovers_with_truncated_history() {
+        let base_url = spawn_api(vec![
+            unclosed_text_turn("partial answer", "max_tokens"),
+            text_turn("done", "end_turn"),
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap();
+
+        let texts: Vec<(Role, String)> = outcome
+            .messages
+            .iter()
+            .map(|m| {
+                let text = m
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                (m.role, text)
+            })
+            .filter(|(_, text)| !text.starts_with(TASK_REMINDER_MARKER))
+            .collect();
+
+        assert_eq!(
+            texts.len(),
+            4,
+            "two assistant messages prove the recovery request occurred: {texts:?}"
+        );
+        assert_eq!(texts[1], (Role::Assistant, "partial answer".to_string()));
+        assert_eq!(texts[2], (Role::User, MAX_TOKENS_RESUME_PROMPT.to_string()));
+        assert_eq!(texts[3], (Role::Assistant, "done".to_string()));
+    }
+
     #[tokio::test]
     async fn max_tokens_recovery_keeps_truncated_assistant_in_history() {
         let base_url = spawn_api(vec![

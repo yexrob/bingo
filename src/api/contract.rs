@@ -412,6 +412,30 @@ impl AssistantAccumulator {
         f(flight)
     }
 
+    pub fn finish(&mut self) -> bool {
+        let Some(in_flight) = self.in_flight.take() else {
+            return false;
+        };
+        let block = match in_flight {
+            InFlight::Text { text } => Some(ContentBlock::Text { text }),
+            InFlight::Thinking {
+                thinking,
+                signature,
+            } => Some(ContentBlock::Thinking {
+                thinking,
+                signature,
+            }),
+            InFlight::ToolUse { .. } => None,
+        };
+        if let Some(block) = block {
+            self.content.push(block);
+        }
+        if self.stop_reason.as_deref() != Some("max_tokens") {
+            self.stop_reason = Some("truncated".to_string());
+        }
+        true
+    }
+
     pub fn message(&self) -> Message {
         Message {
             role: Role::Assistant,
@@ -512,6 +536,91 @@ mod tests {
         .unwrap();
         acc.push(&StreamEvent::BlockStop { index: 0 }).unwrap();
         assert!(matches!(&acc.content[0], ContentBlock::ToolUse { input, .. } if input.is_null()));
+    }
+
+    #[test]
+    fn finish_preserves_max_tokens_for_unclosed_text() {
+        let mut acc = AssistantAccumulator::new();
+        acc.push(&StreamEvent::TextStart { index: 0 }).unwrap();
+        acc.push(&StreamEvent::TextDelta {
+            index: 0,
+            text: "partial answer".into(),
+        })
+        .unwrap();
+        acc.push(&StreamEvent::StopReason {
+            stop_reason: Some("max_tokens".into()),
+            output_tokens: Some(4),
+        })
+        .unwrap();
+
+        assert!(acc.finish());
+        assert_eq!(acc.stop_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(
+            acc.content,
+            vec![ContentBlock::Text {
+                text: "partial answer".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn finish_marks_unclosed_block_truncated_for_non_recoverable_stop_reason() {
+        let mut acc = AssistantAccumulator::new();
+        acc.push(&StreamEvent::TextStart { index: 0 }).unwrap();
+        acc.push(&StreamEvent::TextDelta {
+            index: 0,
+            text: "partial answer".into(),
+        })
+        .unwrap();
+        acc.push(&StreamEvent::StopReason {
+            stop_reason: Some("stop_sequence".into()),
+            output_tokens: Some(4),
+        })
+        .unwrap();
+
+        assert!(acc.finish());
+        assert_eq!(acc.stop_reason.as_deref(), Some("truncated"));
+    }
+
+    #[test]
+    fn finish_preserves_unclosed_thinking_as_truncated() {
+        let mut acc = AssistantAccumulator::new();
+        acc.push(&StreamEvent::ThinkingStart { index: 0 }).unwrap();
+        acc.push(&StreamEvent::ThinkingDelta {
+            index: 0,
+            thinking: "unfinished plan".into(),
+        })
+        .unwrap();
+        acc.push(&StreamEvent::StopReason {
+            stop_reason: Some("end_turn".into()),
+            output_tokens: Some(4),
+        })
+        .unwrap();
+
+        assert!(acc.finish());
+        assert_eq!(acc.stop_reason.as_deref(), Some("truncated"));
+        assert_eq!(
+            acc.content,
+            vec![ContentBlock::Thinking {
+                thinking: "unfinished plan".into(),
+                signature: String::new(),
+            }]
+        );
+    }
+
+    #[test]
+    fn finish_drops_unclosed_tool_use_and_marks_truncated() {
+        let mut acc = AssistantAccumulator::new();
+        acc.push(&StreamEvent::ToolUseStart {
+            index: 0,
+            id: "tu_1".into(),
+            name: "Bash".into(),
+        })
+        .unwrap();
+
+        assert!(acc.finish());
+        assert!(acc.content.is_empty());
+        assert_eq!(acc.stop_reason.as_deref(), Some("truncated"));
     }
 
     #[test]

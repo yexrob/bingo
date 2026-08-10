@@ -4420,6 +4420,15 @@ impl Chat {
     ) {
         if outcome.aborted {
             let _ = events.send(UiEvent::Warning("turn interrupted".to_string()));
+        } else {
+            match outcome.end_reason {
+                crate::query::QueryEndReason::EmptyResponseRetried => {
+                    let _ = events.send(UiEvent::Warning(
+                        "model returned an empty response and was retried".to_string(),
+                    ));
+                }
+                crate::query::QueryEndReason::Completed => {}
+            }
         }
         let _ = events.send(UiEvent::TurnEnd);
         let cwd = std::env::current_dir().unwrap_or_default();
