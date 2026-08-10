@@ -242,10 +242,15 @@ impl ErrorCode for ExperienceError {
 }
 
 /// Experience root: `$XDG_CONFIG_HOME/bingo/experience` (mirrors the skills config convention).
+/// Tests must not depend on the ambient XDG_CONFIG_HOME (CI runners may set it): the home
+/// parameter is the sole source of truth under test.
 fn experience_root(home: &Path) -> PathBuf {
+    #[cfg(not(test))]
     let config = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home.join(".config"));
+    #[cfg(test)]
+    let config = home.join(".config");
     config.join("bingo").join("experience")
 }
 
