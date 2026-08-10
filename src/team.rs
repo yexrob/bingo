@@ -2676,10 +2676,17 @@ mod tests {
         write_chart(&root);
         let note = crew_note(&tree_of(&root), &home);
         assert!(note.contains("`hq` is pinned"), "{note}");
+        // Derived from the directories the fixture actually built, not written as a
+        // literal: the note renders a real path, and its separator is the platform's.
+        let under = |team: &str, dir: &Path| {
+            let rel = dir.strip_prefix(&root).unwrap_or(dir);
+            format!("## {team} — {}", rel.display())
+        };
+        let engineering = root.join("repos/engineering");
         assert!(
-            note.contains("## engineering — repos/engineering")
-                && note.contains("## platform — repos/engineering/platform")
-                && note.contains("## strategy — strategy"),
+            note.contains(&under("engineering", &engineering))
+                && note.contains(&under("platform", &engineering.join("platform")))
+                && note.contains(&under("strategy", &root.join("strategy"))),
             "each department is named under its own directory: {note}"
         );
         assert!(

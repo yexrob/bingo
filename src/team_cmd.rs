@@ -863,8 +863,11 @@ mod tests {
         for team in ["hq", "engineering", "platform", "strategy"] {
             assert!(out.contains(team), "{team} missing from status: {out}");
         }
+        // Derived from the directory the fixture actually built, not written as a
+        // literal: the line renders a real path, and its separator is the platform's.
+        let expected = platform.strip_prefix(&project).unwrap_or(&platform);
         assert!(
-            out.contains("repos/engineering/platform"),
+            out.contains(&expected.display().to_string()),
             "a child team is shown where it lives: {out}"
         );
         assert_eq!(
