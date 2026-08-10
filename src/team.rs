@@ -114,7 +114,8 @@ pub struct ChannelDef {
 
 /// A child team, by where its blueprint lives. The path is relative to the
 /// declaring team's own directory — a committed org chart has to travel with the
-/// repo, so an absolute path is refused.
+/// repo, so a path starting at a filesystem root is refused (absolute *or* merely
+/// rooted: on Windows `/etc/x` is the second and not the first).
 ///
 /// It may point at the directory that holds a blueprint (`repos/marketing`) or at
 /// the blueprint itself (`repos/marketing/.bingo/team.json`); both name the same
@@ -324,9 +325,14 @@ fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
                 "{file}: teams[{i}].path: must not be empty (name the directory holding the child blueprint, or the file itself)"
             )));
         }
-        if Path::new(t.path.trim()).is_absolute() {
+        // `has_root` as well as `is_absolute`, because they disagree exactly where it
+        // matters: on Windows "/etc/team.json" is rooted but not absolute (it has no
+        // drive), and letting it through would mean the rule held on one platform and
+        // not the other for the same committed file.
+        let path = Path::new(t.path.trim());
+        if path.is_absolute() || path.has_root() {
             return Err(TeamError::invalid(format!(
-                "{file}: teams[{i}].path: \"{}\" is absolute; use a path relative to this team's directory (a committed org chart has to travel with the repo)",
+                "{file}: teams[{i}].path: \"{}\" starts at a filesystem root; use a path relative to this team's directory (a committed org chart has to travel with the repo)",
                 t.path
             )));
         }
@@ -2303,13 +2309,15 @@ mod tests {
             "{mislabelled}"
         );
 
-        // An absolute path would not travel with the repo — and this one is refused a
-        // step earlier, by the structural check the writer and the reader share, so it
-        // never reaches the disk at all.
-        let absolute = write_team_file(&root, &hq(vec![child("/etc/team.json")]))
+        // A path that starts at a filesystem root would not travel with the repo — and
+        // it is refused a step earlier, by the structural check the writer and the
+        // reader share, so it never reaches the disk at all. "/etc/team.json" is the
+        // case the two Path predicates disagree on: on Windows it is rooted but not
+        // absolute, and it has to be refused there too.
+        let rooted = write_team_file(&root, &hq(vec![child("/etc/team.json")]))
             .unwrap_err()
             .to_string();
-        assert!(absolute.contains("is absolute"), "{absolute}");
+        assert!(rooted.contains("starts at a filesystem root"), "{rooted}");
         std::fs::remove_dir_all(&root).unwrap_or_else(|e| panic!("{e}"));
     }
 
@@ -2497,7 +2505,10 @@ mod tests {
         let home = tmp("chart-spawn");
         let root = home.join("proj");
         write_chart(&root);
-        let platform = root.join("repos/engineering/platform");
+        // Joined the way the loader joins it (one child reference at a time), so the
+        // path compares equal on a platform whose separator is not the one written in
+        // the reference itself.
+        let platform = root.join("repos/engineering").join("platform");
         // A past filed under the grandchild's own directory and branch is the past
         // that member is pointed at — the partition follows the team, not the session.
         let branch = current_branch(&platform);
