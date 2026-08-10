@@ -353,7 +353,9 @@ pub fn load_entries(home: &Path, project_key: &str) -> Vec<ExperienceEntry> {
     };
     let mut out = Vec::new();
     for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+        // metadata() follows symlinks (file_type() reports a linked file as not-a-file);
+        // a dangling link fails metadata and is skipped.
+        if !std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file()) {
             continue;
         }
         let Ok(raw) = std::fs::read_to_string(entry.path()) else {
@@ -687,6 +689,42 @@ mod tests {
             "corrupted entries are skipped, not errored"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// L: an entry file symlinked into entries/ (e.g. from a shared dotfiles store)
+    /// must load — file_type() reports the link itself as not-a-file, so scanning has
+    /// to follow metadata() to see the target.
+    #[test]
+    fn symlinked_entry_is_loaded() {
+        #[cfg(unix)]
+        {
+            let root = tmp_root("symlink");
+            let home = root.join("home");
+            let key = "k";
+            let entry = ExperienceEntry::new(
+                key,
+                vec!["build".into()],
+                "symlinked entry".into(),
+                vec!["step".into()],
+                None,
+                None,
+            );
+            let store = root.join("store");
+            std::fs::create_dir_all(&store).unwrap();
+            std::fs::write(store.join("entry.md"), entry.serialize()).unwrap();
+            let dir = entries_dir(&home, key);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::os::unix::fs::symlink(
+                store.join("entry.md"),
+                dir.join(format!("{}.md", entry.id)),
+            )
+            .unwrap();
+            let loaded = load_entries(&home, key);
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].id, entry.id);
+            assert_eq!(loaded[0].summary, entry.summary);
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     #[test]
