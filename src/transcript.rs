@@ -176,8 +176,24 @@ impl Transcript {
                 self.path.display()
             );
         }
+        drop_contentless(&mut messages);
         Ok(messages)
     }
+}
+
+/// A message carrying nothing is not history. A model turn that streamed no block lands
+/// here as `content: []`, and a resumed turn built from it is rejected by the endpoints
+/// ("content: at least one item required") — so the session it poisons can never be
+/// resumed. Blank text blocks go the same way, then messages left with no block at all.
+/// Only blocks that carry nothing are removed, so no tool_use ever loses its tool_result.
+fn drop_contentless(messages: &mut Vec<Message>) {
+    use crate::api::types::ContentBlock;
+    for message in messages.iter_mut() {
+        message.content.retain(
+            |block| !matches!(block, ContentBlock::Text { text } if text.trim().is_empty()),
+        );
+    }
+    messages.retain(|message| !message.content.is_empty());
 }
 
 #[cfg(test)]
@@ -236,6 +252,66 @@ mod tests {
         let messages = transcript.load_messages().unwrap();
         assert_eq!(messages.len(), 2, "bad lines skipped, good lines kept");
         assert_eq!(messages[0], good);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A turn that streamed nothing is persisted as `content: []`, and the endpoints reject
+    /// a content-free message on the next request — leaving it in history means the session
+    /// can never be resumed. Blocks carrying nothing go the same way; a tool_result never
+    /// does, so no tool_use is orphaned.
+    #[test]
+    fn load_drops_messages_that_carry_nothing() {
+        use crate::api::types::ContentBlock;
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-transcript-void-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let transcript = create(&home, &tmp).unwrap();
+        let good = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+        };
+        let call = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text { text: "  ".into() },
+                ContentBlock::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({ "command": "ls" }),
+                },
+            ],
+        };
+        transcript.append(&good).unwrap();
+        transcript
+            .append(&Message {
+                role: Role::Assistant,
+                content: Vec::new(),
+            })
+            .unwrap();
+        transcript
+            .append(&Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "".into() }],
+            })
+            .unwrap();
+        transcript.append(&call).unwrap();
+
+        let messages = transcript.load_messages().unwrap();
+
+        assert_eq!(messages.len(), 2, "both content-free messages are dropped");
+        assert_eq!(messages[0], good);
+        assert_eq!(
+            messages[1].content.len(),
+            1,
+            "the blank text block goes, the tool_use stays"
+        );
+        assert!(matches!(
+            &messages[1].content[0],
+            ContentBlock::ToolUse { id, .. } if id == "toolu_1"
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -64,7 +64,7 @@ pub struct UiMessage {
 }
 
 /// Collapse group for consecutive Read/Search operations: collapses into a one-line rule summary (`Read 3 files`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CollapseGroup {
     /// Activity indices in the group (in order).
     pub activities: Vec<usize>,
@@ -78,6 +78,12 @@ pub struct CollapseGroup {
     pub list: usize,
     /// Number of plain Bash operations.
     pub bash: usize,
+    /// Number of read-only subagent inspections (AgentControl list/messages).
+    pub agent_checks: usize,
+    /// Number of subagents stopped (AgentControl stop).
+    pub agent_stops: usize,
+    /// Number of subagents deleted (AgentControl delete).
+    pub agent_deletes: usize,
     /// Group still open (in progress → summary uses the -ing form + …).
     pub active: bool,
     /// ctrl+o / click expands the group into individual tools.
@@ -95,6 +101,12 @@ pub enum CollapseKind {
     List,
     /// Plain Bash that is neither search, read, nor list.
     Bash,
+    /// Looking a subagent up (AgentControl list/messages).
+    AgentCheck,
+    /// Stopping a subagent (AgentControl stop).
+    AgentStop,
+    /// Deleting a subagent (AgentControl delete).
+    AgentDelete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,6 +403,11 @@ pub const ENTITY_ROWS_MAX: usize = 6;
 pub const UNDO_MAX: usize = 20;
 /// Exit-confirmation window between two Ctrl+C presses.
 pub const CTRL_C_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How long a requested interrupt may go unhonoured before Ctrl+C force-quits instead.
+/// A live turn acknowledges cancellation well inside this; a turn whose task died never
+/// will, and `busy` gates every other way out.
+pub const INTERRUPT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 /// Clear-confirmation window between two Esc presses.
 pub const ESC_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 /// Paste-burst detection: key intervals shorter than this count as one batch of input.
@@ -464,6 +481,16 @@ pub fn classify_tool(name: &str, input: &serde_json::Value) -> Option<CollapseKi
             .and_then(|p| p.as_str())
             .map(|p| CollapseKind::Read(Some(p.to_string()))),
         "Grep" | "Glob" => Some(CollapseKind::Search),
+        // Managing subagents runs in streaks (check three, stop one), and every row used to be
+        // its own two-line block that also closed whatever group was open. Fold the whole
+        // streak, but count a stop apart from a look so the summary never reports a
+        // deletion as a glance. An action-less call stays standalone (it is a malformed call).
+        "AgentControl" => match input.get("action").and_then(|a| a.as_str()) {
+            Some("stop") => Some(CollapseKind::AgentStop),
+            Some("delete") => Some(CollapseKind::AgentDelete),
+            Some(_) => Some(CollapseKind::AgentCheck),
+            None => None,
+        },
         "Bash" => {
             let kind = input
                 .get("command")
@@ -666,6 +693,29 @@ pub fn collapse_summary(g: &CollapseGroup, in_progress: bool) -> String {
             ),
         );
     }
+    if g.agent_checks > 0 {
+        push(
+            "checked",
+            "checking",
+            format!(" {} {}", g.agent_checks, subagents(g.agent_checks)),
+        );
+    }
+    // A stop and a delete are counted (and worded) apart from a look: folding them into
+    // "checked 4 subagents" would report a run being killed as a glance.
+    if g.agent_stops > 0 {
+        push(
+            "stopped",
+            "stopping",
+            format!(" {} {}", g.agent_stops, subagents(g.agent_stops)),
+        );
+    }
+    if g.agent_deletes > 0 {
+        push(
+            "deleted",
+            "deleting",
+            format!(" {} {}", g.agent_deletes, subagents(g.agent_deletes)),
+        );
+    }
     if g.bash > 0 {
         push(
             "ran",
@@ -679,6 +729,10 @@ pub fn collapse_summary(g: &CollapseGroup, in_progress: bool) -> String {
     }
     let text = parts.join(", ");
     if active { format!("{text}…") } else { text }
+}
+
+fn subagents(n: usize) -> &'static str {
+    if n == 1 { "subagent" } else { "subagents" }
 }
 
 fn capitalize(s: &str) -> String {
@@ -833,6 +887,9 @@ pub struct Chat {
     pub notice_until: Option<std::time::Instant>,
     /// Time of the most recent Ctrl+C on empty input (a second press within [`CTRL_C_WINDOW`] exits).
     ctrl_c_at: Option<std::time::Instant>,
+    /// Time the running turn was first asked to stop; cleared when the next turn starts.
+    /// Ctrl+C force-quits once it is older than [`INTERRUPT_GRACE`] and the turn is still busy.
+    interrupt_at: Option<std::time::Instant>,
     /// Time of the most recent Esc (a second press within [`ESC_WINDOW`] clears the input).
     esc_at: Option<std::time::Instant>,
     /// Time of the last key press and the count of consecutive "fast" keys (paste-burst heuristic).
@@ -860,6 +917,10 @@ pub struct Chat {
     pub interrupted: bool,
     /// Index of the current assistant message.
     pub stream_msg: Option<usize>,
+    /// Message opened by [`Chat::open_continuation_message`] to carry what the model says after a
+    /// mid-turn answer. Recorded so a turn that ends without using it can drop it again —
+    /// inferring that from "empty assistant message" would also catch messages nobody opened here.
+    continuation_msg: Option<usize>,
     thinking_buf: String,
     /// Whether the current thinking segment is open for continuation: closed after ToolStart/TextDelta
     /// (segment boundaries); deltas in the same segment continue without paragraph breaks; new segments (fresh reasoning after a tool) are aggregated with \n\n.
@@ -1153,6 +1214,7 @@ impl Chat {
             notice: None,
             notice_until: None,
             ctrl_c_at: None,
+            interrupt_at: None,
             esc_at: None,
             last_key_at: None,
             burst_keys: 0,
@@ -1165,6 +1227,7 @@ impl Chat {
             bash_mode: false,
             busy: false,
             stream_msg: None,
+            continuation_msg: None,
             thinking_buf: String::new(),
             thinking_seg_open: false,
             output_tokens: 0,
@@ -1335,6 +1398,7 @@ impl Chat {
                 self.thinking_buf.clear();
                 self.thinking_seg_open = false;
                 self.pending_tools_clear();
+                self.interrupt_at = None;
                 self.turn_started = Some(std::time::Instant::now());
                 self.messages.push(UiMessage {
                     role: Role::Assistant,
@@ -1345,6 +1409,7 @@ impl Chat {
                     group_of: Vec::new(),
                 });
                 self.stream_msg = Some(self.messages.len() - 1);
+                self.continuation_msg = None;
                 self.busy = true;
                 self.turn_start_tick = self.tick;
                 // Placeholder thinking: when the endpoint delays deltas (DeepSeek often by tens of seconds),
@@ -1376,15 +1441,7 @@ impl Chat {
                     // and the running thinking block closes with it (same closing semantics as ToolStart).
                     self.thinking_buf.clear();
                     self.thinking_seg_open = false;
-                    for hint in &mut self.messages[i].activities {
-                        if let ActivityKind::Thinking(t) = &mut hint.kind
-                            && t.state == ThinkingState::Running
-                        {
-                            t.state = ThinkingState::Done;
-                            t.duration_ms =
-                                self.tick.saturating_sub(t.start_tick).saturating_mul(33);
-                        }
-                    }
+                    self.close_running_thinking(i);
                 }
             }
             UiEvent::ThinkingDelta(thinking) => {
@@ -1484,15 +1541,7 @@ impl Chat {
                     return;
                 }
                 if let Some(i) = self.stream_msg {
-                    for hint in &mut self.messages[i].activities {
-                        if let ActivityKind::Thinking(t) = &mut hint.kind
-                            && t.state == ThinkingState::Running
-                        {
-                            t.state = ThinkingState::Done;
-                            t.duration_ms =
-                                self.tick.saturating_sub(t.start_tick).saturating_mul(33);
-                        }
-                    }
+                    self.close_running_thinking(i);
                 }
                 // Tool start = reasoning segment boundary: subsequent deltas aggregate into a new segment.
                 self.thinking_seg_open = false;
@@ -1542,15 +1591,8 @@ impl Chat {
                     self.messages[i].groups.len() - 1
                 } else {
                     self.messages[i].groups.push(CollapseGroup {
-                        activities: Vec::new(),
-                        search: 0,
-                        read_paths: Vec::new(),
-                        read_ops: 0,
-                        list: 0,
-                        bash: 0,
                         active: true,
-                        expanded: false,
-                        last_hint: None,
+                        ..CollapseGroup::default()
                     });
                     self.messages[i].groups.len() - 1
                 };
@@ -1565,6 +1607,9 @@ impl Chat {
                     },
                     CollapseKind::List => self.messages[i].groups[g].list += 1,
                     CollapseKind::Bash => self.messages[i].groups[g].bash += 1,
+                    CollapseKind::AgentCheck => self.messages[i].groups[g].agent_checks += 1,
+                    CollapseKind::AgentStop => self.messages[i].groups[g].agent_stops += 1,
+                    CollapseKind::AgentDelete => self.messages[i].groups[g].agent_deletes += 1,
                 }
             }
             UiEvent::WatchEvent {
@@ -1738,6 +1783,7 @@ impl Chat {
                 self.turn_started = None;
                 self.output_tokens = 0;
                 self.thinking_seg_open = false;
+                self.drop_empty_stream_message();
                 // AskUserQuestion answers are ordinary user messages (in the message flow,
                 // settled/flushed with it) — nothing to clean at turn end, they persist with the session.
                 // After a user interruption, background-task completion must not auto-start a new turn;
@@ -1833,6 +1879,7 @@ impl Chat {
                 // the v1.21 instant-command contract).
                 if matches!(context, crate::error::ErrorContext::LongTurn) {
                     self.busy = false;
+                    self.drop_empty_stream_message();
                     self.stream_msg = None;
                 }
                 // #18: structured error-state record (code/msg/level/context); the render side uses it to
@@ -4435,6 +4482,23 @@ impl Chat {
         crate::memory::extract_memory(session, &outcome.messages, &session.home, &cwd).await;
     }
 
+    /// A turn task that dies without reporting an outcome (a panic inside the spawn) leaves
+    /// `busy` latched, and every interrupt and quit route is gated on `busy` — the session
+    /// then answers only to `kill`. Watching the handle turns a lost turn back into the
+    /// ordinary long-turn error state, which releases `busy` and offers retry / go back.
+    fn supervise_turn(events: mpsc::UnboundedSender<UiEvent>, handle: tokio::task::JoinHandle<()>) {
+        tokio::spawn(async move {
+            if handle.await.is_err() {
+                let _ = events.send(UiEvent::Error {
+                    code: crate::error::TURN_LOST,
+                    msg: "The turn ended unexpectedly; retry or go back.".to_string(),
+                    level: crate::error::ErrorLevel::Full,
+                    context: crate::error::ErrorContext::LongTurn,
+                });
+            }
+        });
+    }
+
     fn start_turn(&mut self, text: String, show_user: bool) {
         if show_user {
             self.messages.push(UiMessage {
@@ -4457,7 +4521,7 @@ impl Chat {
         // fail (the value stays true) and the new turn would be misread as interrupted during connection.
         let cancel_rx = self.cancel_tx.subscribe();
         self.cancel_tx.send_replace(false);
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
             let mut ui = crate::ui::tui_hooks(events.clone(), asks);
             let history = Self::load_history(&session, &mut ui.on_warning);
@@ -4479,6 +4543,7 @@ impl Chat {
                 }
             }
         });
+        Self::supervise_turn(self.events.clone(), handle);
     }
 
     /// Turn-level error message with auth guidance for the current provider:
@@ -4524,7 +4589,7 @@ impl Chat {
         // Same as start_turn: subscribe first, then reset (send does not update with no receivers).
         let cancel_rx = self.cancel_tx.subscribe();
         self.cancel_tx.send_replace(false);
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
             let mut ui = crate::ui::tui_hooks(events.clone(), asks);
             let history = Self::load_history(&session, &mut ui.on_warning);
@@ -4552,6 +4617,7 @@ impl Chat {
                 }
             }
         });
+        Self::supervise_turn(self.events.clone(), handle);
     }
 
     /// Dialog key input (Select semantics):
@@ -4651,6 +4717,69 @@ impl Chat {
             groups: Vec::new(),
             group_of: Vec::new(),
         });
+        self.open_continuation_message();
+    }
+
+    /// The answer lands mid-turn and the model keeps going. Without a message of its own, that
+    /// continuation streams into the assistant message *above* the answer (`stream_msg` still
+    /// points there), so everything the model does next renders above what the user just said
+    /// and the answer stays pinned to the bottom until the turn ends. Close the old message and
+    /// open a fresh one, the way a turn boundary would: the transcript then reads in clock order.
+    fn open_continuation_message(&mut self) {
+        let Some(prev) = self.stream_msg else { return };
+        // Tool rows registered before the answer index into `prev`'s activities
+        // (`pending_tools` holds those indices), so a call still in flight pins the stream here.
+        if !self.pending_tools.is_empty() {
+            return;
+        }
+        // AskUserQuestion is a hidden tool: `ToolStart` returns before closing the running
+        // thinking block, and a block left running would keep `prev` from ever settling
+        // (`message_static_settled`) — with it the whole flush prefix, for the rest of the session.
+        self.close_running_thinking(prev);
+        // The buffer belongs to the block just closed; carried over, the next reasoning delta
+        // would try to merge into a block the new message does not have, and be dropped.
+        self.thinking_buf.clear();
+        self.thinking_seg_open = false;
+        self.messages.push(UiMessage {
+            role: Role::Assistant,
+            text: String::new(),
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        self.stream_msg = Some(self.messages.len() - 1);
+        self.continuation_msg = self.stream_msg;
+    }
+
+    /// A continuation message the turn never filled (the answer was the last thing that happened):
+    /// an empty assistant block renders as a stray gap. Only ever drops the message
+    /// [`Chat::open_continuation_message`] opened. Call before clearing `stream_msg`.
+    fn drop_empty_stream_message(&mut self) {
+        let Some(i) = self.continuation_msg.take() else {
+            return;
+        };
+        if self.stream_msg == Some(i)
+            && i + 1 == self.messages.len()
+            && self.messages[i].text.is_empty()
+            && self.messages[i].activities.is_empty()
+        {
+            self.messages.pop();
+            self.stream_msg = None;
+        }
+    }
+
+    /// A tool call, message text, or a mid-turn answer all end the current reasoning segment.
+    fn close_running_thinking(&mut self, i: usize) {
+        let tick = self.tick;
+        for hint in &mut self.messages[i].activities {
+            if let ActivityKind::Thinking(t) = &mut hint.kind
+                && t.state == ThinkingState::Running
+            {
+                t.state = ThinkingState::Done;
+                t.duration_ms = tick.saturating_sub(t.start_tick).saturating_mul(33);
+            }
+        }
     }
 
     /// Submitting Other free text (CC SelectInputOption onSubmit: empty text = cancel).
@@ -4924,7 +5053,19 @@ impl Chat {
     /// first press on idle empty input shows a hint, a second press within [`CTRL_C_WINDOW`] quits.
     fn ctrl_c(&mut self, now: std::time::Instant) -> bool {
         if self.busy {
-            self.interrupt();
+            // The quit path below is gated on `busy`, so a turn that never clears it (its
+            // task died) used to leave `kill` as the only way out. An interrupt the turn
+            // has ignored for [`INTERRUPT_GRACE`] hands Ctrl+C back its exit meaning.
+            if self
+                .interrupt_at
+                .is_some_and(|at| now.duration_since(at) >= INTERRUPT_GRACE)
+            {
+                self.exit = true;
+                return true;
+            }
+            self.interrupt(now);
+            self.notice = Some("Interrupting… press ctrl-c again to force quit");
+            self.notice_until = Some(now + CTRL_C_WINDOW);
             return true;
         }
         if !self.input.is_empty() {
@@ -4949,7 +5090,7 @@ impl Chat {
     /// Esc: interrupts when busy; closes menus/suggestions; double-press with text while idle clears (into history).
     fn escape(&mut self, now: std::time::Instant) -> bool {
         if self.busy {
-            self.interrupt();
+            self.interrupt(now);
             return true;
         }
         // A Page/Field error row is dismissable like every other overlay —
@@ -5012,9 +5153,11 @@ impl Chat {
         true
     }
 
-    /// Interrupts the current turn (Esc / Ctrl+C while busy).
-    fn interrupt(&mut self) {
+    /// Interrupts the current turn (Esc / Ctrl+C while busy). The first request is stamped
+    /// so Ctrl+C can tell "the turn is stopping" from "the turn is never going to answer".
+    fn interrupt(&mut self, now: std::time::Instant) {
         self.interrupted = true;
+        self.interrupt_at.get_or_insert(now);
         self.cancel_tx.send_replace(true);
     }
 
@@ -6267,6 +6410,22 @@ impl Chat {
                         )
                     });
                 let summary = collapse_summary(&msg.groups[g], in_progress);
+                // A failure inside the fold is otherwise invisible: the summary counts the call
+                // as if it had worked, and only ctrl+o shows the error row. Say so on the
+                // summary line — it matters most for the calls that change something.
+                let failed = msg.groups[g]
+                    .activities
+                    .iter()
+                    .filter(|&&ai| {
+                        matches!(
+                            msg.activities.get(ai),
+                            Some(a) if matches!(
+                                &a.kind,
+                                ActivityKind::Tool(t) if t.status == ToolStatus::Error
+                            )
+                        )
+                    })
+                    .count();
                 // The group row is a static `⏺ …`: the spinner only lives in the bottom status row.
                 let mut line = Line::styled(
                     "⏺ ",
@@ -6277,6 +6436,9 @@ impl Chat {
                     },
                 );
                 line.push_styled(summary, SegStyle::fg(theme.text));
+                if failed > 0 {
+                    line.push_styled(format!(" · {failed} failed"), SegStyle::fg(theme.error));
+                }
                 line.push_styled(
                     " (ctrl+o to expand)".to_string(),
                     SegStyle::fg(theme.inactive),
@@ -9956,17 +10118,44 @@ mod tests {
     }
 
     #[test]
+    fn agent_control_classifier_counts_a_change_apart_from_a_look() {
+        assert_eq!(
+            classify_tool("AgentControl", &json!({"action": "list"})),
+            Some(CollapseKind::AgentCheck)
+        );
+        assert_eq!(
+            classify_tool(
+                "AgentControl",
+                &json!({"action": "messages", "agent": "scout"})
+            ),
+            Some(CollapseKind::AgentCheck)
+        );
+        assert_eq!(
+            classify_tool("AgentControl", &json!({"action": "stop", "agent": "scout"})),
+            Some(CollapseKind::AgentStop)
+        );
+        assert_eq!(
+            classify_tool(
+                "AgentControl",
+                &json!({"action": "delete", "agent": "scout"})
+            ),
+            Some(CollapseKind::AgentDelete)
+        );
+        // No action at all is a malformed call: it stays a standalone row rather than
+        // being counted as one of anything.
+        assert_eq!(
+            classify_tool("AgentControl", &json!({"agent": "scout"})),
+            None
+        );
+    }
+
+    #[test]
     fn summary_past_tense_counts() {
         let mut g = CollapseGroup {
             activities: vec![0, 1, 2],
             search: 1,
             read_paths: vec!["a.md".into(), "b.md".into(), "c.md".into()],
-            read_ops: 0,
-            list: 0,
-            bash: 0,
-            active: false,
-            expanded: false,
-            last_hint: None,
+            ..CollapseGroup::default()
         };
         assert_eq!(
             collapse_summary(&g, false),
@@ -9985,29 +10174,49 @@ mod tests {
     }
 
     #[test]
+    fn summary_never_reports_a_stopped_subagent_as_a_look() {
+        let g = CollapseGroup {
+            activities: vec![0, 1, 2, 3],
+            agent_checks: 3,
+            agent_stops: 1,
+            ..CollapseGroup::default()
+        };
+        assert_eq!(
+            collapse_summary(&g, false),
+            "Checked 3 subagents, stopped 1 subagent"
+        );
+        let g = CollapseGroup {
+            activities: vec![0],
+            agent_deletes: 1,
+            ..CollapseGroup::default()
+        };
+        assert_eq!(collapse_summary(&g, false), "Deleted 1 subagent");
+        // Mixed with file work: one group, one line, every kind still named.
+        let g = CollapseGroup {
+            activities: vec![0, 1],
+            read_paths: vec!["a.md".into()],
+            agent_checks: 2,
+            ..CollapseGroup::default()
+        };
+        assert_eq!(
+            collapse_summary(&g, true),
+            "Reading 1 file, checking 2 subagents…"
+        );
+    }
+
+    #[test]
     fn summary_read_paths_dedupe_and_ops_fallback() {
         let g = CollapseGroup {
             activities: vec![0, 1],
-            search: 0,
             read_paths: vec!["a.md".into(), "a.md".into()],
-            read_ops: 0,
-            list: 0,
-            bash: 0,
-            active: false,
-            expanded: false,
-            last_hint: None,
+            ..CollapseGroup::default()
         };
         assert_eq!(collapse_summary(&g, false), "Read 1 file");
         let g = CollapseGroup {
             activities: vec![0],
-            search: 0,
-            read_paths: vec![],
             read_ops: 2,
             list: 1,
-            bash: 0,
-            active: false,
-            expanded: false,
-            last_hint: None,
+            ..CollapseGroup::default()
         };
         assert_eq!(
             collapse_summary(&g, false),
@@ -10062,6 +10271,117 @@ mod tests {
         assert!(
             !joined.contains("a.md"),
             "paths hidden when collapsed: {joined}"
+        );
+    }
+
+    /// Managing subagents used to produce one two-line block per call, all reading
+    /// `AgentControl(action="messages")` — the target was invisible (the k=v fallback takes the
+    /// alphabetically first key). One fold, counts that keep a stop apart, and a ⎿ row naming
+    /// the instance the latest call was aimed at.
+    #[test]
+    fn consecutive_agent_control_calls_fold_and_name_their_target() {
+        let mut chat = test_chat();
+        chat.messages.push(msg(Role::Assistant, ""));
+        chat.stream_msg = Some(0);
+        for input in [
+            json!({"action": "messages", "agent": "scout"}),
+            json!({"action": "messages", "agent": "reviewer"}),
+            json!({"action": "stop", "agent": "scout"}),
+        ] {
+            let _ = chat.events.send(UiEvent::ToolStart {
+                name: "AgentControl".into(),
+            });
+            chat.drain_events();
+            let _ = chat.events.send(UiEvent::ToolReady {
+                name: "AgentControl".into(),
+                input,
+                standalone: false,
+            });
+            chat.drain_events();
+        }
+        assert_eq!(
+            chat.messages[0].groups.len(),
+            1,
+            "three calls, one group — not three blocks"
+        );
+        let joined = visible(&mut chat, 120, 20);
+        assert!(
+            joined.contains("Checking 2 subagents, stopping 1 subagent"),
+            "the stop is not counted as a look: {joined}"
+        );
+        assert!(
+            joined.contains("⎿  stop scout"),
+            "the ⎿ row names the latest call and its target: {joined}"
+        );
+    }
+
+    /// A tool the classifier did not know closed the open group, so a subagent check in the
+    /// middle of file work split one fold into three blocks.
+    #[test]
+    fn an_agent_control_call_no_longer_breaks_a_file_group() {
+        let mut chat = test_chat();
+        chat.messages.push(msg(Role::Assistant, ""));
+        chat.stream_msg = Some(0);
+        for (name, input) in [
+            ("Read", json!({"file_path": "a.md"})),
+            ("AgentControl", json!({"action": "list"})),
+            ("Read", json!({"file_path": "b.md"})),
+        ] {
+            let _ = chat.events.send(UiEvent::ToolStart { name: name.into() });
+            chat.drain_events();
+            let _ = chat.events.send(UiEvent::ToolReady {
+                name: name.into(),
+                input,
+                standalone: false,
+            });
+            chat.drain_events();
+        }
+        assert_eq!(chat.messages[0].groups.len(), 1, "still one group");
+        let joined = visible(&mut chat, 120, 20);
+        assert!(
+            joined.contains("Reading 2 files, checking 1 subagent"),
+            "both kinds counted on one line: {joined}"
+        );
+    }
+
+    /// A failure inside a fold used to be invisible: the summary counted the call as if it had
+    /// worked and only ctrl+o showed the error row. It matters most now that stopping a subagent
+    /// folds too — "stopped 1 subagent" must not stand for a stop that was refused.
+    #[test]
+    fn a_failure_inside_the_fold_is_named_on_the_summary_row() {
+        let mut chat = test_chat();
+        chat.messages.push(msg(Role::Assistant, ""));
+        chat.stream_msg = Some(0);
+        for input in [
+            json!({"action": "stop", "agent": "ghost"}),
+            json!({"action": "list"}),
+        ] {
+            let _ = chat.events.send(UiEvent::ToolStart {
+                name: "AgentControl".into(),
+            });
+            chat.drain_events();
+            let _ = chat.events.send(UiEvent::ToolReady {
+                name: "AgentControl".into(),
+                input,
+                standalone: false,
+            });
+            chat.drain_events();
+        }
+        let _ = chat
+            .events
+            .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                name: "AgentControl".into(),
+                summary: "stop ghost".into(),
+                output: "no subagent named ghost".into(),
+                is_error: true,
+                duration_ms: 0,
+                diff: None,
+            }));
+        chat.drain_events();
+        let joined = visible(&mut chat, 120, 20);
+        assert!(
+            joined.contains("· 1 failed"),
+            "the folded failure is named: {joined}"
         );
     }
 
@@ -11212,17 +11532,112 @@ mod tests {
         );
     }
 
-    /// An answer given mid-turn lands after the streaming assistant message: an ordering guard — while streaming
-    /// has not ended, the answer must not settle (otherwise flushing would cross the streaming rows and push the intermediate state into
-    /// scrollback); once the turn ends, both settle and flush together.
+    /// Answering mid-turn ends the assistant message and opens a fresh one: everything the model
+    /// does next belongs *below* what the user just said. Before this, `stream_msg` kept pointing
+    /// at the message above the answer, so the continuation rendered on top of it and the answer
+    /// sat pinned at the bottom of the transcript until the turn ended (#28).
     #[test]
-    fn ask_answer_after_streaming_message_settles_only_after_turn_end() {
+    fn answer_mid_turn_opens_a_new_message_for_the_continuation() {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::User, "hi"));
         chat.handle(UiEvent::TurnStart);
-        chat.handle(UiEvent::TextDelta("thinking…".into()));
+        chat.handle(UiEvent::TextDelta("before".into()));
+        answer_pending_ask(&mut chat);
+        assert_eq!(
+            chat.messages.len(),
+            4,
+            "hi + what the model said before asking + the answer + the continuation"
+        );
+        assert_eq!(
+            chat.stream_msg,
+            Some(3),
+            "the stream moved below the answer"
+        );
 
-        // An answer mid-turn (model asks → user answers, the model is still streaming).
+        chat.handle(UiEvent::TextDelta("after".into()));
+        assert_eq!(chat.messages[1].text, "before");
+        assert_eq!(chat.messages[2].role, Role::User, "the answer");
+        assert_eq!(
+            chat.messages[3].text, "after",
+            "the continuation lands under the answer, not above it"
+        );
+    }
+
+    /// The message the answer closed has to be able to settle. AskUserQuestion is a hidden tool,
+    /// so `ToolStart` never closed the placeholder thinking block TurnStart opened — left running
+    /// it would hold the settle prefix (and every flush after it) for the rest of the session.
+    #[test]
+    fn the_message_an_answer_closed_settles_without_waiting_for_the_turn() {
+        let mut chat = test_chat();
+        chat.messages.push(msg(Role::User, "hi"));
+        chat.handle(UiEvent::TurnStart);
+        chat.handle(UiEvent::ThinkingDelta("weighing it up".into()));
+        answer_pending_ask(&mut chat);
+
+        chat.build_rows(80);
+        assert!(chat.message_settled(0), "the leading user message");
+        assert!(
+            chat.message_settled(1),
+            "the pre-answer message is finished: nothing more can be added to it"
+        );
+        assert!(chat.message_settled(2), "the answer");
+        assert!(
+            !chat.message_settled(3),
+            "the continuation is still streaming"
+        );
+
+        chat.handle(UiEvent::TurnEnd);
+        chat.build_rows(80);
+        assert_eq!(
+            chat.doc.settled,
+            chat.doc.rows.len(),
+            "everything settles after the turn ends"
+        );
+    }
+
+    /// The turn ends right after the answer: the continuation message never received anything,
+    /// and an empty assistant block would render as a stray gap.
+    #[test]
+    fn an_unused_continuation_message_is_dropped_at_turn_end() {
+        let mut chat = test_chat();
+        chat.messages.push(msg(Role::User, "hi"));
+        chat.handle(UiEvent::TurnStart);
+        chat.handle(UiEvent::TextDelta("before".into()));
+        answer_pending_ask(&mut chat);
+        assert_eq!(chat.messages.len(), 4);
+
+        chat.handle(UiEvent::TurnEnd);
+        assert_eq!(
+            chat.messages.len(),
+            3,
+            "the empty continuation is dropped: hi + the model's text + the answer"
+        );
+        assert_eq!(chat.messages[2].role, Role::User, "the answer is last");
+        chat.build_rows(80);
+        chat.advance_flushed();
+        assert_eq!(
+            chat.flushed_segments, 4,
+            "welcome card + hi + the model's text + the answer all flush"
+        );
+    }
+
+    /// A tool call still in flight owns activity indices in the current message
+    /// (`pending_tools`), so its rows must keep landing there: the split waits.
+    #[test]
+    fn a_tool_in_flight_pins_the_stream_to_its_own_message() {
+        let mut chat = test_chat();
+        chat.messages.push(msg(Role::User, "hi"));
+        chat.handle(UiEvent::TurnStart);
+        chat.handle(UiEvent::ToolStart {
+            name: "Read".into(),
+        });
+        answer_pending_ask(&mut chat);
+        assert_eq!(chat.stream_msg, Some(1), "the stream stays with the tool");
+        assert_eq!(chat.messages.len(), 3, "hi + assistant + answer");
+    }
+
+    /// Answers a pending free-text question by confirming its first option.
+    fn answer_pending_ask(chat: &mut Chat) {
         let (tx, _rx) = oneshot::channel();
         let mut request = PermissionRequest::new("Tech stack", "Which library?", vec!["A".into()]);
         request.free_text = true;
@@ -11231,41 +11646,6 @@ mod tests {
         assert!(
             chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
             "select A"
-        );
-        assert_eq!(chat.messages.len(), 3, "hi + streaming assistant + answer");
-
-        // Streaming not finished: neither the answer nor the streaming message settles; settling stops at the first user message.
-        chat.build_rows(80);
-        assert!(
-            chat.message_settled(0),
-            "the leading user message is settled"
-        );
-        assert!(
-            !chat.message_settled(1),
-            "the streaming message is not settled"
-        );
-        assert!(
-            !chat.message_settled(2),
-            "the answer does not settle before the streaming ends"
-        );
-        assert_eq!(
-            chat.doc.settled_marks.len(),
-            2,
-            "welcome card + the first user message"
-        );
-
-        // Turn ended: everything settles and flushes (including the answer, in the right order).
-        chat.handle(UiEvent::TurnEnd);
-        chat.build_rows(80);
-        assert_eq!(
-            chat.doc.settled,
-            chat.doc.rows.len(),
-            "everything settles after the turn ends"
-        );
-        chat.advance_flushed();
-        assert_eq!(
-            chat.flushed_segments, 4,
-            "the welcome card + hi + streaming + answer all flush"
         );
     }
 
@@ -12264,6 +12644,87 @@ mod tests {
         assert!(!chat.exit, "outside the window: no exit, just a new hint");
         assert_eq!(chat.notice, Some("Press ctrl-c again to exit"));
         let _ = std::fs::remove_dir_all(&chat.session.home);
+    }
+
+    /// A turn whose task died never clears `busy`, and every quit route is gated on `busy` —
+    /// the session used to answer only to `kill`. An interrupt left unhonoured past
+    /// [`INTERRUPT_GRACE`] gives Ctrl+C its exit meaning back.
+    #[test]
+    fn ctrl_c_force_quits_a_turn_that_never_stops() {
+        let mut chat = chat_with_history("wedged");
+        let t0 = std::time::Instant::now();
+        chat.busy = true;
+
+        chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
+        assert!(chat.interrupted, "the first press asks the turn to stop");
+        assert!(
+            !chat.exit,
+            "a turn that may still be stopping is not killed"
+        );
+
+        chat.on_key_at(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            t0 + INTERRUPT_GRACE - std::time::Duration::from_millis(1),
+        );
+        assert!(!chat.exit, "inside the grace it stays an interrupt");
+
+        chat.on_key_at(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            t0 + INTERRUPT_GRACE,
+        );
+        assert!(chat.exit, "still busy past the grace → exit");
+        let _ = std::fs::remove_dir_all(&chat.session.home);
+    }
+
+    /// The escape hatch must not fire on a healthy interrupt: the next turn clears the
+    /// stamp, so Ctrl+C during it hints and interrupts exactly as before.
+    #[test]
+    fn a_new_turn_rearms_the_ordinary_interrupt() {
+        let mut chat = chat_with_history("rearm");
+        let t0 = std::time::Instant::now();
+        chat.busy = true;
+        chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
+        assert!(chat.interrupt_at.is_some());
+
+        chat.apply_event(UiEvent::TurnStart);
+        assert_eq!(
+            chat.interrupt_at, None,
+            "a fresh turn is owed a fresh grace"
+        );
+
+        chat.on_key_at(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            t0 + INTERRUPT_GRACE * 10,
+        );
+        assert!(!chat.exit, "the new turn's first press only interrupts");
+        let _ = std::fs::remove_dir_all(&chat.session.home);
+    }
+
+    /// A panic inside the turn task is swallowed by tokio (nothing joins the handle) and the
+    /// terminal repaints over its message, so the only visible symptom was a session stuck
+    /// on "Working…" forever. The supervisor turns it into the ordinary long-turn error.
+    #[tokio::test]
+    async fn a_lost_turn_reports_itself_instead_of_latching_busy() {
+        let (events, mut rx) = mpsc::unbounded_channel();
+        // The panic below prints its own backtrace line; that noise is the point — in the
+        // TUI it lands on the alternate screen and is repainted away within a frame.
+        let handle = tokio::spawn(async { panic!("turn task died") });
+
+        Chat::supervise_turn(events, handle);
+
+        let event = rx.recv().await;
+        assert!(
+            matches!(
+                event,
+                Some(UiEvent::Error { code, context, .. })
+                    if code == crate::error::TURN_LOST
+                        && context == crate::error::ErrorContext::LongTurn
+            ),
+            "a lost turn reports itself: {event:?}"
+        );
     }
 
     /// Esc: interrupts when busy; closes suggestions/panels layer by layer; double-press with text clears and saves to history.
