@@ -12461,9 +12461,13 @@ mod tests {
         assert!(chat.notice.is_some(), "empty-state hint");
         assert!(chat.entity_focus.is_none());
         // Create one agent instance + one channel.
-        chat.session
-            .agents
-            .insert("scout", None, "research".into(), chat.session.clone());
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "research".into(),
+            chat.session.clone(),
+        );
         chat.session
             .channels
             .create("table", vec![], crate::channels::ChannelMode::Serial)

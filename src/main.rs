@@ -209,6 +209,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         load_project_memory(&home, &project_dir),
         settings.cache_control.unwrap_or(false),
     );
+    // The crew pinned to this project, and the rule that decides between giving a member
+    // work and hiring someone new (D53). A system block rather than a tool description:
+    // compaction rewrites the message history and leaves `Session::system` alone, so the
+    // routing rule is still there on turn fifty, when the roster matters most.
+    if let Ok(Some(team)) = crate::team::load_team_file(&project_dir) {
+        let defs = crate::agents::load_agent_defs(&home, &project_dir);
+        system.push(crate::api::contract::SystemBlock {
+            text: crate::team::crew_note(
+                &team,
+                &defs,
+                crate::team::load_norms(&project_dir).is_some(),
+            ),
+            cache: settings.cache_control.unwrap_or(false),
+        });
+    }
     // Inject this project's active experience index at session start (≤10 lines;
     // full entries via ExperienceQuery and applied-use feedback via ExperienceOutcome).
     let experience_index = crate::tool::experience::session_index(&home, &project_dir);

@@ -280,6 +280,13 @@ impl TeamTool {
         };
         let view = crate::team::view(&def, defs);
         let instances = self.session.agents.list();
+        let norms = match crate::team::load_norms(cwd) {
+            Some(_) => format!(
+                " · working agreement in {} (every member and every hire carries it)",
+                crate::team::NORMS_FILE
+            ),
+            None => String::new(),
+        };
         let limit = def
             .channel
             .as_ref()
@@ -287,7 +294,7 @@ impl TeamTool {
             .map(|l| format!(" · message limit {l}"))
             .unwrap_or_default();
         let mut out = vec![format!(
-            "team {} · #{} channel ({}){limit} · {} members",
+            "team {} · #{} channel ({}){limit} · {} members{norms}",
             def.name,
             def.name,
             crate::team::channel_mode(&def).label(),
@@ -319,6 +326,27 @@ impl TeamTool {
                 source_badge(m.source),
                 m.description
             ));
+        }
+        // Hires listed apart from the crew: they are not in the blueprint, they leave when
+        // their task does, and reading them as members is what this section prevents (D53).
+        let hires: Vec<&crate::agents::AgentStatus> = instances
+            .iter()
+            .filter(|a| a.kind == crate::agents::AgentKind::Hire)
+            .collect();
+        if !hires.is_empty() {
+            out.push(format!(
+                "temporary hires ({}) — not in {}, released once their task is done:",
+                hires.len(),
+                crate::team::TEAM_FILE
+            ));
+            for a in hires {
+                out.push(format!(
+                    "- {} · {} · {}",
+                    a.name,
+                    a.state.label(),
+                    a.description
+                ));
+            }
         }
         out.push(available_defs(defs));
         out.push(available_portraits());

@@ -437,8 +437,13 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("ghost"), "{err}");
         // depth-1 members pass; the hub joins automatically.
-        hub.agents
-            .insert("a", None, "a".into(), sub_session(&hub, "a"));
+        hub.agents.insert(
+            "a",
+            crate::agents::AgentKind::Hire,
+            None,
+            "a".into(),
+            sub_session(&hub, "a"),
+        );
         let out = tool
             .call(
                 serde_json::json!({"action": "create", "channel": "t", "members": ["a"]}),
@@ -453,7 +458,13 @@ mod tests {
             depth: 2,
             ..(*sub_session(&hub, "deep")).clone()
         });
-        hub.agents.insert("deep", None, "d".into(), deep);
+        hub.agents.insert(
+            "deep",
+            crate::agents::AgentKind::Hire,
+            None,
+            "d".into(),
+            deep,
+        );
         let err = tool
             .call(
                 serde_json::json!({"action": "invite", "channel": "t", "members": ["deep"]}),
@@ -474,10 +485,20 @@ mod tests {
     #[tokio::test]
     async fn post_stamps_sender_and_queues_to_running_members() {
         let hub = hub_session();
-        hub.agents
-            .insert("a", None, "a".into(), sub_session(&hub, "a"));
-        hub.agents
-            .insert("b", None, "b".into(), sub_session(&hub, "b"));
+        hub.agents.insert(
+            "a",
+            crate::agents::AgentKind::Hire,
+            None,
+            "a".into(),
+            sub_session(&hub, "a"),
+        );
+        hub.agents.insert(
+            "b",
+            crate::agents::AgentKind::Hire,
+            None,
+            "b".into(),
+            sub_session(&hub, "b"),
+        );
         let mgmt = ChannelTool::new(hub.clone());
         let _ = mgmt
             .call(
@@ -533,10 +554,20 @@ mod tests {
     #[tokio::test]
     async fn serial_bounce_returns_increments_as_result() {
         let hub = hub_session();
-        hub.agents
-            .insert("a", None, "a".into(), sub_session(&hub, "a"));
-        hub.agents
-            .insert("b", None, "b".into(), sub_session(&hub, "b"));
+        hub.agents.insert(
+            "a",
+            crate::agents::AgentKind::Hire,
+            None,
+            "a".into(),
+            sub_session(&hub, "a"),
+        );
+        hub.agents.insert(
+            "b",
+            crate::agents::AgentKind::Hire,
+            None,
+            "b".into(),
+            sub_session(&hub, "b"),
+        );
         let mgmt = ChannelTool::new(hub.clone());
         let _ = mgmt
             .call(
