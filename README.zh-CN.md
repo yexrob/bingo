@@ -197,7 +197,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `mcpServers` | object | 见下「MCP」 |
 | `disabledMcpServers` | string[] | 禁用的 MCP 服务器名单（`/mcp disable` 写入） |
 | `permissions` | object | `{allow[], deny[], ask[]}`，规则语法见「权限系统」 |
-| `experimental` | object | 实验特性：`agentChannels`、`channelMessageLimit`（默认 500）、`agentMessageLimit`（默认 50） |
+| `experimental` | object | 实验特性：`agentChannels`、`channelMessageLimit`（默认 500）、`agentMessageLimit`（默认 50）、`chatAvatars`（默认 false = 主聊天不带脸；工作区视图不受此开关管辖） |
 | `team` | object | 团队启动行为：`{"autoStart": true}`（缺省 true = 项目绑定 team 时启动自动拉起；`--no-team` 或 false 关闭） |
 | `hooks` | object | 各事件 hook，见「Hooks」 |
 
@@ -322,11 +322,14 @@ Unicode 占位符格子定位。team 成员的头像钉在 `.bingo/team.json`（
 一支队伍就有固定班底；其余实例按名字取脸。不支持的终端保留首字母色块；两种皮肤行数一致，只有装订线
 不同。
 
-**主聊天**用同一批脸：每条消息上面多一条带子，头像挨着名字——hub 是 `main`，你自己
+**主聊天**在 `experimental.chatAvatars`（默认关）后面用同一批脸：每条消息上面多一条
+带子，头像挨着名字——hub 是 `main`，你自己
 的消息是 `You`，都是房间里本来就用的名字。带子底下的正文一列没动，仍按整个终端宽度
 排版，消息内部的 `⏺` 也仍然负责把正文和工具行分开。能放图的终端给两行带子，退化时
 一行，带子底下没有东西依赖它的高度。一处已知退化：终端清空图片存储时（resize 会），
-还在屏幕上的脸会重画，已经滚进 scrollback 的消息则留下 4 列空白，名字还在。
+还在屏幕上的脸会重画，已经滚进 scrollback 的消息则留下 4 列空白，名字还在。开关关掉
+则整条带子不出现，subagent 的 watch 行也保留 `◉`；开关只管主聊天，DM、频道、team
+视图照旧带脸——那里的头像占的是排版本来就花掉的装订线。
 
 ## 技能（Skills）
 

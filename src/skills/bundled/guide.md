@@ -72,7 +72,7 @@ Three config layers, shallow-merged; the later one overrides:
 | `mcpServers` | object | `{name: {type?, command, args, env}}` (stdio, default) or `{name: {type: "http", url, headers?}}` (streamable HTTP) |
 | `disabledMcpServers` | string[] | List of disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`; rule syntax `Tool(content)`, `:*` is a prefix wildcard (e.g. `Bash(git push:*)`); Bash rules match per subcommand segment; path rules normalize before matching (see diagnostics 4) |
-| `experimental` | object | Experimental features: `{"agentChannels": true}` enables agent channel messaging (the main session gets the Channel/Post tools, direct subagents get Post); `channelMessageLimit` (default 500, freezes the channel when exceeded) / `agentMessageLimit` (default 50) are budget gates |
+| `experimental` | object | Experimental features: `{"agentChannels": true}` enables agent channel messaging (the main session gets the Channel/Post tools, direct subagents get Post); `channelMessageLimit` (default 500, freezes the channel when exceeded) / `agentMessageLimit` (default 50) are budget gates; `{"chatAvatars": true}` puts faces in the main chat (default false — no sender band, no portrait on a watch row; the workspace views wear theirs regardless) |
 | `team` | object | agent team startup behavior: `{"autoStart": true}` (default true = when a project-bound team exists, start it automatically at launch; members stand by Idle at zero tokens; `--no-team` or false turns it off) |
 | `hooks` | object | PreToolUse/PostToolUse/PreCompact/PostCompact/UserPromptSubmit/Stop/SessionStart/SessionEnd/TaskCreated/TaskCompleted, matcher + command; the matcher is a whole-string anchored regex (`Edit\|Write`, `mcp__.*`); invalid regexes fall back to exact matching |
 
@@ -271,10 +271,12 @@ Example (.bingo/settings.json):
   sender gets one of eight bundled anime-style portraits, 4×2 cells beside the name; elsewhere it falls back to the sender's
   initial on a colour, and the row count is identical either way. A team member's portrait is pinned in `.bingo/team.json`
   (`"avatar": "sora"`), so a crew keeps a fixed cast; everyone else gets a face derived from their name. The **main chat** wears
-  the same faces: each message carries a band above it with the speaker's portrait and name (`main` for the hub, `You` for your own),
+  the same faces behind `experimental.chatAvatars` (off by default): each message carries a band above it with the speaker's
+  portrait and name (`main` for the hub, `You` for your own),
   two rows where portraits place and one where they fall back to the chip. Nothing below the band moves — bodies still run the full
   width. A terminal that purges its image store (a resize) redraws the faces still on screen; ones already in scrollback leave four
-  blank columns with the name intact. Wake-up scaffolding the
+  blank columns with the name intact. Switched off, the transcript has no band and a subagent's watch row keeps its `◉` — the
+  switch governs the main chat only, never these workspace views. Wake-up scaffolding the
   runtime injected (a relayed channel message, the task reminder) collapses to one dim line instead of being quoted as a message. The composer sends: in a channel it posts as `user` (same
   delivery path as Post, members woken normally; rendering = read, so serial never bounces you), in a DM it queues on the
   instance and flushes at the turn boundary (shown as a pending message until then). Keys: Tab switches between the message
@@ -372,8 +374,9 @@ Example (.bingo/settings.json):
   every conversation and its unread count) and alt+↑↓. **Avatars**: terminals that can place kitty images (the same capability behind inline images)
   assign each speaker one of eight bundled anime-style portraits, 4×2 cells to the left of the name; other terminals fall back to an initial-on-color
   chip, and both skins keep the same row count. Team members' avatars are pinned in `.bingo/team.json` (`"avatar": "sora"`),
-  so a crew has a fixed cast; other instances get a face by name. The **main chat** uses the same faces: every message gets a band
-  above it carrying the speaker's portrait and name (`main` for the hub, `You` for your own); message bodies are unchanged underneath. Runtime-injected wake scaffolding (channel-message relays,
+  so a crew has a fixed cast; other instances get a face by name. The **main chat** uses the same faces behind `experimental.chatAvatars` (off by default): every message gets a band
+  above it carrying the speaker's portrait and name (`main` for the hub, `You` for your own); message bodies are unchanged underneath.
+  Off, the transcript has no band and a subagent's watch row keeps its `◉`; the switch governs the main chat only. Runtime-injected wake scaffolding (channel-message relays,
   task reminders) collapses into a single dim hint line instead of being quoted as a whole message. Sending from the bottom input box: in a channel you speak as `user` (the same delivery
   path as Post, waking members normally; rendered counts as read, serial won't bounce you), DMs queue into the instance's inbox and are
   delivered at the turn boundary (shown as pending before delivery). Keys: Tab switches between the message list and the input box, alt+↑↓ switches conversations,

@@ -225,7 +225,7 @@ otherwise the user layer — no `.bingo/` is conjured in arbitrary directories
 | `mcpServers` | object | see MCP below |
 | `disabledMcpServers` | string[] | disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`, rule syntax under Permission system below |
-| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50) |
+| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50), `chatAvatars` (default false = no faces in the main chat; the workspace views keep theirs either way) |
 | `team` | object | team startup behavior: `{"autoStart": true}` (default true = auto-pull the project team at startup; `--no-team` or false disables) |
 | `hooks` | object | per-event hooks, see Hooks below |
 
@@ -380,7 +380,8 @@ placeholder cells. A team member's portrait is pinned in `.bingo/team.json`
 derived from their name. Terminals without that capability keep the sender's initial
 on a colour; the row count is identical either way, so only the gutter changes.
 
-**In the main chat**, the same faces sit on a band above each message: the
+**In the main chat**, behind `experimental.chatAvatars` (off by default), the
+same faces sit on a band above each message: the
 speaker's portrait beside their name — `main` for the hub, `You` for your own
 messages, the names the room itself uses. Message bodies are untouched
 underneath; they still run the full width, and the `⏺` markers inside a message
@@ -388,7 +389,10 @@ keep separating prose from tool rows. The band is two rows where portraits place
 and one where they fall back to the chip — nothing below it depends on its
 height. One known degradation: a terminal that purges its image store (a resize
 does) gets the faces still on screen redrawn, but messages already in scrollback
-keep four blank columns where the portrait was, with the name intact.
+keep four blank columns where the portrait was, with the name intact. Switched
+off, the transcript carries no band and a subagent's watch row keeps its `◉`;
+the switch governs the main chat only — DM, channel and team views wear their
+faces regardless, where the portrait sits in a gutter the layout already spends.
 
 ## Skills
 

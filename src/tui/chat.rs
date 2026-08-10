@@ -905,6 +905,12 @@ pub struct Chat {
     /// it, so re-reading it per frame would be waste (the workspace learned the
     /// same thing in D49).
     faces_pinned: HashMap<String, usize>,
+    /// Faces in the transcript at all (`experimental.chatAvatars`, off by default).
+    /// Off means no sender band and no portrait on a watch row — the transcript the
+    /// hub wrote before D50. The workspace views keep their portraits either way:
+    /// there the face sits in a gutter the layout already spends, here it costs
+    /// rows of its own, which is what the switch is for.
+    chat_avatars: bool,
     /// Loaded image cache (url → PNG bytes + cell dimensions).
     pub images: HashMap<String, Arc<ImageMeta>>,
     /// Image urls currently being fetched (prevents duplicate loads).
@@ -1123,6 +1129,7 @@ impl Chat {
         let update_banner = crate::update::latest_cached(&session.home).map(|v| v.to_string());
         let motion_off = session.settings.motion.as_deref() == Some("off")
             || std::env::var_os("BINGO_NO_MOTION").is_some();
+        let chat_avatars = session.settings.experimental.chat_avatars;
         Self {
             session,
             events,
@@ -1176,6 +1183,7 @@ impl Chat {
             image_cap: None,
             faces: HashSet::new(),
             faces_pinned,
+            chat_avatars,
             images: HashMap::new(),
             images_pending: HashSet::new(),
             images_failed: HashSet::new(),
@@ -6016,16 +6024,18 @@ impl Chat {
             .skip(skip.saturating_sub(1))
         {
             let role = self.messages[i].role;
-            let band = self.sender_band_el(role, &pal);
+            // The band is the experimental face (`experimental.chatAvatars`): switched
+            // off, a message opens on its body, exactly as it did before D50.
+            let band = self.chat_avatars.then(|| self.sender_band_el(role, &pal));
             let body = match role {
                 Role::User => El::Rows(user_message_rows(&self.messages[i].text, width, &theme)),
                 Role::Assistant => self.assistant_el(i, width, &theme, settled, &pal),
             };
             // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
-            blocks.push(Block::settled(
-                El::col(vec![El::Blank, band, body]),
-                settled,
-            ));
+            let mut stack = vec![El::Blank];
+            stack.extend(band);
+            stack.push(body);
+            blocks.push(Block::settled(El::col(stack), settled));
         }
         if let Some(ask) = self.ask_el(&theme) {
             blocks.push(Block::live(ask));
@@ -6119,12 +6129,14 @@ impl Chat {
     /// Only a subagent watch row gets one, and only where the terminal can place
     /// images: the face is what buys the `⎿` connector's place, so a chip skin —
     /// which has no face to spend — keeps `◉` and the connector exactly as before.
+    /// With `experimental.chatAvatars` off the transcript wears no faces at all,
+    /// which lands in the same place as a terminal that cannot draw them.
     fn watch_portraits(
         &mut self,
         i: usize,
         pal: &crate::tui::slack::Palette,
     ) -> Vec<Option<Portrait>> {
-        if self.image_cap.is_none() {
+        if !self.chat_avatars || self.image_cap.is_none() {
             return Vec::new();
         }
         let named: Vec<Option<String>> = self.messages[i]
@@ -7113,6 +7125,7 @@ mod tests {
         };
 
         let mut chip = test_chat();
+        chip.chat_avatars = true;
         let rows = watch(&mut chip);
         assert!(
             rows.iter().any(|r| r.contains("◉ 林夏 · UI review")),
@@ -7128,6 +7141,7 @@ mod tests {
         );
 
         let mut placed = test_chat();
+        placed.chat_avatars = true;
         placed.image_cap = Some(ImageCap::default_cells());
         let rows = watch(&mut placed);
         let header = rows
@@ -7152,6 +7166,7 @@ mod tests {
     #[test]
     fn sender_band_names_the_speaker_and_records_its_face() {
         let mut chat = test_chat();
+        chat.chat_avatars = true;
         chat.messages.push(msg(Role::User, "hi"));
         chat.messages.push(msg(Role::Assistant, "hello"));
         chat.build_rows(80);
@@ -7185,6 +7200,7 @@ mod tests {
     fn sender_band_costs_a_second_row_only_where_portraits_place() {
         let build = |cap: Option<ImageCap>| -> (usize, bool) {
             let mut chat = test_chat();
+            chat.chat_avatars = true;
             chat.image_cap = cap;
             chat.messages.push(msg(Role::User, "hi"));
             chat.build_rows(80);
@@ -7204,6 +7220,46 @@ mod tests {
         );
         assert!(portrait_placed, "image terminals get placeholder cells");
         assert!(!chip_placed, "the chip skin places no image");
+    }
+
+    /// The switch is what the transcript's faces hang on, and it is off unless a
+    /// settings layer asks for them: no band over a message, no portrait on a watch
+    /// row, and nothing recorded for transmission — a face nobody drew must not be
+    /// sent. The workspace views are not governed by this and are not touched here.
+    #[test]
+    fn without_the_switch_the_transcript_wears_no_face() {
+        let mut chat = test_chat();
+        assert!(!chat.chat_avatars, "off unless a settings layer asks");
+        chat.image_cap = Some(ImageCap::default_cells());
+        chat.messages.push(msg(Role::User, "hi"));
+        chat.messages.push(msg(Role::Assistant, ""));
+        chat.apply_event(UiEvent::WatchEvent {
+            label: "林夏 · UI review".into(),
+            kind: crate::watch::WatchKind::Agent,
+            status: WatchState::Running,
+            detail: Some("produced 200 chars".into()),
+            duration_ms: 0,
+            payload: None,
+            signal: None,
+        });
+        chat.build_rows(80);
+        let rows: Vec<String> = chat
+            .doc
+            .rows
+            .iter()
+            .map(|r| r.line.plain_text().trim().to_string())
+            .collect();
+        assert!(
+            !rows.iter().any(|r| r.ends_with("You")
+                || r.ends_with(crate::channels::HUB_NAME)
+                || r.contains(gfx::PLACEHOLDER)),
+            "no band and no portrait: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("◉ 林夏 · UI review")),
+            "the watch row keeps its glyph: {rows:?}"
+        );
+        assert!(chat.faces.is_empty(), "nothing is claimed for transmission");
     }
 
     /// Task-family / AskUserQuestion calls are not shown in the transcript
