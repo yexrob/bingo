@@ -1,12 +1,16 @@
 //! `/team` command family implementation (D31): list/start/status/assign/stop/validate/new + memory.
 //! Purely functional: takes Session + cwd + args, returns output lines (chat.rs pushes after dispatch).
 //! The three-part error format (file path + field path + expectation) is shared with spawn/validate.
+//!
+//! Every read and every action spans the whole tree (D54): a chart declared in one file is
+//! one formation, so `status` shows all of it and `start` brings all of it up.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::agents::AgentState;
 use crate::query::Session;
+use crate::team::{TeamNode, TeamTree};
 
 /// Main entry: `/team <subcommand>`, returns the lines to display. Unknown subcommands get usage.
 pub fn run(session: &Arc<Session>, cwd: &Path, arg: &str) -> Vec<String> {
@@ -48,74 +52,94 @@ fn usage() -> Vec<String> {
     ]
 }
 
-/// Load the team definition + the definition list. Parse errors (invalid JSON, etc.)
-/// → Err (not silently swallowed).
-fn load(
-    session: &Arc<Session>,
-    cwd: &Path,
-) -> Result<Option<(crate::team::TeamDef, Vec<crate::agents::AgentDef>)>, String> {
-    let defs = crate::agents::load_agent_defs(&session.home, cwd);
-    crate::team::load_team_file(cwd)
-        .map(|opt| opt.map(|def| (def, defs)))
-        .map_err(|e| e.to_string())
+/// Load the whole org chart. Parse errors (invalid JSON, a broken reference, a name
+/// used twice) → Err (not silently swallowed).
+fn load(cwd: &Path) -> Result<Option<TeamTree>, String> {
+    crate::team::load_team_tree(cwd).map_err(|e| e.to_string())
 }
 
 /// Convenience: both Ok(None) and Err become a "no team file" output (shared wording across read commands).
-fn load_or_no_team(
-    session: &Arc<Session>,
-    cwd: &Path,
-    no_team_msg: &str,
-) -> Result<(crate::team::TeamDef, Vec<crate::agents::AgentDef>), Vec<String>> {
-    match load(session, cwd) {
-        Ok(Some(x)) => Ok(x),
+fn load_or_no_team(cwd: &Path, no_team_msg: &str) -> Result<TeamTree, Vec<String>> {
+    match load(cwd) {
+        Ok(Some(tree)) => Ok(tree),
         Ok(None) => Err(vec![no_team_msg.to_string()]),
         Err(e) => Err(vec![format!("✗ {e}")]),
     }
 }
 
-fn branch(_session: &Arc<Session>, cwd: &Path) -> String {
-    crate::team::current_branch(cwd)
+/// Indent by depth, so a chart reads as one.
+fn indent(node: &TeamNode) -> String {
+    "  ".repeat(node.depth)
 }
 
-/// Definitions section: team name + channel mode + members (role + source badge).
-fn def_zone(def: &crate::team::TeamDef, defs: &[crate::agents::AgentDef]) -> Vec<String> {
-    let view = crate::team::view(def, defs);
-    let mode = crate::team::channel_mode(def).label();
-    let mut out = vec![format!(
-        "▸ {} · {} members · {mode} channel",
-        view.def.name,
-        view.members.len()
-    )];
-    for m in &view.members {
-        let badge = match m.source {
-            crate::agents::AgentDefSource::Project => "[project]",
-            crate::agents::AgentDefSource::User => "[user]",
-            crate::agents::AgentDefSource::Unknown => "",
-        };
-        let engine = def
-            .members
-            .iter()
-            .find(|p| p.name == m.name)
-            .map(crate::team::engine_label)
-            .unwrap_or_default();
+/// A child team's directory as the root sees it (the root's own line names no path —
+/// it is the directory the session is already in).
+fn where_at(tree: &TeamTree, node: &TeamNode) -> String {
+    if node.depth == 0 {
+        return String::new();
+    }
+    let root = &tree.root().dir;
+    let path = node
+        .dir
+        .strip_prefix(root)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| node.dir.display().to_string());
+    format!(" · {path}")
+}
+
+/// Definitions section: every team in the chart, with its rooms and members
+/// (role + source badge).
+fn def_zone(session: &Arc<Session>, tree: &TeamTree) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in tree.nodes() {
+        let defs = crate::agents::load_agent_defs(&session.home, &node.dir);
+        let view = crate::team::view(&node.def, &defs);
+        let pad = indent(node);
         out.push(format!(
-            "  {} → {} {}{engine} ({})",
-            m.name, m.agent, badge, m.description
+            "{pad}▸ {} · {} members{}",
+            view.def.name,
+            view.members.len(),
+            where_at(tree, node)
         ));
+        for room in crate::team::rooms(&node.def) {
+            out.push(format!(
+                "{pad}  #{} · {} · {}",
+                room.name,
+                room.mode.label(),
+                room.members.join(", ")
+            ));
+        }
+        for m in &view.members {
+            let badge = match m.source {
+                crate::agents::AgentDefSource::Project => "[project]",
+                crate::agents::AgentDefSource::User => "[user]",
+                crate::agents::AgentDefSource::Unknown => "",
+            };
+            let engine = node
+                .def
+                .members
+                .iter()
+                .find(|p| p.name == m.name)
+                .map(crate::team::engine_label)
+                .unwrap_or_default();
+            out.push(format!(
+                "{pad}  {} → {} {}{engine} ({})",
+                m.name, m.agent, badge, m.description
+            ));
+        }
     }
     out
 }
 
 fn list(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
-    let (def, defs) = match load_or_no_team(
-        session,
+    let tree = match load_or_no_team(
         cwd,
         "no .bingo/team.json (the team is not pinned to this project; /team new creates it).",
     ) {
         Ok(x) => x,
         Err(out) => return out,
     };
-    let mut out = def_zone(&def, &defs);
+    let mut out = def_zone(session, &tree);
     out.push(String::new());
     // Runtime section: member instance states (not spawned = offline ○).
     let instances = session.agents.list();
@@ -172,30 +196,32 @@ fn state_mark(state: AgentState) -> &'static str {
 }
 
 fn start(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
-    let (def, defs) = match load_or_no_team(
-        session,
+    let tree = match load_or_no_team(
         cwd,
         "no .bingo/team.json (/team new first, then /team start).",
     ) {
         Ok(x) => x,
         Err(out) => return out,
     };
-    let branch = branch(session, cwd);
-    match crate::team::spawn_team(session, &def, &defs, &session.home, cwd, &branch) {
+    let name = &tree.root().def.name;
+    match crate::team::spawn_tree(session, &tree, &session.home) {
         Ok(summary) => {
             let total = summary.spawned.len() + summary.reused.len() + summary.failed.len();
             let ready = total - summary.failed.len();
+            let scope = if tree.nodes().len() > 1 {
+                format!(" across {} teams", tree.nodes().len())
+            } else {
+                String::new()
+            };
             let mut out = Vec::new();
             if !summary.spawned.is_empty() {
                 let names = summary.spawned.join(" · ");
                 out.push(format!(
-                    "[team] {} up · {ready}/{total} on standby ({names})",
-                    def.name
+                    "[team] {name} up · {ready}/{total} on standby{scope} ({names})"
                 ));
             } else if !summary.reused.is_empty() {
                 out.push(format!(
-                    "[team] {} already running · reusing existing instances ({ready}/{total} on standby)",
-                    def.name
+                    "[team] {name} already running · reusing existing instances ({ready}/{total} on standby{scope})"
                 ));
             }
             if !summary.events().is_empty() {
@@ -207,7 +233,7 @@ fn start(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
                 ));
             }
             if out.is_empty() {
-                out.push(format!("[team] {} no change", def.name));
+                out.push(format!("[team] {name} no change"));
             }
             out.push(
                 "(/team status to check · /team assign <member> <task> to delegate)".to_string(),
@@ -215,15 +241,13 @@ fn start(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
             out
         }
         Err(e) => vec![format!(
-            "[team] {} validation failed: {e} (fix and retry; /team validate to pre-check)",
-            def.name
+            "[team] {name} validation failed: {e} (fix and retry; /team validate to pre-check)"
         )],
     }
 }
 
 fn status(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
-    let (def, _defs) = match load_or_no_team(
-        session,
+    let tree = match load_or_no_team(
         cwd,
         "no .bingo/team.json (the team must be pinned before /team start).",
     ) {
@@ -231,23 +255,27 @@ fn status(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
         Err(out) => return out,
     };
     let instances = session.agents.list();
-    let mut out = vec![format!("▸ {} status", def.name)];
-    for m in &def.members {
-        let mark = match instances.iter().find(|a| a.name == m.name) {
-            Some(a) => state_mark(a.state),
-            None => "○ offline",
-        };
-        out.push(format!("  {mark}  {}", m.name));
+    let mut out = Vec::new();
+    for node in tree.nodes() {
+        let pad = indent(node);
+        out.push(format!(
+            "{pad}▸ {} status{}",
+            node.def.name,
+            where_at(&tree, node)
+        ));
+        for m in &node.def.members {
+            let mark = match instances.iter().find(|a| a.name == m.name) {
+                Some(a) => state_mark(a.state),
+                None => "○ offline",
+            };
+            out.push(format!("{pad}  {mark}  {}", m.name));
+        }
     }
     out
 }
 
 fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
-    let (def, _defs) = match load_or_no_team(
-        session,
-        cwd,
-        "no .bingo/team.json (the team is not pinned).",
-    ) {
+    let tree = match load_or_no_team(cwd, "no .bingo/team.json (the team is not pinned).") {
         Ok(x) => x,
         Err(out) => return out,
     };
@@ -257,31 +285,34 @@ fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
     if member.is_empty() || message.is_empty() {
         return vec!["usage: /team assign <member> <task>".to_string()];
     }
-    if !def.members.iter().any(|m| m.name == member) {
-        let known: Vec<&str> = def.members.iter().map(|m| m.name.as_str()).collect();
+    // Names are unique across the tree, so a bare name resolves from anywhere in it.
+    let Some((node, _)) = tree.find_member(member) else {
+        let known: Vec<&str> = tree.members().map(|(_, m)| m.name.as_str()).collect();
         return vec![format!(
             "{member} is not a member of {}; members: {}",
-            def.name,
+            tree.root().def.name,
             known.join(", ")
         )];
-    }
+    };
+    let (team, dir) = (node.def.name.clone(), node.dir.clone());
     match session.agents.deliver(member, message, Vec::new(), None) {
         Ok(_) => {
             // A slash command has no turn boundary behind it: deliver now, so the user sees the
             // assignment start instead of waiting for the hub's next turn.
             crate::tool::agent::flush_agent_inbox(session, &session.watch);
-            // Dispatch audit: append-only decision record (zero model cost).
+            // Dispatch audit: append-only decision record (zero model cost), filed with the
+            // team the member actually belongs to.
             crate::team::append_decision(
                 &session.home,
-                cwd,
-                &branch(session, cwd),
-                &def.name,
+                &dir,
+                &crate::team::current_branch(&dir),
+                &team,
                 "task",
                 message,
                 &[member],
             );
             vec![format!(
-                "✓ assigned to {member} · notified on completion (/team status to check)"
+                "✓ assigned to {member} ({team}) · notified on completion (/team status to check)"
             )]
         }
         Err(e) => vec![format!("✗ assignment failed: {e}")],
@@ -289,48 +320,43 @@ fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
 }
 
 fn stop(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
-    let (def, _defs) = match load_or_no_team(session, cwd, "no .bingo/team.json.") {
+    let tree = match load_or_no_team(cwd, "no .bingo/team.json.") {
         Ok(x) => x,
         Err(out) => return out,
     };
     let mut stopped = Vec::new();
-    for m in &def.members {
+    for (_, m) in tree.members() {
         if session.agents.stop(&m.name).is_ok() {
             stopped.push(m.name.clone());
         }
     }
+    let name = &tree.root().def.name;
     if stopped.is_empty() {
-        vec![format!("[team] {} has no running members", def.name)]
+        vec![format!("[team] {name} has no running members")]
     } else {
         vec![format!(
-            "[team] {} stopped · {} members (history kept; /team start brings it back)",
-            def.name,
+            "[team] {name} stopped · {} members (history kept; /team start brings it back)",
             stopped.len()
         )]
     }
 }
 
 fn validate(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
-    let (def, defs) = match load_or_no_team(
-        session,
-        cwd,
-        "no .bingo/team.json (/team new first, then validate).",
-    ) {
+    let tree = match load_or_no_team(cwd, "no .bingo/team.json (/team new first, then validate).") {
         Ok(x) => x,
         Err(out) => return out,
     };
-    match crate::team::validate(&def, &defs, session) {
+    match crate::team::validate_tree(&tree, session, &session.home) {
         Ok(()) => {
-            let mode = crate::team::channel_mode(&def).label();
-            let limit = def
-                .channel
-                .as_ref()
-                .and_then(|s| s.message_limit)
-                .map(|l| format!(" · budget {l}"))
-                .unwrap_or_default();
+            let members = tree.members().count();
+            let rooms: Vec<String> = tree
+                .rooms()
+                .map(|(_, r)| format!("#{} ({})", r.name, r.mode.label()))
+                .collect();
             vec![format!(
-                "✓ team.json passes validation ({} members · {mode} channel{limit})",
-                def.members.len()
+                "✓ team.json passes validation ({} team(s) · {members} members · {})",
+                tree.nodes().len(),
+                rooms.join(" · ")
             )]
         }
         Err(e) => vec![format!("✗ validation failed: {e}")],
@@ -383,6 +409,10 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
             mode: Some("serial".to_string()),
             message_limit: None,
         }),
+        // Scaffolding writes one room and no children: a starter chart with an
+        // invented org in it is one the user has to undo before they can use it.
+        channels: Vec::new(),
+        teams: Vec::new(),
         // Portraits handed out in roster order rather than by hashing the name:
         // a scaffolded crew should come out with distinct faces, and a hash of
         // four role names collides more often than not. The two the hub and the
@@ -437,12 +467,37 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
 /// `/team norms`: the working agreement as it is on disk, so the thing every member is
 /// carrying can be read without leaving the session. No editing here — it is a project file
 /// under version control, and an editor is where a file like that is changed.
+///
+/// Each team in the chart has its own agreement, carried by its own members, so every one
+/// that exists is printed under the team it binds.
 fn norms(cwd: &Path) -> Vec<String> {
-    let path = cwd.join(crate::team::NORMS_FILE);
-    match crate::team::load_norms(cwd) {
+    let Ok(Some(tree)) = crate::team::load_team_tree(cwd) else {
+        return norms_of(cwd, None);
+    };
+    let mut out = Vec::new();
+    for node in tree.nodes() {
+        if crate::team::load_norms(&node.dir).is_none() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+        out.extend(norms_of(&node.dir, Some(&node.def.name)));
+    }
+    if out.is_empty() {
+        return norms_of(cwd, None);
+    }
+    out
+}
+
+/// One team's agreement, or the advice for a crew that has not written one.
+fn norms_of(dir: &Path, team: Option<&str>) -> Vec<String> {
+    let path = dir.join(crate::team::NORMS_FILE);
+    let who = team.map(|t| format!(" ({t})")).unwrap_or_default();
+    match crate::team::load_norms(dir) {
         Some(text) => {
             let mut out = vec![
-                format!("▸ team norms · {}", path.display()),
+                format!("▸ team norms{who} · {}", path.display()),
                 "  carried by every member and every hire; a direct instruction outranks it"
                     .to_string(),
                 String::new(),
@@ -462,44 +517,50 @@ fn norms(cwd: &Path) -> Vec<String> {
     }
 }
 
-/// Memory subcommand: list shows this team's memory under the project + branch; gc cleans by TTL.
+/// Memory subcommand: list shows each team's memory under its own project + branch;
+/// gc cleans by TTL. Per team rather than per session, because that is how it is
+/// stored — a department in another repo keeps its memory with that repo.
 fn memory(session: &Arc<Session>, cwd: &Path, sub: &str) -> Vec<String> {
-    let (def, _defs) = match load_or_no_team(
-        session,
-        cwd,
-        "no .bingo/team.json (memory is namespaced per team).",
-    ) {
+    let tree = match load_or_no_team(cwd, "no .bingo/team.json (memory is namespaced per team).") {
         Ok(x) => x,
         Err(out) => return out,
     };
-    let branch = branch(session, cwd);
-    let dir = crate::team::team_memory_dir(&session.home, cwd, &branch, &def.name);
+    let dirs: Vec<(String, String, std::path::PathBuf)> = tree
+        .nodes()
+        .iter()
+        .map(|n| {
+            let branch = crate::team::current_branch(&n.dir);
+            let dir = crate::team::team_memory_dir(&session.home, &n.dir, &branch, &n.def.name);
+            (n.def.name.clone(), branch, dir)
+        })
+        .collect();
     match sub {
         "" | "list" | "ls" => {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                return vec![format!(
-                    "no memory for {} yet (nothing persisted under the {} branch)",
-                    def.name, branch
-                )];
-            };
-            let mut out = vec![format!(
-                "▸ {} memory · {} branch · {}",
-                def.name,
-                branch,
-                dir.display()
-            )];
-            let mut files: Vec<(String, u64)> = entries
-                .flatten()
-                .map(|e| {
-                    (
-                        e.file_name().to_string_lossy().to_string(),
-                        e.metadata().map(|m| m.len()).unwrap_or(0),
-                    )
-                })
-                .collect();
-            files.sort();
-            for (name, size) in files {
-                out.push(format!("  {name} · {size} B"));
+            let mut out = Vec::new();
+            for (team, branch, dir) in &dirs {
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    out.push(format!(
+                        "no memory for {team} yet (nothing persisted under the {branch} branch)"
+                    ));
+                    continue;
+                };
+                out.push(format!(
+                    "▸ {team} memory · {branch} branch · {}",
+                    dir.display()
+                ));
+                let mut files: Vec<(String, u64)> = entries
+                    .flatten()
+                    .map(|e| {
+                        (
+                            e.file_name().to_string_lossy().to_string(),
+                            e.metadata().map(|m| m.len()).unwrap_or(0),
+                        )
+                    })
+                    .collect();
+                files.sort();
+                for (name, size) in files {
+                    out.push(format!("  {name} · {size} B"));
+                }
             }
             // Nobody should have to read the code to learn that this is not loaded.
             out.push(
@@ -515,27 +576,29 @@ fn memory(session: &Arc<Session>, cwd: &Path, sub: &str) -> Vec<String> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                return vec!["no memory to clean.".to_string()];
-            };
             let mut removed = 0;
-            for e in entries.flatten() {
-                let stale = e
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| now.saturating_sub(d.as_secs()) > TTL_SECS)
-                    .unwrap_or(false);
-                if stale {
-                    let _ = std::fs::remove_file(e.path());
-                    removed += 1;
+            for (_, _, dir) in &dirs {
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    continue;
+                };
+                for e in entries.flatten() {
+                    let stale = e
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| now.saturating_sub(d.as_secs()) > TTL_SECS)
+                        .unwrap_or(false);
+                    if stale {
+                        let _ = std::fs::remove_file(e.path());
+                        removed += 1;
+                    }
                 }
             }
             if removed == 0 {
                 vec![format!(
                     "no stale memory files for {} (TTL 30 days)",
-                    def.name
+                    tree.root().def.name
                 )]
             } else {
                 vec![format!(
@@ -738,6 +801,117 @@ mod tests {
         let roster_end = text.find("runtime zone").unwrap_or(text.len());
         assert!(!text[..roster_end].contains("temp"), "{text}");
         let _ = std::fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    /// The issue's acceptance criterion, from the user's side: in one session at the
+    /// project root, `/team status` shows both departments and the team under one of
+    /// them, `/team start` brings the whole chart up at once, and running it again
+    /// changes nothing.
+    #[test]
+    fn status_and_start_span_the_whole_chart() {
+        let (s, project) = session("chart");
+        let agent = |dir: &std::path::Path, name: &str| {
+            std::fs::create_dir_all(dir.join(".bingo/agents")).unwrap_or_else(|e| panic!("{e}"));
+            std::fs::write(
+                dir.join(format!(".bingo/agents/{name}.md")),
+                format!("---\ndescription: {name} description\n---\n\nYou are {name}.\n"),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        };
+        let blueprint = |dir: &std::path::Path, json: &str| {
+            std::fs::create_dir_all(dir.join(".bingo")).unwrap_or_else(|e| panic!("{e}"));
+            std::fs::write(dir.join(crate::team::TEAM_FILE), json)
+                .unwrap_or_else(|e| panic!("{e}"));
+        };
+
+        agent(&project, "lead");
+        blueprint(
+            &project,
+            r#"{"name":"hq","members":[{"name":"Wen","agent":"lead"}],
+                "teams":[{"path":"repos/engineering"},{"name":"strategy","path":"strategy"}]}"#,
+        );
+        let engineering = project.join("repos/engineering");
+        agent(&engineering, "dev");
+        blueprint(
+            &engineering,
+            r#"{"name":"engineering","members":[{"name":"Linh","agent":"dev"},{"name":"Mira","agent":"dev"}],
+                "channels":[{"name":"eng","members":["Linh","Mira"]},{"name":"oncall","mode":"free","members":["Mira","Kai"]}],
+                "teams":[{"path":"platform"}]}"#,
+        );
+        let platform = engineering.join("platform");
+        agent(&platform, "sre");
+        blueprint(
+            &platform,
+            r#"{"name":"platform","members":[{"name":"Kai","agent":"sre"}]}"#,
+        );
+        let strategy = project.join("strategy");
+        agent(&strategy, "analyst");
+        blueprint(
+            &strategy,
+            r#"{"name":"strategy","members":[{"name":"Sora","agent":"analyst"}]}"#,
+        );
+
+        // validate first: one chart, one verdict.
+        let out = validate(&s, &project).join("\n");
+        assert!(
+            out.contains("4 team(s)") && out.contains("5 members"),
+            "{out}"
+        );
+
+        // status: both departments, and the team under one of them.
+        let out = status(&s, &project).join("\n");
+        for team in ["hq", "engineering", "platform", "strategy"] {
+            assert!(out.contains(team), "{team} missing from status: {out}");
+        }
+        assert!(
+            out.contains("repos/engineering/platform"),
+            "a child team is shown where it lives: {out}"
+        );
+        assert_eq!(
+            out.matches("○ offline").count(),
+            5,
+            "every member in the chart reads offline before start: {out}"
+        );
+
+        // start: the whole chart, at once.
+        let out = start(&s, &project).join("\n");
+        assert!(out.contains("across 4 teams"), "{out}");
+        assert!(!out.contains("failed"), "{out}");
+        assert_eq!(s.agents.list().len(), 5, "every member in the chart is up");
+        for room in ["hq", "eng", "oncall", "platform", "strategy"] {
+            assert!(s.channels.info(room).is_some(), "#{room} should exist");
+        }
+        assert!(
+            s.channels.info("engineering").is_none(),
+            "a team declaring its own rooms gets no room named after it"
+        );
+        assert_eq!(
+            s.channels
+                .info("oncall")
+                .map(|c| c.members)
+                .unwrap_or_default(),
+            vec!["main", "user", "Mira", "Kai"],
+            "a room may hold a member from the team below it"
+        );
+
+        // Idempotent: a second start reuses everything.
+        let out = start(&s, &project).join("\n");
+        assert!(out.contains("already running"), "{out}");
+        assert_eq!(s.agents.list().len(), 5, "no duplicate instances");
+
+        // Dispatch resolves a bare name against the whole chart, not just the root team:
+        // the roster it offers when a name misses is every member under this session.
+        let out = assign(&s, &project, "Nobody do it".to_string());
+        assert!(out[0].contains("is not a member of hq"), "{out:?}");
+        assert!(
+            out[0].contains("Kai") && out[0].contains("Sora") && out[0].contains("Wen"),
+            "the names it will accept span the chart: {out:?}"
+        );
+
+        // stop takes the whole chart down.
+        let out = stop(&s, &project).join("\n");
+        assert!(out.contains("5 members"), "{out}");
+        let _ = std::fs::remove_dir_all(project.parent().unwrap_or(&project));
     }
 
     /// Parse errors are not silently swallowed: broken JSON surfaces an error line.
