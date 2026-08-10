@@ -142,7 +142,9 @@ fn load_dir(dir: &Path, out: &mut Vec<Skill>) {
     // readdir order isn't guaranteed (arbitrary on APFS): sort by name so the listing is predictable.
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+        // file_type() reports symlinks as not-a-dir; metadata() follows the link, so a
+        // symlinked skill directory loads (a dangling link fails metadata and is skipped).
+        if !std::fs::metadata(entry.path()).is_ok_and(|m| m.is_dir()) {
             continue;
         }
         let skill_dir = entry.path();
@@ -524,6 +526,42 @@ mod tests {
             assert_eq!(count, 1, "same-source files dedup");
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// L: a skill directory symlinked into the skills layer (e.g. a plugin checked out
+    /// elsewhere) must load — file_type() reports the link itself as not-a-dir, so the
+    /// scan has to follow metadata() to see the target.
+    #[test]
+    fn symlinked_skill_dir_is_loaded() {
+        #[cfg(unix)]
+        {
+            let root = std::env::temp_dir().join(format!("bingo-skills-{}-sl", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let home = root.join("home");
+            let real = root.join("plugin");
+            write(
+                &real.join("SKILL.md"),
+                "---\ndescription: symlinked skill\n---\nplugin body\n",
+            );
+            std::fs::create_dir_all(home.join(".config/bingo/skills")).unwrap();
+            std::os::unix::fs::symlink(&real, home.join(".config/bingo/skills/plugin")).unwrap();
+            let skills = load_skills(&home, &root);
+            let plugin = skills.iter().find(|s| s.name == "plugin").unwrap();
+            assert_eq!(plugin.description, "symlinked skill");
+            assert!(plugin.content.contains("plugin body"));
+            // Dangling link: no target to follow, skipped rather than erroring.
+            std::os::unix::fs::symlink(
+                root.join("missing"),
+                home.join(".config/bingo/skills/dangling"),
+            )
+            .unwrap();
+            let skills = load_skills(&home, &root);
+            assert!(
+                skills.iter().all(|s| s.name != "dangling"),
+                "dangling symlink is skipped"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     /// L2: a cache hit doesn't change the result; dir/file changes invalidate and rescan.
