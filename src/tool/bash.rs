@@ -3,13 +3,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use tokio::io::AsyncBufReadExt;
 
 use async_trait::async_trait;
 
 use super::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_OUTPUT_MAX_CHARS: usize = 48_000;
+pub const MAX_OUTPUT_MAX_CHARS: usize = 48_000;
 /// Default check interval for periodic commands (when no explicit -n is given).
 pub const DEFAULT_WATCH_INTERVAL_SECS: u64 = 5;
 /// Upper bound for waiting on readers to drain after the command exits (so we don't
@@ -387,11 +388,19 @@ struct BashInput {
     background: Option<bool>,
 }
 
-pub struct BashTool;
+pub struct BashTool {
+    output_max_chars: usize,
+}
 
 impl BashTool {
     pub fn new() -> Self {
-        Self
+        Self::with_output_max_chars(DEFAULT_OUTPUT_MAX_CHARS)
+    }
+
+    pub fn with_output_max_chars(output_max_chars: usize) -> Self {
+        Self {
+            output_max_chars: output_max_chars.min(MAX_OUTPUT_MAX_CHARS),
+        }
     }
 }
 
@@ -440,53 +449,17 @@ impl Tool for BashTool {
         // Periodic commands (watch/while/until/for/tail -f) are backgrounded automatically:
         // immediately return async_launched; background execution + per-round checks + completion notification.
         if let Some(interval) = periodic_bash_interval(&params.command) {
-            return launch_background(&params, ctx, Some(interval)).await;
+            return launch_background(&params, ctx, Some(interval), self.output_max_chars).await;
         }
         // Explicit backgrounding: for non-dependent/long-running commands (e.g. cargo build,
         // npm install), the main agent does not wait when the result is not needed immediately.
         if params.background.unwrap_or(false) {
-            return launch_background(&params, ctx, None).await;
+            return launch_background(&params, ctx, None, self.output_max_chars).await;
         }
 
-        let mut command = shell_command(&params.command, &ctx.cwd);
-        // When the turn is interrupted (Esc), dropping the future kills the child process too,
-        // leaving no orphans.
-        command.kill_on_drop(true);
-        let child = command
-            .spawn()
-            .map_err(|e| ToolError::failed(format!("failed to run command: {e}")))?;
-        // Process-tree root = the child shell itself: on timeout the whole tree is cleaned
-        // up; grandchild processes are not orphaned.
-        let child_pid = child.id();
-
-        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => {
-                return Err(ToolError::failed(format!("failed to run command: {e}")));
-            }
-            Err(_) => {
-                if let Some(child_pid) = child_pid {
-                    crate::platform::kill_process_tree(child_pid).await;
-                }
-                return Err(ToolError::failed(format!(
-                    "command timed out after {}s",
-                    timeout.as_secs()
-                )));
-            }
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        let mut text = format!("$ {}\n", params.command);
-        if !stdout.is_empty() {
-            text.push_str(&stdout);
-        }
-        if !stderr.is_empty() {
-            text.push_str(&stderr);
-        }
-        text.push_str(&format!("\n[Exited with code {exit_code}]"));
+        let output = run_command(&params.command, &ctx.cwd, timeout, self.output_max_chars).await?;
+        let mut text = format!("$ {}\n{}", params.command, output.text);
+        text.push_str(&format!("\n[Exited with code {}]", output.exit_code));
 
         Ok(ToolResult {
             content: serde_json::Value::String(text),
@@ -494,6 +467,51 @@ impl Tool for BashTool {
             diff: None,
         })
     }
+}
+
+fn truncation_note(total: usize, max_chars: usize) -> String {
+    format!(
+        "\n[Content truncated: {total} characters total, showing first {max_chars}. Use Read on a redirected output file for the complete content.]"
+    )
+}
+
+struct CommandOutput {
+    text: String,
+    exit_code: i32,
+}
+
+async fn run_command(
+    command: &str,
+    cwd: &std::path::Path,
+    timeout: Duration,
+    output_max_chars: usize,
+) -> Result<CommandOutput, ToolError> {
+    let mut child = shell_command(command, cwd)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| ToolError::failed(format!("failed to run command: {e}")))?;
+    let child_pid = child.id();
+    let output = Arc::new(Mutex::new(BoundedOutput::new(output_max_chars)));
+    let readers = spawn_output_readers(&mut child, output.clone(), None);
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => return Err(ToolError::failed(format!("failed to run command: {e}"))),
+        Err(_) => {
+            if let Some(child_pid) = child_pid {
+                crate::platform::kill_process_tree(child_pid).await;
+            }
+            let _ = child.kill().await;
+            return Err(ToolError::failed(format!(
+                "command timed out after {}s",
+                timeout.as_secs()
+            )));
+        }
+    };
+    drain_readers(readers, child_pid).await;
+    Ok(CommandOutput {
+        text: output.lock().map(|b| b.finish()).unwrap_or_default(),
+        exit_code: status.code().unwrap_or(-1),
+    })
 }
 
 /// Child shell command: its own process tree (whole tree cleaned up on timeout/cancel),
@@ -514,6 +532,7 @@ async fn launch_background(
     params: &BashInput,
     ctx: &ToolContext,
     interval: Option<Duration>,
+    output_max_chars: usize,
 ) -> Result<ToolResult, ToolError> {
     let mut conditions = Vec::new();
     if let Some(patterns) = params.notify_on.clone() {
@@ -545,7 +564,17 @@ async fn launch_background(
     let cwd = ctx.cwd.clone();
     tokio::spawn(async move {
         // Background tasks have their own lifecycle: periodic commands are not limited by a single timeout.
-        match run_streaming(&command, &cwd, None, cell, watch.clone(), id).await {
+        match run_streaming(
+            &command,
+            &cwd,
+            None,
+            output_max_chars,
+            cell,
+            watch.clone(),
+            id,
+        )
+        .await
+        {
             Ok((text, code)) => {
                 watch.set_state(
                     id,
@@ -579,6 +608,7 @@ async fn run_streaming(
     command: &str,
     cwd: &std::path::Path,
     timeout: Option<Duration>,
+    output_max_chars: usize,
     cell: Arc<BashCell>,
     watch: std::sync::Arc<crate::watch::WatchRegistry>,
     id: crate::watch::WatchId,
@@ -588,42 +618,12 @@ async fn run_streaming(
         .spawn()
         .map_err(|e| format!("failed to spawn: {e}"))?;
     let child_pid = child.id();
-    let buf = Arc::new(Mutex::new(String::new()));
-    let mut readers = Vec::new();
-    let streams: Vec<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = [
-        child
-            .stdout
-            .take()
-            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
-        child
-            .stderr
-            .take()
-            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    for stream in streams {
-        let cell = cell.clone();
-        let buf = buf.clone();
-        let watch = watch.clone();
-        readers.push(tokio::spawn(async move {
-            let mut reader = tokio::io::BufReader::new(stream);
-            loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        cell.record_line(&line);
-                        watch.feed_content(id, &line);
-                        if let Ok(mut b) = buf.lock() {
-                            b.push_str(&line);
-                        }
-                    }
-                }
-            }
-        }));
-    }
+    let buf = Arc::new(Mutex::new(BoundedOutput::new(output_max_chars)));
+    let readers = spawn_output_readers(
+        &mut child,
+        buf.clone(),
+        Some((cell.clone(), watch.clone(), id)),
+    );
     let status = match timeout {
         Some(t) => match tokio::time::timeout(t, child.wait()).await {
             Ok(Ok(status)) => status,
@@ -643,8 +643,116 @@ async fn run_streaming(
             Err(e) => return Err(format!("failed to wait: {e}")),
         },
     };
-    // Grandchild processes may still hold stdout: guard the join with a timeout, otherwise
-    // readers hang forever and the watch entry stays Running.
+    drain_readers(readers, child_pid).await;
+    let code = status.code().unwrap_or(-1);
+    let text = buf.lock().map(|b| b.finish()).unwrap_or_default();
+    Ok((text, code))
+}
+
+type OutputReader = tokio::task::JoinHandle<()>;
+
+fn spawn_output_readers(
+    child: &mut tokio::process::Child,
+    output: Arc<Mutex<BoundedOutput>>,
+    watch: Option<(
+        Arc<BashCell>,
+        Arc<crate::watch::WatchRegistry>,
+        crate::watch::WatchId,
+    )>,
+) -> Vec<OutputReader> {
+    let streams: Vec<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = [
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    streams
+        .into_iter()
+        .map(|mut stream| {
+            let output = output.clone();
+            let watch = watch.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+
+                let mut bytes = [0u8; 8 * 1024];
+                let mut utf8_tail = Vec::new();
+                loop {
+                    let read = match stream.read(&mut bytes).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    utf8_tail.extend_from_slice(&bytes[..read]);
+                    loop {
+                        match std::str::from_utf8(&utf8_tail) {
+                            Ok(_) => {
+                                if !utf8_tail.is_empty() {
+                                    feed_bash_output(&utf8_tail, &output, watch.as_ref());
+                                    utf8_tail.clear();
+                                }
+                                break;
+                            }
+                            Err(error) if error.error_len().is_none() => {
+                                let valid = error.valid_up_to();
+                                if valid > 0 {
+                                    feed_bash_output(&utf8_tail[..valid], &output, watch.as_ref());
+                                    utf8_tail.drain(..valid);
+                                }
+                                break;
+                            }
+                            Err(error) => {
+                                let valid = error.valid_up_to();
+                                if valid > 0 {
+                                    feed_bash_output(&utf8_tail[..valid], &output, watch.as_ref());
+                                }
+                                if let Ok(mut output) = output.lock() {
+                                    output.mark_invalid_utf8();
+                                    output.push("�");
+                                }
+                                utf8_tail.drain(..valid + error.error_len().unwrap_or(1));
+                            }
+                        }
+                    }
+                }
+                if !utf8_tail.is_empty()
+                    && let Ok(mut output) = output.lock()
+                {
+                    output.mark_invalid_utf8();
+                    output.push("�");
+                }
+            })
+        })
+        .collect()
+}
+
+fn feed_bash_output(
+    bytes: &[u8],
+    output: &Arc<Mutex<BoundedOutput>>,
+    watch: Option<&(
+        Arc<BashCell>,
+        Arc<crate::watch::WatchRegistry>,
+        crate::watch::WatchId,
+    )>,
+) {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return;
+    };
+    if let Some((cell, registry, id)) = watch {
+        cell.record_text(text);
+        registry.feed_content(*id, text);
+    }
+    if let Ok(mut output) = output.lock() {
+        output.push(text);
+    }
+}
+
+async fn drain_readers(readers: Vec<OutputReader>, child_pid: Option<u32>) {
     for mut reader in readers {
         if tokio::time::timeout(READER_DRAIN_TIMEOUT, &mut reader)
             .await
@@ -657,9 +765,53 @@ async fn run_streaming(
             reader.abort();
         }
     }
-    let code = status.code().unwrap_or(-1);
-    let text = buf.lock().map(|b| b.clone()).unwrap_or_default();
-    Ok((text, code))
+}
+
+struct BoundedOutput {
+    text: String,
+    max_chars: usize,
+    total_chars: usize,
+    saw_invalid_utf8: bool,
+}
+
+impl BoundedOutput {
+    fn new(max_chars: usize) -> Self {
+        Self {
+            text: String::new(),
+            max_chars,
+            total_chars: 0,
+            saw_invalid_utf8: false,
+        }
+    }
+
+    fn push(&mut self, text: &str) {
+        let remaining = self.max_chars.saturating_sub(self.text.chars().count());
+        let mut chars = text.chars();
+        let mut kept = 0usize;
+        self.text
+            .extend(chars.by_ref().take(remaining).inspect(|_| {
+                kept += 1;
+            }));
+        self.total_chars = self
+            .total_chars
+            .saturating_add(kept)
+            .saturating_add(chars.count());
+    }
+
+    fn mark_invalid_utf8(&mut self) {
+        self.saw_invalid_utf8 = true;
+    }
+
+    fn finish(&self) -> String {
+        let mut text = self.text.clone();
+        if self.total_chars > self.max_chars {
+            text.push_str(&truncation_note(self.total_chars, self.max_chars));
+        }
+        if self.saw_invalid_utf8 {
+            text.push_str("\n[Invalid UTF-8 replaced while decoding command output]");
+        }
+        text
+    }
 }
 
 /// Shared execution state for background Bash: a round = new output lines since the last poll.
@@ -668,6 +820,7 @@ struct BashCell {
     rounds: AtomicUsize,
     line_delta: AtomicUsize,
     total_lines: AtomicUsize,
+    partial_line: std::sync::atomic::AtomicBool,
 }
 
 impl BashCell {
@@ -677,11 +830,19 @@ impl BashCell {
             rounds: AtomicUsize::new(0),
             line_delta: AtomicUsize::new(0),
             total_lines: AtomicUsize::new(0),
+            partial_line: std::sync::atomic::AtomicBool::new(false),
         }
     }
-    fn record_line(&self, _line: &str) {
-        self.line_delta.fetch_add(1, Ordering::SeqCst);
-        self.total_lines.fetch_add(1, Ordering::SeqCst);
+    fn record_text(&self, text: &str) {
+        let complete = text.bytes().filter(|byte| *byte == b'\n').count();
+        let had_partial = self.partial_line.load(Ordering::SeqCst);
+        let has_partial = !text.ends_with('\n');
+        self.partial_line.store(has_partial, Ordering::SeqCst);
+        let lines = complete + usize::from(has_partial && !had_partial);
+        if lines > 0 {
+            self.line_delta.fetch_add(lines, Ordering::SeqCst);
+            self.total_lines.fetch_add(lines, Ordering::SeqCst);
+        }
     }
     fn poll(&self, periodic: bool) -> crate::watch::WatchPoll {
         let delta = self.line_delta.swap(0, Ordering::SeqCst);
@@ -734,6 +895,141 @@ impl crate::watch::Watchable for BashWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_output_limit_cannot_exceed_the_model_result_budget() {
+        let tool = BashTool::with_output_max_chars(usize::MAX);
+        assert_eq!(tool.output_max_chars, MAX_OUTPUT_MAX_CHARS);
+    }
+
+    #[test]
+    fn bounded_output_counts_characters_without_growing_past_limit() {
+        let mut output = BoundedOutput::new(3);
+        output.push("❤❤");
+        output.push("❤❤❤");
+        let text = output.finish();
+        assert!(
+            text.starts_with("❤❤❤\n[Content truncated: 5 characters total, showing first 3."),
+            "{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn utf8_split_across_pipe_reads_is_preserved() {
+        let ctx = ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch: crate::watch::WatchRegistry::new(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+        };
+        let command = r#"python3 -c 'import os,time; b="❤".encode(); os.write(1,b[:1]); time.sleep(.05); os.write(1,b[1:])'"#;
+        let result = BashTool::new()
+            .call(serde_json::json!({"command": command}), &ctx)
+            .await
+            .unwrap();
+        let text = result.content.as_str().unwrap_or_default();
+        assert!(text.contains("❤"), "{text}");
+        assert!(!text.contains("Invalid UTF-8"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn newline_free_output_is_streamed_through_the_cap() {
+        let ctx = ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch: crate::watch::WatchRegistry::new(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+        };
+        let result = BashTool::with_output_max_chars(32)
+            .call(
+                serde_json::json!({"command": r#"python3 -c 'print("x" * 100000, end="")'"#}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let text = result.content.as_str().unwrap_or_default();
+        assert!(text.contains("showing first 32"), "{text}");
+        assert!(text.chars().count() < 512, "{}", text.chars().count());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invalid_utf8_output_is_lossy_not_dropped() {
+        let ctx = ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch: crate::watch::WatchRegistry::new(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+        };
+        let result = BashTool::new()
+            .call(serde_json::json!({"command": r"printf '\377ok\n'"}), &ctx)
+            .await
+            .unwrap();
+        let text = result.content.as_str().unwrap_or_default();
+        assert!(text.contains("�ok"), "{text}");
+        assert!(text.contains("[Invalid UTF-8 replaced"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn truncates_stdout_and_stderr_at_configured_limit() {
+        let ctx = ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch: crate::watch::WatchRegistry::new(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+        };
+        #[cfg(unix)]
+        let command = "printf 12345; printf 67890 >&2";
+        #[cfg(windows)]
+        let command = "[Console]::Out.Write('12345'); [Console]::Error.Write('67890')";
+        let result = BashTool::with_output_max_chars(7)
+            .call(serde_json::json!({"command": command}), &ctx)
+            .await
+            .unwrap();
+        let text = result.content.as_str().unwrap_or_default();
+        let body = text
+            .split_once('\n')
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        let shown = body.lines().next().unwrap_or_default();
+        assert_eq!(shown.chars().count(), 7, "{text}");
+        assert!(shown.chars().all(|c| c.is_ascii_digit()), "{text}");
+        assert!(
+            text.contains("[Content truncated: 10 characters total, showing first 7."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Use Read on a redirected output file"),
+            "{text}"
+        );
+        assert!(text.ends_with("[Exited with code 0]"), "{text}");
+    }
 
     #[tokio::test]
     async fn explicit_background_non_periodic_command_notifies() {

@@ -9,8 +9,10 @@ use super::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// Grep result cap (in lines).
 const MAX_GREP_LINES: usize = 200;
+const MAX_GREP_CONTEXT: usize = 10_000;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct GrepInput {
     #[schemars(description = "regular expression")]
     pub pattern: String,
@@ -21,6 +23,23 @@ pub struct GrepInput {
     #[serde(default)]
     #[schemars(description = "only search files matching this glob")]
     pub glob: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "include this many lines before and after each match")]
+    pub context: Option<usize>,
+    #[serde(default)]
+    #[schemars(description = "match without regard to letter case")]
+    pub case_insensitive: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "only match whole words")]
+    pub whole_word: Option<bool>,
+    #[serde(default)]
+    #[schemars(
+        description = "treat the pattern as a literal string instead of a regular expression"
+    )]
+    pub fixed_string: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "list matching file paths instead of matching lines")]
+    pub files_with_matches: Option<bool>,
 }
 
 /// Grep: recursively search file contents with a regex (ripgrep semantics).
@@ -59,8 +78,22 @@ impl Tool for GrepTool {
         } else {
             ctx.cwd.join(root)
         };
-        let re = regex::Regex::new(&params.pattern)
+        let pattern = if params.fixed_string.unwrap_or(false) {
+            regex::escape(&params.pattern)
+        } else {
+            params.pattern.clone()
+        };
+        let pattern = if params.whole_word.unwrap_or(false) {
+            format!(r"(?:^|\W)(?:{pattern})(?:$|\W)")
+        } else {
+            pattern
+        };
+        let re = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(params.case_insensitive.unwrap_or(false))
+            .build()
             .map_err(|e| ToolError::failed(format!("bad regex pattern: {e}")))?;
+        let context = params.context.unwrap_or(0).min(MAX_GREP_CONTEXT);
+        let files_with_matches = params.files_with_matches.unwrap_or(false);
         let filter = params
             .glob
             .as_deref()
@@ -74,14 +107,13 @@ impl Tool for GrepTool {
         let search_root = root.clone();
         let (lines, stopped_early) = tokio::task::spawn_blocking(move || {
             let mut lines = Vec::new();
-            let stopped = search_dir(
-                &search_root,
-                &search_root,
-                &re,
-                filter.as_ref(),
-                &mut lines,
-                0,
-            );
+            let options = SearchOptions {
+                re: &re,
+                filter: filter.as_ref(),
+                context,
+                files_with_matches,
+            };
+            let stopped = search_dir(&search_root, &search_root, &options, &mut lines, 0);
             (lines, stopped)
         })
         .await
@@ -129,12 +161,18 @@ pub fn sorted_entries(dir: &std::path::Path) -> Vec<std::fs::DirEntry> {
     entries
 }
 
+struct SearchOptions<'a> {
+    re: &'a regex::Regex,
+    filter: Option<&'a super::glob::PathGlob>,
+    context: usize,
+    files_with_matches: bool,
+}
+
 /// Returns true when the cap is reached and traversal stops early (no further traversal).
 fn search_dir(
     root: &std::path::Path,
     dir: &std::path::Path,
-    re: &regex::Regex,
-    filter: Option<&super::glob::PathGlob>,
+    options: &SearchOptions<'_>,
     out: &mut Vec<String>,
     depth: u32,
 ) -> bool {
@@ -151,12 +189,18 @@ fn search_dir(
             if should_skip_dir(&name) {
                 continue;
             }
-            if search_dir(root, &path, re, filter, out, depth + 1) {
+            if search_dir(root, &path, options, out, depth + 1) {
                 return true;
             }
         } else if file_type.is_file()
-            && filter.is_none_or(|f| f.is_match(root, &path))
-            && search_file(&path, re, out)
+            && options.filter.is_none_or(|f| f.is_match(root, &path))
+            && search_file(
+                &path,
+                options.re,
+                options.context,
+                options.files_with_matches,
+                out,
+            )
         {
             return true;
         }
@@ -165,7 +209,13 @@ fn search_dir(
 }
 
 /// Returns true when the result cap is reached.
-fn search_file(path: &std::path::Path, re: &regex::Regex, out: &mut Vec<String>) -> bool {
+fn search_file(
+    path: &std::path::Path,
+    re: &regex::Regex,
+    context: usize,
+    files_with_matches: bool,
+    out: &mut Vec<String>,
+) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
@@ -175,13 +225,35 @@ fn search_file(path: &std::path::Path, re: &regex::Regex, out: &mut Vec<String>)
     let Ok(bytes) = std::fs::read(path) else {
         return false;
     };
-    // Binary detection: NUL byte → skip.
     if bytes.contains(&0) {
         return false;
     }
     let text = String::from_utf8_lossy(&bytes);
-    for (idx, line) in text.lines().enumerate() {
-        if re.is_match(line) {
+    let lines: Vec<&str> = text.lines().collect();
+    let matches: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| re.is_match(line).then_some(idx))
+        .collect();
+    if matches.is_empty() {
+        return false;
+    }
+    if files_with_matches {
+        out.push(path.display().to_string());
+        return out.len() >= MAX_GREP_LINES;
+    }
+    let mut emit = vec![false; lines.len()];
+    for idx in matches {
+        let start = idx.saturating_sub(context);
+        let end = idx
+            .saturating_add(context)
+            .min(lines.len().saturating_sub(1));
+        for selected in &mut emit[start..=end] {
+            *selected = true;
+        }
+    }
+    for (idx, line) in lines.iter().enumerate() {
+        if emit[idx] {
             out.push(format!("{}:{}:{}", path.display(), idx + 1, line));
             if out.len() >= MAX_GREP_LINES {
                 return true;
@@ -228,6 +300,154 @@ mod tests {
             std::fs::write(&path, body).unwrap();
         }
         root
+    }
+
+    async fn search(root: &std::path::Path, input: serde_json::Value) -> String {
+        GrepTool
+            .call(input, &ctx(root.to_path_buf()))
+            .await
+            .unwrap()
+            .content
+            .as_str()
+            .unwrap_or_default()
+            .replace('\\', "/")
+    }
+
+    #[tokio::test]
+    async fn context_returns_surrounding_lines_with_coordinates() {
+        let root = fixture("context");
+        std::fs::write(root.join("context.txt"), "before\nneedle\nafter\nfar\n").unwrap();
+        let text = search(
+            &root,
+            serde_json::json!({"pattern": "needle", "context": 1}),
+        )
+        .await;
+        assert!(text.contains("context.txt:1:before"), "{text}");
+        assert!(text.contains("context.txt:2:needle"), "{text}");
+        assert!(text.contains("context.txt:3:after"), "{text}");
+        assert!(!text.contains("context.txt:4:far"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn case_insensitive_matches_letter_case() {
+        let root = fixture("case");
+        std::fs::write(root.join("case.txt"), "Needle\n").unwrap();
+        let text = search(
+            &root,
+            serde_json::json!({"pattern": "needle", "case_insensitive": true}),
+        )
+        .await;
+        assert!(text.contains("case.txt:1:Needle"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn whole_word_rejects_substrings() {
+        let root = fixture("word");
+        std::fs::write(root.join("word.txt"), "cat\nconcatenate\n").unwrap();
+        let text = search(
+            &root,
+            serde_json::json!({"pattern": "cat", "whole_word": true}),
+        )
+        .await;
+        assert!(text.contains("word.txt:1:cat"), "{text}");
+        assert!(!text.contains("concatenate"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn whole_word_allows_longer_alternative_at_same_position() {
+        let root = fixture("word-alternation");
+        std::fs::write(root.join("alternation.txt"), "foobar\nfoo\n").unwrap();
+        let text = search(
+            &root,
+            serde_json::json!({"pattern": "foo|foobar", "whole_word": true}),
+        )
+        .await;
+        assert!(text.contains("alternation.txt:1:foobar"), "{text}");
+        assert!(text.contains("alternation.txt:2:foo"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn whole_word_uses_match_boundaries_for_grouped_regex() {
+        let root = fixture("word-group");
+        std::fs::write(root.join("group.txt"), "cat\nconcatenate\n(cat)\n").unwrap();
+        let text = search(
+            &root,
+            serde_json::json!({"pattern": "(?:cat)", "whole_word": true}),
+        )
+        .await;
+        assert!(text.contains("group.txt:1:cat"), "{text}");
+        assert!(text.contains("group.txt:3:(cat)"), "{text}");
+        assert!(!text.contains("concatenate"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn whole_word_matches_punctuation_like_ripgrep() {
+        let root = fixture("word-punctuation");
+        std::fs::write(
+            root.join("punctuation.txt"),
+            "foo-\nfoo-x\nxfoo-\n(foo-)\nfoo--\n",
+        )
+        .unwrap();
+        let text = search(
+            &root,
+            serde_json::json!({
+                "pattern": "foo-",
+                "whole_word": true,
+                "fixed_string": true
+            }),
+        )
+        .await;
+        assert!(text.contains("punctuation.txt:1:foo-"), "{text}");
+        assert!(text.contains("punctuation.txt:4:(foo-)"), "{text}");
+        assert!(text.contains("punctuation.txt:5:foo--"), "{text}");
+        assert!(!text.contains("punctuation.txt:2:foo-x"), "{text}");
+        assert!(!text.contains("punctuation.txt:3:xfoo-"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn fixed_string_treats_metacharacters_literally() {
+        let root = fixture("fixed");
+        std::fs::write(root.join("fixed.txt"), "a.b\naxb\n").unwrap();
+        let text = search(
+            &root,
+            serde_json::json!({"pattern": "a.b", "fixed_string": true}),
+        )
+        .await;
+        assert!(text.contains("fixed.txt:1:a.b"), "{text}");
+        assert!(!text.contains("axb"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn files_with_matches_lists_each_file_once() {
+        let root = fixture("files");
+        std::fs::write(root.join("many.txt"), "needle\nneedle\n").unwrap();
+        let text = search(
+            &root,
+            serde_json::json!({"pattern": "needle", "files_with_matches": true}),
+        )
+        .await;
+        assert!(
+            text.lines().any(|line| line.ends_with("many.txt")),
+            "{text}"
+        );
+        assert!(
+            !text.lines().any(|line| line.contains(":")),
+            "files only: {text}"
+        );
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.ends_with("many.txt"))
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// M1 regression: target/.git/node_modules/hidden directories are not traversed by default.

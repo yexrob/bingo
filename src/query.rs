@@ -779,12 +779,25 @@ pub(crate) fn summarize_input(tool_name: &str, input: &serde_json::Value) -> Str
 /// Clip tool results before feeding back to the model: overlong output is truncated with
 /// a note (50k cap; simplified to truncation rather than spilling to disk + preview).
 fn clipped_result(text: String) -> String {
-    if text.chars().count() > MAX_RESULT_CHARS {
-        let cut: String = text.chars().take(MAX_RESULT_CHARS).collect();
-        format!("{cut}\n…[truncated at {MAX_RESULT_CHARS} chars]")
-    } else {
-        text
+    let total = text.chars().count();
+    if total <= MAX_RESULT_CHARS {
+        return text;
     }
+    const TAIL_CHARS: usize = 1_000;
+    let note = format!("\n…[truncated: {total} chars total]");
+    let note_chars = note.chars().count();
+    let tail_chars = TAIL_CHARS.min(MAX_RESULT_CHARS.saturating_sub(note_chars));
+    let head_chars = MAX_RESULT_CHARS.saturating_sub(note_chars + tail_chars);
+    let head: String = text.chars().take(head_chars).collect();
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}{note}{tail}")
 }
 
 /// HTTP client for tools: creating one per turn would lose the connection pool (TLS
@@ -2498,8 +2511,57 @@ mod tests {
     fn clips_oversized_results() {
         let long = "x".repeat(MAX_RESULT_CHARS + 100);
         let clipped = clipped_result(long);
-        assert!(clipped.contains("[truncated at"));
-        assert!(clipped.chars().count() <= MAX_RESULT_CHARS + 64);
+        assert!(clipped.contains("[truncated:"));
+        assert_eq!(clipped.chars().count(), MAX_RESULT_CHARS);
+    }
+
+    #[test]
+    fn bash_default_cap_preserves_its_truncation_guidance() {
+        let output = "x".repeat(crate::tool::bash::DEFAULT_OUTPUT_MAX_CHARS);
+        let note = format!(
+            "\n[Content truncated: {} characters total, showing first {}. Use Read on a redirected output file for the complete content.]",
+            crate::tool::bash::DEFAULT_OUTPUT_MAX_CHARS + 1,
+            crate::tool::bash::DEFAULT_OUTPUT_MAX_CHARS,
+        );
+        let result = crate::tool::ToolResult {
+            content: serde_json::Value::String(format!(
+                "$ noisy-command\n{output}{note}\n[Exited with code 0]"
+            )),
+            is_error: false,
+            diff: None,
+        };
+        let ContentBlock::ToolResult { content, .. } = result_block("bash-1", &result) else {
+            unreachable!();
+        };
+        let text = crate::api::types::tool_result_text(&content);
+        assert!(text.contains("[Content truncated:"), "{text}");
+        assert!(
+            text.contains("Use Read on a redirected output file"),
+            "{text}"
+        );
+        assert!(
+            text.chars().count() <= MAX_RESULT_CHARS,
+            "{}",
+            text.chars().count()
+        );
+    }
+
+    #[test]
+    fn long_bash_command_still_preserves_truncation_guidance() {
+        let command = "c".repeat(8_000);
+        let output = "x".repeat(crate::tool::bash::DEFAULT_OUTPUT_MAX_CHARS);
+        let note = format!(
+            "\n[Content truncated: {} characters total, showing first {}. Use Read on a redirected output file for the complete content.]",
+            crate::tool::bash::DEFAULT_OUTPUT_MAX_CHARS + 1,
+            crate::tool::bash::DEFAULT_OUTPUT_MAX_CHARS,
+        );
+        let raw = format!("$ {command}\n{output}{note}\n[Exited with code 0]");
+        let clipped = clipped_result(raw);
+        assert!(clipped.contains("[Content truncated:"), "{clipped}");
+        assert!(
+            clipped.contains("Use Read on a redirected output file"),
+            "{clipped}"
+        );
     }
 
     #[test]
