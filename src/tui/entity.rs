@@ -168,6 +168,15 @@ fn send(session: &Arc<Session>, conv: &Conv, text: &str) -> Option<String> {
     }
 }
 
+fn apply_open(ws: &mut Workspace, open: EntityOpen) {
+    match open {
+        EntityOpen::Workspace => {}
+        EntityOpen::Agent(name) => ws.select(Conv::Dm(name)),
+    }
+    ws.focus = Focus::Composer;
+    ws.switcher = None;
+}
+
 /// Full-screen entity modal: a self-drawing loop on the alternate screen,
 /// Esc/ctrl+c returns.
 /// `already_alt`: the fullscreen host is already on the alternate screen, so
@@ -201,9 +210,7 @@ async fn modal_loop(
     // The workspace state lives on Chat so read cursors and the open
     // conversation survive leaving and re-entering the view.
     let mut ws = std::mem::take(&mut chat.slack);
-    let EntityOpen::Workspace = open;
-    ws.focus = Focus::Composer;
-    ws.switcher = None;
+    apply_open(&mut ws, open);
 
     // Avatars are ordinary kitty images: transmitted once per portrait, then
     // placed by the cells the message list paints.
@@ -287,7 +294,12 @@ async fn modal_loop(
                 .saturating_sub(composer.len())
                 .max(1);
             let (posts, _, divider) = conversation(&session, &ws, &conv);
-            let content = slack::message_rows(&posts, divider, &pal, width, &avatars);
+            let content = match conv {
+                Conv::Dm(_) => {
+                    slack::dm_message_rows(&posts, divider, &pal, width, &avatars, &theme)
+                }
+                Conv::Channel(_) => slack::message_rows(&posts, divider, &pal, width, &avatars),
+            };
 
             // Bottom-anchored + scroll offset (clamped so it can't run past the top).
             let max_up = content.len().saturating_sub(viewport);
@@ -475,6 +487,24 @@ mod tests {
             snap,
             KeyEvent::new(code, mods),
         )
+    }
+
+    #[test]
+    fn direct_agent_open_selects_that_dm_without_losing_workspace_navigation() {
+        let mut ws = Workspace::default();
+        ws.select(Conv::Channel("dev-room".into()));
+        ws.switcher = Some(Switcher::default());
+        apply_open(&mut ws, EntityOpen::Agent("scout".into()));
+        assert_eq!(ws.open, Some(Conv::Dm("scout".into())));
+        assert_eq!(ws.focus, Focus::Composer);
+        assert!(ws.switcher.is_none());
+
+        apply_open(&mut ws, EntityOpen::Workspace);
+        assert_eq!(
+            ws.open,
+            Some(Conv::Dm("scout".into())),
+            "Ctrl+G keeps the workspace's last conversation"
+        );
     }
 
     #[test]

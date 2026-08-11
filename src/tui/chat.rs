@@ -397,6 +397,13 @@ pub const SLASH_SUGGESTIONS_MAX: usize = 5;
 pub const INPUT_ROWS_MAX: usize = 10;
 /// Max rows shown for queued messages (more collapse into `… +N more`).
 pub const QUEUE_ROWS_MAX: usize = 3;
+/// Max running agents shown while the compact entity selector is open.
+pub const ENTITY_ROWS_MAX: usize = 6;
+/// Max running agents shown at once in the background-agent manager.
+pub const AGENT_MANAGER_ROWS_MAX: usize = 8;
+/// Agent detail follows the reference dialog's bounded prompt preview.
+pub const AGENT_PROMPT_CHARS_MAX: usize = 300;
+pub const AGENT_PROMPT_ROWS_MAX: usize = 6;
 /// Undo stack depth (ctrl+_).
 pub const UNDO_MAX: usize = 20;
 /// Exit-confirmation window between two Ctrl+C presses.
@@ -1069,6 +1076,10 @@ pub struct Chat {
     pub tasks_auto: bool,
     /// Snapshot of the bottom entity area (running agent instances + channels; refreshed on tick/WatchEvent).
     pub entities: Vec<EntityRow>,
+    /// Selection in the compact running-agent list; `None` keeps the one-line presence summary.
+    pub entity_focus: Option<usize>,
+    /// Main-view background-agent manager; `None` means the panel is closed.
+    pub agent_manager: Option<AgentManager>,
     /// Entity view pending open (app layer consumes → enters the fullscreen modal).
     pub open_entity: Option<EntityOpen>,
     /// Slack workspace view state. Lives here rather than in the modal so read
@@ -1095,10 +1106,18 @@ pub enum EntityRow {
     },
 }
 
-/// Workspace view to open after Ctrl+G.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Background-agent manager layered over the main chat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentManager {
+    List { selected: usize },
+    Detail { name: String },
+}
+
+/// Entity view to open from the main chat.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityOpen {
     Workspace,
+    Agent(String),
 }
 
 impl Chat {
@@ -1293,6 +1312,8 @@ impl Chat {
             tasks_visible: false,
             tasks_auto: false,
             entities: Vec::new(),
+            entity_focus: None,
+            agent_manager: None,
             open_entity: None,
             slack: Default::default(),
             interrupted: false,
@@ -4958,7 +4979,10 @@ impl Chat {
         if self.search.is_some() {
             return self.search_key(code, modifiers);
         }
-        // Ctrl+G opens the workspace before the global Esc/interrupt semantics.
+        // Main-view agent management and the compact entity selector take precedence over global Esc/editing.
+        if self.agent_manager_key(code, modifiers) {
+            return true;
+        }
         if self.entity_key(code, modifiers) {
             return true;
         }
@@ -5675,6 +5699,13 @@ impl Chat {
                     .tasks_cache
                     .iter()
                     .any(|t| t.status == TodoStatus::InProgress))
+            || (self.agent_manager.is_some()
+                && self
+                    .session
+                    .agents
+                    .list()
+                    .iter()
+                    .any(|status| status.state == crate::agents::AgentState::Running))
             || self.update_anim_active()
     }
 
@@ -5922,7 +5953,7 @@ impl Chat {
             .collect()
     }
 
-    /// Refreshes the bottom entity-area snapshot (agent instances + channels). Dirty only on change.
+    /// Refreshes the bottom entity-area snapshot (running agents + channels). Dirty only on change.
     pub fn refresh_entities(&mut self) {
         let mut fresh: Vec<EntityRow> = self
             .session
@@ -5949,14 +5980,80 @@ impl Chat {
                 }),
         );
         if fresh != self.entities {
+            if let Some(selected) = self.entity_focus {
+                let agents = fresh
+                    .iter()
+                    .filter(|entity| matches!(entity, EntityRow::Agent { .. }))
+                    .count();
+                self.entity_focus = (agents > 0).then(|| selected.min(agents - 1));
+            }
             self.entities = fresh;
             self.dirty = true;
         }
     }
 
-    /// Bottom entity area: one-line summary of running agents and channels.
-    /// Takes no rows when there are no entities.
+    fn running_agent_rows(&self) -> Vec<&EntityRow> {
+        self.entities
+            .iter()
+            .filter(|entity| matches!(entity, EntityRow::Agent { .. }))
+            .collect()
+    }
+
+    /// Bottom entity area: a compact presence summary, or a selectable running-agent list.
     pub fn entity_rows(&self, width: usize) -> Vec<Line> {
+        if let Some(selected) = self.entity_focus {
+            let agents = self.running_agent_rows();
+            if agents.is_empty() {
+                return Vec::new();
+            }
+            let cap = ENTITY_ROWS_MAX;
+            let selected = selected.min(agents.len() - 1);
+            let start = selected.saturating_sub(cap.saturating_sub(1));
+            let mut rows = agents
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(cap)
+                .map(|(index, entity)| {
+                    let EntityRow::Agent {
+                        name,
+                        state,
+                        model,
+                        thinking,
+                    } = entity
+                    else {
+                        unreachable!("running-agent list contains only agents")
+                    };
+                    let prefix = if index == selected { "❯ " } else { "  " };
+                    let style = if index == selected {
+                        SegStyle::fg(self.theme.permission)
+                    } else {
+                        SegStyle::fg(self.theme.inactive)
+                    };
+                    Line::styled(
+                        one_line(
+                            &format!(
+                                "{prefix}◉ {name} · {model} · {} · {state}",
+                                thinking.as_deref().unwrap_or("off")
+                            ),
+                            width,
+                        ),
+                        style,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if agents.len() > cap {
+                rows.push(Line::styled(
+                    format!("  … {} running agents", agents.len()),
+                    SegStyle::fg(self.theme.inactive),
+                ));
+            }
+            rows.push(Line::styled(
+                "  ↑↓ select · enter opens DM · esc closes".to_string(),
+                SegStyle::fg(self.theme.inactive),
+            ));
+            return rows;
+        }
         if self.entities.is_empty() {
             return Vec::new();
         }
@@ -5969,7 +6066,6 @@ impl Chat {
                     state,
                     model,
                     thinking,
-                    ..
                 } => format!(
                     "◉ {name} · {model} · {} · {state}",
                     thinking.as_deref().unwrap_or("off")
@@ -5981,20 +6077,310 @@ impl Chat {
             .collect::<Vec<_>>()
             .join(" · ");
         vec![Line::styled(
-            one_line(&format!("  {summary} — ctrl+g to view"), width),
+            one_line(
+                &format!("  {summary} — ↑↓ select agent · ctrl+g workspace · ctrl+b manage"),
+                width,
+            ),
             SegStyle::fg(self.theme.inactive),
         )]
     }
 
-    /// Ctrl+G opens the full-screen workspace directly.
+    /// Ctrl+G opens the full workspace. Plain ↑/↓ focuses running agents and Enter opens a DM.
     pub fn entity_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         if code == KeyCode::Char('g') && ctrl {
+            self.entity_focus = None;
             self.open_entity = Some(EntityOpen::Workspace);
             self.dirty = true;
             return true;
         }
-        false
+        if self.entity_focus.is_none()
+            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && matches!(code, KeyCode::Up | KeyCode::Down)
+            && self.input.is_empty()
+        {
+            self.refresh_entities();
+            let agents = self.running_agent_rows();
+            if agents.is_empty() {
+                return false;
+            }
+            self.entity_focus = Some(if code == KeyCode::Up {
+                agents.len() - 1
+            } else {
+                0
+            });
+            self.dirty = true;
+            return true;
+        }
+        let Some(selected) = self.entity_focus else {
+            return false;
+        };
+        let agents = self.running_agent_rows();
+        if agents.is_empty() {
+            self.entity_focus = None;
+            return false;
+        }
+        match code {
+            KeyCode::Up => {
+                self.entity_focus = Some(selected.saturating_sub(1));
+            }
+            KeyCode::Down => {
+                self.entity_focus = Some((selected + 1).min(agents.len() - 1));
+            }
+            KeyCode::Enter => {
+                self.open_entity = agents.get(selected).and_then(|entity| match entity {
+                    EntityRow::Agent { name, .. } => Some(EntityOpen::Agent(name.clone())),
+                    EntityRow::Channel { .. } => None,
+                });
+                self.entity_focus = None;
+            }
+            KeyCode::Esc => self.entity_focus = None,
+            _ => return false,
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// Main-view entry for running background-agent management.
+    pub fn agent_manager_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+        if self.agent_manager.is_none() && code == KeyCode::Char('b') && ctrl {
+            self.agent_manager = Some(AgentManager::List { selected: 0 });
+            self.entity_focus = None;
+            self.dirty = true;
+            return true;
+        }
+        let Some(mut manager) = self.agent_manager.take() else {
+            return false;
+        };
+        let running = self
+            .session
+            .agents
+            .list()
+            .into_iter()
+            .filter(|status| status.state == crate::agents::AgentState::Running)
+            .collect::<Vec<_>>();
+        let keep = match &mut manager {
+            AgentManager::List { selected } => {
+                *selected = (*selected).min(running.len().saturating_sub(1));
+                match code {
+                    KeyCode::Up => {
+                        *selected = selected.saturating_sub(1);
+                        true
+                    }
+                    KeyCode::Down => {
+                        *selected = (*selected + 1).min(running.len().saturating_sub(1));
+                        true
+                    }
+                    KeyCode::Enter => {
+                        if let Some(status) = running.get(*selected) {
+                            manager = AgentManager::Detail {
+                                name: status.name.clone(),
+                            };
+                        }
+                        true
+                    }
+                    KeyCode::Char('x') => {
+                        if let Some(status) = running.get(*selected) {
+                            self.stop_agent_from_manager(&status.name);
+                        }
+                        true
+                    }
+                    KeyCode::Esc => false,
+                    _ => {
+                        self.agent_manager = Some(manager);
+                        return true;
+                    }
+                }
+            }
+            AgentManager::Detail { name } => match code {
+                KeyCode::Char('x') => {
+                    self.stop_agent_from_manager(name);
+                    false
+                }
+                KeyCode::Left | KeyCode::Esc => {
+                    manager = AgentManager::List { selected: 0 };
+                    true
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => false,
+                _ => {
+                    self.agent_manager = Some(manager);
+                    return true;
+                }
+            },
+        };
+        if keep {
+            self.agent_manager = Some(manager);
+        }
+        self.dirty = true;
+        true
+    }
+
+    fn stop_agent_from_manager(&mut self, name: &str) {
+        match self.session.agents.stop(name) {
+            Ok((watch_id, dropped)) => {
+                if let Some(id) = watch_id {
+                    self.session.watch.set_state(
+                        id,
+                        WatchState::Cancelled,
+                        Some("stopped".to_string()),
+                        None,
+                    );
+                }
+                self.push_warning(if dropped == 0 {
+                    format!("stopped {name}")
+                } else {
+                    format!("stopped {name} · {dropped} queued instructions discarded")
+                });
+                self.notice_until = Some(std::time::Instant::now() + CTRL_C_WINDOW);
+                self.refresh_entities();
+            }
+            Err(error) => self.push_warning(error),
+        }
+    }
+
+    /// Rows for the main-view manager overlay.
+    pub fn agent_manager_rows(&self, width: usize) -> Vec<Row> {
+        let Some(manager) = &self.agent_manager else {
+            return Vec::new();
+        };
+        let statuses = self.session.agents.list();
+        let running = statuses
+            .iter()
+            .filter(|status| status.state == crate::agents::AgentState::Running)
+            .collect::<Vec<_>>();
+        match manager {
+            AgentManager::List { selected } => {
+                let mut rows = vec![Row::new(Line::styled(
+                    format!("Background agents · {} running", running.len()),
+                    SegStyle::fg(self.theme.text).bold(),
+                ))];
+                if running.is_empty() {
+                    rows.push(Row::new(Line::styled(
+                        "No agents currently running",
+                        SegStyle::fg(self.theme.inactive),
+                    )));
+                } else {
+                    let selected = (*selected).min(running.len() - 1);
+                    let start = selected.saturating_sub(AGENT_MANAGER_ROWS_MAX - 1);
+                    for (index, status) in running
+                        .iter()
+                        .enumerate()
+                        .skip(start)
+                        .take(AGENT_MANAGER_ROWS_MAX)
+                    {
+                        let activity = status
+                            .recent_activity
+                            .last()
+                            .map(String::as_str)
+                            .unwrap_or("initializing…");
+                        let prefix = if index == selected { "❯ " } else { "  " };
+                        let stats = format_agent_stats(status);
+                        rows.push(Row::new(Line::styled(
+                            one_line(
+                                &format!(
+                                    "{prefix}◉ {} · {} · {} · {activity}",
+                                    status.name, status.description, stats
+                                ),
+                                width.saturating_sub(2),
+                            ),
+                            SegStyle::fg(if prefix == "❯ " {
+                                self.theme.permission
+                            } else {
+                                self.theme.text
+                            }),
+                        )));
+                    }
+                    if running.len() > AGENT_MANAGER_ROWS_MAX {
+                        rows.push(Row::new(Line::styled(
+                            format!("  … {} running agents", running.len()),
+                            SegStyle::fg(self.theme.inactive),
+                        )));
+                    }
+                }
+                rows.push(Row::new(Line::styled(
+                    "↑/↓ select · Enter details · x stop · Esc close",
+                    SegStyle::fg(self.theme.inactive),
+                )));
+                manager_box(rows, width, &self.theme)
+            }
+            AgentManager::Detail { name } => {
+                let status = statuses.iter().find(|status| &status.name == name);
+                let mut rows = vec![Row::new(Line::styled(
+                    status.map_or_else(
+                        || name.clone(),
+                        |s| format!("{} › {}", s.name, s.description),
+                    ),
+                    SegStyle::fg(self.theme.text).bold(),
+                ))];
+                if let Some(status) = status {
+                    rows.push(Row::new(Line::styled(
+                        format!("{} · {}", status.state.label(), format_agent_stats(status)),
+                        SegStyle::fg(self.theme.inactive),
+                    )));
+                    rows.push(Row::new(Line::empty()));
+                    rows.push(Row::new(Line::styled(
+                        "Progress",
+                        SegStyle::fg(self.theme.inactive).bold(),
+                    )));
+                    if status.recent_activity.is_empty() {
+                        rows.push(Row::new(Line::styled(
+                            "› initializing…",
+                            SegStyle::fg(self.theme.inactive),
+                        )));
+                    } else {
+                        for (index, activity) in status.recent_activity.iter().enumerate() {
+                            let prefix = if index + 1 == status.recent_activity.len() {
+                                "› "
+                            } else {
+                                "  "
+                            };
+                            rows.push(Row::new(Line::styled(
+                                one_line(&format!("{prefix}{activity}"), width.saturating_sub(2)),
+                                SegStyle::fg(if prefix == "› " {
+                                    self.theme.text
+                                } else {
+                                    self.theme.inactive
+                                }),
+                            )));
+                        }
+                    }
+                    rows.push(Row::new(Line::empty()));
+                    rows.push(Row::new(Line::styled(
+                        "Prompt",
+                        SegStyle::fg(self.theme.inactive).bold(),
+                    )));
+                    let prompt = if status.prompt.is_empty() {
+                        "(prompt unavailable)".to_string()
+                    } else {
+                        truncate_chars(&status.prompt, AGENT_PROMPT_CHARS_MAX)
+                    };
+                    let prompt_rows = wrap_words(&prompt, width.saturating_sub(4).max(1));
+                    for line in prompt_rows.iter().take(AGENT_PROMPT_ROWS_MAX) {
+                        rows.push(Row::new(Line::plain(line.clone())));
+                    }
+                    if prompt_rows.len() > AGENT_PROMPT_ROWS_MAX {
+                        rows.push(Row::new(Line::styled(
+                            format!(
+                                "… +{} prompt lines",
+                                prompt_rows.len() - AGENT_PROMPT_ROWS_MAX
+                            ),
+                            SegStyle::fg(self.theme.inactive),
+                        )));
+                    }
+                } else {
+                    rows.push(Row::new(Line::styled(
+                        "Agent is no longer available",
+                        SegStyle::fg(self.theme.inactive),
+                    )));
+                }
+                rows.push(Row::new(Line::styled(
+                    "←/Esc back · Enter close · x stop",
+                    SegStyle::fg(self.theme.inactive),
+                )));
+                manager_box(rows, width, &self.theme)
+            }
+        }
     }
 
     /// `?` panel rows (single source for the shortcut table). The row budget comes from the terminal height:
@@ -6626,6 +7012,69 @@ impl Chat {
         }
         self.dirty = true;
     }
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let mut chars = text.chars();
+    let mut out = chars.by_ref().take(max).collect::<String>();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
+fn format_agent_stats(status: &crate::agents::AgentStatus) -> String {
+    let elapsed = status.elapsed.unwrap_or_default().as_secs();
+    let elapsed = if elapsed >= 60 {
+        format!("{}m {:02}s", elapsed / 60, elapsed % 60)
+    } else {
+        format!("{elapsed}s")
+    };
+    let tools = if status.tool_uses == 1 {
+        "tool"
+    } else {
+        "tools"
+    };
+    format!(
+        "{elapsed} · {} tokens · {} {tools}",
+        status.output_tokens, status.tool_uses
+    )
+}
+
+fn manager_box(rows: Vec<Row>, width: usize, theme: &Theme) -> Vec<Row> {
+    let inner = width.saturating_sub(4).max(1);
+    let border = "─".repeat(inner);
+    let mut out = Vec::with_capacity(rows.len() + 2);
+    out.push(Row::new(Line::styled(
+        format!("╭{border}╮"),
+        SegStyle::fg(theme.inactive),
+    )));
+    for row in rows {
+        let mut line = Line::styled("│ ", SegStyle::fg(theme.inactive));
+        let mut used = 0usize;
+        for seg in row.line.segs {
+            if used >= inner.saturating_sub(2) {
+                break;
+            }
+            let remaining = inner.saturating_sub(2 + used);
+            let text = one_line(&seg.text, remaining.max(1));
+            used += text_width(&text);
+            line.push_styled(text, seg.style);
+        }
+        line.push_styled(
+            format!("{} │", " ".repeat(inner.saturating_sub(used + 2))),
+            SegStyle::fg(theme.inactive),
+        );
+        let mut boxed = Row::new(line);
+        boxed.bg = row.bg;
+        boxed.padding_right = row.padding_right;
+        out.push(boxed);
+    }
+    out.push(Row::new(Line::styled(
+        format!("╰{border}╯"),
+        SegStyle::fg(theme.inactive),
+    )));
+    out
 }
 
 /// User message rows: a `❯ ` prefix + body wrapped to the width (multi-line pasted messages split into rows).
@@ -12985,6 +13434,163 @@ mod tests {
 
         assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
         assert_eq!(chat.open_entity, Some(EntityOpen::Workspace));
+    }
+
+    /// Running agents can be selected from the entity area and Enter opens that exact DM.
+    #[test]
+    fn entity_area_selects_running_agent_and_enter_opens_dm() {
+        let mut chat = test_chat();
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "research".into(),
+            chat.session.clone(),
+        );
+        chat.session.agents.insert(
+            "reviewer",
+            crate::agents::AgentKind::Hire,
+            None,
+            "review".into(),
+            chat.session.clone(),
+        );
+        chat.refresh_entities();
+
+        assert!(chat.on_key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(chat.entity_focus, Some(0));
+        assert!(
+            chat.entity_rows(100)[0]
+                .plain_text()
+                .contains("❯ ◉ reviewer")
+        );
+        assert!(chat.on_key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(chat.entity_focus, Some(1));
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(chat.open_entity, Some(EntityOpen::Agent("scout".into())));
+        assert_eq!(chat.entity_focus, None);
+    }
+
+    /// Ctrl+B owns list/detail navigation and x stops the selected running agent.
+    #[test]
+    fn agent_manager_lists_opens_details_and_stops_agents() {
+        let mut chat = test_chat();
+        chat.session.agents.insert(
+            "alpha",
+            crate::agents::AgentKind::Hire,
+            None,
+            "first agent".into(),
+            chat.session.clone(),
+        );
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "inspect the code".into(),
+            chat.session.clone(),
+        );
+        chat.session
+            .agents
+            .set_prompt("scout", "Find the rendering seam".into());
+        chat.session.agents.set_progress_snapshot(
+            "scout",
+            crate::agents::AgentProgress {
+                started_at: Some(std::time::Instant::now()),
+                output_tokens: 123,
+                tool_uses: 2,
+                recent_activity: vec!["⏺Read(src/tui/chat.rs)".into()],
+            },
+        );
+
+        assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        let list = chat
+            .agent_manager_rows(100)
+            .iter()
+            .map(|row| row.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(list.contains("Background agents · 2 running"), "{list}");
+        assert!(list.contains("scout · inspect the code"), "{list}");
+        assert!(list.contains("123 tokens · 2 tools"), "{list}");
+        assert!(list.contains("Read(src/tui/chat.rs)"), "{list}");
+        assert!(chat.on_key(KeyCode::Down, KeyModifiers::NONE));
+        assert!(chat.on_key(KeyCode::Char('x'), KeyModifiers::NONE));
+        let statuses = chat.session.agents.list();
+        assert_eq!(
+            statuses
+                .iter()
+                .find(|status| status.name == "scout")
+                .map(|status| status.state),
+            Some(crate::agents::AgentState::Stopped),
+            "x stops the selected row rather than the first row"
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .find(|status| status.name == "alpha")
+                .map(|status| status.state),
+            Some(crate::agents::AgentState::Running)
+        );
+        assert!(
+            chat.agent_manager_rows(100).len() <= AGENT_MANAGER_ROWS_MAX + 4,
+            "manager list stays bounded"
+        );
+
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "inspect the code".into(),
+            chat.session.clone(),
+        );
+        chat.session
+            .agents
+            .set_prompt("scout", "Find the rendering seam".into());
+        chat.session.agents.set_progress_snapshot(
+            "scout",
+            crate::agents::AgentProgress {
+                started_at: Some(std::time::Instant::now()),
+                output_tokens: 123,
+                tool_uses: 2,
+                recent_activity: vec!["⏺Read(src/tui/chat.rs)".into()],
+            },
+        );
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            chat.agent_manager,
+            Some(AgentManager::Detail {
+                name: "scout".into()
+            })
+        );
+        let detail = chat
+            .agent_manager_rows(100)
+            .iter()
+            .map(|row| row.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(detail.contains("scout › inspect the code"), "{detail}");
+        assert!(detail.contains("Prompt"), "{detail}");
+        assert!(detail.contains("Find the rendering seam"), "{detail}");
+        assert!(detail.contains("Progress"), "{detail}");
+        assert!(
+            chat.agent_manager_rows(100).len() <= AGENT_PROMPT_ROWS_MAX + 12,
+            "detail prompt is bounded"
+        );
+        assert!(
+            chat.has_dynamic_rows(),
+            "an open running detail keeps elapsed live"
+        );
+
+        assert!(chat.on_key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(chat.agent_manager.is_none());
+        assert_eq!(
+            chat.session
+                .agents
+                .list()
+                .iter()
+                .find(|status| status.name == "scout")
+                .map(|status| status.state),
+            Some(crate::agents::AgentState::Stopped)
+        );
     }
 
     /// Queues beyond the cap fold into one row (row count feeds chrome, so it must be bounded).

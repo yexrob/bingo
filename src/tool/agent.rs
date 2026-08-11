@@ -148,12 +148,17 @@ fn ask_gate() -> &'static tokio::sync::Mutex<()> {
     GATE.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+struct SubagentOutput {
+    text: Arc<Mutex<String>>,
+    live: Arc<Mutex<Vec<crate::agents::LiveBlock>>>,
+    progress: Arc<Mutex<crate::agents::AgentProgress>>,
+}
+
 /// Sub-agent UI: captures text, renders nothing, and forwards permission prompts to the
 /// session that owns the UI. The cell tracks the number of characters produced (for interval
 /// progress checks of background agents).
 fn subagent_hooks(
-    output: Arc<Mutex<String>>,
-    live: Arc<Mutex<Vec<crate::agents::LiveBlock>>>,
+    output: SubagentOutput,
     cell: Arc<AgentCell>,
     watch: Arc<WatchRegistry>,
     id: WatchId,
@@ -163,34 +168,49 @@ fn subagent_hooks(
     // `output` stays the flat reply (what the spawn returns and what `spoke` is
     // judged on); `live` is the same turn as the instance view needs to show it,
     // with the tool calls and round boundaries the flat string cannot carry.
-    let tool_live = live.clone();
-    let round_live = live.clone();
+    let tool_live = output.live.clone();
+    let tool_progress = output.progress.clone();
+    let round_live = output.live.clone();
+    let text_output = output.text;
+    let live_output = output.live;
+    let progress_output = output.progress;
     UiHooks {
-        on_event: Box::new(move |event| {
-            if let crate::api::contract::StreamEvent::TextDelta { text, .. } = event
-                && let Ok(mut output) = output.lock()
-            {
-                output.push_str(text);
-                if let Ok(mut live) = live.lock() {
-                    crate::agents::LiveBlock::push_text(&mut live, text);
+        on_event: Box::new(move |event| match event {
+            crate::api::contract::StreamEvent::TextDelta { text, .. } => {
+                if let Ok(mut output) = text_output.lock() {
+                    output.push_str(text);
+                    if let Ok(mut live) = live_output.lock() {
+                        crate::agents::LiveBlock::push_text(&mut live, text);
+                    }
+                    cell.record_chars(text.chars().count());
+                    watch.feed_content(id, text);
                 }
-                cell.record_chars(text.chars().count());
-                // Feed produced text into the condition engine (notify_on hit → signal notification).
-                watch.feed_content(id, text);
             }
+            crate::api::contract::StreamEvent::StopReason {
+                output_tokens: Some(tokens),
+                ..
+            } => {
+                if let Ok(mut progress) = progress_output.lock() {
+                    progress.add_output_tokens(*tokens);
+                }
+            }
+            _ => {}
         }),
         on_tool_ready: Box::new(move |name, input, _standalone| {
-            let Ok(mut live) = tool_live.lock() else {
-                return;
-            };
             let glyph = crate::tui::activities::tool_glyph(&name);
             let shown = crate::tui::activities::display_tool_name(&name);
             let summary = crate::query::summarize_input(&name, &input);
-            live.push(crate::agents::LiveBlock::Tool(if summary.is_empty() {
+            let activity = if summary.is_empty() {
                 format!("{glyph}{shown}")
             } else {
                 format!("{glyph}{shown}({summary})")
-            }));
+            };
+            if let Ok(mut live) = tool_live.lock() {
+                live.push(crate::agents::LiveBlock::Tool(activity.clone()));
+            }
+            if let Ok(mut progress) = tool_progress.lock() {
+                progress.record_tool(activity);
+            }
         }),
         on_tool_done: Box::new(|_| {}),
         // A round boundary closes the open prose block, so the next round's first
@@ -513,10 +533,19 @@ pub(crate) fn spawn_agent_loop(
         loop {
             let output = Arc::new(Mutex::new(String::new()));
             let live = Arc::new(Mutex::new(Vec::new()));
+            let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+            if let Ok(mut progress) = progress.lock() {
+                progress.start_run();
+            }
+            loop_registry.set_prompt(&name, prompt.clone());
             loop_registry.set_live(&name, Some(live.clone()));
+            loop_registry.set_progress(&name, Some(progress.clone()));
             let mut ui = subagent_hooks(
-                output.clone(),
-                live.clone(),
+                SubagentOutput {
+                    text: output.clone(),
+                    live: live.clone(),
+                    progress,
+                },
                 run.1.clone(),
                 watch.clone(),
                 run.0,
@@ -529,6 +558,7 @@ pub(crate) fn spawn_agent_loop(
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let spoke = !text.trim().is_empty();
                     loop_registry.set_live(&name, None);
+                    loop_registry.set_progress(&name, None);
                     watch.set_state(
                         run.0,
                         WatchState::Done,
@@ -556,6 +586,7 @@ pub(crate) fn spawn_agent_loop(
                 }
                 Err(e) => {
                     loop_registry.set_live(&name, None);
+                    loop_registry.set_progress(&name, None);
                     watch.set_state(
                         run.0,
                         WatchState::Failed,
@@ -1029,10 +1060,21 @@ impl Tool for AgentTool {
         self.session.agents.set_run_watch(&name, id);
         let output = Arc::new(Mutex::new(String::new()));
         let live = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+        if let Ok(mut progress) = progress.lock() {
+            progress.start_run();
+        }
+        self.session.agents.set_prompt(&name, params.prompt.clone());
         self.session.agents.set_live(&name, Some(live.clone()));
+        self.session
+            .agents
+            .set_progress(&name, Some(progress.clone()));
         let mut ui = subagent_hooks(
-            output.clone(),
-            live.clone(),
+            SubagentOutput {
+                text: output.clone(),
+                live: live.clone(),
+                progress,
+            },
             cell.clone(),
             ctx.watch.clone(),
             id,
@@ -1050,6 +1092,7 @@ impl Tool for AgentTool {
         )
         .await;
         self.session.agents.set_live(&name, None);
+        self.session.agents.set_progress(&name, None);
         match sync_run {
             Ok(outcome) => {
                 let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -2555,6 +2598,61 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
+        let output = Arc::new(Mutex::new(String::new()));
+        let live = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+        progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .start_run();
+        let watch = crate::watch::WatchRegistry::new();
+        let id = register_run_watch(
+            &watch,
+            "progress".into(),
+            Arc::new(AgentCell::new()),
+            Vec::new(),
+            None,
+        );
+        let mut ui = subagent_hooks(
+            SubagentOutput {
+                text: output,
+                live,
+                progress: progress.clone(),
+            },
+            Arc::new(AgentCell::new()),
+            watch,
+            id,
+            "worker".into(),
+            None,
+        );
+        (ui.on_event)(&crate::api::contract::StreamEvent::StopReason {
+            stop_reason: Some("tool_use".into()),
+            output_tokens: Some(12),
+        });
+        (ui.on_tool_ready)(
+            "Read".into(),
+            serde_json::json!({"file_path":"src/main.rs"}),
+            false,
+        );
+        (ui.on_event)(&crate::api::contract::StreamEvent::StopReason {
+            stop_reason: Some("end_turn".into()),
+            output_tokens: Some(7),
+        });
+        (ui.on_tool_ready)(
+            "Bash".into(),
+            serde_json::json!({"command":"cargo check"}),
+            false,
+        );
+        let progress = progress.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(progress.output_tokens, 19);
+        assert_eq!(progress.tool_uses, 2);
+        assert_eq!(progress.recent_activity.len(), 2);
+        assert!(progress.recent_activity[0].contains("Read"));
+        assert!(progress.recent_activity[1].contains("Bash"));
+    }
+
     /// A subagent's Ask decision is forwarded to the attached prompt surface, stamped with the
     /// instance name — never silently auto-denied (or auto-allowed under bypass).
     #[tokio::test]
@@ -2577,8 +2675,11 @@ mod tests {
             None,
         );
         let ui = subagent_hooks(
-            Arc::new(Mutex::new(String::new())),
-            Arc::new(Mutex::new(Vec::new())),
+            SubagentOutput {
+                text: Arc::new(Mutex::new(String::new())),
+                live: Arc::new(Mutex::new(Vec::new())),
+                progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
+            },
             Arc::new(AgentCell::new()),
             watch.clone(),
             id,
@@ -2593,8 +2694,11 @@ mod tests {
 
         // Nothing attached (embedded/test path): deny rather than block on a modal nobody shows.
         let ui = subagent_hooks(
-            Arc::new(Mutex::new(String::new())),
-            Arc::new(Mutex::new(Vec::new())),
+            SubagentOutput {
+                text: Arc::new(Mutex::new(String::new())),
+                live: Arc::new(Mutex::new(Vec::new())),
+                progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
+            },
             Arc::new(AgentCell::new()),
             watch,
             id,

@@ -444,8 +444,9 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     for line in chat.help_lines() {
         children.push(El::Row(dim_row(line, theme)));
     }
-    // Bottom entity area (running agent instances + channels; Ctrl+G opens the workspace).
+    // Bottom entity area (running agents + channels; arrows open a DM, Ctrl+G opens the workspace).
     children.push(El::Lines(chat.entity_rows(width)));
+    children.push(El::Rows(chat.agent_manager_rows(width)));
 
     // Pinned panels (login flows, long-operation progress): persistent until
     // the owning flow unpins them — the one place a device code can wait out

@@ -194,6 +194,7 @@ pub struct AgentStatus {
     pub name: String,
     pub def: Option<String>,
     pub description: String,
+    pub prompt: String,
     pub state: AgentState,
     /// Crew member or temporary hire (D53).
     pub kind: AgentKind,
@@ -208,6 +209,14 @@ pub struct AgentStatus {
     pub model: String,
     pub provider: String,
     pub thinking: Option<String>,
+    /// Elapsed time of the current run; absent while idle or stopped.
+    pub elapsed: Option<Duration>,
+    /// Cumulative output tokens reported by the current model run.
+    pub output_tokens: u64,
+    /// Tool calls observed in the current run.
+    pub tool_uses: usize,
+    /// Most recent tool activity in this run, oldest first.
+    pub recent_activity: Vec<String>,
 }
 
 /// Message identifier, unique per registry. Handed back to the sender so it can check later
@@ -340,6 +349,7 @@ pub struct Continuation {
 struct Entry {
     def: Option<String>,
     description: String,
+    prompt: String,
     state: AgentState,
     kind: AgentKind,
     /// Sweeps a finished hire has left before release, refilled whenever it has work
@@ -361,6 +371,39 @@ struct Entry {
     /// Streaming output of the current turn (shares the same Arc with subagent_hooks;
     /// cleared at turn end — the TUI instance view shows the live tail from this).
     live: Option<Arc<Mutex<Vec<LiveBlock>>>>,
+    /// Progress sampled by the main TUI's background-task manager.
+    progress: Option<Arc<Mutex<AgentProgress>>>,
+}
+
+const RECENT_AGENT_ACTIVITIES: usize = 5;
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentProgress {
+    pub started_at: Option<Instant>,
+    pub output_tokens: u64,
+    pub tool_uses: usize,
+    pub recent_activity: Vec<String>,
+}
+
+impl AgentProgress {
+    pub fn start_run(&mut self) {
+        self.started_at = Some(Instant::now());
+        self.output_tokens = 0;
+        self.tool_uses = 0;
+        self.recent_activity.clear();
+    }
+
+    pub fn add_output_tokens(&mut self, tokens: u64) {
+        self.output_tokens = self.output_tokens.saturating_add(tokens);
+    }
+
+    pub fn record_tool(&mut self, activity: String) {
+        self.tool_uses += 1;
+        self.recent_activity.push(activity);
+        if self.recent_activity.len() > RECENT_AGENT_ACTIVITIES {
+            self.recent_activity.remove(0);
+        }
+    }
 }
 
 /// One piece of a running turn, as the instance view sees it while it happens.
@@ -502,6 +545,7 @@ impl AgentRegistry {
             Entry {
                 def,
                 description,
+                prompt: String::new(),
                 state: AgentState::Running,
                 kind,
                 lease: HIRE_LEASE,
@@ -513,6 +557,7 @@ impl AgentRegistry {
                 runs: 0,
                 watch_id: None,
                 live: None,
+                progress: None,
             },
         );
         self.sync_share(name);
@@ -569,6 +614,23 @@ impl AgentRegistry {
         if let Some(entry) = self.lock().get_mut(name) {
             entry.live = live;
         }
+    }
+
+    pub fn set_prompt(&self, name: &str, prompt: String) {
+        if let Some(entry) = self.lock().get_mut(name) {
+            entry.prompt = prompt;
+        }
+    }
+
+    pub fn set_progress(&self, name: &str, progress: Option<Arc<Mutex<AgentProgress>>>) {
+        if let Some(entry) = self.lock().get_mut(name) {
+            entry.progress = progress;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_progress_snapshot(&self, name: &str, progress: AgentProgress) {
+        self.set_progress(name, Some(Arc::new(Mutex::new(progress))));
     }
 
     /// Instance view data: history + live tail + state (None if the instance doesn't exist).
@@ -866,17 +928,32 @@ impl AgentRegistry {
         let inner = self.lock();
         let mut out: Vec<AgentStatus> = inner
             .iter()
-            .map(|(name, e)| AgentStatus {
-                name: name.clone(),
-                def: e.def.clone(),
-                description: e.description.clone(),
-                state: e.state,
-                kind: e.kind,
-                pending: e.inbox.len(),
-                unacked: e.acks.iter().filter(|a| a.state.is_outstanding()).count(),
-                model: e.session.runtime.model.borrow().clone(),
-                provider: e.session.runtime.provider.borrow().clone(),
-                thinking: e.session.runtime.thinking.borrow().clone(),
+            .map(|(name, e)| {
+                let progress = e.progress.as_ref().map(|progress| {
+                    progress
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .clone()
+                });
+                AgentStatus {
+                    name: name.clone(),
+                    def: e.def.clone(),
+                    description: e.description.clone(),
+                    prompt: e.prompt.clone(),
+                    state: e.state,
+                    kind: e.kind,
+                    pending: e.inbox.len(),
+                    unacked: e.acks.iter().filter(|a| a.state.is_outstanding()).count(),
+                    model: e.session.runtime.model.borrow().clone(),
+                    provider: e.session.runtime.provider.borrow().clone(),
+                    thinking: e.session.runtime.thinking.borrow().clone(),
+                    elapsed: progress
+                        .as_ref()
+                        .and_then(|p| p.started_at.map(|started| started.elapsed())),
+                    output_tokens: progress.as_ref().map_or(0, |p| p.output_tokens),
+                    tool_uses: progress.as_ref().map_or(0, |p| p.tool_uses),
+                    recent_activity: progress.map_or_else(Vec::new, |p| p.recent_activity),
+                }
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));

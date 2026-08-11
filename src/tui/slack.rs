@@ -25,12 +25,15 @@
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
+use rsmarkdown_core::{MarkdownProcessor, Renderer};
+
 use crate::agents::AgentState;
 use crate::api::types::{ContentBlock, Message, Role};
 use crate::channels::{ChannelMessage, ChannelMode};
 use crate::tui::avatar;
 use crate::tui::chat::Row;
 use crate::tui::line::{Line, SegStyle, text_width, wrap_words};
+use crate::tui::markdown::MarkdownRenderer;
 use crate::tui::theme::Theme;
 
 /// Left gutter of the message list when the avatar is a text chip: ` X ` plus one
@@ -859,6 +862,80 @@ pub fn sender_band(
     vec![head, gutter_cell(index, name, 1, images, pal)]
 }
 
+fn indent_rows(
+    body: Vec<Row>,
+    post: &Post,
+    grouped: bool,
+    gutter_w: usize,
+    avatars: &Avatars,
+    pal: &Palette,
+) -> Vec<Row> {
+    body.into_iter()
+        .enumerate()
+        .map(|(i, body)| {
+            let mut line = if i == 0 && !grouped {
+                gutter_line(&post.from, 1, avatars, pal)
+            } else {
+                Line::styled(" ".repeat(gutter_w), SegStyle::fg(pal.main_dim))
+            };
+            let gutter_segments = line.segs.len();
+            line.image = body.line.image.clone();
+            line.segs.extend(body.line.segs);
+            let bg = body.bg;
+            if let Some(bg) = bg {
+                for seg in line.segs.iter_mut().skip(gutter_segments) {
+                    seg.style.bg = Some(bg);
+                }
+            }
+            let mut row = Row::new(line);
+            row.bg = None;
+            row.padding_right = body.padding_right;
+            row
+        })
+        .collect()
+}
+
+/// The DM body uses the same user bubble and assistant markdown row builders as
+/// the main transcript. The surrounding name row and avatar gutter remain the
+/// workspace's existing DM skin.
+fn dm_body_rows(post: &Post, width: usize, theme: &Theme) -> Vec<Row> {
+    match post.kind {
+        PostKind::Queued => wrap_words(&post.text, width)
+            .into_iter()
+            .map(|line| Row::new(Line::styled(line, SegStyle::fg(theme.inactive))))
+            .collect(),
+        PostKind::Typing if post.text.is_empty() => Vec::new(),
+        _ if post.you => crate::tui::chat::user_message_rows(&post.text, width, theme),
+        _ => {
+            let mut processor = MarkdownProcessor::default();
+            let mut renderer = MarkdownRenderer::with_theme(width.saturating_sub(2), theme.clone());
+            let doc = processor.process_streaming(&post.text);
+            renderer.render(&doc);
+            crate::tui::chat::text_rows(theme, renderer.lines().to_vec())
+        }
+    }
+}
+
+fn workspace_body_rows(post: &Post, width: usize, pal: &Palette) -> Vec<Row> {
+    let style = match post.kind {
+        PostKind::Queued => SegStyle::fg(pal.main_dim),
+        _ => SegStyle::fg(pal.main_text),
+    };
+    let mut rows = Vec::new();
+    for para in post.text.lines() {
+        let wrapped = wrap_words(para, width);
+        if wrapped.is_empty() {
+            rows.push(Row::new(Line::empty()));
+        }
+        rows.extend(
+            wrapped
+                .into_iter()
+                .map(|line| Row::new(Line::styled(line, style))),
+        );
+    }
+    rows
+}
+
 /// The message list. Consecutive posts from one sender inside [`GROUP_WINDOW`]
 /// share a name row; the day changes and the first unread message get dividers.
 /// `avatars` says whether the terminal can place portraits and which ones the
@@ -870,6 +947,28 @@ pub fn message_rows(
     pal: &Palette,
     width: usize,
     avatars: &Avatars,
+) -> Vec<Row> {
+    message_rows_for(posts, unread_from, pal, width, avatars, None)
+}
+
+pub fn dm_message_rows(
+    posts: &[Post],
+    unread_from: usize,
+    pal: &Palette,
+    width: usize,
+    avatars: &Avatars,
+    theme: &Theme,
+) -> Vec<Row> {
+    message_rows_for(posts, unread_from, pal, width, avatars, Some(theme))
+}
+
+fn message_rows_for(
+    posts: &[Post],
+    unread_from: usize,
+    pal: &Palette,
+    width: usize,
+    avatars: &Avatars,
+    main_theme: Option<&Theme>,
 ) -> Vec<Row> {
     if posts.is_empty() {
         return vec![
@@ -931,35 +1030,20 @@ pub fn message_rows(
             }
             rows.push(row(head));
         }
-        // The first body row of an ungrouped post carries the bottom half of the
-        // portrait; every other row is plain indentation.
-        let mut lead = 0usize;
-        let indent = |lead: &mut usize| -> Line {
-            let line = if *lead == 0 && !grouped {
+        let body = match main_theme {
+            Some(theme) => dm_body_rows(post, body_w, theme),
+            None => workspace_body_rows(post, body_w, pal),
+        };
+        let mut body = indent_rows(body, post, grouped, gutter_w, avatars, pal);
+        let mut lead = body.len();
+        rows.append(&mut body);
+        if post.kind == PostKind::Queued {
+            let mut line = if lead == 0 && !grouped {
                 gutter_line(&post.from, 1, avatars, pal)
             } else {
                 Line::styled(" ".repeat(gutter_w), SegStyle::fg(pal.main_dim))
             };
-            *lead += 1;
-            line
-        };
-        let style = match post.kind {
-            PostKind::Queued => SegStyle::fg(pal.main_dim),
-            _ => SegStyle::fg(pal.main_text),
-        };
-        for para in post.text.lines() {
-            let wrapped = wrap_words(para, body_w);
-            if wrapped.is_empty() {
-                rows.push(row(indent(&mut lead)));
-            }
-            for l in wrapped {
-                let mut line = indent(&mut lead);
-                line.push_styled(l, style);
-                rows.push(row(line));
-            }
-        }
-        if post.kind == PostKind::Queued {
-            let mut line = indent(&mut lead);
+            lead += 1;
             line.push_styled(
                 "⧖ pending delivery (injected at the next turn boundary)",
                 SegStyle::fg(pal.main_dim).italic(),
@@ -967,7 +1051,12 @@ pub fn message_rows(
             rows.push(row(line));
         }
         if post.kind == PostKind::Typing {
-            let mut line = indent(&mut lead);
+            let mut line = if lead == 0 && !grouped {
+                gutter_line(&post.from, 1, avatars, pal)
+            } else {
+                Line::styled(" ".repeat(gutter_w), SegStyle::fg(pal.main_dim))
+            };
+            lead += 1;
             line.push_styled(
                 format!("✻ {} is typing…", post.from),
                 SegStyle::fg(pal.accent).italic(),
@@ -1559,6 +1648,118 @@ mod tests {
             gutter(true),
             "second body row aligns to the same column"
         );
+    }
+
+    #[test]
+    fn dm_rows_reuse_main_body_rendering_and_keep_the_existing_avatar_gutter() {
+        let posts = vec![
+            Post {
+                from: "user".into(),
+                you: true,
+                at: 0,
+                text: "plain **user** text".into(),
+                kind: PostKind::Said,
+            },
+            Post {
+                from: "scout".into(),
+                you: false,
+                at: 0,
+                text: "## Result\n\nUse `cargo test`.".into(),
+                kind: PostKind::Said,
+            },
+        ];
+        let pal = pal();
+        let theme = Theme::dark();
+        let avatars = Avatars::default();
+        let rows = dm_message_rows(&posts, usize::MAX, &pal, 60, &avatars, &theme);
+
+        let user_head = rows
+            .iter()
+            .position(|row| row.line.plain_text().contains("You"))
+            .unwrap_or_else(|| panic!("user name row missing"));
+        let user_body = &rows[user_head + 1];
+        assert_eq!(user_body.bg, None, "bubble must not repaint the DM gutter");
+        assert!(
+            user_body
+                .line
+                .segs
+                .first()
+                .is_some_and(|seg| seg.style.bg.is_none()),
+            "existing avatar gutter keeps its own style"
+        );
+        assert!(
+            user_body
+                .line
+                .segs
+                .iter()
+                .skip(1)
+                .all(|seg| seg.style.bg == Some(theme.user_message_bg)),
+            "main bubble background stays scoped to the body"
+        );
+        assert!(
+            user_body
+                .line
+                .plain_text()
+                .contains("❯ plain **user** text"),
+            "main user bubble rows remain intact behind the gutter: {:?}",
+            texts(&rows)
+        );
+        assert!(
+            user_body.line.plain_text().starts_with("    "),
+            "DM avatar gutter stays in front of the main body row"
+        );
+
+        let image_avatars = Avatars {
+            images: true,
+            ..Avatars::default()
+        };
+        let image_rows = dm_message_rows(&posts[..1], usize::MAX, &pal, 60, &image_avatars, &theme);
+        let image_body = image_rows
+            .iter()
+            .find(|row| row.line.plain_text().contains("plain **user** text"))
+            .unwrap_or_else(|| panic!("image-avatar user body missing"));
+        assert!(
+            image_body
+                .line
+                .segs
+                .iter()
+                .take(2)
+                .all(|seg| seg.style.bg != Some(theme.user_message_bg)),
+            "portrait and its spacer keep the existing DM gutter style"
+        );
+        assert!(
+            image_body
+                .line
+                .segs
+                .iter()
+                .skip(2)
+                .all(|seg| seg.style.bg == Some(theme.user_message_bg)),
+            "the bubble begins only after the image-avatar gutter"
+        );
+
+        let scout_head = rows
+            .iter()
+            .position(|row| row.line.plain_text().contains("scout"))
+            .unwrap_or_else(|| panic!("agent name row missing"));
+        let assistant = &rows[scout_head + 1..];
+        assert!(
+            assistant
+                .iter()
+                .any(|row| row.line.plain_text().contains("⏺ Result")),
+            "assistant uses the main markdown heading/prefix path: {:?}",
+            texts(&rows)
+        );
+        assert!(
+            assistant
+                .iter()
+                .any(|row| row.line.plain_text().contains("cargo test"))
+        );
+        assert!(assistant.iter().any(|row| {
+            row.line
+                .segs
+                .iter()
+                .any(|seg| seg.style.fg == Some(theme.code_fg))
+        }));
     }
 
     #[test]
