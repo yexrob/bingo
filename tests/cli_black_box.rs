@@ -119,6 +119,27 @@ fn readme_command_tables_document_explicit_public_sharing() {
 }
 
 #[test]
+fn missing_home_never_falls_back_to_the_working_directory() {
+    let root = TempDir::new("missing-home");
+    let output = isolated_command(&root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .args(["--print", "hello"])
+        .output()
+        .expect("bingo process must start");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("error output must be UTF-8");
+    assert!(stderr.starts_with("[error] code=CONFIG_INVALID msg="));
+    assert!(stderr.contains("cannot determine the user home directory"));
+    assert!(
+        !root.path().join(".local").exists(),
+        "state must never be written below cwd when home cannot be resolved"
+    );
+}
+
+#[test]
 fn non_tty_errors_use_the_stable_single_line_contract() {
     let root = TempDir::new("error");
     fs::create_dir_all(root.path().join(".bingo")).expect("project config directory");

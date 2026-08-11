@@ -488,9 +488,13 @@ impl AgentRegistry {
         )
     }
 
-    /// Attach share persistence: instance create/finish/stop events sync into the share document from now on.
+    /// Replace share persistence for future instance changes.
     pub fn attach_share(&self, store: Arc<crate::share::ShareStore>) {
         *self.share.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
+    }
+
+    pub fn detach_share(&self) {
+        *self.share.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Attach the prompt surface subagents borrow (called once by whoever owns the UI).

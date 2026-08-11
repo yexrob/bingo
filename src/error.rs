@@ -165,6 +165,7 @@ fn downcast_error_code(err: &(dyn std::error::Error + 'static)) -> Option<&'stat
         crate::hooks::HookError,
         crate::mcp::McpError,
         crate::share::ShareError,
+        crate::storage::StorageError,
         crate::update::UpdateError,
     )
 }
@@ -344,6 +345,19 @@ mod tests {
             TranscriptError::Parse(serde_json::from_str::<()>("x").unwrap_err()).error_code(),
             "STORAGE_ERROR"
         );
+        // StorageError's 2 variants explicitly enumerated (AC-40).
+        use crate::storage::StorageError;
+        let storage_variants = vec![
+            StorageError::HomeUnavailable,
+            StorageError::Io {
+                operation: "read",
+                path: std::path::PathBuf::from("p"),
+                source: std::io::Error::other("x"),
+            },
+        ];
+        assert_stable_codes("storage::StorageError", &storage_variants);
+        assert_eq!(storage_variants[0].error_code(), "CONFIG_INVALID");
+        assert_eq!(storage_variants[1].error_code(), "STORAGE_ERROR");
         // All 6 ShareError variants explicitly enumerated (AC-40).
         use crate::share::ShareError;
         let share_variants = vec![
@@ -449,7 +463,7 @@ mod tests {
     }
 
     /// The macro registry covers all ErrorCode-implementing types (guardrail 4
-    /// "registry is the contract's second place"): each of the 11 registered types is
+    /// "registry is the contract's second place"): each of the 13 registered types is
     /// asserted non-GENERIC through the boxed exit — a type implementing ErrorCode that
     /// only takes effect on the TUI exit while missing from the downcast macro would
     /// silently fall to GENERIC on the CLI exit and turn this test red. Cross-checked
@@ -463,6 +477,7 @@ mod tests {
         use crate::query::QueryError;
         use crate::settings::SettingsError;
         use crate::share::ShareError;
+        use crate::storage::StorageError;
         use crate::tasks::TaskError;
         use crate::team::TeamError;
         use crate::tool::ToolError;
@@ -483,12 +498,13 @@ mod tests {
                 detail: "d".into(),
             }),
             Box::new(ShareError::SessionNotFound("x".into())),
+            Box::new(StorageError::HomeUnavailable),
             Box::new(UpdateError::Http { status: 503 }),
         ];
         assert_eq!(
             samples.len(),
-            12,
-            "the boxed exit should have 12 registered types: new ErrorCode implementors must be \
+            13,
+            "the boxed exit should have 13 registered types: new ErrorCode implementors must be \
              `downcast_error_code` macro registration + an instance in this test; missing either turns CI red"
         );
         for e in &samples {

@@ -33,6 +33,7 @@ Rust 实现的本地 agent CLI（agent harness）。在终端里驱动大模型�
 - **上下文管理**：token 预算监控、自动压缩（保留最近消息 + 结构化摘要）、
   手动 `/compact`、压缩失败熔断。
 - **会话与记忆**：transcript JSONL 持久化（`--continue`/`/resume` 恢复），
+  30 天 TTL + 最近 100 个非活跃会话的有界保留策略（24 小时活跃保护，`/gc`），
   memdir 自动记忆 + CLAUDE.md/AGENTS.md 项目记忆。
 - **Hooks 扩展点**：工具前后、会话起止、压缩、Stop、任务生命周期等事件的
   shell hook（stdin 喂 JSON、stdout 回传决策）。
@@ -157,7 +158,7 @@ bingo --continue            # 恢复最近一次会话
 `/skills`（清单，`/技能名` 直接执行）、`/context`（用量）、`/status`、
 `/config`（生效配置与来源：哪个层/环境变量赢了、当前端点、未知配置项提示）、
 `/compact`（强制压缩）、`/resume [名称]`（恢复历史会话）、`/rename`、
-`/share [--public] [--open]`、`/clear`、`/exit`。
+`/gc`（清理过期会话数据）、`/share [--public] [--open]`、`/clear`、`/exit`。
 `/share` 默认只在本地生成自包含 HTML；只有显式加 `--public` 才会上传为
 任何人可访问的公开链接，且上传前会先显示敏感内容警告。`--open` 打开本地文件
 或已发布链接。等价 CLI 为 `bingo share [会话] [--public] [--open] [-o 路径]`。
@@ -492,7 +493,11 @@ bingo 的 Tool trait：
 
 - **Transcript**：`~/.local/share/bingo/transcripts/<项目>-<ts>.jsonl`，
   每行一条 Message；坏行跳过不阻塞恢复。`--continue` 续最近会话，
-  `/resume [名]` 列出/切换，`/rename` 重命名。
+  `/resume [名]` 列出/切换，`/rename` 重命名。启动清理与 `/gc` 最多保留最近
+  100 个非活跃会话，并删除超过 30 天的会话；最近 24 小时有活动的会话不受数量
+  上限清理；对应 share 快照随 transcript 删除。
+  输入历史文件同样采用 30 天 TTL 与 100 个文件上限；本地导出的 HTML 与任务
+  清单不会被自动删除。
 - **上下文预算**：窗口 200k，输出预算 64k，有效输入窗口 = 窗口 − 输出预算；
   自动压缩阈值 = 有效窗口的 90%（≈122k），提前 20k 提醒（`/context`）。
   压缩 = 摘要旧消息 + 保留最近 8 条；压缩切点安全推进到 tool_result 边界之外，

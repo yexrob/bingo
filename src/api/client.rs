@@ -28,14 +28,6 @@ fn protocol_default_base_url(protocol: Option<&str>) -> String {
     }
 }
 
-/// User home (auth.json lives under ~/.local/share/bingo; bingo requires
-/// HOME at startup, so a missing var degrades to an empty path).
-fn home_dir() -> std::path::PathBuf {
-    std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default()
-}
-
 /// Display info for a provider (the `/provider` listing and `/model` menu):
 /// auth material (masked by the caller) + endpoint URL.
 #[derive(Clone)]
@@ -65,27 +57,32 @@ pub struct Client {
 }
 
 impl Client {
-    /// Settings first, falling back to environment variables
-    /// (ANTHROPIC_API_KEY/DEEPSEEK_API_KEY, ANTHROPIC_BASE_URL). Reports
-    /// MissingApiKey when neither settings nor env has a key.
+    #[cfg(test)]
     pub fn from_settings(settings: &crate::settings::Settings) -> Result<Self, ClientError> {
-        Self::from_settings_with(settings, |name| std::env::var(name))
+        Self::from_settings_at(settings, std::path::Path::new("/tmp/bingo-test-home"))
     }
 
-    /// Injectable variant of from_settings (tests use a fake env, avoiding
-    /// real environment variables). The auth store resolves against the
-    /// user's HOME.
+    #[cfg(test)]
     pub(crate) fn from_settings_with(
         settings: &crate::settings::Settings,
         env: impl Fn(&str) -> std::result::Result<String, std::env::VarError>,
     ) -> Result<Self, ClientError> {
-        Self::build(settings, env, &home_dir())
+        Self::from_settings_at_with(settings, env, std::path::Path::new("/tmp/bingo-test-home"))
     }
 
-    /// Build against an explicit home (tests isolate the auth.json read;
-    /// production main passes the same HOME).
+    /// Build against an explicitly resolved home. Production passes the same home used
+    /// by every state store so HOME-less Windows never falls back to cwd.
+    pub fn from_settings_at(
+        settings: &crate::settings::Settings,
+        home: &std::path::Path,
+    ) -> Result<Self, ClientError> {
+        Self::build(settings, |name| std::env::var(name), home)
+    }
+
+    /// Build against an explicit home and injected environment (tests isolate auth.json
+    /// and avoid real environment variables).
     #[cfg(test)]
-    pub(crate) fn from_settings_at(
+    pub(crate) fn from_settings_at_with(
         settings: &crate::settings::Settings,
         env: impl Fn(&str) -> std::result::Result<String, std::env::VarError>,
         home: &std::path::Path,
@@ -447,6 +444,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_home_routes_stored_credentials_outside_cwd() {
+        let home = std::env::temp_dir().join(format!("bingo-client-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        crate::auth::AuthStore::new(&home)
+            .set(
+                "opencode-go",
+                crate::auth::AuthEntry::Api {
+                    key: "stored-key".into(),
+                },
+            )
+            .unwrap();
+        let settings = crate::settings::Settings::default();
+
+        let client = Client::from_settings_at_with(
+            &settings,
+            |_| Err(std::env::VarError::NotPresent),
+            &home,
+        )
+        .unwrap();
+
+        assert!(client.is_configured("opencode-go"));
+        assert!(crate::auth::auth_path(&home).exists());
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn from_settings_prefers_settings_over_env() {
         let settings = crate::settings::Settings {
             api_key: Some("sk-settings".into()),
@@ -674,7 +697,7 @@ mod tests {
             ..Default::default()
         };
         let client =
-            Client::from_settings_at(&settings, |_| Err(std::env::VarError::NotPresent), &tmp)
+            Client::from_settings_at_with(&settings, |_| Err(std::env::VarError::NotPresent), &tmp)
                 .unwrap();
         assert_eq!(
             client.provider_names(),

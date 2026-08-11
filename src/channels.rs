@@ -179,9 +179,34 @@ impl ChannelRegistry {
         })
     }
 
-    /// Attach share persistence: channel metadata/message changes sync into the share document from now on.
+    /// Replace share persistence and ensure existing channels can accept future messages.
     pub fn attach_share(&self, store: Arc<crate::share::ShareStore>) {
-        *self.share.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
+        let inner = self.lock();
+        for (name, channel) in &inner.channels {
+            store.upsert_channel_meta(name, channel.mode, channel.members.clone());
+        }
+        *self.share.lock().unwrap_or_else(|e| e.into_inner()) = Some(store.clone());
+        store.persist();
+    }
+
+    pub fn align_with_share(&self, store: &crate::share::ShareStore) {
+        let doc = store.snapshot();
+        let mut inner = self.lock();
+        for saved in doc.channels {
+            let Some(channel) = inner.channels.get_mut(&saved.name) else {
+                continue;
+            };
+            if saved.messages.last().map_or(0, |message| message.seq) > channel.seq {
+                channel.log = saved.messages;
+                channel.seq = channel.log.last().map_or(0, |message| message.seq);
+                channel.sent.clear();
+                channel.seen.retain(|_, seen| *seen <= channel.seq);
+            }
+        }
+    }
+
+    pub fn detach_share(&self) {
+        *self.share.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Write a channel's latest metadata (mode + members) into the share document (no-op without a store).
@@ -753,6 +778,48 @@ mod tests {
         let doc = reloaded.snapshot();
         assert_eq!(doc.channels[0].messages[0].seq, 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn attaching_new_share_store_preserves_destination_history() {
+        let root =
+            std::env::temp_dir().join(format!("bingo-ch-{}-share-rebind", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let reg = ChannelRegistry::new(ChannelLimits::default());
+        reg.create("t", vec!["a".into()], ChannelMode::Free)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let _ = sent(
+            reg.post("a", "t", "source session")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        let store = crate::share::ShareStore::load_or_create(&root.join("s.json"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        store.upsert_channel_meta("t", ChannelMode::Free, vec!["main".into(), "a".into()]);
+        store.append_channel_message(
+            "t",
+            ChannelMessage {
+                seq: 10,
+                from: "a".into(),
+                text: "destination session".into(),
+                at: 1,
+            },
+        );
+
+        reg.align_with_share(&store);
+        reg.attach_share(store.clone());
+        let _ = sent(
+            reg.post("a", "t", "after rebind")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+
+        let doc = store.snapshot();
+        assert_eq!(doc.channels.len(), 1);
+        assert_eq!(doc.channels[0].members, vec!["main", "user", "a"]);
+        assert_eq!(doc.channels[0].messages.len(), 2);
+        assert_eq!(doc.channels[0].messages[0].text, "destination session");
+        assert_eq!(doc.channels[0].messages[1].seq, 11);
+        assert_eq!(doc.channels[0].messages[1].text, "after rebind");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -87,12 +87,7 @@ fn list_id_from_env_or(key: &str) -> String {
 
 impl TaskStore {
     pub fn new(home: &Path, key: &str) -> Self {
-        let dir = home
-            .join(".local")
-            .join("share")
-            .join("bingo")
-            .join("tasks")
-            .join(list_id_from_env_or(key));
+        let dir = crate::storage::tasks_dir(home).join(list_id_from_env_or(key));
         Self {
             dir,
             lock: Mutex::new(()),

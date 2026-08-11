@@ -43,7 +43,8 @@ produces intent; side effects are gated by the harness.
   (summary of old messages + keep recent), manual `/compact`, and a fuse after
   repeated compaction failures.
 - **Sessions & memory**: JSONL transcript persistence (`--continue`/`/resume`
-  recovery), memdir auto-memory, plus CLAUDE.md/AGENTS.md project memory.
+  recovery), bounded 30-day/latest-100 retention with a 24-hour activity
+  grace (`/gc`), memdir auto-memory, plus CLAUDE.md/AGENTS.md project memory.
 - **Hooks extension points**: shell hooks for pre/post-tool, session
   start/end, compaction, Stop, and task lifecycle events (JSON on stdin,
   decisions returned on stdout).
@@ -178,7 +179,7 @@ opens the level picker; the choice persists), `/theme`,
 `/skills` (listing; `/skill-name` executes directly), `/context` (usage),
 `/status`, `/config` (effective config with per-key source layer/env, current
 endpoint, unknown-key hints), `/compact` (force compaction), `/resume [name]` (resume a past
-session), `/rename`, `/share [--public] [--open]`, `/clear`, `/exit`.
+session), `/rename`, `/gc` (clean expired session data), `/share [--public] [--open]`, `/clear`, `/exit`.
 `/share` writes a self-contained HTML file locally by default. `--public` is
 an explicit opt-in to upload it to a link anyone can access; bingo shows the
 sensitive-content warning before upload. `--open` opens the local file or the
@@ -562,7 +563,11 @@ Example (PreToolUse denies Bash):
 - **Transcript**: `~/.local/share/bingo/transcripts/<project>-<ts>.jsonl`, one
   Message per line; corrupt lines are skipped without blocking recovery.
   `--continue` resumes the latest session, `/resume [name]` lists/switches,
-  `/rename` renames.
+  `/rename` renames. Startup cleanup and `/gc` retain the newest 100
+  inactive sessions and remove sessions older than 30 days; sessions touched in
+  the last 24 hours are never count-pruned; matching share snapshots
+  follow transcript deletion. Prompt-history files use the same TTL and a
+  100-file cap. Local exported HTML and task lists are never removed.
 - **Context budget**: 200k window, 64k output budget, effective input window =
   window − output budget; auto-compaction threshold = 90% of the effective
   window (≈122k), with a 20k headroom warning (`/context`). Compaction
