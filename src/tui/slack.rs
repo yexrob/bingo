@@ -59,6 +59,8 @@ pub struct Palette {
     pub main_dim: Color,
     pub divider: Color,
     pub accent: Color,
+    pub warning: Color,
+    pub danger: Color,
     pub unread: Color,
     pub avatars: [Color; 6],
 }
@@ -80,6 +82,8 @@ impl Palette {
             main_dim: theme.inactive,
             divider: rgb(0x38332D),
             accent: theme.claude,
+            warning: theme.warning,
+            danger: theme.error,
             unread: theme.claude_strong,
             avatars: [
                 rgb(0x4C9AE0),
@@ -121,6 +125,8 @@ impl Palette {
             main_dim: f(self.main_dim),
             divider: f(self.divider),
             accent: f(self.accent),
+            warning: f(self.warning),
+            danger: f(self.danger),
             unread: f(self.unread),
             avatars: self.avatars.map(f),
         }
@@ -963,6 +969,8 @@ pub fn composer_rows(
     conv: &Conv,
     pal: &Palette,
     width: usize,
+    token_rate: Option<&str>,
+    context_usage: Option<crate::context_usage::ContextUsage>,
 ) -> (Vec<Row>, Option<(usize, usize)>) {
     // Box geometry: margin + │ + space + inner + space + │ == width.
     let inner = width.saturating_sub(5).max(4);
@@ -1020,10 +1028,56 @@ pub fn composer_rows(
     } else {
         "  tab returns to the composer · ↑↓ scrolls · ctrl+k switches conversation · alt+↑↓ moves up/down · esc back"
     };
-    let foot = Line::styled(
-        crate::tui::chat::one_line(hint, width.saturating_sub(2)),
-        SegStyle::fg(pal.main_dim),
-    );
+    let usage = context_usage.map(|usage| (usage.label(), usage.band()));
+    let mut status = Line::empty();
+    if let Some(rate) = token_rate {
+        status.push_styled(rate, SegStyle::fg(pal.accent));
+        status.push_styled(" · ", SegStyle::fg(pal.main_dim));
+    }
+    if let Some((label, band)) = &usage {
+        let color = match band {
+            crate::context_usage::ContextUsageBand::Normal => pal.main_dim,
+            crate::context_usage::ContextUsageBand::Warning => pal.warning,
+            crate::context_usage::ContextUsageBand::Danger => pal.danger,
+        };
+        status.push_styled(label, SegStyle::fg(color));
+    }
+    let available = width.saturating_sub(2);
+    if text_width(&status.plain_text()) > available {
+        status = usage
+            .map(|(label, band)| {
+                let color = match band {
+                    crate::context_usage::ContextUsageBand::Normal => pal.main_dim,
+                    crate::context_usage::ContextUsageBand::Warning => pal.warning,
+                    crate::context_usage::ContextUsageBand::Danger => pal.danger,
+                };
+                Line::styled(label, SegStyle::fg(color))
+            })
+            .unwrap_or_else(Line::empty);
+    }
+    if text_width(&status.plain_text()) > available {
+        status = Line::styled(
+            crate::tui::chat::one_line(&status.plain_text(), available),
+            status
+                .segs
+                .last()
+                .map(|seg| seg.style)
+                .unwrap_or_else(SegStyle::plain),
+        );
+    }
+    let status_width = text_width(&status.plain_text());
+    let hint_width = available.saturating_sub(status_width + usize::from(status_width > 0));
+    let hint = if hint_width > 0 {
+        crate::tui::chat::one_line(hint, hint_width)
+    } else {
+        String::new()
+    };
+    let mut foot = Line::styled(hint.clone(), SegStyle::fg(pal.main_dim));
+    if status_width > 0 {
+        let gap = available.saturating_sub(text_width(&hint) + status_width);
+        foot.push_styled(" ".repeat(gap), SegStyle::fg(pal.main_dim));
+        foot.segs.extend(status.segs);
+    }
     rows.push(row(foot));
     if let Some(flash) = &ws.flash {
         rows.push(row(Line::styled(
@@ -1418,7 +1472,7 @@ mod tests {
             60,
             &Avatars::default(),
         ));
-        all.extend(composer_rows(&ws, &conv, &pal, 60).0);
+        all.extend(composer_rows(&ws, &conv, &pal, 60, None, None).0);
         all.extend(empty_pane_rows(&pal, 60, 8));
         assert!(
             all.iter().all(|r| r.bg.is_none()),
@@ -1640,7 +1694,7 @@ mod tests {
     fn composer_shows_the_placeholder_and_tracks_the_caret() {
         let ws = Workspace::default();
         let conv = Conv::Channel("dev-room".into());
-        let (rows, caret) = composer_rows(&ws, &conv, &pal(), 50);
+        let (rows, caret) = composer_rows(&ws, &conv, &pal(), 50, None, None);
         let t = texts(&rows);
         assert!(t.iter().any(|l| l.contains("message #dev-room")), "{t:?}");
         assert!(t[0].contains('╭') && t.iter().any(|l| l.contains('╰')));
@@ -1654,7 +1708,7 @@ mod tests {
             composer: "change".into(),
             ..Workspace::default()
         };
-        let (rows, caret) = composer_rows(&typed, &conv, &pal(), 50);
+        let (rows, caret) = composer_rows(&typed, &conv, &pal(), 50, None, None);
         assert!(texts(&rows).iter().any(|l| l.contains("change")));
         assert_eq!(
             caret.map(|(_, col)| col),
@@ -1663,8 +1717,124 @@ mod tests {
         );
 
         // A DM addresses the instance, not a channel.
-        let (rows, _) = composer_rows(&ws, &Conv::Dm("scout".into()), &pal(), 50);
+        let (rows, _) = composer_rows(&ws, &Conv::Dm("scout".into()), &pal(), 50, None, None);
         assert!(texts(&rows).iter().any(|l| l.contains("message scout")));
+    }
+
+    #[test]
+    fn dm_composer_keeps_context_usage_and_rate_in_the_same_footer() {
+        let ws = Workspace::default();
+        let usage = crate::context_usage::ContextUsage::new(74_240, 128_000);
+        let rows = composer_rows(
+            &ws,
+            &Conv::Dm("scout".into()),
+            &pal(),
+            100,
+            Some("█▀▄ 48.0 tok/s"),
+            Some(usage),
+        )
+        .0;
+        let text = texts(&rows);
+        assert!(
+            text.iter().any(|line| {
+                line.contains("█▀▄ 48.0 tok/s") && line.contains("▓▓░░ 58% 74240/128k")
+            }),
+            "{text:?}"
+        );
+
+        let idle = composer_rows(
+            &ws,
+            &Conv::Dm("scout".into()),
+            &pal(),
+            100,
+            None,
+            Some(usage),
+        )
+        .0;
+        let idle_text = texts(&idle);
+        assert!(idle_text.iter().all(|line| !line.contains("tok/s")));
+        assert!(
+            idle_text
+                .iter()
+                .any(|line| line.contains("▓▓░░ 58% 74240/128k")),
+            "{idle_text:?}"
+        );
+        let pal = pal();
+        let warning = composer_rows(
+            &ws,
+            &Conv::Dm("scout".into()),
+            &pal,
+            80,
+            None,
+            Some(crate::context_usage::ContextUsage::new(70, 100)),
+        )
+        .0;
+        assert!(warning.last().is_some_and(|row| {
+            row.line
+                .segs
+                .iter()
+                .any(|seg| seg.text.contains("70%") && seg.style.fg == Some(pal.warning))
+        }));
+        let danger = composer_rows(
+            &ws,
+            &Conv::Dm("scout".into()),
+            &pal,
+            80,
+            None,
+            Some(crate::context_usage::ContextUsage::new(91, 100)),
+        )
+        .0;
+        assert!(danger.last().is_some_and(|row| {
+            row.line
+                .segs
+                .iter()
+                .any(|seg| seg.text.contains("91%") && seg.style.fg == Some(pal.danger))
+        }));
+        let narrow = composer_rows(&ws, &Conv::Dm("scout".into()), &pal, 12, None, Some(usage)).0;
+        assert!(
+            text_width(&narrow.last().expect("footer").line.plain_text()) <= 12,
+            "{:?}",
+            texts(&narrow)
+        );
+    }
+
+    #[test]
+    fn dm_composer_puts_the_live_token_rate_at_the_right_edge() {
+        let ws = Workspace::default();
+        let rows = composer_rows(
+            &ws,
+            &Conv::Dm("scout".into()),
+            &pal(),
+            80,
+            Some("█▀▄ 48.0 tok/s"),
+            None,
+        )
+        .0;
+        let text = texts(&rows);
+        assert!(
+            text.iter().any(|line| line.contains("█▀▄ 48.0 tok/s")),
+            "{text:?}"
+        );
+        assert_eq!(text_width(text.last().expect("footer row")), 78);
+
+        let narrow = texts(
+            &composer_rows(
+                &ws,
+                &Conv::Dm("scout".into()),
+                &pal(),
+                12,
+                Some("█▀▄ 48.0 tok/s"),
+                None,
+            )
+            .0,
+        );
+        assert!(
+            text_width(narrow.last().expect("narrow footer")) <= 12,
+            "{narrow:?}"
+        );
+
+        let idle = texts(&composer_rows(&ws, &Conv::Dm("scout".into()), &pal(), 80, None, None).0);
+        assert!(idle.iter().all(|line| !line.contains("tok/s")), "{idle:?}");
     }
 
     /// One title row plus a rule: the metadata trails the name instead of taking

@@ -151,9 +151,12 @@ fn ask_gate() -> &'static tokio::sync::Mutex<()> {
 /// Sub-agent UI: captures text, renders nothing, and forwards permission prompts to the
 /// session that owns the UI. The cell tracks the number of characters produced (for interval
 /// progress checks of background agents).
+#[allow(clippy::too_many_arguments)]
 fn subagent_hooks(
     output: Arc<Mutex<String>>,
     live: Arc<Mutex<Vec<crate::agents::LiveBlock>>>,
+    token_rate: Arc<Mutex<crate::token_rate::TokenRateSampler>>,
+    agents: Arc<AgentRegistry>,
     cell: Arc<AgentCell>,
     watch: Arc<WatchRegistry>,
     id: WatchId,
@@ -165,19 +168,56 @@ fn subagent_hooks(
     // with the tool calls and round boundaries the flat string cannot carry.
     let tool_live = live.clone();
     let round_live = live.clone();
+    let round_rate = token_rate.clone();
+    let context_agents = agents.clone();
+    let context_instance = instance.clone();
+    let round_chars = Arc::new(Mutex::new(0u64));
+    let event_round_chars = round_chars.clone();
     UiHooks {
         on_event: Box::new(move |event| {
-            if let crate::api::contract::StreamEvent::TextDelta { text, .. } = event
-                && let Ok(mut output) = output.lock()
-            {
-                output.push_str(text);
-                if let Ok(mut live) = live.lock() {
-                    crate::agents::LiveBlock::push_text(&mut live, text);
+            let tokens = match event {
+                crate::api::contract::StreamEvent::TextDelta { text, .. } => {
+                    let tokens = {
+                        let mut chars = event_round_chars.lock().unwrap_or_else(|e| e.into_inner());
+                        *chars = chars.saturating_add(text.chars().count() as u64);
+                        chars.div_ceil(4)
+                    };
+                    if let Ok(mut output) = output.lock() {
+                        output.push_str(text);
+                        if let Ok(mut live) = live.lock() {
+                            crate::agents::LiveBlock::push_text(&mut live, text);
+                        }
+                        cell.record_chars(text.chars().count());
+                        watch.feed_content(id, text);
+                    }
+                    tokens
                 }
-                cell.record_chars(text.chars().count());
-                // Feed produced text into the condition engine (notify_on hit → signal notification).
-                watch.feed_content(id, text);
+                crate::api::contract::StreamEvent::ThinkingDelta { thinking, .. } => {
+                    let mut chars = event_round_chars.lock().unwrap_or_else(|e| e.into_inner());
+                    *chars = chars.saturating_add(thinking.chars().count() as u64);
+                    chars.div_ceil(4)
+                }
+                crate::api::contract::StreamEvent::InputJsonDelta { partial_json, .. } => {
+                    let mut chars = event_round_chars.lock().unwrap_or_else(|e| e.into_inner());
+                    *chars = chars.saturating_add(partial_json.chars().count() as u64);
+                    chars.div_ceil(4)
+                }
+                crate::api::contract::StreamEvent::StopReason {
+                    output_tokens: Some(tokens),
+                    ..
+                } => {
+                    *event_round_chars.lock().unwrap_or_else(|e| e.into_inner()) =
+                        tokens.saturating_mul(4);
+                    *tokens
+                }
+                _ => return,
+            };
+            if let Ok(mut sampler) = token_rate.lock() {
+                sampler.observe_round(tokens, std::time::Instant::now());
             }
+        }),
+        on_context_usage: Arc::new(move |used, _window| {
+            context_agents.set_context_tokens(&context_instance, used);
         }),
         on_tool_ready: Box::new(move |name, input, _standalone| {
             let Ok(mut live) = tool_live.lock() else {
@@ -196,6 +236,10 @@ fn subagent_hooks(
         // A round boundary closes the open prose block, so the next round's first
         // sentence does not run into the previous round's last one.
         on_round_end: Box::new(move || {
+            *round_chars.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+            if let Ok(mut sampler) = round_rate.lock() {
+                sampler.finish_round();
+            }
             if let Ok(mut live) = round_live.lock()
                 && matches!(live.last(), Some(crate::agents::LiveBlock::Text(_)))
             {
@@ -513,10 +557,16 @@ pub(crate) fn spawn_agent_loop(
         loop {
             let output = Arc::new(Mutex::new(String::new()));
             let live = Arc::new(Mutex::new(Vec::new()));
-            loop_registry.set_live(&name, Some(live.clone()));
+            let token_rate = Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default()));
+            if let Ok(mut sampler) = token_rate.lock() {
+                sampler.start(std::time::Instant::now());
+            }
+            loop_registry.set_live(&name, Some(live.clone()), Some(token_rate.clone()));
             let mut ui = subagent_hooks(
                 output.clone(),
                 live.clone(),
+                token_rate,
+                loop_registry.clone(),
                 run.1.clone(),
                 watch.clone(),
                 run.0,
@@ -528,7 +578,7 @@ pub(crate) fn spawn_agent_loop(
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let spoke = !text.trim().is_empty();
-                    loop_registry.set_live(&name, None);
+                    loop_registry.set_live(&name, None, None);
                     watch.set_state(
                         run.0,
                         WatchState::Done,
@@ -555,7 +605,7 @@ pub(crate) fn spawn_agent_loop(
                     }
                 }
                 Err(e) => {
-                    loop_registry.set_live(&name, None);
+                    loop_registry.set_live(&name, None, None);
                     watch.set_state(
                         run.0,
                         WatchState::Failed,
@@ -1029,10 +1079,18 @@ impl Tool for AgentTool {
         self.session.agents.set_run_watch(&name, id);
         let output = Arc::new(Mutex::new(String::new()));
         let live = Arc::new(Mutex::new(Vec::new()));
-        self.session.agents.set_live(&name, Some(live.clone()));
+        let token_rate = Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default()));
+        if let Ok(mut sampler) = token_rate.lock() {
+            sampler.start(std::time::Instant::now());
+        }
+        self.session
+            .agents
+            .set_live(&name, Some(live.clone()), Some(token_rate.clone()));
         let mut ui = subagent_hooks(
             output.clone(),
             live.clone(),
+            token_rate,
+            self.session.agents.clone(),
             cell.clone(),
             ctx.watch.clone(),
             id,
@@ -1049,7 +1107,7 @@ impl Tool for AgentTool {
             None,
         )
         .await;
-        self.session.agents.set_live(&name, None);
+        self.session.agents.set_live(&name, None, None);
         match sync_run {
             Ok(outcome) => {
                 let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -2579,6 +2637,8 @@ mod tests {
         let ui = subagent_hooks(
             Arc::new(Mutex::new(String::new())),
             Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            AgentRegistry::new(),
             Arc::new(AgentCell::new()),
             watch.clone(),
             id,
@@ -2595,6 +2655,8 @@ mod tests {
         let ui = subagent_hooks(
             Arc::new(Mutex::new(String::new())),
             Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            AgentRegistry::new(),
             Arc::new(AgentCell::new()),
             watch,
             id,

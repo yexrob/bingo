@@ -926,6 +926,9 @@ pub struct Chat {
     /// (segment boundaries); deltas in the same segment continue without paragraph breaks; new segments (fresh reasoning after a tool) are aggregated with \n\n.
     thinking_seg_open: bool,
     output_tokens: u64,
+    output_round_tokens: u64,
+    pub(super) token_rate: crate::token_rate::TokenRateSampler,
+    pub(super) context_usage: crate::context_usage::ContextUsage,
     pub tick: u64,
     /// Tick at TurnStart: the relative timing baseline for running-state thinking.
     turn_start_tick: u64,
@@ -1191,6 +1194,16 @@ impl Chat {
         let motion_off = session.settings.motion.as_deref() == Some("off")
             || std::env::var_os("BINGO_NO_MOTION").is_some();
         let chat_avatars = session.settings.experimental.chat_avatars;
+        let context_window =
+            crate::budget::context_window_for(&session.runtime.model.borrow().clone());
+        let context_tokens = session
+            .runtime
+            .transcript
+            .borrow()
+            .clone()
+            .and_then(|transcript| transcript.load_messages().ok())
+            .map(|messages| crate::compact::estimate_tokens(&session.system, &messages))
+            .unwrap_or(0);
         Self {
             session,
             events,
@@ -1229,6 +1242,9 @@ impl Chat {
             thinking_buf: String::new(),
             thinking_seg_open: false,
             output_tokens: 0,
+            output_round_tokens: 0,
+            token_rate: crate::token_rate::TokenRateSampler::default(),
+            context_usage: crate::context_usage::ContextUsage::new(context_tokens, context_window),
             tick: 0,
             turn_start_tick: 0,
             turn_started: None,
@@ -1397,7 +1413,11 @@ impl Chat {
                 self.thinking_seg_open = false;
                 self.pending_tools_clear();
                 self.interrupt_at = None;
-                self.turn_started = Some(std::time::Instant::now());
+                let now = std::time::Instant::now();
+                self.turn_started = Some(now);
+                self.output_tokens = 0;
+                self.output_round_tokens = 0;
+                self.token_rate.start(now);
                 self.messages.push(UiMessage {
                     role: Role::Assistant,
                     text: String::new(),
@@ -1531,8 +1551,17 @@ impl Chat {
                     }
                 }
             }
+            UiEvent::ContextUsage { used, window } => {
+                self.context_usage = crate::context_usage::ContextUsage::new(used, window);
+            }
             UiEvent::OutputTokens(tokens) => {
-                self.output_tokens = tokens;
+                self.output_tokens = self
+                    .output_tokens
+                    .saturating_sub(self.output_round_tokens)
+                    .saturating_add(tokens);
+                self.output_round_tokens = tokens;
+                self.token_rate
+                    .observe_round(tokens, std::time::Instant::now());
             }
             UiEvent::ToolStart { name } => {
                 if is_hidden_tool(&name) {
@@ -1698,6 +1727,8 @@ impl Chat {
                 }
             }
             UiEvent::RoundEnd => {
+                self.output_round_tokens = 0;
+                self.token_rate.finish_round();
                 if let Some(i) = self.stream_msg {
                     // Collapse groups are bounded by text: model rounds do not split a group, nor does thinking —
                     // only text (TextDelta) and non-collapsible tools close the group.
@@ -1780,6 +1811,8 @@ impl Chat {
                 self.busy = false;
                 self.turn_started = None;
                 self.output_tokens = 0;
+                self.output_round_tokens = 0;
+                self.token_rate.stop();
                 self.thinking_seg_open = false;
                 self.drop_empty_stream_message();
                 // AskUserQuestion answers are ordinary user messages (in the message flow,
@@ -2527,6 +2560,32 @@ impl Chat {
         self.push_slash_output(format!("✓ working directory: {}", path.display()));
     }
 
+    fn reset_context_usage(&mut self) {
+        let model = self.session.runtime.model.borrow().clone();
+        self.context_usage =
+            crate::context_usage::ContextUsage::new(0, crate::budget::context_window_for(&model));
+    }
+
+    fn estimate_context_usage(&mut self, messages: &[crate::api::types::Message]) {
+        let model = self.session.runtime.model.borrow().clone();
+        self.context_usage = crate::context_usage::ContextUsage::new(
+            crate::compact::estimate_tokens(&self.session.system, messages),
+            crate::budget::context_window_for(&model),
+        );
+    }
+
+    fn refresh_context_usage_from_transcript(&mut self) {
+        let messages = self
+            .session
+            .runtime
+            .transcript
+            .borrow()
+            .clone()
+            .and_then(|transcript| transcript.load_messages().ok())
+            .unwrap_or_default();
+        self.estimate_context_usage(&messages);
+    }
+
     fn slash_clear(&mut self) {
         let session = self.session.clone();
         let cwd = std::path::PathBuf::from(&self.cwd);
@@ -2537,6 +2596,7 @@ impl Chat {
         self.slash_lines.clear();
         self.warnings.clear();
         self.reset_flushed();
+        self.reset_context_usage();
         self.push_slash_output("✓ conversation cleared; starting a new session.".to_string());
     }
 
@@ -2550,6 +2610,13 @@ impl Chat {
 
     /// Switches the runtime model and persists it as the default (same path as /theme /think: writes the project layer).
     fn set_model(&mut self, model: String) {
+        if self.busy {
+            self.push_slash_error(
+                "[error] code=BUSY msg=cannot switch models mid-turn (press Esc to interrupt, then retry)"
+                    .to_string(),
+            );
+            return;
+        }
         // P1-E: known-list check — when the current provider has a cache and the model is not in it, append a note
         // (advisory, non-blocking; the endpoint may have just shipped a new model or the cache may never have been pulled — typing it directly is still
         // a valid path). Merged into one line with the success note, to avoid the jarring "⚠ and ✓ together".
@@ -2559,6 +2626,7 @@ impl Chat {
             .get(&provider)
             .is_some_and(|known| !known.is_empty() && !known.contains(&model));
         let _ = self.session.runtime.model_tx.send(model.clone());
+        self.refresh_context_usage_from_transcript();
         self.provider_models.insert(provider.clone(), model.clone());
         // Persistence follows the provider's scope: a session-only provider
         // (`s` in the picker) must not have its model half-persisted — that
@@ -3014,6 +3082,7 @@ impl Chat {
         self.messages.clear();
         self.slash_lines.clear();
         self.reset_flushed();
+        self.refresh_context_usage_from_transcript();
         self.push_slash_output(format!(
             "✓ switched to session {} ({count} messages); the next reply uses its history.",
             found.name()
@@ -3088,6 +3157,7 @@ impl Chat {
                 self.messages.clear();
                 self.slash_lines.clear();
                 self.reset_flushed();
+                self.refresh_context_usage_from_transcript();
                 self.push_slash_output(format!(
                     "✓ switched to session {name} ({count} messages); the next reply uses its history."
                 ));
@@ -3278,6 +3348,10 @@ impl Chat {
             if let Some(t) = transcript {
                 let _ = t.replace_messages(&messages);
             }
+            let _ = events.send(UiEvent::ContextUsage {
+                used: crate::compact::estimate_tokens(&session.system, &messages),
+                window: crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
+            });
             unpin();
             let _ = events.send(UiEvent::SlashInfo(format!(
                 "✓ compacted {old_len} messages → summary + the latest 8.\nSummary: {summary}"
@@ -3749,6 +3823,10 @@ impl Chat {
                     ),
                 };
                 let model_now = session.runtime.model.borrow().clone();
+                self.context_usage = crate::context_usage::ContextUsage::new(
+                    self.context_usage.used,
+                    crate::budget::context_window_for(&model_now),
+                );
                 self.provider_models.insert(name.clone(), model_now.clone());
                 self.provider_session_only = !persist;
                 if persist {
@@ -5867,6 +5945,18 @@ impl Chat {
             elapsed,
             tokens: self.output_tokens,
         })
+    }
+
+    pub fn token_rate_label(&self) -> Option<String> {
+        if !self.busy {
+            return None;
+        }
+        self.token_rate
+            .label(std::time::Instant::now(), self.motion_off)
+    }
+
+    pub fn context_usage(&self) -> crate::context_usage::ContextUsage {
+        self.context_usage
     }
 
     /// Input-area rendered rows (with the ▋ caret) — the single source for the row-count model and rendering:
@@ -8309,6 +8399,8 @@ mod tests {
         chat.input = "/model deepseek-v4".to_string();
         chat.submit();
         assert_eq!(*chat.session.runtime.model.borrow(), "deepseek-v4");
+        assert_eq!(chat.context_usage.window, 128_000);
+        assert_eq!(chat.context_usage.used, 0);
         assert!(chat.slash_lines.join("\n").contains("deepseek-v4"));
         // No layer defines `model` → the USER layer gets it; the cwd stays
         // untouched (no conjured .bingo/ in arbitrary directories).
@@ -8344,9 +8436,11 @@ mod tests {
     fn slash_clear_resets_session() {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::User, "hi"));
+        chat.context_usage = crate::context_usage::ContextUsage::new(90_000, 200_000);
         chat.input = "/clear".to_string();
         chat.submit();
         assert!(chat.messages.is_empty(), "UI messages cleared");
+        assert_eq!(chat.context_usage.used, 0);
         assert!(
             chat.session.runtime.transcript.borrow().is_some(),
             "new transcript"
@@ -8487,10 +8581,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let home = tmp.join("home");
         let t_a = crate::transcript::create(&home, &tmp).unwrap();
-        let _ = t_a.append(&crate::api::types::Message::user_text("a"));
+        let _ = t_a.append(&crate::api::types::Message::user_text("aaaa"));
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let t_b = crate::transcript::create(&home, &tmp).unwrap();
-        let _ = t_b.append(&crate::api::types::Message::user_text("b"));
+        let _ = t_b.append(&crate::api::types::Message::user_text("bbbb"));
         let mut chat = test_chat_home(home.clone());
         let _ = chat.session.runtime.transcript_tx.send(Some(t_a.clone()));
         let name_b = t_b.name();
@@ -8538,6 +8632,7 @@ mod tests {
             name_b,
             "Enter switches the session (snapshot by index)"
         );
+        assert!(chat.context_usage.used > 0, "resumed history is estimated");
 
         // The argument fast path stays.
         chat.input = format!("/resume {}", t_a.name());
@@ -12956,6 +13051,15 @@ mod tests {
         assert!(chat.queued.is_empty(), "whitelisted commands do not queue");
         let out = chat.slash_lines.join("\n");
         assert!(out.contains("✓ thinking level set: xhigh"), "{out}");
+
+        chat.set_input("/model deepseek-v4");
+        chat.submit();
+        assert_eq!(*chat.session.runtime.model.borrow(), "test-model");
+        assert!(
+            chat.slash_error_lines
+                .join("\n")
+                .contains("cannot switch models mid-turn")
+        );
 
         // Non-instant slash: queued with the slash marker (never sent as a prompt).
         chat.set_input("/clear");

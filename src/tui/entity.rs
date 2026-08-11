@@ -206,6 +206,8 @@ async fn modal_loop(
     // Avatars are ordinary kitty images: transmitted once per portrait, then
     // placed by the cells the message list paints.
     let image_cap = chat.image_cap;
+    let motion_off = chat.session.settings.motion.as_deref() == Some("off")
+        || std::env::var_os("BINGO_NO_MOTION").is_some();
     let mut transmits = gfx::Transmits::default();
     let (workspace, avatars) = blueprint(&chat.session, image_cap.is_some());
 
@@ -279,7 +281,23 @@ async fn modal_loop(
             };
 
             let header = slack::header_rows(&snap, &conv, &pal, width);
-            let (composer, caret) = slack::composer_rows(&ws, &conv, &pal, width);
+            let (token_rate, context_usage) = match &conv {
+                Conv::Dm(name) => (
+                    session
+                        .agents
+                        .token_rate_label(name, std::time::Instant::now(), motion_off),
+                    session.agents.context_usage(name),
+                ),
+                Conv::Channel(_) => (None, None),
+            };
+            let (composer, caret) = slack::composer_rows(
+                &ws,
+                &conv,
+                &pal,
+                width,
+                token_rate.as_deref(),
+                context_usage,
+            );
             let viewport = height
                 .saturating_sub(header.len())
                 .saturating_sub(composer.len())

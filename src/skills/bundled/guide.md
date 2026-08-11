@@ -36,6 +36,7 @@ commands, and verification steps in conclusions. Never speculate about features 
   Enter opens a fullscreen view, Esc closes; the agent view shows that instance's full conversation and streaming output; the channel view
   is a WeChat-style group room where you can speak directly as user) · Ctrl+L clear and redraw · Shift+Tab cycles permission
   modes (default → acceptEdits → plan) · Alt+T thinking toggle (off ↔ the last non-off level, default medium) · while busy, Enter queues the message (sent automatically at turn end; /think /model /provider /theme /status /context /tasks /help /skills run immediately) ·
+- During streamed output, the main footer shows a live `N tok/s` indicator; the speed band changes its character animation and cadence, and idle/stalled output hides it. Beside it, context usage stays visible as a four-cell bar, percentage, and `used/window` token count, using the active model's window; 70–90% is warning-colored and above 90% is danger-colored. A running instance's DM composer shows the same indicators. `motion: "off"` freezes the rate frame but keeps the value.
 - Large pastes auto-collapse to a `[Pasted text #N +M lines]` placeholder; the real content expands on send
   (precisely detected via terminal bracketed-paste events; terminals without that feature fall back to a
   key-burst heuristic — extremely fast typing may misdetect, and pausing recovers).

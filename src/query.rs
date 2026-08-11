@@ -276,9 +276,12 @@ pub type AskQuestionFn = dyn Fn(
     + Send
     + Sync;
 
+pub type ContextUsageFn = dyn Fn(u64, u64) + Send + Sync;
+
 /// UI hooks: stream events, tool completion, permission prompts, non-fatal warnings.
 pub struct UiHooks {
     pub on_event: Box<dyn FnMut(&StreamEvent) + Send>,
+    pub on_context_usage: Arc<ContextUsageFn>,
     /// Callback when a tool block is complete (including input): the fold decision needs
     /// the input (Bash command classification). standalone=true: non-model tools like the
     /// `!` command — summary only, not part of a fold group.
@@ -324,6 +327,7 @@ pub fn headless_hooks() -> UiHooks {
                 let _ = std::io::stdout().flush();
             }
         }),
+        on_context_usage: Arc::new(|_, _| {}),
         on_tool_ready: Box::new(|_name, _input, _standalone| {}),
         on_tool_done: Box::new(|_| {}),
         on_round_end: Box::new(|| {}),
@@ -834,6 +838,10 @@ async fn query_loop(
                 mail.join("\n")
             )));
         }
+        let context_tokens =
+            gate.current(crate::compact::estimate_tokens(&session.system, &messages));
+        let model = session.runtime.model.borrow().clone();
+        (ui.on_context_usage)(context_tokens, crate::budget::context_window_for(&model));
         let turn = one_turn(session, &messages, tools, &mut *ui, cancel_rx.as_mut()).await?;
         if turn.aborted {
             // Interrupted: the whole turn is discarded (assistant incomplete); neither
@@ -873,6 +881,7 @@ async fn query_loop(
                 && recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
             {
                 recovery_count += 1;
+                (ui.on_round_end)();
                 messages.push(Message::user_text(MAX_TOKENS_RESUME_PROMPT));
                 continue;
             }
@@ -886,6 +895,7 @@ async fn query_loop(
                 .await
             {
                 stop_hook_fired = true;
+                (ui.on_round_end)();
                 messages.push(Message::user_text(format!(
                     "(Stop hook blocked continuation)\n{blocking}"
                 )));
@@ -897,6 +907,12 @@ async fn query_loop(
             } else {
                 QueryEndReason::Completed
             };
+            let context_tokens =
+                gate.current(crate::compact::estimate_tokens(&session.system, &messages));
+            (ui.on_context_usage)(
+                context_tokens,
+                crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
+            );
             return Ok(QueryOutcome {
                 messages,
                 end_reason,
@@ -1067,6 +1083,12 @@ async fn query_loop(
         );
         if interrupted {
             println!();
+            let context_tokens =
+                gate.current(crate::compact::estimate_tokens(&session.system, &messages));
+            (ui.on_context_usage)(
+                context_tokens,
+                crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
+            );
             return Ok(QueryOutcome {
                 messages,
                 end_reason: QueryEndReason::Completed,
@@ -1078,6 +1100,12 @@ async fn query_loop(
         // same fold group.
         (ui.on_round_end)();
         if stop_after_tools || is_cancelled(&cancel_rx) {
+            let context_tokens =
+                gate.current(crate::compact::estimate_tokens(&session.system, &messages));
+            (ui.on_context_usage)(
+                context_tokens,
+                crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
+            );
             return Ok(QueryOutcome {
                 messages,
                 end_reason: if empty_retry_count > 0 {
@@ -1291,6 +1319,14 @@ pub async fn run_bash_command(
                     // interrupted: the `!` command's tool_use is not yet in history, so
                     // returning directly leaves no orphans.
                     let Some(outcome) = outcomes.into_iter().next().filter(|_| !interrupted) else {
+                        let context_tokens =
+                            crate::compact::estimate_tokens(&session.system, &messages);
+                        (ui.on_context_usage)(
+                            context_tokens,
+                            crate::budget::context_window_for(
+                                &session.runtime.model.borrow().clone(),
+                            ),
+                        );
                         return Ok(QueryOutcome {
                             messages,
                             end_reason: QueryEndReason::Completed,
@@ -1362,6 +1398,11 @@ pub async fn run_bash_command(
         }
     }
     if !respond {
+        let context_tokens = crate::compact::estimate_tokens(&session.system, &messages);
+        (ui.on_context_usage)(
+            context_tokens,
+            crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
+        );
         return Ok(QueryOutcome {
             messages,
             end_reason: QueryEndReason::Completed,
