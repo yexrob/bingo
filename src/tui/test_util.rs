@@ -290,8 +290,8 @@ pub use crate::error::ErrorContext;
 pub use crate::error::ErrorLevel;
 
 /// Error-state fixture: a single data carrier (shared by qa assertions /
-/// ui/ux acceptance / dev preview). Fields align with the presentation v1.5
-/// FX checklist (10 injectable stable codes + FX-11 long turn).
+/// ui/ux acceptance / dev preview). Fields align with the presentation v1.10.1
+/// FX checklist (11 injectable stable codes + the second TIMEOUT context).
 #[derive(Debug, Clone, Copy)]
 pub struct ErrorFixture {
     pub code: &'static str,
@@ -323,16 +323,15 @@ impl ErrorFixture {
     }
 }
 
-/// All 10 injectable stable codes of §4.4 (FX-01…11). `GENERIC` stays out of
+/// All 11 injectable stable codes of §4.4 (FX-01…12). `GENERIC` stays out of
 /// the fixtures (no real return point; its guard belongs to error.rs unit
-/// tests); FX-12 mixed state / FX-13 collapsed detail are not in the
-/// injection set.
+/// tests); mixed state / collapsed detail are not in the injection set.
 ///
 /// Note: **only the TIMEOUT class derives its level from the context**
 /// (short sync = page level, long turn = full-flow level, FX-01/FX-11 share
 /// the code and are graded by context); every other code has an intrinsic
-/// level (AUTH_REQUIRED/PERMISSION_DENIED = full-flow, CONFIG_INVALID =
-/// field, the rest = page), and its context field is only recorded
+/// level (AUTH_REQUIRED/PERMISSION_DENIED/CONTEXT_OVERFLOW = full-flow,
+/// CONFIG_INVALID = field, the rest = page), and its context field is only recorded
 /// informationally (known at production emission time), never used for level
 /// derivation.
 pub fn error_fixtures() -> Vec<ErrorFixture> {
@@ -440,6 +439,15 @@ pub fn error_fixtures() -> Vec<ErrorFixture> {
             action: "retry or go back",
             expect_style: ERR,
         },
+        // FX-12 context overflow after recovery → full-flow level
+        ErrorFixture {
+            code: "CONTEXT_OVERFLOW",
+            msg: "context window exceeded after compaction; reduce or clear context",
+            context: LongTurn,
+            level: Full,
+            action: "reduce or clear context",
+            expect_style: ERR,
+        },
     ]
 }
 
@@ -482,7 +490,7 @@ mod tests {
     }
 
     /// Fixture-list completeness (the single data source for qa assertions /
-    /// ui/ux acceptance / dev preview): covers all 10 injectable stable codes
+    /// ui/ux acceptance / dev preview): covers all 11 injectable stable codes
     /// of §4.4; `TIMEOUT` has two levels (short sync / long turn) told apart
     /// by context; `GENERIC` is absent.
     #[test]
@@ -494,6 +502,7 @@ mod tests {
         let expect = [
             "AUTH_REQUIRED",
             "CONFIG_INVALID",
+            "CONTEXT_OVERFLOW",
             "HOOK_FAILED",
             "OFFLINE",
             "PERMISSION_DENIED",
@@ -505,7 +514,7 @@ mod tests {
         ];
         assert_eq!(
             codes, expect,
-            "the fixture covers all 10 injectable stable codes in §4.4"
+            "the fixture covers all 11 injectable stable codes in §4.4"
         );
         assert!(
             !fxs.iter().any(|f| f.code == "GENERIC"),

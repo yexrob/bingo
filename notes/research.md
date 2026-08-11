@@ -855,9 +855,17 @@ Issue #33 separates two jobs that had drifted together. The compact strip above 
 The DM workspace is a conversation surface, not a second execution transcript. Stored `ToolUse` blocks and live `LiveBlock::Tool` blocks do not become posts; user messages and agent prose remain. Their bodies reuse the main transcript's `user_message_rows` and assistant markdown/`text_rows` path, including bubbles, prefixes, styles, wrapping, and row attributes. The workspace still owns the surrounding DM name row and existing avatar gutter, so body alignment does not replace its identity skin. The generic working indicator is deliberately kept while the live tail is mid-tool or between rounds, because hiding tool detail must not make a long operation look idle. Channel posts are unchanged.
 
 `AgentStatus` exposes the runtime thinking level beside model/provider so both surfaces read one snapshot. DM headers show model/thinking/state. Channel headers list model/thinking for the hub and members when the complete names fit, and use one bounded aggregate otherwise; this preserves D47's compact header and keeps the composer visible on short terminals.
-
 ### D58. Running agents remain reachable from the main chat
 
 Issue #36 restores the direct path that D57 accidentally removed without taking Ctrl+G away from the full workspace. When the input is empty, plain ↑/↓ enters a bounded list of running agents, moves the selection, and Enter opens that instance's DM; channels and idle/stopped agents stay out of this selector. Ctrl+G still opens the workspace at its last conversation, so the two entrances are complementary rather than competing.
 
 Ctrl+B opens a main-view background-agent manager modeled on Claude Code's BackgroundTasksDialog and narrowed to bingo's hub-and-spoke model: running agents only, ↑/↓ selection, Enter detail, x stop, Esc close, and no foreground action. The detail view reports the current prompt, running state, elapsed time, cumulative output tokens, tool-use count, and the five most recent tool activities. Progress is sampled in the existing subagent UI hooks and exposed through `AgentStatus`; stopping delegates to the same registry/watch state transition as AgentControl, rather than adding a second lifecycle.
+
+### D59. Provider rejection is the second compaction trigger
+
+Issue #37: local token estimation is deliberately heuristic, so the provider's 400/413 response is the authoritative fallback when the estimate misses.
+
+- **Recognition lives in the neutral client contract.** Both Anthropic Messages and OpenAI Responses pass non-success status/body pairs through the same classifier. A 400/413 plus a context-size message feature becomes `ClientError::ContextOverflow`; other errors retain their existing mapping. The stable exit code is `CONTEXT_OVERFLOW`.
+- **Recovery lives in `query_loop`.** When any provider request overflows, the loop compacts without consulting the proactive threshold and immediately retries that exact request once. A second overflow is terminal. The direct retry does not run turn-boundary inbox, notification, reminder, or proactive-compaction work, and the one-retry guard is scoped to that rejected request rather than the whole tool loop.
+- **The existing breaker remains authoritative.** A failed overflow compaction increments `compact_failures`; a second overflow after a successful compact increments it as a failed recovery; the existing `MAX_COMPACT_FAILURES` cap prevents further overflow compaction attempts. A successful summary resets the consecutive-failure count, matching proactive compaction.
+- **Scope.** The proactive 90% threshold is unchanged. Main sessions and subagents share the same `query_loop`, so no agent-specific path exists.

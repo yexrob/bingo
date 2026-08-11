@@ -125,6 +125,8 @@ Example (.bingo/settings.json):
    (200k − 64k output budget) ≈ 122k, about 61% of the total window). Endpoints without a
    count_tokens API (DeepSeek/ollama; OpenAI-protocol providers — `count_tokens` is Anthropic-only)
    automatically fall back to local estimation (characters/4), with a one-time warning on first fallback.
+   If that estimate is low and either wire protocol rejects a request as a context overflow, bingo compacts
+   the history and retries the rejected request once; a second overflow ends the turn instead of looping.
    If an upstream response completes without assistant content or tool calls (including an unclosed thinking block),
    bingo treats it as malformed and retries the side-effect-free attempt once instead of ending silently; if the retry
    is also empty, the turn shows the normal full-flow retry/back error.

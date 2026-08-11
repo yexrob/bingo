@@ -229,6 +229,10 @@ mod tests {
                 status: 500,
                 body: String::new(),
             },
+            ClientError::ContextOverflow {
+                status: 400,
+                body: String::new(),
+            },
             ClientError::Stream("s".into()),
             ClientError::Timeout,
             ClientError::Unsupported("count_tokens".into()),
@@ -251,6 +255,11 @@ mod tests {
             body: String::new(),
         };
         assert_eq!(server.error_code(), "SERVER_ERROR");
+        let overflow = ClientError::ContextOverflow {
+            status: 400,
+            body: String::new(),
+        };
+        assert_eq!(overflow.error_code(), "CONTEXT_OVERFLOW");
         // The `ClientError::Transport` variant can't be constructed at runtime
         // (reqwest::Error has no public constructor API, all pub(crate) in 0.13.x):
         // the mapping is locked down by `transport_offline_code` and asserted here

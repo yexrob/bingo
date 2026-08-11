@@ -78,11 +78,29 @@ pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, token
     if messages.len() <= KEEP_RECENT {
         return false;
     }
-    let threshold = autocompact_threshold_for(&session.runtime.model.borrow().clone());
-    if tokens < threshold {
+    if tokens < autocompact_threshold_for(&session.runtime.model.borrow().clone()) {
         return false;
     }
+    compact(session, messages).await
+}
 
+pub async fn compact_after_overflow(session: &Session, messages: &mut Vec<Message>) -> bool {
+    if session.compact_failures.load(Ordering::SeqCst) >= MAX_COMPACT_FAILURES {
+        if !session.quiet {
+            eprintln!(
+                "[bingo] warning: overflow compaction disabled after {MAX_COMPACT_FAILURES} consecutive failures"
+            );
+        }
+        return false;
+    }
+    if messages.len() <= KEEP_RECENT {
+        session.compact_failures.fetch_add(1, Ordering::SeqCst);
+        return false;
+    }
+    compact(session, messages).await
+}
+
+async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {
     let split = safe_split(messages, messages.len() - KEEP_RECENT);
 
     run_pre_compact(
