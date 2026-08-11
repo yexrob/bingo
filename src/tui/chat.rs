@@ -2476,6 +2476,7 @@ impl Chat {
             "theme" => self.slash_theme(arg),
             "rename" => self.slash_rename(arg),
             "resume" => self.slash_resume(arg),
+            "gc" => self.slash_gc(),
             "share" => self.slash_share(arg),
             "compact" => self.slash_compact(),
             "status" => self.slash_status(),
@@ -2602,11 +2603,32 @@ impl Chat {
         self.estimate_context_usage(&messages);
     }
 
+    fn attach_share_to_transcript(&mut self, transcript: Option<&crate::transcript::Transcript>) {
+        let Some(transcript) = transcript else {
+            self.session.agents.detach_share();
+            self.session.channels.detach_share();
+            return;
+        };
+        let path = crate::share::shares_dir(&self.session.home)
+            .join(format!("{}.json", transcript.name()));
+        match crate::share::ShareStore::load_or_create(&path) {
+            Ok(store) => {
+                self.session.channels.align_with_share(&store);
+                self.session.agents.attach_share(store.clone());
+                self.session.channels.attach_share(store);
+            }
+            Err(error) => self.push_warning(format!(
+                "share store unavailable ({error}); bingo share will have the conversation view only"
+            )),
+        }
+    }
+
     fn slash_clear(&mut self) {
         let session = self.session.clone();
         let cwd = std::path::PathBuf::from(&self.cwd);
         let new_transcript = crate::transcript::create(&session.home, &cwd).ok();
-        let _ = session.runtime.transcript_tx.send(new_transcript);
+        let _ = session.runtime.transcript_tx.send(new_transcript.clone());
+        self.attach_share_to_transcript(new_transcript.as_ref());
         self.messages.clear();
         self.stream_msg = None;
         self.slash_lines.clear();
@@ -3055,10 +3077,19 @@ impl Chat {
             self.push_slash_error("this session has no transcript; cannot rename.".to_string());
             return;
         };
+        let old_name = t.name();
         match t.rename(arg) {
             Ok(new_t) => {
                 let name = new_t.name();
-                let _ = self.session.runtime.transcript_tx.send(Some(new_t));
+                if let Err(error) =
+                    crate::share::rename_session_sidecars(&self.session.home, &old_name, &name)
+                {
+                    self.push_warning(format!(
+                        "share data could not follow the renamed session ({error}); export may omit agent/channel history"
+                    ));
+                }
+                let _ = self.session.runtime.transcript_tx.send(Some(new_t.clone()));
+                self.attach_share_to_transcript(Some(&new_t));
                 self.push_slash_output(format!("✓ session renamed: {name}"));
             }
             Err(e) => self.push_slash_error(format!("rename failed: {e}")),
@@ -3093,8 +3124,13 @@ impl Chat {
             self.push_slash_error(format!("no session contains '{arg}'."));
             return;
         };
+        if let Err(error) = found.activate() {
+            self.push_slash_error(format!("cannot resume session: {error}"));
+            return;
+        }
         let count = found.load_messages().unwrap_or_default().len();
         let _ = self.session.runtime.transcript_tx.send(Some(found.clone()));
+        self.attach_share_to_transcript(Some(found));
         self.messages.clear();
         self.slash_lines.clear();
         self.reset_flushed();
@@ -3166,10 +3202,16 @@ impl Chat {
                 let Some(t) = menu.transcripts.get(menu.selected).cloned() else {
                     return false;
                 };
+                if let Err(error) = t.activate() {
+                    self.resume_menu = None;
+                    self.push_slash_error(format!("cannot resume session: {error}"));
+                    return true;
+                }
                 let name = t.name();
                 let count = t.load_messages().unwrap_or_default().len();
                 self.resume_menu = None;
-                let _ = self.session.runtime.transcript_tx.send(Some(t));
+                let _ = self.session.runtime.transcript_tx.send(Some(t.clone()));
+                self.attach_share_to_transcript(Some(&t));
                 self.messages.clear();
                 self.slash_lines.clear();
                 self.reset_flushed();
@@ -3184,6 +3226,41 @@ impl Chat {
                 true
             }
             _ => false,
+        }
+    }
+
+    fn slash_gc(&mut self) {
+        if self.busy {
+            self.push_slash_error(format!(
+                "[error] code={} msg=cannot clean session data mid-turn (press Esc to interrupt, then retry)",
+                crate::error::SLASH_ERROR_BAD_ARGUMENT
+            ));
+            return;
+        }
+        let home = self.session.home.clone();
+        let protected = self
+            .session
+            .runtime
+            .transcript
+            .borrow()
+            .as_ref()
+            .map(|transcript| transcript.path().to_path_buf());
+        self.pin_panel("gc", vec!["⏳ cleaning session data…".to_string()]);
+        let result = crate::storage::cleanup(&home, protected.as_deref());
+        self.unpin_panel("gc");
+        match result {
+            Ok(report) => self.push_slash_info(format!("✓ {}", report.summary())),
+            Err(error) => {
+                self.last_error = Some(ErrorState {
+                    code: crate::error::map_error(&error),
+                    msg: format!(
+                        "session storage cleanup failed: {error}; check disk permissions and retry /gc"
+                    ),
+                    level: crate::error::ErrorLevel::Page,
+                    context: crate::error::ErrorContext::ShortSync,
+                });
+                self.dirty = true;
+            }
         }
     }
 
@@ -7480,6 +7557,37 @@ mod tests {
     }
 
     #[test]
+    fn slash_gc_cleans_storage_and_reports_the_policy() {
+        let home = std::env::temp_dir().join(format!("bingo-slash-gc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let stale = crate::storage::transcripts_dir(&home).join("stale.jsonl");
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, "{}").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
+            .unwrap();
+        file.set_modified(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(31 * 24 * 60 * 60),
+        )
+        .unwrap();
+        let mut chat = test_chat_home(home.clone());
+
+        assert!(chat.run_slash("gc"));
+
+        assert!(!stale.exists());
+        assert!(!chat.pinned_panels.iter().any(|(id, _)| id == "gc"));
+        assert!(
+            all_slash_text(&chat).contains("cleaned 1 transcript(s)")
+                && all_slash_text(&chat).contains("TTL 30 days")
+                && all_slash_text(&chat).contains("latest 100 inactive sessions kept")
+                && all_slash_text(&chat).contains("24-hour activity grace")
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn slash_cd_updates_session_and_tool_context_cwd() {
         let root =
             std::env::temp_dir().join(format!("bingo-slash-cd-updates-{}", std::process::id()));
@@ -9544,7 +9652,7 @@ mod tests {
             },
         );
         Arc::get_mut(&mut chat.session).unwrap().client =
-            crate::api::client::Client::from_settings_at(
+            crate::api::client::Client::from_settings_at_with(
                 &settings,
                 |_| Err(std::env::VarError::NotPresent),
                 &tmp.join("home"),
@@ -10004,6 +10112,7 @@ mod tests {
             ("theme", "theme"),
             ("rename", "rename"),
             ("resume", "resume"),
+            ("gc", "gc"),
             ("share", "share"),
             ("compact", "compact"),
             ("status", "status"),
@@ -13409,6 +13518,16 @@ mod tests {
         assert!(chat.queued.is_empty(), "whitelisted commands do not queue");
         let out = chat.slash_lines.join("\n");
         assert!(out.contains("✓ thinking level set: xhigh"), "{out}");
+
+        chat.set_input("/gc");
+        chat.submit();
+        assert!(chat.busy, "refused cleanup does not reset the active turn");
+        assert!(chat.queued.is_empty(), "refused cleanup is never queued");
+        assert!(
+            chat.slash_error_lines
+                .join("\n")
+                .contains("cannot clean session data mid-turn")
+        );
 
         chat.set_input("/model deepseek-v4");
         chat.submit();

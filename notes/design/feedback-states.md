@@ -1,6 +1,6 @@
 # Feedback States Specification
 
-> Version: v1.39 · Status: in effect (2026-08-11)
+> Version: v1.40 · Status: in effect (2026-08-11)
 > Scope: the unified design conventions for every user-visible feedback state in bingo. The GUI (TUI) and CLI (headless) sides share a single source; qa acceptance anchors are at the end.
 
 ## General principles
@@ -292,3 +292,5 @@ Web-side conventions (for a future web frontend to reuse):
 - v1.38 (2026-08-11): issue #37 adds `CONTEXT_OVERFLOW` to the stable error table. A provider-reported 400/413 overflow is recovered internally by compacting and retrying once; only failed recovery reaches the existing Full+LongTurn error surface, with the stable code available to both TUI and headless exits.
 
 - v1.39 (2026-08-11): issue #35 removes SendMessage's sender-turn latency. The receipt stays immediate and retains its queued/delivered/answered/dropped contract; an idle receiver is claimed and shown Running before the tool returns, while a running receiver gets an inbox signal and folds everything waiting into its context between tool rounds. The batching boundary is therefore the receiver's actual inbox drain rather than the sender's turn end. The existing acknowledgement watchdog and stop/delete feedback are unchanged.
+
+- v1.40 (2026-08-11): issue #6 adds visible manual storage cleanup. `/gc` shows its progress row for the bounded synchronous cleanup and then emits an info-tier summary with per-kind counts; failures use the structured `STORAGE_ERROR` page-level path with a disk-permission + retry action. Startup applies the same bounded policy before storage-reading command paths and warns on stderr if it cannot complete.

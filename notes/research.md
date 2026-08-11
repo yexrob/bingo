@@ -113,6 +113,7 @@ Round-trip principle: `the model only emits tool_use; the local harness owns per
 
 - A transcript (JSON Lines) is persisted per session; `--continue`/`--resume` resumes from it.
 - Compact is bounded by the transcript: archive before compacting, then replace with a generated summary segment.
+- Retention is enforced at startup and by `/gc`: transcript mtime gets a 30-day TTL plus a latest-100 inactive cap with a 24-hour activity grace, and its share snapshot follows transcript deletion. Prompt-history files use the same TTL with a 100-file cap. Public HTML exports and task lists are outside this policy and are never deleted.
 
 ### D12. Token budget management
 

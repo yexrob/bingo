@@ -97,16 +97,45 @@ impl ShareDoc {
 
 /// The shares dir: ~/.local/share/bingo/shares (sibling of transcripts).
 pub fn shares_dir(home: &Path) -> PathBuf {
-    home.join(".local")
-        .join("share")
-        .join("bingo")
-        .join("shares")
+    crate::storage::shares_dir(home)
+}
+
+pub fn rename_session_sidecars(home: &Path, old: &str, new: &str) -> Result<(), ShareError> {
+    let dir = shares_dir(home);
+    std::fs::create_dir_all(&dir)?;
+    let old_lock_path = dir.join(format!("{old}.json.lock"));
+    let old_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&old_lock_path)?;
+    old_lock.lock()?;
+    for suffix in ["json", "json.bak", "json.tmp"] {
+        let old_path = dir.join(format!("{old}.{suffix}"));
+        if !old_path.exists() {
+            continue;
+        }
+        let new_path = dir.join(format!("{new}.{suffix}"));
+        std::fs::rename(old_path, new_path)?;
+    }
+    let new_lock_path = dir.join(format!("{new}.json.lock"));
+    let _ = std::fs::rename(&old_lock_path, &new_lock_path);
+    let path = dir.join(format!("{new}.json"));
+    if path.exists() {
+        let mut doc: ShareDoc = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+        doc.session = new.to_string();
+        std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
+    }
+    drop(old_lock);
+    Ok(())
 }
 
 /// Per-session shared-document store (Session holds an Arc; sub-sessions share it via the registry).
 pub struct ShareStore {
     path: PathBuf,
     inner: Mutex<ShareDoc>,
+    save_lock: Mutex<()>,
 }
 
 impl ShareStore {
@@ -132,6 +161,7 @@ impl ShareStore {
         Ok(Arc::new(Self {
             path: path.to_path_buf(),
             inner: Mutex::new(doc),
+            save_lock: Mutex::new(()),
         }))
     }
 
@@ -197,12 +227,22 @@ impl ShareStore {
 
     /// Atomic write: tmp file + rename (readers see either the old or the new document).
     pub fn save(&self) -> Result<(), ShareError> {
-        let json = serde_json::to_string_pretty(&*self.lock())?;
+        let _save_guard = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let doc = self.lock();
+        let json = serde_json::to_string_pretty(&*doc)?;
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent)?;
         }
+        let lock_path = self.path.with_extension("json.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        lock_file.lock()?;
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &self.path)?;
@@ -522,6 +562,27 @@ mod tests {
             },
         );
         store
+    }
+
+    #[test]
+    fn rename_session_sidecars_moves_snapshot_and_updates_key() {
+        let home = temp_dir("rename-sidecars");
+        let old_path = shares_dir(&home).join("old.json");
+        let store = sample_store(&old_path);
+        store.persist();
+        let old_backup = shares_dir(&home).join("old.json.bak");
+        std::fs::write(&old_backup, "backup").unwrap();
+
+        rename_session_sidecars(&home, "old", "new").unwrap();
+
+        assert!(!old_path.exists());
+        assert!(!old_backup.exists());
+        assert!(shares_dir(&home).join("new.json.bak").exists());
+        let reloaded = ShareStore::load_or_create(&shares_dir(&home).join("new.json"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(reloaded.snapshot().session, "new");
+        assert_eq!(reloaded.snapshot().agents.len(), 1);
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

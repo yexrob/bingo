@@ -106,7 +106,7 @@ Example (.bingo/settings.json):
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` runs it directly) · `/context` (usage) · `/status` ·
-`/compact` (force compaction) · `/resume [name]` (restore a past session; no arg opens the session picker, Enter restores) · `/rename` · `/clear` · `/exit`.
+`/compact` (force compaction) · `/resume [name]` (restore a past session; no arg opens the session picker, Enter restores) · `/rename` · `/gc` (clean expired session storage; 30-day TTL, latest 100 inactive sessions, 24-hour activity grace) · `/clear` · `/exit`.
 `/team` (project-level crew): `list` (blueprint + runtime on one screen) · `start` (pull up / idempotent reuse) · `status` ·
 `assign <member> <task>` (dispatch work) · `stop` · `validate` · `new` (scaffolds team.json + team-norms.md) ·
 `norms` (the crew's working agreement) · `memory list|gc` (cross-session memory management).
@@ -156,7 +156,7 @@ Example (.bingo/settings.json):
 6. **Stuck in bash mode/accidental trigger**: with an empty input, Esc/backspace/Ctrl+U all exit bash mode;
    with non-empty input `!` is an ordinary character; Tab completes from this session's `!` history prefix.
 7. **Can't find a historical session**: transcripts live in `~/.local/share/bingo/transcripts` (`--continue`
-   resumes the last one; `/resume` lists/switches).
+   resumes the last one; `/resume` lists/switches). Session storage is cleaned at startup with a 30-day TTL and a latest-100 inactive-session cap plus a 24-hour activity grace; matching share snapshots follow transcript removal. `/gc` applies the same policy on demand. Prompt-history files use the same TTL with a 100-file cap.
 8. **Tool output collapsed**: ctrl+o expands all collapsed items and replays the full transcript to the
    terminal (scroll up to read; printed old collapsed copies stay higher up — normal); pressing ctrl+o again in the fully expanded
    state collapses — back to aggregates with a clear/consolidate; long output shows `+N lines`.
@@ -339,7 +339,7 @@ Example (.bingo/settings.json):
 - **MCP**: stdio and streamable HTTP (`type: "http"`, with custom headers) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
-- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts. `/cd <dir>` switches the session-owned working directory without changing the process cwd; subsequent Bash/Read/Edit/Write/Glob/Grep calls, project skills/agent definitions, Team/Agent crew lookup, Experience project keys, memory extraction, settings command paths, image paths, and `/team` resolve from the new directory. Startup-loaded settings/MCP configuration and the already-built system prompt are not reloaded.
+- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts. Startup cleanup and `/gc` enforce a 30-day TTL plus a latest-100 inactive-session cap plus a 24-hour activity grace; share snapshots are removed with their transcript, while prompt-history files use the same TTL and a 100-file cap. `/cd <dir>` switches the session-owned working directory without changing the process cwd; subsequent Bash/Read/Edit/Write/Glob/Grep calls, project skills/agent definitions, Team/Agent crew lookup, Experience project keys, memory extraction, settings command paths, image paths, and `/team` resolve from the new directory. Startup-loaded settings/MCP configuration and the already-built system prompt are not reloaded.
 - **Built-in tools**: Bash (through the permission gate, combined output capped by `bashOutputMaxChars`),
   Read/Glob/Grep (line ranges, exclusion/depth filters, search context/options; Read returns image files as
   viewable images, so screenshots and rendered charts can be inspected), Edit/Write, WebFetch/WebSearch,
