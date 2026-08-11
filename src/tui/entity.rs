@@ -80,7 +80,7 @@ fn snapshot(session: &Arc<Session>, ws: &mut Workspace, workspace: &str) -> Snap
 /// committed file is waste, and the crew does not change while you are looking at
 /// it.
 fn blueprint(session: &Arc<Session>, images: bool) -> (String, Avatars) {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = session.cwd();
     let tree = crate::team::load_team_tree(&cwd).ok().flatten();
     let name = tree
         .as_ref()
@@ -98,7 +98,6 @@ fn blueprint(session: &Arc<Session>, images: bool) -> (String, Avatars) {
             Some((m.name.clone(), avatar::index_of_id(id)?))
         })
         .collect();
-    let _ = session;
     (name, Avatars { images, pinned })
 }
 

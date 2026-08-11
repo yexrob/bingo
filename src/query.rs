@@ -208,6 +208,8 @@ pub struct Session {
     pub system: Vec<SystemBlock>,
     /// Sub-agent nesting depth (Agent tool recursion).
     pub depth: usize,
+    /// Session working directory, shared by the hub and all derived sub-sessions.
+    pub cwd: Arc<std::sync::Mutex<PathBuf>>,
     /// User home (memdir memory location).
     pub home: PathBuf,
     /// User config dir (`$XDG_CONFIG_HOME` or `~/.config`), resolved once at
@@ -498,9 +500,10 @@ async fn gate_tool(
     hooks: &HooksConfig,
     permissions: &crate::settings::PermissionRules,
     ask: &AskFn,
+    cwd: &std::path::Path,
 ) -> (PermissionBehavior, String, serde_json::Value) {
     let (hook_behavior, hook_reason, hook_input) =
-        run_pre_tool_use(hooks, &tool.name(), input, permission_mode_str(mode)).await;
+        run_pre_tool_use(hooks, &tool.name(), input, permission_mode_str(mode), cwd).await;
     if hook_behavior != PermissionBehavior::Allow {
         return (hook_behavior, hook_reason, hook_input);
     }
@@ -512,6 +515,7 @@ async fn gate_tool(
         &permissions.deny,
         &permissions.ask,
         &permissions.allow,
+        cwd,
     );
     match decision.behavior {
         PermissionBehavior::Ask => {
@@ -541,6 +545,14 @@ fn permission_mode_str(mode: PermissionMode) -> &'static str {
 }
 
 impl Session {
+    pub fn cwd(&self) -> PathBuf {
+        self.cwd.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn set_cwd(&self, cwd: PathBuf) {
+        *self.cwd.lock().unwrap_or_else(|e| e.into_inner()) = cwd;
+    }
+
     pub fn permission_mode_str(&self) -> &'static str {
         permission_mode_str(self.permission_mode)
     }
@@ -695,10 +707,9 @@ fn tool_http() -> Result<reqwest::Client, QueryError> {
 }
 
 /// Tool execution context (cwd/registry/http shared by tool pool assembly and execution).
-fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContext, QueryError> {
+pub(crate) fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContext, QueryError> {
     Ok(ToolContext {
-        cwd: std::env::current_dir()
-            .map_err(|e| QueryError::Tool(ToolError::failed(e.to_string())))?,
+        cwd: session.cwd(),
         home: session.home.clone(),
         watch: session.watch.clone(),
         http: tool_http()?,
@@ -870,6 +881,7 @@ async fn query_loop(
                 && let Some(blocking) = run_stop_hooks(
                     &session.settings.hooks,
                     permission_mode_str(session.permission_mode),
+                    &ctx.cwd,
                 )
                 .await
             {
@@ -930,6 +942,7 @@ async fn query_loop(
                     &session.settings.hooks,
                     &permissions,
                     &*ui.ask,
+                    &ctx.cwd,
                 )
                 .await
             };
@@ -995,6 +1008,7 @@ async fn query_loop(
                             input,
                             &result.content,
                             permission_mode_str(session.permission_mode),
+                            &ctx.cwd,
                         )
                         .await;
                     }
@@ -1098,6 +1112,7 @@ pub async fn run_query(
         &session.settings.hooks,
         user_input,
         permission_mode_str(session.permission_mode),
+        &ctx.cwd,
     )
     .await
     {
@@ -1257,6 +1272,7 @@ pub async fn run_bash_command(
                 &session.settings.hooks,
                 &permissions,
                 &*ui.ask,
+                &ctx.cwd,
             )
             .await;
             match behavior {
@@ -1326,6 +1342,7 @@ pub async fn run_bash_command(
         &input,
         &serde_json::Value::String(text),
         permission_mode_str(session.permission_mode),
+        &ctx.cwd,
     )
     .await;
     let respond = session.settings.respond_to_bash_commands.unwrap_or(true)
@@ -1688,6 +1705,7 @@ mod tests {
             settings: crate::settings::Settings::default(),
             system: Vec::new(),
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
             home: std::env::temp_dir(),
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
@@ -1839,6 +1857,7 @@ mod tests {
             },
             system: Vec::new(),
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
             home: std::env::temp_dir(),
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
@@ -2215,6 +2234,7 @@ mod tests {
             },
             system: Vec::new(),
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
             home: std::env::temp_dir(),
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,

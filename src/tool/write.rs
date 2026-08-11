@@ -37,10 +37,15 @@ impl Tool for WriteTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: WriteInput = parse_input(&input)?;
         let path = std::path::PathBuf::from(&params.file_path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            ctx.cwd.join(path)
+        };
         // Failed reads of the old content were once treated as an empty file: binary/
         // non-UTF-8/permission-denied files would be silently overwritten and the diff would
         // show everything as added. Only "not found" means a new file.
@@ -94,6 +99,29 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
         }
+    }
+
+    #[tokio::test]
+    async fn relative_path_resolves_from_context_cwd() {
+        let root = std::env::temp_dir().join(format!("bingo-write-cwd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut context = ctx();
+        context.cwd = root.clone();
+
+        WriteTool
+            .call(
+                serde_json::json!({"file_path": "nested/file.txt", "content": "hello"}),
+                &context,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("nested/file.txt")).unwrap(),
+            "hello"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// L3 regression: non-UTF-8 files were once treated as empty and silently overwritten.

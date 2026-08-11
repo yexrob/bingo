@@ -1167,9 +1167,7 @@ impl Chat {
                 }
             });
         }
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+        let cwd = session.cwd().display().to_string();
         let history = crate::tui::history::History::new(crate::tui::history::load(
             &session.home,
             std::path::Path::new(&cwd),
@@ -2425,6 +2423,7 @@ impl Chat {
             "exit" | "quit" => self.exit = true,
             "clear" | "reset" | "new" => self.slash_clear(),
             "model" => self.slash_model(arg),
+            "cd" => self.slash_cd(arg),
             "theme" => self.slash_theme(arg),
             "rename" => self.slash_rename(arg),
             "resume" => self.slash_resume(arg),
@@ -2469,6 +2468,63 @@ impl Chat {
 
     fn slash_help(&mut self) {
         self.push_slash_info(crate::tui::slash::help_lines(SLASH_COMMANDS).join("\n"));
+    }
+
+    fn slash_cd(&mut self, arg: &str) {
+        if self.busy {
+            self.push_slash_error(format!(
+                "[error] code={} msg=cannot switch working directory mid-turn (press Esc to interrupt, then retry)",
+                crate::error::SLASH_ERROR_BAD_ARGUMENT
+            ));
+            return;
+        }
+        if arg.is_empty() {
+            self.push_slash_error(format!(
+                "[error] code={} msg=usage: /cd <dir>",
+                crate::error::SLASH_ERROR_BAD_ARGUMENT
+            ));
+            return;
+        }
+        let requested = std::path::PathBuf::from(arg);
+        let path = if requested.is_absolute() {
+            requested
+        } else {
+            self.session.cwd().join(requested)
+        };
+        let path = match std::fs::canonicalize(&path) {
+            Ok(path) if path.is_dir() => path,
+            Ok(_) => {
+                self.push_slash_error(format!(
+                    "[error] code={} msg=not a directory: {arg}",
+                    crate::error::SLASH_ERROR_BAD_ARGUMENT
+                ));
+                return;
+            }
+            Err(e) => {
+                self.push_slash_error(format!(
+                    "[error] code={} msg=cannot switch working directory to {arg}: {e}",
+                    crate::error::SLASH_ERROR_BAD_ARGUMENT
+                ));
+                return;
+            }
+        };
+        self.session.set_cwd(path.clone());
+        self.cwd = path.display().to_string();
+        self.history =
+            crate::tui::history::History::new(crate::tui::history::load(&self.session.home, &path));
+        self.faces_pinned = crate::team::load_team_tree(&path)
+            .ok()
+            .flatten()
+            .iter()
+            .flat_map(|tree| tree.members())
+            .filter_map(|(_, member)| {
+                Some((
+                    member.name.clone(),
+                    avatar::index_of_id(member.avatar.as_deref()?)?,
+                ))
+            })
+            .collect();
+        self.push_slash_output(format!("✓ working directory: {}", path.display()));
     }
 
     fn slash_clear(&mut self) {
@@ -4478,7 +4534,7 @@ impl Chat {
             }
         }
         let _ = events.send(UiEvent::TurnEnd);
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = session.cwd();
         crate::memory::extract_memory(session, &outcome.messages, &session.home, &cwd).await;
     }
 
@@ -6930,6 +6986,7 @@ mod tests {
     /// shared with other tests). cwd points at the same home: the persistence paths of /model /think /theme etc.
     /// write into `{cwd}/.bingo` and must never pollute the repo's real config.
     fn test_chat_home(home: std::path::PathBuf) -> Chat {
+        let _ = std::fs::create_dir_all(&home);
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
         let session = Arc::new(Session {
@@ -6942,6 +6999,7 @@ mod tests {
             settings: crate::settings::Settings::default(),
             system: Vec::new(),
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(home.clone())),
             home: home.clone(),
             // Hermetic: scoped writes must never touch the real user config.
             user_config_dir: home.join(".config"),
@@ -6955,7 +7013,7 @@ mod tests {
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         });
-        let mut chat = Chat::new(
+        Chat::new(
             session,
             events_tx,
             events_rx,
@@ -6964,9 +7022,50 @@ mod tests {
             Theme::dark(),
             crate::tui::theme::ThemeSetting::Auto,
             None,
-        );
-        chat.cwd = home.display().to_string();
-        chat
+        )
+    }
+
+    #[test]
+    fn slash_cd_updates_session_and_tool_context_cwd() {
+        let root = std::env::temp_dir().join(format!(
+            "bingo-slash-cd-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let start = root.join("start");
+        let target = root.join("target");
+        std::fs::create_dir_all(&start).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let target = std::fs::canonicalize(target).unwrap();
+        let mut chat = test_chat_home(start.clone());
+
+        assert_eq!(chat.session.cwd(), start);
+        assert!(chat.run_slash(&format!("cd {}", target.display())));
+        assert_eq!(chat.session.cwd(), target);
+        assert_eq!(chat.cwd, target.display().to_string());
+        let ctx =
+            crate::query::tool_context(&chat.session, &crate::query::headless_hooks()).unwrap();
+        assert_eq!(ctx.cwd, target);
+        assert!(all_slash_text(&chat).contains("✓ working directory:"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn slash_cd_rejects_missing_directory_without_changing_cwd() {
+        let root = std::env::temp_dir().join(format!(
+            "bingo-slash-cd-missing-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut chat = test_chat_home(root.clone());
+
+        assert!(chat.run_slash("cd missing"));
+        assert_eq!(chat.session.cwd(), root);
+        assert!(all_slash_text(&chat).contains("code=BAD_ARGUMENT"));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Banner truncation chain (update-banner spec §1.3): full / drop the available clause / command only / hidden.
@@ -7870,6 +7969,7 @@ mod tests {
             },
             system: Vec::new(),
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
             home: std::env::temp_dir(),
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
@@ -9447,6 +9547,7 @@ mod tests {
             ("reset", "clear"),
             ("new", "clear"),
             ("model", "model"),
+            ("cd", "cd"),
             ("theme", "theme"),
             ("rename", "rename"),
             ("resume", "resume"),

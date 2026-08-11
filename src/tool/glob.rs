@@ -86,10 +86,14 @@ impl Tool for GlobTool {
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: GlobInput = parse_input(&input)?;
-        let root = params
-            .path
-            .map(PathBuf::from)
-            .unwrap_or_else(|| ctx.cwd.clone());
+        let root = params.path.map(PathBuf::from).unwrap_or_default();
+        let root = if root.as_os_str().is_empty() {
+            ctx.cwd.clone()
+        } else if root.is_absolute() {
+            root
+        } else {
+            ctx.cwd.join(root)
+        };
         let matcher = PathGlob::new(&params.pattern)
             .map_err(|e| ToolError::failed(format!("bad glob pattern: {e}")))?;
 

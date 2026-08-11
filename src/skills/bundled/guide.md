@@ -102,6 +102,7 @@ Example (.bingo/settings.json):
 `/help` for the full list. Common ones: `/model [name]` (no args: two-level picker — level 1 providers → level 2 model list; with a name: switch directly, validated against the known list when available),
 `/provider [name]` (no args: picker — ● current, s = session-only, Enter persists; with a name: switch directly), `/provider login <name> [--device-auth|--manual <token>]` (OAuth login: default opens the browser; `--device-auth` prints URL + code and polls for headless/SSH; `--manual` stores a pasted token), `/provider logout <name>` (revokes + clears),
 `/think [off|low|medium|high|xhigh|max]` (thinking level, persists to settings; no arg opens the level picker: ●=in effect, ↑↓/1-6 to browse, Enter confirms, Esc cancels), `/theme [dark|light|auto]` (no arg opens the level picker; the `/theme auto` explicit shortcut stays),
+`/cd <dir>` (switch the working directory for this session; relative paths resolve from the current session directory),
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` runs it directly) · `/context` (usage) · `/status` ·
@@ -333,7 +334,7 @@ Example (.bingo/settings.json):
 - **MCP**: stdio and streamable HTTP (`type: "http"`, with custom headers) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
-- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts.
+- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts. `/cd <dir>` switches the session-owned working directory without changing the process cwd; subsequent Bash/Read/Edit/Write/Glob/Grep calls, project skills/agent definitions, Team/Agent crew lookup, Experience project keys, memory extraction, settings command paths, image paths, and `/team` resolve from the new directory. Startup-loaded settings/MCP configuration and the already-built system prompt are not reloaded.
 - **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep (Read returns image files as
   viewable images, so screenshots and rendered charts can be inspected), Edit/Write, WebFetch/WebSearch,
   Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
@@ -432,7 +433,7 @@ Example (.bingo/settings.json):
 - **MCP**: stdio and streamable HTTP (`type: "http"`, custom headers allowed) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
-- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts.
+- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts. `/cd <dir>` switches the session-owned working directory without changing the process cwd; subsequent Bash/Read/Edit/Write/Glob/Grep calls, project skills/agent definitions, Team/Agent crew lookup, Experience project keys, memory extraction, settings command paths, image paths, and `/team` resolve from the new directory. Startup-loaded settings/MCP configuration and the already-built system prompt are not reloaded.
   **Sharing**: `bingo share [session]` generates a self-contained HTML file in the current directory by default (`--output`
   specifies the path), never touching the network. Only an explicit `--public` uploads to the official share service and prints
   a public `https://bingo.ruobin.dev/share/u/<id>` link; **anyone can access it publicly**, so

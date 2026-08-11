@@ -629,6 +629,7 @@ mod tests {
             settings: crate::settings::Settings::default(),
             system: Vec::new(),
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(project.clone())),
             home: root.join("home"),
             user_config_dir: root.join("home").join(".config"),
             quiet: true,

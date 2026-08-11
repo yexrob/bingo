@@ -37,6 +37,7 @@ pub fn test_session() -> Arc<Session> {
         settings: crate::settings::Settings::default(),
         system: Vec::new(),
         depth: 0,
+        cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
         home: std::env::temp_dir(),
         user_config_dir: std::env::temp_dir().join(".config"),
         quiet: true,

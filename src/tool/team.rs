@@ -19,7 +19,7 @@
 //! Reads and actions span the whole tree: `status` shows every team under this one,
 //! `start` brings all of them up, `stop` takes all of them down.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -148,12 +148,6 @@ impl TeamTool {
     pub fn new(session: Arc<Session>) -> Self {
         Self { session }
     }
-}
-
-/// The project the blueprint belongs to. `confirm_reason` runs inside the permission gate,
-/// which has no [`ToolContext`], so it resolves the directory the same way the context does.
-fn project_dir() -> PathBuf {
-    std::env::current_dir().unwrap_or_default()
 }
 
 /// `a, b, c, and 5 total` — a confirmation line names the crew, and stops naming it once the
@@ -710,7 +704,7 @@ impl Tool for TeamTool {
         // Unparseable input can't reach `call` either (it parses first), so there is nothing
         // to guard yet — let the ordinary gate handle it and the call fail on its own terms.
         let params: TeamInput = parse_input(input).ok()?;
-        let project = project_dir();
+        let project = self.session.cwd();
         match params.action {
             TeamAction::Status | TeamAction::Validate => None,
             TeamAction::Start => Some(start_reason(&project)),
@@ -749,7 +743,7 @@ mod tests {
 
     /// A session rooted in a scratch project directory (the tool reads `.bingo/` from the
     /// context cwd, so the test drives it through a real one).
-    fn fixture(name: &str) -> (Arc<Session>, PathBuf) {
+    fn fixture(name: &str) -> (Arc<Session>, std::path::PathBuf) {
         let root =
             std::env::temp_dir().join(format!("bingo-teamtool-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -762,6 +756,7 @@ mod tests {
             settings: crate::settings::Settings::default(),
             system: Vec::new(),
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(project.clone())),
             home: root.join("home"),
             user_config_dir: root.join("home").join(".config"),
             quiet: true,
@@ -800,7 +795,15 @@ mod tests {
     }
 
     fn decide(tool: &TeamTool, input: serde_json::Value, mode: PermissionMode) -> PermissionResult {
-        can_use_tool(tool as &dyn Tool, &input, mode, &[], &[], &[])
+        can_use_tool(
+            tool as &dyn Tool,
+            &input,
+            mode,
+            &[],
+            &[],
+            &[],
+            &std::env::temp_dir(),
+        )
     }
 
     use crate::permission::PermissionResult;
@@ -1078,7 +1081,8 @@ mod tests {
                     PermissionMode::Default,
                     &[],
                     &[],
-                    &allow
+                    &allow,
+                    &std::env::temp_dir()
                 )
                 .behavior,
                 PermissionBehavior::Ask,
@@ -1092,7 +1096,8 @@ mod tests {
                     PermissionMode::Default,
                     &deny,
                     &[],
-                    &[]
+                    &[],
+                    &std::env::temp_dir()
                 )
                 .behavior,
                 PermissionBehavior::Deny,

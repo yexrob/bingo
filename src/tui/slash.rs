@@ -16,6 +16,7 @@ pub const COMMANDS: &[SlashCommand] = &[
         "compact the context (old messages → summary)",
     ),
     ("model", "[name]", "show/switch the model"),
+    ("cd", "<dir>", "switch the session working directory"),
     ("resume", "[name or keyword]", "resume a past session"),
     ("rename", "[name]", "rename the current session"),
     (
@@ -164,6 +165,7 @@ mod tests {
     const COMMANDS: &[SlashCommand] = &[
         ("help", "", "show available commands"),
         ("model", "[name]", "show/switch the model"),
+        ("cd", "<dir>", "switch the session working directory"),
         ("status", "", "show session status"),
     ];
 

@@ -88,6 +88,7 @@ pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, token
     run_pre_compact(
         &session.settings.hooks,
         permission_mode_str(session.permission_mode),
+        &session.cwd(),
     )
     .await;
 
@@ -131,6 +132,7 @@ pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, token
     run_post_compact(
         &session.settings.hooks,
         permission_mode_str(session.permission_mode),
+        &session.cwd(),
     )
     .await;
     eprintln!("[bingo] compacted {split} old messages");

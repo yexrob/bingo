@@ -582,6 +582,13 @@ impl AgentRegistry {
         Some((entry.history.clone(), live, entry.state))
     }
 
+    /// Whether an instance belongs to the given project directory.
+    pub fn is_in_project(&self, name: &str, cwd: &Path) -> bool {
+        self.lock()
+            .get(name)
+            .is_some_and(|entry| entry.session.cwd() == cwd)
+    }
+
     /// Instance depth (channel cohort check: only direct subagents with depth==1 may join a channel).
     pub fn depth_of(&self, name: &str) -> Option<usize> {
         self.lock().get(name).map(|e| e.session.depth)
@@ -962,6 +969,7 @@ mod tests {
             settings: crate::settings::Settings::default(),
             system: Vec::new(),
             depth: 1,
+            cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
             home: std::env::temp_dir(),
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,

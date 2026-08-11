@@ -132,22 +132,11 @@ pub struct AgentInput {
 pub struct AgentTool {
     session: Arc<Session>,
     defs: Vec<AgentDef>,
-    /// The crew pinned to this project, if there is one — read once at construction so
-    /// `description` names it without touching the disk on every request.
-    crew: Option<String>,
 }
 
 impl AgentTool {
     pub fn new(session: Arc<Session>, defs: Vec<AgentDef>) -> Self {
-        let crew = crate::team::load_team_file(&std::env::current_dir().unwrap_or_default())
-            .ok()
-            .flatten()
-            .map(|t| t.name);
-        Self {
-            session,
-            defs,
-            crew,
-        }
+        Self { session, defs }
     }
 }
 
@@ -733,6 +722,7 @@ fn hire_context(cwd: &std::path::Path) -> MemberContext {
         memory: None,
         norms: crate::team::load_norms(cwd).map(|n| crate::team::norms_block(&team.name, &n)),
         standing: Some(crate::team::hire_note(&team.name)),
+        cwd: None,
     }
 }
 
@@ -749,6 +739,8 @@ pub(crate) struct MemberContext {
     pub norms: Option<String>,
     /// Where this instance stands relative to the crew — set only for a temporary hire.
     pub standing: Option<String>,
+    /// Override the parent session's working directory for a team rooted elsewhere.
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 impl MemberContext {
@@ -867,6 +859,11 @@ pub(crate) fn build_sub_session(
             cache: false,
         });
     }
+    let cwd = context
+        .cwd
+        .clone()
+        .map(|cwd| Arc::new(std::sync::Mutex::new(cwd)))
+        .unwrap_or_else(|| parent.cwd.clone());
     // The agreement, the standing, the past — whichever of them this instance has.
     for text in context.blocks() {
         system.push(SystemBlock { text, cache: false });
@@ -886,6 +883,7 @@ pub(crate) fn build_sub_session(
         settings: parent.settings.clone(),
         system,
         depth: parent.depth + 1,
+        cwd,
         home: parent.home.clone(),
         user_config_dir: parent.user_config_dir.clone(),
         quiet: parent.quiet,
@@ -960,7 +958,11 @@ impl Tool for AgentTool {
         // The crew is the reason not to reach for this tool, so it is named here and not
         // only in the system prompt: this description is where the list of definitions
         // tempts a second `dev` into existence beside the `dev` already standing by.
-        if let Some(crew) = &self.crew {
+        if let Some(crew) = crate::team::load_team_file(&self.session.cwd())
+            .ok()
+            .flatten()
+            .map(|team| team.name)
+        {
             desc.push_str(&format!(
                 "\n\nThis project has a standing crew ({crew}, see the system prompt's roster): \
                  give the work to a member with SendMessage first, and spawn here only for what \
@@ -1477,6 +1479,7 @@ mod tests {
                 cache: false,
             }],
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
             home: std::env::temp_dir(),
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
@@ -2514,6 +2517,13 @@ mod tests {
         .unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, ["parent system", SUBAGENT_NOTE]);
+        let moved = std::env::temp_dir().join("bingo-subagent-shared-cwd");
+        session.set_cwd(moved.clone());
+        assert_eq!(
+            sub.cwd(),
+            moved,
+            "ad-hoc subagents follow the parent session's cwd"
+        );
         assert!(
             !sub.system.last().map(|b| b.cache).unwrap_or(true),
             "the note block does not occupy a cache breakpoint"

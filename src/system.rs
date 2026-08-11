@@ -117,29 +117,30 @@ pub fn load_memory(home: &Path, cwd: &Path) -> Memory {
 /// `cache_control` controls whether cache_control is sent (off by default; non-official
 /// endpoints handle it unreliably).
 /// Dynamic environment segment (OS/date/arch).
-fn env_info_block() -> String {
+fn env_info_block(cwd: &Path) -> String {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
     let date = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "?".to_string());
-    format!("# Environment\nOS: {os} ({arch})\nUnix timestamp: {date}\nWorking directory: {cwd}")
+    format!(
+        "# Environment\nOS: {os} ({arch})\nUnix timestamp: {date}\nWorking directory: {}",
+        cwd.display()
+    )
 }
 
 pub fn build_system(
     memory: &Memory,
     project_memory: Option<String>,
     cache_control: bool,
+    cwd: &Path,
 ) -> Vec<SystemBlock> {
     let block = |text: String| SystemBlock {
         text,
         cache: cache_control,
     };
-    let mut blocks = vec![block(BASE_PROMPT.to_string()), block(env_info_block())];
+    let mut blocks = vec![block(BASE_PROMPT.to_string()), block(env_info_block(cwd))];
     if let Some(user) = &memory.user {
         blocks.push(block(format!("User-level memory (CLAUDE.md):\n{user}")));
     }
@@ -166,7 +167,12 @@ mod tests {
             user: Some("user rules".into()),
             project: Some("project rules".into()),
         };
-        let blocks = build_system(&memory, Some("mem facts".into()), true);
+        let blocks = build_system(
+            &memory,
+            Some("mem facts".into()),
+            true,
+            Path::new("/tmp/project"),
+        );
         assert_eq!(blocks.len(), 5);
         assert!(blocks[4].text.contains("mem facts"));
         assert!(blocks[0].text.starts_with("You are bingo"));
@@ -203,7 +209,7 @@ mod tests {
 
     #[test]
     fn env_block_reports_os_and_date() {
-        let text = env_info_block();
+        let text = env_info_block(Path::new("/tmp/project"));
         assert!(text.contains("# Environment"));
         assert!(text.contains(std::env::consts::OS));
         assert!(text.contains(std::env::consts::ARCH));
@@ -213,14 +219,14 @@ mod tests {
 
     #[test]
     fn cache_control_off_by_default() {
-        let blocks = build_system(&Memory::default(), None, false);
+        let blocks = build_system(&Memory::default(), None, false, Path::new("/tmp/project"));
         assert!(blocks.iter().all(|b| !b.cache));
     }
 
     #[test]
     fn omits_missing_memory() {
         let memory = Memory::default();
-        let blocks = build_system(&memory, None, true);
+        let blocks = build_system(&memory, None, true, Path::new("/tmp/project"));
         // base + env info, no memory segments.
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, BASE_PROMPT);

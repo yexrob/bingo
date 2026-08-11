@@ -115,9 +115,9 @@ async fn run_hook_with_timeout(
     command: &str,
     input: &serde_json::Value,
     timeout: Duration,
+    cwd: &std::path::Path,
 ) -> Result<(i32, serde_json::Value, String), HookError> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let mut child = crate::platform::shell_command(command, &cwd)
+    let mut child = crate::platform::shell_command(command, cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -170,8 +170,9 @@ async fn run_hook_with_timeout(
 async fn run_hook(
     command: &str,
     input: &serde_json::Value,
+    cwd: &std::path::Path,
 ) -> Result<(i32, serde_json::Value, String), HookError> {
-    run_hook_with_timeout(command, input, HOOK_TIMEOUT).await
+    run_hook_with_timeout(command, input, HOOK_TIMEOUT, cwd).await
 }
 
 /// PreToolUse: run all matching hooks in order; any deny/ask takes effect,
@@ -182,6 +183,7 @@ pub async fn run_pre_tool_use(
     tool_name: &str,
     tool_input: &serde_json::Value,
     permission_mode: &str,
+    cwd: &std::path::Path,
 ) -> (PermissionBehavior, String, serde_json::Value) {
     let commands = commands_for(config, "PreToolUse", tool_name);
     if commands.is_empty() {
@@ -198,6 +200,7 @@ pub async fn run_pre_tool_use(
         let (code, output, stderr) = match run_hook(
             command,
             &serde_json::to_value(hook_input).expect("HookInput serialization must not fail"),
+            cwd,
         )
         .await
         {
@@ -254,28 +257,28 @@ pub async fn run_pre_tool_use(
 }
 
 /// PreCompact: run matching hooks (no tool name). Failures don't block.
-pub async fn run_pre_compact(config: &HooksConfig, permission_mode: &str) {
+pub async fn run_pre_compact(config: &HooksConfig, permission_mode: &str, cwd: &std::path::Path) {
     let commands = commands_for(config, "PreCompact", "");
     for command in commands {
         let input = serde_json::json!({
             "hook_event_name": "PreCompact",
             "permission_mode": permission_mode,
         });
-        if let Err(e) = run_hook(command, &input).await {
+        if let Err(e) = run_hook(command, &input, cwd).await {
             eprintln!("[bingo] PreCompact hook warning: {e}");
         }
     }
 }
 
 /// PostCompact: run matching hooks. Failures don't block.
-pub async fn run_post_compact(config: &HooksConfig, permission_mode: &str) {
+pub async fn run_post_compact(config: &HooksConfig, permission_mode: &str, cwd: &std::path::Path) {
     let commands = commands_for(config, "PostCompact", "");
     for command in commands {
         let input = serde_json::json!({
             "hook_event_name": "PostCompact",
             "permission_mode": permission_mode,
         });
-        if let Err(e) = run_hook(command, &input).await {
+        if let Err(e) = run_hook(command, &input, cwd).await {
             eprintln!("[bingo] PostCompact hook warning: {e}");
         }
     }
@@ -288,6 +291,7 @@ pub async fn run_post_tool_use(
     tool_input: &serde_json::Value,
     tool_result: &serde_json::Value,
     permission_mode: &str,
+    cwd: &std::path::Path,
 ) -> bool {
     let commands = commands_for(config, "PostToolUse", tool_name);
     let mut blocked = false;
@@ -299,7 +303,7 @@ pub async fn run_post_tool_use(
             "tool_response": tool_result,
             "permission_mode": permission_mode,
         });
-        match run_hook(command, &input).await {
+        match run_hook(command, &input, cwd).await {
             Ok((2, _, stderr)) => {
                 eprintln!("[bingo] PostToolUse hook blocked continuation: {stderr}");
                 blocked = true;
@@ -322,6 +326,7 @@ pub async fn run_user_prompt_submit(
     config: &HooksConfig,
     prompt: &str,
     permission_mode: &str,
+    cwd: &std::path::Path,
 ) -> bool {
     let commands = commands_for(config, "UserPromptSubmit", "");
     for command in commands {
@@ -330,7 +335,7 @@ pub async fn run_user_prompt_submit(
             "user_prompt": prompt,
             "permission_mode": permission_mode,
         });
-        match run_hook(command, &input).await {
+        match run_hook(command, &input, cwd).await {
             Ok((2, _, stderr)) => {
                 eprintln!("[bingo] UserPromptSubmit hook blocked: {stderr}");
                 return true;
@@ -359,14 +364,18 @@ pub async fn run_user_prompt_submit(
 
 /// Stop: run when a turn ends normally. exit 2 → return blocking stderr (caller
 /// injects it into the model and retries).
-pub async fn run_stop_hooks(config: &HooksConfig, permission_mode: &str) -> Option<String> {
+pub async fn run_stop_hooks(
+    config: &HooksConfig,
+    permission_mode: &str,
+    cwd: &std::path::Path,
+) -> Option<String> {
     let commands = commands_for(config, "Stop", "");
     for command in commands {
         let input = serde_json::json!({
             "hook_event_name": "Stop",
             "permission_mode": permission_mode,
         });
-        match run_hook(command, &input).await {
+        match run_hook(command, &input, cwd).await {
             Ok((2, _, stderr)) => {
                 eprintln!("[bingo] Stop hook blocked continuation: {stderr}");
                 return Some(stderr);
@@ -384,28 +393,28 @@ pub async fn run_stop_hooks(config: &HooksConfig, permission_mode: &str) -> Opti
 }
 
 /// SessionStart: run when the session starts (no decision semantics, failures don't block).
-pub async fn run_session_start(config: &HooksConfig, permission_mode: &str) {
+pub async fn run_session_start(config: &HooksConfig, permission_mode: &str, cwd: &std::path::Path) {
     let commands = commands_for(config, "SessionStart", "");
     for command in commands {
         let input = serde_json::json!({
             "hook_event_name": "SessionStart",
             "permission_mode": permission_mode,
         });
-        if let Err(e) = run_hook(command, &input).await {
+        if let Err(e) = run_hook(command, &input, cwd).await {
             eprintln!("[bingo] SessionStart hook warning: {e}");
         }
     }
 }
 
 /// SessionEnd: run when the session ends. Fast timeout (1.5s).
-pub async fn run_session_end(config: &HooksConfig, permission_mode: &str) {
+pub async fn run_session_end(config: &HooksConfig, permission_mode: &str, cwd: &std::path::Path) {
     let commands = commands_for(config, "SessionEnd", "");
     for command in commands {
         let input = serde_json::json!({
             "hook_event_name": "SessionEnd",
             "permission_mode": permission_mode,
         });
-        if let Err(e) = run_hook_with_timeout(command, &input, SESSION_END_TIMEOUT).await {
+        if let Err(e) = run_hook_with_timeout(command, &input, SESSION_END_TIMEOUT, cwd).await {
             eprintln!("[bingo] SessionEnd hook warning: {e}");
         }
     }
@@ -419,6 +428,7 @@ async fn run_task_lifecycle_hooks(
     task_id: &str,
     subject: &str,
     permission_mode: &str,
+    cwd: &std::path::Path,
 ) -> Vec<String> {
     let commands = commands_for(config, event, "");
     let mut blocking = Vec::new();
@@ -429,7 +439,7 @@ async fn run_task_lifecycle_hooks(
             "subject": subject,
             "permission_mode": permission_mode,
         });
-        match run_hook(command, &input).await {
+        match run_hook(command, &input, cwd).await {
             Ok((2, _, stderr)) => {
                 let reason = if stderr.is_empty() {
                     format!("blocked by {event} hook")
@@ -458,8 +468,17 @@ pub async fn run_task_created(
     task_id: &str,
     subject: &str,
     permission_mode: &str,
+    cwd: &std::path::Path,
 ) -> Vec<String> {
-    run_task_lifecycle_hooks(config, "TaskCreated", task_id, subject, permission_mode).await
+    run_task_lifecycle_hooks(
+        config,
+        "TaskCreated",
+        task_id,
+        subject,
+        permission_mode,
+        cwd,
+    )
+    .await
 }
 
 /// TaskCompleted: run before a task is marked completed. blockingError → reject
@@ -469,8 +488,17 @@ pub async fn run_task_completed(
     task_id: &str,
     subject: &str,
     permission_mode: &str,
+    cwd: &std::path::Path,
 ) -> Vec<String> {
-    run_task_lifecycle_hooks(config, "TaskCompleted", task_id, subject, permission_mode).await
+    run_task_lifecycle_hooks(
+        config,
+        "TaskCompleted",
+        task_id,
+        subject,
+        permission_mode,
+        cwd,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -495,6 +523,7 @@ mod tests {
             "Bash",
             &serde_json::json!({"command": "ls"}),
             "default",
+            &std::env::temp_dir(),
         )
         .await;
         assert_eq!(behavior, PermissionBehavior::Deny);
@@ -509,6 +538,7 @@ mod tests {
             "Bash",
             &serde_json::json!({"command": "ls"}),
             "default",
+            &std::env::temp_dir(),
         )
         .await;
         assert_eq!(behavior, PermissionBehavior::Allow);
@@ -523,6 +553,7 @@ mod tests {
             "Read",
             &serde_json::json!({"file_path": "x"}),
             "default",
+            &std::env::temp_dir(),
         )
         .await;
         assert_eq!(behavior, PermissionBehavior::Allow);
@@ -536,6 +567,7 @@ mod tests {
             "Bash",
             &serde_json::json!({"command": "ls"}),
             "default",
+            &std::env::temp_dir(),
         )
         .await;
         assert_eq!(behavior, PermissionBehavior::Allow);
@@ -562,6 +594,7 @@ mod tests {
             "Bash",
             &serde_json::json!({"command": "ls"}),
             "default",
+            &std::env::temp_dir(),
         )
         .await;
         assert_eq!(behavior, PermissionBehavior::Deny);
@@ -583,6 +616,7 @@ mod tests {
             &serde_json::json!({"command": "ls"}),
             &serde_json::json!("ok"),
             "default",
+            &std::env::temp_dir(),
         )
         .await;
         assert!(blocked);
@@ -596,7 +630,8 @@ mod tests {
             }]
         }))
         .unwrap();
-        let blocked = run_user_prompt_submit(&config, "hello", "default").await;
+        let blocked =
+            run_user_prompt_submit(&config, "hello", "default", &std::env::temp_dir()).await;
         assert!(blocked);
     }
 
@@ -608,7 +643,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        let blocking = run_stop_hooks(&config, "default").await;
+        let blocking = run_stop_hooks(&config, "default", &std::env::temp_dir()).await;
         assert_eq!(blocking.as_deref(), Some("review pending"));
     }
 
@@ -625,11 +660,31 @@ mod tests {
                 "Bash",
                 &serde_json::json!({"command": huge}),
                 "default",
+                &std::env::temp_dir(),
             ),
         )
         .await;
         let (behavior, _, _) = done.unwrap_or_else(|_| unreachable!("hook stdin write deadlock"));
         assert_eq!(behavior, PermissionBehavior::Allow);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_runs_from_supplied_cwd() {
+        let root = std::env::temp_dir().join(format!("bingo-hook-cwd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let (_, output, _) = run_hook_with_timeout(
+            "printf '\"%s\"' \"$PWD\"",
+            &serde_json::json!({"hook_event_name": "Test"}),
+            Duration::from_secs(1),
+            &root,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output, serde_json::json!(root.display().to_string()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// A timed-out hook doesn't block the turn, and no process is left behind
@@ -641,6 +696,7 @@ mod tests {
             "sleep 30",
             &serde_json::json!({"hook_event_name": "Test"}),
             Duration::from_millis(300),
+            &std::env::temp_dir(),
         )
         .await;
         assert!(matches!(result, Err(HookError::Failed(ref m)) if m.contains("timed out")));
@@ -683,6 +739,7 @@ mod tests {
             "Write",
             &serde_json::json!({"file_path": "x"}),
             "default",
+            &std::env::temp_dir(),
         )
         .await;
         assert_eq!(behavior, PermissionBehavior::Deny);
@@ -692,6 +749,7 @@ mod tests {
             "Read",
             &serde_json::json!({"file_path": "x"}),
             "default",
+            &std::env::temp_dir(),
         )
         .await;
         assert_eq!(behavior, PermissionBehavior::Allow);
@@ -705,7 +763,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        let blocking = run_stop_hooks(&config, "default").await;
+        let blocking = run_stop_hooks(&config, "default", &std::env::temp_dir()).await;
         assert_eq!(blocking, None);
     }
 }
