@@ -13515,7 +13515,7 @@ mod tests {
             "review".into(),
             chat.session.clone(),
         );
-        let _ = chat.session.agents.finish("reviewer", Vec::new(), false);
+        let _ = chat.session.agents.finish("reviewer", Vec::new(), 0);
         chat.session
             .channels
             .create("table", vec![], crate::channels::ChannelMode::Serial)
