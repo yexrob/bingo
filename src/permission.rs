@@ -134,10 +134,10 @@ fn bash_content_matches(command: &str, content: &str, mode: MatchMode) -> bool {
     }
 }
 
-/// Path normalization: `~` expansion, relative paths expanded against the process cwd,
+/// Path normalization: `~` expansion, relative paths expanded against the session cwd,
 /// `.` and `..` resolved.
 /// No filesystem lookups (rules must hold for non-existent paths too).
-fn normalize_path(path: &str) -> String {
+fn normalize_path(path: &str, cwd: &std::path::Path) -> String {
     use std::path::{Component, PathBuf};
     let expanded = match path.strip_prefix("~/") {
         Some(rest) => match std::env::var("HOME") {
@@ -150,7 +150,7 @@ fn normalize_path(path: &str) -> String {
     let mut out = if raw.is_absolute() {
         PathBuf::new()
     } else {
-        std::env::current_dir().unwrap_or_default()
+        cwd.to_path_buf()
     };
     for component in raw.components() {
         match component {
@@ -183,6 +183,7 @@ fn content_matches(
     input: &serde_json::Value,
     content: &str,
     mode: MatchMode,
+    cwd: &std::path::Path,
 ) -> bool {
     // Skill rules: `Skill(name)` exact; `Skill(name:*)` prefix; `*` matches everything.
     if tool_name == "Skill" {
@@ -218,7 +219,9 @@ fn content_matches(
             .get("file_path")
             .or_else(|| input.get("path"))
             .and_then(|v| v.as_str())
-            .is_some_and(|target| normalize_path(target).starts_with(&normalize_path(content)));
+            .is_some_and(|target| {
+                normalize_path(target, cwd).starts_with(&normalize_path(content, cwd))
+            });
     }
     let target = match tool_name {
         "WebFetch" => {
@@ -240,7 +243,13 @@ fn content_matches(
 
 /// Whether rule `Tool(content)` matches the current tool call.
 /// The `mcp__server` form matches all tools of that server.
-fn rule_matches(rule: &str, tool_name: &str, input: &serde_json::Value, mode: MatchMode) -> bool {
+fn rule_matches(
+    rule: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    mode: MatchMode,
+    cwd: &std::path::Path,
+) -> bool {
     if let Some(open) = rule.find('(') {
         let rule_tool = rule[..open].trim();
         let rest = &rule[open + 1..];
@@ -251,7 +260,7 @@ fn rule_matches(rule: &str, tool_name: &str, input: &serde_json::Value, mode: Ma
         if rule_tool != tool_name {
             return false;
         }
-        content_matches(tool_name, input, content, mode)
+        content_matches(tool_name, input, content, mode, cwd)
     } else if rule.contains("__") {
         // mcp__server rule: prefix-match the tool name.
         tool_name.starts_with(rule)
@@ -265,17 +274,22 @@ fn rule_hits(
     tool_name: &str,
     input: &serde_json::Value,
     mode: MatchMode,
+    cwd: &std::path::Path,
 ) -> bool {
     rules
         .iter()
-        .any(|r| rule_matches(r, tool_name, input, mode))
+        .any(|r| rule_matches(r, tool_name, input, mode, cwd))
 }
 
 /// safetyCheck sensitive dirs: a write tool targeting inside these dirs → must prompt
 /// (immune to bypass).
 const SENSITIVE_DIRS: &[&str] = &[".git", ".claude", ".vscode", ".idea"];
 
-fn safety_check(tool: &dyn Tool, input: &serde_json::Value) -> Option<String> {
+fn safety_check(
+    tool: &dyn Tool,
+    input: &serde_json::Value,
+    cwd: &std::path::Path,
+) -> Option<String> {
     // A tool may declare that this particular call is the user's to accept: same standing
     // as the sensitive-path rule below — modes and allow rules don't reach it.
     if let Some(reason) = tool.confirm_reason(input) {
@@ -285,7 +299,12 @@ fn safety_check(tool: &dyn Tool, input: &serde_json::Value) -> Option<String> {
         return None;
     }
     let target = input.get("file_path").and_then(|v| v.as_str())?;
-    let path = std::path::Path::new(target);
+    let target_path = std::path::Path::new(target);
+    let path = if target_path.is_absolute() {
+        target_path.to_path_buf()
+    } else {
+        cwd.join(target_path)
+    };
     // The team blueprint decides who works on this project, so editing it by hand is the
     // same decision the Team tool asks about — and without this, acceptEdits would be the
     // way around that question.
@@ -310,14 +329,15 @@ pub fn can_use_tool(
     rules: &[String],
     ask_rules: &[String],
     allow_rules: &[String],
+    cwd: &std::path::Path,
 ) -> PermissionResult {
     let name = tool.name();
     // 1. deny rules (whole tool or content match): any sub-command hit denies.
-    if rule_hits(rules, &name, input, MatchMode::Any) {
+    if rule_hits(rules, &name, input, MatchMode::Any, cwd) {
         return deny(format!("denied by permission rule: {name}"));
     }
     // 2. ask rules: respected even in bypass mode (content-ask exception)
-    if rule_hits(ask_rules, &name, input, MatchMode::Any) {
+    if rule_hits(ask_rules, &name, input, MatchMode::Any, cwd) {
         return ask(format!("permission rule requires confirmation: {name}"));
     }
     // 2b. WebFetch preapproved domains auto-allow.
@@ -343,7 +363,7 @@ pub fn can_use_tool(
         };
     }
     // 4. safetyCheck: sensitive paths, bypass-immune, must prompt
-    if let Some(reason) = safety_check(tool, input) {
+    if let Some(reason) = safety_check(tool, input, cwd) {
         return ask(reason);
     }
     // 5. bypass check
@@ -361,7 +381,7 @@ pub fn can_use_tool(
         };
     }
     // 7. allow rules: Bash needs every sub-command to match.
-    if rule_hits(allow_rules, &name, input, MatchMode::All) {
+    if rule_hits(allow_rules, &name, input, MatchMode::All, cwd) {
         return PermissionResult {
             behavior: PermissionBehavior::Allow,
             reason: format!("allowed by permission rule: {name}"),
@@ -401,7 +421,7 @@ mod tests {
         rules: &[&str],
     ) -> PermissionResult {
         let all: Vec<String> = rules.iter().map(|s| s.to_string()).collect();
-        can_use_tool(tool, &input, mode, &all, &[], &[])
+        can_use_tool(tool, &input, mode, &all, &[], &[], &std::env::temp_dir())
     }
 
     #[test]
@@ -466,6 +486,27 @@ mod tests {
         assert_eq!(result.behavior, PermissionBehavior::Allow);
     }
 
+    #[test]
+    fn sensitive_relative_path_resolves_from_session_cwd() {
+        let tool = WriteTool;
+        for (cwd, file_path, expected) in [
+            ("project/.git", "config", "sensitive path"),
+            ("project/.bingo", "team.json", "team blueprint"),
+        ] {
+            let result = can_use_tool(
+                &tool as &dyn Tool,
+                &serde_json::json!({"file_path": file_path, "content": "x"}),
+                PermissionMode::BypassPermissions,
+                &[],
+                &[],
+                &[],
+                std::path::Path::new(cwd),
+            );
+            assert_eq!(result.behavior, PermissionBehavior::Ask, "{cwd}");
+            assert!(result.reason.contains(expected), "{}", result.reason);
+        }
+    }
+
     /// The Team tool's confirmation must not be routable around: hand-editing the blueprint
     /// asks the same question, in every mode.
     #[test]
@@ -526,6 +567,7 @@ mod tests {
                 &[],
                 &[],
                 &all,
+                &std::env::temp_dir(),
             )
         };
         // No rules → ask (skill execution is non-read-only)
@@ -570,6 +612,7 @@ mod tests {
             &[],
             &all,
             &[],
+            &std::env::temp_dir(),
         );
         assert_eq!(result.behavior, PermissionBehavior::Ask);
     }
@@ -586,6 +629,7 @@ mod tests {
             &[],
             &[],
             &all,
+            &std::env::temp_dir(),
         );
         assert_eq!(result.behavior, PermissionBehavior::Allow);
     }
@@ -626,6 +670,7 @@ mod tests {
             &[],
             &[],
             &all,
+            &std::env::temp_dir(),
         );
         assert_eq!(result.behavior, PermissionBehavior::Allow);
     }
@@ -641,6 +686,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &std::env::temp_dir(),
         );
         assert_eq!(result.behavior, PermissionBehavior::Allow);
     }
@@ -656,6 +702,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &std::env::temp_dir(),
         );
         assert_eq!(result.behavior, PermissionBehavior::Ask);
     }
@@ -670,6 +717,7 @@ mod tests {
             &deny_rules.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             &[],
             &allow.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            &std::env::temp_dir(),
         )
     }
 
@@ -765,6 +813,7 @@ mod tests {
                 &[format!("Read({etc}/)")],
                 &[],
                 &[],
+                &std::env::temp_dir(),
             )
             .behavior
         };
@@ -782,7 +831,7 @@ mod tests {
         // Paths outside the directory are unaffected (read-only tools pass).
         assert_eq!(denied(&format!("{other}/log/x")), PermissionBehavior::Allow);
         // Relative paths expand against cwd, then match against absolute rules.
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = std::env::temp_dir().join("bingo-permission-cwd");
         let rule = format!("Read({})", cwd.join("src").to_string_lossy());
         let hit = can_use_tool(
             &tool as &dyn Tool,
@@ -791,6 +840,7 @@ mod tests {
             &[rule],
             &[],
             &[],
+            &cwd,
         );
         assert_eq!(hit.behavior, PermissionBehavior::Deny);
     }
@@ -830,6 +880,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &std::env::temp_dir(),
         );
         assert_eq!(
             result.behavior,
@@ -845,6 +896,7 @@ mod tests {
             &[],
             &[],
             &allow,
+            &std::env::temp_dir(),
         );
         assert_eq!(result.behavior, PermissionBehavior::Allow);
         // Built-in read-only tools are unaffected.
@@ -856,6 +908,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &std::env::temp_dir(),
         );
         assert_eq!(result.behavior, PermissionBehavior::Allow);
     }
@@ -872,6 +925,7 @@ mod tests {
             &[],
             &[],
             &all,
+            &std::env::temp_dir(),
         );
         assert_eq!(result.behavior, PermissionBehavior::Allow);
     }

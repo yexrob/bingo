@@ -132,22 +132,11 @@ pub struct AgentInput {
 pub struct AgentTool {
     session: Arc<Session>,
     defs: Vec<AgentDef>,
-    /// The crew pinned to this project, if there is one — read once at construction so
-    /// `description` names it without touching the disk on every request.
-    crew: Option<String>,
 }
 
 impl AgentTool {
     pub fn new(session: Arc<Session>, defs: Vec<AgentDef>) -> Self {
-        let crew = crate::team::load_team_file(&std::env::current_dir().unwrap_or_default())
-            .ok()
-            .flatten()
-            .map(|t| t.name);
-        Self {
-            session,
-            defs,
-            crew,
-        }
+        Self { session, defs }
     }
 }
 
@@ -159,12 +148,19 @@ fn ask_gate() -> &'static tokio::sync::Mutex<()> {
     GATE.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+struct SubagentOutput {
+    text: Arc<Mutex<String>>,
+    live: Arc<Mutex<Vec<crate::agents::LiveBlock>>>,
+    progress: Arc<Mutex<crate::agents::AgentProgress>>,
+}
+
 /// Sub-agent UI: captures text, renders nothing, and forwards permission prompts to the
 /// session that owns the UI. The cell tracks the number of characters produced (for interval
 /// progress checks of background agents).
+#[allow(clippy::too_many_arguments)]
 fn subagent_hooks(
-    output: Arc<Mutex<String>>,
-    live: Arc<Mutex<Vec<crate::agents::LiveBlock>>>,
+    output: SubagentOutput,
+    token_rate: Arc<Mutex<crate::token_rate::TokenRateSampler>>,
     cell: Arc<AgentCell>,
     watch: Arc<WatchRegistry>,
     id: WatchId,
@@ -174,39 +170,100 @@ fn subagent_hooks(
     // `output` stays the flat reply (what the spawn returns and what `spoke` is
     // judged on); `live` is the same turn as the instance view needs to show it,
     // with the tool calls and round boundaries the flat string cannot carry.
-    let tool_live = live.clone();
-    let round_live = live.clone();
+    let tool_live = output.live.clone();
+    let tool_progress = output.progress.clone();
+    let round_live = output.live.clone();
+    let text_output = output.text;
+    let live_output = output.live;
+    let progress_output = output.progress;
+    let registry = cell.registry.clone();
+    let event_registry = registry.clone();
+    let event_instance = instance.clone();
+    let tool_registry = registry.clone();
+    let tool_instance = instance.clone();
+    let done_registry = registry.clone();
+    let done_instance = instance.clone();
+    let round_rate = token_rate.clone();
+    let context_agents = registry.clone();
+    let context_instance = instance.clone();
+    let round_chars = Arc::new(Mutex::new(0u64));
+    let event_round_chars = round_chars.clone();
     UiHooks {
         on_event: Box::new(move |event| {
-            if let crate::api::contract::StreamEvent::TextDelta { text, .. } = event
-                && let Ok(mut output) = output.lock()
-            {
-                output.push_str(text);
-                if let Ok(mut live) = live.lock() {
-                    crate::agents::LiveBlock::push_text(&mut live, text);
+            let tokens = match event {
+                crate::api::contract::StreamEvent::TextDelta { text, .. } => {
+                    event_registry.touch(&event_instance);
+                    let tokens = {
+                        let mut chars = event_round_chars.lock().unwrap_or_else(|e| e.into_inner());
+                        *chars = chars.saturating_add(text.chars().count() as u64);
+                        chars.div_ceil(4)
+                    };
+                    if let Ok(mut output) = text_output.lock() {
+                        output.push_str(text);
+                        if let Ok(mut live) = live_output.lock() {
+                            crate::agents::LiveBlock::push_text(&mut live, text);
+                        }
+                        cell.record_chars(text.chars().count());
+                        // Feed produced text into the condition engine (notify_on hit → signal notification).
+                        watch.feed_content(id, text);
+                    }
+                    tokens
                 }
-                cell.record_chars(text.chars().count());
-                // Feed produced text into the condition engine (notify_on hit → signal notification).
-                watch.feed_content(id, text);
+                crate::api::contract::StreamEvent::ThinkingDelta { thinking, .. } => {
+                    let mut chars = event_round_chars.lock().unwrap_or_else(|e| e.into_inner());
+                    *chars = chars.saturating_add(thinking.chars().count() as u64);
+                    chars.div_ceil(4)
+                }
+                crate::api::contract::StreamEvent::InputJsonDelta { partial_json, .. } => {
+                    let mut chars = event_round_chars.lock().unwrap_or_else(|e| e.into_inner());
+                    *chars = chars.saturating_add(partial_json.chars().count() as u64);
+                    chars.div_ceil(4)
+                }
+                crate::api::contract::StreamEvent::StopReason {
+                    output_tokens: Some(tokens),
+                    ..
+                } => {
+                    *event_round_chars.lock().unwrap_or_else(|e| e.into_inner()) =
+                        tokens.saturating_mul(4);
+                    if let Ok(mut progress) = progress_output.lock() {
+                        progress.add_output_tokens(*tokens);
+                    }
+                    *tokens
+                }
+                _ => return,
+            };
+            if let Ok(mut sampler) = token_rate.lock() {
+                sampler.observe_round(tokens, std::time::Instant::now());
             }
         }),
+        on_context_usage: Arc::new(move |used, _window| {
+            context_agents.set_context_tokens(&context_instance, used);
+        }),
         on_tool_ready: Box::new(move |name, input, _standalone| {
-            let Ok(mut live) = tool_live.lock() else {
-                return;
-            };
+            tool_registry.touch(&tool_instance);
             let glyph = crate::tui::activities::tool_glyph(&name);
             let shown = crate::tui::activities::display_tool_name(&name);
             let summary = crate::query::summarize_input(&name, &input);
-            live.push(crate::agents::LiveBlock::Tool(if summary.is_empty() {
+            let activity = if summary.is_empty() {
                 format!("{glyph}{shown}")
             } else {
                 format!("{glyph}{shown}({summary})")
-            }));
+            };
+            if let Ok(mut live) = tool_live.lock() {
+                live.push(crate::agents::LiveBlock::Tool(activity.clone()));
+            }
+            if let Ok(mut progress) = tool_progress.lock() {
+                progress.record_tool(activity);
+            }
         }),
-        on_tool_done: Box::new(|_| {}),
+        on_tool_done: Box::new(move |_| done_registry.touch(&done_instance)),
         // A round boundary closes the open prose block, so the next round's first
         // sentence does not run into the previous round's last one.
         on_round_end: Box::new(move || {
+            *round_chars.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+            if let Ok(mut sampler) = round_rate.lock() {
+                sampler.finish_round();
+            }
             if let Ok(mut live) = round_live.lock()
                 && matches!(live.last(), Some(crate::agents::LiveBlock::Text(_)))
             {
@@ -238,15 +295,17 @@ fn subagent_hooks(
     }
 }
 
-/// Turn-boundary delivery: start a run for every instance that has messages waiting.
-///
-/// This is the only place a queued message becomes a running turn. Holding delivery until the
-/// boundary is what makes a batch a batch — messages sent during one turn arrive together
-/// instead of one per turn — and it doubles as the recovery path for a run chain that died
-/// with messages still in its inbox.
+/// Start every idle recipient that has mail waiting. `AgentRegistry::flush_pending` claims the
+/// full inbox atomically, so concurrent dispatchers cannot double-start an instance and every
+/// item present at the receiver's claim point becomes one prompt.
 pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &Arc<WatchRegistry>) {
     for wake in session.agents.flush_pending() {
+        if !session.agents.accepts_run(&wake.name, wake.run) {
+            session.agents.restore_inbox(&wake.name, wake.items);
+            continue;
+        }
         let (prompt, images) = absorb_inbox(&session.channels, &wake.name, &wake.items);
+        let items = wake.items;
         let label = format!("{} #{} · {}", wake.name, wake.run, excerpt(&prompt));
         spawn_agent_loop(
             session.agents.clone(),
@@ -256,7 +315,9 @@ pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &Arc<WatchRegistr
             wake.history,
             prompt,
             images,
+            items,
             label,
+            wake.run,
             Vec::new(),
             session.instance.clone(),
         );
@@ -506,28 +567,51 @@ pub(crate) fn spawn_agent_loop(
     history: Vec<Message>,
     prompt: String,
     images: Vec<crate::api::types::ImageAttachment>,
+    initial_items: Vec<InboxItem>,
     first_label: String,
+    first_run: u64,
     conditions: Vec<NotifyCondition>,
     owner: Option<String>,
 ) -> WatchId {
-    let cell = Arc::new(AgentCell::new());
+    let cell = Arc::new(AgentCell::new(registry.clone()));
     let first_id = register_run_watch(&watch, first_label, cell.clone(), conditions, owner.clone());
     registry.set_run_watch(&name, first_id);
     let loop_registry = registry.clone();
     let loop_name = name.clone();
+    let retry_items = initial_items;
+    let current_items_for_install = retry_items.clone();
     let handle = tokio::spawn(async move {
         let name = loop_name;
+        if !loop_registry.accepts_run(&name, first_run) {
+            loop_registry.restore_inbox(&name, retry_items);
+            return;
+        }
         let mut history = history;
         let mut prompt = prompt;
         let mut images = images;
+        let mut current_items = retry_items;
         let mut run = (first_id, cell);
         loop {
             let output = Arc::new(Mutex::new(String::new()));
             let live = Arc::new(Mutex::new(Vec::new()));
-            loop_registry.set_live(&name, Some(live.clone()));
+            let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+            if let Ok(mut progress) = progress.lock() {
+                progress.start_run();
+            }
+            let token_rate = Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default()));
+            if let Ok(mut sampler) = token_rate.lock() {
+                sampler.start(std::time::Instant::now());
+            }
+            loop_registry.set_prompt(&name, prompt.clone());
+            loop_registry.set_live(&name, Some(live.clone()), Some(token_rate.clone()));
+            loop_registry.set_progress(&name, Some(progress.clone()));
             let mut ui = subagent_hooks(
-                output.clone(),
-                live.clone(),
+                SubagentOutput {
+                    text: output.clone(),
+                    live: live.clone(),
+                    progress,
+                },
+                token_rate,
                 run.1.clone(),
                 watch.clone(),
                 run.0,
@@ -538,19 +622,22 @@ pub(crate) fn spawn_agent_loop(
             {
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    let spoke = !text.trim().is_empty();
-                    loop_registry.set_live(&name, None);
+                    let output_chars = text.chars().count();
+                    loop_registry.set_live(&name, None, None);
+                    loop_registry.set_progress(&name, None);
                     watch.set_state(
                         run.0,
                         WatchState::Done,
                         Some("done".to_string()),
                         Some(serde_json::json!(non_empty(text))),
                     );
-                    match loop_registry.finish(&name, outcome.messages, spoke) {
+                    match loop_registry.finish(&name, outcome.messages, output_chars) {
                         Some(next) => {
                             history = next.history;
-                            (prompt, images) = absorb_inbox(&session.channels, &name, &next.items);
-                            let cell = Arc::new(AgentCell::new());
+                            current_items = next.items;
+                            (prompt, images) =
+                                absorb_inbox(&session.channels, &name, &current_items);
+                            let cell = Arc::new(AgentCell::new(loop_registry.clone()));
                             let label = format!("{name} #{} · {}", next.run, excerpt(&prompt));
                             let id = register_run_watch(
                                 &watch,
@@ -566,7 +653,9 @@ pub(crate) fn spawn_agent_loop(
                     }
                 }
                 Err(e) => {
-                    loop_registry.set_live(&name, None);
+                    loop_registry.set_live(&name, None, None);
+                    loop_registry.set_progress(&name, None);
+                    loop_registry.restore_inbox(&name, current_items);
                     watch.set_state(
                         run.0,
                         WatchState::Failed,
@@ -579,7 +668,12 @@ pub(crate) fn spawn_agent_loop(
             }
         }
     });
-    registry.set_abort(&name, handle.abort_handle());
+    let _ = registry.set_abort_if_running(
+        &name,
+        first_run,
+        handle.abort_handle(),
+        current_items_for_install,
+    );
     first_id
 }
 
@@ -645,7 +739,7 @@ impl AgentTool {
     ) -> Result<ToolResult, ToolError> {
         let def = self.resolve_def(params)?;
         let (name, description, sub_session) = self.spawn_instance(params, def, &ctx.cwd)?;
-        let _ = self.session.agents.next_run(&name);
+        let run = self.session.agents.next_run(&name);
         let conditions = params
             .notify_on
             .clone()
@@ -659,7 +753,9 @@ impl AgentTool {
             Vec::new(),
             params.prompt.clone(),
             self.session.attachments.resolve(&params.prompt),
+            Vec::new(),
             format!("{name} · {description}"),
+            run,
             conditions,
             ctx.instance.clone(),
         );
@@ -733,6 +829,7 @@ fn hire_context(cwd: &std::path::Path) -> MemberContext {
         memory: None,
         norms: crate::team::load_norms(cwd).map(|n| crate::team::norms_block(&team.name, &n)),
         standing: Some(crate::team::hire_note(&team.name)),
+        cwd: None,
     }
 }
 
@@ -749,6 +846,8 @@ pub(crate) struct MemberContext {
     pub norms: Option<String>,
     /// Where this instance stands relative to the crew — set only for a temporary hire.
     pub standing: Option<String>,
+    /// Override the parent session's working directory for a team rooted elsewhere.
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 impl MemberContext {
@@ -867,6 +966,11 @@ pub(crate) fn build_sub_session(
             cache: false,
         });
     }
+    let cwd = context
+        .cwd
+        .clone()
+        .map(|cwd| Arc::new(std::sync::Mutex::new(cwd)))
+        .unwrap_or_else(|| parent.cwd.clone());
     // The agreement, the standing, the past — whichever of them this instance has.
     for text in context.blocks() {
         system.push(SystemBlock { text, cache: false });
@@ -886,6 +990,7 @@ pub(crate) fn build_sub_session(
         settings: parent.settings.clone(),
         system,
         depth: parent.depth + 1,
+        cwd,
         home: parent.home.clone(),
         user_config_dir: parent.user_config_dir.clone(),
         quiet: parent.quiet,
@@ -903,12 +1008,14 @@ pub(crate) fn build_sub_session(
 /// Background agent progress: characters produced (for interval polling).
 struct AgentCell {
     chars: std::sync::atomic::AtomicUsize,
+    registry: Arc<AgentRegistry>,
 }
 
 impl AgentCell {
-    fn new() -> Self {
+    fn new(registry: Arc<AgentRegistry>) -> Self {
         Self {
             chars: std::sync::atomic::AtomicUsize::new(0),
+            registry,
         }
     }
     fn record_chars(&self, n: usize) {
@@ -960,7 +1067,11 @@ impl Tool for AgentTool {
         // The crew is the reason not to reach for this tool, so it is named here and not
         // only in the system prompt: this description is where the list of definitions
         // tempts a second `dev` into existence beside the `dev` already standing by.
-        if let Some(crew) = &self.crew {
+        if let Some(crew) = crate::team::load_team_file(&self.session.cwd())
+            .ok()
+            .flatten()
+            .map(|team| team.name)
+        {
             desc.push_str(&format!(
                 "\n\nThis project has a standing crew ({crew}, see the system prompt's roster): \
                  give the work to a member with SendMessage first, and spawn here only for what \
@@ -1011,7 +1122,7 @@ impl Tool for AgentTool {
         let _ = self.session.agents.next_run(&name);
 
         // Foreground sub-agents can also be watched: Running (characters produced) → Done/Failed.
-        let cell = Arc::new(AgentCell::new());
+        let cell = Arc::new(AgentCell::new(self.session.agents.clone()));
         let conditions = params
             .notify_on
             .clone()
@@ -1027,10 +1138,28 @@ impl Tool for AgentTool {
         self.session.agents.set_run_watch(&name, id);
         let output = Arc::new(Mutex::new(String::new()));
         let live = Arc::new(Mutex::new(Vec::new()));
-        self.session.agents.set_live(&name, Some(live.clone()));
+        let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+        if let Ok(mut progress) = progress.lock() {
+            progress.start_run();
+        }
+        let token_rate = Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default()));
+        if let Ok(mut sampler) = token_rate.lock() {
+            sampler.start(std::time::Instant::now());
+        }
+        self.session.agents.set_prompt(&name, params.prompt.clone());
+        self.session
+            .agents
+            .set_live(&name, Some(live.clone()), Some(token_rate.clone()));
+        self.session
+            .agents
+            .set_progress(&name, Some(progress.clone()));
         let mut ui = subagent_hooks(
-            output.clone(),
-            live.clone(),
+            SubagentOutput {
+                text: output.clone(),
+                live: live.clone(),
+                progress,
+            },
+            token_rate,
             cell.clone(),
             ctx.watch.clone(),
             id,
@@ -1047,10 +1176,12 @@ impl Tool for AgentTool {
             None,
         )
         .await;
-        self.session.agents.set_live(&name, None);
+        self.session.agents.set_live(&name, None, None);
+        self.session.agents.set_progress(&name, None);
         match sync_run {
             Ok(outcome) => {
                 let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let output_chars = text.chars().count();
                 let content = non_empty(text);
                 ctx.watch.set_state(
                     id,
@@ -1060,9 +1191,13 @@ impl Tool for AgentTool {
                 );
                 // On the synchronous path tools run serially, so queued messages never reach here;
                 // if one somehow does, hand it to the background loop (same continuation mechanism).
-                let spoke = !content.trim().is_empty();
-                if let Some(next) = self.session.agents.finish(&name, outcome.messages, spoke) {
+                if let Some(next) =
+                    self.session
+                        .agents
+                        .finish(&name, outcome.messages, output_chars)
+                {
                     let (prompt, images) = absorb_inbox(&sub_session.channels, &name, &next.items);
+                    let items = next.items;
                     spawn_agent_loop(
                         self.session.agents.clone(),
                         ctx.watch.clone(),
@@ -1071,7 +1206,9 @@ impl Tool for AgentTool {
                         next.history,
                         prompt.clone(),
                         images,
+                        items,
                         format!("{name} #{} · {}", next.run, excerpt(&prompt)),
+                        next.run,
                         Vec::new(),
                         ctx.instance.clone(),
                     );
@@ -1124,9 +1261,9 @@ const ACK_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 /// quiet, and short enough that a hang is not discovered by the user an hour later.
 const DEFAULT_ACK_TIMEOUT_SECS: u64 = 300;
 
-/// Main→sub continuation channel (hub-and-spoke, main session only): an idle instance is woken
-/// with its full history to continue; a busy instance queues the message and it is delivered
-/// when the turn ends.
+/// Main→sub continuation channel (hub-and-spoke, main session only): an idle instance starts as
+/// soon as the dispatch point claims its inbox; a running instance absorbs queued mail between
+/// tool rounds.
 pub struct SendMessageTool {
     session: Arc<Session>,
 }
@@ -1143,7 +1280,7 @@ impl Tool for SendMessageTool {
         "SendMessage".to_string()
     }
     fn description(&self) -> String {
-        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id: the message is queued and delivered at the end of this turn, batched with any other message sent to the same instance in this turn, so the receiver reads them together rather than one per turn. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing. AgentControl(action=messages) reports which of those it is: queued, delivered but unanswered, answered (with the run that replied), or dropped because the instance stopped. You do not have to poll that yourself: the harness runs the same check five minutes after sending (tune with ack_timeout) and follows up on the receiver, up to 3 rounds, reporting back if no answer ever comes. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
+        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id after enqueueing: an idle receiver starts immediately, while a running receiver drains all mail waiting at its next tool round. Messages present when the receiver drains its inbox are batched into one prompt. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing. AgentControl(action=messages) reports which of those it is: queued, delivered but unanswered, answered (with the run that replied), or dropped because the instance stopped. You do not have to poll that yourself: the harness runs the same check five minutes after sending (tune with ack_timeout) and follows up on the receiver, up to 3 rounds, reporting back if no answer ever comes. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<SendMessageInput>()
@@ -1174,13 +1311,13 @@ impl Tool for SendMessageTool {
             .agents
             .deliver(&params.agent, &params.message, images, timeout)
             .map_err(ToolError::failed)?;
+        flush_agent_inbox(&self.session, &ctx.watch);
         let note = match timeout {
             Some(t) => format!(
-                "delivered in a batch with the recipient's other messages at the end of this turn; if no reply arrives within {}s (including read-but-silent rounds), it is automatically re-checked and chased (up to {MAX_FOLLOW_UPS} rounds); the outcome is reported as a task notification",
+                "enqueued for immediate processing; the receiver batches everything waiting when it next drains its inbox; if no reply arrives within {}s (including read-but-silent rounds), it is automatically re-checked and chased (up to {MAX_FOLLOW_UPS} rounds); the outcome is reported as a task notification",
                 t.as_secs()
             ),
-            None => "delivered in a batch with the recipient's other messages at the end of this turn;\
-                      follow-up chasing is off (ack_timeout=0); check yourself with AgentControl(action=messages, agent=…) when needed"
+            None => "enqueued for immediate processing; the receiver batches everything waiting when it next drains its inbox; follow-up chasing is off (ack_timeout=0); check yourself with AgentControl(action=messages, agent=…) when needed"
                 .to_string(),
         };
         if let Some(timeout) = timeout {
@@ -1273,13 +1410,28 @@ impl AgentControlTool {
     }
 }
 
+pub(crate) fn format_last_active(age: std::time::Duration) -> String {
+    let seconds = age.as_secs();
+    if seconds == 0 {
+        "active now".to_string()
+    } else if seconds < 60 {
+        format!("active {seconds}s ago")
+    } else if seconds < 3_600 {
+        format!("active {}min ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("active {}h ago", seconds / 3_600)
+    } else {
+        format!("active {}d ago", seconds / 86_400)
+    }
+}
+
 #[async_trait]
 impl Tool for AgentControlTool {
     fn name(&self) -> String {
         "AgentControl".to_string()
     }
     fn description(&self) -> String {
-        "Manage subagent instances: list all (name/definition/status/queued-instruction count), check messages sent to one (per-message queued/delivered-but-unanswered/answered/dropped, how long it has been waiting, and whether SendMessage's ack_timeout is already chasing it — use this when an instance has gone quiet on you), stop one (aborts the current run, stops accepting instructions; history kept), delete one (stops and removes it; the name is released).".to_string()
+        "Manage subagent instances: list all (name/definition/status/last activity/queued-instruction count), check messages sent to one (per-message queued/delivered-but-unanswered/answered/dropped, how long it has been waiting, and whether SendMessage's ack_timeout is already chasing it — use this when an instance has gone quiet on you), stop one (aborts the current run, stops accepting instructions; history kept), delete one (stops and removes it; the name is released).".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<AgentControlInput>()
@@ -1324,8 +1476,9 @@ impl Tool for AgentControlTool {
                             } else {
                                 String::new()
                             };
+                            let active = format_last_active(s.last_active.elapsed());
                             format!(
-                                "- {} ({} {}{def}{pending}{unacked}, {} @ {}): {}",
+                                "- {} ({} {}, {active}{def}{pending}{unacked}, {} @ {}): {}",
                                 s.name,
                                 s.kind.label(),
                                 s.state.label(),
@@ -1350,7 +1503,7 @@ impl Tool for AgentControlTool {
                         .map(|a| {
                             let detail = match &a.state {
                                 crate::agents::AckState::Queued => format!(
-                                    "queued (waiting {}s{}, will be delivered in a batch at the next turn boundary)",
+                                    "queued (waiting {}s{}, the receiver will claim it immediately when idle or at its next tool round)",
                                     a.queued_at.elapsed().as_secs(),
                                     Self::chase_note(a)
                                 ),
@@ -1477,6 +1630,7 @@ mod tests {
                 cache: false,
             }],
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
             home: std::env::temp_dir(),
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
@@ -1934,6 +2088,23 @@ mod tests {
         assert!(cut.ends_with('…'));
     }
 
+    #[test]
+    fn agent_control_list_reports_relative_last_activity() {
+        assert_eq!(format_last_active(std::time::Duration::ZERO), "active now");
+        assert_eq!(
+            format_last_active(std::time::Duration::from_secs(3)),
+            "active 3s ago"
+        );
+        assert_eq!(
+            format_last_active(std::time::Duration::from_secs(125)),
+            "active 2min ago"
+        );
+        assert_eq!(
+            format_last_active(std::time::Duration::from_secs(7_200)),
+            "active 2h ago"
+        );
+    }
+
     #[tokio::test]
     async fn agent_control_list_stop_delete() {
         let (session, _client) = parent_session();
@@ -1964,7 +2135,10 @@ mod tests {
             .await
             .unwrap();
         let text = out.content.as_str().unwrap();
-        assert!(text.contains("scout") && text.contains("running"), "{text}");
+        assert!(
+            text.contains("scout") && text.contains("running") && text.contains("active now"),
+            "{text}"
+        );
         let out = ctl
             .call(
                 serde_json::json!({"action": "stop", "agent": "scout"}),
@@ -2001,7 +2175,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_message_queues_on_running_instance() {
+    async fn send_message_starts_an_idle_instance_before_returning() {
+        let (session, _client) = parent_session();
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        );
+        session.agents.mark_idle("worker");
+        let out = SendMessageTool::new(session.clone())
+            .call(
+                serde_json::json!({"agent": "worker", "message": "start now", "ack_timeout": 0}),
+                &hub_ctx(&session),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let receipt: serde_json::Value =
+            serde_json::from_str(out.content.as_str().unwrap_or_default())
+                .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(receipt["status"], "queued");
+        let status = &session.agents.list()[0];
+        assert_eq!(status.state, crate::agents::AgentState::Running);
+        assert_eq!(status.pending, 0, "the idle inbox was claimed immediately");
+        let acks = session
+            .agents
+            .acks_of("worker")
+            .unwrap_or_else(|| unreachable!());
+        assert!(matches!(
+            acks[0].state,
+            crate::agents::AckState::Delivered { run: 1 }
+        ));
+        let _ = session.agents.stop("worker");
+    }
+
+    #[tokio::test]
+    async fn send_message_keeps_running_instance_queued_for_its_next_tool_round() {
         let (session, _client) = parent_session();
         session.agents.insert(
             "worker",
@@ -2023,7 +2233,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // The receipt carries the message id; delivery itself waits for the turn boundary.
+        // A running receiver keeps it queued until its query loop reaches the next tool round.
         let receipt: serde_json::Value =
             serde_json::from_str(out.content.as_str().unwrap_or_default())
                 .unwrap_or_else(|e| panic!("{e}"));
@@ -2116,7 +2326,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn unacknowledged_message_is_chased_three_times_then_reported() {
         let (session, _client) = parent_session();
-        // Running: the boundary flush cannot claim it, so the message really does stay queued.
+        // Running without a query loop: the dispatcher cannot claim it, so the message stays queued.
         session.agents.insert(
             "worker",
             AgentKind::Hire,
@@ -2187,7 +2397,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         // A turn ends without a word and takes the queued message into the next one: delivered,
         // unanswered, and still Running — so the flush the watchdog retries stays a no-op here.
-        assert!(session.agents.finish("mute", Vec::new(), false).is_some());
+        assert!(session.agents.finish("mute", Vec::new(), 0).is_some());
         assert!(matches!(
             session
                 .agents
@@ -2236,8 +2446,8 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("{e}"));
         // The receiver picks it up at the boundary, then that run ends with something to say.
-        assert!(session.agents.finish("worker", Vec::new(), true).is_some());
-        assert!(session.agents.finish("worker", Vec::new(), true).is_none());
+        assert!(session.agents.finish("worker", Vec::new(), 1).is_some());
+        assert!(session.agents.finish("worker", Vec::new(), 2).is_none());
         tokio::time::sleep(std::time::Duration::from_secs(120)).await;
         let acks = session
             .agents
@@ -2304,9 +2514,9 @@ mod tests {
             .agents
             .deliver("worker", "compare #[image 1]", images.clone(), None)
             .unwrap_or_else(|e| panic!("{e}"));
-        let (prompt, carried) = match session.agents.finish("worker", Vec::new(), true) {
+        let (prompt, carried) = match session.agents.finish("worker", Vec::new(), 1) {
             Some(next) => absorb_inbox(&sub.channels, "worker", &next.items),
-            None => unreachable!("queued messages should be picked up at the turn boundary"),
+            None => unreachable!("queued messages should be claimed by the receiver"),
         };
         let acks = session
             .agents
@@ -2514,6 +2724,13 @@ mod tests {
         .unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, ["parent system", SUBAGENT_NOTE]);
+        let moved = std::env::temp_dir().join("bingo-subagent-shared-cwd");
+        session.set_cwd(moved.clone());
+        assert_eq!(
+            sub.cwd(),
+            moved,
+            "ad-hoc subagents follow the parent session's cwd"
+        );
         assert!(
             !sub.system.last().map(|b| b.cache).unwrap_or(true),
             "the note block does not occupy a cache breakpoint"
@@ -2545,8 +2762,123 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
+        let output = Arc::new(Mutex::new(String::new()));
+        let live = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+        progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .start_run();
+        let watch = crate::watch::WatchRegistry::new();
+        let registry = AgentRegistry::new();
+        let id = register_run_watch(
+            &watch,
+            "progress".into(),
+            Arc::new(AgentCell::new(registry.clone())),
+            Vec::new(),
+            None,
+        );
+        let mut ui = subagent_hooks(
+            SubagentOutput {
+                text: output,
+                live,
+                progress: progress.clone(),
+            },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            Arc::new(AgentCell::new(registry.clone())),
+            watch,
+            id,
+            "worker".into(),
+            None,
+        );
+        (ui.on_event)(&crate::api::contract::StreamEvent::StopReason {
+            stop_reason: Some("tool_use".into()),
+            output_tokens: Some(12),
+        });
+        (ui.on_tool_ready)(
+            "Read".into(),
+            serde_json::json!({"file_path":"src/main.rs"}),
+            false,
+        );
+        (ui.on_event)(&crate::api::contract::StreamEvent::StopReason {
+            stop_reason: Some("end_turn".into()),
+            output_tokens: Some(7),
+        });
+        (ui.on_tool_ready)(
+            "Bash".into(),
+            serde_json::json!({"command":"cargo check"}),
+            false,
+        );
+        let progress = progress.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(progress.output_tokens, 19);
+        assert_eq!(progress.tool_uses, 2);
+        assert_eq!(progress.recent_activity.len(), 2);
+        assert!(progress.recent_activity[0].contains("Read"));
+        assert!(progress.recent_activity[1].contains("Bash"));
+    }
+
     /// A subagent's Ask decision is forwarded to the attached prompt surface, stamped with the
     /// instance name — never silently auto-denied (or auto-allowed under bypass).
+    #[tokio::test]
+    async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
+        let session = parent_session().0;
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "work".into(),
+            session.clone(),
+        );
+        let watch = crate::watch::WatchRegistry::new();
+        let registry = session.agents.clone();
+        let id = register_run_watch(
+            &watch,
+            "l".into(),
+            Arc::new(AgentCell::new(registry.clone())),
+            Vec::new(),
+            None,
+        );
+        let mut ui = subagent_hooks(
+            SubagentOutput {
+                text: Arc::new(Mutex::new(String::new())),
+                live: Arc::new(Mutex::new(Vec::new())),
+                progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
+            },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            Arc::new(AgentCell::new(registry.clone())),
+            watch,
+            id,
+            "worker".into(),
+            None,
+        );
+        let inserted = session.agents.list()[0].last_active;
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "hi".into(),
+        });
+        let streamed = session.agents.list()[0].last_active;
+        assert!(streamed > inserted);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        (ui.on_tool_ready)("Read".into(), serde_json::json!({"file_path": "a"}), false);
+        let ready = session.agents.list()[0].last_active;
+        assert!(ready > streamed);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        (ui.on_tool_done)(&crate::query::ToolCallDone {
+            name: "Read".into(),
+            summary: String::new(),
+            output: String::new(),
+            is_error: false,
+            diff: None,
+            duration_ms: 1,
+        });
+        assert!(session.agents.list()[0].last_active > ready);
+    }
+
     #[tokio::test]
     async fn subagent_ask_forwards_to_attached_prompt() {
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -2559,17 +2891,22 @@ mod tests {
             Box::pin(async { true })
         });
         let watch = crate::watch::WatchRegistry::new();
+        let registry = AgentRegistry::new();
         let id = register_run_watch(
             &watch,
             "l".into(),
-            Arc::new(AgentCell::new()),
+            Arc::new(AgentCell::new(registry.clone())),
             Vec::new(),
             None,
         );
         let ui = subagent_hooks(
-            Arc::new(Mutex::new(String::new())),
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(AgentCell::new()),
+            SubagentOutput {
+                text: Arc::new(Mutex::new(String::new())),
+                live: Arc::new(Mutex::new(Vec::new())),
+                progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
+            },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            Arc::new(AgentCell::new(registry.clone())),
             watch.clone(),
             id,
             "worker".into(),
@@ -2583,9 +2920,13 @@ mod tests {
 
         // Nothing attached (embedded/test path): deny rather than block on a modal nobody shows.
         let ui = subagent_hooks(
-            Arc::new(Mutex::new(String::new())),
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(AgentCell::new()),
+            SubagentOutput {
+                text: Arc::new(Mutex::new(String::new())),
+                live: Arc::new(Mutex::new(Vec::new())),
+                progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
+            },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            Arc::new(AgentCell::new(registry.clone())),
             watch,
             id,
             "worker".into(),

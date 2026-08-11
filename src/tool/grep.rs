@@ -51,10 +51,14 @@ impl Tool for GrepTool {
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: GrepInput = parse_input(&input)?;
-        let root = params
-            .path
-            .map(PathBuf::from)
-            .unwrap_or_else(|| ctx.cwd.clone());
+        let root = params.path.map(PathBuf::from).unwrap_or_default();
+        let root = if root.as_os_str().is_empty() {
+            ctx.cwd.clone()
+        } else if root.is_absolute() {
+            root
+        } else {
+            ctx.cwd.join(root)
+        };
         let re = regex::Regex::new(&params.pattern)
             .map_err(|e| ToolError::failed(format!("bad regex pattern: {e}")))?;
         let filter = params

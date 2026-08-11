@@ -140,7 +140,7 @@ bingo --continue            # 恢复最近一次会话
 | `Ctrl+C` | busy 中断 / 有文本清空 / 空输入连按两次退出 |
 | `Ctrl+T` | 显隐任务区 |
 | `Ctrl+O` | 展开/闭合切换：展开 = 重放完整 transcript 供上滑翻看 |
-| `Ctrl+G` | agent / 频道选择器 → Slack 式工作区（整屏一栏消息流 + 输入框；Ctrl+K 换会话、alt+↑↓ 上下会话） |
+| `Ctrl+G` | 直接打开全屏 Slack 式工作区；`Ctrl+K` 切换频道与 DM，alt+↑↓ 上下会话 |
 | `Ctrl+L` | 清屏重画 |
 | `Shift+Tab` | 循环权限模式（default → acceptEdits → plan） |
 | `Alt+T` | 思考开关 |

@@ -19,6 +19,7 @@ mod auth;
 mod budget;
 mod channels;
 mod compact;
+mod context_usage;
 mod error;
 mod experience;
 mod hooks;
@@ -36,6 +37,7 @@ mod system;
 mod tasks;
 mod team;
 mod team_cmd;
+mod token_rate;
 mod tool;
 mod tools;
 mod transcript;
@@ -208,6 +210,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         &load_memory(&home, &project_dir),
         load_project_memory(&home, &project_dir),
         settings.cache_control.unwrap_or(false),
+        &project_dir,
     );
     // The crew pinned to this project, and the rule that decides between giving a member
     // work and hiring someone new (D53). A system block rather than a tool description:
@@ -321,6 +324,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         settings,
         system,
         depth: 0,
+        cwd: Arc::new(std::sync::Mutex::new(project_dir.clone())),
         home: home.clone(),
         user_config_dir: user_dir.clone(),
         quiet: !cli.print,
@@ -354,7 +358,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mode_str = session.permission_mode_str();
-    crate::hooks::run_session_start(&session.settings.hooks, mode_str).await;
+    crate::hooks::run_session_start(&session.settings.hooks, mode_str, &session.cwd()).await;
 
     // D31 startup default: project-bound team with autoStart (default true) → spawn it.
     // The whole tree, not just the root (D54): a chart declared in one file is one
@@ -422,7 +426,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut ui = headless_hooks();
             let outcome =
                 run_query(&session, initial_messages, &prompt, &[], &mut ui, None).await?;
-            extract_memory(&session, &outcome.messages, &home, &project_dir).await;
+            let cwd = session.cwd();
+            extract_memory(&session, &outcome.messages, &home, &cwd).await;
         } else {
             drop(initial_messages); // in interactive mode, --continue history is reused by later turns
             tui::run_tui_session(session.clone(), expand_rx, fullscreen, startup_notes).await?;
@@ -434,9 +439,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // D31 session-end persistence: latest history of team members (for cross-session
     // restore; failures are silent).
     if !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
-        persist_team_memory(&session, &home, &project_dir);
+        persist_team_memory(&session, &home, &session.cwd());
     }
-    crate::hooks::run_session_end(&session.settings.hooks, mode_str).await;
+    crate::hooks::run_session_end(&session.settings.hooks, mode_str, &session.cwd()).await;
     result
 }
 

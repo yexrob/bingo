@@ -184,6 +184,7 @@ impl Tool for TaskCreateTool {
             &id,
             &task.subject,
             ctx.permission_mode.as_str(),
+            &ctx.cwd,
         )
         .await;
         if !blocking.is_empty() {
@@ -417,6 +418,7 @@ impl Tool for TaskUpdateTool {
                 &args.task_id,
                 &task.subject,
                 ctx.permission_mode.as_str(),
+                &ctx.cwd,
             )
             .await;
             if !blocking.is_empty() {

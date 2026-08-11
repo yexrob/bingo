@@ -946,17 +946,12 @@ fn relative_dir(root: &Path, dir: &Path) -> String {
 }
 
 /// What a member of a team rooted elsewhere is told about where its work is.
-///
-/// Tools resolve relative paths against the session's working directory, which is the
-/// root project's — so a member of a department pinned two directories down would
-/// otherwise read and write in the wrong place while believing it was at home.
 pub fn team_root_note(team: &str, dir: &Path) -> String {
     format!(
         "# Your team is rooted at {}\n\n\
          You are on `{team}`, whose blueprint, agent definitions and working agreement live in \
-         that directory. It is not this session's working directory: tool paths resolve against \
-         the session's, so use the path above (or an absolute path under it) when you read or \
-         write your team's files. Work outside it only when the task you were given says so.",
+         that directory. It is this session's working directory, so relative tool paths resolve \
+         from there. Work outside it only when the task you were given says so.",
         dir.display()
     )
 }
@@ -1116,8 +1111,7 @@ pub fn spawn_tree(
     for node in tree.nodes() {
         let defs = crate::agents::load_agent_defs(home, &node.dir);
         let branch = current_branch(&node.dir);
-        // A member of a team rooted elsewhere is told where that is: tool paths
-        // resolve against the session's directory, not its team's.
+        // The note remains useful context even though D56 now gives the member that cwd directly.
         let standing = (node.depth > 0).then(|| team_root_note(&node.def.name, &node.dir));
         spawn_members(
             session,
@@ -1156,7 +1150,7 @@ fn spawn_members(
     let by_name: HashMap<&str, &AgentDef> = defs.iter().map(|d| (d.name.as_str(), d)).collect();
     for member in &def.members {
         // Idempotency key = instance name: already exists (Idle/Running) → reuse, no re-spawn.
-        let exists = session.agents.list().iter().any(|a| a.name == member.name);
+        let exists = session.agents.is_in_project(&member.name, project_dir);
         if exists {
             summary.reused.push(member.name.clone());
             continue;
@@ -1179,6 +1173,7 @@ fn spawn_members(
             memory: member_memory_note(home, project_dir, branch, &def.name, &name),
             norms: norms.clone(),
             standing: standing.clone(),
+            cwd: Some(project_dir.to_path_buf()),
         };
         let sub = match crate::tool::agent::build_sub_session(
             session,
@@ -1754,6 +1749,7 @@ mod tests {
             settings: crate::settings::Settings::default(),
             system: Vec::new(),
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
             home: std::env::temp_dir(),
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
@@ -1775,6 +1771,7 @@ mod tests {
         let s = session();
         let home = tmp("spawn-mem");
         let project = home.join("proj");
+        s.set_cwd(project.clone());
         for role in ["dev-ex", "ui/ux", "dev"] {
             write_agent(&project, role);
         }
@@ -2550,6 +2547,11 @@ mod tests {
             .agents
             .session_of("Kai")
             .unwrap_or_else(|| panic!("Kai should exist"));
+        assert_eq!(
+            kai.cwd(),
+            platform,
+            "a member runs from its own team's directory"
+        );
         let standing = kai
             .system
             .iter()

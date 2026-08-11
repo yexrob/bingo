@@ -397,8 +397,13 @@ pub const SLASH_SUGGESTIONS_MAX: usize = 5;
 pub const INPUT_ROWS_MAX: usize = 10;
 /// Max rows shown for queued messages (more collapse into `… +N more`).
 pub const QUEUE_ROWS_MAX: usize = 3;
-/// Max entities shown one per line while the entity selector is focused.
+/// Max running agents shown while the compact entity selector is open.
 pub const ENTITY_ROWS_MAX: usize = 6;
+/// Max running agents shown at once in the background-agent manager.
+pub const AGENT_MANAGER_ROWS_MAX: usize = 8;
+/// Agent detail follows the reference dialog's bounded prompt preview.
+pub const AGENT_PROMPT_CHARS_MAX: usize = 300;
+pub const AGENT_PROMPT_ROWS_MAX: usize = 6;
 /// Undo stack depth (ctrl+_).
 pub const UNDO_MAX: usize = 20;
 /// Exit-confirmation window between two Ctrl+C presses.
@@ -926,6 +931,9 @@ pub struct Chat {
     /// (segment boundaries); deltas in the same segment continue without paragraph breaks; new segments (fresh reasoning after a tool) are aggregated with \n\n.
     thinking_seg_open: bool,
     output_tokens: u64,
+    output_round_tokens: u64,
+    pub(super) token_rate: crate::token_rate::TokenRateSampler,
+    pub(super) context_usage: crate::context_usage::ContextUsage,
     pub tick: u64,
     /// Tick at TurnStart: the relative timing baseline for running-state thinking.
     turn_start_tick: u64,
@@ -1069,10 +1077,12 @@ pub struct Chat {
     pub tasks_visible: bool,
     /// Whether the task area was auto-opened by TaskCreate (not manually via ctrl+t): hides automatically when everything is done.
     pub tasks_auto: bool,
-    /// Snapshot of the bottom entity area (agent instances + channels; refreshed on tick/WatchEvent).
+    /// Snapshot of the bottom entity area (running agent instances + channels; refreshed on tick/WatchEvent).
     pub entities: Vec<EntityRow>,
-    /// Entity selector focus (Some(i) = selection mode: ↑↓/Enter/Esc are captured).
+    /// Selection in the compact running-agent list; `None` keeps the one-line presence summary.
     pub entity_focus: Option<usize>,
+    /// Main-view background-agent manager; `None` means the panel is closed.
+    pub agent_manager: Option<AgentManager>,
     /// Entity view pending open (app layer consumes → enters the fullscreen modal).
     pub open_entity: Option<EntityOpen>,
     /// Slack workspace view state. Lives here rather than in the modal so read
@@ -1089,7 +1099,8 @@ pub enum EntityRow {
     Agent {
         name: String,
         state: &'static str,
-        description: String,
+        model: String,
+        thinking: Option<String>,
     },
     Channel {
         name: String,
@@ -1098,11 +1109,18 @@ pub enum EntityRow {
     },
 }
 
-/// Entity view to open after selecting with Enter.
+/// Background-agent manager layered over the main chat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentManager {
+    List { selected: usize },
+    Detail { name: String },
+}
+
+/// Entity view to open from the main chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityOpen {
+    Workspace,
     Agent(String),
-    Channel(String),
 }
 
 impl Chat {
@@ -1167,9 +1185,7 @@ impl Chat {
                 }
             });
         }
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+        let cwd = session.cwd().display().to_string();
         let history = crate::tui::history::History::new(crate::tui::history::load(
             &session.home,
             std::path::Path::new(&cwd),
@@ -1193,6 +1209,16 @@ impl Chat {
         let motion_off = session.settings.motion.as_deref() == Some("off")
             || std::env::var_os("BINGO_NO_MOTION").is_some();
         let chat_avatars = session.settings.experimental.chat_avatars;
+        let context_window =
+            crate::budget::context_window_for(&session.runtime.model.borrow().clone());
+        let context_tokens = session
+            .runtime
+            .transcript
+            .borrow()
+            .clone()
+            .and_then(|transcript| transcript.load_messages().ok())
+            .map(|messages| crate::compact::estimate_tokens(&session.system, &messages))
+            .unwrap_or(0);
         Self {
             session,
             events,
@@ -1231,6 +1257,9 @@ impl Chat {
             thinking_buf: String::new(),
             thinking_seg_open: false,
             output_tokens: 0,
+            output_round_tokens: 0,
+            token_rate: crate::token_rate::TokenRateSampler::default(),
+            context_usage: crate::context_usage::ContextUsage::new(context_tokens, context_window),
             tick: 0,
             turn_start_tick: 0,
             turn_started: None,
@@ -1300,6 +1329,7 @@ impl Chat {
             tasks_auto: false,
             entities: Vec::new(),
             entity_focus: None,
+            agent_manager: None,
             open_entity: None,
             slack: Default::default(),
             interrupted: false,
@@ -1399,7 +1429,11 @@ impl Chat {
                 self.thinking_seg_open = false;
                 self.pending_tools_clear();
                 self.interrupt_at = None;
-                self.turn_started = Some(std::time::Instant::now());
+                let now = std::time::Instant::now();
+                self.turn_started = Some(now);
+                self.output_tokens = 0;
+                self.output_round_tokens = 0;
+                self.token_rate.start(now);
                 self.messages.push(UiMessage {
                     role: Role::Assistant,
                     text: String::new(),
@@ -1533,8 +1567,17 @@ impl Chat {
                     }
                 }
             }
+            UiEvent::ContextUsage { used, window } => {
+                self.context_usage = crate::context_usage::ContextUsage::new(used, window);
+            }
             UiEvent::OutputTokens(tokens) => {
-                self.output_tokens = tokens;
+                self.output_tokens = self
+                    .output_tokens
+                    .saturating_sub(self.output_round_tokens)
+                    .saturating_add(tokens);
+                self.output_round_tokens = tokens;
+                self.token_rate
+                    .observe_round(tokens, std::time::Instant::now());
             }
             UiEvent::ToolStart { name } => {
                 if is_hidden_tool(&name) {
@@ -1700,6 +1743,8 @@ impl Chat {
                 }
             }
             UiEvent::RoundEnd => {
+                self.output_round_tokens = 0;
+                self.token_rate.finish_round();
                 if let Some(i) = self.stream_msg {
                     // Collapse groups are bounded by text: model rounds do not split a group, nor does thinking —
                     // only text (TextDelta) and non-collapsible tools close the group.
@@ -1782,6 +1827,8 @@ impl Chat {
                 self.busy = false;
                 self.turn_started = None;
                 self.output_tokens = 0;
+                self.output_round_tokens = 0;
+                self.token_rate.stop();
                 self.thinking_seg_open = false;
                 self.drop_empty_stream_message();
                 // AskUserQuestion answers are ordinary user messages (in the message flow,
@@ -2425,6 +2472,7 @@ impl Chat {
             "exit" | "quit" => self.exit = true,
             "clear" | "reset" | "new" => self.slash_clear(),
             "model" => self.slash_model(arg),
+            "cd" => self.slash_cd(arg),
             "theme" => self.slash_theme(arg),
             "rename" => self.slash_rename(arg),
             "resume" => self.slash_resume(arg),
@@ -2471,6 +2519,89 @@ impl Chat {
         self.push_slash_info(crate::tui::slash::help_lines(SLASH_COMMANDS).join("\n"));
     }
 
+    fn slash_cd(&mut self, arg: &str) {
+        if self.busy {
+            self.push_slash_error(format!(
+                "[error] code={} msg=cannot switch working directory mid-turn (press Esc to interrupt, then retry)",
+                crate::error::SLASH_ERROR_BAD_ARGUMENT
+            ));
+            return;
+        }
+        if arg.is_empty() {
+            self.push_slash_error(format!(
+                "[error] code={} msg=usage: /cd <dir>",
+                crate::error::SLASH_ERROR_BAD_ARGUMENT
+            ));
+            return;
+        }
+        let requested = std::path::PathBuf::from(arg);
+        let path = if requested.is_absolute() {
+            requested
+        } else {
+            self.session.cwd().join(requested)
+        };
+        let path = match std::fs::canonicalize(&path) {
+            Ok(path) if path.is_dir() => path,
+            Ok(_) => {
+                self.push_slash_error(format!(
+                    "[error] code={} msg=not a directory: {arg}",
+                    crate::error::SLASH_ERROR_BAD_ARGUMENT
+                ));
+                return;
+            }
+            Err(e) => {
+                self.push_slash_error(format!(
+                    "[error] code={} msg=cannot switch working directory to {arg}: {e}",
+                    crate::error::SLASH_ERROR_BAD_ARGUMENT
+                ));
+                return;
+            }
+        };
+        self.session.set_cwd(path.clone());
+        self.cwd = path.display().to_string();
+        self.history =
+            crate::tui::history::History::new(crate::tui::history::load(&self.session.home, &path));
+        self.faces_pinned = crate::team::load_team_tree(&path)
+            .ok()
+            .flatten()
+            .iter()
+            .flat_map(|tree| tree.members())
+            .filter_map(|(_, member)| {
+                Some((
+                    member.name.clone(),
+                    avatar::index_of_id(member.avatar.as_deref()?)?,
+                ))
+            })
+            .collect();
+        self.push_slash_output(format!("✓ working directory: {}", path.display()));
+    }
+
+    fn reset_context_usage(&mut self) {
+        let model = self.session.runtime.model.borrow().clone();
+        self.context_usage =
+            crate::context_usage::ContextUsage::new(0, crate::budget::context_window_for(&model));
+    }
+
+    fn estimate_context_usage(&mut self, messages: &[crate::api::types::Message]) {
+        let model = self.session.runtime.model.borrow().clone();
+        self.context_usage = crate::context_usage::ContextUsage::new(
+            crate::compact::estimate_tokens(&self.session.system, messages),
+            crate::budget::context_window_for(&model),
+        );
+    }
+
+    fn refresh_context_usage_from_transcript(&mut self) {
+        let messages = self
+            .session
+            .runtime
+            .transcript
+            .borrow()
+            .clone()
+            .and_then(|transcript| transcript.load_messages().ok())
+            .unwrap_or_default();
+        self.estimate_context_usage(&messages);
+    }
+
     fn slash_clear(&mut self) {
         let session = self.session.clone();
         let cwd = std::path::PathBuf::from(&self.cwd);
@@ -2481,6 +2612,7 @@ impl Chat {
         self.slash_lines.clear();
         self.warnings.clear();
         self.reset_flushed();
+        self.reset_context_usage();
         self.push_slash_output("✓ conversation cleared; starting a new session.".to_string());
     }
 
@@ -2494,6 +2626,13 @@ impl Chat {
 
     /// Switches the runtime model and persists it as the default (same path as /theme /think: writes the project layer).
     fn set_model(&mut self, model: String) {
+        if self.busy {
+            self.push_slash_error(
+                "[error] code=BUSY msg=cannot switch models mid-turn (press Esc to interrupt, then retry)"
+                    .to_string(),
+            );
+            return;
+        }
         // P1-E: known-list check — when the current provider has a cache and the model is not in it, append a note
         // (advisory, non-blocking; the endpoint may have just shipped a new model or the cache may never have been pulled — typing it directly is still
         // a valid path). Merged into one line with the success note, to avoid the jarring "⚠ and ✓ together".
@@ -2503,6 +2642,7 @@ impl Chat {
             .get(&provider)
             .is_some_and(|known| !known.is_empty() && !known.contains(&model));
         let _ = self.session.runtime.model_tx.send(model.clone());
+        self.refresh_context_usage_from_transcript();
         self.provider_models.insert(provider.clone(), model.clone());
         // Persistence follows the provider's scope: a session-only provider
         // (`s` in the picker) must not have its model half-persisted — that
@@ -2958,6 +3098,7 @@ impl Chat {
         self.messages.clear();
         self.slash_lines.clear();
         self.reset_flushed();
+        self.refresh_context_usage_from_transcript();
         self.push_slash_output(format!(
             "✓ switched to session {} ({count} messages); the next reply uses its history.",
             found.name()
@@ -3032,6 +3173,7 @@ impl Chat {
                 self.messages.clear();
                 self.slash_lines.clear();
                 self.reset_flushed();
+                self.refresh_context_usage_from_transcript();
                 self.push_slash_output(format!(
                     "✓ switched to session {name} ({count} messages); the next reply uses its history."
                 ));
@@ -3222,6 +3364,10 @@ impl Chat {
             if let Some(t) = transcript {
                 let _ = t.replace_messages(&messages);
             }
+            let _ = events.send(UiEvent::ContextUsage {
+                used: crate::compact::estimate_tokens(&session.system, &messages),
+                window: crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
+            });
             unpin();
             let _ = events.send(UiEvent::SlashInfo(format!(
                 "✓ compacted {old_len} messages → summary + the latest 8.\nSummary: {summary}"
@@ -3693,6 +3839,10 @@ impl Chat {
                     ),
                 };
                 let model_now = session.runtime.model.borrow().clone();
+                self.context_usage = crate::context_usage::ContextUsage::new(
+                    self.context_usage.used,
+                    crate::budget::context_window_for(&model_now),
+                );
                 self.provider_models.insert(name.clone(), model_now.clone());
                 self.provider_session_only = !persist;
                 if persist {
@@ -4478,7 +4628,7 @@ impl Chat {
             }
         }
         let _ = events.send(UiEvent::TurnEnd);
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = session.cwd();
         crate::memory::extract_memory(session, &outcome.messages, &session.home, &cwd).await;
     }
 
@@ -4907,7 +5057,10 @@ impl Chat {
         if self.search.is_some() {
             return self.search_key(code, modifiers);
         }
-        // Entity selector (ctrl+g / ↑↓ Enter Esc while focused) precedes the global Esc semantics.
+        // Main-view agent management and the compact entity selector take precedence over global Esc/editing.
+        if self.agent_manager_key(code, modifiers) {
+            return true;
+        }
         if self.entity_key(code, modifiers) {
             return true;
         }
@@ -5624,6 +5777,13 @@ impl Chat {
                     .tasks_cache
                     .iter()
                     .any(|t| t.status == TodoStatus::InProgress))
+            || (self.agent_manager.is_some()
+                && self
+                    .session
+                    .agents
+                    .list()
+                    .iter()
+                    .any(|status| status.state == crate::agents::AgentState::Running))
             || self.update_anim_active()
     }
 
@@ -5813,6 +5973,18 @@ impl Chat {
         })
     }
 
+    pub fn token_rate_label(&self) -> Option<String> {
+        if !self.busy {
+            return None;
+        }
+        self.token_rate
+            .label(std::time::Instant::now(), self.motion_off)
+    }
+
+    pub fn context_usage(&self) -> crate::context_usage::ContextUsage {
+        self.context_usage
+    }
+
     /// Input-area rendered rows (with the ▋ caret) — the single source for the row-count model and rendering:
     /// chrome height is counted from it and assembly emits rows from it.
     ///
@@ -5871,17 +6043,19 @@ impl Chat {
             .collect()
     }
 
-    /// Refreshes the bottom entity-area snapshot (agent instances + channels). Dirty only on change.
+    /// Refreshes the bottom entity-area snapshot (running agents + channels). Dirty only on change.
     pub fn refresh_entities(&mut self) {
         let mut fresh: Vec<EntityRow> = self
             .session
             .agents
             .list()
             .into_iter()
+            .filter(|s| s.state == crate::agents::AgentState::Running)
             .map(|s| EntityRow::Agent {
                 name: s.name,
                 state: s.state.label(),
-                description: s.description,
+                model: s.model,
+                thinking: s.thinking,
             })
             .collect();
         fresh.extend(
@@ -5896,135 +6070,406 @@ impl Chat {
                 }),
         );
         if fresh != self.entities {
-            // Clamp the selection when the list shrinks.
-            if let Some(i) = self.entity_focus
-                && i >= fresh.len()
-            {
-                self.entity_focus = fresh.len().checked_sub(1);
+            if let Some(selected) = self.entity_focus {
+                let agents = fresh
+                    .iter()
+                    .filter(|entity| matches!(entity, EntityRow::Agent { .. }))
+                    .count();
+                self.entity_focus = (agents > 0).then(|| selected.min(agents - 1));
             }
             self.entities = fresh;
             self.dirty = true;
         }
     }
 
-    /// Bottom entity area: collapsed = a one-line summary (dim); focused = a per-row list with `❯` selection +
-    /// action hints. Takes no rows when there are no entities.
+    fn running_agent_rows(&self) -> Vec<&EntityRow> {
+        self.entities
+            .iter()
+            .filter(|entity| matches!(entity, EntityRow::Agent { .. }))
+            .collect()
+    }
+
+    /// Bottom entity area: a compact presence summary, or a selectable running-agent list.
     pub fn entity_rows(&self, width: usize) -> Vec<Line> {
+        if let Some(selected) = self.entity_focus {
+            let agents = self.running_agent_rows();
+            if agents.is_empty() {
+                return Vec::new();
+            }
+            let cap = ENTITY_ROWS_MAX;
+            let selected = selected.min(agents.len() - 1);
+            let start = selected.saturating_sub(cap.saturating_sub(1));
+            let mut rows = agents
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(cap)
+                .map(|(index, entity)| {
+                    let EntityRow::Agent {
+                        name,
+                        state,
+                        model,
+                        thinking,
+                    } = entity
+                    else {
+                        unreachable!("running-agent list contains only agents")
+                    };
+                    let prefix = if index == selected { "❯ " } else { "  " };
+                    let style = if index == selected {
+                        SegStyle::fg(self.theme.permission)
+                    } else {
+                        SegStyle::fg(self.theme.inactive)
+                    };
+                    Line::styled(
+                        one_line(
+                            &format!(
+                                "{prefix}◉ {name} · {model} · {} · {state}",
+                                thinking.as_deref().unwrap_or("off")
+                            ),
+                            width,
+                        ),
+                        style,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if agents.len() > cap {
+                rows.push(Line::styled(
+                    format!("  … {} running agents", agents.len()),
+                    SegStyle::fg(self.theme.inactive),
+                ));
+            }
+            rows.push(Line::styled(
+                "  ↑↓ select · enter opens DM · esc closes".to_string(),
+                SegStyle::fg(self.theme.inactive),
+            ));
+            return rows;
+        }
         if self.entities.is_empty() {
             return Vec::new();
         }
-        let glyph = |e: &EntityRow| match e {
-            EntityRow::Agent { .. } => "◉",
-            EntityRow::Channel { .. } => "◇",
-        };
-        let brief = |e: &EntityRow| match e {
-            EntityRow::Agent { name, state, .. } => format!("◉ {name}({state})"),
-            EntityRow::Channel { name, seq, frozen } => {
-                format!("◇ #{name}({seq}{})", if *frozen { "❄" } else { "" })
-            }
-        };
-        let Some(selected) = self.entity_focus else {
-            let summary = self
-                .entities
-                .iter()
-                .map(brief)
-                .collect::<Vec<_>>()
-                .join(" · ");
-            return vec![Line::styled(
-                one_line(&format!("  {summary} — ctrl+g to view"), width),
-                SegStyle::fg(self.theme.inactive),
-            )];
-        };
-        let mut rows = Vec::new();
-        // Keep the selection visible: the window slides around selected.
-        let cap = ENTITY_ROWS_MAX;
-        let start = selected.saturating_sub(cap.saturating_sub(1));
-        for (i, e) in self.entities.iter().enumerate().skip(start).take(cap) {
-            let focused = i == selected;
-            let detail = match e {
+        let summary = self
+            .entities
+            .iter()
+            .map(|e| match e {
                 EntityRow::Agent {
                     name,
                     state,
-                    description,
-                } => format!("{} {name} · {state} · {description}", glyph(e)),
-                EntityRow::Channel { name, seq, frozen } => format!(
-                    "{} #{name} · {seq} msgs{}",
-                    glyph(e),
-                    if *frozen { " · frozen" } else { "" }
+                    model,
+                    thinking,
+                } => format!(
+                    "◉ {name} · {model} · {} · {state}",
+                    thinking.as_deref().unwrap_or("off")
                 ),
-            };
-            let style = if focused {
-                SegStyle::fg(self.theme.permission)
-            } else {
-                SegStyle::fg(self.theme.inactive)
-            };
-            let prefix = if focused { "❯ " } else { "  " };
-            rows.push(Line::styled(
-                one_line(&format!("{prefix}{detail}"), width),
-                style,
-            ));
-        }
-        if self.entities.len() > cap {
-            rows.push(Line::styled(
-                format!("  … {} total", self.entities.len()),
-                SegStyle::fg(self.theme.inactive),
-            ));
-        }
-        rows.push(Line::styled(
-            "  ↑↓ select · enter opens · esc closes".to_string(),
+                EntityRow::Channel { name, seq, frozen } => {
+                    format!("◇ #{name}({seq}{})", if *frozen { "❄" } else { "" })
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        vec![Line::styled(
+            one_line(
+                &format!("  {summary} — ↑↓ select agent · ctrl+g workspace · ctrl+b manage"),
+                width,
+            ),
             SegStyle::fg(self.theme.inactive),
-        ));
-        rows
+        )]
     }
 
-    /// Entity selector keys: ctrl+g toggles focus; while focused, ↑↓ move, Enter opens,
-    /// Esc closes. Returns whether consumed.
+    /// Ctrl+G opens the full workspace. Plain ↑/↓ focuses running agents and Enter opens a DM.
     pub fn entity_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         if code == KeyCode::Char('g') && ctrl {
-            self.refresh_entities();
-            if self.entities.is_empty() {
-                self.notice = Some(
-                    "no subagent instances or channels yet (they appear after the Agent tool spawns one)",
-                );
-                self.notice_until = Some(std::time::Instant::now() + CTRL_C_WINDOW);
-            } else if self.entity_focus.is_some() {
-                self.entity_focus = None;
-            } else {
-                self.entity_focus = Some(0);
-            }
+            self.entity_focus = None;
+            self.open_entity = Some(EntityOpen::Workspace);
             self.dirty = true;
             return true;
         }
-        let Some(i) = self.entity_focus else {
+        if self.entity_focus.is_none()
+            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && matches!(code, KeyCode::Up | KeyCode::Down)
+            && self.input.is_empty()
+        {
+            self.refresh_entities();
+            let agents = self.running_agent_rows();
+            if agents.is_empty() {
+                return false;
+            }
+            self.entity_focus = Some(if code == KeyCode::Up {
+                agents.len() - 1
+            } else {
+                0
+            });
+            self.dirty = true;
+            return true;
+        }
+        let Some(selected) = self.entity_focus else {
             return false;
         };
+        let agents = self.running_agent_rows();
+        if agents.is_empty() {
+            self.entity_focus = None;
+            return false;
+        }
         match code {
             KeyCode::Up => {
-                self.entity_focus = Some(i.saturating_sub(1));
-                self.dirty = true;
-                true
+                self.entity_focus = Some(selected.saturating_sub(1));
             }
             KeyCode::Down => {
-                self.entity_focus = Some((i + 1).min(self.entities.len().saturating_sub(1)));
-                self.dirty = true;
-                true
+                self.entity_focus = Some((selected + 1).min(agents.len() - 1));
             }
             KeyCode::Enter => {
-                self.open_entity = self.entities.get(i).map(|e| match e {
-                    EntityRow::Agent { name, .. } => EntityOpen::Agent(name.clone()),
-                    EntityRow::Channel { name, .. } => EntityOpen::Channel(name.clone()),
+                self.open_entity = agents.get(selected).and_then(|entity| match entity {
+                    EntityRow::Agent { name, .. } => Some(EntityOpen::Agent(name.clone())),
+                    EntityRow::Channel { .. } => None,
                 });
                 self.entity_focus = None;
-                self.dirty = true;
-                true
             }
-            KeyCode::Esc => {
-                self.entity_focus = None;
-                self.dirty = true;
-                true
+            KeyCode::Esc => self.entity_focus = None,
+            _ => return false,
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// Main-view entry for running background-agent management.
+    pub fn agent_manager_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+        if self.agent_manager.is_none() && code == KeyCode::Char('b') && ctrl {
+            self.agent_manager = Some(AgentManager::List { selected: 0 });
+            self.entity_focus = None;
+            self.dirty = true;
+            return true;
+        }
+        let Some(mut manager) = self.agent_manager.take() else {
+            return false;
+        };
+        let running = self
+            .session
+            .agents
+            .list()
+            .into_iter()
+            .filter(|status| status.state == crate::agents::AgentState::Running)
+            .collect::<Vec<_>>();
+        let keep = match &mut manager {
+            AgentManager::List { selected } => {
+                *selected = (*selected).min(running.len().saturating_sub(1));
+                match code {
+                    KeyCode::Up => {
+                        *selected = selected.saturating_sub(1);
+                        true
+                    }
+                    KeyCode::Down => {
+                        *selected = (*selected + 1).min(running.len().saturating_sub(1));
+                        true
+                    }
+                    KeyCode::Enter => {
+                        if let Some(status) = running.get(*selected) {
+                            manager = AgentManager::Detail {
+                                name: status.name.clone(),
+                            };
+                        }
+                        true
+                    }
+                    KeyCode::Char('x') => {
+                        if let Some(status) = running.get(*selected) {
+                            self.stop_agent_from_manager(&status.name);
+                        }
+                        true
+                    }
+                    KeyCode::Esc => false,
+                    _ => {
+                        self.agent_manager = Some(manager);
+                        return true;
+                    }
+                }
             }
-            _ => false,
+            AgentManager::Detail { name } => match code {
+                KeyCode::Char('x') => {
+                    self.stop_agent_from_manager(name);
+                    false
+                }
+                KeyCode::Left | KeyCode::Esc => {
+                    manager = AgentManager::List { selected: 0 };
+                    true
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => false,
+                _ => {
+                    self.agent_manager = Some(manager);
+                    return true;
+                }
+            },
+        };
+        if keep {
+            self.agent_manager = Some(manager);
+        }
+        self.dirty = true;
+        true
+    }
+
+    fn stop_agent_from_manager(&mut self, name: &str) {
+        match self.session.agents.stop(name) {
+            Ok((watch_id, dropped)) => {
+                if let Some(id) = watch_id {
+                    self.session.watch.set_state(
+                        id,
+                        WatchState::Cancelled,
+                        Some("stopped".to_string()),
+                        None,
+                    );
+                }
+                self.push_warning(if dropped == 0 {
+                    format!("stopped {name}")
+                } else {
+                    format!("stopped {name} · {dropped} queued instructions discarded")
+                });
+                self.notice_until = Some(std::time::Instant::now() + CTRL_C_WINDOW);
+                self.refresh_entities();
+            }
+            Err(error) => self.push_warning(error),
+        }
+    }
+
+    /// Rows for the main-view manager overlay.
+    pub fn agent_manager_rows(&self, width: usize) -> Vec<Row> {
+        let Some(manager) = &self.agent_manager else {
+            return Vec::new();
+        };
+        let statuses = self.session.agents.list();
+        let running = statuses
+            .iter()
+            .filter(|status| status.state == crate::agents::AgentState::Running)
+            .collect::<Vec<_>>();
+        match manager {
+            AgentManager::List { selected } => {
+                let mut rows = vec![Row::new(Line::styled(
+                    format!("Background agents · {} running", running.len()),
+                    SegStyle::fg(self.theme.text).bold(),
+                ))];
+                if running.is_empty() {
+                    rows.push(Row::new(Line::styled(
+                        "No agents currently running",
+                        SegStyle::fg(self.theme.inactive),
+                    )));
+                } else {
+                    let selected = (*selected).min(running.len() - 1);
+                    let start = selected.saturating_sub(AGENT_MANAGER_ROWS_MAX - 1);
+                    for (index, status) in running
+                        .iter()
+                        .enumerate()
+                        .skip(start)
+                        .take(AGENT_MANAGER_ROWS_MAX)
+                    {
+                        let activity = status
+                            .recent_activity
+                            .last()
+                            .map(String::as_str)
+                            .unwrap_or("initializing…");
+                        let prefix = if index == selected { "❯ " } else { "  " };
+                        let stats = format_agent_stats(status);
+                        rows.push(Row::new(Line::styled(
+                            one_line(
+                                &format!(
+                                    "{prefix}◉ {} · {} · {} · {activity}",
+                                    status.name, status.description, stats
+                                ),
+                                width.saturating_sub(2),
+                            ),
+                            SegStyle::fg(if prefix == "❯ " {
+                                self.theme.permission
+                            } else {
+                                self.theme.text
+                            }),
+                        )));
+                    }
+                    if running.len() > AGENT_MANAGER_ROWS_MAX {
+                        rows.push(Row::new(Line::styled(
+                            format!("  … {} running agents", running.len()),
+                            SegStyle::fg(self.theme.inactive),
+                        )));
+                    }
+                }
+                rows.push(Row::new(Line::styled(
+                    "↑/↓ select · Enter details · x stop · Esc close",
+                    SegStyle::fg(self.theme.inactive),
+                )));
+                manager_box(rows, width, &self.theme)
+            }
+            AgentManager::Detail { name } => {
+                let status = statuses.iter().find(|status| &status.name == name);
+                let mut rows = vec![Row::new(Line::styled(
+                    status.map_or_else(
+                        || name.clone(),
+                        |s| format!("{} › {}", s.name, s.description),
+                    ),
+                    SegStyle::fg(self.theme.text).bold(),
+                ))];
+                if let Some(status) = status {
+                    rows.push(Row::new(Line::styled(
+                        format!("{} · {}", status.state.label(), format_agent_stats(status)),
+                        SegStyle::fg(self.theme.inactive),
+                    )));
+                    rows.push(Row::new(Line::empty()));
+                    rows.push(Row::new(Line::styled(
+                        "Progress",
+                        SegStyle::fg(self.theme.inactive).bold(),
+                    )));
+                    if status.recent_activity.is_empty() {
+                        rows.push(Row::new(Line::styled(
+                            "› initializing…",
+                            SegStyle::fg(self.theme.inactive),
+                        )));
+                    } else {
+                        for (index, activity) in status.recent_activity.iter().enumerate() {
+                            let prefix = if index + 1 == status.recent_activity.len() {
+                                "› "
+                            } else {
+                                "  "
+                            };
+                            rows.push(Row::new(Line::styled(
+                                one_line(&format!("{prefix}{activity}"), width.saturating_sub(2)),
+                                SegStyle::fg(if prefix == "› " {
+                                    self.theme.text
+                                } else {
+                                    self.theme.inactive
+                                }),
+                            )));
+                        }
+                    }
+                    rows.push(Row::new(Line::empty()));
+                    rows.push(Row::new(Line::styled(
+                        "Prompt",
+                        SegStyle::fg(self.theme.inactive).bold(),
+                    )));
+                    let prompt = if status.prompt.is_empty() {
+                        "(prompt unavailable)".to_string()
+                    } else {
+                        truncate_chars(&status.prompt, AGENT_PROMPT_CHARS_MAX)
+                    };
+                    let prompt_rows = wrap_words(&prompt, width.saturating_sub(4).max(1));
+                    for line in prompt_rows.iter().take(AGENT_PROMPT_ROWS_MAX) {
+                        rows.push(Row::new(Line::plain(line.clone())));
+                    }
+                    if prompt_rows.len() > AGENT_PROMPT_ROWS_MAX {
+                        rows.push(Row::new(Line::styled(
+                            format!(
+                                "… +{} prompt lines",
+                                prompt_rows.len() - AGENT_PROMPT_ROWS_MAX
+                            ),
+                            SegStyle::fg(self.theme.inactive),
+                        )));
+                    }
+                } else {
+                    rows.push(Row::new(Line::styled(
+                        "Agent is no longer available",
+                        SegStyle::fg(self.theme.inactive),
+                    )));
+                }
+                rows.push(Row::new(Line::styled(
+                    "←/Esc back · Enter close · x stop",
+                    SegStyle::fg(self.theme.inactive),
+                )));
+                manager_box(rows, width, &self.theme)
+            }
         }
     }
 
@@ -6659,10 +7104,73 @@ impl Chat {
     }
 }
 
+fn truncate_chars(text: &str, max: usize) -> String {
+    let mut chars = text.chars();
+    let mut out = chars.by_ref().take(max).collect::<String>();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
+fn format_agent_stats(status: &crate::agents::AgentStatus) -> String {
+    let elapsed = status.elapsed.unwrap_or_default().as_secs();
+    let elapsed = if elapsed >= 60 {
+        format!("{}m {:02}s", elapsed / 60, elapsed % 60)
+    } else {
+        format!("{elapsed}s")
+    };
+    let tools = if status.tool_uses == 1 {
+        "tool"
+    } else {
+        "tools"
+    };
+    format!(
+        "{elapsed} · {} tokens · {} {tools}",
+        status.output_tokens, status.tool_uses
+    )
+}
+
+fn manager_box(rows: Vec<Row>, width: usize, theme: &Theme) -> Vec<Row> {
+    let inner = width.saturating_sub(4).max(1);
+    let border = "─".repeat(inner);
+    let mut out = Vec::with_capacity(rows.len() + 2);
+    out.push(Row::new(Line::styled(
+        format!("╭{border}╮"),
+        SegStyle::fg(theme.inactive),
+    )));
+    for row in rows {
+        let mut line = Line::styled("│ ", SegStyle::fg(theme.inactive));
+        let mut used = 0usize;
+        for seg in row.line.segs {
+            if used >= inner.saturating_sub(2) {
+                break;
+            }
+            let remaining = inner.saturating_sub(2 + used);
+            let text = one_line(&seg.text, remaining.max(1));
+            used += text_width(&text);
+            line.push_styled(text, seg.style);
+        }
+        line.push_styled(
+            format!("{} │", " ".repeat(inner.saturating_sub(used + 2))),
+            SegStyle::fg(theme.inactive),
+        );
+        let mut boxed = Row::new(line);
+        boxed.bg = row.bg;
+        boxed.padding_right = row.padding_right;
+        out.push(boxed);
+    }
+    out.push(Row::new(Line::styled(
+        format!("╰{border}╯"),
+        SegStyle::fg(theme.inactive),
+    )));
+    out
+}
+
 /// User message rows: a `❯ ` prefix + body wrapped to the width (multi-line pasted messages split into rows).
 /// One bubble Row per line — stuffing the whole message into a single height=1 View would clip
 /// everything after the first newline and detach the canvas height from the row model.
-fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<Row> {
+pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<Row> {
     // 2 prefix columns + 1 column of right padding inside the bubble.
     let body_width = width.saturating_sub(3).max(1);
     let style = SegStyle::fg(theme.text);
@@ -6686,24 +7194,26 @@ pub(crate) fn one_line(text: &str, width: usize) -> String {
 
 /// Text segment: the first reply line carries the `⏺ ` marker (CC assistant
 /// reply prefix); the rest map one line per row.
-fn text_el(theme: &Theme, reply: Vec<Line>) -> El {
+pub(crate) fn text_rows(theme: &Theme, reply: Vec<Line>) -> Vec<Row> {
     let claude = theme.claude;
-    El::Rows(
-        reply
-            .into_iter()
-            .enumerate()
-            .map(|(j, line)| {
-                if j == 0 {
-                    let mut styled = Line::styled("⏺ ", SegStyle::fg(claude));
-                    styled.image = line.image.clone();
-                    styled.segs.extend(line.segs);
-                    Row::new(styled)
-                } else {
-                    Row::new(line)
-                }
-            })
-            .collect(),
-    )
+    reply
+        .into_iter()
+        .enumerate()
+        .map(|(j, line)| {
+            if j == 0 {
+                let mut styled = Line::styled("⏺ ", SegStyle::fg(claude));
+                styled.image = line.image.clone();
+                styled.segs.extend(line.segs);
+                Row::new(styled)
+            } else {
+                Row::new(line)
+            }
+        })
+        .collect()
+}
+
+fn text_el(theme: &Theme, reply: Vec<Line>) -> El {
+    El::Rows(text_rows(theme, reply))
 }
 
 /// Welcome card body (CC WelcomeBox): a starred greeting, the two commands
@@ -6930,6 +7440,7 @@ mod tests {
     /// shared with other tests). cwd points at the same home: the persistence paths of /model /think /theme etc.
     /// write into `{cwd}/.bingo` and must never pollute the repo's real config.
     fn test_chat_home(home: std::path::PathBuf) -> Chat {
+        let _ = std::fs::create_dir_all(&home);
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (asks_tx, asks_rx) = mpsc::unbounded_channel();
         let session = Arc::new(Session {
@@ -6942,6 +7453,7 @@ mod tests {
             settings: crate::settings::Settings::default(),
             system: Vec::new(),
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(home.clone())),
             home: home.clone(),
             // Hermetic: scoped writes must never touch the real user config.
             user_config_dir: home.join(".config"),
@@ -6955,7 +7467,7 @@ mod tests {
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         });
-        let mut chat = Chat::new(
+        Chat::new(
             session,
             events_tx,
             events_rx,
@@ -6964,9 +7476,44 @@ mod tests {
             Theme::dark(),
             crate::tui::theme::ThemeSetting::Auto,
             None,
-        );
-        chat.cwd = home.display().to_string();
-        chat
+        )
+    }
+
+    #[test]
+    fn slash_cd_updates_session_and_tool_context_cwd() {
+        let root =
+            std::env::temp_dir().join(format!("bingo-slash-cd-updates-{}", std::process::id()));
+        let start = root.join("start");
+        let target = root.join("target");
+        std::fs::create_dir_all(&start).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let target = std::fs::canonicalize(target).unwrap();
+        let mut chat = test_chat_home(start.clone());
+
+        assert_eq!(chat.session.cwd(), start);
+        assert!(chat.run_slash(&format!("cd {}", target.display())));
+        assert_eq!(chat.session.cwd(), target);
+        assert_eq!(chat.cwd, target.display().to_string());
+        let ctx =
+            crate::query::tool_context(&chat.session, &crate::query::headless_hooks()).unwrap();
+        assert_eq!(ctx.cwd, target);
+        assert!(all_slash_text(&chat).contains("✓ working directory:"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn slash_cd_rejects_missing_directory_without_changing_cwd() {
+        let root =
+            std::env::temp_dir().join(format!("bingo-slash-cd-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut chat = test_chat_home(root.clone());
+
+        assert!(chat.run_slash("cd missing"));
+        assert_eq!(chat.session.cwd(), root);
+        assert!(all_slash_text(&chat).contains("code=BAD_ARGUMENT"));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Banner truncation chain (update-banner spec §1.3): full / drop the available clause / command only / hidden.
@@ -7870,6 +8417,7 @@ mod tests {
             },
             system: Vec::new(),
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
             home: std::env::temp_dir(),
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
@@ -8209,6 +8757,8 @@ mod tests {
         chat.input = "/model deepseek-v4".to_string();
         chat.submit();
         assert_eq!(*chat.session.runtime.model.borrow(), "deepseek-v4");
+        assert_eq!(chat.context_usage.window, 128_000);
+        assert_eq!(chat.context_usage.used, 0);
         assert!(chat.slash_lines.join("\n").contains("deepseek-v4"));
         // No layer defines `model` → the USER layer gets it; the cwd stays
         // untouched (no conjured .bingo/ in arbitrary directories).
@@ -8244,9 +8794,11 @@ mod tests {
     fn slash_clear_resets_session() {
         let mut chat = test_chat();
         chat.messages.push(msg(Role::User, "hi"));
+        chat.context_usage = crate::context_usage::ContextUsage::new(90_000, 200_000);
         chat.input = "/clear".to_string();
         chat.submit();
         assert!(chat.messages.is_empty(), "UI messages cleared");
+        assert_eq!(chat.context_usage.used, 0);
         assert!(
             chat.session.runtime.transcript.borrow().is_some(),
             "new transcript"
@@ -8387,10 +8939,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let home = tmp.join("home");
         let t_a = crate::transcript::create(&home, &tmp).unwrap();
-        let _ = t_a.append(&crate::api::types::Message::user_text("a"));
+        let _ = t_a.append(&crate::api::types::Message::user_text("aaaa"));
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let t_b = crate::transcript::create(&home, &tmp).unwrap();
-        let _ = t_b.append(&crate::api::types::Message::user_text("b"));
+        let _ = t_b.append(&crate::api::types::Message::user_text("bbbb"));
         let mut chat = test_chat_home(home.clone());
         let _ = chat.session.runtime.transcript_tx.send(Some(t_a.clone()));
         let name_b = t_b.name();
@@ -8438,6 +8990,7 @@ mod tests {
             name_b,
             "Enter switches the session (snapshot by index)"
         );
+        assert!(chat.context_usage.used > 0, "resumed history is estimated");
 
         // The argument fast path stays.
         chat.input = format!("/resume {}", t_a.name());
@@ -9447,6 +10000,7 @@ mod tests {
             ("reset", "clear"),
             ("new", "clear"),
             ("model", "model"),
+            ("cd", "cd"),
             ("theme", "theme"),
             ("rename", "rename"),
             ("resume", "resume"),
@@ -12856,6 +13410,15 @@ mod tests {
         let out = chat.slash_lines.join("\n");
         assert!(out.contains("✓ thinking level set: xhigh"), "{out}");
 
+        chat.set_input("/model deepseek-v4");
+        chat.submit();
+        assert_eq!(*chat.session.runtime.model.borrow(), "test-model");
+        assert!(
+            chat.slash_error_lines
+                .join("\n")
+                .contains("cannot switch models mid-turn")
+        );
+
         // Non-instant slash: queued with the slash marker (never sent as a prompt).
         chat.set_input("/clear");
         chat.submit();
@@ -12921,18 +13484,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Bottom entity area: ctrl+g focuses the selector, ↑↓ move, Enter opens, Esc closes;
-    /// collapsed state is a one-line summary; no entities → no rows and ctrl+g gives a hint.
+    /// Bottom entity area lists only running entities with their engine; Ctrl+G
+    /// opens the full workspace directly instead of focusing an inline selector.
     #[test]
-    fn entity_selector_picks_agent_and_channel() {
+    fn entity_area_filters_idle_agents_and_ctrl_g_opens_workspace() {
         let mut chat = test_chat();
-        chat.width = 80;
-        // No entities: takes no rows; ctrl+g shows a hint.
-        assert!(chat.entity_rows(80).is_empty());
+        chat.width = 100;
+        assert!(chat.entity_rows(100).is_empty());
+
+        let running = chat.session.clone();
+        let _ = running.runtime.model_tx.send("gpt-5.6-sol".to_string());
+        let _ = running.runtime.thinking_tx.send(Some("max".to_string()));
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "research".into(),
+            running,
+        );
+        chat.session.agents.insert(
+            "reviewer",
+            crate::agents::AgentKind::Hire,
+            None,
+            "review".into(),
+            chat.session.clone(),
+        );
+        let _ = chat.session.agents.finish("reviewer", Vec::new(), 0);
+        chat.session
+            .channels
+            .create("table", vec![], crate::channels::ChannelMode::Serial)
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        chat.refresh_entities();
+        assert_eq!(chat.entities.len(), 2, "running agent plus channel");
+        assert!(
+            chat.entities
+                .iter()
+                .all(|e| !matches!(e, EntityRow::Agent { name, .. } if name == "reviewer")),
+            "idle agents stay out of the compact entity area"
+        );
+        let summary = chat.entity_rows(100)[0].plain_text();
+        assert!(
+            summary.contains("◉ scout · gpt-5.6-sol · max · running"),
+            "{summary}"
+        );
+        assert!(summary.contains("◇ #table(0)"), "{summary}");
+
         assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
-        assert!(chat.notice.is_some(), "empty-state hint");
-        assert!(chat.entity_focus.is_none());
-        // Create one agent instance + one channel.
+        assert_eq!(chat.open_entity, Some(EntityOpen::Workspace));
+    }
+
+    /// Running agents can be selected from the entity area and Enter opens that exact DM.
+    #[test]
+    fn entity_area_selects_running_agent_and_enter_opens_dm() {
+        let mut chat = test_chat();
         chat.session.agents.insert(
             "scout",
             crate::agents::AgentKind::Hire,
@@ -12940,45 +13545,150 @@ mod tests {
             "research".into(),
             chat.session.clone(),
         );
-        chat.session
-            .channels
-            .create("table", vec![], crate::channels::ChannelMode::Serial)
-            .unwrap_or_else(|e| panic!("{e}"));
+        chat.session.agents.insert(
+            "reviewer",
+            crate::agents::AgentKind::Hire,
+            None,
+            "review".into(),
+            chat.session.clone(),
+        );
         chat.refresh_entities();
-        assert_eq!(chat.entities.len(), 2);
-        // Collapsed: one summary line containing both.
-        let rows = chat.entity_rows(80);
-        assert_eq!(rows.len(), 1);
-        let summary = rows[0].plain_text();
-        assert!(
-            summary.contains("◉ scout(running)") && summary.contains("◇ #table(0)"),
-            "{summary}"
-        );
-        // Focused: per-row list + ❯ selection + hint row.
-        assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+
+        assert!(chat.on_key(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(chat.entity_focus, Some(0));
-        let rows = chat.entity_rows(80);
-        let joined: Vec<String> = rows.iter().map(|l| l.plain_text()).collect();
-        assert!(joined[0].starts_with("❯ ◉ scout"), "{joined:?}");
         assert!(
-            joined
-                .last()
-                .unwrap_or(&String::new())
-                .contains("enter opens")
+            chat.entity_rows(100)[0]
+                .plain_text()
+                .contains("❯ ◉ reviewer")
         );
-        // ↓ to the channel, Enter opens it.
-        assert!(chat.on_key(KeyCode::Down, KeyModifiers::empty()));
-        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(chat.on_key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(chat.entity_focus, Some(1));
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(chat.open_entity, Some(EntityOpen::Agent("scout".into())));
+        assert_eq!(chat.entity_focus, None);
+    }
+
+    /// Ctrl+B owns list/detail navigation and x stops the selected running agent.
+    #[test]
+    fn agent_manager_lists_opens_details_and_stops_agents() {
+        let mut chat = test_chat();
+        chat.session.agents.insert(
+            "alpha",
+            crate::agents::AgentKind::Hire,
+            None,
+            "first agent".into(),
+            chat.session.clone(),
+        );
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "inspect the code".into(),
+            chat.session.clone(),
+        );
+        chat.session
+            .agents
+            .set_prompt("scout", "Find the rendering seam".into());
+        chat.session.agents.set_progress_snapshot(
+            "scout",
+            crate::agents::AgentProgress {
+                started_at: Some(std::time::Instant::now()),
+                output_tokens: 123,
+                tool_uses: 2,
+                recent_activity: vec!["⏺Read(src/tui/chat.rs)".into()],
+            },
+        );
+
+        assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        let list = chat
+            .agent_manager_rows(100)
+            .iter()
+            .map(|row| row.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(list.contains("Background agents · 2 running"), "{list}");
+        assert!(list.contains("scout · inspect the code"), "{list}");
+        assert!(list.contains("123 tokens · 2 tools"), "{list}");
+        assert!(list.contains("Read(src/tui/chat.rs)"), "{list}");
+        assert!(chat.on_key(KeyCode::Down, KeyModifiers::NONE));
+        assert!(chat.on_key(KeyCode::Char('x'), KeyModifiers::NONE));
+        let statuses = chat.session.agents.list();
         assert_eq!(
-            chat.open_entity,
-            Some(EntityOpen::Channel("table".into())),
-            "channel selected"
+            statuses
+                .iter()
+                .find(|status| status.name == "scout")
+                .map(|status| status.state),
+            Some(crate::agents::AgentState::Stopped),
+            "x stops the selected row rather than the first row"
         );
-        assert!(chat.entity_focus.is_none(), "focus exits after opening");
-        // After refocusing, Esc only closes the selector (does not trigger global Esc semantics).
-        let _ = chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL);
-        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
-        assert!(chat.entity_focus.is_none());
+        assert_eq!(
+            statuses
+                .iter()
+                .find(|status| status.name == "alpha")
+                .map(|status| status.state),
+            Some(crate::agents::AgentState::Running)
+        );
+        assert!(
+            chat.agent_manager_rows(100).len() <= AGENT_MANAGER_ROWS_MAX + 4,
+            "manager list stays bounded"
+        );
+
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "inspect the code".into(),
+            chat.session.clone(),
+        );
+        chat.session
+            .agents
+            .set_prompt("scout", "Find the rendering seam".into());
+        chat.session.agents.set_progress_snapshot(
+            "scout",
+            crate::agents::AgentProgress {
+                started_at: Some(std::time::Instant::now()),
+                output_tokens: 123,
+                tool_uses: 2,
+                recent_activity: vec!["⏺Read(src/tui/chat.rs)".into()],
+            },
+        );
+        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            chat.agent_manager,
+            Some(AgentManager::Detail {
+                name: "scout".into()
+            })
+        );
+        let detail = chat
+            .agent_manager_rows(100)
+            .iter()
+            .map(|row| row.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(detail.contains("scout › inspect the code"), "{detail}");
+        assert!(detail.contains("Prompt"), "{detail}");
+        assert!(detail.contains("Find the rendering seam"), "{detail}");
+        assert!(detail.contains("Progress"), "{detail}");
+        assert!(
+            chat.agent_manager_rows(100).len() <= AGENT_PROMPT_ROWS_MAX + 12,
+            "detail prompt is bounded"
+        );
+        assert!(
+            chat.has_dynamic_rows(),
+            "an open running detail keeps elapsed live"
+        );
+
+        assert!(chat.on_key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(chat.agent_manager.is_none());
+        assert_eq!(
+            chat.session
+                .agents
+                .list()
+                .iter()
+                .find(|status| status.name == "scout")
+                .map(|status| status.state),
+            Some(crate::agents::AgentState::Stopped)
+        );
     }
 
     /// Queues beyond the cap fold into one row (row count feeds chrome, so it must be bounded).

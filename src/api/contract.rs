@@ -22,6 +22,8 @@ pub enum ClientError {
     InvalidApiKey(String),
     #[error("API error: HTTP {status}: {body}")]
     Api { status: u16, body: String },
+    #[error("API context overflow: HTTP {status}: {body}")]
+    ContextOverflow { status: u16, body: String },
     #[error("API stream error: {0}")]
     Stream(String),
     #[error("transport error: {0}")]
@@ -42,6 +44,42 @@ pub enum ClientError {
     Config(String),
 }
 
+impl ClientError {
+    pub fn from_response(status: u16, body: String) -> Self {
+        if is_context_overflow(status, &body) {
+            Self::ContextOverflow { status, body }
+        } else {
+            Self::Api { status, body }
+        }
+    }
+}
+
+fn is_context_overflow(status: u16, body: &str) -> bool {
+    if status != 400 && status != 413 {
+        return false;
+    }
+    let body = body.to_ascii_lowercase();
+    [
+        "context length",
+        "context window",
+        "context limit",
+        "max context",
+        "maximum context",
+        "input exceeds",
+        "input is too long",
+        "input too long",
+        "prompt is too long",
+        "prompt too long",
+        "too many tokens",
+        "token limit",
+    ]
+    .iter()
+    .any(|feature| body.contains(feature))
+        || (body.contains("maximum")
+            && body.contains("token")
+            && (body.contains("prompt") || body.contains("input")))
+}
+
 impl From<crate::api::auth::AuthError> for ClientError {
     fn from(e: crate::api::auth::AuthError) -> Self {
         ClientError::Auth(e.to_string())
@@ -60,6 +98,7 @@ impl crate::error::ErrorCode for ClientError {
             ClientError::Api { status: 401, .. } => "AUTH_REQUIRED",
             ClientError::Api { status: 403, .. } => "PERMISSION_DENIED",
             ClientError::Api { status: 429, .. } => "RATE_LIMITED",
+            ClientError::ContextOverflow { .. } => "CONTEXT_OVERFLOW",
             // Remaining non-success responses (4xx outside the above / 5xx):
             // server-interaction anomaly, action = "retry later".
             ClientError::Api { .. } => "SERVER_ERROR",
@@ -447,6 +486,48 @@ impl AssistantAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_overflow_response_classification() {
+        for (status, body) in [
+            (
+                400,
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 211000 tokens > 200000 maximum"}}"#,
+            ),
+            (
+                400,
+                r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 132450 tokens."}}"#,
+            ),
+            (
+                413,
+                r#"{"error":{"message":"The input exceeds the context window for this model."}}"#,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    ClientError::from_response(status, body.to_string()),
+                    ClientError::ContextOverflow { status: actual, .. } if actual == status
+                ),
+                "status={status}, body={body}"
+            );
+        }
+    }
+
+    #[test]
+    fn context_overflow_requires_400_or_413_and_a_message_feature() {
+        assert!(matches!(
+            ClientError::from_response(500, "maximum context length".to_string()),
+            ClientError::Api { status: 500, .. }
+        ));
+        assert!(matches!(
+            ClientError::from_response(400, "invalid request".to_string()),
+            ClientError::Api { status: 400, .. }
+        ));
+        assert!(matches!(
+            ClientError::from_response(413, "request too large".to_string()),
+            ClientError::Api { status: 413, .. }
+        ));
+    }
 
     #[test]
     fn thinking_level_parse_and_display() {

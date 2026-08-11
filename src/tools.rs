@@ -27,8 +27,8 @@ pub async fn assemble_tools(
     // Skill/agent-definition scanning is synchronous IO: move it off the runtime thread
     // (on a cache hit it's just a few stats).
     let home = session.home.clone();
+    let cwd = session.cwd();
     let (skills, agent_defs) = tokio::task::spawn_blocking(move || {
-        let cwd = std::env::current_dir().unwrap_or_default();
         (
             crate::skills::load_skills(&home, &cwd),
             crate::agents::load_agent_defs(&home, &cwd),
@@ -144,6 +144,7 @@ mod tests {
             settings,
             system: Vec::new(),
             depth,
+            cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
             home: std::env::temp_dir(),
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,

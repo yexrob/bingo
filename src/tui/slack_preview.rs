@@ -22,6 +22,8 @@ mod preview {
     fn snap() -> Snapshot {
         Snapshot {
             workspace: "bingo".into(),
+            main_model: "main-model".into(),
+            main_thinking: Some("high".into()),
             channels: vec![
                 ChannelItem {
                     name: "dev-room".into(),
@@ -52,19 +54,28 @@ mod preview {
                 DmItem {
                     name: "scout".into(),
                     state: AgentState::Running,
+                    model: "gpt-5.6-sol".into(),
+                    thinking: Some("max".into()),
                     description: "code reconnaissance".into(),
+                    last_active: std::time::Duration::from_secs(3),
                     unread: 0,
                 },
                 DmItem {
                     name: "qa".into(),
                     state: AgentState::Idle,
+                    model: "claude-sonnet".into(),
+                    thinking: Some("high".into()),
                     description: "acceptance".into(),
+                    last_active: std::time::Duration::from_secs(125),
                     unread: 3,
                 },
                 DmItem {
                     name: "ui-ux".into(),
                     state: AgentState::Stopped,
+                    model: "claude-haiku".into(),
+                    thinking: None,
                     description: "interface review".into(),
+                    last_active: std::time::Duration::from_secs(7_200),
                     unread: 0,
                 },
             ],
@@ -93,8 +104,8 @@ mod preview {
                 from: "scout".into(),
                 you: false,
                 at: now - 3580,
-                text: "⏺ Read(src/tui/term.rs:410)".into(),
-                kind: PostKind::Tool,
+                text: "I traced it to src/tui/term.rs:410.".into(),
+                kind: PostKind::Said,
             },
             Post {
                 from: "user".into(),
@@ -130,12 +141,15 @@ mod preview {
         let w = main.width as usize;
         let conv = ws.open.clone().unwrap_or(Conv::Channel("dev-room".into()));
         let header = header_rows(&snap, &conv, &pal, w);
-        let (composer, _) = composer_rows(ws, &conv, &pal, w);
+        let (composer, _) = composer_rows(ws, &conv, &pal, w, None, None);
         let viewport = h.saturating_sub(header.len() + composer.len()).max(1);
         // The text chip, not the portrait: a browser screenshot cannot show a
         // kitty placement, and a preview that silently dropped the gutter would
         // be measuring a layout the terminal never draws.
-        let content = message_rows(&posts(now), 4, &pal, w, &Avatars::default());
+        let content = match conv {
+            Conv::Dm(_) => dm_message_rows(&posts(now), 4, &pal, w, &Avatars::default(), theme),
+            Conv::Channel(_) => message_rows(&posts(now), 4, &pal, w, &Avatars::default()),
+        };
         let start = content.len().saturating_sub(viewport);
         let mut slice: Vec<_> = content.iter().skip(start).cloned().collect();
         while slice.len() < viewport {

@@ -78,16 +78,35 @@ pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, token
     if messages.len() <= KEEP_RECENT {
         return false;
     }
-    let threshold = autocompact_threshold_for(&session.runtime.model.borrow().clone());
-    if tokens < threshold {
+    if tokens < autocompact_threshold_for(&session.runtime.model.borrow().clone()) {
         return false;
     }
+    compact(session, messages).await
+}
 
+pub async fn compact_after_overflow(session: &Session, messages: &mut Vec<Message>) -> bool {
+    if session.compact_failures.load(Ordering::SeqCst) >= MAX_COMPACT_FAILURES {
+        if !session.quiet {
+            eprintln!(
+                "[bingo] warning: overflow compaction disabled after {MAX_COMPACT_FAILURES} consecutive failures"
+            );
+        }
+        return false;
+    }
+    if messages.len() <= KEEP_RECENT {
+        session.compact_failures.fetch_add(1, Ordering::SeqCst);
+        return false;
+    }
+    compact(session, messages).await
+}
+
+async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {
     let split = safe_split(messages, messages.len() - KEEP_RECENT);
 
     run_pre_compact(
         &session.settings.hooks,
         permission_mode_str(session.permission_mode),
+        &session.cwd(),
     )
     .await;
 
@@ -131,6 +150,7 @@ pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, token
     run_post_compact(
         &session.settings.hooks,
         permission_mode_str(session.permission_mode),
+        &session.cwd(),
     )
     .await;
     eprintln!("[bingo] compacted {split} old messages");
@@ -140,7 +160,7 @@ pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, token
 /// Local estimate when count_tokens is unavailable: ~4 chars per token.
 /// Non-Anthropic endpoints (DeepSeek/ollama) lack this API; silently returning
 /// would mean auto-compact never triggers and context grows until it explodes.
-fn estimate_tokens(system: &[SystemBlock], messages: &[Message]) -> u64 {
+pub(crate) fn estimate_tokens(system: &[SystemBlock], messages: &[Message]) -> u64 {
     let mut chars: usize = system.iter().map(|b| b.text.chars().count()).sum();
     for message in messages {
         for block in &message.content {
@@ -188,14 +208,25 @@ impl TokenGate {
         self.turns_since_exact = 0;
     }
 
+    pub(crate) fn current(&self, estimate: u64) -> u64 {
+        match self.last {
+            Some((exact, estimate_then)) => {
+                exact.saturating_add(estimate.saturating_sub(estimate_then))
+            }
+            None => estimate,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.last = None;
+        self.turns_since_exact = 0;
+    }
+
     /// Turns without an exact count: extrapolate from the last exact value by the
     /// estimate delta.
     fn project(&mut self, estimate: u64) -> u64 {
         self.turns_since_exact = self.turns_since_exact.saturating_add(1);
-        match self.last {
-            Some((exact, estimate_then)) => exact + estimate.saturating_sub(estimate_then),
-            None => estimate,
-        }
+        self.current(estimate)
     }
 }
 
@@ -205,7 +236,7 @@ pub async fn check_and_compact(
     session: &Session,
     messages: &mut Vec<Message>,
     gate: &mut TokenGate,
-) {
+) -> u64 {
     let estimate = estimate_tokens(&session.system, messages);
     let tokens = if gate.wants_exact(estimate) {
         let model = session.runtime.model.borrow().clone();
@@ -244,12 +275,14 @@ pub async fn check_and_compact(
                     "[bingo] warning: auto-compact disabled after {MAX_COMPACT_FAILURES} consecutive failures"
                 );
             }
-        } else {
-            maybe_compact(session, messages, tokens).await;
+        } else if maybe_compact(session, messages, tokens).await {
+            gate.reset();
+            return estimate_tokens(&session.system, messages);
         }
     } else if tokens >= warning_threshold_for(&model) && !session.quiet {
         eprintln!("[bingo] warning: context at {tokens} tokens, auto-compact at {threshold}");
     }
+    tokens
 }
 
 fn permission_mode_str(mode: PermissionMode) -> &'static str {
@@ -396,6 +429,7 @@ mod tests {
             5_100,
             "extrapolated from the estimated delta"
         );
+        assert_eq!(gate.current(1_200), 5_200);
 
         assert!(
             gate.wants_exact(1_000 + COUNT_TOKENS_GROWTH),
