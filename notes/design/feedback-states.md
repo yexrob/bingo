@@ -1,6 +1,6 @@
 # Feedback States Specification
 
-> Version: v1.18 · Status: in effect (2026-08-07)
+> Version: v1.35 · Status: in effect (2026-08-11)
 > Scope: the unified design conventions for every user-visible feedback state in bingo. The GUI (TUI) and CLI (headless) sides share a single source; qa acceptance anchors are at the end.
 
 ## General principles
@@ -280,3 +280,5 @@ Web-side conventions (for a future web frontend to reuse):
 - v1.33 (2026-08-11): `/cd <dir>` follows the existing slash feedback tiers — a successful session-directory switch is a transient confirmation, while a busy turn, missing arguments, missing paths, and non-directory targets use the structured `BAD_ARGUMENT` error row and leave the current directory unchanged.
 
 - v1.34 (2026-08-11): issue #33 narrows the entity strip and DM feedback surface. The compact strip lists running agents and channels only; running agents expose model/thinking/state, and Ctrl+G opens the full workspace directly instead of entering an inline selector. DM history and live tails render only user messages and agent prose: tool activity is deliberately absent there, while the trailing working indicator remains during a hidden tool wait so a long turn never becomes silent. DM headers expose model/thinking/state; channel headers list model/thinking when the complete names fit and otherwise use one bounded aggregate, preserving the composer on short terminals. Channel message rendering itself is unchanged.
+
+- v1.35 (2026-08-11): issue #35 removes SendMessage's sender-turn latency. The receipt stays immediate and retains its queued/delivered/answered/dropped contract; an idle receiver is claimed and shown Running before the tool returns, while a running receiver gets an inbox signal and folds everything waiting into its context between tool rounds. The batching boundary is therefore the receiver's actual inbox drain rather than the sender's turn end. The existing acknowledgement watchdog and stop/delete feedback are unchanged.

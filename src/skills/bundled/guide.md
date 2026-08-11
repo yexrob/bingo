@@ -210,12 +210,12 @@ Example (.bingo/settings.json):
 - **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
   auto-suffix -2/-3), shown in the transcript as `◉ name · task`; history is kept after completion, and the main agent can
   SendMessage to continue, or manage with AgentControl list/messages/stop/delete.
-  **Messaging**: SendMessage returns a `message_id` and only queues — delivery happens at the turn boundary, where
-  every message sent to the same instance in that turn is folded into one prompt (the receiver reads them together
-  rather than one per turn). Queued is not an acknowledgement: `AgentControl(action=messages, agent=…)` reports each
+  **Messaging**: SendMessage returns a `message_id` after enqueueing and dispatches immediately: an idle instance starts
+  now, while a running instance drains its inbox between tool rounds. Everything waiting when the receiver drains is
+  folded into one prompt. Queued is not an acknowledgement: `AgentControl(action=messages, agent=…)` reports each
   message as delivered (with the run it landed in), still queued (with its age), or dropped because the instance was
   stopped. Stopping or deleting an instance discards its inbox and says how many undelivered messages died with it.
-  A run chain that fails leaves its queued messages in place — the next turn boundary retries them.
+  A run chain that fails leaves its queued messages in place — the recovery dispatcher retries them.
   **Delivered is not answered**: an instance can read a message and end its turn without a word, which from the outside
   looks the same as a hang. The acknowledgement is the reply, so `messages` reports four states — queued, delivered but
   unanswered, answered (naming the run that spoke), dropped — and a turn that produces text answers everything that
@@ -223,7 +223,7 @@ Example (.bingo/settings.json):
   **Chasing a reply**: the harness does that polling for you, and it is on by default — every SendMessage arms a 300s
   check unless told otherwise. Once the wait elapses it re-reads the same record; while the sender is still owed an
   answer it puts a follow-up in the receiver's inbox (naming which silence it is, and asking for a reply rather than
-  repeating the instruction) and retries the boundary flush, at most 3 rounds. An answer inside the wait is silent;
+  repeating the instruction) and triggers the dispatcher again, at most 3 rounds. An answer inside the wait is silent;
   anything else — chased into replying, dropped, or still quiet after the last round — comes back as a task
   notification. `ack_timeout: <seconds>` tunes the wait (5-3600: shorter when actively waiting, longer for a task that
   will be quiet for a while), and `ack_timeout: 0` switches the check off for a message needing no answer.
@@ -278,8 +278,8 @@ Example (.bingo/settings.json):
   blank columns with the name intact. Switched off, the transcript has no band and a subagent's watch row keeps its `◉` — the
   switch governs the main chat only, never these workspace views. Wake-up scaffolding the
   runtime injected (a relayed channel message, the task reminder) collapses to one dim line instead of being quoted as a message. The composer sends: in a channel it posts as `user` (same
-  delivery path as Post, members woken normally; rendering = read, so serial never bounces you), in a DM it queues on the
-  instance and flushes at the turn boundary (shown as a pending message until then). Keys: Tab switches between the message
+  delivery path as Post, members woken normally; rendering = read, so serial never bounces you), in a DM it uses the same
+  immediate dispatch path as SendMessage (shown as pending only until the receiver claims it). Keys: Tab switches between the message
   list and the composer, alt+↑↓ switches conversation, Ctrl+K is the quick switcher, Esc returns.
 - **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/`channels[{name,mode?,messageLimit?,members?}]`/`teams[{name?,path}]`/
   `members[{name,agent,avatar?,model?,provider?,thinking?}]`, members reference AgentDefs; `name` is the name shown on the member's messages, so make it a person's name, and `avatar` pins one of the bundled portraits.
@@ -352,17 +352,17 @@ Example (.bingo/settings.json):
 - **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
   auto-suffix -2/-3), shown in the transcript as `◉ name · task`; history is kept after completion, and the main agent can
   SendMessage to continue, or manage with AgentControl list/messages/stop/delete.
-  **Messaging**: SendMessage returns a `message_id` and only queues — delivery happens at the turn boundary, and
-  every message sent to the same instance in that turn is folded into one prompt delivered at once, rather than one per turn. Queued is not an acknowledgement:
+  **Messaging**: SendMessage returns a `message_id` after enqueueing and dispatches immediately: an idle instance starts now,
+  while a running instance drains its inbox between tool rounds. Everything waiting when the receiver drains is folded into one prompt. Queued is not an acknowledgement:
   `AgentControl(action=messages, agent=…)` reports each message as delivered (with which run it landed in), still queued (with its wait time),
   or dropped because the instance was stopped. stop/delete clears the mailbox and reports how many undelivered instructions were dropped with it;
-  when the run chain fails the messages stay in the mailbox and are redelivered at the next turn boundary.
+  when the run chain fails the messages stay in the mailbox and the recovery dispatcher retries them.
   **Delivered ≠ replied**: an instance can fully read a message, finish a turn without a word, and look identical to a dead one from outside. The receipt is based on "reply",
   so `messages` reports four states — queued, read but unanswered, replied (noting which turn opened its mouth), dropped; as soon as a turn produces any text,
   every message that instance had read before counts as replied (including those read in the silence of an earlier turn).
   **Automatic reply chase**: this round of checking is done by the system, and it's **on by default** — every SendMessage carries a 300s check unless explicitly disabled.
   When the wait elapses it re-reads the same receipt; as long as a reply is still owed to the sender, it drops a follow-up into the recipient's mailbox (stating which kind of silence it was, asking only for a reply,
-  not re-sending the original instruction) and retries the boundary delivery, at most 3 rounds. A reply within the wait stays silent throughout; speaking only after being chased, being dropped, or staying silent through the last round
+  not re-sending the original instruction) and triggers the dispatcher again, at most 3 rounds. A reply within the wait stays silent throughout; speaking only after being chased, being dropped, or staying silent through the last round
   are all reported to the main agent as task notifications. `ack_timeout: <seconds>` adjusts the wait (5-3600: shorten it when the reply is expected soon, lengthen it when the work is known to be quiet and long),
   and `ack_timeout: 0` disables the check for that message.
   **Sending images to subagents**: restate the `#[image N]` marker in the Agent prompt or SendMessage text — the attachment table belongs to the session,
@@ -398,8 +398,8 @@ Example (.bingo/settings.json):
   above it carrying the speaker's portrait and name (`main` for the hub, `You` for your own); message bodies are unchanged underneath.
   Off, the transcript has no band and a subagent's watch row keeps its `◉`; the switch governs the main chat only. Runtime-injected wake scaffolding (channel-message relays,
   task reminders) collapses into a single dim hint line instead of being quoted as a whole message. Sending from the bottom input box: in a channel you speak as `user` (the same delivery
-  path as Post, waking members normally; rendered counts as read, serial won't bounce you), DMs queue into the instance's inbox and are
-  delivered at the turn boundary (shown as pending before delivery). Keys: Tab switches between the message list and the input box, alt+↑↓ switches conversations,
+  path as Post, waking members normally; rendered counts as read, serial won't bounce you), DMs use SendMessage's immediate dispatcher
+  (shown as pending only until the receiver claims them). Keys: Tab switches between the message list and the input box, alt+↑↓ switches conversations,
   Ctrl+K quick-jumps, Esc returns.
 - **agent team** (project-level crew): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
   `members[{name,agent,avatar?,model?,provider?,thinking?}]`, members reference AgentDef; `name` is the name shown on the member's messages — give it a person's name, not a role code; `avatar` pins the portrait.

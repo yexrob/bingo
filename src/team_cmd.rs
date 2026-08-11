@@ -297,8 +297,7 @@ fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
     let (team, dir) = (node.def.name.clone(), node.dir.clone());
     match session.agents.deliver(member, message, Vec::new(), None) {
         Ok(_) => {
-            // A slash command has no turn boundary behind it: deliver now, so the user sees the
-            // assignment start instead of waiting for the hub's next turn.
+            // Use the same dispatcher as SendMessage so a slash-command assignment starts now.
             crate::tool::agent::flush_agent_inbox(session, &session.watch);
             // Dispatch audit: append-only decision record (zero model cost), filed with the
             // team the member actually belongs to.

@@ -55,6 +55,45 @@ pub struct QueryOutcome {
     pub aborted: bool,
 }
 
+struct InboxWake {
+    instance: String,
+    rx: watch::Receiver<u64>,
+    output_chars: usize,
+    claimed: Vec<crate::agents::InboxItem>,
+}
+
+impl InboxWake {
+    fn for_session(session: &Arc<Session>) -> Option<Self> {
+        session.instance.clone().map(|instance| Self {
+            instance,
+            rx: session.agents.subscribe_inbox(),
+            output_chars: 0,
+            claimed: Vec::new(),
+        })
+    }
+
+    fn take(&mut self, session: &Arc<Session>) -> Vec<crate::agents::InboxItem> {
+        let _ = self.rx.borrow_and_update();
+        let items = session
+            .agents
+            .take_running(&self.instance, self.output_chars);
+        self.claimed.extend(items.iter().cloned());
+        items
+    }
+
+    fn restore(&mut self, session: &Arc<Session>) {
+        session
+            .agents
+            .restore_inbox(&self.instance, std::mem::take(&mut self.claimed));
+    }
+
+    async fn changed(&mut self) {
+        if self.rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 /// Recovery injection after max_tokens truncation.
 const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
 const MAX_TOKENS_RESUME_PROMPT: &str =
@@ -385,6 +424,7 @@ async fn one_turn(
     tools: &[Box<dyn Tool>],
     ui: &mut UiHooks,
     mut cancel: Option<&mut watch::Receiver<bool>>,
+    mut inbox: Option<&mut InboxWake>,
 ) -> Result<Turn, QueryError> {
     let model = session.runtime.model.borrow().clone();
     let thinking = session.runtime.thinking.borrow().clone();
@@ -414,37 +454,71 @@ async fn one_turn(
         stop_reason: None,
         aborted: true,
     };
-    let mut stream = match &mut cancel {
-        Some(cancel) => {
-            // Clear the version and acknowledge an already-set signal before entering select:
-            // otherwise a new receiver's changed() is ready immediately, select picks a branch
-            // at random, and roughly half the turns would drop the already-issued HTTP stream
-            // future and resend (double billing + latency).
-            if *cancel.borrow_and_update() {
-                return Ok(aborted_turn(&acc));
+    let stream_request = session.client.stream(&request);
+    futures_util::pin_mut!(stream_request);
+    let mut stream = loop {
+        let result = match (cancel.as_deref_mut(), inbox.as_deref_mut()) {
+            (Some(cancel), Some(inbox)) => {
+                if *cancel.borrow_and_update() {
+                    return Ok(aborted_turn(&acc));
+                }
+                tokio::select! {
+                    stream = &mut stream_request => Some(stream),
+                    _ = cancel_requested(cancel) => return Ok(aborted_turn(&acc)),
+                    _ = inbox.changed() => None,
+                }
             }
-            tokio::select! {
-                stream = session.client.stream(&request) => stream?,
-                _ = cancel_requested(cancel) => return Ok(aborted_turn(&acc)),
+            (Some(cancel), None) => {
+                if *cancel.borrow_and_update() {
+                    return Ok(aborted_turn(&acc));
+                }
+                tokio::select! {
+                    stream = &mut stream_request => Some(stream),
+                    _ = cancel_requested(cancel) => return Ok(aborted_turn(&acc)),
+                }
             }
+            (None, Some(inbox)) => tokio::select! {
+                stream = &mut stream_request => Some(stream),
+                _ = inbox.changed() => None,
+            },
+            (None, None) => Some((&mut stream_request).await),
+        };
+        if let Some(stream) = result {
+            break stream?;
         }
-        None => session.client.stream(&request).await?,
     };
     let mut tool_uses = Vec::new();
     let mut aborted = false;
     loop {
-        let event = match &mut cancel {
-            Some(cancel) => tokio::select! {
+        let event = match (cancel.as_deref_mut(), inbox.as_deref_mut()) {
+            (Some(cancel), Some(inbox)) => tokio::select! {
+                maybe = stream.next() => maybe,
+                _ = cancel_requested(cancel) => {
+                    aborted = true;
+                    None
+                }
+                _ = inbox.changed() => continue,
+            },
+            (Some(cancel), None) => tokio::select! {
                 maybe = stream.next() => maybe,
                 _ = cancel_requested(cancel) => {
                     aborted = true;
                     None
                 }
             },
-            None => stream.next().await,
+            (None, Some(inbox)) => tokio::select! {
+                maybe = stream.next() => maybe,
+                _ = inbox.changed() => continue,
+            },
+            (None, None) => stream.next().await,
         };
         let Some(event) = event else { break };
         let event = event?;
+        if let StreamEvent::TextDelta { text, .. } = &event
+            && let Some(inbox) = inbox.as_deref_mut()
+        {
+            inbox.output_chars += text.chars().count();
+        }
         (ui.on_event)(&event);
         if let Err(e) = acc.push(&event) {
             return Err(QueryError::Protocol(e));
@@ -782,14 +856,32 @@ async fn query_loop(
     let mut empty_retry_count = 0u32;
     let mut stop_hook_fired = false;
     let mut gate = TokenGate::new();
+    let mut inbox_wake = InboxWake::for_session(session);
     normalize_synthetic_bash_calls(&mut messages);
     loop {
+        if let Some(inbox) = inbox_wake.as_mut() {
+            let items = inbox.take(session);
+            if !items.is_empty() {
+                let (prompt, images) =
+                    crate::tool::agent::absorb_inbox(&session.channels, &inbox.instance, &items);
+                record(
+                    session,
+                    &mut messages,
+                    user_message_with_images(
+                        &prompt,
+                        &images,
+                        session.client.supports_images(),
+                        &session.client.image_capable_providers(),
+                    ),
+                    ui,
+                );
+            }
+        }
         check_and_compact(session, &mut messages, &mut gate).await;
         // task_reminder: no Task tool for 10 turns + 10 turns since the last reminder.
         maybe_inject_task_reminder(session, &mut messages).await;
-        // Messages queued by the previous step are delivered here, one batch per recipient:
-        // the SendMessage tool only enqueues, so several messages sent in the same step reach
-        // the receiver together instead of one per turn.
+        // Recovery sweep: event-driven SendMessage claims idle recipients immediately, while
+        // this catches mail left behind by a failed run or deposited through another path.
         crate::tool::agent::flush_agent_inbox(session, &ctx.watch);
         // Temporary hires are released once their task is done (D53) — after the flush, so a
         // follow-up sent in the previous round has already refilled the inbox and renewed the
@@ -834,7 +926,24 @@ async fn query_loop(
                 mail.join("\n")
             )));
         }
-        let turn = one_turn(session, &messages, tools, &mut *ui, cancel_rx.as_mut()).await?;
+        let turn = match one_turn(
+            session,
+            &messages,
+            tools,
+            &mut *ui,
+            cancel_rx.as_mut(),
+            inbox_wake.as_mut(),
+        )
+        .await
+        {
+            Ok(turn) => turn,
+            Err(error) => {
+                if let Some(inbox) = inbox_wake.as_mut() {
+                    inbox.restore(session);
+                }
+                return Err(error);
+            }
+        };
         if turn.aborted {
             // Interrupted: the whole turn is discarded (assistant incomplete); neither
             // executed nor pending tools are filled back.
@@ -858,6 +967,9 @@ async fn query_loop(
                     (ui.on_warning)("model returned an empty response; retrying once".to_string());
                 }
                 continue;
+            }
+            if let Some(inbox) = inbox_wake.as_mut() {
+                inbox.restore(session);
             }
             return Err(QueryError::Protocol(
                 "the model returned no response after the stream ended; retry the turn".to_string(),
@@ -1588,6 +1700,52 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_delayed_api(
+        responses: Vec<(std::time::Duration, String)>,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut remaining = responses;
+        remaining.reverse();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 64 * 1024];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..read]).to_string();
+                let (content_type, delay, body) = if head.contains("/v1/messages/count_tokens") {
+                    (
+                        "application/json",
+                        std::time::Duration::ZERO,
+                        "{\"input_tokens\":10}".to_string(),
+                    )
+                } else {
+                    let _ = request_tx.send(head);
+                    let (delay, body) = remaining.pop().unwrap_or_default();
+                    ("text/event-stream", delay, body)
+                };
+                tokio::time::sleep(delay).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (format!("http://{addr}"), request_rx)
+    }
+
+    fn request_body(head: &str) -> serde_json::Value {
+        let body = head.split("\r\n\r\n").nth(1).unwrap_or_default();
+        serde_json::from_str(body).unwrap_or_else(|e| panic!("invalid request body: {e}\n{head}"))
+    }
+
     fn sse(events: &[(&str, String)]) -> String {
         events
             .iter()
@@ -1668,9 +1826,8 @@ mod tests {
         ])
     }
 
-    fn bash_tool_turn(id: &str, command: &str) -> String {
-        let input = serde_json::to_string(&serde_json::json!({ "command": command }).to_string())
-            .unwrap_or_default();
+    fn tool_turn(id: &str, name: &str, input: serde_json::Value) -> String {
+        let input = serde_json::to_string(&input.to_string()).unwrap_or_default();
         sse(&[
             (
                 "message_start",
@@ -1679,7 +1836,7 @@ mod tests {
             (
                 "content_block_start",
                 format!(
-                    r#"{{"index":0,"content_block":{{"type":"tool_use","id":"{id}","name":"Bash","input":{{}}}}}}"#
+                    r#"{{"index":0,"content_block":{{"type":"tool_use","id":"{id}","name":"{name}","input":{{}}}}}}"#
                 ),
             ),
             (
@@ -1695,6 +1852,10 @@ mod tests {
             ),
             ("message_stop", "{}".into()),
         ])
+    }
+
+    fn bash_tool_turn(id: &str, command: &str) -> String {
+        tool_turn(id, "Bash", serde_json::json!({ "command": command }))
     }
 
     fn test_session(base_url: String, transcript: Option<Transcript>) -> Arc<Session> {
@@ -1740,6 +1901,105 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn request_texts(request: &serde_json::Value) -> Vec<&str> {
+        request["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|message| {
+                message["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|block| block["text"].as_str())
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn running_agent_absorbs_a_batch_at_the_next_tool_round() {
+        let (base_url, mut requests) = spawn_delayed_api(vec![
+            (
+                std::time::Duration::from_millis(250),
+                tool_turn("tu_1", "TaskList", serde_json::json!({})),
+            ),
+            (std::time::Duration::ZERO, text_turn("done", "end_turn")),
+        ])
+        .await;
+        let base = test_session(base_url, None);
+        let session = Arc::new(Session {
+            depth: 1,
+            instance: Some("worker".into()),
+            ..base.as_ref().clone()
+        });
+        session.agents.insert(
+            "worker",
+            crate::agents::AgentKind::Hire,
+            None,
+            "work".into(),
+            session.clone(),
+        );
+        session.agents.next_run("worker");
+        let mut ui = headless_hooks();
+        let tools = crate::tools::assemble_tools(&session, &mut ui.on_warning).await;
+        let ctx = tool_context(&session, &ui).unwrap_or_else(|e| panic!("{e}"));
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move {
+                query_loop(
+                    &session,
+                    vec![Message::user_text("initial")],
+                    &mut ui,
+                    &tools,
+                    &ctx,
+                    None,
+                )
+                .await
+            }
+        });
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), requests.recv())
+            .await
+            .unwrap_or_else(|_| panic!("first request never started"))
+            .unwrap_or_else(|| panic!("request server stopped"));
+        assert!(request_texts(&request_body(&first)).contains(&"initial"));
+        session
+            .agents
+            .deliver("worker", "first", Vec::new(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        session
+            .agents
+            .deliver("worker", "second", Vec::new(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(session.agents.list()[0].pending, 2);
+
+        let second = tokio::time::timeout(std::time::Duration::from_secs(3), requests.recv())
+            .await
+            .unwrap_or_else(|_| panic!("receiver did not start its next tool round"))
+            .unwrap_or_else(|| panic!("request server stopped"));
+        let body = request_body(&second);
+        let texts = request_texts(&body);
+        let batch = texts
+            .iter()
+            .find(|text| text.contains("first") || text.contains("second"))
+            .unwrap_or_else(|| panic!("no inbox batch in second request: {body}"));
+        assert!(
+            batch.contains("first") && batch.contains("second"),
+            "{batch}"
+        );
+        let acks = session
+            .agents
+            .acks_of("worker")
+            .unwrap_or_else(|| unreachable!());
+        assert!(
+            acks.iter()
+                .all(|ack| matches!(ack.state, crate::agents::AckState::Delivered { run: 1 })),
+            "{acks:?}"
+        );
+        let outcome = run.await.unwrap_or_else(|e| panic!("{e}"));
+        assert!(outcome.is_ok(), "{outcome:?}");
     }
 
     #[test]
