@@ -142,7 +142,7 @@ pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, token
 /// Local estimate when count_tokens is unavailable: ~4 chars per token.
 /// Non-Anthropic endpoints (DeepSeek/ollama) lack this API; silently returning
 /// would mean auto-compact never triggers and context grows until it explodes.
-fn estimate_tokens(system: &[SystemBlock], messages: &[Message]) -> u64 {
+pub(crate) fn estimate_tokens(system: &[SystemBlock], messages: &[Message]) -> u64 {
     let mut chars: usize = system.iter().map(|b| b.text.chars().count()).sum();
     for message in messages {
         for block in &message.content {
@@ -190,14 +190,25 @@ impl TokenGate {
         self.turns_since_exact = 0;
     }
 
+    pub(crate) fn current(&self, estimate: u64) -> u64 {
+        match self.last {
+            Some((exact, estimate_then)) => {
+                exact.saturating_add(estimate.saturating_sub(estimate_then))
+            }
+            None => estimate,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.last = None;
+        self.turns_since_exact = 0;
+    }
+
     /// Turns without an exact count: extrapolate from the last exact value by the
     /// estimate delta.
     fn project(&mut self, estimate: u64) -> u64 {
         self.turns_since_exact = self.turns_since_exact.saturating_add(1);
-        match self.last {
-            Some((exact, estimate_then)) => exact + estimate.saturating_sub(estimate_then),
-            None => estimate,
-        }
+        self.current(estimate)
     }
 }
 
@@ -207,7 +218,7 @@ pub async fn check_and_compact(
     session: &Session,
     messages: &mut Vec<Message>,
     gate: &mut TokenGate,
-) {
+) -> u64 {
     let estimate = estimate_tokens(&session.system, messages);
     let tokens = if gate.wants_exact(estimate) {
         let model = session.runtime.model.borrow().clone();
@@ -246,12 +257,14 @@ pub async fn check_and_compact(
                     "[bingo] warning: auto-compact disabled after {MAX_COMPACT_FAILURES} consecutive failures"
                 );
             }
-        } else {
-            maybe_compact(session, messages, tokens).await;
+        } else if maybe_compact(session, messages, tokens).await {
+            gate.reset();
+            return estimate_tokens(&session.system, messages);
         }
     } else if tokens >= warning_threshold_for(&model) && !session.quiet {
         eprintln!("[bingo] warning: context at {tokens} tokens, auto-compact at {threshold}");
     }
+    tokens
 }
 
 fn permission_mode_str(mode: PermissionMode) -> &'static str {
@@ -398,6 +411,7 @@ mod tests {
             5_100,
             "extrapolated from the estimated delta"
         );
+        assert_eq!(gate.current(1_200), 5_200);
 
         assert!(
             gate.wants_exact(1_000 + COUNT_TOKENS_GROWTH),

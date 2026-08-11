@@ -157,8 +157,10 @@ struct SubagentOutput {
 /// Sub-agent UI: captures text, renders nothing, and forwards permission prompts to the
 /// session that owns the UI. The cell tracks the number of characters produced (for interval
 /// progress checks of background agents).
+#[allow(clippy::too_many_arguments)]
 fn subagent_hooks(
     output: SubagentOutput,
+    token_rate: Arc<Mutex<crate::token_rate::TokenRateSampler>>,
     cell: Arc<AgentCell>,
     watch: Arc<WatchRegistry>,
     id: WatchId,
@@ -181,29 +183,61 @@ fn subagent_hooks(
     let tool_instance = instance.clone();
     let done_registry = registry.clone();
     let done_instance = instance.clone();
+    let round_rate = token_rate.clone();
+    let context_agents = registry.clone();
+    let context_instance = instance.clone();
+    let round_chars = Arc::new(Mutex::new(0u64));
+    let event_round_chars = round_chars.clone();
     UiHooks {
-        on_event: Box::new(move |event| match event {
-            crate::api::contract::StreamEvent::TextDelta { text, .. } => {
-                event_registry.touch(&event_instance);
-                if let Ok(mut output) = text_output.lock() {
-                    output.push_str(text);
-                    if let Ok(mut live) = live_output.lock() {
-                        crate::agents::LiveBlock::push_text(&mut live, text);
+        on_event: Box::new(move |event| {
+            let tokens = match event {
+                crate::api::contract::StreamEvent::TextDelta { text, .. } => {
+                    event_registry.touch(&event_instance);
+                    let tokens = {
+                        let mut chars = event_round_chars.lock().unwrap_or_else(|e| e.into_inner());
+                        *chars = chars.saturating_add(text.chars().count() as u64);
+                        chars.div_ceil(4)
+                    };
+                    if let Ok(mut output) = text_output.lock() {
+                        output.push_str(text);
+                        if let Ok(mut live) = live_output.lock() {
+                            crate::agents::LiveBlock::push_text(&mut live, text);
+                        }
+                        cell.record_chars(text.chars().count());
+                        // Feed produced text into the condition engine (notify_on hit → signal notification).
+                        watch.feed_content(id, text);
                     }
-                    cell.record_chars(text.chars().count());
-                    // Feed produced text into the condition engine (notify_on hit → signal notification).
-                    watch.feed_content(id, text);
+                    tokens
                 }
-            }
-            crate::api::contract::StreamEvent::StopReason {
-                output_tokens: Some(tokens),
-                ..
-            } => {
-                if let Ok(mut progress) = progress_output.lock() {
-                    progress.add_output_tokens(*tokens);
+                crate::api::contract::StreamEvent::ThinkingDelta { thinking, .. } => {
+                    let mut chars = event_round_chars.lock().unwrap_or_else(|e| e.into_inner());
+                    *chars = chars.saturating_add(thinking.chars().count() as u64);
+                    chars.div_ceil(4)
                 }
+                crate::api::contract::StreamEvent::InputJsonDelta { partial_json, .. } => {
+                    let mut chars = event_round_chars.lock().unwrap_or_else(|e| e.into_inner());
+                    *chars = chars.saturating_add(partial_json.chars().count() as u64);
+                    chars.div_ceil(4)
+                }
+                crate::api::contract::StreamEvent::StopReason {
+                    output_tokens: Some(tokens),
+                    ..
+                } => {
+                    *event_round_chars.lock().unwrap_or_else(|e| e.into_inner()) =
+                        tokens.saturating_mul(4);
+                    if let Ok(mut progress) = progress_output.lock() {
+                        progress.add_output_tokens(*tokens);
+                    }
+                    *tokens
+                }
+                _ => return,
+            };
+            if let Ok(mut sampler) = token_rate.lock() {
+                sampler.observe_round(tokens, std::time::Instant::now());
             }
-            _ => {}
+        }),
+        on_context_usage: Arc::new(move |used, _window| {
+            context_agents.set_context_tokens(&context_instance, used);
         }),
         on_tool_ready: Box::new(move |name, input, _standalone| {
             tool_registry.touch(&tool_instance);
@@ -226,6 +260,10 @@ fn subagent_hooks(
         // A round boundary closes the open prose block, so the next round's first
         // sentence does not run into the previous round's last one.
         on_round_end: Box::new(move || {
+            *round_chars.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+            if let Ok(mut sampler) = round_rate.lock() {
+                sampler.finish_round();
+            }
             if let Ok(mut live) = round_live.lock()
                 && matches!(live.last(), Some(crate::agents::LiveBlock::Text(_)))
             {
@@ -547,8 +585,12 @@ pub(crate) fn spawn_agent_loop(
             if let Ok(mut progress) = progress.lock() {
                 progress.start_run();
             }
+            let token_rate = Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default()));
+            if let Ok(mut sampler) = token_rate.lock() {
+                sampler.start(std::time::Instant::now());
+            }
             loop_registry.set_prompt(&name, prompt.clone());
-            loop_registry.set_live(&name, Some(live.clone()));
+            loop_registry.set_live(&name, Some(live.clone()), Some(token_rate.clone()));
             loop_registry.set_progress(&name, Some(progress.clone()));
             let mut ui = subagent_hooks(
                 SubagentOutput {
@@ -556,6 +598,7 @@ pub(crate) fn spawn_agent_loop(
                     live: live.clone(),
                     progress,
                 },
+                token_rate,
                 run.1.clone(),
                 watch.clone(),
                 run.0,
@@ -567,7 +610,7 @@ pub(crate) fn spawn_agent_loop(
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let spoke = !text.trim().is_empty();
-                    loop_registry.set_live(&name, None);
+                    loop_registry.set_live(&name, None, None);
                     loop_registry.set_progress(&name, None);
                     watch.set_state(
                         run.0,
@@ -595,7 +638,7 @@ pub(crate) fn spawn_agent_loop(
                     }
                 }
                 Err(e) => {
-                    loop_registry.set_live(&name, None);
+                    loop_registry.set_live(&name, None, None);
                     loop_registry.set_progress(&name, None);
                     watch.set_state(
                         run.0,
@@ -1076,8 +1119,14 @@ impl Tool for AgentTool {
         if let Ok(mut progress) = progress.lock() {
             progress.start_run();
         }
+        let token_rate = Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default()));
+        if let Ok(mut sampler) = token_rate.lock() {
+            sampler.start(std::time::Instant::now());
+        }
         self.session.agents.set_prompt(&name, params.prompt.clone());
-        self.session.agents.set_live(&name, Some(live.clone()));
+        self.session
+            .agents
+            .set_live(&name, Some(live.clone()), Some(token_rate.clone()));
         self.session
             .agents
             .set_progress(&name, Some(progress.clone()));
@@ -1087,6 +1136,7 @@ impl Tool for AgentTool {
                 live: live.clone(),
                 progress,
             },
+            token_rate,
             cell.clone(),
             ctx.watch.clone(),
             id,
@@ -1103,7 +1153,7 @@ impl Tool for AgentTool {
             None,
         )
         .await;
-        self.session.agents.set_live(&name, None);
+        self.session.agents.set_live(&name, None, None);
         self.session.agents.set_progress(&name, None);
         match sync_run {
             Ok(outcome) => {
@@ -2670,6 +2720,7 @@ mod tests {
                 live,
                 progress: progress.clone(),
             },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
             Arc::new(AgentCell::new(registry.clone())),
             watch,
             id,
@@ -2729,6 +2780,7 @@ mod tests {
                 live: Arc::new(Mutex::new(Vec::new())),
                 progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
             },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
             Arc::new(AgentCell::new(registry.clone())),
             watch,
             id,
@@ -2787,6 +2839,7 @@ mod tests {
                 live: Arc::new(Mutex::new(Vec::new())),
                 progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
             },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
             Arc::new(AgentCell::new(registry.clone())),
             watch.clone(),
             id,
@@ -2806,6 +2859,7 @@ mod tests {
                 live: Arc::new(Mutex::new(Vec::new())),
                 progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
             },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
             Arc::new(AgentCell::new(registry.clone())),
             watch,
             id,

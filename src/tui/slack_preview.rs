@@ -141,7 +141,7 @@ mod preview {
         let w = main.width as usize;
         let conv = ws.open.clone().unwrap_or(Conv::Channel("dev-room".into()));
         let header = header_rows(&snap, &conv, &pal, w);
-        let (composer, _) = composer_rows(ws, &conv, &pal, w);
+        let (composer, _) = composer_rows(ws, &conv, &pal, w, None, None);
         let viewport = h.saturating_sub(header.len() + composer.len()).max(1);
         // The text chip, not the portrait: a browser screenshot cannot show a
         // kitty placement, and a preview that silently dropped the gutter would

@@ -376,6 +376,10 @@ struct Entry {
     live: Option<Arc<Mutex<Vec<LiveBlock>>>>,
     /// Progress sampled by the main TUI's background-task manager.
     progress: Option<Arc<Mutex<AgentProgress>>>,
+    /// Per-turn token-rate sampler, shared with the instance view.
+    token_rate: Option<Arc<Mutex<crate::token_rate::TokenRateSampler>>>,
+    /// Latest context-window usage reported for this instance.
+    context_tokens: u64,
 }
 
 const RECENT_AGENT_ACTIVITIES: usize = 5;
@@ -562,6 +566,8 @@ impl AgentRegistry {
                 watch_id: None,
                 live: None,
                 progress: None,
+                token_rate: None,
+                context_tokens: 0,
             },
         );
         self.sync_share(name);
@@ -614,12 +620,18 @@ impl AgentRegistry {
     }
 
     /// Streaming output buffer of the current turn (attached at turn start, detached at turn end).
-    pub fn set_live(&self, name: &str, live: Option<Arc<Mutex<Vec<LiveBlock>>>>) {
+    pub fn set_live(
+        &self,
+        name: &str,
+        live: Option<Arc<Mutex<Vec<LiveBlock>>>>,
+        token_rate: Option<Arc<Mutex<crate::token_rate::TokenRateSampler>>>,
+    ) {
         if let Some(entry) = self.lock().get_mut(name) {
             if live.is_some() {
                 entry.last_active = Instant::now();
             }
             entry.live = live;
+            entry.token_rate = token_rate;
         }
     }
 
@@ -663,6 +675,32 @@ impl AgentRegistry {
         self.lock()
             .get(name)
             .is_some_and(|entry| entry.session.cwd() == cwd)
+    }
+
+    pub fn token_rate_label(
+        &self,
+        name: &str,
+        now: std::time::Instant,
+        motion_off: bool,
+    ) -> Option<String> {
+        let rate = self.lock().get(name)?.token_rate.clone()?;
+        rate.lock().ok()?.label(now, motion_off)
+    }
+
+    pub fn set_context_tokens(&self, name: &str, tokens: u64) {
+        if let Some(entry) = self.lock().get_mut(name) {
+            entry.context_tokens = tokens;
+        }
+    }
+
+    pub fn context_usage(&self, name: &str) -> Option<crate::context_usage::ContextUsage> {
+        let inner = self.lock();
+        let entry = inner.get(name)?;
+        let model = entry.session.runtime.model.borrow().clone();
+        Some(crate::context_usage::ContextUsage::new(
+            entry.context_tokens,
+            crate::budget::context_window_for(&model),
+        ))
     }
 
     /// Instance depth (channel cohort check: only direct subagents with depth==1 may join a channel).

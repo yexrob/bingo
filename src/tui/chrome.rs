@@ -91,11 +91,9 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
         left.push(("! for shell mode".to_string(), theme.bash_border));
     }
     left.push((hints, theme.inactive));
+
     let model_name = chat.session.runtime.model.borrow().clone();
     let thinking = chat.session.runtime.thinking.borrow().clone();
-    // `/think` picker preview: while the menu is open the badge shows the browsed
-    // level with a `▸` suffix (would-be state) in the accent colour; committed
-    // badge has no suffix and stays dim.
     let (model, model_color) = if let Some(menu) = &chat.think_menu {
         let level = crate::tui::chat::THINK_LEVELS
             [menu.selected.min(crate::tui::chat::THINK_LEVELS.len() - 1)]
@@ -114,23 +112,59 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
         format!("{provider} · {model}")
     };
 
-    let mut line = Line::styled("  ", SegStyle::fg(theme.text));
-    let mut used = 2usize;
-    for (i, (text, color)) in left.iter().enumerate() {
-        if i > 0 {
-            line.push_styled(" ", SegStyle::fg(theme.inactive));
-            used += 1;
-        }
-        used += text_width(text);
-        line.push_styled(text.clone(), SegStyle::fg(*color));
+    let usage = chat.context_usage();
+    let usage_label = usage.label();
+    let usage_color = match usage.band() {
+        crate::context_usage::ContextUsageBand::Normal => theme.inactive,
+        crate::context_usage::ContextUsageBand::Warning => theme.warning,
+        crate::context_usage::ContextUsageBand::Danger => theme.error,
+    };
+    let rate = chat.token_rate_label();
+    let mut status = Line::empty();
+    if let Some(rate) = rate.as_deref() {
+        status.push_styled(rate, SegStyle::fg(theme.claude));
+        status.push_styled(" · ", SegStyle::fg(theme.inactive));
     }
-    // Right-align the model name (also leaving 2 columns on the right).
-    let gap = width.saturating_sub(used + text_width(&model) + 2).max(1);
+    status.push_styled(usage_label.clone(), SegStyle::fg(usage_color));
+
+    let content_width = width.saturating_sub(2);
+    if text_width(&status.plain_text()) > content_width {
+        status = Line::styled(usage_label, SegStyle::fg(usage_color));
+    }
+    if text_width(&status.plain_text()) > content_width {
+        status = Line::styled(
+            crate::tui::chat::one_line(&status.plain_text(), content_width),
+            SegStyle::fg(usage_color),
+        );
+    }
+    let status_width = text_width(&status.plain_text()).min(content_width);
+    let prefix_width = content_width.saturating_sub(status_width + 1);
+    let mut line = Line::empty();
+    if prefix_width > 0 {
+        let mut prefix = Line::styled("  ", SegStyle::fg(theme.text));
+        for (i, (text, color)) in left.iter().enumerate() {
+            if i > 0 {
+                prefix.push_styled(" ", SegStyle::fg(theme.inactive));
+            }
+            prefix.push_styled(text.clone(), SegStyle::fg(*color));
+        }
+        let left_text = crate::tui::chat::one_line(&prefix.plain_text(), prefix_width);
+        line = Line::styled(left_text.clone(), SegStyle::fg(theme.inactive));
+        let model_width = prefix_width.saturating_sub(text_width(&left_text) + 1);
+        if model_width > 0 {
+            let model = crate::tui::chat::one_line(&model, model_width);
+            let gap = prefix_width
+                .saturating_sub(text_width(&left_text) + text_width(&model))
+                .max(1);
+            line.push_styled(" ".repeat(gap), SegStyle::fg(theme.inactive));
+            line.push_styled(model, SegStyle::fg(model_color));
+        }
+    }
+    let gap = content_width.saturating_sub(text_width(&line.plain_text()) + status_width);
     line.push_styled(" ".repeat(gap), SegStyle::fg(theme.inactive));
-    line.push_styled(model, SegStyle::fg(model_color));
+    line.segs.extend(status.segs);
     Row::new(line)
 }
-
 /// Suggestion area: slash suggestions first, then the `/model` menu, then the `/think` menu.
 /// Row count and content share one source — they were once separate, causing chrome to underestimate and the canvas to overflow.
 fn suggestion_rows(
@@ -996,6 +1030,67 @@ mod tests {
         let text = row_text(&footer_row(&chat, 80));
         assert!(text.contains("⏸ plan mode on ·"), "{text}");
         assert!(text.contains("! for shell mode"), "{text}");
+    }
+
+    #[test]
+    fn footer_keeps_context_usage_idle_and_colors_thresholds() {
+        let mut chat = chat_at(100, 24);
+        chat.context_usage = crate::context_usage::ContextUsage::new(74_240, 128_000);
+        let normal = footer_row(&chat, 100);
+        let text = row_text(&normal);
+        assert!(text.contains("▓▓░░ 58% 74240/128k"), "{text}");
+        assert!(!text.contains("tok/s"), "{text}");
+        assert!(
+            normal
+                .line
+                .segs
+                .iter()
+                .any(|seg| seg.text.contains("58%") && seg.style.fg == Some(chat.theme.inactive))
+        );
+
+        chat.context_usage = crate::context_usage::ContextUsage::new(70, 100);
+        let warning = footer_row(&chat, 100);
+        assert!(
+            warning.line.segs.iter().any(|seg| {
+                seg.text.contains("70%") && seg.style.fg == Some(chat.theme.warning)
+            })
+        );
+
+        chat.context_usage = crate::context_usage::ContextUsage::new(91, 100);
+        let danger = footer_row(&chat, 100);
+        assert!(
+            danger
+                .line
+                .segs
+                .iter()
+                .any(|seg| { seg.text.contains("91%") && seg.style.fg == Some(chat.theme.error) })
+        );
+        assert!(text_width(&row_text(&footer_row(&chat, 8))) <= 8);
+    }
+
+    #[test]
+    fn footer_shows_context_usage_and_live_rate_together() {
+        let mut chat = chat_at(100, 24);
+        assert!(!row_text(&footer_row(&chat, 100)).contains("tok/s"));
+        assert!(row_text(&footer_row(&chat, 100)).contains("0% 0/200k"));
+
+        let start = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        chat.busy = true;
+        chat.token_rate.start(start);
+        chat.token_rate
+            .observe_round(8, start + std::time::Duration::from_millis(500));
+        chat.token_rate.observe_round(24, std::time::Instant::now());
+        let text = row_text(&footer_row(&chat, 100));
+        assert!(text.contains("tok/s"), "{text}");
+        assert!(text.contains("0% 0/200k"), "{text}");
+        assert!(text_width(&text) <= 100, "{text}");
+        assert!(
+            text.contains('▁') || text.contains('▃') || text.contains('▅') || text.contains('▇'),
+            "{text}"
+        );
+
+        chat.busy = false;
+        assert!(!row_text(&footer_row(&chat, 100)).contains("tok/s"));
     }
 
     /// Footer `/think` picker preview: while the menu is open the badge shows the
