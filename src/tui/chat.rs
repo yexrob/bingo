@@ -7482,9 +7482,8 @@ mod tests {
     #[test]
     fn slash_cd_updates_session_and_tool_context_cwd() {
         let root = std::env::temp_dir().join(format!(
-            "bingo-slash-cd-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            "bingo-slash-cd-updates-{}",
+            std::process::id()
         ));
         let start = root.join("start");
         let target = root.join("target");
@@ -7508,9 +7507,8 @@ mod tests {
     #[test]
     fn slash_cd_rejects_missing_directory_without_changing_cwd() {
         let root = std::env::temp_dir().join(format!(
-            "bingo-slash-cd-missing-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            "bingo-slash-cd-missing-{}",
+            std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
         let mut chat = test_chat_home(root.clone());
