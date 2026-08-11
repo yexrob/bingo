@@ -87,6 +87,9 @@ pub struct Settings {
     /// (`respondToBashCommands`, default true; false = pure execution, no model query).
     #[serde(rename = "respondToBashCommands")]
     pub respond_to_bash_commands: Option<bool>,
+    /// Maximum characters returned by the Bash tool (`bashOutputMaxChars`, default 48,000).
+    #[serde(rename = "bashOutputMaxChars")]
+    pub bash_output_max_chars: Option<usize>,
     /// Shell program (`shell`) for the Bash tool and hooks. Default per platform:
     /// macOS /bin/zsh, other Unix /bin/bash, Windows powershell.exe (PowerShell-family
     /// shells run with -Command; any other configured shell with -c, e.g. Git Bash).
@@ -325,6 +328,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     if let Some(respond) = layer.respond_to_bash_commands {
         base.respond_to_bash_commands = Some(respond);
     }
+    if let Some(max_chars) = layer.bash_output_max_chars {
+        base.bash_output_max_chars = Some(max_chars);
+    }
     if let Some(shell) = layer.shell {
         base.shell = Some(shell);
     }
@@ -408,6 +414,7 @@ pub const KNOWN_KEYS: &[&str] = &[
     "motion",
     "cacheControl",
     "respondToBashCommands",
+    "bashOutputMaxChars",
     "shell",
     "hooks",
     "mcpServers",
@@ -657,6 +664,7 @@ mod tests {
             "motion": "off",
             "cacheControl": true,
             "respondToBashCommands": false,
+            "bashOutputMaxChars": 12345,
             "shell": "/bin/fish",
             "hooks": {
                 "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "a"}]}],
@@ -726,6 +734,28 @@ mod tests {
         assert_eq!(settings.permission_mode.as_deref(), Some("plan"));
         assert_eq!(settings.hooks.pre_tool_use.len(), 1);
         assert_eq!(settings.hooks.pre_tool_use[0].hooks[0].command, "echo hi");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn merges_bash_output_max_chars() {
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-settings-bash-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write(
+            &tmp,
+            "user/bingo/settings.json",
+            r#"{"bashOutputMaxChars":20000}"#,
+        );
+        write(
+            &tmp,
+            ".bingo/settings.json",
+            r#"{"bashOutputMaxChars":32000}"#,
+        );
+
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.bash_output_max_chars, Some(32_000));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

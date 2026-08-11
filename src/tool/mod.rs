@@ -182,6 +182,8 @@ mod tests {
     use serde_json::json;
 
     use crate::tool::bash::BashTool;
+    use crate::tool::glob::GlobTool;
+    use crate::tool::grep::GrepTool;
     use crate::tool::read::ReadTool;
 
     #[test]
@@ -210,6 +212,42 @@ mod tests {
             schema["properties"]["file_path"]["description"],
             "File path to read (absolute or relative)"
         );
+    }
+
+    #[test]
+    fn file_tool_optional_parameters_stay_optional() {
+        let read = ReadTool::new().input_schema();
+        assert_eq!(read["required"], json!(["file_path"]));
+        for name in ["start_line", "end_line"] {
+            assert!(
+                read["properties"][name].is_object(),
+                "missing {name}: {read}"
+            );
+        }
+
+        let grep = GrepTool.input_schema();
+        assert_eq!(grep["required"], json!(["pattern"]));
+        for name in [
+            "context",
+            "case_insensitive",
+            "whole_word",
+            "fixed_string",
+            "files_with_matches",
+        ] {
+            assert!(
+                grep["properties"][name].is_object(),
+                "missing {name}: {grep}"
+            );
+        }
+
+        let glob = GlobTool.input_schema();
+        assert_eq!(glob["required"], json!(["pattern"]));
+        for name in ["exclude", "max_depth"] {
+            assert!(
+                glob["properties"][name].is_object(),
+                "missing {name}: {glob}"
+            );
+        }
     }
 
     #[test]

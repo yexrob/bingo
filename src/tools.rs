@@ -37,7 +37,12 @@ pub async fn assemble_tools(
     .await
     .unwrap_or_default();
     let mut tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(BashTool::new()),
+        Box::new(BashTool::with_output_max_chars(
+            session
+                .settings
+                .bash_output_max_chars
+                .unwrap_or(crate::tool::bash::DEFAULT_OUTPUT_MAX_CHARS),
+        )),
         Box::new(ReadTool::new()),
         Box::new(GlobTool),
         Box::new(GrepTool),
