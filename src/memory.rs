@@ -132,10 +132,10 @@ pub async fn extract_memory(session: &Session, messages: &[Message], home: &Path
     }
 
     let path = memory_file(home, cwd);
-    if let Err(e) = std::fs::create_dir_all(
-        path.parent()
-            .expect("memory file path always has a parent dir"),
-    ) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
         if !session.quiet {
             eprintln!("[bingo] memory: cannot create dir: {e}");
         }
