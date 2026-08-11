@@ -139,7 +139,7 @@ pub fn load_agent_defs(home: &Path, cwd: &Path) -> Vec<AgentDef> {
 /// Instance lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
-    /// Turn in progress (new messages queue and are delivered automatically at turn end).
+    /// Turn in progress (new messages queue and are absorbed between tool rounds).
     Running,
     /// Waiting for a command (SendMessage wakes it immediately; history is kept).
     Idle,
@@ -198,7 +198,7 @@ pub struct AgentStatus {
     pub state: AgentState,
     /// Crew member or temporary hire (D53).
     pub kind: AgentKind,
-    /// Messages waiting in the inbox for the next turn boundary.
+    /// Messages waiting in the inbox for the receiver to claim.
     pub pending: usize,
     /// Messages the sender has had no reply to yet — queued, or read and left unanswered.
     pub unacked: usize,
@@ -276,6 +276,9 @@ pub struct Ack {
     pub timeout: Option<Duration>,
     /// Follow-ups already spent chasing this message (0..=MAX_FOLLOW_UPS).
     pub follow_ups: u8,
+    /// The output offset when this message entered the running query. A reply only acknowledges
+    /// it if the query produced text after that point.
+    delivered_after_chars: Option<usize>,
 }
 
 /// Retained delivery records per instance. Bounded: acks are an audit trail, not storage.
@@ -360,8 +363,8 @@ struct Entry {
     lease: u8,
     /// Full message history since the last completed turn (continuation context).
     history: Vec<Message>,
-    /// Inbox accumulated since the last drain (commands + channel messages, injected as one
-    /// batch at a turn boundary — never one message per turn).
+    /// Inbox accumulated since the last drain (commands + channel messages, claimed as one
+    /// batch when the receiver is ready).
     inbox: Vec<InboxItem>,
     /// Delivery records for direct messages, oldest first, capped at MAX_ACKS.
     acks: Vec<Ack>,
@@ -453,16 +456,29 @@ pub struct AgentRegistry {
     ask: Mutex<Option<Arc<crate::query::AskFn>>>,
     /// Monotonic message id source (registry-wide, so ids never collide across instances).
     next_msg: std::sync::atomic::AtomicU64,
+    /// Inbox generation: every accepted item advances this watch channel. Receivers wait on it
+    /// between tool rounds so a busy agent does not depend on the sender reaching a boundary.
+    inbox_tx: tokio::sync::watch::Sender<u64>,
 }
 
 impl AgentRegistry {
     pub fn new() -> Arc<Self> {
+        let (inbox_tx, _) = tokio::sync::watch::channel(0);
         Arc::new(Self {
             inner: Mutex::new(HashMap::new()),
             share: Mutex::new(None),
             ask: Mutex::new(None),
             next_msg: std::sync::atomic::AtomicU64::new(1),
+            inbox_tx,
         })
+    }
+
+    pub fn subscribe_inbox(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inbox_tx.subscribe()
+    }
+
+    fn notify_inbox(&self) {
+        self.inbox_tx.send_modify(|generation| *generation += 1);
     }
 
     fn mint_msg_id(&self) -> MsgId {
@@ -716,10 +732,37 @@ impl AgentRegistry {
         self.lock().get(name).map(|e| e.session.clone())
     }
 
-    pub fn set_abort(&self, name: &str, abort: tokio::task::AbortHandle) {
-        if let Some(entry) = self.lock().get_mut(name) {
-            entry.abort = Some(abort);
+    pub fn set_abort_if_running(
+        &self,
+        name: &str,
+        run: u64,
+        abort: tokio::task::AbortHandle,
+        items: Vec<InboxItem>,
+    ) -> bool {
+        let mut inner = self.lock();
+        let Some(entry) = inner.get_mut(name) else {
+            abort.abort();
+            return false;
+        };
+        if entry.state != AgentState::Running {
+            abort.abort();
+            for item in &items {
+                if let InboxItem::Direct { id, .. } = item
+                    && let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id)
+                {
+                    ack.state = AckState::Dropped {
+                        reason: "instance stopped".to_string(),
+                    };
+                    ack.delivered_after_chars = None;
+                }
+            }
+            return false;
         }
+        if entry.runs != run {
+            return false;
+        }
+        entry.abort = Some(abort);
+        true
     }
 
     /// Next run sequence number (starting at 1).
@@ -745,25 +788,29 @@ impl AgentRegistry {
     /// return (history copy, drained inbox); empty → switch to Idle.
     /// Stopped (stopped mid-turn) never revives and never returns a continuation.
     ///
-    /// `spoke` is whether the turn produced any text for the hub. Only then are the messages this
-    /// run carried acknowledged: a turn that ends in silence is the case the sender most needs to
-    /// hear about, so it must not look like one that answered.
-    pub fn finish(&self, name: &str, history: Vec<Message>, spoke: bool) -> Option<Continuation> {
+    /// `output_chars` is the final amount of text produced by this query. A message is answered
+    /// only when text was produced after it entered the query; earlier prose cannot acknowledge a
+    /// later instruction.
+    pub fn finish(
+        &self,
+        name: &str,
+        history: Vec<Message>,
+        output_chars: usize,
+    ) -> Option<Continuation> {
         let result = {
             let mut inner = self.lock();
             let entry = inner.get_mut(name)?;
             entry.last_active = Instant::now();
             entry.history = history;
-            if spoke {
-                answer_acks(entry);
-            }
+            answer_acks(entry, output_chars);
             if entry.state == AgentState::Stopped {
                 None
             } else if entry.inbox.is_empty() {
                 entry.state = AgentState::Idle;
                 None
             } else {
-                let items = drain_inbox(entry);
+                entry.runs += 1;
+                let items = drain_inbox(entry, entry.runs, 0);
                 entry.state = AgentState::Running;
                 Some(Continuation {
                     history: entry.history.clone(),
@@ -776,13 +823,8 @@ impl AgentRegistry {
         result
     }
 
-    /// Turn-boundary batch delivery: every idle instance with a non-empty inbox is claimed
-    /// (flipped to Running, inbox drained in one pass) and handed back for the caller to run.
-    ///
-    /// Delivery is deliberately not immediate. Several messages sent within one turn all land in
-    /// the inbox first and are folded into a *single* prompt here — waking on the first one would
-    /// make the receiver process them one at a time. It also means a run chain that died with
-    /// messages still queued gets picked up at the next boundary instead of stranding them.
+    /// Claim every idle instance with waiting mail. The caller starts each returned run; draining
+    /// the inbox in one pass makes the batch boundary the receiver's actual claim point.
     pub fn flush_pending(&self) -> Vec<Wake> {
         let mut woken = Vec::new();
         {
@@ -791,7 +833,8 @@ impl AgentRegistry {
                 if entry.state != AgentState::Idle || entry.inbox.is_empty() {
                     continue;
                 }
-                let items = drain_inbox(entry);
+                entry.runs += 1;
+                let items = drain_inbox(entry, entry.runs, 0);
                 entry.state = AgentState::Running;
                 entry.last_active = Instant::now();
                 woken.push(Wake {
@@ -809,6 +852,72 @@ impl AgentRegistry {
         woken
     }
 
+    /// Put a direct message into one running instance's current query. Unlike a new run, this
+    /// keeps the run number and records the output offset at which the message entered.
+    pub fn take_running(&self, name: &str, output_chars: usize) -> Vec<InboxItem> {
+        let items = {
+            let mut inner = self.lock();
+            let Some(entry) = inner.get_mut(name) else {
+                return Vec::new();
+            };
+            if entry.state != AgentState::Running || entry.inbox.is_empty() {
+                return Vec::new();
+            }
+            let items = take_direct_inbox(entry, entry.runs, output_chars);
+            if items.is_empty() {
+                return Vec::new();
+            }
+            items
+        };
+        self.sync_share(name);
+        items
+    }
+
+    /// Turn failed before the claimed batch completed: restore it to the front of the inbox and
+    /// make its direct-message receipts queued again so the recovery dispatcher can retry it.
+    pub fn restore_inbox(&self, name: &str, mut items: Vec<InboxItem>) {
+        if items.is_empty() {
+            return;
+        }
+        let mut inner = self.lock();
+        let Some(entry) = inner.get_mut(name) else {
+            return;
+        };
+        if entry.state == AgentState::Stopped {
+            for item in &items {
+                if let InboxItem::Direct { id, .. } = item
+                    && let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id)
+                {
+                    ack.state = AckState::Dropped {
+                        reason: "instance stopped".to_string(),
+                    };
+                    ack.delivered_after_chars = None;
+                }
+            }
+            return;
+        }
+        for item in &items {
+            if let InboxItem::Direct { id, .. } = item
+                && let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id)
+            {
+                ack.state = AckState::Queued;
+                ack.delivered_after_chars = None;
+            }
+        }
+        items.append(&mut entry.inbox);
+        entry.inbox = items;
+        drop(inner);
+        self.notify_inbox();
+    }
+
+    /// A claimed idle run may be stopped before its task is spawned. Re-checking under the
+    /// registry lock closes that gap without exposing the entry or holding the lock across spawn.
+    pub fn accepts_run(&self, name: &str, run: u64) -> bool {
+        self.lock()
+            .get(name)
+            .is_some_and(|entry| entry.state == AgentState::Running && entry.runs == run)
+    }
+
     /// Turn failed: keep the pre-failure history, switch to Idle (retryable via SendMessage).
     pub fn mark_idle(&self, name: &str) {
         if let Some(entry) = self.lock().get_mut(name)
@@ -819,12 +928,11 @@ impl AgentRegistry {
         }
     }
 
-    /// Deliver a hub command: queue when Running; wake when Idle (returns the session,
-    /// history and drained inbox needed to continue); error when Stopped/unknown.
     /// Queue a hub command. Returns the message id — the receipt the sender uses to check the
-    /// outcome later; delivery itself happens at the next turn boundary (see `flush_pending`).
-    /// `ack_timeout` records the wait the sender allowed before the acknowledgement is chased
-    /// (see `follow_up`); it is a note on the record, not a timer — the caller owns the clock.
+    /// outcome later. Idle instances are claimed by the immediate dispatcher; running instances
+    /// absorb the batch between tool rounds. `ack_timeout` records the wait the sender allowed
+    /// before the acknowledgement is chased (see `follow_up`); it is a note on the record, not a
+    /// timer — the caller owns the clock.
     pub fn deliver(
         &self,
         name: &str,
@@ -856,6 +964,7 @@ impl AgentRegistry {
             text: message.to_string(),
             images,
         });
+        entry.lease = HIRE_LEASE;
         push_ack(
             entry,
             Ack {
@@ -865,8 +974,11 @@ impl AgentRegistry {
                 queued_at: Instant::now(),
                 timeout: ack_timeout,
                 follow_ups: 0,
+                delivered_after_chars: None,
             },
         );
+        drop(inner);
+        self.notify_inbox();
         Ok(id)
     }
 
@@ -899,6 +1011,8 @@ impl AgentRegistry {
             waited,
             delivered,
         });
+        drop(inner);
+        self.notify_inbox();
         FollowUp::Sent { round }
     }
 
@@ -923,8 +1037,7 @@ impl AgentRegistry {
     }
 
     /// Direct messages still sitting in the inbox, in order. The DM view renders
-    /// them after the history so a message you just sent stays on screen until
-    /// the turn boundary folds it into the transcript.
+    /// them after the history so a message just sent stays visible until the receiver claims it.
     pub fn pending_of(&self, name: &str) -> Vec<String> {
         self.lock()
             .get(name)
@@ -1019,30 +1132,53 @@ impl AgentRegistry {
     }
 }
 
-/// A turn that produced text answers every message the instance has read so far — replying is a
-/// turn-level act, not a per-message one, and a message first read in a silent run is answered by
-/// the run that finally speaks. Anything still queued is untouched: it has not been read yet.
-fn answer_acks(entry: &mut Entry) {
+/// A reply answers a delivered message only if text was produced after that message entered the
+/// query. Anything still queued is untouched: it has not been read yet.
+fn answer_acks(entry: &mut Entry, output_chars: usize) {
     let run = entry.runs;
     for ack in entry.acks.iter_mut() {
-        if matches!(ack.state, AckState::Delivered { .. }) {
+        if let AckState::Delivered { run: delivered_run } = ack.state
+            && (run > delivered_run && output_chars > 0
+                || run == delivered_run
+                    && ack
+                        .delivered_after_chars
+                        .is_some_and(|before| output_chars > before))
+        {
             ack.state = AckState::Answered { run };
         }
     }
 }
 
-/// Take the whole inbox in one pass and mark every direct message in it delivered: being folded
-/// into the next prompt is exactly the moment a message enters the receiver's context.
-fn drain_inbox(entry: &mut Entry) -> Vec<InboxItem> {
-    let items = std::mem::take(&mut entry.inbox);
-    entry.runs += 1;
-    let run = entry.runs;
-    for item in &items {
-        if let InboxItem::Direct { id, .. } = item {
-            set_ack(entry, *id, AckState::Delivered { run });
+fn mark_delivered(entry: &mut Entry, items: &[InboxItem], run: u64, output_chars: usize) {
+    for item in items {
+        if let InboxItem::Direct { id, .. } = item
+            && let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id)
+        {
+            ack.state = AckState::Delivered { run };
+            ack.delivered_after_chars = Some(output_chars);
         }
     }
+}
+
+fn drain_inbox(entry: &mut Entry, run: u64, output_chars: usize) -> Vec<InboxItem> {
+    let items = std::mem::take(&mut entry.inbox);
+    mark_delivered(entry, &items, run, output_chars);
     items
+}
+
+fn take_direct_inbox(entry: &mut Entry, run: u64, output_chars: usize) -> Vec<InboxItem> {
+    let mut direct = Vec::new();
+    let mut other = Vec::new();
+    for item in std::mem::take(&mut entry.inbox) {
+        if matches!(item, InboxItem::Direct { .. } | InboxItem::FollowUp { .. }) {
+            direct.push(item);
+        } else {
+            other.push(item);
+        }
+    }
+    entry.inbox = other;
+    mark_delivered(entry, &direct, run, output_chars);
+    direct
 }
 
 /// Record every still-queued inbox message as dropped; returns how many.
@@ -1307,7 +1443,7 @@ mod tests {
 
         // Finished: idle, empty inbox, nothing owed. One sweep is not enough — that would
         // take the instance away in the very round its result reaches the hub.
-        assert!(reg.finish("temp", Vec::new(), true).is_none());
+        assert!(reg.finish("temp", Vec::new(), 1).is_none());
         assert!(
             reg.release_hires().is_empty(),
             "the hub still has a round to follow up in"
@@ -1341,7 +1477,7 @@ mod tests {
         // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
         // and a hire with no run behind it is unstarted, not finished.
         let _ = reg.next_run("temp");
-        assert!(reg.finish("temp", Vec::new(), true).is_none());
+        assert!(reg.finish("temp", Vec::new(), 1).is_none());
         assert!(reg.release_hires().is_empty());
 
         // A queued follow-up is work waiting: the count goes back to full.
@@ -1354,7 +1490,7 @@ mod tests {
         // Read into a run and answered, with nothing left waiting → released as before.
         let woken = reg.flush_pending();
         assert_eq!(woken.len(), 1);
-        assert!(reg.finish("temp", Vec::new(), true).is_none());
+        assert!(reg.finish("temp", Vec::new(), 1).is_none());
         assert!(reg.release_hires().is_empty());
         assert_eq!(reg.release_hires(), vec!["temp".to_string()]);
     }
@@ -1381,7 +1517,7 @@ mod tests {
         // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
         // and a hire with no run behind it is unstarted, not finished.
         let _ = reg.next_run("temp");
-        assert!(reg.finish("temp", Vec::new(), true).is_none());
+        assert!(reg.finish("temp", Vec::new(), 1).is_none());
         let _ = reg.deliver("temp", "answer me", Vec::new(), None);
         assert_eq!(
             reg.flush_pending().len(),
@@ -1389,7 +1525,7 @@ mod tests {
             "the idle hire takes the message"
         );
         // The run that read it ended saying nothing: delivered, unanswered, inbox empty.
-        assert!(reg.finish("temp", Vec::new(), false).is_none());
+        assert!(reg.finish("temp", Vec::new(), 0).is_none());
         let owed = |reg: &AgentRegistry| {
             reg.list()
                 .into_iter()
@@ -1422,7 +1558,7 @@ mod tests {
         // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
         // and a hire with no run behind it is unstarted, not finished.
         let _ = reg.next_run("temp");
-        assert!(reg.finish("temp", Vec::new(), true).is_none());
+        assert!(reg.finish("temp", Vec::new(), 1).is_none());
         for _ in 0..4 {
             assert!(reg.release_hires().is_empty());
         }
@@ -1510,7 +1646,7 @@ mod tests {
         );
 
         std::thread::sleep(Duration::from_millis(2));
-        assert!(reg.finish("scout", Vec::new(), true).is_some());
+        assert!(reg.finish("scout", Vec::new(), 0).is_some());
         let finished = reg.list()[0].last_active;
         assert!(finished > streamed, "turn completion is activity");
     }
@@ -1531,7 +1667,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         // Turn finished + inbox non-empty → continues (history saved, inbox drained, ack set).
         let next = reg
-            .finish("scout", vec![Message::user_text("hi")], true)
+            .finish("scout", vec![Message::user_text("hi")], 1)
             .unwrap_or_else(|| panic!("should continue"));
         assert_eq!(
             next.history.len(),
@@ -1547,7 +1683,7 @@ mod tests {
         assert_eq!(acks[0].id, first);
         assert_eq!(acks[0].state, AckState::Delivered { run: next.run });
         // Finish again with an empty inbox → Idle.
-        assert!(reg.finish("scout", Vec::new(), true).is_none());
+        assert!(reg.finish("scout", Vec::new(), 1).is_none());
         assert_eq!(reg.list()[0].state, AgentState::Idle);
         // Idle: the message waits for a flush rather than starting a run on the spot.
         let _ = reg
@@ -1585,7 +1721,7 @@ mod tests {
             },
         ));
         let items = reg
-            .finish("w", Vec::new(), true)
+            .finish("w", Vec::new(), 1)
             .unwrap_or_else(|| panic!("continue"))
             .items;
         assert_eq!(items.len(), 2);
@@ -1598,7 +1734,7 @@ mod tests {
             "channel entries carry seq/from"
         );
         // Idle: deposit wakes it; Stopped/unknown silently dropped.
-        assert!(reg.finish("w", Vec::new(), true).is_none());
+        assert!(reg.finish("w", Vec::new(), 1).is_none());
         assert!(reg.deposit(
             "w",
             InboxItem::Channel {
@@ -1652,7 +1788,7 @@ mod tests {
         assert!(doc.agents[0].history.is_empty());
 
         // finish → history + state (empty inbox → idle).
-        reg.finish("scout", vec![Message::user_text("hi")], true);
+        reg.finish("scout", vec![Message::user_text("hi")], 1);
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "idle");
         assert_eq!(doc.agents[0].history.len(), 1);
@@ -1664,11 +1800,11 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         reg.deliver("scout", "check once more", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
-        reg.finish("scout", Vec::new(), true);
+        reg.finish("scout", Vec::new(), 1);
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "running");
         // Inbox drained → idle.
-        reg.finish("scout", Vec::new(), true);
+        reg.finish("scout", Vec::new(), 1);
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "idle");
 
@@ -1695,10 +1831,7 @@ mod tests {
     fn messages_sent_in_one_turn_arrive_as_one_batch() {
         let reg = AgentRegistry::new();
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
-        assert!(
-            reg.finish("w", Vec::new(), true).is_none(),
-            "turns idle first"
-        );
+        assert!(reg.finish("w", Vec::new(), 1).is_none(), "turns idle first");
         for text in ["look at A first", "look at B again", "and finally C"] {
             reg.deliver("w", text, Vec::new(), None)
                 .unwrap_or_else(|e| panic!("{e}"));
@@ -1766,8 +1899,8 @@ mod tests {
             "budget exhausted"
         );
         let items = reg
-            .finish("w", Vec::new(), true)
-            .unwrap_or_else(|| panic!("queued messages should be picked up at the turn boundary"))
+            .finish("w", Vec::new(), 1)
+            .unwrap_or_else(|| panic!("queued messages should be claimed by the receiver"))
             .items;
         assert_eq!(
             items.len(),
@@ -1795,7 +1928,7 @@ mod tests {
             "entering the context is not yet a receipt"
         );
         assert!(
-            reg.finish("w", Vec::new(), true).is_none(),
+            reg.finish("w", Vec::new(), 2).is_none(),
             "that round answers"
         );
         assert!(
@@ -1821,7 +1954,7 @@ mod tests {
             test_session(),
         );
         assert!(
-            reg.finish("mute", Vec::new(), true).is_none(),
+            reg.finish("mute", Vec::new(), 1).is_none(),
             "turns idle first"
         );
         let id = reg
@@ -1838,7 +1971,7 @@ mod tests {
             "idle instances receive at the boundary"
         );
         // The turn ends producing no text for the hub.
-        assert!(reg.finish("mute", Vec::new(), false).is_none());
+        assert!(reg.finish("mute", Vec::new(), 0).is_none());
         let acks = reg.acks_of("mute").unwrap_or_else(|| unreachable!());
         assert!(
             matches!(acks[0].state, AckState::Delivered { run: 1 }),
@@ -1862,7 +1995,7 @@ mod tests {
             "the follow-up marks 'read but silent' rather than 'not picked up'"
         );
         // Speaking up answers what it had already read, even though a later run says it.
-        assert!(reg.finish("mute", Vec::new(), true).is_none());
+        assert!(reg.finish("mute", Vec::new(), 1).is_none());
         assert_eq!(
             reg.acks_of("mute").unwrap_or_else(|| unreachable!())[0].state,
             AckState::Answered { run: 2 },
@@ -1900,7 +2033,7 @@ mod tests {
     }
 
     /// A run chain that dies with messages still queued must not strand them: the instance goes
-    /// back to Idle and the next boundary flush picks the batch up.
+    /// back to Idle and the recovery dispatcher picks the batch up.
     #[test]
     fn messages_survive_a_failed_run_and_are_retried() {
         let reg = AgentRegistry::new();
@@ -1915,8 +2048,80 @@ mod tests {
             "the message is still in the inbox"
         );
         let woken = reg.flush_pending();
-        assert_eq!(woken.len(), 1, "the next turn boundary re-delivers");
+        assert_eq!(woken.len(), 1, "the recovery dispatcher re-delivers");
         assert_eq!(woken[0].items.len(), 1);
+    }
+
+    #[test]
+    fn delivered_messages_require_output_after_their_delivery_offset() {
+        let reg = AgentRegistry::new();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
+        let _ = reg.next_run("w");
+        let id = reg
+            .deliver("w", "late instruction", Vec::new(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let items = reg.take_running("w", 5);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
+            AckState::Delivered { run: 1 }
+        );
+        assert!(reg.finish("w", Vec::new(), 5).is_none());
+        assert_eq!(
+            reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
+            AckState::Delivered { run: 1 },
+            "text produced before delivery does not answer it"
+        );
+        assert_eq!(reg.follow_up("w", id), FollowUp::Sent { round: 1 });
+        let follow_up = reg.flush_pending();
+        assert_eq!(follow_up.len(), 1);
+        assert!(reg.finish("w", Vec::new(), 1).is_none());
+        assert_eq!(
+            reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
+            AckState::Answered { run: 2 },
+            "later text does answer the previously delivered message"
+        );
+    }
+
+    #[test]
+    fn restored_running_batch_returns_to_queued_state() {
+        let reg = AgentRegistry::new();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
+        let _ = reg.next_run("w");
+        reg.deliver("w", "retry me", Vec::new(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let items = reg.take_running("w", 0);
+        assert!(matches!(
+            reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
+            AckState::Delivered { run: 1 }
+        ));
+        reg.restore_inbox("w", items);
+        assert_eq!(
+            reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
+            AckState::Queued
+        );
+        reg.mark_idle("w");
+        let retry = reg.flush_pending();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].run, 2);
+    }
+
+    #[tokio::test]
+    async fn stop_wins_before_a_claimed_run_installs_its_abort_handle() {
+        let reg = AgentRegistry::new();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
+        reg.mark_idle("w");
+        reg.deliver("w", "start", Vec::new(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let wake = reg.flush_pending().pop().unwrap_or_else(|| unreachable!());
+        assert_eq!(wake.run, 1);
+        reg.stop("w").unwrap_or_else(|e| panic!("{e}"));
+        let task = tokio::spawn(async { std::future::pending::<()>().await });
+        assert!(
+            !reg.set_abort_if_running("w", wake.run, task.abort_handle(), wake.items),
+            "a stopped entry rejects the late handle"
+        );
+        assert!(!reg.accepts_run("w", wake.run));
     }
 
     #[test]
@@ -1938,10 +2143,7 @@ mod tests {
             "rejected after stop"
         );
         // Turn finishing after a stop: history is still archived, no revival.
-        assert!(
-            reg.finish("x", vec![Message::user_text("h")], true)
-                .is_none()
-        );
+        assert!(reg.finish("x", vec![Message::user_text("h")], 1).is_none());
         assert_eq!(reg.list()[0].state, AgentState::Stopped);
         reg.remove("x").unwrap_or_else(|e| panic!("{e}"));
         assert!(reg.list().is_empty());
@@ -1953,7 +2155,7 @@ mod tests {
         // Stopping an idle instance: no active line.
         reg.insert("y", AgentKind::Hire, None, "y".into(), test_session());
         reg.set_run_watch("y", crate::watch::WatchId(9));
-        assert!(reg.finish("y", Vec::new(), true).is_none());
+        assert!(reg.finish("y", Vec::new(), 1).is_none());
         assert!(
             reg.stop("y").unwrap_or_else(|e| panic!("{e}")).0.is_none(),
             "stopping while idle does not cancel a terminal watch line"

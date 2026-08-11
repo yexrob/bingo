@@ -295,15 +295,17 @@ fn subagent_hooks(
     }
 }
 
-/// Turn-boundary delivery: start a run for every instance that has messages waiting.
-///
-/// This is the only place a queued message becomes a running turn. Holding delivery until the
-/// boundary is what makes a batch a batch — messages sent during one turn arrive together
-/// instead of one per turn — and it doubles as the recovery path for a run chain that died
-/// with messages still in its inbox.
+/// Start every idle recipient that has mail waiting. `AgentRegistry::flush_pending` claims the
+/// full inbox atomically, so concurrent dispatchers cannot double-start an instance and every
+/// item present at the receiver's claim point becomes one prompt.
 pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &Arc<WatchRegistry>) {
     for wake in session.agents.flush_pending() {
+        if !session.agents.accepts_run(&wake.name, wake.run) {
+            session.agents.restore_inbox(&wake.name, wake.items);
+            continue;
+        }
         let (prompt, images) = absorb_inbox(&session.channels, &wake.name, &wake.items);
+        let items = wake.items;
         let label = format!("{} #{} · {}", wake.name, wake.run, excerpt(&prompt));
         spawn_agent_loop(
             session.agents.clone(),
@@ -313,7 +315,9 @@ pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &Arc<WatchRegistr
             wake.history,
             prompt,
             images,
+            items,
             label,
+            wake.run,
             Vec::new(),
             session.instance.clone(),
         );
@@ -563,7 +567,9 @@ pub(crate) fn spawn_agent_loop(
     history: Vec<Message>,
     prompt: String,
     images: Vec<crate::api::types::ImageAttachment>,
+    initial_items: Vec<InboxItem>,
     first_label: String,
+    first_run: u64,
     conditions: Vec<NotifyCondition>,
     owner: Option<String>,
 ) -> WatchId {
@@ -572,11 +578,18 @@ pub(crate) fn spawn_agent_loop(
     registry.set_run_watch(&name, first_id);
     let loop_registry = registry.clone();
     let loop_name = name.clone();
+    let retry_items = initial_items;
+    let current_items_for_install = retry_items.clone();
     let handle = tokio::spawn(async move {
         let name = loop_name;
+        if !loop_registry.accepts_run(&name, first_run) {
+            loop_registry.restore_inbox(&name, retry_items);
+            return;
+        }
         let mut history = history;
         let mut prompt = prompt;
         let mut images = images;
+        let mut current_items = retry_items;
         let mut run = (first_id, cell);
         loop {
             let output = Arc::new(Mutex::new(String::new()));
@@ -609,7 +622,7 @@ pub(crate) fn spawn_agent_loop(
             {
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    let spoke = !text.trim().is_empty();
+                    let output_chars = text.chars().count();
                     loop_registry.set_live(&name, None, None);
                     loop_registry.set_progress(&name, None);
                     watch.set_state(
@@ -618,10 +631,12 @@ pub(crate) fn spawn_agent_loop(
                         Some("done".to_string()),
                         Some(serde_json::json!(non_empty(text))),
                     );
-                    match loop_registry.finish(&name, outcome.messages, spoke) {
+                    match loop_registry.finish(&name, outcome.messages, output_chars) {
                         Some(next) => {
                             history = next.history;
-                            (prompt, images) = absorb_inbox(&session.channels, &name, &next.items);
+                            current_items = next.items;
+                            (prompt, images) =
+                                absorb_inbox(&session.channels, &name, &current_items);
                             let cell = Arc::new(AgentCell::new(loop_registry.clone()));
                             let label = format!("{name} #{} · {}", next.run, excerpt(&prompt));
                             let id = register_run_watch(
@@ -640,6 +655,7 @@ pub(crate) fn spawn_agent_loop(
                 Err(e) => {
                     loop_registry.set_live(&name, None, None);
                     loop_registry.set_progress(&name, None);
+                    loop_registry.restore_inbox(&name, current_items);
                     watch.set_state(
                         run.0,
                         WatchState::Failed,
@@ -652,7 +668,12 @@ pub(crate) fn spawn_agent_loop(
             }
         }
     });
-    registry.set_abort(&name, handle.abort_handle());
+    let _ = registry.set_abort_if_running(
+        &name,
+        first_run,
+        handle.abort_handle(),
+        current_items_for_install,
+    );
     first_id
 }
 
@@ -718,7 +739,7 @@ impl AgentTool {
     ) -> Result<ToolResult, ToolError> {
         let def = self.resolve_def(params)?;
         let (name, description, sub_session) = self.spawn_instance(params, def, &ctx.cwd)?;
-        let _ = self.session.agents.next_run(&name);
+        let run = self.session.agents.next_run(&name);
         let conditions = params
             .notify_on
             .clone()
@@ -732,7 +753,9 @@ impl AgentTool {
             Vec::new(),
             params.prompt.clone(),
             self.session.attachments.resolve(&params.prompt),
+            Vec::new(),
             format!("{name} · {description}"),
+            run,
             conditions,
             ctx.instance.clone(),
         );
@@ -1158,6 +1181,7 @@ impl Tool for AgentTool {
         match sync_run {
             Ok(outcome) => {
                 let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let output_chars = text.chars().count();
                 let content = non_empty(text);
                 ctx.watch.set_state(
                     id,
@@ -1167,9 +1191,13 @@ impl Tool for AgentTool {
                 );
                 // On the synchronous path tools run serially, so queued messages never reach here;
                 // if one somehow does, hand it to the background loop (same continuation mechanism).
-                let spoke = !content.trim().is_empty();
-                if let Some(next) = self.session.agents.finish(&name, outcome.messages, spoke) {
+                if let Some(next) =
+                    self.session
+                        .agents
+                        .finish(&name, outcome.messages, output_chars)
+                {
                     let (prompt, images) = absorb_inbox(&sub_session.channels, &name, &next.items);
+                    let items = next.items;
                     spawn_agent_loop(
                         self.session.agents.clone(),
                         ctx.watch.clone(),
@@ -1178,7 +1206,9 @@ impl Tool for AgentTool {
                         next.history,
                         prompt.clone(),
                         images,
+                        items,
                         format!("{name} #{} · {}", next.run, excerpt(&prompt)),
+                        next.run,
                         Vec::new(),
                         ctx.instance.clone(),
                     );
@@ -1231,9 +1261,9 @@ const ACK_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 /// quiet, and short enough that a hang is not discovered by the user an hour later.
 const DEFAULT_ACK_TIMEOUT_SECS: u64 = 300;
 
-/// Main→sub continuation channel (hub-and-spoke, main session only): an idle instance is woken
-/// with its full history to continue; a busy instance queues the message and it is delivered
-/// when the turn ends.
+/// Main→sub continuation channel (hub-and-spoke, main session only): an idle instance starts as
+/// soon as the dispatch point claims its inbox; a running instance absorbs queued mail between
+/// tool rounds.
 pub struct SendMessageTool {
     session: Arc<Session>,
 }
@@ -1250,7 +1280,7 @@ impl Tool for SendMessageTool {
         "SendMessage".to_string()
     }
     fn description(&self) -> String {
-        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id: the message is queued and delivered at the end of this turn, batched with any other message sent to the same instance in this turn, so the receiver reads them together rather than one per turn. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing. AgentControl(action=messages) reports which of those it is: queued, delivered but unanswered, answered (with the run that replied), or dropped because the instance stopped. You do not have to poll that yourself: the harness runs the same check five minutes after sending (tune with ack_timeout) and follows up on the receiver, up to 3 rounds, reporting back if no answer ever comes. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
+        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id after enqueueing: an idle receiver starts immediately, while a running receiver drains all mail waiting at its next tool round. Messages present when the receiver drains its inbox are batched into one prompt. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing. AgentControl(action=messages) reports which of those it is: queued, delivered but unanswered, answered (with the run that replied), or dropped because the instance stopped. You do not have to poll that yourself: the harness runs the same check five minutes after sending (tune with ack_timeout) and follows up on the receiver, up to 3 rounds, reporting back if no answer ever comes. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<SendMessageInput>()
@@ -1281,13 +1311,13 @@ impl Tool for SendMessageTool {
             .agents
             .deliver(&params.agent, &params.message, images, timeout)
             .map_err(ToolError::failed)?;
+        flush_agent_inbox(&self.session, &ctx.watch);
         let note = match timeout {
             Some(t) => format!(
-                "delivered in a batch with the recipient's other messages at the end of this turn; if no reply arrives within {}s (including read-but-silent rounds), it is automatically re-checked and chased (up to {MAX_FOLLOW_UPS} rounds); the outcome is reported as a task notification",
+                "enqueued for immediate processing; the receiver batches everything waiting when it next drains its inbox; if no reply arrives within {}s (including read-but-silent rounds), it is automatically re-checked and chased (up to {MAX_FOLLOW_UPS} rounds); the outcome is reported as a task notification",
                 t.as_secs()
             ),
-            None => "delivered in a batch with the recipient's other messages at the end of this turn;\
-                      follow-up chasing is off (ack_timeout=0); check yourself with AgentControl(action=messages, agent=…) when needed"
+            None => "enqueued for immediate processing; the receiver batches everything waiting when it next drains its inbox; follow-up chasing is off (ack_timeout=0); check yourself with AgentControl(action=messages, agent=…) when needed"
                 .to_string(),
         };
         if let Some(timeout) = timeout {
@@ -1473,7 +1503,7 @@ impl Tool for AgentControlTool {
                         .map(|a| {
                             let detail = match &a.state {
                                 crate::agents::AckState::Queued => format!(
-                                    "queued (waiting {}s{}, will be delivered in a batch at the next turn boundary)",
+                                    "queued (waiting {}s{}, the receiver will claim it immediately when idle or at its next tool round)",
                                     a.queued_at.elapsed().as_secs(),
                                     Self::chase_note(a)
                                 ),
@@ -2145,7 +2175,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_message_queues_on_running_instance() {
+    async fn send_message_starts_an_idle_instance_before_returning() {
+        let (session, _client) = parent_session();
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        );
+        session.agents.mark_idle("worker");
+        let out = SendMessageTool::new(session.clone())
+            .call(
+                serde_json::json!({"agent": "worker", "message": "start now", "ack_timeout": 0}),
+                &hub_ctx(&session),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let receipt: serde_json::Value =
+            serde_json::from_str(out.content.as_str().unwrap_or_default())
+                .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(receipt["status"], "queued");
+        let status = &session.agents.list()[0];
+        assert_eq!(status.state, crate::agents::AgentState::Running);
+        assert_eq!(status.pending, 0, "the idle inbox was claimed immediately");
+        let acks = session
+            .agents
+            .acks_of("worker")
+            .unwrap_or_else(|| unreachable!());
+        assert!(matches!(
+            acks[0].state,
+            crate::agents::AckState::Delivered { run: 1 }
+        ));
+        let _ = session.agents.stop("worker");
+    }
+
+    #[tokio::test]
+    async fn send_message_keeps_running_instance_queued_for_its_next_tool_round() {
         let (session, _client) = parent_session();
         session.agents.insert(
             "worker",
@@ -2167,7 +2233,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // The receipt carries the message id; delivery itself waits for the turn boundary.
+        // A running receiver keeps it queued until its query loop reaches the next tool round.
         let receipt: serde_json::Value =
             serde_json::from_str(out.content.as_str().unwrap_or_default())
                 .unwrap_or_else(|e| panic!("{e}"));
@@ -2260,7 +2326,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn unacknowledged_message_is_chased_three_times_then_reported() {
         let (session, _client) = parent_session();
-        // Running: the boundary flush cannot claim it, so the message really does stay queued.
+        // Running without a query loop: the dispatcher cannot claim it, so the message stays queued.
         session.agents.insert(
             "worker",
             AgentKind::Hire,
@@ -2331,7 +2397,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         // A turn ends without a word and takes the queued message into the next one: delivered,
         // unanswered, and still Running — so the flush the watchdog retries stays a no-op here.
-        assert!(session.agents.finish("mute", Vec::new(), false).is_some());
+        assert!(session.agents.finish("mute", Vec::new(), 0).is_some());
         assert!(matches!(
             session
                 .agents
@@ -2380,8 +2446,8 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("{e}"));
         // The receiver picks it up at the boundary, then that run ends with something to say.
-        assert!(session.agents.finish("worker", Vec::new(), true).is_some());
-        assert!(session.agents.finish("worker", Vec::new(), true).is_none());
+        assert!(session.agents.finish("worker", Vec::new(), 1).is_some());
+        assert!(session.agents.finish("worker", Vec::new(), 2).is_none());
         tokio::time::sleep(std::time::Duration::from_secs(120)).await;
         let acks = session
             .agents
@@ -2448,9 +2514,9 @@ mod tests {
             .agents
             .deliver("worker", "compare #[image 1]", images.clone(), None)
             .unwrap_or_else(|e| panic!("{e}"));
-        let (prompt, carried) = match session.agents.finish("worker", Vec::new(), true) {
+        let (prompt, carried) = match session.agents.finish("worker", Vec::new(), 1) {
             Some(next) => absorb_inbox(&sub.channels, "worker", &next.items),
-            None => unreachable!("queued messages should be picked up at the turn boundary"),
+            None => unreachable!("queued messages should be claimed by the receiver"),
         };
         let acks = session
             .agents

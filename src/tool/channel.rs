@@ -87,8 +87,8 @@ pub(crate) fn deliver_post(
     match session.channels.post(from, channel, text)? {
         PostOutcome::Sent { seq, deliveries } => {
             refresh_channel_row(session, channel);
-            // Deposit only: idle members are started by the turn-boundary flush, so a burst of
-            // posts reaches a member as one batch rather than one run per message.
+            // Deposit first, then claim idle members in one pass. Running members observe the
+            // inbox signal and absorb everything waiting at their next tool round.
             for (member, msg) in deliveries {
                 session.agents.deposit(
                     &member,
@@ -520,7 +520,7 @@ mod tests {
         assert!(out.content.as_str().unwrap().contains("msg #1"));
         let items = hub
             .agents
-            .finish("b", Vec::new(), true)
+            .finish("b", Vec::new(), 1)
             .unwrap_or_else(|| panic!("b's inbox should have a message"))
             .items;
         assert!(

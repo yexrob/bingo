@@ -696,8 +696,8 @@ mod tests {
     }
 
     /// The composer is the one place a human can speak into the runtime from
-    /// this view: a channel post goes out as `user`, a DM queues on the
-    /// instance and gets flushed at the turn boundary.
+    /// this view: a channel post goes out as `user`, and a DM uses SendMessage's
+    /// immediate dispatcher.
     #[tokio::test]
     async fn sending_reaches_channels_and_instances() {
         let session = crate::tui::test_util::test_session();
