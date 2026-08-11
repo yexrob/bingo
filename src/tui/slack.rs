@@ -8,7 +8,7 @@
 //! | workspace        | the team (`.bingo/team.json` name)           |
 //! | channel `#name`  | [`crate::channels`] channel                  |
 //! | direct message   | a subagent instance                          |
-//! | app/bot messages | agent turns; tool calls read as attachments  |
+//! | app/bot messages | agent text replies                           |
 //!
 //! Everything here is a pure function of a [`Snapshot`] (what the session holds
 //! right now) plus [`Workspace`] (where the eye is). The host loop in
@@ -158,6 +158,8 @@ pub struct ChannelItem {
 pub struct DmItem {
     pub name: String,
     pub state: AgentState,
+    pub model: String,
+    pub thinking: Option<String>,
     pub description: String,
     pub unread: u64,
 }
@@ -166,6 +168,8 @@ pub struct DmItem {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     pub workspace: String,
+    pub main_model: String,
+    pub main_thinking: Option<String>,
     pub channels: Vec<ChannelItem>,
     pub dms: Vec<DmItem>,
 }
@@ -201,8 +205,6 @@ impl Snapshot {
 pub enum PostKind {
     /// An ordinary message.
     Said,
-    /// A tool call, rendered the way Slack renders an app attachment.
-    Tool,
     /// Sent but still in the inbox — delivery happens at the next turn boundary.
     Queued,
     /// The streaming tail of a running turn (Slack's "…is typing").
@@ -239,9 +241,9 @@ pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
         .collect()
 }
 
-/// Subagent history → posts. User turns are yours, assistant text is theirs, and
-/// tool calls become attachments; tool results and thinking stay out (the main
-/// transcript is where that detail lives).
+/// Subagent history → posts. User turns and assistant text form the DM;
+/// tool activity, tool results, and thinking stay out. The main transcript is
+/// where execution detail lives.
 /// One line of runtime scaffolding → how it reads collapsed, or `None` for text
 /// a person actually wrote. The shapes are the ones `absorb_inbox` and the task
 /// reminder compose, so this stays in step with them by construction: anything
@@ -331,23 +333,6 @@ pub fn dm_posts(
                     text: text.clone(),
                     kind: PostKind::Said,
                 }),
-                (Role::Assistant, ContentBlock::ToolUse { name, input, .. }) => {
-                    let glyph = crate::tui::activities::tool_glyph(name);
-                    let shown = crate::tui::activities::display_tool_name(name);
-                    let summary = crate::query::summarize_input(name, input);
-                    let head = if summary.is_empty() {
-                        format!("{glyph}{shown}")
-                    } else {
-                        format!("{glyph}{shown}({summary})")
-                    };
-                    out.push(Post {
-                        from: who.to_string(),
-                        you: false,
-                        at: 0,
-                        text: head,
-                        kind: PostKind::Tool,
-                    });
-                }
                 _ => {}
             }
         }
@@ -361,13 +346,9 @@ pub fn dm_posts(
             kind: PostKind::Queued,
         });
     }
-    // The running turn, shown the way the finished one is: prose per round, tool
-    // calls between them.
-    //
-    // "Typing" means text is arriving *now*, so it belongs to the tail and only
-    // when the tail is prose. When the turn is mid-tool the indicator becomes a
-    // post of its own at the end — otherwise it would sit halfway up the
-    // conversation, above the very tool call the agent is waiting on.
+    // Only prose belongs in the DM. A tool block still keeps the trailing
+    // working indicator alive below, so silent waits remain visible without
+    // exposing execution detail.
     let typing_at = match live.last() {
         Some(crate::agents::LiveBlock::Text(t)) if !t.trim().is_empty() => Some(live.len() - 1),
         _ => None,
@@ -385,18 +366,12 @@ pub fn dm_posts(
                     PostKind::Said
                 },
             }),
-            crate::agents::LiveBlock::Tool(head) => out.push(Post {
-                from: who.to_string(),
-                you: false,
-                at: 0,
-                text: head.clone(),
-                kind: PostKind::Tool,
-            }),
-            crate::agents::LiveBlock::Text(_) => {}
+            crate::agents::LiveBlock::Tool(_) | crate::agents::LiveBlock::Text(_) => {}
         }
     }
-    // Mid-tool, or between rounds: still working, and the view should say so rather
-    // than going quiet exactly when it has the most to report.
+    // Mid-tool or between rounds, the agent is still working. Keep this feedback
+    // even though the tool itself is hidden: otherwise the DM goes silent during
+    // exactly the wait the user cannot infer from visible prose.
     if typing_at.is_none() && !live.is_empty() {
         out.push(Post {
             from: who.to_string(),
@@ -638,12 +613,54 @@ fn presence(state: AgentState, pal: &Palette) -> (&'static str, Color) {
     }
 }
 
+fn member_engine(snap: &Snapshot, name: &str) -> Option<String> {
+    if name == crate::channels::HUB_NAME {
+        return Some(format!(
+            "{name}: {}/{}",
+            snap.main_model,
+            snap.main_thinking.as_deref().unwrap_or("off")
+        ));
+    }
+    let dm = snap.dm(name)?;
+    Some(format!(
+        "{name}: {}/{}",
+        dm.model,
+        dm.thinking.as_deref().unwrap_or("off")
+    ))
+}
+
+fn channel_engine_meta(snap: &Snapshot, channel: &ChannelItem, width: usize) -> String {
+    let engines = channel
+        .members
+        .iter()
+        .filter_map(|member| member_engine(snap, member))
+        .collect::<Vec<_>>();
+    let named = engines.join(", ");
+    if engines.len() <= 3 && text_width(&named) <= width {
+        return named;
+    }
+    let summaries = engines
+        .iter()
+        .map(|engine| {
+            engine
+                .split_once(':')
+                .map_or(engine.as_str(), |(_, engine)| engine.trim())
+        })
+        .collect::<Vec<_>>();
+    if let Some(engine) = summaries.first()
+        && summaries.iter().all(|candidate| candidate == engine)
+    {
+        return format!("{} agents · {engine}", summaries.len());
+    }
+    format!("{} agents · mixed engines", summaries.len())
+}
+
 /// Conversation header: who you are looking at, what it is, and a rule under it.
-/// Two rows, not three — with no sidebar left to name the workspace, the team's
-/// name moves here, and the metadata that had a line of its own now trails the
-/// title, where it reads as a subtitle instead of a second heading.
+/// DM metadata trails the title; small channels get wrapped per-member engine
+/// rows, while larger rooms get one bounded engine summary.
 pub fn header_rows(snap: &Snapshot, conv: &Conv, pal: &Palette, width: usize) -> Vec<Row> {
-    let (title, meta) = match conv {
+    let engine_width = width.saturating_sub(3).max(1);
+    let (title, meta, engines) = match conv {
         Conv::Channel(name) => match snap.channel(name) {
             Some(c) => (
                 format!(" # {name}"),
@@ -654,18 +671,34 @@ pub fn header_rows(snap: &Snapshot, conv: &Conv, pal: &Palette, width: usize) ->
                     c.members.len(),
                     if c.frozen { " · frozen" } else { "" }
                 ),
+                channel_engine_meta(snap, c, engine_width),
             ),
-            None => (format!(" # {name}"), "  no longer exists".to_string()),
+            None => (
+                format!(" # {name}"),
+                "  no longer exists".to_string(),
+                String::new(),
+            ),
         },
         Conv::Dm(name) => match snap.dm(name) {
             Some(d) => {
                 let (glyph, _) = presence(d.state, pal);
                 (
                     format!(" {glyph} {name}"),
-                    format!("  DM · {} · {}", d.state.label(), d.description),
+                    format!(
+                        "  DM · {} · {} · {} · {}",
+                        d.model,
+                        d.thinking.as_deref().unwrap_or("off"),
+                        d.state.label(),
+                        d.description
+                    ),
+                    String::new(),
                 )
             }
-            None => (format!(" {name}"), "  no longer exists".to_string()),
+            None => (
+                format!(" {name}"),
+                "  no longer exists".to_string(),
+                String::new(),
+            ),
         },
     };
     // The workspace name sits right, where the member count used to: it is the one
@@ -686,13 +719,18 @@ pub fn header_rows(snap: &Snapshot, conv: &Conv, pal: &Palette, width: usize) ->
         .saturating_sub(text_width(&right));
     head.push_styled(" ".repeat(gap), SegStyle::fg(pal.main_dim));
     head.push_styled(right, SegStyle::fg(pal.main_dim));
-    vec![
-        row(head),
-        row(Line::styled(
-            "─".repeat(width.min(500)),
-            SegStyle::fg(pal.divider),
-        )),
-    ]
+    let mut rows = vec![row(head)];
+    if !engines.is_empty() {
+        let engine = crate::tui::chat::one_line(&engines, engine_width);
+        let mut line = Line::styled("  ", SegStyle::fg(pal.main_dim));
+        line.push_styled(engine, SegStyle::fg(pal.main_dim));
+        rows.push(row(line));
+    }
+    rows.push(row(Line::styled(
+        "─".repeat(width.min(500)),
+        SegStyle::fg(pal.divider),
+    )));
+    rows
 }
 
 /// Slack's day divider: a hairline rule with the day centred on it.
@@ -905,47 +943,36 @@ pub fn message_rows(
             *lead += 1;
             line
         };
-        match post.kind {
-            PostKind::Tool => {
-                let text = crate::tui::chat::one_line(&post.text, body_w);
+        let style = match post.kind {
+            PostKind::Queued => SegStyle::fg(pal.main_dim),
+            _ => SegStyle::fg(pal.main_text),
+        };
+        for para in post.text.lines() {
+            let wrapped = wrap_words(para, body_w);
+            if wrapped.is_empty() {
+                rows.push(row(indent(&mut lead)));
+            }
+            for l in wrapped {
                 let mut line = indent(&mut lead);
-                line.push_styled("▏", SegStyle::fg(pal.accent));
-                line.push_styled(format!(" {text}"), SegStyle::fg(pal.main_dim));
+                line.push_styled(l, style);
                 rows.push(row(line));
             }
-            _ => {
-                let style = match post.kind {
-                    PostKind::Queued => SegStyle::fg(pal.main_dim),
-                    _ => SegStyle::fg(pal.main_text),
-                };
-                for para in post.text.lines() {
-                    let wrapped = wrap_words(para, body_w);
-                    if wrapped.is_empty() {
-                        rows.push(row(indent(&mut lead)));
-                    }
-                    for l in wrapped {
-                        let mut line = indent(&mut lead);
-                        line.push_styled(l, style);
-                        rows.push(row(line));
-                    }
-                }
-                if post.kind == PostKind::Queued {
-                    let mut line = indent(&mut lead);
-                    line.push_styled(
-                        "⧖ pending delivery (injected at the next turn boundary)",
-                        SegStyle::fg(pal.main_dim).italic(),
-                    );
-                    rows.push(row(line));
-                }
-                if post.kind == PostKind::Typing {
-                    let mut line = indent(&mut lead);
-                    line.push_styled(
-                        format!("✻ {} is typing…", post.from),
-                        SegStyle::fg(pal.accent).italic(),
-                    );
-                    rows.push(row(line));
-                }
-            }
+        }
+        if post.kind == PostKind::Queued {
+            let mut line = indent(&mut lead);
+            line.push_styled(
+                "⧖ pending delivery (injected at the next turn boundary)",
+                SegStyle::fg(pal.main_dim).italic(),
+            );
+            rows.push(row(line));
+        }
+        if post.kind == PostKind::Typing {
+            let mut line = indent(&mut lead);
+            line.push_styled(
+                format!("✻ {} is typing…", post.from),
+                SegStyle::fg(pal.accent).italic(),
+            );
+            rows.push(row(line));
         }
         // A post with no body at all still owes the portrait its second row.
         if lead == 0 && !grouped {
@@ -1174,6 +1201,8 @@ mod tests {
     fn snap() -> Snapshot {
         Snapshot {
             workspace: "bingo".into(),
+            main_model: "main-model".into(),
+            main_thinking: Some("high".into()),
             channels: vec![
                 ChannelItem {
                     name: "dev-room".into(),
@@ -1196,12 +1225,16 @@ mod tests {
                 DmItem {
                     name: "scout".into(),
                     state: AgentState::Running,
+                    model: "gpt-5.6-sol".into(),
+                    thinking: Some("max".into()),
                     description: "recon".into(),
                     unread: 0,
                 },
                 DmItem {
                     name: "qa".into(),
                     state: AgentState::Idle,
+                    model: "claude-sonnet".into(),
+                    thinking: Some("high".into()),
                     description: "acceptance".into(),
                     unread: 3,
                 },
@@ -1529,15 +1562,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_calls_render_as_attachments_and_queued_posts_stay_visible() {
+    fn queued_and_typing_posts_stay_visible() {
         let posts = vec![
-            Post {
-                from: "scout".into(),
-                you: false,
-                at: 0,
-                text: "⏺ Bash($ rg lazy)".into(),
-                kind: PostKind::Tool,
-            },
             Post {
                 from: "user".into(),
                 you: true,
@@ -1560,18 +1586,14 @@ mod tests {
             60,
             &Avatars::default(),
         ));
-        assert!(t.iter().any(|l| l.contains("▏ ⏺ Bash")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("pending delivery")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("is typing")), "{t:?}");
     }
 
-    /// A running turn shows its process, and its rounds stay apart. The live tail
-    /// used to reach the view as one flat string of text deltas: no tool calls, and
-    /// nothing between rounds, so a five-round turn read as one wall with sentences
-    /// butting together (`…the current state.Now let me verify…`). Only the last
-    /// prose block is "typing" — that is where text is still arriving.
+    /// A running turn shows prose from each round, hides every tool row, and
+    /// keeps a trailing working state when the current block is a tool.
     #[test]
-    fn a_running_turn_shows_its_tools_and_keeps_its_rounds_apart() {
+    fn a_running_turn_hides_tools_and_keeps_its_rounds_apart() {
         use crate::agents::LiveBlock;
         let live = vec![
             LiveBlock::Text("Let me verify the current state.".into()),
@@ -1584,16 +1606,13 @@ mod tests {
         let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
         assert_eq!(
             kinds,
-            vec![
-                PostKind::Said,
-                PostKind::Tool,
-                PostKind::Said,
-                PostKind::Tool,
-                PostKind::Typing,
-            ],
-            "process interleaved, only the tail typing: {posts:?}"
+            vec![PostKind::Said, PostKind::Said, PostKind::Typing],
+            "only prose, with the tail typing: {posts:?}"
         );
-        // The rounds are separate posts, so nothing can run together.
+        assert!(posts.iter().all(|p| matches!(
+            p.kind,
+            PostKind::Said | PostKind::Queued | PostKind::Typing | PostKind::Note
+        )));
         assert!(
             posts
                 .iter()
@@ -1601,25 +1620,22 @@ mod tests {
             "{posts:?}"
         );
 
-        // Mid-tool the indicator moves to the end rather than sitting above the very
-        // call the agent is waiting on.
         assert_eq!(
             dm_posts(&[], &live[..2], &[], "deploy", "user")
                 .iter()
                 .map(|p| p.kind)
                 .collect::<Vec<_>>(),
-            vec![PostKind::Said, PostKind::Tool, PostKind::Typing]
+            vec![PostKind::Said, PostKind::Typing]
         );
         let only_tools = vec![LiveBlock::Tool("⏺ Bash($ git status)".into())];
+        let tool_wait = dm_posts(&[], &only_tools, &[], "deploy", "user");
         assert_eq!(
-            dm_posts(&[], &only_tools, &[], "deploy", "user")
-                .iter()
-                .map(|p| p.kind)
-                .collect::<Vec<_>>(),
-            vec![PostKind::Tool, PostKind::Typing],
+            tool_wait.iter().map(|p| p.kind).collect::<Vec<_>>(),
+            vec![PostKind::Typing],
             "silent tool-only work still says it is working"
         );
-        // A round that just ended leaves an empty block: still working, not silent.
+        assert!(tool_wait.iter().all(|p| p.text.is_empty()));
+
         let between = vec![
             LiveBlock::Text("first round".into()),
             LiveBlock::Text(String::new()),
@@ -1631,9 +1647,58 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![PostKind::Said, PostKind::Typing]
         );
-
-        // Idle: no live blocks, no invented posts.
         assert!(dm_posts(&[], &[], &[], "deploy", "user").is_empty());
+    }
+
+    /// DM history and live turns show conversation text, never tool activity.
+    /// A trailing working indicator remains while the hidden tool is running.
+    #[test]
+    fn dm_posts_hide_all_tool_activity_but_keep_working_feedback() {
+        use crate::agents::LiveBlock;
+        use crate::api::types::{ContentBlock, Message, Role};
+
+        let history = vec![
+            Message::user_text("check the repository"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "I will inspect it.".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool-1".into(),
+                        name: "Bash".into(),
+                        input: serde_json::json!({"command": "git status"}),
+                    },
+                    ContentBlock::Text {
+                        text: "The tree is clean.".into(),
+                    },
+                ],
+            },
+        ];
+        let live = vec![
+            LiveBlock::Text("Checking one more thing.".into()),
+            LiveBlock::Tool("⏺ Read(src/main.rs)".into()),
+        ];
+
+        let posts = dm_posts(&history, &live, &[], "dev", "user");
+        assert!(posts.iter().all(|post| matches!(
+            post.kind,
+            PostKind::Said | PostKind::Queued | PostKind::Typing | PostKind::Note
+        )));
+        assert!(
+            posts.iter().all(|post| !post.text.contains("Bash")
+                && !post.text.contains("Read(src/main.rs)")),
+            "{posts:?}"
+        );
+        assert_eq!(
+            posts
+                .iter()
+                .filter(|post| post.kind == PostKind::Typing)
+                .count(),
+            1,
+            "hidden mid-tool work still has one visible working state: {posts:?}"
+        );
     }
 
     #[test]
@@ -1667,11 +1732,10 @@ mod tests {
         assert!(texts(&rows).iter().any(|l| l.contains("message scout")));
     }
 
-    /// One title row plus a rule: the metadata trails the name instead of taking
-    /// a heading of its own, and the workspace name rides the right edge — the
-    /// one thing the cut sidebar was carrying that nothing else says.
+    /// The title keeps its compact metadata row; small channels list each engine
+    /// in one bounded row and larger rooms collapse to one engine summary.
     #[test]
-    fn header_is_one_row_carrying_name_metadata_and_workspace() {
+    fn header_keeps_metadata_and_bounds_channel_engines() {
         let snap = snap();
         let t = texts(&header_rows(
             &snap,
@@ -1679,21 +1743,62 @@ mod tests {
             &pal(),
             70,
         ));
-        assert_eq!(t.len(), 2, "title + divider: {t:?}");
+        assert_eq!(t.len(), 3, "title + engines + divider: {t:?}");
         assert!(t[0].contains("# dev-room"), "{t:?}");
         assert!(t[0].contains("serial") && t[0].contains("4 msgs"), "{t:?}");
         assert!(t[0].contains("3 people"), "{t:?}");
         assert!(
+            t[1].contains("main: main-model/high") && t[1].contains("scout: gpt-5.6-sol/max"),
+            "small channel header names each agent engine: {t:?}"
+        );
+        assert!(
             t[0].trim_end().ends_with("bingo"),
             "workspace name right-aligned: {t:?}"
         );
-        assert!(t[1].starts_with("─"), "{t:?}");
+        assert!(t[2].starts_with("─"), "{t:?}");
+
+        let narrow = texts(&header_rows(
+            &snap,
+            &Conv::Channel("dev-room".into()),
+            &pal(),
+            24,
+        ));
+        assert_eq!(narrow.len(), 3, "header stays bounded: {narrow:?}");
+        assert!(
+            narrow[1].contains("2 agents · mixed"),
+            "small rooms aggregate before names clip: {narrow:?}"
+        );
+
+        let mut large = snap.clone();
+        for i in 0..3 {
+            let name = format!("agent-{i}");
+            large.dms.push(DmItem {
+                name: name.clone(),
+                state: AgentState::Running,
+                model: format!("model-{i}"),
+                thinking: Some("high".into()),
+                description: "member".into(),
+                unread: 0,
+            });
+            large.channels[0].members.push(name);
+        }
+        let large = texts(&header_rows(
+            &large,
+            &Conv::Channel("dev-room".into()),
+            &pal(),
+            32,
+        ));
+        assert_eq!(large.len(), 3, "header stays bounded: {large:?}");
+        assert!(
+            large[1].contains("5 agents · mixed engines"),
+            "large rooms use a complete aggregate: {large:?}"
+        );
 
         let t = texts(&header_rows(&snap, &Conv::Dm("qa".into()), &pal(), 70));
         assert!(t[0].contains("○ qa"), "{t:?}");
         assert!(
-            t[0].contains("idle") && t[0].contains("acceptance"),
-            "{t:?}"
+            t[0].contains("DM · claude-sonnet · high · idle · acceptance"),
+            "DM metadata includes model, thinking, state, and description: {t:?}"
         );
     }
 

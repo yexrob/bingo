@@ -1,4 +1,4 @@
-//! Full-screen workspace view (opened from the ctrl+g picker), wearing the
+//! Full-screen workspace view (opened directly with ctrl+g), wearing the
 //! Slack shape defined in [`crate::tui::slack`] (D43, narrowed to one pane by
 //! D47): a channel log or an instance's history as a Slack message list, with a
 //! composer that speaks as `user` into a channel and as the hub into a DM.
@@ -38,6 +38,7 @@ use crate::tui::{avatar, gfx, view};
 /// first time are seeded as read: a workspace you have never opened shouldn't
 /// greet you with an unread badge for every turn that already happened.
 fn snapshot(session: &Arc<Session>, ws: &mut Workspace, workspace: &str) -> Snapshot {
+    let statuses = session.agents.list();
     let channels: Vec<ChannelItem> = session
         .channels
         .list()
@@ -54,7 +55,7 @@ fn snapshot(session: &Arc<Session>, ws: &mut Workspace, workspace: &str) -> Snap
         })
         .collect();
     let mut dms: Vec<DmItem> = Vec::new();
-    for status in session.agents.list() {
+    for status in statuses {
         let conv = Conv::Dm(status.name.clone());
         let seq = dm_seq(session, &status.name);
         if !ws.knows(&conv) {
@@ -64,11 +65,15 @@ fn snapshot(session: &Arc<Session>, ws: &mut Workspace, workspace: &str) -> Snap
             unread: seq.saturating_sub(ws.read_cursor(&conv)),
             name: status.name,
             state: status.state,
+            model: status.model,
+            thinking: status.thinking,
             description: status.description,
         });
     }
     Snapshot {
         workspace: workspace.to_string(),
+        main_model: session.runtime.model.borrow().clone(),
+        main_thinking: session.runtime.thinking.borrow().clone(),
         channels,
         dms,
     }
@@ -196,10 +201,7 @@ async fn modal_loop(
     // The workspace state lives on Chat so read cursors and the open
     // conversation survive leaving and re-entering the view.
     let mut ws = std::mem::take(&mut chat.slack);
-    ws.select(match open {
-        EntityOpen::Agent(name) => Conv::Dm(name),
-        EntityOpen::Channel(name) => Conv::Channel(name),
-    });
+    let EntityOpen::Workspace = open;
     ws.focus = Focus::Composer;
     ws.switcher = None;
 
@@ -445,6 +447,8 @@ mod tests {
     fn snap() -> Snapshot {
         Snapshot {
             workspace: "bingo".into(),
+            main_model: "main-model".into(),
+            main_thinking: Some("high".into()),
             channels: vec![ChannelItem {
                 name: "dev-room".into(),
                 seq: 2,
@@ -456,6 +460,8 @@ mod tests {
             dms: vec![DmItem {
                 name: "scout".into(),
                 state: AgentState::Idle,
+                model: "test-model".into(),
+                thinking: None,
                 description: "recon".into(),
                 unread: 0,
             }],
@@ -587,6 +593,54 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_carries_every_channel_members_engine() {
+        let session = crate::tui::test_util::test_session();
+        for (name, model, thinking) in [
+            ("scout", "gpt-5.6-sol", Some("max")),
+            ("qa", "claude-sonnet", Some("high")),
+        ] {
+            let member = crate::tui::test_util::test_session();
+            let _ = member.runtime.model_tx.send(model.to_string());
+            let _ = member
+                .runtime
+                .thinking_tx
+                .send(thinking.map(str::to_string));
+            session.agents.insert(
+                name,
+                crate::agents::AgentKind::Crew,
+                None,
+                name.to_string(),
+                member,
+            );
+        }
+        session
+            .channels
+            .create(
+                "dev-team",
+                vec!["scout".into(), "qa".into()],
+                ChannelMode::Serial,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let mut ws = Workspace::default();
+        let snap = snapshot(&session, &mut ws, "bingo");
+        let header = crate::tui::slack::header_rows(
+            &snap,
+            &Conv::Channel("dev-team".into()),
+            &crate::tui::slack::Palette::new(&crate::tui::theme::Theme::dark()),
+            120,
+        );
+        let text = header
+            .iter()
+            .map(|row| row.line.plain_text())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("main: test-model/off"), "{text}");
+        assert!(text.contains("scout: gpt-5.6-sol/max"), "{text}");
+        assert!(text.contains("qa: claude-sonnet/high"), "{text}");
+    }
+
+    #[test]
     fn dm_history_becomes_posts_with_queued_drafts_last() {
         use crate::api::types::{ContentBlock, Message, Role};
         let history = vec![
@@ -619,13 +673,13 @@ mod tests {
             kinds,
             vec![
                 (true, slack::PostKind::Said),
-                (false, slack::PostKind::Tool),
                 (false, slack::PostKind::Said),
                 (true, slack::PostKind::Queued),
                 (false, slack::PostKind::Typing),
             ],
             "{posts:?}"
         );
-        assert!(posts[1].text.contains("Bash"));
+        assert_eq!(posts[1].text, "Conclusion: lazy flush is correct.");
+        assert!(posts.iter().all(|post| !post.text.contains("Bash")));
     }
 }

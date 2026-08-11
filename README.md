@@ -159,7 +159,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
 | `Ctrl+T` | toggle the task area |
 | `Ctrl+O` | expand/collapse: expanded replays the full transcript for scrolling up |
-| `Ctrl+G` | agent/channel picker (agent view shows full instance conversation; channel view is a WeChat-style room) |
+| `Ctrl+G` | open the full workspace directly; `Ctrl+K` switches channels and DMs |
 | `Ctrl+L` | clear and redraw |
 | `Shift+Tab` | cycle permission modes (default → acceptEdits → plan) |
 | `Alt+T` | toggle thinking |

@@ -207,6 +207,7 @@ pub struct AgentStatus {
     /// invisible until the bill arrives.
     pub model: String,
     pub provider: String,
+    pub thinking: Option<String>,
 }
 
 /// Message identifier, unique per registry. Handed back to the sender so it can check later
@@ -875,6 +876,7 @@ impl AgentRegistry {
                 unacked: e.acks.iter().filter(|a| a.state.is_outstanding()).count(),
                 model: e.session.runtime.model.borrow().clone(),
                 provider: e.session.runtime.provider.borrow().clone(),
+                thinking: e.session.runtime.thinking.borrow().clone(),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -982,6 +984,28 @@ mod tests {
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })
+    }
+
+    #[test]
+    fn list_reports_the_runtime_engine_and_thinking() {
+        let registry = AgentRegistry::new();
+        let session = test_session();
+        let _ = session.runtime.model_tx.send("gpt-5.6-sol".into());
+        let _ = session.runtime.provider_tx.send("road".into());
+        let _ = session.runtime.thinking_tx.send(Some("max".into()));
+        registry.insert(
+            "dev",
+            AgentKind::Hire,
+            None,
+            "implementation".into(),
+            session,
+        );
+
+        let statuses = registry.list();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].model, "gpt-5.6-sol");
+        assert_eq!(statuses[0].provider, "road");
+        assert_eq!(statuses[0].thinking.as_deref(), Some("max"));
     }
 
     #[test]

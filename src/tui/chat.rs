@@ -397,8 +397,6 @@ pub const SLASH_SUGGESTIONS_MAX: usize = 5;
 pub const INPUT_ROWS_MAX: usize = 10;
 /// Max rows shown for queued messages (more collapse into `… +N more`).
 pub const QUEUE_ROWS_MAX: usize = 3;
-/// Max entities shown one per line while the entity selector is focused.
-pub const ENTITY_ROWS_MAX: usize = 6;
 /// Undo stack depth (ctrl+_).
 pub const UNDO_MAX: usize = 20;
 /// Exit-confirmation window between two Ctrl+C presses.
@@ -1069,10 +1067,8 @@ pub struct Chat {
     pub tasks_visible: bool,
     /// Whether the task area was auto-opened by TaskCreate (not manually via ctrl+t): hides automatically when everything is done.
     pub tasks_auto: bool,
-    /// Snapshot of the bottom entity area (agent instances + channels; refreshed on tick/WatchEvent).
+    /// Snapshot of the bottom entity area (running agent instances + channels; refreshed on tick/WatchEvent).
     pub entities: Vec<EntityRow>,
-    /// Entity selector focus (Some(i) = selection mode: ↑↓/Enter/Esc are captured).
-    pub entity_focus: Option<usize>,
     /// Entity view pending open (app layer consumes → enters the fullscreen modal).
     pub open_entity: Option<EntityOpen>,
     /// Slack workspace view state. Lives here rather than in the modal so read
@@ -1089,7 +1085,8 @@ pub enum EntityRow {
     Agent {
         name: String,
         state: &'static str,
-        description: String,
+        model: String,
+        thinking: Option<String>,
     },
     Channel {
         name: String,
@@ -1098,11 +1095,10 @@ pub enum EntityRow {
     },
 }
 
-/// Entity view to open after selecting with Enter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Workspace view to open after Ctrl+G.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityOpen {
-    Agent(String),
-    Channel(String),
+    Workspace,
 }
 
 impl Chat {
@@ -1297,7 +1293,6 @@ impl Chat {
             tasks_visible: false,
             tasks_auto: false,
             entities: Vec::new(),
-            entity_focus: None,
             open_entity: None,
             slack: Default::default(),
             interrupted: false,
@@ -4963,7 +4958,7 @@ impl Chat {
         if self.search.is_some() {
             return self.search_key(code, modifiers);
         }
-        // Entity selector (ctrl+g / ↑↓ Enter Esc while focused) precedes the global Esc semantics.
+        // Ctrl+G opens the workspace before the global Esc/interrupt semantics.
         if self.entity_key(code, modifiers) {
             return true;
         }
@@ -5934,10 +5929,12 @@ impl Chat {
             .agents
             .list()
             .into_iter()
+            .filter(|s| s.state == crate::agents::AgentState::Running)
             .map(|s| EntityRow::Agent {
                 name: s.name,
                 state: s.state.label(),
-                description: s.description,
+                model: s.model,
+                thinking: s.thinking,
             })
             .collect();
         fresh.extend(
@@ -5952,136 +5949,52 @@ impl Chat {
                 }),
         );
         if fresh != self.entities {
-            // Clamp the selection when the list shrinks.
-            if let Some(i) = self.entity_focus
-                && i >= fresh.len()
-            {
-                self.entity_focus = fresh.len().checked_sub(1);
-            }
             self.entities = fresh;
             self.dirty = true;
         }
     }
 
-    /// Bottom entity area: collapsed = a one-line summary (dim); focused = a per-row list with `❯` selection +
-    /// action hints. Takes no rows when there are no entities.
+    /// Bottom entity area: one-line summary of running agents and channels.
+    /// Takes no rows when there are no entities.
     pub fn entity_rows(&self, width: usize) -> Vec<Line> {
         if self.entities.is_empty() {
             return Vec::new();
         }
-        let glyph = |e: &EntityRow| match e {
-            EntityRow::Agent { .. } => "◉",
-            EntityRow::Channel { .. } => "◇",
-        };
-        let brief = |e: &EntityRow| match e {
-            EntityRow::Agent { name, state, .. } => format!("◉ {name}({state})"),
-            EntityRow::Channel { name, seq, frozen } => {
-                format!("◇ #{name}({seq}{})", if *frozen { "❄" } else { "" })
-            }
-        };
-        let Some(selected) = self.entity_focus else {
-            let summary = self
-                .entities
-                .iter()
-                .map(brief)
-                .collect::<Vec<_>>()
-                .join(" · ");
-            return vec![Line::styled(
-                one_line(&format!("  {summary} — ctrl+g to view"), width),
-                SegStyle::fg(self.theme.inactive),
-            )];
-        };
-        let mut rows = Vec::new();
-        // Keep the selection visible: the window slides around selected.
-        let cap = ENTITY_ROWS_MAX;
-        let start = selected.saturating_sub(cap.saturating_sub(1));
-        for (i, e) in self.entities.iter().enumerate().skip(start).take(cap) {
-            let focused = i == selected;
-            let detail = match e {
+        let summary = self
+            .entities
+            .iter()
+            .map(|e| match e {
                 EntityRow::Agent {
                     name,
                     state,
-                    description,
-                } => format!("{} {name} · {state} · {description}", glyph(e)),
-                EntityRow::Channel { name, seq, frozen } => format!(
-                    "{} #{name} · {seq} msgs{}",
-                    glyph(e),
-                    if *frozen { " · frozen" } else { "" }
+                    model,
+                    thinking,
+                    ..
+                } => format!(
+                    "◉ {name} · {model} · {} · {state}",
+                    thinking.as_deref().unwrap_or("off")
                 ),
-            };
-            let style = if focused {
-                SegStyle::fg(self.theme.permission)
-            } else {
-                SegStyle::fg(self.theme.inactive)
-            };
-            let prefix = if focused { "❯ " } else { "  " };
-            rows.push(Line::styled(
-                one_line(&format!("{prefix}{detail}"), width),
-                style,
-            ));
-        }
-        if self.entities.len() > cap {
-            rows.push(Line::styled(
-                format!("  … {} total", self.entities.len()),
-                SegStyle::fg(self.theme.inactive),
-            ));
-        }
-        rows.push(Line::styled(
-            "  ↑↓ select · enter opens · esc closes".to_string(),
+                EntityRow::Channel { name, seq, frozen } => {
+                    format!("◇ #{name}({seq}{})", if *frozen { "❄" } else { "" })
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        vec![Line::styled(
+            one_line(&format!("  {summary} — ctrl+g to view"), width),
             SegStyle::fg(self.theme.inactive),
-        ));
-        rows
+        )]
     }
 
-    /// Entity selector keys: ctrl+g toggles focus; while focused, ↑↓ move, Enter opens,
-    /// Esc closes. Returns whether consumed.
+    /// Ctrl+G opens the full-screen workspace directly.
     pub fn entity_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         if code == KeyCode::Char('g') && ctrl {
-            self.refresh_entities();
-            if self.entities.is_empty() {
-                self.notice = Some(
-                    "no subagent instances or channels yet (they appear after the Agent tool spawns one)",
-                );
-                self.notice_until = Some(std::time::Instant::now() + CTRL_C_WINDOW);
-            } else if self.entity_focus.is_some() {
-                self.entity_focus = None;
-            } else {
-                self.entity_focus = Some(0);
-            }
+            self.open_entity = Some(EntityOpen::Workspace);
             self.dirty = true;
             return true;
         }
-        let Some(i) = self.entity_focus else {
-            return false;
-        };
-        match code {
-            KeyCode::Up => {
-                self.entity_focus = Some(i.saturating_sub(1));
-                self.dirty = true;
-                true
-            }
-            KeyCode::Down => {
-                self.entity_focus = Some((i + 1).min(self.entities.len().saturating_sub(1)));
-                self.dirty = true;
-                true
-            }
-            KeyCode::Enter => {
-                self.open_entity = self.entities.get(i).map(|e| match e {
-                    EntityRow::Agent { name, .. } => EntityOpen::Agent(name.clone()),
-                    EntityRow::Channel { name, .. } => EntityOpen::Channel(name.clone()),
-                });
-                self.entity_focus = None;
-                self.dirty = true;
-                true
-            }
-            KeyCode::Esc => {
-                self.entity_focus = None;
-                self.dirty = true;
-                true
-            }
-            _ => false,
-        }
+        false
     }
 
     /// `?` panel rows (single source for the shortcut table). The row budget comes from the terminal height:
@@ -6718,7 +6631,7 @@ impl Chat {
 /// User message rows: a `❯ ` prefix + body wrapped to the width (multi-line pasted messages split into rows).
 /// One bubble Row per line — stuffing the whole message into a single height=1 View would clip
 /// everything after the first newline and detach the canvas height from the row model.
-fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<Row> {
+pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<Row> {
     // 2 prefix columns + 1 column of right padding inside the bubble.
     let body_width = width.saturating_sub(3).max(1);
     let style = SegStyle::fg(theme.text);
@@ -6742,24 +6655,26 @@ pub(crate) fn one_line(text: &str, width: usize) -> String {
 
 /// Text segment: the first reply line carries the `⏺ ` marker (CC assistant
 /// reply prefix); the rest map one line per row.
-fn text_el(theme: &Theme, reply: Vec<Line>) -> El {
+pub(crate) fn text_rows(theme: &Theme, reply: Vec<Line>) -> Vec<Row> {
     let claude = theme.claude;
-    El::Rows(
-        reply
-            .into_iter()
-            .enumerate()
-            .map(|(j, line)| {
-                if j == 0 {
-                    let mut styled = Line::styled("⏺ ", SegStyle::fg(claude));
-                    styled.image = line.image.clone();
-                    styled.segs.extend(line.segs);
-                    Row::new(styled)
-                } else {
-                    Row::new(line)
-                }
-            })
-            .collect(),
-    )
+    reply
+        .into_iter()
+        .enumerate()
+        .map(|(j, line)| {
+            if j == 0 {
+                let mut styled = Line::styled("⏺ ", SegStyle::fg(claude));
+                styled.image = line.image.clone();
+                styled.segs.extend(line.segs);
+                Row::new(styled)
+            } else {
+                Row::new(line)
+            }
+        })
+        .collect()
+}
+
+fn text_el(theme: &Theme, reply: Vec<Line>) -> El {
+    El::Rows(text_rows(theme, reply))
 }
 
 /// Welcome card body (CC WelcomeBox): a starred greeting, the two commands
@@ -13022,64 +12937,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Bottom entity area: ctrl+g focuses the selector, ↑↓ move, Enter opens, Esc closes;
-    /// collapsed state is a one-line summary; no entities → no rows and ctrl+g gives a hint.
+    /// Bottom entity area lists only running entities with their engine; Ctrl+G
+    /// opens the full workspace directly instead of focusing an inline selector.
     #[test]
-    fn entity_selector_picks_agent_and_channel() {
+    fn entity_area_filters_idle_agents_and_ctrl_g_opens_workspace() {
         let mut chat = test_chat();
-        chat.width = 80;
-        // No entities: takes no rows; ctrl+g shows a hint.
-        assert!(chat.entity_rows(80).is_empty());
-        assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
-        assert!(chat.notice.is_some(), "empty-state hint");
-        assert!(chat.entity_focus.is_none());
-        // Create one agent instance + one channel.
+        chat.width = 100;
+        assert!(chat.entity_rows(100).is_empty());
+
+        let running = chat.session.clone();
+        let _ = running.runtime.model_tx.send("gpt-5.6-sol".to_string());
+        let _ = running.runtime.thinking_tx.send(Some("max".to_string()));
         chat.session.agents.insert(
             "scout",
             crate::agents::AgentKind::Hire,
             None,
             "research".into(),
+            running,
+        );
+        chat.session.agents.insert(
+            "reviewer",
+            crate::agents::AgentKind::Hire,
+            None,
+            "review".into(),
             chat.session.clone(),
         );
+        let _ = chat.session.agents.finish("reviewer", Vec::new(), false);
         chat.session
             .channels
             .create("table", vec![], crate::channels::ChannelMode::Serial)
             .unwrap_or_else(|e| panic!("{e}"));
+
         chat.refresh_entities();
-        assert_eq!(chat.entities.len(), 2);
-        // Collapsed: one summary line containing both.
-        let rows = chat.entity_rows(80);
-        assert_eq!(rows.len(), 1);
-        let summary = rows[0].plain_text();
+        assert_eq!(chat.entities.len(), 2, "running agent plus channel");
         assert!(
-            summary.contains("◉ scout(running)") && summary.contains("◇ #table(0)"),
+            chat.entities
+                .iter()
+                .all(|e| !matches!(e, EntityRow::Agent { name, .. } if name == "reviewer")),
+            "idle agents stay out of the compact entity area"
+        );
+        let summary = chat.entity_rows(100)[0].plain_text();
+        assert!(
+            summary.contains("◉ scout · gpt-5.6-sol · max · running"),
             "{summary}"
         );
-        // Focused: per-row list + ❯ selection + hint row.
+        assert!(summary.contains("◇ #table(0)"), "{summary}");
+
         assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
-        assert_eq!(chat.entity_focus, Some(0));
-        let rows = chat.entity_rows(80);
-        let joined: Vec<String> = rows.iter().map(|l| l.plain_text()).collect();
-        assert!(joined[0].starts_with("❯ ◉ scout"), "{joined:?}");
-        assert!(
-            joined
-                .last()
-                .unwrap_or(&String::new())
-                .contains("enter opens")
-        );
-        // ↓ to the channel, Enter opens it.
-        assert!(chat.on_key(KeyCode::Down, KeyModifiers::empty()));
-        assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
-        assert_eq!(
-            chat.open_entity,
-            Some(EntityOpen::Channel("table".into())),
-            "channel selected"
-        );
-        assert!(chat.entity_focus.is_none(), "focus exits after opening");
-        // After refocusing, Esc only closes the selector (does not trigger global Esc semantics).
-        let _ = chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL);
-        assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
-        assert!(chat.entity_focus.is_none());
+        assert_eq!(chat.open_entity, Some(EntityOpen::Workspace));
     }
 
     /// Queues beyond the cap fold into one row (row count feeds chrome, so it must be bounded).

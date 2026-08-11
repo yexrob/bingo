@@ -22,6 +22,8 @@ mod preview {
     fn snap() -> Snapshot {
         Snapshot {
             workspace: "bingo".into(),
+            main_model: "main-model".into(),
+            main_thinking: Some("high".into()),
             channels: vec![
                 ChannelItem {
                     name: "dev-room".into(),
@@ -52,18 +54,24 @@ mod preview {
                 DmItem {
                     name: "scout".into(),
                     state: AgentState::Running,
+                    model: "gpt-5.6-sol".into(),
+                    thinking: Some("max".into()),
                     description: "code reconnaissance".into(),
                     unread: 0,
                 },
                 DmItem {
                     name: "qa".into(),
                     state: AgentState::Idle,
+                    model: "claude-sonnet".into(),
+                    thinking: Some("high".into()),
                     description: "acceptance".into(),
                     unread: 3,
                 },
                 DmItem {
                     name: "ui-ux".into(),
                     state: AgentState::Stopped,
+                    model: "claude-haiku".into(),
+                    thinking: None,
                     description: "interface review".into(),
                     unread: 0,
                 },
@@ -93,8 +101,8 @@ mod preview {
                 from: "scout".into(),
                 you: false,
                 at: now - 3580,
-                text: "⏺ Read(src/tui/term.rs:410)".into(),
-                kind: PostKind::Tool,
+                text: "I traced it to src/tui/term.rs:410.".into(),
+                kind: PostKind::Said,
             },
             Post {
                 from: "user".into(),

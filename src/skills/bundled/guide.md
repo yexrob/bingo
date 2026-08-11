@@ -32,9 +32,7 @@ commands, and verification steps in conclusions. Never speculate about features 
   Ctrl+R reverse history search · Ctrl+A/E line start/end · Alt+B/F word movement · Ctrl+W/U/K delete word/to line
   start/end · Ctrl+Y paste back deleted · Ctrl+S stash/restore input · Ctrl+_ undo · ctrl+o
   expand/collapse toggle (expand = replays the full transcript for terminal scroll-up; press again to collapse back to
-  aggregates and clear/consolidate) · Ctrl+T toggle the task area · Ctrl+G agent/channel selector (↑↓ to select,
-  Enter opens a fullscreen view, Esc closes; the agent view shows that instance's full conversation and streaming output; the channel view
-  is a WeChat-style group room where you can speak directly as user) · Ctrl+L clear and redraw · Shift+Tab cycles permission
+  aggregates and clear/consolidate) · Ctrl+T toggle the task area · Ctrl+G opens the fullscreen team/DM workspace directly (Ctrl+K switches channels and DMs; the DM view shows user/agent text while hiding tool activity; channel rooms let you speak directly as user) · Ctrl+L clear and redraw · Shift+Tab cycles permission
   modes (default → acceptEdits → plan) · Alt+T thinking toggle (off ↔ the last non-off level, default medium) · while busy, Enter queues the message (sent automatically at turn end; /think /model /provider /theme /status /context /tasks /help /skills run immediately) ·
 - Large pastes auto-collapse to a `[Pasted text #N +M lines]` placeholder; the real content expands on send
   (precisely detected via terminal bracketed-paste events; terminals without that feature fall back to a
@@ -265,11 +263,9 @@ Example (.bingo/settings.json):
   message into a room-wide storm). The rule also states the mechanism the model cannot infer: a turn woken by a channel message
   reports to the hub, so **only Post puts words in the room** — a reply written as turn text reaches nobody in the channel. It lives in the system block on purpose: compaction rewrites the history
   but never touches the system prompt, so the rule survives a long-running member's context being summarised away.
-  **Bottom entity area**: when instances/channels exist, a one-line summary shows above the input box; Ctrl+G enters selection
-  (↑↓/Enter), and Enter opens the fullscreen **Slack-shaped workspace**: one conversation pane, full width, rendering a Slack
+  **Bottom entity area**: when running instances/channels exist, a one-line summary shows above the input box; idle/stopped agents stay out. Running rows include model/thinking/state. Ctrl+G opens the fullscreen **Slack-shaped workspace** directly: one conversation pane, full width, rendering a Slack
   message list (a header naming the channel/instance with the team's name at the right edge, day dividers, avatar + bold sender
-  + timestamp, grouped consecutive messages, an unread divider, tool calls as attachments, a running instance's live tail as a
-  typing indicator). There is no rail and no sidebar, and the view paints no background of its own — the terminal's own
+  + timestamp, grouped consecutive messages, and an unread divider. DMs show user messages and agent text only—historical and live tool activity stays hidden—while a working indicator remains during silent tool waits. DM headers show model/thinking; channel headers list model/thinking when the names fit and otherwise use one bounded aggregate, so the composer stays visible. There is no rail and no sidebar, and the view paints no background of its own — the terminal's own
   background shows through. Navigation is Ctrl+K (the quick switcher, which lists every conversation with its unread count)
   and alt+↑↓. **Avatars**: on terminals that can place kitty images (the same capability that renders inline images), each
   sender gets one of eight bundled anime-style portraits, 4×2 cells beside the name; elsewhere it falls back to the sender's
@@ -391,10 +387,9 @@ Example (.bingo/settings.json):
   (unless named or you can unblock them), and **never answer an answer** (replies to replies are the source of noise). The rule also spells out the mechanism the model can't infer:
   in a turn woken by a channel message, the body text goes back to the hub — **only Post can put words in the room**. The rule lives in the system block, not the wake payload: compaction rewrites message history but never touches the system prompt,
   so the rule survives even after a long-running member's context is summarized away.
-  **Bottom entity area**: when instances/channels exist, a one-line summary shows above the input; Ctrl+G enters the selector
-  (↑↓/Enter), Enter opens the fullscreen **Slack-style workspace**: the whole screen is a single message-flow column (a one-line title at the top
+  **Bottom entity area**: when running instances/channels exist, a one-line summary shows above the input; idle/stopped agents stay out, and running rows show model/thinking/state. Ctrl+G opens the fullscreen **Slack-style workspace** directly: the whole screen is a single message-flow column (a compact title at the top
   giving the channel/instance with the team name at the right edge; date separators, avatar + bold sender + time, consecutive messages merged, new-message
-  dividers, tool calls as attachments, a running instance's live tail as "typing"). No rail and no sidebar,
+  dividers; DMs contain only user messages and agent text, with all historical/live tool activity hidden while silent tool waits retain a working indicator). DM headers include model/thinking; channel headers list model/thinking when it fits and otherwise use one bounded aggregate. No rail and no sidebar,
   the view paints no background of its own — the terminal's own background shows through; switching conversations is Ctrl+K (quick switcher listing
   every conversation and its unread count) and alt+↑↓. **Avatars**: terminals that can place kitty images (the same capability behind inline images)
   assign each speaker one of eight bundled anime-style portraits, 4×2 cells to the left of the name; other terminals fall back to an initial-on-color

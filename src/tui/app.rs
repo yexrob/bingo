@@ -397,7 +397,7 @@ pub async fn run_inline(
             },
         }
 
-        // Entity view (ctrl+g then Enter): the alternate-screen modal takes over; afterwards, a deterministic
+        // Entity view (Ctrl+G): the alternate-screen modal takes over; afterwards, a deterministic
         // redraw goes through the resize channel (clear + rehydrate, without guessing whether alt-screen restore works).
         if let Some(open) = chat.open_entity.take() {
             crate::tui::entity::run_entity_modal(&mut chat, &mut events, open, false).await?;
