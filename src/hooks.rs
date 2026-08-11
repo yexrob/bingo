@@ -204,8 +204,7 @@ pub async fn run_pre_tool_use(
                 continue;
             }
         };
-        let (code, output, stderr) = match run_hook(command, &hook_value, cwd).await
-        {
+        let (code, output, stderr) = match run_hook(command, &hook_value, cwd).await {
             Ok(o) => o,
             Err(e) => {
                 eprintln!("[bingo] warning: PreToolUse hook failed: {e}");
