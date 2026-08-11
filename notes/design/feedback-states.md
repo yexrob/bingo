@@ -1,6 +1,6 @@
 # Feedback States Specification
 
-> Version: v1.18 · Status: in effect (2026-08-07)
+> Version: v1.34 · Status: in effect (2026-08-11)
 > Scope: the unified design conventions for every user-visible feedback state in bingo. The GUI (TUI) and CLI (headless) sides share a single source; qa acceptance anchors are at the end.
 
 ## General principles
@@ -278,3 +278,4 @@ Web-side conventions (for a future web frontend to reuse):
 - v1.32 (2026-08-10): the transcript stops lying about order and about subagent work (D55, issue #28). **Order**: an `AskUserQuestion` answer is pushed as an ordinary user message (v1.20) but `stream_msg` still pointed at the assistant message above it, so everything the model did next rendered on top of the answer and the answer stayed pinned to the bottom until TurnEnd. The answer now ends that message and opens a fresh one (`open_continuation_message`) — the interrupted message settles and flushes immediately instead of waiting for the turn, a continuation the turn never filled is dropped at TurnEnd (tracked by `continuation_msg`), and a tool still in flight pins the stream where it is. **Folding**: `AgentControl` joins the existing collapse groups instead of producing one two-line block per call (and instead of closing whatever group was open); a look and a change are counted apart, so the summary reads `Checked 3 subagents, stopped 1 subagent` and never reports a killed run as a glance. The ⎿ row under a running group already showed the latest call — it now shows *which instance* it was aimed at, because `summarize_input`'s k=v fallback (first key, alphabetical) always landed on `action` and hid the target for `AgentControl`, `Channel` and `Team` alike. Every collapse group (not only subagent ones) now carries `· N failed` in the error colour when something inside it failed: a fold that can hide a stop must not count a refused stop as a success.
 
 - v1.33 (2026-08-11): `/cd <dir>` follows the existing slash feedback tiers — a successful session-directory switch is a transient confirmation, while a busy turn, missing arguments, missing paths, and non-directory targets use the structured `BAD_ARGUMENT` error row and leave the current directory unchanged.
+- v1.34 (2026-08-11): workspace DM/channel transcripts accept mouse-wheel scrolling at the same three-row step as the main fullscreen chat; `AgentControl list` adds relative last-activity feedback, refreshed on inbox receipt, turn start/end, streamed text, and tool ready/done signals.

@@ -22,6 +22,8 @@
 //! avatar chip, the switcher's selected row — plus the explicit erase [`opaque`]
 //! needs to keep an overlay from being see-through.
 
+use std::time::Duration;
+
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
@@ -159,6 +161,7 @@ pub struct DmItem {
     pub name: String,
     pub state: AgentState,
     pub description: String,
+    pub last_active: Duration,
     pub unread: u64,
 }
 
@@ -662,7 +665,12 @@ pub fn header_rows(snap: &Snapshot, conv: &Conv, pal: &Palette, width: usize) ->
                 let (glyph, _) = presence(d.state, pal);
                 (
                     format!(" {glyph} {name}"),
-                    format!("  DM · {} · {}", d.state.label(), d.description),
+                    format!(
+                        "  DM · {} · {} · {}",
+                        d.state.label(),
+                        crate::tool::agent::format_last_active(d.last_active),
+                        d.description
+                    ),
                 )
             }
             None => (format!(" {name}"), "  no longer exists".to_string()),
@@ -1197,12 +1205,14 @@ mod tests {
                     name: "scout".into(),
                     state: AgentState::Running,
                     description: "recon".into(),
+                    last_active: Duration::from_secs(3),
                     unread: 0,
                 },
                 DmItem {
                     name: "qa".into(),
                     state: AgentState::Idle,
                     description: "acceptance".into(),
+                    last_active: Duration::from_secs(125),
                     unread: 3,
                 },
             ],
@@ -1692,7 +1702,9 @@ mod tests {
         let t = texts(&header_rows(&snap, &Conv::Dm("qa".into()), &pal(), 70));
         assert!(t[0].contains("○ qa"), "{t:?}");
         assert!(
-            t[0].contains("idle") && t[0].contains("acceptance"),
+            t[0].contains("idle")
+                && t[0].contains("active 2min ago")
+                && t[0].contains("acceptance"),
             "{t:?}"
         );
     }

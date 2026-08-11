@@ -211,7 +211,8 @@ Example (.bingo/settings.json):
   the project key is derived from the git remote URL (normalized) → git root → normalized absolute path, stable across directories/machines.
 - **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
   auto-suffix -2/-3), shown in the transcript as `◉ name · task`; history is kept after completion, and the main agent can
-  SendMessage to continue, or manage with AgentControl list/messages/stop/delete.
+  SendMessage to continue, or manage with AgentControl list/messages/stop/delete; each list row includes relative last activity
+  (`active now`, `active 3s ago`, `active 2min ago`) so a quiet idle instance is distinguishable from one that just finished.
   **Messaging**: SendMessage returns a `message_id` and only queues — delivery happens at the turn boundary, where
   every message sent to the same instance in that turn is folded into one prompt (the receiver reads them together
   rather than one per turn). Queued is not an acknowledgement: `AgentControl(action=messages, agent=…)` reports each
@@ -284,7 +285,8 @@ Example (.bingo/settings.json):
   runtime injected (a relayed channel message, the task reminder) collapses to one dim line instead of being quoted as a message. The composer sends: in a channel it posts as `user` (same
   delivery path as Post, members woken normally; rendering = read, so serial never bounces you), in a DM it queues on the
   instance and flushes at the turn boundary (shown as a pending message until then). Keys: Tab switches between the message
-  list and the composer, alt+↑↓ switches conversation, Ctrl+K is the quick switcher, Esc returns.
+  list and the composer, ↑↓ or the mouse wheel scrolls the transcript (three rows per wheel notch), alt+↑↓ switches conversation,
+  Ctrl+K is the quick switcher, Esc returns.
 - **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/`channels[{name,mode?,messageLimit?,members?}]`/`teams[{name?,path}]`/
   `members[{name,agent,avatar?,model?,provider?,thinking?}]`, members reference AgentDefs; `name` is the name shown on the member's messages, so make it a person's name, and `avatar` pins one of the bundled portraits.
   `model`/`provider`/`thinking` pin the member's engine — which model does which job is part of the formation, so a crew can mix a cheap fast reviewer with a stronger designer; each falls back to the agent definition and then to the session, and a named `provider` other than the session's needs a `model` too.
@@ -355,7 +357,8 @@ Example (.bingo/settings.json):
   the project key comes from the git remote URL (normalized) → git root → normalized absolute path, stable across directories/machines.
 - **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
   auto-suffix -2/-3), shown in the transcript as `◉ name · task`; history is kept after completion, and the main agent can
-  SendMessage to continue, or manage with AgentControl list/messages/stop/delete.
+  SendMessage to continue, or manage with AgentControl list/messages/stop/delete; each list row includes relative last activity
+  (`active now`, `active 3s ago`, `active 2min ago`) so a quiet idle instance is distinguishable from one that just finished.
   **Messaging**: SendMessage returns a `message_id` and only queues — delivery happens at the turn boundary, and
   every message sent to the same instance in that turn is folded into one prompt delivered at once, rather than one per turn. Queued is not an acknowledgement:
   `AgentControl(action=messages, agent=…)` reports each message as delivered (with which run it landed in), still queued (with its wait time),
@@ -404,8 +407,8 @@ Example (.bingo/settings.json):
   Off, the transcript has no band and a subagent's watch row keeps its `◉`; the switch governs the main chat only. Runtime-injected wake scaffolding (channel-message relays,
   task reminders) collapses into a single dim hint line instead of being quoted as a whole message. Sending from the bottom input box: in a channel you speak as `user` (the same delivery
   path as Post, waking members normally; rendered counts as read, serial won't bounce you), DMs queue into the instance's inbox and are
-  delivered at the turn boundary (shown as pending before delivery). Keys: Tab switches between the message list and the input box, alt+↑↓ switches conversations,
-  Ctrl+K quick-jumps, Esc returns.
+  delivered at the turn boundary (shown as pending before delivery). Keys: Tab switches between the message list and the input box, ↑↓ or the mouse wheel
+  scrolls the transcript (three rows per wheel notch), alt+↑↓ switches conversations, Ctrl+K quick-jumps, Esc returns.
 - **agent team** (project-level crew): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
   `members[{name,agent,avatar?,model?,provider?,thinking?}]`, members reference AgentDef; `name` is the name shown on the member's messages — give it a person's name, not a role code; `avatar` pins the portrait.
   `model`/`provider`/`thinking` pin the member's engine, each falling back to the agent definition and then to the session; a named `provider` other than the session's needs a `model` too, and `/team validate` checks all of it, so a blueprint that passes still starts.

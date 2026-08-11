@@ -18,7 +18,10 @@ use std::io::stdout;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use futures_util::StreamExt;
@@ -65,6 +68,7 @@ fn snapshot(session: &Arc<Session>, ws: &mut Workspace, workspace: &str) -> Snap
             name: status.name,
             state: status.state,
             description: status.description,
+            last_active: status.last_active.elapsed(),
         });
     }
     Snapshot {
@@ -173,12 +177,13 @@ pub async fn run_entity_modal(
     open: EntityOpen,
     already_alt: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !already_alt {
-        execute!(stdout(), EnterAlternateScreen)?;
+    if !already_alt && let Err(e) = execute!(stdout(), EnterAlternateScreen, EnableMouseCapture) {
+        let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
+        return Err(e.into());
     }
     let result = modal_loop(chat, events, open).await;
     if !already_alt {
-        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
     }
     result
 }
@@ -207,6 +212,7 @@ async fn modal_loop(
     // placed by the cells the message list paints.
     let image_cap = chat.image_cap;
     let mut transmits = gfx::Transmits::default();
+    let mut scroll_content: Option<(Conv, usize)> = None;
     let (workspace, avatars) = blueprint(&chat.session, image_cap.is_some());
 
     loop {
@@ -218,6 +224,9 @@ async fn modal_loop(
                     if !handle_key(&session, &mut ws, &snap, key) {
                         break;
                     }
+                }
+                Some(Ok(Event::Mouse(mouse))) => {
+                    let _ = handle_mouse(&mut ws, mouse);
                 }
                 Some(Ok(Event::Paste(text))) => {
                     match &mut ws.switcher {
@@ -287,10 +296,9 @@ async fn modal_loop(
             let (posts, _, divider) = conversation(&session, &ws, &conv);
             let content = slack::message_rows(&posts, divider, &pal, width, &avatars);
 
-            // Bottom-anchored + scroll offset (clamped so it can't run past the top).
-            let max_up = content.len().saturating_sub(viewport);
-            let up = ws.scroll_up.min(max_up);
-            let start = content.len().saturating_sub(viewport + up);
+            preserve_scroll(&mut ws, &mut scroll_content, &conv, content.len());
+            clamp_scroll(&mut ws, content.len(), viewport);
+            let start = content.len().saturating_sub(viewport + ws.scroll_up);
             let mut slice: Vec<Row> = content.iter().skip(start).take(viewport).cloned().collect();
             while slice.len() < viewport {
                 slice.push(slack::blank_row());
@@ -348,6 +356,45 @@ fn render_at(
             pane.height.saturating_sub(offset),
         ),
     );
+}
+
+fn preserve_scroll(
+    ws: &mut Workspace,
+    previous: &mut Option<(Conv, usize)>,
+    conv: &Conv,
+    content_rows: usize,
+) {
+    match previous {
+        Some((open, rows)) if open == conv => {
+            if ws.scroll_up > 0 {
+                ws.scroll_up = ws
+                    .scroll_up
+                    .saturating_add(content_rows.saturating_sub(*rows));
+            }
+            *rows = content_rows;
+        }
+        _ => *previous = Some((conv.clone(), content_rows)),
+    }
+}
+
+fn clamp_scroll(ws: &mut Workspace, content_rows: usize, viewport: usize) {
+    ws.scroll_up = ws.scroll_up.min(content_rows.saturating_sub(viewport));
+}
+
+const WHEEL_ROWS: usize = 3;
+
+fn handle_mouse(ws: &mut Workspace, mouse: MouseEvent) -> bool {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            ws.scroll_up = ws.scroll_up.saturating_add(WHEEL_ROWS);
+            true
+        }
+        MouseEventKind::ScrollDown => {
+            ws.scroll_up = ws.scroll_up.saturating_sub(WHEEL_ROWS);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Route one key. Returns `false` to leave the view.
@@ -440,7 +487,7 @@ mod tests {
     use super::*;
     use crate::agents::AgentState;
     use crate::channels::ChannelMode;
-    use crossterm::event::KeyEvent;
+    use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
 
     fn snap() -> Snapshot {
         Snapshot {
@@ -457,6 +504,7 @@ mod tests {
                 name: "scout".into(),
                 state: AgentState::Idle,
                 description: "recon".into(),
+                last_active: Duration::ZERO,
                 unread: 0,
             }],
         }
@@ -469,6 +517,40 @@ mod tests {
             snap,
             KeyEvent::new(code, mods),
         )
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_three_rows_from_either_focus() {
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut ws = Workspace::default();
+
+        assert!(handle_mouse(&mut ws, wheel(MouseEventKind::ScrollUp)));
+        assert_eq!(ws.scroll_up, 3);
+        ws.scroll_up = usize::MAX;
+        clamp_scroll(&mut ws, 12, 5);
+        assert_eq!(ws.scroll_up, 7, "overscroll clamps to the oldest row");
+        assert!(handle_mouse(&mut ws, wheel(MouseEventKind::ScrollDown)));
+        assert_eq!(ws.scroll_up, 4);
+
+        ws.scroll_up = 4;
+        let conv = Conv::Channel("dev-room".into());
+        let mut previous = Some((conv.clone(), 12));
+        preserve_scroll(&mut ws, &mut previous, &conv, 15);
+        assert_eq!(ws.scroll_up, 7, "new rows preserve the viewed content");
+        ws.scroll_up = 0;
+        preserve_scroll(&mut ws, &mut previous, &conv, 18);
+        assert_eq!(ws.scroll_up, 0, "the latest view stays pinned");
+
+        ws.scroll_up = 0;
+        ws.focus = Focus::Messages;
+        assert!(handle_mouse(&mut ws, wheel(MouseEventKind::ScrollUp)));
+        assert_eq!(ws.scroll_up, 3);
+        assert!(!handle_mouse(&mut ws, wheel(MouseEventKind::Moved)));
     }
 
     #[test]
