@@ -174,15 +174,24 @@ fn subagent_hooks(
     let text_output = output.text;
     let live_output = output.live;
     let progress_output = output.progress;
+    let registry = cell.registry.clone();
+    let event_registry = registry.clone();
+    let event_instance = instance.clone();
+    let tool_registry = registry.clone();
+    let tool_instance = instance.clone();
+    let done_registry = registry.clone();
+    let done_instance = instance.clone();
     UiHooks {
         on_event: Box::new(move |event| match event {
             crate::api::contract::StreamEvent::TextDelta { text, .. } => {
+                event_registry.touch(&event_instance);
                 if let Ok(mut output) = text_output.lock() {
                     output.push_str(text);
                     if let Ok(mut live) = live_output.lock() {
                         crate::agents::LiveBlock::push_text(&mut live, text);
                     }
                     cell.record_chars(text.chars().count());
+                    // Feed produced text into the condition engine (notify_on hit → signal notification).
                     watch.feed_content(id, text);
                 }
             }
@@ -197,6 +206,7 @@ fn subagent_hooks(
             _ => {}
         }),
         on_tool_ready: Box::new(move |name, input, _standalone| {
+            tool_registry.touch(&tool_instance);
             let glyph = crate::tui::activities::tool_glyph(&name);
             let shown = crate::tui::activities::display_tool_name(&name);
             let summary = crate::query::summarize_input(&name, &input);
@@ -212,7 +222,7 @@ fn subagent_hooks(
                 progress.record_tool(activity);
             }
         }),
-        on_tool_done: Box::new(|_| {}),
+        on_tool_done: Box::new(move |_| done_registry.touch(&done_instance)),
         // A round boundary closes the open prose block, so the next round's first
         // sentence does not run into the previous round's last one.
         on_round_end: Box::new(move || {
@@ -519,7 +529,7 @@ pub(crate) fn spawn_agent_loop(
     conditions: Vec<NotifyCondition>,
     owner: Option<String>,
 ) -> WatchId {
-    let cell = Arc::new(AgentCell::new());
+    let cell = Arc::new(AgentCell::new(registry.clone()));
     let first_id = register_run_watch(&watch, first_label, cell.clone(), conditions, owner.clone());
     registry.set_run_watch(&name, first_id);
     let loop_registry = registry.clone();
@@ -569,7 +579,7 @@ pub(crate) fn spawn_agent_loop(
                         Some(next) => {
                             history = next.history;
                             (prompt, images) = absorb_inbox(&session.channels, &name, &next.items);
-                            let cell = Arc::new(AgentCell::new());
+                            let cell = Arc::new(AgentCell::new(loop_registry.clone()));
                             let label = format!("{name} #{} · {}", next.run, excerpt(&prompt));
                             let id = register_run_watch(
                                 &watch,
@@ -932,12 +942,14 @@ pub(crate) fn build_sub_session(
 /// Background agent progress: characters produced (for interval polling).
 struct AgentCell {
     chars: std::sync::atomic::AtomicUsize,
+    registry: Arc<AgentRegistry>,
 }
 
 impl AgentCell {
-    fn new() -> Self {
+    fn new(registry: Arc<AgentRegistry>) -> Self {
         Self {
             chars: std::sync::atomic::AtomicUsize::new(0),
+            registry,
         }
     }
     fn record_chars(&self, n: usize) {
@@ -1044,7 +1056,7 @@ impl Tool for AgentTool {
         let _ = self.session.agents.next_run(&name);
 
         // Foreground sub-agents can also be watched: Running (characters produced) → Done/Failed.
-        let cell = Arc::new(AgentCell::new());
+        let cell = Arc::new(AgentCell::new(self.session.agents.clone()));
         let conditions = params
             .notify_on
             .clone()
@@ -1318,13 +1330,28 @@ impl AgentControlTool {
     }
 }
 
+pub(crate) fn format_last_active(age: std::time::Duration) -> String {
+    let seconds = age.as_secs();
+    if seconds == 0 {
+        "active now".to_string()
+    } else if seconds < 60 {
+        format!("active {seconds}s ago")
+    } else if seconds < 3_600 {
+        format!("active {}min ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("active {}h ago", seconds / 3_600)
+    } else {
+        format!("active {}d ago", seconds / 86_400)
+    }
+}
+
 #[async_trait]
 impl Tool for AgentControlTool {
     fn name(&self) -> String {
         "AgentControl".to_string()
     }
     fn description(&self) -> String {
-        "Manage subagent instances: list all (name/definition/status/queued-instruction count), check messages sent to one (per-message queued/delivered-but-unanswered/answered/dropped, how long it has been waiting, and whether SendMessage's ack_timeout is already chasing it — use this when an instance has gone quiet on you), stop one (aborts the current run, stops accepting instructions; history kept), delete one (stops and removes it; the name is released).".to_string()
+        "Manage subagent instances: list all (name/definition/status/last activity/queued-instruction count), check messages sent to one (per-message queued/delivered-but-unanswered/answered/dropped, how long it has been waiting, and whether SendMessage's ack_timeout is already chasing it — use this when an instance has gone quiet on you), stop one (aborts the current run, stops accepting instructions; history kept), delete one (stops and removes it; the name is released).".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<AgentControlInput>()
@@ -1369,8 +1396,9 @@ impl Tool for AgentControlTool {
                             } else {
                                 String::new()
                             };
+                            let active = format_last_active(s.last_active.elapsed());
                             format!(
-                                "- {} ({} {}{def}{pending}{unacked}, {} @ {}): {}",
+                                "- {} ({} {}, {active}{def}{pending}{unacked}, {} @ {}): {}",
                                 s.name,
                                 s.kind.label(),
                                 s.state.label(),
@@ -1980,6 +2008,23 @@ mod tests {
         assert!(cut.ends_with('…'));
     }
 
+    #[test]
+    fn agent_control_list_reports_relative_last_activity() {
+        assert_eq!(format_last_active(std::time::Duration::ZERO), "active now");
+        assert_eq!(
+            format_last_active(std::time::Duration::from_secs(3)),
+            "active 3s ago"
+        );
+        assert_eq!(
+            format_last_active(std::time::Duration::from_secs(125)),
+            "active 2min ago"
+        );
+        assert_eq!(
+            format_last_active(std::time::Duration::from_secs(7_200)),
+            "active 2h ago"
+        );
+    }
+
     #[tokio::test]
     async fn agent_control_list_stop_delete() {
         let (session, _client) = parent_session();
@@ -2010,7 +2055,10 @@ mod tests {
             .await
             .unwrap();
         let text = out.content.as_str().unwrap();
-        assert!(text.contains("scout") && text.contains("running"), "{text}");
+        assert!(
+            text.contains("scout") && text.contains("running") && text.contains("active now"),
+            "{text}"
+        );
         let out = ctl
             .call(
                 serde_json::json!({"action": "stop", "agent": "scout"}),
@@ -2608,10 +2656,11 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .start_run();
         let watch = crate::watch::WatchRegistry::new();
+        let registry = AgentRegistry::new();
         let id = register_run_watch(
             &watch,
             "progress".into(),
-            Arc::new(AgentCell::new()),
+            Arc::new(AgentCell::new(registry.clone())),
             Vec::new(),
             None,
         );
@@ -2621,7 +2670,7 @@ mod tests {
                 live,
                 progress: progress.clone(),
             },
-            Arc::new(AgentCell::new()),
+            Arc::new(AgentCell::new(registry.clone())),
             watch,
             id,
             "worker".into(),
@@ -2656,6 +2705,63 @@ mod tests {
     /// A subagent's Ask decision is forwarded to the attached prompt surface, stamped with the
     /// instance name — never silently auto-denied (or auto-allowed under bypass).
     #[tokio::test]
+    async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
+        let session = parent_session().0;
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "work".into(),
+            session.clone(),
+        );
+        let watch = crate::watch::WatchRegistry::new();
+        let registry = session.agents.clone();
+        let id = register_run_watch(
+            &watch,
+            "l".into(),
+            Arc::new(AgentCell::new(registry.clone())),
+            Vec::new(),
+            None,
+        );
+        let mut ui = subagent_hooks(
+            SubagentOutput {
+                text: Arc::new(Mutex::new(String::new())),
+                live: Arc::new(Mutex::new(Vec::new())),
+                progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
+            },
+            Arc::new(AgentCell::new(registry.clone())),
+            watch,
+            id,
+            "worker".into(),
+            None,
+        );
+        let inserted = session.agents.list()[0].last_active;
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "hi".into(),
+        });
+        let streamed = session.agents.list()[0].last_active;
+        assert!(streamed > inserted);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        (ui.on_tool_ready)("Read".into(), serde_json::json!({"file_path": "a"}), false);
+        let ready = session.agents.list()[0].last_active;
+        assert!(ready > streamed);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        (ui.on_tool_done)(&crate::query::ToolCallDone {
+            name: "Read".into(),
+            summary: String::new(),
+            output: String::new(),
+            is_error: false,
+            diff: None,
+            duration_ms: 1,
+        });
+        assert!(session.agents.list()[0].last_active > ready);
+    }
+
+    #[tokio::test]
     async fn subagent_ask_forwards_to_attached_prompt() {
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
         let recorder = seen.clone();
@@ -2667,10 +2773,11 @@ mod tests {
             Box::pin(async { true })
         });
         let watch = crate::watch::WatchRegistry::new();
+        let registry = AgentRegistry::new();
         let id = register_run_watch(
             &watch,
             "l".into(),
-            Arc::new(AgentCell::new()),
+            Arc::new(AgentCell::new(registry.clone())),
             Vec::new(),
             None,
         );
@@ -2680,7 +2787,7 @@ mod tests {
                 live: Arc::new(Mutex::new(Vec::new())),
                 progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
             },
-            Arc::new(AgentCell::new()),
+            Arc::new(AgentCell::new(registry.clone())),
             watch.clone(),
             id,
             "worker".into(),
@@ -2699,7 +2806,7 @@ mod tests {
                 live: Arc::new(Mutex::new(Vec::new())),
                 progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
             },
-            Arc::new(AgentCell::new()),
+            Arc::new(AgentCell::new(registry.clone())),
             watch,
             id,
             "worker".into(),

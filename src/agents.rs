@@ -217,6 +217,8 @@ pub struct AgentStatus {
     pub tool_uses: usize,
     /// Most recent tool activity in this run, oldest first.
     pub recent_activity: Vec<String>,
+    /// When this instance last did something real (inbox receipt, turn start/end, activity).
+    pub last_active: Instant,
 }
 
 /// Message identifier, unique per registry. Handed back to the sender so it can check later
@@ -352,6 +354,7 @@ struct Entry {
     prompt: String,
     state: AgentState,
     kind: AgentKind,
+    last_active: Instant,
     /// Sweeps a finished hire has left before release, refilled whenever it has work
     /// again. Meaningless for a crew member, which no sweep touches.
     lease: u8,
@@ -548,6 +551,7 @@ impl AgentRegistry {
                 prompt: String::new(),
                 state: AgentState::Running,
                 kind,
+                last_active: Instant::now(),
                 lease: HIRE_LEASE,
                 history: Vec::new(),
                 inbox: Vec::new(),
@@ -612,6 +616,9 @@ impl AgentRegistry {
     /// Streaming output buffer of the current turn (attached at turn start, detached at turn end).
     pub fn set_live(&self, name: &str, live: Option<Arc<Mutex<Vec<LiveBlock>>>>) {
         if let Some(entry) = self.lock().get_mut(name) {
+            if live.is_some() {
+                entry.last_active = Instant::now();
+            }
             entry.live = live;
         }
     }
@@ -631,6 +638,12 @@ impl AgentRegistry {
     #[cfg(test)]
     pub fn set_progress_snapshot(&self, name: &str, progress: AgentProgress) {
         self.set_progress(name, Some(Arc::new(Mutex::new(progress))));
+    }
+
+    pub fn touch(&self, name: &str) {
+        if let Some(entry) = self.lock().get_mut(name) {
+            entry.last_active = Instant::now();
+        }
     }
 
     /// Instance view data: history + live tail + state (None if the instance doesn't exist).
@@ -676,6 +689,7 @@ impl AgentRegistry {
         match self.lock().get_mut(name) {
             Some(entry) => {
                 entry.runs += 1;
+                entry.last_active = Instant::now();
                 entry.runs
             }
             None => 1,
@@ -700,6 +714,7 @@ impl AgentRegistry {
         let result = {
             let mut inner = self.lock();
             let entry = inner.get_mut(name)?;
+            entry.last_active = Instant::now();
             entry.history = history;
             if spoke {
                 answer_acks(entry);
@@ -740,6 +755,7 @@ impl AgentRegistry {
                 }
                 let items = drain_inbox(entry);
                 entry.state = AgentState::Running;
+                entry.last_active = Instant::now();
                 woken.push(Wake {
                     name: name.clone(),
                     session: entry.session.clone(),
@@ -761,6 +777,7 @@ impl AgentRegistry {
             && entry.state != AgentState::Stopped
         {
             entry.state = AgentState::Idle;
+            entry.last_active = Instant::now();
         }
     }
 
@@ -795,6 +812,7 @@ impl AgentRegistry {
                 "{name} is stopped and no longer accepts instructions (delete removes the instance)"
             ));
         }
+        entry.last_active = Instant::now();
         entry.inbox.push(InboxItem::Direct {
             id,
             text: message.to_string(),
@@ -856,6 +874,7 @@ impl AgentRegistry {
         if entry.state == AgentState::Stopped {
             return false;
         }
+        entry.last_active = Instant::now();
         entry.inbox.push(item);
         true
     }
@@ -953,6 +972,7 @@ impl AgentRegistry {
                     output_tokens: progress.as_ref().map_or(0, |p| p.output_tokens),
                     tool_uses: progress.as_ref().map_or(0, |p| p.tool_uses),
                     recent_activity: progress.map_or_else(Vec::new, |p| p.recent_activity),
+                    last_active: e.last_active,
                 }
             })
             .collect();
@@ -1409,6 +1429,52 @@ mod tests {
         let _ = reg.stop("temp");
         assert_eq!(reg.release_hires(), vec!["temp".to_string()]);
         assert_eq!(reg.list().len(), 1);
+    }
+
+    #[test]
+    fn activity_timestamp_refreshes_only_when_the_instance_is_active() {
+        let reg = AgentRegistry::new();
+        reg.insert(
+            "scout",
+            AgentKind::Hire,
+            None,
+            "research".into(),
+            test_session(),
+        );
+        let initial = reg.list()[0].last_active;
+        std::thread::sleep(Duration::from_millis(2));
+        let unchanged = reg.list()[0].last_active;
+        assert_eq!(unchanged, initial, "listing is not agent activity");
+
+        let first = reg
+            .deliver("scout", "add A", Vec::new(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let delivered = reg.list()[0].last_active;
+        assert!(
+            delivered > initial,
+            "receiving an inbox message is activity"
+        );
+
+        std::thread::sleep(Duration::from_millis(2));
+        let _ = reg.follow_up("scout", first);
+        assert_eq!(
+            reg.list()[0].last_active,
+            delivered,
+            "watchdog bookkeeping is not agent activity"
+        );
+
+        std::thread::sleep(Duration::from_millis(2));
+        reg.touch("scout");
+        let streamed = reg.list()[0].last_active;
+        assert!(
+            streamed > delivered,
+            "stream and tool hooks can touch the entry"
+        );
+
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(reg.finish("scout", Vec::new(), true).is_some());
+        let finished = reg.list()[0].last_active;
+        assert!(finished > streamed, "turn completion is activity");
     }
 
     #[test]

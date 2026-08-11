@@ -22,6 +22,8 @@
 //! avatar chip, the switcher's selected row — plus the explicit erase [`opaque`]
 //! needs to keep an overlay from being see-through.
 
+use std::time::Duration;
+
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
@@ -164,6 +166,7 @@ pub struct DmItem {
     pub model: String,
     pub thinking: Option<String>,
     pub description: String,
+    pub last_active: Duration,
     pub unread: u64,
 }
 
@@ -688,10 +691,11 @@ pub fn header_rows(snap: &Snapshot, conv: &Conv, pal: &Palette, width: usize) ->
                 (
                     format!(" {glyph} {name}"),
                     format!(
-                        "  DM · {} · {} · {} · {}",
+                        "  DM · {} · {} · {} · {} · {}",
                         d.model,
                         d.thinking.as_deref().unwrap_or("off"),
                         d.state.label(),
+                        crate::tool::agent::format_last_active(d.last_active),
                         d.description
                     ),
                     String::new(),
@@ -1317,6 +1321,7 @@ mod tests {
                     model: "gpt-5.6-sol".into(),
                     thinking: Some("max".into()),
                     description: "recon".into(),
+                    last_active: Duration::from_secs(3),
                     unread: 0,
                 },
                 DmItem {
@@ -1325,6 +1330,7 @@ mod tests {
                     model: "claude-sonnet".into(),
                     thinking: Some("high".into()),
                     description: "acceptance".into(),
+                    last_active: Duration::from_secs(125),
                     unread: 3,
                 },
             ],
@@ -1979,6 +1985,7 @@ mod tests {
                 model: format!("model-{i}"),
                 thinking: Some("high".into()),
                 description: "member".into(),
+                last_active: Duration::from_secs(120),
                 unread: 0,
             });
             large.channels[0].members.push(name);
@@ -1995,11 +2002,11 @@ mod tests {
             "large rooms use a complete aggregate: {large:?}"
         );
 
-        let t = texts(&header_rows(&snap, &Conv::Dm("qa".into()), &pal(), 70));
+        let t = texts(&header_rows(&snap, &Conv::Dm("qa".into()), &pal(), 120));
         assert!(t[0].contains("○ qa"), "{t:?}");
         assert!(
-            t[0].contains("DM · claude-sonnet · high · idle · acceptance"),
-            "DM metadata includes model, thinking, state, and description: {t:?}"
+            t[0].contains("DM · claude-sonnet · high · idle · active 2min ago · acceptance"),
+            "DM metadata includes model, thinking, state, last activity, and description: {t:?}"
         );
     }
 

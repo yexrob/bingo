@@ -1,6 +1,6 @@
 # Feedback States Specification
 
-> Version: v1.18 · Status: in effect (2026-08-07)
+> Version: v1.34 · Status: in effect (2026-08-11)
 > Scope: the unified design conventions for every user-visible feedback state in bingo. The GUI (TUI) and CLI (headless) sides share a single source; qa acceptance anchors are at the end.
 
 ## General principles
@@ -282,3 +282,5 @@ Web-side conventions (for a future web frontend to reuse):
 - v1.34 (2026-08-11): issue #33 narrows the entity strip and DM feedback surface. The compact strip lists running agents and channels only; running agents expose model/thinking/state, and Ctrl+G opens the full workspace directly instead of entering an inline selector. DM history and live tails render only user messages and agent prose: tool activity is deliberately absent there. DM bodies reuse the main transcript's user-bubble and assistant-markdown row builders (prefixes, wrapping, and row attributes included), while the existing DM name/avatar gutter remains unchanged; the trailing working indicator remains during a hidden tool wait so a long turn never becomes silent. DM headers expose model/thinking/state; channel headers list model/thinking when the complete names fit and otherwise use one bounded aggregate, preserving the composer on short terminals. Channel message rendering itself is unchanged.
 
 - v1.35 (2026-08-11): issue #36 restores direct running-agent interaction beside the #33 workspace entry. With an empty composer, ↑/↓ opens and moves a bounded running-agent selector and Enter opens that agent's DM; Esc collapses it, while Ctrl+G still opens the full workspace. Ctrl+B opens a background-agent manager over the main chat: ↑/↓ select, Enter shows prompt/status/elapsed/tokens/tool count/recent tool activity, x stops the selected run, and Esc closes or returns; hub-and-spoke deliberately has no foreground action. Stop results reuse the existing warning tier, and running detail remains live through the normal tick refresh.
+
+- v1.36 (2026-08-11): workspace DM/channel transcripts accept mouse-wheel scrolling at the same three-row step as the main fullscreen chat; `AgentControl list` adds relative last-activity feedback, refreshed on inbox receipt, turn start/end, streamed text, and tool ready/done signals.

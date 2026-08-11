@@ -57,6 +57,7 @@ mod preview {
                     model: "gpt-5.6-sol".into(),
                     thinking: Some("max".into()),
                     description: "code reconnaissance".into(),
+                    last_active: std::time::Duration::from_secs(3),
                     unread: 0,
                 },
                 DmItem {
@@ -65,6 +66,7 @@ mod preview {
                     model: "claude-sonnet".into(),
                     thinking: Some("high".into()),
                     description: "acceptance".into(),
+                    last_active: std::time::Duration::from_secs(125),
                     unread: 3,
                 },
                 DmItem {
@@ -73,6 +75,7 @@ mod preview {
                     model: "claude-haiku".into(),
                     thinking: None,
                     description: "interface review".into(),
+                    last_active: std::time::Duration::from_secs(7_200),
                     unread: 0,
                 },
             ],
