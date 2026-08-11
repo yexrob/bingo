@@ -61,7 +61,7 @@ impl Version {
     /// The current binary's version (Cargo.toml `version`).
     pub fn from_pkg() -> Version {
         Version::parse(env!("CARGO_PKG_VERSION"))
-            .expect("Cargo.toml version must be a semantic version")
+            .expect("Cargo.toml version must be a semantic version") // unreachable: Cargo enforces semver
     }
 
     /// The version's numeric parts (production only uses Display/comparison; tests assert on them).

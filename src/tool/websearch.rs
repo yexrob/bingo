@@ -158,7 +158,7 @@ static RESULT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
         r#"(?s)class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</a>"#,
     )
-    .expect("static result regex must compile")
+    .expect("static result regex must compile") // unreachable: literal pattern compiles
 });
 
 /// Parse DDG HTML result blocks.

@@ -197,12 +197,14 @@ pub async fn run_pre_tool_use(
             tool_input: &input,
             permission_mode,
         };
-        let (code, output, stderr) = match run_hook(
-            command,
-            &serde_json::to_value(hook_input).expect("HookInput serialization must not fail"),
-            cwd,
-        )
-        .await
+        let hook_value = match serde_json::to_value(hook_input) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("[bingo] warning: PreToolUse hook serialization failed: {error}");
+                continue;
+            }
+        };
+        let (code, output, stderr) = match run_hook(command, &hook_value, cwd).await
         {
             Ok(o) => o,
             Err(e) => {

@@ -23,7 +23,7 @@ pub struct PreparedImage {
 
 /// Image placeholder reference (`#[image N]` → the Nth attachment, 1-based).
 static MARKER_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"#\[image (\d+)\]").expect("static regex"));
+    std::sync::LazyLock::new(|| regex::Regex::new(r"#\[image (\d+)\]").expect("static regex")); // unreachable: literal pattern compiles
 
 /// Image placeholder text: `#[image N]`.
 pub fn marker(id: usize) -> String {
