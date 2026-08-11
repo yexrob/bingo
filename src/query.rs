@@ -11,7 +11,7 @@ use crate::api::client::{AssistantAccumulator, Client, ClientError};
 use crate::api::contract::{NeutralRequest, StreamEvent, SystemBlock, ThinkingLevel};
 use crate::api::types::{ContentBlock, DEFAULT_MAX_TOKENS, Message, Role};
 use crate::budget::MAX_RESULT_CHARS;
-use crate::compact::{TokenGate, check_and_compact};
+use crate::compact::{TokenGate, check_and_compact, compact_after_overflow};
 use crate::error::ErrorCode;
 use crate::hooks::{run_post_tool_use, run_pre_tool_use, run_stop_hooks, run_user_prompt_submit};
 use crate::permission::{PermissionBehavior, PermissionMode, can_use_tool};
@@ -475,6 +475,24 @@ async fn one_turn(
     })
 }
 
+async fn retry_after_overflow(
+    session: &Arc<Session>,
+    messages: &[Message],
+    tools: &[Box<dyn Tool>],
+    ui: &mut UiHooks,
+    cancel: Option<&mut watch::Receiver<bool>>,
+) -> Result<Turn, QueryError> {
+    match one_turn(session, messages, tools, ui, cancel).await {
+        Err(error @ QueryError::Client(ClientError::ContextOverflow { .. })) => {
+            session
+                .compact_failures
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(error)
+        }
+        outcome => outcome,
+    }
+}
+
 fn tool_result_text(tool_use_id: &str, text: impl Into<String>) -> ContentBlock {
     ContentBlock::ToolResult {
         tool_use_id: tool_use_id.to_string(),
@@ -834,7 +852,16 @@ async fn query_loop(
                 mail.join("\n")
             )));
         }
-        let turn = one_turn(session, &messages, tools, &mut *ui, cancel_rx.as_mut()).await?;
+        let turn = match one_turn(session, &messages, tools, &mut *ui, cancel_rx.as_mut()).await {
+            Err(error @ QueryError::Client(ClientError::ContextOverflow { .. })) => {
+                if !compact_after_overflow(session, &mut messages).await {
+                    return Err(error);
+                }
+                retry_after_overflow(session, &messages, tools, &mut *ui, cancel_rx.as_mut())
+                    .await?
+            }
+            outcome => outcome?,
+        };
         if turn.aborted {
             // Interrupted: the whole turn is discarded (assistant incomplete); neither
             // executed nor pending tools are filled back.
@@ -1558,7 +1585,71 @@ mod tests {
     /// Minimal Anthropic endpoint: count_tokens returns a fixed value; /v1/messages
     /// replies with preset SSE in order.
     async fn spawn_api(responses: Vec<String>) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        spawn_anthropic_api(responses.into_iter().map(ApiResponse::Ok).collect()).await
+    }
+
+    enum ApiResponse {
+        Ok(String),
+        Error { status: u16, body: String },
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ApiRequestKind {
+        CountTokens,
+        Stream,
+        CompleteText,
+    }
+
+    fn request_kind(request: &str) -> ApiRequestKind {
+        if request.contains("/v1/messages/count_tokens") {
+            return ApiRequestKind::CountTokens;
+        }
+        let body = request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        let stream = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| value.get("stream").and_then(|value| value.as_bool()))
+            .unwrap_or(true);
+        if stream {
+            ApiRequestKind::Stream
+        } else {
+            ApiRequestKind::CompleteText
+        }
+    }
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut request = Vec::new();
+        loop {
+            let mut buf = [0u8; 4096];
+            let read = socket.read(&mut buf).await.unwrap_or(0);
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..read]);
+            let text = String::from_utf8_lossy(&request);
+            let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                continue;
+            };
+            let content_length = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            if body.len() >= content_length {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&request).to_string()
+    }
+
+    async fn spawn_anthropic_api(responses: Vec<ApiResponse>) -> String {
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let mut remaining = responses;
@@ -1568,16 +1659,26 @@ mod tests {
                 let Ok((mut socket, _)) = listener.accept().await else {
                     return;
                 };
-                let mut buf = vec![0u8; 64 * 1024];
-                let read = socket.read(&mut buf).await.unwrap_or(0);
-                let head = String::from_utf8_lossy(&buf[..read]).to_string();
-                let (content_type, body) = if head.contains("/v1/messages/count_tokens") {
-                    ("application/json", "{\"input_tokens\":10}".to_string())
+                let head = read_http_request(&mut socket).await;
+                let (status, content_type, body) = if request_kind(&head)
+                    == ApiRequestKind::CountTokens
+                {
+                    (200, "application/json", "{\"input_tokens\":10}".to_string())
                 } else {
-                    ("text/event-stream", remaining.pop().unwrap_or_default())
+                    match remaining.pop().unwrap_or(ApiResponse::Ok(String::new())) {
+                        ApiResponse::Ok(body) => (200, "text/event-stream", body),
+                        ApiResponse::Error { status, body } => (status, "application/json", body),
+                    }
+                };
+                let reason = if status == 200 {
+                    "OK"
+                } else if status == 413 {
+                    "Payload Too Large"
+                } else {
+                    "Bad Request"
                 };
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
@@ -1586,6 +1687,108 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    async fn spawn_openai_api(responses: Vec<ApiResponse>) -> String {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut remaining = responses;
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let head = read_http_request(&mut socket).await;
+                let request_kind = request_kind(&head);
+                let response = match request_kind {
+                    ApiRequestKind::Stream => remaining.remove(0),
+                    ApiRequestKind::CompleteText => remaining.remove(0),
+                    ApiRequestKind::CountTokens => unreachable!(),
+                };
+                let (status, content_type, body) = match response {
+                    ApiResponse::Ok(body) => (
+                        200,
+                        if request_kind == ApiRequestKind::Stream {
+                            "text/event-stream"
+                        } else {
+                            "application/json"
+                        },
+                        body,
+                    ),
+                    ApiResponse::Error { status, body } => (status, "application/json", body),
+                };
+                let reason = if status == 200 {
+                    "OK"
+                } else if status == 413 {
+                    "Payload Too Large"
+                } else {
+                    "Bad Request"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn openai_text_turn(text: &str) -> String {
+        [
+            (
+                "response.created",
+                r#"{"type":"response.created","response":{"id":"r1","model":"gpt-5"}}"#.to_string(),
+            ),
+            (
+                "response.output_item.added",
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m1","role":"assistant","status":"in_progress","content":[]}}"#.to_string(),
+            ),
+            (
+                "response.output_text.delta",
+                format!(r#"{{"type":"response.output_text.delta","output_index":0,"delta":"{text}"}}"#),
+            ),
+            (
+                "response.output_item.done",
+                format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{{"type":"message","id":"m1","role":"assistant","status":"completed","content":[{{"type":"output_text","text":"{text}"}}]}}}}"#),
+            ),
+            (
+                "response.completed",
+                r#"{"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"output_tokens":5}}}"#.to_string(),
+            ),
+        ]
+        .into_iter()
+        .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+        .collect()
+    }
+
+    fn openai_completion(text: &str) -> String {
+        format!(
+            r#"{{"output":[{{"type":"message","content":[{{"type":"output_text","text":"{text}"}}]}}]}}"#
+        )
+    }
+
+    fn openai_test_client(base_url: String) -> crate::api::client::Client {
+        let mut settings = crate::settings::Settings::default();
+        settings.providers.insert(
+            "openai-test".to_string(),
+            crate::settings::ProviderConfig {
+                api_key: Some("k".to_string()),
+                api_base_url: base_url,
+                protocol: Some("openai".to_string()),
+                oauth: None,
+                supports_images: Some(false),
+            },
+        );
+        let client = crate::api::client::Client::from_settings_with(&settings, |_| {
+            Err(std::env::VarError::NotPresent)
+        })
+        .unwrap();
+        client.set_provider("openai-test").unwrap();
+        client
     }
 
     fn sse(events: &[(&str, String)]) -> String {
@@ -1698,8 +1901,26 @@ mod tests {
     }
 
     fn test_session(base_url: String, transcript: Option<Transcript>) -> Arc<Session> {
+        test_session_with_client(
+            crate::api::client::Client::new("k".into(), base_url),
+            transcript,
+        )
+    }
+
+    fn test_session_with_client(
+        client: crate::api::client::Client,
+        transcript: Option<Transcript>,
+    ) -> Arc<Session> {
+        test_session_with_client_and_failures(client, transcript, 0)
+    }
+
+    fn test_session_with_client_and_failures(
+        client: crate::api::client::Client,
+        transcript: Option<Transcript>,
+        compact_failures: u64,
+    ) -> Arc<Session> {
         Arc::new(Session {
-            client: crate::api::client::Client::new("k".into(), base_url),
+            client,
             runtime: Runtime::new("m".into(), transcript, Default::default()),
             permission_mode: PermissionMode::BypassPermissions,
             settings: crate::settings::Settings::default(),
@@ -1709,7 +1930,9 @@ mod tests {
             home: std::env::temp_dir(),
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
-            compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+                compact_failures,
+            )),
             watch: crate::watch::WatchRegistry::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             expand_tasks: tokio::sync::watch::channel(false).0,
@@ -1740,6 +1963,225 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn overflow_history() -> Vec<Message> {
+        (0..10)
+            .map(|index| Message::user_text(format!("message {index}")))
+            .collect()
+    }
+
+    const ANTHROPIC_OVERFLOW: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 211000 tokens > 200000 maximum"}}"#;
+    const OPENAI_OVERFLOW: &str = r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 132450 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+
+    #[tokio::test]
+    async fn anthropic_overflow_compacts_and_retries_once() {
+        let base_url = spawn_anthropic_api(vec![
+            ApiResponse::Error {
+                status: 400,
+                body: ANTHROPIC_OVERFLOW.to_string(),
+            },
+            ApiResponse::Ok(
+                r#"{"content":[{"type":"text","text":"compacted context"}]}"#.to_string(),
+            ),
+            ApiResponse::Ok(text_turn("recovered", "end_turn")),
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        let outcome = run_query(
+            &session,
+            overflow_history(),
+            "current request",
+            &[],
+            &mut ui,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            session
+                .compact_failures
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(outcome.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text } if text.contains("compacted context"))
+            })
+        }));
+        assert!(outcome.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text == "recovered"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn openai_overflow_compacts_and_retries_once() {
+        let base_url = spawn_openai_api(vec![
+            ApiResponse::Error {
+                status: 400,
+                body: OPENAI_OVERFLOW.to_string(),
+            },
+            ApiResponse::Ok(openai_completion("compacted context")),
+            ApiResponse::Ok(openai_text_turn("recovered")),
+        ])
+        .await;
+        let session = test_session_with_client(openai_test_client(base_url), None);
+        let mut ui = headless_hooks();
+        let outcome = run_query(
+            &session,
+            overflow_history(),
+            "current request",
+            &[],
+            &mut ui,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            session
+                .compact_failures
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(outcome.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text } if text.contains("compacted context"))
+            })
+        }));
+        assert!(outcome.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text == "recovered"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn repeated_overflow_stops_after_one_retry_and_increments_breaker() {
+        let base_url = spawn_anthropic_api(vec![
+            ApiResponse::Error {
+                status: 400,
+                body: ANTHROPIC_OVERFLOW.to_string(),
+            },
+            ApiResponse::Ok(
+                r#"{"content":[{"type":"text","text":"compacted context"}]}"#.to_string(),
+            ),
+            ApiResponse::Error {
+                status: 413,
+                body: r#"{"type":"error","error":{"type":"request_too_large","message":"input exceeds the context window"}}"#.to_string(),
+            },
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        let error = run_query(
+            &session,
+            overflow_history(),
+            "current request",
+            &[],
+            &mut ui,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            QueryError::Client(ClientError::ContextOverflow { status: 413, .. })
+        ));
+        assert_eq!(
+            session
+                .compact_failures
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_overflow_compaction_resets_previous_failures() {
+        let base_url = spawn_anthropic_api(vec![
+            ApiResponse::Error {
+                status: 400,
+                body: ANTHROPIC_OVERFLOW.to_string(),
+            },
+            ApiResponse::Ok(
+                r#"{"content":[{"type":"text","text":"compacted context"}]}"#.to_string(),
+            ),
+            ApiResponse::Error {
+                status: 413,
+                body: r#"{"type":"error","error":{"type":"request_too_large","message":"input exceeds the context window"}}"#.to_string(),
+            },
+        ])
+        .await;
+        let client = crate::api::client::Client::new("k".into(), base_url);
+        let session = test_session_with_client_and_failures(client, None, 1);
+        let mut ui = headless_hooks();
+        let error = run_query(
+            &session,
+            overflow_history(),
+            "current request",
+            &[],
+            &mut ui,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            QueryError::Client(ClientError::ContextOverflow { status: 413, .. })
+        ));
+        assert_eq!(
+            session
+                .compact_failures
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "successful compaction resets prior failures before the retry overflow adds one"
+        );
+    }
+
+    #[tokio::test]
+    async fn overflow_compaction_failure_increments_breaker_without_retrying_request() {
+        let base_url = spawn_anthropic_api(vec![
+            ApiResponse::Error {
+                status: 400,
+                body: ANTHROPIC_OVERFLOW.to_string(),
+            },
+            ApiResponse::Error {
+                status: 500,
+                body: r#"{"error":{"message":"summary unavailable"}}"#.to_string(),
+            },
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        let error = run_query(
+            &session,
+            overflow_history(),
+            "current request",
+            &[],
+            &mut ui,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            QueryError::Client(ClientError::ContextOverflow { status: 400, .. })
+        ));
+        assert_eq!(
+            session
+                .compact_failures
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[test]

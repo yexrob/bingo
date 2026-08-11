@@ -422,10 +422,7 @@ impl AnthropicProvider {
                         .map(Duration::from_secs);
                     let body = response.text().await.unwrap_or_default();
                     if attempt >= MAX_RETRIES {
-                        return Err(ClientError::Api {
-                            status: status.as_u16(),
-                            body,
-                        });
+                        return Err(ClientError::from_response(status.as_u16(), body));
                     }
                     let delay = retry_after.unwrap_or_else(|| backoff(attempt));
                     tokio::time::sleep(delay).await;
@@ -450,10 +447,7 @@ impl AnthropicProvider {
                         attempt += 1;
                         continue;
                     }
-                    return Err(ClientError::Api {
-                        status: status.as_u16(),
-                        body,
-                    });
+                    return Err(ClientError::from_response(status.as_u16(), body));
                 }
                 Ok(Err(_transport)) if attempt < MAX_RETRIES => {
                     tokio::time::sleep(backoff(attempt)).await;
@@ -500,10 +494,7 @@ impl AnthropicProvider {
                 Ok(response) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
-                    return Err(ClientError::Api {
-                        status: status.as_u16(),
-                        body,
-                    });
+                    return Err(ClientError::from_response(status.as_u16(), body));
                 }
                 Err(_transport) if attempt < MAX_RETRIES => {
                     tokio::time::sleep(backoff(attempt)).await;
@@ -623,10 +614,7 @@ impl ProviderClient for AnthropicProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status: status.as_u16(),
-                body,
-            });
+            return Err(ClientError::from_response(status.as_u16(), body));
         }
         let body: serde_json::Value = response.json().await?;
         let mut models: Vec<String> = body
@@ -674,10 +662,7 @@ impl ProviderClient for AnthropicProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status: status.as_u16(),
-                body,
-            });
+            return Err(ClientError::from_response(status.as_u16(), body));
         }
         let body: serde_json::Value = response.json().await?;
         Ok(body

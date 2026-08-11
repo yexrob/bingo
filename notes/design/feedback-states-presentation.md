@@ -1,6 +1,6 @@
 # Feedback States Specification · TUI Presentation Acceptance Checklist
 
-> Version: v1.9 · Deliverable: ui/ux (2026-08-08) · Corresponds to: `notes/design/feedback-states.md` v1.22 §5 + §7
+> Version: v1.10.1 · Deliverable: ui/ux (2026-08-11) · Corresponds to: `notes/design/feedback-states.md` v1.35 §5 + §7
 > Purpose: the **presentation-layer acceptance** ui/ux owns in the #14 TUI component-level regression; qa owns the assertion side (AC-15/26/53 state-machine behavior + test infrastructure).
 > Lens: **what the user sees, how they operate, whether feedback is timely**. Every acceptance item is an "observable, decidable" pass criterion, independent of implementation internals.
 
@@ -120,7 +120,7 @@
 
 ## Fixture error-code coverage list (aligned with qa #63)
 
-> For dev to land fixtures and for dev's local preview; qa assertions and presentation-layer acceptance share the same carrier. Against the complete §4.4 code table (v1.15) **covering all 10 injectable stable codes** — `GENERIC` excluded (main's decision: no actual return point, invisible on normal user paths; the guardrails are covered by error.rs unit tests, not fixtures); items outside #14 scope are marked. **The presented level is decided by the trigger context, not inferred from the code alone** (qa #69 / main #71 increment 2): fixtures must carry a context field (short-sync vs long turn); `TIMEOUT` is a dual-level code.
+> For dev to land fixtures and for dev's local preview; qa assertions and presentation-layer acceptance share the same carrier. Against the complete §4.4 code table (v1.35) **covering all 11 injectable stable codes** — `GENERIC` excluded (main's decision: no actual return point, invisible on normal user paths; the guardrails are covered by error.rs unit tests, not fixtures); items outside #14 scope are marked. **The presented level is decided by the trigger context, not inferred from the code alone** (qa #69 / main #71 increment 2): fixtures must carry a context field (short-sync vs long turn); `TIMEOUT` is a dual-level code.
 
 | FX | code | Level | Scenario | User action | Presentation expectation |
 |---|---|---|---|---|---|
@@ -135,15 +135,16 @@
 | FX-09 | `HOOK_FAILED` | page-level | hook execution failure | check the hook config | error-line highlight |
 | FX-10 | `STORAGE_ERROR` | page-level | local storage failure | check disk/permissions | error-line highlight |
 | FX-11 | `TIMEOUT` (transport) | flow-level (context=long turn) | long agent turn failed | retry or return | full-screen state (AC-53) |
-| FX-12 | mixed state (AC-27) | — | batch partial failure | — | **not covered by #14**, pending the mixed-state feature |
-| FX-13 | error-code advanced details | collapsed state | H1/H2 | key expand/collapse | hidden by default, expandable to the stable code |
+| FX-12 | `CONTEXT_OVERFLOW` | flow-level (context=long turn) | provider rejected context after one compact retry | reduce or clear context | full-screen state |
+| FX-13 | mixed state (AC-27) | — | batch partial failure | — | **not covered by #14**, pending the mixed-state feature |
+| FX-14 | error-code advanced details | collapsed state | H1/H2 | key expand/collapse | hidden by default, expandable to the stable code |
 
 **Sample color baseline**: error color `(255,107,128)`, contrast-distinguishable from normal colors (R2 style-assertion acceptance baseline).
-**Priority**: FX-01/04/05/06/11 are the AC-15/26/53/29 core; FX-02/03/07/08/09/10 give full code-table coverage (§4.4 ten codes one by one, AC-29); FX-13 verifies area H. FX-01 and FX-11 share the `TIMEOUT` code; the level is distinguished by context.
+**Priority**: FX-01/04/05/06/11/12 are the AC-15/26/53/29 core; FX-02/03/07/08/09/10/12 give full code-table coverage (§4.4 eleven codes one by one, AC-29); FX-14 verifies area H. FX-01 and FX-11 share the `TIMEOUT` code; the level is distinguished by context.
 
 ## Acceptance record (#20, 2026-08-07)
 
-> Baseline: **564 tests all passing / 0 failures** (dev 561 + qa assertions 3) + test targets compile clean (clippy being confirmed). Fixture carrier = `error_fixtures()` (10 codes + FX-11), shared by qa assertions and presentation-layer acceptance.
+> Baseline: **564 tests all passing / 0 failures** (dev 561 + qa assertions 3) + test targets compile clean (clippy being confirmed). Fixture carrier = `error_fixtures()` (11 codes + the second TIMEOUT context), shared by qa assertions and presentation-layer acceptance.
 
 **Automated verification passed (fixture inject → `last_error` → Frame::assemble → assertion)**:
 
@@ -162,13 +163,13 @@
 | G1 Retry reachable | ✅ | `full_error_enter_retries_last_prompt` (Enter retries the last input, clears the error state, starts a new turn) |
 | G3 State-machine reset | ✅ | Enter/Esc clears + busy reset |
 | E1/E2 Spinner kept | ⏳ manual | real-terminal visual confirmation (indicator kept / rate reduction perceivable) |
-| H Collapsed details | ⚠️ not covered | AC-48 P1; FX-13 not in the injection set (known out-of-scope) |
+| H Collapsed details | ⚠️ not covered | AC-48 P1; FX-14 not in the injection set (known out-of-scope) |
 | I1 Copy formula | ✅ fixtures | fixture msgs all "what happened + what you can do"; production `e.to_string()` copy pending manual spot-check |
 | I2 Width fit | ⏳ manual | — |
 
 **Recorded items (non-blocking)**:
 1. ~~No production emission path for ShortSync/Field/Page~~ → **resolved (dev #92)**: main #91 decided option ①, dev landed it — `list_models`/`count_tokens` failures now emit `UiEvent::Error { level: Page, context: ShortSync }` (chat.rs:1972/2236), degradation behavior kept (empty menu / budget 0 still usable) + error line visible; TurnStart resets the error state (chat.rs:1031). Production `ErrorLevel::Page`/`ErrorContext::ShortSync` move from dead_code to real emission sources. **FX-01 is now verifiable through the real path** (qa can add a /model-failure → page-level error-line assertion). Field-level stays un-added per main #88 (a conversational CLI has no form fields).
-2. Area H collapsed details (AC-48 P1), FX-13, and the FX-12 mixed state: not in #14 scope; schedule later.
+2. Area H collapsed details (AC-48 P1), FX-14, and the FX-13 mixed state: not in #14 scope; schedule later.
 3. Manual items (E/I2/A1 visuals under a real terminal color scheme) await manual visual acceptance.
 
 **Conclusion**: **presentation-layer acceptance passed** — the FX-01…11 inject → render chain is fully verified (A/C/D/F/G core + B main path automated coverage); the three parties' stances are consistent (fixture carrier from one source).
@@ -181,6 +182,7 @@
 - v1.3 (2026-08-07): against qa #63's infrastructure requirement list — added the "**fixture error-code coverage list**" (FX-01…13, against the complete §4.4 code table; including the sample color baseline error `(255,107,128)`; marking mixed-state FX-12 out of #14 scope); the fixture carrier is shared by qa assertions and dev's local preview.
 - v1.4 (2026-08-07): self-check against the §4.4 v1.14 code table — added FX-14 `GENERIC` (missed in the previous list; qa R1 has it, §4.4 lists it as a published stable code, so it must be renderable and assertable); the list now covers all 11 stable codes in §4.4.
 - v1.5 (2026-08-07): main decided three items (qa #69 / main #71) — **withdrew FX-14 `GENERIC`** (no actual return point, invisible on normal paths; guardrails covered by error.rs unit tests, not fixtures; the §4.4 table includes it but fixtures don't); **FX-01/FX-11 gain context fields** (`TIMEOUT` dual level: short-sync = page-level, long turn = flow-level; level decided by context, not inferred from the code alone); the list covers all 10 injectable stable codes in §4.4, consistent with AC table v1.9/v1.9.1 section C (verified consistent in practice by qa #76).
+- v1.6.1 (2026-08-11): issue #37 adds FX-12 `CONTEXT_OVERFLOW` as a Full+LongTurn terminal recovery failure, bringing the live fixture carrier to 11 stable codes; the older non-injectable mixed/detail checklist items move to FX-13/14.
 - v1.6 (2026-08-07): #14 infrastructure + presentation-layer minimal implementation landed (dev #86) — all prerequisites for executing this checklist ready: R1 fixtures with 6 fields (`{ code, msg, context, level, action, expect_style }`, level/context use the production contracts `error::ErrorLevel`/`error::ErrorContext`, FX-05 at flow-level slot), `inject()` → `UiEvent::Error { code, msg, level, context }` → `last_error`-driven rendering (Full=full-screen state / Page/Field=error-line highlight); doc §5 "level carried by the producer" + §3.1 "typical level overridable" synced (feedback-states.md v1.16). Presentation-layer acceptance (#20) executable.
 - v1.7 (2026-08-07): **#20 presentation-layer acceptance record** — 564 tests all passing / 0 failures; A/C/D/F/G core + B main path automated verification passed (qa AC-29 matrix + AC-53 dual-tier comparison + real-cell style assertions); 3 recorded items (no production ShortSync emission path / area H collapsed details P1 / manual items). Conclusion: presentation-layer acceptance passed.
 - v1.8 (2026-08-07): recorded item 1 updated — dev #92 landed production Page+ShortSync emission sources (list_models/count_tokens + TurnStart reset; main #91 decided option ①), **FX-01 is verifiable through the real path**; doc sync complete (feedback-states.md v1.16 including §4.4's "short-op degrade-visibly" stance). Remaining recorded items: area H collapsed details P1 + manual items.

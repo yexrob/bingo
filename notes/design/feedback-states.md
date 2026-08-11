@@ -1,6 +1,6 @@
 # Feedback States Specification
 
-> Version: v1.18 · Status: in effect (2026-08-07)
+> Version: v1.35 · Status: in effect (2026-08-11)
 > Scope: the unified design conventions for every user-visible feedback state in bingo. The GUI (TUI) and CLI (headless) sides share a single source; qa acceptance anchors are at the end.
 
 ## General principles
@@ -155,6 +155,7 @@ stable code and `GENERIC_ALLOWLIST` is empty):
 | Login expired / key missing / invalid key / 401 | `AUTH_REQUIRED` | Log in again / configure the key |
 | No permission / 403 | `PERMISSION_DENIED` | Go back / request permission |
 | Rate limited / 429 | `RATE_LIMITED` | Retry later |
+| Context window rejected after one compact retry | `CONTEXT_OVERFLOW` | Reduce or clear context |
 | Server error / stream protocol / MCP connection failure | `SERVER_ERROR` | Retry later |
 | No network (transport-layer error) | `OFFLINE` | Check the network and retry |
 | Invalid config (settings / team.json read, write, or validation) | `CONFIG_INVALID` | Fix the config and retry |
@@ -280,3 +281,5 @@ Web-side conventions (for a future web frontend to reuse):
 - v1.33 (2026-08-11): `/cd <dir>` follows the existing slash feedback tiers — a successful session-directory switch is a transient confirmation, while a busy turn, missing arguments, missing paths, and non-directory targets use the structured `BAD_ARGUMENT` error row and leave the current directory unchanged.
 
 - v1.34 (2026-08-11): issue #33 narrows the entity strip and DM feedback surface. The compact strip lists running agents and channels only; running agents expose model/thinking/state, and Ctrl+G opens the full workspace directly instead of entering an inline selector. DM history and live tails render only user messages and agent prose: tool activity is deliberately absent there, while the trailing working indicator remains during a hidden tool wait so a long turn never becomes silent. DM headers expose model/thinking/state; channel headers list model/thinking when the complete names fit and otherwise use one bounded aggregate, preserving the composer on short terminals. Channel message rendering itself is unchanged.
+
+- v1.35 (2026-08-11): issue #37 adds `CONTEXT_OVERFLOW` to the stable error table. A provider-reported 400/413 overflow is recovered internally by compacting and retrying once; only failed recovery reaches the existing Full+LongTurn error surface, with the stable code available to both TUI and headless exits.
