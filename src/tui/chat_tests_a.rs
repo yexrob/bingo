@@ -3762,3 +3762,27 @@ pub(super) fn type_text(chat: &mut Chat, text: &str) {
 pub(super) fn alt(chat: &mut Chat, c: char) -> bool {
     chat.on_key_at(KeyCode::Char(c), KeyModifiers::ALT, key_time())
 }
+
+#[test]
+fn stream_retry_resets_only_current_attempt_and_replaces_progress_warning() {
+    let home =
+        std::env::temp_dir().join(format!("bingo-stream-retry-reset-{}", std::process::id()));
+    let mut chat = test_chat_home(home.clone());
+    chat.handle(UiEvent::TurnStart);
+    chat.handle(UiEvent::TextDelta("committed".into()));
+    chat.handle(UiEvent::RoundEnd);
+    chat.handle(UiEvent::TextDelta("partial".into()));
+    chat.handle(UiEvent::ToolStart {
+        name: "Read".into(),
+    });
+    chat.handle(UiEvent::StreamRetry);
+    chat.handle(UiEvent::Warning("Reconnecting... 2/10".into()));
+    chat.handle(UiEvent::Warning("Reconnecting... 3/10".into()));
+
+    let index = chat.stream_msg.unwrap();
+    assert_eq!(chat.messages[index].text, "committed");
+    assert_eq!(chat.messages[index].activities.len(), 2);
+    assert!(chat.pending_tools.is_empty());
+    assert_eq!(chat.visible_warning(), Some("Reconnecting... 3/10"));
+    let _ = std::fs::remove_dir_all(home);
+}

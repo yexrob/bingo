@@ -130,7 +130,12 @@ Example (.bingo/settings.json):
    the history and retries the rejected request once; a second overflow ends the turn instead of looping.
    If an upstream response completes without assistant content or tool calls (including an unclosed thinking block),
    bingo treats it as malformed and retries the side-effect-free attempt once instead of ending silently; if the retry
-   is also empty, the turn shows the normal full-flow retry/back error.
+   is also empty, the turn shows the normal full-flow retry/back error. Transient error events received after a stream
+   opens (`429`, `5xx`, overloaded, `server_error`) restart the model response with jittered exponential backoff up to
+   10 times; the first reconnect notice is suppressed, later attempts show `Reconnecting... N/10`, and interactive
+   live views discard the failed attempt before showing its replacement (headless stdout cannot retract an already
+   written prefix). Quota, plan, invalid-prompt, and context-overflow errors fail immediately; short synchronous
+   operations keep their existing 10s read / 15s write timeout tier and do not enter this long-turn retry loop.
 3. **MCP server not working**: `/mcp` shows status — `✗ failed: <details>` fixes per the details
    (command missing/spawn failure/handshake failure; for http servers also check url reachability and headers auth);
    the stdio server's own error output lives in `~/.local/share/bingo/logs/mcp-<name>.log`

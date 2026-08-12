@@ -70,6 +70,10 @@ impl PermissionRequest {
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     TurnStart,
+    /// Discard all live output and tool rows produced by the current model-response attempt before
+    /// a transparent stream reconnect. Persisted history is unchanged because the attempt has not
+    /// committed yet.
+    StreamRetry,
     /// All tool calls in a batch finished (one query loop round closed).
     RoundEnd,
     TextDelta(String),
@@ -175,12 +179,14 @@ pub fn tui_hooks(
 ) -> UiHooks {
     let tool_events = events.clone();
     let ready_events = events.clone();
+    let retry_events = events.clone();
     let round_events = events.clone();
     let context_events = events.clone();
     let warn_events = events.clone();
     let ask_asks = asks.clone();
     let round_tokens = Arc::new(std::sync::Mutex::new((0u64, None::<usize>)));
     let event_round_tokens = round_tokens.clone();
+    let retry_round_tokens = round_tokens.clone();
     UiHooks {
         on_event: Box::new(move |event| match event {
             StreamEvent::TextDelta { index, text } => {
@@ -236,6 +242,10 @@ pub fn tui_hooks(
                 let _ = events.send(UiEvent::OutputTokens(*tokens));
             }
             _ => {}
+        }),
+        on_stream_retry: Box::new(move || {
+            *retry_round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
+            let _ = retry_events.send(UiEvent::StreamRetry);
         }),
         on_context_usage: Arc::new(move |used, window| {
             let _ = context_events.send(UiEvent::ContextUsage { used, window });
@@ -312,6 +322,9 @@ mod tests {
         });
         assert!(matches!(events_rx.try_recv(), Ok(UiEvent::TextDelta(_))));
         assert!(matches!(events_rx.try_recv(), Ok(UiEvent::OutputTokens(3))));
+
+        (ui.on_stream_retry)();
+        assert!(matches!(events_rx.try_recv(), Ok(UiEvent::StreamRetry)));
 
         (ui.on_event)(&StreamEvent::StopReason {
             stop_reason: Some("end_turn".to_string()),

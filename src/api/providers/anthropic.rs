@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{backoff, retryable};
 use crate::api::contract::{
-    AuthStatus, BoxStream, Capabilities, ClientError, NeutralRequest, ProviderClient, StreamEvent,
-    SystemBlock, ThinkingLevel,
+    AuthStatus, BoxStream, Capabilities, ClientError, NeutralRequest, ProviderClient,
+    StreamApiErrorKind, StreamEvent, SystemBlock, ThinkingLevel,
 };
 use crate::api::sse::SseParser;
 use crate::api::types::{DEFAULT_MAX_TOKENS, Message};
@@ -346,6 +346,14 @@ pub fn parse_sse_event(event: &str, data: &str) -> Result<Option<StreamEvent>, S
                 serde_json::from_str(data).map_err(|e| format!("bad error event: {e}"))?;
             Ok(Some(StreamEvent::ApiError {
                 message: format!("{}: {}", p.error.kind, p.error.message),
+                kind: match p.error.kind.as_str() {
+                    "overloaded_error" | "server_error" | "api_error" => {
+                        StreamApiErrorKind::Retryable
+                    }
+                    "invalid_request_error" => StreamApiErrorKind::NonRetryable,
+                    _ => StreamApiErrorKind::Unknown,
+                },
+                retry_after: None,
             }))
         }
         _other => Ok(None), // unknown event type: ignore, stay forward-compatible
@@ -994,7 +1002,9 @@ mod tests {
         assert_eq!(
             ev,
             StreamEvent::ApiError {
-                message: "overloaded_error: Overloaded".into()
+                message: "overloaded_error: Overloaded".into(),
+                kind: StreamApiErrorKind::Retryable,
+                retry_after: None,
             }
         );
     }

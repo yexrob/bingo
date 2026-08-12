@@ -14,8 +14,8 @@ use serde::Deserialize;
 
 use super::{AuthSource, backoff, retryable};
 use crate::api::contract::{
-    AuthStatus, BoxStream, Capabilities, ClientError, NeutralRequest, ProviderClient, StreamEvent,
-    SystemBlock, ThinkingLevel,
+    AuthStatus, BoxStream, Capabilities, ClientError, NeutralRequest, ProviderClient,
+    StreamApiErrorKind, StreamEvent, SystemBlock, ThinkingLevel,
 };
 use crate::api::sse::SseParser;
 use crate::api::types::{ContentBlock, Message, Role};
@@ -411,6 +411,81 @@ struct ErrorPayload {
     message: String,
     #[serde(default)]
     code: Option<String>,
+    #[serde(default)]
+    retry_after: Option<f64>,
+    #[serde(default)]
+    retry_after_ms: Option<f64>,
+}
+
+fn retry_after(milliseconds: Option<f64>, seconds: Option<f64>) -> Option<Duration> {
+    if let Some(milliseconds) = milliseconds
+        && milliseconds.is_finite()
+        && milliseconds >= 0.0
+    {
+        return Some(Duration::from_secs_f64(milliseconds / 1_000.0));
+    }
+    seconds
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map(Duration::from_secs_f64)
+}
+
+fn retry_after_from_value(value: &serde_json::Value) -> Option<Duration> {
+    let error = value.get("error");
+    let milliseconds = value
+        .get("retry_after_ms")
+        .or_else(|| value.get("retry-after-ms"))
+        .and_then(serde_json::Value::as_f64)
+        .or_else(|| {
+            error
+                .and_then(|error| error.get("retry_after_ms"))
+                .and_then(serde_json::Value::as_f64)
+        });
+    let seconds = value
+        .get("retry_after")
+        .or_else(|| value.get("retry-after"))
+        .and_then(serde_json::Value::as_f64)
+        .or_else(|| {
+            error
+                .and_then(|error| error.get("retry_after"))
+                .and_then(serde_json::Value::as_f64)
+        });
+    retry_after(milliseconds, seconds)
+}
+
+fn stream_api_error_kind(code: Option<&str>, message: &str) -> StreamApiErrorKind {
+    match code {
+        Some("server_is_overloaded" | "server_error" | "overloaded_error") => {
+            StreamApiErrorKind::Retryable
+        }
+        Some(
+            "insufficient_quota"
+            | "usage_not_included"
+            | "invalid_prompt"
+            | "context_length_exceeded",
+        ) => StreamApiErrorKind::NonRetryable,
+        _ if message_retryable(message) => StreamApiErrorKind::Retryable,
+        _ => StreamApiErrorKind::Unknown,
+    }
+}
+
+fn message_retryable(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    let status_5xx = message
+        .split(|character: char| !character.is_ascii_digit())
+        .any(|digits| matches!(digits.parse::<u16>(), Ok(status) if (500..600).contains(&status)));
+    status_5xx
+        || [
+            "429",
+            "overloaded",
+            "server_error",
+            "server error",
+            "service unavailable",
+            "too many requests",
+            "rate limit",
+            "try again later",
+        ]
+        .iter()
+        .any(|pattern| message.contains(pattern))
 }
 
 /// Incremental Responses SSE mapper: flattens the two-layer index
@@ -591,23 +666,33 @@ impl ResponsesSseMapper {
             }
             "response.failed" => {
                 let response = value.get("response").unwrap_or(&value);
-                let message = response
-                    .get("error")
+                let error = response.get("error");
+                let message = error
                     .and_then(|e| e.get("message"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("response failed")
-                    .to_string();
-                Ok(vec![StreamEvent::ApiError { message }])
+                    .unwrap_or("response failed");
+                let code = error.and_then(|e| e.get("code")).and_then(|v| v.as_str());
+                Ok(vec![StreamEvent::ApiError {
+                    message: match code {
+                        Some(code) => format!("{code}: {message}"),
+                        None => message.to_string(),
+                    },
+                    kind: stream_api_error_kind(code, message),
+                    retry_after: retry_after_from_value(response),
+                }])
             }
             "error" => {
                 let payload: ErrorPayload =
                     serde_json::from_value(value).map_err(|e| format!("bad error payload: {e}"))?;
+                let kind = stream_api_error_kind(payload.code.as_deref(), &payload.message);
                 Ok(vec![StreamEvent::ApiError {
                     message: if let Some(code) = payload.code {
                         format!("{code}: {}", payload.message)
                     } else {
                         payload.message
                     },
+                    kind,
+                    retry_after: retry_after(payload.retry_after_ms, payload.retry_after),
                 }])
             }
             _other => Ok(Vec::new()), // response.in_progress, ping, .done noise, ...
@@ -736,7 +821,7 @@ impl ProviderClient for OpenAIProvider {
                 while let Some(event) = stream.next().await {
                     match event? {
                         StreamEvent::TextDelta { text: t, .. } => text.push_str(&t),
-                        StreamEvent::ApiError { message } => {
+                        StreamEvent::ApiError { message, .. } => {
                             return Err(ClientError::Stream(message));
                         }
                         _ => {}
@@ -1366,6 +1451,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retry_after_metadata_accepts_milliseconds_and_seconds() {
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({"retry_after_ms": 125})),
+            Some(Duration::from_millis(125))
+        );
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({
+                "error": {"retry_after_ms": 250}
+            })),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({"retry_after": 1.5})),
+            Some(Duration::from_millis(1_500))
+        );
+    }
+
     /// failed → ApiError with the error detail (never a silent Done; §9).
     #[test]
     fn sse_maps_failed_to_api_error() {
@@ -1381,7 +1484,9 @@ mod tests {
         assert_eq!(
             ev,
             StreamEvent::ApiError {
-                message: "upstream unavailable".into()
+                message: "server_error: upstream unavailable".into(),
+                kind: StreamApiErrorKind::Retryable,
+                retry_after: None,
             }
         );
     }

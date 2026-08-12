@@ -1,6 +1,6 @@
 # Feedback States Specification
 
-> Version: v1.40 · Status: in effect (2026-08-11)
+> Version: v1.41 · Status: in effect (2026-08-12)
 > Scope: the unified design conventions for every user-visible feedback state in bingo. The GUI (TUI) and CLI (headless) sides share a single source; qa acceptance anchors are at the end.
 
 ## General principles
@@ -218,6 +218,7 @@ Web-side conventions (for a future web frontend to reuse):
 - **Error states**: three levels + mixed state each trigger correctly; 401/403/500/offline map to the correct actions; field-level focuses the corresponding input; copy contains "what happened + what the user can do"; state resets after retry.
 - **Timeout**: read 10s / write 15s (short sync ops) time out into the corresponding error level; long turns go through the transport layer (120s/60s) + user interruption, escalating to flow-level on failure; **a late error arriving after success is cancelled**; the timeout timer is cancelled on success/failure.
 - **Empty long turn**: an upstream completion with no committed assistant content and no tool calls is never accepted silently; an unclosed in-flight block marks the attempt malformed; bingo retries once without recording that empty attempt, then either completes normally or exposes a full-flow retry/back error.
+- **Transient stream error**: a long-turn SSE/API error classified as `429`, `5xx`, overloaded, or `server_error` restarts the whole uncommitted response up to 10 times with server-provided delay first, otherwise jittered exponential backoff capped at 32s; the first reconnect notice is suppressed and later notices show `Reconnecting... N/10`. TUI and subagent live views clear failed-attempt output before the replacement stream; headless stdout cannot retract already-written bytes, but persisted/result content contains only the successful attempt. Quota, usage-not-included, invalid-prompt, and context-overflow errors fail immediately. The 10s/15s short-operation tier does not enter this retry loop.
 - **State reset**: all four reset actions asserted one by one (aria-busy, aria-invalid, aria-live content, focus transfer); focus happens after rendering completes; stale-response races are ignored.
 - **Structured errors**: non-TTY output follows the single-line `[error] code=... msg=...` contract; assertions use error codes, not copy.
 - **Accessibility**: toast `aria-live` / error `role="alert"` readable by screen readers; under `prefers-reduced-motion`, motion is disabled but the loading indicator remains.
@@ -292,5 +293,6 @@ Web-side conventions (for a future web frontend to reuse):
 - v1.38 (2026-08-11): issue #37 adds `CONTEXT_OVERFLOW` to the stable error table. A provider-reported 400/413 overflow is recovered internally by compacting and retrying once; only failed recovery reaches the existing Full+LongTurn error surface, with the stable code available to both TUI and headless exits.
 
 - v1.39 (2026-08-11): issue #35 removes SendMessage's sender-turn latency. The receipt stays immediate and retains its queued/delivered/answered/dropped contract; an idle receiver is claimed and shown Running before the tool returns, while a running receiver gets an inbox signal and folds everything waiting into its context between tool rounds. The batching boundary is therefore the receiver's actual inbox drain rather than the sender's turn end. The existing acknowledgement watchdog and stop/delete feedback are unchanged.
-
 - v1.40 (2026-08-11): issue #6 adds visible manual storage cleanup. `/gc` shows its progress row for the bounded synchronous cleanup and then emits an info-tier summary with per-kind counts; failures use the structured `STORAGE_ERROR` page-level path with a disk-permission + retry action. Startup applies the same bounded policy before storage-reading command paths and warns on stderr if it cannot complete.
+
+- v1.41 (2026-08-12): issue #39 adds long-turn recovery for transient in-stream API errors. `429`, `5xx`, overloaded, and `server_error` events restart the uncommitted model response up to 10 times; a server-provided retry delay wins, otherwise the delay uses capped exponential backoff with ±10% jitter. The first reconnect notice is suppressed and attempts 2–10 show `Reconnecting... N/10`. TUI and subagent live views clear failed-attempt output before the replacement stream; headless stdout cannot retract an already-written prefix, while persisted/result content still contains only the successful attempt. Quota, usage-not-included, invalid-prompt, and context-overflow errors remain immediate failures, and short synchronous operations retain their existing 10s/15s timeout tier without entering this retry loop.

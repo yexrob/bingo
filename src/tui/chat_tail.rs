@@ -1116,6 +1116,9 @@ impl super::Chat {
             group_of: Vec::new(),
         });
         self.stream_msg = Some(self.messages.len() - 1);
+        self.stream_attempt_checkpoint = self
+            .stream_msg
+            .and_then(|index| self.messages.get(index).cloned());
         self.continuation_msg = self.stream_msg;
     }
 
@@ -1133,6 +1136,7 @@ impl super::Chat {
         {
             self.messages.pop();
             self.stream_msg = None;
+            self.stream_attempt_checkpoint = None;
         }
     }
 

@@ -233,6 +233,13 @@ pub struct NeutralRequest {
     pub thinking: Option<ThinkingLevel>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamApiErrorKind {
+    Retryable,
+    NonRetryable,
+    Unknown,
+}
+
 /// Normalized streaming event, consumed by the query loop and the TUI.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
@@ -277,6 +284,8 @@ pub enum StreamEvent {
     Done,
     ApiError {
         message: String,
+        kind: StreamApiErrorKind,
+        retry_after: Option<std::time::Duration>,
     },
 }
 

@@ -922,6 +922,9 @@ pub struct Chat {
     pub interrupted: bool,
     /// Index of the current assistant message.
     pub stream_msg: Option<usize>,
+    /// Current response-attempt start within the live message. Retrying restores this snapshot,
+    /// preserving completed tool rounds even when the failed attempt mutated an existing group.
+    stream_attempt_checkpoint: Option<UiMessage>,
     /// Message opened by [`Chat::open_continuation_message`] to carry what the model says after a
     /// mid-turn answer. Recorded so a turn that ends without using it can drop it again —
     /// inferring that from "empty assistant message" would also catch messages nobody opened here.
@@ -1132,6 +1135,10 @@ impl Chat {
     pub(crate) fn push_warning(&mut self, message: String) {
         self.warnings
             .retain(|(t, _)| t.elapsed() < Self::WARNING_TTL);
+        if message.starts_with("Reconnecting... ") {
+            self.warnings
+                .retain(|(_, warning)| !warning.starts_with("Reconnecting... "));
+        }
         if !self.warnings.iter().any(|(_, w)| w == &message) {
             self.warnings.push((std::time::Instant::now(), message));
         }
@@ -1142,6 +1149,7 @@ impl Chat {
     pub fn visible_warning(&self) -> Option<&str> {
         self.warnings
             .iter()
+            .rev()
             .find(|(t, _)| t.elapsed() < Self::WARNING_TTL)
             .map(|(_, w)| w.as_str())
     }
@@ -1253,6 +1261,7 @@ impl Chat {
             bash_mode: false,
             busy: false,
             stream_msg: None,
+            stream_attempt_checkpoint: None,
             continuation_msg: None,
             thinking_buf: String::new(),
             thinking_seg_open: false,
@@ -1443,6 +1452,9 @@ impl Chat {
                     group_of: Vec::new(),
                 });
                 self.stream_msg = Some(self.messages.len() - 1);
+                self.stream_attempt_checkpoint = self
+                    .stream_msg
+                    .and_then(|index| self.messages.get(index).cloned());
                 self.continuation_msg = None;
                 self.busy = true;
                 self.turn_start_tick = self.tick;
@@ -1462,6 +1474,31 @@ impl Chat {
                     self.messages[i].insert_points.push(0);
                     self.messages[i].group_of.push(None);
                 }
+            }
+            UiEvent::StreamRetry => {
+                if let Some(index) = self.stream_msg {
+                    if let Some(checkpoint) = self.stream_attempt_checkpoint.clone() {
+                        self.messages[index] = checkpoint;
+                    }
+                    let text_len = self.messages[index].text.chars().count();
+                    let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
+                        state: ThinkingState::Running,
+                        duration_ms: 0,
+                        stage: thinking_stage(self.messages.len()),
+                        done_verb: Some(thinking_done_verb()),
+                        start_tick: self.tick,
+                        segments: 1,
+                    }));
+                    hint.expand_hint = Some("ctrl+o to expand".to_string());
+                    self.messages[index].activities.push(hint);
+                    self.messages[index].insert_points.push(text_len);
+                    self.messages[index].group_of.push(None);
+                }
+                self.thinking_buf.clear();
+                self.thinking_seg_open = false;
+                self.pending_tools_clear();
+                self.output_round_tokens = 0;
+                self.token_rate.retry_round();
             }
             UiEvent::TextDelta(text) => {
                 if let Some(i) = self.stream_msg
@@ -1746,6 +1783,7 @@ impl Chat {
                 self.output_round_tokens = 0;
                 self.token_rate.finish_round();
                 if let Some(i) = self.stream_msg {
+                    self.stream_attempt_checkpoint = self.messages.get(i).cloned();
                     // Collapse groups are bounded by text: model rounds do not split a group, nor does thinking —
                     // only text (TextDelta) and non-collapsible tools close the group.
                     // Warm the image cache a round early: by TurnEnd the message
@@ -1893,6 +1931,7 @@ impl Chat {
                     self.load_message_images(&text);
                 }
                 self.stream_msg = None;
+                self.stream_attempt_checkpoint = None;
                 self.submit_queued();
             }
             UiEvent::Warning(message) => {
@@ -1928,6 +1967,7 @@ impl Chat {
                     self.busy = false;
                     self.drop_empty_stream_message();
                     self.stream_msg = None;
+                    self.stream_attempt_checkpoint = None;
                 }
                 // #18: structured error-state record (code/msg/level/context); the render side uses it to
                 // produce the error row (Page/Field) or the full-screen state (Full) — independent of message-text
@@ -2640,6 +2680,7 @@ impl Chat {
         self.attach_share_to_transcript(new_transcript.as_ref());
         self.messages.clear();
         self.stream_msg = None;
+        self.stream_attempt_checkpoint = None;
         self.slash_lines.clear();
         self.warnings.clear();
         self.reset_flushed();

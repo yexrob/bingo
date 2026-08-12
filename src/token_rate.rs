@@ -118,6 +118,11 @@ impl TokenRateSampler {
         self.round_tokens = 0;
     }
 
+    pub fn retry_round(&mut self) {
+        self.samples.clear();
+        self.round_tokens = 0;
+    }
+
     pub fn stop(&mut self) {
         self.samples.clear();
         self.active = false;

@@ -172,7 +172,14 @@ fn subagent_hooks(
     // with the tool calls and round boundaries the flat string cannot carry.
     let tool_live = output.live.clone();
     let tool_progress = output.progress.clone();
+    let retry_live = output.live.clone();
+    let retry_text = output.text.clone();
+    let retry_progress = output.progress.clone();
+    let warning_live = output.live.clone();
     let round_live = output.live.clone();
+    let round_text = output.text.clone();
+    let round_live_checkpoint = output.live.clone();
+    let round_progress = output.progress.clone();
     let text_output = output.text;
     let live_output = output.live;
     let progress_output = output.progress;
@@ -184,10 +191,25 @@ fn subagent_hooks(
     let done_registry = registry.clone();
     let done_instance = instance.clone();
     let round_rate = token_rate.clone();
+    let retry_rate = token_rate.clone();
     let context_agents = registry.clone();
     let context_instance = instance.clone();
     let round_chars = Arc::new(Mutex::new(0u64));
+    let retry_chars = round_chars.clone();
     let event_round_chars = round_chars.clone();
+    let attempt_checkpoint = Arc::new(Mutex::new((
+        0usize,
+        Vec::<crate::agents::LiveBlock>::new(),
+        0usize,
+        0u64,
+        0usize,
+        Vec::<String>::new(),
+    )));
+    let retry_checkpoint = attempt_checkpoint.clone();
+    let round_checkpoint = attempt_checkpoint.clone();
+    let event_cell = cell.clone();
+    let retry_cell = cell.clone();
+    let round_cell = cell.clone();
     UiHooks {
         on_event: Box::new(move |event| {
             let tokens = match event {
@@ -203,7 +225,7 @@ fn subagent_hooks(
                         if let Ok(mut live) = live_output.lock() {
                             crate::agents::LiveBlock::push_text(&mut live, text);
                         }
-                        cell.record_chars(text.chars().count());
+                        event_cell.record_chars(text.chars().count());
                         // Feed produced text into the condition engine (notify_on hit → signal notification).
                         watch.feed_content(id, text);
                     }
@@ -234,6 +256,33 @@ fn subagent_hooks(
             };
             if let Ok(mut sampler) = token_rate.lock() {
                 sampler.observe_round(tokens, std::time::Instant::now());
+            }
+        }),
+        on_stream_retry: Box::new(move || {
+            *retry_chars.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+            if let Ok(mut sampler) = retry_rate.lock() {
+                sampler.retry_round();
+            }
+            let (
+                text_len,
+                live_checkpoint,
+                produced_chars,
+                output_tokens,
+                tool_uses,
+                recent_activity,
+            ) = retry_checkpoint
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Ok(mut text) = retry_text.lock() {
+                text.truncate(text_len);
+            }
+            if let Ok(mut live) = retry_live.lock() {
+                *live = live_checkpoint;
+            }
+            retry_cell.set_chars(produced_chars);
+            if let Ok(mut progress) = retry_progress.lock() {
+                progress.restore_attempt(output_tokens, tool_uses, recent_activity);
             }
         }),
         on_context_usage: Arc::new(move |used, _window| {
@@ -269,8 +318,41 @@ fn subagent_hooks(
             {
                 live.push(crate::agents::LiveBlock::Text(String::new()));
             }
+            let text_len = round_text.lock().map_or(0, |text| text.len());
+            let live_checkpoint = round_live_checkpoint
+                .lock()
+                .map(|live| live.clone())
+                .unwrap_or_default();
+            let progress = round_progress
+                .lock()
+                .map(|progress| {
+                    (
+                        progress.output_tokens,
+                        progress.tool_uses,
+                        progress.recent_activity.clone(),
+                    )
+                })
+                .unwrap_or_default();
+            *round_checkpoint.lock().unwrap_or_else(|e| e.into_inner()) = (
+                text_len,
+                live_checkpoint,
+                round_cell.chars(),
+                progress.0,
+                progress.1,
+                progress.2,
+            );
         }),
-        on_warning: Box::new(|_| {}),
+        on_warning: Box::new(move |message| {
+            if message.starts_with("Reconnecting... ")
+                && let Ok(mut live) = warning_live.lock()
+            {
+                live.retain(|block| {
+                    !matches!(block, crate::agents::LiveBlock::Text(text) if text.starts_with("Reconnecting... "))
+                });
+                live.push(crate::agents::LiveBlock::Text(message));
+                live.push(crate::agents::LiveBlock::Text(String::new()));
+            }
+        }),
         // A subagent has no prompt surface of its own, so its Ask decisions are forwarded to
         // the session that owns the UI, stamped with the instance name. Auto-denying here
         // would fail the tool call as "user denied" without the user ever being asked — and
@@ -1020,6 +1102,12 @@ impl AgentCell {
     }
     fn record_chars(&self, n: usize) {
         self.chars.fetch_add(n, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn chars(&self) -> usize {
+        self.chars.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn set_chars(&self, chars: usize) {
+        self.chars.store(chars, std::sync::atomic::Ordering::SeqCst);
     }
     fn poll(&self) -> crate::watch::WatchPoll {
         crate::watch::WatchPoll {
@@ -2760,6 +2848,67 @@ mod tests {
             Arc::ptr_eq(&sub.runtime.permissions, &parent.runtime.permissions),
             "the permission tables should be shared, otherwise /permissions changes after spawn never reach subagents"
         );
+    }
+
+    #[tokio::test]
+    async fn subagent_retry_restores_the_current_attempt_checkpoint() {
+        let output = Arc::new(Mutex::new(String::new()));
+        let live = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+        let watch = crate::watch::WatchRegistry::new();
+        let registry = AgentRegistry::new();
+        let cell = Arc::new(AgentCell::new(registry.clone()));
+        let id = register_run_watch(&watch, "retry".into(), cell.clone(), Vec::new(), None);
+        let mut ui = subagent_hooks(
+            SubagentOutput {
+                text: output.clone(),
+                live: live.clone(),
+                progress: progress.clone(),
+            },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            cell.clone(),
+            watch,
+            id,
+            "worker".into(),
+            None,
+        );
+        (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "committed".into(),
+        });
+        (ui.on_tool_ready)("Read".into(), serde_json::json!({"file_path":"a"}), false);
+        (ui.on_round_end)();
+        (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "partial".into(),
+        });
+        (ui.on_tool_ready)("Bash".into(), serde_json::json!({"command":"bad"}), false);
+        (ui.on_stream_retry)();
+        (ui.on_warning)("Reconnecting... 2/10".into());
+        (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "answer".into(),
+        });
+
+        assert_eq!(
+            &*output.lock().unwrap_or_else(|e| e.into_inner()),
+            "committedanswer"
+        );
+        let live = live.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            matches!(live.first(), Some(crate::agents::LiveBlock::Text(text)) if text == "committed")
+        );
+        assert!(matches!(
+            live.get(live.len().saturating_sub(2)),
+            Some(crate::agents::LiveBlock::Text(text)) if text == "Reconnecting... 2/10"
+        ));
+        assert!(matches!(
+            live.last(),
+            Some(crate::agents::LiveBlock::Text(text)) if text == "answer"
+        ));
+        let progress = progress.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(progress.tool_uses, 1);
+        assert_eq!(cell.chars(), "committedanswer".chars().count());
     }
 
     #[tokio::test]

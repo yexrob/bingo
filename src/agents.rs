@@ -414,6 +414,17 @@ impl AgentProgress {
             self.recent_activity.remove(0);
         }
     }
+
+    pub fn restore_attempt(
+        &mut self,
+        output_tokens: u64,
+        tool_uses: usize,
+        recent_activity: Vec<String>,
+    ) {
+        self.output_tokens = output_tokens;
+        self.tool_uses = tool_uses;
+        self.recent_activity = recent_activity;
+    }
 }
 
 /// One piece of a running turn, as the instance view sees it while it happens.

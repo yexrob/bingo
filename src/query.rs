@@ -227,6 +227,7 @@ pub type ContextUsageFn = dyn Fn(u64, u64) + Send + Sync;
 /// UI hooks: stream events, tool completion, permission prompts, non-fatal warnings.
 pub struct UiHooks {
     pub on_event: Box<dyn FnMut(&StreamEvent) + Send>,
+    pub on_stream_retry: Box<dyn Fn() + Send>,
     pub on_context_usage: Arc<ContextUsageFn>,
     /// Callback when a tool block is complete (including input): the fold decision needs
     /// the input (Bash command classification). standalone=true: non-model tools like the
@@ -273,6 +274,7 @@ pub fn headless_hooks() -> UiHooks {
                 let _ = std::io::stdout().flush();
             }
         }),
+        on_stream_retry: Box::new(|| {}),
         on_context_usage: Arc::new(|_, _| {}),
         on_tool_ready: Box::new(|_name, _input, _standalone| {}),
         on_tool_done: Box::new(|_| {}),
@@ -319,7 +321,7 @@ pub fn headless_hooks() -> UiHooks {
     }
 }
 
-use crate::query_turn::{one_turn, retry_after_overflow};
+use crate::query_turn::{one_turn_with_stream_retries, retry_after_overflow};
 
 fn tool_result_text(tool_use_id: &str, text: impl Into<String>) -> ContentBlock {
     ContentBlock::ToolResult {
@@ -701,7 +703,7 @@ async fn query_loop(
             gate.current(crate::compact::estimate_tokens(&session.system, &messages));
         let model = session.runtime.model.borrow().clone();
         (ui.on_context_usage)(context_tokens, crate::budget::context_window_for(&model));
-        let turn = match one_turn(
+        let turn = match one_turn_with_stream_retries(
             session,
             &messages,
             tools,
@@ -1374,6 +1376,12 @@ use crate::transcript::Transcript;
 mod tests {
     use super::*;
 
+    use crate::api::contract::StreamApiErrorKind;
+    use crate::query_turn::{
+        STREAM_API_MAX_RETRIES, retryable_stream_api_error, stream_api_backoff,
+        stream_api_retry_delay,
+    };
+
     /// A tool result carrying images must reach the API as protocol blocks. Re-stringifying it
     /// here is what would turn a screenshot into a wall of base64 text the model can't see.
     #[test]
@@ -1493,6 +1501,67 @@ mod tests {
         let msg = user_message_with_images("look at #[image 1]", &imgs, false, &[]);
         assert_eq!(msg.content.len(), 1, "no image block sent when unsupported");
         assert!(matches!(msg.content[0], ContentBlock::Text { .. }));
+    }
+
+    #[test]
+    fn retryable_stream_api_errors_follow_provider_semantics() {
+        for message in [
+            "api_error: Our servers are currently overloaded. Please try again later.",
+            "server_error: upstream unavailable",
+            "HTTP 503: Service Unavailable",
+            "HTTP 599: upstream proxy failed",
+            "429 too many requests",
+        ] {
+            assert!(
+                retryable_stream_api_error(StreamApiErrorKind::Unknown, message),
+                "{message}"
+            );
+        }
+
+        for message in [
+            "insufficient_quota: check billing",
+            "usage_not_included: upgrade your plan",
+            "invalid_prompt: malformed input",
+            "context_length_exceeded: reduce the prompt",
+        ] {
+            assert!(
+                !retryable_stream_api_error(StreamApiErrorKind::Unknown, message),
+                "{message}"
+            );
+        }
+        assert!(retryable_stream_api_error(
+            StreamApiErrorKind::Retryable,
+            "opaque provider error"
+        ));
+        assert!(!retryable_stream_api_error(
+            StreamApiErrorKind::NonRetryable,
+            "HTTP 503"
+        ));
+    }
+
+    #[test]
+    fn stream_api_backoff_is_exponential_jittered_and_capped() {
+        assert_eq!(
+            stream_api_backoff(1, 0.0),
+            std::time::Duration::from_millis(450)
+        );
+        assert_eq!(
+            stream_api_backoff(1, 1.0),
+            std::time::Duration::from_millis(550)
+        );
+        assert_eq!(
+            stream_api_backoff(2, 0.5),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            stream_api_backoff(10, 0.5),
+            std::time::Duration::from_secs(32)
+        );
+        assert_eq!(
+            stream_api_retry_delay(10, Some(std::time::Duration::from_millis(125)),),
+            std::time::Duration::from_millis(125),
+            "the server-provided retry delay wins over local backoff"
+        );
     }
 
     /// Minimal Anthropic endpoint: count_tokens returns a fixed value; /v1/messages
@@ -1757,6 +1826,13 @@ mod tests {
             .collect()
     }
 
+    fn stream_api_error(kind: &str, message: &str) -> String {
+        sse(&[(
+            "error",
+            format!(r#"{{"type":"error","error":{{"type":"{kind}","message":"{message}"}}}}"#),
+        )])
+    }
+
     fn text_turn(text: &str, stop_reason: &str) -> String {
         sse(&[
             (
@@ -1935,6 +2011,67 @@ mod tests {
 
     const ANTHROPIC_OVERFLOW: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 211000 tokens > 200000 maximum"}}"#;
     const OPENAI_OVERFLOW: &str = r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 132450 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+
+    #[tokio::test]
+    async fn retryable_stream_api_error_retries_then_succeeds() {
+        let base_url = spawn_api(vec![
+            stream_api_error("overloaded_error", "servers are overloaded"),
+            text_turn("recovered", "end_turn"),
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+
+        let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap();
+
+        assert!(outcome.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text == "recovered"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn non_retryable_stream_api_error_fails_without_retrying() {
+        let base_url = spawn_api(vec![stream_api_error(
+            "insufficient_quota",
+            "check plan and billing",
+        )])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+
+        let error = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            QueryError::Protocol(message) if message.contains("insufficient_quota")
+        ));
+    }
+
+    #[tokio::test]
+    async fn retryable_stream_api_error_stops_after_ten_retries() {
+        let responses = (0..=STREAM_API_MAX_RETRIES)
+            .map(|_| stream_api_error("server_error", "upstream unavailable"))
+            .collect();
+        let base_url = spawn_api(responses).await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+
+        let error = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            QueryError::Protocol(message) if message.contains("server_error")
+        ));
+    }
 
     #[tokio::test]
     async fn anthropic_overflow_compacts_and_retries_once() {
