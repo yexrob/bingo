@@ -434,10 +434,11 @@ pub fn dm_posts(
             crate::agents::LiveBlock::Text(_) => {}
         }
     }
-    // Mid-tool, mid-thought or between rounds, the agent is still working; the
-    // process rows say what it is doing, this trailing indicator says it is not
-    // done saying it.
-    if typing_at.is_none() && !live.is_empty() {
+    // The indicator spans the whole stretch the agent owes a reply: from the
+    // instant a message is on its way (queued or claimed, before the stream
+    // says anything) through tool waits and round gaps. Without the early leg
+    // the DM sits silent for exactly the send-to-first-delta latency.
+    if typing_at.is_none() && !(live.is_empty() && in_flight.is_empty() && pending.is_empty()) {
         out.push(Post {
             from: who.to_string(),
             you: false,
@@ -2108,6 +2109,42 @@ mod tests {
             vec![PostKind::Said, PostKind::Typing]
         );
         assert!(dm_posts(&[], &[], &[], &[], &[], "deploy", "user").is_empty());
+    }
+
+    /// A fresh send gets the agent's face and typing row at once: the
+    /// indicator must not wait for the stream's first delta.
+    #[test]
+    fn a_fresh_send_shows_the_agent_typing_at_once() {
+        let claimed = dm_posts(
+            &[],
+            &[],
+            &["fix the bug".into()],
+            &[],
+            &[],
+            "deploy",
+            "user",
+        );
+        assert_eq!(
+            claimed.iter().map(|p| p.kind).collect::<Vec<_>>(),
+            vec![PostKind::Said, PostKind::Typing],
+            "claimed but not yet streaming still reads as typing"
+        );
+        assert!(claimed[1].from == "deploy" && !claimed[1].you);
+
+        let queued = dm_posts(
+            &[],
+            &[],
+            &[],
+            &[],
+            &["fix the bug".into()],
+            "deploy",
+            "user",
+        );
+        assert_eq!(
+            queued.iter().map(|p| p.kind).collect::<Vec<_>>(),
+            vec![PostKind::Queued, PostKind::Typing],
+            "queued behind a busy turn is also on its way"
+        );
     }
 
     /// The turn's process survives its landing: the history's ToolUse and
