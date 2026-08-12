@@ -186,9 +186,12 @@ mod preview {
 
         let mut chat = crate::tui::test_util::chat_at(width as usize, height as usize);
         chat.theme = theme.clone();
+        // A fixed, dated clock: the frame shows the trailing send-time stamps
+        // in their long form, and the render stays reproducible.
         let msg = |role: Role, text: &str| UiMessage {
             role,
             text: text.to_string(),
+            at: 1_754_700_000,
             activities: Vec::new(),
             insert_points: Vec::new(),
             groups: Vec::new(),

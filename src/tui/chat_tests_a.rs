@@ -372,6 +372,7 @@ pub(super) fn msg(role: Role, text: &str) -> UiMessage {
     UiMessage {
         role,
         text: text.to_string(),
+        at: 0,
         activities: Vec::new(),
         insert_points: Vec::new(),
         groups: Vec::new(),
@@ -1285,6 +1286,52 @@ fn single_turn_thinking_accumulates() {
     let acts = &chat.messages[0].activities;
     assert_eq!(acts.len(), 1);
     assert_eq!(thinking_text(&acts[0]), "ab");
+}
+
+/// Issue #41: every message trails its send time as a dim row — the same
+/// stamp brick the workspace views use — while a still-streaming reply
+/// shows none, and a message without a clock renders none.
+#[test]
+fn messages_trail_their_send_time() {
+    let at = 1_760_000_000u64;
+    let want = crate::tui::slack::stamp(at);
+    let mut chat = test_chat();
+    chat.messages.push(UiMessage {
+        at,
+        ..msg(Role::User, "hello there")
+    });
+    chat.messages.push(UiMessage {
+        at,
+        ..msg(Role::Assistant, "the reply")
+    });
+    let joined = visible(&mut chat, 100, 40);
+    let hello = joined.find("hello there").expect("user body");
+    let reply = joined.find("the reply").expect("assistant body");
+    let first = joined.find(&want).expect("user stamp");
+    let last = joined.rfind(&want).expect("assistant stamp");
+    assert!(hello < first && first < reply && reply < last, "{joined}");
+
+    // While the reply is still streaming, its clock stays off the screen.
+    chat.stream_msg = Some(1);
+    let joined = visible(&mut chat, 100, 40);
+    assert_eq!(joined.matches(&want).count(), 1, "{joined}");
+    chat.stream_msg = None;
+
+    // No clock (a test fixture, a legacy record) → no stamp row.
+    chat.messages.clear();
+    chat.messages.push(msg(Role::User, "undated"));
+    let joined = visible(&mut chat, 100, 40);
+    assert!(!joined.contains(&want), "{joined}");
+
+    // Turn end restamps the streaming reply: the shown time is when the
+    // reply landed, exactly as the workspace DM stamps it.
+    chat.messages.push(UiMessage {
+        at: 5,
+        ..msg(Role::Assistant, "late reply")
+    });
+    chat.stream_msg = Some(1);
+    chat.apply_event(UiEvent::TurnEnd);
+    assert!(chat.messages[1].at > 5, "restamped at turn end");
 }
 
 /// Interleaved rendering: text and activities cross by insert point (model output in text → tool → text order).
