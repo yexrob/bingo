@@ -818,13 +818,14 @@ mod tests {
             kinds,
             vec![
                 (true, slack::PostKind::Said),
+                (false, slack::PostKind::Process),
                 (false, slack::PostKind::Said),
                 (true, slack::PostKind::Queued),
                 (false, slack::PostKind::Typing),
             ],
             "{posts:?}"
         );
-        assert_eq!(posts[1].text, "Conclusion: lazy flush is correct.");
-        assert!(posts.iter().all(|post| !post.text.contains("Bash")));
+        assert_eq!(posts[1].text, "⏺ Bash($ rg lazy)");
+        assert_eq!(posts[2].text, "Conclusion: lazy flush is correct.");
     }
 }

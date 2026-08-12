@@ -462,6 +462,9 @@ pub enum LiveBlock {
     Text(String),
     /// A tool call, already rendered the way the transcript renders one.
     Tool(String),
+    /// A reasoning phase. The DM view shows it the way the transcript does —
+    /// a collapsed `✻ Thinking` row, never the raw stream.
+    Thinking(String),
 }
 
 impl LiveBlock {
@@ -470,6 +473,15 @@ impl LiveBlock {
         match blocks.last_mut() {
             Some(LiveBlock::Text(open)) => open.push_str(text),
             _ => blocks.push(LiveBlock::Text(text.to_string())),
+        }
+    }
+
+    /// Append streamed reasoning, continuing the open thinking block or opening
+    /// one (a tool or prose block in between starts a new phase).
+    pub fn push_thinking(blocks: &mut Vec<LiveBlock>, thinking: &str) {
+        match blocks.last_mut() {
+            Some(LiveBlock::Thinking(open)) => open.push_str(thinking),
+            _ => blocks.push(LiveBlock::Thinking(thinking.to_string())),
         }
     }
 }

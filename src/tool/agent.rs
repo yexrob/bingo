@@ -237,6 +237,13 @@ fn subagent_hooks(
                     tokens
                 }
                 crate::api::contract::StreamEvent::ThinkingDelta { thinking, .. } => {
+                    event_registry.touch(&event_instance);
+                    // The DM view shows the phase, not the stream: the block marks
+                    // "reasoning happened here" the way the transcript's collapsed
+                    // `✻ Thinking` row does.
+                    if let Ok(mut live) = live_output.lock() {
+                        crate::agents::LiveBlock::push_thinking(&mut live, thinking);
+                    }
                     let mut units = event_round_units.lock().unwrap_or_else(|e| e.into_inner());
                     *units = units.saturating_add(crate::compact::text_units(thinking));
                     units.div_ceil(4)
@@ -2852,6 +2859,68 @@ mod tests {
         assert!(
             Arc::ptr_eq(&sub.runtime.permissions, &parent.runtime.permissions),
             "the permission tables should be shared, otherwise /permissions changes after spawn never reach subagents"
+        );
+    }
+
+    /// Thinking deltas reach the live tail as their own blocks — one per
+    /// phase, closed by whatever interrupts it — so the DM can show the
+    /// reasoning happening, while the flat reply output stays prose-only.
+    #[tokio::test]
+    async fn thinking_deltas_open_one_live_block_per_phase() {
+        let output = Arc::new(Mutex::new(String::new()));
+        let live = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+        let watch = crate::watch::WatchRegistry::new();
+        let registry = AgentRegistry::new();
+        let cell = Arc::new(AgentCell::new(registry.clone()));
+        let id = register_run_watch(&watch, "think".into(), cell.clone(), Vec::new(), None);
+        let mut ui = subagent_hooks(
+            SubagentOutput {
+                text: output.clone(),
+                live: live.clone(),
+                progress,
+            },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            cell,
+            watch,
+            id,
+            "worker".into(),
+            None,
+        );
+        (ui.on_event)(&crate::api::contract::StreamEvent::ThinkingDelta {
+            index: 0,
+            thinking: "first ".into(),
+        });
+        (ui.on_event)(&crate::api::contract::StreamEvent::ThinkingDelta {
+            index: 0,
+            thinking: "phase".into(),
+        });
+        (ui.on_tool_ready)("Read".into(), serde_json::json!({"file_path": "a"}), false);
+        (ui.on_event)(&crate::api::contract::StreamEvent::ThinkingDelta {
+            index: 0,
+            thinking: "second phase".into(),
+        });
+        (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "the answer".into(),
+        });
+
+        let live = live.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(live.len(), 4, "{live:?}");
+        assert!(
+            matches!(&live[0], crate::agents::LiveBlock::Thinking(t) if t == "first phase"),
+            "consecutive deltas fold into one phase: {live:?}"
+        );
+        assert!(matches!(&live[1], crate::agents::LiveBlock::Tool(_)));
+        assert!(
+            matches!(&live[2], crate::agents::LiveBlock::Thinking(t) if t == "second phase"),
+            "a tool call closes the phase: {live:?}"
+        );
+        assert!(matches!(&live[3], crate::agents::LiveBlock::Text(t) if t == "the answer"));
+        assert_eq!(
+            &*output.lock().unwrap_or_else(|e| e.into_inner()),
+            "the answer",
+            "reasoning never leaks into the flat reply"
         );
     }
 

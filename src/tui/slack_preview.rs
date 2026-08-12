@@ -131,6 +131,38 @@ mod preview {
         ]
     }
 
+    /// The DM frame's posts: the shared conversation plus the work rows the DM
+    /// shows and the channel skin never does — a reasoning phase, tool calls,
+    /// and a message still in flight — so the preview judges the process rows
+    /// against the stamps and the gutter they must not disturb.
+    fn dm_posts_fixture(now: u64) -> Vec<Post> {
+        let mut posts = posts(now);
+        let process = |text: &str| Post {
+            from: "qa".into(),
+            you: false,
+            at: 0,
+            text: text.into(),
+            kind: PostKind::Process,
+        };
+        posts.insert(5, process("✻ Thinking"));
+        posts.insert(6, process("⏺ Read(src/tui/term.rs)"));
+        posts.insert(
+            7,
+            process("⏺ Bash($ cargo test --locked resize_keeps_the_hint_row)"),
+        );
+        posts.insert(
+            8,
+            Post {
+                from: "user".into(),
+                you: true,
+                at: 0,
+                text: "add the 80x24 case to the matrix too".into(),
+                kind: PostKind::Said,
+            },
+        );
+        posts
+    }
+
     fn frame(width: u16, height: u16, ws: &Workspace, theme: &Theme, now: u64) -> Buffer {
         let pal = Palette::new(theme);
         let area = Rect::new(0, 0, width, height);
@@ -147,7 +179,14 @@ mod preview {
         // kitty placement, and a preview that silently dropped the gutter would
         // be measuring a layout the terminal never draws.
         let content = match conv {
-            Conv::Dm(_) => dm_message_rows(&posts(now), 4, &pal, w, &Avatars::default(), theme),
+            Conv::Dm(_) => dm_message_rows(
+                &dm_posts_fixture(now),
+                4,
+                &pal,
+                w,
+                &Avatars::default(),
+                theme,
+            ),
             Conv::Channel(_) => message_rows(&posts(now), 4, &pal, w, &Avatars::default()),
         };
         let start = content.len().saturating_sub(viewport);
@@ -331,6 +370,11 @@ mod preview {
             &frame(100, 30, &dm, &Theme::dark(), now),
             "100×30 dark · DM + messages focused",
             TERM_DARK,
+        ));
+        body.push_str(&html(
+            &frame(100, 30, &dm, &Theme::light(), now),
+            "100×30 light · DM + messages focused",
+            TERM_LIGHT,
         ));
         body.push_str(&html(
             &frame(100, 30, &ws, &Theme::light(), now),
