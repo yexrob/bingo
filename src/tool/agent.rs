@@ -19,27 +19,40 @@ const MAX_AGENT_DEPTH: usize = 3;
 /// owns the terminal, and two of its promises do not hold here: rendering images for the user,
 /// and being woken by background-task notifications. Say so rather than letting the model plan
 /// against a surface it does not have.
+///
+/// The DM bullet exists because the user has a real private line to every instance (D57's
+/// workspace and the main-chat selector), and its messages arrive indistinguishable from the
+/// hub's. A note that claims the user never sees the turn text leaves exactly one imaginable
+/// way to reach them — a channel Post — which is how a private question ends up answered in
+/// front of the whole room (D63).
 const SUBAGENT_NOTE: &str = "\
 # You are a subagent
 
 - The main agent (the hub) spawned you for one task. Your final text is returned to the hub
-  as its tool result; it is not displayed to the user, and markdown image blocks are not
-  rendered for anyone. Put conclusions in the text itself.
+  as its tool result; it does not appear in the user's main transcript, and markdown image
+  blocks are not rendered for anyone. Put conclusions in the text itself.
+- The user has a private direct-message window with you. A message they send there arrives
+  like any other direct instruction, and the prose of your turns is exactly what they read
+  back — a direct message is answered where it arrived, in your turn text.
 - You cannot question the user: AskUserQuestion is not available here. Permission prompts do
   reach the user, but anything else you need must be reported back to the hub.
 - Your turn ends when you stop calling tools, and background tasks you started will NOT wake
   you afterwards. Finish what needs finishing within this turn, or state what is still
   pending — the hub can resume you with a follow-up message.";
 
-/// Appended when agent channels are on. Two failure modes pull in opposite directions and the
-/// note has to hold both: a room of polite agents acknowledging each other's acknowledgements
-/// (D45), and a room so afraid of chatter that nobody answers the human at all (D48).
+/// Appended when agent channels are on. Three failure modes pull against each other and the
+/// note has to hold all of them: a room of polite agents acknowledging each other's
+/// acknowledgements (D45), a room so afraid of chatter that nobody answers the human at all
+/// (D48), and a member answering a private DM with a channel Post because `user` only ever
+/// appeared in this note as a room speaker (D63).
 ///
-/// The rule that separates them is *who spoke*, not how the message reads — a person answers
-/// their manager and ignores their colleagues' hellos — plus the mechanical fact the model
-/// cannot infer: a turn woken by a channel message reports back to the hub, so a reply written
-/// as turn text never reaches the room. Without that sentence the model believes it has already
-/// answered and stays silent on purpose.
+/// The rule that separates the first two is *who spoke*, not how the message reads — a person
+/// answers their manager and ignores their colleagues' hellos — plus the mechanical fact the
+/// model cannot infer: a turn woken by a channel message reports back to the hub, so a reply
+/// written as turn text never reaches the room. Without that sentence the model believes it has
+/// already answered and stays silent on purpose. The third failure mode needs the opposite
+/// mechanical fact: *where* a message arrived decides where the answer goes, and the only
+/// observable difference is the `[#channel msg #N]` tag on channel traffic.
 ///
 /// It lives in the system prompt rather than in the wake-up payload deliberately: compaction
 /// rewrites the message history but never touches `Session::system`, so the rule is still there
@@ -69,8 +82,12 @@ Beyond that first line, post only what changes what someone else will do: a deci
 blocked on, a disagreement, a result, a question you cannot continue without. Name the person you
 mean. When you have nothing to add, stop calling tools — silence costs nothing and wakes nobody.
 
-A direct instruction sent to you alone is a different thing: it is not channel traffic, and your
-turn text is exactly where the hub is listening for the answer.";
+**A direct message is a different lane, and a private one.** Channel traffic arrives tagged
+`[#channel msg #N]`; text without that tag was sent to you alone — by the hub, or by the user
+from your direct-message window, where your turn text is exactly what they read. Answer a direct
+message in your turn text, never with Post: the answer belongs to the person who asked, not to
+the room. What reaches you privately stays private — do not repeat or summarize it into a
+channel unless the message itself tells you to take it there.";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -2756,6 +2773,29 @@ mod tests {
         assert!(
             CHANNEL_NOTE.contains("`user` or `main` addressed the room"),
             "must spell out \"answer when a human speaks\", otherwise the silence rule overshoots"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("never with Post"),
+            "must state that a DM is answered in turn text — otherwise a member takes a private question to the room"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("stays private"),
+            "must forbid relaying DM content into a channel, not just answering there"
+        );
+    }
+
+    /// The user reads a member's turn text in the DM window (D57), so the subagent note may
+    /// not claim the user never sees it. That claim is what made a DM'd member believe the
+    /// only way to reach the human was a channel Post (D63).
+    #[test]
+    fn subagent_note_knows_the_dm_window_exists() {
+        assert!(
+            SUBAGENT_NOTE.contains("direct-message window"),
+            "must name the private surface the user reaches an instance through"
+        );
+        assert!(
+            !SUBAGENT_NOTE.contains("not displayed to the user"),
+            "the old claim was false once the DM window existed, and it routed private answers into channels"
         );
     }
 
