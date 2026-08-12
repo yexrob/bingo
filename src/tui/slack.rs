@@ -253,9 +253,6 @@ pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
         .collect()
 }
 
-/// Subagent history → posts. User turns and assistant text form the DM;
-/// tool activity, tool results, and thinking stay out. The main transcript is
-/// where execution detail lives.
 /// One line of runtime scaffolding → how it reads collapsed, or `None` for text
 /// a person actually wrote. The shapes are the ones `absorb_inbox` and the task
 /// reminder compose, so this stays in step with them by construction: anything
@@ -326,9 +323,15 @@ fn user_posts(text: &str, at: u64, me: &str) -> Vec<Post> {
     out
 }
 
+/// Subagent history → posts. User turns and assistant text form the DM;
+/// tool activity, tool results, and thinking stay out. The main transcript is
+/// where execution detail lives. `in_flight` is the messages already claimed by
+/// the running turn but not yet landed in history: rendered as ordinary sent
+/// messages, so a message never vanishes between the send and the turn's end.
 pub fn dm_posts(
     history: &[Message],
     stamps: &[u64],
+    in_flight: &[String],
     live: &[crate::agents::LiveBlock],
     pending: &[String],
     who: &str,
@@ -351,6 +354,17 @@ pub fn dm_posts(
                 _ => {}
             }
         }
+    }
+    // Claimed by the running turn, not yet in the record: an ordinary message
+    // (it is one — the run's prompt carries it), just without a landing clock.
+    for text in in_flight {
+        out.push(Post {
+            from: me.to_string(),
+            you: true,
+            at: 0,
+            text: text.clone(),
+            kind: PostKind::Said,
+        });
     }
     for text in pending {
         out.push(Post {
@@ -1582,7 +1596,7 @@ mod tests {
                 }],
             },
         ];
-        let posts = dm_posts(&history, &[100, 200, 300], &[], &[], "scout", "user");
+        let posts = dm_posts(&history, &[100, 200, 300], &[], &[], &[], "scout", "user");
         let ats: Vec<(PostKind, u64)> = posts.iter().map(|p| (p.kind, p.at)).collect();
         assert_eq!(
             ats,
@@ -1610,7 +1624,7 @@ mod tests {
             crate::api::types::Message::user_text(relay),
             crate::api::types::Message::user_text("one thing just for you\nsecond line"),
         ];
-        let posts = dm_posts(&history, &[], &[], &[], "devex", "user");
+        let posts = dm_posts(&history, &[], &[], &[], &[], "devex", "user");
         let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
         assert_eq!(
             kinds,
@@ -2004,17 +2018,13 @@ mod tests {
             LiveBlock::Tool("⏺ Read(ci.yml)".into()),
             LiveBlock::Text("The quality job is the one failing.".into()),
         ];
-        let posts = dm_posts(&[], &[], &live, &[], "deploy", "user");
+        let posts = dm_posts(&[], &[], &[], &live, &[], "deploy", "user");
         let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
         assert_eq!(
             kinds,
             vec![PostKind::Said, PostKind::Said, PostKind::Typing],
             "only prose, with the tail typing: {posts:?}"
         );
-        assert!(posts.iter().all(|p| matches!(
-            p.kind,
-            PostKind::Said | PostKind::Queued | PostKind::Typing | PostKind::Note
-        )));
         assert!(
             posts
                 .iter()
@@ -2023,14 +2033,14 @@ mod tests {
         );
 
         assert_eq!(
-            dm_posts(&[], &[], &live[..2], &[], "deploy", "user")
+            dm_posts(&[], &[], &[], &live[..2], &[], "deploy", "user")
                 .iter()
                 .map(|p| p.kind)
                 .collect::<Vec<_>>(),
             vec![PostKind::Said, PostKind::Typing]
         );
         let only_tools = vec![LiveBlock::Tool("⏺ Bash($ git status)".into())];
-        let tool_wait = dm_posts(&[], &[], &only_tools, &[], "deploy", "user");
+        let tool_wait = dm_posts(&[], &[], &[], &only_tools, &[], "deploy", "user");
         assert_eq!(
             tool_wait.iter().map(|p| p.kind).collect::<Vec<_>>(),
             vec![PostKind::Typing],
@@ -2043,13 +2053,13 @@ mod tests {
             LiveBlock::Text(String::new()),
         ];
         assert_eq!(
-            dm_posts(&[], &[], &between, &[], "deploy", "user")
+            dm_posts(&[], &[], &[], &between, &[], "deploy", "user")
                 .iter()
                 .map(|p| p.kind)
                 .collect::<Vec<_>>(),
             vec![PostKind::Said, PostKind::Typing]
         );
-        assert!(dm_posts(&[], &[], &[], &[], "deploy", "user").is_empty());
+        assert!(dm_posts(&[], &[], &[], &[], &[], "deploy", "user").is_empty());
     }
 
     /// DM history and live turns show conversation text, never tool activity.
@@ -2083,14 +2093,15 @@ mod tests {
             LiveBlock::Tool("⏺ Read(src/main.rs)".into()),
         ];
 
-        let posts = dm_posts(&history, &[], &live, &[], "dev", "user");
+        let posts = dm_posts(&history, &[], &[], &live, &[], "dev", "user");
         assert!(posts.iter().all(|post| matches!(
             post.kind,
             PostKind::Said | PostKind::Queued | PostKind::Typing | PostKind::Note
         )));
         assert!(
-            posts.iter().all(|post| !post.text.contains("Bash")
-                && !post.text.contains("Read(src/main.rs)")),
+            posts
+                .iter()
+                .all(|post| !post.text.contains("Bash") && !post.text.contains("Read(src/main.rs)")),
             "{posts:?}"
         );
         assert_eq!(
@@ -2100,6 +2111,59 @@ mod tests {
                 .count(),
             1,
             "hidden mid-tool work still has one visible working state: {posts:?}"
+        );
+    }
+
+    /// The moment a message is claimed by a run it is neither in the history
+    /// nor in the inbox — the in-flight record keeps it on screen as an
+    /// ordinary sent message (no landing clock yet), between the history and
+    /// anything still queued.
+    #[test]
+    fn an_in_flight_message_reads_as_sent_not_queued() {
+        use crate::api::types::Message;
+        let history = vec![Message::user_text("first task")];
+        let posts = dm_posts(
+            &history,
+            &[100],
+            &["second task, being worked on".to_string()],
+            &[crate::agents::LiveBlock::Tool("⏺ Read(a.rs)".into())],
+            &["third task, still queued".to_string()],
+            "scout",
+            "user",
+        );
+        let flags: Vec<(bool, PostKind, u64)> =
+            posts.iter().map(|p| (p.you, p.kind, p.at)).collect();
+        assert_eq!(
+            flags,
+            vec![
+                (true, PostKind::Said, 100),
+                (true, PostKind::Said, 0),
+                (true, PostKind::Queued, 0),
+                (false, PostKind::Typing, 0),
+            ],
+            "{posts:?}"
+        );
+        assert_eq!(posts[1].text, "second task, being worked on");
+
+        // On screen it wears the ordinary sent-message skin: no pending banner,
+        // no invented stamp row.
+        let rows = dm_message_rows(
+            &posts,
+            usize::MAX,
+            &pal(),
+            60,
+            &Avatars::default(),
+            &Theme::dark(),
+        );
+        let t = texts(&rows);
+        assert!(
+            t.iter().any(|l| l.contains("second task")),
+            "the claimed message stays on screen: {t:?}"
+        );
+        assert_eq!(
+            t.iter().filter(|l| l.contains("pending delivery")).count(),
+            1,
+            "only the still-queued draft carries the pending banner: {t:?}"
         );
     }
 

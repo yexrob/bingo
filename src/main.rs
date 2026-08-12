@@ -569,7 +569,7 @@ fn persist_team_memory(session: &Arc<Session>, home: &Path, project_dir: &std::p
     for node in tree.nodes() {
         let branch = crate::team::current_branch(&node.dir);
         for m in &node.def.members {
-            if let Some((history, _, _, _)) = session.agents.view_of(&m.name)
+            if let Some((history, _, _, _, _)) = session.agents.view_of(&m.name)
                 && !history.is_empty()
             {
                 crate::team::save_member_history(

@@ -115,7 +115,7 @@ fn dm_seq(session: &Arc<Session>, name: &str) -> u64 {
     session
         .agents
         .view_of(name)
-        .map(|(history, _, _, _)| history.len() as u64)
+        .map(|(history, _, _, _, _)| history.len() as u64)
         .unwrap_or(0)
 }
 
@@ -131,7 +131,8 @@ fn conversation(session: &Arc<Session>, ws: &Workspace, conv: &Conv) -> (Vec<Pos
             (slack::channel_posts(&log, USER_NAME), seq, divider)
         }
         Conv::Dm(name) => {
-            let (history, stamps, live, _) = session.agents.view_of(name).unwrap_or((
+            let (history, stamps, live, in_flight, _) = session.agents.view_of(name).unwrap_or((
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -140,9 +141,19 @@ fn conversation(session: &Arc<Session>, ws: &Workspace, conv: &Conv) -> (Vec<Pos
             let pending = session.agents.pending_of(name);
             let seq = history.len() as u64;
             let read_upto = (cursor as usize).min(history.len());
-            let divider =
-                slack::dm_posts(&history[..read_upto], &stamps, &[], &[], name, USER_NAME).len();
-            let posts = slack::dm_posts(&history, &stamps, &live, &pending, name, USER_NAME);
+            let divider = slack::dm_posts(
+                &history[..read_upto],
+                &stamps,
+                &[],
+                &[],
+                &[],
+                name,
+                USER_NAME,
+            )
+            .len();
+            let posts = slack::dm_posts(
+                &history, &stamps, &in_flight, &live, &pending, name, USER_NAME,
+            );
             (posts, seq, divider)
         }
     }
@@ -793,6 +804,7 @@ mod tests {
         ];
         let posts = slack::dm_posts(
             &history,
+            &[],
             &[],
             &[crate::agents::LiveBlock::Text(
                 "writing the second paragraph".into(),
