@@ -337,8 +337,15 @@ pub enum InboxItem {
 /// double-start the same instance.
 /// What [`AgentRegistry::view_of`] samples for the DM view: history, the
 /// landing-time stamp of each history message (unix seconds, 0 = unknown),
-/// the live tail, and the instance state.
-pub type AgentView = (Vec<Message>, Vec<u64>, Vec<LiveBlock>, AgentState);
+/// the live tail, the direct messages claimed by the current run but not yet
+/// landed in history, and the instance state.
+pub type AgentView = (
+    Vec<Message>,
+    Vec<u64>,
+    Vec<LiveBlock>,
+    Vec<String>,
+    AgentState,
+);
 
 pub struct Wake {
     pub name: String,
@@ -374,6 +381,12 @@ struct Entry {
     /// Inbox accumulated since the last drain (commands + channel messages, claimed as one
     /// batch when the receiver is ready).
     inbox: Vec<InboxItem>,
+    /// Direct messages drained into the current run and not yet landed in `history`.
+    /// Without this record a sent message vanishes for the whole turn: the inbox is
+    /// emptied at the claim point and `history` only catches up at [`AgentRegistry::finish`].
+    /// The DM view bridges that window from here; cleared when the history lands, and
+    /// pruned when a failed run puts its batch back in the inbox.
+    in_flight: Vec<(MsgId, String)>,
     /// Delivery records for direct messages, oldest first, capped at MAX_ACKS.
     acks: Vec<Ack>,
     session: Arc<Session>,
@@ -449,6 +462,9 @@ pub enum LiveBlock {
     Text(String),
     /// A tool call, already rendered the way the transcript renders one.
     Tool(String),
+    /// A reasoning phase. The DM view shows it the way the transcript does —
+    /// a collapsed `✻ Thinking` row, never the raw stream.
+    Thinking(String),
 }
 
 impl LiveBlock {
@@ -457,6 +473,15 @@ impl LiveBlock {
         match blocks.last_mut() {
             Some(LiveBlock::Text(open)) => open.push_str(text),
             _ => blocks.push(LiveBlock::Text(text.to_string())),
+        }
+    }
+
+    /// Append streamed reasoning, continuing the open thinking block or opening
+    /// one (a tool or prose block in between starts a new phase).
+    pub fn push_thinking(blocks: &mut Vec<LiveBlock>, thinking: &str) {
+        match blocks.last_mut() {
+            Some(LiveBlock::Thinking(open)) => open.push_str(thinking),
+            _ => blocks.push(LiveBlock::Thinking(thinking.to_string())),
         }
     }
 }
@@ -607,6 +632,7 @@ impl AgentRegistry {
                 history: Vec::new(),
                 stamps: Vec::new(),
                 inbox: Vec::new(),
+                in_flight: Vec::new(),
                 acks: Vec::new(),
                 session,
                 abort: None,
@@ -719,6 +745,11 @@ impl AgentRegistry {
             entry.history.clone(),
             entry.stamps.clone(),
             live,
+            entry
+                .in_flight
+                .iter()
+                .map(|(_, text)| text.clone())
+                .collect(),
             entry.state,
         ))
     }
@@ -784,13 +815,14 @@ impl AgentRegistry {
         if entry.state != AgentState::Running {
             abort.abort();
             for item in &items {
-                if let InboxItem::Direct { id, .. } = item
-                    && let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id)
-                {
-                    ack.state = AckState::Dropped {
-                        reason: "instance stopped".to_string(),
-                    };
-                    ack.delivered_after_chars = None;
+                if let InboxItem::Direct { id, .. } = item {
+                    entry.in_flight.retain(|(flying, _)| flying != id);
+                    if let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id) {
+                        ack.state = AckState::Dropped {
+                            reason: "instance stopped".to_string(),
+                        };
+                        ack.delivered_after_chars = None;
+                    }
                 }
             }
             return false;
@@ -849,6 +881,9 @@ impl AgentRegistry {
             };
             entry.stamps.resize(history.len(), refill);
             entry.history = history;
+            // The stored history now carries the run's messages: the bridge record
+            // has done its job (the continuation drain below refills it).
+            entry.in_flight.clear();
             answer_acks(entry, output_chars);
             if entry.state == AgentState::Stopped {
                 None
@@ -932,23 +967,27 @@ impl AgentRegistry {
         };
         if entry.state == AgentState::Stopped {
             for item in &items {
-                if let InboxItem::Direct { id, .. } = item
-                    && let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id)
-                {
-                    ack.state = AckState::Dropped {
-                        reason: "instance stopped".to_string(),
-                    };
-                    ack.delivered_after_chars = None;
+                if let InboxItem::Direct { id, .. } = item {
+                    entry.in_flight.retain(|(flying, _)| flying != id);
+                    if let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id) {
+                        ack.state = AckState::Dropped {
+                            reason: "instance stopped".to_string(),
+                        };
+                        ack.delivered_after_chars = None;
+                    }
                 }
             }
             return;
         }
         for item in &items {
-            if let InboxItem::Direct { id, .. } = item
-                && let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id)
-            {
-                ack.state = AckState::Queued;
-                ack.delivered_after_chars = None;
+            if let InboxItem::Direct { id, .. } = item {
+                // Back in the inbox, back to the pending view — a message rendered
+                // both as sent and as queued would be on screen twice.
+                entry.in_flight.retain(|(flying, _)| flying != id);
+                if let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id) {
+                    ack.state = AckState::Queued;
+                    ack.delivered_after_chars = None;
+                }
             }
         }
         items.append(&mut entry.inbox);
@@ -1198,11 +1237,14 @@ fn answer_acks(entry: &mut Entry, output_chars: usize) {
 
 fn mark_delivered(entry: &mut Entry, items: &[InboxItem], run: u64, output_chars: usize) {
     for item in items {
-        if let InboxItem::Direct { id, .. } = item
-            && let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id)
-        {
-            ack.state = AckState::Delivered { run };
-            ack.delivered_after_chars = Some(output_chars);
+        if let InboxItem::Direct { id, text, .. } = item {
+            // Delivered into a run means gone from the inbox but not yet in the
+            // history: record it so the DM keeps showing what was sent.
+            entry.in_flight.push((*id, text.clone()));
+            if let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id) {
+                ack.state = AckState::Delivered { run };
+                ack.delivered_after_chars = Some(output_chars);
+            }
         }
     }
 }
@@ -1718,7 +1760,7 @@ mod tests {
             )
             .is_none()
         );
-        let (history, stamps, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        let (history, stamps, _, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         assert_eq!(stamps.len(), history.len());
         assert!(stamps.iter().all(|&at| at > 0), "{stamps:?}");
         // Compaction hands back a shorter, rewritten history: the old clocks no
@@ -1727,7 +1769,7 @@ mod tests {
             reg.finish("scout", vec![Message::user_text("summary")], 0)
                 .is_none()
         );
-        let (history, stamps, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        let (history, stamps, _, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         assert_eq!(history.len(), 1);
         assert_eq!(stamps, vec![0]);
         // The record grows again: only the new tail is stamped.
@@ -1739,9 +1781,84 @@ mod tests {
             )
             .is_none()
         );
-        let (_, stamps, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        let (_, stamps, _, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         assert_eq!(stamps[0], 0, "the rewritten prefix stays clockless");
         assert!(stamps[1] > 0, "{stamps:?}");
+    }
+
+    /// A message claimed by a run must not vanish between the drain and the
+    /// landing: the inbox empties at the claim point and the history only
+    /// catches up at finish — the in-flight record carries the DM view across
+    /// that window, and lets go the moment the history holds the message.
+    #[test]
+    fn a_claimed_message_stays_visible_until_it_lands() {
+        let reg = AgentRegistry::new();
+        reg.insert(
+            "scout",
+            AgentKind::Hire,
+            None,
+            "research".into(),
+            test_session(),
+        );
+        assert!(reg.finish("scout", Vec::new(), 0).is_none());
+        let _ = reg
+            .deliver("scout", "map the module", Vec::new(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(reg.pending_of("scout"), vec!["map the module".to_string()]);
+
+        // Claimed: gone from the inbox, not yet in the history — in flight.
+        assert_eq!(reg.flush_pending().len(), 1);
+        assert!(reg.pending_of("scout").is_empty());
+        let (history, _, _, in_flight, _) =
+            reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        assert!(history.is_empty());
+        assert_eq!(in_flight, vec!["map the module".to_string()]);
+
+        // Landed: the stored history carries it, the bridge record is gone.
+        let landed = vec![
+            Message::user_text("map the module"),
+            Message {
+                role: crate::api::types::Role::Assistant,
+                content: vec![crate::api::types::ContentBlock::Text {
+                    text: "mapped".into(),
+                }],
+            },
+        ];
+        assert!(reg.finish("scout", landed, 6).is_none());
+        let (history, _, _, in_flight, _) =
+            reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        assert_eq!(history.len(), 2);
+        assert!(in_flight.is_empty(), "history took over: {in_flight:?}");
+    }
+
+    /// A failed run puts its claimed batch back in the inbox; the in-flight
+    /// record lets go of it in the same move, so the message reads as queued
+    /// again instead of being on screen twice.
+    #[test]
+    fn a_restored_message_leaves_the_in_flight_record() {
+        let reg = AgentRegistry::new();
+        reg.insert(
+            "scout",
+            AgentKind::Hire,
+            None,
+            "research".into(),
+            test_session(),
+        );
+        assert!(reg.finish("scout", Vec::new(), 0).is_none());
+        let _ = reg
+            .deliver("scout", "map the module", Vec::new(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let wake = reg
+            .flush_pending()
+            .pop()
+            .unwrap_or_else(|| panic!("claimed"));
+        let (_, _, _, in_flight, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        assert_eq!(in_flight.len(), 1);
+
+        reg.restore_inbox("scout", wake.items);
+        let (_, _, _, in_flight, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        assert!(in_flight.is_empty(), "{in_flight:?}");
+        assert_eq!(reg.pending_of("scout"), vec!["map the module".to_string()]);
     }
 
     #[test]

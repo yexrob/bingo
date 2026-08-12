@@ -226,6 +226,11 @@ pub enum PostKind {
     /// typed it, so it gets one dim line instead of a quoted block with a name
     /// and an avatar over it.
     Note,
+    /// A step of the agent's work — a tool call or a reasoning phase — shown
+    /// the way the main transcript shows it: one dim line under the agent's
+    /// name, kept after the turn lands (the history's ToolUse/Thinking blocks
+    /// re-render the same rows).
+    Process,
 }
 
 /// One rendered message.
@@ -253,9 +258,6 @@ pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
         .collect()
 }
 
-/// Subagent history → posts. User turns and assistant text form the DM;
-/// tool activity, tool results, and thinking stay out. The main transcript is
-/// where execution detail lives.
 /// One line of runtime scaffolding → how it reads collapsed, or `None` for text
 /// a person actually wrote. The shapes are the ones `absorb_inbox` and the task
 /// reminder compose, so this stays in step with them by construction: anything
@@ -326,15 +328,47 @@ fn user_posts(text: &str, at: u64, me: &str) -> Vec<Post> {
     out
 }
 
+/// The collapsed reasoning row, exactly the transcript's header: the phase is
+/// shown, the stream is not.
+const THINKING_ROW: &str = "✻ Thinking";
+
+/// A stored tool-use block → the transcript's call line (`⏺ Bash(git status)`),
+/// the same brick `on_tool_ready` builds the live tail from.
+fn tool_call_line(name: &str, input: &serde_json::Value) -> String {
+    let glyph = crate::tui::activities::tool_glyph(name);
+    let shown = crate::tui::activities::display_tool_name(name);
+    let summary = crate::query::summarize_input(name, input);
+    if summary.is_empty() {
+        format!("{glyph}{shown}")
+    } else {
+        format!("{glyph}{shown}({summary})")
+    }
+}
+
+/// Subagent history + live turn → posts. User turns and assistant prose form
+/// the conversation; the work between them — tool calls and reasoning phases —
+/// shows as dim [`PostKind::Process`] rows, mirroring the main transcript
+/// (which keeps `⏺ Tool(…)` lines and the collapsed `✻ Thinking` header in the
+/// scrollback). `in_flight` is the messages already claimed by the running turn
+/// but not yet landed in history: rendered as ordinary sent messages, so a
+/// message never vanishes between the send and the turn's end.
 pub fn dm_posts(
     history: &[Message],
     stamps: &[u64],
+    in_flight: &[String],
     live: &[crate::agents::LiveBlock],
     pending: &[String],
     who: &str,
     me: &str,
 ) -> Vec<Post> {
     let mut out = Vec::new();
+    let process = |text: String| Post {
+        from: who.to_string(),
+        you: false,
+        at: 0,
+        text,
+        kind: PostKind::Process,
+    };
     for (i, msg) in history.iter().enumerate() {
         // `stamps[i]` is when `history[i]` landed in the record (0 = no clock).
         let at = stamps.get(i).copied().unwrap_or(0);
@@ -348,9 +382,26 @@ pub fn dm_posts(
                     text: text.clone(),
                     kind: PostKind::Said,
                 }),
+                (Role::Assistant, ContentBlock::ToolUse { name, input, .. }) => {
+                    out.push(process(tool_call_line(name, input)));
+                }
+                (Role::Assistant, ContentBlock::Thinking { .. }) => {
+                    out.push(process(THINKING_ROW.to_string()));
+                }
                 _ => {}
             }
         }
+    }
+    // Claimed by the running turn, not yet in the record: an ordinary message
+    // (it is one — the run's prompt carries it), just without a landing clock.
+    for text in in_flight {
+        out.push(Post {
+            from: me.to_string(),
+            you: true,
+            at: 0,
+            text: text.clone(),
+            kind: PostKind::Said,
+        });
     }
     for text in pending {
         out.push(Post {
@@ -361,9 +412,6 @@ pub fn dm_posts(
             kind: PostKind::Queued,
         });
     }
-    // Only prose belongs in the DM. A tool block still keeps the trailing
-    // working indicator alive below, so silent waits remain visible without
-    // exposing execution detail.
     let typing_at = match live.last() {
         Some(crate::agents::LiveBlock::Text(t)) if !t.trim().is_empty() => Some(live.len() - 1),
         _ => None,
@@ -381,12 +429,14 @@ pub fn dm_posts(
                     PostKind::Said
                 },
             }),
-            crate::agents::LiveBlock::Tool(_) | crate::agents::LiveBlock::Text(_) => {}
+            crate::agents::LiveBlock::Tool(text) => out.push(process(text.clone())),
+            crate::agents::LiveBlock::Thinking(_) => out.push(process(THINKING_ROW.to_string())),
+            crate::agents::LiveBlock::Text(_) => {}
         }
     }
-    // Mid-tool or between rounds, the agent is still working. Keep this feedback
-    // even though the tool itself is hidden: otherwise the DM goes silent during
-    // exactly the wait the user cannot infer from visible prose.
+    // Mid-tool, mid-thought or between rounds, the agent is still working; the
+    // process rows say what it is doing, this trailing indicator says it is not
+    // done saying it.
     if typing_at.is_none() && !live.is_empty() {
         out.push(Post {
             from: who.to_string(),
@@ -929,6 +979,12 @@ fn dm_body_rows(post: &Post, width: usize, theme: &Theme) -> Vec<Row> {
             .into_iter()
             .map(|line| Row::new(Line::styled(line, SegStyle::fg(theme.inactive))))
             .collect(),
+        // One dim line per work step, like the transcript's tool rows: cut, not
+        // wrapped, so a long command never disturbs the gutter alignment.
+        PostKind::Process => vec![Row::new(Line::styled(
+            crate::tui::chat::one_line(&post.text, width),
+            SegStyle::fg(theme.inactive),
+        ))],
         PostKind::Typing if post.text.is_empty() => Vec::new(),
         _ if post.you => crate::tui::chat::user_message_rows(&post.text, width, theme),
         _ => {
@@ -943,7 +999,7 @@ fn dm_body_rows(post: &Post, width: usize, theme: &Theme) -> Vec<Row> {
 
 fn workspace_body_rows(post: &Post, width: usize, pal: &Palette) -> Vec<Row> {
     let style = match post.kind {
-        PostKind::Queued => SegStyle::fg(pal.main_dim),
+        PostKind::Queued | PostKind::Process => SegStyle::fg(pal.main_dim),
         _ => SegStyle::fg(pal.main_text),
     };
     let mut rows = Vec::new();
@@ -1582,7 +1638,7 @@ mod tests {
                 }],
             },
         ];
-        let posts = dm_posts(&history, &[100, 200, 300], &[], &[], "scout", "user");
+        let posts = dm_posts(&history, &[100, 200, 300], &[], &[], &[], "scout", "user");
         let ats: Vec<(PostKind, u64)> = posts.iter().map(|p| (p.kind, p.at)).collect();
         assert_eq!(
             ats,
@@ -1610,7 +1666,7 @@ mod tests {
             crate::api::types::Message::user_text(relay),
             crate::api::types::Message::user_text("one thing just for you\nsecond line"),
         ];
-        let posts = dm_posts(&history, &[], &[], &[], "devex", "user");
+        let posts = dm_posts(&history, &[], &[], &[], &[], "devex", "user");
         let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
         assert_eq!(
             kinds,
@@ -1992,29 +2048,39 @@ mod tests {
         assert!(t.iter().any(|l| l.contains("is typing")), "{t:?}");
     }
 
-    /// A running turn shows prose from each round, hides every tool row, and
-    /// keeps a trailing working state when the current block is a tool.
+    /// A running turn shows the work as the main transcript does: prose from
+    /// each round, a dim process row per tool call and reasoning phase, and a
+    /// trailing working state while the current block is not prose.
     #[test]
-    fn a_running_turn_hides_tools_and_keeps_its_rounds_apart() {
+    fn a_running_turn_shows_its_process_and_keeps_its_rounds_apart() {
         use crate::agents::LiveBlock;
         let live = vec![
+            LiveBlock::Thinking("where do I even start".into()),
             LiveBlock::Text("Let me verify the current state.".into()),
             LiveBlock::Tool("⏺ Bash($ git status)".into()),
             LiveBlock::Text("State confirmed. Checking the workflow.".into()),
             LiveBlock::Tool("⏺ Read(ci.yml)".into()),
             LiveBlock::Text("The quality job is the one failing.".into()),
         ];
-        let posts = dm_posts(&[], &[], &live, &[], "deploy", "user");
+        let posts = dm_posts(&[], &[], &[], &live, &[], "deploy", "user");
         let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
         assert_eq!(
             kinds,
-            vec![PostKind::Said, PostKind::Said, PostKind::Typing],
-            "only prose, with the tail typing: {posts:?}"
+            vec![
+                PostKind::Process,
+                PostKind::Said,
+                PostKind::Process,
+                PostKind::Said,
+                PostKind::Process,
+                PostKind::Typing,
+            ],
+            "{posts:?}"
         );
-        assert!(posts.iter().all(|p| matches!(
-            p.kind,
-            PostKind::Said | PostKind::Queued | PostKind::Typing | PostKind::Note
-        )));
+        assert_eq!(
+            posts[0].text, "✻ Thinking",
+            "the phase is shown, the stream is not: {posts:?}"
+        );
+        assert_eq!(posts[2].text, "⏺ Bash($ git status)");
         assert!(
             posts
                 .iter()
@@ -2022,40 +2088,34 @@ mod tests {
             "{posts:?}"
         );
 
-        assert_eq!(
-            dm_posts(&[], &[], &live[..2], &[], "deploy", "user")
-                .iter()
-                .map(|p| p.kind)
-                .collect::<Vec<_>>(),
-            vec![PostKind::Said, PostKind::Typing]
-        );
         let only_tools = vec![LiveBlock::Tool("⏺ Bash($ git status)".into())];
-        let tool_wait = dm_posts(&[], &[], &only_tools, &[], "deploy", "user");
+        let tool_wait = dm_posts(&[], &[], &[], &only_tools, &[], "deploy", "user");
         assert_eq!(
             tool_wait.iter().map(|p| p.kind).collect::<Vec<_>>(),
-            vec![PostKind::Typing],
-            "silent tool-only work still says it is working"
+            vec![PostKind::Process, PostKind::Typing],
+            "mid-tool work shows the call and stays visibly working"
         );
-        assert!(tool_wait.iter().all(|p| p.text.is_empty()));
 
         let between = vec![
             LiveBlock::Text("first round".into()),
             LiveBlock::Text(String::new()),
         ];
         assert_eq!(
-            dm_posts(&[], &[], &between, &[], "deploy", "user")
+            dm_posts(&[], &[], &[], &between, &[], "deploy", "user")
                 .iter()
                 .map(|p| p.kind)
                 .collect::<Vec<_>>(),
             vec![PostKind::Said, PostKind::Typing]
         );
-        assert!(dm_posts(&[], &[], &[], &[], "deploy", "user").is_empty());
+        assert!(dm_posts(&[], &[], &[], &[], &[], "deploy", "user").is_empty());
     }
 
-    /// DM history and live turns show conversation text, never tool activity.
-    /// A trailing working indicator remains while the hidden tool is running.
+    /// The turn's process survives its landing: the history's ToolUse and
+    /// Thinking blocks re-render the same rows the live tail showed, in place
+    /// between the prose — the DM's scrollback keeps what the main transcript
+    /// keeps.
     #[test]
-    fn dm_posts_hide_all_tool_activity_but_keep_working_feedback() {
+    fn dm_history_keeps_the_process_rows_after_the_turn_lands() {
         use crate::agents::LiveBlock;
         use crate::api::types::{ContentBlock, Message, Role};
 
@@ -2064,6 +2124,10 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "look before speaking".into(),
+                        signature: "sig".into(),
+                    },
                     ContentBlock::Text {
                         text: "I will inspect it.".into(),
                     },
@@ -2083,15 +2147,31 @@ mod tests {
             LiveBlock::Tool("⏺ Read(src/main.rs)".into()),
         ];
 
-        let posts = dm_posts(&history, &[], &live, &[], "dev", "user");
-        assert!(posts.iter().all(|post| matches!(
-            post.kind,
-            PostKind::Said | PostKind::Queued | PostKind::Typing | PostKind::Note
-        )));
-        assert!(
-            posts.iter().all(|post| !post.text.contains("Bash")
-                && !post.text.contains("Read(src/main.rs)")),
+        let posts = dm_posts(&history, &[], &[], &live, &[], "dev", "user");
+        let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                PostKind::Said,
+                PostKind::Process,
+                PostKind::Said,
+                PostKind::Process,
+                PostKind::Said,
+                PostKind::Said,
+                PostKind::Process,
+                PostKind::Typing,
+            ],
             "{posts:?}"
+        );
+        assert_eq!(
+            posts[3].text, "⏺ Bash($ git status)",
+            "a landed tool call renders through the same brick as the live row"
+        );
+        assert!(
+            posts
+                .iter()
+                .all(|p| !p.text.contains("look before speaking")),
+            "landed reasoning stays collapsed, like the transcript: {posts:?}"
         );
         assert_eq!(
             posts
@@ -2099,8 +2179,135 @@ mod tests {
                 .filter(|post| post.kind == PostKind::Typing)
                 .count(),
             1,
-            "hidden mid-tool work still has one visible working state: {posts:?}"
+            "mid-tool work still has exactly one working state: {posts:?}"
         );
+    }
+
+    /// The moment a message is claimed by a run it is neither in the history
+    /// nor in the inbox — the in-flight record keeps it on screen as an
+    /// ordinary sent message (no landing clock yet), between the history and
+    /// anything still queued.
+    #[test]
+    fn an_in_flight_message_reads_as_sent_not_queued() {
+        use crate::api::types::Message;
+        let history = vec![Message::user_text("first task")];
+        let posts = dm_posts(
+            &history,
+            &[100],
+            &["second task, being worked on".to_string()],
+            &[crate::agents::LiveBlock::Tool("⏺ Read(a.rs)".into())],
+            &["third task, still queued".to_string()],
+            "scout",
+            "user",
+        );
+        let flags: Vec<(bool, PostKind, u64)> =
+            posts.iter().map(|p| (p.you, p.kind, p.at)).collect();
+        assert_eq!(
+            flags,
+            vec![
+                (true, PostKind::Said, 100),
+                (true, PostKind::Said, 0),
+                (true, PostKind::Queued, 0),
+                (false, PostKind::Process, 0),
+                (false, PostKind::Typing, 0),
+            ],
+            "{posts:?}"
+        );
+        assert_eq!(posts[1].text, "second task, being worked on");
+
+        // On screen it wears the ordinary sent-message skin: no pending banner,
+        // no invented stamp row.
+        let rows = dm_message_rows(
+            &posts,
+            usize::MAX,
+            &pal(),
+            60,
+            &Avatars::default(),
+            &Theme::dark(),
+        );
+        let t = texts(&rows);
+        assert!(
+            t.iter().any(|l| l.contains("second task")),
+            "the claimed message stays on screen: {t:?}"
+        );
+        assert_eq!(
+            t.iter().filter(|l| l.contains("pending delivery")).count(),
+            1,
+            "only the still-queued draft carries the pending banner: {t:?}"
+        );
+    }
+
+    /// Process rows are visually quiet: one dim line each, no name row of
+    /// their own inside a group, no trailing stamp — the timestamps and the
+    /// gutter belong to the conversation, not to the work between it.
+    #[test]
+    fn process_rows_stay_dim_and_unstamped() {
+        let at = 1_760_000_000u64;
+        let posts = vec![
+            Post {
+                from: "scout".into(),
+                you: false,
+                at,
+                text: "Let me check.".into(),
+                kind: PostKind::Said,
+            },
+            Post {
+                from: "scout".into(),
+                you: false,
+                at: 0,
+                text: "⏺ Bash($ cargo test)".into(),
+                kind: PostKind::Process,
+            },
+            Post {
+                from: "scout".into(),
+                you: false,
+                at: 0,
+                text: "✻ Thinking".into(),
+                kind: PostKind::Process,
+            },
+            Post {
+                from: "scout".into(),
+                you: false,
+                at: at + 5,
+                text: "All green.".into(),
+                kind: PostKind::Said,
+            },
+        ];
+        let rows = dm_message_rows(
+            &posts,
+            usize::MAX,
+            &pal(),
+            60,
+            &Avatars::default(),
+            &Theme::dark(),
+        );
+        let t = texts(&rows);
+        // One name row for the whole group: the process rows neither break the
+        // grouping nor impersonate a second message.
+        let name_rows = rows
+            .iter()
+            .filter(|r| r.line.segs.iter().any(|s| s.style.bg.is_some()))
+            .count();
+        assert_eq!(name_rows, 1, "{t:?}");
+        let tool_row = rows
+            .iter()
+            .find(|r| r.line.plain_text().contains("cargo test"))
+            .unwrap_or_else(|| panic!("tool row rendered: {t:?}"));
+        assert!(
+            tool_row
+                .line
+                .segs
+                .iter()
+                .skip(1)
+                .all(|s| s.style.fg == Some(Theme::dark().inactive)),
+            "process rows are dimmed: {tool_row:?}"
+        );
+        // Exactly the two Said posts carry stamps; the process rows add none.
+        let stamps = t
+            .iter()
+            .filter(|l| l.trim() == stamp(at) || l.trim() == stamp(at + 5))
+            .count();
+        assert_eq!(stamps, 2, "{t:?}");
     }
 
     #[test]
