@@ -1135,9 +1135,10 @@ impl Chat {
     pub(crate) fn push_warning(&mut self, message: String) {
         self.warnings
             .retain(|(t, _)| t.elapsed() < Self::WARNING_TTL);
-        if message.starts_with("Reconnecting... ") {
-            self.warnings
-                .retain(|(_, warning)| !warning.starts_with("Reconnecting... "));
+        if message.starts_with(crate::query::RECONNECT_WARNING_PREFIX) {
+            self.warnings.retain(|(_, warning)| {
+                !warning.starts_with(crate::query::RECONNECT_WARNING_PREFIX)
+            });
         }
         if !self.warnings.iter().any(|(_, w)| w == &message) {
             self.warnings.push((std::time::Instant::now(), message));

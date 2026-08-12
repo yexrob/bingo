@@ -157,6 +157,18 @@ struct SubagentOutput {
 /// Sub-agent UI: captures text, renders nothing, and forwards permission prompts to the
 /// session that owns the UI. The cell tracks the number of characters produced (for interval
 /// progress checks of background agents).
+/// Snapshot of everything a subagent's live view accumulated up to the last committed round;
+/// a stream retry rolls the failed attempt back to this point.
+#[derive(Clone, Default)]
+struct AttemptCheckpoint {
+    text_len: usize,
+    live: Vec<crate::agents::LiveBlock>,
+    produced_chars: usize,
+    output_tokens: u64,
+    tool_uses: usize,
+    recent_activity: Vec<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn subagent_hooks(
     output: SubagentOutput,
@@ -197,14 +209,7 @@ fn subagent_hooks(
     let round_chars = Arc::new(Mutex::new(0u64));
     let retry_chars = round_chars.clone();
     let event_round_chars = round_chars.clone();
-    let attempt_checkpoint = Arc::new(Mutex::new((
-        0usize,
-        Vec::<crate::agents::LiveBlock>::new(),
-        0usize,
-        0u64,
-        0usize,
-        Vec::<String>::new(),
-    )));
+    let attempt_checkpoint = Arc::new(Mutex::new(AttemptCheckpoint::default()));
     let retry_checkpoint = attempt_checkpoint.clone();
     let round_checkpoint = attempt_checkpoint.clone();
     let event_cell = cell.clone();
@@ -263,26 +268,23 @@ fn subagent_hooks(
             if let Ok(mut sampler) = retry_rate.lock() {
                 sampler.retry_round();
             }
-            let (
-                text_len,
-                live_checkpoint,
-                produced_chars,
-                output_tokens,
-                tool_uses,
-                recent_activity,
-            ) = retry_checkpoint
+            let checkpoint = retry_checkpoint
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             if let Ok(mut text) = retry_text.lock() {
-                text.truncate(text_len);
+                text.truncate(checkpoint.text_len);
             }
             if let Ok(mut live) = retry_live.lock() {
-                *live = live_checkpoint;
+                *live = checkpoint.live;
             }
-            retry_cell.set_chars(produced_chars);
+            retry_cell.set_chars(checkpoint.produced_chars);
             if let Ok(mut progress) = retry_progress.lock() {
-                progress.restore_attempt(output_tokens, tool_uses, recent_activity);
+                progress.restore_attempt(
+                    checkpoint.output_tokens,
+                    checkpoint.tool_uses,
+                    checkpoint.recent_activity,
+                );
             }
         }),
         on_context_usage: Arc::new(move |used, _window| {
@@ -318,12 +320,7 @@ fn subagent_hooks(
             {
                 live.push(crate::agents::LiveBlock::Text(String::new()));
             }
-            let text_len = round_text.lock().map_or(0, |text| text.len());
-            let live_checkpoint = round_live_checkpoint
-                .lock()
-                .map(|live| live.clone())
-                .unwrap_or_default();
-            let progress = round_progress
+            let (output_tokens, tool_uses, recent_activity) = round_progress
                 .lock()
                 .map(|progress| {
                     (
@@ -333,21 +330,24 @@ fn subagent_hooks(
                     )
                 })
                 .unwrap_or_default();
-            *round_checkpoint.lock().unwrap_or_else(|e| e.into_inner()) = (
-                text_len,
-                live_checkpoint,
-                round_cell.chars(),
-                progress.0,
-                progress.1,
-                progress.2,
-            );
+            *round_checkpoint.lock().unwrap_or_else(|e| e.into_inner()) = AttemptCheckpoint {
+                text_len: round_text.lock().map_or(0, |text| text.len()),
+                live: round_live_checkpoint
+                    .lock()
+                    .map(|live| live.clone())
+                    .unwrap_or_default(),
+                produced_chars: round_cell.chars(),
+                output_tokens,
+                tool_uses,
+                recent_activity,
+            };
         }),
         on_warning: Box::new(move |message| {
-            if message.starts_with("Reconnecting... ")
+            if message.starts_with(crate::query::RECONNECT_WARNING_PREFIX)
                 && let Ok(mut live) = warning_live.lock()
             {
                 live.retain(|block| {
-                    !matches!(block, crate::agents::LiveBlock::Text(text) if text.starts_with("Reconnecting... "))
+                    !matches!(block, crate::agents::LiveBlock::Text(text) if text.starts_with(crate::query::RECONNECT_WARNING_PREFIX))
                 });
                 live.push(crate::agents::LiveBlock::Text(message));
                 live.push(crate::agents::LiveBlock::Text(String::new()));

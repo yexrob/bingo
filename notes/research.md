@@ -707,3 +707,23 @@ Channel timing stays on its existing `deposit` + explicit dispatcher path; issue
 Issue #39 supersedes D1's original 2–3-attempt cap for errors received after a stream has opened. Long agent turns retry normalized `429`/`5xx`/overloaded/`server_error` events up to 10 times because losing a multi-hour turn to a transient provider event is more costly than waiting through bounded backoff. A provider-supplied retry delay wins; otherwise the delay starts at 500ms, doubles, applies ±10% jitter, and never exceeds 32s. Quota, plan, invalid-prompt, and context-overflow errors remain terminal. Short synchronous operations retain their 10s/15s feedback-layer budgets and do not enter this loop.
 
 Retry restarts the entire still-uncommitted model response. The renderer-neutral boundary therefore carries an explicit retry reset: TUI and subagent live views discard failed-attempt deltas and tool rows before consuming the replacement stream. Headless stdout cannot retract bytes already written, so a mid-output reconnect may leave the failed prefix visible; persisted history and the result returned to the agent still contain only the successful attempt.
+
+### D62. One classifier, one backoff for retryable stream errors
+
+Review of the issue #39 change consolidated its three retry surfaces. Message-based transient
+classification is owned by the contract layer (`StreamApiErrorKind::from_message`); the openai
+adapter's code table and the query loop's `Unknown` fallback both defer to it, so the retryable /
+terminal pattern lists can no longer drift apart. A bare 5xx number in a message counts as an HTTP
+status only when it opens the message or follows a status marker (`http`/`status`/`code`) — prose
+like "512 characters" is not transient. The exponential-backoff shape lives once in
+`api::providers::backoff_delay` (500ms·2^(n−1), ±10% jitter, capped at 32s); the adapters' connect
+loops and the in-stream retry loop share it, which changes connect jitter from additive +0–50% to
+±10% with the cap applied after jitter.
+
+In-stream pacing is a `StreamRetryPolicy` value: a server-directed delay wins but is clamped at
+60s, because an absurd `retry_after` behind the suppressed first notice reads as a hang. Test
+builds shrink only the policy's delay data, so the loop and its delay selection run the same code
+in tests instead of forking control flow on `cfg(test)`. The `Reconnecting... ` progress-notice
+prefix that TUI and subagent views key their replacement logic on is a shared constant
+(`query::RECONNECT_WARNING_PREFIX`), not a repeated literal. Retry-after metadata additionally
+accepts string forms (`"3s"`, `"250ms"`, bare numeric strings) and the `retry_delay` key.

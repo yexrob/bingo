@@ -224,6 +224,10 @@ pub type AskQuestionFn = dyn Fn(
 
 pub type ContextUsageFn = dyn Fn(u64, u64) + Send + Sync;
 
+/// Prefix of the in-stream reconnect progress warning (`Reconnecting... N/M`); the TUI and
+/// subagent views key replacement of stale progress notices off this prefix.
+pub const RECONNECT_WARNING_PREFIX: &str = "Reconnecting... ";
+
 /// UI hooks: stream events, tool completion, permission prompts, non-fatal warnings.
 pub struct UiHooks {
     pub on_event: Box<dyn FnMut(&StreamEvent) + Send>,
@@ -1376,11 +1380,7 @@ use crate::transcript::Transcript;
 mod tests {
     use super::*;
 
-    use crate::api::contract::StreamApiErrorKind;
-    use crate::query_turn::{
-        STREAM_API_MAX_RETRIES, retryable_stream_api_error, stream_api_backoff,
-        stream_api_retry_delay,
-    };
+    use crate::query_turn::STREAM_API_MAX_RETRIES;
 
     /// A tool result carrying images must reach the API as protocol blocks. Re-stringifying it
     /// here is what would turn a screenshot into a wall of base64 text the model can't see.
@@ -1501,67 +1501,6 @@ mod tests {
         let msg = user_message_with_images("look at #[image 1]", &imgs, false, &[]);
         assert_eq!(msg.content.len(), 1, "no image block sent when unsupported");
         assert!(matches!(msg.content[0], ContentBlock::Text { .. }));
-    }
-
-    #[test]
-    fn retryable_stream_api_errors_follow_provider_semantics() {
-        for message in [
-            "api_error: Our servers are currently overloaded. Please try again later.",
-            "server_error: upstream unavailable",
-            "HTTP 503: Service Unavailable",
-            "HTTP 599: upstream proxy failed",
-            "429 too many requests",
-        ] {
-            assert!(
-                retryable_stream_api_error(StreamApiErrorKind::Unknown, message),
-                "{message}"
-            );
-        }
-
-        for message in [
-            "insufficient_quota: check billing",
-            "usage_not_included: upgrade your plan",
-            "invalid_prompt: malformed input",
-            "context_length_exceeded: reduce the prompt",
-        ] {
-            assert!(
-                !retryable_stream_api_error(StreamApiErrorKind::Unknown, message),
-                "{message}"
-            );
-        }
-        assert!(retryable_stream_api_error(
-            StreamApiErrorKind::Retryable,
-            "opaque provider error"
-        ));
-        assert!(!retryable_stream_api_error(
-            StreamApiErrorKind::NonRetryable,
-            "HTTP 503"
-        ));
-    }
-
-    #[test]
-    fn stream_api_backoff_is_exponential_jittered_and_capped() {
-        assert_eq!(
-            stream_api_backoff(1, 0.0),
-            std::time::Duration::from_millis(450)
-        );
-        assert_eq!(
-            stream_api_backoff(1, 1.0),
-            std::time::Duration::from_millis(550)
-        );
-        assert_eq!(
-            stream_api_backoff(2, 0.5),
-            std::time::Duration::from_secs(1)
-        );
-        assert_eq!(
-            stream_api_backoff(10, 0.5),
-            std::time::Duration::from_secs(32)
-        );
-        assert_eq!(
-            stream_api_retry_delay(10, Some(std::time::Duration::from_millis(125)),),
-            std::time::Duration::from_millis(125),
-            "the server-provided retry delay wins over local backoff"
-        );
     }
 
     /// Minimal Anthropic endpoint: count_tokens returns a fixed value; /v1/messages

@@ -411,45 +411,49 @@ struct ErrorPayload {
     message: String,
     #[serde(default)]
     code: Option<String>,
-    #[serde(default)]
-    retry_after: Option<f64>,
-    #[serde(default)]
-    retry_after_ms: Option<f64>,
 }
 
-fn retry_after(milliseconds: Option<f64>, seconds: Option<f64>) -> Option<Duration> {
-    if let Some(milliseconds) = milliseconds
-        && milliseconds.is_finite()
-        && milliseconds >= 0.0
-    {
-        return Some(Duration::from_secs_f64(milliseconds / 1_000.0));
+/// `2`, `"1.5"`, `"3s"`, `"250ms"` → duration; `assume_ms` sets the unit for bare numbers.
+fn retry_after_value(value: &serde_json::Value, assume_ms: bool) -> Option<Duration> {
+    if let Some(number) = value.as_f64() {
+        return retry_after_number(number, assume_ms);
     }
-    seconds
-        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-        .map(Duration::from_secs_f64)
+    let text = value.as_str()?.trim();
+    if let Some(milliseconds) = text.strip_suffix("ms") {
+        return retry_after_number(milliseconds.trim().parse().ok()?, true);
+    }
+    if let Some(seconds) = text.strip_suffix('s') {
+        return retry_after_number(seconds.trim().parse().ok()?, false);
+    }
+    retry_after_number(text.parse().ok()?, assume_ms)
+}
+
+fn retry_after_number(value: f64, milliseconds: bool) -> Option<Duration> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(if milliseconds {
+        value / 1_000.0
+    } else {
+        value
+    }))
 }
 
 fn retry_after_from_value(value: &serde_json::Value) -> Option<Duration> {
     let error = value.get("error");
-    let milliseconds = value
-        .get("retry_after_ms")
-        .or_else(|| value.get("retry-after-ms"))
-        .and_then(serde_json::Value::as_f64)
+    let field = |key: &str| {
+        value
+            .get(key)
+            .or_else(|| error.and_then(|error| error.get(key)))
+    };
+    ["retry_after_ms", "retry-after-ms"]
+        .iter()
+        .find_map(|key| field(key).and_then(|value| retry_after_value(value, true)))
         .or_else(|| {
-            error
-                .and_then(|error| error.get("retry_after_ms"))
-                .and_then(serde_json::Value::as_f64)
-        });
-    let seconds = value
-        .get("retry_after")
-        .or_else(|| value.get("retry-after"))
-        .and_then(serde_json::Value::as_f64)
-        .or_else(|| {
-            error
-                .and_then(|error| error.get("retry_after"))
-                .and_then(serde_json::Value::as_f64)
-        });
-    retry_after(milliseconds, seconds)
+            ["retry_after", "retry-after", "retry_delay"]
+                .iter()
+                .find_map(|key| field(key).and_then(|value| retry_after_value(value, false)))
+        })
 }
 
 fn stream_api_error_kind(code: Option<&str>, message: &str) -> StreamApiErrorKind {
@@ -463,29 +467,8 @@ fn stream_api_error_kind(code: Option<&str>, message: &str) -> StreamApiErrorKin
             | "invalid_prompt"
             | "context_length_exceeded",
         ) => StreamApiErrorKind::NonRetryable,
-        _ if message_retryable(message) => StreamApiErrorKind::Retryable,
-        _ => StreamApiErrorKind::Unknown,
+        _ => StreamApiErrorKind::from_message(message),
     }
-}
-
-fn message_retryable(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    let status_5xx = message
-        .split(|character: char| !character.is_ascii_digit())
-        .any(|digits| matches!(digits.parse::<u16>(), Ok(status) if (500..600).contains(&status)));
-    status_5xx
-        || [
-            "429",
-            "overloaded",
-            "server_error",
-            "server error",
-            "service unavailable",
-            "too many requests",
-            "rate limit",
-            "try again later",
-        ]
-        .iter()
-        .any(|pattern| message.contains(pattern))
 }
 
 /// Incremental Responses SSE mapper: flattens the two-layer index
@@ -682,6 +665,7 @@ impl ResponsesSseMapper {
                 }])
             }
             "error" => {
+                let retry_after = retry_after_from_value(&value);
                 let payload: ErrorPayload =
                     serde_json::from_value(value).map_err(|e| format!("bad error payload: {e}"))?;
                 let kind = stream_api_error_kind(payload.code.as_deref(), &payload.message);
@@ -692,7 +676,7 @@ impl ResponsesSseMapper {
                         payload.message
                     },
                     kind,
-                    retry_after: retry_after(payload.retry_after_ms, payload.retry_after),
+                    retry_after,
                 }])
             }
             _other => Ok(Vec::new()), // response.in_progress, ping, .done noise, ...
@@ -1466,6 +1450,22 @@ mod tests {
         assert_eq!(
             retry_after_from_value(&serde_json::json!({"retry_after": 1.5})),
             Some(Duration::from_millis(1_500))
+        );
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({"error": {"retry_delay": "3s"}})),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({"retry_after": "250ms"})),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({"retry_after": "2"})),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({"retry_after": "soon"})),
+            None
         );
     }
 
