@@ -20,6 +20,11 @@ pub const COMMANDS: &[SlashCommand] = &[
     ("resume", "[name or keyword]", "resume a past session"),
     ("rename", "[name]", "rename the current session"),
     (
+        "gc",
+        "",
+        "clean expired session data (30-day TTL; latest 100 inactive sessions kept)",
+    ),
+    (
         "share",
         "[--public] [--open]",
         "export HTML; --public publishes a public link",
@@ -60,7 +65,8 @@ pub const COMMANDS: &[SlashCommand] = &[
 
 /// Slash commands that execute immediately while a model turn is active.
 pub const INSTANT_COMMANDS: &[&str] = &[
-    "think", "model", "provider", "theme", "status", "context", "tasks", "help", "skills", "config",
+    "think", "model", "provider", "theme", "status", "context", "tasks", "help", "skills",
+    "config", "gc",
 ];
 
 /// Slash dropdown suggestion item (`/name`, hint, and description).

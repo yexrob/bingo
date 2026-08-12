@@ -67,6 +67,7 @@ Three config layers, shallow-merged; the later one overrides:
 | `motion` | string | TUI motion: `auto` (default) / `off` — motion (e.g. the welcome-card update notice breathing) settles to the base color while the notice itself stays; env `BINGO_NO_MOTION=1` is equivalent |
 | `cacheControl` | bool | Send prompt caching; turn off if a non-official endpoint is unstable |
 | `respondToBashCommands` | bool | Whether `!` commands are handed to the model for a response after execution (default true; false = pure execution) |
+| `bashOutputMaxChars` | integer | Maximum combined stdout/stderr characters returned by the Bash tool (default and maximum 48,000); truncated results point to redirecting output and reading the file |
 | `shell` | string | Shell program for the Bash tool and hooks; default per platform: macOS `/bin/zsh`, other Unix `/bin/bash`, Windows `powershell.exe`. PowerShell-family shells run with `-Command`; other configured shells (e.g. Git Bash `bash.exe`) with `-c` |
 | `mcpServers` | object | `{name: {type?, command, args, env}}` (stdio, default) or `{name: {type: "http", url, headers?}}` (streamable HTTP) |
 | `disabledMcpServers` | string[] | List of disabled MCP servers (written by `/mcp disable`) |
@@ -105,7 +106,7 @@ Example (.bingo/settings.json):
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` runs it directly) · `/context` (usage) · `/status` ·
-`/compact` (force compaction) · `/resume [name]` (restore a past session; no arg opens the session picker, Enter restores) · `/rename` · `/clear` · `/exit`.
+`/compact` (force compaction) · `/resume [name]` (restore a past session; no arg opens the session picker, Enter restores) · `/rename` · `/gc` (clean expired session storage; 30-day TTL, latest 100 inactive sessions, 24-hour activity grace) · `/clear` · `/exit`.
 `/team` (project-level crew): `list` (blueprint + runtime on one screen) · `start` (pull up / idempotent reuse) · `status` ·
 `assign <member> <task>` (dispatch work) · `stop` · `validate` · `new` (scaffolds team.json + team-norms.md) ·
 `norms` (the crew's working agreement) · `memory list|gc` (cross-session memory management).
@@ -155,7 +156,7 @@ Example (.bingo/settings.json):
 6. **Stuck in bash mode/accidental trigger**: with an empty input, Esc/backspace/Ctrl+U all exit bash mode;
    with non-empty input `!` is an ordinary character; Tab completes from this session's `!` history prefix.
 7. **Can't find a historical session**: transcripts live in `~/.local/share/bingo/transcripts` (`--continue`
-   resumes the last one; `/resume` lists/switches).
+   resumes the last one; `/resume` lists/switches). Session storage is cleaned at startup with a 30-day TTL and a latest-100 inactive-session cap plus a 24-hour activity grace; matching share snapshots follow transcript removal. `/gc` applies the same policy on demand. Prompt-history files use the same TTL with a 100-file cap.
 8. **Tool output collapsed**: ctrl+o expands all collapsed items and replays the full transcript to the
    terminal (scroll up to read; printed old collapsed copies stay higher up — normal); pressing ctrl+o again in the fully expanded
    state collapses — back to aggregates with a clear/consolidate; long output shows `+N lines`.
@@ -164,14 +165,17 @@ Example (.bingo/settings.json):
 10. **Grep/Glob finds nothing**: `.git`/`target`/`node_modules` and dot-prefixed directories are skipped by default
     (they still search when `path` points at them explicitly); patterns are relative to the search root
     (`src/**/*.rs` works); patterns without `/` match file names at any depth
-    (`*.rs` hits the whole tree); traversal stops when the result cap is reached.
+    (`*.rs` hits the whole tree); traversal stops when the result cap is reached. Glob accepts `exclude` patterns and `max_depth`;
+    Grep accepts `context`, case-insensitive/whole-word/fixed-string modes, and files-only results. Read accepts inclusive,
+    1-based `start_line`/`end_line` ranges and reports ranges extending past the file.
 11. **Processes left behind after timeout/interruption**: Bash commands run in their own process group; timeouts and cancellation
     terminate the whole group (grandchildren no longer orphan); after Esc interrupts a turn, unfinished tools get placeholder results,
     and the session stays recoverable (no 400s on later requests from orphaned tool_use).
 
 ## Capability map (reference when asked "what can bingo do")
 
-- **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep (Read returns image files as
+- **Built-in tools**: Bash (through the permission gate, combined output capped by `bashOutputMaxChars`),
+  Read/Glob/Grep (line ranges, exclusion/depth filters, search context/options; Read returns image files as
   viewable images, so screenshots and rendered charts can be inspected), Edit/Write, WebFetch/WebSearch,
   Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
   Team (the project crew, main session only — reads are free, every change asks the user),
@@ -335,8 +339,9 @@ Example (.bingo/settings.json):
 - **MCP**: stdio and streamable HTTP (`type: "http"`, with custom headers) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
-- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts. `/cd <dir>` switches the session-owned working directory without changing the process cwd; subsequent Bash/Read/Edit/Write/Glob/Grep calls, project skills/agent definitions, Team/Agent crew lookup, Experience project keys, memory extraction, settings command paths, image paths, and `/team` resolve from the new directory. Startup-loaded settings/MCP configuration and the already-built system prompt are not reloaded.
-- **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep (Read returns image files as
+- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts. Startup cleanup and `/gc` enforce a 30-day TTL plus a latest-100 inactive-session cap plus a 24-hour activity grace; share snapshots are removed with their transcript, while prompt-history files use the same TTL and a 100-file cap. `/cd <dir>` switches the session-owned working directory without changing the process cwd; subsequent Bash/Read/Edit/Write/Glob/Grep calls, project skills/agent definitions, Team/Agent crew lookup, Experience project keys, memory extraction, settings command paths, image paths, and `/team` resolve from the new directory. Startup-loaded settings/MCP configuration and the already-built system prompt are not reloaded.
+- **Built-in tools**: Bash (through the permission gate, combined output capped by `bashOutputMaxChars`),
+  Read/Glob/Grep (line ranges, exclusion/depth filters, search context/options; Read returns image files as
   viewable images, so screenshots and rendered charts can be inspected), Edit/Write, WebFetch/WebSearch,
   Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
   Team (the project crew, main session only — reads are free, every change asks the user in person),

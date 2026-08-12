@@ -29,10 +29,13 @@ mod permission;
 mod platform;
 mod preapproved;
 mod query;
+mod query_session;
+mod query_turn;
 mod settings;
 mod share;
 mod share_html;
 mod skills;
+mod storage;
 mod system;
 mod tasks;
 mod team;
@@ -134,15 +137,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let fullscreen = cli.fullscreen_mode();
 
-    let home = match std::env::var("HOME") {
-        Ok(h) => PathBuf::from(h),
-        Err(_) => {
-            if !cli.print {
-                eprintln!("[bingo] warning: HOME is not set; using current dir for state");
-            }
-            PathBuf::new()
-        }
-    };
+    let home = crate::storage::resolve_home()?;
+    if let Err(error) = crate::storage::cleanup(&home, None) {
+        eprintln!("[bingo] warning: session storage cleanup failed: {error}; run /gc to retry");
+    }
     // Subcommand fast path: share only needs home (transcript/shares dirs), update only needs home (cache),
     // neither touches settings/API.
     if let Some(Command::Share {
@@ -205,7 +203,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "default".to_string())
         .parse()?;
 
-    let client = Client::from_settings(&settings)?;
+    let client = Client::from_settings_at(&settings, &home)?;
     let mut system = build_system(
         &load_memory(&home, &project_dir),
         load_project_memory(&home, &project_dir),
@@ -240,6 +238,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (transcript, initial_messages): (Option<Transcript>, Vec<Message>) = if cli.continue_ {
         match latest_transcript(&home)? {
             Some(t) => {
+                t.activate()?;
                 eprintln!("[bingo] continuing transcript: {}", t.path().display());
                 (Some(t.clone()), t.load_messages()?)
             }

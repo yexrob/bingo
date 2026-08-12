@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -22,10 +24,34 @@ impl ErrorCode for TranscriptError {
     }
 }
 
+type ActiveFiles = Option<(std::fs::File, std::fs::File)>;
+type ActiveLock = Arc<Mutex<ActiveFiles>>;
+type ActiveLockMap = Mutex<HashMap<PathBuf, Weak<Mutex<ActiveFiles>>>>;
+
 /// Session transcript: JSONL, one Message per line (D11).
 #[derive(Debug, Clone)]
 pub struct Transcript {
     path: PathBuf,
+    active_lock: ActiveLock,
+}
+
+impl Transcript {
+    fn at(path: PathBuf) -> Self {
+        static ACTIVE_LOCKS: OnceLock<ActiveLockMap> = OnceLock::new();
+        let mut active_locks = ACTIVE_LOCKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let active_lock = active_locks
+            .get(&path)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let active_lock = Arc::new(Mutex::new(None));
+                active_locks.insert(path.clone(), Arc::downgrade(&active_lock));
+                active_lock
+            });
+        Self { path, active_lock }
+    }
 }
 
 fn slugify(name: &str) -> String {
@@ -48,10 +74,7 @@ fn slugify(name: &str) -> String {
 
 /// transcripts dir: ~/.local/share/bingo/transcripts.
 pub fn transcripts_dir(home: &Path) -> PathBuf {
-    home.join(".local")
-        .join("share")
-        .join("bingo")
-        .join("transcripts")
+    crate::storage::transcripts_dir(home)
 }
 
 /// New session file: <project-slug>-<unix-ts>.jsonl.
@@ -68,7 +91,7 @@ pub fn create(home: &Path, cwd: &Path) -> Result<Transcript, TranscriptError> {
         .unwrap_or_default();
     let slug = slugify(&name);
     let path = dir.join(format!("{slug}-{ts}.jsonl"));
-    Ok(Transcript { path })
+    Ok(Transcript::at(path))
 }
 
 /// All sessions (/resume list), most recently modified first.
@@ -86,7 +109,7 @@ pub fn list(home: &Path) -> Result<Vec<Transcript>, TranscriptError> {
                 .and_then(|m| m.modified())
                 .ok()
                 .unwrap_or(SystemTime::UNIX_EPOCH);
-            (modified, Transcript { path: p })
+            (modified, Transcript::at(p))
         })
         .collect();
     entries.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
@@ -127,14 +150,95 @@ impl Transcript {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         let new_path = self.path.with_file_name(format!("{stem}-{slug}.jsonl"));
+        let old_lock_path = self.path.with_extension("jsonl.lock");
+        let new_lock_path = new_path.with_extension("jsonl.lock");
+        let mut active_lock = self
+            .active_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         std::fs::rename(&self.path, &new_path)?;
-        Ok(Transcript { path: new_path })
+        if old_lock_path.exists()
+            && let Err(error) = std::fs::rename(&old_lock_path, &new_lock_path)
+        {
+            if let Err(rollback) = std::fs::rename(&new_path, &self.path) {
+                return Err(TranscriptError::Io(std::io::Error::other(format!(
+                    "failed to rename transcript lock ({error}); data-file rollback failed: {rollback}"
+                ))));
+            }
+            return Err(TranscriptError::Io(error));
+        }
+        let old_lock = active_lock.take();
+        drop(active_lock);
+        let renamed = Transcript::at(new_path);
+        if let Some((lock_file, file)) = old_lock {
+            *renamed
+                .active_lock
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some((lock_file, file));
+        }
+        Ok(renamed)
+    }
+
+    fn ensure_active_lock(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, ActiveFiles>, TranscriptError> {
+        let mut active_lock = self
+            .active_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if active_lock.is_none() {
+            let lock_path = self.path.with_extension("jsonl.lock");
+            let lock_file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)?;
+            lock_file.try_lock().map_err(|error| match error {
+                std::fs::TryLockError::Error(error) => TranscriptError::Io(error),
+                std::fs::TryLockError::WouldBlock => TranscriptError::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!(
+                        "transcript is active in another process: {}",
+                        self.path.display()
+                    ),
+                )),
+            })?;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&self.path)?;
+            file.try_lock().map_err(|error| match error {
+                std::fs::TryLockError::Error(error) => TranscriptError::Io(error),
+                std::fs::TryLockError::WouldBlock => TranscriptError::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!(
+                        "transcript is active in another process: {}",
+                        self.path.display()
+                    ),
+                )),
+            })?;
+            *active_lock = Some((lock_file, file));
+        }
+        Ok(active_lock)
+    }
+
+    pub fn activate(&self) -> Result<(), TranscriptError> {
+        drop(self.ensure_active_lock()?);
+        Ok(())
     }
 
     /// Full-file rewrite (persisted after a manual /compact).
     pub fn replace_messages(&self, messages: &[Message]) -> Result<(), TranscriptError> {
-        use std::io::Write;
-        let mut file = std::fs::File::create(&self.path)?;
+        use std::io::{Seek, Write};
+        let mut active_lock = self.ensure_active_lock()?;
+        let file = active_lock.as_mut().map(|(_, file)| file).ok_or_else(|| {
+            TranscriptError::Io(std::io::Error::other("transcript active lock missing"))
+        })?;
+        file.set_len(0)?;
+        file.seek(std::io::SeekFrom::Start(0))?;
         for message in messages {
             let line = serde_json::to_string(message)?;
             writeln!(file, "{line}")?;
@@ -144,11 +248,12 @@ impl Transcript {
 
     /// Append one message.
     pub fn append(&self, message: &Message) -> Result<(), TranscriptError> {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        use std::io::{Seek, Write};
+        let mut active_lock = self.ensure_active_lock()?;
+        let file = active_lock.as_mut().map(|(_, file)| file).ok_or_else(|| {
+            TranscriptError::Io(std::io::Error::other("transcript active lock missing"))
+        })?;
+        file.seek(std::io::SeekFrom::End(0))?;
         let line = serde_json::to_string(message)?;
         writeln!(file, "{line}")?;
         Ok(())
@@ -313,6 +418,36 @@ mod tests {
             ContentBlock::ToolUse { id, .. } if id == "toolu_1"
         ));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rename_moves_the_active_lock_sidecar() {
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-transcript-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let transcript = create(&home, &tmp).unwrap();
+        transcript.append(&Message::user_text("active")).unwrap();
+        let old_lock_path = transcript.path().with_extension("jsonl.lock");
+
+        let renamed = transcript.rename("named").unwrap();
+        let new_lock_path = renamed.path().with_extension("jsonl.lock");
+        let competing_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&new_lock_path)
+            .unwrap();
+
+        assert!(!old_lock_path.exists());
+        assert!(new_lock_path.exists());
+        assert!(matches!(
+            competing_lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        let _ = std::fs::remove_dir_all(tmp);
     }
 
     #[test]

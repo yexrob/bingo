@@ -1,6 +1,6 @@
 # Feedback States Specification
 
-> Version: v1.39 · Status: in effect (2026-08-11)
+> Version: v1.40 · Status: in effect (2026-08-11)
 > Scope: the unified design conventions for every user-visible feedback state in bingo. The GUI (TUI) and CLI (headless) sides share a single source; qa acceptance anchors are at the end.
 
 ## General principles
@@ -224,6 +224,7 @@ Web-side conventions (for a future web frontend to reuse):
 
 ## Changelog
 
+- v1.40 (2026-08-11): tool-output feedback hardening for issues #5/#22 — Bash stdout/stderr is streamed through the configurable `bashOutputMaxChars` cap (default/maximum 48,000) and appends a `[Content truncated: …]` recovery hint directing the agent to redirect output and use Read; invalid UTF-8 is replaced with an explicit note instead of silently dropping the stream. Read range calls keep the existing 20,000-character cap and append clear range/truncation notes after the bounded content.
 - v0.1 (2026-08-07): draft, covering the three error tiers (Loading/Toast/error states) and acceptance anchors.
 - v1.0 (2026-08-07): merged devex's three additions — structured error protocol (4.1), TTY/non-TTY degradation (4.2), four state-machine resets (state-machine section); plus GUI-side feedback: error codes presented collapsible, and the general principle that feedback states must not depend on the environment.
 - v1.1 (2026-08-07): merged main's two implementation-side additions — async focus after render (state-machine reset #4 / §5 "focus timing"), and the CLI error-code contract format `[error] code=... msg=...` (4.1); merged qa's six boundary categories — tiered timeouts with timer cancellation (Loading §"timeout"), error-code → user-action mapping (3.1), mixed state (3), action-granularity duplicate prevention (Loading §"duplicate prevention"), stale-response race (state-machine section), Toast quantification (2); testability conventions (6); under reduced-motion the loading indicator is retained, aria-live writes an empty string instead of deleting the node.
@@ -291,3 +292,5 @@ Web-side conventions (for a future web frontend to reuse):
 - v1.38 (2026-08-11): issue #37 adds `CONTEXT_OVERFLOW` to the stable error table. A provider-reported 400/413 overflow is recovered internally by compacting and retrying once; only failed recovery reaches the existing Full+LongTurn error surface, with the stable code available to both TUI and headless exits.
 
 - v1.39 (2026-08-11): issue #35 removes SendMessage's sender-turn latency. The receipt stays immediate and retains its queued/delivered/answered/dropped contract; an idle receiver is claimed and shown Running before the tool returns, while a running receiver gets an inbox signal and folds everything waiting into its context between tool rounds. The batching boundary is therefore the receiver's actual inbox drain rather than the sender's turn end. The existing acknowledgement watchdog and stop/delete feedback are unchanged.
+
+- v1.40 (2026-08-11): issue #6 adds visible manual storage cleanup. `/gc` shows its progress row for the bounded synchronous cleanup and then emits an info-tier summary with per-kind counts; failures use the structured `STORAGE_ERROR` page-level path with a disk-permission + retry action. Startup applies the same bounded policy before storage-reading command paths and warns on stderr if it cannot complete.

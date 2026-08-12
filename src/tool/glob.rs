@@ -19,6 +19,7 @@ pub struct PathGlob {
     matcher: globset::GlobMatcher,
     absolute: bool,
     name_only: bool,
+    excluded_subtree: Option<PathBuf>,
 }
 
 impl PathGlob {
@@ -28,6 +29,7 @@ impl PathGlob {
             // Absolute on Windows too: `C:\...` patterns are drive-absolute, not relative.
             absolute: pattern.starts_with('/') || Path::new(pattern).is_absolute(),
             name_only: !pattern.contains('/'),
+            excluded_subtree: excluded_subtree(pattern),
         })
     }
 
@@ -47,13 +49,31 @@ impl PathGlob {
     }
 }
 
+fn excluded_subtree(pattern: &str) -> Option<PathBuf> {
+    let prefix = pattern
+        .strip_suffix("/**/*")
+        .or_else(|| pattern.strip_suffix("/**"))?;
+    if !prefix.is_empty() && !prefix.chars().any(|c| matches!(c, '*' | '?' | '[' | '{')) {
+        Some(PathBuf::from(prefix))
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct GlobInput {
     #[schemars(description = "glob pattern, e.g. **/*.rs")]
     pub pattern: String,
     #[serde(default)]
     #[schemars(description = "directory to search (default: cwd)")]
     pub path: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "glob patterns to exclude from results and traversal")]
+    pub exclude: Option<Vec<String>>,
+    #[serde(default)]
+    #[schemars(description = "maximum directory depth below the search root")]
+    pub max_depth: Option<usize>,
 }
 
 /// Glob: recursively list files matching a pattern.
@@ -96,13 +116,29 @@ impl Tool for GlobTool {
         };
         let matcher = PathGlob::new(&params.pattern)
             .map_err(|e| ToolError::failed(format!("bad glob pattern: {e}")))?;
+        let exclusions = params
+            .exclude
+            .unwrap_or_default()
+            .into_iter()
+            .map(|pattern| PathGlob::new(&pattern))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ToolError::failed(format!("bad exclusion glob: {e}")))?;
+        let max_depth = params.max_depth.unwrap_or(24);
 
         // The synchronous recursive walk goes into spawn_blocking: it must not block runtime
         // threads on large repos.
         let search_root = root.clone();
         let (mut matches, stopped_early) = tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
-            let stopped = collect(&search_root, &search_root, &matcher, &mut out, 0);
+            let stopped = collect(
+                &search_root,
+                &search_root,
+                &matcher,
+                &exclusions,
+                max_depth,
+                &mut out,
+                0,
+            );
             (out, stopped)
         })
         .await
@@ -130,8 +166,16 @@ impl Tool for GlobTool {
 /// Depth-first collection of matching files (paths relative to root); skips symlinked dirs to
 /// prevent cycles, and skips .git/target/node_modules/hidden directories. Returns true when the
 /// cap is reached and traversal stops early.
-fn collect(root: &Path, dir: &Path, matcher: &PathGlob, out: &mut Vec<String>, depth: u32) -> bool {
-    if depth > 24 || out.len() >= MAX_GLOB_RESULTS {
+fn collect(
+    root: &Path,
+    dir: &Path,
+    matcher: &PathGlob,
+    exclusions: &[PathGlob],
+    max_depth: usize,
+    out: &mut Vec<String>,
+    depth: usize,
+) -> bool {
+    if depth > max_depth || out.len() >= MAX_GLOB_RESULTS {
         return out.len() >= MAX_GLOB_RESULTS;
     }
     for entry in super::grep::sorted_entries(dir) {
@@ -141,13 +185,25 @@ fn collect(root: &Path, dir: &Path, matcher: &PathGlob, out: &mut Vec<String>, d
         };
         if file_type.is_dir() && !file_type.is_symlink() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if super::grep::should_skip_dir(&name) {
+            let excluded = exclusions.iter().any(|exclude| {
+                exclude.is_match(root, &path)
+                    || exclude.excluded_subtree.as_ref().is_some_and(|subtree| {
+                        path.strip_prefix(root)
+                            .is_ok_and(|relative| relative == subtree)
+                    })
+            });
+            if super::grep::should_skip_dir(&name) || depth >= max_depth || excluded {
                 continue;
             }
-            if collect(root, &path, matcher, out, depth + 1) {
+            if collect(root, &path, matcher, exclusions, max_depth, out, depth + 1) {
                 return true;
             }
-        } else if file_type.is_file() && matcher.is_match(root, &path) {
+        } else if file_type.is_file()
+            && matcher.is_match(root, &path)
+            && !exclusions
+                .iter()
+                .any(|exclude| exclude.is_match(root, &path))
+        {
             let rel = path
                 .strip_prefix(root)
                 .map(|p| p.to_string_lossy().into_owned())
@@ -213,6 +269,58 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .replace('\\', "/")
+    }
+
+    async fn run_input(root: &Path, input: serde_json::Value) -> String {
+        GlobTool
+            .call(input, &ctx(root.to_path_buf()))
+            .await
+            .unwrap()
+            .content
+            .as_str()
+            .unwrap_or_default()
+            .replace('\\', "/")
+    }
+
+    #[tokio::test]
+    async fn exclusions_remove_matching_files_and_subtrees() {
+        let root = fixture("exclude");
+        let text = run_input(
+            &root,
+            serde_json::json!({"pattern": "**/*.rs", "exclude": ["src/deep/**"]}),
+        )
+        .await;
+        assert!(text.contains("src/main.rs"), "{text}");
+        assert!(!text.contains("src/deep/lib.rs"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn file_exclusion_does_not_prune_siblings() {
+        let root = fixture("exclude-file");
+        std::fs::write(root.join("src/drop.tmp"), "x").unwrap();
+        std::fs::write(root.join("src/keep.txt"), "x").unwrap();
+        let text = run_input(
+            &root,
+            serde_json::json!({"pattern": "src/*", "exclude": ["src/*.tmp"]}),
+        )
+        .await;
+        assert!(text.contains("src/keep.txt"), "{text}");
+        assert!(!text.contains("src/drop.tmp"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn max_depth_limits_directory_descent() {
+        let root = fixture("depth");
+        let text = run_input(
+            &root,
+            serde_json::json!({"pattern": "**/*.rs", "max_depth": 1}),
+        )
+        .await;
+        assert!(text.contains("src/main.rs"), "{text}");
+        assert!(!text.contains("src/deep/lib.rs"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// M6 regression: relative patterns with a directory prefix once always matched zero.

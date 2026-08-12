@@ -19,6 +19,8 @@ jobs:
           components: rustfmt
       - name: cargo fmt
         run: cargo fmt --all -- --check
+      - name: engineering discipline gate
+        run: scripts/check_discipline.sh
 
   test:
     name: ${{ matrix.os }} · check / clippy / test
