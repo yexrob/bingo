@@ -1978,7 +1978,7 @@ mod tests {
         save_member_history(&mem_home, &project, branch, "t", "qa", &msgs);
 
         spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
-        let (history, _, state) = s
+        let (history, _, _, state) = s
             .agents
             .view_of("qa")
             .unwrap_or_else(|| panic!("instance should exist"));

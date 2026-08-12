@@ -54,6 +54,10 @@ pub struct ErrorState {
 pub struct UiMessage {
     pub role: Role,
     pub text: String,
+    /// Wall-clock send time, unix seconds (0 = no clock; renders no stamp).
+    /// User messages stamp at submit; assistant messages restamp at turn end,
+    /// so the shown time is when the reply landed, as in the workspace views.
+    pub at: u64,
     pub activities: Vec<Activity>,
     /// Char count of text at activities[i] creation: rendering interleaves text and activities in model output order.
     pub insert_points: Vec<usize>,
@@ -1447,6 +1451,7 @@ impl Chat {
                 self.messages.push(UiMessage {
                     role: Role::Assistant,
                     text: String::new(),
+                    at: crate::channels::now_unix(),
                     activities: Vec::new(),
                     insert_points: Vec::new(),
                     groups: Vec::new(),
@@ -1882,6 +1887,9 @@ impl Chat {
                     self.submit_auto();
                 }
                 if let Some(i) = self.stream_msg {
+                    // The reply's send time is when it landed, not when the turn
+                    // opened — the same clock the workspace DM stamps carry.
+                    self.messages[i].at = crate::channels::now_unix();
                     if let Some(g) = self.messages[i].groups.last_mut() {
                         g.active = false;
                     }

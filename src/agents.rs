@@ -335,6 +335,11 @@ pub enum InboxItem {
 /// A run the caller should start: the instance was idle with a non-empty inbox, and this call
 /// claimed it (state is already Running, inbox already drained) — so two flushes can't
 /// double-start the same instance.
+/// What [`AgentRegistry::view_of`] samples for the DM view: history, the
+/// landing-time stamp of each history message (unix seconds, 0 = unknown),
+/// the live tail, and the instance state.
+pub type AgentView = (Vec<Message>, Vec<u64>, Vec<LiveBlock>, AgentState);
+
 pub struct Wake {
     pub name: String,
     pub session: Arc<Session>,
@@ -363,6 +368,9 @@ struct Entry {
     lease: u8,
     /// Full message history since the last completed turn (continuation context).
     history: Vec<Message>,
+    /// Wall-clock landing time of each history message, unix seconds, index-aligned
+    /// with `history` (0 = unknown). Display metadata only — never sent to the model.
+    stamps: Vec<u64>,
     /// Inbox accumulated since the last drain (commands + channel messages, claimed as one
     /// batch when the receiver is ready).
     inbox: Vec<InboxItem>,
@@ -597,6 +605,7 @@ impl AgentRegistry {
                 last_active: Instant::now(),
                 lease: HIRE_LEASE,
                 history: Vec::new(),
+                stamps: Vec::new(),
                 inbox: Vec::new(),
                 acks: Vec::new(),
                 session,
@@ -697,8 +706,8 @@ impl AgentRegistry {
         }
     }
 
-    /// Instance view data: history + live tail + state (None if the instance doesn't exist).
-    pub fn view_of(&self, name: &str) -> Option<(Vec<Message>, Vec<LiveBlock>, AgentState)> {
+    /// Instance view data (None if the instance doesn't exist).
+    pub fn view_of(&self, name: &str) -> Option<AgentView> {
         let inner = self.lock();
         let entry = inner.get(name)?;
         let live = entry
@@ -706,7 +715,12 @@ impl AgentRegistry {
             .as_ref()
             .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).clone())
             .unwrap_or_default();
-        Some((entry.history.clone(), live, entry.state))
+        Some((
+            entry.history.clone(),
+            entry.stamps.clone(),
+            live,
+            entry.state,
+        ))
     }
 
     /// Whether an instance belongs to the given project directory.
@@ -824,6 +838,16 @@ impl AgentRegistry {
             let mut inner = self.lock();
             let entry = inner.get_mut(name)?;
             entry.last_active = Instant::now();
+            // Stamp the new tail with now: history normally only grows. Shorter
+            // means it was rewritten (compaction) and the old clocks no longer
+            // describe it — better no stamp than a wrong one.
+            let refill = if history.len() < entry.stamps.len() {
+                entry.stamps.clear();
+                0
+            } else {
+                crate::channels::now_unix()
+            };
+            entry.stamps.resize(history.len(), refill);
             entry.history = history;
             answer_acks(entry, output_chars);
             if entry.state == AgentState::Stopped {
@@ -1672,6 +1696,52 @@ mod tests {
         assert!(reg.finish("scout", Vec::new(), 0).is_some());
         let finished = reg.list()[0].last_active;
         assert!(finished > streamed, "turn completion is activity");
+    }
+
+    /// Every stored history message carries a landing clock for the DM view;
+    /// a rewritten (shorter) history drops the stale clocks instead of lying.
+    #[test]
+    fn finish_stamps_history_and_drops_clocks_on_rewrite() {
+        let reg = AgentRegistry::new();
+        reg.insert(
+            "scout",
+            AgentKind::Hire,
+            None,
+            "research".into(),
+            test_session(),
+        );
+        assert!(
+            reg.finish(
+                "scout",
+                vec![Message::user_text("a"), Message::user_text("b")],
+                0,
+            )
+            .is_none()
+        );
+        let (history, stamps, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        assert_eq!(stamps.len(), history.len());
+        assert!(stamps.iter().all(|&at| at > 0), "{stamps:?}");
+        // Compaction hands back a shorter, rewritten history: the old clocks no
+        // longer describe it — no stamp is rendered rather than a wrong one.
+        assert!(
+            reg.finish("scout", vec![Message::user_text("summary")], 0)
+                .is_none()
+        );
+        let (history, stamps, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        assert_eq!(history.len(), 1);
+        assert_eq!(stamps, vec![0]);
+        // The record grows again: only the new tail is stamped.
+        assert!(
+            reg.finish(
+                "scout",
+                vec![Message::user_text("summary"), Message::user_text("more")],
+                0,
+            )
+            .is_none()
+        );
+        let (_, stamps, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        assert_eq!(stamps[0], 0, "the rewritten prefix stays clockless");
+        assert!(stamps[1] > 0, "{stamps:?}");
     }
 
     #[test]

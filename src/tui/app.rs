@@ -1000,6 +1000,7 @@ mod tests {
         chat.messages.push(crate::tui::chat::UiMessage {
             role: crate::tui::chat::Role::User,
             text: "a long-enough user message whose wrap count changes with the width".repeat(2),
+            at: 0,
             activities: Vec::new(),
             insert_points: Vec::new(),
             groups: Vec::new(),
@@ -1061,6 +1062,7 @@ mod tests {
         chat.messages.push(crate::tui::chat::UiMessage {
             role: crate::tui::chat::Role::Assistant,
             text: "reply".into(),
+            at: 0,
             activities: Vec::new(),
             insert_points: Vec::new(),
             groups: Vec::new(),

@@ -276,7 +276,7 @@ fn scaffold_note(line: &str) -> Option<String> {
 
 /// A user-role message → posts. Runtime scaffolding collapses to [`PostKind::Note`]
 /// lines; whatever a person actually wrote stays a message.
-fn user_posts(text: &str, me: &str) -> Vec<Post> {
+fn user_posts(text: &str, at: u64, me: &str) -> Vec<Post> {
     let mut out = Vec::new();
     let mut plain: Vec<&str> = Vec::new();
     let flush = |plain: &mut Vec<&str>, out: &mut Vec<Post>| {
@@ -288,7 +288,7 @@ fn user_posts(text: &str, me: &str) -> Vec<Post> {
         out.push(Post {
             from: me.to_string(),
             you: true,
-            at: 0,
+            at,
             text: joined,
             kind: PostKind::Said,
         });
@@ -328,20 +328,23 @@ fn user_posts(text: &str, me: &str) -> Vec<Post> {
 
 pub fn dm_posts(
     history: &[Message],
+    stamps: &[u64],
     live: &[crate::agents::LiveBlock],
     pending: &[String],
     who: &str,
     me: &str,
 ) -> Vec<Post> {
     let mut out = Vec::new();
-    for msg in history {
+    for (i, msg) in history.iter().enumerate() {
+        // `stamps[i]` is when `history[i]` landed in the record (0 = no clock).
+        let at = stamps.get(i).copied().unwrap_or(0);
         for block in &msg.content {
             match (msg.role, block) {
-                (Role::User, ContentBlock::Text { text }) => out.extend(user_posts(text, me)),
+                (Role::User, ContentBlock::Text { text }) => out.extend(user_posts(text, at, me)),
                 (Role::Assistant, ContentBlock::Text { text }) => out.push(Post {
                     from: who.to_string(),
                     you: false,
-                    at: 0,
+                    at,
                     text: text.clone(),
                     kind: PostKind::Said,
                 }),
@@ -586,8 +589,11 @@ fn boxed(text: &str, width: usize) -> String {
     format!("{}{text}{}", " ".repeat(lead), " ".repeat(tail))
 }
 
-/// Local wall-clock `HH:MM`; empty when the source carries no timestamp.
-fn hhmm(at: u64) -> String {
+/// Send-time stamp trailing a message body (issue #41), the same in every view:
+/// local `HH:MM` today, `M/D HH:MM` on any other day. Empty when the source
+/// carries no timestamp — a missing clock renders as nothing rather than being
+/// invented (the [`ChannelMessage`] rule).
+pub fn stamp(at: u64) -> String {
     use chrono::TimeZone;
     if at == 0 {
         return String::new();
@@ -595,8 +601,17 @@ fn hhmm(at: u64) -> String {
     chrono::Local
         .timestamp_opt(at as i64, 0)
         .single()
-        .map(|t| t.format("%H:%M").to_string())
+        .map(|t| stamp_of(&t, chrono::Local::now().date_naive()))
         .unwrap_or_default()
+}
+
+/// [`stamp`] with "today" injected, so tests pin both sides of the day boundary.
+fn stamp_of(t: &chrono::DateTime<chrono::Local>, today: chrono::NaiveDate) -> String {
+    if t.date_naive() == today {
+        t.format("%H:%M").to_string()
+    } else {
+        t.format("%-m/%-d %H:%M").to_string()
+    }
 }
 
 /// Day-divider label: Today / Yesterday / M/D. `None` when there is no clock to
@@ -947,7 +962,8 @@ fn workspace_body_rows(post: &Post, width: usize, pal: &Palette) -> Vec<Row> {
 }
 
 /// The message list. Consecutive posts from one sender inside [`GROUP_WINDOW`]
-/// share a name row; the day changes and the first unread message get dividers.
+/// share a name row; the day changes and the first unread message get dividers;
+/// every real message ends with its dim send-time [`stamp`].
 /// `avatars` says whether the terminal can place portraits and which ones the
 /// blueprint pinned; the row count is the same either way, so only the gutter
 /// changes.
@@ -1034,10 +1050,6 @@ fn message_rows_for(
                 post.from.clone()
             };
             head.push_styled(shown, SegStyle::fg(pal.main_text).bold());
-            let time = hhmm(post.at);
-            if !time.is_empty() {
-                head.push_styled(format!("  {time}"), SegStyle::fg(pal.main_dim));
-            }
             rows.push(row(head));
         }
         let body = match main_theme {
@@ -1046,6 +1058,25 @@ fn message_rows_for(
         };
         let mut body = indent_rows(body, post, grouped, gutter_w, avatars, pal);
         let mut lead = body.len();
+        // Send time, trailing the body (issue #41): its own dim row, so it never
+        // disturbs the body's wrapping or wide-character alignment. A markdown
+        // body may end in a blank line; the stamp belongs to the message, so it
+        // slots in before that spacing rather than floating under it.
+        let time = stamp(post.at);
+        if post.kind == PostKind::Said && !time.is_empty() {
+            let keep = body
+                .iter()
+                .rposition(|r| r.line.image.is_some() || !r.line.plain_text().trim().is_empty())
+                .map_or(0, |p| p + 1);
+            let mut line = if body.is_empty() && !grouped {
+                gutter_line(&post.from, 1, avatars, pal)
+            } else {
+                Line::styled(" ".repeat(gutter_w), SegStyle::fg(pal.main_dim))
+            };
+            lead += 1;
+            line.push_styled(time, SegStyle::fg(pal.main_dim));
+            body.insert(keep, row(line));
+        }
         rows.append(&mut body);
         if post.kind == PostKind::Queued {
             let mut line = if lead == 0 && !grouped {
@@ -1454,6 +1485,116 @@ mod tests {
         );
     }
 
+    /// The stamp brick every view shares (issue #41): `HH:MM` today, `M/D HH:MM`
+    /// once the message is not from today, nothing when there is no clock.
+    #[test]
+    fn stamp_is_hhmm_today_and_dated_across_days() {
+        use chrono::TimeZone;
+        let t = chrono::Local
+            .with_ymd_and_hms(2026, 8, 10, 9, 5, 0)
+            .single()
+            .unwrap();
+        let same_day = chrono::NaiveDate::from_ymd_opt(2026, 8, 10).unwrap();
+        let two_days_on = chrono::NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
+        assert_eq!(stamp_of(&t, same_day), "09:05");
+        assert_eq!(stamp_of(&t, two_days_on), "8/10 09:05");
+        assert_eq!(stamp(0), "", "no clock renders nothing, never an invention");
+        // The public wrapper agrees with the injected-today core.
+        assert!(
+            stamp(t.timestamp() as u64).ends_with("09:05"),
+            "{}",
+            stamp(t.timestamp() as u64)
+        );
+    }
+
+    /// Issue #41: the send time trails the body as its own dim row — in the
+    /// channel skin and the DM skin alike — and the name row no longer carries
+    /// a clock of its own.
+    #[test]
+    fn the_send_time_trails_the_body() {
+        let at = 1_760_000_000u64;
+        let want = stamp(at);
+        let posts = vec![
+            Post {
+                from: "scout".into(),
+                you: false,
+                at,
+                text: "found the regression".into(),
+                kind: PostKind::Said,
+            },
+            Post {
+                from: "scout".into(),
+                you: false,
+                at: at + 30,
+                text: "in term.rs".into(),
+                kind: PostKind::Said,
+            },
+        ];
+        let rows = message_rows(&posts, usize::MAX, &pal(), 60, &Avatars::default());
+        let t = texts(&rows);
+        let name = t.iter().position(|l| l.contains("scout")).unwrap();
+        let body = t
+            .iter()
+            .position(|l| l.contains("found the regression"))
+            .unwrap();
+        let time = t.iter().position(|l| l.trim() == want).unwrap();
+        assert!(name < body && body < time, "{t:?}");
+        assert!(
+            !t[name].contains(&want),
+            "the name row no longer carries the clock: {t:?}"
+        );
+        // A grouped message (no name row of its own) still gets its stamp.
+        assert!(
+            t.iter().any(|l| l.trim() == stamp(at + 30)),
+            "grouped messages keep their own clock: {t:?}"
+        );
+        let dm = dm_message_rows(
+            &posts,
+            usize::MAX,
+            &pal(),
+            60,
+            &Avatars::default(),
+            &Theme::dark(),
+        );
+        let dm = texts(&dm);
+        let body = dm
+            .iter()
+            .position(|l| l.contains("found the regression"))
+            .unwrap();
+        assert_eq!(
+            dm[body + 1].trim(),
+            want,
+            "the DM stamp sits directly under its body, before any trailing spacing: {dm:?}"
+        );
+    }
+
+    /// DM stamps come from the registry, index-aligned with the history; the
+    /// runtime's scaffolding notes stay clockless.
+    #[test]
+    fn dm_history_stamps_land_on_posts() {
+        let history = vec![
+            crate::api::types::Message::user_text("[follow-up 1/3] still waiting"),
+            crate::api::types::Message::user_text("what a person wrote"),
+            crate::api::types::Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "the reply".into(),
+                }],
+            },
+        ];
+        let posts = dm_posts(&history, &[100, 200, 300], &[], &[], "scout", "user");
+        let ats: Vec<(PostKind, u64)> = posts.iter().map(|p| (p.kind, p.at)).collect();
+        assert_eq!(
+            ats,
+            vec![
+                (PostKind::Note, 0),
+                (PostKind::Said, 200),
+                (PostKind::Said, 300),
+            ],
+            "{posts:?}"
+        );
+    }
+
     /// The runtime writes its own scaffolding into an instance's history — the
     /// relay of a channel message, the task reminder. Quoting those in full put a
     /// wall of English system text under a "You" name row, as if the user had typed
@@ -1469,7 +1610,7 @@ mod tests {
             crate::api::types::Message::user_text(relay),
             crate::api::types::Message::user_text("one thing just for you\nsecond line"),
         ];
-        let posts = dm_posts(&history, &[], &[], "devex", "user");
+        let posts = dm_posts(&history, &[], &[], &[], "devex", "user");
         let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
         assert_eq!(
             kinds,
@@ -1863,7 +2004,7 @@ mod tests {
             LiveBlock::Tool("⏺ Read(ci.yml)".into()),
             LiveBlock::Text("The quality job is the one failing.".into()),
         ];
-        let posts = dm_posts(&[], &live, &[], "deploy", "user");
+        let posts = dm_posts(&[], &[], &live, &[], "deploy", "user");
         let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
         assert_eq!(
             kinds,
@@ -1882,14 +2023,14 @@ mod tests {
         );
 
         assert_eq!(
-            dm_posts(&[], &live[..2], &[], "deploy", "user")
+            dm_posts(&[], &[], &live[..2], &[], "deploy", "user")
                 .iter()
                 .map(|p| p.kind)
                 .collect::<Vec<_>>(),
             vec![PostKind::Said, PostKind::Typing]
         );
         let only_tools = vec![LiveBlock::Tool("⏺ Bash($ git status)".into())];
-        let tool_wait = dm_posts(&[], &only_tools, &[], "deploy", "user");
+        let tool_wait = dm_posts(&[], &[], &only_tools, &[], "deploy", "user");
         assert_eq!(
             tool_wait.iter().map(|p| p.kind).collect::<Vec<_>>(),
             vec![PostKind::Typing],
@@ -1902,13 +2043,13 @@ mod tests {
             LiveBlock::Text(String::new()),
         ];
         assert_eq!(
-            dm_posts(&[], &between, &[], "deploy", "user")
+            dm_posts(&[], &[], &between, &[], "deploy", "user")
                 .iter()
                 .map(|p| p.kind)
                 .collect::<Vec<_>>(),
             vec![PostKind::Said, PostKind::Typing]
         );
-        assert!(dm_posts(&[], &[], &[], "deploy", "user").is_empty());
+        assert!(dm_posts(&[], &[], &[], &[], "deploy", "user").is_empty());
     }
 
     /// DM history and live turns show conversation text, never tool activity.
@@ -1942,7 +2083,7 @@ mod tests {
             LiveBlock::Tool("⏺ Read(src/main.rs)".into()),
         ];
 
-        let posts = dm_posts(&history, &live, &[], "dev", "user");
+        let posts = dm_posts(&history, &[], &live, &[], "dev", "user");
         assert!(posts.iter().all(|post| matches!(
             post.kind,
             PostKind::Said | PostKind::Queued | PostKind::Typing | PostKind::Note

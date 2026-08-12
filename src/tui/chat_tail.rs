@@ -871,6 +871,7 @@ impl super::Chat {
             self.messages.push(UiMessage {
                 role: Role::User,
                 text: text.clone(),
+                at: crate::channels::now_unix(),
                 activities: Vec::new(),
                 insert_points: Vec::new(),
                 groups: Vec::new(),
@@ -940,6 +941,7 @@ impl super::Chat {
         self.messages.push(UiMessage {
             role: Role::User,
             text: format!("!{command}"),
+            at: crate::channels::now_unix(),
             activities: Vec::new(),
             insert_points: Vec::new(),
             groups: Vec::new(),
@@ -1079,6 +1081,7 @@ impl super::Chat {
         self.messages.push(UiMessage {
             role: Role::User,
             text,
+            at: crate::channels::now_unix(),
             activities: Vec::new(),
             insert_points: Vec::new(),
             groups: Vec::new(),
@@ -1110,6 +1113,7 @@ impl super::Chat {
         self.messages.push(UiMessage {
             role: Role::Assistant,
             text: String::new(),
+            at: crate::channels::now_unix(),
             activities: Vec::new(),
             insert_points: Vec::new(),
             groups: Vec::new(),
@@ -2848,7 +2852,16 @@ impl super::Chat {
             // off, a message opens on its body, exactly as it did before D50.
             let band = self.chat_avatars.then(|| self.sender_band_el(role, &pal));
             let body = match role {
-                Role::User => El::Rows(user_message_rows(&self.messages[i].text, width, &theme)),
+                Role::User => {
+                    let mut rows = user_message_rows(&self.messages[i].text, width, &theme);
+                    // Send time under the bubble (issue #41), the same dim stamp
+                    // every view trails its message bodies with.
+                    let time = crate::tui::slack::stamp(self.messages[i].at);
+                    if !time.is_empty() {
+                        rows.push(Row::new(Line::styled(format!("  {time}"), theme.dim())));
+                    }
+                    El::Rows(rows)
+                }
                 Role::Assistant => self.assistant_el(i, width, &theme, settled, &pal),
             };
             // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
@@ -3184,6 +3197,26 @@ impl super::Chat {
                     })
         {
             parts.push(El::Line(line));
+        }
+        // Send time after the body (issue #41): only once the turn has finished —
+        // a clock under still-streaming text would read as an ending. A markdown
+        // body may end in a blank line; the stamp belongs to the message, so it
+        // slots in before that spacing rather than floating under it.
+        let time = crate::tui::slack::stamp(self.messages[i].at);
+        if show_done_line && !time.is_empty() && !parts.is_empty() {
+            let stamp_line = Line::styled(format!("  {time}"), theme.dim());
+            match parts.last_mut() {
+                Some(El::Rows(rows)) => {
+                    let keep = rows
+                        .iter()
+                        .rposition(|r| {
+                            r.line.image.is_some() || !r.line.plain_text().trim().is_empty()
+                        })
+                        .map_or(0, |p| p + 1);
+                    rows.insert(keep, Row::new(stamp_line));
+                }
+                _ => parts.push(El::Line(stamp_line)),
+            }
         }
         El::Col(parts)
     }
