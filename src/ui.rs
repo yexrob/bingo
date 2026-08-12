@@ -83,7 +83,13 @@ pub enum UiEvent {
         window: u64,
     },
     /// Cumulative output token count for the current model response while it streams.
-    OutputTokens(u64),
+    /// `authoritative`: the end-of-round usage total (message_delta), an accounting
+    /// correction rather than freshly streamed output — the rate sampler must not
+    /// read the jump as an instantaneous burst.
+    OutputTokens {
+        tokens: u64,
+        authoritative: bool,
+    },
     ToolStart {
         name: String,
     },
@@ -196,11 +202,14 @@ pub fn tui_hooks(
                         state.0 = 0;
                     }
                     state.1 = Some(*index);
-                    state.0 = state.0.saturating_add(text.chars().count() as u64);
+                    state.0 = state.0.saturating_add(crate::compact::text_units(text));
                     state.0.div_ceil(4)
                 };
                 let _ = events.send(UiEvent::TextDelta(text.clone()));
-                let _ = events.send(UiEvent::OutputTokens(tokens));
+                let _ = events.send(UiEvent::OutputTokens {
+                    tokens,
+                    authoritative: false,
+                });
             }
             StreamEvent::ThinkingDelta { index, thinking } => {
                 let tokens = {
@@ -209,11 +218,14 @@ pub fn tui_hooks(
                         state.0 = 0;
                     }
                     state.1 = Some(*index);
-                    state.0 = state.0.saturating_add(thinking.chars().count() as u64);
+                    state.0 = state.0.saturating_add(crate::compact::text_units(thinking));
                     state.0.div_ceil(4)
                 };
                 let _ = events.send(UiEvent::ThinkingDelta(thinking.clone()));
-                let _ = events.send(UiEvent::OutputTokens(tokens));
+                let _ = events.send(UiEvent::OutputTokens {
+                    tokens,
+                    authoritative: false,
+                });
             }
             StreamEvent::InputJsonDelta {
                 index,
@@ -225,10 +237,15 @@ pub fn tui_hooks(
                         state.0 = 0;
                     }
                     state.1 = Some(*index);
-                    state.0 = state.0.saturating_add(partial_json.chars().count() as u64);
+                    state.0 = state
+                        .0
+                        .saturating_add(crate::compact::text_units(partial_json));
                     state.0.div_ceil(4)
                 };
-                let _ = events.send(UiEvent::OutputTokens(tokens));
+                let _ = events.send(UiEvent::OutputTokens {
+                    tokens,
+                    authoritative: false,
+                });
             }
             StreamEvent::ToolUseStart { name, .. } => {
                 let _ = events.send(UiEvent::ToolStart { name: name.clone() });
@@ -239,7 +256,10 @@ pub fn tui_hooks(
             } => {
                 let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
                 state.0 = tokens.saturating_mul(4);
-                let _ = events.send(UiEvent::OutputTokens(*tokens));
+                let _ = events.send(UiEvent::OutputTokens {
+                    tokens: *tokens,
+                    authoritative: true,
+                });
             }
             _ => {}
         }),
@@ -321,7 +341,13 @@ mod tests {
             text: "abcdefghijkl".to_string(),
         });
         assert!(matches!(events_rx.try_recv(), Ok(UiEvent::TextDelta(_))));
-        assert!(matches!(events_rx.try_recv(), Ok(UiEvent::OutputTokens(3))));
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(UiEvent::OutputTokens {
+                tokens: 3,
+                authoritative: false
+            })
+        ));
 
         (ui.on_stream_retry)();
         assert!(matches!(events_rx.try_recv(), Ok(UiEvent::StreamRetry)));
@@ -332,7 +358,10 @@ mod tests {
         });
         assert!(matches!(
             events_rx.try_recv(),
-            Ok(UiEvent::OutputTokens(10))
+            Ok(UiEvent::OutputTokens {
+                tokens: 10,
+                authoritative: true
+            })
         ));
     }
 

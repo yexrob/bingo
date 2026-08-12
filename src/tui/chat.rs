@@ -1226,7 +1226,7 @@ impl Chat {
             .borrow()
             .clone()
             .and_then(|transcript| transcript.load_messages().ok())
-            .map(|messages| crate::compact::estimate_tokens(&session.system, &messages))
+            .map(|messages| crate::compact::estimate_tokens(&session.system, &messages, &[]))
             .unwrap_or(0);
         Self {
             session,
@@ -1608,14 +1608,25 @@ impl Chat {
             UiEvent::ContextUsage { used, window } => {
                 self.context_usage = crate::context_usage::ContextUsage::new(used, window);
             }
-            UiEvent::OutputTokens(tokens) => {
+            UiEvent::OutputTokens {
+                tokens,
+                authoritative,
+            } => {
                 self.output_tokens = self
                     .output_tokens
                     .saturating_sub(self.output_round_tokens)
                     .saturating_add(tokens);
                 self.output_round_tokens = tokens;
-                self.token_rate
-                    .observe_round(tokens, std::time::Instant::now());
+                // The end-of-round usage total is a correction, not freshly streamed
+                // output: fed as a sample it divided the jump by the live window and
+                // rendered as a one-frame spike of thousands of tok/s.
+                if authoritative {
+                    self.token_rate
+                        .correct_round(tokens, std::time::Instant::now());
+                } else {
+                    self.token_rate
+                        .observe_round(tokens, std::time::Instant::now());
+                }
             }
             UiEvent::ToolStart { name } => {
                 if is_hidden_tool(&name) {
@@ -2627,7 +2638,7 @@ impl Chat {
     fn estimate_context_usage(&mut self, messages: &[crate::api::types::Message]) {
         let model = self.session.runtime.model.borrow().clone();
         self.context_usage = crate::context_usage::ContextUsage::new(
-            crate::compact::estimate_tokens(&self.session.system, messages),
+            crate::compact::estimate_tokens(&self.session.system, messages, &[]),
             crate::budget::context_window_for(&model),
         );
     }
@@ -3502,7 +3513,7 @@ impl Chat {
                 let _ = t.replace_messages(&messages);
             }
             let _ = events.send(UiEvent::ContextUsage {
-                used: crate::compact::estimate_tokens(&session.system, &messages),
+                used: crate::compact::estimate_tokens(&session.system, &messages, &[]),
                 window: crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
             });
             unpin();
@@ -3528,9 +3539,15 @@ impl Chat {
             let msgs = transcript
                 .map(|t| t.load_messages().unwrap_or_default())
                 .unwrap_or_default();
+            // Count with the tool schemas each request carries — the same payload
+            // the auto-compact gate measures (query_loop), so /status and /context
+            // report the number the gate acts on.
+            let mut warn = |_: String| {};
+            let tools = crate::tools::assemble_tools(&session, &mut warn).await;
+            let schemas = crate::tool::tool_params(&tools);
             let tokens = match session
                 .client
-                .count_tokens(&model, &session.system, &msgs)
+                .count_tokens(&model, &session.system, &msgs, &schemas)
                 .await
             {
                 Ok(t) => t,

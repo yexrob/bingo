@@ -643,12 +643,9 @@ impl ProviderClient for AnthropicProvider {
         model: &str,
         system: &[SystemBlock],
         messages: &[Message],
+        tools: &[serde_json::Value],
     ) -> Result<u64, ClientError> {
-        let payload = serde_json::json!({
-            "model": model,
-            "system": system.iter().map(|b| WireSystemBlock { text: b.text.clone(), cache: b.cache }).collect::<Vec<_>>(),
-            "messages": messages,
-        });
+        let payload = count_tokens_payload(model, system, messages, tools);
         let base_url = self
             .endpoint
             .read()
@@ -678,6 +675,28 @@ impl ProviderClient for AnthropicProvider {
             .and_then(|v| v.as_u64())
             .unwrap_or(0))
     }
+}
+
+/// count_tokens body: the same system/messages/tools payload the streaming
+/// request carries — a count that skipped the tool schemas (10k+ tokens for the
+/// base pool) read under the real input size, and auto-compact fired too late.
+/// tools are omitted when empty for compatibility with anthropic-shaped
+/// endpoints that reject the field.
+fn count_tokens_payload(
+    model: &str,
+    system: &[SystemBlock],
+    messages: &[Message],
+    tools: &[serde_json::Value],
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "model": model,
+        "system": system.iter().map(|b| WireSystemBlock { text: b.text.clone(), cache: b.cache }).collect::<Vec<_>>(),
+        "messages": messages,
+    });
+    if !tools.is_empty() {
+        payload["tools"] = serde_json::Value::Array(tools.to_vec());
+    }
+    payload
 }
 
 /// Idle-timeout wrapper for `stream.next()`: if not a single event arrives
@@ -737,6 +756,26 @@ fn trailing_number(text: &str) -> Option<(u64, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The count must measure the payload the streaming request sends: skipping
+    /// the tool schemas undercounted the input by their full size and let the
+    /// context overrun the window before auto-compact fired.
+    #[test]
+    fn count_tokens_payload_carries_the_request_tools() {
+        let tools = vec![serde_json::json!({
+            "name": "Bash",
+            "description": "Run a command",
+            "input_schema": {"type": "object"},
+        })];
+        let payload = count_tokens_payload("m", &[], &[], &tools);
+        assert_eq!(payload["tools"], serde_json::Value::Array(tools));
+
+        let empty = count_tokens_payload("m", &[], &[], &[]);
+        assert!(
+            empty.get("tools").is_none(),
+            "an empty tools field stays off the wire: {empty}"
+        );
+    }
 
     /// AC-12/13/14: short-sync feedback-layer timeouts are tiered — read
     /// 10s / write 15s, never confused (read must fire before 11s and write

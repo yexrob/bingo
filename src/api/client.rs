@@ -379,8 +379,11 @@ impl Client {
         model: &str,
         system: &[SystemBlock],
         messages: &[Message],
+        tools: &[serde_json::Value],
     ) -> Result<u64, ClientError> {
-        self.current().count_tokens(model, system, messages).await
+        self.current()
+            .count_tokens(model, system, messages, tools)
+            .await
     }
 
     /// Whether the provider comes from the built-in preset registry (D34) —

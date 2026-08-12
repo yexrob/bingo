@@ -157,26 +157,45 @@ async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {
     true
 }
 
-/// Local estimate when count_tokens is unavailable: ~4 chars per token.
-/// Non-Anthropic endpoints (DeepSeek/ollama) lack this API; silently returning
-/// would mean auto-compact never triggers and context grows until it explodes.
-pub(crate) fn estimate_tokens(system: &[SystemBlock], messages: &[Message]) -> u64 {
-    let mut chars: usize = system.iter().map(|b| b.text.chars().count()).sum();
+/// Quarter-token units for one text fragment: ASCII ≈ 4 chars/token, other
+/// scripts (CJK etc.) ≈ 1 token/char. A flat chars/4 undercounted Chinese
+/// conversations ~4x, so growth between exact counts went mostly unseen and
+/// auto-compact fired far too late.
+pub(crate) fn text_units(text: &str) -> u64 {
+    text.chars().map(|c| if c.is_ascii() { 1 } else { 4 }).sum()
+}
+
+/// Local estimate when count_tokens is unavailable. Non-Anthropic endpoints
+/// (DeepSeek/ollama) lack this API; silently returning would mean auto-compact
+/// never triggers and context grows until it explodes.
+/// tools must be the schemas actually sent with each request: they are input
+/// tokens too, and skipping them (10k+ for the base pool) ate most of the
+/// headroom between the compact threshold and the hard context limit.
+pub(crate) fn estimate_tokens(
+    system: &[SystemBlock],
+    messages: &[Message],
+    tools: &[serde_json::Value],
+) -> u64 {
+    let mut units: u64 = system.iter().map(|b| text_units(&b.text)).sum();
+    units += tools
+        .iter()
+        .map(|schema| text_units(&schema.to_string()))
+        .sum::<u64>();
     for message in messages {
         for block in &message.content {
-            chars += match block {
-                ContentBlock::Text { text } => text.chars().count(),
-                ContentBlock::Thinking { thinking, .. } => thinking.chars().count(),
+            units += match block {
+                ContentBlock::Text { text } => text_units(text),
+                ContentBlock::Thinking { thinking, .. } => text_units(thinking),
                 ContentBlock::ToolUse { name, input, .. } => {
-                    name.chars().count() + input.to_string().chars().count()
+                    text_units(name) + text_units(&input.to_string())
                 }
-                ContentBlock::ToolResult { content, .. } => content.to_string().chars().count(),
+                ContentBlock::ToolResult { content, .. } => text_units(&content.to_string()),
                 // Image blocks estimated by base64 length (the real token hog).
-                ContentBlock::Image { source } => source.data.chars().count(),
+                ContentBlock::Image { source } => source.data.chars().count() as u64,
             };
         }
     }
-    (chars / 4) as u64
+    units / 4
 }
 
 /// count_tokens call throttling: always measured at turn start, then every
@@ -232,17 +251,20 @@ impl TokenGate {
 
 /// Called before every turn's request: compact when tokens exceed the threshold; skip
 /// and remind once the breaker has tripped.
+/// tools are the schemas the next request will carry — measured with the request,
+/// exactly, or the count reads under the real input size (see `estimate_tokens`).
 pub async fn check_and_compact(
     session: &Session,
     messages: &mut Vec<Message>,
     gate: &mut TokenGate,
+    tools: &[serde_json::Value],
 ) -> u64 {
-    let estimate = estimate_tokens(&session.system, messages);
+    let estimate = estimate_tokens(&session.system, messages, tools);
     let tokens = if gate.wants_exact(estimate) {
         let model = session.runtime.model.borrow().clone();
         match session
             .client
-            .count_tokens(&model, &session.system, messages)
+            .count_tokens(&model, &session.system, messages, tools)
             .await
         {
             Ok(exact) => {
@@ -277,7 +299,7 @@ pub async fn check_and_compact(
             }
         } else if maybe_compact(session, messages, tokens).await {
             gate.reset();
-            return estimate_tokens(&session.system, messages);
+            return estimate_tokens(&session.system, messages, tools);
         }
     } else if tokens >= warning_threshold_for(&model) && !session.quiet {
         eprintln!("[bingo] warning: context at {tokens} tokens, auto-compact at {threshold}");
@@ -396,17 +418,47 @@ mod tests {
             text: "s".repeat(400),
             cache: false,
         }];
-        let empty = estimate_tokens(&system, &[]);
+        let empty = estimate_tokens(&system, &[], &[]);
         assert_eq!(empty, 100, "400 chars ≈ 100 tokens");
 
         let messages = vec![text(Role::User, &"x".repeat(4_000))];
-        let with_message = estimate_tokens(&system, &messages);
+        let with_message = estimate_tokens(&system, &messages, &[]);
         assert!(with_message > empty);
         assert_eq!(with_message, 1_100);
 
         // tool_use / tool_result count too, otherwise tool-turn growth is invisible.
-        let with_tools = estimate_tokens(&system, &[tool_use("a"), tool_result("a")]);
+        let with_tools = estimate_tokens(&system, &[tool_use("a"), tool_result("a")], &[]);
         assert!(with_tools > empty);
+    }
+
+    /// CJK text is ~1 token/char, not 4 chars/token: a flat chars/4 read a Chinese
+    /// conversation at a quarter of its real size and compaction fired far too late.
+    #[test]
+    fn local_estimate_weighs_cjk_as_one_token_per_char() {
+        let messages = vec![text(Role::User, &"上下文压缩".repeat(80))];
+        assert_eq!(
+            estimate_tokens(&[], &messages, &[]),
+            400,
+            "400 CJK chars ≈ 400 tokens"
+        );
+    }
+
+    /// Tool schemas ride along with every request; a measurement that skips them
+    /// (10k+ tokens for the base pool) eats the headroom between the compact
+    /// threshold and the hard context limit.
+    #[test]
+    fn local_estimate_includes_tool_schemas() {
+        let tools = vec![serde_json::json!({
+            "name": "Bash",
+            "description": "d".repeat(398),
+        })];
+        let without = estimate_tokens(&[], &[], &[]);
+        let with = estimate_tokens(&[], &[], &tools);
+        assert_eq!(without, 0);
+        assert!(
+            with >= 100,
+            "schema JSON counts as input tokens, got {with}"
+        );
     }
 
     /// Throttling: first turn always measures; then by interval or estimate growth,
