@@ -387,11 +387,14 @@ pub trait ProviderClient: Send + Sync {
 
     /// Exact input token count (D6). Protocols without a count endpoint
     /// fall back to local estimation (see compact.rs).
+    /// tools are the schemas the streaming request carries: they are input
+    /// tokens too, so the count must measure the same payload it predicts.
     async fn count_tokens(
         &self,
         model: &str,
         system: &[SystemBlock],
         messages: &[Message],
+        tools: &[serde_json::Value],
     ) -> Result<u64, ClientError>;
 }
 

@@ -217,6 +217,7 @@ impl ProviderClient for Unconfigured {
         _model: &str,
         _system: &[crate::api::contract::SystemBlock],
         _messages: &[crate::api::types::Message],
+        _tools: &[serde_json::Value],
     ) -> Result<u64, crate::api::contract::ClientError> {
         Err(crate::api::contract::ClientError::MissingApiKey)
     }

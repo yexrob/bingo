@@ -1226,7 +1226,7 @@ impl Chat {
             .borrow()
             .clone()
             .and_then(|transcript| transcript.load_messages().ok())
-            .map(|messages| crate::compact::estimate_tokens(&session.system, &messages))
+            .map(|messages| crate::compact::estimate_tokens(&session.system, &messages, &[]))
             .unwrap_or(0);
         Self {
             session,
@@ -2627,7 +2627,7 @@ impl Chat {
     fn estimate_context_usage(&mut self, messages: &[crate::api::types::Message]) {
         let model = self.session.runtime.model.borrow().clone();
         self.context_usage = crate::context_usage::ContextUsage::new(
-            crate::compact::estimate_tokens(&self.session.system, messages),
+            crate::compact::estimate_tokens(&self.session.system, messages, &[]),
             crate::budget::context_window_for(&model),
         );
     }
@@ -3502,7 +3502,7 @@ impl Chat {
                 let _ = t.replace_messages(&messages);
             }
             let _ = events.send(UiEvent::ContextUsage {
-                used: crate::compact::estimate_tokens(&session.system, &messages),
+                used: crate::compact::estimate_tokens(&session.system, &messages, &[]),
                 window: crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
             });
             unpin();
@@ -3528,9 +3528,15 @@ impl Chat {
             let msgs = transcript
                 .map(|t| t.load_messages().unwrap_or_default())
                 .unwrap_or_default();
+            // Count with the tool schemas each request carries — the same payload
+            // the auto-compact gate measures (query_loop), so /status and /context
+            // report the number the gate acts on.
+            let mut warn = |_: String| {};
+            let tools = crate::tools::assemble_tools(&session, &mut warn).await;
+            let schemas = crate::tool::tool_params(&tools);
             let tokens = match session
                 .client
-                .count_tokens(&model, &session.system, &msgs)
+                .count_tokens(&model, &session.system, &msgs, &schemas)
                 .await
             {
                 Ok(t) => t,

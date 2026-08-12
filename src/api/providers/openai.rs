@@ -902,6 +902,7 @@ impl ProviderClient for OpenAIProvider {
         _model: &str,
         _system: &[SystemBlock],
         _messages: &[Message],
+        _tools: &[serde_json::Value],
     ) -> Result<u64, ClientError> {
         Err(ClientError::Unsupported(
             "count_tokens is not available for the openai protocol (local estimation used)".into(),

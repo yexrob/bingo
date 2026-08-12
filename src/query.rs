@@ -14,7 +14,7 @@ use crate::hooks::{run_post_tool_use, run_pre_tool_use, run_stop_hooks, run_user
 use crate::permission::{PermissionBehavior, PermissionMode, can_use_tool};
 use crate::settings::HooksConfig;
 use crate::tool::executor::{PendingCall, execute_calls};
-use crate::tool::{Tool, ToolContext, ToolError, ToolResult, find_tool};
+use crate::tool::{Tool, ToolContext, ToolError, ToolResult, find_tool, tool_params};
 
 #[derive(Debug, Error)]
 pub enum QueryError {
@@ -634,6 +634,9 @@ async fn query_loop(
     let mut stop_hook_fired = false;
     let mut gate = TokenGate::new();
     let mut inbox_wake = InboxWake::for_session(session);
+    // The schemas every request in this loop carries: token measurements must
+    // count the same payload, or they read under the real input size.
+    let tool_schemas = tool_params(tools);
     normalize_synthetic_bash_calls(&mut messages);
     loop {
         if let Some(inbox) = inbox_wake.as_mut() {
@@ -654,7 +657,7 @@ async fn query_loop(
                 );
             }
         }
-        check_and_compact(session, &mut messages, &mut gate).await;
+        check_and_compact(session, &mut messages, &mut gate, &tool_schemas).await;
         // task_reminder: no Task tool for 10 turns + 10 turns since the last reminder.
         maybe_inject_task_reminder(session, &mut messages).await;
         // Recovery sweep: event-driven SendMessage claims idle recipients immediately, while
@@ -703,8 +706,11 @@ async fn query_loop(
                 mail.join("\n")
             )));
         }
-        let context_tokens =
-            gate.current(crate::compact::estimate_tokens(&session.system, &messages));
+        let context_tokens = gate.current(crate::compact::estimate_tokens(
+            &session.system,
+            &messages,
+            &tool_schemas,
+        ));
         let model = session.runtime.model.borrow().clone();
         (ui.on_context_usage)(context_tokens, crate::budget::context_window_for(&model));
         let turn = match one_turn_with_stream_retries(
@@ -809,8 +815,11 @@ async fn query_loop(
             } else {
                 QueryEndReason::Completed
             };
-            let context_tokens =
-                gate.current(crate::compact::estimate_tokens(&session.system, &messages));
+            let context_tokens = gate.current(crate::compact::estimate_tokens(
+                &session.system,
+                &messages,
+                &tool_schemas,
+            ));
             (ui.on_context_usage)(
                 context_tokens,
                 crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
@@ -985,8 +994,11 @@ async fn query_loop(
         );
         if interrupted {
             println!();
-            let context_tokens =
-                gate.current(crate::compact::estimate_tokens(&session.system, &messages));
+            let context_tokens = gate.current(crate::compact::estimate_tokens(
+                &session.system,
+                &messages,
+                &tool_schemas,
+            ));
             (ui.on_context_usage)(
                 context_tokens,
                 crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
@@ -1002,8 +1014,11 @@ async fn query_loop(
         // same fold group.
         (ui.on_round_end)();
         if stop_after_tools || is_cancelled(&cancel_rx) {
-            let context_tokens =
-                gate.current(crate::compact::estimate_tokens(&session.system, &messages));
+            let context_tokens = gate.current(crate::compact::estimate_tokens(
+                &session.system,
+                &messages,
+                &tool_schemas,
+            ));
             (ui.on_context_usage)(
                 context_tokens,
                 crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
@@ -1155,6 +1170,7 @@ pub async fn run_bash_command(
     mut cancel: Option<watch::Receiver<bool>>,
 ) -> Result<QueryOutcome, QueryError> {
     let tools = crate::tools::assemble_tools(session, &mut ui.on_warning).await;
+    let tool_schemas = tool_params(&tools);
     let ctx = tool_context(session, &*ui)?;
     let mut messages = history;
 
@@ -1221,8 +1237,11 @@ pub async fn run_bash_command(
                     // interrupted: the `!` command's tool_use is not yet in history, so
                     // returning directly leaves no orphans.
                     let Some(outcome) = outcomes.into_iter().next().filter(|_| !interrupted) else {
-                        let context_tokens =
-                            crate::compact::estimate_tokens(&session.system, &messages);
+                        let context_tokens = crate::compact::estimate_tokens(
+                            &session.system,
+                            &messages,
+                            &tool_schemas,
+                        );
                         (ui.on_context_usage)(
                             context_tokens,
                             crate::budget::context_window_for(
@@ -1300,7 +1319,8 @@ pub async fn run_bash_command(
         }
     }
     if !respond {
-        let context_tokens = crate::compact::estimate_tokens(&session.system, &messages);
+        let context_tokens =
+            crate::compact::estimate_tokens(&session.system, &messages, &tool_schemas);
         (ui.on_context_usage)(
             context_tokens,
             crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
