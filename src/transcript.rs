@@ -150,12 +150,25 @@ impl Transcript {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         let new_path = self.path.with_file_name(format!("{stem}-{slug}.jsonl"));
-        std::fs::rename(&self.path, &new_path)?;
-        let old_lock = self
+        let old_lock_path = self.path.with_extension("jsonl.lock");
+        let new_lock_path = new_path.with_extension("jsonl.lock");
+        let mut active_lock = self
             .active_lock
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
+            .unwrap_or_else(|error| error.into_inner());
+        std::fs::rename(&self.path, &new_path)?;
+        if old_lock_path.exists()
+            && let Err(error) = std::fs::rename(&old_lock_path, &new_lock_path)
+        {
+            if let Err(rollback) = std::fs::rename(&new_path, &self.path) {
+                return Err(TranscriptError::Io(std::io::Error::other(format!(
+                    "failed to rename transcript lock ({error}); data-file rollback failed: {rollback}"
+                ))));
+            }
+            return Err(TranscriptError::Io(error));
+        }
+        let old_lock = active_lock.take();
+        drop(active_lock);
         let renamed = Transcript::at(new_path);
         if let Some((lock_file, file)) = old_lock {
             *renamed
@@ -405,6 +418,36 @@ mod tests {
             ContentBlock::ToolUse { id, .. } if id == "toolu_1"
         ));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rename_moves_the_active_lock_sidecar() {
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-transcript-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let transcript = create(&home, &tmp).unwrap();
+        transcript.append(&Message::user_text("active")).unwrap();
+        let old_lock_path = transcript.path().with_extension("jsonl.lock");
+
+        let renamed = transcript.rename("named").unwrap();
+        let new_lock_path = renamed.path().with_extension("jsonl.lock");
+        let competing_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&new_lock_path)
+            .unwrap();
+
+        assert!(!old_lock_path.exists());
+        assert!(new_lock_path.exists());
+        assert!(matches!(
+            competing_lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        let _ = std::fs::remove_dir_all(tmp);
     }
 
     #[test]

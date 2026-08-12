@@ -1,0 +1,122 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tokio::sync::watch;
+
+use crate::api::client::Client;
+use crate::api::contract::SystemBlock;
+use crate::permission::PermissionMode;
+use crate::settings::Settings;
+use crate::transcript::Transcript;
+
+/// Session runtime mutable via slash commands (/model /clear /resume /permissions):
+/// watch channels are read by the query loop each turn.
+#[derive(Clone)]
+pub struct Runtime {
+    pub model_tx: watch::Sender<String>,
+    pub model: watch::Receiver<String>,
+    pub transcript_tx: watch::Sender<Option<Transcript>>,
+    pub transcript: watch::Receiver<Option<Transcript>>,
+    /// Runtime permission rules table (modified via /permissions; initially from settings).
+    pub permissions: Arc<std::sync::Mutex<crate::settings::PermissionRules>>,
+    /// Current provider (/provider switch; "default" = top-level apiKey/apiBaseUrl/env).
+    pub provider_tx: watch::Sender<String>,
+    pub provider: watch::Receiver<String>,
+    /// Current thinking level (/think switch; None = no thinking parameter sent).
+    pub thinking_tx: watch::Sender<Option<String>>,
+    pub thinking: watch::Receiver<Option<String>>,
+    /// MCP connection manager (lazy connection cache; initialized from settings at main
+    /// construction; tests default to an empty manager — no MCP tools, behavior unchanged).
+    pub mcp: Arc<tokio::sync::Mutex<crate::mcp::McpManager>>,
+}
+
+impl Runtime {
+    pub fn new(
+        model: String,
+        transcript: Option<Transcript>,
+        permissions: crate::settings::PermissionRules,
+    ) -> Self {
+        let (model_tx, model) = watch::channel(model);
+        let (transcript_tx, transcript) = watch::channel(transcript);
+        let (provider_tx, provider) = watch::channel("default".to_string());
+        let (thinking_tx, thinking) = watch::channel(None);
+        Self {
+            model_tx,
+            model,
+            transcript_tx,
+            transcript,
+            permissions: Arc::new(std::sync::Mutex::new(permissions)),
+            provider_tx,
+            provider,
+            thinking_tx,
+            thinking,
+            mcp: Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
+                HashMap::new(),
+                Default::default(),
+            ))),
+        }
+    }
+}
+
+/// Full context of a query (shared by TUI and headless).
+#[derive(Clone)]
+pub struct Session {
+    pub client: Client,
+    /// Runtime state mutable via slash commands (model/transcript/permission rules).
+    pub runtime: Runtime,
+    pub permission_mode: PermissionMode,
+    pub settings: Settings,
+    pub system: Vec<SystemBlock>,
+    /// Sub-agent nesting depth (Agent tool recursion).
+    pub depth: usize,
+    /// Session working directory, shared by the hub and all derived sub-sessions.
+    pub cwd: Arc<std::sync::Mutex<PathBuf>>,
+    /// User home (memdir memory location).
+    pub home: PathBuf,
+    /// User config dir (`$XDG_CONFIG_HOME` or `~/.config`), resolved once at
+    /// startup: scoped settings writes and /config source display read it
+    /// (re-reading the env in library code would break test hermeticity).
+    pub user_config_dir: PathBuf,
+    /// Interactive TUI session: suppress stderr progress prints (to avoid polluting the screen).
+    pub quiet: bool,
+    /// Consecutive auto-compact failure count (circuit breaker: skip after MAX_COMPACT_FAILURES).
+    pub compact_failures: Arc<std::sync::atomic::AtomicU64>,
+    /// Watchable registry (command/agent status observation and notifications).
+    pub watch: Arc<crate::watch::WatchRegistry>,
+    /// Task store (shared by the Task tool family + TUI task panel + reminder injection).
+    pub tasks: Arc<crate::tasks::TaskStore>,
+    /// Task panel expand signal (subscribed by the TUI loop).
+    pub expand_tasks: watch::Sender<bool>,
+    /// Sub-agent instance registry (continuation/lifecycle; sub-sessions share the same table).
+    pub agents: Arc<crate::agents::AgentRegistry>,
+    /// Agent channel registry (experimental; sub-sessions share the same table).
+    pub channels: Arc<crate::channels::ChannelRegistry>,
+    /// This session's instance name (sub-agents = Some(registry name); main session None,
+    /// channel member name main).
+    pub instance: Option<String>,
+    /// Images the user mounted on the input box, addressed by the `#[image N]` markers left in
+    /// the message text. Sub-sessions share the table, so the hub forwards an image to a
+    /// subagent by repeating its marker.
+    pub attachments: Arc<crate::api::image::Attachments>,
+}
+
+impl Session {
+    pub fn cwd(&self) -> PathBuf {
+        self.cwd.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn set_cwd(&self, cwd: PathBuf) {
+        *self.cwd.lock().unwrap_or_else(|e| e.into_inner()) = cwd;
+    }
+
+    pub fn permission_mode_str(&self) -> &'static str {
+        match self.permission_mode {
+            PermissionMode::Default => "default",
+            PermissionMode::AcceptEdits => "acceptEdits",
+            PermissionMode::BypassPermissions => "bypassPermissions",
+            PermissionMode::DontAsk => "dontAsk",
+            PermissionMode::Plan => "plan",
+        }
+    }
+}

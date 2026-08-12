@@ -29,6 +29,8 @@ mod permission;
 mod platform;
 mod preapproved;
 mod query;
+mod query_session;
+mod query_turn;
 mod settings;
 mod share;
 mod share_html;

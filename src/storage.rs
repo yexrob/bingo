@@ -347,7 +347,7 @@ fn remove_inactive_transcript(path: &Path) -> Result<bool, StorageError> {
             return Err(io_error("lock transcript for cleanup", &lock_path, source));
         }
     }
-    let _file = match std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
@@ -356,6 +356,13 @@ fn remove_inactive_transcript(path: &Path) -> Result<bool, StorageError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(source) => return Err(io_error("open transcript for cleanup", path, source)),
     };
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
+        Err(std::fs::TryLockError::Error(source)) => {
+            return Err(io_error("lock transcript for cleanup", path, source));
+        }
+    }
     if remove_file(path)? {
         let _ = std::fs::remove_file(lock_path);
         Ok(true)
@@ -544,6 +551,26 @@ mod tests {
                 .join(format!("{}.json", active.name()))
                 .exists()
         );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn cleanup_skips_a_transcript_when_only_its_data_file_is_locked() {
+        let home = temp_home("active-data-lock");
+        let now = SystemTime::now();
+        let transcript = transcripts_dir(&home).join("renamed.jsonl");
+        write_at(&transcript, now - Duration::from_secs(31 * 24 * 60 * 60));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&transcript)
+            .unwrap();
+        file.try_lock().unwrap();
+
+        let report = cleanup_with_policy_at(&home, None, test_policy(0), now).unwrap();
+
+        assert_eq!(report.transcripts, 0);
+        assert!(transcript.exists());
         let _ = std::fs::remove_dir_all(home);
     }
 

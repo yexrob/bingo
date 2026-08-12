@@ -154,11 +154,12 @@ async fn search(
 
 /// DDG result block regex: `result__a` (title/URL) and `result__snippet` (snippet).
 /// (?s): there may be newlines between the a tag and the snippet div.
+#[allow(clippy::expect_used)]
 static RESULT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
         r#"(?s)class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</a>"#,
     )
-    .expect("static result regex must compile") // unreachable: literal pattern compiles
+    .expect("static result regex must compile")
 });
 
 /// Parse DDG HTML result blocks.

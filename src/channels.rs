@@ -209,6 +209,14 @@ impl ChannelRegistry {
         *self.share.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
+    #[cfg(test)]
+    pub fn has_share(&self) -> bool {
+        self.share
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
+    }
+
     /// Write a channel's latest metadata (mode + members) into the share document (no-op without a store).
     fn sync_channel_meta(&self, name: &str) {
         let Some(store) = self.share.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
@@ -337,9 +345,20 @@ impl ChannelRegistry {
 
     /// Remove an instance from all channels on deletion (called by the tool layer on AgentControl delete).
     pub fn remove_member_everywhere(&self, member: &str) {
-        let mut inner = self.lock();
-        for ch in inner.channels.values_mut() {
-            ch.members.retain(|m| m != member);
+        let changed = {
+            let mut inner = self.lock();
+            let mut changed = Vec::new();
+            for (name, channel) in &mut inner.channels {
+                let before = channel.members.len();
+                channel.members.retain(|candidate| candidate != member);
+                if channel.members.len() != before {
+                    changed.push(name.clone());
+                }
+            }
+            changed
+        };
+        for name in changed {
+            self.sync_channel_meta(&name);
         }
     }
 
@@ -778,6 +797,32 @@ mod tests {
         let doc = reloaded.snapshot();
         assert_eq!(doc.channels[0].messages[0].seq, 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn removing_a_member_everywhere_persists_channel_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "bingo-ch-{}-remove-member-share",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("s.json");
+        let store = crate::share::ShareStore::load_or_create(&path)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let reg = ChannelRegistry::new(ChannelLimits::default());
+        reg.attach_share(store);
+        reg.create("t", vec!["a".into(), "b".into()], ChannelMode::Free)
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        reg.remove_member_everywhere("a");
+
+        let reloaded = crate::share::ShareStore::load_or_create(&path)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            reloaded.snapshot().channels[0].members,
+            vec!["main", "user", "b"]
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -497,6 +497,14 @@ impl AgentRegistry {
         *self.share.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
+    #[cfg(test)]
+    pub fn has_share(&self) -> bool {
+        self.share
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
+    }
+
     /// Attach the prompt surface subagents borrow (called once by whoever owns the UI).
     pub fn attach_ask(&self, ask: Arc<crate::query::AskFn>) {
         *self.ask.lock().unwrap_or_else(|e| e.into_inner()) = Some(ask);

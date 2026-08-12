@@ -1,24 +1,20 @@
-use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use futures_util::StreamExt;
 use thiserror::Error;
 use tokio::sync::watch;
 
-use crate::api::client::{AssistantAccumulator, Client, ClientError};
-use crate::api::contract::{NeutralRequest, StreamEvent, SystemBlock, ThinkingLevel};
-use crate::api::types::{ContentBlock, DEFAULT_MAX_TOKENS, Message, Role};
+use crate::api::client::ClientError;
+use crate::api::contract::StreamEvent;
+use crate::api::types::{ContentBlock, Message, Role};
 use crate::budget::MAX_RESULT_CHARS;
 use crate::compact::{TokenGate, check_and_compact, compact_after_overflow};
 use crate::error::ErrorCode;
 use crate::hooks::{run_post_tool_use, run_pre_tool_use, run_stop_hooks, run_user_prompt_submit};
 use crate::permission::{PermissionBehavior, PermissionMode, can_use_tool};
-use crate::settings::{HooksConfig, Settings};
-use crate::tool::executor::{PendingCall, cancel_requested, execute_calls};
-use crate::tool::{Tool, ToolContext, ToolError, ToolResult, find_tool, tool_params};
-use crate::transcript::Transcript;
+use crate::settings::HooksConfig;
+use crate::tool::executor::{PendingCall, execute_calls};
+use crate::tool::{Tool, ToolContext, ToolError, ToolResult, find_tool};
 
 #[derive(Debug, Error)]
 pub enum QueryError {
@@ -55,10 +51,10 @@ pub struct QueryOutcome {
     pub aborted: bool,
 }
 
-struct InboxWake {
+pub(crate) struct InboxWake {
     instance: String,
     rx: watch::Receiver<u64>,
-    output_chars: usize,
+    pub(crate) output_chars: usize,
     claimed: Vec<crate::agents::InboxItem>,
 }
 
@@ -87,7 +83,7 @@ impl InboxWake {
             .restore_inbox(&self.instance, std::mem::take(&mut self.claimed));
     }
 
-    async fn changed(&mut self) {
+    pub(crate) async fn changed(&mut self) {
         if self.rx.changed().await.is_err() {
             std::future::pending::<()>().await;
         }
@@ -187,96 +183,7 @@ mention this reminder to the user."
     messages.push(Message::user_text(text));
 }
 
-/// Session runtime mutable via slash commands (/model /clear /resume /permissions):
-/// watch channels are read by the query loop each turn.
-#[derive(Clone)]
-pub struct Runtime {
-    pub model_tx: watch::Sender<String>,
-    pub model: watch::Receiver<String>,
-    pub transcript_tx: watch::Sender<Option<Transcript>>,
-    pub transcript: watch::Receiver<Option<Transcript>>,
-    /// Runtime permission rules table (modified via /permissions; initially from settings).
-    pub permissions: Arc<std::sync::Mutex<crate::settings::PermissionRules>>,
-    /// Current provider (/provider switch; "default" = top-level apiKey/apiBaseUrl/env).
-    pub provider_tx: watch::Sender<String>,
-    pub provider: watch::Receiver<String>,
-    /// Current thinking level (/think switch; None = no thinking parameter sent).
-    pub thinking_tx: watch::Sender<Option<String>>,
-    pub thinking: watch::Receiver<Option<String>>,
-    /// MCP connection manager (lazy connection cache; initialized from settings at main
-    /// construction; tests default to an empty manager — no MCP tools, behavior unchanged).
-    pub mcp: Arc<tokio::sync::Mutex<crate::mcp::McpManager>>,
-}
-
-impl Runtime {
-    pub fn new(
-        model: String,
-        transcript: Option<Transcript>,
-        permissions: crate::settings::PermissionRules,
-    ) -> Self {
-        let (model_tx, model) = watch::channel(model);
-        let (transcript_tx, transcript) = watch::channel(transcript);
-        let (provider_tx, provider) = watch::channel("default".to_string());
-        let (thinking_tx, thinking) = watch::channel(None);
-        Self {
-            model_tx,
-            model,
-            transcript_tx,
-            transcript,
-            permissions: Arc::new(std::sync::Mutex::new(permissions)),
-            provider_tx,
-            provider,
-            thinking_tx,
-            thinking,
-            mcp: Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
-                HashMap::new(),
-                Default::default(),
-            ))),
-        }
-    }
-}
-
-/// Full context of a query (shared by TUI and headless).
-#[derive(Clone)]
-pub struct Session {
-    pub client: Client,
-    /// Runtime state mutable via slash commands (model/transcript/permission rules).
-    pub runtime: Runtime,
-    pub permission_mode: PermissionMode,
-    pub settings: Settings,
-    pub system: Vec<SystemBlock>,
-    /// Sub-agent nesting depth (Agent tool recursion).
-    pub depth: usize,
-    /// Session working directory, shared by the hub and all derived sub-sessions.
-    pub cwd: Arc<std::sync::Mutex<PathBuf>>,
-    /// User home (memdir memory location).
-    pub home: PathBuf,
-    /// User config dir (`$XDG_CONFIG_HOME` or `~/.config`), resolved once at
-    /// startup: scoped settings writes and /config source display read it
-    /// (re-reading the env in library code would break test hermeticity).
-    pub user_config_dir: PathBuf,
-    /// Interactive TUI session: suppress stderr progress prints (to avoid polluting the screen).
-    pub quiet: bool,
-    /// Consecutive auto-compact failure count (circuit breaker: skip after MAX_COMPACT_FAILURES).
-    pub compact_failures: Arc<std::sync::atomic::AtomicU64>,
-    /// Watchable registry (command/agent status observation and notifications).
-    pub watch: Arc<crate::watch::WatchRegistry>,
-    /// Task store (shared by the Task tool family + TUI task panel + reminder injection).
-    pub tasks: Arc<crate::tasks::TaskStore>,
-    /// Task panel expand signal (subscribed by the TUI loop).
-    pub expand_tasks: watch::Sender<bool>,
-    /// Sub-agent instance registry (continuation/lifecycle; sub-sessions share the same table).
-    pub agents: Arc<crate::agents::AgentRegistry>,
-    /// Agent channel registry (experimental; sub-sessions share the same table).
-    pub channels: Arc<crate::channels::ChannelRegistry>,
-    /// This session's instance name (sub-agents = Some(registry name); main session None,
-    /// channel member name main).
-    pub instance: Option<String>,
-    /// Images the user mounted on the input box, addressed by the `#[image N]` markers left in
-    /// the message text. Sub-sessions share the table, so the hub forwards an image to a
-    /// subagent by repeating its marker.
-    pub attachments: Arc<crate::api::image::Attachments>,
-}
+pub use crate::query_session::{Runtime, Session};
 
 /// Single tool completion event.
 #[derive(Debug, Clone)]
@@ -412,165 +319,7 @@ pub fn headless_hooks() -> UiHooks {
     }
 }
 
-/// Single-turn result: assistant message + the turn's tool_use blocks + stop_reason.
-struct Turn {
-    assistant: Message,
-    tool_uses: Vec<ContentBlock>,
-    stop_reason: Option<String>,
-    /// Cancelled while reading the stream (assistant incomplete, whole turn discarded).
-    aborted: bool,
-}
-
-/// One turn: request the model once and accumulate the assistant reply.
-async fn one_turn(
-    session: &Arc<Session>,
-    messages: &[Message],
-    tools: &[Box<dyn Tool>],
-    ui: &mut UiHooks,
-    mut cancel: Option<&mut watch::Receiver<bool>>,
-    mut inbox: Option<&mut InboxWake>,
-) -> Result<Turn, QueryError> {
-    let model = session.runtime.model.borrow().clone();
-    let thinking = session.runtime.thinking.borrow().clone();
-    // Thinking gate: models that reject the parameter (DeepSeek family) get
-    // none regardless of the configured level — the UI shows the same fact
-    // when the level is set, so display and wire agree.
-    let thinking = if crate::api::models::supports_thinking(&model) {
-        ThinkingLevel::parse(thinking.as_deref())
-    } else {
-        None
-    };
-    let request = NeutralRequest {
-        model,
-        max_tokens: DEFAULT_MAX_TOKENS,
-        system: session.system.clone(),
-        messages: messages.to_vec(),
-        tools: tool_params(tools),
-        stream: true,
-        thinking,
-    };
-    // The connect phase is also interruptible (Esc gives up immediately on a hanging/
-    // retrying connection, without waiting for output to start).
-    let mut acc = AssistantAccumulator::new();
-    let aborted_turn = |acc: &AssistantAccumulator| Turn {
-        assistant: acc.message(),
-        tool_uses: Vec::new(),
-        stop_reason: None,
-        aborted: true,
-    };
-    let stream_request = session.client.stream(&request);
-    futures_util::pin_mut!(stream_request);
-    let mut stream = loop {
-        let result = match (cancel.as_deref_mut(), inbox.as_deref_mut()) {
-            (Some(cancel), Some(inbox)) => {
-                if *cancel.borrow_and_update() {
-                    return Ok(aborted_turn(&acc));
-                }
-                tokio::select! {
-                    stream = &mut stream_request => Some(stream),
-                    _ = cancel_requested(cancel) => return Ok(aborted_turn(&acc)),
-                    _ = inbox.changed() => None,
-                }
-            }
-            (Some(cancel), None) => {
-                if *cancel.borrow_and_update() {
-                    return Ok(aborted_turn(&acc));
-                }
-                tokio::select! {
-                    stream = &mut stream_request => Some(stream),
-                    _ = cancel_requested(cancel) => return Ok(aborted_turn(&acc)),
-                }
-            }
-            (None, Some(inbox)) => tokio::select! {
-                stream = &mut stream_request => Some(stream),
-                _ = inbox.changed() => None,
-            },
-            (None, None) => Some((&mut stream_request).await),
-        };
-        if let Some(stream) = result {
-            break stream?;
-        }
-    };
-    let mut tool_uses = Vec::new();
-    let mut aborted = false;
-    loop {
-        let event = match (cancel.as_deref_mut(), inbox.as_deref_mut()) {
-            (Some(cancel), Some(inbox)) => tokio::select! {
-                maybe = stream.next() => maybe,
-                _ = cancel_requested(cancel) => {
-                    aborted = true;
-                    None
-                }
-                _ = inbox.changed() => continue,
-            },
-            (Some(cancel), None) => tokio::select! {
-                maybe = stream.next() => maybe,
-                _ = cancel_requested(cancel) => {
-                    aborted = true;
-                    None
-                }
-            },
-            (None, Some(inbox)) => tokio::select! {
-                maybe = stream.next() => maybe,
-                _ = inbox.changed() => continue,
-            },
-            (None, None) => stream.next().await,
-        };
-        let Some(event) = event else { break };
-        let event = event?;
-        if let StreamEvent::TextDelta { text, .. } = &event
-            && let Some(inbox) = inbox.as_deref_mut()
-        {
-            inbox.output_chars += text.chars().count();
-        }
-        (ui.on_event)(&event);
-        if let Err(e) = acc.push(&event) {
-            return Err(QueryError::Protocol(e));
-        }
-        match &event {
-            StreamEvent::ApiError { message } => {
-                return Err(QueryError::Protocol(message.clone()));
-            }
-            StreamEvent::BlockStop { index } => {
-                if let Some(ContentBlock::ToolUse { id, name, input }) = acc.content.get(*index) {
-                    tool_uses.push(ContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: input.clone(),
-                    });
-                    (ui.on_tool_ready)(name.clone(), input.clone(), false);
-                }
-            }
-            _ => {}
-        }
-    }
-    acc.finish();
-    Ok(Turn {
-        assistant: acc.message(),
-        tool_uses,
-        stop_reason: acc.stop_reason,
-        aborted,
-    })
-}
-
-async fn retry_after_overflow(
-    session: &Arc<Session>,
-    messages: &[Message],
-    tools: &[Box<dyn Tool>],
-    ui: &mut UiHooks,
-    cancel: Option<&mut watch::Receiver<bool>>,
-    inbox: Option<&mut InboxWake>,
-) -> Result<Turn, QueryError> {
-    match one_turn(session, messages, tools, ui, cancel, inbox).await {
-        Err(error @ QueryError::Client(ClientError::ContextOverflow { .. })) => {
-            session
-                .compact_failures
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err(error)
-        }
-        outcome => outcome,
-    }
-}
+use crate::query_turn::{one_turn, retry_after_overflow};
 
 fn tool_result_text(tool_use_id: &str, text: impl Into<String>) -> ContentBlock {
     ContentBlock::ToolResult {
@@ -638,20 +387,6 @@ fn permission_mode_str(mode: PermissionMode) -> &'static str {
         PermissionMode::BypassPermissions => "bypassPermissions",
         PermissionMode::DontAsk => "dontAsk",
         PermissionMode::Plan => "plan",
-    }
-}
-
-impl Session {
-    pub fn cwd(&self) -> PathBuf {
-        self.cwd.lock().unwrap_or_else(|e| e.into_inner()).clone()
-    }
-
-    pub fn set_cwd(&self, cwd: PathBuf) {
-        *self.cwd.lock().unwrap_or_else(|e| e.into_inner()) = cwd;
-    }
-
-    pub fn permission_mode_str(&self) -> &'static str {
-        permission_mode_str(self.permission_mode)
     }
 }
 
@@ -1631,6 +1366,9 @@ fn normalize_synthetic_bash_calls(messages: &mut Vec<Message>) {
 fn is_cancelled(cancel: &Option<watch::Receiver<bool>>) -> bool {
     cancel.as_ref().is_some_and(|rx| *rx.borrow())
 }
+
+#[cfg(test)]
+use crate::transcript::Transcript;
 
 #[cfg(test)]
 mod tests {

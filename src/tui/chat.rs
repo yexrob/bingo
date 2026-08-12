@@ -2603,10 +2603,18 @@ impl Chat {
         self.estimate_context_usage(&messages);
     }
 
+    fn rebind_tasks_to_transcript(&self, transcript: Option<&crate::transcript::Transcript>) {
+        let key = transcript
+            .map(crate::transcript::Transcript::name)
+            .filter(|key| !key.is_empty())
+            .unwrap_or_else(|| crate::tasks::project_task_key(&self.session.cwd()));
+        self.session.tasks.rebind(&key);
+    }
+
     fn attach_share_to_transcript(&mut self, transcript: Option<&crate::transcript::Transcript>) {
+        self.session.agents.detach_share();
+        self.session.channels.detach_share();
         let Some(transcript) = transcript else {
-            self.session.agents.detach_share();
-            self.session.channels.detach_share();
             return;
         };
         let path = crate::share::shares_dir(&self.session.home)
@@ -2628,6 +2636,7 @@ impl Chat {
         let cwd = std::path::PathBuf::from(&self.cwd);
         let new_transcript = crate::transcript::create(&session.home, &cwd).ok();
         let _ = session.runtime.transcript_tx.send(new_transcript.clone());
+        self.rebind_tasks_to_transcript(new_transcript.as_ref());
         self.attach_share_to_transcript(new_transcript.as_ref());
         self.messages.clear();
         self.stream_msg = None;
@@ -3083,6 +3092,11 @@ impl Chat {
         match t.rename(arg) {
             Ok(new_t) => {
                 let name = new_t.name();
+                if let Err(error) = self.session.tasks.rename_key(&old_name, &name) {
+                    self.push_warning(format!(
+                        "task data could not follow the renamed session ({error}); tasks remain under the previous session name"
+                    ));
+                }
                 if let Err(error) =
                     crate::share::rename_session_sidecars(&self.session.home, &old_name, &name)
                 {
@@ -3132,6 +3146,7 @@ impl Chat {
         }
         let count = found.load_messages().unwrap_or_default().len();
         let _ = self.session.runtime.transcript_tx.send(Some(found.clone()));
+        self.rebind_tasks_to_transcript(Some(found));
         self.attach_share_to_transcript(Some(found));
         self.messages.clear();
         self.slash_lines.clear();
@@ -3213,6 +3228,7 @@ impl Chat {
                 let count = t.load_messages().unwrap_or_default().len();
                 self.resume_menu = None;
                 let _ = self.session.runtime.transcript_tx.send(Some(t.clone()));
+                self.rebind_tasks_to_transcript(Some(&t));
                 self.attach_share_to_transcript(Some(&t));
                 self.messages.clear();
                 self.slash_lines.clear();

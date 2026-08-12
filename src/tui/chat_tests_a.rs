@@ -66,6 +66,39 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
 }
 
 #[test]
+fn share_rebind_failure_detaches_the_previous_store() {
+    let home = std::env::temp_dir().join(format!("bingo-share-rebind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let mut chat = test_chat_home(home.clone());
+    let initial = crate::transcript::create(&home, &home).unwrap();
+    initial
+        .append(&crate::api::types::Message::user_text("active"))
+        .unwrap();
+    let store = crate::share::ShareStore::load_or_create(
+        &crate::share::shares_dir(&home).join(format!("{}.json", initial.name())),
+    )
+    .unwrap();
+    chat.session.agents.attach_share(store.clone());
+    chat.session.channels.attach_share(store);
+    let destination = initial.rename("destination").unwrap();
+    let destination_share =
+        crate::share::shares_dir(&home).join(format!("{}.json", destination.name()));
+    std::fs::create_dir_all(&destination_share).unwrap();
+
+    chat.attach_share_to_transcript(Some(&destination));
+
+    assert!(!chat.session.agents.has_share());
+    assert!(!chat.session.channels.has_share());
+    assert!(
+        chat.warnings
+            .iter()
+            .any(|(_, warning)| warning.contains("share store unavailable"))
+    );
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
 fn slash_gc_cleans_storage_and_reports_the_policy() {
     let home = std::env::temp_dir().join(format!("bingo-slash-gc-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
@@ -1535,13 +1568,39 @@ fn slash_rename_renames_transcript() {
     let t = crate::transcript::create(&home, &tmp).unwrap();
     // create only makes the directory; drop a message first so the file exists.
     let _ = t.append(&crate::api::types::Message::user_text("hi"));
-    let mut chat = test_chat();
+    let old_name = t.name();
+    let task_store = crate::tasks::TaskStore::new(&home, &old_name);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(task_store.create(&crate::tasks::Task {
+        id: String::new(),
+        subject: "rename task".into(),
+        description: String::new(),
+        active_form: None,
+        status: crate::tasks::TaskStatus::Pending,
+        owner: None,
+        blocks: Vec::new(),
+        blocked_by: Vec::new(),
+        metadata: Default::default(),
+    }))
+    .unwrap();
+    let mut chat = test_chat_home(home.clone());
     let _ = chat.session.runtime.transcript_tx.send(Some(t));
+    chat.session.tasks.rebind(&old_name);
     chat.input = "/rename my-session".to_string();
     chat.submit();
     let t = chat.session.runtime.transcript.borrow().clone().unwrap();
     assert!(t.name().contains("my-session"), "{}", t.name());
     assert!(t.path().exists());
+    assert_eq!(
+        chat.tasks()[0].text,
+        "rename task",
+        "renaming the transcript migrates its task list to the renamed key"
+    );
+    assert_eq!(
+        crate::tasks::TaskStore::new(&home, &t.name()).list_ui()[0].subject,
+        "rename task",
+        "the renamed task list is restored by its new session key"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -1602,6 +1661,10 @@ fn slash_resume_lists_and_switches() {
         current.name(),
         name_b,
         "Enter switches the session (snapshot by index)"
+    );
+    assert!(
+        chat.tasks().is_empty(),
+        "session b starts with its own tasks"
     );
     assert!(chat.context_usage.used > 0, "resumed history is estimated");
 
