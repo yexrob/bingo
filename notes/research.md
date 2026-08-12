@@ -727,3 +727,22 @@ in tests instead of forking control flow on `cfg(test)`. The `Reconnecting... ` 
 prefix that TUI and subagent views key their replacement logic on is a shared constant
 (`query::RECONNECT_WARNING_PREFIX`), not a repeated literal. Retry-after metadata additionally
 accepts string forms (`"3s"`, `"250ms"`, bare numeric strings) and the `retry_delay` key.
+
+### D63. A direct message is a private lane, and the notes say which surface reads the turn text
+
+A member DM'd by the user would answer in the crew channel. The routing was never wrong — a DM
+delivers to one inbox, and the reply is the turn text the DM window renders — the member's model
+of the surfaces was: `SUBAGENT_NOTE` claimed the turn text "is not displayed to the user", and
+`CHANNEL_NOTE` mentioned `user` only as a room speaker to be answered with Post. From inside that
+description, the one imaginable way to reach the human is a channel Post, so private questions
+were answered in front of the room. The fix is words, not plumbing (the intent-layer/code-layer
+rule): `SUBAGENT_NOTE` now states the DM window exists and that its prose is exactly what the
+user reads there, and `CHANNEL_NOTE` gains the medium rule — *where* a message arrived decides
+where the answer goes. Channel traffic is recognizable by its `[#channel msg #N]` tag; untagged
+text was sent to you alone, is answered in turn text, never with Post, and its content stays out
+of channels unless the message itself says otherwise.
+
+DMs stay sender-anonymous on purpose: the hub's `SendMessage` and the user's composer feed the
+same `deliver`, and distinguishing them would add plumbing (an `InboxItem` field, UI scaffold
+filtering) that the reply medium does not need — both senders read the same turn text. If tone
+ever warrants it, tagging the sender is the follow-up, not a prerequisite.
