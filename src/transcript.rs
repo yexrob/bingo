@@ -94,6 +94,38 @@ pub fn create(home: &Path, cwd: &Path) -> Result<Transcript, TranscriptError> {
     Ok(Transcript::at(path))
 }
 
+pub fn create_reserved(home: &Path, cwd: &Path) -> Result<Transcript, TranscriptError> {
+    let dir = transcripts_dir(home);
+    std::fs::create_dir_all(&dir)?;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let name = cwd
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let slug = slugify(&name);
+    for suffix in 0u64.. {
+        let stem = if suffix == 0 {
+            format!("{slug}-{ts}")
+        } else {
+            format!("{slug}-{ts}-{suffix}")
+        };
+        let path = dir.join(format!("{stem}.jsonl"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(Transcript::at(path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(TranscriptError::Io(error)),
+        }
+    }
+    unreachable!()
+}
+
 /// All sessions (/resume list), most recently modified first.
 pub fn list(home: &Path) -> Result<Vec<Transcript>, TranscriptError> {
     let dir = transcripts_dir(home);
@@ -228,6 +260,15 @@ impl Transcript {
     pub fn activate(&self) -> Result<(), TranscriptError> {
         drop(self.ensure_active_lock()?);
         Ok(())
+    }
+
+    /// Remove this session's transcript. A never-written transcript is already deleted.
+    pub fn delete(&self) -> Result<(), TranscriptError> {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(TranscriptError::Io(error)),
+        }
     }
 
     /// Full-file rewrite (persisted after a manual /compact).

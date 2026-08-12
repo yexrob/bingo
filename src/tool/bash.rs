@@ -463,7 +463,7 @@ impl Tool for BashTool {
 
         Ok(ToolResult {
             content: serde_json::Value::String(text),
-            is_error: false,
+            is_error: output.exit_code != 0,
             diff: None,
         })
     }
@@ -1076,6 +1076,31 @@ mod tests {
             notes.iter().any(|n| n.contains("finished")),
             "output in notification: {notes:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn non_zero_exit_is_flagged_as_error() {
+        let watch = crate::watch::WatchRegistry::new();
+        let ctx = ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch: watch.clone(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+        };
+        let tool = BashTool::new();
+        let result = tool
+            .call(serde_json::json!({"command": "sh -c 'exit 7'"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.is_error, "non-zero exit must be an error result");
+        let text = result.content.as_str().unwrap();
+        assert!(text.contains("[Exited with code 7]"), "output: {text}");
     }
 
     #[tokio::test]

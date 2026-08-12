@@ -406,6 +406,7 @@ pub(super) fn start_group(chat: &mut Chat) {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Read".into(),
             input: json!({"file_path": path}),
             standalone: false,
@@ -428,10 +429,11 @@ pub(super) fn start_group_done(chat: &mut Chat) {
         let _ = chat
             .events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                tool_call_id: "test-tool".into(),
                 name: "Read".into(),
                 summary: summary.into(),
                 output: out.into(),
-                is_error: false,
+                status: crate::query::ToolCallStatus::Done,
                 duration_ms: 0,
                 diff: None,
             }));
@@ -647,6 +649,7 @@ fn hidden_tools_produce_no_activities() {
         let _ = chat.events.send(UiEvent::ToolStart { name: name.into() });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: name.into(),
             input: json!({}),
             standalone: false,
@@ -668,6 +671,7 @@ fn hidden_tools_produce_no_activities() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Bash".into(),
         input: json!({"command": "ls"}),
         standalone: false,
@@ -998,6 +1002,7 @@ fn bash_preview_expands_with_output() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Bash".into(),
         input: json!({"command": "ls"}),
         standalone: true,
@@ -1010,10 +1015,11 @@ fn bash_preview_expands_with_output() {
     let _ = chat
         .events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "test-tool".into(),
             name: "Bash".into(),
             summary: "$ ls".into(),
             output: "$ ls\nREADME.md\nsrc\n[Exited with code 0]".into(),
-            is_error: false,
+            status: crate::query::ToolCallStatus::Done,
             duration_ms: 5,
             diff: None,
         }));
@@ -1039,6 +1045,7 @@ fn model_bash_still_folds_into_group() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Bash".into(),
         input: json!({"command": "cargo test"}),
         standalone: false,
@@ -3528,6 +3535,7 @@ fn parallel_reads_collapse_to_one_line() {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "Read".into(),
             input: json!({"file_path": path}),
             standalone: false,
@@ -3565,6 +3573,7 @@ fn consecutive_agent_control_calls_fold_and_name_their_target() {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "AgentControl".into(),
             input,
             standalone: false,
@@ -3602,6 +3611,7 @@ fn an_agent_control_call_no_longer_breaks_a_file_group() {
         let _ = chat.events.send(UiEvent::ToolStart { name: name.into() });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: name.into(),
             input,
             standalone: false,
@@ -3633,6 +3643,7 @@ fn a_failure_inside_the_fold_is_named_on_the_summary_row() {
         });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: "AgentControl".into(),
             input,
             standalone: false,
@@ -3642,10 +3653,11 @@ fn a_failure_inside_the_fold_is_named_on_the_summary_row() {
     let _ = chat
         .events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "test-tool".into(),
             name: "AgentControl".into(),
             summary: "stop ghost".into(),
             output: "no subagent named ghost".into(),
-            is_error: true,
+            status: crate::query::ToolCallStatus::Error,
             duration_ms: 0,
             diff: None,
         }));
@@ -3673,20 +3685,22 @@ fn ctrl_o_expands_group_to_individual_tools() {
     let _ = chat
         .events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "test-tool".into(),
             name: "Read".into(),
             summary: "Read a.md".into(),
             output: "l1\nl2\nl3".into(),
-            is_error: false,
+            status: crate::query::ToolCallStatus::Done,
             duration_ms: 0,
             diff: None,
         }));
     let _ = chat
         .events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "test-tool".into(),
             name: "Read".into(),
             summary: "Read b.md".into(),
             output: "x\ny".into(),
-            is_error: false,
+            status: crate::query::ToolCallStatus::Done,
             duration_ms: 0,
             diff: None,
         }));
@@ -3721,6 +3735,7 @@ fn non_collapsible_tool_breaks_group() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: json!({"file_path": "a.md"}),
         standalone: false,
@@ -3730,6 +3745,7 @@ fn non_collapsible_tool_breaks_group() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "WebSearch".into(),
         input: json!({"query": "rust"}),
         standalone: false,
@@ -3759,6 +3775,7 @@ fn tool_after_thinking_placeholder_groups_without_panic() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: json!({"file_path": "a.md"}),
         standalone: false,

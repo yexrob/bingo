@@ -14,6 +14,7 @@ fn interleaved_group_keeps_text_position() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: json!({"file_path": "a.md"}),
         standalone: false,
@@ -89,6 +90,7 @@ fn running_tool_shows_input_summary_after_ready() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Skill".into(),
         input: json!({"skill": "pdf", "args": "doc.md"}),
         standalone: false,
@@ -103,10 +105,11 @@ fn running_tool_shows_input_summary_after_ready() {
     let _ = chat
         .events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "test-tool".into(),
             name: "Skill".into(),
             summary: "pdf doc.md".into(),
             output: "✦ pdf — read /tmp/skills/SKILL.md".into(),
-            is_error: false,
+            status: crate::query::ToolCallStatus::Done,
             diff: None,
             duration_ms: 3210,
         }));
@@ -334,6 +337,7 @@ async fn draw_with_long_cjk_stream_and_activities_does_not_panic() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Bash".into(),
         input: json!({"command": "cargo clippy"}),
         standalone: false,
@@ -356,10 +360,11 @@ async fn draw_with_long_cjk_stream_and_activities_does_not_panic() {
     let _ = chat
         .events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "test-tool".into(),
             name: "Bash".into(),
             summary: "$ cargo clippy".into(),
             output: "ok".into(),
-            is_error: false,
+            status: crate::query::ToolCallStatus::Done,
             diff: None,
             duration_ms: 3000,
         }));
@@ -495,6 +500,7 @@ fn bash_folds_into_group_with_count() {
         let _ = chat.events.send(UiEvent::ToolStart { name: name.into() });
         chat.drain_events();
         let _ = chat.events.send(UiEvent::ToolReady {
+            tool_call_id: "test-tool".into(),
             name: name.into(),
             input,
             standalone: false,
@@ -522,10 +528,11 @@ fn bash_folds_into_group_with_count() {
         let _ = chat
             .events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                tool_call_id: "test-tool".into(),
                 name: summary.split(' ').next().unwrap().into(),
                 summary: summary.into(),
                 output: out.into(),
-                is_error: false,
+                status: crate::query::ToolCallStatus::Done,
                 diff: None,
                 duration_ms: 1,
             }));
@@ -548,6 +555,7 @@ fn running_group_shows_hint_line_then_hides_when_done() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: json!({"file_path": "package.json"}),
         standalone: false,
@@ -561,10 +569,11 @@ fn running_group_shows_hint_line_then_hides_when_done() {
     let _ = chat
         .events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "test-tool".into(),
             name: "Read".into(),
             summary: "Read package.json".into(),
             output: "l1".into(),
-            is_error: false,
+            status: crate::query::ToolCallStatus::Done,
             diff: None,
             duration_ms: 3,
         }));
@@ -589,6 +598,7 @@ fn group_survives_rounds_and_thinking_until_text() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Grep".into(),
         input: json!({"pattern": "nomatch"}),
         standalone: false,
@@ -604,6 +614,7 @@ fn group_survives_rounds_and_thinking_until_text() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Grep".into(),
         input: json!({"pattern": "another"}),
         standalone: false,
@@ -617,6 +628,7 @@ fn group_survives_rounds_and_thinking_until_text() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: json!({"file_path": "a.md"}),
         standalone: false,
@@ -635,6 +647,7 @@ fn group_survives_rounds_and_thinking_until_text() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Grep".into(),
         input: json!({"pattern": "post-text"}),
         standalone: false,
@@ -662,10 +675,11 @@ fn expand_running_then_complete_then_collapse_back() {
         let _ = chat
             .events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                tool_call_id: "test-tool".into(),
                 name: "Read".into(),
                 summary: summary.into(),
                 output: out.into(),
-                is_error: false,
+                status: crate::query::ToolCallStatus::Done,
                 duration_ms: 0,
                 diff: None,
             }));
@@ -719,10 +733,11 @@ fn collapse_after_expand_then_expand_again() {
         let _ = chat
             .events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+                tool_call_id: "test-tool".into(),
                 name: "Read".into(),
                 summary: summary.into(),
                 output: out.into(),
-                is_error: false,
+                status: crate::query::ToolCallStatus::Done,
                 duration_ms: 0,
                 diff: None,
             }));
@@ -811,6 +826,7 @@ fn multiline_hint_stays_one_row() {
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
         name: "Bash".into(),
         input: json!({"command": "grep -rn foo \\\n  --include='*.rs' .\nls -la"}),
         standalone: false,
@@ -1335,10 +1351,11 @@ fn expand_transcript_rewinds_and_expands_everything() {
     let _ = chat
         .events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "test-tool".into(),
             name: "Read".into(),
             summary: "Read a.md".into(),
             output: "l1\nl2\nl3".into(),
-            is_error: false,
+            status: crate::query::ToolCallStatus::Done,
             duration_ms: 0,
             diff: None,
         }));

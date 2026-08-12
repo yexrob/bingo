@@ -319,7 +319,7 @@ fn subagent_hooks(
         on_context_usage: Arc::new(move |used, _window| {
             context_agents.set_context_tokens(&context_instance, used);
         }),
-        on_tool_ready: Box::new(move |name, input, _standalone| {
+        on_tool_ready: Box::new(move |_tool_call_id, name, input, _standalone| {
             tool_registry.touch(&tool_instance);
             let glyph = crate::tui::activities::tool_glyph(&name);
             let shown = crate::tui::activities::display_tool_name(&name);
@@ -2935,7 +2935,12 @@ mod tests {
             index: 0,
             thinking: "phase".into(),
         });
-        (ui.on_tool_ready)("Read".into(), serde_json::json!({"file_path": "a"}), false);
+        (ui.on_tool_ready)(
+            "test-tool".into(),
+            "Read".into(),
+            serde_json::json!({"file_path": "a"}),
+            false,
+        );
         (ui.on_event)(&crate::api::contract::StreamEvent::ThinkingDelta {
             index: 0,
             thinking: "second phase".into(),
@@ -2990,13 +2995,23 @@ mod tests {
             index: 0,
             text: "committed".into(),
         });
-        (ui.on_tool_ready)("Read".into(), serde_json::json!({"file_path":"a"}), false);
+        (ui.on_tool_ready)(
+            "test-tool".into(),
+            "Read".into(),
+            serde_json::json!({"file_path":"a"}),
+            false,
+        );
         (ui.on_round_end)();
         (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
             index: 0,
             text: "partial".into(),
         });
-        (ui.on_tool_ready)("Bash".into(), serde_json::json!({"command":"bad"}), false);
+        (ui.on_tool_ready)(
+            "test-tool".into(),
+            "Bash".into(),
+            serde_json::json!({"command":"bad"}),
+            false,
+        );
         (ui.on_stream_retry)();
         (ui.on_warning)("Reconnecting... 2/10".into());
         (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
@@ -3061,6 +3076,7 @@ mod tests {
             output_tokens: Some(12),
         });
         (ui.on_tool_ready)(
+            "test-tool".into(),
             "Read".into(),
             serde_json::json!({"file_path":"src/main.rs"}),
             false,
@@ -3070,6 +3086,7 @@ mod tests {
             output_tokens: Some(7),
         });
         (ui.on_tool_ready)(
+            "test-tool".into(),
             "Bash".into(),
             serde_json::json!({"command":"cargo check"}),
             false,
@@ -3126,16 +3143,22 @@ mod tests {
         assert!(streamed > inserted);
 
         std::thread::sleep(std::time::Duration::from_millis(2));
-        (ui.on_tool_ready)("Read".into(), serde_json::json!({"file_path": "a"}), false);
+        (ui.on_tool_ready)(
+            "test-tool".into(),
+            "Read".into(),
+            serde_json::json!({"file_path": "a"}),
+            false,
+        );
         let ready = session.agents.list()[0].last_active;
         assert!(ready > streamed);
 
         std::thread::sleep(std::time::Duration::from_millis(2));
         (ui.on_tool_done)(&crate::query::ToolCallDone {
+            tool_call_id: "test-tool".into(),
             name: "Read".into(),
             summary: String::new(),
             output: String::new(),
-            is_error: false,
+            status: crate::query::ToolCallStatus::Done,
             diff: None,
             duration_ms: 1,
         });

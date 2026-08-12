@@ -1655,10 +1655,12 @@ impl Chat {
                 }
             }
             UiEvent::ToolReady {
+                tool_call_id,
                 name,
                 input,
                 standalone,
             } => {
+                let _ = tool_call_id;
                 let Some(i) = self.stream_msg else { return };
                 if is_hidden_tool(&name) {
                     return;
@@ -1834,10 +1836,10 @@ impl Chat {
                         && call.name == done.name.as_str()
                         && call.status == ToolStatus::Running
                     {
-                        call.status = if done.is_error {
-                            ToolStatus::Error
-                        } else {
-                            ToolStatus::Done
+                        call.status = match done.status {
+                            crate::query::ToolCallStatus::Done
+                            | crate::query::ToolCallStatus::Interrupted => ToolStatus::Done,
+                            crate::query::ToolCallStatus::Error => ToolStatus::Error,
                         };
                         call.summary = done.summary.clone();
                         call.duration_ms = done.duration_ms;

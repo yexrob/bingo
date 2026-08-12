@@ -276,7 +276,7 @@ async fn one_turn(
                         name: name.clone(),
                         input: input.clone(),
                     });
-                    (ui.on_tool_ready)(name.clone(), input.clone(), false);
+                    (ui.on_tool_ready)(id.clone(), name.clone(), input.clone(), false);
                 }
             }
             _ => {}
