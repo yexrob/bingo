@@ -1608,14 +1608,25 @@ impl Chat {
             UiEvent::ContextUsage { used, window } => {
                 self.context_usage = crate::context_usage::ContextUsage::new(used, window);
             }
-            UiEvent::OutputTokens(tokens) => {
+            UiEvent::OutputTokens {
+                tokens,
+                authoritative,
+            } => {
                 self.output_tokens = self
                     .output_tokens
                     .saturating_sub(self.output_round_tokens)
                     .saturating_add(tokens);
                 self.output_round_tokens = tokens;
-                self.token_rate
-                    .observe_round(tokens, std::time::Instant::now());
+                // The end-of-round usage total is a correction, not freshly streamed
+                // output: fed as a sample it divided the jump by the live window and
+                // rendered as a one-frame spike of thousands of tok/s.
+                if authoritative {
+                    self.token_rate
+                        .correct_round(tokens, std::time::Instant::now());
+                } else {
+                    self.token_rate
+                        .observe_round(tokens, std::time::Instant::now());
+                }
             }
             UiEvent::ToolStart { name } => {
                 if is_hidden_tool(&name) {

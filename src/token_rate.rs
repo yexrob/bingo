@@ -113,6 +113,22 @@ impl TokenRateSampler {
         self.observe_total(self.committed_tokens.saturating_add(tokens), now);
     }
 
+    /// End-of-round authoritative usage: replaces the running estimate without
+    /// counting the correction as output produced at `now`. Feeding the jump
+    /// through `observe_round` divided it by the live window and rendered as a
+    /// one-frame spike of thousands of tok/s; the rate window restarts from the
+    /// corrected total instead, exactly like a downward correction.
+    pub fn correct_round(&mut self, tokens: u64, now: Instant) {
+        if !self.active {
+            self.start(now);
+        }
+        if tokens != self.round_tokens {
+            self.samples.clear();
+        }
+        self.round_tokens = tokens;
+        self.observe_total(self.committed_tokens.saturating_add(tokens), now);
+    }
+
     pub fn finish_round(&mut self) {
         self.committed_tokens = self.committed_tokens.saturating_add(self.round_tokens);
         self.round_tokens = 0;
@@ -274,6 +290,35 @@ mod tests {
         assert!(
             rate.tokens_per_second.is_finite() && rate.tokens_per_second > 0.0,
             "the correction must keep a finite live rate: {rate:?}"
+        );
+    }
+
+    /// The usage total on message_delta covers thinking and tool JSON the chars/4
+    /// estimate undercounted; treating that jump as instantly streamed output showed
+    /// absurd one-frame spikes (thousands of tok/s). A correction restarts the
+    /// window at the corrected total instead.
+    #[test]
+    fn upward_usage_correction_is_not_a_rate_spike() {
+        let start = Instant::now();
+        let mut sampler = TokenRateSampler::new(start);
+        sampler.start(start);
+        sampler.observe_round(10, start + Duration::from_millis(100));
+        sampler.observe_round(20, start + Duration::from_millis(200));
+        sampler.correct_round(5_000, start + Duration::from_millis(210));
+        assert_eq!(
+            sampler.rate(start + Duration::from_millis(210)),
+            None,
+            "the correction restarts the rate window instead of spiking"
+        );
+        sampler.finish_round();
+        sampler.observe_round(8, start + Duration::from_millis(700));
+        sampler.observe_round(16, start + Duration::from_millis(1200));
+        let rate = sampler
+            .rate(start + Duration::from_millis(1200))
+            .expect("streaming after the correction is measurable again");
+        assert!(
+            rate.tokens_per_second < 100.0,
+            "the corrected baseline does not leak into the next round: {rate:?}"
         );
     }
 

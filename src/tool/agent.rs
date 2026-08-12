@@ -206,9 +206,9 @@ fn subagent_hooks(
     let retry_rate = token_rate.clone();
     let context_agents = registry.clone();
     let context_instance = instance.clone();
-    let round_chars = Arc::new(Mutex::new(0u64));
-    let retry_chars = round_chars.clone();
-    let event_round_chars = round_chars.clone();
+    let round_units = Arc::new(Mutex::new(0u64));
+    let retry_units = round_units.clone();
+    let event_round_units = round_units.clone();
     let attempt_checkpoint = Arc::new(Mutex::new(AttemptCheckpoint::default()));
     let retry_checkpoint = attempt_checkpoint.clone();
     let round_checkpoint = attempt_checkpoint.clone();
@@ -221,9 +221,9 @@ fn subagent_hooks(
                 crate::api::contract::StreamEvent::TextDelta { text, .. } => {
                     event_registry.touch(&event_instance);
                     let tokens = {
-                        let mut chars = event_round_chars.lock().unwrap_or_else(|e| e.into_inner());
-                        *chars = chars.saturating_add(text.chars().count() as u64);
-                        chars.div_ceil(4)
+                        let mut units = event_round_units.lock().unwrap_or_else(|e| e.into_inner());
+                        *units = units.saturating_add(crate::compact::text_units(text));
+                        units.div_ceil(4)
                     };
                     if let Ok(mut output) = text_output.lock() {
                         output.push_str(text);
@@ -237,25 +237,30 @@ fn subagent_hooks(
                     tokens
                 }
                 crate::api::contract::StreamEvent::ThinkingDelta { thinking, .. } => {
-                    let mut chars = event_round_chars.lock().unwrap_or_else(|e| e.into_inner());
-                    *chars = chars.saturating_add(thinking.chars().count() as u64);
-                    chars.div_ceil(4)
+                    let mut units = event_round_units.lock().unwrap_or_else(|e| e.into_inner());
+                    *units = units.saturating_add(crate::compact::text_units(thinking));
+                    units.div_ceil(4)
                 }
                 crate::api::contract::StreamEvent::InputJsonDelta { partial_json, .. } => {
-                    let mut chars = event_round_chars.lock().unwrap_or_else(|e| e.into_inner());
-                    *chars = chars.saturating_add(partial_json.chars().count() as u64);
-                    chars.div_ceil(4)
+                    let mut units = event_round_units.lock().unwrap_or_else(|e| e.into_inner());
+                    *units = units.saturating_add(crate::compact::text_units(partial_json));
+                    units.div_ceil(4)
                 }
                 crate::api::contract::StreamEvent::StopReason {
                     output_tokens: Some(tokens),
                     ..
                 } => {
-                    *event_round_chars.lock().unwrap_or_else(|e| e.into_inner()) =
+                    *event_round_units.lock().unwrap_or_else(|e| e.into_inner()) =
                         tokens.saturating_mul(4);
                     if let Ok(mut progress) = progress_output.lock() {
                         progress.add_output_tokens(*tokens);
                     }
-                    *tokens
+                    // Accounting correction, not freshly streamed output: fed as a
+                    // sample it rendered as a one-frame rate spike (see UiEvent::OutputTokens).
+                    if let Ok(mut sampler) = token_rate.lock() {
+                        sampler.correct_round(*tokens, std::time::Instant::now());
+                    }
+                    return;
                 }
                 _ => return,
             };
@@ -264,7 +269,7 @@ fn subagent_hooks(
             }
         }),
         on_stream_retry: Box::new(move || {
-            *retry_chars.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+            *retry_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
             if let Ok(mut sampler) = retry_rate.lock() {
                 sampler.retry_round();
             }
@@ -311,7 +316,7 @@ fn subagent_hooks(
         // A round boundary closes the open prose block, so the next round's first
         // sentence does not run into the previous round's last one.
         on_round_end: Box::new(move || {
-            *round_chars.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+            *round_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
             if let Ok(mut sampler) = round_rate.lock() {
                 sampler.finish_round();
             }
