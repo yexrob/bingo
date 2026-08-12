@@ -20,6 +20,9 @@ pub const GENERIC: &str = "GENERIC";
 pub const SLASH_ERROR_UNKNOWN_COMMAND: &str = "UNKNOWN_COMMAND";
 /// Invalid slash argument (usage line shown, state unchanged).
 pub const SLASH_ERROR_BAD_ARGUMENT: &str = "BAD_ARGUMENT";
+/// The turn's task ended without reporting an outcome (a panic inside the spawn).
+/// Distinct from `SERVER_ERROR`: nothing was wrong upstream, the harness lost the turn.
+pub const TURN_LOST: &str = "TURN_LOST";
 
 /// Stable error code: `SCREAMING_SNAKE` (e.g. `CONFIG_INVALID`).
 pub trait ErrorCode {
@@ -163,6 +166,7 @@ fn downcast_error_code(err: &(dyn std::error::Error + 'static)) -> Option<&'stat
         crate::json_events::JsonEventsError,
         crate::mcp::McpError,
         crate::share::ShareError,
+        crate::storage::StorageError,
         crate::update::UpdateError,
     )
 }
@@ -227,6 +231,10 @@ mod tests {
                 status: 500,
                 body: String::new(),
             },
+            ClientError::ContextOverflow {
+                status: 400,
+                body: String::new(),
+            },
             ClientError::Stream("s".into()),
             ClientError::Timeout,
             ClientError::Unsupported("count_tokens".into()),
@@ -249,6 +257,11 @@ mod tests {
             body: String::new(),
         };
         assert_eq!(server.error_code(), "SERVER_ERROR");
+        let overflow = ClientError::ContextOverflow {
+            status: 400,
+            body: String::new(),
+        };
+        assert_eq!(overflow.error_code(), "CONTEXT_OVERFLOW");
         // The `ClientError::Transport` variant can't be constructed at runtime
         // (reqwest::Error has no public constructor API, all pub(crate) in 0.13.x):
         // the mapping is locked down by `transport_offline_code` and asserted here
@@ -333,6 +346,19 @@ mod tests {
             TranscriptError::Parse(serde_json::from_str::<()>("x").unwrap_err()).error_code(),
             "STORAGE_ERROR"
         );
+        // StorageError's 2 variants explicitly enumerated (AC-40).
+        use crate::storage::StorageError;
+        let storage_variants = vec![
+            StorageError::HomeUnavailable,
+            StorageError::Io {
+                operation: "read",
+                path: std::path::PathBuf::from("p"),
+                source: std::io::Error::other("x"),
+            },
+        ];
+        assert_stable_codes("storage::StorageError", &storage_variants);
+        assert_eq!(storage_variants[0].error_code(), "CONFIG_INVALID");
+        assert_eq!(storage_variants[1].error_code(), "STORAGE_ERROR");
         // All 6 ShareError variants explicitly enumerated (AC-40).
         use crate::share::ShareError;
         let share_variants = vec![
@@ -438,7 +464,7 @@ mod tests {
     }
 
     /// The macro registry covers all ErrorCode-implementing types (guardrail 4
-    /// "registry is the contract's second place"): each of the 11 registered types is
+    /// "registry is the contract's second place"): each of the 14 registered types is
     /// asserted non-GENERIC through the boxed exit — a type implementing ErrorCode that
     /// only takes effect on the TUI exit while missing from the downcast macro would
     /// silently fall to GENERIC on the CLI exit and turn this test red. Cross-checked
@@ -453,6 +479,7 @@ mod tests {
         use crate::query::QueryError;
         use crate::settings::SettingsError;
         use crate::share::ShareError;
+        use crate::storage::StorageError;
         use crate::tasks::TaskError;
         use crate::team::TeamError;
         use crate::tool::ToolError;
@@ -474,12 +501,13 @@ mod tests {
                 detail: "d".into(),
             }),
             Box::new(ShareError::SessionNotFound("x".into())),
+            Box::new(StorageError::HomeUnavailable),
             Box::new(UpdateError::Http { status: 503 }),
         ];
         assert_eq!(
             samples.len(),
-            13,
-            "the boxed exit should have 13 registered types: new ErrorCode implementors must be \
+            14,
+            "the boxed exit should have 14 registered types: new ErrorCode implementors must be \
              `downcast_error_code` macro registration + an instance in this test; missing either turns CI red"
         );
         for e in &samples {

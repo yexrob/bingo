@@ -87,6 +87,9 @@ pub struct Settings {
     /// (`respondToBashCommands`, default true; false = pure execution, no model query).
     #[serde(rename = "respondToBashCommands")]
     pub respond_to_bash_commands: Option<bool>,
+    /// Maximum characters returned by the Bash tool (`bashOutputMaxChars`, default 48,000).
+    #[serde(rename = "bashOutputMaxChars")]
+    pub bash_output_max_chars: Option<usize>,
     /// Shell program (`shell`) for the Bash tool and hooks. Default per platform:
     /// macOS /bin/zsh, other Unix /bin/bash, Windows powershell.exe (PowerShell-family
     /// shells run with -Command; any other configured shell with -c, e.g. Git Bash).
@@ -144,6 +147,13 @@ pub struct ExperimentalSettings {
     /// Per-agent per-channel message cap (`agentMessageLimit`, default 50).
     #[serde(rename = "agentMessageLimit")]
     pub agent_message_limit: Option<u64>,
+    /// Faces in the main transcript (`chatAvatars`): when enabled, every message
+    /// gets a sender band (portrait + name) and a subagent watch row wears the
+    /// instance's portrait. Off = the transcript carries no portraits at all.
+    /// The workspace views (DM, channel, team) are not governed by this switch —
+    /// there the portrait sits in a gutter the layout already spends.
+    #[serde(rename = "chatAvatars", default)]
+    pub chat_avatars: bool,
 }
 
 /// Named provider. v1 = Anthropic-protocol endpoint; v2 adds the optional
@@ -318,6 +328,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     if let Some(respond) = layer.respond_to_bash_commands {
         base.respond_to_bash_commands = Some(respond);
     }
+    if let Some(max_chars) = layer.bash_output_max_chars {
+        base.bash_output_max_chars = Some(max_chars);
+    }
     if let Some(shell) = layer.shell {
         base.shell = Some(shell);
     }
@@ -356,6 +369,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     }
     if let Some(v) = layer.experimental.agent_message_limit {
         base.experimental.agent_message_limit = Some(v);
+    }
+    if layer.experimental.chat_avatars {
+        base.experimental.chat_avatars = true;
     }
     // team: autoStart overridden by later layers (user → project → local).
     if let Some(v) = layer.team.auto_start {
@@ -398,6 +414,7 @@ pub const KNOWN_KEYS: &[&str] = &[
     "motion",
     "cacheControl",
     "respondToBashCommands",
+    "bashOutputMaxChars",
     "shell",
     "hooks",
     "mcpServers",
@@ -647,6 +664,7 @@ mod tests {
             "motion": "off",
             "cacheControl": true,
             "respondToBashCommands": false,
+            "bashOutputMaxChars": 12345,
             "shell": "/bin/fish",
             "hooks": {
                 "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "a"}]}],
@@ -663,7 +681,8 @@ mod tests {
             "mcpServers": {"m": {"command": "mcp", "args": ["--x"], "env": {"K": "V"}}},
             "disabledMcpServers": ["m"],
             "permissions": {"allow": ["Bash(a:*)"], "deny": ["Bash(b:*)"], "ask": ["Bash(c:*)"]},
-            "experimental": {"agentChannels": true, "channelMessageLimit": 7, "agentMessageLimit": 3},
+            "experimental": {"agentChannels": true, "channelMessageLimit": 7, "agentMessageLimit": 3,
+                             "chatAvatars": true},
             "team": {"autoStart": false},
             "share": {"baseUrl": "https://share.example"}
         }"#;
@@ -715,6 +734,28 @@ mod tests {
         assert_eq!(settings.permission_mode.as_deref(), Some("plan"));
         assert_eq!(settings.hooks.pre_tool_use.len(), 1);
         assert_eq!(settings.hooks.pre_tool_use[0].hooks[0].command, "echo hi");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn merges_bash_output_max_chars() {
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-settings-bash-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write(
+            &tmp,
+            "user/bingo/settings.json",
+            r#"{"bashOutputMaxChars":20000}"#,
+        );
+        write(
+            &tmp,
+            ".bingo/settings.json",
+            r#"{"bashOutputMaxChars":32000}"#,
+        );
+
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.bash_output_max_chars, Some(32_000));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -807,13 +848,15 @@ mod tests {
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert!(!settings.experimental.agent_channels);
         assert!(settings.experimental.channel_message_limit.is_none());
+        assert!(!settings.experimental.chat_avatars);
         write(
             &tmp,
             ".bingo/settings.json",
-            r#"{"experimental":{"agentChannels":true,"channelMessageLimit":100,"agentMessageLimit":10}}"#,
+            r#"{"experimental":{"agentChannels":true,"channelMessageLimit":100,"agentMessageLimit":10,"chatAvatars":true}}"#,
         );
         let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
         assert!(settings.experimental.agent_channels);
+        assert!(settings.experimental.chat_avatars);
         let limits = crate::channels::ChannelLimits::from_settings(&settings);
         assert_eq!(limits.channel_total, 100);
         assert_eq!(limits.per_agent, 10);

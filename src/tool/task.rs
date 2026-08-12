@@ -67,11 +67,11 @@ fn coerce_create(input: serde_json::Value) -> (serde_json::Value, Vec<&'static s
             map.get("subject").cloned().unwrap_or_default(),
         );
         fixed.push("backfill_description");
-    } else if has_description && !has_subject {
-        map.insert(
-            "subject".to_string(),
-            map.get("description").cloned().unwrap(),
-        );
+    } else if has_description
+        && !has_subject
+        && let Some(description) = map.get("description").cloned()
+    {
+        map.insert("subject".to_string(), description);
         fixed.push("backfill_subject");
     }
     (value, fixed)
@@ -184,6 +184,7 @@ impl Tool for TaskCreateTool {
             &id,
             &task.subject,
             ctx.permission_mode.as_str(),
+            &ctx.cwd,
         )
         .await;
         if !blocking.is_empty() {
@@ -417,6 +418,7 @@ impl Tool for TaskUpdateTool {
                 &args.task_id,
                 &task.subject,
                 ctx.permission_mode.as_str(),
+                &ctx.cwd,
             )
             .await;
             if !blocking.is_empty() {

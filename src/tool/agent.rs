@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::agents::{AgentDef, AgentRegistry, FollowUp, InboxItem, MAX_FOLLOW_UPS, MsgId};
+use crate::agents::{
+    AgentDef, AgentKind, AgentRegistry, FollowUp, InboxItem, MAX_FOLLOW_UPS, MsgId,
+};
 use crate::api::contract::SystemBlock;
 use crate::api::types::Message;
 use crate::channels::ChannelRegistry;
@@ -17,27 +19,40 @@ const MAX_AGENT_DEPTH: usize = 3;
 /// owns the terminal, and two of its promises do not hold here: rendering images for the user,
 /// and being woken by background-task notifications. Say so rather than letting the model plan
 /// against a surface it does not have.
+///
+/// The DM bullet exists because the user has a real private line to every instance (D57's
+/// workspace and the main-chat selector), and its messages arrive indistinguishable from the
+/// hub's. A note that claims the user never sees the turn text leaves exactly one imaginable
+/// way to reach them — a channel Post — which is how a private question ends up answered in
+/// front of the whole room (D63).
 const SUBAGENT_NOTE: &str = "\
 # You are a subagent
 
 - The main agent (the hub) spawned you for one task. Your final text is returned to the hub
-  as its tool result; it is not displayed to the user, and markdown image blocks are not
-  rendered for anyone. Put conclusions in the text itself.
+  as its tool result; it does not appear in the user's main transcript, and markdown image
+  blocks are not rendered for anyone. Put conclusions in the text itself.
+- The user has a private direct-message window with you. A message they send there arrives
+  like any other direct instruction, and the prose of your turns is exactly what they read
+  back — a direct message is answered where it arrived, in your turn text.
 - You cannot question the user: AskUserQuestion is not available here. Permission prompts do
   reach the user, but anything else you need must be reported back to the hub.
 - Your turn ends when you stop calling tools, and background tasks you started will NOT wake
   you afterwards. Finish what needs finishing within this turn, or state what is still
   pending — the hub can resume you with a follow-up message.";
 
-/// Appended when agent channels are on. Two failure modes pull in opposite directions and the
-/// note has to hold both: a room of polite agents acknowledging each other's acknowledgements
-/// (D45), and a room so afraid of chatter that nobody answers the human at all (D48).
+/// Appended when agent channels are on. Three failure modes pull against each other and the
+/// note has to hold all of them: a room of polite agents acknowledging each other's
+/// acknowledgements (D45), a room so afraid of chatter that nobody answers the human at all
+/// (D48), and a member answering a private DM with a channel Post because `user` only ever
+/// appeared in this note as a room speaker (D63).
 ///
-/// The rule that separates them is *who spoke*, not how the message reads — a person answers
-/// their manager and ignores their colleagues' hellos — plus the mechanical fact the model
-/// cannot infer: a turn woken by a channel message reports back to the hub, so a reply written
-/// as turn text never reaches the room. Without that sentence the model believes it has already
-/// answered and stays silent on purpose.
+/// The rule that separates the first two is *who spoke*, not how the message reads — a person
+/// answers their manager and ignores their colleagues' hellos — plus the mechanical fact the
+/// model cannot infer: a turn woken by a channel message reports back to the hub, so a reply
+/// written as turn text never reaches the room. Without that sentence the model believes it has
+/// already answered and stays silent on purpose. The third failure mode needs the opposite
+/// mechanical fact: *where* a message arrived decides where the answer goes, and the only
+/// observable difference is the `[#channel msg #N]` tag on channel traffic.
 ///
 /// It lives in the system prompt rather than in the wake-up payload deliberately: compaction
 /// rewrites the message history but never touches `Session::system`, so the rule is still there
@@ -67,8 +82,12 @@ Beyond that first line, post only what changes what someone else will do: a deci
 blocked on, a disagreement, a result, a question you cannot continue without. Name the person you
 mean. When you have nothing to add, stop calling tools — silence costs nothing and wakes nobody.
 
-A direct instruction sent to you alone is a different thing: it is not channel traffic, and your
-turn text is exactly where the hub is listening for the answer.";
+**A direct message is a different lane, and a private one.** Channel traffic arrives tagged
+`[#channel msg #N]`; text without that tag was sent to you alone — by the hub, or by the user
+from your direct-message window, where your turn text is exactly what they read. Answer a direct
+message in your turn text, never with Post: the answer belongs to the person who asked, not to
+the room. What reaches you privately stays private — do not repeat or summarize it into a
+channel unless the message itself tells you to take it there.";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -146,12 +165,31 @@ fn ask_gate() -> &'static tokio::sync::Mutex<()> {
     GATE.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+struct SubagentOutput {
+    text: Arc<Mutex<String>>,
+    live: Arc<Mutex<Vec<crate::agents::LiveBlock>>>,
+    progress: Arc<Mutex<crate::agents::AgentProgress>>,
+}
+
 /// Sub-agent UI: captures text, renders nothing, and forwards permission prompts to the
 /// session that owns the UI. The cell tracks the number of characters produced (for interval
 /// progress checks of background agents).
+/// Snapshot of everything a subagent's live view accumulated up to the last committed round;
+/// a stream retry rolls the failed attempt back to this point.
+#[derive(Clone, Default)]
+struct AttemptCheckpoint {
+    text_len: usize,
+    live: Vec<crate::agents::LiveBlock>,
+    produced_chars: usize,
+    output_tokens: u64,
+    tool_uses: usize,
+    recent_activity: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn subagent_hooks(
-    output: Arc<Mutex<String>>,
-    live: Arc<Mutex<Vec<crate::agents::LiveBlock>>>,
+    output: SubagentOutput,
+    token_rate: Arc<Mutex<crate::token_rate::TokenRateSampler>>,
     cell: Arc<AgentCell>,
     watch: Arc<WatchRegistry>,
     id: WatchId,
@@ -161,46 +199,189 @@ fn subagent_hooks(
     // `output` stays the flat reply (what the spawn returns and what `spoke` is
     // judged on); `live` is the same turn as the instance view needs to show it,
     // with the tool calls and round boundaries the flat string cannot carry.
-    let tool_live = live.clone();
-    let round_live = live.clone();
+    let tool_live = output.live.clone();
+    let tool_progress = output.progress.clone();
+    let retry_live = output.live.clone();
+    let retry_text = output.text.clone();
+    let retry_progress = output.progress.clone();
+    let warning_live = output.live.clone();
+    let round_live = output.live.clone();
+    let round_text = output.text.clone();
+    let round_live_checkpoint = output.live.clone();
+    let round_progress = output.progress.clone();
+    let text_output = output.text;
+    let live_output = output.live;
+    let progress_output = output.progress;
+    let registry = cell.registry.clone();
+    let event_registry = registry.clone();
+    let event_instance = instance.clone();
+    let tool_registry = registry.clone();
+    let tool_instance = instance.clone();
+    let done_registry = registry.clone();
+    let done_instance = instance.clone();
+    let round_rate = token_rate.clone();
+    let retry_rate = token_rate.clone();
+    let context_agents = registry.clone();
+    let context_instance = instance.clone();
+    let round_units = Arc::new(Mutex::new(0u64));
+    let retry_units = round_units.clone();
+    let event_round_units = round_units.clone();
+    let attempt_checkpoint = Arc::new(Mutex::new(AttemptCheckpoint::default()));
+    let retry_checkpoint = attempt_checkpoint.clone();
+    let round_checkpoint = attempt_checkpoint.clone();
+    let event_cell = cell.clone();
+    let retry_cell = cell.clone();
+    let round_cell = cell.clone();
     UiHooks {
         on_event: Box::new(move |event| {
-            if let crate::api::contract::StreamEvent::TextDelta { text, .. } = event
-                && let Ok(mut output) = output.lock()
-            {
-                output.push_str(text);
-                if let Ok(mut live) = live.lock() {
-                    crate::agents::LiveBlock::push_text(&mut live, text);
+            let tokens = match event {
+                crate::api::contract::StreamEvent::TextDelta { text, .. } => {
+                    event_registry.touch(&event_instance);
+                    let tokens = {
+                        let mut units = event_round_units.lock().unwrap_or_else(|e| e.into_inner());
+                        *units = units.saturating_add(crate::compact::text_units(text));
+                        units.div_ceil(4)
+                    };
+                    if let Ok(mut output) = text_output.lock() {
+                        output.push_str(text);
+                        if let Ok(mut live) = live_output.lock() {
+                            crate::agents::LiveBlock::push_text(&mut live, text);
+                        }
+                        event_cell.record_chars(text.chars().count());
+                        // Feed produced text into the condition engine (notify_on hit → signal notification).
+                        watch.feed_content(id, text);
+                    }
+                    tokens
                 }
-                cell.record_chars(text.chars().count());
-                // Feed produced text into the condition engine (notify_on hit → signal notification).
-                watch.feed_content(id, text);
+                crate::api::contract::StreamEvent::ThinkingDelta { thinking, .. } => {
+                    event_registry.touch(&event_instance);
+                    // The DM view shows the phase, not the stream: the block marks
+                    // "reasoning happened here" the way the transcript's collapsed
+                    // `✻ Thinking` row does.
+                    if let Ok(mut live) = live_output.lock() {
+                        crate::agents::LiveBlock::push_thinking(&mut live, thinking);
+                    }
+                    let mut units = event_round_units.lock().unwrap_or_else(|e| e.into_inner());
+                    *units = units.saturating_add(crate::compact::text_units(thinking));
+                    units.div_ceil(4)
+                }
+                crate::api::contract::StreamEvent::InputJsonDelta { partial_json, .. } => {
+                    let mut units = event_round_units.lock().unwrap_or_else(|e| e.into_inner());
+                    *units = units.saturating_add(crate::compact::text_units(partial_json));
+                    units.div_ceil(4)
+                }
+                crate::api::contract::StreamEvent::StopReason {
+                    output_tokens: Some(tokens),
+                    ..
+                } => {
+                    *event_round_units.lock().unwrap_or_else(|e| e.into_inner()) =
+                        tokens.saturating_mul(4);
+                    if let Ok(mut progress) = progress_output.lock() {
+                        progress.add_output_tokens(*tokens);
+                    }
+                    // Accounting correction, not freshly streamed output: fed as a
+                    // sample it rendered as a one-frame rate spike (see UiEvent::OutputTokens).
+                    if let Ok(mut sampler) = token_rate.lock() {
+                        sampler.correct_round(*tokens, std::time::Instant::now());
+                    }
+                    return;
+                }
+                _ => return,
+            };
+            if let Ok(mut sampler) = token_rate.lock() {
+                sampler.observe_round(tokens, std::time::Instant::now());
             }
         }),
+        on_stream_retry: Box::new(move || {
+            *retry_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+            if let Ok(mut sampler) = retry_rate.lock() {
+                sampler.retry_round();
+            }
+            let checkpoint = retry_checkpoint
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Ok(mut text) = retry_text.lock() {
+                text.truncate(checkpoint.text_len);
+            }
+            if let Ok(mut live) = retry_live.lock() {
+                *live = checkpoint.live;
+            }
+            retry_cell.set_chars(checkpoint.produced_chars);
+            if let Ok(mut progress) = retry_progress.lock() {
+                progress.restore_attempt(
+                    checkpoint.output_tokens,
+                    checkpoint.tool_uses,
+                    checkpoint.recent_activity,
+                );
+            }
+        }),
+        on_context_usage: Arc::new(move |used, _window| {
+            context_agents.set_context_tokens(&context_instance, used);
+        }),
         on_tool_ready: Box::new(move |_tool_call_id, name, input, _standalone| {
-            let Ok(mut live) = tool_live.lock() else {
-                return;
-            };
+            tool_registry.touch(&tool_instance);
             let glyph = crate::tui::activities::tool_glyph(&name);
             let shown = crate::tui::activities::display_tool_name(&name);
             let summary = crate::query::summarize_input(&name, &input);
-            live.push(crate::agents::LiveBlock::Tool(if summary.is_empty() {
+            let activity = if summary.is_empty() {
                 format!("{glyph}{shown}")
             } else {
                 format!("{glyph}{shown}({summary})")
-            }));
+            };
+            if let Ok(mut live) = tool_live.lock() {
+                live.push(crate::agents::LiveBlock::Tool(activity.clone()));
+            }
+            if let Ok(mut progress) = tool_progress.lock() {
+                progress.record_tool(activity);
+            }
         }),
-        on_tool_done: Box::new(|_| {}),
+        on_tool_done: Box::new(move |_| done_registry.touch(&done_instance)),
         // A round boundary closes the open prose block, so the next round's first
         // sentence does not run into the previous round's last one.
         on_round_end: Box::new(move || {
+            *round_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+            if let Ok(mut sampler) = round_rate.lock() {
+                sampler.finish_round();
+            }
             if let Ok(mut live) = round_live.lock()
                 && matches!(live.last(), Some(crate::agents::LiveBlock::Text(_)))
             {
                 live.push(crate::agents::LiveBlock::Text(String::new()));
             }
+            let (output_tokens, tool_uses, recent_activity) = round_progress
+                .lock()
+                .map(|progress| {
+                    (
+                        progress.output_tokens,
+                        progress.tool_uses,
+                        progress.recent_activity.clone(),
+                    )
+                })
+                .unwrap_or_default();
+            *round_checkpoint.lock().unwrap_or_else(|e| e.into_inner()) = AttemptCheckpoint {
+                text_len: round_text.lock().map_or(0, |text| text.len()),
+                live: round_live_checkpoint
+                    .lock()
+                    .map(|live| live.clone())
+                    .unwrap_or_default(),
+                produced_chars: round_cell.chars(),
+                output_tokens,
+                tool_uses,
+                recent_activity,
+            };
         }),
-        on_warning: Box::new(|_| {}),
+        on_warning: Box::new(move |message| {
+            if message.starts_with(crate::query::RECONNECT_WARNING_PREFIX)
+                && let Ok(mut live) = warning_live.lock()
+            {
+                live.retain(|block| {
+                    !matches!(block, crate::agents::LiveBlock::Text(text) if text.starts_with(crate::query::RECONNECT_WARNING_PREFIX))
+                });
+                live.push(crate::agents::LiveBlock::Text(message));
+                live.push(crate::agents::LiveBlock::Text(String::new()));
+            }
+        }),
         // A subagent has no prompt surface of its own, so its Ask decisions are forwarded to
         // the session that owns the UI, stamped with the instance name. Auto-denying here
         // would fail the tool call as "user denied" without the user ever being asked — and
@@ -225,15 +406,17 @@ fn subagent_hooks(
     }
 }
 
-/// Turn-boundary delivery: start a run for every instance that has messages waiting.
-///
-/// This is the only place a queued message becomes a running turn. Holding delivery until the
-/// boundary is what makes a batch a batch — messages sent during one turn arrive together
-/// instead of one per turn — and it doubles as the recovery path for a run chain that died
-/// with messages still in its inbox.
+/// Start every idle recipient that has mail waiting. `AgentRegistry::flush_pending` claims the
+/// full inbox atomically, so concurrent dispatchers cannot double-start an instance and every
+/// item present at the receiver's claim point becomes one prompt.
 pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &Arc<WatchRegistry>) {
     for wake in session.agents.flush_pending() {
+        if !session.agents.accepts_run(&wake.name, wake.run) {
+            session.agents.restore_inbox(&wake.name, wake.items);
+            continue;
+        }
         let (prompt, images) = absorb_inbox(&session.channels, &wake.name, &wake.items);
+        let items = wake.items;
         let label = format!("{} #{} · {}", wake.name, wake.run, excerpt(&prompt));
         spawn_agent_loop(
             session.agents.clone(),
@@ -243,7 +426,9 @@ pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &Arc<WatchRegistr
             wake.history,
             prompt,
             images,
+            items,
             label,
+            wake.run,
             Vec::new(),
             session.instance.clone(),
         );
@@ -493,28 +678,51 @@ pub(crate) fn spawn_agent_loop(
     history: Vec<Message>,
     prompt: String,
     images: Vec<crate::api::types::ImageAttachment>,
+    initial_items: Vec<InboxItem>,
     first_label: String,
+    first_run: u64,
     conditions: Vec<NotifyCondition>,
     owner: Option<String>,
 ) -> WatchId {
-    let cell = Arc::new(AgentCell::new());
+    let cell = Arc::new(AgentCell::new(registry.clone()));
     let first_id = register_run_watch(&watch, first_label, cell.clone(), conditions, owner.clone());
     registry.set_run_watch(&name, first_id);
     let loop_registry = registry.clone();
     let loop_name = name.clone();
+    let retry_items = initial_items;
+    let current_items_for_install = retry_items.clone();
     let handle = tokio::spawn(async move {
         let name = loop_name;
+        if !loop_registry.accepts_run(&name, first_run) {
+            loop_registry.restore_inbox(&name, retry_items);
+            return;
+        }
         let mut history = history;
         let mut prompt = prompt;
         let mut images = images;
+        let mut current_items = retry_items;
         let mut run = (first_id, cell);
         loop {
             let output = Arc::new(Mutex::new(String::new()));
             let live = Arc::new(Mutex::new(Vec::new()));
-            loop_registry.set_live(&name, Some(live.clone()));
+            let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+            if let Ok(mut progress) = progress.lock() {
+                progress.start_run();
+            }
+            let token_rate = Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default()));
+            if let Ok(mut sampler) = token_rate.lock() {
+                sampler.start(std::time::Instant::now());
+            }
+            loop_registry.set_prompt(&name, prompt.clone());
+            loop_registry.set_live(&name, Some(live.clone()), Some(token_rate.clone()));
+            loop_registry.set_progress(&name, Some(progress.clone()));
             let mut ui = subagent_hooks(
-                output.clone(),
-                live.clone(),
+                SubagentOutput {
+                    text: output.clone(),
+                    live: live.clone(),
+                    progress,
+                },
+                token_rate,
                 run.1.clone(),
                 watch.clone(),
                 run.0,
@@ -525,19 +733,22 @@ pub(crate) fn spawn_agent_loop(
             {
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    let spoke = !text.trim().is_empty();
-                    loop_registry.set_live(&name, None);
+                    let output_chars = text.chars().count();
+                    loop_registry.set_live(&name, None, None);
+                    loop_registry.set_progress(&name, None);
                     watch.set_state(
                         run.0,
                         WatchState::Done,
                         Some("done".to_string()),
                         Some(serde_json::json!(non_empty(text))),
                     );
-                    match loop_registry.finish(&name, outcome.messages, spoke) {
+                    match loop_registry.finish(&name, outcome.messages, output_chars) {
                         Some(next) => {
                             history = next.history;
-                            (prompt, images) = absorb_inbox(&session.channels, &name, &next.items);
-                            let cell = Arc::new(AgentCell::new());
+                            current_items = next.items;
+                            (prompt, images) =
+                                absorb_inbox(&session.channels, &name, &current_items);
+                            let cell = Arc::new(AgentCell::new(loop_registry.clone()));
                             let label = format!("{name} #{} · {}", next.run, excerpt(&prompt));
                             let id = register_run_watch(
                                 &watch,
@@ -553,7 +764,9 @@ pub(crate) fn spawn_agent_loop(
                     }
                 }
                 Err(e) => {
-                    loop_registry.set_live(&name, None);
+                    loop_registry.set_live(&name, None, None);
+                    loop_registry.set_progress(&name, None);
+                    loop_registry.restore_inbox(&name, current_items);
                     watch.set_state(
                         run.0,
                         WatchState::Failed,
@@ -566,7 +779,12 @@ pub(crate) fn spawn_agent_loop(
             }
         }
     });
-    registry.set_abort(&name, handle.abort_handle());
+    let _ = registry.set_abort_if_running(
+        &name,
+        first_run,
+        handle.abort_handle(),
+        current_items_for_install,
+    );
     first_id
 }
 
@@ -599,6 +817,7 @@ impl AgentTool {
         &self,
         params: &AgentInput,
         def: Option<&AgentDef>,
+        cwd: &std::path::Path,
     ) -> Result<(String, String, Arc<Session>), ToolError> {
         let base = params
             .name
@@ -606,17 +825,21 @@ impl AgentTool {
             .or_else(|| def.map(|d| d.name.clone()))
             .unwrap_or_else(|| "agent".to_string());
         let name = self.session.agents.claim_name(&base);
-        let sub_session = self.build_sub_session(params, def, &name)?;
+        let sub_session = self.build_sub_session(params, def, &name, cwd)?;
         let description = params
             .description
             .clone()
             .unwrap_or_else(|| excerpt(&params.prompt));
+        // Every spawn from this tool is a hire, never a member: the blueprint is the only
+        // thing that makes a crew, and it is written by the user's confirmation alone (D53).
         self.session.agents.insert(
             &name,
+            AgentKind::Hire,
             def.map(|d| d.name.clone()),
             description.clone(),
             sub_session.clone(),
         );
+        record_hire(&self.session, cwd, &name, &description);
         Ok((name, description, sub_session))
     }
 
@@ -626,8 +849,8 @@ impl AgentTool {
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let def = self.resolve_def(params)?;
-        let (name, description, sub_session) = self.spawn_instance(params, def)?;
-        let _ = self.session.agents.next_run(&name);
+        let (name, description, sub_session) = self.spawn_instance(params, def, &ctx.cwd)?;
+        let run = self.session.agents.next_run(&name);
         let conditions = params
             .notify_on
             .clone()
@@ -641,7 +864,9 @@ impl AgentTool {
             Vec::new(),
             params.prompt.clone(),
             self.session.attachments.resolve(&params.prompt),
+            Vec::new(),
             format!("{name} · {description}"),
+            run,
             conditions,
             ctx.instance.clone(),
         );
@@ -667,6 +892,7 @@ impl AgentTool {
         params: &AgentInput,
         def: Option<&AgentDef>,
         instance: &str,
+        cwd: &std::path::Path,
     ) -> Result<Arc<Session>, ToolError> {
         build_sub_session(
             &self.session,
@@ -675,10 +901,71 @@ impl AgentTool {
             params.thinking.clone(),
             def,
             instance,
-            // An ad-hoc subagent has no past on disk: memory belongs to a crew
-            // member, which is the thing a blueprint keeps across sessions.
-            None,
+            hire_context(cwd),
         )
+    }
+}
+
+/// What a fresh ad-hoc spawn carries about the project's crew: the agreement it works to,
+/// and the fact that this spawn is a hire rather than a member.
+///
+/// Empty when no crew is pinned here — an ordinary subagent in a project with no crew is
+/// not temporary relative to anything, and telling it otherwise would be a lie about a
+/// team that does not exist. Memory stays empty either way: a past on disk belongs to a
+/// crew member, which is the thing a blueprint keeps across sessions (D51).
+/// Record a hire in the crew's decision log — the same append-only file `/team assign`
+/// writes to, so "who was brought in from outside, and for what" is reviewable after the
+/// fact rather than being a thing that only ever happened in a context window. No-op in a
+/// project with no crew: there is nothing for the hire to be outside of.
+fn record_hire(session: &Arc<Session>, cwd: &std::path::Path, name: &str, description: &str) {
+    let Some(team) = crate::team::load_team_file(cwd).ok().flatten() else {
+        return;
+    };
+    crate::team::append_decision(
+        &session.home,
+        cwd,
+        &crate::team::current_branch(cwd),
+        &team.name,
+        "hire",
+        description,
+        &[name],
+    );
+}
+
+fn hire_context(cwd: &std::path::Path) -> MemberContext {
+    let Some(team) = crate::team::load_team_file(cwd).ok().flatten() else {
+        return MemberContext::default();
+    };
+    MemberContext {
+        memory: None,
+        norms: crate::team::load_norms(cwd).map(|n| crate::team::norms_block(&team.name, &n)),
+        standing: Some(crate::team::hire_note(&team.name)),
+        cwd: None,
+    }
+}
+
+/// The system blocks an instance carries beyond its persona: where its own past on disk is
+/// (D51), the agreement the project's crew works to, and — for a hire — the fact that it is
+/// not on that crew (D53). All three are system blocks rather than messages, because nobody
+/// said them, and because compaction rewrites messages and leaves `Session::system` alone.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct MemberContext {
+    /// Pointer to this instance's own transcript, for the instances that have one.
+    pub memory: Option<String>,
+    /// The crew's working agreement (`.bingo/team-norms.md`), already wrapped with its
+    /// precedence rule by [`crate::team::norms_block`].
+    pub norms: Option<String>,
+    /// Where this instance stands relative to the crew — set only for a temporary hire.
+    pub standing: Option<String>,
+    /// Override the parent session's working directory for a team rooted elsewhere.
+    pub cwd: Option<std::path::PathBuf>,
+}
+
+impl MemberContext {
+    fn blocks(self) -> impl Iterator<Item = String> {
+        [self.norms, self.standing, self.memory]
+            .into_iter()
+            .flatten()
     }
 }
 
@@ -705,8 +992,8 @@ pub(crate) fn normalize_thinking(level: &str) -> Result<Option<String>, String> 
 /// forks an independent-endpoint client so the parent session is unaffected; "default" or no
 /// provider shares the parent endpoint and follows the parent session's switches.
 ///
-/// `memory` is the pointer a team member gets to its own past on disk (D51) — a
-/// system block rather than a message, because nobody said it.
+/// `context` carries what this instance knows beyond its persona — its own past on disk,
+/// the crew's agreement, its standing on that crew (see [`MemberContext`]).
 pub(crate) fn build_sub_session(
     parent: &Arc<Session>,
     model: Option<String>,
@@ -714,7 +1001,7 @@ pub(crate) fn build_sub_session(
     thinking: Option<String>,
     def: Option<&AgentDef>,
     instance: &str,
-    memory: Option<String>,
+    context: MemberContext,
 ) -> Result<Arc<Session>, ToolError> {
     let model = model.or_else(|| def.and_then(|d| d.model.clone()));
     // provider: "default" and unset are equivalent (shared parent endpoint, follows the parent's switches);
@@ -790,12 +1077,14 @@ pub(crate) fn build_sub_session(
             cache: false,
         });
     }
-    // Where this instance's own past lives, for the instances that have one.
-    if let Some(memory) = memory {
-        system.push(SystemBlock {
-            text: memory,
-            cache: false,
-        });
+    let cwd = context
+        .cwd
+        .clone()
+        .map(|cwd| Arc::new(std::sync::Mutex::new(cwd)))
+        .unwrap_or_else(|| parent.cwd.clone());
+    // The agreement, the standing, the past — whichever of them this instance has.
+    for text in context.blocks() {
+        system.push(SystemBlock { text, cache: false });
     }
     let mut runtime = crate::query::Runtime::new(model, None, Default::default());
     // Share the parent's permission table and MCP connections rather than snapshotting them:
@@ -812,6 +1101,7 @@ pub(crate) fn build_sub_session(
         settings: parent.settings.clone(),
         system,
         depth: parent.depth + 1,
+        cwd,
         home: parent.home.clone(),
         user_config_dir: parent.user_config_dir.clone(),
         quiet: parent.quiet,
@@ -829,16 +1119,24 @@ pub(crate) fn build_sub_session(
 /// Background agent progress: characters produced (for interval polling).
 struct AgentCell {
     chars: std::sync::atomic::AtomicUsize,
+    registry: Arc<AgentRegistry>,
 }
 
 impl AgentCell {
-    fn new() -> Self {
+    fn new(registry: Arc<AgentRegistry>) -> Self {
         Self {
             chars: std::sync::atomic::AtomicUsize::new(0),
+            registry,
         }
     }
     fn record_chars(&self, n: usize) {
         self.chars.fetch_add(n, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn chars(&self) -> usize {
+        self.chars.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn set_chars(&self, chars: usize) {
+        self.chars.store(chars, std::sync::atomic::Ordering::SeqCst);
     }
     fn poll(&self) -> crate::watch::WatchPoll {
         crate::watch::WatchPoll {
@@ -883,6 +1181,21 @@ impl Tool for AgentTool {
     fn description(&self) -> String {
         let mut desc = "Spawn a subagent for an independent task (depth-limited). Async by default: returns the instance name and task id immediately without waiting; a completion notification is injected when the subagent finishes; background:false waits synchronously for the result; notify_on also notifies when the subagent's output matches. The instance name is addressable: SendMessage sends follow-up instructions (context preserved), AgentControl manages (list/stop/delete). The `agent` argument uses a named definition (preset system prompt and model); model/provider/thinking can be set per instance (defaulting to the named definition or parent session)."
             .to_string();
+        // The crew is the reason not to reach for this tool, so it is named here and not
+        // only in the system prompt: this description is where the list of definitions
+        // tempts a second `dev` into existence beside the `dev` already standing by.
+        if let Some(crew) = crate::team::load_team_file(&self.session.cwd())
+            .ok()
+            .flatten()
+            .map(|team| team.name)
+        {
+            desc.push_str(&format!(
+                "\n\nThis project has a standing crew ({crew}, see the system prompt's roster): \
+                 give the work to a member with SendMessage first, and spawn here only for what \
+                 no member covers. A spawn is a temporary hire — it never enters .bingo/team.json \
+                 and is released once its task is done."
+            ));
+        }
         if !self.defs.is_empty() {
             desc.push_str("\n\nAvailable named definitions:");
             for def in &self.defs {
@@ -922,11 +1235,11 @@ impl Tool for AgentTool {
         }
 
         let def = self.resolve_def(&params)?;
-        let (name, description, sub_session) = self.spawn_instance(&params, def)?;
+        let (name, description, sub_session) = self.spawn_instance(&params, def, &ctx.cwd)?;
         let _ = self.session.agents.next_run(&name);
 
         // Foreground sub-agents can also be watched: Running (characters produced) → Done/Failed.
-        let cell = Arc::new(AgentCell::new());
+        let cell = Arc::new(AgentCell::new(self.session.agents.clone()));
         let conditions = params
             .notify_on
             .clone()
@@ -942,10 +1255,28 @@ impl Tool for AgentTool {
         self.session.agents.set_run_watch(&name, id);
         let output = Arc::new(Mutex::new(String::new()));
         let live = Arc::new(Mutex::new(Vec::new()));
-        self.session.agents.set_live(&name, Some(live.clone()));
+        let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+        if let Ok(mut progress) = progress.lock() {
+            progress.start_run();
+        }
+        let token_rate = Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default()));
+        if let Ok(mut sampler) = token_rate.lock() {
+            sampler.start(std::time::Instant::now());
+        }
+        self.session.agents.set_prompt(&name, params.prompt.clone());
+        self.session
+            .agents
+            .set_live(&name, Some(live.clone()), Some(token_rate.clone()));
+        self.session
+            .agents
+            .set_progress(&name, Some(progress.clone()));
         let mut ui = subagent_hooks(
-            output.clone(),
-            live.clone(),
+            SubagentOutput {
+                text: output.clone(),
+                live: live.clone(),
+                progress,
+            },
+            token_rate,
             cell.clone(),
             ctx.watch.clone(),
             id,
@@ -962,10 +1293,12 @@ impl Tool for AgentTool {
             None,
         )
         .await;
-        self.session.agents.set_live(&name, None);
+        self.session.agents.set_live(&name, None, None);
+        self.session.agents.set_progress(&name, None);
         match sync_run {
             Ok(outcome) => {
                 let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let output_chars = text.chars().count();
                 let content = non_empty(text);
                 ctx.watch.set_state(
                     id,
@@ -975,9 +1308,13 @@ impl Tool for AgentTool {
                 );
                 // On the synchronous path tools run serially, so queued messages never reach here;
                 // if one somehow does, hand it to the background loop (same continuation mechanism).
-                let spoke = !content.trim().is_empty();
-                if let Some(next) = self.session.agents.finish(&name, outcome.messages, spoke) {
+                if let Some(next) =
+                    self.session
+                        .agents
+                        .finish(&name, outcome.messages, output_chars)
+                {
                     let (prompt, images) = absorb_inbox(&sub_session.channels, &name, &next.items);
+                    let items = next.items;
                     spawn_agent_loop(
                         self.session.agents.clone(),
                         ctx.watch.clone(),
@@ -986,7 +1323,9 @@ impl Tool for AgentTool {
                         next.history,
                         prompt.clone(),
                         images,
+                        items,
                         format!("{name} #{} · {}", next.run, excerpt(&prompt)),
+                        next.run,
                         Vec::new(),
                         ctx.instance.clone(),
                     );
@@ -1039,9 +1378,9 @@ const ACK_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 /// quiet, and short enough that a hang is not discovered by the user an hour later.
 const DEFAULT_ACK_TIMEOUT_SECS: u64 = 300;
 
-/// Main→sub continuation channel (hub-and-spoke, main session only): an idle instance is woken
-/// with its full history to continue; a busy instance queues the message and it is delivered
-/// when the turn ends.
+/// Main→sub continuation channel (hub-and-spoke, main session only): an idle instance starts as
+/// soon as the dispatch point claims its inbox; a running instance absorbs queued mail between
+/// tool rounds.
 pub struct SendMessageTool {
     session: Arc<Session>,
 }
@@ -1058,7 +1397,7 @@ impl Tool for SendMessageTool {
         "SendMessage".to_string()
     }
     fn description(&self) -> String {
-        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id: the message is queued and delivered at the end of this turn, batched with any other message sent to the same instance in this turn, so the receiver reads them together rather than one per turn. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing. AgentControl(action=messages) reports which of those it is: queued, delivered but unanswered, answered (with the run that replied), or dropped because the instance stopped. You do not have to poll that yourself: the harness runs the same check five minutes after sending (tune with ack_timeout) and follows up on the receiver, up to 3 rounds, reporting back if no answer ever comes. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
+        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id after enqueueing: an idle receiver starts immediately, while a running receiver drains all mail waiting at its next tool round. Messages present when the receiver drains its inbox are batched into one prompt. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing. AgentControl(action=messages) reports which of those it is: queued, delivered but unanswered, answered (with the run that replied), or dropped because the instance stopped. You do not have to poll that yourself: the harness runs the same check five minutes after sending (tune with ack_timeout) and follows up on the receiver, up to 3 rounds, reporting back if no answer ever comes. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<SendMessageInput>()
@@ -1089,13 +1428,13 @@ impl Tool for SendMessageTool {
             .agents
             .deliver(&params.agent, &params.message, images, timeout)
             .map_err(ToolError::failed)?;
+        flush_agent_inbox(&self.session, &ctx.watch);
         let note = match timeout {
             Some(t) => format!(
-                "delivered in a batch with the recipient's other messages at the end of this turn; if no reply arrives within {}s (including read-but-silent rounds), it is automatically re-checked and chased (up to {MAX_FOLLOW_UPS} rounds); the outcome is reported as a task notification",
+                "enqueued for immediate processing; the receiver batches everything waiting when it next drains its inbox; if no reply arrives within {}s (including read-but-silent rounds), it is automatically re-checked and chased (up to {MAX_FOLLOW_UPS} rounds); the outcome is reported as a task notification",
                 t.as_secs()
             ),
-            None => "delivered in a batch with the recipient's other messages at the end of this turn;\
-                      follow-up chasing is off (ack_timeout=0); check yourself with AgentControl(action=messages, agent=…) when needed"
+            None => "enqueued for immediate processing; the receiver batches everything waiting when it next drains its inbox; follow-up chasing is off (ack_timeout=0); check yourself with AgentControl(action=messages, agent=…) when needed"
                 .to_string(),
         };
         if let Some(timeout) = timeout {
@@ -1188,13 +1527,28 @@ impl AgentControlTool {
     }
 }
 
+pub(crate) fn format_last_active(age: std::time::Duration) -> String {
+    let seconds = age.as_secs();
+    if seconds == 0 {
+        "active now".to_string()
+    } else if seconds < 60 {
+        format!("active {seconds}s ago")
+    } else if seconds < 3_600 {
+        format!("active {}min ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("active {}h ago", seconds / 3_600)
+    } else {
+        format!("active {}d ago", seconds / 86_400)
+    }
+}
+
 #[async_trait]
 impl Tool for AgentControlTool {
     fn name(&self) -> String {
         "AgentControl".to_string()
     }
     fn description(&self) -> String {
-        "Manage subagent instances: list all (name/definition/status/queued-instruction count), check messages sent to one (per-message queued/delivered-but-unanswered/answered/dropped, how long it has been waiting, and whether SendMessage's ack_timeout is already chasing it — use this when an instance has gone quiet on you), stop one (aborts the current run, stops accepting instructions; history kept), delete one (stops and removes it; the name is released).".to_string()
+        "Manage subagent instances: list all (name/definition/status/last activity/queued-instruction count), check messages sent to one (per-message queued/delivered-but-unanswered/answered/dropped, how long it has been waiting, and whether SendMessage's ack_timeout is already chasing it — use this when an instance has gone quiet on you), stop one (aborts the current run, stops accepting instructions; history kept), delete one (stops and removes it; the name is released).".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<AgentControlInput>()
@@ -1239,9 +1593,11 @@ impl Tool for AgentControlTool {
                             } else {
                                 String::new()
                             };
+                            let active = format_last_active(s.last_active.elapsed());
                             format!(
-                                "- {} ({}{def}{pending}{unacked}, {} @ {}): {}",
+                                "- {} ({} {}, {active}{def}{pending}{unacked}, {} @ {}): {}",
                                 s.name,
+                                s.kind.label(),
                                 s.state.label(),
                                 s.model,
                                 s.provider,
@@ -1264,7 +1620,7 @@ impl Tool for AgentControlTool {
                         .map(|a| {
                             let detail = match &a.state {
                                 crate::agents::AckState::Queued => format!(
-                                    "queued (waiting {}s{}, will be delivered in a batch at the next turn boundary)",
+                                    "queued (waiting {}s{}, the receiver will claim it immediately when idle or at its next tool round)",
                                     a.queued_at.elapsed().as_secs(),
                                     Self::chase_note(a)
                                 ),
@@ -1391,6 +1747,7 @@ mod tests {
                 cache: false,
             }],
             depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
             home: std::env::temp_dir(),
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
@@ -1404,6 +1761,14 @@ mod tests {
             attachments: crate::api::image::Attachments::new(),
         });
         (session, client)
+    }
+
+    /// A project directory with no crew pinned. Never the ambient cwd: these tests assert
+    /// the exact system blocks a sub-session gets, and running them inside a repo that has
+    /// its own `.bingo/team.json` would add the hire's blocks and fail them for a reason
+    /// that has nothing to do with what they check.
+    fn crewless() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("bingo-crewless-{}", std::process::id()))
     }
 
     fn params(prompt: &str) -> AgentInput {
@@ -1441,13 +1806,123 @@ mod tests {
         }
     }
 
+    /// A project directory with a pinned crew and a written agreement.
+    fn crewed_project(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("bingo-hire-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".bingo")).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            dir.join(crate::team::TEAM_FILE),
+            r#"{"name":"dev-room","members":[{"name":"Mira","agent":"qa"}]}"#,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            dir.join(crate::team::NORMS_FILE),
+            "# Team norms\n\n- Report outcomes as they are.\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        dir
+    }
+
+    /// A spawn in a crewed project is a hire and is told so (D53): it carries the crew's
+    /// agreement, and it knows it is not on the crew. Without the second block "temporary"
+    /// would be bookkeeping the instance itself never learns, and it would plan as if there
+    /// were a next session in which it is asked again.
+    #[test]
+    fn a_spawn_beside_a_crew_is_a_hire_and_knows_it() {
+        let (session, _client) = parent_session();
+        let project = crewed_project("standing");
+        let tool = AgentTool::new(session.clone(), Vec::new());
+        let sub = tool
+            .build_sub_session(&params("one job"), None, "temp", &project)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let has = |head: &str| sub.system.iter().any(|b| b.text.starts_with(head));
+        assert!(has("# Team norms (dev-room)"), "{:?}", sub.system);
+        assert!(has("# You are a temporary hire"), "{:?}", sub.system);
+        let standing = sub
+            .system
+            .iter()
+            .find(|b| b.text.starts_with("# You are a temporary hire"))
+            .unwrap_or_else(|| panic!("expected the standing block"));
+        assert!(
+            standing.text.contains(crate::team::TEAM_FILE)
+                && standing.text.contains("not written into"),
+            "it is told it never joins the blueprint: {}",
+            standing.text
+        );
+        std::fs::remove_dir_all(&project).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// With no crew pinned, an ad-hoc subagent is the ordinary way to work: telling it that
+    /// it is temporary relative to a team that does not exist would be a lie, and it is the
+    /// same session it has always been.
+    #[test]
+    fn a_spawn_with_no_crew_is_told_nothing_about_one() {
+        let (session, _client) = parent_session();
+        let empty = std::env::temp_dir().join(format!("bingo-nocrew-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).unwrap_or_else(|e| panic!("{e}"));
+        let tool = AgentTool::new(session.clone(), Vec::new());
+        let sub = tool
+            .build_sub_session(&params("do it"), None, "solo", &empty)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            !sub.system
+                .iter()
+                .any(|b| b.text.contains("temporary hire") || b.text.starts_with("# Team norms")),
+            "{:?}",
+            sub.system
+        );
+        std::fs::remove_dir_all(&empty).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// The acceptance criterion in one assertion: hiring leaves the blueprint byte-identical.
+    /// A hire that could edit `.bingo/team.json` would make the crew something the model
+    /// grows on its own, which is exactly the decision the user keeps.
+    #[tokio::test]
+    async fn hiring_never_touches_the_blueprint() {
+        let (session, _client) = parent_session();
+        let project = crewed_project("blueprint");
+        let path = project.join(crate::team::TEAM_FILE);
+        let before = std::fs::read(&path).unwrap_or_else(|e| panic!("{e}"));
+        let tool = AgentTool::new(session.clone(), Vec::new());
+        let ctx = ToolContext {
+            cwd: project.clone(),
+            ..hub_ctx(&session)
+        };
+        let out = tool
+            .call(
+                serde_json::json!({"prompt": "look at one thing", "description": "one job"}),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            out.content.as_str().unwrap_or_default().contains("name"),
+            "the spawn returns an addressable instance"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap_or_else(|e| panic!("{e}")),
+            before,
+            "the blueprint is byte-identical before and after a hire"
+        );
+        let listed = session.agents.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].kind,
+            AgentKind::Hire,
+            "an Agent-tool spawn is never a crew member"
+        );
+        std::fs::remove_dir_all(&project).unwrap_or_else(|e| panic!("{e}"));
+    }
+
     #[test]
     fn sub_session_inherits_model_and_shared_endpoint() {
         let (session, client) = parent_session();
         let _ = session.runtime.thinking_tx.send(Some("medium".into()));
         let tool = AgentTool::new(session.clone(), Vec::new());
         let sub = tool
-            .build_sub_session(&params("do it"), None, "sub")
+            .build_sub_session(&params("do it"), None, "sub", &crewless())
             .unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "parent-model");
         assert_eq!(
@@ -1483,7 +1958,9 @@ mod tests {
         p.model = Some("sub-model".into());
         p.provider = Some("ds".into());
         p.thinking = Some("xhigh".into());
-        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, None, "sub", &crewless())
+            .unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "sub-model");
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
         assert_eq!(
@@ -1512,7 +1989,7 @@ mod tests {
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
         // The definition supplies system/model/provider/thinking defaults.
         let sub = tool
-            .build_sub_session(&params("review"), Some(&d), "sub")
+            .build_sub_session(&params("review"), Some(&d), "sub", &crewless())
             .unwrap();
         // Default is append: parent system + persona + the subagent note block.
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
@@ -1532,7 +2009,9 @@ mod tests {
         let mut p = params("review");
         p.model = Some("explicit".into());
         p.thinking = Some("off".into());
-        let sub = tool.build_sub_session(&p, Some(&d), "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, Some(&d), "sub", &crewless())
+            .unwrap();
         assert_eq!(*sub.runtime.model.borrow(), "explicit");
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
@@ -1553,7 +2032,8 @@ mod tests {
         let mut p = params("do it");
         p.provider = Some("nope".into());
         assert!(
-            tool.build_sub_session(&p, None, "sub").is_err(),
+            tool.build_sub_session(&p, None, "sub", &crewless())
+                .is_err(),
             "unknown provider errors"
         );
     }
@@ -1567,7 +2047,7 @@ mod tests {
         let tool = AgentTool::new(session.clone(), Vec::new());
         let mut p = params("do it");
         p.provider = Some("ds".into());
-        let err = sub_err(tool.build_sub_session(&p, None, "sub"));
+        let err = sub_err(tool.build_sub_session(&p, None, "sub", &crewless()));
         assert!(
             err.contains("requires a model") && err.contains("ds"),
             "crossing providers requires an explicit model: {err}"
@@ -1576,7 +2056,7 @@ mod tests {
         let mut d = def("reviewer");
         d.model = None;
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
-        let err = sub_err(tool.build_sub_session(&params("review"), Some(&d), "sub"));
+        let err = sub_err(tool.build_sub_session(&params("review"), Some(&d), "sub", &crewless()));
         assert!(
             err.contains("requires a model"),
             "the definition-side cross-provider case errors the same way: {err}"
@@ -1586,7 +2066,9 @@ mod tests {
         let tool = AgentTool::new(session.clone(), Vec::new());
         let mut p = params("do it");
         p.provider = Some("ds".into());
-        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, None, "sub", &crewless())
+            .unwrap();
         assert_eq!(
             *sub.runtime.model.borrow(),
             "parent-model",
@@ -1604,7 +2086,9 @@ mod tests {
         let mut p = params("do it");
         p.provider = Some("ds".into());
         p.model = Some("ds-model".into());
-        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, None, "sub", &crewless())
+            .unwrap();
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
             None,
@@ -1615,7 +2099,9 @@ mod tests {
         p.provider = Some("ds".into());
         p.model = Some("ds-model".into());
         p.thinking = Some("high".into());
-        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, None, "sub", &crewless())
+            .unwrap();
         assert_eq!(sub.runtime.thinking.borrow().as_deref(), Some("high"));
     }
 
@@ -1627,7 +2113,9 @@ mod tests {
         let tool = AgentTool::new(session.clone(), Vec::new());
         let mut p = params("do it");
         p.provider = Some("ds".into());
-        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, None, "sub", &crewless())
+            .unwrap();
         assert_eq!(
             sub.runtime.thinking.borrow().as_deref(),
             Some("xhigh"),
@@ -1642,7 +2130,9 @@ mod tests {
         // Explicit "default": shares the parent endpoint, no fork, no error.
         let mut p = params("do it");
         p.provider = Some("default".into());
-        let sub = tool.build_sub_session(&p, None, "sub").unwrap();
+        let sub = tool
+            .build_sub_session(&p, None, "sub", &crewless())
+            .unwrap();
         assert_eq!(sub.runtime.provider.borrow().as_str(), "default");
         assert_eq!(
             sub.client.current_endpoint(),
@@ -1660,7 +2150,7 @@ mod tests {
         d.provider = Some("default".into());
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
         let sub = tool
-            .build_sub_session(&params("review"), Some(&d), "sub")
+            .build_sub_session(&params("review"), Some(&d), "sub", &crewless())
             .unwrap();
         assert_eq!(sub.runtime.provider.borrow().as_str(), "ds");
     }
@@ -1672,7 +2162,7 @@ mod tests {
         for bad in ["auto", "super", "HIGH"] {
             let mut p = params("do it");
             p.thinking = Some(bad.into());
-            let err = sub_err(tool.build_sub_session(&p, None, "sub"));
+            let err = sub_err(tool.build_sub_session(&p, None, "sub", &crewless()));
             assert!(
                 err.contains("invalid thinking level"),
                 "invalid level {bad:?} should error: {err}"
@@ -1682,7 +2172,7 @@ mod tests {
         let mut d = def("reviewer");
         d.thinking = Some("bogus".into());
         let tool = AgentTool::new(session.clone(), vec![d.clone()]);
-        let err = sub_err(tool.build_sub_session(&params("review"), Some(&d), "sub"));
+        let err = sub_err(tool.build_sub_session(&params("review"), Some(&d), "sub", &crewless()));
         assert!(
             err.contains("invalid thinking level"),
             "definition-side invalid value should error: {err}"
@@ -1715,12 +2205,33 @@ mod tests {
         assert!(cut.ends_with('…'));
     }
 
+    #[test]
+    fn agent_control_list_reports_relative_last_activity() {
+        assert_eq!(format_last_active(std::time::Duration::ZERO), "active now");
+        assert_eq!(
+            format_last_active(std::time::Duration::from_secs(3)),
+            "active 3s ago"
+        );
+        assert_eq!(
+            format_last_active(std::time::Duration::from_secs(125)),
+            "active 2min ago"
+        );
+        assert_eq!(
+            format_last_active(std::time::Duration::from_secs(7_200)),
+            "active 2h ago"
+        );
+    }
+
     #[tokio::test]
     async fn agent_control_list_stop_delete() {
         let (session, _client) = parent_session();
-        session
-            .agents
-            .insert("scout", None, "research".into(), session.clone());
+        session.agents.insert(
+            "scout",
+            AgentKind::Hire,
+            None,
+            "research".into(),
+            session.clone(),
+        );
         let ctl = AgentControlTool::new(session.clone());
         let ctx = crate::tool::ToolContext {
             home: std::env::temp_dir(),
@@ -1741,7 +2252,10 @@ mod tests {
             .await
             .unwrap();
         let text = out.content.as_str().unwrap();
-        assert!(text.contains("scout") && text.contains("running"), "{text}");
+        assert!(
+            text.contains("scout") && text.contains("running") && text.contains("active now"),
+            "{text}"
+        );
         let out = ctl
             .call(
                 serde_json::json!({"action": "stop", "agent": "scout"}),
@@ -1778,11 +2292,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_message_queues_on_running_instance() {
+    async fn send_message_starts_an_idle_instance_before_returning() {
         let (session, _client) = parent_session();
-        session
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        );
+        session.agents.mark_idle("worker");
+        let out = SendMessageTool::new(session.clone())
+            .call(
+                serde_json::json!({"agent": "worker", "message": "start now", "ack_timeout": 0}),
+                &hub_ctx(&session),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let receipt: serde_json::Value =
+            serde_json::from_str(out.content.as_str().unwrap_or_default())
+                .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(receipt["status"], "queued");
+        let status = &session.agents.list()[0];
+        assert_eq!(status.state, crate::agents::AgentState::Running);
+        assert_eq!(status.pending, 0, "the idle inbox was claimed immediately");
+        let acks = session
             .agents
-            .insert("worker", None, "do work".into(), session.clone());
+            .acks_of("worker")
+            .unwrap_or_else(|| unreachable!());
+        assert!(matches!(
+            acks[0].state,
+            crate::agents::AckState::Delivered { run: 1 }
+        ));
+        let _ = session.agents.stop("worker");
+    }
+
+    #[tokio::test]
+    async fn send_message_keeps_running_instance_queued_for_its_next_tool_round() {
+        let (session, _client) = parent_session();
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        );
         let send = SendMessageTool::new(session.clone());
         let ctx = hub_ctx(&session);
         // The acknowledgement wait is opt-in: omitting it keeps the plain fire-and-forget path.
@@ -1796,7 +2350,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // The receipt carries the message id; delivery itself waits for the turn boundary.
+        // A running receiver keeps it queued until its query loop reaches the next tool round.
         let receipt: serde_json::Value =
             serde_json::from_str(out.content.as_str().unwrap_or_default())
                 .unwrap_or_else(|e| panic!("{e}"));
@@ -1818,9 +2372,13 @@ mod tests {
     #[tokio::test]
     async fn the_reply_check_is_on_by_default_and_zero_turns_it_off() {
         let (session, _client) = parent_session();
-        session
-            .agents
-            .insert("worker", None, "do work".into(), session.clone());
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        );
         let send = SendMessageTool::new(session.clone());
         let ctx = hub_ctx(&session);
         let receipt = |out: ToolResult| -> serde_json::Value {
@@ -1885,10 +2443,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn unacknowledged_message_is_chased_three_times_then_reported() {
         let (session, _client) = parent_session();
-        // Running: the boundary flush cannot claim it, so the message really does stay queued.
-        session
-            .agents
-            .insert("worker", None, "do work".into(), session.clone());
+        // Running without a query loop: the dispatcher cannot claim it, so the message stays queued.
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        );
         let ctx = hub_ctx(&session);
         let out = SendMessageTool::new(session.clone())
             .call(
@@ -1935,9 +2497,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_receiver_that_reads_and_says_nothing_is_still_chased() {
         let (session, _client) = parent_session();
-        session
-            .agents
-            .insert("mute", None, "silent".into(), session.clone());
+        session.agents.insert(
+            "mute",
+            AgentKind::Hire,
+            None,
+            "silent".into(),
+            session.clone(),
+        );
         let ctx = hub_ctx(&session);
         SendMessageTool::new(session.clone())
             .call(
@@ -1948,7 +2514,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         // A turn ends without a word and takes the queued message into the next one: delivered,
         // unanswered, and still Running — so the flush the watchdog retries stays a no-op here.
-        assert!(session.agents.finish("mute", Vec::new(), false).is_some());
+        assert!(session.agents.finish("mute", Vec::new(), 0).is_some());
         assert!(matches!(
             session
                 .agents
@@ -1981,9 +2547,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_acknowledged_message_reports_nothing() {
         let (session, _client) = parent_session();
-        session
-            .agents
-            .insert("worker", None, "do work".into(), session.clone());
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        );
         let ctx = hub_ctx(&session);
         SendMessageTool::new(session.clone())
             .call(
@@ -1993,8 +2563,8 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("{e}"));
         // The receiver picks it up at the boundary, then that run ends with something to say.
-        assert!(session.agents.finish("worker", Vec::new(), true).is_some());
-        assert!(session.agents.finish("worker", Vec::new(), true).is_none());
+        assert!(session.agents.finish("worker", Vec::new(), 1).is_some());
+        assert!(session.agents.finish("worker", Vec::new(), 2).is_none());
         tokio::time::sleep(std::time::Duration::from_secs(120)).await;
         let acks = session
             .agents
@@ -2041,20 +2611,29 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].media_type, "image/png");
         // Sub-sessions share the table, so a nested spawn can resolve the same marker.
-        let sub = build_sub_session(&session, None, None, None, None, "worker", None).unwrap();
+        let sub = build_sub_session(
+            &session,
+            None,
+            None,
+            None,
+            None,
+            "worker",
+            MemberContext::default(),
+        )
+        .unwrap();
         assert_eq!(sub.attachments.resolve("#[image 1]").len(), 1);
 
         // Follow-up: a queued instruction keeps its images until it is delivered.
         session
             .agents
-            .insert("worker", None, "d".into(), sub.clone());
+            .insert("worker", AgentKind::Hire, None, "d".into(), sub.clone());
         let id = session
             .agents
             .deliver("worker", "compare #[image 1]", images.clone(), None)
             .unwrap_or_else(|e| panic!("{e}"));
-        let (prompt, carried) = match session.agents.finish("worker", Vec::new(), true) {
+        let (prompt, carried) = match session.agents.finish("worker", Vec::new(), 1) {
             Some(next) => absorb_inbox(&sub.channels, "worker", &next.items),
-            None => unreachable!("queued messages should be picked up at the turn boundary"),
+            None => unreachable!("queued messages should be claimed by the receiver"),
         };
         let acks = session
             .agents
@@ -2106,7 +2685,7 @@ mod tests {
             None,
             None,
             "looker",
-            None,
+            MemberContext::default(),
         )
         .unwrap_or_else(|e| panic!("{e}"));
         assert!(
@@ -2136,7 +2715,7 @@ mod tests {
         d.inherit_system = false;
         let tool = AgentTool::new(session, vec![d.clone()]);
         let sub = tool
-            .build_sub_session(&params("review"), Some(&d), "sub")
+            .build_sub_session(&params("review"), Some(&d), "sub", &crewless())
             .unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, ["You are the reviewer.", SUBAGENT_NOTE]);
@@ -2152,8 +2731,16 @@ mod tests {
     fn channel_note_is_gated_by_the_flag() {
         let (off, _c1) = parent_session();
         assert!(!off.settings.experimental.agent_channels, "off by default");
-        let sub = build_sub_session(&off, None, None, None, None, "solo", None)
-            .unwrap_or_else(|e| panic!("spawn: {e}"));
+        let sub = build_sub_session(
+            &off,
+            None,
+            None,
+            None,
+            None,
+            "solo",
+            MemberContext::default(),
+        )
+        .unwrap_or_else(|e| panic!("spawn: {e}"));
         assert!(
             !sub.system.iter().any(|b| b.text == CHANNEL_NOTE),
             "channel etiquette must not be injected when channels are off"
@@ -2162,8 +2749,16 @@ mod tests {
         let (mut on, _c2) = parent_session();
         let session = Arc::get_mut(&mut on).unwrap_or_else(|| panic!("exclusive"));
         session.settings.experimental.agent_channels = true;
-        let sub = build_sub_session(&on, None, None, None, None, "member", None)
-            .unwrap_or_else(|e| panic!("spawn: {e}"));
+        let sub = build_sub_session(
+            &on,
+            None,
+            None,
+            None,
+            None,
+            "member",
+            MemberContext::default(),
+        )
+        .unwrap_or_else(|e| panic!("spawn: {e}"));
         assert!(sub.system.iter().any(|b| b.text == CHANNEL_NOTE));
         // Both failure modes have to survive edits to this text: the storm it was written
         // for, and the over-correction where nobody answers the human at all.
@@ -2179,6 +2774,29 @@ mod tests {
             CHANNEL_NOTE.contains("`user` or `main` addressed the room"),
             "must spell out \"answer when a human speaks\", otherwise the silence rule overshoots"
         );
+        assert!(
+            CHANNEL_NOTE.contains("never with Post"),
+            "must state that a DM is answered in turn text — otherwise a member takes a private question to the room"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("stays private"),
+            "must forbid relaying DM content into a channel, not just answering there"
+        );
+    }
+
+    /// The user reads a member's turn text in the DM window (D57), so the subagent note may
+    /// not claim the user never sees it. That claim is what made a DM'd member believe the
+    /// only way to reach the human was a channel Post (D63).
+    #[test]
+    fn subagent_note_knows_the_dm_window_exists() {
+        assert!(
+            SUBAGENT_NOTE.contains("direct-message window"),
+            "must name the private surface the user reaches an instance through"
+        );
+        assert!(
+            !SUBAGENT_NOTE.contains("not displayed to the user"),
+            "the old claim was false once the DM window existed, and it routed private answers into channels"
+        );
     }
 
     /// A crew member's memory arrives as a system block, not as history and not as
@@ -2189,8 +2807,19 @@ mod tests {
     fn memory_note_rides_the_system_prompt_when_there_is_one() {
         let (parent, _c) = parent_session();
         let note = "your past is at /tmp/qa.md".to_string();
-        let sub = build_sub_session(&parent, None, None, None, None, "qa", Some(note.clone()))
-            .unwrap_or_else(|e| panic!("spawn: {e}"));
+        let sub = build_sub_session(
+            &parent,
+            None,
+            None,
+            None,
+            None,
+            "qa",
+            MemberContext {
+                memory: Some(note.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("spawn: {e}"));
         assert!(
             sub.system.iter().any(|b| b.text == note),
             "the pointer is in the system prompt"
@@ -2200,8 +2829,16 @@ mod tests {
             "a per-member tail block must not open another cache breakpoint"
         );
 
-        let solo = build_sub_session(&parent, None, None, None, None, "solo", None)
-            .unwrap_or_else(|e| panic!("spawn: {e}"));
+        let solo = build_sub_session(
+            &parent,
+            None,
+            None,
+            None,
+            None,
+            "solo",
+            MemberContext::default(),
+        )
+        .unwrap_or_else(|e| panic!("spawn: {e}"));
         assert!(
             !solo
                 .system
@@ -2215,9 +2852,25 @@ mod tests {
     #[test]
     fn plain_subagent_inherits_parent_system_plus_note() {
         let (session, _client) = parent_session();
-        let sub = build_sub_session(&session, None, None, None, None, "worker", None).unwrap();
+        let sub = build_sub_session(
+            &session,
+            None,
+            None,
+            None,
+            None,
+            "worker",
+            MemberContext::default(),
+        )
+        .unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, ["parent system", SUBAGENT_NOTE]);
+        let moved = std::env::temp_dir().join("bingo-subagent-shared-cwd");
+        session.set_cwd(moved.clone());
+        assert_eq!(
+            sub.cwd(),
+            moved,
+            "ad-hoc subagents follow the parent session's cwd"
+        );
         assert!(
             !sub.system.last().map(|b| b.cache).unwrap_or(true),
             "the note block does not occupy a cache breakpoint"
@@ -2229,7 +2882,16 @@ mod tests {
     #[test]
     fn sub_session_shares_parent_mcp_and_permissions() {
         let (parent, _) = parent_session();
-        let sub = build_sub_session(&parent, None, None, None, None, "worker", None).unwrap();
+        let sub = build_sub_session(
+            &parent,
+            None,
+            None,
+            None,
+            None,
+            "worker",
+            MemberContext::default(),
+        )
+        .unwrap();
         assert!(
             Arc::ptr_eq(&sub.runtime.mcp, &parent.runtime.mcp),
             "the MCP manager should be shared, otherwise subagents get no MCP tools"
@@ -2240,8 +2902,269 @@ mod tests {
         );
     }
 
+    /// Thinking deltas reach the live tail as their own blocks — one per
+    /// phase, closed by whatever interrupts it — so the DM can show the
+    /// reasoning happening, while the flat reply output stays prose-only.
+    #[tokio::test]
+    async fn thinking_deltas_open_one_live_block_per_phase() {
+        let output = Arc::new(Mutex::new(String::new()));
+        let live = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+        let watch = crate::watch::WatchRegistry::new();
+        let registry = AgentRegistry::new();
+        let cell = Arc::new(AgentCell::new(registry.clone()));
+        let id = register_run_watch(&watch, "think".into(), cell.clone(), Vec::new(), None);
+        let mut ui = subagent_hooks(
+            SubagentOutput {
+                text: output.clone(),
+                live: live.clone(),
+                progress,
+            },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            cell,
+            watch,
+            id,
+            "worker".into(),
+            None,
+        );
+        (ui.on_event)(&crate::api::contract::StreamEvent::ThinkingDelta {
+            index: 0,
+            thinking: "first ".into(),
+        });
+        (ui.on_event)(&crate::api::contract::StreamEvent::ThinkingDelta {
+            index: 0,
+            thinking: "phase".into(),
+        });
+        (ui.on_tool_ready)(
+            "test-tool".into(),
+            "Read".into(),
+            serde_json::json!({"file_path": "a"}),
+            false,
+        );
+        (ui.on_event)(&crate::api::contract::StreamEvent::ThinkingDelta {
+            index: 0,
+            thinking: "second phase".into(),
+        });
+        (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "the answer".into(),
+        });
+
+        let live = live.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(live.len(), 4, "{live:?}");
+        assert!(
+            matches!(&live[0], crate::agents::LiveBlock::Thinking(t) if t == "first phase"),
+            "consecutive deltas fold into one phase: {live:?}"
+        );
+        assert!(matches!(&live[1], crate::agents::LiveBlock::Tool(_)));
+        assert!(
+            matches!(&live[2], crate::agents::LiveBlock::Thinking(t) if t == "second phase"),
+            "a tool call closes the phase: {live:?}"
+        );
+        assert!(matches!(&live[3], crate::agents::LiveBlock::Text(t) if t == "the answer"));
+        assert_eq!(
+            &*output.lock().unwrap_or_else(|e| e.into_inner()),
+            "the answer",
+            "reasoning never leaks into the flat reply"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_retry_restores_the_current_attempt_checkpoint() {
+        let output = Arc::new(Mutex::new(String::new()));
+        let live = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+        let watch = crate::watch::WatchRegistry::new();
+        let registry = AgentRegistry::new();
+        let cell = Arc::new(AgentCell::new(registry.clone()));
+        let id = register_run_watch(&watch, "retry".into(), cell.clone(), Vec::new(), None);
+        let mut ui = subagent_hooks(
+            SubagentOutput {
+                text: output.clone(),
+                live: live.clone(),
+                progress: progress.clone(),
+            },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            cell.clone(),
+            watch,
+            id,
+            "worker".into(),
+            None,
+        );
+        (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "committed".into(),
+        });
+        (ui.on_tool_ready)(
+            "test-tool".into(),
+            "Read".into(),
+            serde_json::json!({"file_path":"a"}),
+            false,
+        );
+        (ui.on_round_end)();
+        (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "partial".into(),
+        });
+        (ui.on_tool_ready)(
+            "test-tool".into(),
+            "Bash".into(),
+            serde_json::json!({"command":"bad"}),
+            false,
+        );
+        (ui.on_stream_retry)();
+        (ui.on_warning)("Reconnecting... 2/10".into());
+        (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "answer".into(),
+        });
+
+        assert_eq!(
+            &*output.lock().unwrap_or_else(|e| e.into_inner()),
+            "committedanswer"
+        );
+        let live = live.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            matches!(live.first(), Some(crate::agents::LiveBlock::Text(text)) if text == "committed")
+        );
+        assert!(matches!(
+            live.get(live.len().saturating_sub(2)),
+            Some(crate::agents::LiveBlock::Text(text)) if text == "Reconnecting... 2/10"
+        ));
+        assert!(matches!(
+            live.last(),
+            Some(crate::agents::LiveBlock::Text(text)) if text == "answer"
+        ));
+        let progress = progress.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(progress.tool_uses, 1);
+        assert_eq!(cell.chars(), "committedanswer".chars().count());
+    }
+
+    #[tokio::test]
+    async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
+        let output = Arc::new(Mutex::new(String::new()));
+        let live = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
+        progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .start_run();
+        let watch = crate::watch::WatchRegistry::new();
+        let registry = AgentRegistry::new();
+        let id = register_run_watch(
+            &watch,
+            "progress".into(),
+            Arc::new(AgentCell::new(registry.clone())),
+            Vec::new(),
+            None,
+        );
+        let mut ui = subagent_hooks(
+            SubagentOutput {
+                text: output,
+                live,
+                progress: progress.clone(),
+            },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            Arc::new(AgentCell::new(registry.clone())),
+            watch,
+            id,
+            "worker".into(),
+            None,
+        );
+        (ui.on_event)(&crate::api::contract::StreamEvent::StopReason {
+            stop_reason: Some("tool_use".into()),
+            output_tokens: Some(12),
+        });
+        (ui.on_tool_ready)(
+            "test-tool".into(),
+            "Read".into(),
+            serde_json::json!({"file_path":"src/main.rs"}),
+            false,
+        );
+        (ui.on_event)(&crate::api::contract::StreamEvent::StopReason {
+            stop_reason: Some("end_turn".into()),
+            output_tokens: Some(7),
+        });
+        (ui.on_tool_ready)(
+            "test-tool".into(),
+            "Bash".into(),
+            serde_json::json!({"command":"cargo check"}),
+            false,
+        );
+        let progress = progress.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(progress.output_tokens, 19);
+        assert_eq!(progress.tool_uses, 2);
+        assert_eq!(progress.recent_activity.len(), 2);
+        assert!(progress.recent_activity[0].contains("Read"));
+        assert!(progress.recent_activity[1].contains("Bash"));
+    }
+
     /// A subagent's Ask decision is forwarded to the attached prompt surface, stamped with the
     /// instance name — never silently auto-denied (or auto-allowed under bypass).
+    #[tokio::test]
+    async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
+        let session = parent_session().0;
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "work".into(),
+            session.clone(),
+        );
+        let watch = crate::watch::WatchRegistry::new();
+        let registry = session.agents.clone();
+        let id = register_run_watch(
+            &watch,
+            "l".into(),
+            Arc::new(AgentCell::new(registry.clone())),
+            Vec::new(),
+            None,
+        );
+        let mut ui = subagent_hooks(
+            SubagentOutput {
+                text: Arc::new(Mutex::new(String::new())),
+                live: Arc::new(Mutex::new(Vec::new())),
+                progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
+            },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            Arc::new(AgentCell::new(registry.clone())),
+            watch,
+            id,
+            "worker".into(),
+            None,
+        );
+        let inserted = session.agents.list()[0].last_active;
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "hi".into(),
+        });
+        let streamed = session.agents.list()[0].last_active;
+        assert!(streamed > inserted);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        (ui.on_tool_ready)(
+            "test-tool".into(),
+            "Read".into(),
+            serde_json::json!({"file_path": "a"}),
+            false,
+        );
+        let ready = session.agents.list()[0].last_active;
+        assert!(ready > streamed);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        (ui.on_tool_done)(&crate::query::ToolCallDone {
+            tool_call_id: "test-tool".into(),
+            name: "Read".into(),
+            summary: String::new(),
+            output: String::new(),
+            status: crate::query::ToolCallStatus::Done,
+            diff: None,
+            duration_ms: 1,
+        });
+        assert!(session.agents.list()[0].last_active > ready);
+    }
+
     #[tokio::test]
     async fn subagent_ask_forwards_to_attached_prompt() {
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -2254,17 +3177,22 @@ mod tests {
             Box::pin(async { true })
         });
         let watch = crate::watch::WatchRegistry::new();
+        let registry = AgentRegistry::new();
         let id = register_run_watch(
             &watch,
             "l".into(),
-            Arc::new(AgentCell::new()),
+            Arc::new(AgentCell::new(registry.clone())),
             Vec::new(),
             None,
         );
         let ui = subagent_hooks(
-            Arc::new(Mutex::new(String::new())),
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(AgentCell::new()),
+            SubagentOutput {
+                text: Arc::new(Mutex::new(String::new())),
+                live: Arc::new(Mutex::new(Vec::new())),
+                progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
+            },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            Arc::new(AgentCell::new(registry.clone())),
             watch.clone(),
             id,
             "worker".into(),
@@ -2278,9 +3206,13 @@ mod tests {
 
         // Nothing attached (embedded/test path): deny rather than block on a modal nobody shows.
         let ui = subagent_hooks(
-            Arc::new(Mutex::new(String::new())),
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(AgentCell::new()),
+            SubagentOutput {
+                text: Arc::new(Mutex::new(String::new())),
+                live: Arc::new(Mutex::new(Vec::new())),
+                progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
+            },
+            Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+            Arc::new(AgentCell::new(registry.clone())),
             watch,
             id,
             "worker".into(),

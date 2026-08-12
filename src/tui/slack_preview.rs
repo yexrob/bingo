@@ -22,6 +22,8 @@ mod preview {
     fn snap() -> Snapshot {
         Snapshot {
             workspace: "bingo".into(),
+            main_model: "main-model".into(),
+            main_thinking: Some("high".into()),
             channels: vec![
                 ChannelItem {
                     name: "dev-room".into(),
@@ -52,19 +54,28 @@ mod preview {
                 DmItem {
                     name: "scout".into(),
                     state: AgentState::Running,
+                    model: "gpt-5.6-sol".into(),
+                    thinking: Some("max".into()),
                     description: "code reconnaissance".into(),
+                    last_active: std::time::Duration::from_secs(3),
                     unread: 0,
                 },
                 DmItem {
                     name: "qa".into(),
                     state: AgentState::Idle,
+                    model: "claude-sonnet".into(),
+                    thinking: Some("high".into()),
                     description: "acceptance".into(),
+                    last_active: std::time::Duration::from_secs(125),
                     unread: 3,
                 },
                 DmItem {
                     name: "ui-ux".into(),
                     state: AgentState::Stopped,
+                    model: "claude-haiku".into(),
+                    thinking: None,
                     description: "interface review".into(),
+                    last_active: std::time::Duration::from_secs(7_200),
                     unread: 0,
                 },
             ],
@@ -93,8 +104,8 @@ mod preview {
                 from: "scout".into(),
                 you: false,
                 at: now - 3580,
-                text: "⏺ Read(src/tui/term.rs:410)".into(),
-                kind: PostKind::Tool,
+                text: "I traced it to src/tui/term.rs:410.".into(),
+                kind: PostKind::Said,
             },
             Post {
                 from: "user".into(),
@@ -120,6 +131,38 @@ mod preview {
         ]
     }
 
+    /// The DM frame's posts: the shared conversation plus the work rows the DM
+    /// shows and the channel skin never does — a reasoning phase, tool calls,
+    /// and a message still in flight — so the preview judges the process rows
+    /// against the stamps and the gutter they must not disturb.
+    fn dm_posts_fixture(now: u64) -> Vec<Post> {
+        let mut posts = posts(now);
+        let process = |text: &str| Post {
+            from: "qa".into(),
+            you: false,
+            at: 0,
+            text: text.into(),
+            kind: PostKind::Process,
+        };
+        posts.insert(5, process("✻ Thinking"));
+        posts.insert(6, process("⏺ Read(src/tui/term.rs)"));
+        posts.insert(
+            7,
+            process("⏺ Bash($ cargo test --locked resize_keeps_the_hint_row)"),
+        );
+        posts.insert(
+            8,
+            Post {
+                from: "user".into(),
+                you: true,
+                at: 0,
+                text: "add the 80x24 case to the matrix too".into(),
+                kind: PostKind::Said,
+            },
+        );
+        posts
+    }
+
     fn frame(width: u16, height: u16, ws: &Workspace, theme: &Theme, now: u64) -> Buffer {
         let pal = Palette::new(theme);
         let area = Rect::new(0, 0, width, height);
@@ -130,12 +173,22 @@ mod preview {
         let w = main.width as usize;
         let conv = ws.open.clone().unwrap_or(Conv::Channel("dev-room".into()));
         let header = header_rows(&snap, &conv, &pal, w);
-        let (composer, _) = composer_rows(ws, &conv, &pal, w);
+        let (composer, _) = composer_rows(ws, &conv, &pal, w, None, None);
         let viewport = h.saturating_sub(header.len() + composer.len()).max(1);
         // The text chip, not the portrait: a browser screenshot cannot show a
         // kitty placement, and a preview that silently dropped the gutter would
         // be measuring a layout the terminal never draws.
-        let content = message_rows(&posts(now), 4, &pal, w, &Avatars::default());
+        let content = match conv {
+            Conv::Dm(_) => dm_message_rows(
+                &dm_posts_fixture(now),
+                4,
+                &pal,
+                w,
+                &Avatars::default(),
+                theme,
+            ),
+            Conv::Channel(_) => message_rows(&posts(now), 4, &pal, w, &Avatars::default()),
+        };
         let start = content.len().saturating_sub(viewport);
         let mut slice: Vec<_> = content.iter().skip(start).cloned().collect();
         while slice.len() < viewport {
@@ -172,9 +225,12 @@ mod preview {
 
         let mut chat = crate::tui::test_util::chat_at(width as usize, height as usize);
         chat.theme = theme.clone();
+        // A fixed, dated clock: the frame shows the trailing send-time stamps
+        // in their long form, and the render stays reproducible.
         let msg = |role: Role, text: &str| UiMessage {
             role,
             text: text.to_string(),
+            at: 1_754_700_000,
             activities: Vec::new(),
             insert_points: Vec::new(),
             groups: Vec::new(),
@@ -314,6 +370,11 @@ mod preview {
             &frame(100, 30, &dm, &Theme::dark(), now),
             "100×30 dark · DM + messages focused",
             TERM_DARK,
+        ));
+        body.push_str(&html(
+            &frame(100, 30, &dm, &Theme::light(), now),
+            "100×30 light · DM + messages focused",
+            TERM_LIGHT,
         ));
         body.push_str(&html(
             &frame(100, 30, &ws, &Theme::light(), now),

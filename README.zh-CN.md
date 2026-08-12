@@ -16,7 +16,10 @@ Rust 实现的本地 agent CLI（agent harness）。在终端里驱动大模型�
 - **子代理（hub-and-spoke）**：主 agent 派生命名子代理，异步执行、完成通知自动
   注入上下文；SendMessage 续话、AgentControl 管理生命周期。
 - **Agent 团队（项目级）**：`.bingo/team.json` 把一组角色固定到项目，启动自动
-  拉起（成员零 token 待命），`/team` 命令族管理；跨会话记忆按「项目路径 +
+  拉起（成员零 token 待命），`/team` 命令族管理；钉了团队的项目里，团队就是默认
+  用工对象——活先派给队内成员，另派的子代理只是不进队的临时工；
+  `.bingo/team-norms.md` 是这支队伍的协作约定，每个成员随启动带着它。
+  跨会话记忆按「项目路径 +
   分支」隔离。
 - **经验库（Experience）**：agent 按项目沉淀可复用的操作经验
   （trigger/summary/steps/verify），跨会话复利，并记录经验证的 helpful/harmful
@@ -30,6 +33,7 @@ Rust 实现的本地 agent CLI（agent harness）。在终端里驱动大模型�
 - **上下文管理**：token 预算监控、自动压缩（保留最近消息 + 结构化摘要）、
   手动 `/compact`、压缩失败熔断。
 - **会话与记忆**：transcript JSONL 持久化（`--continue`/`/resume` 恢复），
+  30 天 TTL + 最近 100 个非活跃会话的有界保留策略（24 小时活跃保护，`/gc`），
   memdir 自动记忆 + CLAUDE.md/AGENTS.md 项目记忆。
 - **Hooks 扩展点**：工具前后、会话起止、压缩、Stop、任务生命周期等事件的
   shell hook（stdin 喂 JSON、stdout 回传决策）。
@@ -137,7 +141,7 @@ bingo --continue            # 恢复最近一次会话
 | `Ctrl+C` | busy 中断 / 有文本清空 / 空输入连按两次退出 |
 | `Ctrl+T` | 显隐任务区 |
 | `Ctrl+O` | 展开/闭合切换：展开 = 重放完整 transcript 供上滑翻看 |
-| `Ctrl+G` | agent / 频道选择器 → Slack 式工作区（整屏一栏消息流 + 输入框；Ctrl+K 换会话、alt+↑↓ 上下会话） |
+| `Ctrl+G` | 直接打开全屏 Slack 式工作区；`Ctrl+K` 切换频道与 DM，alt+↑↓ 上下会话 |
 | `Ctrl+L` | 清屏重画 |
 | `Shift+Tab` | 循环权限模式（default → acceptEdits → plan） |
 | `Alt+T` | 思考开关 |
@@ -154,13 +158,13 @@ bingo --continue            # 恢复最近一次会话
 `/skills`（清单，`/技能名` 直接执行）、`/context`（用量）、`/status`、
 `/config`（生效配置与来源：哪个层/环境变量赢了、当前端点、未知配置项提示）、
 `/compact`（强制压缩）、`/resume [名称]`（恢复历史会话）、`/rename`、
-`/share [--public] [--open]`、`/clear`、`/exit`。
+`/gc`（清理过期会话数据）、`/share [--public] [--open]`、`/clear`、`/exit`。
 `/share` 默认只在本地生成自包含 HTML；只有显式加 `--public` 才会上传为
 任何人可访问的公开链接，且上传前会先显示敏感内容警告。`--open` 打开本地文件
 或已发布链接。等价 CLI 为 `bingo share [会话] [--public] [--open] [-o 路径]`。
 `/team`（项目团队）：`list`（图纸+运行区同屏）、`start`（拉起/幂等复用）、
 `status`、`assign <成员> <任务>`（派活）、`stop`、`validate`、`new`
-（脚手架生成 team.json）、`memory list|gc`。
+（脚手架生成 team.json + team-norms.md）、`norms`（团队规范）、`memory list|gc`。
 
 ### 图片渲染
 
@@ -197,7 +201,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `mcpServers` | object | 见下「MCP」 |
 | `disabledMcpServers` | string[] | 禁用的 MCP 服务器名单（`/mcp disable` 写入） |
 | `permissions` | object | `{allow[], deny[], ask[]}`，规则语法见「权限系统」 |
-| `experimental` | object | 实验特性：`agentChannels`、`channelMessageLimit`（默认 500）、`agentMessageLimit`（默认 50） |
+| `experimental` | object | 实验特性：`agentChannels`、`channelMessageLimit`（默认 500）、`agentMessageLimit`（默认 50）、`chatAvatars`（默认 false = 主聊天不带脸；工作区视图不受此开关管辖） |
 | `team` | object | 团队启动行为：`{"autoStart": true}`（缺省 true = 项目绑定 team 时启动自动拉起；`--no-team` 或 false 关闭） |
 | `hooks` | object | 各事件 hook，见「Hooks」 |
 
@@ -266,20 +270,52 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 - **定义**：`.bingo/team.json`（camelCase，进版本库）——`name` + `channel{mode,
   messageLimit}` + `members[{name, agent, avatar?, model?, provider?, thinking?}]`；`name` 即消息上显示的名字（取人名而非角色代号），`avatar` 钉住内置头像之一；成员引用 AgentDef，人格单一事实来源
   仍在 `.bingo/agents/<名>.md`，一人格可入多 team。
+- **一个 team 多个房间**：`channels[{name, mode?, messageLimit?, members?}]` 声明这支
+  队伍开哪些房间，各房间成员可以不一样——像一个部门有站会、有发布群、有设计评审，
+  同一个人在其中一些里、不在另一些里。`members` 省略即全队；写了 `channels` 就以它
+  为准，不再另建一个以 team 命名的大房间（没人要的房间就是没人读的房间）。什么都不
+  写时仍是老样子：一个叫 team 名、装全体成员的房间，旧文件不用改。
+- **多层 team（部门制）**：`teams[{name?, path}]` 声明子队伍的图纸在哪儿，可递归到
+  任意深度（上限 8 层）。`path` 相对于本 team 自己的目录（拒绝绝对路径——进了版本库
+  的组织架构得跟着仓库走），可以指目录，也可以直接指那份 `team.json`。每个 team 都以
+  **自己的目录**为根：角色定义、团队规范、git 分支、记忆分区全都取自那里——所以从根
+  会话进到某个部门，和直接在那个目录开会话拿到的是同一支队伍；子树也因此能单独成立。
+  队名、成员名、房间名在整棵树内唯一，于是 `SendMessage("Linh")` 不带前缀就能点到三
+  层之下的人。房间的成员只能取自本 team 及其子树——上级可以召集自己这一摊，平级不能
+  征调别的部门。子树里的成员会在系统块里被告知自己团队的目录（工具路径是相对**会话**
+  的工作目录解析的，不是相对它的团队）。`/team status|start|stop|validate|memory`
+  与 `Team` 工具的各动作都作用于整棵树。
 - **逐成员的引擎**：`model` / `provider` / `thinking` 钉住这名成员跑在什么上面。
   谁用哪个模型是编队的一部分，不是每次派生临时决定的事，所以写进进版本库的图纸——
   一支队伍可以让评审跑便宜快的端点、让架构跑贵的。三者都是先落回 AgentDef、再落回
   会话，与 `Agent` 调用的同名参数同一套优先级；`provider` 指到会话之外的端点时必须
   同时给 `model`（模型名换个端点就不认识了）。`/team list` 与 `AgentControl list`
   会报出每个在跑实例实际所在的引擎。
-- **启动自动拉起**：`settings.team.autoStart`（缺省 true）时启动即拉起——派生
-  成员 + 建房间，但**不唤醒**（成员 Idle 零 token 待命，等 `/team assign` 或
+- **启动自动拉起**：`settings.team.autoStart`（缺省 true）时启动即拉起**整棵树**——
+  先派生全树成员，再开所有房间（两段分明：上级的房间可能装着下级的人，人没起就开房，
+  房里会缺人），但**不唤醒**（成员 Idle 零 token 待命，等 `/team assign` 或
   频道消息才开跑）。opt-out：`--no-team` 或 `team.autoStart: false`。
-  幂等：以实例名为键，重复 `/team start` 复用不重派。
+  幂等：以实例名为键，重复 `/team start` 复用不重派。整树校验先跑：树里任何一处引用
+  有问题，一个成员也不派。
 - **命令**：`/team list`（图纸+运行区同屏）、`start`、`status`
   （●待命 ◐忙碌 ✗异常 ○离线）、`assign`、`stop`、`validate`（与 start 同源
-  校验：validate 能过 start 必成）、`new`（脚手架，产物必过 validate）、
-  `memory list|gc`。
+  校验：validate 能过 start 必成）、`new`（脚手架，产物必过 validate，并附一份
+  团队规范初稿）、`norms`（读团队规范）、`memory list|gc`。
+- **固定团队优先用工**：项目钉了团队，hub 的系统提示里就带着这份名册和随之而来的
+  规矩——活先用 `SendMessage` 交给队内匹配的成员，只有队里没人覆盖的工作才另派
+  子代理。给一个正闲着的成员再派一个替身，既浪费你在付钱养的队伍，也丢掉了它
+  已经攒下的记忆。
+- **临时招募不进队**：有固定团队时，Agent 工具派生出来的是「临时工」而非成员。
+  它不会写进 `.bingo/team.json`；在 `/team list` 与 `AgentControl list` 里与队伍
+  分开列（`crew` / `hire`）；会以 `type: hire` 记进队伍的 `decisions.md`；任务
+  完成即回收——空闲、收件箱为空、没有欠着的回复，并留给 hub 一轮追问的窗口。
+  这一回收只在队伍确实起着时才跑：没有团队的项目里，临时子代理的生命周期和过去
+  一模一样。
+- **团队规范**：`.bingo/team-norms.md`，与图纸并列进版本库，是这支队伍的协作约定
+  ——写成散文而非 schema，因为它既要被模型读，也要被人评审。它随启动进入每个成员
+  以及每个临时工的系统块，无需每次口头重申，并且自带优先级条款：显式指令在它所
+  针对的那一点上压过规范，其余规范照旧生效。`/team new` 会生成一份初稿（已存在
+  则不覆盖），`/team norms` 打印磁盘上的内容。
 - **跨会话记忆**：成员历史 + append-only 决策记录存
   `~/.config/bingo/teams/<项目哈希>/<分支>/<team>/`——按「项目路径 + 分支」隔离，
   main 与特性 worktree 记忆互不污染。每个成员一份 `<名>.md`（可读转录）
@@ -295,6 +331,10 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
   `bypassPermissions`），`allow` 规则也不能预授权，只有 `deny` 压得住。确认行给的是
   变化而非文件（`改写 .bingo/team.json · dev-room · 4 名成员（-ui +qa）`）；用
   Write/Edit 手改 `.bingo/team.json` 问同一个问题。派活不在工具里，用 `SendMessage`。
+  整份覆写有一个例外：`teams`（组织架构）每次 save 原样带过——它指向别的目录、是人手
+  搭起来的，改名册不构成重新决定组织架构的理由，确认行会写明「保留 N 个子 team」。
+  房间可以改：给了 `channels` 就整体替换，不给就保留；对一支已声明 `channels` 的队伍
+  再传 `mode`/`message_limit` 会被拒绝而不是猜——照做就会删掉它描述不了的那些房间。
 
 ## 频道（实验特性）
 
@@ -322,11 +362,14 @@ Unicode 占位符格子定位。team 成员的头像钉在 `.bingo/team.json`（
 一支队伍就有固定班底；其余实例按名字取脸。不支持的终端保留首字母色块；两种皮肤行数一致，只有装订线
 不同。
 
-**主聊天**用同一批脸：每条消息上面多一条带子，头像挨着名字——hub 是 `main`，你自己
+**主聊天**在 `experimental.chatAvatars`（默认关）后面用同一批脸：每条消息上面多一条
+带子，头像挨着名字——hub 是 `main`，你自己
 的消息是 `You`，都是房间里本来就用的名字。带子底下的正文一列没动，仍按整个终端宽度
 排版，消息内部的 `⏺` 也仍然负责把正文和工具行分开。能放图的终端给两行带子，退化时
 一行，带子底下没有东西依赖它的高度。一处已知退化：终端清空图片存储时（resize 会），
-还在屏幕上的脸会重画，已经滚进 scrollback 的消息则留下 4 列空白，名字还在。
+还在屏幕上的脸会重画，已经滚进 scrollback 的消息则留下 4 列空白，名字还在。开关关掉
+则整条带子不出现，subagent 的 watch 行也保留 `◉`；开关只管主聊天，DM、频道、team
+视图照旧带脸——那里的头像占的是排版本来就花掉的装订线。
 
 ## 技能（Skills）
 
@@ -450,7 +493,11 @@ bingo 的 Tool trait：
 
 - **Transcript**：`~/.local/share/bingo/transcripts/<项目>-<ts>.jsonl`，
   每行一条 Message；坏行跳过不阻塞恢复。`--continue` 续最近会话，
-  `/resume [名]` 列出/切换，`/rename` 重命名。
+  `/resume [名]` 列出/切换，`/rename` 重命名。启动清理与 `/gc` 最多保留最近
+  100 个非活跃会话，并删除超过 30 天的会话；最近 24 小时有活动的会话不受数量
+  上限清理；对应 share 快照随 transcript 删除。
+  输入历史文件同样采用 30 天 TTL 与 100 个文件上限；本地导出的 HTML 与任务
+  清单不会被自动删除。
 - **上下文预算**：窗口 200k，输出预算 64k，有效输入窗口 = 窗口 − 输出预算；
   自动压缩阈值 = 有效窗口的 90%（≈122k），提前 20k 提醒（`/context`）。
   压缩 = 摘要旧消息 + 保留最近 8 条；压缩切点安全推进到 tool_result 边界之外，

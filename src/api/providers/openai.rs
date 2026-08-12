@@ -14,8 +14,8 @@ use serde::Deserialize;
 
 use super::{AuthSource, backoff, retryable};
 use crate::api::contract::{
-    AuthStatus, BoxStream, Capabilities, ClientError, NeutralRequest, ProviderClient, StreamEvent,
-    SystemBlock, ThinkingLevel,
+    AuthStatus, BoxStream, Capabilities, ClientError, NeutralRequest, ProviderClient,
+    StreamApiErrorKind, StreamEvent, SystemBlock, ThinkingLevel,
 };
 use crate::api::sse::SseParser;
 use crate::api::types::{ContentBlock, Message, Role};
@@ -37,14 +37,15 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const MAX_RETRIES: u32 = 5;
 
-/// thinking level → Responses `reasoning.effort`. OpenAI accepts
-/// minimal/low/medium/high; bingo's xhigh/max converge to high (depth beyond
-/// the public effort ladder is a Claude-5 concept).
-fn effort_for(level: ThinkingLevel) -> &'static str {
+/// thinking level → Responses `reasoning.effort`; GPT-5.6 adds xhigh/max.
+fn effort_for(model: &str, level: ThinkingLevel) -> &'static str {
     match level {
         ThinkingLevel::Low => "low",
         ThinkingLevel::Medium => "medium",
-        ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => "high",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::Xhigh if model.starts_with("gpt-5.6") => "xhigh",
+        ThinkingLevel::Max if model.starts_with("gpt-5.6") => "max",
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => "high",
     }
 }
 
@@ -272,7 +273,7 @@ fn build_body(request: &NeutralRequest, variant: OpenAiVariant) -> serde_json::V
         );
     }
     if let Some(level) = request.thinking {
-        body["reasoning"] = serde_json::json!({ "effort": effort_for(level) });
+        body["reasoning"] = serde_json::json!({ "effort": effort_for(&request.model, level) });
         // Reasoning include per endpoint: the public API takes the summary
         // (thinking UI affordance); the codex endpoint accepts only
         // reasoning.encrypted_content (main-tested 200; summary_text → 400).
@@ -410,6 +411,64 @@ struct ErrorPayload {
     message: String,
     #[serde(default)]
     code: Option<String>,
+}
+
+/// `2`, `"1.5"`, `"3s"`, `"250ms"` → duration; `assume_ms` sets the unit for bare numbers.
+fn retry_after_value(value: &serde_json::Value, assume_ms: bool) -> Option<Duration> {
+    if let Some(number) = value.as_f64() {
+        return retry_after_number(number, assume_ms);
+    }
+    let text = value.as_str()?.trim();
+    if let Some(milliseconds) = text.strip_suffix("ms") {
+        return retry_after_number(milliseconds.trim().parse().ok()?, true);
+    }
+    if let Some(seconds) = text.strip_suffix('s') {
+        return retry_after_number(seconds.trim().parse().ok()?, false);
+    }
+    retry_after_number(text.parse().ok()?, assume_ms)
+}
+
+fn retry_after_number(value: f64, milliseconds: bool) -> Option<Duration> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(if milliseconds {
+        value / 1_000.0
+    } else {
+        value
+    }))
+}
+
+fn retry_after_from_value(value: &serde_json::Value) -> Option<Duration> {
+    let error = value.get("error");
+    let field = |key: &str| {
+        value
+            .get(key)
+            .or_else(|| error.and_then(|error| error.get(key)))
+    };
+    ["retry_after_ms", "retry-after-ms"]
+        .iter()
+        .find_map(|key| field(key).and_then(|value| retry_after_value(value, true)))
+        .or_else(|| {
+            ["retry_after", "retry-after", "retry_delay"]
+                .iter()
+                .find_map(|key| field(key).and_then(|value| retry_after_value(value, false)))
+        })
+}
+
+fn stream_api_error_kind(code: Option<&str>, message: &str) -> StreamApiErrorKind {
+    match code {
+        Some("server_is_overloaded" | "server_error" | "overloaded_error") => {
+            StreamApiErrorKind::Retryable
+        }
+        Some(
+            "insufficient_quota"
+            | "usage_not_included"
+            | "invalid_prompt"
+            | "context_length_exceeded",
+        ) => StreamApiErrorKind::NonRetryable,
+        _ => StreamApiErrorKind::from_message(message),
+    }
 }
 
 /// Incremental Responses SSE mapper: flattens the two-layer index
@@ -590,23 +649,34 @@ impl ResponsesSseMapper {
             }
             "response.failed" => {
                 let response = value.get("response").unwrap_or(&value);
-                let message = response
-                    .get("error")
+                let error = response.get("error");
+                let message = error
                     .and_then(|e| e.get("message"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("response failed")
-                    .to_string();
-                Ok(vec![StreamEvent::ApiError { message }])
+                    .unwrap_or("response failed");
+                let code = error.and_then(|e| e.get("code")).and_then(|v| v.as_str());
+                Ok(vec![StreamEvent::ApiError {
+                    message: match code {
+                        Some(code) => format!("{code}: {message}"),
+                        None => message.to_string(),
+                    },
+                    kind: stream_api_error_kind(code, message),
+                    retry_after: retry_after_from_value(response),
+                }])
             }
             "error" => {
+                let retry_after = retry_after_from_value(&value);
                 let payload: ErrorPayload =
                     serde_json::from_value(value).map_err(|e| format!("bad error payload: {e}"))?;
+                let kind = stream_api_error_kind(payload.code.as_deref(), &payload.message);
                 Ok(vec![StreamEvent::ApiError {
                     message: if let Some(code) = payload.code {
                         format!("{code}: {}", payload.message)
                     } else {
                         payload.message
                     },
+                    kind,
+                    retry_after,
                 }])
             }
             _other => Ok(Vec::new()), // response.in_progress, ping, .done noise, ...
@@ -701,20 +771,14 @@ impl ProviderClient for OpenAIProvider {
                         .map(Duration::from_secs);
                     let body = response.text().await.unwrap_or_default();
                     if attempt >= MAX_RETRIES {
-                        return Err(ClientError::Api {
-                            status: status.as_u16(),
-                            body,
-                        });
+                        return Err(ClientError::from_response(status.as_u16(), body));
                     }
                     tokio::time::sleep(retry_after.unwrap_or_else(|| backoff(attempt))).await;
                 }
                 Ok(Ok(response)) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
-                    return Err(ClientError::Api {
-                        status: status.as_u16(),
-                        body,
-                    });
+                    return Err(ClientError::from_response(status.as_u16(), body));
                 }
                 Ok(Err(_transport)) if attempt < MAX_RETRIES => {
                     tokio::time::sleep(backoff(attempt)).await;
@@ -741,7 +805,7 @@ impl ProviderClient for OpenAIProvider {
                 while let Some(event) = stream.next().await {
                     match event? {
                         StreamEvent::TextDelta { text: t, .. } => text.push_str(&t),
-                        StreamEvent::ApiError { message } => {
+                        StreamEvent::ApiError { message, .. } => {
                             return Err(ClientError::Stream(message));
                         }
                         _ => {}
@@ -785,10 +849,7 @@ impl ProviderClient for OpenAIProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status: status.as_u16(),
-                body,
-            });
+            return Err(ClientError::from_response(status.as_u16(), body));
         }
         let body: serde_json::Value = response.json().await?;
         Ok(parse_completion_text(&body))
@@ -818,10 +879,7 @@ impl ProviderClient for OpenAIProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status: status.as_u16(),
-                body,
-            });
+            return Err(ClientError::from_response(status.as_u16(), body));
         }
         let body: serde_json::Value = response.json().await?;
         let mut models: Vec<String> = body
@@ -844,6 +902,7 @@ impl ProviderClient for OpenAIProvider {
         _model: &str,
         _system: &[SystemBlock],
         _messages: &[Message],
+        _tools: &[serde_json::Value],
     ) -> Result<u64, ClientError> {
         Err(ClientError::Unsupported(
             "count_tokens is not available for the openai protocol (local estimation used)".into(),
@@ -946,6 +1005,24 @@ mod tests {
             serde_json::json!(["reasoning.summary_text"])
         );
         assert_eq!(body["max_output_tokens"], 1024);
+    }
+
+    #[test]
+    fn body_scopes_extended_thinking_effort_to_gpt_5_6() {
+        let mut r = req();
+        r.model = "gpt-5.6-sol".into();
+        for (level, effort) in [(ThinkingLevel::Xhigh, "xhigh"), (ThinkingLevel::Max, "max")] {
+            r.thinking = Some(level);
+            let body = build_body(&r, OpenAiVariant::Default);
+            assert_eq!(body["reasoning"]["effort"], effort);
+        }
+
+        r.model = "gpt-5".into();
+        for level in [ThinkingLevel::Xhigh, ThinkingLevel::Max] {
+            r.thinking = Some(level);
+            let body = build_body(&r, OpenAiVariant::Default);
+            assert_eq!(body["reasoning"]["effort"], "high");
+        }
     }
 
     /// Variant-isolated request params (main-reported live matrix): the codex
@@ -1359,6 +1436,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retry_after_metadata_accepts_milliseconds_and_seconds() {
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({"retry_after_ms": 125})),
+            Some(Duration::from_millis(125))
+        );
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({
+                "error": {"retry_after_ms": 250}
+            })),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({"retry_after": 1.5})),
+            Some(Duration::from_millis(1_500))
+        );
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({"error": {"retry_delay": "3s"}})),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({"retry_after": "250ms"})),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({"retry_after": "2"})),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            retry_after_from_value(&serde_json::json!({"retry_after": "soon"})),
+            None
+        );
+    }
+
     /// failed → ApiError with the error detail (never a silent Done; §9).
     #[test]
     fn sse_maps_failed_to_api_error() {
@@ -1374,7 +1485,9 @@ mod tests {
         assert_eq!(
             ev,
             StreamEvent::ApiError {
-                message: "upstream unavailable".into()
+                message: "server_error: upstream unavailable".into(),
+                kind: StreamApiErrorKind::Retryable,
+                retry_after: None,
             }
         );
     }

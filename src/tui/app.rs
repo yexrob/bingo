@@ -397,7 +397,7 @@ pub async fn run_inline(
             },
         }
 
-        // Entity view (ctrl+g then Enter): the alternate-screen modal takes over; afterwards, a deterministic
+        // Entity view (Ctrl+G): the alternate-screen modal takes over; afterwards, a deterministic
         // redraw goes through the resize channel (clear + rehydrate, without guessing whether alt-screen restore works).
         if let Some(open) = chat.open_entity.take() {
             crate::tui::entity::run_entity_modal(&mut chat, &mut events, open, false).await?;
@@ -1000,6 +1000,7 @@ mod tests {
         chat.messages.push(crate::tui::chat::UiMessage {
             role: crate::tui::chat::Role::User,
             text: "a long-enough user message whose wrap count changes with the width".repeat(2),
+            at: 0,
             activities: Vec::new(),
             insert_points: Vec::new(),
             groups: Vec::new(),
@@ -1061,6 +1062,7 @@ mod tests {
         chat.messages.push(crate::tui::chat::UiMessage {
             role: crate::tui::chat::Role::Assistant,
             text: "reply".into(),
+            at: 0,
             activities: Vec::new(),
             insert_points: Vec::new(),
             groups: Vec::new(),

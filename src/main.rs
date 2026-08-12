@@ -19,6 +19,7 @@ mod auth;
 mod budget;
 mod channels;
 mod compact;
+mod context_usage;
 mod error;
 mod experience;
 mod hooks;
@@ -29,14 +30,18 @@ mod permission;
 mod platform;
 mod preapproved;
 mod query;
+mod query_session;
+mod query_turn;
 mod settings;
 mod share;
 mod share_html;
 mod skills;
+mod storage;
 mod system;
 mod tasks;
 mod team;
 mod team_cmd;
+mod token_rate;
 mod tool;
 mod tools;
 mod transcript;
@@ -172,15 +177,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     let fullscreen = cli.fullscreen_mode();
 
-    let home = match std::env::var("HOME") {
-        Ok(h) => PathBuf::from(h),
-        Err(_) => {
-            if !cli.print && !cli.json_events {
-                eprintln!("[bingo] warning: HOME is not set; using current dir for state");
-            }
-            PathBuf::new()
-        }
-    };
+    let home = crate::storage::resolve_home()?;
+    if let Err(error) = crate::storage::cleanup(&home, None) {
+        eprintln!("[bingo] warning: session storage cleanup failed: {error}; run /gc to retry");
+    }
     // Subcommand fast path: share only needs home (transcript/shares dirs), update only needs home (cache),
     // neither touches settings/API.
     if let Some(Command::Share {
@@ -245,7 +245,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "default".to_string())
         .parse()?;
 
-    let client = Client::from_settings(&settings)?;
+    let client = Client::from_settings_at(&settings, &home)?;
     if cli.json_events && cli.inspect {
         let reader = std::io::BufReader::new(std::io::stdin());
         let writer = std::io::BufWriter::new(std::io::stdout());
@@ -259,7 +259,19 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &load_memory(&home, &project_dir),
         load_project_memory(&home, &project_dir),
         settings.cache_control.unwrap_or(false),
+        &project_dir,
     );
+    // The crew pinned to this project, and the rule that decides between giving a member
+    // work and hiring someone new (D53). A system block rather than a tool description:
+    // compaction rewrites the message history and leaves `Session::system` alone, so the
+    // routing rule is still there on turn fifty, when the roster matters most. The whole
+    // tree is named (D54) — a department the hub cannot see is one it will re-hire.
+    if let Ok(Some(tree)) = crate::team::load_team_tree(&project_dir) {
+        system.push(crate::api::contract::SystemBlock {
+            text: crate::team::crew_note(&tree, &home),
+            cache: settings.cache_control.unwrap_or(false),
+        });
+    }
     // Inject this project's active experience index at session start (≤10 lines;
     // full entries via ExperienceQuery and applied-use feedback via ExperienceOutcome).
     let experience_index = crate::tool::experience::session_index(&home, &project_dir);
@@ -277,11 +289,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (transcript, initial_messages, resumed): (Option<Transcript>, Vec<Message>, bool) =
         if let Some(stem) = cli.session.as_deref() {
             let transcript = crate::json_events::resolve_session(&home, stem)?;
+            transcript.activate()?;
             let messages = transcript.load_messages()?;
             (Some(transcript), messages, true)
         } else if cli.continue_ {
             match latest_transcript(&home)? {
                 Some(t) => {
+                    t.activate()?;
                     eprintln!("[bingo] continuing transcript: {}", t.path().display());
                     (Some(t.clone()), t.load_messages()?, true)
                 }
@@ -370,6 +384,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         settings,
         system,
         depth: 0,
+        cwd: Arc::new(std::sync::Mutex::new(project_dir.clone())),
         home: home.clone(),
         user_config_dir: user_dir.clone(),
         quiet: !cli.print,
@@ -404,37 +419,40 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mode_str = session.permission_mode_str();
-    crate::hooks::run_session_start(&session.settings.hooks, mode_str).await;
+    crate::hooks::run_session_start(&session.settings.hooks, mode_str, &session.cwd()).await;
 
     // D31 startup default: project-bound team with autoStart (default true) → spawn it.
+    // The whole tree, not just the root (D54): a chart declared in one file is one
+    // formation, and a half-started org is worse than none.
     // Double opt-out: settings `team.autoStart:false` + `--no-team`.
     if !cli.json_events && !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
-        let branch = crate::team::current_branch(&project_dir);
-        let defs = crate::agents::load_agent_defs(&home, &project_dir);
-        match crate::team::load_team_file(&project_dir) {
-            Ok(Some(team)) => {
-                match crate::team::spawn_team(&session, &team, &defs, &home, &project_dir, &branch)
-                {
+        match crate::team::load_team_tree(&project_dir) {
+            Ok(Some(tree)) => {
+                let name = tree.root().def.name.clone();
+                let teams = tree.nodes().len();
+                match crate::team::spawn_tree(&session, &tree, &home) {
                     Ok(summary) => {
                         let total =
                             summary.spawned.len() + summary.reused.len() + summary.failed.len();
                         let ready = total - summary.failed.len();
+                        let scope = if teams > 1 {
+                            format!(" across {teams} teams")
+                        } else {
+                            String::new()
+                        };
                         if summary.failed.is_empty() {
                             eprintln!(
-                                "[team] {} ready · {ready}/{total} on standby (/team status · /team stop)",
-                                team.name
+                                "[team] {name} ready · {ready}/{total} on standby{scope} (/team status · /team stop)"
                             );
                         } else {
                             eprintln!(
-                                "[team] {} partially spawned · {ready}/{total} ({} failed; see /team status)",
-                                team.name,
+                                "[team] {name} partially spawned · {ready}/{total}{scope} ({} failed; see /team status)",
                                 summary.failed.len()
                             );
                         }
                     }
                     Err(e) => eprintln!(
-                        "[team] {} validation failed: {e} (fix and /team start to spawn)",
-                        team.name
+                        "[team] {name} validation failed: {e} (fix and /team start to spawn)"
                     ),
                 }
             }
@@ -512,7 +530,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let mut ui = headless_hooks();
             let outcome =
                 run_query(&session, initial_messages, &prompt, &[], &mut ui, None).await?;
-            extract_memory(&session, &outcome.messages, &home, &project_dir).await;
+            let cwd = session.cwd();
+            extract_memory(&session, &outcome.messages, &home, &cwd).await;
         } else {
             drop(initial_messages); // in interactive mode, --continue history is reused by later turns
             tui::run_tui_session(session.clone(), expand_rx, fullscreen, startup_notes).await?;
@@ -524,9 +543,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // D31 session-end persistence: latest history of team members (for cross-session
     // restore; failures are silent).
     if !cli.json_events && !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
-        persist_team_memory(&session, &home, &project_dir);
+        persist_team_memory(&session, &home, &session.cwd());
     }
-    crate::hooks::run_session_end(&session.settings.hooks, mode_str).await;
+    crate::hooks::run_session_end(&session.settings.hooks, mode_str, &session.cwd()).await;
     result
 }
 
@@ -655,25 +674,29 @@ fn report_error(err: &(dyn std::error::Error + 'static)) {
     eprintln!("[error] code={code} msg={msg}");
 }
 
-/// Persist the latest message history of all team members (only members with content;
-/// failures are silent — memory is an enhancement, not a contract).
+/// Persist the latest message history of every member in the tree (only members with
+/// content; failures are silent — memory is an enhancement, not a contract). Each
+/// member's history is filed under its own team's directory and branch, so a
+/// department in another repo keeps its memory with that repo.
 fn persist_team_memory(session: &Arc<Session>, home: &Path, project_dir: &std::path::Path) {
-    let Ok(Some(team)) = crate::team::load_team_file(project_dir) else {
+    let Ok(Some(tree)) = crate::team::load_team_tree(project_dir) else {
         return;
     };
-    let branch = crate::team::current_branch(project_dir);
-    for m in &team.members {
-        if let Some((history, _, _)) = session.agents.view_of(&m.name)
-            && !history.is_empty()
-        {
-            crate::team::save_member_history(
-                home,
-                project_dir,
-                &branch,
-                &team.name,
-                &m.name,
-                &history,
-            );
+    for node in tree.nodes() {
+        let branch = crate::team::current_branch(&node.dir);
+        for m in &node.def.members {
+            if let Some((history, _, _, _, _)) = session.agents.view_of(&m.name)
+                && !history.is_empty()
+            {
+                crate::team::save_member_history(
+                    home,
+                    &node.dir,
+                    &branch,
+                    &node.def.name,
+                    &m.name,
+                    &history,
+                );
+            }
         }
     }
 }

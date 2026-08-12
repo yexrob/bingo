@@ -16,8 +16,14 @@ pub const COMMANDS: &[SlashCommand] = &[
         "compact the context (old messages → summary)",
     ),
     ("model", "[name]", "show/switch the model"),
+    ("cd", "<dir>", "switch the session working directory"),
     ("resume", "[name or keyword]", "resume a past session"),
     ("rename", "[name]", "rename the current session"),
+    (
+        "gc",
+        "",
+        "clean expired session data (30-day TTL; latest 100 inactive sessions kept)",
+    ),
     (
         "share",
         "[--public] [--open]",
@@ -59,7 +65,8 @@ pub const COMMANDS: &[SlashCommand] = &[
 
 /// Slash commands that execute immediately while a model turn is active.
 pub const INSTANT_COMMANDS: &[&str] = &[
-    "think", "model", "provider", "theme", "status", "context", "tasks", "help", "skills", "config",
+    "think", "model", "provider", "theme", "status", "context", "tasks", "help", "skills",
+    "config", "gc",
 ];
 
 /// Slash dropdown suggestion item (`/name`, hint, and description).
@@ -164,6 +171,7 @@ mod tests {
     const COMMANDS: &[SlashCommand] = &[
         ("help", "", "show available commands"),
         ("model", "[name]", "show/switch the model"),
+        ("cd", "<dir>", "switch the session working directory"),
         ("status", "", "show session status"),
     ];
 

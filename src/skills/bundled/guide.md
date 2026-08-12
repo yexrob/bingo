@@ -32,10 +32,9 @@ commands, and verification steps in conclusions. Never speculate about features 
   Ctrl+R reverse history search · Ctrl+A/E line start/end · Alt+B/F word movement · Ctrl+W/U/K delete word/to line
   start/end · Ctrl+Y paste back deleted · Ctrl+S stash/restore input · Ctrl+_ undo · ctrl+o
   expand/collapse toggle (expand = replays the full transcript for terminal scroll-up; press again to collapse back to
-  aggregates and clear/consolidate) · Ctrl+T toggle the task area · Ctrl+G agent/channel selector (↑↓ to select,
-  Enter opens a fullscreen view, Esc closes; the agent view shows that instance's full conversation and streaming output; the channel view
-  is a WeChat-style group room where you can speak directly as user) · Ctrl+L clear and redraw · Shift+Tab cycles permission
+  aggregates and clear/consolidate) · Ctrl+T toggle the task area · Ctrl+G opens the fullscreen team/DM workspace directly (Ctrl+K switches channels and DMs; the DM view shows user/agent text while hiding tool activity; channel rooms let you speak directly as user) · Ctrl+B manages running background agents · Ctrl+L clear and redraw · Shift+Tab cycles permission
   modes (default → acceptEdits → plan) · Alt+T thinking toggle (off ↔ the last non-off level, default medium) · while busy, Enter queues the message (sent automatically at turn end; /think /model /provider /theme /status /context /tasks /help /skills run immediately) ·
+- During streamed output, the main footer shows a live `N tok/s` indicator; the speed band changes its character animation and cadence, and idle/stalled output hides it. Beside it, context usage stays visible as a four-cell bar, percentage, and `used/window` token count, using the active model's window; 70–90% is warning-colored and above 90% is danger-colored. A running instance's DM composer shows the same indicators. `motion: "off"` freezes the rate frame but keeps the value.
 - Large pastes auto-collapse to a `[Pasted text #N +M lines]` placeholder; the real content expands on send
   (precisely detected via terminal bracketed-paste events; terminals without that feature fall back to a
   key-burst heuristic — extremely fast typing may misdetect, and pausing recovers).
@@ -68,11 +67,12 @@ Three config layers, shallow-merged; the later one overrides:
 | `motion` | string | TUI motion: `auto` (default) / `off` — motion (e.g. the welcome-card update notice breathing) settles to the base color while the notice itself stays; env `BINGO_NO_MOTION=1` is equivalent |
 | `cacheControl` | bool | Send prompt caching; turn off if a non-official endpoint is unstable |
 | `respondToBashCommands` | bool | Whether `!` commands are handed to the model for a response after execution (default true; false = pure execution) |
+| `bashOutputMaxChars` | integer | Maximum combined stdout/stderr characters returned by the Bash tool (default and maximum 48,000); truncated results point to redirecting output and reading the file |
 | `shell` | string | Shell program for the Bash tool and hooks; default per platform: macOS `/bin/zsh`, other Unix `/bin/bash`, Windows `powershell.exe`. PowerShell-family shells run with `-Command`; other configured shells (e.g. Git Bash `bash.exe`) with `-c` |
 | `mcpServers` | object | `{name: {type?, command, args, env}}` (stdio, default) or `{name: {type: "http", url, headers?}}` (streamable HTTP) |
 | `disabledMcpServers` | string[] | List of disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`; rule syntax `Tool(content)`, `:*` is a prefix wildcard (e.g. `Bash(git push:*)`); Bash rules match per subcommand segment; path rules normalize before matching (see diagnostics 4) |
-| `experimental` | object | Experimental features: `{"agentChannels": true}` enables agent channel messaging (the main session gets the Channel/Post tools, direct subagents get Post); `channelMessageLimit` (default 500, freezes the channel when exceeded) / `agentMessageLimit` (default 50) are budget gates |
+| `experimental` | object | Experimental features: `{"agentChannels": true}` enables agent channel messaging (the main session gets the Channel/Post tools, direct subagents get Post); `channelMessageLimit` (default 500, freezes the channel when exceeded) / `agentMessageLimit` (default 50) are budget gates; `{"chatAvatars": true}` puts faces in the main chat (default false — no sender band, no portrait on a watch row; the workspace views wear theirs regardless) |
 | `team` | object | agent team startup behavior: `{"autoStart": true}` (default true = when a project-bound team exists, start it automatically at launch; members stand by Idle at zero tokens; `--no-team` or false turns it off) |
 | `hooks` | object | PreToolUse/PostToolUse/PreCompact/PostCompact/UserPromptSubmit/Stop/SessionStart/SessionEnd/TaskCreated/TaskCompleted, matcher + command; the matcher is a whole-string anchored regex (`Edit\|Write`, `mcp__.*`); invalid regexes fall back to exact matching |
 
@@ -102,13 +102,14 @@ Example (.bingo/settings.json):
 `/help` for the full list. Common ones: `/model [name]` (no args: two-level picker — level 1 providers → level 2 model list; with a name: switch directly, validated against the known list when available),
 `/provider [name]` (no args: picker — ● current, s = session-only, Enter persists; with a name: switch directly), `/provider login <name> [--device-auth|--manual <token>]` (OAuth login: default opens the browser; `--device-auth` prints URL + code and polls for headless/SSH; `--manual` stores a pasted token), `/provider logout <name>` (revokes + clears),
 `/think [off|low|medium|high|xhigh|max]` (thinking level, persists to settings; no arg opens the level picker: ●=in effect, ↑↓/1-6 to browse, Enter confirms, Esc cancels), `/theme [dark|light|auto]` (no arg opens the level picker; the `/theme auto` explicit shortcut stays),
+`/cd <dir>` (switch the working directory for this session; relative paths resolve from the current session directory),
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` runs it directly) · `/context` (usage) · `/status` ·
-`/compact` (force compaction) · `/resume [name]` (restore a past session; no arg opens the session picker, Enter restores) · `/rename` · `/clear` · `/exit`.
+`/compact` (force compaction) · `/resume [name]` (restore a past session; no arg opens the session picker, Enter restores) · `/rename` · `/gc` (clean expired session storage; 30-day TTL, latest 100 inactive sessions, 24-hour activity grace) · `/clear` · `/exit`.
 `/team` (project-level crew): `list` (blueprint + runtime on one screen) · `start` (pull up / idempotent reuse) · `status` ·
-`assign <member> <task>` (dispatch work) · `stop` · `validate` · `new` (scaffolds team.json) ·
-`memory list|gc` (cross-session memory management).
+`assign <member> <task>` (dispatch work) · `stop` · `validate` · `new` (scaffolds team.json + team-norms.md) ·
+`norms` (the crew's working agreement) · `memory list|gc` (cross-session memory management).
 
 ## Diagnostic guide (common problems → troubleshooting paths)
 
@@ -125,6 +126,16 @@ Example (.bingo/settings.json):
    (200k − 64k output budget) ≈ 122k, about 61% of the total window). Endpoints without a
    count_tokens API (DeepSeek/ollama; OpenAI-protocol providers — `count_tokens` is Anthropic-only)
    automatically fall back to local estimation (characters/4), with a one-time warning on first fallback.
+   If that estimate is low and either wire protocol rejects a request as a context overflow, bingo compacts
+   the history and retries the rejected request once; a second overflow ends the turn instead of looping.
+   If an upstream response completes without assistant content or tool calls (including an unclosed thinking block),
+   bingo treats it as malformed and retries the side-effect-free attempt once instead of ending silently; if the retry
+   is also empty, the turn shows the normal full-flow retry/back error. Transient error events received after a stream
+   opens (`429`, `5xx`, overloaded, `server_error`) restart the model response with jittered exponential backoff up to
+   10 times; the first reconnect notice is suppressed, later attempts show `Reconnecting... N/10`, and interactive
+   live views discard the failed attempt before showing its replacement (headless stdout cannot retract an already
+   written prefix). Quota, plan, invalid-prompt, and context-overflow errors fail immediately; short synchronous
+   operations keep their existing 10s read / 15s write timeout tier and do not enter this long-turn retry loop.
 3. **MCP server not working**: `/mcp` shows status — `✗ failed: <details>` fixes per the details
    (command missing/spawn failure/handshake failure; for http servers also check url reachability and headers auth);
    the stdio server's own error output lives in `~/.local/share/bingo/logs/mcp-<name>.log`
@@ -150,7 +161,7 @@ Example (.bingo/settings.json):
 6. **Stuck in bash mode/accidental trigger**: with an empty input, Esc/backspace/Ctrl+U all exit bash mode;
    with non-empty input `!` is an ordinary character; Tab completes from this session's `!` history prefix.
 7. **Can't find a historical session**: transcripts live in `~/.local/share/bingo/transcripts` (`--continue`
-   resumes the last one; `/resume` lists/switches).
+   resumes the last one; `/resume` lists/switches). Session storage is cleaned at startup with a 30-day TTL and a latest-100 inactive-session cap plus a 24-hour activity grace; matching share snapshots follow transcript removal. `/gc` applies the same policy on demand. Prompt-history files use the same TTL with a 100-file cap.
 8. **Tool output collapsed**: ctrl+o expands all collapsed items and replays the full transcript to the
    terminal (scroll up to read; printed old collapsed copies stay higher up — normal); pressing ctrl+o again in the fully expanded
    state collapses — back to aggregates with a clear/consolidate; long output shows `+N lines`.
@@ -159,14 +170,17 @@ Example (.bingo/settings.json):
 10. **Grep/Glob finds nothing**: `.git`/`target`/`node_modules` and dot-prefixed directories are skipped by default
     (they still search when `path` points at them explicitly); patterns are relative to the search root
     (`src/**/*.rs` works); patterns without `/` match file names at any depth
-    (`*.rs` hits the whole tree); traversal stops when the result cap is reached.
+    (`*.rs` hits the whole tree); traversal stops when the result cap is reached. Glob accepts `exclude` patterns and `max_depth`;
+    Grep accepts `context`, case-insensitive/whole-word/fixed-string modes, and files-only results. Read accepts inclusive,
+    1-based `start_line`/`end_line` ranges and reports ranges extending past the file.
 11. **Processes left behind after timeout/interruption**: Bash commands run in their own process group; timeouts and cancellation
     terminate the whole group (grandchildren no longer orphan); after Esc interrupts a turn, unfinished tools get placeholder results,
     and the session stays recoverable (no 400s on later requests from orphaned tool_use).
 
 ## Capability map (reference when asked "what can bingo do")
 
-- **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep (Read returns image files as
+- **Built-in tools**: Bash (through the permission gate, combined output capped by `bashOutputMaxChars`),
+  Read/Glob/Grep (line ranges, exclusion/depth filters, search context/options; Read returns image files as
   viewable images, so screenshots and rendered charts can be inspected), Edit/Write, WebFetch/WebSearch,
   Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
   Team (the project crew, main session only — reads are free, every change asks the user),
@@ -207,13 +221,14 @@ Example (.bingo/settings.json):
   the project key is derived from the git remote URL (normalized) → git root → normalized absolute path, stable across directories/machines.
 - **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
   auto-suffix -2/-3), shown in the transcript as `◉ name · task`; history is kept after completion, and the main agent can
-  SendMessage to continue, or manage with AgentControl list/messages/stop/delete.
-  **Messaging**: SendMessage returns a `message_id` and only queues — delivery happens at the turn boundary, where
-  every message sent to the same instance in that turn is folded into one prompt (the receiver reads them together
-  rather than one per turn). Queued is not an acknowledgement: `AgentControl(action=messages, agent=…)` reports each
+  SendMessage to continue, or manage with AgentControl list/messages/stop/delete; each list row includes relative last activity
+  (`active now`, `active 3s ago`, `active 2min ago`) so a quiet idle instance is distinguishable from one that just finished.
+  **Messaging**: SendMessage returns a `message_id` after enqueueing and dispatches immediately: an idle instance starts
+  now, while a running instance drains its inbox between tool rounds. Everything waiting when the receiver drains is
+  folded into one prompt. Queued is not an acknowledgement: `AgentControl(action=messages, agent=…)` reports each
   message as delivered (with the run it landed in), still queued (with its age), or dropped because the instance was
   stopped. Stopping or deleting an instance discards its inbox and says how many undelivered messages died with it.
-  A run chain that fails leaves its queued messages in place — the next turn boundary retries them.
+  A run chain that fails leaves its queued messages in place — the recovery dispatcher retries them.
   **Delivered is not answered**: an instance can read a message and end its turn without a word, which from the outside
   looks the same as a hang. The acknowledgement is the reply, so `messages` reports four states — queued, delivered but
   unanswered, answered (naming the run that spoke), dropped — and a turn that produces text answers everything that
@@ -221,7 +236,7 @@ Example (.bingo/settings.json):
   **Chasing a reply**: the harness does that polling for you, and it is on by default — every SendMessage arms a 300s
   check unless told otherwise. Once the wait elapses it re-reads the same record; while the sender is still owed an
   answer it puts a follow-up in the receiver's inbox (naming which silence it is, and asking for a reply rather than
-  repeating the instruction) and retries the boundary flush, at most 3 rounds. An answer inside the wait is silent;
+  repeating the instruction) and triggers the dispatcher again, at most 3 rounds. An answer inside the wait is silent;
   anything else — chased into replying, dropped, or still quiet after the last round — comes back as a task
   notification. `ack_timeout: <seconds>` tunes the wait (5-3600: shorter when actively waiting, longer for a task that
   will be quiet for a while), and `ack_timeout: 0` switches the check off for a message needing no answer.
@@ -261,25 +276,27 @@ Example (.bingo/settings.json):
   message into a room-wide storm). The rule also states the mechanism the model cannot infer: a turn woken by a channel message
   reports to the hub, so **only Post puts words in the room** — a reply written as turn text reaches nobody in the channel. It lives in the system block on purpose: compaction rewrites the history
   but never touches the system prompt, so the rule survives a long-running member's context being summarised away.
-  **Bottom entity area**: when instances/channels exist, a one-line summary shows above the input box; Ctrl+G enters selection
-  (↑↓/Enter), and Enter opens the fullscreen **Slack-shaped workspace**: one conversation pane, full width, rendering a Slack
-  message list (a header naming the channel/instance with the team's name at the right edge, day dividers, avatar + bold sender
-  + timestamp, grouped consecutive messages, an unread divider, tool calls as attachments, a running instance's live tail as a
-  typing indicator). There is no rail and no sidebar, and the view paints no background of its own — the terminal's own
+  **Bottom entity area**: when running instances/channels exist, a one-line summary shows above the input box; idle/stopped agents stay out. Running rows include model/thinking/state. With an empty input, ↑/↓ selects running agents and Enter opens that agent's DM; Esc collapses the selector. Ctrl+G opens the fullscreen **Slack-shaped workspace** directly. Ctrl+B opens the main-view background-agent manager (↑/↓ select, Enter detail, x stop, Esc close); detail shows prompt/status/elapsed/tokens/tool count/recent tool activity, with no foreground action. The workspace is one conversation pane, full width, rendering a Slack
+  message list (a header naming the channel/instance with the team's name at the right edge, day dividers, avatar + bold sender,
+  grouped consecutive messages, an unread divider, and every message body trailed by its dim send time — `HH:MM`, dated `M/D HH:MM`
+  once it is not from today — the same stamp the main transcript trails its messages with. DMs show user messages and agent text only—historical and live tool activity stays hidden—while reusing the main transcript's user bubbles, assistant markdown, prefixes, wrapping, and row structure; the existing DM name/avatar gutter stays unchanged. A working indicator remains during silent tool waits. DM headers show model/thinking; channel headers list model/thinking when the names fit and otherwise use one bounded aggregate, so the composer stays visible. There is no rail and no sidebar, and the view paints no background of its own — the terminal's own
   background shows through. Navigation is Ctrl+K (the quick switcher, which lists every conversation with its unread count)
   and alt+↑↓. **Avatars**: on terminals that can place kitty images (the same capability that renders inline images), each
   sender gets one of eight bundled anime-style portraits, 4×2 cells beside the name; elsewhere it falls back to the sender's
   initial on a colour, and the row count is identical either way. A team member's portrait is pinned in `.bingo/team.json`
   (`"avatar": "sora"`), so a crew keeps a fixed cast; everyone else gets a face derived from their name. The **main chat** wears
-  the same faces: each message carries a band above it with the speaker's portrait and name (`main` for the hub, `You` for your own),
+  the same faces behind `experimental.chatAvatars` (off by default): each message carries a band above it with the speaker's
+  portrait and name (`main` for the hub, `You` for your own),
   two rows where portraits place and one where they fall back to the chip. Nothing below the band moves — bodies still run the full
   width. A terminal that purges its image store (a resize) redraws the faces still on screen; ones already in scrollback leave four
-  blank columns with the name intact. Wake-up scaffolding the
+  blank columns with the name intact. Switched off, the transcript has no band and a subagent's watch row keeps its `◉` — the
+  switch governs the main chat only, never these workspace views. Wake-up scaffolding the
   runtime injected (a relayed channel message, the task reminder) collapses to one dim line instead of being quoted as a message. The composer sends: in a channel it posts as `user` (same
-  delivery path as Post, members woken normally; rendering = read, so serial never bounces you), in a DM it queues on the
-  instance and flushes at the turn boundary (shown as a pending message until then). Keys: Tab switches between the message
-  list and the composer, alt+↑↓ switches conversation, Ctrl+K is the quick switcher, Esc returns.
-- **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
+  delivery path as Post, members woken normally; rendering = read, so serial never bounces you), in a DM it uses the same
+  immediate dispatch path as SendMessage (shown as pending only until the receiver claims it). Keys: Tab switches between the message
+  list and the composer, ↑↓ or the mouse wheel scrolls the transcript (three rows per wheel notch), alt+↑↓ switches conversation,
+  Ctrl+K is the quick switcher, Esc returns.
+- **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/`channels[{name,mode?,messageLimit?,members?}]`/`teams[{name?,path}]`/
   `members[{name,agent,avatar?,model?,provider?,thinking?}]`, members reference AgentDefs; `name` is the name shown on the member's messages, so make it a person's name, and `avatar` pins one of the bundled portraits.
   `model`/`provider`/`thinking` pin the member's engine — which model does which job is part of the formation, so a crew can mix a cheap fast reviewer with a stronger designer; each falls back to the agent definition and then to the session, and a named `provider` other than the session's needs a `model` too.
   `/team validate` checks the engine against this session's providers, so a blueprint that passes still starts) pins multiple roles to one project; started by default at launch
@@ -291,8 +308,29 @@ Example (.bingo/settings.json):
   and every change is confirmed by the user in person — the prompt appears in *every* permission mode and an `allow` rule cannot
   pre-authorize it (only `deny` outranks it), because hiring a crew is not something a permission table should be able to consent to on
   the user's behalf. The confirmation names the change, not the file (`Rewrite .bingo/team.json · dev-room · 4 members (-ui +qa)`).
-  `save` writes the whole document, so it takes the complete roster — whoever is left out is removed. Hand-editing `.bingo/team.json`
-  with Write/Edit asks the same question. Dispatch is not part of the tool: SendMessage gives a member work.
+  `save` writes the whole document, so it takes the complete roster — whoever is left out is removed, with one exception: `teams` (the org
+  chart) is carried across every save, because it points at other directories and a roster edit is no reason to re-decide it. Hand-editing
+  `.bingo/team.json` with Write/Edit asks the same question. Dispatch is not part of the tool: SendMessage gives a member work.
+- **rooms and the team tree** (D54): a team declares its rooms in `channels[]`, each with its own mode, budget and roster — a department
+  has a standup, a release channel and a design review, and the same person is in some and not others. A team that declares none gets one
+  room named after it holding everybody (the `channel{mode,messageLimit}` shorthand, unchanged); a team that declares rooms gets *only*
+  those. A blueprint may name child blueprints in `teams[{name?,path}]`, recursively: `path` is relative to that team's own directory
+  (absolute is refused) and names either the directory holding a blueprint or the file itself. Each team keeps its own agent definitions,
+  working agreement, git branch and memory partition, rooted at its own directory — so reaching a department from the root gives the same
+  crew as opening a session inside it, and a member of one is told in a system block where its directory is (tool paths resolve against the
+  *session's* cwd, not its team's). Teams, members and rooms are unique across the whole tree, which is what lets `SendMessage("Linh")`
+  reach a member three levels down with no team prefix. A room reaches its own team and the teams below it, never a parent or a sibling.
+  `/team status|start|stop|validate|memory` and the Team tool's actions all span the chart; `autoStart` brings the whole thing up.
+- **crew first, hires temporary** (D53): where a crew is pinned, it is the default workforce — work goes to a member by SendMessage,
+  and the Agent tool is for what no member covers. An Agent-tool spawn is a *temporary hire*: it never enters `.bingo/team.json`,
+  it is listed apart from the crew (`/team list`, Team `status`, and a `crew`/`hire` prefix on every `AgentControl list` row), it is
+  recorded in the crew's `decisions.md` under `type: hire`, and it is released once its task is done — idle, inbox empty, nothing
+  still owed an answer, with one hub round left to follow up in. The sweep only runs while a crew is actually up; in a project with
+  no crew, ad-hoc subagents live exactly as long as they always did.
+- **team norms** (`.bingo/team-norms.md`, committed beside the blueprint): prose, not a schema — the crew's working agreement.
+  It reaches every member and every hire as a system block, so it applies without being restated, and it carries its own precedence
+  rule: a direct instruction outranks it on the point that instruction makes, and every other norm still holds. `/team new` scaffolds
+  a starter agreement (never overwriting one that exists); `/team norms` prints what is on disk.
 - **Skills**: built-in `guide` (this guide) + `~/.config/bingo/skills/` and `.bingo/skills/`
   directory skills (same-name disk skills override built-ins); the model invokes them via SkillTool, users run them via `/skill-name`.
 - **Images**: markdown images in model replies (`![alt](path)`, supports `~/`, relative paths/data/http(s))
@@ -307,8 +345,9 @@ Example (.bingo/settings.json):
 - **MCP**: stdio and streamable HTTP (`type: "http"`, with custom headers) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
-- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts.
-- **Built-in tools**: Bash (through the permission gate), Read/Glob/Grep (Read returns image files as
+- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts. Startup cleanup and `/gc` enforce a 30-day TTL plus a latest-100 inactive-session cap plus a 24-hour activity grace; share snapshots are removed with their transcript, while prompt-history files use the same TTL and a 100-file cap. `/cd <dir>` switches the session-owned working directory without changing the process cwd; subsequent Bash/Read/Edit/Write/Glob/Grep calls, project skills/agent definitions, Team/Agent crew lookup, Experience project keys, memory extraction, settings command paths, image paths, and `/team` resolve from the new directory. Startup-loaded settings/MCP configuration and the already-built system prompt are not reloaded.
+- **Built-in tools**: Bash (through the permission gate, combined output capped by `bashOutputMaxChars`),
+  Read/Glob/Grep (line ranges, exclusion/depth filters, search context/options; Read returns image files as
   viewable images, so screenshots and rendered charts can be inspected), Edit/Write, WebFetch/WebSearch,
   Agent (subagents), SendMessage/AgentControl (subagent continuation and lifecycle, main session only),
   Team (the project crew, main session only — reads are free, every change asks the user in person),
@@ -328,18 +367,19 @@ Example (.bingo/settings.json):
   the project key comes from the git remote URL (normalized) → git root → normalized absolute path, stable across directories/machines.
 - **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
   auto-suffix -2/-3), shown in the transcript as `◉ name · task`; history is kept after completion, and the main agent can
-  SendMessage to continue, or manage with AgentControl list/messages/stop/delete.
-  **Messaging**: SendMessage returns a `message_id` and only queues — delivery happens at the turn boundary, and
-  every message sent to the same instance in that turn is folded into one prompt delivered at once, rather than one per turn. Queued is not an acknowledgement:
+  SendMessage to continue, or manage with AgentControl list/messages/stop/delete; each list row includes relative last activity
+  (`active now`, `active 3s ago`, `active 2min ago`) so a quiet idle instance is distinguishable from one that just finished.
+  **Messaging**: SendMessage returns a `message_id` after enqueueing and dispatches immediately: an idle instance starts now,
+  while a running instance drains its inbox between tool rounds. Everything waiting when the receiver drains is folded into one prompt. Queued is not an acknowledgement:
   `AgentControl(action=messages, agent=…)` reports each message as delivered (with which run it landed in), still queued (with its wait time),
   or dropped because the instance was stopped. stop/delete clears the mailbox and reports how many undelivered instructions were dropped with it;
-  when the run chain fails the messages stay in the mailbox and are redelivered at the next turn boundary.
+  when the run chain fails the messages stay in the mailbox and the recovery dispatcher retries them.
   **Delivered ≠ replied**: an instance can fully read a message, finish a turn without a word, and look identical to a dead one from outside. The receipt is based on "reply",
   so `messages` reports four states — queued, read but unanswered, replied (noting which turn opened its mouth), dropped; as soon as a turn produces any text,
   every message that instance had read before counts as replied (including those read in the silence of an earlier turn).
   **Automatic reply chase**: this round of checking is done by the system, and it's **on by default** — every SendMessage carries a 300s check unless explicitly disabled.
   When the wait elapses it re-reads the same receipt; as long as a reply is still owed to the sender, it drops a follow-up into the recipient's mailbox (stating which kind of silence it was, asking only for a reply,
-  not re-sending the original instruction) and retries the boundary delivery, at most 3 rounds. A reply within the wait stays silent throughout; speaking only after being chased, being dropped, or staying silent through the last round
+  not re-sending the original instruction) and triggers the dispatcher again, at most 3 rounds. A reply within the wait stays silent throughout; speaking only after being chased, being dropped, or staying silent through the last round
   are all reported to the main agent as task notifications. `ack_timeout: <seconds>` adjusts the wait (5-3600: shorten it when the reply is expected soon, lengthen it when the work is known to be quiet and long),
   and `ack_timeout: 0` disables the check for that message.
   **Sending images to subagents**: restate the `#[image N]` marker in the Agent prompt or SendMessage text — the attachment table belongs to the session,
@@ -364,20 +404,20 @@ Example (.bingo/settings.json):
   (unless named or you can unblock them), and **never answer an answer** (replies to replies are the source of noise). The rule also spells out the mechanism the model can't infer:
   in a turn woken by a channel message, the body text goes back to the hub — **only Post can put words in the room**. The rule lives in the system block, not the wake payload: compaction rewrites message history but never touches the system prompt,
   so the rule survives even after a long-running member's context is summarized away.
-  **Bottom entity area**: when instances/channels exist, a one-line summary shows above the input; Ctrl+G enters the selector
-  (↑↓/Enter), Enter opens the fullscreen **Slack-style workspace**: the whole screen is a single message-flow column (a one-line title at the top
-  giving the channel/instance with the team name at the right edge; date separators, avatar + bold sender + time, consecutive messages merged, new-message
-  dividers, tool calls as attachments, a running instance's live tail as "typing"). No rail and no sidebar,
+  **Bottom entity area**: when running instances/channels exist, a one-line summary shows above the input; idle/stopped agents stay out, and running rows show model/thinking/state. With empty input, ↑/↓ selects running agents and Enter opens that DM; Esc collapses the selector. Ctrl+G opens the fullscreen **Slack-style workspace** directly. Ctrl+B opens the main-view background-agent manager (↑/↓ select, Enter detail, x stop, Esc close); detail shows prompt/status/elapsed/tokens/tool count/recent tool activity, and hub-and-spoke has no foreground action. The workspace is the whole screen as a single message-flow column (a compact title at the top
+  giving the channel/instance with the team name at the right edge; date separators, avatar + bold sender, consecutive messages merged, new-message
+  dividers, every message body trailed by its dim send time (`HH:MM`, dated `M/D HH:MM` across days — the same stamp the main transcript uses); DMs contain only user messages and agent text, with all historical/live tool activity hidden; their bodies reuse the main transcript's bubble/markdown/prefix/wrapping row builders while the existing DM name/avatar gutter stays unchanged, and silent tool waits retain a working indicator). DM headers include model/thinking; channel headers list model/thinking when it fits and otherwise use one bounded aggregate. No rail and no sidebar,
   the view paints no background of its own — the terminal's own background shows through; switching conversations is Ctrl+K (quick switcher listing
   every conversation and its unread count) and alt+↑↓. **Avatars**: terminals that can place kitty images (the same capability behind inline images)
   assign each speaker one of eight bundled anime-style portraits, 4×2 cells to the left of the name; other terminals fall back to an initial-on-color
   chip, and both skins keep the same row count. Team members' avatars are pinned in `.bingo/team.json` (`"avatar": "sora"`),
-  so a crew has a fixed cast; other instances get a face by name. The **main chat** uses the same faces: every message gets a band
-  above it carrying the speaker's portrait and name (`main` for the hub, `You` for your own); message bodies are unchanged underneath. Runtime-injected wake scaffolding (channel-message relays,
+  so a crew has a fixed cast; other instances get a face by name. The **main chat** uses the same faces behind `experimental.chatAvatars` (off by default): every message gets a band
+  above it carrying the speaker's portrait and name (`main` for the hub, `You` for your own); message bodies are unchanged underneath.
+  Off, the transcript has no band and a subagent's watch row keeps its `◉`; the switch governs the main chat only. Runtime-injected wake scaffolding (channel-message relays,
   task reminders) collapses into a single dim hint line instead of being quoted as a whole message. Sending from the bottom input box: in a channel you speak as `user` (the same delivery
-  path as Post, waking members normally; rendered counts as read, serial won't bounce you), DMs queue into the instance's inbox and are
-  delivered at the turn boundary (shown as pending before delivery). Keys: Tab switches between the message list and the input box, alt+↑↓ switches conversations,
-  Ctrl+K quick-jumps, Esc returns.
+  path as Post, waking members normally; rendered counts as read, serial won't bounce you), DMs use SendMessage's immediate dispatcher
+  (shown as pending only until the receiver claims them). Keys: Tab switches between the message list and the input box, ↑↓ or the mouse wheel
+  scrolls the transcript (three rows per wheel notch), alt+↑↓ switches conversations, Ctrl+K quick-jumps, Esc returns.
 - **agent team** (project-level crew): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/
   `members[{name,agent,avatar?,model?,provider?,thinking?}]`, members reference AgentDef; `name` is the name shown on the member's messages — give it a person's name, not a role code; `avatar` pins the portrait.
   `model`/`provider`/`thinking` pin the member's engine, each falling back to the agent definition and then to the session; a named `provider` other than the session's needs a `model` too, and `/team validate` checks all of it, so a blueprint that passes still starts.
@@ -405,7 +445,7 @@ Example (.bingo/settings.json):
 - **MCP**: stdio and streamable HTTP (`type: "http"`, custom headers allowed) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
-- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts.
+- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts. `/cd <dir>` switches the session-owned working directory without changing the process cwd; subsequent Bash/Read/Edit/Write/Glob/Grep calls, project skills/agent definitions, Team/Agent crew lookup, Experience project keys, memory extraction, settings command paths, image paths, and `/team` resolve from the new directory. Startup-loaded settings/MCP configuration and the already-built system prompt are not reloaded.
   **Sharing**: `bingo share [session]` generates a self-contained HTML file in the current directory by default (`--output`
   specifies the path), never touching the network. Only an explicit `--public` uploads to the official share service and prints
   a public `https://bingo.ruobin.dev/share/u/<id>` link; **anyone can access it publicly**, so

@@ -217,6 +217,7 @@ impl ProviderClient for Unconfigured {
         _model: &str,
         _system: &[crate::api::contract::SystemBlock],
         _messages: &[crate::api::types::Message],
+        _tools: &[serde_json::Value],
     ) -> Result<u64, crate::api::contract::ClientError> {
         Err(crate::api::contract::ClientError::MissingApiKey)
     }
@@ -259,23 +260,66 @@ pub fn openai(
     ))
 }
 
-/// Exponential backoff + jitter: from 500ms, capped at 32s (shared by every
-/// adapter's retry loop).
-fn backoff(attempt: u32) -> Duration {
-    let base_ms = (500u64 << attempt.min(6)).min(32_000);
-    let jitter = rand_jitter(base_ms);
-    Duration::from_millis(base_ms + jitter)
+/// Retry pacing shared by the adapters' connect loops and the query loop's
+/// in-stream retries: initial·2^(retry−1) with ±10% jitter, capped.
+pub(crate) const RETRY_INITIAL_DELAY: Duration = Duration::from_millis(500);
+pub(crate) const RETRY_MAX_DELAY: Duration = Duration::from_secs(32);
+
+pub(crate) fn backoff_delay(
+    retry: u32,
+    initial: Duration,
+    cap: Duration,
+    jitter_unit: f64,
+) -> Duration {
+    let exponent = retry.saturating_sub(1).min(6);
+    let base = initial.saturating_mul(1u32 << exponent);
+    let jitter = 0.9 + jitter_unit.clamp(0.0, 1.0) * 0.2;
+    Duration::from_secs_f64(base.as_secs_f64() * jitter).min(cap)
 }
 
-fn rand_jitter(scale: u64) -> u64 {
+pub(crate) fn jitter_unit() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
+        .map(|duration| duration.subsec_nanos())
         .unwrap_or(0);
-    nanos % (scale / 2 + 1)
+    f64::from(nanos) / 1_000_000_000.0
+}
+
+fn backoff(attempt: u32) -> Duration {
+    backoff_delay(
+        attempt + 1,
+        RETRY_INITIAL_DELAY,
+        RETRY_MAX_DELAY,
+        jitter_unit(),
+    )
 }
 
 fn retryable(status: &reqwest::StatusCode) -> bool {
     status.is_server_error() || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_delay_is_exponential_jittered_and_capped() {
+        assert_eq!(
+            backoff_delay(1, RETRY_INITIAL_DELAY, RETRY_MAX_DELAY, 0.0),
+            Duration::from_millis(450)
+        );
+        assert_eq!(
+            backoff_delay(1, RETRY_INITIAL_DELAY, RETRY_MAX_DELAY, 1.0),
+            Duration::from_millis(550)
+        );
+        assert_eq!(
+            backoff_delay(2, RETRY_INITIAL_DELAY, RETRY_MAX_DELAY, 0.5),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            backoff_delay(10, RETRY_INITIAL_DELAY, RETRY_MAX_DELAY, 0.5),
+            Duration::from_secs(32)
+        );
+    }
 }

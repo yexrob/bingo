@@ -93,7 +93,11 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+g",
-        description: "agents / channels (↑↓ pick · enter opens the workspace)",
+        description: "open agents / channels workspace",
+    },
+    Binding {
+        keys: "ctrl+b",
+        description: "manage running background agents",
     },
     Binding {
         keys: "ctrl+l",
@@ -194,6 +198,25 @@ pub fn help_lines(width: usize, max_rows: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ctrl_g_help_opens_the_workspace_directly() {
+        let binding = BINDINGS
+            .iter()
+            .find(|binding| binding.keys == "ctrl+g")
+            .unwrap_or_else(|| panic!("ctrl+g binding missing"));
+        assert_eq!(binding.description, "open agents / channels workspace");
+        assert!(!binding.description.contains("pick"));
+    }
+
+    #[test]
+    fn ctrl_b_help_opens_the_background_agent_manager() {
+        let binding = BINDINGS
+            .iter()
+            .find(|binding| binding.keys == "ctrl+b")
+            .unwrap_or_else(|| panic!("ctrl+b binding missing"));
+        assert_eq!(binding.description, "manage running background agents");
+    }
 
     #[test]
     fn help_panel_fits_the_row_budget() {

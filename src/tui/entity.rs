@@ -1,4 +1,4 @@
-//! Full-screen workspace view (opened from the ctrl+g picker), wearing the
+//! Full-screen workspace view (opened directly with ctrl+g), wearing the
 //! Slack shape defined in [`crate::tui::slack`] (D43, narrowed to one pane by
 //! D47): a channel log or an instance's history as a Slack message list, with a
 //! composer that speaks as `user` into a channel and as the hub into a DM.
@@ -18,7 +18,10 @@ use std::io::stdout;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use futures_util::StreamExt;
@@ -38,6 +41,7 @@ use crate::tui::{avatar, gfx, view};
 /// first time are seeded as read: a workspace you have never opened shouldn't
 /// greet you with an unread badge for every turn that already happened.
 fn snapshot(session: &Arc<Session>, ws: &mut Workspace, workspace: &str) -> Snapshot {
+    let statuses = session.agents.list();
     let channels: Vec<ChannelItem> = session
         .channels
         .list()
@@ -54,7 +58,7 @@ fn snapshot(session: &Arc<Session>, ws: &mut Workspace, workspace: &str) -> Snap
         })
         .collect();
     let mut dms: Vec<DmItem> = Vec::new();
-    for status in session.agents.list() {
+    for status in statuses {
         let conv = Conv::Dm(status.name.clone());
         let seq = dm_seq(session, &status.name);
         if !ws.knows(&conv) {
@@ -64,11 +68,16 @@ fn snapshot(session: &Arc<Session>, ws: &mut Workspace, workspace: &str) -> Snap
             unread: seq.saturating_sub(ws.read_cursor(&conv)),
             name: status.name,
             state: status.state,
+            model: status.model,
+            thinking: status.thinking,
             description: status.description,
+            last_active: status.last_active.elapsed(),
         });
     }
     Snapshot {
         workspace: workspace.to_string(),
+        main_model: session.runtime.model.borrow().clone(),
+        main_thinking: session.runtime.thinking.borrow().clone(),
         channels,
         dms,
     }
@@ -80,22 +89,24 @@ fn snapshot(session: &Arc<Session>, ws: &mut Workspace, workspace: &str) -> Snap
 /// committed file is waste, and the crew does not change while you are looking at
 /// it.
 fn blueprint(session: &Arc<Session>, images: bool) -> (String, Avatars) {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let def = crate::team::load_team_file(&cwd).ok().flatten();
-    let name = def
+    let cwd = session.cwd();
+    let tree = crate::team::load_team_tree(&cwd).ok().flatten();
+    let name = tree
         .as_ref()
-        .map(|d| d.name.clone())
+        .map(|t| t.root().def.name.clone())
         .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| "bingo".to_string());
-    let pinned = def
+    // Every team in the chart, not just the root: a member's face is pinned in its own
+    // blueprint, and a face that only resolves for the root team is a face missing from
+    // exactly the rooms a chart exists to hold.
+    let pinned = tree
         .iter()
-        .flat_map(|d| &d.members)
-        .filter_map(|m| {
+        .flat_map(|t| t.members())
+        .filter_map(|(_, m)| {
             let id = m.avatar.as_deref()?;
             Some((m.name.clone(), avatar::index_of_id(id)?))
         })
         .collect();
-    let _ = session;
     (name, Avatars { images, pinned })
 }
 
@@ -104,7 +115,7 @@ fn dm_seq(session: &Arc<Session>, name: &str) -> u64 {
     session
         .agents
         .view_of(name)
-        .map(|(history, _, _)| history.len() as u64)
+        .map(|(history, _, _, _, _)| history.len() as u64)
         .unwrap_or(0)
 }
 
@@ -120,7 +131,9 @@ fn conversation(session: &Arc<Session>, ws: &Workspace, conv: &Conv) -> (Vec<Pos
             (slack::channel_posts(&log, USER_NAME), seq, divider)
         }
         Conv::Dm(name) => {
-            let (history, live, _) = session.agents.view_of(name).unwrap_or((
+            let (history, stamps, live, in_flight, _) = session.agents.view_of(name).unwrap_or((
+                Vec::new(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 crate::agents::AgentState::Stopped,
@@ -128,8 +141,19 @@ fn conversation(session: &Arc<Session>, ws: &Workspace, conv: &Conv) -> (Vec<Pos
             let pending = session.agents.pending_of(name);
             let seq = history.len() as u64;
             let read_upto = (cursor as usize).min(history.len());
-            let divider = slack::dm_posts(&history[..read_upto], &[], &[], name, USER_NAME).len();
-            let posts = slack::dm_posts(&history, &live, &pending, name, USER_NAME);
+            let divider = slack::dm_posts(
+                &history[..read_upto],
+                &stamps,
+                &[],
+                &[],
+                &[],
+                name,
+                USER_NAME,
+            )
+            .len();
+            let posts = slack::dm_posts(
+                &history, &stamps, &in_flight, &live, &pending, name, USER_NAME,
+            );
             (posts, seq, divider)
         }
     }
@@ -161,6 +185,15 @@ fn send(session: &Arc<Session>, conv: &Conv, text: &str) -> Option<String> {
     }
 }
 
+fn apply_open(ws: &mut Workspace, open: EntityOpen) {
+    match open {
+        EntityOpen::Workspace => {}
+        EntityOpen::Agent(name) => ws.select(Conv::Dm(name)),
+    }
+    ws.focus = Focus::Composer;
+    ws.switcher = None;
+}
+
 /// Full-screen entity modal: a self-drawing loop on the alternate screen,
 /// Esc/ctrl+c returns.
 /// `already_alt`: the fullscreen host is already on the alternate screen, so
@@ -171,12 +204,13 @@ pub async fn run_entity_modal(
     open: EntityOpen,
     already_alt: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !already_alt {
-        execute!(stdout(), EnterAlternateScreen)?;
+    if !already_alt && let Err(e) = execute!(stdout(), EnterAlternateScreen, EnableMouseCapture) {
+        let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
+        return Err(e.into());
     }
     let result = modal_loop(chat, events, open).await;
     if !already_alt {
-        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
     }
     result
 }
@@ -194,17 +228,15 @@ async fn modal_loop(
     // The workspace state lives on Chat so read cursors and the open
     // conversation survive leaving and re-entering the view.
     let mut ws = std::mem::take(&mut chat.slack);
-    ws.select(match open {
-        EntityOpen::Agent(name) => Conv::Dm(name),
-        EntityOpen::Channel(name) => Conv::Channel(name),
-    });
-    ws.focus = Focus::Composer;
-    ws.switcher = None;
+    apply_open(&mut ws, open);
 
     // Avatars are ordinary kitty images: transmitted once per portrait, then
     // placed by the cells the message list paints.
     let image_cap = chat.image_cap;
+    let motion_off = chat.session.settings.motion.as_deref() == Some("off")
+        || std::env::var_os("BINGO_NO_MOTION").is_some();
     let mut transmits = gfx::Transmits::default();
+    let mut scroll_content: Option<(Conv, usize)> = None;
     let (workspace, avatars) = blueprint(&chat.session, image_cap.is_some());
 
     loop {
@@ -216,6 +248,9 @@ async fn modal_loop(
                     if !handle_key(&session, &mut ws, &snap, key) {
                         break;
                     }
+                }
+                Some(Ok(Event::Mouse(mouse))) => {
+                    let _ = handle_mouse(&mut ws, mouse);
                 }
                 Some(Ok(Event::Paste(text))) => {
                     match &mut ws.switcher {
@@ -277,18 +312,38 @@ async fn modal_loop(
             };
 
             let header = slack::header_rows(&snap, &conv, &pal, width);
-            let (composer, caret) = slack::composer_rows(&ws, &conv, &pal, width);
+            let (token_rate, context_usage) = match &conv {
+                Conv::Dm(name) => (
+                    session
+                        .agents
+                        .token_rate_label(name, std::time::Instant::now(), motion_off),
+                    session.agents.context_usage(name),
+                ),
+                Conv::Channel(_) => (None, None),
+            };
+            let (composer, caret) = slack::composer_rows(
+                &ws,
+                &conv,
+                &pal,
+                width,
+                token_rate.as_deref(),
+                context_usage,
+            );
             let viewport = height
                 .saturating_sub(header.len())
                 .saturating_sub(composer.len())
                 .max(1);
             let (posts, _, divider) = conversation(&session, &ws, &conv);
-            let content = slack::message_rows(&posts, divider, &pal, width, &avatars);
+            let content = match conv {
+                Conv::Dm(_) => {
+                    slack::dm_message_rows(&posts, divider, &pal, width, &avatars, &theme)
+                }
+                Conv::Channel(_) => slack::message_rows(&posts, divider, &pal, width, &avatars),
+            };
 
-            // Bottom-anchored + scroll offset (clamped so it can't run past the top).
-            let max_up = content.len().saturating_sub(viewport);
-            let up = ws.scroll_up.min(max_up);
-            let start = content.len().saturating_sub(viewport + up);
+            preserve_scroll(&mut ws, &mut scroll_content, &conv, content.len());
+            clamp_scroll(&mut ws, content.len(), viewport);
+            let start = content.len().saturating_sub(viewport + ws.scroll_up);
             let mut slice: Vec<Row> = content.iter().skip(start).take(viewport).cloned().collect();
             while slice.len() < viewport {
                 slice.push(slack::blank_row());
@@ -346,6 +401,45 @@ fn render_at(
             pane.height.saturating_sub(offset),
         ),
     );
+}
+
+fn preserve_scroll(
+    ws: &mut Workspace,
+    previous: &mut Option<(Conv, usize)>,
+    conv: &Conv,
+    content_rows: usize,
+) {
+    match previous {
+        Some((open, rows)) if open == conv => {
+            if ws.scroll_up > 0 {
+                ws.scroll_up = ws
+                    .scroll_up
+                    .saturating_add(content_rows.saturating_sub(*rows));
+            }
+            *rows = content_rows;
+        }
+        _ => *previous = Some((conv.clone(), content_rows)),
+    }
+}
+
+fn clamp_scroll(ws: &mut Workspace, content_rows: usize, viewport: usize) {
+    ws.scroll_up = ws.scroll_up.min(content_rows.saturating_sub(viewport));
+}
+
+const WHEEL_ROWS: usize = 3;
+
+fn handle_mouse(ws: &mut Workspace, mouse: MouseEvent) -> bool {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            ws.scroll_up = ws.scroll_up.saturating_add(WHEEL_ROWS);
+            true
+        }
+        MouseEventKind::ScrollDown => {
+            ws.scroll_up = ws.scroll_up.saturating_sub(WHEEL_ROWS);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Route one key. Returns `false` to leave the view.
@@ -438,11 +532,13 @@ mod tests {
     use super::*;
     use crate::agents::AgentState;
     use crate::channels::ChannelMode;
-    use crossterm::event::KeyEvent;
+    use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
 
     fn snap() -> Snapshot {
         Snapshot {
             workspace: "bingo".into(),
+            main_model: "main-model".into(),
+            main_thinking: Some("high".into()),
             channels: vec![ChannelItem {
                 name: "dev-room".into(),
                 seq: 2,
@@ -454,7 +550,10 @@ mod tests {
             dms: vec![DmItem {
                 name: "scout".into(),
                 state: AgentState::Idle,
+                model: "test-model".into(),
+                thinking: None,
                 description: "recon".into(),
+                last_active: Duration::ZERO,
                 unread: 0,
             }],
         }
@@ -467,6 +566,58 @@ mod tests {
             snap,
             KeyEvent::new(code, mods),
         )
+    }
+
+    #[test]
+    fn direct_agent_open_selects_that_dm_without_losing_workspace_navigation() {
+        let mut ws = Workspace::default();
+        ws.select(Conv::Channel("dev-room".into()));
+        ws.switcher = Some(Switcher::default());
+        apply_open(&mut ws, EntityOpen::Agent("scout".into()));
+        assert_eq!(ws.open, Some(Conv::Dm("scout".into())));
+        assert_eq!(ws.focus, Focus::Composer);
+        assert!(ws.switcher.is_none());
+
+        apply_open(&mut ws, EntityOpen::Workspace);
+        assert_eq!(
+            ws.open,
+            Some(Conv::Dm("scout".into())),
+            "Ctrl+G keeps the workspace's last conversation"
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_three_rows_from_either_focus() {
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut ws = Workspace::default();
+
+        assert!(handle_mouse(&mut ws, wheel(MouseEventKind::ScrollUp)));
+        assert_eq!(ws.scroll_up, 3);
+        ws.scroll_up = usize::MAX;
+        clamp_scroll(&mut ws, 12, 5);
+        assert_eq!(ws.scroll_up, 7, "overscroll clamps to the oldest row");
+        assert!(handle_mouse(&mut ws, wheel(MouseEventKind::ScrollDown)));
+        assert_eq!(ws.scroll_up, 4);
+
+        ws.scroll_up = 4;
+        let conv = Conv::Channel("dev-room".into());
+        let mut previous = Some((conv.clone(), 12));
+        preserve_scroll(&mut ws, &mut previous, &conv, 15);
+        assert_eq!(ws.scroll_up, 7, "new rows preserve the viewed content");
+        ws.scroll_up = 0;
+        preserve_scroll(&mut ws, &mut previous, &conv, 18);
+        assert_eq!(ws.scroll_up, 0, "the latest view stays pinned");
+
+        ws.scroll_up = 0;
+        ws.focus = Focus::Messages;
+        assert!(handle_mouse(&mut ws, wheel(MouseEventKind::ScrollUp)));
+        assert_eq!(ws.scroll_up, 3);
+        assert!(!handle_mouse(&mut ws, wheel(MouseEventKind::Moved)));
     }
 
     #[test]
@@ -558,8 +709,8 @@ mod tests {
     }
 
     /// The composer is the one place a human can speak into the runtime from
-    /// this view: a channel post goes out as `user`, a DM queues on the
-    /// instance and gets flushed at the turn boundary.
+    /// this view: a channel post goes out as `user`, and a DM uses SendMessage's
+    /// immediate dispatcher.
     #[tokio::test]
     async fn sending_reaches_channels_and_instances() {
         let session = crate::tui::test_util::test_session();
@@ -585,6 +736,54 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_carries_every_channel_members_engine() {
+        let session = crate::tui::test_util::test_session();
+        for (name, model, thinking) in [
+            ("scout", "gpt-5.6-sol", Some("max")),
+            ("qa", "claude-sonnet", Some("high")),
+        ] {
+            let member = crate::tui::test_util::test_session();
+            let _ = member.runtime.model_tx.send(model.to_string());
+            let _ = member
+                .runtime
+                .thinking_tx
+                .send(thinking.map(str::to_string));
+            session.agents.insert(
+                name,
+                crate::agents::AgentKind::Crew,
+                None,
+                name.to_string(),
+                member,
+            );
+        }
+        session
+            .channels
+            .create(
+                "dev-team",
+                vec!["scout".into(), "qa".into()],
+                ChannelMode::Serial,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let mut ws = Workspace::default();
+        let snap = snapshot(&session, &mut ws, "bingo");
+        let header = crate::tui::slack::header_rows(
+            &snap,
+            &Conv::Channel("dev-team".into()),
+            &crate::tui::slack::Palette::new(&crate::tui::theme::Theme::dark()),
+            120,
+        );
+        let text = header
+            .iter()
+            .map(|row| row.line.plain_text())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("main: test-model/off"), "{text}");
+        assert!(text.contains("scout: gpt-5.6-sol/max"), "{text}");
+        assert!(text.contains("qa: claude-sonnet/high"), "{text}");
+    }
+
+    #[test]
     fn dm_history_becomes_posts_with_queued_drafts_last() {
         use crate::api::types::{ContentBlock, Message, Role};
         let history = vec![
@@ -605,6 +804,8 @@ mod tests {
         ];
         let posts = slack::dm_posts(
             &history,
+            &[],
+            &[],
             &[crate::agents::LiveBlock::Text(
                 "writing the second paragraph".into(),
             )],
@@ -617,13 +818,14 @@ mod tests {
             kinds,
             vec![
                 (true, slack::PostKind::Said),
-                (false, slack::PostKind::Tool),
+                (false, slack::PostKind::Process),
                 (false, slack::PostKind::Said),
                 (true, slack::PostKind::Queued),
                 (false, slack::PostKind::Typing),
             ],
             "{posts:?}"
         );
-        assert!(posts[1].text.contains("Bash"));
+        assert_eq!(posts[1].text, "⏺ Bash($ rg lazy)");
+        assert_eq!(posts[2].text, "Conclusion: lazy flush is correct.");
     }
 }

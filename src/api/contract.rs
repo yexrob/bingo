@@ -22,6 +22,8 @@ pub enum ClientError {
     InvalidApiKey(String),
     #[error("API error: HTTP {status}: {body}")]
     Api { status: u16, body: String },
+    #[error("API context overflow: HTTP {status}: {body}")]
+    ContextOverflow { status: u16, body: String },
     #[error("API stream error: {0}")]
     Stream(String),
     #[error("transport error: {0}")]
@@ -42,6 +44,42 @@ pub enum ClientError {
     Config(String),
 }
 
+impl ClientError {
+    pub fn from_response(status: u16, body: String) -> Self {
+        if is_context_overflow(status, &body) {
+            Self::ContextOverflow { status, body }
+        } else {
+            Self::Api { status, body }
+        }
+    }
+}
+
+fn is_context_overflow(status: u16, body: &str) -> bool {
+    if status != 400 && status != 413 {
+        return false;
+    }
+    let body = body.to_ascii_lowercase();
+    [
+        "context length",
+        "context window",
+        "context limit",
+        "max context",
+        "maximum context",
+        "input exceeds",
+        "input is too long",
+        "input too long",
+        "prompt is too long",
+        "prompt too long",
+        "too many tokens",
+        "token limit",
+    ]
+    .iter()
+    .any(|feature| body.contains(feature))
+        || (body.contains("maximum")
+            && body.contains("token")
+            && (body.contains("prompt") || body.contains("input")))
+}
+
 impl From<crate::api::auth::AuthError> for ClientError {
     fn from(e: crate::api::auth::AuthError) -> Self {
         ClientError::Auth(e.to_string())
@@ -60,6 +98,7 @@ impl crate::error::ErrorCode for ClientError {
             ClientError::Api { status: 401, .. } => "AUTH_REQUIRED",
             ClientError::Api { status: 403, .. } => "PERMISSION_DENIED",
             ClientError::Api { status: 429, .. } => "RATE_LIMITED",
+            ClientError::ContextOverflow { .. } => "CONTEXT_OVERFLOW",
             // Remaining non-success responses (4xx outside the above / 5xx):
             // server-interaction anomaly, action = "retry later".
             ClientError::Api { .. } => "SERVER_ERROR",
@@ -194,6 +233,89 @@ pub struct NeutralRequest {
     pub thinking: Option<ThinkingLevel>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamApiErrorKind {
+    Retryable,
+    NonRetryable,
+    Unknown,
+}
+
+impl StreamApiErrorKind {
+    /// Classify a free-form provider message when no structured error code decides:
+    /// quota/plan/prompt-size errors are terminal, transient-looking ones retry.
+    pub fn from_message(message: &str) -> Self {
+        let message = message.to_ascii_lowercase();
+        if [
+            "insufficient_quota",
+            "usage_not_included",
+            "invalid_prompt",
+            "context_length_exceeded",
+            "context overflow",
+            "context window",
+            "prompt is too long",
+            "input is too long",
+        ]
+        .iter()
+        .any(|pattern| message.contains(pattern))
+        {
+            return Self::NonRetryable;
+        }
+        if status_5xx(&message)
+            || [
+                "overloaded",
+                "server_error",
+                "server error",
+                "internal_error",
+                "internal error",
+                "service_unavailable",
+                "service unavailable",
+                "too_many_requests",
+                "too many requests",
+                "rate_limit",
+                "rate limit",
+                "resource_exhausted",
+                "resource exhausted",
+                "bad gateway",
+                "gateway timeout",
+                "429",
+                "try again later",
+            ]
+            .iter()
+            .any(|pattern| message.contains(pattern))
+        {
+            return Self::Retryable;
+        }
+        Self::Unknown
+    }
+
+    /// Final in-stream retry decision; `Unknown` falls back to message classification.
+    pub fn retryable(self, message: &str) -> bool {
+        match self {
+            Self::Retryable => true,
+            Self::NonRetryable => false,
+            Self::Unknown => Self::from_message(message) == Self::Retryable,
+        }
+    }
+}
+
+/// A 5xx number only counts as an HTTP status when it opens the message or follows a
+/// status marker: a bare "512 characters" elsewhere must not look transient.
+fn status_5xx(message: &str) -> bool {
+    let mut after_marker = true;
+    for token in message.split(|character: char| !character.is_ascii_alphanumeric()) {
+        if token.is_empty() {
+            continue;
+        }
+        if after_marker
+            && matches!(token.parse::<u16>(), Ok(status) if (500..600).contains(&status))
+        {
+            return true;
+        }
+        after_marker = matches!(token, "http" | "https" | "status" | "code");
+    }
+    false
+}
+
 /// Normalized streaming event, consumed by the query loop and the TUI.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
@@ -238,6 +360,8 @@ pub enum StreamEvent {
     Done,
     ApiError {
         message: String,
+        kind: StreamApiErrorKind,
+        retry_after: Option<std::time::Duration>,
     },
 }
 
@@ -263,11 +387,14 @@ pub trait ProviderClient: Send + Sync {
 
     /// Exact input token count (D6). Protocols without a count endpoint
     /// fall back to local estimation (see compact.rs).
+    /// tools are the schemas the streaming request carries: they are input
+    /// tokens too, so the count must measure the same payload it predicts.
     async fn count_tokens(
         &self,
         model: &str,
         system: &[SystemBlock],
         messages: &[Message],
+        tools: &[serde_json::Value],
     ) -> Result<u64, ClientError>;
 }
 
@@ -412,6 +539,30 @@ impl AssistantAccumulator {
         f(flight)
     }
 
+    pub fn finish(&mut self) -> bool {
+        let Some(in_flight) = self.in_flight.take() else {
+            return false;
+        };
+        let block = match in_flight {
+            InFlight::Text { text } => Some(ContentBlock::Text { text }),
+            InFlight::Thinking {
+                thinking,
+                signature,
+            } => Some(ContentBlock::Thinking {
+                thinking,
+                signature,
+            }),
+            InFlight::ToolUse { .. } => None,
+        };
+        if let Some(block) = block {
+            self.content.push(block);
+        }
+        if self.stop_reason.as_deref() != Some("max_tokens") {
+            self.stop_reason = Some("truncated".to_string());
+        }
+        true
+    }
+
     pub fn message(&self) -> Message {
         Message {
             role: Role::Assistant,
@@ -423,6 +574,76 @@ impl AssistantAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retryable_stream_api_errors_follow_provider_semantics() {
+        for message in [
+            "api_error: Our servers are currently overloaded. Please try again later.",
+            "server_error: upstream unavailable",
+            "HTTP 503: Service Unavailable",
+            "HTTP 599: upstream proxy failed",
+            "502 Bad Gateway",
+            "Error code: 504",
+            "429 too many requests",
+        ] {
+            assert!(StreamApiErrorKind::Unknown.retryable(message), "{message}");
+        }
+
+        for message in [
+            "insufficient_quota: check billing",
+            "usage_not_included: upgrade your plan",
+            "invalid_prompt: malformed input",
+            "context_length_exceeded: reduce the prompt",
+            "field exceeds the maximum of 512 characters",
+            "opaque provider error",
+        ] {
+            assert!(!StreamApiErrorKind::Unknown.retryable(message), "{message}");
+        }
+        assert!(StreamApiErrorKind::Retryable.retryable("opaque provider error"));
+        assert!(!StreamApiErrorKind::NonRetryable.retryable("HTTP 503"));
+    }
+
+    #[test]
+    fn context_overflow_response_classification() {
+        for (status, body) in [
+            (
+                400,
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 211000 tokens > 200000 maximum"}}"#,
+            ),
+            (
+                400,
+                r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 132450 tokens."}}"#,
+            ),
+            (
+                413,
+                r#"{"error":{"message":"The input exceeds the context window for this model."}}"#,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    ClientError::from_response(status, body.to_string()),
+                    ClientError::ContextOverflow { status: actual, .. } if actual == status
+                ),
+                "status={status}, body={body}"
+            );
+        }
+    }
+
+    #[test]
+    fn context_overflow_requires_400_or_413_and_a_message_feature() {
+        assert!(matches!(
+            ClientError::from_response(500, "maximum context length".to_string()),
+            ClientError::Api { status: 500, .. }
+        ));
+        assert!(matches!(
+            ClientError::from_response(400, "invalid request".to_string()),
+            ClientError::Api { status: 400, .. }
+        ));
+        assert!(matches!(
+            ClientError::from_response(413, "request too large".to_string()),
+            ClientError::Api { status: 413, .. }
+        ));
+    }
 
     #[test]
     fn thinking_level_parse_and_display() {
@@ -512,6 +733,91 @@ mod tests {
         .unwrap();
         acc.push(&StreamEvent::BlockStop { index: 0 }).unwrap();
         assert!(matches!(&acc.content[0], ContentBlock::ToolUse { input, .. } if input.is_null()));
+    }
+
+    #[test]
+    fn finish_preserves_max_tokens_for_unclosed_text() {
+        let mut acc = AssistantAccumulator::new();
+        acc.push(&StreamEvent::TextStart { index: 0 }).unwrap();
+        acc.push(&StreamEvent::TextDelta {
+            index: 0,
+            text: "partial answer".into(),
+        })
+        .unwrap();
+        acc.push(&StreamEvent::StopReason {
+            stop_reason: Some("max_tokens".into()),
+            output_tokens: Some(4),
+        })
+        .unwrap();
+
+        assert!(acc.finish());
+        assert_eq!(acc.stop_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(
+            acc.content,
+            vec![ContentBlock::Text {
+                text: "partial answer".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn finish_marks_unclosed_block_truncated_for_non_recoverable_stop_reason() {
+        let mut acc = AssistantAccumulator::new();
+        acc.push(&StreamEvent::TextStart { index: 0 }).unwrap();
+        acc.push(&StreamEvent::TextDelta {
+            index: 0,
+            text: "partial answer".into(),
+        })
+        .unwrap();
+        acc.push(&StreamEvent::StopReason {
+            stop_reason: Some("stop_sequence".into()),
+            output_tokens: Some(4),
+        })
+        .unwrap();
+
+        assert!(acc.finish());
+        assert_eq!(acc.stop_reason.as_deref(), Some("truncated"));
+    }
+
+    #[test]
+    fn finish_preserves_unclosed_thinking_as_truncated() {
+        let mut acc = AssistantAccumulator::new();
+        acc.push(&StreamEvent::ThinkingStart { index: 0 }).unwrap();
+        acc.push(&StreamEvent::ThinkingDelta {
+            index: 0,
+            thinking: "unfinished plan".into(),
+        })
+        .unwrap();
+        acc.push(&StreamEvent::StopReason {
+            stop_reason: Some("end_turn".into()),
+            output_tokens: Some(4),
+        })
+        .unwrap();
+
+        assert!(acc.finish());
+        assert_eq!(acc.stop_reason.as_deref(), Some("truncated"));
+        assert_eq!(
+            acc.content,
+            vec![ContentBlock::Thinking {
+                thinking: "unfinished plan".into(),
+                signature: String::new(),
+            }]
+        );
+    }
+
+    #[test]
+    fn finish_drops_unclosed_tool_use_and_marks_truncated() {
+        let mut acc = AssistantAccumulator::new();
+        acc.push(&StreamEvent::ToolUseStart {
+            index: 0,
+            id: "tu_1".into(),
+            name: "Bash".into(),
+        })
+        .unwrap();
+
+        assert!(acc.finish());
+        assert!(acc.content.is_empty());
+        assert_eq!(acc.stop_reason.as_deref(), Some("truncated"));
     }
 
     #[test]

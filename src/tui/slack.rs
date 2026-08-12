@@ -8,7 +8,7 @@
 //! | workspace        | the team (`.bingo/team.json` name)           |
 //! | channel `#name`  | [`crate::channels`] channel                  |
 //! | direct message   | a subagent instance                          |
-//! | app/bot messages | agent turns; tool calls read as attachments  |
+//! | app/bot messages | agent text replies                           |
 //!
 //! Everything here is a pure function of a [`Snapshot`] (what the session holds
 //! right now) plus [`Workspace`] (where the eye is). The host loop in
@@ -22,8 +22,12 @@
 //! avatar chip, the switcher's selected row — plus the explicit erase [`opaque`]
 //! needs to keep an overlay from being see-through.
 
+use std::time::Duration;
+
 use ratatui::layout::Rect;
 use ratatui::style::Color;
+
+use rsmarkdown_core::{MarkdownProcessor, Renderer};
 
 use crate::agents::AgentState;
 use crate::api::types::{ContentBlock, Message, Role};
@@ -31,6 +35,7 @@ use crate::channels::{ChannelMessage, ChannelMode};
 use crate::tui::avatar;
 use crate::tui::chat::Row;
 use crate::tui::line::{Line, SegStyle, text_width, wrap_words};
+use crate::tui::markdown::MarkdownRenderer;
 use crate::tui::theme::Theme;
 
 /// Left gutter of the message list when the avatar is a text chip: ` X ` plus one
@@ -59,6 +64,8 @@ pub struct Palette {
     pub main_dim: Color,
     pub divider: Color,
     pub accent: Color,
+    pub warning: Color,
+    pub danger: Color,
     pub unread: Color,
     pub avatars: [Color; 6],
 }
@@ -80,6 +87,8 @@ impl Palette {
             main_dim: theme.inactive,
             divider: rgb(0x38332D),
             accent: theme.claude,
+            warning: theme.warning,
+            danger: theme.error,
             unread: theme.claude_strong,
             avatars: [
                 rgb(0x4C9AE0),
@@ -121,6 +130,8 @@ impl Palette {
             main_dim: f(self.main_dim),
             divider: f(self.divider),
             accent: f(self.accent),
+            warning: f(self.warning),
+            danger: f(self.danger),
             unread: f(self.unread),
             avatars: self.avatars.map(f),
         }
@@ -158,7 +169,10 @@ pub struct ChannelItem {
 pub struct DmItem {
     pub name: String,
     pub state: AgentState,
+    pub model: String,
+    pub thinking: Option<String>,
     pub description: String,
+    pub last_active: Duration,
     pub unread: u64,
 }
 
@@ -166,6 +180,8 @@ pub struct DmItem {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     pub workspace: String,
+    pub main_model: String,
+    pub main_thinking: Option<String>,
     pub channels: Vec<ChannelItem>,
     pub dms: Vec<DmItem>,
 }
@@ -201,8 +217,6 @@ impl Snapshot {
 pub enum PostKind {
     /// An ordinary message.
     Said,
-    /// A tool call, rendered the way Slack renders an app attachment.
-    Tool,
     /// Sent but still in the inbox — delivery happens at the next turn boundary.
     Queued,
     /// The streaming tail of a running turn (Slack's "…is typing").
@@ -212,6 +226,11 @@ pub enum PostKind {
     /// typed it, so it gets one dim line instead of a quoted block with a name
     /// and an avatar over it.
     Note,
+    /// A step of the agent's work — a tool call or a reasoning phase — shown
+    /// the way the main transcript shows it: one dim line under the agent's
+    /// name, kept after the turn lands (the history's ToolUse/Thinking blocks
+    /// re-render the same rows).
+    Process,
 }
 
 /// One rendered message.
@@ -239,9 +258,6 @@ pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
         .collect()
 }
 
-/// Subagent history → posts. User turns are yours, assistant text is theirs, and
-/// tool calls become attachments; tool results and thinking stay out (the main
-/// transcript is where that detail lives).
 /// One line of runtime scaffolding → how it reads collapsed, or `None` for text
 /// a person actually wrote. The shapes are the ones `absorb_inbox` and the task
 /// reminder compose, so this stays in step with them by construction: anything
@@ -262,7 +278,7 @@ fn scaffold_note(line: &str) -> Option<String> {
 
 /// A user-role message → posts. Runtime scaffolding collapses to [`PostKind::Note`]
 /// lines; whatever a person actually wrote stays a message.
-fn user_posts(text: &str, me: &str) -> Vec<Post> {
+fn user_posts(text: &str, at: u64, me: &str) -> Vec<Post> {
     let mut out = Vec::new();
     let mut plain: Vec<&str> = Vec::new();
     let flush = |plain: &mut Vec<&str>, out: &mut Vec<Post>| {
@@ -274,7 +290,7 @@ fn user_posts(text: &str, me: &str) -> Vec<Post> {
         out.push(Post {
             from: me.to_string(),
             you: true,
-            at: 0,
+            at,
             text: joined,
             kind: PostKind::Said,
         });
@@ -312,45 +328,80 @@ fn user_posts(text: &str, me: &str) -> Vec<Post> {
     out
 }
 
+/// The collapsed reasoning row, exactly the transcript's header: the phase is
+/// shown, the stream is not.
+const THINKING_ROW: &str = "✻ Thinking";
+
+/// A stored tool-use block → the transcript's call line (`⏺ Bash(git status)`),
+/// the same brick `on_tool_ready` builds the live tail from.
+fn tool_call_line(name: &str, input: &serde_json::Value) -> String {
+    let glyph = crate::tui::activities::tool_glyph(name);
+    let shown = crate::tui::activities::display_tool_name(name);
+    let summary = crate::query::summarize_input(name, input);
+    if summary.is_empty() {
+        format!("{glyph}{shown}")
+    } else {
+        format!("{glyph}{shown}({summary})")
+    }
+}
+
+/// Subagent history + live turn → posts. User turns and assistant prose form
+/// the conversation; the work between them — tool calls and reasoning phases —
+/// shows as dim [`PostKind::Process`] rows, mirroring the main transcript
+/// (which keeps `⏺ Tool(…)` lines and the collapsed `✻ Thinking` header in the
+/// scrollback). `in_flight` is the messages already claimed by the running turn
+/// but not yet landed in history: rendered as ordinary sent messages, so a
+/// message never vanishes between the send and the turn's end.
 pub fn dm_posts(
     history: &[Message],
+    stamps: &[u64],
+    in_flight: &[String],
     live: &[crate::agents::LiveBlock],
     pending: &[String],
     who: &str,
     me: &str,
 ) -> Vec<Post> {
     let mut out = Vec::new();
-    for msg in history {
+    let process = |text: String| Post {
+        from: who.to_string(),
+        you: false,
+        at: 0,
+        text,
+        kind: PostKind::Process,
+    };
+    for (i, msg) in history.iter().enumerate() {
+        // `stamps[i]` is when `history[i]` landed in the record (0 = no clock).
+        let at = stamps.get(i).copied().unwrap_or(0);
         for block in &msg.content {
             match (msg.role, block) {
-                (Role::User, ContentBlock::Text { text }) => out.extend(user_posts(text, me)),
+                (Role::User, ContentBlock::Text { text }) => out.extend(user_posts(text, at, me)),
                 (Role::Assistant, ContentBlock::Text { text }) => out.push(Post {
                     from: who.to_string(),
                     you: false,
-                    at: 0,
+                    at,
                     text: text.clone(),
                     kind: PostKind::Said,
                 }),
                 (Role::Assistant, ContentBlock::ToolUse { name, input, .. }) => {
-                    let glyph = crate::tui::activities::tool_glyph(name);
-                    let shown = crate::tui::activities::display_tool_name(name);
-                    let summary = crate::query::summarize_input(name, input);
-                    let head = if summary.is_empty() {
-                        format!("{glyph}{shown}")
-                    } else {
-                        format!("{glyph}{shown}({summary})")
-                    };
-                    out.push(Post {
-                        from: who.to_string(),
-                        you: false,
-                        at: 0,
-                        text: head,
-                        kind: PostKind::Tool,
-                    });
+                    out.push(process(tool_call_line(name, input)));
+                }
+                (Role::Assistant, ContentBlock::Thinking { .. }) => {
+                    out.push(process(THINKING_ROW.to_string()));
                 }
                 _ => {}
             }
         }
+    }
+    // Claimed by the running turn, not yet in the record: an ordinary message
+    // (it is one — the run's prompt carries it), just without a landing clock.
+    for text in in_flight {
+        out.push(Post {
+            from: me.to_string(),
+            you: true,
+            at: 0,
+            text: text.clone(),
+            kind: PostKind::Said,
+        });
     }
     for text in pending {
         out.push(Post {
@@ -361,13 +412,6 @@ pub fn dm_posts(
             kind: PostKind::Queued,
         });
     }
-    // The running turn, shown the way the finished one is: prose per round, tool
-    // calls between them.
-    //
-    // "Typing" means text is arriving *now*, so it belongs to the tail and only
-    // when the tail is prose. When the turn is mid-tool the indicator becomes a
-    // post of its own at the end — otherwise it would sit halfway up the
-    // conversation, above the very tool call the agent is waiting on.
     let typing_at = match live.last() {
         Some(crate::agents::LiveBlock::Text(t)) if !t.trim().is_empty() => Some(live.len() - 1),
         _ => None,
@@ -385,19 +429,16 @@ pub fn dm_posts(
                     PostKind::Said
                 },
             }),
-            crate::agents::LiveBlock::Tool(head) => out.push(Post {
-                from: who.to_string(),
-                you: false,
-                at: 0,
-                text: head.clone(),
-                kind: PostKind::Tool,
-            }),
+            crate::agents::LiveBlock::Tool(text) => out.push(process(text.clone())),
+            crate::agents::LiveBlock::Thinking(_) => out.push(process(THINKING_ROW.to_string())),
             crate::agents::LiveBlock::Text(_) => {}
         }
     }
-    // Mid-tool, or between rounds: still working, and the view should say so rather
-    // than going quiet exactly when it has the most to report.
-    if typing_at.is_none() && !live.is_empty() {
+    // The indicator spans the whole stretch the agent owes a reply: from the
+    // instant a message is on its way (queued or claimed, before the stream
+    // says anything) through tool waits and round gaps. Without the early leg
+    // the DM sits silent for exactly the send-to-first-delta latency.
+    if typing_at.is_none() && !(live.is_empty() && in_flight.is_empty() && pending.is_empty()) {
         out.push(Post {
             from: who.to_string(),
             you: false,
@@ -599,8 +640,11 @@ fn boxed(text: &str, width: usize) -> String {
     format!("{}{text}{}", " ".repeat(lead), " ".repeat(tail))
 }
 
-/// Local wall-clock `HH:MM`; empty when the source carries no timestamp.
-fn hhmm(at: u64) -> String {
+/// Send-time stamp trailing a message body (issue #41), the same in every view:
+/// local `HH:MM` today, `M/D HH:MM` on any other day. Empty when the source
+/// carries no timestamp — a missing clock renders as nothing rather than being
+/// invented (the [`ChannelMessage`] rule).
+pub fn stamp(at: u64) -> String {
     use chrono::TimeZone;
     if at == 0 {
         return String::new();
@@ -608,8 +652,17 @@ fn hhmm(at: u64) -> String {
     chrono::Local
         .timestamp_opt(at as i64, 0)
         .single()
-        .map(|t| t.format("%H:%M").to_string())
+        .map(|t| stamp_of(&t, chrono::Local::now().date_naive()))
         .unwrap_or_default()
+}
+
+/// [`stamp`] with "today" injected, so tests pin both sides of the day boundary.
+fn stamp_of(t: &chrono::DateTime<chrono::Local>, today: chrono::NaiveDate) -> String {
+    if t.date_naive() == today {
+        t.format("%H:%M").to_string()
+    } else {
+        t.format("%-m/%-d %H:%M").to_string()
+    }
 }
 
 /// Day-divider label: Today / Yesterday / M/D. `None` when there is no clock to
@@ -638,12 +691,54 @@ fn presence(state: AgentState, pal: &Palette) -> (&'static str, Color) {
     }
 }
 
+fn member_engine(snap: &Snapshot, name: &str) -> Option<String> {
+    if name == crate::channels::HUB_NAME {
+        return Some(format!(
+            "{name}: {}/{}",
+            snap.main_model,
+            snap.main_thinking.as_deref().unwrap_or("off")
+        ));
+    }
+    let dm = snap.dm(name)?;
+    Some(format!(
+        "{name}: {}/{}",
+        dm.model,
+        dm.thinking.as_deref().unwrap_or("off")
+    ))
+}
+
+fn channel_engine_meta(snap: &Snapshot, channel: &ChannelItem, width: usize) -> String {
+    let engines = channel
+        .members
+        .iter()
+        .filter_map(|member| member_engine(snap, member))
+        .collect::<Vec<_>>();
+    let named = engines.join(", ");
+    if engines.len() <= 3 && text_width(&named) <= width {
+        return named;
+    }
+    let summaries = engines
+        .iter()
+        .map(|engine| {
+            engine
+                .split_once(':')
+                .map_or(engine.as_str(), |(_, engine)| engine.trim())
+        })
+        .collect::<Vec<_>>();
+    if let Some(engine) = summaries.first()
+        && summaries.iter().all(|candidate| candidate == engine)
+    {
+        return format!("{} agents · {engine}", summaries.len());
+    }
+    format!("{} agents · mixed engines", summaries.len())
+}
+
 /// Conversation header: who you are looking at, what it is, and a rule under it.
-/// Two rows, not three — with no sidebar left to name the workspace, the team's
-/// name moves here, and the metadata that had a line of its own now trails the
-/// title, where it reads as a subtitle instead of a second heading.
+/// DM metadata trails the title; small channels get wrapped per-member engine
+/// rows, while larger rooms get one bounded engine summary.
 pub fn header_rows(snap: &Snapshot, conv: &Conv, pal: &Palette, width: usize) -> Vec<Row> {
-    let (title, meta) = match conv {
+    let engine_width = width.saturating_sub(3).max(1);
+    let (title, meta, engines) = match conv {
         Conv::Channel(name) => match snap.channel(name) {
             Some(c) => (
                 format!(" # {name}"),
@@ -654,18 +749,35 @@ pub fn header_rows(snap: &Snapshot, conv: &Conv, pal: &Palette, width: usize) ->
                     c.members.len(),
                     if c.frozen { " · frozen" } else { "" }
                 ),
+                channel_engine_meta(snap, c, engine_width),
             ),
-            None => (format!(" # {name}"), "  no longer exists".to_string()),
+            None => (
+                format!(" # {name}"),
+                "  no longer exists".to_string(),
+                String::new(),
+            ),
         },
         Conv::Dm(name) => match snap.dm(name) {
             Some(d) => {
                 let (glyph, _) = presence(d.state, pal);
                 (
                     format!(" {glyph} {name}"),
-                    format!("  DM · {} · {}", d.state.label(), d.description),
+                    format!(
+                        "  DM · {} · {} · {} · {} · {}",
+                        d.model,
+                        d.thinking.as_deref().unwrap_or("off"),
+                        d.state.label(),
+                        crate::tool::agent::format_last_active(d.last_active),
+                        d.description
+                    ),
+                    String::new(),
                 )
             }
-            None => (format!(" {name}"), "  no longer exists".to_string()),
+            None => (
+                format!(" {name}"),
+                "  no longer exists".to_string(),
+                String::new(),
+            ),
         },
     };
     // The workspace name sits right, where the member count used to: it is the one
@@ -686,13 +798,18 @@ pub fn header_rows(snap: &Snapshot, conv: &Conv, pal: &Palette, width: usize) ->
         .saturating_sub(text_width(&right));
     head.push_styled(" ".repeat(gap), SegStyle::fg(pal.main_dim));
     head.push_styled(right, SegStyle::fg(pal.main_dim));
-    vec![
-        row(head),
-        row(Line::styled(
-            "─".repeat(width.min(500)),
-            SegStyle::fg(pal.divider),
-        )),
-    ]
+    let mut rows = vec![row(head)];
+    if !engines.is_empty() {
+        let engine = crate::tui::chat::one_line(&engines, engine_width);
+        let mut line = Line::styled("  ", SegStyle::fg(pal.main_dim));
+        line.push_styled(engine, SegStyle::fg(pal.main_dim));
+        rows.push(row(line));
+    }
+    rows.push(row(Line::styled(
+        "─".repeat(width.min(500)),
+        SegStyle::fg(pal.divider),
+    )));
+    rows
 }
 
 /// Slack's day divider: a hairline rule with the day centred on it.
@@ -821,8 +938,89 @@ pub fn sender_band(
     vec![head, gutter_cell(index, name, 1, images, pal)]
 }
 
+fn indent_rows(
+    body: Vec<Row>,
+    post: &Post,
+    grouped: bool,
+    gutter_w: usize,
+    avatars: &Avatars,
+    pal: &Palette,
+) -> Vec<Row> {
+    body.into_iter()
+        .enumerate()
+        .map(|(i, body)| {
+            let mut line = if i == 0 && !grouped {
+                gutter_line(&post.from, 1, avatars, pal)
+            } else {
+                Line::styled(" ".repeat(gutter_w), SegStyle::fg(pal.main_dim))
+            };
+            let gutter_segments = line.segs.len();
+            line.image = body.line.image.clone();
+            line.segs.extend(body.line.segs);
+            let bg = body.bg;
+            if let Some(bg) = bg {
+                for seg in line.segs.iter_mut().skip(gutter_segments) {
+                    seg.style.bg = Some(bg);
+                }
+            }
+            let mut row = Row::new(line);
+            row.bg = None;
+            row.padding_right = body.padding_right;
+            row
+        })
+        .collect()
+}
+
+/// The DM body uses the same user bubble and assistant markdown row builders as
+/// the main transcript. The surrounding name row and avatar gutter remain the
+/// workspace's existing DM skin.
+fn dm_body_rows(post: &Post, width: usize, theme: &Theme) -> Vec<Row> {
+    match post.kind {
+        PostKind::Queued => wrap_words(&post.text, width)
+            .into_iter()
+            .map(|line| Row::new(Line::styled(line, SegStyle::fg(theme.inactive))))
+            .collect(),
+        // One dim line per work step, like the transcript's tool rows: cut, not
+        // wrapped, so a long command never disturbs the gutter alignment.
+        PostKind::Process => vec![Row::new(Line::styled(
+            crate::tui::chat::one_line(&post.text, width),
+            SegStyle::fg(theme.inactive),
+        ))],
+        PostKind::Typing if post.text.is_empty() => Vec::new(),
+        _ if post.you => crate::tui::chat::user_message_rows(&post.text, width, theme),
+        _ => {
+            let mut processor = MarkdownProcessor::default();
+            let mut renderer = MarkdownRenderer::with_theme(width.saturating_sub(2), theme.clone());
+            let doc = processor.process_streaming(&post.text);
+            renderer.render(&doc);
+            crate::tui::chat::text_rows(theme, renderer.lines().to_vec())
+        }
+    }
+}
+
+fn workspace_body_rows(post: &Post, width: usize, pal: &Palette) -> Vec<Row> {
+    let style = match post.kind {
+        PostKind::Queued | PostKind::Process => SegStyle::fg(pal.main_dim),
+        _ => SegStyle::fg(pal.main_text),
+    };
+    let mut rows = Vec::new();
+    for para in post.text.lines() {
+        let wrapped = wrap_words(para, width);
+        if wrapped.is_empty() {
+            rows.push(Row::new(Line::empty()));
+        }
+        rows.extend(
+            wrapped
+                .into_iter()
+                .map(|line| Row::new(Line::styled(line, style))),
+        );
+    }
+    rows
+}
+
 /// The message list. Consecutive posts from one sender inside [`GROUP_WINDOW`]
-/// share a name row; the day changes and the first unread message get dividers.
+/// share a name row; the day changes and the first unread message get dividers;
+/// every real message ends with its dim send-time [`stamp`].
 /// `avatars` says whether the terminal can place portraits and which ones the
 /// blueprint pinned; the row count is the same either way, so only the gutter
 /// changes.
@@ -832,6 +1030,28 @@ pub fn message_rows(
     pal: &Palette,
     width: usize,
     avatars: &Avatars,
+) -> Vec<Row> {
+    message_rows_for(posts, unread_from, pal, width, avatars, None)
+}
+
+pub fn dm_message_rows(
+    posts: &[Post],
+    unread_from: usize,
+    pal: &Palette,
+    width: usize,
+    avatars: &Avatars,
+    theme: &Theme,
+) -> Vec<Row> {
+    message_rows_for(posts, unread_from, pal, width, avatars, Some(theme))
+}
+
+fn message_rows_for(
+    posts: &[Post],
+    unread_from: usize,
+    pal: &Palette,
+    width: usize,
+    avatars: &Avatars,
+    main_theme: Option<&Theme>,
 ) -> Vec<Row> {
     if posts.is_empty() {
         return vec![
@@ -887,65 +1107,59 @@ pub fn message_rows(
                 post.from.clone()
             };
             head.push_styled(shown, SegStyle::fg(pal.main_text).bold());
-            let time = hhmm(post.at);
-            if !time.is_empty() {
-                head.push_styled(format!("  {time}"), SegStyle::fg(pal.main_dim));
-            }
             rows.push(row(head));
         }
-        // The first body row of an ungrouped post carries the bottom half of the
-        // portrait; every other row is plain indentation.
-        let mut lead = 0usize;
-        let indent = |lead: &mut usize| -> Line {
-            let line = if *lead == 0 && !grouped {
+        let body = match main_theme {
+            Some(theme) => dm_body_rows(post, body_w, theme),
+            None => workspace_body_rows(post, body_w, pal),
+        };
+        let mut body = indent_rows(body, post, grouped, gutter_w, avatars, pal);
+        let mut lead = body.len();
+        // Send time, trailing the body (issue #41): its own dim row, so it never
+        // disturbs the body's wrapping or wide-character alignment. A markdown
+        // body may end in a blank line; the stamp belongs to the message, so it
+        // slots in before that spacing rather than floating under it.
+        let time = stamp(post.at);
+        if post.kind == PostKind::Said && !time.is_empty() {
+            let keep = body
+                .iter()
+                .rposition(|r| r.line.image.is_some() || !r.line.plain_text().trim().is_empty())
+                .map_or(0, |p| p + 1);
+            let mut line = if body.is_empty() && !grouped {
                 gutter_line(&post.from, 1, avatars, pal)
             } else {
                 Line::styled(" ".repeat(gutter_w), SegStyle::fg(pal.main_dim))
             };
-            *lead += 1;
-            line
-        };
-        match post.kind {
-            PostKind::Tool => {
-                let text = crate::tui::chat::one_line(&post.text, body_w);
-                let mut line = indent(&mut lead);
-                line.push_styled("▏", SegStyle::fg(pal.accent));
-                line.push_styled(format!(" {text}"), SegStyle::fg(pal.main_dim));
-                rows.push(row(line));
-            }
-            _ => {
-                let style = match post.kind {
-                    PostKind::Queued => SegStyle::fg(pal.main_dim),
-                    _ => SegStyle::fg(pal.main_text),
-                };
-                for para in post.text.lines() {
-                    let wrapped = wrap_words(para, body_w);
-                    if wrapped.is_empty() {
-                        rows.push(row(indent(&mut lead)));
-                    }
-                    for l in wrapped {
-                        let mut line = indent(&mut lead);
-                        line.push_styled(l, style);
-                        rows.push(row(line));
-                    }
-                }
-                if post.kind == PostKind::Queued {
-                    let mut line = indent(&mut lead);
-                    line.push_styled(
-                        "⧖ pending delivery (injected at the next turn boundary)",
-                        SegStyle::fg(pal.main_dim).italic(),
-                    );
-                    rows.push(row(line));
-                }
-                if post.kind == PostKind::Typing {
-                    let mut line = indent(&mut lead);
-                    line.push_styled(
-                        format!("✻ {} is typing…", post.from),
-                        SegStyle::fg(pal.accent).italic(),
-                    );
-                    rows.push(row(line));
-                }
-            }
+            lead += 1;
+            line.push_styled(time, SegStyle::fg(pal.main_dim));
+            body.insert(keep, row(line));
+        }
+        rows.append(&mut body);
+        if post.kind == PostKind::Queued {
+            let mut line = if lead == 0 && !grouped {
+                gutter_line(&post.from, 1, avatars, pal)
+            } else {
+                Line::styled(" ".repeat(gutter_w), SegStyle::fg(pal.main_dim))
+            };
+            lead += 1;
+            line.push_styled(
+                "⧖ pending delivery (injected at the next turn boundary)",
+                SegStyle::fg(pal.main_dim).italic(),
+            );
+            rows.push(row(line));
+        }
+        if post.kind == PostKind::Typing {
+            let mut line = if lead == 0 && !grouped {
+                gutter_line(&post.from, 1, avatars, pal)
+            } else {
+                Line::styled(" ".repeat(gutter_w), SegStyle::fg(pal.main_dim))
+            };
+            lead += 1;
+            line.push_styled(
+                format!("✻ {} is typing…", post.from),
+                SegStyle::fg(pal.accent).italic(),
+            );
+            rows.push(row(line));
         }
         // A post with no body at all still owes the portrait its second row.
         if lead == 0 && !grouped {
@@ -963,6 +1177,8 @@ pub fn composer_rows(
     conv: &Conv,
     pal: &Palette,
     width: usize,
+    token_rate: Option<&str>,
+    context_usage: Option<crate::context_usage::ContextUsage>,
 ) -> (Vec<Row>, Option<(usize, usize)>) {
     // Box geometry: margin + │ + space + inner + space + │ == width.
     let inner = width.saturating_sub(5).max(4);
@@ -1020,10 +1236,56 @@ pub fn composer_rows(
     } else {
         "  tab returns to the composer · ↑↓ scrolls · ctrl+k switches conversation · alt+↑↓ moves up/down · esc back"
     };
-    let foot = Line::styled(
-        crate::tui::chat::one_line(hint, width.saturating_sub(2)),
-        SegStyle::fg(pal.main_dim),
-    );
+    let usage = context_usage.map(|usage| (usage.label(), usage.band()));
+    let mut status = Line::empty();
+    if let Some(rate) = token_rate {
+        status.push_styled(rate, SegStyle::fg(pal.accent));
+        status.push_styled(" · ", SegStyle::fg(pal.main_dim));
+    }
+    if let Some((label, band)) = &usage {
+        let color = match band {
+            crate::context_usage::ContextUsageBand::Normal => pal.main_dim,
+            crate::context_usage::ContextUsageBand::Warning => pal.warning,
+            crate::context_usage::ContextUsageBand::Danger => pal.danger,
+        };
+        status.push_styled(label, SegStyle::fg(color));
+    }
+    let available = width.saturating_sub(2);
+    if text_width(&status.plain_text()) > available {
+        status = usage
+            .map(|(label, band)| {
+                let color = match band {
+                    crate::context_usage::ContextUsageBand::Normal => pal.main_dim,
+                    crate::context_usage::ContextUsageBand::Warning => pal.warning,
+                    crate::context_usage::ContextUsageBand::Danger => pal.danger,
+                };
+                Line::styled(label, SegStyle::fg(color))
+            })
+            .unwrap_or_else(Line::empty);
+    }
+    if text_width(&status.plain_text()) > available {
+        status = Line::styled(
+            crate::tui::chat::one_line(&status.plain_text(), available),
+            status
+                .segs
+                .last()
+                .map(|seg| seg.style)
+                .unwrap_or_else(SegStyle::plain),
+        );
+    }
+    let status_width = text_width(&status.plain_text());
+    let hint_width = available.saturating_sub(status_width + usize::from(status_width > 0));
+    let hint = if hint_width > 0 {
+        crate::tui::chat::one_line(hint, hint_width)
+    } else {
+        String::new()
+    };
+    let mut foot = Line::styled(hint.clone(), SegStyle::fg(pal.main_dim));
+    if status_width > 0 {
+        let gap = available.saturating_sub(text_width(&hint) + status_width);
+        foot.push_styled(" ".repeat(gap), SegStyle::fg(pal.main_dim));
+        foot.segs.extend(status.segs);
+    }
     rows.push(row(foot));
     if let Some(flash) = &ws.flash {
         rows.push(row(Line::styled(
@@ -1174,6 +1436,8 @@ mod tests {
     fn snap() -> Snapshot {
         Snapshot {
             workspace: "bingo".into(),
+            main_model: "main-model".into(),
+            main_thinking: Some("high".into()),
             channels: vec![
                 ChannelItem {
                     name: "dev-room".into(),
@@ -1196,13 +1460,19 @@ mod tests {
                 DmItem {
                     name: "scout".into(),
                     state: AgentState::Running,
+                    model: "gpt-5.6-sol".into(),
+                    thinking: Some("max".into()),
                     description: "recon".into(),
+                    last_active: Duration::from_secs(3),
                     unread: 0,
                 },
                 DmItem {
                     name: "qa".into(),
                     state: AgentState::Idle,
+                    model: "claude-sonnet".into(),
+                    thinking: Some("high".into()),
                     description: "acceptance".into(),
+                    last_active: Duration::from_secs(125),
                     unread: 3,
                 },
             ],
@@ -1272,6 +1542,116 @@ mod tests {
         );
     }
 
+    /// The stamp brick every view shares (issue #41): `HH:MM` today, `M/D HH:MM`
+    /// once the message is not from today, nothing when there is no clock.
+    #[test]
+    fn stamp_is_hhmm_today_and_dated_across_days() {
+        use chrono::TimeZone;
+        let t = chrono::Local
+            .with_ymd_and_hms(2026, 8, 10, 9, 5, 0)
+            .single()
+            .unwrap();
+        let same_day = chrono::NaiveDate::from_ymd_opt(2026, 8, 10).unwrap();
+        let two_days_on = chrono::NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
+        assert_eq!(stamp_of(&t, same_day), "09:05");
+        assert_eq!(stamp_of(&t, two_days_on), "8/10 09:05");
+        assert_eq!(stamp(0), "", "no clock renders nothing, never an invention");
+        // The public wrapper agrees with the injected-today core.
+        assert!(
+            stamp(t.timestamp() as u64).ends_with("09:05"),
+            "{}",
+            stamp(t.timestamp() as u64)
+        );
+    }
+
+    /// Issue #41: the send time trails the body as its own dim row — in the
+    /// channel skin and the DM skin alike — and the name row no longer carries
+    /// a clock of its own.
+    #[test]
+    fn the_send_time_trails_the_body() {
+        let at = 1_760_000_000u64;
+        let want = stamp(at);
+        let posts = vec![
+            Post {
+                from: "scout".into(),
+                you: false,
+                at,
+                text: "found the regression".into(),
+                kind: PostKind::Said,
+            },
+            Post {
+                from: "scout".into(),
+                you: false,
+                at: at + 30,
+                text: "in term.rs".into(),
+                kind: PostKind::Said,
+            },
+        ];
+        let rows = message_rows(&posts, usize::MAX, &pal(), 60, &Avatars::default());
+        let t = texts(&rows);
+        let name = t.iter().position(|l| l.contains("scout")).unwrap();
+        let body = t
+            .iter()
+            .position(|l| l.contains("found the regression"))
+            .unwrap();
+        let time = t.iter().position(|l| l.trim() == want).unwrap();
+        assert!(name < body && body < time, "{t:?}");
+        assert!(
+            !t[name].contains(&want),
+            "the name row no longer carries the clock: {t:?}"
+        );
+        // A grouped message (no name row of its own) still gets its stamp.
+        assert!(
+            t.iter().any(|l| l.trim() == stamp(at + 30)),
+            "grouped messages keep their own clock: {t:?}"
+        );
+        let dm = dm_message_rows(
+            &posts,
+            usize::MAX,
+            &pal(),
+            60,
+            &Avatars::default(),
+            &Theme::dark(),
+        );
+        let dm = texts(&dm);
+        let body = dm
+            .iter()
+            .position(|l| l.contains("found the regression"))
+            .unwrap();
+        assert_eq!(
+            dm[body + 1].trim(),
+            want,
+            "the DM stamp sits directly under its body, before any trailing spacing: {dm:?}"
+        );
+    }
+
+    /// DM stamps come from the registry, index-aligned with the history; the
+    /// runtime's scaffolding notes stay clockless.
+    #[test]
+    fn dm_history_stamps_land_on_posts() {
+        let history = vec![
+            crate::api::types::Message::user_text("[follow-up 1/3] still waiting"),
+            crate::api::types::Message::user_text("what a person wrote"),
+            crate::api::types::Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "the reply".into(),
+                }],
+            },
+        ];
+        let posts = dm_posts(&history, &[100, 200, 300], &[], &[], &[], "scout", "user");
+        let ats: Vec<(PostKind, u64)> = posts.iter().map(|p| (p.kind, p.at)).collect();
+        assert_eq!(
+            ats,
+            vec![
+                (PostKind::Note, 0),
+                (PostKind::Said, 200),
+                (PostKind::Said, 300),
+            ],
+            "{posts:?}"
+        );
+    }
+
     /// The runtime writes its own scaffolding into an instance's history — the
     /// relay of a channel message, the task reminder. Quoting those in full put a
     /// wall of English system text under a "You" name row, as if the user had typed
@@ -1287,7 +1667,7 @@ mod tests {
             crate::api::types::Message::user_text(relay),
             crate::api::types::Message::user_text("one thing just for you\nsecond line"),
         ];
-        let posts = dm_posts(&history, &[], &[], "devex", "user");
+        let posts = dm_posts(&history, &[], &[], &[], &[], "devex", "user");
         let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
         assert_eq!(
             kinds,
@@ -1418,7 +1798,7 @@ mod tests {
             60,
             &Avatars::default(),
         ));
-        all.extend(composer_rows(&ws, &conv, &pal, 60).0);
+        all.extend(composer_rows(&ws, &conv, &pal, 60, None, None).0);
         all.extend(empty_pane_rows(&pal, 60, 8));
         assert!(
             all.iter().all(|r| r.bg.is_none()),
@@ -1529,15 +1909,120 @@ mod tests {
     }
 
     #[test]
-    fn tool_calls_render_as_attachments_and_queued_posts_stay_visible() {
+    fn dm_rows_reuse_main_body_rendering_and_keep_the_existing_avatar_gutter() {
         let posts = vec![
+            Post {
+                from: "user".into(),
+                you: true,
+                at: 0,
+                text: "plain **user** text".into(),
+                kind: PostKind::Said,
+            },
             Post {
                 from: "scout".into(),
                 you: false,
                 at: 0,
-                text: "⏺ Bash($ rg lazy)".into(),
-                kind: PostKind::Tool,
+                text: "## Result\n\nUse `cargo test`.".into(),
+                kind: PostKind::Said,
             },
+        ];
+        let pal = pal();
+        let theme = Theme::dark();
+        let avatars = Avatars::default();
+        let rows = dm_message_rows(&posts, usize::MAX, &pal, 60, &avatars, &theme);
+
+        let user_head = rows
+            .iter()
+            .position(|row| row.line.plain_text().contains("You"))
+            .unwrap_or_else(|| panic!("user name row missing"));
+        let user_body = &rows[user_head + 1];
+        assert_eq!(user_body.bg, None, "bubble must not repaint the DM gutter");
+        assert!(
+            user_body
+                .line
+                .segs
+                .first()
+                .is_some_and(|seg| seg.style.bg.is_none()),
+            "existing avatar gutter keeps its own style"
+        );
+        assert!(
+            user_body
+                .line
+                .segs
+                .iter()
+                .skip(1)
+                .all(|seg| seg.style.bg == Some(theme.user_message_bg)),
+            "main bubble background stays scoped to the body"
+        );
+        assert!(
+            user_body
+                .line
+                .plain_text()
+                .contains("❯ plain **user** text"),
+            "main user bubble rows remain intact behind the gutter: {:?}",
+            texts(&rows)
+        );
+        assert!(
+            user_body.line.plain_text().starts_with("    "),
+            "DM avatar gutter stays in front of the main body row"
+        );
+
+        let image_avatars = Avatars {
+            images: true,
+            ..Avatars::default()
+        };
+        let image_rows = dm_message_rows(&posts[..1], usize::MAX, &pal, 60, &image_avatars, &theme);
+        let image_body = image_rows
+            .iter()
+            .find(|row| row.line.plain_text().contains("plain **user** text"))
+            .unwrap_or_else(|| panic!("image-avatar user body missing"));
+        assert!(
+            image_body
+                .line
+                .segs
+                .iter()
+                .take(2)
+                .all(|seg| seg.style.bg != Some(theme.user_message_bg)),
+            "portrait and its spacer keep the existing DM gutter style"
+        );
+        assert!(
+            image_body
+                .line
+                .segs
+                .iter()
+                .skip(2)
+                .all(|seg| seg.style.bg == Some(theme.user_message_bg)),
+            "the bubble begins only after the image-avatar gutter"
+        );
+
+        let scout_head = rows
+            .iter()
+            .position(|row| row.line.plain_text().contains("scout"))
+            .unwrap_or_else(|| panic!("agent name row missing"));
+        let assistant = &rows[scout_head + 1..];
+        assert!(
+            assistant
+                .iter()
+                .any(|row| row.line.plain_text().contains("⏺ Result")),
+            "assistant uses the main markdown heading/prefix path: {:?}",
+            texts(&rows)
+        );
+        assert!(
+            assistant
+                .iter()
+                .any(|row| row.line.plain_text().contains("cargo test"))
+        );
+        assert!(assistant.iter().any(|row| {
+            row.line
+                .segs
+                .iter()
+                .any(|seg| seg.style.fg == Some(theme.code_fg))
+        }));
+    }
+
+    #[test]
+    fn queued_and_typing_posts_stay_visible() {
+        let posts = vec![
             Post {
                 from: "user".into(),
                 you: true,
@@ -1560,40 +2045,43 @@ mod tests {
             60,
             &Avatars::default(),
         ));
-        assert!(t.iter().any(|l| l.contains("▏ ⏺ Bash")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("pending delivery")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("is typing")), "{t:?}");
     }
 
-    /// A running turn shows its process, and its rounds stay apart. The live tail
-    /// used to reach the view as one flat string of text deltas: no tool calls, and
-    /// nothing between rounds, so a five-round turn read as one wall with sentences
-    /// butting together (`…the current state.Now let me verify…`). Only the last
-    /// prose block is "typing" — that is where text is still arriving.
+    /// A running turn shows the work as the main transcript does: prose from
+    /// each round, a dim process row per tool call and reasoning phase, and a
+    /// trailing working state while the current block is not prose.
     #[test]
-    fn a_running_turn_shows_its_tools_and_keeps_its_rounds_apart() {
+    fn a_running_turn_shows_its_process_and_keeps_its_rounds_apart() {
         use crate::agents::LiveBlock;
         let live = vec![
+            LiveBlock::Thinking("where do I even start".into()),
             LiveBlock::Text("Let me verify the current state.".into()),
             LiveBlock::Tool("⏺ Bash($ git status)".into()),
             LiveBlock::Text("State confirmed. Checking the workflow.".into()),
             LiveBlock::Tool("⏺ Read(ci.yml)".into()),
             LiveBlock::Text("The quality job is the one failing.".into()),
         ];
-        let posts = dm_posts(&[], &live, &[], "deploy", "user");
+        let posts = dm_posts(&[], &[], &[], &live, &[], "deploy", "user");
         let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
         assert_eq!(
             kinds,
             vec![
+                PostKind::Process,
                 PostKind::Said,
-                PostKind::Tool,
+                PostKind::Process,
                 PostKind::Said,
-                PostKind::Tool,
+                PostKind::Process,
                 PostKind::Typing,
             ],
-            "process interleaved, only the tail typing: {posts:?}"
+            "{posts:?}"
         );
-        // The rounds are separate posts, so nothing can run together.
+        assert_eq!(
+            posts[0].text, "✻ Thinking",
+            "the phase is shown, the stream is not: {posts:?}"
+        );
+        assert_eq!(posts[2].text, "⏺ Bash($ git status)");
         assert!(
             posts
                 .iter()
@@ -1601,46 +2089,269 @@ mod tests {
             "{posts:?}"
         );
 
-        // Mid-tool the indicator moves to the end rather than sitting above the very
-        // call the agent is waiting on.
-        assert_eq!(
-            dm_posts(&[], &live[..2], &[], "deploy", "user")
-                .iter()
-                .map(|p| p.kind)
-                .collect::<Vec<_>>(),
-            vec![PostKind::Said, PostKind::Tool, PostKind::Typing]
-        );
         let only_tools = vec![LiveBlock::Tool("⏺ Bash($ git status)".into())];
+        let tool_wait = dm_posts(&[], &[], &[], &only_tools, &[], "deploy", "user");
         assert_eq!(
-            dm_posts(&[], &only_tools, &[], "deploy", "user")
-                .iter()
-                .map(|p| p.kind)
-                .collect::<Vec<_>>(),
-            vec![PostKind::Tool, PostKind::Typing],
-            "silent tool-only work still says it is working"
+            tool_wait.iter().map(|p| p.kind).collect::<Vec<_>>(),
+            vec![PostKind::Process, PostKind::Typing],
+            "mid-tool work shows the call and stays visibly working"
         );
-        // A round that just ended leaves an empty block: still working, not silent.
+
         let between = vec![
             LiveBlock::Text("first round".into()),
             LiveBlock::Text(String::new()),
         ];
         assert_eq!(
-            dm_posts(&[], &between, &[], "deploy", "user")
+            dm_posts(&[], &[], &[], &between, &[], "deploy", "user")
                 .iter()
                 .map(|p| p.kind)
                 .collect::<Vec<_>>(),
             vec![PostKind::Said, PostKind::Typing]
         );
+        assert!(dm_posts(&[], &[], &[], &[], &[], "deploy", "user").is_empty());
+    }
 
-        // Idle: no live blocks, no invented posts.
-        assert!(dm_posts(&[], &[], &[], "deploy", "user").is_empty());
+    /// A fresh send gets the agent's face and typing row at once: the
+    /// indicator must not wait for the stream's first delta.
+    #[test]
+    fn a_fresh_send_shows_the_agent_typing_at_once() {
+        let claimed = dm_posts(
+            &[],
+            &[],
+            &["fix the bug".into()],
+            &[],
+            &[],
+            "deploy",
+            "user",
+        );
+        assert_eq!(
+            claimed.iter().map(|p| p.kind).collect::<Vec<_>>(),
+            vec![PostKind::Said, PostKind::Typing],
+            "claimed but not yet streaming still reads as typing"
+        );
+        assert!(claimed[1].from == "deploy" && !claimed[1].you);
+
+        let queued = dm_posts(
+            &[],
+            &[],
+            &[],
+            &[],
+            &["fix the bug".into()],
+            "deploy",
+            "user",
+        );
+        assert_eq!(
+            queued.iter().map(|p| p.kind).collect::<Vec<_>>(),
+            vec![PostKind::Queued, PostKind::Typing],
+            "queued behind a busy turn is also on its way"
+        );
+    }
+
+    /// The turn's process survives its landing: the history's ToolUse and
+    /// Thinking blocks re-render the same rows the live tail showed, in place
+    /// between the prose — the DM's scrollback keeps what the main transcript
+    /// keeps.
+    #[test]
+    fn dm_history_keeps_the_process_rows_after_the_turn_lands() {
+        use crate::agents::LiveBlock;
+        use crate::api::types::{ContentBlock, Message, Role};
+
+        let history = vec![
+            Message::user_text("check the repository"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "look before speaking".into(),
+                        signature: "sig".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "I will inspect it.".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool-1".into(),
+                        name: "Bash".into(),
+                        input: serde_json::json!({"command": "git status"}),
+                    },
+                    ContentBlock::Text {
+                        text: "The tree is clean.".into(),
+                    },
+                ],
+            },
+        ];
+        let live = vec![
+            LiveBlock::Text("Checking one more thing.".into()),
+            LiveBlock::Tool("⏺ Read(src/main.rs)".into()),
+        ];
+
+        let posts = dm_posts(&history, &[], &[], &live, &[], "dev", "user");
+        let kinds: Vec<PostKind> = posts.iter().map(|p| p.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                PostKind::Said,
+                PostKind::Process,
+                PostKind::Said,
+                PostKind::Process,
+                PostKind::Said,
+                PostKind::Said,
+                PostKind::Process,
+                PostKind::Typing,
+            ],
+            "{posts:?}"
+        );
+        assert_eq!(
+            posts[3].text, "⏺ Bash($ git status)",
+            "a landed tool call renders through the same brick as the live row"
+        );
+        assert!(
+            posts
+                .iter()
+                .all(|p| !p.text.contains("look before speaking")),
+            "landed reasoning stays collapsed, like the transcript: {posts:?}"
+        );
+        assert_eq!(
+            posts
+                .iter()
+                .filter(|post| post.kind == PostKind::Typing)
+                .count(),
+            1,
+            "mid-tool work still has exactly one working state: {posts:?}"
+        );
+    }
+
+    /// The moment a message is claimed by a run it is neither in the history
+    /// nor in the inbox — the in-flight record keeps it on screen as an
+    /// ordinary sent message (no landing clock yet), between the history and
+    /// anything still queued.
+    #[test]
+    fn an_in_flight_message_reads_as_sent_not_queued() {
+        use crate::api::types::Message;
+        let history = vec![Message::user_text("first task")];
+        let posts = dm_posts(
+            &history,
+            &[100],
+            &["second task, being worked on".to_string()],
+            &[crate::agents::LiveBlock::Tool("⏺ Read(a.rs)".into())],
+            &["third task, still queued".to_string()],
+            "scout",
+            "user",
+        );
+        let flags: Vec<(bool, PostKind, u64)> =
+            posts.iter().map(|p| (p.you, p.kind, p.at)).collect();
+        assert_eq!(
+            flags,
+            vec![
+                (true, PostKind::Said, 100),
+                (true, PostKind::Said, 0),
+                (true, PostKind::Queued, 0),
+                (false, PostKind::Process, 0),
+                (false, PostKind::Typing, 0),
+            ],
+            "{posts:?}"
+        );
+        assert_eq!(posts[1].text, "second task, being worked on");
+
+        // On screen it wears the ordinary sent-message skin: no pending banner,
+        // no invented stamp row.
+        let rows = dm_message_rows(
+            &posts,
+            usize::MAX,
+            &pal(),
+            60,
+            &Avatars::default(),
+            &Theme::dark(),
+        );
+        let t = texts(&rows);
+        assert!(
+            t.iter().any(|l| l.contains("second task")),
+            "the claimed message stays on screen: {t:?}"
+        );
+        assert_eq!(
+            t.iter().filter(|l| l.contains("pending delivery")).count(),
+            1,
+            "only the still-queued draft carries the pending banner: {t:?}"
+        );
+    }
+
+    /// Process rows are visually quiet: one dim line each, no name row of
+    /// their own inside a group, no trailing stamp — the timestamps and the
+    /// gutter belong to the conversation, not to the work between it.
+    #[test]
+    fn process_rows_stay_dim_and_unstamped() {
+        let at = 1_760_000_000u64;
+        let posts = vec![
+            Post {
+                from: "scout".into(),
+                you: false,
+                at,
+                text: "Let me check.".into(),
+                kind: PostKind::Said,
+            },
+            Post {
+                from: "scout".into(),
+                you: false,
+                at: 0,
+                text: "⏺ Bash($ cargo test)".into(),
+                kind: PostKind::Process,
+            },
+            Post {
+                from: "scout".into(),
+                you: false,
+                at: 0,
+                text: "✻ Thinking".into(),
+                kind: PostKind::Process,
+            },
+            Post {
+                from: "scout".into(),
+                you: false,
+                at: at + 5,
+                text: "All green.".into(),
+                kind: PostKind::Said,
+            },
+        ];
+        let rows = dm_message_rows(
+            &posts,
+            usize::MAX,
+            &pal(),
+            60,
+            &Avatars::default(),
+            &Theme::dark(),
+        );
+        let t = texts(&rows);
+        // One name row for the whole group: the process rows neither break the
+        // grouping nor impersonate a second message.
+        let name_rows = rows
+            .iter()
+            .filter(|r| r.line.segs.iter().any(|s| s.style.bg.is_some()))
+            .count();
+        assert_eq!(name_rows, 1, "{t:?}");
+        let tool_row = rows
+            .iter()
+            .find(|r| r.line.plain_text().contains("cargo test"))
+            .unwrap_or_else(|| panic!("tool row rendered: {t:?}"));
+        assert!(
+            tool_row
+                .line
+                .segs
+                .iter()
+                .skip(1)
+                .all(|s| s.style.fg == Some(Theme::dark().inactive)),
+            "process rows are dimmed: {tool_row:?}"
+        );
+        // Exactly the two Said posts carry stamps; the process rows add none.
+        let stamps = t
+            .iter()
+            .filter(|l| l.trim() == stamp(at) || l.trim() == stamp(at + 5))
+            .count();
+        assert_eq!(stamps, 2, "{t:?}");
     }
 
     #[test]
     fn composer_shows_the_placeholder_and_tracks_the_caret() {
         let ws = Workspace::default();
         let conv = Conv::Channel("dev-room".into());
-        let (rows, caret) = composer_rows(&ws, &conv, &pal(), 50);
+        let (rows, caret) = composer_rows(&ws, &conv, &pal(), 50, None, None);
         let t = texts(&rows);
         assert!(t.iter().any(|l| l.contains("message #dev-room")), "{t:?}");
         assert!(t[0].contains('╭') && t.iter().any(|l| l.contains('╰')));
@@ -1654,7 +2365,7 @@ mod tests {
             composer: "change".into(),
             ..Workspace::default()
         };
-        let (rows, caret) = composer_rows(&typed, &conv, &pal(), 50);
+        let (rows, caret) = composer_rows(&typed, &conv, &pal(), 50, None, None);
         assert!(texts(&rows).iter().any(|l| l.contains("change")));
         assert_eq!(
             caret.map(|(_, col)| col),
@@ -1663,15 +2374,133 @@ mod tests {
         );
 
         // A DM addresses the instance, not a channel.
-        let (rows, _) = composer_rows(&ws, &Conv::Dm("scout".into()), &pal(), 50);
+        let (rows, _) = composer_rows(&ws, &Conv::Dm("scout".into()), &pal(), 50, None, None);
         assert!(texts(&rows).iter().any(|l| l.contains("message scout")));
+    }
+
+    /// The title keeps its compact metadata row; small channels list each engine
+    /// in one bounded row and larger rooms collapse to one engine summary.
+    #[test]
+    fn dm_composer_keeps_context_usage_and_rate_in_the_same_footer() {
+        let ws = Workspace::default();
+        let usage = crate::context_usage::ContextUsage::new(74_240, 128_000);
+        let rows = composer_rows(
+            &ws,
+            &Conv::Dm("scout".into()),
+            &pal(),
+            100,
+            Some("█▀▄ 48.0 tok/s"),
+            Some(usage),
+        )
+        .0;
+        let text = texts(&rows);
+        assert!(
+            text.iter().any(|line| {
+                line.contains("█▀▄ 48.0 tok/s") && line.contains("▓▓░░ 58% 74240/128k")
+            }),
+            "{text:?}"
+        );
+
+        let idle = composer_rows(
+            &ws,
+            &Conv::Dm("scout".into()),
+            &pal(),
+            100,
+            None,
+            Some(usage),
+        )
+        .0;
+        let idle_text = texts(&idle);
+        assert!(idle_text.iter().all(|line| !line.contains("tok/s")));
+        assert!(
+            idle_text
+                .iter()
+                .any(|line| line.contains("▓▓░░ 58% 74240/128k")),
+            "{idle_text:?}"
+        );
+        let pal = pal();
+        let warning = composer_rows(
+            &ws,
+            &Conv::Dm("scout".into()),
+            &pal,
+            80,
+            None,
+            Some(crate::context_usage::ContextUsage::new(70, 100)),
+        )
+        .0;
+        assert!(warning.last().is_some_and(|row| {
+            row.line
+                .segs
+                .iter()
+                .any(|seg| seg.text.contains("70%") && seg.style.fg == Some(pal.warning))
+        }));
+        let danger = composer_rows(
+            &ws,
+            &Conv::Dm("scout".into()),
+            &pal,
+            80,
+            None,
+            Some(crate::context_usage::ContextUsage::new(91, 100)),
+        )
+        .0;
+        assert!(danger.last().is_some_and(|row| {
+            row.line
+                .segs
+                .iter()
+                .any(|seg| seg.text.contains("91%") && seg.style.fg == Some(pal.danger))
+        }));
+        let narrow = composer_rows(&ws, &Conv::Dm("scout".into()), &pal, 12, None, Some(usage)).0;
+        assert!(
+            text_width(&narrow.last().expect("footer").line.plain_text()) <= 12,
+            "{:?}",
+            texts(&narrow)
+        );
+    }
+
+    #[test]
+    fn dm_composer_puts_the_live_token_rate_at_the_right_edge() {
+        let ws = Workspace::default();
+        let rows = composer_rows(
+            &ws,
+            &Conv::Dm("scout".into()),
+            &pal(),
+            80,
+            Some("█▀▄ 48.0 tok/s"),
+            None,
+        )
+        .0;
+        let text = texts(&rows);
+        assert!(
+            text.iter().any(|line| line.contains("█▀▄ 48.0 tok/s")),
+            "{text:?}"
+        );
+        assert_eq!(text_width(text.last().expect("footer row")), 78);
+
+        let narrow = texts(
+            &composer_rows(
+                &ws,
+                &Conv::Dm("scout".into()),
+                &pal(),
+                12,
+                Some("█▀▄ 48.0 tok/s"),
+                None,
+            )
+            .0,
+        );
+        assert!(
+            text_width(narrow.last().expect("narrow footer")) <= 12,
+            "{narrow:?}"
+        );
+
+        let idle = texts(&composer_rows(&ws, &Conv::Dm("scout".into()), &pal(), 80, None, None).0);
+        assert!(idle.iter().all(|line| !line.contains("tok/s")), "{idle:?}");
     }
 
     /// One title row plus a rule: the metadata trails the name instead of taking
     /// a heading of its own, and the workspace name rides the right edge — the
     /// one thing the cut sidebar was carrying that nothing else says.
     #[test]
-    fn header_is_one_row_carrying_name_metadata_and_workspace() {
+    fn header_keeps_metadata_and_bounds_channel_engines() {
         let snap = snap();
         let t = texts(&header_rows(
             &snap,
@@ -1679,21 +2508,63 @@ mod tests {
             &pal(),
             70,
         ));
-        assert_eq!(t.len(), 2, "title + divider: {t:?}");
+        assert_eq!(t.len(), 3, "title + engines + divider: {t:?}");
         assert!(t[0].contains("# dev-room"), "{t:?}");
         assert!(t[0].contains("serial") && t[0].contains("4 msgs"), "{t:?}");
         assert!(t[0].contains("3 people"), "{t:?}");
         assert!(
+            t[1].contains("main: main-model/high") && t[1].contains("scout: gpt-5.6-sol/max"),
+            "small channel header names each agent engine: {t:?}"
+        );
+        assert!(
             t[0].trim_end().ends_with("bingo"),
             "workspace name right-aligned: {t:?}"
         );
-        assert!(t[1].starts_with("─"), "{t:?}");
+        assert!(t[2].starts_with("─"), "{t:?}");
 
-        let t = texts(&header_rows(&snap, &Conv::Dm("qa".into()), &pal(), 70));
+        let narrow = texts(&header_rows(
+            &snap,
+            &Conv::Channel("dev-room".into()),
+            &pal(),
+            24,
+        ));
+        assert_eq!(narrow.len(), 3, "header stays bounded: {narrow:?}");
+        assert!(
+            narrow[1].contains("2 agents · mixed"),
+            "small rooms aggregate before names clip: {narrow:?}"
+        );
+
+        let mut large = snap.clone();
+        for i in 0..3 {
+            let name = format!("agent-{i}");
+            large.dms.push(DmItem {
+                name: name.clone(),
+                state: AgentState::Running,
+                model: format!("model-{i}"),
+                thinking: Some("high".into()),
+                description: "member".into(),
+                last_active: Duration::from_secs(120),
+                unread: 0,
+            });
+            large.channels[0].members.push(name);
+        }
+        let large = texts(&header_rows(
+            &large,
+            &Conv::Channel("dev-room".into()),
+            &pal(),
+            32,
+        ));
+        assert_eq!(large.len(), 3, "header stays bounded: {large:?}");
+        assert!(
+            large[1].contains("5 agents · mixed engines"),
+            "large rooms use a complete aggregate: {large:?}"
+        );
+
+        let t = texts(&header_rows(&snap, &Conv::Dm("qa".into()), &pal(), 120));
         assert!(t[0].contains("○ qa"), "{t:?}");
         assert!(
-            t[0].contains("idle") && t[0].contains("acceptance"),
-            "{t:?}"
+            t[0].contains("DM · claude-sonnet · high · idle · active 2min ago · acceptance"),
+            "DM metadata includes model, thinking, state, last activity, and description: {t:?}"
         );
     }
 

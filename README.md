@@ -25,7 +25,10 @@ produces intent; side effects are gated by the harness.
 - **Agent teams (project-scoped)**: a `.bingo/team.json` fixes a roster of
   roles to a project; the team is pulled up automatically at startup (members
   idle at zero token cost) and managed via `/team`; cross-session memory is
-  scoped by project path + git branch.
+  scoped by project path + git branch. Where a crew is pinned it is the default
+  workforce — work routes to a member, and a subagent spawned beside it is a
+  temporary hire that never joins the roster. `.bingo/team-norms.md` is the
+  crew's working agreement, carried by every member.
 - **Experience library**: agents accumulate reusable operational experience
   per project (trigger/summary/steps/verify), share it across sessions, and
   record verified helpful/harmful outcomes without automatic self-promotion.
@@ -40,7 +43,8 @@ produces intent; side effects are gated by the harness.
   (summary of old messages + keep recent), manual `/compact`, and a fuse after
   repeated compaction failures.
 - **Sessions & memory**: JSONL transcript persistence (`--continue`/`/resume`
-  recovery), memdir auto-memory, plus CLAUDE.md/AGENTS.md project memory.
+  recovery), bounded 30-day/latest-100 retention with a 24-hour activity
+  grace (`/gc`), memdir auto-memory, plus CLAUDE.md/AGENTS.md project memory.
 - **Hooks extension points**: shell hooks for pre/post-tool, session
   start/end, compaction, Stop, and task lifecycle events (JSON on stdin,
   decisions returned on stdout).
@@ -156,7 +160,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
 | `Ctrl+T` | toggle the task area |
 | `Ctrl+O` | expand/collapse: expanded replays the full transcript for scrolling up |
-| `Ctrl+G` | agent/channel picker (agent view shows full instance conversation; channel view is a WeChat-style room) |
+| `Ctrl+G` | open the full workspace directly; `Ctrl+K` switches channels and DMs |
 | `Ctrl+L` | clear and redraw |
 | `Shift+Tab` | cycle permission modes (default → acceptEdits → plan) |
 | `Alt+T` | toggle thinking |
@@ -175,7 +179,7 @@ opens the level picker; the choice persists), `/theme`,
 `/skills` (listing; `/skill-name` executes directly), `/context` (usage),
 `/status`, `/config` (effective config with per-key source layer/env, current
 endpoint, unknown-key hints), `/compact` (force compaction), `/resume [name]` (resume a past
-session), `/rename`, `/share [--public] [--open]`, `/clear`, `/exit`.
+session), `/rename`, `/gc` (clean expired session data), `/share [--public] [--open]`, `/clear`, `/exit`.
 `/share` writes a self-contained HTML file locally by default. `--public` is
 an explicit opt-in to upload it to a link anyone can access; bingo shows the
 sensitive-content warning before upload. `--open` opens the local file or the
@@ -183,7 +187,8 @@ published URL. The equivalent CLI is `bingo share [session] [--public]
 [--open] [-o path]`.
 `/team` (project teams): `list` (roster + runtime), `start` (pull up / reuse),
 `status`, `assign <member> <task>`, `stop`, `validate`, `new` (scaffold
-`team.json`), `memory list|gc`.
+`team.json` + `team-norms.md`), `norms` (the working agreement),
+`memory list|gc`.
 
 ### Image rendering
 
@@ -225,7 +230,7 @@ otherwise the user layer — no `.bingo/` is conjured in arbitrary directories
 | `mcpServers` | object | see MCP below |
 | `disabledMcpServers` | string[] | disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`, rule syntax under Permission system below |
-| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50) |
+| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50), `chatAvatars` (default false = no faces in the main chat; the workspace views keep theirs either way) |
 | `team` | object | team startup behavior: `{"autoStart": true}` (default true = auto-pull the project team at startup; `--no-team` or false disables) |
 | `hooks` | object | per-event hooks, see Hooks below |
 
@@ -321,8 +326,29 @@ surface.
 - **Slash commands**: `/team list` (roster + runtime in one screen),
   `start`, `status` (● idle / ◐ busy / ✗ error / ○ offline), `assign`,
   `stop`, `validate` (same checks as start — if validate passes, start
-  succeeds), `new` (interactive scaffold that always produces a valid file),
+  succeeds), `new` (interactive scaffold that always produces a valid file,
+  plus a starter working agreement), `norms` (read the agreement),
   `memory list|gc`.
+- **The crew is the default workforce**: where a team is pinned, the hub sees
+  the roster in its system prompt along with the rule that goes with it — give
+  the work to a member with `SendMessage`, and spawn a subagent only for what
+  no member covers. Spawning a stand-in for a member that is already idle
+  wastes a crew you are paying for and throws away the memory it holds.
+- **A hire is temporary**: an Agent-tool spawn beside a pinned crew is a hire,
+  not a member. It never enters `.bingo/team.json`; it is listed apart from the
+  crew in `/team list` and `AgentControl list` (`crew` / `hire`); it is recorded
+  in the crew's `decisions.md` under `type: hire`; and it is released once its
+  task is done — idle, inbox empty, nothing still owed an answer, with one hub
+  round left to send a follow-up in. The sweep runs only while a crew is
+  actually up: in a project with no team, ad-hoc subagents live as long as they
+  always did.
+- **Team norms**: `.bingo/team-norms.md`, committed beside the blueprint, is the
+  crew's working agreement — prose, not a schema, because it is read by models
+  and reviewed by people. It reaches every member and every hire as a system
+  block, so it applies without being restated, and it carries its own precedence
+  rule: a direct instruction outranks it on the point that instruction makes,
+  and every other norm still holds. `/team new` scaffolds one (never overwriting
+  an existing file); `/team norms` prints what is on disk.
 - **Cross-session memory**: member history and append-only decision records
   persist to `~/.config/bingo/teams/<project-hash>/<branch>/<team>/` — scoped
   by project path + git branch, so main and a feature worktree never share
@@ -380,7 +406,8 @@ placeholder cells. A team member's portrait is pinned in `.bingo/team.json`
 derived from their name. Terminals without that capability keep the sender's initial
 on a colour; the row count is identical either way, so only the gutter changes.
 
-**In the main chat**, the same faces sit on a band above each message: the
+**In the main chat**, behind `experimental.chatAvatars` (off by default), the
+same faces sit on a band above each message: the
 speaker's portrait beside their name — `main` for the hub, `You` for your own
 messages, the names the room itself uses. Message bodies are untouched
 underneath; they still run the full width, and the `⏺` markers inside a message
@@ -388,7 +415,10 @@ keep separating prose from tool rows. The band is two rows where portraits place
 and one where they fall back to the chip — nothing below it depends on its
 height. One known degradation: a terminal that purges its image store (a resize
 does) gets the faces still on screen redrawn, but messages already in scrollback
-keep four blank columns where the portrait was, with the name intact.
+keep four blank columns where the portrait was, with the name intact. Switched
+off, the transcript carries no band and a subagent's watch row keeps its `◉`;
+the switch governs the main chat only — DM, channel and team views wear their
+faces regardless, where the portrait sits in a gutter the layout already spends.
 
 ## Skills
 
@@ -533,7 +563,11 @@ Example (PreToolUse denies Bash):
 - **Transcript**: `~/.local/share/bingo/transcripts/<project>-<ts>.jsonl`, one
   Message per line; corrupt lines are skipped without blocking recovery.
   `--continue` resumes the latest session, `/resume [name]` lists/switches,
-  `/rename` renames.
+  `/rename` renames. Startup cleanup and `/gc` retain the newest 100
+  inactive sessions and remove sessions older than 30 days; sessions touched in
+  the last 24 hours are never count-pruned; matching share snapshots
+  follow transcript deletion. Prompt-history files use the same TTL and a
+  100-file cap. Local exported HTML and task lists are never removed.
 - **Context budget**: 200k window, 64k output budget, effective input window =
   window − output budget; auto-compaction threshold = 90% of the effective
   window (≈122k), with a 20k headroom warning (`/context`). Compaction

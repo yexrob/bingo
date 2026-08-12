@@ -44,10 +44,15 @@ impl Tool for EditTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: EditInput = parse_input(&input)?;
         let path = std::path::PathBuf::from(&params.file_path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            ctx.cwd.join(path)
+        };
         if params.old_string.is_empty() {
             return Err(ToolError::failed("old_string must not be empty"));
         }
@@ -87,6 +92,44 @@ impl Tool for EditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn relative_path_resolves_from_context_cwd() {
+        let root = std::env::temp_dir().join(format!("bingo-edit-cwd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("file.txt"), "before").unwrap();
+        let context = ToolContext {
+            cwd: root.clone(),
+            home: std::env::temp_dir(),
+            watch: crate::watch::WatchRegistry::new(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+        };
+
+        EditTool
+            .call(
+                serde_json::json!({
+                    "file_path": "file.txt",
+                    "old_string": "before",
+                    "new_string": "after",
+                }),
+                &context,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("file.txt")).unwrap(),
+            "after"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn edit_produces_diff() {

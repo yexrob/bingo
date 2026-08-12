@@ -70,12 +70,26 @@ impl PermissionRequest {
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     TurnStart,
+    /// Discard all live output and tool rows produced by the current model-response attempt before
+    /// a transparent stream reconnect. Persisted history is unchanged because the attempt has not
+    /// committed yet.
+    StreamRetry,
     /// All tool calls in a batch finished (one query loop round closed).
     RoundEnd,
     TextDelta(String),
     ThinkingDelta(String),
-    /// Cumulative output token count from message_delta.
-    OutputTokens(u64),
+    ContextUsage {
+        used: u64,
+        window: u64,
+    },
+    /// Cumulative output token count for the current model response while it streams.
+    /// `authoritative`: the end-of-round usage total (message_delta), an accounting
+    /// correction rather than freshly streamed output — the rate sampler must not
+    /// read the jump as an instantaneous burst.
+    OutputTokens {
+        tokens: u64,
+        authoritative: bool,
+    },
     ToolStart {
         name: String,
     },
@@ -172,16 +186,67 @@ pub fn tui_hooks(
 ) -> UiHooks {
     let tool_events = events.clone();
     let ready_events = events.clone();
+    let retry_events = events.clone();
     let round_events = events.clone();
+    let context_events = events.clone();
     let warn_events = events.clone();
     let ask_asks = asks.clone();
+    let round_tokens = Arc::new(std::sync::Mutex::new((0u64, None::<usize>)));
+    let event_round_tokens = round_tokens.clone();
+    let retry_round_tokens = round_tokens.clone();
     UiHooks {
         on_event: Box::new(move |event| match event {
-            StreamEvent::TextDelta { text, .. } => {
+            StreamEvent::TextDelta { index, text } => {
+                let tokens = {
+                    let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
+                    if state.1.is_some_and(|previous| previous > *index) {
+                        state.0 = 0;
+                    }
+                    state.1 = Some(*index);
+                    state.0 = state.0.saturating_add(crate::compact::text_units(text));
+                    state.0.div_ceil(4)
+                };
                 let _ = events.send(UiEvent::TextDelta(text.clone()));
+                let _ = events.send(UiEvent::OutputTokens {
+                    tokens,
+                    authoritative: false,
+                });
             }
-            StreamEvent::ThinkingDelta { thinking, .. } => {
+            StreamEvent::ThinkingDelta { index, thinking } => {
+                let tokens = {
+                    let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
+                    if state.1.is_some_and(|previous| previous > *index) {
+                        state.0 = 0;
+                    }
+                    state.1 = Some(*index);
+                    state.0 = state.0.saturating_add(crate::compact::text_units(thinking));
+                    state.0.div_ceil(4)
+                };
                 let _ = events.send(UiEvent::ThinkingDelta(thinking.clone()));
+                let _ = events.send(UiEvent::OutputTokens {
+                    tokens,
+                    authoritative: false,
+                });
+            }
+            StreamEvent::InputJsonDelta {
+                index,
+                partial_json,
+            } => {
+                let tokens = {
+                    let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
+                    if state.1.is_some_and(|previous| previous > *index) {
+                        state.0 = 0;
+                    }
+                    state.1 = Some(*index);
+                    state.0 = state
+                        .0
+                        .saturating_add(crate::compact::text_units(partial_json));
+                    state.0.div_ceil(4)
+                };
+                let _ = events.send(UiEvent::OutputTokens {
+                    tokens,
+                    authoritative: false,
+                });
             }
             StreamEvent::ToolUseStart { name, .. } => {
                 let _ = events.send(UiEvent::ToolStart { name: name.clone() });
@@ -190,9 +255,21 @@ pub fn tui_hooks(
                 output_tokens: Some(tokens),
                 ..
             } => {
-                let _ = events.send(UiEvent::OutputTokens(*tokens));
+                let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
+                state.0 = tokens.saturating_mul(4);
+                let _ = events.send(UiEvent::OutputTokens {
+                    tokens: *tokens,
+                    authoritative: true,
+                });
             }
             _ => {}
+        }),
+        on_stream_retry: Box::new(move || {
+            *retry_round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
+            let _ = retry_events.send(UiEvent::StreamRetry);
+        }),
+        on_context_usage: Arc::new(move |used, window| {
+            let _ = context_events.send(UiEvent::ContextUsage { used, window });
         }),
         on_tool_ready: Box::new(move |tool_call_id, name, input, standalone| {
             let _ = ready_events.send(UiEvent::ToolReady {
@@ -214,6 +291,7 @@ pub fn tui_hooks(
             }));
         }),
         on_round_end: Box::new(move || {
+            *round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
             let _ = round_events.send(UiEvent::RoundEnd);
         }),
         on_warning: Box::new(move |message| {
@@ -245,6 +323,50 @@ pub fn tui_hooks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tui_hooks_emit_live_token_samples_before_final_usage() {
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let (asks_tx, _asks_rx) = mpsc::unbounded_channel();
+        let mut ui = tui_hooks(events_tx, asks_tx);
+
+        (ui.on_context_usage)(12_345, 128_000);
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(UiEvent::ContextUsage {
+                used: 12_345,
+                window: 128_000
+            })
+        ));
+
+        (ui.on_event)(&StreamEvent::TextDelta {
+            index: 0,
+            text: "abcdefghijkl".to_string(),
+        });
+        assert!(matches!(events_rx.try_recv(), Ok(UiEvent::TextDelta(_))));
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(UiEvent::OutputTokens {
+                tokens: 3,
+                authoritative: false
+            })
+        ));
+
+        (ui.on_stream_retry)();
+        assert!(matches!(events_rx.try_recv(), Ok(UiEvent::StreamRetry)));
+
+        (ui.on_event)(&StreamEvent::StopReason {
+            stop_reason: Some("end_turn".to_string()),
+            output_tokens: Some(10),
+        });
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(UiEvent::OutputTokens {
+                tokens: 10,
+                authoritative: true
+            })
+        ));
+    }
 
     /// AskUserQuestion's TUI hook: requests go through the permission modal
     /// (title/question/options); confirm → Some(index), Esc cancel → None.

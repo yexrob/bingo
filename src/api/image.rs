@@ -22,6 +22,7 @@ pub struct PreparedImage {
 }
 
 /// Image placeholder reference (`#[image N]` → the Nth attachment, 1-based).
+#[allow(clippy::expect_used)]
 static MARKER_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"#\[image (\d+)\]").expect("static regex"));
 
