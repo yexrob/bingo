@@ -55,7 +55,7 @@ impl super::Chat {
                 let model_now = session.runtime.model.borrow().clone();
                 self.context_usage = crate::context_usage::ContextUsage::new(
                     self.context_usage.used,
-                    crate::budget::context_window_for(&model_now),
+                    crate::budget::context_window_for(&session.client.models(), &model_now),
                 );
                 self.provider_models.insert(name.clone(), model_now.clone());
                 self.provider_session_only = !persist;
@@ -544,7 +544,8 @@ impl super::Chat {
         // The wire gate (query.rs) skips thinking for models that reject it —
         // say so here, or the footer shows a level that never takes effect.
         let model = self.session.runtime.model.borrow().clone();
-        let ignored = if level.is_some() && !crate::api::models::supports_thinking(&model) {
+        let ignored = if level.is_some() && !self.session.client.models().supports_thinking(&model)
+        {
             format!(" (⚠ {model} does not support thinking; the level will be ignored)")
         } else {
             String::new()

@@ -720,7 +720,10 @@ async fn query_loop(
             &tool_schemas,
         ));
         let model = session.runtime.model.borrow().clone();
-        (ui.on_context_usage)(context_tokens, crate::budget::context_window_for(&model));
+        (ui.on_context_usage)(
+            context_tokens,
+            crate::budget::context_window_for(&session.client.models(), &model),
+        );
         let turn = match one_turn_with_stream_retries(
             session,
             &messages,
@@ -834,7 +837,10 @@ async fn query_loop(
             ));
             (ui.on_context_usage)(
                 context_tokens,
-                crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
+                crate::budget::context_window_for(
+                    &session.client.models(),
+                    &session.runtime.model.borrow().clone(),
+                ),
             );
             return Ok(QueryOutcome {
                 messages,
@@ -1023,7 +1029,10 @@ async fn query_loop(
             ));
             (ui.on_context_usage)(
                 context_tokens,
-                crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
+                crate::budget::context_window_for(
+                    &session.client.models(),
+                    &session.runtime.model.borrow().clone(),
+                ),
             );
             return Ok(QueryOutcome {
                 messages,
@@ -1043,7 +1052,10 @@ async fn query_loop(
             ));
             (ui.on_context_usage)(
                 context_tokens,
-                crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
+                crate::budget::context_window_for(
+                    &session.client.models(),
+                    &session.runtime.model.borrow().clone(),
+                ),
             );
             return Ok(QueryOutcome {
                 messages,
@@ -1267,6 +1279,7 @@ pub async fn run_bash_command(
                         (ui.on_context_usage)(
                             context_tokens,
                             crate::budget::context_window_for(
+                                &session.client.models(),
                                 &session.runtime.model.borrow().clone(),
                             ),
                         );
@@ -1350,7 +1363,10 @@ pub async fn run_bash_command(
             crate::compact::estimate_tokens(&session.system, &messages, &tool_schemas);
         (ui.on_context_usage)(
             context_tokens,
-            crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
+            crate::budget::context_window_for(
+                &session.client.models(),
+                &session.runtime.model.borrow().clone(),
+            ),
         );
         return Ok(QueryOutcome {
             messages,
@@ -1744,6 +1760,8 @@ mod tests {
         settings.providers.insert(
             "openai-test".to_string(),
             crate::settings::ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: Some("k".to_string()),
                 api_base_url: base_url,
                 protocol: Some("openai".to_string()),

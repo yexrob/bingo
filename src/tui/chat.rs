@@ -1222,8 +1222,10 @@ impl Chat {
         let motion_off = session.settings.motion.as_deref() == Some("off")
             || std::env::var_os("BINGO_NO_MOTION").is_some();
         let chat_avatars = session.settings.experimental.chat_avatars;
-        let context_window =
-            crate::budget::context_window_for(&session.runtime.model.borrow().clone());
+        let context_window = crate::budget::context_window_for(
+            &session.client.models(),
+            &session.runtime.model.borrow().clone(),
+        );
         let context_tokens = session
             .runtime
             .transcript
@@ -2641,15 +2643,17 @@ impl Chat {
 
     fn reset_context_usage(&mut self) {
         let model = self.session.runtime.model.borrow().clone();
-        self.context_usage =
-            crate::context_usage::ContextUsage::new(0, crate::budget::context_window_for(&model));
+        self.context_usage = crate::context_usage::ContextUsage::new(
+            0,
+            crate::budget::context_window_for(&self.session.client.models(), &model),
+        );
     }
 
     fn estimate_context_usage(&mut self, messages: &[crate::api::types::Message]) {
         let model = self.session.runtime.model.borrow().clone();
         self.context_usage = crate::context_usage::ContextUsage::new(
             crate::compact::estimate_tokens(&self.session.system, messages, &[]),
-            crate::budget::context_window_for(&model),
+            crate::budget::context_window_for(&self.session.client.models(), &model),
         );
     }
 
@@ -3524,7 +3528,10 @@ impl Chat {
             }
             let _ = events.send(UiEvent::ContextUsage {
                 used: crate::compact::estimate_tokens(&session.system, &messages, &[]),
-                window: crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
+                window: crate::budget::context_window_for(
+                    &session.client.models(),
+                    &session.runtime.model.borrow().clone(),
+                ),
             });
             unpin();
             let _ = events.send(UiEvent::SlashInfo(format!(
@@ -3590,10 +3597,11 @@ impl Chat {
             .map(|t| t.name())
             .unwrap_or_else(|| "none".to_string());
         let mode = session.permission_mode_str().to_string();
+        let models = session.client.models();
         self.slash_stats_async(move |msg_count, tokens| {
             // Window/percentage measured with the model actually in use — the
             // fixed 200k constant misread every non-Claude endpoint.
-            let window = crate::budget::context_window_for(&model).max(1);
+            let window = crate::budget::context_window_for(&models, &model).max(1);
             format!(
                 "Model: {model}\nProvider: {provider}\nThinking: {thinking_shown}\nPermission mode: {mode}\nSession: {transcript_name}\nMessages: {msg_count}\nContext: {tokens} tokens / {window} ({}%)",
                 tokens * 100 / window
@@ -3707,15 +3715,16 @@ impl Chat {
 
     fn slash_context(&mut self) {
         let model = self.session.runtime.model.borrow().clone();
+        let models = self.session.client.models();
         self.slash_stats_async(move |_msg_count, tokens| {
-            let window = crate::budget::context_window_for(&model).max(1);
+            let window = crate::budget::context_window_for(&models, &model).max(1);
             let pct = tokens * 100 / window;
             let bar_len = 40usize;
             let filled = ((pct as usize * bar_len) / 100).min(bar_len);
             let bar = format!("{}·{}", "#".repeat(filled), "·".repeat(bar_len - filled));
             format!(
                 "context: [{bar}] {pct}%\n{tokens} / {window} tokens used\nauto-compaction threshold: {}%",
-                crate::budget::autocompact_threshold_for(&model) * 100 / window
+                crate::budget::autocompact_threshold_for(&models, &model) * 100 / window
             )
         });
     }

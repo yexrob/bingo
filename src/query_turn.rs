@@ -156,7 +156,7 @@ async fn one_turn(
     // Thinking gate: models that reject the parameter (DeepSeek family) get
     // none regardless of the configured level — the UI shows the same fact
     // when the level is set, so display and wire agree.
-    let thinking = if crate::api::models::supports_thinking(&model) {
+    let thinking = if session.client.models().supports_thinking(&model) {
         ThinkingLevel::parse(thinking.as_deref())
     } else {
         None

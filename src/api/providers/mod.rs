@@ -90,7 +90,6 @@ pub fn build_provider(
     supports_images: bool,
     oauth: Option<&OauthConfig>,
     home: &Path,
-    model_allowlist: Option<openai::ModelAllowlist>,
     stored_key: bool,
 ) -> Result<BuiltProvider, String> {
     match protocol.unwrap_or("anthropic") {
@@ -147,14 +146,7 @@ pub fn build_provider(
                 openai::OpenAiVariant::Default
             };
             Ok(BuiltProvider {
-                adapter: openai(
-                    http,
-                    auth,
-                    base_url,
-                    supports_images,
-                    variant,
-                    model_allowlist,
-                ),
+                adapter: openai(http, auth, base_url, supports_images, variant),
                 token_provider,
             })
         }
@@ -248,7 +240,6 @@ pub fn openai(
     base_url: String,
     supports_images: bool,
     variant: openai::OpenAiVariant,
-    model_allowlist: Option<openai::ModelAllowlist>,
 ) -> Arc<dyn ProviderClient> {
     Arc::new(openai::OpenAIProvider::new(
         http,
@@ -256,7 +247,6 @@ pub fn openai(
         base_url,
         supports_images,
         variant,
-        model_allowlist,
     ))
 }
 
