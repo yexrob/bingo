@@ -417,8 +417,26 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> String {
-        "Execute a command in the local shell, returning stdout/stderr and the exit code. Prefer background:true for long-running tasks (e.g. cargo build, npm install, big test suites) — even when you need the result later: it returns async_launched immediately and tells the user the task runs in the background; continue when the completion notification arrives. Periodic commands (watch/while/until/for/tail -f) become background tasks automatically and can be given notify_on/notify_regex conditions — a hit in the output notifies (no need to wait for the command to finish). Interactive commands that need a TTY (top/htop/vim/bare ssh etc. — full-screen or session programs) are rejected."
-            .to_string()
+        // #42: name the real executor and its dialect — the tool name `Bash`
+        // primes POSIX syntax even when the resolved shell is PowerShell.
+        use crate::platform::ShellDialect;
+        let shell = crate::platform::shell();
+        let syntax = match crate::platform::shell_dialect() {
+            ShellDialect::Posix => String::new(),
+            ShellDialect::PowerShell => {
+                " Commands are interpreted by PowerShell — use PowerShell syntax, not POSIX."
+                    .to_string()
+            }
+            ShellDialect::Cmd => {
+                " Commands are interpreted by cmd.exe — use cmd syntax, not POSIX.".to_string()
+            }
+            ShellDialect::Unknown => {
+                format!(" Commands are interpreted by {shell} — match its syntax.")
+            }
+        };
+        format!(
+            "Execute a command in the local shell ({shell}), returning stdout/stderr and the exit code.{syntax} Prefer background:true for long-running tasks (e.g. cargo build, npm install, big test suites) — even when you need the result later: it returns async_launched immediately and tells the user the task runs in the background; continue when the completion notification arrives. Periodic commands (watch/while/until/for/tail -f) become background tasks automatically and can be given notify_on/notify_regex conditions — a hit in the output notifies (no need to wait for the command to finish). Interactive commands that need a TTY (top/htop/vim/bare ssh etc. — full-screen or session programs) are rejected."
+        )
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -900,6 +918,17 @@ mod tests {
     fn configured_output_limit_cannot_exceed_the_model_result_budget() {
         let tool = BashTool::with_output_max_chars(usize::MAX);
         assert_eq!(tool.output_max_chars, MAX_OUTPUT_MAX_CHARS);
+    }
+
+    /// #42: the description names the real executor so the tool name `Bash`
+    /// does not prime POSIX syntax against a PowerShell/cmd executor.
+    #[test]
+    fn description_names_the_resolved_shell() {
+        let text = BashTool::new().description();
+        assert!(text.contains(crate::platform::shell()), "{text}");
+        if crate::platform::shell_dialect() == crate::platform::ShellDialect::PowerShell {
+            assert!(text.contains("use PowerShell syntax, not POSIX"), "{text}");
+        }
     }
 
     #[test]

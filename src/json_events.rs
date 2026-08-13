@@ -233,6 +233,11 @@ pub struct CliSessionMetadata {
     pub permission_mode: String,
     pub theme: String,
     pub supports_images: bool,
+    /// Resolved shell executable for the Bash tool (effective value, not the
+    /// raw setting — an empty setting resolves to the platform default).
+    pub shell: String,
+    /// Syntax family of `shell`: `posix` / `powershell` / `cmd` / `unknown`.
+    pub shell_dialect: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -662,7 +667,7 @@ impl From<crate::transcript::TranscriptError> for JsonEventsError {
 
 #[derive(Debug)]
 enum AdapterEvent {
-    Cli(CliEvent),
+    Cli(Box<CliEvent>),
     Prompt(PendingPrompt),
     TurnFinished {
         turn_id: String,
@@ -1141,7 +1146,7 @@ impl<W: Write> JsonSession<W> {
 
     fn handle_adapter_event(&mut self, event: AdapterEvent) -> Result<(), JsonEventsError> {
         match event {
-            AdapterEvent::Cli(event) => self.emit(event),
+            AdapterEvent::Cli(event) => self.emit(*event),
             AdapterEvent::Prompt(prompt) => {
                 self.emit(CliEvent::PromptRequest {
                     base: EventBase::default(),
@@ -1337,11 +1342,11 @@ fn json_hooks(
     UiHooks {
         on_event: Box::new(move |event| {
             if let StreamEvent::TextDelta { text, .. } = event {
-                let _ = event_sender.send(AdapterEvent::Cli(CliEvent::TextDelta {
+                let _ = event_sender.send(AdapterEvent::Cli(Box::new(CliEvent::TextDelta {
                     base: EventBase::default(),
                     turn_id: turn_id.clone(),
                     delta: text.clone(),
-                }));
+                })));
             }
         }),
         // Stream retries and context usage have no protocol events yet; a later
@@ -1350,13 +1355,13 @@ fn json_hooks(
         on_context_usage: Arc::new(|_, _| {}),
         on_tool_ready: Box::new(move |tool_call_id, name, input, _standalone| {
             let summary = crate::query::summarize_input(&name, &input);
-            let _ = ready_sender.send(AdapterEvent::Cli(CliEvent::ToolReady {
+            let _ = ready_sender.send(AdapterEvent::Cli(Box::new(CliEvent::ToolReady {
                 base: EventBase::default(),
                 turn_id: ready_turn_id.clone(),
                 tool_call_id,
                 name,
                 summary,
-            }));
+            })));
         }),
         on_tool_done: Box::new(move |done| {
             let status = match done.status {
@@ -1364,7 +1369,7 @@ fn json_hooks(
                 ToolCallStatus::Error => ToolEventStatus::Error,
                 ToolCallStatus::Interrupted => ToolEventStatus::Interrupted,
             };
-            let _ = done_sender.send(AdapterEvent::Cli(CliEvent::ToolDone {
+            let _ = done_sender.send(AdapterEvent::Cli(Box::new(CliEvent::ToolDone {
                 base: EventBase::default(),
                 turn_id: done_turn_id.clone(),
                 tool_call_id: done.tool_call_id.clone(),
@@ -1373,16 +1378,16 @@ fn json_hooks(
                 status,
                 output: done.output.clone(),
                 duration_ms: done.duration_ms,
-            }));
+            })));
         }),
         on_round_end: Box::new(|| {}),
         on_warning: Box::new(move |message| {
-            let _ = warning_sender.send(AdapterEvent::Cli(CliEvent::Warning {
+            let _ = warning_sender.send(AdapterEvent::Cli(Box::new(CliEvent::Warning {
                 base: EventBase::default(),
                 turn_id: None,
                 code: None,
                 msg: sanitize_msg(&message),
-            }));
+            })));
         }),
         ask: Arc::new(move |tool_name, reason| {
             let prompt_id = format!(
@@ -1471,12 +1476,12 @@ fn load_history(
             Vec::new()
         }
         Err(error) => {
-            let _ = sender.send(AdapterEvent::Cli(CliEvent::Warning {
+            let _ = sender.send(AdapterEvent::Cli(Box::new(CliEvent::Warning {
                 base: EventBase::default(),
                 turn_id: Some(turn_id.to_string()),
                 code: Some(error.error_code().to_string()),
                 msg: sanitize_msg(&error.to_string()),
-            }));
+            })));
             Vec::new()
         }
     }

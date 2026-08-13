@@ -131,7 +131,7 @@ pub fn load_memory(home: &Path, cwd: &Path) -> Memory {
 /// come and go depending on which files exist.
 /// `cache_control` controls whether cache_control is sent (off by default; non-official
 /// endpoints handle it unreliably).
-/// Dynamic environment segment (OS/date/arch).
+/// Dynamic environment segment (OS/date/arch/shell).
 fn env_info_block(cwd: &Path) -> String {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -140,9 +140,32 @@ fn env_info_block(cwd: &Path) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!(
-        "# Environment\nOS: {os} ({arch})\nUnix timestamp: {date}\nWorking directory: {}",
+        "# Environment\nOS: {os} ({arch})\n{}\nUnix timestamp: {date}\nWorking directory: {}",
+        shell_line(),
         cwd.display()
     )
+}
+
+/// Resolved-shell line: names the real executor of Bash tool commands, with a
+/// syntax directive whenever the dialect is not the POSIX the tool's name
+/// primes for (#42 — `OS: windows` alone does not override that prior).
+fn shell_line() -> String {
+    use crate::platform::ShellDialect;
+    let shell = crate::platform::shell();
+    match crate::platform::shell_dialect() {
+        ShellDialect::Posix => format!("Shell: {shell} (POSIX)"),
+        ShellDialect::PowerShell => format!(
+            "Shell: {shell} (PowerShell) — Bash tool commands are executed by PowerShell; \
+             use PowerShell syntax, not POSIX (e.g. Get-ChildItem, not ls -la)"
+        ),
+        ShellDialect::Cmd => format!(
+            "Shell: {shell} (cmd) — Bash tool commands are executed by cmd.exe; \
+             use cmd syntax, not POSIX"
+        ),
+        ShellDialect::Unknown => format!(
+            "Shell: {shell} — Bash tool commands are executed by this shell; match its syntax"
+        ),
+    }
 }
 
 pub fn build_system(
@@ -247,6 +270,31 @@ mod tests {
         assert!(text.contains(std::env::consts::ARCH));
         assert!(text.contains("Unix timestamp"));
         assert!(text.contains("Working directory"));
+    }
+
+    /// #42: the environment block names the real executor of Bash tool
+    /// commands, and a non-POSIX dialect carries an explicit syntax directive.
+    #[test]
+    fn env_block_reports_resolved_shell() {
+        let text = env_info_block(Path::new("/tmp/project"));
+        assert!(
+            text.contains(&format!("Shell: {}", crate::platform::shell())),
+            "{text}"
+        );
+        match crate::platform::shell_dialect() {
+            crate::platform::ShellDialect::Posix => {
+                assert!(!text.contains("use PowerShell syntax"), "{text}")
+            }
+            crate::platform::ShellDialect::PowerShell => {
+                assert!(text.contains("use PowerShell syntax, not POSIX"), "{text}")
+            }
+            crate::platform::ShellDialect::Cmd => {
+                assert!(text.contains("use cmd syntax, not POSIX"), "{text}")
+            }
+            crate::platform::ShellDialect::Unknown => {
+                assert!(text.contains("match its syntax"), "{text}")
+            }
+        }
     }
 
     #[test]

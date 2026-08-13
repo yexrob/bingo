@@ -496,6 +496,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .filter(|theme| matches!(theme.as_str(), "auto" | "dark" | "light"))
                     .unwrap_or_else(|| "auto".to_string()),
                 supports_images: session.client.supports_images(),
+                shell: crate::platform::shell().to_string(),
+                shell_dialect: crate::platform::shell_dialect().as_str().to_string(),
             };
             let reader = std::io::BufReader::new(std::io::stdin());
             let writer = std::io::BufWriter::new(std::io::stdout());

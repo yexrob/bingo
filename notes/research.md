@@ -970,3 +970,23 @@ from degrading — "materially" bars taste-level questions, and a user who has h
 and still wants their way gets it without relitigating. Members inherit the section through the
 parent system; their existing "report to the hub" redirect already reroutes the ask they cannot
 make. Both halves are guarded as a pair by a test, like the venue rule (D67).
+
+### D71. The shell contract names the real executor (#42)
+
+Three layers disagreed about what runs a Bash tool command: `platform.rs` resolves the executor
+(PowerShell on native Windows), the tool schema names itself `Bash` with a "local shell"
+description, and the environment block said only `OS: windows`. The tool name is the strongest
+prior the model sees, so it generated POSIX commands that PowerShell then executed — failing
+outright or, worse, meaning something else (same-named aliases differ between the two).
+
+The fix aligns the three layers on one resolved value instead of renaming the tool. `platform.rs`
+gains `ShellDialect` (posix / powershell / cmd / unknown, classified by executable basename; an
+unrecognized shell like fish is honestly `unknown` rather than assumed POSIX). The environment
+block and the Bash tool description both name the executor, and a non-POSIX dialect carries an
+explicit syntax directive — the description matters because a weak environment hint does not
+outrank the tool-name prior. `session.ready` metadata reports `shell`/`shellDialect` as effective
+values so JSON clients render the real executor without guessing platform defaults.
+
+The wire tool name stays `Bash`: permission rules (`Bash(git push:*)`), hooks, stored transcripts,
+and provider-side tool-call history all key on it, and a rename would break every one of them for
+a cosmetic gain. The dialect strings are wire format now (tested), not display text.
