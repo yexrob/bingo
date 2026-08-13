@@ -665,7 +665,14 @@ async fn query_loop(
                 );
             }
         }
-        check_and_compact(session, &mut messages, &mut gate, &tool_schemas).await;
+        check_and_compact(
+            session,
+            &mut messages,
+            &mut gate,
+            &tool_schemas,
+            &mut ui.on_warning,
+        )
+        .await;
         // task_reminder: no Task tool for 10 turns + 10 turns since the last reminder.
         maybe_inject_task_reminder(session, &mut messages).await;
         // Recovery sweep: event-driven SendMessage claims idle recipients immediately, while
@@ -735,7 +742,9 @@ async fn query_loop(
         .await
         {
             Err(error @ QueryError::Client(ClientError::ContextOverflow { .. })) => {
-                if !compact_after_overflow(session, &mut messages, &mut gate).await {
+                if !compact_after_overflow(session, &mut messages, &mut gate, &mut ui.on_warning)
+                    .await
+                {
                     if let Some(inbox) = inbox_wake.as_mut() {
                         inbox.restore(session);
                     }
@@ -2372,6 +2381,54 @@ mod tests {
         );
     }
 
+    fn capturing_hooks() -> (UiHooks, Arc<std::sync::Mutex<Vec<String>>>) {
+        let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&warnings);
+        let mut ui = headless_hooks();
+        ui.on_warning = Box::new(move |message| {
+            seen.lock().unwrap_or_else(|e| e.into_inner()).push(message);
+        });
+        (ui, warnings)
+    }
+
+    /// Compaction is invisible to the TUI and to a JSON client if it writes
+    /// stderr: both run quiet, and the TUI owns the screen. Its notices go
+    /// through the one channel every surface implements.
+    #[tokio::test]
+    async fn compaction_reports_itself_through_the_ui_hook() {
+        let base_url = spawn_anthropic_api(vec![
+            ApiResponse::Error {
+                status: 400,
+                body: ANTHROPIC_OVERFLOW.to_string(),
+            },
+            ApiResponse::Ok(
+                r#"{"content":[{"type":"text","text":"compacted context"}]}"#.to_string(),
+            ),
+            ApiResponse::Ok(text_turn("recovered", "end_turn")),
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let (mut ui, warnings) = capturing_hooks();
+        run_query(
+            &session,
+            overflow_history(),
+            "current request",
+            &[],
+            &mut ui,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let warnings = warnings.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.starts_with("context compacted:")),
+            "{warnings:?}"
+        );
+    }
+
     #[tokio::test]
     async fn overflow_compaction_failure_increments_breaker_without_retrying_request() {
         let base_url = spawn_anthropic_api(vec![
@@ -2386,7 +2443,7 @@ mod tests {
         ])
         .await;
         let session = test_session(base_url, None);
-        let mut ui = headless_hooks();
+        let (mut ui, warnings) = capturing_hooks();
         let error = run_query(
             &session,
             overflow_history(),
@@ -2407,6 +2464,13 @@ mod tests {
                 .compact_failures
                 .load(std::sync::atomic::Ordering::SeqCst),
             1
+        );
+        let warnings = warnings.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("history kept as-is")),
+            "the failure reason reaches the UI, not just stderr: {warnings:?}"
         );
     }
 

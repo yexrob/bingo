@@ -166,6 +166,14 @@ fn summary_prompt(old: &[Message], budget: u64) -> String {
     prompt
 }
 
+/// Where compaction reports itself. The three surfaces already differ on how a
+/// notice is shown (TUI warning row, headless stderr, JSON `warning` event) and
+/// `UiHooks::on_warning` is the one channel all three implement, so compaction
+/// borrows it rather than writing stderr underneath a TUI that owns the screen.
+/// The manual `/compact` path reports through its own slash events and passes a
+/// no-op.
+pub type CompactNotify<'a> = &'a mut (dyn Fn(String) + Send + 'a);
+
 /// Auto-compact when context exceeds the threshold: old messages → model summary,
 /// keep the most recent KEEP_RECENT.
 /// Success resets the circuit breaker; failure increments it (after
@@ -173,7 +181,12 @@ fn summary_prompt(old: &[Message], budget: u64) -> String {
 /// messages aren't touched until the summary arrives — on failure history is kept
 /// verbatim, never replaced by a placeholder string.
 /// Returns whether compaction happened.
-pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, tokens: u64) -> bool {
+pub async fn maybe_compact(
+    session: &Session,
+    messages: &mut Vec<Message>,
+    tokens: u64,
+    notify: CompactNotify<'_>,
+) -> bool {
     if messages.len() <= KEEP_RECENT {
         return false;
     }
@@ -185,7 +198,7 @@ pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, token
     {
         return false;
     }
-    compact(session, messages).await
+    compact(session, messages, notify).await
 }
 
 /// Recovery after the server rejected the request as too long. Takes the gate
@@ -197,27 +210,30 @@ pub async fn compact_after_overflow(
     session: &Session,
     messages: &mut Vec<Message>,
     gate: &mut TokenGate,
+    notify: CompactNotify<'_>,
 ) -> bool {
     if session.compact_failures.load(Ordering::SeqCst) >= MAX_COMPACT_FAILURES {
-        if !session.quiet {
-            eprintln!(
-                "[bingo] warning: overflow compaction disabled after {MAX_COMPACT_FAILURES} consecutive failures"
-            );
-        }
+        notify(format!(
+            "overflow compaction disabled after {MAX_COMPACT_FAILURES} consecutive failures"
+        ));
         return false;
     }
     if messages.len() <= KEEP_RECENT {
         session.compact_failures.fetch_add(1, Ordering::SeqCst);
         return false;
     }
-    let compacted = compact(session, messages).await;
+    let compacted = compact(session, messages, notify).await;
     if compacted {
         gate.reset();
     }
     compacted
 }
 
-async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {
+async fn compact(
+    session: &Session,
+    messages: &mut Vec<Message>,
+    notify: CompactNotify<'_>,
+) -> bool {
     let split = safe_split(messages, messages.len() - KEEP_RECENT);
 
     run_pre_compact(
@@ -252,16 +268,10 @@ async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {
         }
         outcome => {
             session.compact_failures.fetch_add(1, Ordering::SeqCst);
-            if !session.quiet {
-                match outcome {
-                    Err(e) => eprintln!(
-                        "[bingo] warning: context compaction failed, history kept as-is: {e}"
-                    ),
-                    _ => eprintln!(
-                        "[bingo] warning: context compaction returned an empty summary, history kept as-is"
-                    ),
-                }
-            }
+            notify(match outcome {
+                Err(e) => format!("context compaction failed, history kept as-is: {e}"),
+                _ => "context compaction returned an empty summary, history kept as-is".to_string(),
+            });
             return false;
         }
     };
@@ -279,7 +289,9 @@ async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {
         &session.cwd(),
     )
     .await;
-    eprintln!("[bingo] compacted {split} old messages");
+    notify(format!(
+        "context compacted: {split} earlier messages replaced by a summary"
+    ));
     true
 }
 
@@ -401,6 +413,7 @@ pub async fn check_and_compact(
     messages: &mut Vec<Message>,
     gate: &mut TokenGate,
     tools: &[serde_json::Value],
+    notify: CompactNotify<'_>,
 ) -> u64 {
     let estimate = estimate_tokens(&session.system, messages, tools);
     let tokens = if gate.wants_exact(estimate) {
@@ -436,12 +449,10 @@ pub async fn check_and_compact(
     let threshold = autocompact_threshold_for(&models, &model);
     if tokens >= threshold {
         if session.compact_failures.load(Ordering::SeqCst) >= MAX_COMPACT_FAILURES {
-            if !session.quiet {
-                eprintln!(
-                    "[bingo] warning: auto-compact disabled after {MAX_COMPACT_FAILURES} consecutive failures"
-                );
-            }
-        } else if maybe_compact(session, messages, tokens).await {
+            notify(format!(
+                "auto-compact disabled after {MAX_COMPACT_FAILURES} consecutive failures"
+            ));
+        } else if maybe_compact(session, messages, tokens, notify).await {
             gate.reset();
             return estimate_tokens(&session.system, messages, tools);
         }

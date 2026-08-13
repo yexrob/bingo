@@ -3171,7 +3171,10 @@ impl Chat {
                 return;
             }
             let old_len = messages.len();
-            let compacted = crate::compact::maybe_compact(&session, &mut messages, u64::MAX).await;
+            // The slash command reports its own outcome below, so the shared
+            // notification channel stays quiet here.
+            let compacted =
+                crate::compact::maybe_compact(&session, &mut messages, u64::MAX, &mut |_| {}).await;
             if !compacted {
                 unpin();
                 let _ = events.send(UiEvent::SlashError(
