@@ -355,8 +355,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .model
         .or_else(|| settings.model.clone())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let mut runtime =
-        crate::query::Runtime::new(model, transcript.clone(), settings.permissions.clone());
+    let mut runtime = crate::query::Runtime::new(
+        model.clone(),
+        transcript.clone(),
+        settings.permissions.clone(),
+    );
     runtime.mcp = Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
         settings.mcp_servers.clone(),
         settings.disabled_mcp_servers.iter().cloned().collect(),
@@ -381,6 +384,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // Tell the model what it is and what it can do (vision above all): a text-only
+    // model must not be handed image-first work. Built after the provider restore so
+    // the capabilities resolve against the provider actually in use.
+    system.push(crate::system::model_capability_block(
+        &model,
+        &runtime.provider.borrow().clone(),
+        &client.models(),
+    ));
     let channel_limits = crate::channels::ChannelLimits::from_settings(&settings);
     let session = Arc::new(Session {
         client,

@@ -1,12 +1,12 @@
-# 主流大模型 API 参数调研（context window / max output / thinking）
+# 主流大模型 API 参数调研（context window / max output / thinking / vision）
 
-调研日期：2026-08-13。方法：仅用各家官方 API 文档（WebSearch 定位 + WebFetch 抓取当日页面），逐模型核实 context window、max output tokens、reasoning/thinking 参数及思考 token 是否计入 max output；查不到官方数字的格子标「未查到官方值」，不用第三方转述补。本文数据将喂给「按 id 前缀匹配」的代码表，家族内例外在各表后显式标注，文末给出归并后的最小前缀表。
+调研日期：2026-08-13（vision 列补充于 2026-08-21，同样只认官方文档：各家族模型页的输入模态声明）。方法：仅用各家官方 API 文档（WebSearch 定位 + WebFetch 抓取当日页面），逐模型核实 context window、max output tokens、reasoning/thinking 参数及思考 token 是否计入 max output；查不到官方数字的格子标「未查到官方值」，不用第三方转述补。vision 一列 = 该模型是否接受图像输入（输入模态含 Image）。本文数据将喂给「按 id 前缀匹配」的代码表，家族内例外在各表后显式标注，文末给出归并后的最小前缀表。
 
 ---
 
 ## Anthropic Claude
 
-思考计入口径（全系统一）：**计入**。官方 extended thinking 文档原文："Thinking tokens count toward the `max_tokens` limit for the turn"，且 "`max_tokens` remains the hard ceiling on total output"（出处：https://platform.claude.com/docs/en/build-with-claude/extended-thinking ）。`max_tokens` 为必填参数、无服务端默认值，下表 max output 均为上限。
+思考计入口径（全系统一）：**计入**。官方 extended thinking 文档原文："Thinking tokens count toward the `max_tokens` limit for the turn"，且 "`max_tokens` remains the hard ceiling on total output"（出处：https://platform.claude.com/docs/en/build-with-claude/extended-thinking ）。`max_tokens` 为必填参数、无服务端默认值，下表 max output 均为上限。**Vision：全系支持图像输入**——models overview 原文 "All current Claude models support text and image input, text output, multilingual capabilities, and vision"（https://platform.claude.com/docs/en/about-claude/models/overview ）。
 
 | API 模型 id | 前缀家族 | context window | max output（默认/最大） | thinking 支持 | 思考计入 max output？ | 出处 |
 |---|---|---|---|---|---|---|
@@ -31,7 +31,7 @@
 
 ## OpenAI
 
-思考计入口径（全系统一）：**计入**。官方 reasoning 指南："reasoning tokens still occupy space in the model's context window and are billed as output tokens"，`max_output_tokens` 限制 reasoning + 可见输出的总和（出处：https://developers.openai.com/api/docs/guides/reasoning ；platform.openai.com 现 301 到 developers.openai.com）。参数为 `reasoning.effort`（档位全集 none/minimal/low/medium/high/xhigh/max，各型号支持子集）。官方不区分默认/最大，只给单一 max output 上限。
+思考计入口径（全系统一）：**计入**。官方 reasoning 指南："reasoning tokens still occupy space in the model's context window and are billed as output tokens"，`max_output_tokens` 限制 reasoning + 可见输出的总和（出处：https://developers.openai.com/api/docs/guides/reasoning ；platform.openai.com 现 301 到 developers.openai.com）。参数为 `reasoning.effort`（档位全集 none/minimal/low/medium/high/xhigh/max，各型号支持子集）。官方不区分默认/最大，只给单一 max output 上限。**Vision：全系支持图像输入**——gpt-5.6-sol 型号页 "Input modalities: text, image" 且 supported features 含 `image_input`（https://developers.openai.com/api/docs/models/gpt-5.6-sol ），5.x 全系同源；o 系列亦接受图像。
 
 | API 模型 id | 前缀家族 | context window | max output | reasoning 支持（effort 档位） | 计入 max output？ | 出处 |
 |---|---|---|---|---|---|---|
@@ -67,7 +67,7 @@
 
 ## DeepSeek
 
-旧型号 `deepseek-chat` / `deepseek-reasoner` 已于 2026-07-24 起全面停用（https://api-docs.deepseek.com/news/news260424/ ），当前仅两个型号。thinking 参数：`thinking: {"type":"enabled"|"disabled"}`（默认 enabled）+ `reasoning_effort: low/high(默认)/max`（medium/xhigh 映射为 high；Anthropic 兼容格式为 `reasoning.effort: none/low/high/max`）。CoT 经独立字段 `reasoning_content` 返回；thinking 模式不支持 temperature/top_p/presence_penalty/frequency_penalty；带 tools 的多轮请求必须回传 `reasoning_content` 否则 400。
+旧型号 `deepseek-chat` / `deepseek-reasoner` 已于 2026-07-24 起全面停用（https://api-docs.deepseek.com/news/news260424/ ），当前仅两个型号。thinking 参数：`thinking: {"type":"enabled"|"disabled"}`（默认 enabled）+ `reasoning_effort: low/high(默认)/max`（medium/xhigh 映射为 high；Anthropic 兼容格式为 `reasoning.effort: none/low/high/max`）。CoT 经独立字段 `reasoning_content` 返回；thinking 模式不支持 temperature/top_p/presence_penalty/frequency_penalty；带 tools 的多轮请求必须回传 `reasoning_content` 否则 400。**Vision：不支持图像输入**——Models & Pricing 页 FEATURES 表仅列 JSON Output / Tool Calls / Responses API / Anthropic API / FIM，无图像输入（https://api-docs.deepseek.com/quick_start/pricing/ ）。
 
 | API 模型 id | 前缀家族 | context window | max output（默认/最大） | thinking 支持 | 思考计入 max output？ | 出处 |
 |---|---|---|---|---|---|---|
@@ -80,7 +80,7 @@
 
 ## Google Gemini
 
-全系 input 1,048,576 / output 65,536，官方只给单一 "Output token limit"，不区分默认/最大。thinking 参数为 `generation_config.thinking_level: minimal/low/medium/high`（3.x 系列文档已不见旧的数值型 `thinkingBudget` 写法）。思考计入口径：**未查到官方明确说明**——官方仅言计费 "response pricing is the sum of output tokens and thinking tokens"（https://ai.google.dev/gemini-api/docs/thinking ），API 参考中 `maxOutputTokens` 与 `thoughtsTokenCount` 为独立字段（https://ai.google.dev/api/generate-content ），是否计入上限官方未言明。
+全系 input 1,048,576 / output 65,536，官方只给单一 "Output token limit"，不区分默认/最大。thinking 参数为 `generation_config.thinking_level: minimal/low/medium/high`（3.x 系列文档已不见旧的数值型 `thinkingBudget` 写法）。思考计入口径：**未查到官方明确说明**——官方仅言计费 "response pricing is the sum of output tokens and thinking tokens"（https://ai.google.dev/gemini-api/docs/thinking ），API 参考中 `maxOutputTokens` 与 `thoughtsTokenCount` 为独立字段（https://ai.google.dev/api/generate-content ），是否计入上限官方未言明。**Vision：全系支持**——gemini-3.6-flash 型号页 "Inputs: Text, Image, Video, Audio, and PDF"（https://ai.google.dev/gemini-api/docs/models/gemini-3.6-flash ）。
 
 | API 模型 id | 前缀家族 | context window | max output | thinking 支持 | 思考计入 max output？ | 出处 |
 |---|---|---|---|---|---|---|
@@ -100,7 +100,7 @@
 
 ## Qwen（阿里云百炼 / DashScope）
 
-thinking 参数：`enable_thinking` + `thinking_budget`（OpenAI 兼容接口经 `extra_body` 传入；thinking_budget 默认=该模型最大思维链长度）。思考计入口径有官方明文：**不计入**——"max_tokens = 模型回答的最大长度（不包含思维链内容）"，思维链单独受 `thinking_budget` 约束，思考内容按输出 token 计费（https://help.aliyun.com/zh/model-studio/deep-thinking ）。
+thinking 参数：`enable_thinking` + `thinking_budget`（OpenAI 兼容接口经 `extra_body` 传入；thinking_budget 默认=该模型最大思维链长度）。思考计入口径有官方明文：**不计入**——"max_tokens = 模型回答的最大长度（不包含思维链内容）"，思维链单独受 `thinking_budget` 约束，思考内容按输出 token 计费（https://help.aliyun.com/zh/model-studio/deep-thinking ）。**Vision 按代际分裂**：qwen3.x 主线（如 qwen3.8-max）输入模态为 Image/Text/Video（https://help.aliyun.com/zh/model-studio/qwen3-8-max ），支持图像；旧别名 qwen-plus（https://help.aliyun.com/zh/model-studio/qwen-plus ）输入模态仅 Text，qwen-max 同理——代码表按 `qwen3.`（vision=true）与 `qwen-`（vision=false）分列。
 
 | API 模型 id | 前缀家族 | context window | max output（默认=最大） | thinking 支持 | 思考计入 max output？ | 出处 |
 |---|---|---|---|---|---|---|
@@ -119,7 +119,7 @@ thinking 参数：`enable_thinking` + `thinking_budget`（OpenAI 兼容接口经
 
 ## Moonshot Kimi
 
-注意：`max_tokens` 已弃用，改用 `max_completion_tokens`。思考计入口径有官方明文：**计入**——"reasoning_content 的 Tokens 数加上 content 的 Tokens 数应小于等于 max_tokens"，官方建议思考模型设 ≥16000（https://platform.kimi.com/docs/guide/use-thinking-models.md ）。文档域名现为 platform.kimi.com（moonshot 官方平台新域名）。
+注意：`max_tokens` 已弃用，改用 `max_completion_tokens`。思考计入口径有官方明文：**计入**——"reasoning_content 的 Tokens 数加上 content 的 Tokens 数应小于等于 max_tokens"，官方建议思考模型设 ≥16000（https://platform.kimi.com/docs/guide/use-thinking-models.md ）。文档域名现为 platform.kimi.com（moonshot 官方平台新域名）。**Vision：支持**——kimi-k3 "原生支持视觉理解"（https://platform.kimi.com/docs/models.md ），k2.5/k2.6 "支持视觉与文本输入"；moonshot-v1 系仅 `*-vision-preview` 变体支持图像。
 
 | API 模型 id | 前缀家族 | context window | max output（默认/最大） | thinking 支持 | 思考计入 max output？ | 出处 |
 |---|---|---|---|---|---|---|
@@ -138,7 +138,7 @@ thinking 参数：`enable_thinking` + `thinking_budget`（OpenAI 兼容接口经
 
 ## 智谱 GLM
 
-thinking 参数统一为 `thinking.type: "enabled"(默认)/"disabled"`，另有 `clear_thinking`（默认 true）。思考计入口径：**未查到官方明确说明**，仅称"思考过程会消耗额外的 Token"（https://docs.bigmodel.cn/cn/guide/capabilities/thinking.md ）。max output 上限来自 API 参考：GLM-5.x/4.7/4.6 系列 128K，GLM-4.5 系列 96K（https://docs.bigmodel.cn/api-reference/模型-api/对话补全 ）。当前在售无 air 变体。
+thinking 参数统一为 `thinking.type: "enabled"(默认)/"disabled"`，另有 `clear_thinking`（默认 true）。思考计入口径：**未查到官方明确说明**，仅称"思考过程会消耗额外的 Token"（https://docs.bigmodel.cn/cn/guide/capabilities/thinking.md ）。max output 上限来自 API 参考：GLM-5.x/4.7/4.6 系列 128K，GLM-4.5 系列 96K（https://docs.bigmodel.cn/api-reference/模型-api/对话补全 ）。当前在售无 air 变体。**Vision：不支持**——glm-5.2 型号页「输入模态：文本」（https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2 ）。
 
 | API 模型 id | 前缀家族 | context window | max output | thinking 支持 | 思考计入 max output？ | 出处 |
 |---|---|---|---|---|---|---|
@@ -158,7 +158,7 @@ thinking 参数统一为 `thinking.type: "enabled"(默认)/"disabled"`，另有 
 
 ## xAI Grok
 
-思考计入口径按端点分裂（**关键差异**）：Chat Completions 的 `max_completion_tokens` **不含** reasoning token（官方原文 "only applies to visible output tokens"）；Responses API 的 `max_output_tokens` **包含** reasoning token（"This includes both output and reasoning tokens"）。两参数默认均 128,000（https://docs.x.ai/developers/rest-api-reference/inference/chat ）。xAI 不公布各模型硬性 max output 上限（grok-4.6 官方页明确 "Output limit: No text output limit"）。
+思考计入口径按端点分裂（**关键差异**）：Chat Completions 的 `max_completion_tokens` **不含** reasoning token（官方原文 "only applies to visible output tokens"）；Responses API 的 `max_output_tokens` **包含** reasoning token（"This includes both output and reasoning tokens"）。两参数默认均 128,000（https://docs.x.ai/developers/rest-api-reference/inference/chat ）。xAI 不公布各模型硬性 max output 上限（grok-4.6 官方页明确 "Output limit: No text output limit"）。**Vision：支持**——grok-4.6 与 grok-build-0.1 型号页 "Modalities: text, image → text"（https://docs.x.ai/developers/models/grok-4.6 、https://docs.x.ai/developers/models/grok-build-0.1 ）。
 
 | API 模型 id | 前缀家族 | context window | max output（默认/最大） | reasoning 支持 | 计入 max output？ | 出处 |
 |---|---|---|---|---|---|---|
@@ -179,7 +179,7 @@ thinking 参数统一为 `thinking.type: "enabled"(默认)/"disabled"`，另有 
 
 ## Mistral
 
-重大变化：**Magistral 原生 reasoning 系列已废弃**（官方 reasoning 文档明文；Magistral Small 1.2 标 2026-04-30 弃用，替代 Mistral Small 4）。reasoning 现经 `reasoning_effort: "high"/"none"` 参数（https://docs.mistral.ai/capabilities/reasoning ）。思考计入口径：**未查到官方明确说明**（仅称 high 档 "at the cost of increased token usage"）。各模型卡均不公布独立 max output 上限。
+重大变化：**Magistral 原生 reasoning 系列已废弃**（官方 reasoning 文档明文；Magistral Small 1.2 标 2026-04-30 弃用，替代 Mistral Small 4）。reasoning 现经 `reasoning_effort: "high"/"none"` 参数（https://docs.mistral.ai/capabilities/reasoning ）。思考计入口径：**未查到官方明确说明**（仅称 high 档 "at the cost of increased token usage"）。各模型卡均不公布独立 max output 上限。**Vision：支持**——Mistral Large 3 "general-purpose multimodal model"（https://docs.mistral.ai/models/model-cards/mistral-large-3-25-12 ）、Mistral Medium 3.5 "frontier-class multimodal model"（https://docs.mistral.ai/models/model-cards/mistral-medium-3-5-26-04 ）。
 
 | API 模型 id | 前缀家族 | context window | max output | reasoning 支持 | 计入 max output？ | 出处 |
 |---|---|---|---|---|---|---|
@@ -193,47 +193,48 @@ thinking 参数统一为 `thinking.type: "enabled"(默认)/"disabled"`，另有 
 
 ## 按前缀归并的建议表（最终进代码的形态）
 
-取家族内最保守/最通用值；例外单列为更长前缀，**匹配必须长前缀优先**。`thinking` 为布尔（该前缀是否支持 reasoning/thinking 参数）。`maxTokens` 取官方 max output 上限（无官方值的标注说明，勿猜数字填入）。
+取家族内最保守/最通用值；例外单列为更长前缀，**匹配必须长前缀优先**。`thinking` 为布尔（该前缀是否支持 reasoning/thinking 参数）。`vision` 为布尔（该前缀的模型是否接受图像输入，喂给 prompt 的能力块——文本模型不得接看图任务）。`maxTokens` 取官方 max output 上限（无官方值的标注说明，勿猜数字填入）。
 
-| prefix | contextWindow | maxTokens | thinking | 备注 |
-|---|---|---|---|---|
-| `claude-haiku-4-5` | 200000 | 64000 | true | extended（budget_tokens）形态 |
-| `claude-sonnet-4-5` | 200000 | 64000 | true | extended 形态 |
-| `claude-opus-4-5` | 200000 | 64000 | true | extended 形态 |
-| `claude-` | 1000000 | 128000 | true | 思考计入 max_tokens |
-| `gpt-5.6-cyber` | 400000 | 128000 | true | |
-| `gpt-5.6` | 1050000 | 128000 | true | |
-| `gpt-5.5-cyber` | 未查到官方值 | 未查到官方值 | true | 型号页缺失，暂勿依赖 |
-| `gpt-5.5` | 1050000 | 128000 | true | |
-| `gpt-5.4-mini` | 400000 | 128000 | true | |
-| `gpt-5.4-nano` | 400000 | 128000 | true | |
-| `gpt-5.4` | 1050000 | 128000 | true | |
-| `gpt-5.2` | 400000 | 128000 | true | |
-| `gpt-5.1` | 400000 | 128000 | true | effort 无 xhigh |
-| `gpt-5-pro` | 400000 | 272000 | true | 全 OpenAI 唯一非 128K |
-| `gpt-5` | 400000 | 128000 | true | 兜底裸 gpt-5/-mini/-nano（2026-12-11 下线）；必须排在所有 gpt-5.x 之后 |
-| `o3` / `o4` / `o1` | 200000 | 100000 | true | 均在弃用通道 |
-| `deepseek` | 1000000 | 384000 | true | 计入与否官方未明 |
-| `gemini` | 1048576 | 65536 | true | 全系一致；thinking_level 参数 |
-| `qwen-max` | 32768 | 8192 | false | 滞后旧快照 |
-| `qwen3.` | 1000000 | 131072 | true | 思维链不计入 max_tokens |
-| `qwen-` | 1000000 | 32768 | true | 兜底旧别名 plus/flash；思维链不计入 |
-| `kimi-k3` | 1048576 | 131072 | true | 官方最大可到 1048576；思考计入 |
-| `kimi-` | 262144 | 未查到官方值 | true | k2.x 家族；思考计入 max_tokens；用 max_completion_tokens |
-| `moonshot-v1-8k` | 8192 | 未查到官方值 | false | 窗口含输入+输出 |
-| `moonshot-v1-32k` | 32768 | 未查到官方值 | false | 同上 |
-| `moonshot-v1-128k` | 131072 | 未查到官方值 | false | 同上 |
-| `glm-5.2` | 1000000 | 128000 | true | 注意排在 `glm-5` 前 |
-| `glm-` | 200000 | 128000 | true | 计入与否官方未明 |
-| `grok-4.3` | 1000000 | 128000 | true | maxTokens 取 API 参数默认值 |
-| `grok-4.20-multi-agent` | 1000000 | 未查到官方值 | true | 不支持 max_tokens 参数，effort 语义特殊 |
-| `grok-4.20` | 1000000 | 128000 | true | maxTokens 取 API 参数默认值 |
-| `grok-build` | 256000 | 128000 | true | 同上 |
-| `grok-` | 500000 | 128000 | true | 兜底 4.6/4.5；chat 端点思考不计入、responses 端点计入 |
-| `mistral-large` | 256000 | 未查到官方值 | false | 卡片未标 reasoning |
-| `mistral-` | 256000 | 未查到官方值 | true | medium/small 支持 reasoning_effort |
+| prefix | contextWindow | maxTokens | thinking | vision | 备注 |
+|---|---|---|---|---|---|
+| `claude-haiku-4-5` | 200000 | 64000 | true | true | extended（budget_tokens）形态；全系 vision |
+| `claude-sonnet-4-5` | 200000 | 64000 | true | true | extended 形态；全系 vision |
+| `claude-opus-4-5` | 200000 | 64000 | true | true | extended 形态；全系 vision |
+| `claude-` | 1000000 | 128000 | true | true | 思考计入 max_tokens；全系 vision |
+| `gpt-5.6-cyber` | 400000 | 128000 | true | true | 全系 vision（gpt-5.6-sol 页证实） |
+| `gpt-5.6` | 1050000 | 128000 | true | true | |
+| `gpt-5.5-cyber` | 未查到官方值 | 未查到官方值 | true | true | 型号页缺失，暂勿依赖 |
+| `gpt-5.5` | 1050000 | 128000 | true | true | |
+| `gpt-5.4-mini` | 400000 | 128000 | true | true | |
+| `gpt-5.4-nano` | 400000 | 128000 | true | true | |
+| `gpt-5.4` | 1050000 | 128000 | true | true | |
+| `gpt-5.2` | 400000 | 128000 | true | true | |
+| `gpt-5.1` | 400000 | 128000 | true | true | effort 无 xhigh |
+| `gpt-5-pro` | 400000 | 272000 | true | true | 全 OpenAI 唯一非 128K |
+| `gpt-5` | 400000 | 128000 | true | true | 兜底裸 gpt-5/-mini/-nano（2026-12-11 下线）；必须排在所有 gpt-5.x 之后 |
+| `o3` / `o4` / `o1` | 200000 | 100000 | true | true | 均在弃用通道 |
+| `deepseek` | 1000000 | 384000 | true | **false** | 计入与否官方未明；**无图像输入（FEATURES 表无 vision）** |
+| `gemini` | 1048576 | 65536 | true | true | 全系一致；thinking_level 参数；全系 multimodal |
+| `qwen-max` | 32768 | 8192 | false | false | 滞后旧快照；文本仅 |
+| `qwen3.` | 1000000 | 131072 | true | true | 思维链不计入；Image/Text/Video 输入 |
+| `qwen-` | 1000000 | 32768 | true | false | 兜底旧别名 plus/flash；思维链不计入；文本仅 |
+| `kimi-k3` | 1048576 | 131072 | true | true | 官方最大可到 1048576；思考计入；原生视觉 |
+| `kimi-` | 262144 | 未查到官方值 | true | true | k2.x 家族；思考计入；k2.5/k2.6 支持视觉与文本 |
+| `moonshot-v1-8k` | 8192 | 未查到官方值 | false | false | 窗口含输入+输出；仅 -vision-preview 变体有图像 |
+| `moonshot-v1-32k` | 32768 | 未查到官方值 | false | false | 同上 |
+| `moonshot-v1-128k` | 131072 | 未查到官方值 | false | false | 同上 |
+| `glm-5.2` | 1000000 | 128000 | true | false | 注意排在 `glm-5` 前；文本仅 |
+| `glm-` | 200000 | 128000 | true | false | 计入与否官方未明；文本仅 |
+| `grok-4.3` | 1000000 | 128000 | true | true | maxTokens 取 API 参数默认值 |
+| `grok-4.20-multi-agent` | 1000000 | 未查到官方值 | true | true | 不支持 max_tokens 参数，effort 语义特殊 |
+| `grok-4.20` | 1000000 | 128000 | true | true | maxTokens 取 API 参数默认值 |
+| `grok-build` | 256000 | 128000 | true | true | 同上 |
+| `grok-` | 500000 | 128000 | true | true | 兜底 4.6/4.5；chat 端点思考不计入、responses 端点计入 |
+| `mistral-large` | 256000 | 未查到官方值 | false | true | 卡片未标 reasoning；Large 3 multimodal |
+| `mistral-` | 256000 | 未查到官方值 | true | true | medium/small 支持 reasoning_effort；Medium 3.5 multimodal |
 
 归并原则备注：
 1. 长前缀优先是硬前提——`gpt-5` vs `gpt-5.x`、`glm-5` vs `glm-5.2`、`qwen-` vs `qwen-max`、`grok-4` vs `grok-4.3` 都存在前缀包含关系。
 2. maxTokens 语义各家不同：Anthropic/OpenAI/Kimi 是「含思考的硬顶」，Qwen 是「不含思维链的回答上限」，xAI 按端点分裂，Gemini/GLM/DeepSeek/Mistral 官方未言明——代码表如需统一语义，建议另加 `thinkingCounted: yes/no/unknown/per-endpoint` 一列。
-3. 「未查到官方值」的格子进代码时留空或用保守配置，不要拿本表以外的数字回填。
+3. vision 一列的语义是「模型是否接受图像输入」，与端点级 `supportsImages`（协议是否带图）不同；未知家族走保守默认 true（Claude 系基线），文本家族（deepseek/glm/qwen- 旧别名）显式 false。
+4. 「未查到官方值」的格子进代码时留空或用保守配置，不要拿本表以外的数字回填。

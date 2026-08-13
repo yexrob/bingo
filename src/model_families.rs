@@ -30,7 +30,7 @@ const CATALOG_FILE: &str = "model-catalog.json";
 /// its own contract to someone opening it cold.
 const DOC: &str = "bingo rewrites `builtin` on upgrade; put your changes in `overrides`. \
      Keys are model-id prefixes (longest match wins, field by field); fields are \
-     contextWindow, maxTokens, thinking. settings.json model declarations outrank this file.";
+     contextWindow, maxTokens, thinking, vision. settings.json model declarations outrank this file.";
 
 /// One family's (possibly partial) metadata as written in the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -46,6 +46,10 @@ pub struct FamilyMeta {
     pub max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
+    /// Whether the model accepts image input; feeds the prompt's capability
+    /// block (per-model, unlike the endpoint-wide `supportsImages`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
 }
 
 /// Full file shape. Unknown top-level keys are rejected on purpose: a typo'd
@@ -76,6 +80,7 @@ fn seed() -> BTreeMap<String, FamilyMeta> {
                     context_window: Some(meta.context_window),
                     max_tokens: Some(meta.max_tokens),
                     thinking: Some(meta.supports_thinking),
+                    vision: Some(meta.supports_vision),
                 },
             )
         })

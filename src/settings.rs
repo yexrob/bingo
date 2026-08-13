@@ -216,6 +216,11 @@ pub enum ModelEntry {
         max_tokens: Option<u32>,
         #[serde(default)]
         thinking: Option<bool>,
+        /// Whether the model accepts image input (`vision`); absent defers to
+        /// the prefix table. Unlike `supportsImages` (endpoint-wide opt-out)
+        /// this is per-model capability, surfaced to the model itself.
+        #[serde(default)]
+        vision: Option<bool>,
     },
 }
 
@@ -252,6 +257,13 @@ impl ModelEntry {
         match self {
             ModelEntry::Id(_) => None,
             ModelEntry::Detailed { thinking, .. } => *thinking,
+        }
+    }
+
+    pub fn vision(&self) -> Option<bool> {
+        match self {
+            ModelEntry::Id(_) => None,
+            ModelEntry::Detailed { vision, .. } => *vision,
         }
     }
 }

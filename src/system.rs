@@ -195,6 +195,62 @@ pub fn build_system(
     blocks
 }
 
+/// The `# Model capabilities` heading — the stable marker callers use to
+/// find and replace the block when the active model changes (subagent with
+/// its own model, /model switch rebuilds are appended, never stacked).
+pub const MODEL_CAPABILITIES_HEADING: &str = "# Model capabilities";
+
+/// A system block telling the model what it can and cannot do, so a task
+/// whose value depends on a capability (image input above all) is not taken
+/// to an endpoint that lacks it. Read from the model resolver, so the
+/// declaration, the family-catalog overrides and the prefix table all feed
+/// it. Uncached: cheap to rebuild, and cacheability varies per endpoint.
+pub fn model_capability_block(
+    model: &str,
+    provider: &str,
+    resolver: &crate::api::models::ModelResolver,
+) -> SystemBlock {
+    let vision = resolver.supports_vision(model);
+    let thinking = resolver.supports_thinking(model);
+    let vision_line = if vision {
+        "yes — accepts image input; you can act on screenshots and rendered output"
+    } else {
+        "no — text only; do not take image-first tasks, say you cannot see images"
+    };
+    let thinking_line = if thinking {
+        "yes — bingo may send thinking parameters for this model"
+    } else {
+        "no — bingo sends no thinking parameter for this model"
+    };
+    SystemBlock {
+        text: format!(
+            "{MODEL_CAPABILITIES_HEADING}\nActive model: {model} (provider: {provider})\n\
+             - Vision: {vision_line}\n- Thinking: {thinking_line}"
+        ),
+        cache: false,
+    }
+}
+
+/// The request's system with the capability block refreshed for the model
+/// actually speaking. The persisted `Session::system` carries one built at
+/// startup (and subagent spawn), but `/model`/`/provider` switch mid-session
+/// without touching it — so every request rebuilds it from the runtime state,
+/// keeping the vision/thinking facts honest turn after turn.
+pub fn with_model_capabilities(
+    system: &[SystemBlock],
+    model: &str,
+    provider: &str,
+    resolver: &crate::api::models::ModelResolver,
+) -> Vec<SystemBlock> {
+    let mut blocks: Vec<SystemBlock> = system
+        .iter()
+        .filter(|b| !b.text.starts_with(MODEL_CAPABILITIES_HEADING))
+        .cloned()
+        .collect();
+    blocks.push(model_capability_block(model, provider, resolver));
+    blocks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +326,52 @@ mod tests {
         assert!(text.contains(std::env::consts::ARCH));
         assert!(text.contains("Unix timestamp"));
         assert!(text.contains("Working directory"));
+    }
+
+    /// The capability block names the active model and tells it honestly
+    /// whether it can see images — the rule that keeps image-first work away
+    /// from text-only endpoints.
+    #[test]
+    fn model_capability_block_reports_vision_and_thinking() {
+        let resolver = crate::api::models::ModelResolver::default();
+        let vision = model_capability_block("gpt-5.6-sol", "road", &resolver);
+        assert!(vision.text.starts_with(MODEL_CAPABILITIES_HEADING));
+        assert!(vision.text.contains("Active model: gpt-5.6-sol"));
+        assert!(vision.text.contains("provider: road"));
+        assert!(vision.text.contains("Vision: yes"));
+        assert!(!vision.cache, "uncached, like the subagent note");
+        let text_only = model_capability_block("deepseek-v4-flash", "default", &resolver);
+        assert!(text_only.text.contains("Vision: no"));
+        assert!(text_only.text.contains("cannot see images"));
+        assert!(text_only.text.contains("Thinking: no"));
+    }
+
+    /// The per-request refresh replaces any existing capability block instead
+    /// of stacking: switching models must update the facts, never accumulate
+    /// stale ones.
+    #[test]
+    fn with_model_capabilities_replaces_not_stacks() {
+        let resolver = crate::api::models::ModelResolver::default();
+        let base = vec![
+            SystemBlock {
+                text: "base".into(),
+                cache: false,
+            },
+            model_capability_block("gpt-5.6-sol", "road", &resolver),
+        ];
+        let refreshed = with_model_capabilities(&base, "deepseek-v4-flash", "default", &resolver);
+        let texts: Vec<&str> = refreshed.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts.len(), 2, "exactly one capability block survives");
+        assert_eq!(texts[0], "base");
+        assert!(texts[1].contains("Active model: deepseek-v4-flash"));
+        assert!(texts[1].contains("Vision: no"));
+        assert_eq!(
+            refreshed
+                .iter()
+                .filter(|b| b.text.starts_with(MODEL_CAPABILITIES_HEADING))
+                .count(),
+            1
+        );
     }
 
     /// #42: the environment block names the real executor of Bash tool

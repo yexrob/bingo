@@ -221,7 +221,7 @@ otherwise the user layer — no `.bingo/` is conjured in arbitrary directories
 | `apiBaseUrl` | string | API endpoint (settings take precedence over `ANTHROPIC_BASE_URL`; default is the official one) |
 | `providers` | object | named providers: `{name: {protocol?, apiKey?, envKey?, apiBaseUrl?, supportsImages?, oauth?, models?}}`, switch with `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, bearer auth; `apiBaseUrl` defaults to `https://api.openai.com`); `envKey` names an environment variable holding the key (credential order: `apiKey` > `envKey` > stored key / OAuth); `oauth: {kind: "codex"}` enables OAuth login (`/provider login`, apiKey wins) |
 | `model` | string | default model (written by `/model`); precedence: `--model` > settings > built-in `claude-sonnet-5` |
-| `models` | array | the default provider's model list; per-provider under `providers.<name>.models`. Entries are ids (`"gpt-5.6-sol"`) or objects (`{id, display?, contextWindow?, maxTokens?, thinking?}`). Declared = authoritative: `/model` shows exactly this list with no request, and the metadata overrides the built-in table. `maxTokens` is the model's output ceiling — it is sent as the request's `max_tokens` and reserved out of the input window, clamped to half the window so a small `contextWindow` still leaves room to work. Undeclared providers pull `/v1/models` and the result is cached for 24h (`r` in the menu re-asks) |
+| `models` | array | the default provider's model list; per-provider under `providers.<name>.models`. Entries are ids (`"gpt-5.6-sol"`) or objects (`{id, display?, contextWindow?, maxTokens?, thinking?, vision?}`). Declared = authoritative: `/model` shows exactly this list with no request, and the metadata overrides the built-in table. `maxTokens` is the model's output ceiling — it is sent as the request's `max_tokens` and reserved out of the input window, clamped to half the window so a small `contextWindow` still leaves room to work. `vision` says whether the model accepts image input; the model is told its own capabilities in the system prompt (a text-only model refuses image-first work instead of failing silently — distinct from the endpoint-wide `sendImages`/`supportsImages` send gates). Undeclared providers pull `/v1/models` and the result is cached for 24h (`r` in the menu re-asks) |
 | `thinkingLevel` | string | `off` omits thinking params (DeepSeek-compatible, default); `low`/`medium`/`high`/`xhigh`/`max` send adaptive thinking + `output_config.effort` at that level |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto` (follow terminal background) / `dark` / `light` |
@@ -249,7 +249,7 @@ Example:
       "protocol": "openai",
       "apiBaseUrl": "https://proxy.example/v1",
       "envKey": "PROXY_API_KEY",
-      "models": ["gpt-5.6-sol", { "id": "deepseek-v4", "display": "DeepSeek V4", "contextWindow": 131072, "maxTokens": 8000, "thinking": false }]
+      "models": ["gpt-5.6-sol", { "id": "deepseek-v4", "display": "DeepSeek V4", "contextWindow": 131072, "maxTokens": 8000, "thinking": false, "vision": false }]
     }
   },
   "model": "claude-sonnet-5",
@@ -266,8 +266,8 @@ Example:
 ### Model catalog (model-catalog.json)
 
 `~/.config/bingo/model-catalog.json` (created on first start, next to settings.json) holds the
-per-family model defaults — `contextWindow`, `maxTokens` (output ceiling), `thinking` — keyed by
-model-id **prefix**, longest match winning field by field. Two sections with different owners:
+per-family model defaults — `contextWindow`, `maxTokens` (output ceiling), `thinking`, `vision` —
+keyed by model-id **prefix**, longest match winning field by field. Two sections with different owners:
 
 - `builtin` is bingo's: a mirror of the researched defaults compiled into the binary, rewritten
   on upgrade so corrected numbers reach you. Edits here are reverted on the next start.

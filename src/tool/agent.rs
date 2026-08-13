@@ -1103,6 +1103,13 @@ pub(crate) fn build_sub_session(
         text: SUBAGENT_NOTE.to_string(),
         cache: false,
     });
+    // The parent's capability block names the parent's model; refresh it for
+    // this instance's own (a cross-provider subagent has a different model,
+    // and the vision/thinking facts must describe the endpoint actually
+    // speaking). The per-request refresh in query_turn keeps it honest after
+    // any mid-session switch.
+    system =
+        crate::system::with_model_capabilities(&system, &model, &provider_name, &client.models());
     // Only when the feature is on: channel etiquette is noise for a solo subagent that will
     // never see a room.
     if parent.settings.experimental.agent_channels {
@@ -1741,6 +1748,18 @@ mod tests {
     use super::*;
     use crate::query::{Runtime, Session};
 
+    /// The exact capability block a subagent with the given (unknown-to-the-
+    /// table → conservative defaults) model carries. Unknown models keep the
+    /// default: vision yes, thinking yes.
+    fn capability_block(model: &str, provider: &str) -> String {
+        format!(
+            "{}\nActive model: {model} (provider: {provider})\n- Vision: yes — accepts image input; \
+             you can act on screenshots and rendered output\n- Thinking: yes — bingo may send \
+             thinking parameters for this model",
+            crate::system::MODEL_CAPABILITIES_HEADING
+        )
+    }
+
     fn parent_session() -> (Arc<Session>, Arc<crate::api::client::Client>) {
         let mut settings = crate::settings::Settings {
             api_key: Some("sk-parent".into()),
@@ -2036,11 +2055,17 @@ mod tests {
         let sub = tool
             .build_sub_session(&params("review"), Some(&d), "sub", &crewless())
             .unwrap();
-        // Default is append: parent system + persona + the subagent note block.
+        // Default is append: parent system + persona + the subagent note block
+        // + the instance's own capability block.
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(
             texts,
-            ["parent system", "You are the reviewer.", SUBAGENT_NOTE],
+            [
+                "parent system",
+                "You are the reviewer.",
+                SUBAGENT_NOTE,
+                &capability_block("def-model", "ds")
+            ],
             "a named definition appends by default rather than replacing"
         );
         assert_eq!(*sub.runtime.model.borrow(), "def-model");
@@ -2815,7 +2840,14 @@ mod tests {
             .build_sub_session(&params("review"), Some(&d), "sub", &crewless())
             .unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
-        assert_eq!(texts, ["You are the reviewer.", SUBAGENT_NOTE]);
+        assert_eq!(
+            texts,
+            [
+                "You are the reviewer.",
+                SUBAGENT_NOTE,
+                &capability_block("def-model", "ds")
+            ]
+        );
     }
 
     /// Channel etiquette rides in the system prompt, and only when channels are on.
@@ -2978,7 +3010,14 @@ mod tests {
         )
         .unwrap();
         let texts: Vec<&str> = sub.system.iter().map(|b| b.text.as_str()).collect();
-        assert_eq!(texts, ["parent system", SUBAGENT_NOTE]);
+        assert_eq!(
+            texts,
+            [
+                "parent system",
+                SUBAGENT_NOTE,
+                &capability_block("parent-model", "default")
+            ]
+        );
         let moved = std::env::temp_dir().join("bingo-subagent-shared-cwd");
         session.set_cwd(moved.clone());
         assert_eq!(

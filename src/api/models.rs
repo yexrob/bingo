@@ -1,12 +1,12 @@
-//! Per-model metadata: context window and thinking support.
+//! Per-model metadata: context window, thinking support and vision support.
 //!
 //! Three tiers, most specific first (D65): what the user declared for this
 //! provider's model, then the prefix table, then the conservative default.
 //! `/status` percentages, the auto-compact threshold and the thinking gate all
 //! read the model actually in use — the old fixed 200k window measured every
 //! non-Claude model with a Claude ruler. Unknown models fall back to the
-//! Claude defaults (200k window, thinking supported), which preserves the old
-//! behavior exactly where nothing better is known.
+//! Claude defaults (200k window, thinking supported, vision supported), which
+//! preserves the old behavior exactly where nothing better is known.
 //!
 //! The catalog is a value, not a global: it hangs off `Client` (the provider
 //! authority) and reaches the measuring sites as a [`ModelResolver`] already
@@ -28,6 +28,12 @@ pub struct ModelMeta {
     /// `DEFAULT_MAX_TOKENS` both stops 400ing and gets that headroom back.
     pub max_tokens: u32,
     pub supports_thinking: bool,
+    /// Whether the model accepts image content blocks. Unlike
+    /// `supports_thinking` this is not a wire gate — bingo sends no vision
+    /// parameter — it is the capability the model itself is told about
+    /// (system prompt), so it will not take image-first tasks to a
+    /// text-only endpoint.
+    pub supports_vision: bool,
 }
 
 /// Conservative default (Claude family): what the whole app assumed for
@@ -36,6 +42,7 @@ pub const DEFAULT_META: ModelMeta = ModelMeta {
     context_window: 200_000,
     max_tokens: DEFAULT_MAX_TOKENS,
     supports_thinking: true,
+    supports_vision: true,
 };
 
 /// Longest-prefix match over known families, researched against each vendor's
@@ -46,20 +53,26 @@ pub const DEFAULT_META: ModelMeta = ModelMeta {
 /// conservative `DEFAULT_MAX_TOKENS` rather than a guess. `supports_thinking`
 /// gates whether bingo *sends* its thinking parameters — false does not mean
 /// the model cannot reason (DeepSeek reasons by default server-side), it means
-/// the wire parameter would be wrong for that endpoint.
+/// the wire parameter would be wrong for that endpoint. `supports_vision`
+/// names whether the model accepts image input (verified against each vendor's
+/// model page); it feeds the system prompt's capability block, so a text-only
+/// model is not sent image-first work.
 ///
 /// Longer prefixes are the exceptions and win per the matcher below — the
 /// shadowing pairs to be careful with: `gpt-5` < `gpt-5.x`, `glm-` < `glm-5.2`,
 /// `qwen-` < `qwen-max`, `kimi-` < `kimi-k3`, `claude-` < `claude-*-4-5`.
 const PREFIXES: &[(&str, ModelMeta)] = &[
     // Anthropic: the 5s and 4.6+ are 1M/128K; the 4.5 generation stayed at
-    // 200K/64K. Thinking tokens count toward max_tokens.
+    // 200K/64K. Thinking tokens count toward max_tokens. Every current Claude
+    // supports image input ("text and image input ... and vision", models
+    // overview).
     (
         "claude-",
         ModelMeta {
             context_window: 1_000_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -68,6 +81,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 200_000,
             max_tokens: 64_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -76,6 +90,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 200_000,
             max_tokens: 64_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -84,18 +99,22 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 200_000,
             max_tokens: 64_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     // OpenAI: 5.4+ mainline is 1.05M, everything older (and the mini/nano/
     // cyber variants) 400K; output is 128K across the board except gpt-5-pro.
     // Reasoning tokens count toward max output. Bare "gpt-5" is the fallback
     // for the deprecated gpt-5/-mini/-nano and must stay the shortest prefix.
+    // The whole line takes image input (gpt-5.6-sol: "Input modalities: text,
+    // image"; the 5.x generation shares it).
     (
         "gpt-5",
         ModelMeta {
             context_window: 400_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -104,6 +123,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 400_000,
             max_tokens: 272_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -112,6 +132,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 400_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -120,6 +141,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 400_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -128,6 +150,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 1_050_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -136,6 +159,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 400_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -144,6 +168,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 400_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -152,6 +177,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 1_050_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -160,6 +186,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 1_050_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -168,39 +195,48 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 400_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     // DeepSeek: v4-flash/v4-pro (the only current models) are 1M with a 384K
     // documented output maximum. The gate stays false because their endpoints
     // take DeepSeek-shaped thinking parameters, not the ones bingo sends —
     // reasoning is on by default server-side either way; a user whose endpoint
-    // accepts bingo's parameters can flip it in model-catalog.json.
+    // accepts bingo's parameters can flip it in model-catalog.json. Text-only:
+    // the models & pricing page lists JSON/tools/Responses/Anthropic-API/FIM
+    // as the v4 features, no image input.
     (
         "deepseek",
         ModelMeta {
             context_window: 1_000_000,
             max_tokens: 384_000,
             supports_thinking: false,
+            supports_vision: false,
         },
     ),
-    // Google: the whole gemini line is uniformly 1,048,576 / 65,536.
+    // Google: the whole gemini line is uniformly 1,048,576 / 65,536 and
+    // multimodal — gemini-3.6-flash lists Text, Image, Video, Audio, PDF input.
     (
         "gemini",
         ModelMeta {
             context_window: 1_048_576,
             max_tokens: 65_536,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     // Qwen (DashScope): qwen3.x mainline vs the legacy qwen-plus/-flash
     // aliases differ only in output ceiling; qwen-max is a stale snapshot a
     // magnitude smaller. Chain-of-thought does NOT count toward max_tokens.
+    // qwen3.x takes Image/Text/Video input; the legacy aliases and qwen-max
+    // are text-only.
     (
         "qwen3.",
         ModelMeta {
             context_window: 1_000_000,
             max_tokens: 131_072,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -209,6 +245,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 1_000_000,
             max_tokens: 32_768,
             supports_thinking: true,
+            supports_vision: false,
         },
     ),
     (
@@ -217,17 +254,20 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 32_768,
             max_tokens: 8_192,
             supports_thinking: false,
+            supports_vision: false,
         },
     ),
     // Moonshot Kimi: k3 has published numbers; the k2.x family's output
     // ceiling is unpublished, so it keeps the conservative default. Thinking
-    // counts toward max output.
+    // counts toward max output. k3 "natively supports vision understanding";
+    // k2.5/k2.6 accept visual and text input.
     (
         "kimi-k3",
         ModelMeta {
             context_window: 1_048_576,
             max_tokens: 131_072,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -236,16 +276,19 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 262_144,
             max_tokens: DEFAULT_MAX_TOKENS,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     // Zhipu GLM: glm-5.2 alone is 1M; the rest of 4.7/5.x are 200K/128K, and
     // the 4.5 series caps output at 96K (a 128K request would 400 there).
+    // Text-only line: glm-5.2's card lists 文本 as its input modality.
     (
         "glm-5.2",
         ModelMeta {
             context_window: 1_000_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: false,
         },
     ),
     (
@@ -254,6 +297,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 200_000,
             max_tokens: 96_000,
             supports_thinking: true,
+            supports_vision: false,
         },
     ),
     (
@@ -262,16 +306,19 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 200_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: false,
         },
     ),
     // xAI Grok: 4.6/4.5 are 500K, 4.3/4.20 are 1M, grok-build 256K. xAI
     // publishes no hard output cap — 128K is the API parameter's default.
+    // Image input throughout: grok-4.6 and grok-build list "text, image → text".
     (
         "grok-",
         ModelMeta {
             context_window: 500_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -280,6 +327,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 1_000_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -288,6 +336,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 1_000_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -296,17 +345,20 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 256_000,
             max_tokens: 128_000,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     // Mistral: 256K windows, no published output ceiling (conservative
     // default). The large model card lists no reasoning support; medium and
-    // small take reasoning_effort.
+    // small take reasoning_effort. Large 3 and Medium 3.5 are both general-
+    // purpose multimodal models.
     (
         "mistral-",
         ModelMeta {
             context_window: 256_000,
             max_tokens: DEFAULT_MAX_TOKENS,
             supports_thinking: true,
+            supports_vision: true,
         },
     ),
     (
@@ -315,6 +367,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
             context_window: 256_000,
             max_tokens: DEFAULT_MAX_TOKENS,
             supports_thinking: false,
+            supports_vision: true,
         },
     ),
 ];
@@ -347,6 +400,7 @@ pub struct CatalogModel {
     pub context_window: Option<u64>,
     pub max_tokens: Option<u32>,
     pub thinking: Option<bool>,
+    pub vision: Option<bool>,
 }
 
 impl CatalogModel {
@@ -422,6 +476,7 @@ fn convert(entries: &[ModelEntry]) -> Vec<CatalogModel> {
             context_window: entry.context_window(),
             max_tokens: entry.max_tokens(),
             thinking: entry.thinking(),
+            vision: entry.vision(),
         })
         .collect()
 }
@@ -456,12 +511,14 @@ impl ModelResolver {
                 family.context_window = family.context_window.or(entry.context_window);
                 family.max_tokens = family.max_tokens.or(entry.max_tokens);
                 family.thinking = family.thinking.or(entry.thinking);
+                family.vision = family.vision.or(entry.vision);
             }
         }
         let base = ModelMeta {
             context_window: family.context_window.unwrap_or(table.context_window),
             max_tokens: family.max_tokens.unwrap_or(table.max_tokens),
             supports_thinking: family.thinking.unwrap_or(table.supports_thinking),
+            supports_vision: family.vision.unwrap_or(table.supports_vision),
         };
         let Some(entry) = self.catalog.entry(&self.provider, model) else {
             return base;
@@ -470,6 +527,7 @@ impl ModelResolver {
             context_window: entry.context_window.unwrap_or(base.context_window),
             max_tokens: entry.max_tokens.unwrap_or(base.max_tokens),
             supports_thinking: entry.thinking.unwrap_or(base.supports_thinking),
+            supports_vision: entry.vision.unwrap_or(base.supports_vision),
         }
     }
 
@@ -479,6 +537,10 @@ impl ModelResolver {
 
     pub fn supports_thinking(&self, model: &str) -> bool {
         self.meta(model).supports_thinking
+    }
+
+    pub fn supports_vision(&self, model: &str) -> bool {
+        self.meta(model).supports_vision
     }
 }
 
@@ -557,6 +619,7 @@ mod tests {
                 context_window: cw,
                 max_tokens: mt,
                 thinking: th,
+                vision: None,
             }
         };
         let json = r#"{"providers": {"proxy": {"apiKey": "k", "models": [
@@ -640,6 +703,49 @@ mod tests {
         );
     }
 
+    /// Vision is a per-model capability resolved through the same tiers as
+    /// the window: declaration and family overrides may correct the prefix
+    /// table, and unknown models keep the conservative default.
+    #[test]
+    fn vision_resolves_through_declaration_family_and_table() {
+        let json = r#"{
+            "providers": {
+                "proxy": {"apiKey": "k", "models": [
+                    "deepseek-v4-flash",
+                    {"id": "deepseek-v4", "vision": true},
+                    {"id": "house-model", "vision": true}
+                ]}
+            }
+        }"#;
+        let fam = |v: Option<bool>| crate::model_families::FamilyMeta {
+            context_window: None,
+            max_tokens: None,
+            thinking: None,
+            vision: v,
+        };
+        let catalog = ModelCatalog::from_settings(&settings(json)).with_families(vec![
+            ("deepseek".to_string(), fam(Some(true))),
+            ("gpt-".to_string(), fam(Some(false))),
+        ]);
+        let proxy = ModelResolver::new(Arc::new(catalog), "proxy".to_string());
+        // Table defaults: DeepSeek is text-only, gpt-5.6-sol sees images.
+        assert!(!ModelResolver::default().supports_vision("deepseek-v4-flash"));
+        assert!(ModelResolver::default().supports_vision("gpt-5.6-sol"));
+        assert!(
+            ModelResolver::default().supports_vision("some-unknown-model"),
+            "unknown models keep the conservative default"
+        );
+        // A family override re-enables vision for a table-denied family.
+        assert!(proxy.supports_vision("deepseek-v4-flash"));
+        // Declared overrides beat the family tier; a declaration with no
+        // vision field falls through to the family.
+        assert!(proxy.supports_vision("deepseek-v4"));
+        assert!(proxy.supports_vision("house-model"));
+        // A family override can also deny vision the table grants: gpt-5.6-sol
+        // declared with no overrides → family false.
+        assert!(!proxy.supports_vision("gpt-5.6-sol"));
+    }
+
     /// The researched table's shadowing pairs: a longer prefix must beat the
     /// family-wide one, and the family-wide one must still catch the rest.
     #[test]
@@ -677,5 +783,16 @@ mod tests {
         assert!(table.supports_thinking("mistral-small-2603"));
         assert_eq!(table.context_window("gemini-3.5-flash"), 1_048_576);
         assert_eq!(table.meta("gemini-3.5-flash").max_tokens, 65_536);
+        // Vision facts across the families: text-only lines stay visible.
+        assert!(table.supports_vision("claude-haiku-4-5"));
+        assert!(table.supports_vision("gpt-5.4-mini"));
+        assert!(!table.supports_vision("deepseek-v4-pro"));
+        assert!(table.supports_vision("gemini-3.6-flash"));
+        assert!(table.supports_vision("qwen3.8-max"));
+        assert!(!table.supports_vision("qwen-plus"));
+        assert!(table.supports_vision("kimi-k3"));
+        assert!(!table.supports_vision("glm-5.2"));
+        assert!(table.supports_vision("grok-4.6"));
+        assert!(table.supports_vision("mistral-large-2512"));
     }
 }

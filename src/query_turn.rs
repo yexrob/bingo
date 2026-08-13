@@ -162,10 +162,19 @@ async fn one_turn(
         None
     };
     let max_tokens = crate::budget::max_tokens_for(&session.client.models(), &model);
+    // Capability block refreshed per request: /model and /provider switch the
+    // runtime without touching Session::system, and the vision/thinking facts
+    // must describe the model actually speaking.
+    let system = crate::system::with_model_capabilities(
+        &session.system,
+        &model,
+        &session.runtime.provider.borrow().clone(),
+        &session.client.models(),
+    );
     let request = NeutralRequest {
         model,
         max_tokens,
-        system: session.system.clone(),
+        system,
         messages: messages.to_vec(),
         tools: tool_params(tools),
         stream: true,
