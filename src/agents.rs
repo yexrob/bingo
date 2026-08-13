@@ -181,6 +181,21 @@ impl AgentKind {
     }
 }
 
+/// What a start did to an instance that was already up (D69). A team's blueprint and its
+/// agent definitions are files the user edits between runs; start is where an instance
+/// that is not busy catches up with them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refresh {
+    /// The definition had moved: the instance now runs under the new one, history intact.
+    Refreshed,
+    /// Same definition — nothing was touched.
+    Unchanged,
+    /// Mid-turn: definitions are swapped between turns, never under one.
+    Busy,
+    /// No such instance.
+    Missing,
+}
+
 /// Sweeps a finished hire survives before it is released. One is not enough: a hire that
 /// finishes during hub round N has its result reported in round N+1, which is the round
 /// the hub can first act on it — releasing at the end of N+1's own sweep would take the
@@ -650,6 +665,57 @@ impl AgentRegistry {
             },
         );
         self.sync_share(name);
+    }
+
+    /// Re-point an existing instance at a freshly built session: the definition on disk
+    /// moved, and the instance picks it up without losing what it has already done (D69).
+    ///
+    /// The swap is the whole mechanism. A turn takes its session at wake
+    /// ([`AgentRegistry::flush_pending`]), while the history, the inbox, the ack trail and
+    /// the run count live on the entry beside it — replacing the one leaves the others
+    /// alone, which is exactly "new prompt, same memory". Before this, the only way to
+    /// re-read a member's definition was to delete the instance, which threw its past away
+    /// with it.
+    ///
+    /// A running instance is left alone: its turn is already holding the old session, and
+    /// swapping under it would be a persona change mid-sentence. A stopped one comes back
+    /// idle — `/team stop` promises start brings it back, and a definition that can never
+    /// run again is not one that was refreshed.
+    pub fn refresh(
+        &self,
+        name: &str,
+        def: Option<String>,
+        description: String,
+        session: Arc<Session>,
+    ) -> Refresh {
+        let outcome = {
+            let mut inner = self.lock();
+            let Some(entry) = inner.get_mut(name) else {
+                return Refresh::Missing;
+            };
+            if entry.state == AgentState::Running {
+                return Refresh::Busy;
+            }
+            let changed = entry.def != def
+                || entry.description != description
+                || !same_definition(&entry.session, &session);
+            if changed {
+                entry.def = def;
+                entry.description = description;
+                entry.session = session;
+            }
+            if entry.state == AgentState::Stopped {
+                entry.state = AgentState::Idle;
+            }
+            entry.last_active = Instant::now();
+            if changed {
+                Refresh::Refreshed
+            } else {
+                Refresh::Unchanged
+            }
+        };
+        self.sync_share(name);
+        outcome
     }
 
     /// Release the hires whose task is done, returning the names taken away.
@@ -1223,6 +1289,26 @@ impl AgentRegistry {
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
+}
+
+/// Do two sessions put the same instance in front of the model — the words it runs under
+/// and the engine it runs on?
+///
+/// Compared over the built session rather than the definition file, because the file is
+/// only one of the inputs: the blueprint's per-member overrides, the crew's working
+/// agreement and the parent session's own model all reach the instance too, and what the
+/// member actually runs with is the thing that must not change without saying so. History
+/// and inbox are deliberately not part of it — they are what a refresh preserves.
+fn same_definition(a: &Session, b: &Session) -> bool {
+    a.system.len() == b.system.len()
+        && a.system
+            .iter()
+            .zip(b.system.iter())
+            .all(|(x, y)| x.text == y.text && x.cache == y.cache)
+        && *a.runtime.model.borrow() == *b.runtime.model.borrow()
+        && *a.runtime.provider.borrow() == *b.runtime.provider.borrow()
+        && *a.runtime.thinking.borrow() == *b.runtime.thinking.borrow()
+        && a.cwd() == b.cwd()
 }
 
 /// A reply answers a delivered message only if text was produced after that message entered the

@@ -206,8 +206,8 @@ fn start(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     let name = &tree.root().def.name;
     match crate::team::spawn_tree(session, &tree, &session.home) {
         Ok(summary) => {
-            let total = summary.spawned.len() + summary.reused.len() + summary.failed.len();
-            let ready = total - summary.failed.len();
+            let ready = summary.ready();
+            let total = ready + summary.failed.len();
             let scope = if tree.nodes().len() > 1 {
                 format!(" across {} teams", tree.nodes().len())
             } else {
@@ -218,6 +218,13 @@ fn start(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
                 let names = summary.spawned.join(" · ");
                 out.push(format!(
                     "[team] {name} up · {ready}/{total} on standby{scope} ({names})"
+                ));
+            } else if !summary.refreshed.is_empty() {
+                // The headline says what actually happened: a start whose only effect was
+                // re-reading definitions is not "already running, nothing to do".
+                let names = summary.refreshed.join(" · ");
+                out.push(format!(
+                    "[team] {name} up to date · definitions re-read for {names} (history kept)"
                 ));
             } else if !summary.reused.is_empty() {
                 out.push(format!(

@@ -433,9 +433,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let teams = tree.nodes().len();
                 match crate::team::spawn_tree(&session, &tree, &home) {
                     Ok(summary) => {
-                        let total =
-                            summary.spawned.len() + summary.reused.len() + summary.failed.len();
-                        let ready = total - summary.failed.len();
+                        let ready = summary.ready();
+                        let total = ready + summary.failed.len();
                         let scope = if teams > 1 {
                             format!(" across {teams} teams")
                         } else {
