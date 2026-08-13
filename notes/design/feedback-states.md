@@ -1,6 +1,6 @@
 # Feedback States Specification
 
-> Version: v1.43 · Status: in effect (2026-08-13)
+> Version: v1.44 · Status: in effect (2026-08-13)
 > Scope: the unified design conventions for every user-visible feedback state in bingo. The GUI (TUI) and CLI (headless) sides share a single source; qa acceptance anchors are at the end.
 
 ## General principles
@@ -301,3 +301,5 @@ Web-side conventions (for a future web frontend to reuse):
 - v1.42 (2026-08-12): review hardening of v1.41. A server-provided retry delay is now clamped at 60s so a misbehaving `retry_after` cannot park a turn for an hour behind the suppressed first notice; local backoff (500ms start, ±10% jitter, 32s cap) is unchanged. Message-based transient classification now treats a bare 5xx number as a status code only when it opens the message or follows an HTTP-status marker, so copy like "512 characters" no longer looks retryable. No copy or state-flow changes.
 
 - v1.43 (2026-08-13): auto-compaction review (D66) moves compaction's own feedback onto the shared channel. Success, failure and the tripped circuit breaker are emitted through `UiHooks::on_warning` instead of stderr, so they surface as a TUI warning row, as headless stderr, and as the existing JSON `warning` event — previously the TUI and a JSON client (both `quiet`) saw nothing at all, and the success line wrote stderr under a TUI that owns the screen. Success reads `context compacted: N earlier messages replaced by a summary`; failure keeps its "history kept as-is" wording plus the reason. No new protocol event type and no new error code. The `/compact` slash command is unchanged and still reports through its own slash-output/slash-error rows, now with the "conversation is too short" floor reading the same `KEEP_RECENT` the compactor applies.
+
+- v1.44 (2026-08-13): `/team start` reports a third outcome (D69). A member already up that is not mid-turn re-reads its definition and applies it in place, so start's summary is now `spawned ×N` · `refreshed ×N` · `reused ×N` — the first two words were the whole vocabulary, and an edited member came back as `reused`, which said the opposite of what had happened. The slash headline follows: a start whose only effect was re-reading definitions reads `[team] <name> up to date · definitions re-read for <names> (history kept)` instead of `already running · reusing existing instances`, and the Team tool's result gains a matching `refreshed N already running (definition re-read, history kept): …` line. No new error code, no new surface; the tier is the existing slash-output/tool-result text.

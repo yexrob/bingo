@@ -867,3 +867,52 @@ channel Post for what every member should act on, because per-member private cop
 and the Post description (what concerns one agent alone goes to them directly, not into everyone's
 context). Like the reply rules, it lives in system-prompt/tool-description text rather than wake-up
 payloads: compaction never touches either, so the rule survives long sessions.
+
+### D69. Start re-reads a member's definition; deleting it was never the point
+
+A member's `AgentDef` was read exactly once, at spawn. `spawn_members` keyed idempotency on the
+instance name and stopped there, so a user who rewrote a member's `.md` — its system prompt, its
+model, its thinking level — had one way to make the edit take: delete the instance and let the next
+start build it fresh. That deletion took the member's whole conversation with it. The cost of a
+one-line prompt fix was everything the member had done for the crew, which is exactly backwards:
+the persona is the cheap, editable half and the history is the part that took real turns to earn.
+
+The seam is smaller than it looks. `AgentRegistry::Entry` holds `session: Arc<Session>` **beside**
+`history`, `stamps`, `inbox`, `acks` and `runs`, and the session is where a definition ends up
+baked: `system` blocks, `runtime.model/provider/thinking`, the forked provider client, the cwd. A
+turn takes that session by clone at wake (`flush_pending`), never before. So refreshing a definition
+is one assignment — replace the `Arc<Session>` on the entry — and everything a member remembers is
+on the fields next to it, untouched. No hot path, no parallel copy of the definition, no new
+lifecycle. `AgentRegistry::refresh` does it under the registry lock; the next wake picks up the new
+session, and `list()` reports the new engine immediately because it reads the session too.
+
+Three rules fall out of "the session is what a turn takes":
+
+- **Mid-turn is off limits.** A running member's turn is already holding the old `Arc`; swapping the
+  entry's copy would change nothing for that turn and would change the persona mid-sentence if it
+  did. `Refresh::Busy` leaves it alone and the next start catches it — bounded staleness beats a
+  member that changes character between two tool calls.
+- **A stopped member comes back idle.** `/team stop` has always said "history kept; /team start
+  brings it back", and start never brought it back: `is_in_project` counted a stopped entry as
+  reuse, so the member stayed stopped and refused mail forever. Since the whole documented loop is
+  stop → edit → start, reviving is part of the same fix rather than a separate one.
+- **What "changed" means is decided over the built session, not the file.** The file is one input
+  among several — the blueprint's per-member overrides, the crew's working agreement, the parent
+  session's own model when the member pins none. Comparing `system` block texts plus
+  model/provider/thinking/cwd asks the only question that matters: does the member face the model
+  with different words on a different engine? A stored fingerprint of the `.md` would have answered
+  a narrower question and needed a new field on every insert path to carry it.
+
+Start therefore reports three outcomes, not two: `spawned ×N` for new instances, `refreshed ×N` for
+definitions that moved, `reused ×N` for the ones that did not. Keeping `refreshed` distinct from
+`reused` is what makes the feature checkable — "I edited the prompt and started" now has an
+observable answer, and a start that silently reported reuse would be indistinguishable from the bug
+this replaces.
+
+Known coupling, recorded rather than papered over: the member's memory pointer (D51) is a system
+block, so if that pointer changes the comparison sees a changed definition and reports a refresh.
+Today it cannot move mid-session — `save_member_history` runs once at session end — so a start after
+a member has worked still reports `reused`. Were history persisted per turn, every start would
+report `refreshed` instead. The refresh itself stays correct in that world (history is preserved
+either way); only the wording would get noisy, and the fix would be to exclude the pointer block
+from the comparison rather than to reach for a fingerprint.
