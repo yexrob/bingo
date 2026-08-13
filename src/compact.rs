@@ -10,7 +10,7 @@ use crate::query::Session;
 /// Number of most recent messages kept after compaction. Tool turns spend
 /// messages fast (one tool_use + one tool_result each), so 8 could mean four
 /// tool calls and nothing of the exchange that motivated them.
-const KEEP_RECENT: usize = 12;
+pub(crate) const KEEP_RECENT: usize = 12;
 
 /// Output budget for the summary request, capped by what the model can produce.
 /// The old 1024 was the real ceiling on summary quality: no instruction can put

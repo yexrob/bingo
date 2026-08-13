@@ -3161,7 +3161,9 @@ impl Chat {
                 Some(t) => t.load_messages().unwrap_or_default(),
                 None => Vec::new(),
             };
-            if messages.len() <= 8 {
+            // Same floor maybe_compact applies, so "too short" is reported as
+            // that and not as a model-call failure.
+            if messages.len() <= crate::compact::KEEP_RECENT {
                 unpin();
                 let _ = events.send(UiEvent::SlashOutput(
                     "the conversation is too short; no compaction needed.".to_string(),
