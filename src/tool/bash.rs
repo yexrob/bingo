@@ -1123,8 +1123,12 @@ mod tests {
             instance: None,
         };
         let tool = BashTool::new();
+        #[cfg(unix)]
+        let command = "sh -c 'exit 7'";
+        #[cfg(windows)]
+        let command = "exit 7";
         let result = tool
-            .call(serde_json::json!({"command": "sh -c 'exit 7'"}), &ctx)
+            .call(serde_json::json!({"command": command}), &ctx)
             .await
             .unwrap();
         assert!(result.is_error, "non-zero exit must be an error result");

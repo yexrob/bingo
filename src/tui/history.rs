@@ -69,6 +69,8 @@ pub fn save(home: &Path, cwd: &Path, entries: &[String]) -> std::io::Result<()> 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    // The sidecar serializes concurrent writers; the file itself is never locked, so a
+    // reader in another process is never failed by a write in progress (D72).
     let lock_path = path.with_extension("jsonl.lock");
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
@@ -83,7 +85,6 @@ pub fn save(home: &Path, cwd: &Path, entries: &[String]) -> std::io::Result<()> 
         .write(true)
         .truncate(false)
         .open(&path)?;
-    file.lock()?;
     let start = entries.len().saturating_sub(HISTORY_MAX);
     let body: String = entries[start..]
         .iter()

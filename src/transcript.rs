@@ -24,6 +24,8 @@ impl ErrorCode for TranscriptError {
     }
 }
 
+/// `(sidecar lock, transcript data file)`. Only the sidecar is ever locked (D72);
+/// the data file handle is held open for appends.
 type ActiveFiles = Option<(std::fs::File, std::fs::File)>;
 type ActiveLock = Arc<Mutex<ActiveFiles>>;
 type ActiveLockMap = Mutex<HashMap<PathBuf, Weak<Mutex<ActiveFiles>>>>;
@@ -211,6 +213,11 @@ impl Transcript {
         Ok(renamed)
     }
 
+    /// Claim the session for this process. The sidecar `.jsonl.lock` is the whole mutex:
+    /// the transcript itself is never locked, because Windows file locks are mandatory —
+    /// a lock held for the session's lifetime would fail every other handle opened on the
+    /// same file (`load_messages`, /resume, /share) with ERROR_LOCK_VIOLATION, where the
+    /// advisory Unix locks let those reads through unnoticed (D72).
     fn ensure_active_lock(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, ActiveFiles>, TranscriptError> {
@@ -242,16 +249,6 @@ impl Transcript {
                 .write(true)
                 .truncate(false)
                 .open(&self.path)?;
-            file.try_lock().map_err(|error| match error {
-                std::fs::TryLockError::Error(error) => TranscriptError::Io(error),
-                std::fs::TryLockError::WouldBlock => TranscriptError::Io(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    format!(
-                        "transcript is active in another process: {}",
-                        self.path.display()
-                    ),
-                )),
-            })?;
             *active_lock = Some((lock_file, file));
         }
         Ok(active_lock)
