@@ -437,8 +437,13 @@ mod tests {
             text.lines().any(|line| line.ends_with("many.txt")),
             "{text}"
         );
+        // Paths only, no `path:line:text` coordinates. Compared below the fixture root so a
+        // Windows drive letter ("C:/…") is not read as a coordinate separator.
+        let root_prefix = root.display().to_string().replace('\\', "/");
         assert!(
-            !text.lines().any(|line| line.contains(":")),
+            !text
+                .lines()
+                .any(|line| line.trim_start_matches(&root_prefix).contains(':')),
             "files only: {text}"
         );
         assert_eq!(
