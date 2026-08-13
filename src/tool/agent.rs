@@ -54,6 +54,12 @@ const SUBAGENT_NOTE: &str = "\
 /// mechanical fact: *where* a message arrived decides where the answer goes, and the only
 /// observable difference is the `[#channel msg #N]` tag on channel traffic.
 ///
+/// The first three rules all govern replies, which left initiated messages lawless (D66): a
+/// member that *discovered* something team-wide had no rule sending it to the room — it went to
+/// the hub as turn text and the team worked on stale ground — while the symmetric mistake,
+/// narrating personal progress into the room, is D45's flood through a new door. The venue rule
+/// closes both at once, so its two halves must stay together.
+///
 /// It lives in the system prompt rather than in the wake-up payload deliberately: compaction
 /// rewrites the message history but never touches `Session::system`, so the rule is still there
 /// on turn fifty, when a long-running member has forgotten everything else about the room.
@@ -81,6 +87,13 @@ to answer, call Post.
 Beyond that first line, post only what changes what someone else will do: a decision someone is
 blocked on, a disagreement, a result, a question you cannot continue without. Name the person you
 mean. When you have nothing to add, stop calling tools — silence costs nothing and wakes nobody.
+
+**The audience decides the lane — for what you initiate, not only for replies.** When your work
+surfaces something that changes what other members will do — a contract or interface change, a
+shared blocker, a hazard someone is about to walk into — Post it without waiting to be asked:
+reporting it only to the hub in your turn text leaves the team working on stale ground. What
+concerns nobody but you and the hub — your progress, partial results, questions only the hub can
+answer — stays in your turn text: the room's attention is the scarcest thing in it.
 
 **A direct message is a different lane, and a private one.** Channel traffic arrives tagged
 `[#channel msg #N]`; text without that tag was sent to you alone — by the hub, or by the user
@@ -1397,7 +1410,8 @@ impl Tool for SendMessageTool {
         "SendMessage".to_string()
     }
     fn description(&self) -> String {
-        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id after enqueueing: an idle receiver starts immediately, while a running receiver drains all mail waiting at its next tool round. Messages present when the receiver drains its inbox are batched into one prompt. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing. AgentControl(action=messages) reports which of those it is: queued, delivered but unanswered, answered (with the run that replied), or dropped because the instance stopped. You do not have to poll that yourself: the harness runs the same check five minutes after sending (tune with ack_timeout) and follows up on the receiver, up to 3 rounds, reporting back if no answer ever comes. The instance name comes from the Agent tool's return value or AgentControl list.".to_string()
+        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id after enqueueing: an idle receiver starts immediately, while a running receiver drains all mail waiting at its next tool round. Messages present when the receiver drains its inbox are batched into one prompt. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing. AgentControl(action=messages) reports which of those it is: queued, delivered but unanswered, answered (with the run that replied), or dropped because the instance stopped. You do not have to poll that yourself: the harness runs the same check five minutes after sending (tune with ack_timeout) and follows up on the receiver, up to 3 rounds, reporting back if no answer ever comes. The instance name comes from the Agent tool's return value or AgentControl list. \
+This is the private lane: right for what concerns the receiver alone — an assignment, a follow-up, a correction. Something every member of a channel should act on belongs in one channel Post, not in per-member private copies that drift apart.".to_string()
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<SendMessageInput>()
@@ -2785,6 +2799,16 @@ mod tests {
         assert!(
             CHANNEL_NOTE.contains("stays private"),
             "must forbid relaying DM content into a channel, not just answering there"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("without waiting to be asked"),
+            "must impose the proactive Post duty — otherwise a team-wide finding reaches only \
+             the hub as turn text and the room works on stale ground (D66)"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("stays in your turn text"),
+            "must keep member status out of the room — without this second half the venue rule \
+             reopens the reply storm through a new door (D66)"
         );
     }
 

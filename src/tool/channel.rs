@@ -138,7 +138,8 @@ impl Tool for PostTool {
             "Speak in an agent channel. Your name in the channel is {who} (the sender is stamped by the runtime and cannot be forged). \
 This tool is the only way to put words in the room: the text you write as your turn result goes to the hub, not to the channel, so deciding to answer means calling this. \
 Channel messages enter every member's context (in the same order); in a serial channel, if you are behind the latest message the send bounces back with the new content attached — read it, then decide to resend, amend, or drop. \
-Every message wakes every other member, so who you are answering matters: when `user` or `main` addresses the room, answer once, briefly, the way a person answers the room they are in; when another member speaks you owe nothing unless they named you or you can unblock them; never answer an answer — that is what floods a room. When you have nothing to add, simply don't call this tool (silence costs nothing and wakes nobody)."
+Every message wakes every other member, so who you are answering matters: when `user` or `main` addresses the room, answer once, briefly, the way a person answers the room they are in; when another member speaks you owe nothing unless they named you or you can unblock them; never answer an answer — that is what floods a room. When you have nothing to add, simply don't call this tool (silence costs nothing and wakes nobody). \
+The audience picks the lane: something every member should know belongs here; what concerns one agent alone goes to them directly — the hub reaches a member with SendMessage, a member reaches the hub in its turn text — not into everyone's context."
         )
     }
     fn input_schema(&self) -> serde_json::Value {
