@@ -867,3 +867,40 @@ channel Post for what every member should act on, because per-member private cop
 and the Post description (what concerns one agent alone goes to them directly, not into everyone's
 context). Like the reply rules, it lives in system-prompt/tool-description text rather than wake-up
 payloads: compaction never touches either, so the rule survives long sessions.
+
+### D68. The terminal's own cursor is the caret; nothing is drawn where it stands
+
+The input box carried two carets at once. `prompt_lines` sliced the text at the cursor and
+*inserted* a `▋` cell, while `chrome::prompt` attached `El::Caret` at the same column and
+`Frame::set_cursor_position` put the real terminal cursor there — so the terminal's blinking block
+sat on top of a static glyph. The insertion is the part that hurt: every character after the caret
+shifted one cell right, so editing mid-line made the tail of the line jump as the caret moved, and
+on empty input the placeholder lost its first character to make room (`Try …` rendered as
+`▋ry …`). The `▋` also overrode whatever cursor the user had configured — a bar or underline
+cursor came out as a block, and blink was faked by not blinking at all.
+
+Codex's ChatComposer solves this by not drawing a cursor: it computes the caret's display column
+(width-aware, so a CJK glyph counts two) and calls `Frame::set_cursor_position`, and that is the
+whole mechanism. bingo already had that half — `caret_cell` → `El::Caret` → `Frame::cursor` →
+`set_cursor_position`, with `input::cursor_cell` measuring in display cells — so the fix is
+subtraction, not addition: delete the glyph insertion and let the surviving pipeline be the only
+authority. The cursor now *overlays* the cell it occupies instead of displacing it, which is what
+every other terminal editor does, and shape and blink stay whatever the user's terminal is set to
+(no `SetCursorStyle` is issued anywhere, matching codex's non-vim `DefaultUserShape`).
+
+Three notes on the edges.
+
+- The slack workspace composer (`slack::composer_rows` → `entity.rs`) was already glyph-free and
+  already drove `set_cursor_position`; it needed no change, which is the shape the main input box
+  now matches.
+- The ask block's free-text field (`ask_el`) also drew a trailing `▋`, and it loses its cursor
+  outright rather than gaining a real one: the block renders into the *transcript*, and only
+  chrome-declared carets reach `Frame::cursor`, so the terminal cursor stays in the input box while
+  a permission ask is open. Trading a lying caret for no caret is the right direction — a glyph in
+  the transcript that looks like a cursor but is not one is worse than an unmarked field — but a
+  real caret for the ask field means letting the doc tree declare one, which is a separate change.
+- Visibility semantics are unchanged and deliberately so: the caret is declared on every frame
+  except the Full error screen (`Frame::assemble` returns `cursor: None`, so `term.rs` hides it),
+  which means it stays visible while a menu is open and while a turn is running even though input
+  is not accepted then. That predates this change; it is recorded here rather than fixed, because
+  the fix belongs to whatever decides what "input is unavailable" should look like.

@@ -2046,9 +2046,10 @@ fn multiline_input_renders_as_multiple_rows() {
     for row in &rows {
         assert!(!row.plain_text().contains('\n'), "rows contain no newline");
     }
-    assert!(
-        rows[2].plain_text().contains('▋'),
-        "the caret is drawn on the last row"
+    assert_eq!(
+        rows.iter().map(|r| r.plain_text()).collect::<Vec<_>>(),
+        vec!["first", "second", "third"],
+        "rows carry the raw text: no cursor glyph is inserted anywhere"
     );
     // ↑ moves along visual rows within a multi-line input before switching history.
     chat.record_history("older");
@@ -3035,14 +3036,19 @@ fn empty_prompt_shows_placeholder() {
     let lines = chat.prompt_lines();
     assert_eq!(lines.len(), 1);
     let text = lines[0].plain_text();
-    // Caret sits ON the first placeholder cell: `▋` replaces the first
-    // char instead of being glued in front of the full hint.
-    let mut rest = crate::tui::keys::INPUT_PLACEHOLDER.chars();
-    rest.next();
-    assert_eq!(text, format!("▋{}", rest.as_str()), "{text}");
+    // The whole hint renders: the real terminal cursor covers its first cell instead of
+    // a glyph replacing that character.
+    assert_eq!(text, crate::tui::keys::INPUT_PLACEHOLDER, "{text}");
+    assert!(
+        lines[0]
+            .segs
+            .iter()
+            .all(|s| s.style.fg == Some(chat.theme.inactive)),
+        "the placeholder stays dim end to end"
+    );
     chat.set_input("x");
     let text = chat.prompt_lines()[0].plain_text();
-    assert_eq!(text, "x▋", "with input there is no placeholder");
+    assert_eq!(text, "x", "with input there is no placeholder and no glyph");
 }
 
 /// A 4×2 solid-color PNG (for tests).
