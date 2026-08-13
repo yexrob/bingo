@@ -78,7 +78,12 @@ pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, token
     if messages.len() <= KEEP_RECENT {
         return false;
     }
-    if tokens < autocompact_threshold_for(&session.runtime.model.borrow().clone()) {
+    if tokens
+        < autocompact_threshold_for(
+            &session.client.models(),
+            &session.runtime.model.borrow().clone(),
+        )
+    {
         return false;
     }
     compact(session, messages).await
@@ -289,7 +294,8 @@ pub async fn check_and_compact(
         eprintln!("[bingo] context: {tokens} tokens");
     }
     let model = session.runtime.model.borrow().clone();
-    let threshold = autocompact_threshold_for(&model);
+    let models = session.client.models();
+    let threshold = autocompact_threshold_for(&models, &model);
     if tokens >= threshold {
         if session.compact_failures.load(Ordering::SeqCst) >= MAX_COMPACT_FAILURES {
             if !session.quiet {
@@ -301,7 +307,7 @@ pub async fn check_and_compact(
             gate.reset();
             return estimate_tokens(&session.system, messages, tools);
         }
-    } else if tokens >= warning_threshold_for(&model) && !session.quiet {
+    } else if tokens >= warning_threshold_for(&models, &model) && !session.quiet {
         eprintln!("[bingo] warning: context at {tokens} tokens, auto-compact at {threshold}");
     }
     tokens
@@ -354,9 +360,10 @@ mod tests {
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn compact_threshold_matches_budget() {
+        let models = crate::api::models::ModelResolver::default();
         assert!(
-            crate::budget::autocompact_threshold_for("claude-sonnet-5")
-                < crate::budget::context_window_for("claude-sonnet-5")
+            crate::budget::autocompact_threshold_for(&models, "claude-sonnet-5")
+                < crate::budget::context_window_for(&models, "claude-sonnet-5")
         );
     }
 

@@ -1739,6 +1739,8 @@ mod tests {
         settings.providers.insert(
             "ds".to_string(),
             crate::settings::ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: Some("sk-ds".into()),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
@@ -1751,6 +1753,8 @@ mod tests {
         settings.providers.insert(
             "vision".to_string(),
             crate::settings::ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: Some("sk-v".into()),
                 api_base_url: "https://vision.example".into(),
                 supports_images: Some(true),

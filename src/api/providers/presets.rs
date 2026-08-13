@@ -2,6 +2,10 @@
 //! login for official subscriptions. Users override presets field-by-field
 //! via settings `providers.<name>` (absent fields fall back to the preset);
 //! settings itself stays user-only — presets are resolved at build time.
+//!
+//! A preset templates the endpoint, never the model list: bingo does not
+//! filter models (D65). Narrowing what a subscription offers is the user's
+//! call, spelled `providers.<name>.models` in settings.
 
 /// One built-in subscription template.
 pub struct ProviderPreset {
@@ -16,8 +20,6 @@ pub struct ProviderPreset {
     /// OAuth flow kind (None = apiKey preset — key set via `/provider login`).
     pub oauth_kind: Option<&'static str>,
     pub supports_images: bool,
-    /// Static model allowlist (None = pull the endpoint's model list).
-    pub model_allowlist: Option<&'static [&'static str]>,
 }
 
 /// The official-subscription registry (compile-time, no IO).
@@ -29,9 +31,6 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://chatgpt.com/backend-api",
         oauth_kind: Some("codex"),
         supports_images: true,
-        // Dynamic model list (`/codex/models?client_version=…`) with a static
-        // 9-model fallback — see OpenAIProvider::list_codex_models.
-        model_allowlist: None,
     },
     ProviderPreset {
         name: "opencode-go",
@@ -40,7 +39,6 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://opencode.ai/zen/go",
         oauth_kind: None,
         supports_images: false,
-        model_allowlist: Some(&["gpt-5.6-luna"]),
     },
 ];
 

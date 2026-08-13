@@ -1403,6 +1403,8 @@ async fn model_menu_level_one_uses_picker_core() {
     s2.providers.insert(
         "deepseek".to_string(),
         crate::settings::ProviderConfig {
+            env_key: None,
+            models: None,
             api_key: Some("sk-ds".into()),
             api_base_url: "https://api.deepseek.com".into(),
             supports_images: None,
@@ -2259,6 +2261,8 @@ fn slash_provider_switch_warns_on_oauth_not_logged_in() {
     settings.providers.insert(
         "codex".to_string(),
         crate::settings::ProviderConfig {
+            env_key: None,
+            models: None,
             api_key: None,
             api_base_url: String::new(),
             supports_images: None,
@@ -2373,6 +2377,8 @@ fn slash_provider_lists_and_switches() {
     let providers = std::collections::HashMap::from([(
         "deepseek".to_string(),
         crate::settings::ProviderConfig {
+            env_key: None,
+            models: None,
             api_key: Some("sk-ds".into()),
             api_base_url: "https://api.deepseek.com".into(),
             supports_images: None,
@@ -2391,6 +2397,8 @@ fn slash_provider_lists_and_switches() {
     settings.providers.insert(
         "deepseek".to_string(),
         crate::settings::ProviderConfig {
+            env_key: None,
+            models: None,
             api_key: Some("sk-ds".into()),
             api_base_url: "https://api.deepseek.com".into(),
             supports_images: None,
@@ -2981,7 +2989,10 @@ async fn model_menu_picks_model_and_switches() {
     chat.submit();
     chat.on_key(KeyCode::Enter, KeyModifiers::empty());
     if let Some(m) = &mut chat.model_menu.as_mut().unwrap().models {
-        m.models = vec!["deepseek-v4".to_string(), "deepseek-r1".to_string()];
+        m.models = vec![
+            "deepseek-v4".to_string().into(),
+            "deepseek-r1".to_string().into(),
+        ];
         m.loading = false;
         m.selected = 1;
     }
@@ -3019,6 +3030,8 @@ async fn model_menu_esc_back_keeps_provider_list() {
         settings.providers.insert(
             name.to_string(),
             crate::settings::ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: Some(key.into()),
                 api_base_url: url.into(),
                 supports_images: None,
@@ -3077,6 +3090,8 @@ async fn provider_switch_persists_provider_and_model_menu_persists_both() {
     settings.providers.insert(
         "deepseek".to_string(),
         crate::settings::ProviderConfig {
+            env_key: None,
+            models: None,
             api_key: Some("sk-ds".into()),
             api_base_url: "https://api.deepseek.com".into(),
             supports_images: None,
@@ -3111,7 +3126,7 @@ async fn provider_switch_persists_provider_and_model_menu_persists_both() {
     );
     chat.on_key(KeyCode::Enter, KeyModifiers::empty());
     if let Some(m) = &mut chat.model_menu.as_mut().unwrap().models {
-        m.models = vec!["deepseek-v4".to_string()];
+        m.models = vec!["deepseek-v4".to_string().into()];
         m.loading = false;
     }
     chat.on_key(KeyCode::Enter, KeyModifiers::empty());
@@ -3186,7 +3201,7 @@ async fn models_loaded_preselects_current_model_and_caches() {
     });
     let m = chat.model_menu.as_ref().unwrap().models.as_ref().unwrap();
     assert_eq!(m.selected, 1, "preselects the current model");
-    assert_eq!(m.models[m.selected], "test-model");
+    assert_eq!(m.models[m.selected].id, "test-model");
     assert_eq!(
         chat.models_cache.get("default").map(Vec::as_slice),
         Some(&["m0".to_string(), "test-model".to_string(), "m2".to_string()][..]),

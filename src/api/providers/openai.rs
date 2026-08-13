@@ -52,7 +52,8 @@ fn effort_for(model: &str, level: ThinkingLevel) -> &'static str {
 /// The endpoint (one per provider instance; mirrors the anthropic adapter).
 /// Endpoint flavor: the public Responses API (default) or the ChatGPT
 /// subscription endpoint (codex variant, D33 §6.1b / Path 2): same wire
-/// format, different path + ChatGPT-Account-Id header + model allowlist.
+/// format, different path + ChatGPT-Account-Id header + its own model-list
+/// route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiVariant {
     Default,
@@ -66,17 +67,11 @@ struct Endpoint {
     variant: OpenAiVariant,
 }
 
-/// Static model allowlist (preset subscriptions): list_models returns it
-/// verbatim; None = pull the endpoint's model list (existing behavior).
-#[derive(Debug, Clone)]
-pub struct ModelAllowlist(pub Vec<String>);
-
 #[derive(Debug, Clone)]
 pub struct OpenAIProvider {
     http: reqwest::Client,
     endpoint: Arc<std::sync::RwLock<Endpoint>>,
     auth: AuthSource,
-    model_allowlist: Option<ModelAllowlist>,
 }
 
 impl OpenAIProvider {
@@ -86,7 +81,6 @@ impl OpenAIProvider {
         base_url: String,
         supports_images: bool,
         variant: OpenAiVariant,
-        model_allowlist: Option<ModelAllowlist>,
     ) -> Self {
         Self {
             http,
@@ -96,7 +90,6 @@ impl OpenAIProvider {
                 variant,
             })),
             auth,
-            model_allowlist,
         }
     }
 
@@ -130,8 +123,8 @@ impl OpenAIProvider {
         }
     }
 
-    /// The model-list path (codex short-circuits to the allowlist before
-    /// any network request).
+    /// The model-list path (the codex variant takes its own route before any
+    /// request reaches here).
     fn models_path(&self) -> &'static str {
         "/v1/models"
     }
@@ -856,10 +849,6 @@ impl ProviderClient for OpenAIProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<String>, ClientError> {
-        // Preset allowlist first (opencode-go) — /model shows only what works.
-        if let Some(list) = &self.model_allowlist {
-            return Ok(list.0.clone());
-        }
         // Codex: the subscription's model list is dynamic
         // (`GET {base}/codex/models?client_version=0.146.0`, main live-tested
         // — 9 models; a failed request falls back to the static snapshot).
@@ -1621,6 +1610,32 @@ mod codex_variant_tests {
         tp
     }
 
+    /// D65: bingo filters nothing. The default variant asks the endpoint for
+    /// its own list — which is what the opencode-go preset does now that its
+    /// one-model allowlist is gone.
+    #[tokio::test]
+    async fn default_variant_pulls_the_endpoint_model_list() {
+        let cap = spawn_capture().await;
+        let provider = OpenAIProvider::new(
+            reqwest::Client::new(),
+            AuthSource::ApiKey("sk-test".into()),
+            cap.addr.clone(),
+            false,
+            OpenAiVariant::Default,
+        );
+        assert!(
+            provider.list_models().await.is_err(),
+            "the mock endpoint answers 404"
+        );
+        let requests = cap.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "exactly one request went out");
+        assert!(
+            requests[0].0.starts_with("GET /v1/models"),
+            "got {}",
+            requests[0].0
+        );
+    }
+
     /// Codex variant: POST goes to /codex/responses with the bearer + the
     /// ChatGPT-Account-Id header from JWT claims.
     #[tokio::test]
@@ -1635,7 +1650,6 @@ mod codex_variant_tests {
             cap.addr.clone(),
             false,
             OpenAiVariant::Codex,
-            None,
         );
         let request = NeutralRequest {
             model: "gpt-5.5".into(),
@@ -1688,7 +1702,6 @@ mod codex_variant_tests {
             addr,
             false,
             OpenAiVariant::Codex,
-            None,
         );
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 9, "dynamic list of 9 models");
@@ -1751,7 +1764,6 @@ mod codex_variant_tests {
             "http://127.0.0.1:9".into(),
             false,
             OpenAiVariant::Codex,
-            None,
         );
         let models = provider.list_models().await.unwrap();
         assert_eq!(
@@ -1788,7 +1800,6 @@ mod codex_variant_tests {
             addr,
             false,
             OpenAiVariant::Codex,
-            None,
         );
         let request = NeutralRequest {
             model: "gpt-5.5".into(),
@@ -1839,7 +1850,6 @@ mod codex_variant_tests {
             cap.addr.clone(),
             false,
             OpenAiVariant::Default,
-            None,
         );
         let request = NeutralRequest {
             model: "gpt-5".into(),

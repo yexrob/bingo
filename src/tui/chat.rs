@@ -161,69 +161,7 @@ pub fn model_footer_label(model: &str, thinking: Option<&str>) -> String {
     }
 }
 
-/// `/model` two-level selector state: level one = endpoint list, level two = that endpoint's models
-/// (fetched async from `/v1/models`; shows known models + loading until the fetch completes).
-#[derive(Clone)]
-pub struct ModelMenu {
-    /// Level-one list: `default` (top-level config) + settings.providers names.
-    pub providers: Vec<String>,
-    /// Level-one descriptions (same source as /provider: URL + auth state + protocol).
-    pub provider_descs: Vec<String>,
-    pub provider_selected: usize,
-    /// The current provider's position in the level-one list (●; picker-model.md commit E).
-    pub provider_current: Option<usize>,
-    /// Level-two model list (None = still on level one).
-    pub models: Option<ModelMenuModels>,
-}
-
-impl ModelMenu {
-    /// Level-one list → the PickerModel core (shared row rendering / key dispatch; two-level + async stays in the shell).
-    pub fn provider_picker(&self) -> crate::tui::picker::PickerModel {
-        crate::tui::picker::PickerModel::new(
-            self.providers
-                .iter()
-                .enumerate()
-                .map(|(i, p)| {
-                    crate::tui::picker::PickerItem::new(
-                        p.clone(),
-                        p.clone(),
-                        self.provider_descs.get(i).cloned().unwrap_or_default(),
-                    )
-                })
-                .collect(),
-            self.provider_selected,
-            self.provider_current,
-        )
-    }
-}
-
-#[derive(Clone)]
-pub struct ModelMenuModels {
-    pub provider: String,
-    /// Loaded models (filled in asynchronously; may be incomplete).
-    pub models: Vec<String>,
-    pub loading: bool,
-    pub selected: usize,
-    /// The currently active model's position in the list (● marker; computed on load).
-    pub current: Option<usize>,
-    /// The fetch failure reason (shown in the menu; None = success or not finished).
-    pub failed: Option<String>,
-}
-
-impl ModelMenuModels {
-    /// Level-two list → the PickerModel core (●/❯ dual markers, windowed rendering, number jump — the same
-    /// conventions as the /provider selectors; the old hand-rolled rendering lacked these).
-    pub fn picker(&self) -> crate::tui::picker::PickerModel {
-        crate::tui::picker::PickerModel::new(
-            self.models
-                .iter()
-                .map(|m| crate::tui::picker::PickerItem::new(m.clone(), m.clone(), String::new()))
-                .collect(),
-            self.selected,
-            self.current,
-        )
-    }
-}
+use crate::tui::model_menu::ModelMenu;
 
 /// `/think` single-level selector state (level table = off + [`crate::api::contract::THINKING_LEVELS`]).
 ///
@@ -1222,8 +1160,10 @@ impl Chat {
         let motion_off = session.settings.motion.as_deref() == Some("off")
             || std::env::var_os("BINGO_NO_MOTION").is_some();
         let chat_avatars = session.settings.experimental.chat_avatars;
-        let context_window =
-            crate::budget::context_window_for(&session.runtime.model.borrow().clone());
+        let context_window = crate::budget::context_window_for(
+            &session.client.models(),
+            &session.runtime.model.borrow().clone(),
+        );
         let context_tokens = session
             .runtime
             .transcript
@@ -1390,33 +1330,7 @@ impl Chat {
                 provider,
                 models,
                 failed,
-            } => {
-                // Cache only successful fetches (/model <name> validation +
-                // no re-fetch on re-entry) — a cached failure would poison
-                // the advisory check and the re-entry fast path.
-                if failed.is_none() && !models.is_empty() {
-                    self.models_cache.insert(provider.clone(), models.clone());
-                }
-                if let Some(menu) = &mut self.model_menu
-                    && let Some(m) = &mut menu.models
-                    && m.provider == provider
-                {
-                    m.models = models;
-                    m.loading = false;
-                    m.failed = failed;
-                    // P1-F: when the current provider and current model are in the list, preselect it —
-                    // the counterpart of /think preselecting the current level; browsing must not switch.
-                    let current_provider = self.session.runtime.provider.borrow().clone();
-                    let current_model = self.session.runtime.model.borrow().clone();
-                    let current = if m.provider == current_provider {
-                        m.models.iter().position(|name| *name == current_model)
-                    } else {
-                        None
-                    };
-                    m.current = current;
-                    m.selected = current.unwrap_or(0).min(m.models.len().saturating_sub(1));
-                }
-            }
+            } => self.apply_models_loaded(provider, models, failed),
             UiEvent::ImageReady { url, meta } => {
                 self.images_pending.remove(&url);
                 match meta {
@@ -2641,15 +2555,17 @@ impl Chat {
 
     fn reset_context_usage(&mut self) {
         let model = self.session.runtime.model.borrow().clone();
-        self.context_usage =
-            crate::context_usage::ContextUsage::new(0, crate::budget::context_window_for(&model));
+        self.context_usage = crate::context_usage::ContextUsage::new(
+            0,
+            crate::budget::context_window_for(&self.session.client.models(), &model),
+        );
     }
 
     fn estimate_context_usage(&mut self, messages: &[crate::api::types::Message]) {
         let model = self.session.runtime.model.borrow().clone();
         self.context_usage = crate::context_usage::ContextUsage::new(
             crate::compact::estimate_tokens(&self.session.system, messages, &[]),
-            crate::budget::context_window_for(&model),
+            crate::budget::context_window_for(&self.session.client.models(), &model),
         );
     }
 
@@ -2719,7 +2635,7 @@ impl Chat {
     }
 
     /// Switches the runtime model and persists it as the default (same path as /theme /think: writes the project layer).
-    fn set_model(&mut self, model: String) {
+    pub(crate) fn set_model(&mut self, model: String) {
         if self.busy {
             self.push_slash_error(
                 "[error] code=BUSY msg=cannot switch models mid-turn (press Esc to interrupt, then retry)"
@@ -2731,10 +2647,13 @@ impl Chat {
         // (advisory, non-blocking; the endpoint may have just shipped a new model or the cache may never have been pulled — typing it directly is still
         // a valid path). Merged into one line with the success note, to avoid the jarring "⚠ and ✓ together".
         let provider = self.session.runtime.provider.borrow().clone();
-        let unknown = self
-            .models_cache
-            .get(&provider)
-            .is_some_and(|known| !known.is_empty() && !known.contains(&model));
+        let unknown = match self.session.client.declared_models(&provider) {
+            Some(declared) => !declared.iter().any(|entry| entry.id == model),
+            None => self
+                .models_cache
+                .get(&provider)
+                .is_some_and(|known| !known.is_empty() && !known.contains(&model)),
+        };
         let _ = self.session.runtime.model_tx.send(model.clone());
         self.refresh_context_usage_from_transcript();
         self.provider_models.insert(provider.clone(), model.clone());
@@ -2784,254 +2703,6 @@ impl Chat {
         }
         names.extend(user_names);
         names
-    }
-
-    /// Enters the `/model` two-level selector: level one = current endpoint + configured providers
-    /// (with the same endpoint/auth descriptions as /provider — it is the same list).
-    fn open_model_menu(&mut self) {
-        self.close_menus();
-        let providers = self.provider_order();
-        let provider_descs = providers.iter().map(|p| self.provider_desc(p)).collect();
-        let current = self.session.runtime.provider.borrow().clone();
-        let selected = providers.iter().position(|p| *p == current).unwrap_or(0);
-        self.model_menu = Some(ModelMenu {
-            providers,
-            provider_descs,
-            provider_selected: selected,
-            provider_current: Some(selected),
-            models: None,
-        });
-        self.clear_slash_suggestions();
-    }
-
-    /// Level-one Enter: asynchronously fetches the model list from that provider endpoint (forks the
-    /// endpoint, without switching the current one); results arrive via the ModelsLoaded event. The
-    /// level-one list (providers + provider_selected) is kept as-is: Esc back to level one doesn't lose it.
-    fn open_model_models(
-        &mut self,
-        provider: String,
-        providers: Vec<String>,
-        provider_descs: Vec<String>,
-        provider_selected: usize,
-    ) {
-        // P2-G cache: this session already fetched the list → reuse it
-        // (the field's comment promised this; the fetch never did).
-        if let Some(models) = self
-            .models_cache
-            .get(&provider)
-            .filter(|m| !m.is_empty())
-            .cloned()
-        {
-            let current_model = self.session.runtime.model.borrow().clone();
-            let current_provider = self.session.runtime.provider.borrow().clone();
-            let current = (provider == current_provider)
-                .then(|| models.iter().position(|m| *m == current_model))
-                .flatten();
-            self.model_menu = Some(ModelMenu {
-                providers,
-                provider_descs,
-                provider_selected,
-                provider_current: None,
-                models: Some(ModelMenuModels {
-                    provider,
-                    selected: current.unwrap_or(0).min(models.len().saturating_sub(1)),
-                    models,
-                    loading: false,
-                    current,
-                    failed: None,
-                }),
-            });
-            return;
-        }
-        let session = self.session.clone();
-        let events = self.events.clone();
-        let provider_for_spawn = provider.clone();
-        tokio::spawn(async move {
-            // Unknown names must error — the old fallback silently listed the
-            // CURRENT endpoint's models under the wrong provider label.
-            let client = match session.client.with_provider(&provider_for_spawn) {
-                Ok(c) => c,
-                Err(e) => {
-                    // Same visibility contract as a fetch failure: page-level
-                    // error row + in-menu reason.
-                    let _ = events.send(UiEvent::Error {
-                        code: "GENERIC",
-                        msg: e.clone(),
-                        level: crate::error::ErrorLevel::Page,
-                        context: crate::error::ErrorContext::ShortSync,
-                    });
-                    let _ = events.send(UiEvent::ModelsLoaded {
-                        provider: provider_for_spawn,
-                        models: Vec::new(),
-                        failed: Some(e),
-                    });
-                    return;
-                }
-            };
-            let (models, failed) = match client.list_models().await {
-                Ok(m) => (m, None),
-                Err(e) => {
-                    let code = crate::error::map_error(&e);
-                    // #18/main #91: short-op failures must be visible (page-level error row, error color),
-                    // behavior keeps degrading gracefully — "degraded + visible".
-                    let _ = events.send(UiEvent::Error {
-                        code,
-                        msg: e.to_string(),
-                        level: crate::error::ErrorLevel::Page,
-                        context: crate::error::ErrorContext::ShortSync,
-                    });
-                    // In-menu reason: a 401 is an auth problem, not "the
-                    // endpoint returned no models".
-                    let reason = if code == "AUTH_REQUIRED" {
-                        format!(
-                            "authentication failed: {} credentials invalid or not logged in (/provider login {})",
-                            provider_for_spawn, provider_for_spawn
-                        )
-                    } else {
-                        format!("fetch failed ({code})")
-                    };
-                    (Vec::new(), Some(reason))
-                }
-            };
-            let _ = events.send(UiEvent::ModelsLoaded {
-                provider: provider_for_spawn,
-                models,
-                failed,
-            });
-        });
-        // The menu was taken out by the Enter branch — rebuild the level-two state here (level-one list kept).
-        self.model_menu = Some(ModelMenu {
-            providers,
-            provider_descs,
-            provider_selected,
-            provider_current: None,
-            models: Some(ModelMenuModels {
-                provider,
-                models: Vec::new(),
-                loading: true,
-                selected: 0,
-                current: None,
-                failed: None,
-            }),
-        });
-    }
-
-    /// Model menu keys: ↑↓ move, Enter goes to level two / confirms, Esc exits. Returns whether consumed.
-    pub(crate) fn model_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        let Some(menu) = &mut self.model_menu else {
-            return false;
-        };
-        match code {
-            KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(m) = &mut menu.models {
-                    // Level two uses the same PickerModel core (windowed rendering follows selected).
-                    let mut core = m.picker();
-                    core.move_selection(1);
-                    m.selected = core.selected;
-                } else {
-                    // Level one: delegates to the PickerModel core (picker-model.md commit E).
-                    let mut core = menu.provider_picker();
-                    core.move_selection(1);
-                    menu.provider_selected = core.selected;
-                }
-                true
-            }
-            KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(m) = &mut menu.models {
-                    let mut core = m.picker();
-                    core.move_selection(-1);
-                    m.selected = core.selected;
-                } else {
-                    let mut core = menu.provider_picker();
-                    core.move_selection(-1);
-                    menu.provider_selected = core.selected;
-                }
-                true
-            }
-            // Number jump: applies to both levels; out-of-range is swallowed (digits leaking into the input was once a half-modal boundary bug).
-            KeyCode::Char(c)
-                if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                let n = c.to_digit(10).map(|n| n as usize).unwrap_or(0);
-                if let Some(m) = &mut menu.models {
-                    let mut core = m.picker();
-                    if core.jump(n) {
-                        m.selected = core.selected;
-                    }
-                } else {
-                    let mut core = menu.provider_picker();
-                    if core.jump(n) {
-                        menu.provider_selected = core.selected;
-                    }
-                }
-                true
-            }
-            KeyCode::Enter => {
-                let Some(menu) = self.model_menu.take() else {
-                    return true;
-                };
-                let Some(m) = menu.models else {
-                    // Level one: go to level two and fetch the model list asynchronously (level-one list kept).
-                    let provider = menu
-                        .providers
-                        .get(menu.provider_selected)
-                        .cloned()
-                        .unwrap_or_default();
-                    self.open_model_models(
-                        provider,
-                        menu.providers,
-                        menu.provider_descs,
-                        menu.provider_selected,
-                    );
-                    return true;
-                };
-                // Level two: confirm the selected model. Keep the menu when the list is empty (fetch failed/none returned).
-                let provider = m.provider.clone();
-                let model = m.models.get(m.selected).cloned().unwrap_or_default();
-                if model.is_empty() {
-                    self.model_menu = Some(ModelMenu {
-                        providers: menu.providers,
-                        provider_descs: menu.provider_descs,
-                        provider_selected: menu.provider_selected,
-                        provider_current: menu.provider_current,
-                        models: Some(m),
-                    });
-                    return true;
-                }
-                // provider+model is an atomic selection: confirming across endpoints goes through the same
-                // switch_provider (login warnings, the busy guard, and paired persistence all live there),
-                // the old bypass dropped every provider-side notice (audit A3).
-                self.provider_models.insert(provider.clone(), model.clone());
-                if provider != self.session.runtime.provider.borrow().clone() {
-                    self.switch_provider(&provider, true);
-                    if *self.session.runtime.provider.borrow() != provider {
-                        // Switch refused (busy / unknown): keep the menu alive.
-                        self.model_menu = Some(ModelMenu {
-                            providers: menu.providers,
-                            provider_descs: menu.provider_descs,
-                            provider_selected: menu.provider_selected,
-                            provider_current: menu.provider_current,
-                            models: Some(m),
-                        });
-                    }
-                } else {
-                    self.set_model(model);
-                }
-                true
-            }
-            KeyCode::Esc => {
-                // Level two → back to level one; level one → exit entirely (returns one level at a time).
-                if let Some(menu) = self.model_menu.as_mut()
-                    && menu.models.is_some()
-                {
-                    menu.models = None;
-                } else {
-                    self.model_menu = None;
-                }
-                true
-            }
-            _ => false,
-        }
     }
 
     /// `/theme [dark|light|auto]`: no argument opens the level selector (picker-model.md commit B);
@@ -3524,7 +3195,10 @@ impl Chat {
             }
             let _ = events.send(UiEvent::ContextUsage {
                 used: crate::compact::estimate_tokens(&session.system, &messages, &[]),
-                window: crate::budget::context_window_for(&session.runtime.model.borrow().clone()),
+                window: crate::budget::context_window_for(
+                    &session.client.models(),
+                    &session.runtime.model.borrow().clone(),
+                ),
             });
             unpin();
             let _ = events.send(UiEvent::SlashInfo(format!(
@@ -3590,10 +3264,11 @@ impl Chat {
             .map(|t| t.name())
             .unwrap_or_else(|| "none".to_string());
         let mode = session.permission_mode_str().to_string();
+        let models = session.client.models();
         self.slash_stats_async(move |msg_count, tokens| {
             // Window/percentage measured with the model actually in use — the
             // fixed 200k constant misread every non-Claude endpoint.
-            let window = crate::budget::context_window_for(&model).max(1);
+            let window = crate::budget::context_window_for(&models, &model).max(1);
             format!(
                 "Model: {model}\nProvider: {provider}\nThinking: {thinking_shown}\nPermission mode: {mode}\nSession: {transcript_name}\nMessages: {msg_count}\nContext: {tokens} tokens / {window} ({}%)",
                 tokens * 100 / window
@@ -3707,15 +3382,16 @@ impl Chat {
 
     fn slash_context(&mut self) {
         let model = self.session.runtime.model.borrow().clone();
+        let models = self.session.client.models();
         self.slash_stats_async(move |_msg_count, tokens| {
-            let window = crate::budget::context_window_for(&model).max(1);
+            let window = crate::budget::context_window_for(&models, &model).max(1);
             let pct = tokens * 100 / window;
             let bar_len = 40usize;
             let filled = ((pct as usize * bar_len) / 100).min(bar_len);
             let bar = format!("{}·{}", "#".repeat(filled), "·".repeat(bar_len - filled));
             format!(
                 "context: [{bar}] {pct}%\n{tokens} / {window} tokens used\nauto-compaction threshold: {}%",
-                crate::budget::autocompact_threshold_for(&model) * 100 / window
+                crate::budget::autocompact_threshold_for(&models, &model) * 100 / window
             )
         });
     }

@@ -26,6 +26,7 @@ mod hooks;
 mod json_events;
 mod mcp;
 mod memory;
+mod model_cache;
 mod permission;
 mod platform;
 mod preapproved;

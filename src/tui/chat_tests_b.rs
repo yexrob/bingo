@@ -3470,6 +3470,8 @@ fn switch_provider_resolves_model_atomically() {
     settings.providers.insert(
         "deepseek".to_string(),
         crate::settings::ProviderConfig {
+            env_key: None,
+            models: None,
             api_key: Some("sk-ds".into()),
             api_base_url: "https://api.deepseek.com".into(),
             supports_images: None,

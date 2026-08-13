@@ -60,6 +60,10 @@ pub struct Settings {
     /// Default model (`model`): persisted here by /model selections.
     /// Precedence: `--model` > settings (user < project < local) > built-in default.
     pub model: Option<String>,
+    /// Declared model list of the default provider (`models`), same shape as
+    /// `providers.<name>.models`.
+    #[serde(default)]
+    pub models: Option<Vec<ModelEntry>>,
     /// Whether the default provider sends image attachments to the model (`sendImages`).
     /// Named providers use their own `supportsImages`. None = send: both protocols carry image
     /// blocks, so this is an opt-out for endpoints that speak the protocol but reject them.
@@ -181,6 +185,64 @@ pub struct ProviderConfig {
     /// None/default = send — set false to opt an endpoint out).
     #[serde(rename = "supportsImages", default)]
     pub supports_images: Option<bool>,
+    /// Environment variable holding the API key (`envKey`, D65): keeps the key
+    /// out of a committed project config. Credential order: `apiKey` > this
+    /// variable > the existing mechanisms (auth.json stored key / OAuth).
+    #[serde(rename = "envKey", default)]
+    pub env_key: Option<String>,
+    /// Declared model list (`models`, D65). Declared means authoritative: the
+    /// `/model` menu shows exactly these, with no request to the endpoint.
+    /// Absent = the list is pulled from the endpoint (and disk-cached).
+    #[serde(default)]
+    pub models: Option<Vec<ModelEntry>>,
+}
+
+/// One declared model: either a bare id or an object carrying the metadata
+/// the prefix table would otherwise have to guess (D65).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum ModelEntry {
+    Id(String),
+    Detailed {
+        id: String,
+        /// Menu label (defaults to the id).
+        #[serde(default)]
+        display: Option<String>,
+        #[serde(rename = "contextWindow", default)]
+        context_window: Option<u64>,
+        #[serde(default)]
+        thinking: Option<bool>,
+    },
+}
+
+impl ModelEntry {
+    pub fn id(&self) -> &str {
+        match self {
+            ModelEntry::Id(id) => id,
+            ModelEntry::Detailed { id, .. } => id,
+        }
+    }
+
+    pub fn display(&self) -> Option<&str> {
+        match self {
+            ModelEntry::Id(_) => None,
+            ModelEntry::Detailed { display, .. } => display.as_deref(),
+        }
+    }
+
+    pub fn context_window(&self) -> Option<u64> {
+        match self {
+            ModelEntry::Id(_) => None,
+            ModelEntry::Detailed { context_window, .. } => *context_window,
+        }
+    }
+
+    pub fn thinking(&self) -> Option<bool> {
+        match self {
+            ModelEntry::Id(_) => None,
+            ModelEntry::Detailed { thinking, .. } => *thinking,
+        }
+    }
 }
 
 /// OAuth provider config (`providers.<name>.oauth`, D33).
@@ -307,6 +369,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     if let Some(model) = layer.model {
         base.model = Some(model);
     }
+    if let Some(models) = layer.models {
+        base.models = Some(models);
+    }
     if let Some(v) = layer.send_images {
         base.send_images = Some(v);
     }
@@ -407,6 +472,7 @@ pub const KNOWN_KEYS: &[&str] = &[
     "providers",
     "provider",
     "model",
+    "models",
     "sendImages",
     "thinkingLevel",
     "permissionMode",
@@ -654,9 +720,12 @@ mod tests {
             "apiBaseUrl": "https://full.example",
             "providers": {"p": {"apiKey": "sk-p", "apiBaseUrl": "https://p.example",
                                 "protocol": "openai", "oauth": {"kind": "codex"},
-                                "supportsImages": true}},
+                                "supportsImages": true, "envKey": "P_KEY",
+                                "models": ["a", {"id": "b", "display": "B",
+                                                 "contextWindow": 1024, "thinking": false}]}},
             "provider": "p",
             "model": "model-full",
+            "models": [{"id": "top", "contextWindow": 2048}],
             "sendImages": true,
             "thinkingLevel": "high",
             "permissionMode": "plan",
@@ -944,6 +1013,77 @@ mod tests {
         assert_eq!(road.api_base_url, "https://sub2apis.ruobin.dev/");
     }
 
+    /// D65 settings v3: `models` accepts bare ids and objects in one list,
+    /// `envKey` names the variable holding the key. Both additive — the v1/v2
+    /// fixtures above parse unchanged.
+    #[test]
+    fn parses_declared_models_and_env_key() {
+        let json = r#"{
+            "models": ["claude-sonnet-5"],
+            "providers": {
+                "proxy": {
+                    "apiBaseUrl": "https://proxy.example",
+                    "protocol": "openai",
+                    "envKey": "MY_PROXY_API_KEY",
+                    "models": [
+                        "gpt-5.6-sol",
+                        {"id": "deepseek-v4", "display": "DeepSeek V4",
+                         "contextWindow": 131072, "thinking": false},
+                        {"id": "bare-object"}
+                    ]
+                }
+            }
+        }"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            settings.models.as_ref().map(|m| m[0].id()),
+            Some("claude-sonnet-5"),
+            "the top level declares the default provider's models"
+        );
+        let proxy = settings.providers.get("proxy").unwrap();
+        assert_eq!(proxy.env_key.as_deref(), Some("MY_PROXY_API_KEY"));
+        let models = proxy.models.as_ref().unwrap();
+        assert_eq!(models.len(), 3);
+        // Bare string entry: id only, everything else falls back.
+        assert_eq!(models[0].id(), "gpt-5.6-sol");
+        assert_eq!(models[0].display(), None);
+        assert_eq!(models[0].context_window(), None);
+        assert_eq!(models[0].thinking(), None);
+        // Object entry: all four fields carried.
+        assert_eq!(models[1].id(), "deepseek-v4");
+        assert_eq!(models[1].display(), Some("DeepSeek V4"));
+        assert_eq!(models[1].context_window(), Some(131_072));
+        assert_eq!(models[1].thinking(), Some(false));
+        // Object with only `id` behaves like the bare string.
+        assert_eq!(models[2].id(), "bare-object");
+        assert_eq!(models[2].context_window(), None);
+    }
+
+    /// Provider entries are replaced whole, not merged field by field: a later
+    /// layer restating a provider must restate its models too (documented
+    /// semantics — the same rule that already governs apiKey/apiBaseUrl).
+    #[test]
+    fn provider_layers_replace_declared_models_wholesale() {
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-settings-{}-models", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write(
+            &tmp,
+            "user/bingo/settings.json",
+            r#"{"providers":{"p":{"apiKey":"k","models":["a","b"]}}}"#,
+        );
+        write(
+            &tmp,
+            ".bingo/settings.json",
+            r#"{"providers":{"p":{"apiKey":"k","models":["c"]}}}"#,
+        );
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        let models = settings.providers["p"].models.as_ref().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id(), "c", "project replaces the user entry whole");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// An apiKey-less oauth config parses successfully (main-verified bug regression, D33 §5):
     /// `apiKey` may be omitted; OAuth providers carry no static key.
     #[test]
@@ -987,6 +1127,8 @@ mod tests {
         settings.providers.insert(
             "bogus".to_string(),
             ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: Some("k".into()),
                 api_base_url: String::new(),
                 protocol: Some("chatgpt".into()),

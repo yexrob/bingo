@@ -33,6 +33,7 @@ pub mod keys;
 pub mod line;
 pub mod markdown;
 pub mod math;
+pub mod model_menu;
 pub mod picker;
 pub mod slack;
 #[cfg(test)]

@@ -58,7 +58,8 @@ Three config layers, shallow-merged; the later one overrides:
 |---|---|---|
 | `apiKey` | string | API key (settings take precedence over `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`); prefer the user layer — the project layer gets committed to the repo |
 | `apiBaseUrl` | string | API endpoint (settings take precedence over `ANTHROPIC_BASE_URL`; defaults to the official one) |
-| `providers` | object | Named providers: `{name: {protocol?, apiKey, apiBaseUrl?, supportsImages?, oauth?}}`, switch via `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, `Authorization: Bearer`; `apiBaseUrl` defaults to `https://api.openai.com`); an empty/absent `apiBaseUrl` falls back to the protocol default; unknown protocols are a config error at startup. `oauth: {kind: "codex"}` enables OAuth login (apiKey wins over OAuth); the codex flow (device / loopback PKCE) is `chatgpt.com`-subscription auth, tokens stored in `~/.local/share/bingo/auth.json` (0600, never in the committed settings) |
+| `providers` | object | Named providers: `{name: {protocol?, apiKey?, envKey?, apiBaseUrl?, supportsImages?, oauth?, models?}}`, switch via `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, `Authorization: Bearer`; `apiBaseUrl` defaults to `https://api.openai.com`); an empty/absent `apiBaseUrl` falls back to the protocol default; unknown protocols are a config error at startup. `envKey` names an environment variable holding the key — credential order is `apiKey` > `envKey` > stored key / OAuth, so a project layer can reference a key without containing one. `oauth: {kind: "codex"}` enables OAuth login (apiKey wins over OAuth); the codex flow (device / loopback PKCE) is `chatgpt.com`-subscription auth, tokens stored in `~/.local/share/bingo/auth.json` (0600, never in the committed settings) |
+| `models` | array | The default provider's model list; per-provider under `providers.<name>.models`. Entries are model ids (`"gpt-5.6-sol"`) or objects (`{id, display?, contextWindow?, thinking?}`). Declaring is authoritative: `/model` lists exactly these with no request, and the declared `contextWindow`/`thinking` outrank the built-in metadata table. Providers that declare nothing pull the endpoint's own list, cached in `~/.local/share/bingo/models-cache.json` for 24h (`r` in the menu re-asks). bingo never filters an endpoint's models itself |
 | `provider` | string | Current provider (persisted by `/provider` and the /model menu; default `"default"` = top-level `apiKey`/`apiBaseUrl`); restored at startup, an invalid name falls back to default with a warning |
 | `sendImages` | bool | Whether the default endpoint sends message-box image attachments to the model (named providers use their own `supportsImages`). Both protocols carry image blocks, so this defaults to **true** — set `false` to opt out an endpoint that speaks the protocol but rejects images (some compat proxies) |
 | `thinkingLevel` | string | Thinking level: `off` sends no thinking param (DeepSeek-compatible, default); `low`/`medium`/`high`/`xhigh`/`max` send `{"type":"adaptive"}` adaptive thinking plus `output_config.effort` (the Claude 5 family removed budget_tokens; below `high` saves tokens, `xhigh`/`max` think deeper) |
@@ -99,7 +100,7 @@ Example (.bingo/settings.json):
 
 ## Slash command quick reference
 
-`/help` for the full list. Common ones: `/model [name]` (no args: two-level picker — level 1 providers → level 2 model list; with a name: switch directly, validated against the known list when available),
+`/help` for the full list. Common ones: `/model [name]` (no args: two-level picker — level 1 providers → level 2 model list, which comes from the settings `models` declaration when there is one, otherwise the endpoint; `r` re-asks a fetched list; with a name: switch directly, validated against the known list when available),
 `/provider [name]` (no args: picker — ● current, s = session-only, Enter persists; with a name: switch directly), `/provider login <name> [--device-auth|--manual <token>]` (OAuth login: default opens the browser; `--device-auth` prints URL + code and polls for headless/SSH; `--manual` stores a pasted token), `/provider logout <name>` (revokes + clears),
 `/think [off|low|medium|high|xhigh|max]` (thinking level, persists to settings; no arg opens the level picker: ●=in effect, ↑↓/1-6 to browse, Enter confirms, Esc cancels), `/theme [dark|light|auto]` (no arg opens the level picker; the `/theme auto` explicit shortcut stays),
 `/cd <dir>` (switch the working directory for this session; relative paths resolve from the current session directory),
@@ -207,8 +208,8 @@ Example (.bingo/settings.json):
   settings; `apiKey` in settings wins over OAuth; refresh is automatic (eager 5 min before expiry + on 401),
   permanent refresh failures clear the login and prompt `/provider login <name>` again. Codex providers route to
   `https://chatgpt.com/backend-api/codex/responses` (Responses wire format, same adapter; `ChatGPT-Account-Id`
-  header from the JWT claims; `/model` shows the subscription allowlist: gpt-5.5 / gpt-5.3-codex-spark /
-  gpt-5.4 / gpt-5.4-mini).
+  header from the JWT claims; `/model` pulls the subscription's own model list, falling back to a
+  static snapshot when that request fails — bingo never narrows the list itself).
 - **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
   experience index is injected (≤10 entries, ranked by observed outcomes before the legacy commit count; nothing injected when empty); full text is searched with ExperienceQuery by
   trigger tokens (case-insensitive, shared-prefix tolerant; active first);

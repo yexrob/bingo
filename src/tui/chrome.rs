@@ -12,11 +12,11 @@ use ratatui::style::Color;
 
 use crate::permission::PermissionMode;
 use crate::tui::chat::{
-    Chat, ModelMenu, ProviderMenu, ResumeMenu, Row, SlashSuggestion, ThemeMenu, ThinkMenu,
-    model_footer_label,
+    Chat, ProviderMenu, ResumeMenu, Row, SlashSuggestion, ThemeMenu, ThinkMenu, model_footer_label,
 };
 use crate::tui::el::El;
 use crate::tui::line::{Line, SegStyle, text_width};
+use crate::tui::model_menu::ModelMenu;
 use crate::tui::theme::Theme;
 
 /// The currently active selector menu (mutually exclusive: at most one at any time; rendering groups reads of the shell by this).
@@ -274,7 +274,11 @@ fn suggestion_rows(
             return note(format!("… fetching {}'s model list", m.provider));
         }
         // Failure reasons are attributed honestly (a 401 used to be swallowed as "the endpoint returned no models").
-        if let Some(reason) = &m.failed {
+        // A failure with a list still shows the list: that is the cached one,
+        // stale but usable — degraded and visible, never silently empty.
+        if let Some(reason) = &m.failed
+            && m.models.is_empty()
+        {
             let mut rows = note(reason.clone());
             rows.push(Row::new(Line::styled(
                 "  Esc goes back up",
@@ -287,8 +291,18 @@ fn suggestion_rows(
         }
         let core = m.picker();
         let mut rows = core.window_rows(crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5, width, theme);
+        if let Some(reason) = &m.failed {
+            rows.push(Row::new(Line::styled(
+                crate::tui::markdown::truncate(
+                    &format!("  ⚠ {reason}; showing the last known list"),
+                    width.saturating_sub(2),
+                ),
+                SegStyle::fg(theme.permission),
+            )));
+        }
+        let refresh = if m.declared { "" } else { " · r refreshes" };
         let hint = format!(
-            "↑↓ select · Enter confirms and saves · 1-{} jumps · Esc goes back up",
+            "↑↓ select · Enter confirms and saves · 1-{} jumps{refresh} · Esc goes back up",
             core.items.len().min(9)
         );
         rows.push(Row::new(Line::styled(
@@ -648,7 +662,8 @@ mod tests {
     /// overflowing the canvas).
     #[test]
     fn suggestion_rows_cover_every_menu_state() {
-        use crate::tui::chat::{ModelMenuModels, SlashSuggestion, THINK_LEVELS, ThinkMenu};
+        use crate::tui::chat::{SlashSuggestion, THINK_LEVELS, ThinkMenu};
+        use crate::tui::model_menu::{ModelChoice, ModelMenuModels};
         let theme = Theme::dark();
         let mut menu = ModelMenu {
             providers: vec!["default".into(), "openrouter".into()],
@@ -696,6 +711,7 @@ mod tests {
             selected: 0,
             current: None,
             failed: None,
+            declared: false,
         });
         assert_eq!(
             suggestion_rows(
@@ -722,6 +738,7 @@ mod tests {
             selected: 0,
             current: None,
             failed: None,
+            declared: false,
         });
         assert_eq!(
             suggestion_rows(
@@ -749,6 +766,7 @@ mod tests {
             selected: 0,
             current: None,
             failed: Some("authentication failed: default credentials invalid or not logged in (/provider login default)".into()),
+            declared: false,
         });
         let failed_rows = suggestion_rows(
             &[],
@@ -775,11 +793,14 @@ mod tests {
         // stay reachable by moving the selection.
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
-            models: (0..30).map(|i| format!("m{i}")).collect(),
+            models: (0..30)
+                .map(|i| ModelChoice::from(format!("m{i}")))
+                .collect(),
             loading: false,
             selected: 0,
             current: Some(0),
             failed: None,
+            declared: false,
         });
         assert_eq!(
             suggestion_rows(
