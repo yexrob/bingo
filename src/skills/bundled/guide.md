@@ -123,10 +123,12 @@ Example (.bingo/settings.json):
    current endpoint.
 2. **Model request fails/times out**: `/status` shows the current model; `/model` switches it; with multiple providers use
    `/provider <name>` (the settings `providers` section); `/context` shows usage —
-   when close to the context window, `/compact` (auto-compaction threshold = 90% of the effective window
-   (200k − 64k output budget) ≈ 122k, about 61% of the total window). Endpoints without a
+   when close to the context window, `/compact` (auto-compaction threshold = 90% of the effective window,
+   which is the model's window minus its own output budget: 200k − 64k ≈ 122k for Claude,
+   128k − 8k → 108k for DeepSeek, and a declared `maxTokens` sets it for any other model). Endpoints without a
    count_tokens API (DeepSeek/ollama; OpenAI-protocol providers — `count_tokens` is Anthropic-only)
-   automatically fall back to local estimation (characters/4), with a one-time warning on first fallback.
+   automatically fall back to local estimation (ASCII ≈ 4 characters per token, CJK ≈ 1 token per character,
+   an image a flat 1600), with a one-time warning on first fallback.
    If that estimate is low and either wire protocol rejects a request as a context overflow, bingo compacts
    the history and retries the rejected request once; a second overflow ends the turn instead of looping.
    If an upstream response completes without assistant content or tool calls (including an unclosed thinking block),

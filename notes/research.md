@@ -783,3 +783,57 @@ and write degrades silently to "no cache"; a corrupt file must never cost a star
 holding its key (`apiKey` > `envKey` > auth.json stored key / OAuth). It resolves in
 `Client::build`, before the adapter, so `auth_status`, `is_configured` and the JSON protocol's
 `providers.result` cannot disagree about whether a provider is usable (#43's failure mode).
+
+### D65. One output budget per model, and compaction that reports itself
+
+A review of the auto-compaction path found six defects that share two roots.
+
+**Root one: one number stood for every model's output budget.** `DEFAULT_MAX_TOKENS` (64k) was both
+sent on the wire and subtracted from every context window to get the effective input window. For
+Claude that is right by construction. For anything else it is a guess that fails in both
+directions: DeepSeek's real ceiling is 8k, so 56k of its input window was reserved for output it
+cannot produce; and a model declared with `contextWindow: 32768` (D64 made that declarable, so the
+guess became reachable) had an effective window of exactly 0 — threshold 0, compaction on every
+turn past `KEEP_RECENT`, and a request that 400d anyway for asking 64k of output from a 32k model.
+
+`ModelMeta` therefore carries `max_tokens` alongside `context_window`, resolved by the same three
+tiers, field by field (`maxTokens` in a `models` entry → prefix table → default). `budget::max_tokens_for`
+clamps the resolved value to **half the window** and is the single source for both the wire
+parameter and the reserved headroom, so `effective >= window / 2` holds for any declaration a user
+can write and the threshold hierarchy cannot collapse again. The clamp, not the table, is what
+makes this safe: the table can only ever be wrong about models it lists.
+
+**Root two: the compactor talked to a terminal instead of to a surface.** Compaction wrote
+`eprintln!`, mostly gated on `!quiet` — which is precisely the TUI and JSON modes, so a GUI client
+never learned that its context had been rewritten, and the one ungated line wrote stderr underneath
+a TUI that owns the screen. The notices now go through `UiHooks::on_warning`, the one channel all
+three front ends implement (TUI warning row / headless stderr / the existing JSON `warning` event).
+Success is information rather than a warning and would prefer its own channel, but adding one means
+a new protocol event type for one line of text; borrowing the existing channel is the cheaper trade
+and is recorded here so the next reader knows it was a choice.
+
+Four smaller findings, same review:
+
+- The token gate's exact-count anchor survived overflow compaction. Projection floors at the anchor
+  (`saturating_sub` eats a negative delta), so the shrunken history kept reading at its old size and
+  the next turn compacted what had just been compacted. `compact_after_overflow` now takes the gate,
+  which puts the invariant in the type rather than in a caller's memory.
+- Images were estimated at one unit per base64 character — a 1MB attachment read as ~350k tokens.
+  Since the image lives inside `KEEP_RECENT`, compaction could never bring that number down: on any
+  endpoint without `count_tokens`, an image meant one wasted summary request per turn forever. An
+  image now costs a flat 1600 tokens, Anthropic's cap for a full-size one.
+- The CJK weight stays at 1 token/char even though BPE tokenizers pack CJK tighter. It is what
+  Anthropic's tokenizer does, and the two error directions are not symmetric: overestimating
+  compacts early, underestimating overflows the window and costs a failed turn plus recovery. The
+  estimate only decides anything where `count_tokens` is unavailable, so it takes the conservative
+  side — and per-model `max_tokens` gave those endpoints back the headroom the flat reservation ate,
+  which shrinks the price of being early (#40 is the underestimate this replaced).
+- The summary itself was the quality ceiling: ~120k tokens of history compressed to 300 characters
+  and 8 recent messages, with `summary_prompt` dropping the `tool_use` blocks that hold the very
+  commands the prompt asked it to keep. The prompt is now sectioned and sized to its content,
+  the request carries 4096 output tokens, tool inputs contribute one bounded line each, and
+  `KEEP_RECENT` is 12 — tool turns spend messages two at a time. And because the overflow path hands
+  the summarizer a history the model has already refused, the prompt is trimmed into the model's own
+  budget before it is sent: whole messages from the oldest end, then the head of what remains, with
+  a line saying how many were left out. Local and deterministic, because a recovery path that needs
+  a request to discover it failed is not a recovery path.
