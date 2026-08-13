@@ -178,10 +178,28 @@ async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {
 /// Quarter-token units for one text fragment: ASCII ≈ 4 chars/token, other
 /// scripts (CJK etc.) ≈ 1 token/char. A flat chars/4 undercounted Chinese
 /// conversations ~4x, so growth between exact counts went mostly unseen and
-/// auto-compact fired far too late.
+/// auto-compact fired far too late (#40).
+///
+/// The 1 token/char CJK weight stays even though BPE tokenizers pack CJK
+/// tighter than that: it is what Anthropic's tokenizer actually does, and the
+/// two error directions cost differently. Overestimating compacts early —
+/// annoying. Underestimating overflows the window — a failed turn plus a
+/// recovery round trip. The estimate only decides anything where `count_tokens`
+/// is unavailable, so the conservative side is the right one, and after
+/// per-model max_tokens (F2) freed the headroom the flat 64k reservation ate,
+/// early compaction on BPE endpoints is a smaller price than it was.
 pub(crate) fn text_units(text: &str) -> u64 {
     text.chars().map(|c| if c.is_ascii() { 1 } else { 4 }).sum()
 }
+
+/// One image, in units (÷4 = 1600 tokens). Anthropic bills an image at
+/// roughly `width * height / 750`, capped near 1600 tokens for anything at or
+/// above the resize ceiling — so the largest image costs about this much and a
+/// small one costs less. Counting base64 length instead read a 1MB attachment
+/// as ~350k tokens, which pinned every image conversation over the threshold
+/// forever: the image lives inside KEEP_RECENT, so compaction could never
+/// bring the number down and each turn burned one useless summary request.
+const IMAGE_UNITS: u64 = 6_400;
 
 /// Local estimate when count_tokens is unavailable. Non-Anthropic endpoints
 /// (DeepSeek/ollama) lack this API; silently returning would mean auto-compact
@@ -208,8 +226,7 @@ pub(crate) fn estimate_tokens(
                     text_units(name) + text_units(&input.to_string())
                 }
                 ContentBlock::ToolResult { content, .. } => text_units(&content.to_string()),
-                // Image blocks estimated by base64 length (the real token hog).
-                ContentBlock::Image { source } => source.data.chars().count() as u64,
+                ContentBlock::Image { .. } => IMAGE_UNITS,
             };
         }
     }
@@ -461,6 +478,21 @@ mod tests {
             400,
             "400 CJK chars ≈ 400 tokens"
         );
+    }
+
+    /// An image costs a bounded number of tokens, not one per base64 character:
+    /// a 1MB attachment read as ~350k tokens pinned the session over the compact
+    /// threshold permanently (the image sits inside KEEP_RECENT, so compaction
+    /// cannot bring the number down), burning a summary request every turn.
+    #[test]
+    fn local_estimate_bounds_image_blocks() {
+        let image = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image {
+                source: crate::api::types::ImageSource::base64("image/png", &"A".repeat(1_400_000)),
+            }],
+        };
+        assert_eq!(estimate_tokens(&[], &[image], &[]), 1_600);
     }
 
     /// Tool schemas ride along with every request; a measurement that skips them
