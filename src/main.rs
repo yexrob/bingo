@@ -27,6 +27,7 @@ mod json_events;
 mod mcp;
 mod memory;
 mod model_cache;
+mod model_families;
 mod permission;
 mod platform;
 mod preapproved;
@@ -209,6 +210,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Config lint → startup notes: unknown top-level keys (typos parse fine
     // and silently do nothing) and enum values that silently fall back.
     let mut config_notes: Vec<String> = Vec::new();
+    // Family-catalog file (D73): seed on first run, refresh its builtin
+    // section after an upgrade; any problem becomes a note, never a refusal.
+    config_notes.extend(crate::model_families::maintain(&user_dir));
     for path in crate::settings::layer_paths(&user_dir, &project_dir) {
         for key in crate::settings::layer_keys(&path) {
             if !crate::settings::KNOWN_KEYS.contains(&key.as_str()) {

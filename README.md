@@ -263,6 +263,23 @@ Example:
 }
 ```
 
+### Model catalog (model-catalog.json)
+
+`~/.config/bingo/model-catalog.json` (created on first start, next to settings.json) holds the
+per-family model defaults — `contextWindow`, `maxTokens` (output ceiling), `thinking` — keyed by
+model-id **prefix**, longest match winning field by field. Two sections with different owners:
+
+- `builtin` is bingo's: a mirror of the researched defaults compiled into the binary, rewritten
+  on upgrade so corrected numbers reach you. Edits here are reverted on the next start.
+- `overrides` is yours: never touched by bingo, consulted between a settings `models` declaration
+  and the built-in table. A full model id is just the longest prefix, so
+  `"overrides": {"deepseek-v4-flash": {"maxTokens": 32000}}` lifts one model's output ceiling
+  while `"deepseek"` entries keep governing the rest of the family.
+
+Precedence per field: settings `models` declaration → `overrides` → built-in table → conservative
+default. An unreadable file degrades to the built-ins with a startup warning and is never
+overwritten (delete it to re-seed).
+
 ## Tool set
 
 All tools go through the unified `Tool` trait (serde/schemars generates the

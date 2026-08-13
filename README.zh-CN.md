@@ -228,6 +228,21 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 }
 ```
 
+### 模型目录（model-catalog.json）
+
+`~/.config/bingo/model-catalog.json`（首次启动生成，与 settings.json 同目录）存放按模型 id **前缀**
+归类的家族默认值——`contextWindow`、`maxTokens`（输出上限）、`thinking`——最长前缀逐字段胜出。
+两段各有其主：
+
+- `builtin` 归 bingo：编译进二进制的调研默认值的镜像，升级时重写，修正过的数字随版本到达；
+  在这一段做的修改下次启动会被还原。
+- `overrides` 归你：bingo 永不改写，生效层级在 settings `models` 声明与内置表之间。完整模型 id
+  就是最长的前缀，所以 `"overrides": {"deepseek-v4-flash": {"maxTokens": 32000}}` 只抬高这一个
+  型号的输出上限，`"deepseek"` 条目继续管家族里的其他型号。
+
+逐字段优先级：settings `models` 声明 → `overrides` → 内置表 → 保守默认。文件损坏时降级用内置值并在
+启动时告警，绝不覆盖改写（删除文件可重新播种）。
+
 ## 工具集
 
 全部经统一 Tool trait（serde/schemars 生成 schema，单一来源）：

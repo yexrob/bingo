@@ -73,6 +73,12 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
     ),
 ];
 
+/// The compiled family table, exposed so the catalog file (D73) can mirror it
+/// into its `builtin` section.
+pub(crate) fn builtin_families() -> &'static [(&'static str, ModelMeta)] {
+    PREFIXES
+}
+
 /// Prefix-table tier. Private on purpose: every measuring site must go through
 /// a [`ModelResolver`], or a provider's declaration would apply in one place
 /// and not the next.
@@ -109,6 +115,9 @@ impl CatalogModel {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModelCatalog {
     by_provider: HashMap<String, Vec<CatalogModel>>,
+    /// Family overrides from the catalog file (D73), longest prefix first —
+    /// the tier between a settings declaration and the compiled table.
+    families: Vec<(String, crate::model_families::FamilyMeta)>,
 }
 
 impl ModelCatalog {
@@ -124,7 +133,20 @@ impl ModelCatalog {
         if let Some(entries) = &settings.models {
             by_provider.insert("default".to_string(), convert(entries));
         }
-        Self { by_provider }
+        Self {
+            by_provider,
+            families: Vec::new(),
+        }
+    }
+
+    /// Attach the catalog file's overrides (already longest-prefix-first, as
+    /// [`crate::model_families::load_overrides`] returns them).
+    pub fn with_families(
+        mut self,
+        families: Vec<(String, crate::model_families::FamilyMeta)>,
+    ) -> Self {
+        self.families = families;
+        self
     }
 
     /// What this provider declared; None when it declared nothing (the `/model`
@@ -172,18 +194,36 @@ impl ModelResolver {
         Self { catalog, provider }
     }
 
-    /// Declared value first, prefix table for whatever the declaration left
-    /// out, conservative default underneath (field by field, not all-or-none:
-    /// declaring only `contextWindow` must not silently reset `thinking`).
+    /// Declared value first, then the catalog file's family overrides, then
+    /// the prefix table, conservative default underneath — each tier decided
+    /// field by field, not all-or-none: declaring only `contextWindow` must
+    /// not silently reset `thinking`, and a family override of `maxTokens`
+    /// must not hide the table's window.
     pub fn meta(&self, model: &str) -> ModelMeta {
         let table = meta(model);
+        // Family tier: first Some per field along the longest-prefix-first
+        // list wins, so "deepseek-v4-flash" outranks "deepseek" where they
+        // both speak and defers where it is silent.
+        let mut family = crate::model_families::FamilyMeta::default();
+        for (prefix, entry) in &self.catalog.families {
+            if model.starts_with(prefix.as_str()) {
+                family.context_window = family.context_window.or(entry.context_window);
+                family.max_tokens = family.max_tokens.or(entry.max_tokens);
+                family.thinking = family.thinking.or(entry.thinking);
+            }
+        }
+        let base = ModelMeta {
+            context_window: family.context_window.unwrap_or(table.context_window),
+            max_tokens: family.max_tokens.unwrap_or(table.max_tokens),
+            supports_thinking: family.thinking.unwrap_or(table.supports_thinking),
+        };
         let Some(entry) = self.catalog.entry(&self.provider, model) else {
-            return table;
+            return base;
         };
         ModelMeta {
-            context_window: entry.context_window.unwrap_or(table.context_window),
-            max_tokens: entry.max_tokens.unwrap_or(table.max_tokens),
-            supports_thinking: entry.thinking.unwrap_or(table.supports_thinking),
+            context_window: entry.context_window.unwrap_or(base.context_window),
+            max_tokens: entry.max_tokens.unwrap_or(base.max_tokens),
+            supports_thinking: entry.thinking.unwrap_or(base.supports_thinking),
         }
     }
 
@@ -260,6 +300,45 @@ mod tests {
             ModelResolver::default().context_window("claude-sonnet-5"),
             200_000
         );
+    }
+
+    /// The family tier sits between the declaration and the prefix table,
+    /// decided field by field across matching prefixes (longest first).
+    #[test]
+    fn family_overrides_sit_between_declaration_and_table() {
+        let fam = |cw: Option<u64>, mt: Option<u32>, th: Option<bool>| {
+            crate::model_families::FamilyMeta {
+                context_window: cw,
+                max_tokens: mt,
+                thinking: th,
+            }
+        };
+        let json = r#"{"providers": {"proxy": {"apiKey": "k", "models": [
+            {"id": "deepseek-v4-flash", "contextWindow": 131072}
+        ]}}}"#;
+        let catalog = ModelCatalog::from_settings(&settings(json)).with_families(vec![
+            // load_overrides hands the list longest-prefix-first.
+            (
+                "deepseek-v4-flash".to_string(),
+                fam(None, Some(32_000), None),
+            ),
+            (
+                "deepseek".to_string(),
+                fam(Some(200_000), Some(64_000), Some(true)),
+            ),
+        ]);
+        let proxy = ModelResolver::new(Arc::new(catalog), "proxy".to_string());
+        // Declared beats the family tier; the family tier fills what the
+        // declaration left out; longest prefix wins per field.
+        assert_eq!(proxy.context_window("deepseek-v4-flash"), 131_072);
+        assert_eq!(proxy.meta("deepseek-v4-flash").max_tokens, 32_000);
+        assert!(proxy.supports_thinking("deepseek-v4-flash"));
+        // An undeclared sibling still gets the family-wide values, and the
+        // family tier beats the compiled prefix table.
+        assert_eq!(proxy.context_window("deepseek-chat"), 200_000);
+        assert_eq!(proxy.meta("deepseek-chat").max_tokens, 64_000);
+        // Models no family entry matches fall through to the table untouched.
+        assert_eq!(proxy.meta("claude-sonnet-5").max_tokens, DEFAULT_MAX_TOKENS);
     }
 
     /// `declared` is what the menu keys off: absent and empty both mean "pull
