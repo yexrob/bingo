@@ -1209,9 +1209,10 @@ fn spawn_members(
                 .agents
                 .refresh(&name, Some(member.agent.clone()), description, sub)
             {
-                // A member mid-turn keeps the definition it started under; the next start
-                // catches it. Missing cannot happen (the name was just seen in the
-                // registry) and reads as reuse either way.
+                // Everything else counts as the reuse it has always been: a member
+                // mid-turn keeps the definition it started under (the next start catches
+                // it), a name a hire took first is not the blueprint's to rewrite, and
+                // Missing cannot happen — the name was just seen in the registry.
                 crate::agents::Refresh::Refreshed => summary.refreshed.push(name),
                 _ => summary.reused.push(name),
             }
@@ -2082,6 +2083,37 @@ mod tests {
                 )
                 .is_ok()
         );
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// A hire holding a member's name is left exactly as it was. A hire is not a
+    /// member (D53): it was spawned for one task, it is released when that task is
+    /// done, and a blueprint reaching in to rewrite its persona would change the
+    /// job someone is in the middle of asking for.
+    #[test]
+    fn start_does_not_rewrite_a_hire_that_holds_the_name() {
+        let s = session();
+        let home = tmp("spawn-refresh-hire");
+        let project = home.join("proj");
+        s.set_cwd(project.clone());
+        write_agent(&project, "qa");
+        write_team_file(&project, &team_def("t", &[("qa", "qa")]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        // The name was taken by an ad-hoc spawn in this same project before the crew came up.
+        s.agents.insert(
+            "qa",
+            crate::agents::AgentKind::Hire,
+            None,
+            "hired for one task".into(),
+            s.clone(),
+        );
+
+        let out = spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(out.reused, vec!["qa".to_string()], "{out:?}");
+        assert!(out.refreshed.is_empty(), "{out:?}");
+        let status = s.agents.list().remove(0);
+        assert_eq!(status.kind, crate::agents::AgentKind::Hire);
+        assert_eq!(status.description, "hired for one task");
         std::fs::remove_dir_all(&home).unwrap();
     }
 

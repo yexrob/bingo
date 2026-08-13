@@ -192,6 +192,9 @@ pub enum Refresh {
     Unchanged,
     /// Mid-turn: definitions are swapped between turns, never under one.
     Busy,
+    /// The name is held by a temporary hire that took it first. A hire is not a member
+    /// (D53) and its persona is not the blueprint's to rewrite.
+    Hired,
     /// No such instance.
     Missing,
 }
@@ -695,6 +698,9 @@ impl AgentRegistry {
             };
             if entry.state == AgentState::Running {
                 return Refresh::Busy;
+            }
+            if entry.kind != AgentKind::Crew {
+                return Refresh::Hired;
             }
             let changed = entry.def != def
                 || entry.description != description

@@ -886,7 +886,7 @@ on the fields next to it, untouched. No hot path, no parallel copy of the defini
 lifecycle. `AgentRegistry::refresh` does it under the registry lock; the next wake picks up the new
 session, and `list()` reports the new engine immediately because it reads the session too.
 
-Three rules fall out of "the session is what a turn takes":
+Four rules fall out of "the session is what a turn takes":
 
 - **Mid-turn is off limits.** A running member's turn is already holding the old `Arc`; swapping the
   entry's copy would change nothing for that turn and would change the persona mid-sentence if it
@@ -896,6 +896,11 @@ Three rules fall out of "the session is what a turn takes":
   brings it back", and start never brought it back: `is_in_project` counted a stopped entry as
   reuse, so the member stayed stopped and refused mail forever. Since the whole documented loop is
   stop → edit → start, reviving is part of the same fix rather than a separate one.
+- **A hire holding the name is left alone.** The idempotency check is "is there an instance under
+  this name in this project", which a temporary hire (D53) can satisfy by having taken the name
+  first. Reuse always conflated the two; a refresh would have gone further and rewritten the hire's
+  persona out from under the task it was spawned for, so `Refresh::Hired` stops at the door and the
+  start reads as the reuse it always was.
 - **What "changed" means is decided over the built session, not the file.** The file is one input
   among several — the blueprint's per-member overrides, the crew's working agreement, the parent
   session's own model when the member pins none. Comparing `system` block texts plus
