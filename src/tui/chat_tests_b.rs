@@ -3650,3 +3650,136 @@ fn notice_expires_after_its_window() {
     assert!(chat.notice.is_none(), "cleared once expired");
     assert!(chat.notice_until.is_none());
 }
+
+/// D76: an interrupted tool row must not wear the completion glyph. It is amber, and its
+/// result line says `Interrupted` — a green ⏺ over an unfinished call reads as a result
+/// that was never produced.
+#[test]
+fn interrupted_tool_row_reads_interrupted_in_the_warning_color() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::Assistant, ""));
+    chat.stream_msg = Some(0);
+    let _ = chat.events.send(UiEvent::ToolStart {
+        name: "Bash".into(),
+    });
+    let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "tu_1".into(),
+        name: "Bash".into(),
+        input: json!({"command": "sleep 30"}),
+        standalone: false,
+    });
+    chat.drain_events();
+    let _ = chat
+        .events
+        .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "tu_1".into(),
+            name: "Bash".into(),
+            summary: "sleep 30".into(),
+            output: "interrupted".into(),
+            status: crate::query::ToolCallStatus::Interrupted,
+            duration_ms: 0,
+            diff: None,
+        }));
+    chat.drain_events();
+
+    let call = chat.messages[0]
+        .activities
+        .iter()
+        .find_map(|a| match &a.kind {
+            ActivityKind::Tool(t) if t.name == "Bash" => Some(t.clone()),
+            _ => None,
+        });
+    assert_eq!(
+        call.map(|t| t.status),
+        Some(ToolStatus::Interrupted),
+        "the interrupted call keeps its own status instead of borrowing Done"
+    );
+    // A single bash call still folds into a group; the row itself is what this asserts.
+    assert!(chat.toggle_transcript(), "expand the fold");
+    let rendered = visible(&mut chat, 120, 30);
+    assert!(
+        rendered.contains("⎿  Interrupted"),
+        "the result line names the state: {rendered}"
+    );
+    assert!(
+        !rendered.contains("⎿  Done"),
+        "never reported as done: {rendered}"
+    );
+    chat.build_rows(120);
+    let glyph = chat
+        .doc
+        .rows
+        .iter()
+        .find(|row| row.line.plain_text().starts_with("⏺ Bash"))
+        .and_then(|row| row.line.segs.first().map(|seg| seg.style.fg));
+    assert_eq!(
+        glyph,
+        Some(Some(Theme::dark().warning)),
+        "the glyph is amber: stopped, neither finished nor failed"
+    );
+}
+
+/// D76: the interrupt marker is the persistent record, rendered as a state line. A `❯`
+/// bubble would put words the user never typed in the user's mouth, and the old 10s
+/// warning let the screen forget what the transcript still says.
+#[test]
+fn interrupt_marker_renders_as_a_state_line_not_a_user_bubble() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::User, "run the tests"));
+    chat.messages.push(msg(Role::Assistant, "sure, starting"));
+    let _ = chat.events.send(UiEvent::Interrupted {
+        marker: crate::query::INTERRUPT_MARKER,
+    });
+    chat.drain_events();
+
+    let last = chat.messages.last().expect("the marker message");
+    assert_eq!(last.role, Role::User);
+    assert_eq!(last.text, crate::query::INTERRUPT_MARKER);
+    assert!(
+        chat.visible_warning().is_none(),
+        "the marker replaces the transient warning; no double signal"
+    );
+
+    let rows = crate::tui::chat::user_message_rows(&last.text, 60, &Theme::dark());
+    assert_eq!(rows.len(), 1, "a single line, not a wrapped bubble");
+    assert_eq!(rows[0].line.plain_text(), crate::query::INTERRUPT_MARKER);
+    assert_eq!(
+        rows[0].line.segs.first().map(|seg| seg.style.fg),
+        Some(Some(Theme::dark().error)),
+        "rendered in the error colour"
+    );
+
+    let rendered = visible(&mut chat, 120, 20);
+    assert!(
+        rendered.contains(crate::query::INTERRUPT_MARKER),
+        "the marker stays on screen: {rendered}"
+    );
+    assert!(
+        !rendered.contains(&format!("❯ {}", crate::query::INTERRUPT_MARKER)),
+        "no user bubble around it: {rendered}"
+    );
+    assert!(
+        rendered.contains("❯ run the tests"),
+        "real user input still gets its bubble: {rendered}"
+    );
+}
+
+/// The tool-use variant travels the same path (the model-facing strings differ, the
+/// treatment does not).
+#[test]
+fn tool_use_interrupt_marker_renders_the_same_way() {
+    let rows = crate::tui::chat::user_message_rows(
+        crate::query::INTERRUPT_MARKER_TOOL_USE,
+        80,
+        &Theme::dark(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].line.plain_text(),
+        crate::query::INTERRUPT_MARKER_TOOL_USE
+    );
+    assert_eq!(
+        rows[0].line.segs.first().map(|seg| seg.style.fg),
+        Some(Some(Theme::dark().error))
+    );
+}

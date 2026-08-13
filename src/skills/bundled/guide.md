@@ -182,7 +182,10 @@ Example (.bingo/settings.json):
     1-based `start_line`/`end_line` ranges and reports ranges extending past the file.
 11. **Processes left behind after timeout/interruption**: Bash commands run in their own process group; timeouts and cancellation
     terminate the whole group (grandchildren no longer orphan); after Esc interrupts a turn, unfinished tools get placeholder results,
-    and the session stays recoverable (no 400s on later requests from orphaned tool_use).
+    and the session stays recoverable (no 400s on later requests from orphaned tool_use). The interrupted turn is kept, not
+    discarded: whatever was already said stays in the history and is followed by `[Request interrupted by user]`
+    (`[Request interrupted by user for tool use]` when the stop landed during tool execution) — that marker is the user
+    stopping you, so treat everything after it as the instruction and do not resume the abandoned work unasked.
 
 ## Capability map (reference when asked "what can bingo do")
 

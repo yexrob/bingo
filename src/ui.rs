@@ -128,6 +128,13 @@ pub enum UiEvent {
         meta: Option<ImageMeta>,
     },
     TurnEnd,
+    /// The user interrupted the turn. `marker` is the exact string the transcript
+    /// recorded (`crate::query::INTERRUPT_MARKER` / `…_TOOL_USE`), echoed into the
+    /// message flow so the screen and the model read the same sentence — a transient
+    /// warning would have expired while the marker stayed in the history.
+    Interrupted {
+        marker: &'static str,
+    },
     /// Non-fatal warning (e.g. MCP connection failure), shown above the input
     /// box; expires after `WARNING_TTL` (10s, filtered at render time).
     Warning(String),

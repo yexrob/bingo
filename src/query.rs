@@ -49,6 +49,10 @@ pub struct QueryOutcome {
     pub end_reason: QueryEndReason,
     /// Turn aborted by the user (stream stopped; tools that already ran finish normally).
     pub aborted: bool,
+    /// The interrupt marker this turn appended to the transcript, when it recorded one
+    /// ([`INTERRUPT_MARKER`] / [`INTERRUPT_MARKER_TOOL_USE`]). The UI echoes exactly this
+    /// string, so the screen and the model read the same sentence.
+    pub interrupt_marker: Option<&'static str>,
 }
 
 pub(crate) struct InboxWake {
@@ -597,6 +601,69 @@ fn escape_xml(text: &str) -> String {
 const INTERRUPTED_TOOL_RESULT: &str =
     "<tool_use_error>interrupted by the user before this tool produced a result</tool_use_error>";
 
+/// Recorded when the user stops a reply mid-stream. Model-facing text, verbatim CC: the
+/// turn the user cut off has to say so in the history, or the model keeps answering a
+/// question it never learned was withdrawn.
+pub const INTERRUPT_MARKER: &str = "[Request interrupted by user]";
+/// Recorded when the interrupt landed while tools were running (the assistant message and
+/// the filled tool_results are already in history). Model-facing text, verbatim CC.
+pub const INTERRUPT_MARKER_TOOL_USE: &str = "[Request interrupted by user for tool use]";
+
+/// Whether a message body is one of the interrupt markers (the render layers strip the
+/// bubble off these: they are transcript facts, not something the user typed).
+pub fn is_interrupt_marker(text: &str) -> bool {
+    text == INTERRUPT_MARKER || text == INTERRUPT_MARKER_TOOL_USE
+}
+
+/// What survives from a reply the user cut off mid-stream: the text and the thinking that
+/// finished being signed. A tool_use block has no result and an unsigned thinking block
+/// fails signature verification on replay — either one would 400 every later request in
+/// the session, so the partial reply is trimmed to what can be replayed.
+fn interrupted_content(assistant: Message) -> Vec<ContentBlock> {
+    assistant
+        .content
+        .into_iter()
+        .filter(|block| match block {
+            ContentBlock::Text { text } => !text.trim().is_empty(),
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => !thinking.trim().is_empty() && !signature.is_empty(),
+            ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. }
+            | ContentBlock::Image { .. } => false,
+        })
+        .collect()
+}
+
+/// Close an interrupted turn honestly: keep whatever the model managed to say, then mark
+/// the interruption. Empty partials are skipped — an empty assistant message is another
+/// lie, and some endpoints reject it.
+fn record_interrupt(
+    session: &Session,
+    messages: &mut Vec<Message>,
+    partial: Option<Message>,
+    marker: &'static str,
+    ui: &mut UiHooks,
+) -> &'static str {
+    if let Some(partial) = partial {
+        let content = interrupted_content(partial);
+        if !content.is_empty() {
+            record(
+                session,
+                messages,
+                Message {
+                    role: Role::Assistant,
+                    content,
+                },
+                ui,
+            );
+        }
+    }
+    record(session, messages, Message::user_text(marker), ui);
+    marker
+}
+
 /// Whether blocks already contain a result for this tool_use.
 fn answered(blocks: &[ContentBlock], tool_use_id: &str) -> bool {
     blocks
@@ -786,8 +853,16 @@ async fn query_loop(
             outcome => outcome?,
         };
         if turn.aborted {
-            // Interrupted: the whole turn is discarded (assistant incomplete); neither
-            // executed nor pending tools are filled back.
+            // Interrupted mid-stream: what the model already said stays (the user is
+            // looking at it), followed by the marker that says it was cut off. Discarding
+            // the turn instead left the screen and the history telling different stories.
+            let marker = record_interrupt(
+                session,
+                &mut messages,
+                Some(turn.assistant),
+                INTERRUPT_MARKER,
+                ui,
+            );
             if !session.quiet {
                 println!();
             }
@@ -795,6 +870,7 @@ async fn query_loop(
                 messages,
                 end_reason: QueryEndReason::Completed,
                 aborted: true,
+                interrupt_marker: Some(marker),
             });
         }
         let empty_assistant = turn.assistant.content.iter().all(|block| match block {
@@ -880,6 +956,7 @@ async fn query_loop(
                 messages,
                 end_reason,
                 aborted: false,
+                interrupt_marker: None,
             });
         }
 
@@ -1053,6 +1130,10 @@ async fn query_loop(
             ui,
         );
         if interrupted {
+            // The assistant message and every tool_result are already in history; all the
+            // model still lacks is that the stop was the user's doing.
+            let marker =
+                record_interrupt(session, &mut messages, None, INTERRUPT_MARKER_TOOL_USE, ui);
             if !session.quiet {
                 println!();
             }
@@ -1072,6 +1153,7 @@ async fn query_loop(
                 messages,
                 end_reason: QueryEndReason::Completed,
                 aborted: true,
+                interrupt_marker: Some(marker),
             });
         }
         // All tools in this batch are closed: RoundEnd only marks a batch boundary (image
@@ -1079,6 +1161,12 @@ async fn query_loop(
         // same fold group.
         (ui.on_round_end)();
         if stop_after_tools || is_cancelled(&cancel_rx) {
+            // The cancel landed between the last tool finishing and the next round: no
+            // tool row was cut short, but the turn still stops on the user's word and the
+            // model is owed the same marker. A Stop-hook halt is not an interrupt.
+            let marker = is_cancelled(&cancel_rx).then(|| {
+                record_interrupt(session, &mut messages, None, INTERRUPT_MARKER_TOOL_USE, ui)
+            });
             let context_tokens = gate.current(crate::compact::estimate_tokens(
                 &session.system,
                 &messages,
@@ -1099,6 +1187,7 @@ async fn query_loop(
                     QueryEndReason::Completed
                 },
                 aborted: is_cancelled(&cancel_rx),
+                interrupt_marker: marker,
             });
         }
     }
@@ -1133,6 +1222,7 @@ pub async fn run_query(
             messages: initial_messages,
             end_reason: QueryEndReason::Completed,
             aborted: false,
+            interrupt_marker: None,
         });
     }
 
@@ -1361,6 +1451,21 @@ pub async fn run_bash_command(
                     // interrupted: the `!` command's tool_use is not yet in history, so
                     // returning directly leaves no orphans.
                     let Some(outcome) = outcomes.into_iter().next().filter(|_| !interrupted) else {
+                        // The row must close with the turn: a tool left Running keeps its
+                        // message from ever settling, and the session's whole flush prefix
+                        // with it.
+                        (ui.on_tool_done)(&ToolCallDone {
+                            tool_call_id: tool_use_id,
+                            name: "Bash".to_string(),
+                            summary: format!("$ {command}"),
+                            output: "interrupted".to_string(),
+                            status: ToolCallStatus::Interrupted,
+                            diff: None,
+                            duration_ms: 0,
+                        });
+                        (ui.on_round_end)();
+                        let marker =
+                            record_interrupt(session, &mut messages, None, INTERRUPT_MARKER, ui);
                         let context_tokens = crate::compact::estimate_tokens(
                             &session.system,
                             &messages,
@@ -1377,6 +1482,7 @@ pub async fn run_bash_command(
                             messages,
                             end_reason: QueryEndReason::Completed,
                             aborted: true,
+                            interrupt_marker: Some(marker),
                         });
                     };
                     match outcome.result {
@@ -1449,6 +1555,10 @@ pub async fn run_bash_command(
         }
     }
     if !respond {
+        // `respond` is off for three reasons; only the interrupt owes the model a marker
+        // (the setting and the Stop hook are not the user pressing Esc).
+        let marker = is_cancelled(&cancel)
+            .then(|| record_interrupt(session, &mut messages, None, INTERRUPT_MARKER, ui));
         let context_tokens =
             crate::compact::estimate_tokens(&session.system, &messages, &tool_schemas);
         (ui.on_context_usage)(
@@ -1462,6 +1572,7 @@ pub async fn run_bash_command(
             messages,
             end_reason: QueryEndReason::Completed,
             aborted: is_cancelled(&cancel),
+            interrupt_marker: marker,
         });
     }
     query_loop(session, messages, ui, &tools, &ctx, cancel).await
@@ -2991,16 +3102,194 @@ mod tests {
             "tool_use in the transcript is paired too; resuming will not 400"
         );
         let ContentBlock::ToolResult { is_error, .. } = &saved
-            .last()
-            .unwrap()
-            .content
             .iter()
+            .flat_map(|message| &message.content)
             .find(|b| matches!(b, ContentBlock::ToolResult { .. }))
             .unwrap()
         else {
             panic!("tool result");
         };
         assert!(is_error, "placeholder result is marked is_error");
+
+        // D76: the model is told the stop was the user's doing, in CC's words, and the
+        // marker closes both the returned history and the transcript.
+        assert_eq!(outcome.interrupt_marker, Some(INTERRUPT_MARKER_TOOL_USE));
+        for (label, messages) in [("history", &outcome.messages), ("transcript", &saved)] {
+            let last = messages.last().unwrap();
+            assert_eq!(last.role, Role::User, "{label} closes on a user message");
+            assert_eq!(
+                last.content,
+                vec![ContentBlock::Text {
+                    text: INTERRUPT_MARKER_TOOL_USE.to_string(),
+                }],
+                "{label} ends with the tool-use interrupt marker"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A stream that delivers its SSE prefix and then stalls: the only shape in which a
+    /// mid-stream interrupt is observable (the ordinary mock closes the body at once).
+    async fn spawn_stalling_api(prefix: String) -> String {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let prefix = prefix.clone();
+                tokio::spawn(async move {
+                    let head = read_http_request(&mut socket).await;
+                    // Only the stream stalls: a short synchronous call (count_tokens) is
+                    // not interruptible, so leaving it open would hang the turn instead.
+                    if request_kind(&head) == ApiRequestKind::CountTokens {
+                        let body = r#"{"input_tokens":10}"#;
+                        let _ = socket
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                            )
+                            .await;
+                        let _ = socket.shutdown().await;
+                        return;
+                    }
+                    // A content length the body never reaches: the connection stays open,
+                    // so the turn can only end by interruption.
+                    let _ = socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n{prefix}",
+                                prefix.len() + 1
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                    std::future::pending::<()>().await
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Run a turn against a stalling stream and interrupt it once the prefix has landed.
+    async fn interrupted_turn(prefix: String, transcript: Transcript) -> QueryOutcome {
+        let session = test_session(spawn_stalling_api(prefix).await, Some(transcript));
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn({
+            let session = session.clone();
+            async move {
+                let mut ui = headless_hooks();
+                run_query(&session, Vec::new(), "go", &[], &mut ui, Some(rx)).await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tx.send(true).unwrap();
+        handle.await.unwrap().unwrap()
+    }
+
+    fn text_of(message: &Message) -> String {
+        message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// D76: a reply the user cuts off mid-stream is kept, not discarded. What the model
+    /// already said stays in history (the user is looking at it), followed by the CC
+    /// marker — otherwise the next turn's request denies a reply the screen still shows.
+    #[tokio::test]
+    async fn interrupted_stream_records_the_partial_reply_and_the_marker() {
+        let home =
+            std::env::temp_dir().join(format!("bingo-interrupt-partial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let transcript = crate::transcript::create(&home, &home).unwrap();
+        let outcome = interrupted_turn(
+            sse(&[
+                (
+                    "message_start",
+                    r#"{"message":{"id":"m_1","model":"m"}}"#.into(),
+                ),
+                (
+                    "content_block_start",
+                    r#"{"index":0,"content_block":{"type":"text","text":""}}"#.into(),
+                ),
+                (
+                    "content_block_delta",
+                    r#"{"index":0,"delta":{"type":"text_delta","text":"half an answer"}}"#.into(),
+                ),
+            ]),
+            transcript.clone(),
+        )
+        .await;
+
+        assert!(outcome.aborted, "the turn closes as interrupted");
+        assert_eq!(outcome.interrupt_marker, Some(INTERRUPT_MARKER));
+        // The next turn reloads history from the transcript: both records must be there.
+        let saved = transcript.load_messages().unwrap();
+        for (label, messages) in [("history", &outcome.messages), ("transcript", &saved)] {
+            let tail: Vec<(Role, String)> = messages
+                .iter()
+                .rev()
+                .take(2)
+                .rev()
+                .map(|message| (message.role, text_of(message)))
+                .collect();
+            assert_eq!(
+                tail,
+                vec![
+                    (Role::Assistant, "half an answer".to_string()),
+                    (Role::User, INTERRUPT_MARKER.to_string()),
+                ],
+                "{label} keeps the partial reply and marks it interrupted"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// D76: nothing said, nothing recorded — an empty assistant message is another lie
+    /// (and some endpoints reject it), so the marker stands alone.
+    #[tokio::test]
+    async fn interrupt_before_any_content_records_the_marker_alone() {
+        let home =
+            std::env::temp_dir().join(format!("bingo-interrupt-silent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let transcript = crate::transcript::create(&home, &home).unwrap();
+        let outcome = interrupted_turn(
+            sse(&[(
+                "message_start",
+                r#"{"message":{"id":"m_1","model":"m"}}"#.into(),
+            )]),
+            transcript.clone(),
+        )
+        .await;
+
+        assert!(outcome.aborted);
+        assert_eq!(outcome.interrupt_marker, Some(INTERRUPT_MARKER));
+        let saved = transcript.load_messages().unwrap();
+        for (label, messages) in [("history", &outcome.messages), ("transcript", &saved)] {
+            assert!(
+                !messages.iter().any(|m| m.role == Role::Assistant),
+                "{label} records no empty assistant message"
+            );
+            assert_eq!(
+                messages.last().map(text_of),
+                Some(INTERRUPT_MARKER.to_string()),
+                "{label} ends with the marker"
+            );
+        }
         let _ = std::fs::remove_dir_all(&home);
     }
 

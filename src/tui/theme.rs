@@ -442,6 +442,10 @@ impl Theme {
     pub fn tool_error(&self) -> SegStyle {
         SegStyle::fg(self.error).bold()
     }
+    /// Tool stopped by the user's interrupt (neither success nor failure).
+    pub fn tool_interrupted(&self) -> SegStyle {
+        SegStyle::fg(self.warning).bold()
+    }
     /// Tool output preview.
     pub fn tool_output(&self) -> SegStyle {
         SegStyle::fg(self.tool_output)

@@ -1112,3 +1112,36 @@ appended to the tail of the user message as a system-reminder — the tail is th
 never disturbs the cached request prefix (D74), and the recalled text is recorded with the turn,
 so the canonical transcript stays exactly what the model saw. Stale/degraded entries are never
 auto-injected; they remain reachable through explicit ExperienceQuery.
+
+### D76. An interrupted turn is recorded, not discarded
+
+Pressing Esc mid-stream threw the whole turn away: `query_loop`'s aborted branch returned
+without `record()`, so the partial reply stayed on the user's screen while the model's history
+denied it had said anything. The next turn then answered as if the interrupted attempt had never
+happened — a split-brain the harness institutionalized. The only signal was a 10s warning toast,
+and the tool rows that never ran closed with the green Done glyph.
+
+Both interrupt paths now close the turn honestly. Mid-stream: whatever the model managed to say is
+recorded as an assistant message, followed by a user-role message carrying CC's exact marker
+`[Request interrupted by user]`. During tool execution (assistant and filled orphan tool_results
+already in history) only the marker is appended, in CC's tool variant
+`[Request interrupted by user for tool use]`. The strings are model-facing and verbatim CC, so a
+bingo transcript reads the same as a Claude Code one. `QueryOutcome` carries which marker it wrote;
+the TUI echoes that exact string instead of inventing its own wording.
+
+Three edges decide themselves once the rule is "record what can be replayed". A partial reply is
+trimmed to text and *signed* thinking: an unfinished `tool_use` has no result and an unsigned
+thinking block fails signature verification, and either one would 400 every later request in the
+session — the same permanent corruption `fill_missing_tool_results` exists to prevent. Nothing
+accumulated means no assistant message at all: an empty message is a second lie, and endpoints
+reject it. And the marker follows every user-initiated stop, including the cancel that lands
+between a tool finishing and the next round, and the interrupted `!` command — where the tool row
+is now also closed as Interrupted, because a row left Running keeps its message from ever settling
+and freezes the session's whole flush prefix.
+
+On screen the marker is the record: the transient warning is deleted (it expired while the fact it
+reported stayed in the history), and a user message equal to either marker renders as a single
+error-coloured line rather than a `❯` bubble — the harness wrote it, not the user, and it carries
+no send time. `ToolStatus` finally has an `Interrupted` arm of its own: amber glyph, result line
+`Interrupted`, no borrowed output and nothing to expand. Interrupted rows are still not counted as
+failures inside a collapse summary, and `interrupted` auto-continue suppression is unchanged.

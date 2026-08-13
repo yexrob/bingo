@@ -37,6 +37,9 @@ pub enum ToolStatus {
     Done,
     /// Failed.
     Error,
+    /// Cut short by the user's interrupt: it neither finished nor failed, and the row must
+    /// not claim either.
+    Interrupted,
 }
 
 /// One tool call: `✓ bash · cargo test · 12ms`.
@@ -372,12 +375,13 @@ pub fn thinking_completion_line(t: &Thinking, theme: &Theme) -> Line {
 }
 
 /// Status colour of the leading marker: running is muted, done is green,
-/// failure is red.
+/// failure is red, an interrupted call is amber (it did not fail — it was stopped).
 fn dot_style(status: ToolStatus, theme: &Theme) -> crate::tui::line::SegStyle {
     match status {
         ToolStatus::Running => theme.dim(),
         ToolStatus::Done => theme.tool_done(),
         ToolStatus::Error => theme.tool_error(),
+        ToolStatus::Interrupted => theme.tool_interrupted(),
     }
 }
 
@@ -421,6 +425,9 @@ fn tool_header(t: &ToolCall, theme: &Theme) -> Line {
 fn tool_result(t: &ToolCall, act: &Activity, theme: &Theme) -> Line {
     let mut body = match t.status {
         ToolStatus::Running => "Running…".to_string(),
+        // The state is the whole result: an interrupted call has no output to summarize,
+        // and borrowing one from a half-finished run would read as completion.
+        ToolStatus::Interrupted => "Interrupted".to_string(),
         _ => t
             .result_summary
             .clone()
@@ -433,10 +440,10 @@ fn tool_result(t: &ToolCall, act: &Activity, theme: &Theme) -> Line {
     if t.status != ToolStatus::Running && t.duration_ms > SLOW_TOOL_MS {
         body.push_str(&format!(" · Ran in {:.1}s", t.duration_ms as f64 / 1000.0));
     }
-    let style = if t.status == ToolStatus::Error {
-        theme.tool_error()
-    } else {
-        theme.dim()
+    let style = match t.status {
+        ToolStatus::Error => theme.tool_error(),
+        ToolStatus::Interrupted => theme.tool_interrupted(),
+        _ => theme.dim(),
     };
     let mut line = Line::styled(format!("{RESULT_CONNECTOR}{body}"), style);
     if let Some(hint) = expand_hint(act) {
@@ -821,6 +828,33 @@ mod tests {
         assert_eq!(text(&lines[1]), "  ⎿  Failed");
         assert_eq!(lines[0].segs[0].style.fg, Some(Theme::dark().error));
         assert_eq!(lines[1].segs[0].style.fg, Some(Theme::dark().error));
+    }
+
+    /// D76: a call the user stopped is neither done nor failed. It reads `Interrupted` in
+    /// the warning colour — the green completion glyph used to claim a result that was
+    /// never produced.
+    #[test]
+    fn interrupted_tool_is_amber_and_says_interrupted() {
+        let stopped = Activity::new(ActivityKind::Tool(ToolCall {
+            name: "Bash",
+            status: ToolStatus::Interrupted,
+            summary: "sleep 30".into(),
+            duration_ms: 0,
+            // Even with output on hand, the state is the result.
+            output: Some("partial output".into()),
+            result_summary: None,
+        }));
+        let lines = render_lines(&stopped);
+        assert_eq!(text(&lines[0]), "⏺ Bash(sleep 30)");
+        assert_eq!(text(&lines[1]), "  ⎿  Interrupted");
+        let warning = Some(Theme::dark().warning);
+        assert_eq!(lines[0].segs[0].style.fg, warning, "glyph");
+        assert_eq!(lines[1].segs[0].style.fg, warning, "result line");
+        assert_ne!(
+            lines[0].segs[0].style.fg,
+            Some(Theme::dark().success),
+            "never wears the completion colour"
+        );
     }
 
     /// Edit/Write: `⏺ Update(path)` + `  ⎿  Updated path with N additions…`.

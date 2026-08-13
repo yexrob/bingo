@@ -830,9 +830,10 @@ impl super::Chat {
         session: &Arc<Session>,
         outcome: &crate::query::QueryOutcome,
     ) {
-        if outcome.aborted {
-            let _ = events.send(UiEvent::Warning("turn interrupted".to_string()));
-        } else {
+        if let Some(marker) = outcome.interrupt_marker {
+            let _ = events.send(UiEvent::Interrupted { marker });
+        }
+        if !outcome.aborted {
             match outcome.end_reason {
                 crate::query::QueryEndReason::EmptyResponseRetried => {
                     let _ = events.send(UiEvent::Warning(
@@ -2840,8 +2841,13 @@ impl super::Chat {
                 Role::User => {
                     let mut rows = user_message_rows(&self.messages[i].text, width, &theme);
                     // Send time under the bubble (issue #41), the same dim stamp
-                    // every view trails its message bodies with.
-                    let time = crate::tui::slack::stamp(self.messages[i].at);
+                    // every view trails its message bodies with. An interrupt marker gets
+                    // none: nothing was sent, and the line is a state, not a message.
+                    let time = if crate::query::is_interrupt_marker(&self.messages[i].text) {
+                        String::new()
+                    } else {
+                        crate::tui::slack::stamp(self.messages[i].at)
+                    };
                     if !time.is_empty() {
                         rows.push(Row::new(Line::styled(format!("  {time}"), theme.dim())));
                     }

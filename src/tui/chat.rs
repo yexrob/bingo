@@ -1087,6 +1087,26 @@ impl Chat {
         }
     }
 
+    /// Echo the interrupt marker `query.rs` wrote into the message flow. It is a message,
+    /// not a warning: the record it mirrors is permanent, and a 10s toast that expires
+    /// while the marker stays in the history is exactly the split-brain this closes.
+    pub(crate) fn push_interrupt_marker(&mut self, marker: &'static str) {
+        // The turn's own cleanup still has to run against the message it opened, so the
+        // continuation drop happens before the marker lands after it (TurnEnd's second
+        // call then finds nothing to do).
+        self.drop_empty_stream_message();
+        self.messages.push(UiMessage {
+            role: Role::User,
+            text: marker.to_string(),
+            at: crate::channels::now_unix(),
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        self.dirty = true;
+    }
+
     /// The warning currently displayed (`None` when nothing is
     /// unexpired).
     pub fn visible_warning(&self) -> Option<&str> {
@@ -1751,12 +1771,17 @@ impl Chat {
                         && call.status == ToolStatus::Running
                     {
                         call.status = match done.status {
-                            crate::query::ToolCallStatus::Done
-                            | crate::query::ToolCallStatus::Interrupted => ToolStatus::Done,
+                            crate::query::ToolCallStatus::Done => ToolStatus::Done,
                             crate::query::ToolCallStatus::Error => ToolStatus::Error,
+                            crate::query::ToolCallStatus::Interrupted => ToolStatus::Interrupted,
                         };
                         call.summary = done.summary.clone();
                         call.duration_ms = done.duration_ms;
+                        if call.status == ToolStatus::Interrupted {
+                            // Nothing to summarize or expand: the call was stopped before
+                            // it produced a result, and the status line says so.
+                            break;
+                        }
                         let in_group = group_of.get(hint_idx).copied().flatten().is_some();
                         if in_group {
                             call.result_summary = result_summary(&done.name, &done.output);
@@ -1869,6 +1894,9 @@ impl Chat {
                 self.stream_msg = None;
                 self.stream_attempt_checkpoint = None;
                 self.submit_queued();
+            }
+            UiEvent::Interrupted { marker } => {
+                self.push_interrupt_marker(marker);
             }
             UiEvent::Warning(message) => {
                 self.push_warning(message);
@@ -3650,6 +3678,15 @@ pub(crate) fn one_line(text: &str, width: usize) -> String {
 }
 
 pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<Row> {
+    // An interrupt marker is a user-role message the user never wrote: the harness
+    // recorded it so the model learns the turn was cut off. It reads as a state line in
+    // the error colour, never as a `❯` bubble putting words in the user's mouth.
+    if crate::query::is_interrupt_marker(text) {
+        return vec![Row::new(Line::styled(
+            crate::tui::markdown::truncate(text, width.max(1)),
+            SegStyle::fg(theme.error),
+        ))];
+    }
     // 2 prefix columns + 1 column of right padding inside the bubble.
     let body_width = width.saturating_sub(3).max(1);
     let style = SegStyle::fg(theme.text);
