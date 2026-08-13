@@ -746,3 +746,40 @@ DMs stay sender-anonymous on purpose: the hub's `SendMessage` and the user's com
 same `deliver`, and distinguishing them would add plumbing (an `InboxItem` field, UI scaffold
 filtering) that the reply medium does not need — both senders read the same turn text. If tone
 ever warrants it, tagging the sender is the follow-up, not a prerequisite.
+
+### D64. Models are configuration, not discovery; bingo filters nothing
+
+The model list was discovered, never declared: every session's `/model` menu paid a round trip to
+the endpoint, per-model metadata was a three-entry prefix table nobody could extend, and a preset
+could ship a `model_allowlist` that hid everything a subscription offered but one. Three problems,
+one shape — the user had no way to say what their endpoint serves.
+
+Settings gains `models`, at the top level (the "default" provider) and under
+`providers.<name>`. Entries are model ids or objects (`{id, display?, contextWindow?, thinking?}`)
+— four fields, no cost or modality data bingo does not consume. **Declaring is authoritative**:
+the menu shows exactly that list, in that order, with zero network. Metadata resolves in three
+tiers, field by field: declaration → prefix table → conservative default, so declaring only a
+window does not silently reset the thinking gate.
+
+The catalog is a value on `Client`, not a process global. `Client::models()` hands out a
+`ModelResolver` already bound to the current provider, and every measuring site (`budget`,
+compaction, `/status`, `/context`, the footer, the thinking gate) takes one — a second session on a
+second provider gets a second ruler, and the compiler finds any site that forgets, which is how #40
+(disagreeing window measurements) is prevented rather than re-fixed.
+
+Filtering is removed outright: `ProviderPreset.model_allowlist` and the openai adapter's
+`ModelAllowlist` are gone, so opencode-go pulls `/v1/models` like any other endpoint. Narrowing a
+subscription is now the user's `models` declaration. The codex static list stays — it is a
+*fallback* for a failed dynamic fetch, not a filter, and the difference is the whole point.
+
+Undeclared providers still pull, but no longer once per session: results land in
+`~/.local/share/bingo/models-cache.json` with a 24h TTL, keyed by provider **and** base URL
+(repointing an endpoint must not serve the old list). An expired entry is not discarded — it rides
+along with the fetch, so a failure shows the last known list with the reason attached instead of an
+empty menu ("degraded and visible"), and `r` in the level-two menu forces a re-ask. Every cache read
+and write degrades silently to "no cache"; a corrupt file must never cost a startup.
+
+`envKey` completes the picture on the credential side: a provider may name the environment variable
+holding its key (`apiKey` > `envKey` > auth.json stored key / OAuth). It resolves in
+`Client::build`, before the adapter, so `auth_status`, `is_configured` and the JSON protocol's
+`providers.result` cannot disagree about whether a provider is usable (#43's failure mode).

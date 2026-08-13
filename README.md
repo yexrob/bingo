@@ -219,8 +219,9 @@ otherwise the user layer — no `.bingo/` is conjured in arbitrary directories
 |---|---|---|
 | `apiKey` | string | API key (settings take precedence over `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`) |
 | `apiBaseUrl` | string | API endpoint (settings take precedence over `ANTHROPIC_BASE_URL`; default is the official one) |
-| `providers` | object | named providers: `{name: {protocol?, apiKey, apiBaseUrl?, supportsImages?, oauth?}}`, switch with `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, bearer auth; `apiBaseUrl` defaults to `https://api.openai.com`); `oauth: {kind: "codex"}` enables OAuth login (`/provider login`, apiKey wins) |
+| `providers` | object | named providers: `{name: {protocol?, apiKey?, envKey?, apiBaseUrl?, supportsImages?, oauth?, models?}}`, switch with `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, bearer auth; `apiBaseUrl` defaults to `https://api.openai.com`); `envKey` names an environment variable holding the key (credential order: `apiKey` > `envKey` > stored key / OAuth); `oauth: {kind: "codex"}` enables OAuth login (`/provider login`, apiKey wins) |
 | `model` | string | default model (written by `/model`); precedence: `--model` > settings > built-in `claude-sonnet-5` |
+| `models` | array | the default provider's model list; per-provider under `providers.<name>.models`. Entries are ids (`"gpt-5.6-sol"`) or objects (`{id, display?, contextWindow?, thinking?}`). Declared = authoritative: `/model` shows exactly this list with no request, and the metadata overrides the built-in table. Undeclared providers pull `/v1/models` and the result is cached for 24h (`r` in the menu re-asks) |
 | `thinkingLevel` | string | `off` omits thinking params (DeepSeek-compatible, default); `low`/`medium`/`high`/`xhigh`/`max` send adaptive thinking + `output_config.effort` at that level |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto` (follow terminal background) / `dark` / `light` |
@@ -243,7 +244,13 @@ Example:
   "providers": {
     "deepseek": { "apiKey": "sk-ds", "apiBaseUrl": "https://api.deepseek.com" },
     "local": { "apiKey": "sk-any", "apiBaseUrl": "http://127.0.0.1:11434/v1" },
-    "openai": { "protocol": "openai", "apiKey": "sk-...", "apiBaseUrl": "https://api.openai.com" }
+    "openai": { "protocol": "openai", "apiKey": "sk-...", "apiBaseUrl": "https://api.openai.com" },
+    "proxy": {
+      "protocol": "openai",
+      "apiBaseUrl": "https://proxy.example/v1",
+      "envKey": "PROXY_API_KEY",
+      "models": ["gpt-5.6-sol", { "id": "deepseek-v4", "display": "DeepSeek V4", "contextWindow": 131072, "thinking": false }]
+    }
   },
   "model": "claude-sonnet-5",
   "thinkingLevel": "medium",
