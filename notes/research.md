@@ -1088,3 +1088,27 @@ prefix at the injection point (and would have thrown off `kept`). And the Anthro
 `cache_control` to the last cacheable system block: a breakpoint caches the whole prefix before
 it, and the API rejects more than 4 — memory + crew + experience blocks together already crossed
 that line whenever `cacheControl` was on.
+
+### D75. Recall is BM25 over the stores we already have
+
+Experience retrieval was substring-or-4-char-prefix matching against trigger keywords only — no
+relevance score, and effectively blind to Chinese (a CJK sentence tokenizes as one giant "word",
+so nothing short of the exact trigger phrase inside the query ever matched). Memory had no
+retrieval at all: the whole file rides the system prompt.
+
+`src/bm25.rs` is a ~150-line zero-dependency scorer — the corpora are dozens of entries and a
+200-line memory file, scored in microseconds per query, so tantivy's index files and dependency
+tree would buy nothing (the same instinct that hand-rolled `civil_from_days`). Tokenization
+carries the semantics: ASCII words prefix-stem to 4 chars (exactly the old matcher's ≥4-prefix
+rule, so "migrate" still finds "migration") and CJK runs become character bigrams, which is what
+makes Chinese queries work at all. idf is the Lucene form (always positive) because in a
+three-entry corpus a token every entry shares is normal, not a stopword; the noise guard is
+`rank`'s relative floor instead.
+
+Two consumers: ExperienceQuery ranks by BM25 over trigger/summary/steps/notes (weighted 3/2/1/1),
+breaking ties with the old status-then-outcomes order, entry schema untouched. And each real user
+turn auto-recalls up to 3 active experiences + memory facts relevant to what the user just said,
+appended to the tail of the user message as a system-reminder — the tail is the one position that
+never disturbs the cached request prefix (D74), and the recalled text is recorded with the turn,
+so the canonical transcript stays exactly what the model saw. Stale/degraded entries are never
+auto-injected; they remain reachable through explicit ExperienceQuery.

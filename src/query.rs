@@ -1137,11 +1137,18 @@ pub async fn run_query(
     }
 
     let mut messages = initial_messages;
+    // Recalled context rides the tail of the user turn — the one position
+    // that never disturbs the cached request prefix — and is recorded with
+    // it, so what the model saw is what every reload replays (D75).
+    let user_input = match recall_context(session, user_input) {
+        Some(recalled) => format!("{user_input}\n\n{recalled}"),
+        None => user_input.to_string(),
+    };
     record(
         session,
         &mut messages,
         user_message_with_images(
-            user_input,
+            &user_input,
             images,
             session.client.supports_images(),
             &session.client.image_capable_providers(),
@@ -1149,6 +1156,55 @@ pub async fn run_query(
         ui,
     );
     query_loop(session, messages, ui, &tools, &ctx, cancel).await
+}
+
+/// BM25 recall over this project's committed experiences and extracted memory
+/// facts (D75): the few entries relevant to what the user just said, surfaced
+/// without waiting for the model to think of querying. Active experiences only
+/// — injecting a known-stale pattern unprompted would be advice against the
+/// record.
+fn recall_context(session: &Session, user_input: &str) -> Option<String> {
+    /// At most this many recalled lines per turn: recall is a hint, not a
+    /// second system prompt.
+    const RECALL_LIMIT: usize = 3;
+    if user_input.trim().is_empty() {
+        return None;
+    }
+    let cwd = session.cwd();
+    let mut docs = Vec::new();
+    let mut lines = Vec::new();
+    let key = crate::experience::project_key(&cwd);
+    for entry in crate::experience::load_entries(&session.home, &key) {
+        if entry.status != crate::experience::ExperienceStatus::Active {
+            continue;
+        }
+        docs.push(crate::experience::entry_document(&entry));
+        let short = entry.id.chars().take(4).collect::<String>();
+        lines.push(format!(
+            "- experience E{short}: {} (full steps via ExperienceQuery)",
+            entry.summary
+        ));
+    }
+    if let Some(memory) = crate::memory::load_project_memory(&session.home, &cwd) {
+        for fact in memory.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            docs.push(crate::bm25::Document::default().field(fact, 1.0));
+            lines.push(format!("- memory: {fact}"));
+        }
+    }
+    let ranked = crate::bm25::Bm25::new(docs).rank(user_input, RECALL_LIMIT);
+    if ranked.is_empty() {
+        return None;
+    }
+    let recalled: Vec<&str> = ranked
+        .iter()
+        .map(|(index, _)| lines[*index].as_str())
+        .collect();
+    Some(format!(
+        "<system-reminder>\nPossibly relevant project context, recalled by keyword match — verify \
+         before relying on it; after applying an experience, record the observed outcome with \
+         ExperienceOutcome:\n{}\n</system-reminder>",
+        recalled.join("\n")
+    ))
 }
 
 /// User input → message: text block first, image blocks after (when the provider supports
@@ -2023,6 +2079,71 @@ mod tests {
             crate::api::client::Client::new("k".into(), base_url),
             transcript,
         )
+    }
+
+    /// A session whose home/cwd point at seeded experience/memory stores.
+    fn test_session_at(home: std::path::PathBuf, cwd: std::path::PathBuf) -> Arc<Session> {
+        Arc::new(Session {
+            client: crate::api::client::Client::new("k".into(), "http://127.0.0.1:1".into()),
+            runtime: Runtime::new("m".into(), None, Default::default()),
+            permission_mode: PermissionMode::BypassPermissions,
+            settings: crate::settings::Settings::default(),
+            system: Vec::new(),
+            depth: 0,
+            cwd: Arc::new(std::sync::Mutex::new(cwd)),
+            user_config_dir: home.join(".config"),
+            home,
+            quiet: true,
+            compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            watch: crate::watch::WatchRegistry::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            agents: crate::agents::AgentRegistry::new(),
+            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            instance: None,
+            attachments: crate::api::image::Attachments::new(),
+        })
+    }
+
+    /// D75: the user turn recalls the project facts relevant to what was just
+    /// said — active experiences and memory lines — and nothing on a miss.
+    #[test]
+    fn recall_context_surfaces_matching_facts_only() {
+        let root = std::env::temp_dir().join(format!("bingo-recall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let cwd = root.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let key = crate::experience::project_key(&cwd);
+        let entry = crate::experience::ExperienceEntry::new(
+            &key,
+            vec!["compaction".into(), "cache".into()],
+            "keep the request prefix stable across turns".into(),
+            vec!["run cargo test".into()],
+            None,
+            None,
+        );
+        crate::experience::save_entry(&home, &key, &entry).unwrap();
+        let memory_path = crate::memory::memory_file(&home, &cwd);
+        std::fs::create_dir_all(memory_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &memory_path,
+            "compaction fires at ninety percent of the window\nfrontend bundler is vite\n",
+        )
+        .unwrap();
+
+        let session = test_session_at(home, cwd);
+        let block = recall_context(&session, "why did compaction reset my cache").unwrap();
+        assert!(block.starts_with("<system-reminder>"), "{block}");
+        let short = entry.id.chars().take(4).collect::<String>();
+        assert!(block.contains(&format!("experience E{short}")), "{block}");
+        assert!(block.contains("compaction fires"), "{block}");
+        assert!(!block.contains("vite"), "unrelated facts stay out: {block}");
+
+        assert!(recall_context(&session, "zzz qqq totally alien").is_none());
+        assert!(recall_context(&session, "").is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn test_session_with_client(

@@ -16,6 +16,7 @@ use crate::transcript::{Transcript, create as create_transcript, latest as lates
 mod agents;
 mod api;
 mod auth;
+mod bm25;
 mod budget;
 mod channels;
 mod compact;

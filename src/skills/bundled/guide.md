@@ -218,7 +218,9 @@ Example (.bingo/settings.json):
   static snapshot when that request fails — bingo never narrows the list itself).
 - **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
   experience index is injected (≤10 entries, ranked by observed outcomes before the legacy commit count; nothing injected when empty); full text is searched with ExperienceQuery by
-  trigger tokens (case-insensitive, shared-prefix tolerant; active first);
+  BM25 relevance over triggers/summary/steps/notes (English word stems and CJK bigrams; ties break active-first,
+  then observed outcomes). Each user turn also auto-recalls up to 3 relevant active experiences and
+  project-memory facts, appended to the turn tail as a system-reminder;
   ExperiencePropose generates candidates (not persisted); after user confirmation ExperienceCommit persists
   (same content → stable id, re-committing updates rather than duplicates; `status: stale` marks invalidation,
   exits injection but stays queryable). After actually applying a queried entry, ExperienceOutcome records a
