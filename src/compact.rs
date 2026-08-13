@@ -89,7 +89,16 @@ pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, token
     compact(session, messages).await
 }
 
-pub async fn compact_after_overflow(session: &Session, messages: &mut Vec<Message>) -> bool {
+/// Recovery after the server rejected the request as too long. Takes the gate
+/// because compaction invalidates it: the anchor describes the pre-compaction
+/// history and projection floors at that anchor (`saturating_sub` eats the
+/// drop), so a kept anchor reads the shrunken history at its old size and
+/// compacts what was just compacted.
+pub async fn compact_after_overflow(
+    session: &Session,
+    messages: &mut Vec<Message>,
+    gate: &mut TokenGate,
+) -> bool {
     if session.compact_failures.load(Ordering::SeqCst) >= MAX_COMPACT_FAILURES {
         if !session.quiet {
             eprintln!(
@@ -102,7 +111,11 @@ pub async fn compact_after_overflow(session: &Session, messages: &mut Vec<Messag
         session.compact_failures.fetch_add(1, Ordering::SeqCst);
         return false;
     }
-    compact(session, messages).await
+    let compacted = compact(session, messages).await;
+    if compacted {
+        gate.reset();
+    }
+    compacted
 }
 
 async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {

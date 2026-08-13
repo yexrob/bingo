@@ -735,7 +735,7 @@ async fn query_loop(
         .await
         {
             Err(error @ QueryError::Client(ClientError::ContextOverflow { .. })) => {
-                if !compact_after_overflow(session, &mut messages).await {
+                if !compact_after_overflow(session, &mut messages, &mut gate).await {
                     if let Some(inbox) = inbox_wake.as_mut() {
                         inbox.restore(session);
                     }
@@ -1633,9 +1633,20 @@ mod tests {
     }
 
     async fn spawn_anthropic_api(responses: Vec<ApiResponse>) -> String {
+        spawn_anthropic_api_counting(10, responses).await.0
+    }
+
+    /// Same server with a caller-chosen `count_tokens` answer and a tally of the
+    /// non-streaming (compaction) requests it served.
+    async fn spawn_anthropic_api_counting(
+        input_tokens: u64,
+        responses: Vec<ApiResponse>,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let summaries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served = Arc::clone(&summaries);
         let mut remaining = responses;
         remaining.reverse();
         tokio::spawn(async move {
@@ -1644,10 +1655,16 @@ mod tests {
                     return;
                 };
                 let head = read_http_request(&mut socket).await;
-                let (status, content_type, body) = if request_kind(&head)
-                    == ApiRequestKind::CountTokens
-                {
-                    (200, "application/json", "{\"input_tokens\":10}".to_string())
+                let kind = request_kind(&head);
+                if kind == ApiRequestKind::CompleteText {
+                    served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                let (status, content_type, body) = if kind == ApiRequestKind::CountTokens {
+                    (
+                        200,
+                        "application/json",
+                        format!("{{\"input_tokens\":{input_tokens}}}"),
+                    )
                 } else {
                     match remaining.pop().unwrap_or(ApiResponse::Ok(String::new())) {
                         ApiResponse::Ok(body) => (200, "text/event-stream", body),
@@ -1670,7 +1687,7 @@ mod tests {
                 let _ = socket.shutdown().await;
             }
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), summaries)
     }
 
     async fn spawn_openai_api(responses: Vec<ApiResponse>) -> String {
@@ -2246,6 +2263,53 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             1,
             "successful compaction resets prior failures before the retry overflow adds one"
+        );
+    }
+
+    /// After overflow compaction the gate must forget its exact count: the anchor
+    /// was measured on the pre-compaction history and projection floors at it, so
+    /// keeping it reads the shrunken history at its old size and compacts again on
+    /// the very next turn (one more lost round of detail, one more request).
+    #[tokio::test]
+    async fn overflow_compaction_resets_the_token_gate() {
+        // Just under the 122_400 threshold for a 200k window, so the first turn
+        // measures high without compacting; the summary then adds ~15k estimated
+        // tokens — enough to cross the threshold on top of a stale anchor, but
+        // under the 20k growth that would force a fresh exact count.
+        let summary = format!(
+            r#"{{"content":[{{"type":"text","text":"{}"}}]}}"#,
+            "s".repeat(60_000)
+        );
+        let (base_url, summaries) = spawn_anthropic_api_counting(
+            110_000,
+            vec![
+                ApiResponse::Error {
+                    status: 400,
+                    body: ANTHROPIC_OVERFLOW.to_string(),
+                },
+                ApiResponse::Ok(summary),
+                ApiResponse::Ok(tool_turn("tu_1", "NoSuchTool", serde_json::json!({}))),
+                ApiResponse::Ok(text_turn("done", "end_turn")),
+            ],
+        )
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        run_query(
+            &session,
+            overflow_history(),
+            "current request",
+            &[],
+            &mut ui,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            summaries.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the freshly compacted history must not be compacted again"
         );
     }
 
