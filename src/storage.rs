@@ -282,6 +282,9 @@ fn select_removal_entries(
     removals
 }
 
+/// The sidecar `.jsonl.lock` alone decides whether a file is in use; the file itself is
+/// never locked (D72). Locking the data file would be mandatory on Windows and could fail
+/// a concurrent reader (/resume, /share) for the width of a cleanup pass.
 fn remove_unchanged_file(entry: &StoredEntry) -> Result<bool, StorageError> {
     let lock_path = entry.path.with_extension("jsonl.lock");
     let lock_file = std::fs::OpenOptions::new()
@@ -298,22 +301,11 @@ fn remove_unchanged_file(entry: &StoredEntry) -> Result<bool, StorageError> {
             return Err(io_error("lock file for cleanup", &lock_path, source));
         }
     }
-    let file = match std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&entry.path)
-    {
+    let file = match std::fs::OpenOptions::new().read(true).open(&entry.path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(source) => return Err(io_error("open file for cleanup", &entry.path, source)),
     };
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
-        Err(std::fs::TryLockError::Error(source)) => {
-            return Err(io_error("lock file for cleanup", &entry.path, source));
-        }
-    }
     let metadata = file
         .metadata()
         .map_err(|source| io_error("read metadata for", &entry.path, source))?;
@@ -345,22 +337,6 @@ fn remove_inactive_transcript(path: &Path) -> Result<bool, StorageError> {
         Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
         Err(std::fs::TryLockError::Error(source)) => {
             return Err(io_error("lock transcript for cleanup", &lock_path, source));
-        }
-    }
-    let file = match std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(source) => return Err(io_error("open transcript for cleanup", path, source)),
-    };
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
-        Err(std::fs::TryLockError::Error(source)) => {
-            return Err(io_error("lock transcript for cleanup", path, source));
         }
     }
     if remove_file(path)? {
@@ -554,18 +530,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
+    /// The sidecar is the whole claim (D72): a held `.jsonl.lock` protects the transcript
+    /// even when nothing holds the data file, which is never locked on either platform.
     #[test]
-    fn cleanup_skips_a_transcript_when_only_its_data_file_is_locked() {
-        let home = temp_home("active-data-lock");
+    fn cleanup_skips_a_transcript_whose_sidecar_lock_is_held() {
+        let home = temp_home("active-sidecar-lock");
         let now = SystemTime::now();
         let transcript = transcripts_dir(&home).join("renamed.jsonl");
         write_at(&transcript, now - Duration::from_secs(31 * 24 * 60 * 60));
-        let file = std::fs::OpenOptions::new()
+        let sidecar = std::fs::OpenOptions::new()
+            .create(true)
             .read(true)
             .write(true)
-            .open(&transcript)
+            .truncate(false)
+            .open(transcript.with_extension("jsonl.lock"))
             .unwrap();
-        file.try_lock().unwrap();
+        sidecar.try_lock().unwrap();
 
         let report = cleanup_with_policy_at(&home, None, test_policy(0), now).unwrap();
 

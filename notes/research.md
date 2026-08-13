@@ -990,3 +990,35 @@ values so JSON clients render the real executor without guessing platform defaul
 The wire tool name stays `Bash`: permission rules (`Bash(git push:*)`), hooks, stored transcripts,
 and provider-side tool-call history all key on it, and a rename would break every one of them for
 a cosmetic gain. The dialect strings are wire format now (tested), not display text.
+
+### D72. The sidecar `.lock` is the whole claim; data files are never locked
+
+Session storage locked two files per transcript: the sidecar `<stem>.jsonl.lock` and the
+`<stem>.jsonl` data file itself, the second held open for the session's whole lifetime. Unix file
+locks are advisory, so every other reader — `load_messages`, `/resume`, `/share`, `/compact` —
+opened a second handle and read straight through the lock without noticing it. Windows locks are
+mandatory: `LockFileEx` fails any read or write through *any* other handle, including handles in
+the same process, so those same readers came back `Os { code: 33 }` and eleven tests failed on
+`windows-latest` only. The lock that was invisible on one platform was load-bearing on the other.
+
+The fix is one invariant instead of a platform special case: **the sidecar is the whole claim, and
+a data file is never locked anywhere**. Cross-process exclusion is unchanged — a second bingo still
+finds the sidecar locked and still gets "transcript is active in another process" — because the
+sidecar alone always expressed that contract; the data-file lock only ever duplicated it. The
+data-file handle stays open for appends, just unlocked. Applied uniformly: `transcript.rs`
+(lifetime lock), `storage.rs` cleanup (both removal paths), and `tui/history.rs` save, where the
+mandatory lock could have failed another process's lock-free `load` into a silently empty history.
+
+Two Windows semantics were checked rather than assumed, since neither is visible in the code.
+Renaming and deleting an open file works: Rust's `OpenOptions` opens with `FILE_SHARE_DELETE`, so
+`/rename`'s data-file-then-sidecar rename dance and `delete` succeed with the session's handles
+still open. And cleanup's own removal of a stale sidecar is `let _ = remove_file(..)`, so a Windows
+sharing violation there degrades to a leftover `.lock` — re-lockable on the next pass — rather than
+failing the cleanup. Cleanup's data-file open is now read-only: it exists to compare mtime, not to
+claim anything.
+
+Tests carried two more POSIX assumptions that the executor no longer matches (D71). `sh -c 'exit 7'`
+under PowerShell is a missing command (exit 1), not an exit-7 process, so the non-zero-exit test
+selects its command by `cfg`. And grep's "files only, no `path:line:text` coordinates" assertion
+searched for a colon in absolute paths — which every Windows drive letter carries; it now compares
+below the fixture root.
