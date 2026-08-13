@@ -169,6 +169,21 @@ impl super::Chat {
             let models = models.into_iter().map(ModelChoice::from).collect();
             return self.model_list_state(provider, models, false, None);
         }
+        // Disk cache (D64): a list that is still fresh answers without a round
+        // trip. A stale one is not thrown away — it rides along with the fetch
+        // so a failure has something to fall back on.
+        let cached = self.cached_model_list(provider);
+        if let Some(entry) = cached.as_ref().filter(|entry| entry.fresh()) {
+            self.models_cache
+                .insert(provider.to_string(), entry.models.clone());
+            let models = entry
+                .models
+                .iter()
+                .cloned()
+                .map(ModelChoice::from)
+                .collect();
+            return self.model_list_state(provider, models, false, None);
+        }
         self.fetch_model_list(provider.to_string());
         ModelMenuModels {
             provider: provider.to_string(),
@@ -179,6 +194,13 @@ impl super::Chat {
             failed: None,
             declared: false,
         }
+    }
+
+    /// This provider's disk-cached list, keyed by the endpoint it was fetched
+    /// from (a repointed provider must not eat the old list).
+    fn cached_model_list(&self, provider: &str) -> Option<crate::model_cache::CachedModels> {
+        let (_, base_url) = self.session.client.provider_endpoint(provider)?;
+        crate::model_cache::ModelCache::new(&self.session.home).get(provider, &base_url)
     }
 
     /// A ready level-two list: preselect the running model when this is the
@@ -207,10 +229,17 @@ impl super::Chat {
     }
 
     /// Ask the provider's endpoint for its model list; the answer arrives as
-    /// ModelsLoaded.
+    /// ModelsLoaded. A success updates the disk cache; a failure falls back to
+    /// whatever the cache still holds, however stale.
     fn fetch_model_list(&self, provider: String) {
         let session = self.session.clone();
         let events = self.events.clone();
+        let stale = self.cached_model_list(&provider);
+        let endpoint = self
+            .session
+            .client
+            .provider_endpoint(&provider)
+            .map(|(_, base_url)| base_url);
         tokio::spawn(async move {
             // Unknown names must error — the old fallback silently listed the
             // CURRENT endpoint's models under the wrong provider label.
@@ -254,9 +283,19 @@ impl super::Chat {
                     } else {
                         format!("fetch failed ({code})")
                     };
-                    (Vec::new(), Some(reason))
+                    // An expired list still names real models: showing it with
+                    // the reason beats an empty menu.
+                    let fallback = stale.map(|entry| entry.models).unwrap_or_default();
+                    (fallback, Some(reason))
                 }
             };
+            if failed.is_none()
+                && !models.is_empty()
+                && let Some(base_url) = endpoint
+            {
+                crate::model_cache::ModelCache::new(&session.home)
+                    .put(&provider, &base_url, &models);
+            }
             let _ = events.send(UiEvent::ModelsLoaded {
                 provider,
                 models,
@@ -453,16 +492,57 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers};
 
+    /// An isolated home: the disk cache lives under it, so tests must not
+    /// share one.
+    fn tmp_home(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bingo-model-menu-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
     /// A chat whose client is built from the given settings JSON (the catalog
     /// only exists on a Client built from settings).
     fn chat_with_settings(json: &str) -> crate::tui::chat::Chat {
+        chat_at_home(&tmp_home("default"), json)
+    }
+
+    fn chat_at_home(home: &std::path::Path, json: &str) -> crate::tui::chat::Chat {
         let mut chat = crate::tui::test_util::chat_at(80, 24);
         let settings: crate::settings::Settings = serde_json::from_str(json).unwrap();
-        let home = std::env::temp_dir().join(format!("bingo-model-menu-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::sync::Arc::get_mut(&mut chat.session).unwrap().client =
-            crate::api::client::Client::from_settings_at(&settings, &home).unwrap();
+        let session = std::sync::Arc::get_mut(&mut chat.session).unwrap();
+        session.client = crate::api::client::Client::from_settings_at(&settings, home).unwrap();
+        session.home = home.to_path_buf();
         chat
+    }
+
+    /// Settings pointing at a dead local port: the fetch path is exercised
+    /// without waiting on a real endpoint.
+    const OFFLINE: &str = r#"{"apiKey": "sk", "apiBaseUrl": "http://127.0.0.1:1"}"#;
+
+    fn open_level_two(chat: &mut crate::tui::chat::Chat) {
+        chat.input = "/model".to_string();
+        chat.submit();
+        chat.on_key(KeyCode::Enter, KeyModifiers::empty());
+    }
+
+    fn default_endpoint(chat: &crate::tui::chat::Chat) -> String {
+        chat.session
+            .client
+            .provider_endpoint("default")
+            .expect("default provider")
+            .1
+    }
+
+    /// Backdate every cached entry so it reads as expired.
+    fn expire_cache(home: &std::path::Path) {
+        let path = crate::model_cache::cache_path(home);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut store: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        for (_, entry) in store.as_object_mut().unwrap() {
+            entry["fetchedAt"] = serde_json::json!(1);
+        }
+        std::fs::write(&path, store.to_string()).unwrap();
     }
 
     fn level_two(chat: &crate::tui::chat::Chat) -> &ModelMenuModels {
@@ -567,5 +647,103 @@ mod tests {
             chat.models_cache.is_empty(),
             "a failed fetch must not poison the session cache"
         );
+    }
+
+    /// A fresh disk entry answers the menu across sessions — the point of the
+    /// cache. `loading` stays false, so no request went out.
+    #[tokio::test]
+    async fn a_fresh_disk_entry_answers_without_a_fetch() {
+        let home = tmp_home("disk-fresh");
+        let mut chat = chat_at_home(&home, OFFLINE);
+        let endpoint = default_endpoint(&chat);
+        crate::model_cache::ModelCache::new(&home).put(
+            "default",
+            &endpoint,
+            &["disk-model".to_string()],
+        );
+
+        open_level_two(&mut chat);
+        let m = level_two(&chat);
+        assert!(!m.loading, "the disk cache answered");
+        assert_eq!(m.models, vec![ModelChoice::from("disk-model".to_string())]);
+        assert_eq!(
+            chat.models_cache.get("default").map(Vec::as_slice),
+            Some(&["disk-model".to_string()][..]),
+            "the session cache is warmed from disk"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Past the TTL the list is re-asked, and a different endpoint under the
+    /// same provider name is not the same list.
+    #[tokio::test]
+    async fn stale_or_repointed_entries_do_not_answer() {
+        let home = tmp_home("disk-stale");
+        let cache = crate::model_cache::ModelCache::new(&home);
+        let mut chat = chat_at_home(&home, OFFLINE);
+        let endpoint = default_endpoint(&chat);
+        cache.put("default", &endpoint, &["disk-model".to_string()]);
+        expire_cache(&home);
+
+        open_level_two(&mut chat);
+        assert!(
+            level_two(&chat).loading,
+            "an expired entry sends the request anyway"
+        );
+
+        // Same provider name, different endpoint: the entry must not be reused.
+        let home = tmp_home("disk-repointed");
+        let cache = crate::model_cache::ModelCache::new(&home);
+        cache.put(
+            "default",
+            "https://elsewhere.example",
+            &["other-model".to_string()],
+        );
+        let mut chat = chat_at_home(&home, OFFLINE);
+        open_level_two(&mut chat);
+        assert!(
+            level_two(&chat).loading,
+            "a list fetched from another endpoint is not this endpoint's list"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A successful fetch lands on disk; a later failure serves that list with
+    /// the reason attached rather than an empty menu.
+    #[tokio::test]
+    async fn a_fetch_writes_the_cache_and_a_failure_falls_back_to_it() {
+        let home = tmp_home("disk-write");
+        let mut chat = chat_at_home(&home, OFFLINE);
+        let endpoint = default_endpoint(&chat);
+
+        open_level_two(&mut chat);
+        assert!(level_two(&chat).loading);
+        // The fetch itself is the spawned task's job; assert the contract the
+        // menu depends on — a successful result is persisted for next time.
+        crate::model_cache::ModelCache::new(&home).put(
+            "default",
+            &endpoint,
+            &["fetched-model".to_string()],
+        );
+        expire_cache(&home);
+
+        // Re-entering with an expired entry re-asks, and the failure that
+        // follows shows the expired list plus the reason.
+        chat.model_menu = None;
+        chat.models_cache.clear();
+        open_level_two(&mut chat);
+        assert!(level_two(&chat).loading);
+        chat.apply_models_loaded(
+            "default".to_string(),
+            vec!["fetched-model".to_string()],
+            Some("fetch failed (TIMEOUT)".into()),
+        );
+        let m = level_two(&chat);
+        assert_eq!(
+            m.models,
+            vec![ModelChoice::from("fetched-model".to_string())]
+        );
+        assert_eq!(m.failed.as_deref(), Some("fetch failed (TIMEOUT)"));
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
