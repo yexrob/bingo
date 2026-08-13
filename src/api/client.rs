@@ -263,7 +263,18 @@ impl Client {
             endpoint: Arc::new(std::sync::RwLock::new((default_adapter, default_info))),
             providers,
             preset_names,
-            catalog: Arc::new(crate::api::models::ModelCatalog::from_settings(settings)),
+            catalog: Arc::new(
+                crate::api::models::ModelCatalog::from_settings(settings).with_families(
+                    // Same derivation as main's user_dir: the catalog file
+                    // lives next to settings.json. Read-only here — startup
+                    // maintenance already ran (and reported) in main.
+                    crate::model_families::load_overrides(
+                        &env("XDG_CONFIG_HOME")
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_else(|_| home.join(".config")),
+                    ),
+                ),
+            ),
         })
     }
 
@@ -899,14 +910,14 @@ mod tests {
             Client::from_settings_with(&settings, |_| Err(std::env::VarError::NotPresent)).unwrap();
         assert_eq!(
             client.models().context_window("claude-sonnet-5"),
-            200_000,
+            1_000_000,
             "default provider: the prefix table"
         );
         client.set_provider("narrow").unwrap();
         assert_eq!(client.models().context_window("claude-sonnet-5"), 32_000);
         // A forked client pins its own provider's ruler.
         let fork = client.with_provider("default").unwrap();
-        assert_eq!(fork.models().context_window("claude-sonnet-5"), 200_000);
+        assert_eq!(fork.models().context_window("claude-sonnet-5"), 1_000_000);
         assert_eq!(client.models().context_window("claude-sonnet-5"), 32_000);
     }
 

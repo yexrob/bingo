@@ -1022,3 +1022,40 @@ under PowerShell is a missing command (exit 1), not an exit-7 process, so the no
 selects its command by `cfg`. And grep's "files only, no `path:line:text` coordinates" assertion
 searched for a colon in absolute paths — which every Windows drive letter carries; it now compares
 below the fixture root.
+
+### D73. Family defaults live in a two-owner catalog file
+
+The compiled prefix table (D65) is where per-family research lands — window, output ceiling,
+thinking support — but it was invisible: the only way to see what bingo assumed about a family was
+to read the source, and the only way to correct it was a per-provider, per-model settings
+declaration. The `dnf` drama session showed the cost of invisible defaults: the table's 8k DeepSeek
+output ceiling silently strangled a long-reasoning proxy model mid-thought, and nothing on disk
+said so.
+
+`~/.config/bingo/model-catalog.json` (created at startup, next to settings.json) makes the table a
+file with two sections split by owner. `builtin` is bingo's mirror of the compiled table, rewritten
+whenever an upgrade changes it — which is exactly how corrected research reaches users who never
+tuned anything, the failure mode an add-only or write-once file would have baked in (today's wrong
+8k would have shadowed tomorrow's fix forever). `overrides` is the user's and is never written by
+bingo. Keys are id prefixes, a full id being just the longest prefix, so one mechanism covers both
+"this family" and "this one model". Resolution is per field through the tiers — settings
+declaration, then overrides (longest prefix first), then the compiled table, then the conservative
+default — matching the D65 rule that declaring one field must not reset another.
+
+Failure doctrine follows feedback-states: a file that fails to parse degrades to built-ins with a
+startup note and is *never* rewritten — the broken content may hold the user's overrides mid-edit,
+and a repair would destroy their work to save a cache. `deny_unknown_fields` turns a typo'd field
+into that same visible note rather than a key that silently does nothing (the settings-lint
+doctrine, applied at parse time because this file has a schema and settings.json's layers do not).
+`Client` re-derives the config dir itself (XDG, then home) rather than threading a new parameter
+through both construction paths; maintenance runs once in main, construction only reads.
+
+The seed data itself (29 families across nine vendors) was researched against each vendor's official
+API docs on 2026-08-13 — windows, output ceilings, thinking support, and the prefix-shadowing pairs
+are recorded with per-claim sources in notes/research/model-catalog-params.md. Two rules carried
+into the table: no number enters it that a primary source did not publish (families with no
+documented output ceiling — kimi-k2.x, mistral — keep the conservative default), and
+`supports_thinking` describes bingo's wire parameters, not the model's ability (DeepSeek reasons by
+default server-side while the gate stays off). The old table's DeepSeek entry (128k/8k) had gone
+stale enough to strangle a real session mid-thought; the corrected 1M/384k reaching users through
+the file's `builtin` refresh is D73's mechanism doing its job on day one.

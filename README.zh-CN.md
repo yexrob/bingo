@@ -228,6 +228,21 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 }
 ```
 
+### 模型目录（model-catalog.json）
+
+`~/.config/bingo/model-catalog.json`（首次启动生成，与 settings.json 同目录）存放按模型 id **前缀**
+归类的家族默认值——`contextWindow`、`maxTokens`（输出上限）、`thinking`——最长前缀逐字段胜出。
+两段各有其主：
+
+- `builtin` 归 bingo：编译进二进制的调研默认值的镜像，升级时重写，修正过的数字随版本到达；
+  在这一段做的修改下次启动会被还原。
+- `overrides` 归你：bingo 永不改写，生效层级在 settings `models` 声明与内置表之间。完整模型 id
+  就是最长的前缀，所以 `"overrides": {"deepseek-v4-flash": {"maxTokens": 32000}}` 只抬高这一个
+  型号的输出上限，`"deepseek"` 条目继续管家族里的其他型号。
+
+逐字段优先级：settings `models` 声明 → `overrides` → 内置表 → 保守默认。文件损坏时降级用内置值并在
+启动时告警，绝不覆盖改写（删除文件可重新播种）。
+
 ## 工具集
 
 全部经统一 Tool trait（serde/schemars 生成 schema，单一来源）：
@@ -499,8 +514,9 @@ bingo 的 Tool trait：
   上限清理；对应 share 快照随 transcript 删除。
   输入历史文件同样采用 30 天 TTL 与 100 个文件上限；本地导出的 HTML 与任务
   清单不会被自动删除。
-- **上下文预算**：窗口 200k，输出预算 64k，有效输入窗口 = 窗口 − 输出预算；
-  自动压缩阈值 = 有效窗口的 90%（≈122k），提前 20k 提醒（`/context`）。
+- **上下文预算**：窗口与输出预算按模型取值（settings 声明、`model-catalog.json`
+  或内置家族表；未知模型按 200k/64k 保守假设），有效输入窗口 = 窗口 − 输出预算；
+  自动压缩阈值 = 有效窗口的 90%（当前 Claude 系约 785k），提前 20k 提醒（`/context`）。
   压缩 = 摘要旧消息 + 保留最近 8 条；压缩切点安全推进到 tool_result 边界之外，
   避免孤儿 tool_result 导致 400。连续压缩失败 3 次熔断（`/compact` 手动触发）。
   非 Anthropic 端点（无 count_tokens）自动改用本地估算（字符数/4）。

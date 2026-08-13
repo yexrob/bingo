@@ -263,6 +263,23 @@ Example:
 }
 ```
 
+### Model catalog (model-catalog.json)
+
+`~/.config/bingo/model-catalog.json` (created on first start, next to settings.json) holds the
+per-family model defaults — `contextWindow`, `maxTokens` (output ceiling), `thinking` — keyed by
+model-id **prefix**, longest match winning field by field. Two sections with different owners:
+
+- `builtin` is bingo's: a mirror of the researched defaults compiled into the binary, rewritten
+  on upgrade so corrected numbers reach you. Edits here are reverted on the next start.
+- `overrides` is yours: never touched by bingo, consulted between a settings `models` declaration
+  and the built-in table. A full model id is just the longest prefix, so
+  `"overrides": {"deepseek-v4-flash": {"maxTokens": 32000}}` lifts one model's output ceiling
+  while `"deepseek"` entries keep governing the rest of the family.
+
+Precedence per field: settings `models` declaration → `overrides` → built-in table → conservative
+default. An unreadable file degrades to the built-ins with a startup warning and is never
+overwritten (delete it to re-seed).
+
 ## Tool set
 
 All tools go through the unified `Tool` trait (serde/schemars generates the
@@ -575,9 +592,11 @@ Example (PreToolUse denies Bash):
   the last 24 hours are never count-pruned; matching share snapshots
   follow transcript deletion. Prompt-history files use the same TTL and a
   100-file cap. Local exported HTML and task lists are never removed.
-- **Context budget**: 200k window, 64k output budget, effective input window =
-  window − output budget; auto-compaction threshold = 90% of the effective
-  window (≈122k), with a 20k headroom warning (`/context`). Compaction
+- **Context budget**: per-model window and output budget (from the settings
+  declaration, `model-catalog.json`, or the built-in family table; unknown
+  models assume 200k/64k), effective input window = window − output budget;
+  auto-compaction threshold = 90% of the effective window (≈785k for current
+  Claude models), with a 20k headroom warning (`/context`). Compaction
   summarizes old messages and keeps the most recent 8; the split point advances
   safely past tool_result boundaries to avoid orphaned tool_result 400s.
   Fuse after 3 consecutive failures (`/compact` forces manually). Non-Anthropic
