@@ -852,3 +852,18 @@ Four smaller findings, same review:
   budget before it is sent: whole messages from the oldest end, then the head of what remains, with
   a line saying how many were left out. Local and deterministic, because a recovery path that needs
   a request to discover it failed is not a recovery path.
+
+### D67. The audience decides the lane: venue selection for initiated messages
+
+D45/D48/D63 all govern *replies* — who owes one, where it goes, what stays private. Initiated
+messages had no rule, which leaves two symmetric failures: a member that discovers something
+team-wide (a contract change, a shared blocker) reports it only to the hub as turn text and the
+team works on stale ground; and a member that narrates personal progress into the room re-creates
+the D45 flood through a door the reply rules do not watch. The venue rule closes both with one
+criterion — the audience decides the lane — stated on all three surfaces that choose a lane: the
+member's CHANNEL_NOTE (a proactive Post duty plus a status-stays-out half, guarded as a pair by
+tests), the hub's SendMessage description (private lane for what concerns the receiver alone; a
+channel Post for what every member should act on, because per-member private copies drift apart),
+and the Post description (what concerns one agent alone goes to them directly, not into everyone's
+context). Like the reply rules, it lives in system-prompt/tool-description text rather than wake-up
+payloads: compaction never touches either, so the rule survives long sessions.
