@@ -2211,8 +2211,12 @@ impl super::Chat {
         self.context_usage
     }
 
-    /// Input-area rendered rows (with the ▋ caret) — the single source for the row-count model and rendering:
+    /// Input-area rendered rows — the single source for the row-count model and rendering:
     /// chrome height is counted from it and assembly emits rows from it.
+    ///
+    /// No cursor glyph is drawn here: the terminal's own cursor is the only caret
+    /// ([`crate::tui::chrome::prompt`] attaches it via `El::Caret`), so it overlays the cell it
+    /// sits on and never pushes the text after it aside.
     ///
     /// Empty input gets a one-line dim placeholder; multi-line input beyond [`INPUT_ROWS_MAX`] shows only
     /// the screen around the caret (tail-aligned), so the row count always has an upper bound.
@@ -2224,42 +2228,22 @@ impl super::Chat {
             return vec![Line::styled(one_line(&hit, self.input_width()), style)];
         }
         if self.input.is_empty() {
-            // Block caret sits ON the placeholder's first cell (CC-style):
-            // the hint reads as text under the cursor, not glued after it.
-            let mut hint = crate::tui::keys::INPUT_PLACEHOLDER.chars();
-            hint.next();
-            let mut line = Line::styled("▋", style);
-            line.push_styled(hint.as_str().to_string(), self.theme.dim());
-            return vec![line];
+            // The real cursor rests on the placeholder's first cell; the hint keeps every
+            // character (the terminal inverts the cell it covers).
+            return vec![Line::styled(
+                crate::tui::keys::INPUT_PLACEHOLDER.to_string(),
+                self.theme.dim(),
+            )];
         }
         let width = self.input_width();
         let lines = crate::tui::input::visual_lines(&self.input, width);
-        let (row, col) = crate::tui::input::cursor_cell(&self.input, &lines, self.cursor);
+        let (row, _) = crate::tui::input::cursor_cell(&self.input, &lines, self.cursor);
         let start = row.saturating_sub(INPUT_ROWS_MAX - 1);
         lines
             .iter()
-            .enumerate()
             .skip(start)
             .take(INPUT_ROWS_MAX)
-            .map(|(i, line)| {
-                if i != row {
-                    return Line::styled(line.text.clone(), style);
-                }
-                // Draw ▋ at the caret; text after it renders normally.
-                let mut at = 0usize;
-                let mut w = 0usize;
-                for ch in line.text.chars() {
-                    if w >= col {
-                        break;
-                    }
-                    w += crate::tui::line::char_width(ch);
-                    at += ch.len_utf8();
-                }
-                let mut out = Line::styled(line.text[..at].to_string(), style);
-                out.push_styled("▋", style);
-                out.push_styled(line.text[at..].to_string(), style);
-                out
-            })
+            .map(|line| Line::styled(line.text.clone(), style))
             // Each row must occupy exactly one line: history-filled text may contain tabs (folded to spaces),
             // otherwise the column-width math and canvas height would both drift.
             .map(|mut line| {
@@ -3278,12 +3262,10 @@ impl super::Chat {
             line.push_styled(if focused { "❯ " } else { "  " }, style);
             line.push_styled(format!("{}. Other", other_idx + 1), style);
             parts.push(El::click(ClickTarget::AskOption(other_idx), El::Line(line)));
-            let placeholder = if focused {
-                if self.ask_other.is_empty() {
-                    "Type something.".to_string()
-                } else {
-                    format!("{}{}", self.ask_other, '▋')
-                }
+            // No cursor glyph: the terminal cursor is the only caret in the app, and it stays
+            // anchored to the input box below (the ask block renders into the transcript).
+            let placeholder = if focused && !self.ask_other.is_empty() {
+                self.ask_other.clone()
             } else {
                 "Type something.".to_string()
             };

@@ -400,8 +400,9 @@ fn suggestions(chat: &Chat, width: usize) -> El {
     ))
 }
 
-/// Caret position inside the input box (row offset, column) — same source as where
-/// [`Chat::prompt_lines`] draws `▋`.
+/// Caret position inside the input box (row offset, column) — indexes the rows
+/// [`Chat::prompt_lines`] returns. This is the app's only caret: the frame hands it to
+/// `Frame::set_cursor_position`, so shape and blink stay the user's terminal defaults.
 fn caret_cell(chat: &Chat) -> (usize, usize) {
     if let Some(search) = &chat.search {
         let hit = search.hit.clone().unwrap_or_default();
@@ -1156,25 +1157,29 @@ mod tests {
         assert!(!text.contains('▸'), "restored after Esc: {text}");
     }
 
-    /// Input box: prefix + `▋` fake caret; the real caret (the tree's Caret
-    /// node) lands on the same cell — row offsets fall out of the render walk.
+    /// Input box: prefix + the raw text, no cursor glyph anywhere; the tree's Caret node
+    /// carries the only caret — row offsets fall out of the render walk.
     #[test]
     fn prompt_rows_and_caret_agree() {
         let mut chat = chat_at(80, 24);
         chat.set_input("hi");
         let out = el::render(prompt(&chat, 80));
         assert_eq!(out.rows.len(), 3, "top/bottom borders + one input row");
-        assert_eq!(row_text(&out.rows[1]), "❯ hi▋");
+        assert_eq!(row_text(&out.rows[1]), "❯ hi");
         assert_eq!(
             out.caret,
             Some((1, 4)),
-            "caret sits on ▋ (the first row after the border)"
+            "caret sits past the text (the first row after the border)"
         );
 
         chat.set_input("");
         let out = el::render(prompt(&chat, 80));
         assert_eq!(out.caret, Some((1, 2)));
-        assert!(row_text(&out.rows[1]).starts_with("❯ ▋"));
+        let empty = row_text(&out.rows[1]);
+        assert!(
+            empty.starts_with(&format!("❯ {}", crate::tui::keys::INPUT_PLACEHOLDER)),
+            "the placeholder keeps its first character: {empty}"
+        );
 
         // Multi-line input: the caret row follows the input row.
         chat.set_input("a\nb\nc");
@@ -1182,10 +1187,16 @@ mod tests {
         assert_eq!(out.rows.len(), 5);
         assert_eq!(out.caret, Some((3, 3)));
 
+        // Wide glyphs count two columns each: the caret lands past the CJK run, not past its char count.
+        chat.set_input("你好a");
+        let out = el::render(prompt(&chat, 80));
+        assert_eq!(row_text(&out.rows[1]), "❯ 你好a");
+        assert_eq!(out.caret, Some((1, 7)), "2 prefix + 2 + 2 + 1");
+
         chat.bash_mode = true;
         chat.set_input("ls");
         let out = el::render(prompt(&chat, 80));
-        assert_eq!(row_text(&out.rows[1]), "! ls▋");
+        assert_eq!(row_text(&out.rows[1]), "! ls");
         // bash mode swaps the border color (CC bashBorder).
         assert_eq!(
             out.rows[0].line.segs[0].style.fg,

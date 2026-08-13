@@ -10,7 +10,7 @@
 //! [tasks]       todo · N/M tasks
 //! [warning]     `⚠ …`
 //! [help]        `?` panel
-//! [prompt]      ╭──╮ / `❯ {input}▋` / ╰──╯
+//! [prompt]      ╭──╮ / `❯ {input}` (the real terminal cursor sits in it) / ╰──╯
 //! [search]      `(reverse-i-search)…`
 //! [queue]       `> queued message`
 //! [suggestions] slash menu / `/model` picker
@@ -803,7 +803,8 @@ mod tests {
         );
     }
 
-    /// The frame caret lands on the input row's `▋` (still aligned after the assembly offsets).
+    /// The frame caret lands one cell past the input text (still aligned after the assembly
+    /// offsets), and no row draws a cursor glyph — the terminal cursor is the only caret.
     #[test]
     fn frame_cursor_points_at_the_caret() {
         let mut chat = chat_at(80, 24);
@@ -815,7 +816,18 @@ mod tests {
         let (x, y) = frame.cursor.expect("caret visible");
         assert_eq!(x, 7, "❯ + hello");
         let row = row_text(&frame.rows[y as usize]);
-        assert_eq!(row, "❯ hello▋");
+        assert_eq!(row, "❯ hello");
+        assert!(
+            !frame.rows.iter().any(|r| r.line.plain_text().contains('▋')),
+            "no fake cursor glyph survives anywhere in the frame"
+        );
+
+        // Wide glyphs: the caret column counts display cells, not chars.
+        chat.set_input("你好");
+        let frame = Frame::assemble(&chat, size(80, 24));
+        let (x, y) = frame.cursor.expect("caret visible");
+        assert_eq!(x, 6, "❯ + two double-width glyphs");
+        assert_eq!(row_text(&frame.rows[y as usize]), "❯ 你好");
     }
 
     /// Flushing: the settled prefix becomes scrollback entries; bubble rows fill the terminal width.
