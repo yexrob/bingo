@@ -310,6 +310,13 @@ fn user_posts(text: &str, at: u64, me: &str) -> Vec<Post> {
             });
             return out;
         }
+        // The user's own DM marker is transport scaffolding: the bubble already says who
+        // spoke, so the line is dropped rather than shown — but it still flushes, so two
+        // batched DMs stay two bubbles instead of one merged paragraph.
+        if line.trim_end() == crate::tool::agent::DM_FROM_USER_MARKER {
+            flush(&mut plain, &mut out);
+            continue;
+        }
         match scaffold_note(line) {
             Some(note) => {
                 flush(&mut plain, &mut out);
@@ -1700,6 +1707,30 @@ mod tests {
         );
         assert!(t.iter().any(|l| l.contains("▏ #dev-team")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("▏ system note")), "{t:?}");
+    }
+
+    /// D64: the user's DMs land in history under a `[DM from user]` marker so the member
+    /// knows who wrote them — but the DM window already says who spoke, so the marker line
+    /// never renders. It still splits a batched pair into two bubbles, mirroring how they
+    /// were sent.
+    #[test]
+    fn dm_marker_lines_vanish_but_still_split_batched_messages() {
+        let batch = format!(
+            "{m}\nfirst question\n{m}\nsecond question",
+            m = crate::tool::agent::DM_FROM_USER_MARKER
+        );
+        let history = vec![crate::api::types::Message::user_text(batch)];
+        let posts = dm_posts(&history, &[], &[], &[], &[], "scout", "user");
+        let shown: Vec<(&str, PostKind)> =
+            posts.iter().map(|p| (p.text.as_str(), p.kind)).collect();
+        assert_eq!(
+            shown,
+            vec![
+                ("first question", PostKind::Said),
+                ("second question", PostKind::Said),
+            ],
+            "{posts:?}"
+        );
     }
 
     /// A crew is a standing cast, so the blueprint's pin wins over the name hash —

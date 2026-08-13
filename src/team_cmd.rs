@@ -295,7 +295,14 @@ fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
         )];
     };
     let (team, dir) = (node.def.name.clone(), node.dir.clone());
-    match session.agents.deliver(member, message, Vec::new(), None) {
+    // The human typed the assignment, so it arrives under their name, not the hub's.
+    match session.agents.deliver(
+        member,
+        crate::channels::USER_NAME,
+        message,
+        Vec::new(),
+        None,
+    ) {
         Ok(_) => {
             // Use the same dispatcher as SendMessage so a slash-command assignment starts now.
             crate::tool::agent::flush_agent_inbox(session, &session.watch);

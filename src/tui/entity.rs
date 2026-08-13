@@ -175,7 +175,10 @@ fn send(session: &Arc<Session>, conv: &Conv, text: &str) -> Option<String> {
                 Err(e) => Some(e),
             }
         }
-        Conv::Dm(name) => match session.agents.deliver(name, text, Vec::new(), None) {
+        Conv::Dm(name) => match session
+            .agents
+            .deliver(name, USER_NAME, text, Vec::new(), None)
+        {
             Ok(_) => {
                 crate::tool::agent::flush_agent_inbox(session, &session.watch);
                 None

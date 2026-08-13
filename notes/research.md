@@ -746,3 +746,18 @@ DMs stay sender-anonymous on purpose: the hub's `SendMessage` and the user's com
 same `deliver`, and distinguishing them would add plumbing (an `InboxItem` field, UI scaffold
 filtering) that the reply medium does not need — both senders read the same turn text. If tone
 ever warrants it, tagging the sender is the follow-up, not a prerequisite.
+
+### D64. The user's direct messages arrive named (amends D63's anonymity)
+
+D63 kept DM senders anonymous to avoid plumbing; the user decided members should know when the
+human is the one talking. `InboxItem::Direct` now carries `from`, and `absorb_inbox` renders the
+asymmetry: the hub stays untagged — it is the default voice of direct instructions, so the common
+SendMessage path is byte-identical — while the user's messages (DM window, `/team assign`) arrive
+under a `[DM from user]` line of their own. Both system notes teach the tag, which also repairs a
+display defect: batched user DMs previously took the `[follow-up instruction]` label, whose first
+line the DM view collapsed into a "follow-up" note, eating the message's opening line.
+
+The marker is transport scaffolding, so the DM view drops the line instead of rendering it — the
+bubble already says who spoke — but still splits at it, keeping two batched DMs two bubbles.
+Senders stay a closed set (`main`, `user`): SendMessage is hub-only, so no member-to-member case
+exists to design for.

@@ -32,8 +32,9 @@ const SUBAGENT_NOTE: &str = "\
   as its tool result; it does not appear in the user's main transcript, and markdown image
   blocks are not rendered for anyone. Put conclusions in the text itself.
 - The user has a private direct-message window with you. A message they send there arrives
-  like any other direct instruction, and the prose of your turns is exactly what they read
-  back — a direct message is answered where it arrived, in your turn text.
+  under a `[DM from user]` line; a direct instruction without that line is from the hub.
+  Either way the prose of your turns is exactly what the sender reads back — a direct
+  message is answered where it arrived, in your turn text.
 - You cannot question the user: AskUserQuestion is not available here. Permission prompts do
   reach the user, but anything else you need must be reported back to the hub.
 - Your turn ends when you stop calling tools, and background tasks you started will NOT wake
@@ -83,11 +84,12 @@ blocked on, a disagreement, a result, a question you cannot continue without. Na
 mean. When you have nothing to add, stop calling tools — silence costs nothing and wakes nobody.
 
 **A direct message is a different lane, and a private one.** Channel traffic arrives tagged
-`[#channel msg #N]`; text without that tag was sent to you alone — by the hub, or by the user
-from your direct-message window, where your turn text is exactly what they read. Answer a direct
-message in your turn text, never with Post: the answer belongs to the person who asked, not to
-the room. What reaches you privately stays private — do not repeat or summarize it into a
-channel unless the message itself tells you to take it there.";
+`[#channel msg #N]`; text without that tag was sent to you alone — under a `[DM from user]`
+line when the user wrote it in your direct-message window, unmarked when it is the hub. Your
+turn text is exactly what the sender reads. Answer a direct message in your turn text —
+never with Post: the answer belongs to the person who asked, not to the room. What reaches
+you privately stays private — do not repeat or summarize it into a channel unless the
+message itself tells you to take it there.";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -569,9 +571,28 @@ pub(crate) fn excerpt(text: &str) -> String {
     }
 }
 
+/// Line the user's direct messages arrive under, on its own line above the text (D64). The
+/// hub stays untagged — it is the default voice of direct instructions — so the marker is
+/// the one observable difference between "your manager" and "the human", and the DM view
+/// drops the line rather than rendering scaffolding as prose.
+pub(crate) const DM_FROM_USER_MARKER: &str = "[DM from user]";
+
+/// The user's messages carry the marker in every shape of batch; the hub's only gain their
+/// `[follow-up instruction]` label when a batch makes the boundaries ambiguous.
+fn direct_text(from: &str, text: &str, batched: bool) -> String {
+    if from == crate::channels::USER_NAME {
+        format!("{DM_FROM_USER_MARKER}\n{text}")
+    } else if batched {
+        format!("[follow-up instruction] {text}")
+    } else {
+        text.to_string()
+    }
+}
+
 /// Inbox → turn prompt plus the images those instructions carried: a single hub instruction is
-/// kept verbatim; mixed or multiple entries are annotated with their sources in order. Channel
-/// entries also advance the member's read cursor (messages enter its context with this turn).
+/// kept verbatim; user messages arrive under [`DM_FROM_USER_MARKER`]; mixed or multiple entries
+/// are annotated with their sources in order. Channel entries also advance the member's read
+/// cursor (messages enter its context with this turn).
 pub(crate) fn absorb_inbox(
     channels: &Arc<ChannelRegistry>,
     name: &str,
@@ -598,11 +619,11 @@ pub(crate) fn absorb_inbox(
         .flatten()
         .collect();
     let prompt = match items {
-        [InboxItem::Direct { text, .. }] => text.clone(),
+        [InboxItem::Direct { from, text, .. }] => direct_text(from, text, false),
         _ => items
             .iter()
             .map(|item| match item {
-                InboxItem::Direct { text, .. } => format!("[follow-up instruction] {text}"),
+                InboxItem::Direct { from, text, .. } => direct_text(from, text, true),
                 InboxItem::Channel {
                     channel,
                     from,
@@ -1426,7 +1447,13 @@ impl Tool for SendMessageTool {
         let id = self
             .session
             .agents
-            .deliver(&params.agent, &params.message, images, timeout)
+            .deliver(
+                &params.agent,
+                crate::channels::HUB_NAME,
+                &params.message,
+                images,
+                timeout,
+            )
             .map_err(ToolError::failed)?;
         flush_agent_inbox(&self.session, &ctx.watch);
         let note = match timeout {
@@ -2629,7 +2656,13 @@ mod tests {
             .insert("worker", AgentKind::Hire, None, "d".into(), sub.clone());
         let id = session
             .agents
-            .deliver("worker", "compare #[image 1]", images.clone(), None)
+            .deliver(
+                "worker",
+                crate::channels::HUB_NAME,
+                "compare #[image 1]",
+                images.clone(),
+                None,
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         let (prompt, carried) = match session.agents.finish("worker", Vec::new(), 1) {
             Some(next) => absorb_inbox(&sub.channels, "worker", &next.items),
@@ -2647,6 +2680,52 @@ mod tests {
             "images arrive with the queued instruction"
         );
         assert_eq!(carried[0].data, images[0].data);
+    }
+
+    /// D64: who wrote a direct message is part of the message. The user's DMs arrive under
+    /// the `[DM from user]` line — alone or batched with hub traffic — while a single hub
+    /// instruction stays byte-identical, so the common SendMessage path is unchanged.
+    #[test]
+    fn absorb_inbox_names_the_user_and_keeps_the_hub_verbatim() {
+        let (session, _client) = parent_session();
+        let sub = build_sub_session(
+            &session,
+            None,
+            None,
+            None,
+            None,
+            "worker",
+            MemberContext::default(),
+        )
+        .unwrap_or_else(|e| panic!("spawn: {e}"));
+        session
+            .agents
+            .insert("worker", AgentKind::Hire, None, "d".into(), sub.clone());
+
+        let deliver = |from: &str, text: &str| {
+            session
+                .agents
+                .deliver("worker", from, text, Vec::new(), None)
+                .unwrap_or_else(|e| panic!("{e}"));
+        };
+        let absorb = || match session.agents.finish("worker", Vec::new(), 0) {
+            Some(next) => absorb_inbox(&sub.channels, "worker", &next.items).0,
+            None => unreachable!("queued messages should be claimed by the receiver"),
+        };
+
+        deliver(crate::channels::USER_NAME, "are you there?");
+        assert_eq!(absorb(), format!("{DM_FROM_USER_MARKER}\nare you there?"));
+
+        deliver(crate::channels::HUB_NAME, "map the module");
+        assert_eq!(absorb(), "map the module", "hub singles stay verbatim");
+
+        deliver(crate::channels::HUB_NAME, "first");
+        deliver(crate::channels::USER_NAME, "second");
+        assert_eq!(
+            absorb(),
+            format!("[follow-up instruction] first\n{DM_FROM_USER_MARKER}\nsecond"),
+            "a batch labels the hub's line and marks the user's"
+        );
     }
 
     /// A text-only main session can still get an image looked at: the attachment table is
@@ -2782,6 +2861,10 @@ mod tests {
             CHANNEL_NOTE.contains("stays private"),
             "must forbid relaying DM content into a channel, not just answering there"
         );
+        assert!(
+            CHANNEL_NOTE.contains(DM_FROM_USER_MARKER),
+            "the medium rule needs the observable tag, not just the concept"
+        );
     }
 
     /// The user reads a member's turn text in the DM window (D57), so the subagent note may
@@ -2796,6 +2879,10 @@ mod tests {
         assert!(
             !SUBAGENT_NOTE.contains("not displayed to the user"),
             "the old claim was false once the DM window existed, and it routed private answers into channels"
+        );
+        assert!(
+            SUBAGENT_NOTE.contains(DM_FROM_USER_MARKER),
+            "must teach the tag that identifies the human's messages (D64)"
         );
     }
 

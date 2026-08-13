@@ -307,6 +307,11 @@ pub enum FollowUp {
 pub enum InboxItem {
     Direct {
         id: MsgId,
+        /// Who sent it: [`crate::channels::HUB_NAME`] for the hub's SendMessage,
+        /// [`crate::channels::USER_NAME`] when the human wrote it (DM window, `/team assign`).
+        /// The hub is the default voice of direct instructions and stays untagged in the
+        /// prompt; the user is the exception worth marking (D64).
+        from: String,
         text: String,
         /// Images the `#[image N]` markers in `text` resolved to at send time. Carried with the
         /// message so a queued instruction still has them when it is finally delivered.
@@ -1022,6 +1027,7 @@ impl AgentRegistry {
     pub fn deliver(
         &self,
         name: &str,
+        from: &str,
         message: &str,
         images: Vec<crate::api::types::ImageAttachment>,
         ack_timeout: Option<Duration>,
@@ -1047,6 +1053,7 @@ impl AgentRegistry {
         entry.last_active = Instant::now();
         entry.inbox.push(InboxItem::Direct {
             id,
+            from: from.to_string(),
             text: message.to_string(),
             images,
         });
@@ -1571,7 +1578,13 @@ mod tests {
 
         // A queued follow-up is work waiting: the count goes back to full.
         let _ = reg
-            .deliver("temp", "one more thing", Vec::new(), None)
+            .deliver(
+                "temp",
+                crate::channels::HUB_NAME,
+                "one more thing",
+                Vec::new(),
+                None,
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(reg.release_hires().is_empty());
         assert!(reg.release_hires().is_empty(), "the lease was renewed");
@@ -1607,7 +1620,13 @@ mod tests {
         // and a hire with no run behind it is unstarted, not finished.
         let _ = reg.next_run("temp");
         assert!(reg.finish("temp", Vec::new(), 1).is_none());
-        let _ = reg.deliver("temp", "answer me", Vec::new(), None);
+        let _ = reg.deliver(
+            "temp",
+            crate::channels::HUB_NAME,
+            "answer me",
+            Vec::new(),
+            None,
+        );
         assert_eq!(
             reg.flush_pending().len(),
             1,
@@ -1710,7 +1729,13 @@ mod tests {
         assert_eq!(unchanged, initial, "listing is not agent activity");
 
         let first = reg
-            .deliver("scout", "add A", Vec::new(), None)
+            .deliver(
+                "scout",
+                crate::channels::HUB_NAME,
+                "add A",
+                Vec::new(),
+                None,
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         let delivered = reg.list()[0].last_active;
         assert!(
@@ -1802,7 +1827,13 @@ mod tests {
         );
         assert!(reg.finish("scout", Vec::new(), 0).is_none());
         let _ = reg
-            .deliver("scout", "map the module", Vec::new(), None)
+            .deliver(
+                "scout",
+                crate::channels::HUB_NAME,
+                "map the module",
+                Vec::new(),
+                None,
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(reg.pending_of("scout"), vec!["map the module".to_string()]);
 
@@ -1846,7 +1877,13 @@ mod tests {
         );
         assert!(reg.finish("scout", Vec::new(), 0).is_none());
         let _ = reg
-            .deliver("scout", "map the module", Vec::new(), None)
+            .deliver(
+                "scout",
+                crate::channels::HUB_NAME,
+                "map the module",
+                Vec::new(),
+                None,
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         let wake = reg
             .flush_pending()
@@ -1873,7 +1910,13 @@ mod tests {
         );
         // Running: message queued (delivery never happens inside deliver itself).
         let first = reg
-            .deliver("scout", "add A", Vec::new(), None)
+            .deliver(
+                "scout",
+                crate::channels::HUB_NAME,
+                "add A",
+                Vec::new(),
+                None,
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         // Turn finished + inbox non-empty → continues (history saved, inbox drained, ack set).
         let next = reg
@@ -1897,7 +1940,13 @@ mod tests {
         assert_eq!(reg.list()[0].state, AgentState::Idle);
         // Idle: the message waits for a flush rather than starting a run on the spot.
         let _ = reg
-            .deliver("scout", "look at B again", Vec::new(), None)
+            .deliver(
+                "scout",
+                crate::channels::HUB_NAME,
+                "look at B again",
+                Vec::new(),
+                None,
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             reg.list()[0].state,
@@ -1920,7 +1969,13 @@ mod tests {
     fn inbox_accumulates_direct_and_channel_items_in_order() {
         let reg = AgentRegistry::new();
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
-        let _ = reg.deliver("w", "do 1 first", Vec::new(), None);
+        let _ = reg.deliver(
+            "w",
+            crate::channels::HUB_NAME,
+            "do 1 first",
+            Vec::new(),
+            None,
+        );
         assert!(reg.deposit(
             "w",
             InboxItem::Channel {
@@ -2006,10 +2061,22 @@ mod tests {
 
         // A busy non-empty inbox → stays running after finish (Idle wake-up drains the inbox into Start,
         // while Running queues; two instructions create the queue scenario).
-        reg.deliver("scout", "check again", Vec::new(), None)
-            .unwrap_or_else(|e| panic!("{e}"));
-        reg.deliver("scout", "check once more", Vec::new(), None)
-            .unwrap_or_else(|e| panic!("{e}"));
+        reg.deliver(
+            "scout",
+            crate::channels::HUB_NAME,
+            "check again",
+            Vec::new(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        reg.deliver(
+            "scout",
+            crate::channels::HUB_NAME,
+            "check once more",
+            Vec::new(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         reg.finish("scout", Vec::new(), 1);
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "running");
@@ -2043,7 +2110,7 @@ mod tests {
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         assert!(reg.finish("w", Vec::new(), 1).is_none(), "turns idle first");
         for text in ["look at A first", "look at B again", "and finally C"] {
-            reg.deliver("w", text, Vec::new(), None)
+            reg.deliver("w", crate::channels::HUB_NAME, text, Vec::new(), None)
                 .unwrap_or_else(|e| panic!("{e}"));
         }
         assert_eq!(
@@ -2070,7 +2137,13 @@ mod tests {
         let reg = AgentRegistry::new();
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         let id = reg
-            .deliver("w", "is it too late", Vec::new(), None)
+            .deliver(
+                "w",
+                crate::channels::HUB_NAME,
+                "is it too late",
+                Vec::new(),
+                None,
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         let (_, dropped) = reg.stop("w").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(dropped, 1);
@@ -2095,6 +2168,7 @@ mod tests {
         let id = reg
             .deliver(
                 "w",
+                crate::channels::HUB_NAME,
                 "check the logs",
                 Vec::new(),
                 Some(Duration::from_secs(30)),
@@ -2170,6 +2244,7 @@ mod tests {
         let id = reg
             .deliver(
                 "mute",
+                crate::channels::HUB_NAME,
                 "report progress",
                 Vec::new(),
                 Some(Duration::from_secs(30)),
@@ -2223,6 +2298,7 @@ mod tests {
         let id = reg
             .deliver(
                 "w",
+                crate::channels::HUB_NAME,
                 "is it too late",
                 Vec::new(),
                 Some(Duration::from_secs(10)),
@@ -2248,7 +2324,7 @@ mod tests {
     fn messages_survive_a_failed_run_and_are_retried() {
         let reg = AgentRegistry::new();
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
-        reg.deliver("w", "continue", Vec::new(), None)
+        reg.deliver("w", crate::channels::HUB_NAME, "continue", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         // The run failed (spawn_agent_loop's error branch) — it only marks the instance idle.
         reg.mark_idle("w");
@@ -2268,7 +2344,13 @@ mod tests {
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         let _ = reg.next_run("w");
         let id = reg
-            .deliver("w", "late instruction", Vec::new(), None)
+            .deliver(
+                "w",
+                crate::channels::HUB_NAME,
+                "late instruction",
+                Vec::new(),
+                None,
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         let items = reg.take_running("w", 5);
         assert_eq!(items.len(), 1);
@@ -2298,7 +2380,7 @@ mod tests {
         let reg = AgentRegistry::new();
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         let _ = reg.next_run("w");
-        reg.deliver("w", "retry me", Vec::new(), None)
+        reg.deliver("w", crate::channels::HUB_NAME, "retry me", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         let items = reg.take_running("w", 0);
         assert!(matches!(
@@ -2321,7 +2403,7 @@ mod tests {
         let reg = AgentRegistry::new();
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         reg.mark_idle("w");
-        reg.deliver("w", "start", Vec::new(), None)
+        reg.deliver("w", crate::channels::HUB_NAME, "start", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         let wake = reg.flush_pending().pop().unwrap_or_else(|| unreachable!());
         assert_eq!(wake.run, 1);
@@ -2349,7 +2431,14 @@ mod tests {
             "idempotent"
         );
         assert!(
-            reg.deliver("x", "still there", Vec::new(), None).is_err(),
+            reg.deliver(
+                "x",
+                crate::channels::HUB_NAME,
+                "still there",
+                Vec::new(),
+                None
+            )
+            .is_err(),
             "rejected after stop"
         );
         // Turn finishing after a stop: history is still archived, no revival.
@@ -2359,7 +2448,8 @@ mod tests {
         assert!(reg.list().is_empty());
         assert_eq!(reg.claim_name("x"), "x", "deletion frees the name");
         assert!(
-            reg.deliver("x", "hi", Vec::new(), None).is_err(),
+            reg.deliver("x", crate::channels::HUB_NAME, "hi", Vec::new(), None)
+                .is_err(),
             "unknown instance errors"
         );
         // Stopping an idle instance: no active line.

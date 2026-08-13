@@ -2333,11 +2333,23 @@ mod tests {
         assert!(request_texts(&request_body(&first)).contains(&"initial"));
         session
             .agents
-            .deliver("worker", "first", Vec::new(), None)
+            .deliver(
+                "worker",
+                crate::channels::HUB_NAME,
+                "first",
+                Vec::new(),
+                None,
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         session
             .agents
-            .deliver("worker", "second", Vec::new(), None)
+            .deliver(
+                "worker",
+                crate::channels::HUB_NAME,
+                "second",
+                Vec::new(),
+                None,
+            )
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(session.agents.list()[0].pending, 2);
 
