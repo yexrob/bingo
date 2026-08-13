@@ -2050,7 +2050,7 @@ mod tests {
     }
 
     fn overflow_history() -> Vec<Message> {
-        (0..10)
+        (0..16)
             .map(|index| Message::user_text(format!("message {index}")))
             .collect()
     }

@@ -7,8 +7,20 @@ use crate::hooks::{run_post_compact, run_pre_compact};
 use crate::permission::PermissionMode;
 use crate::query::Session;
 
-/// Number of most recent messages kept after compaction.
-const KEEP_RECENT: usize = 8;
+/// Number of most recent messages kept after compaction. Tool turns spend
+/// messages fast (one tool_use + one tool_result each), so 8 could mean four
+/// tool calls and nothing of the exchange that motivated them.
+const KEEP_RECENT: usize = 12;
+
+/// Output budget for the summary request, capped by what the model can produce.
+/// The old 1024 was the real ceiling on summary quality: no instruction can put
+/// a long session's decisions, paths and pending work into that.
+const SUMMARY_MAX_TOKENS: u32 = 4_096;
+
+/// Longest tool input echoed into the summary prompt. Enough to identify the
+/// command or path that was acted on; short enough that one file write does not
+/// become the bulk of the prompt.
+const TOOL_INPUT_CHARS: usize = 200;
 
 /// count_tokens measurement interval (turns): measuring every turn = one extra round
 /// trip each; 20 tool turns = 20 round trips.
@@ -22,10 +34,29 @@ const COUNT_TOKENS_GROWTH: u64 = 20_000;
 static COUNT_TOKENS_WARNED: AtomicBool = AtomicBool::new(false);
 
 const COMPACT_PROMPT: &str = "\
-You are a conversation compactor. Compress the agent conversation below into one structured summary:
-- Keep key decisions, file paths, executed commands and their results, and conclusions
-- Keep unfinished todos and constraints
-- Output plain text within 300 characters
+You are compacting an agent conversation. Your summary replaces the transcript below, and it is \
+all the agent will have of that work — anything you leave out is lost. Write it under these \
+headings, skipping any heading with nothing to report:
+
+## Task and current state
+What the user asked for, and exactly where the work stands now.
+
+## Decisions and rationale
+Choices that were made and why, including approaches that were tried and rejected.
+
+## Files, commands and results
+Files read or changed, with their paths. Commands that were executed and what they returned.
+
+## Outstanding work
+What is not done yet, in the order it should be tackled.
+
+## Constraints and preferences
+Rules, conventions and user preferences that still apply.
+
+Reproduce identifiers, paths, commands and error text exactly; never invent anything the \
+transcript does not contain. Let the length follow the content — usually several hundred to a \
+thousand words.
+
 Conversation content:
 ";
 
@@ -46,7 +77,22 @@ fn safe_split(messages: &[Message], split: usize) -> usize {
     split
 }
 
-/// Old messages → summary prompt.
+/// Flatten to one line and cap it: a tool input is a label in the prompt, not
+/// a payload.
+fn one_line(text: &str, limit: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if flat.chars().count() <= limit {
+        return flat;
+    }
+    flat.chars().take(limit).chain(['…']).collect()
+}
+
+/// Old messages → summary prompt. tool_use blocks carry the commands that ran,
+/// which the prompt asks the model to keep — dropping them left it summarizing
+/// results whose cause was no longer in front of it.
 fn summary_prompt(old: &[Message]) -> String {
     let mut prompt = String::from(COMPACT_PROMPT);
     for message in old {
@@ -55,6 +101,10 @@ fn summary_prompt(old: &[Message]) -> String {
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.clone()),
+                ContentBlock::ToolUse { name, input, .. } => Some(format!(
+                    "[tool {name}] {}",
+                    one_line(&input.to_string(), TOOL_INPUT_CHARS)
+                )),
                 ContentBlock::ToolResult { content, .. } => {
                     Some(crate::api::types::tool_result_text(content))
                 }
@@ -128,9 +178,13 @@ async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {
     )
     .await;
 
+    let model = session.runtime.model.borrow().clone();
     let request = NeutralRequest {
-        model: session.runtime.model.borrow().clone(),
-        max_tokens: 1024,
+        max_tokens: SUMMARY_MAX_TOKENS.min(crate::budget::max_tokens_for(
+            &session.client.models(),
+            &model,
+        )),
+        model,
         system: Vec::new(),
         messages: vec![Message::user_text(summary_prompt(&messages[..split]))],
         tools: Vec::new(),
@@ -477,6 +531,32 @@ mod tests {
             estimate_tokens(&[], &messages, &[]),
             400,
             "400 CJK chars ≈ 400 tokens"
+        );
+    }
+
+    /// The prompt asks the model to keep executed commands, so the tool_use
+    /// blocks that hold them have to be in it — long inputs one line each.
+    #[test]
+    fn summary_prompt_carries_executed_commands() {
+        let call = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tu_1".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({ "command": format!("echo {}", "x".repeat(400)) }),
+            }],
+        };
+        let prompt =
+            summary_prompt(&[text(Role::User, "fix the build"), call, tool_result("tu_1")]);
+        assert!(prompt.contains("fix the build"));
+        assert!(prompt.contains("[tool Bash] {\"command\":\"echo xxx"));
+        assert!(
+            prompt.contains('…'),
+            "a long input is truncated, not dropped"
+        );
+        assert!(
+            prompt.lines().all(|line| line.chars().count() < 300),
+            "the tool input stays one bounded line"
         );
     }
 
