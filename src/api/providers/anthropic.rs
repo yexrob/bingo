@@ -133,15 +133,21 @@ struct WireRequest {
 
 impl WireRequest {
     fn from_neutral(request: &NeutralRequest) -> Self {
+        // One breakpoint, on the last cacheable block: a breakpoint caches the
+        // whole prefix (tools + system) up to it, and the API caps requests at
+        // 4 cache_control blocks — memory + crew + experience blocks together
+        // already push past that, which 400s the request.
+        let last_cache = request.system.iter().rposition(|b| b.cache);
         Self {
             model: request.model.clone(),
             max_tokens: request.max_tokens,
             system: request
                 .system
                 .iter()
-                .map(|b| WireSystemBlock {
+                .enumerate()
+                .map(|(index, b)| WireSystemBlock {
                     text: b.text.clone(),
-                    cache: b.cache,
+                    cache: Some(index) == last_cache,
                 })
                 .collect(),
             messages: request.messages.clone(),
@@ -1073,5 +1079,43 @@ mod tests {
         };
         let json = serde_json::to_value(&wire).unwrap();
         assert_eq!(json, serde_json::json!({"type": "text", "text": "sys"}));
+    }
+
+    /// Many cacheable blocks collapse to one breakpoint on the last: one
+    /// breakpoint caches the whole prefix before it, and the API rejects
+    /// requests carrying more than 4 cache_control blocks.
+    #[test]
+    fn from_neutral_collapses_cache_breakpoints_to_the_last_block() {
+        let block = |text: &str, cache: bool| crate::api::contract::SystemBlock {
+            text: text.into(),
+            cache,
+        };
+        let request = crate::api::contract::NeutralRequest {
+            model: "m".into(),
+            max_tokens: 16,
+            system: vec![
+                block("base", true),
+                block("env", true),
+                block("memory", true),
+                block("crew", true),
+                block("experience", true),
+                block("capabilities", false),
+            ],
+            messages: Vec::new(),
+            tools: Vec::new(),
+            stream: false,
+            thinking: None,
+        };
+        let wire = WireRequest::from_neutral(&request);
+        let flags: Vec<bool> = wire.system.iter().map(|b| b.cache).collect();
+        assert_eq!(flags, [false, false, false, false, true, false]);
+
+        // cache_control off everywhere stays off everywhere.
+        let request = crate::api::contract::NeutralRequest {
+            system: vec![block("base", false), block("env", false)],
+            ..request
+        };
+        let wire = WireRequest::from_neutral(&request);
+        assert!(wire.system.iter().all(|b| !b.cache));
     }
 }

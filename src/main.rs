@@ -16,6 +16,7 @@ use crate::transcript::{Transcript, create as create_transcript, latest as lates
 mod agents;
 mod api;
 mod auth;
+mod bm25;
 mod budget;
 mod channels;
 mod compact;
@@ -578,7 +579,9 @@ async fn run_share(
 ) -> Result<(), crate::share::ShareError> {
     let transcript = crate::share::resolve_transcript(home, key)?;
     let stem = transcript.name();
-    let messages = transcript.load_messages()?;
+    // Human-facing export: the full canonical conversation, not the compacted
+    // projection the model sees.
+    let messages = transcript.load_canonical()?;
 
     // Fall back to an empty doc when the share file is missing/corrupt (conversation-only view; the old-session main path).
     let share_path = crate::share::shares_dir(home).join(format!("{stem}.json"));

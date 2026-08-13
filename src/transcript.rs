@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::api::types::Message;
@@ -268,49 +269,69 @@ impl Transcript {
         }
     }
 
-    /// Full-file rewrite (persisted after a manual /compact).
-    pub fn replace_messages(&self, messages: &[Message]) -> Result<(), TranscriptError> {
-        use std::io::{Seek, Write};
-        let mut active_lock = self.ensure_active_lock()?;
-        let file = active_lock.as_mut().map(|(_, file)| file).ok_or_else(|| {
-            TranscriptError::Io(std::io::Error::other("transcript active lock missing"))
-        })?;
-        file.set_len(0)?;
-        file.seek(std::io::SeekFrom::Start(0))?;
-        for message in messages {
-            let line = serde_json::to_string(message)?;
-            writeln!(file, "{line}")?;
-        }
-        Ok(())
-    }
-
     /// Append one message.
     pub fn append(&self, message: &Message) -> Result<(), TranscriptError> {
+        self.append_line(&serde_json::to_string(message)?)
+    }
+
+    /// Append a compaction marker: the lines above it stay canonical, loads
+    /// project through it (D74). The summary is written once and reused every
+    /// load until the next threshold crossing, so compaction is the only point
+    /// where the request prefix changes bytes.
+    pub fn append_compact(&self, summary: &str, kept: usize) -> Result<(), TranscriptError> {
+        self.append_line(&serde_json::to_string(&CompactLine {
+            tag: CompactTag::Compact,
+            summary: summary.to_string(),
+            kept,
+        })?)
+    }
+
+    fn append_line(&self, line: &str) -> Result<(), TranscriptError> {
         use std::io::{Seek, Write};
         let mut active_lock = self.ensure_active_lock()?;
         let file = active_lock.as_mut().map(|(_, file)| file).ok_or_else(|| {
             TranscriptError::Io(std::io::Error::other("transcript active lock missing"))
         })?;
         file.seek(std::io::SeekFrom::End(0))?;
-        let line = serde_json::to_string(message)?;
         writeln!(file, "{line}")?;
         Ok(())
     }
 
-    /// Load all history messages (for --continue resume).
+    /// The model-facing history (for --continue resume and every turn's
+    /// context): canonical lines projected through the latest compact marker.
+    /// A session without markers loads exactly as written.
+    pub fn load_messages(&self) -> Result<Vec<Message>, TranscriptError> {
+        Ok(project(self.load_lines()?))
+    }
+
+    /// Every message ever written, ignoring compact markers — the full
+    /// conversation for human-facing export (/share).
+    pub fn load_canonical(&self) -> Result<Vec<Message>, TranscriptError> {
+        let mut messages: Vec<Message> = self
+            .load_lines()?
+            .into_iter()
+            .filter_map(|line| match line {
+                Line::Message(message) => Some(message),
+                Line::Compact(_) => None,
+            })
+            .collect();
+        drop_contentless(&mut messages);
+        Ok(messages)
+    }
+
     /// Bad lines are skipped and counted with a warning: one truncated JSONL line must
     /// not make the whole session unrecoverable.
-    pub fn load_messages(&self) -> Result<Vec<Message>, TranscriptError> {
+    fn load_lines(&self) -> Result<Vec<Line>, TranscriptError> {
         let content = std::fs::read_to_string(&self.path)?;
-        let mut messages = Vec::new();
+        let mut lines = Vec::new();
         let mut skipped = 0usize;
         for line in content.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<Message>(line) {
-                Ok(message) => messages.push(message),
-                Err(_) => skipped += 1,
+            match parse_line(line) {
+                Some(parsed) => lines.push(parsed),
+                None => skipped += 1,
             }
         }
         if skipped > 0 {
@@ -319,9 +340,107 @@ impl Transcript {
                 self.path.display()
             );
         }
-        drop_contentless(&mut messages);
-        Ok(messages)
+        Ok(lines)
     }
+}
+
+/// Marker value distinguishing a compact line from a bare `Message` line.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+enum CompactTag {
+    #[serde(rename = "compact")]
+    Compact,
+}
+
+/// A compaction event (D74): every message line above is covered by `summary`,
+/// except the last `kept`, which stay verbatim. A later marker supersedes an
+/// earlier one — markers are appended, canonical lines are never rewritten.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CompactLine {
+    #[serde(rename = "type")]
+    tag: CompactTag,
+    summary: String,
+    kept: usize,
+}
+
+#[derive(Debug)]
+enum Line {
+    Message(Message),
+    Compact(CompactLine),
+}
+
+fn parse_line(line: &str) -> Option<Line> {
+    if let Ok(message) = serde_json::from_str::<Message>(line) {
+        return Some(Line::Message(message));
+    }
+    serde_json::from_str::<CompactLine>(line)
+        .ok()
+        .map(Line::Compact)
+}
+
+/// The summary's message form — shared by the in-memory splice
+/// (`compact::compact`) and this projection so both produce the same bytes:
+/// a reloaded session must hand the provider the prefix it already cached.
+pub(crate) fn summary_message(summary: &str) -> Message {
+    Message::user_text(format!(
+        "(summary of the earlier conversation, from automatic compaction)\n{summary}"
+    ))
+}
+
+/// Apply the last compact marker: [summary] + the kept tail before it + every
+/// message after it. `kept` counts physical message lines, so it is applied
+/// before `drop_contentless` (the splice at compaction time counted the same
+/// in-memory list that `record` had persisted line by line).
+fn project(lines: Vec<Line>) -> Vec<Message> {
+    use crate::api::types::ContentBlock;
+    let marker = lines
+        .iter()
+        .rposition(|line| matches!(line, Line::Compact(_)));
+    let Some(marker) = marker else {
+        let mut messages: Vec<Message> = lines
+            .into_iter()
+            .filter_map(|line| match line {
+                Line::Message(message) => Some(message),
+                Line::Compact(_) => None,
+            })
+            .collect();
+        drop_contentless(&mut messages);
+        return messages;
+    };
+    let mut summary = String::new();
+    let mut kept = 0usize;
+    let mut before: Vec<Message> = Vec::new();
+    let mut after: Vec<Message> = Vec::new();
+    for (index, line) in lines.into_iter().enumerate() {
+        match line {
+            Line::Message(message) if index < marker => before.push(message),
+            Line::Message(message) => after.push(message),
+            Line::Compact(compact) if index == marker => {
+                summary = compact.summary;
+                kept = compact.kept;
+            }
+            // Superseded by the later marker: its span is inside this one's.
+            Line::Compact(_) => {}
+        }
+    }
+    let tail = before.len().saturating_sub(kept);
+    let mut messages = Vec::with_capacity(1 + before.len() - tail + after.len());
+    messages.push(summary_message(&summary));
+    messages.extend(before.into_iter().skip(tail));
+    messages.extend(after);
+    drop_contentless(&mut messages);
+    // The splice cut at a safe boundary, but a crash-truncated line inside the
+    // tail window shifts the count — an orphan tool_result surfacing as the
+    // first kept message would 400 every later request, so advance past it
+    // (the same invariant compact::safe_split maintains).
+    while messages.len() > 1
+        && messages[1]
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+    {
+        messages.remove(1);
+    }
+    messages
 }
 
 /// A message carrying nothing is not history. A model turn that streamed no block lands
@@ -454,6 +573,99 @@ mod tests {
         assert!(matches!(
             &messages[1].content[0],
             ContentBlock::ToolUse { id, .. } if id == "toolu_1"
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// D74: a compact marker projects — the canonical lines stay on disk, the
+    /// load shows [summary, kept tail, everything appended after].
+    #[test]
+    fn compact_marker_projects_summary_plus_kept_tail() {
+        let tmp = std::env::temp_dir().join(format!("bingo-transcript-cpj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let transcript = create(&home, &tmp).unwrap();
+        for i in 0..5 {
+            transcript
+                .append(&Message::user_text(format!("m{i}")))
+                .unwrap();
+        }
+        transcript.append_compact("the gist", 2).unwrap();
+        transcript.append(&Message::user_text("m5")).unwrap();
+
+        let projected = transcript.load_messages().unwrap();
+        let texts: Vec<String> = projected
+            .iter()
+            .map(|m| match &m.content[0] {
+                crate::api::types::ContentBlock::Text { text } => text.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(projected.len(), 4, "summary + 2 kept + 1 appended");
+        assert!(texts[0].contains("the gist"));
+        assert!(
+            texts[0].starts_with("(summary of the earlier conversation"),
+            "projection and in-memory splice must share the same bytes"
+        );
+        assert_eq!(texts[1..], ["m3", "m4", "m5"]);
+
+        let canonical = transcript.load_canonical().unwrap();
+        assert_eq!(canonical.len(), 6, "canonical keeps every message line");
+
+        // A later marker supersedes: its span covers the earlier marker's.
+        transcript.append_compact("newer gist", 1).unwrap();
+        let projected = transcript.load_messages().unwrap();
+        assert_eq!(projected.len(), 2, "summary + 1 kept");
+        assert!(matches!(
+            &projected[0].content[0],
+            crate::api::types::ContentBlock::Text { text } if text.contains("newer gist")
+        ));
+        assert!(matches!(
+            &projected[1].content[0],
+            crate::api::types::ContentBlock::Text { text } if text == "m5"
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A kept count larger than what exists floors at the full history, and a
+    /// kept tail that would begin with an orphan tool_result advances past it
+    /// (otherwise every later request 400s).
+    #[test]
+    fn compact_projection_is_safe_at_the_edges() {
+        use crate::api::types::ContentBlock;
+        let tmp = std::env::temp_dir().join(format!("bingo-transcript-cpe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let transcript = create(&home, &tmp).unwrap();
+        transcript.append(&Message::user_text("only")).unwrap();
+        transcript.append_compact("gist", 99).unwrap();
+        assert_eq!(
+            transcript.load_messages().unwrap().len(),
+            2,
+            "oversized kept keeps everything"
+        );
+
+        let orphan = create(&home, &tmp).unwrap();
+        orphan.append(&Message::user_text("early")).unwrap();
+        orphan
+            .append(&Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "tu_lost".into(),
+                    content: serde_json::Value::String("ok".into()),
+                    is_error: false,
+                }],
+            })
+            .unwrap();
+        orphan.append(&Message::user_text("late")).unwrap();
+        orphan.append_compact("gist", 2).unwrap();
+        let projected = orphan.load_messages().unwrap();
+        assert_eq!(projected.len(), 2, "the orphan tool_result is dropped");
+        assert!(matches!(
+            &projected[1].content[0],
+            ContentBlock::Text { text } if text == "late"
         ));
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -132,6 +132,9 @@ Example (.bingo/settings.json):
    an image a flat 1600), with a one-time warning on first fallback.
    If that estimate is low and either wire protocol rejects a request as a context overflow, bingo compacts
    the history and retries the rejected request once; a second overflow ends the turn instead of looping.
+   Compaction appends a summary marker to the session file instead of rewriting it: reloads and `/resume`
+   replay summary + recent tail without re-summarizing, while `/share` still exports the full original
+   conversation.
    If an upstream response completes without assistant content or tool calls (including an unclosed thinking block),
    bingo treats it as malformed and retries the side-effect-free attempt once instead of ending silently; if the retry
    is also empty, the turn shows the normal full-flow retry/back error. Transient error events received after a stream
@@ -215,7 +218,9 @@ Example (.bingo/settings.json):
   static snapshot when that request fails — bingo never narrows the list itself).
 - **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
   experience index is injected (≤10 entries, ranked by observed outcomes before the legacy commit count; nothing injected when empty); full text is searched with ExperienceQuery by
-  trigger tokens (case-insensitive, shared-prefix tolerant; active first);
+  BM25 relevance over triggers/summary/steps/notes (English word stems and CJK bigrams; ties break active-first,
+  then observed outcomes). Each user turn also auto-recalls up to 3 relevant active experiences and
+  project-memory facts, appended to the turn tail as a system-reminder;
   ExperiencePropose generates candidates (not persisted); after user confirmation ExperienceCommit persists
   (same content → stable id, re-committing updates rather than duplicates; `status: stale` marks invalidation,
   exits injection but stays queryable). After actually applying a queried entry, ExperienceOutcome records a
