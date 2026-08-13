@@ -7,8 +7,25 @@ use crate::hooks::{run_post_compact, run_pre_compact};
 use crate::permission::PermissionMode;
 use crate::query::Session;
 
-/// Number of most recent messages kept after compaction.
-const KEEP_RECENT: usize = 8;
+/// Number of most recent messages kept after compaction. Tool turns spend
+/// messages fast (one tool_use + one tool_result each), so 8 could mean four
+/// tool calls and nothing of the exchange that motivated them.
+pub(crate) const KEEP_RECENT: usize = 12;
+
+/// Output budget for the summary request, capped by what the model can produce.
+/// The old 1024 was the real ceiling on summary quality: no instruction can put
+/// a long session's decisions, paths and pending work into that.
+const SUMMARY_MAX_TOKENS: u32 = 4_096;
+
+/// Longest tool input echoed into the summary prompt. Enough to identify the
+/// command or path that was acted on; short enough that one file write does not
+/// become the bulk of the prompt.
+const TOOL_INPUT_CHARS: usize = 200;
+
+/// Slack left over the summary prompt's own budget: the estimate is an
+/// estimate, and being a little under costs nothing next to a summary request
+/// that overflows on the way out of an overflow.
+const SUMMARY_PROMPT_RESERVE: u64 = 2_000;
 
 /// count_tokens measurement interval (turns): measuring every turn = one extra round
 /// trip each; 20 tool turns = 20 round trips.
@@ -22,10 +39,29 @@ const COUNT_TOKENS_GROWTH: u64 = 20_000;
 static COUNT_TOKENS_WARNED: AtomicBool = AtomicBool::new(false);
 
 const COMPACT_PROMPT: &str = "\
-You are a conversation compactor. Compress the agent conversation below into one structured summary:
-- Keep key decisions, file paths, executed commands and their results, and conclusions
-- Keep unfinished todos and constraints
-- Output plain text within 300 characters
+You are compacting an agent conversation. Your summary replaces the transcript below, and it is \
+all the agent will have of that work — anything you leave out is lost. Write it under these \
+headings, skipping any heading with nothing to report:
+
+## Task and current state
+What the user asked for, and exactly where the work stands now.
+
+## Decisions and rationale
+Choices that were made and why, including approaches that were tried and rejected.
+
+## Files, commands and results
+Files read or changed, with their paths. Commands that were executed and what they returned.
+
+## Outstanding work
+What is not done yet, in the order it should be tackled.
+
+## Constraints and preferences
+Rules, conventions and user preferences that still apply.
+
+Reproduce identifiers, paths, commands and error text exactly; never invent anything the \
+transcript does not contain. Let the length follow the content — usually several hundred to a \
+thousand words.
+
 Conversation content:
 ";
 
@@ -46,26 +82,97 @@ fn safe_split(messages: &[Message], split: usize) -> usize {
     split
 }
 
-/// Old messages → summary prompt.
-fn summary_prompt(old: &[Message]) -> String {
-    let mut prompt = String::from(COMPACT_PROMPT);
-    for message in old {
-        let text = message
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.clone()),
-                ContentBlock::ToolResult { content, .. } => {
-                    Some(crate::api::types::tool_result_text(content))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        prompt.push_str(&format!("\n---\n{text}"));
+/// Flatten to one line and cap it: a tool input is a label in the prompt, not
+/// a payload.
+fn one_line(text: &str, limit: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if flat.chars().count() <= limit {
+        return flat;
     }
+    flat.chars().take(limit).chain(['…']).collect()
+}
+
+/// One transcript message as the summary prompt sees it. tool_use blocks carry
+/// the commands that ran, which the prompt asks the model to keep — dropping
+/// them left it summarizing results whose cause was no longer in front of it.
+fn message_section(message: &Message) -> String {
+    let text = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.clone()),
+            ContentBlock::ToolUse { name, input, .. } => Some(format!(
+                "[tool {name}] {}",
+                one_line(&input.to_string(), TOOL_INPUT_CHARS)
+            )),
+            ContentBlock::ToolResult { content, .. } => {
+                Some(crate::api::types::tool_result_text(content))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("\n---\n{text}")
+}
+
+fn omitted_note(count: usize) -> String {
+    format!(
+        "\n({count} earlier messages are left out of this transcript because they did not fit \
+         the summary request.)\n"
+    )
+}
+
+/// Old messages → summary prompt, trimmed to `budget` tokens.
+///
+/// The overflow path hands this whole histories that the model just refused,
+/// and dropping system blocks and tools is not by itself enough headroom to be
+/// sure it fits. Trimming is local and deterministic — drop whole messages
+/// from the oldest end, then cut the head off what is left — so recovery never
+/// costs an extra request to find out it failed. The oldest end goes first
+/// because it is what a summary loses least by losing.
+fn summary_prompt(old: &[Message], budget: u64) -> String {
+    let allowance = budget.saturating_mul(4);
+    let sections: Vec<String> = old.iter().map(message_section).collect();
+    // The note is charged from the start so dropping cannot undershoot and
+    // need a second pass; over-reserving by one absent line is free.
+    let overhead = text_units(COMPACT_PROMPT) + text_units(&omitted_note(old.len()));
+    let mut used: u64 = sections.iter().map(|section| text_units(section)).sum();
+    let mut dropped = 0;
+    while used + overhead > allowance && dropped < sections.len() {
+        used -= text_units(&sections[dropped]);
+        dropped += 1;
+    }
+
+    let mut prompt = String::from(COMPACT_PROMPT);
+    if let Some(last) = sections.last().filter(|_| dropped == sections.len()) {
+        // Even the newest message alone is over budget: it keeps its tail,
+        // which is where a turn's conclusion lives.
+        if dropped > 1 {
+            prompt.push_str(&omitted_note(dropped - 1));
+        }
+        // Each char costs at most 4 units, so this many always fit.
+        let room = allowance.saturating_sub(overhead) as usize / 4;
+        prompt.push('…');
+        prompt.extend(last.chars().skip(last.chars().count().saturating_sub(room)));
+        return prompt;
+    }
+    if dropped > 0 {
+        prompt.push_str(&omitted_note(dropped));
+    }
+    prompt.push_str(&sections[dropped..].concat());
     prompt
 }
+
+/// Where compaction reports itself. The three surfaces already differ on how a
+/// notice is shown (TUI warning row, headless stderr, JSON `warning` event) and
+/// `UiHooks::on_warning` is the one channel all three implement, so compaction
+/// borrows it rather than writing stderr underneath a TUI that owns the screen.
+/// The manual `/compact` path reports through its own slash events and passes a
+/// no-op.
+pub type CompactNotify<'a> = &'a mut (dyn Fn(String) + Send + 'a);
 
 /// Auto-compact when context exceeds the threshold: old messages → model summary,
 /// keep the most recent KEEP_RECENT.
@@ -74,7 +181,12 @@ fn summary_prompt(old: &[Message]) -> String {
 /// messages aren't touched until the summary arrives — on failure history is kept
 /// verbatim, never replaced by a placeholder string.
 /// Returns whether compaction happened.
-pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, tokens: u64) -> bool {
+pub async fn maybe_compact(
+    session: &Session,
+    messages: &mut Vec<Message>,
+    tokens: u64,
+    notify: CompactNotify<'_>,
+) -> bool {
     if messages.len() <= KEEP_RECENT {
         return false;
     }
@@ -86,26 +198,42 @@ pub async fn maybe_compact(session: &Session, messages: &mut Vec<Message>, token
     {
         return false;
     }
-    compact(session, messages).await
+    compact(session, messages, notify).await
 }
 
-pub async fn compact_after_overflow(session: &Session, messages: &mut Vec<Message>) -> bool {
+/// Recovery after the server rejected the request as too long. Takes the gate
+/// because compaction invalidates it: the anchor describes the pre-compaction
+/// history and projection floors at that anchor (`saturating_sub` eats the
+/// drop), so a kept anchor reads the shrunken history at its old size and
+/// compacts what was just compacted.
+pub async fn compact_after_overflow(
+    session: &Session,
+    messages: &mut Vec<Message>,
+    gate: &mut TokenGate,
+    notify: CompactNotify<'_>,
+) -> bool {
     if session.compact_failures.load(Ordering::SeqCst) >= MAX_COMPACT_FAILURES {
-        if !session.quiet {
-            eprintln!(
-                "[bingo] warning: overflow compaction disabled after {MAX_COMPACT_FAILURES} consecutive failures"
-            );
-        }
+        notify(format!(
+            "overflow compaction disabled after {MAX_COMPACT_FAILURES} consecutive failures"
+        ));
         return false;
     }
     if messages.len() <= KEEP_RECENT {
         session.compact_failures.fetch_add(1, Ordering::SeqCst);
         return false;
     }
-    compact(session, messages).await
+    let compacted = compact(session, messages, notify).await;
+    if compacted {
+        gate.reset();
+    }
+    compacted
 }
 
-async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {
+async fn compact(
+    session: &Session,
+    messages: &mut Vec<Message>,
+    notify: CompactNotify<'_>,
+) -> bool {
     let split = safe_split(messages, messages.len() - KEEP_RECENT);
 
     run_pre_compact(
@@ -115,11 +243,20 @@ async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {
     )
     .await;
 
+    let model = session.runtime.model.borrow().clone();
+    let models = session.client.models();
+    let max_tokens = SUMMARY_MAX_TOKENS.min(crate::budget::max_tokens_for(&models, &model));
+    let prompt_budget = crate::budget::effective_window_for(&models, &model)
+        .saturating_sub(max_tokens as u64)
+        .saturating_sub(SUMMARY_PROMPT_RESERVE);
     let request = NeutralRequest {
-        model: session.runtime.model.borrow().clone(),
-        max_tokens: 1024,
+        model,
+        max_tokens,
         system: Vec::new(),
-        messages: vec![Message::user_text(summary_prompt(&messages[..split]))],
+        messages: vec![Message::user_text(summary_prompt(
+            &messages[..split],
+            prompt_budget,
+        ))],
         tools: Vec::new(),
         stream: false,
         thinking: None,
@@ -131,16 +268,10 @@ async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {
         }
         outcome => {
             session.compact_failures.fetch_add(1, Ordering::SeqCst);
-            if !session.quiet {
-                match outcome {
-                    Err(e) => eprintln!(
-                        "[bingo] warning: context compaction failed, history kept as-is: {e}"
-                    ),
-                    _ => eprintln!(
-                        "[bingo] warning: context compaction returned an empty summary, history kept as-is"
-                    ),
-                }
-            }
+            notify(match outcome {
+                Err(e) => format!("context compaction failed, history kept as-is: {e}"),
+                _ => "context compaction returned an empty summary, history kept as-is".to_string(),
+            });
             return false;
         }
     };
@@ -158,17 +289,37 @@ async fn compact(session: &Session, messages: &mut Vec<Message>) -> bool {
         &session.cwd(),
     )
     .await;
-    eprintln!("[bingo] compacted {split} old messages");
+    notify(format!(
+        "context compacted: {split} earlier messages replaced by a summary"
+    ));
     true
 }
 
 /// Quarter-token units for one text fragment: ASCII ≈ 4 chars/token, other
 /// scripts (CJK etc.) ≈ 1 token/char. A flat chars/4 undercounted Chinese
 /// conversations ~4x, so growth between exact counts went mostly unseen and
-/// auto-compact fired far too late.
+/// auto-compact fired far too late (#40).
+///
+/// The 1 token/char CJK weight stays even though BPE tokenizers pack CJK
+/// tighter than that: it is what Anthropic's tokenizer actually does, and the
+/// two error directions cost differently. Overestimating compacts early —
+/// annoying. Underestimating overflows the window — a failed turn plus a
+/// recovery round trip. The estimate only decides anything where `count_tokens`
+/// is unavailable, so the conservative side is the right one, and after
+/// per-model max_tokens (F2) freed the headroom the flat 64k reservation ate,
+/// early compaction on BPE endpoints is a smaller price than it was.
 pub(crate) fn text_units(text: &str) -> u64 {
     text.chars().map(|c| if c.is_ascii() { 1 } else { 4 }).sum()
 }
+
+/// One image, in units (÷4 = 1600 tokens). Anthropic bills an image at
+/// roughly `width * height / 750`, capped near 1600 tokens for anything at or
+/// above the resize ceiling — so the largest image costs about this much and a
+/// small one costs less. Counting base64 length instead read a 1MB attachment
+/// as ~350k tokens, which pinned every image conversation over the threshold
+/// forever: the image lives inside KEEP_RECENT, so compaction could never
+/// bring the number down and each turn burned one useless summary request.
+const IMAGE_UNITS: u64 = 6_400;
 
 /// Local estimate when count_tokens is unavailable. Non-Anthropic endpoints
 /// (DeepSeek/ollama) lack this API; silently returning would mean auto-compact
@@ -195,8 +346,7 @@ pub(crate) fn estimate_tokens(
                     text_units(name) + text_units(&input.to_string())
                 }
                 ContentBlock::ToolResult { content, .. } => text_units(&content.to_string()),
-                // Image blocks estimated by base64 length (the real token hog).
-                ContentBlock::Image { source } => source.data.chars().count() as u64,
+                ContentBlock::Image { .. } => IMAGE_UNITS,
             };
         }
     }
@@ -263,6 +413,7 @@ pub async fn check_and_compact(
     messages: &mut Vec<Message>,
     gate: &mut TokenGate,
     tools: &[serde_json::Value],
+    notify: CompactNotify<'_>,
 ) -> u64 {
     let estimate = estimate_tokens(&session.system, messages, tools);
     let tokens = if gate.wants_exact(estimate) {
@@ -298,12 +449,10 @@ pub async fn check_and_compact(
     let threshold = autocompact_threshold_for(&models, &model);
     if tokens >= threshold {
         if session.compact_failures.load(Ordering::SeqCst) >= MAX_COMPACT_FAILURES {
-            if !session.quiet {
-                eprintln!(
-                    "[bingo] warning: auto-compact disabled after {MAX_COMPACT_FAILURES} consecutive failures"
-                );
-            }
-        } else if maybe_compact(session, messages, tokens).await {
+            notify(format!(
+                "auto-compact disabled after {MAX_COMPACT_FAILURES} consecutive failures"
+            ));
+        } else if maybe_compact(session, messages, tokens, notify).await {
             gate.reset();
             return estimate_tokens(&session.system, messages, tools);
         }
@@ -448,6 +597,105 @@ mod tests {
             400,
             "400 CJK chars ≈ 400 tokens"
         );
+    }
+
+    /// The prompt asks the model to keep executed commands, so the tool_use
+    /// blocks that hold them have to be in it — long inputs one line each.
+    #[test]
+    fn summary_prompt_carries_executed_commands() {
+        let call = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tu_1".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({ "command": format!("echo {}", "x".repeat(400)) }),
+            }],
+        };
+        let prompt = summary_prompt(
+            &[text(Role::User, "fix the build"), call, tool_result("tu_1")],
+            100_000,
+        );
+        assert!(prompt.contains("fix the build"));
+        assert!(prompt.contains("[tool Bash] {\"command\":\"echo xxx"));
+        assert!(
+            prompt.contains('…'),
+            "a long input is truncated, not dropped"
+        );
+        assert!(
+            prompt.lines().all(|line| line.chars().count() < 300),
+            "the tool input stays one bounded line"
+        );
+    }
+
+    /// The overflow path summarizes a history the model just refused, so the
+    /// summary request must be trimmed to fit before it is sent — locally, with
+    /// no extra round trip to discover that it did not.
+    #[test]
+    fn summary_prompt_is_trimmed_into_the_models_budget() {
+        let models = crate::api::models::ModelResolver::new(
+            std::sync::Arc::new(crate::api::models::ModelCatalog::from_settings(
+                &serde_json::from_str(
+                    r#"{"models": [{"id": "tiny-model", "contextWindow": 32768}]}"#,
+                )
+                .unwrap(),
+            )),
+            "default".to_string(),
+        );
+        let budget = crate::budget::effective_window_for(&models, "tiny-model")
+            .saturating_sub(SUMMARY_MAX_TOKENS as u64)
+            .saturating_sub(SUMMARY_PROMPT_RESERVE);
+        let history: Vec<Message> = (0..40)
+            .map(|index| {
+                text(
+                    Role::User,
+                    &format!("message {index} {}", "x".repeat(4_000)),
+                )
+            })
+            .collect();
+
+        let prompt = summary_prompt(&history, budget);
+        assert!(
+            text_units(&prompt) / 4 <= budget,
+            "prompt is {} tokens against a {budget} budget",
+            text_units(&prompt) / 4
+        );
+        assert!(
+            prompt.contains("are left out of this transcript"),
+            "the summary must say what it could not see"
+        );
+        assert!(
+            prompt.contains("message 39"),
+            "trimming drops the oldest end, so the newest work survives"
+        );
+    }
+
+    /// One message over budget on its own: keep its tail, where the turn's
+    /// conclusion is, rather than dropping the transcript to nothing.
+    #[test]
+    fn summary_prompt_keeps_the_tail_of_an_oversized_message() {
+        let history = vec![
+            text(Role::User, &"old ".repeat(4_000)),
+            text(Role::User, &format!("{}the conclusion", "y".repeat(40_000))),
+        ];
+        let prompt = summary_prompt(&history, 4_000);
+        assert!(text_units(&prompt) / 4 <= 4_000);
+        assert!(prompt.ends_with("the conclusion"));
+        assert!(prompt.contains("1 earlier messages are left out"));
+    }
+
+    /// An image costs a bounded number of tokens, not one per base64 character:
+    /// a 1MB attachment read as ~350k tokens pinned the session over the compact
+    /// threshold permanently (the image sits inside KEEP_RECENT, so compaction
+    /// cannot bring the number down), burning a summary request every turn.
+    #[test]
+    fn local_estimate_bounds_image_blocks() {
+        let image = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image {
+                source: crate::api::types::ImageSource::base64("image/png", "A".repeat(1_400_000)),
+            }],
+        };
+        assert_eq!(estimate_tokens(&[], &[image], &[]), 1_600);
     }
 
     /// Tool schemas ride along with every request; a measurement that skips them

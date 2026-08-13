@@ -59,7 +59,7 @@ Three config layers, shallow-merged; the later one overrides:
 | `apiKey` | string | API key (settings take precedence over `ANTHROPIC_API_KEY`/`DEEPSEEK_API_KEY`); prefer the user layer — the project layer gets committed to the repo |
 | `apiBaseUrl` | string | API endpoint (settings take precedence over `ANTHROPIC_BASE_URL`; defaults to the official one) |
 | `providers` | object | Named providers: `{name: {protocol?, apiKey?, envKey?, apiBaseUrl?, supportsImages?, oauth?, models?}}`, switch via `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, `Authorization: Bearer`; `apiBaseUrl` defaults to `https://api.openai.com`); an empty/absent `apiBaseUrl` falls back to the protocol default; unknown protocols are a config error at startup. `envKey` names an environment variable holding the key — credential order is `apiKey` > `envKey` > stored key / OAuth, so a project layer can reference a key without containing one. `oauth: {kind: "codex"}` enables OAuth login (apiKey wins over OAuth); the codex flow (device / loopback PKCE) is `chatgpt.com`-subscription auth, tokens stored in `~/.local/share/bingo/auth.json` (0600, never in the committed settings) |
-| `models` | array | The default provider's model list; per-provider under `providers.<name>.models`. Entries are model ids (`"gpt-5.6-sol"`) or objects (`{id, display?, contextWindow?, thinking?}`). Declaring is authoritative: `/model` lists exactly these with no request, and the declared `contextWindow`/`thinking` outrank the built-in metadata table. Providers that declare nothing pull the endpoint's own list, cached in `~/.local/share/bingo/models-cache.json` for 24h (`r` in the menu re-asks). bingo never filters an endpoint's models itself |
+| `models` | array | The default provider's model list; per-provider under `providers.<name>.models`. Entries are model ids (`"gpt-5.6-sol"`) or objects (`{id, display?, contextWindow?, maxTokens?, thinking?}`). Declaring is authoritative: `/model` lists exactly these with no request, and the declared `contextWindow`/`maxTokens`/`thinking` outrank the built-in metadata table. `maxTokens` is the output ceiling sent as the request's `max_tokens` and reserved out of the input window (clamped to half the window). Providers that declare nothing pull the endpoint's own list, cached in `~/.local/share/bingo/models-cache.json` for 24h (`r` in the menu re-asks). bingo never filters an endpoint's models itself |
 | `provider` | string | Current provider (persisted by `/provider` and the /model menu; default `"default"` = top-level `apiKey`/`apiBaseUrl`); restored at startup, an invalid name falls back to default with a warning |
 | `sendImages` | bool | Whether the default endpoint sends message-box image attachments to the model (named providers use their own `supportsImages`). Both protocols carry image blocks, so this defaults to **true** — set `false` to opt out an endpoint that speaks the protocol but rejects images (some compat proxies) |
 | `thinkingLevel` | string | Thinking level: `off` sends no thinking param (DeepSeek-compatible, default); `low`/`medium`/`high`/`xhigh`/`max` send `{"type":"adaptive"}` adaptive thinking plus `output_config.effort` (the Claude 5 family removed budget_tokens; below `high` saves tokens, `xhigh`/`max` think deeper) |
@@ -123,10 +123,12 @@ Example (.bingo/settings.json):
    current endpoint.
 2. **Model request fails/times out**: `/status` shows the current model; `/model` switches it; with multiple providers use
    `/provider <name>` (the settings `providers` section); `/context` shows usage —
-   when close to the context window, `/compact` (auto-compaction threshold = 90% of the effective window
-   (200k − 64k output budget) ≈ 122k, about 61% of the total window). Endpoints without a
+   when close to the context window, `/compact` (auto-compaction threshold = 90% of the effective window,
+   which is the model's window minus its own output budget: 200k − 64k ≈ 122k for Claude,
+   128k − 8k → 108k for DeepSeek, and a declared `maxTokens` sets it for any other model). Endpoints without a
    count_tokens API (DeepSeek/ollama; OpenAI-protocol providers — `count_tokens` is Anthropic-only)
-   automatically fall back to local estimation (characters/4), with a one-time warning on first fallback.
+   automatically fall back to local estimation (ASCII ≈ 4 characters per token, CJK ≈ 1 token per character,
+   an image a flat 1600), with a one-time warning on first fallback.
    If that estimate is low and either wire protocol rejects a request as a context overflow, bingo compacts
    the history and retries the rejected request once; a second overflow ends the turn instead of looping.
    If an upstream response completes without assistant content or tool calls (including an unclosed thinking block),

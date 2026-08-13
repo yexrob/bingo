@@ -1,6 +1,6 @@
 # Feedback States Specification
 
-> Version: v1.42 · Status: in effect (2026-08-12)
+> Version: v1.43 · Status: in effect (2026-08-13)
 > Scope: the unified design conventions for every user-visible feedback state in bingo. The GUI (TUI) and CLI (headless) sides share a single source; qa acceptance anchors are at the end.
 
 ## General principles
@@ -299,3 +299,5 @@ Web-side conventions (for a future web frontend to reuse):
 - v1.41 (2026-08-12): issue #39 adds long-turn recovery for transient in-stream API errors. `429`, `5xx`, overloaded, and `server_error` events restart the uncommitted model response up to 10 times; a server-provided retry delay wins, otherwise the delay uses capped exponential backoff with ±10% jitter. The first reconnect notice is suppressed and attempts 2–10 show `Reconnecting... N/10`. TUI and subagent live views clear failed-attempt output before the replacement stream; headless stdout cannot retract an already-written prefix, while persisted/result content still contains only the successful attempt. Quota, usage-not-included, invalid-prompt, and context-overflow errors remain immediate failures, and short synchronous operations retain their existing 10s/15s timeout tier without entering this retry loop.
 
 - v1.42 (2026-08-12): review hardening of v1.41. A server-provided retry delay is now clamped at 60s so a misbehaving `retry_after` cannot park a turn for an hour behind the suppressed first notice; local backoff (500ms start, ±10% jitter, 32s cap) is unchanged. Message-based transient classification now treats a bare 5xx number as a status code only when it opens the message or follows an HTTP-status marker, so copy like "512 characters" no longer looks retryable. No copy or state-flow changes.
+
+- v1.43 (2026-08-13): auto-compaction review (D66) moves compaction's own feedback onto the shared channel. Success, failure and the tripped circuit breaker are emitted through `UiHooks::on_warning` instead of stderr, so they surface as a TUI warning row, as headless stderr, and as the existing JSON `warning` event — previously the TUI and a JSON client (both `quiet`) saw nothing at all, and the success line wrote stderr under a TUI that owns the screen. Success reads `context compacted: N earlier messages replaced by a summary`; failure keeps its "history kept as-is" wording plus the reason. No new protocol event type and no new error code. The `/compact` slash command is unchanged and still reports through its own slash-output/slash-error rows, now with the "conversation is too short" floor reading the same `KEEP_RECENT` the compactor applies.

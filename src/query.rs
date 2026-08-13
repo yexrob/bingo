@@ -665,7 +665,14 @@ async fn query_loop(
                 );
             }
         }
-        check_and_compact(session, &mut messages, &mut gate, &tool_schemas).await;
+        check_and_compact(
+            session,
+            &mut messages,
+            &mut gate,
+            &tool_schemas,
+            &mut ui.on_warning,
+        )
+        .await;
         // task_reminder: no Task tool for 10 turns + 10 turns since the last reminder.
         maybe_inject_task_reminder(session, &mut messages).await;
         // Recovery sweep: event-driven SendMessage claims idle recipients immediately, while
@@ -735,7 +742,9 @@ async fn query_loop(
         .await
         {
             Err(error @ QueryError::Client(ClientError::ContextOverflow { .. })) => {
-                if !compact_after_overflow(session, &mut messages).await {
+                if !compact_after_overflow(session, &mut messages, &mut gate, &mut ui.on_warning)
+                    .await
+                {
                     if let Some(inbox) = inbox_wake.as_mut() {
                         inbox.restore(session);
                     }
@@ -1633,9 +1642,39 @@ mod tests {
     }
 
     async fn spawn_anthropic_api(responses: Vec<ApiResponse>) -> String {
+        spawn_anthropic_api_counting(10, responses).await.0
+    }
+
+    /// What the mock server saw, for tests that assert on the wire rather than
+    /// on the reply.
+    #[derive(Default)]
+    struct ApiLog {
+        requests: std::sync::Mutex<Vec<(ApiRequestKind, serde_json::Value)>>,
+    }
+
+    impl ApiLog {
+        fn bodies(&self, kind: ApiRequestKind) -> Vec<serde_json::Value> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|(seen, _)| *seen == kind)
+                .map(|(_, body)| body.clone())
+                .collect()
+        }
+    }
+
+    /// Same server with a caller-chosen `count_tokens` answer and a log of the
+    /// requests it served.
+    async fn spawn_anthropic_api_counting(
+        input_tokens: u64,
+        responses: Vec<ApiResponse>,
+    ) -> (String, Arc<ApiLog>) {
         use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let log = Arc::new(ApiLog::default());
+        let served = Arc::clone(&log);
         let mut remaining = responses;
         remaining.reverse();
         tokio::spawn(async move {
@@ -1644,10 +1683,22 @@ mod tests {
                     return;
                 };
                 let head = read_http_request(&mut socket).await;
-                let (status, content_type, body) = if request_kind(&head)
-                    == ApiRequestKind::CountTokens
-                {
-                    (200, "application/json", "{\"input_tokens\":10}".to_string())
+                let kind = request_kind(&head);
+                let body = head
+                    .split_once("\r\n\r\n")
+                    .and_then(|(_, body)| serde_json::from_str(body).ok())
+                    .unwrap_or(serde_json::Value::Null);
+                served
+                    .requests
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((kind, body));
+                let (status, content_type, body) = if kind == ApiRequestKind::CountTokens {
+                    (
+                        200,
+                        "application/json",
+                        format!("{{\"input_tokens\":{input_tokens}}}"),
+                    )
                 } else {
                     match remaining.pop().unwrap_or(ApiResponse::Ok(String::new())) {
                         ApiResponse::Ok(body) => (200, "text/event-stream", body),
@@ -1670,7 +1721,7 @@ mod tests {
                 let _ = socket.shutdown().await;
             }
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), log)
     }
 
     async fn spawn_openai_api(responses: Vec<ApiResponse>) -> String {
@@ -2008,7 +2059,7 @@ mod tests {
     }
 
     fn overflow_history() -> Vec<Message> {
-        (0..10)
+        (0..16)
             .map(|index| Message::user_text(format!("message {index}")))
             .collect()
     }
@@ -2249,6 +2300,135 @@ mod tests {
         );
     }
 
+    /// After overflow compaction the gate must forget its exact count: the anchor
+    /// was measured on the pre-compaction history and projection floors at it, so
+    /// keeping it reads the shrunken history at its old size and compacts again on
+    /// the very next turn (one more lost round of detail, one more request).
+    #[tokio::test]
+    async fn overflow_compaction_resets_the_token_gate() {
+        // Just under the 122_400 threshold for a 200k window, so the first turn
+        // measures high without compacting; the summary then adds ~15k estimated
+        // tokens — enough to cross the threshold on top of a stale anchor, but
+        // under the 20k growth that would force a fresh exact count.
+        let summary = format!(
+            r#"{{"content":[{{"type":"text","text":"{}"}}]}}"#,
+            "s".repeat(60_000)
+        );
+        let (base_url, log) = spawn_anthropic_api_counting(
+            110_000,
+            vec![
+                ApiResponse::Error {
+                    status: 400,
+                    body: ANTHROPIC_OVERFLOW.to_string(),
+                },
+                ApiResponse::Ok(summary),
+                ApiResponse::Ok(tool_turn("tu_1", "NoSuchTool", serde_json::json!({}))),
+                ApiResponse::Ok(text_turn("done", "end_turn")),
+            ],
+        )
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        run_query(
+            &session,
+            overflow_history(),
+            "current request",
+            &[],
+            &mut ui,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            log.bodies(ApiRequestKind::CompleteText).len(),
+            1,
+            "the freshly compacted history must not be compacted again"
+        );
+    }
+
+    /// A declared small window must reach the wire: a flat 64k output budget is
+    /// more than such a model can produce, and the request 400s before any
+    /// context arithmetic gets a say.
+    #[tokio::test]
+    async fn declared_max_tokens_reaches_the_request() {
+        let (base_url, log) =
+            spawn_anthropic_api_counting(10, vec![ApiResponse::Ok(text_turn("hi", "end_turn"))])
+                .await;
+        let settings = serde_json::from_str(&format!(
+            r#"{{"apiKey": "k", "apiBaseUrl": "{base_url}",
+                 "models": [{{"id": "m", "contextWindow": 32768}}]}}"#
+        ))
+        .unwrap();
+        let client = crate::api::client::Client::from_settings_with(&settings, |_| {
+            Err(std::env::VarError::NotPresent)
+        })
+        .unwrap();
+        let session = test_session_with_client(client, None);
+        let mut ui = headless_hooks();
+        run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap();
+
+        let sent = log.bodies(ApiRequestKind::Stream);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0]
+                .get("max_tokens")
+                .and_then(serde_json::Value::as_u64),
+            Some(16_384),
+            "half the declared window, not the flat 64k default"
+        );
+    }
+
+    fn capturing_hooks() -> (UiHooks, Arc<std::sync::Mutex<Vec<String>>>) {
+        let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&warnings);
+        let mut ui = headless_hooks();
+        ui.on_warning = Box::new(move |message| {
+            seen.lock().unwrap_or_else(|e| e.into_inner()).push(message);
+        });
+        (ui, warnings)
+    }
+
+    /// Compaction is invisible to the TUI and to a JSON client if it writes
+    /// stderr: both run quiet, and the TUI owns the screen. Its notices go
+    /// through the one channel every surface implements.
+    #[tokio::test]
+    async fn compaction_reports_itself_through_the_ui_hook() {
+        let base_url = spawn_anthropic_api(vec![
+            ApiResponse::Error {
+                status: 400,
+                body: ANTHROPIC_OVERFLOW.to_string(),
+            },
+            ApiResponse::Ok(
+                r#"{"content":[{"type":"text","text":"compacted context"}]}"#.to_string(),
+            ),
+            ApiResponse::Ok(text_turn("recovered", "end_turn")),
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let (mut ui, warnings) = capturing_hooks();
+        run_query(
+            &session,
+            overflow_history(),
+            "current request",
+            &[],
+            &mut ui,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let warnings = warnings.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.starts_with("context compacted:")),
+            "{warnings:?}"
+        );
+    }
+
     #[tokio::test]
     async fn overflow_compaction_failure_increments_breaker_without_retrying_request() {
         let base_url = spawn_anthropic_api(vec![
@@ -2263,7 +2443,7 @@ mod tests {
         ])
         .await;
         let session = test_session(base_url, None);
-        let mut ui = headless_hooks();
+        let (mut ui, warnings) = capturing_hooks();
         let error = run_query(
             &session,
             overflow_history(),
@@ -2284,6 +2464,13 @@ mod tests {
                 .compact_failures
                 .load(std::sync::atomic::Ordering::SeqCst),
             1
+        );
+        let warnings = warnings.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("history kept as-is")),
+            "the failure reason reaches the UI, not just stderr: {warnings:?}"
         );
     }
 

@@ -3161,7 +3161,9 @@ impl Chat {
                 Some(t) => t.load_messages().unwrap_or_default(),
                 None => Vec::new(),
             };
-            if messages.len() <= 8 {
+            // Same floor maybe_compact applies, so "too short" is reported as
+            // that and not as a model-call failure.
+            if messages.len() <= crate::compact::KEEP_RECENT {
                 unpin();
                 let _ = events.send(UiEvent::SlashOutput(
                     "the conversation is too short; no compaction needed.".to_string(),
@@ -3169,7 +3171,10 @@ impl Chat {
                 return;
             }
             let old_len = messages.len();
-            let compacted = crate::compact::maybe_compact(&session, &mut messages, u64::MAX).await;
+            // The slash command reports its own outcome below, so the shared
+            // notification channel stays quiet here.
+            let compacted =
+                crate::compact::maybe_compact(&session, &mut messages, u64::MAX, &mut |_| {}).await;
             if !compacted {
                 unpin();
                 let _ = events.send(UiEvent::SlashError(
