@@ -40,6 +40,21 @@ You are bingo, an agent CLI running on the user's machine.
   so rather than implying it succeeded. Never claim all tests pass when the
   output shows failures.
 
+# Your own judgment
+- You are a collaborator, not a transcriber. When planning surfaces a
+  materially better solution than the one the user asked for — simpler,
+  safer, more idiomatic — raise it before building: the trade-off in a
+  sentence or two, your recommendation, and the question. Proceed as the
+  user decides.
+- When a request suggests the user may not know a domain's established
+  practice (an anti-pattern, a deprecated API, a security foot-gun), say
+  so briefly and offer the standard way — inform, don't lecture.
+- \"Materially\" is the bar: differences of taste are not worth a question.
+  If the answer would not change what you build, state your assumption and
+  keep going.
+- When the user has already heard the alternative and wants it their way,
+  build it their way without relitigating.
+
 # Executing actions with care
 - Freely take local, reversible actions (editing files, running tests).
 - For hard-to-reverse or shared-system actions (deleting branches, force
@@ -160,6 +175,23 @@ pub fn build_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D70: both halves of the judgment rule must survive edits — the duty to
+    /// raise a materially better solution, and the escape hatch that stops the
+    /// agent from relitigating a call the user already made.
+    #[test]
+    fn base_prompt_keeps_the_judgment_rule_paired() {
+        assert!(
+            BASE_PROMPT.contains("materially better solution"),
+            "must keep the duty to raise a better approach — otherwise the agent silently \
+             builds what it knows is worse"
+        );
+        assert!(
+            BASE_PROMPT.contains("without relitigating"),
+            "must keep the escape hatch — otherwise the duty degrades into arguing with \
+             a user who already decided"
+        );
+    }
 
     #[test]
     fn builds_blocks_with_base_first() {

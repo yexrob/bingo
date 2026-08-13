@@ -958,3 +958,15 @@ a member has worked still reports `reused`. Were history persisted per turn, eve
 report `refreshed` instead. The refresh itself stays correct in that world (history is preserved
 either way); only the wording would get noisy, and the fix would be to exclude the pointer block
 from the comparison rather than to reach for a fingerprint.
+
+### D70. The agent owes its judgment, not just its labor
+
+The base prompt's task rules were all restraint — do what was asked, nothing beyond — with no
+counterweight, so complying silently with a request the agent knows is worse was doctrine-conformant
+behavior. A "Your own judgment" section adds the progressive half: a materially better solution
+found while planning is raised before building (trade-off, recommendation, question), an
+apparent best-practice gap is pointed out briefly (inform, don't lecture), and two rails keep it
+from degrading — "materially" bars taste-level questions, and a user who has heard the alternative
+and still wants their way gets it without relitigating. Members inherit the section through the
+parent system; their existing "report to the hub" redirect already reroutes the ask they cannot
+make. Both halves are guarded as a pair by a test, like the venue rule (D67).
