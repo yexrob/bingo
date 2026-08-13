@@ -52,7 +52,8 @@ fn effort_for(model: &str, level: ThinkingLevel) -> &'static str {
 /// The endpoint (one per provider instance; mirrors the anthropic adapter).
 /// Endpoint flavor: the public Responses API (default) or the ChatGPT
 /// subscription endpoint (codex variant, D33 §6.1b / Path 2): same wire
-/// format, different path + ChatGPT-Account-Id header + model allowlist.
+/// format, different path + ChatGPT-Account-Id header + its own model-list
+/// route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiVariant {
     Default,

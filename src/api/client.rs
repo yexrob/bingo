@@ -393,9 +393,21 @@ impl Client {
         self.current().complete_text(request).await
     }
 
-    /// List the models the current endpoint supports (the `/model` menu).
+    /// The models the current provider offers. A settings declaration answers
+    /// without asking the endpoint (D64) — this is the single authority, so
+    /// the `/model` menu and the JSON protocol's models.list cannot disagree
+    /// about what a provider offers.
     pub async fn list_models(&self) -> Result<Vec<String>, ClientError> {
-        self.current().list_models().await
+        let declared = {
+            let current = self.endpoint.read().unwrap_or_else(|p| p.into_inner());
+            self.catalog
+                .declared(&current.1.name)
+                .map(|models| models.iter().map(|m| m.id.clone()).collect())
+        };
+        match declared {
+            Some(models) => Ok(models),
+            None => self.current().list_models().await,
+        }
     }
 
     /// Input token count on the current provider (D12: the budget display
@@ -842,6 +854,29 @@ mod tests {
         assert_eq!(
             client.declared_models("default").map(|m| m[0].id.clone()),
             Some("claude-opus-5".to_string())
+        );
+    }
+
+    /// list_models is the one authority: a declaration answers it too, so the
+    /// JSON protocol's models.list and the `/model` menu describe the same
+    /// provider. Reaching the endpoint here would be a network call — the
+    /// unreachable base URL proves none was made.
+    #[tokio::test]
+    async fn list_models_answers_from_the_declaration() {
+        let settings: crate::settings::Settings = serde_json::from_str(
+            r#"{
+                "apiKey": "sk-main",
+                "apiBaseUrl": "http://127.0.0.1:1",
+                "models": ["declared-a", {"id": "declared-b", "display": "B"}]
+            }"#,
+        )
+        .unwrap();
+        let client =
+            Client::from_settings_with(&settings, |_| Err(std::env::VarError::NotPresent)).unwrap();
+        assert_eq!(
+            client.list_models().await.unwrap(),
+            vec!["declared-a".to_string(), "declared-b".to_string()],
+            "ids, in declaration order"
         );
     }
 

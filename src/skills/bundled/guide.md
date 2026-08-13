@@ -208,8 +208,8 @@ Example (.bingo/settings.json):
   settings; `apiKey` in settings wins over OAuth; refresh is automatic (eager 5 min before expiry + on 401),
   permanent refresh failures clear the login and prompt `/provider login <name>` again. Codex providers route to
   `https://chatgpt.com/backend-api/codex/responses` (Responses wire format, same adapter; `ChatGPT-Account-Id`
-  header from the JWT claims; `/model` shows the subscription allowlist: gpt-5.5 / gpt-5.3-codex-spark /
-  gpt-5.4 / gpt-5.4-mini).
+  header from the JWT claims; `/model` pulls the subscription's own model list, falling back to a
+  static snapshot when that request fails — bingo never narrows the list itself).
 - **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
   experience index is injected (≤10 entries, ranked by observed outcomes before the legacy commit count; nothing injected when empty); full text is searched with ExperienceQuery by
   trigger tokens (case-insensitive, shared-prefix tolerant; active first);
