@@ -69,7 +69,7 @@ Three config layers, shallow-merged; the later one overrides:
 | `cacheControl` | bool | Send prompt caching; turn off if a non-official endpoint is unstable |
 | `respondToBashCommands` | bool | Whether `!` commands are handed to the model for a response after execution (default true; false = pure execution) |
 | `bashOutputMaxChars` | integer | Maximum combined stdout/stderr characters returned by the Bash tool (default and maximum 48,000); truncated results point to redirecting output and reading the file |
-| `shell` | string | Shell program for the Bash tool and hooks; default per platform: macOS `/bin/zsh`, other Unix `/bin/bash`, Windows `powershell.exe`. PowerShell-family shells run with `-Command`; other configured shells (e.g. Git Bash `bash.exe`) with `-c` |
+| `shell` | string | Shell program for the Bash tool and hooks; default per platform: macOS `/bin/zsh`, other Unix `/bin/bash`, Windows `powershell.exe`. PowerShell-family shells run with `-Command`; other configured shells (e.g. Git Bash `bash.exe`) with `-c`. The resolved shell and its dialect (posix/powershell/cmd) are reported to the model (environment block, Bash tool description) and to JSON clients (`session.ready` metadata `shell`/`shellDialect`), so generated commands match the real executor |
 | `mcpServers` | object | `{name: {type?, command, args, env}}` (stdio, default) or `{name: {type: "http", url, headers?}}` (streamable HTTP) |
 | `disabledMcpServers` | string[] | List of disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`; rule syntax `Tool(content)`, `:*` is a prefix wildcard (e.g. `Bash(git push:*)`); Bash rules match per subcommand segment; path rules normalize before matching (see diagnostics 4) |

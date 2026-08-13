@@ -84,6 +84,19 @@ fn json_events_eof_cancels_active_turn_without_mixing_stdout() {
         .map(|line| serde_json::from_str(line).expect("each stdout line must be JSON"))
         .collect();
     assert_eq!(events[0]["type"], "session.ready");
+    // #42: session.ready carries the resolved shell so clients need not guess
+    // platform defaults.
+    let shell = events[0]["metadata"]["shell"]
+        .as_str()
+        .expect("metadata.shell must be a string");
+    assert!(!shell.is_empty());
+    let dialect = events[0]["metadata"]["shellDialect"]
+        .as_str()
+        .expect("metadata.shellDialect must be a string");
+    assert!(
+        ["posix", "powershell", "cmd", "unknown"].contains(&dialect),
+        "{dialect}"
+    );
     assert_eq!(events[1]["type"], "turn.started");
     let last = events.last().expect("terminal event");
     assert_eq!(last["type"], "turn.cancelled");
