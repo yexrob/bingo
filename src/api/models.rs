@@ -16,12 +16,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::api::types::DEFAULT_MAX_TOKENS;
 use crate::settings::{ModelEntry, Settings};
 
 /// Metadata for one model family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelMeta {
     pub context_window: u64,
+    /// Output budget sent as `max_tokens`. It is also the headroom the input
+    /// window must reserve, so a family whose real ceiling is lower than
+    /// `DEFAULT_MAX_TOKENS` both stops 400ing and gets that headroom back.
+    pub max_tokens: u32,
     pub supports_thinking: bool,
 }
 
@@ -29,6 +34,7 @@ pub struct ModelMeta {
 /// every model before this table existed.
 pub const DEFAULT_META: ModelMeta = ModelMeta {
     context_window: 200_000,
+    max_tokens: DEFAULT_MAX_TOKENS,
     supports_thinking: true,
 };
 
@@ -40,6 +46,7 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
         "claude-",
         ModelMeta {
             context_window: 200_000,
+            max_tokens: DEFAULT_MAX_TOKENS,
             supports_thinking: true,
         },
     ),
@@ -48,16 +55,19 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
         "gpt-5",
         ModelMeta {
             context_window: 400_000,
+            max_tokens: DEFAULT_MAX_TOKENS,
             supports_thinking: true,
         },
     ),
     // DeepSeek chat endpoints reject anthropic thinking parameters — the
     // documented reason `/think off` exists. The gate skips the parameter for
-    // them regardless of the configured level.
+    // them regardless of the configured level. Their documented output ceiling
+    // is 8k, so the other 56k of reserved headroom belongs to the input window.
     (
         "deepseek",
         ModelMeta {
             context_window: 128_000,
+            max_tokens: 8_000,
             supports_thinking: false,
         },
     ),
@@ -83,6 +93,7 @@ pub struct CatalogModel {
     pub display: Option<String>,
     /// Declared overrides — absent fields defer to the prefix table.
     pub context_window: Option<u64>,
+    pub max_tokens: Option<u32>,
     pub thinking: Option<bool>,
 }
 
@@ -141,6 +152,7 @@ fn convert(entries: &[ModelEntry]) -> Vec<CatalogModel> {
             id: entry.id().to_string(),
             display: entry.display().map(str::to_string),
             context_window: entry.context_window(),
+            max_tokens: entry.max_tokens(),
             thinking: entry.thinking(),
         })
         .collect()
@@ -170,6 +182,7 @@ impl ModelResolver {
         };
         ModelMeta {
             context_window: entry.context_window.unwrap_or(table.context_window),
+            max_tokens: entry.max_tokens.unwrap_or(table.max_tokens),
             supports_thinking: entry.thinking.unwrap_or(table.supports_thinking),
         }
     }
@@ -208,7 +221,8 @@ mod tests {
                 "proxy": {"apiKey": "k", "models": [
                     "gpt-5.6-sol",
                     {"id": "deepseek-v4", "contextWindow": 131072, "thinking": true},
-                    {"id": "house-model", "thinking": false}
+                    {"id": "house-model", "thinking": false},
+                    {"id": "small-model", "contextWindow": 32768, "maxTokens": 4096}
                 ]}
             }
         }"#;
@@ -221,9 +235,16 @@ mod tests {
             proxy.supports_thinking("deepseek-v4"),
             "a declaration may re-enable thinking the prefix table denies"
         );
+        assert_eq!(
+            proxy.meta("deepseek-v4").max_tokens,
+            8_000,
+            "an undeclared output budget still falls through to the prefix table"
+        );
         // Partial declaration: the untouched field still falls through.
         assert_eq!(proxy.context_window("house-model"), 200_000);
         assert!(!proxy.supports_thinking("house-model"));
+        assert_eq!(proxy.meta("house-model").max_tokens, DEFAULT_MAX_TOKENS);
+        assert_eq!(proxy.meta("small-model").max_tokens, 4_096);
         // Undeclared model on a declaring provider → prefix table.
         assert_eq!(proxy.context_window("claude-sonnet-5"), 200_000);
 
@@ -271,6 +292,13 @@ mod tests {
         assert_eq!(table.context_window("claude-sonnet-5"), 200_000);
         assert_eq!(table.context_window("gpt-5.6-sol"), 400_000);
         assert_eq!(table.context_window("deepseek-chat"), 128_000);
+        assert_eq!(table.meta("claude-sonnet-5").max_tokens, DEFAULT_MAX_TOKENS);
+        assert_eq!(table.meta("gpt-5.6-sol").max_tokens, DEFAULT_MAX_TOKENS);
+        assert_eq!(
+            table.meta("deepseek-chat").max_tokens,
+            8_000,
+            "DeepSeek's documented output ceiling, not the Claude default"
+        );
         assert_eq!(
             table.context_window("some-unknown-model"),
             200_000,

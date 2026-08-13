@@ -1636,17 +1636,36 @@ mod tests {
         spawn_anthropic_api_counting(10, responses).await.0
     }
 
-    /// Same server with a caller-chosen `count_tokens` answer and a tally of the
-    /// non-streaming (compaction) requests it served.
+    /// What the mock server saw, for tests that assert on the wire rather than
+    /// on the reply.
+    #[derive(Default)]
+    struct ApiLog {
+        requests: std::sync::Mutex<Vec<(ApiRequestKind, serde_json::Value)>>,
+    }
+
+    impl ApiLog {
+        fn bodies(&self, kind: ApiRequestKind) -> Vec<serde_json::Value> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|(seen, _)| *seen == kind)
+                .map(|(_, body)| body.clone())
+                .collect()
+        }
+    }
+
+    /// Same server with a caller-chosen `count_tokens` answer and a log of the
+    /// requests it served.
     async fn spawn_anthropic_api_counting(
         input_tokens: u64,
         responses: Vec<ApiResponse>,
-    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    ) -> (String, Arc<ApiLog>) {
         use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let summaries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let served = Arc::clone(&summaries);
+        let log = Arc::new(ApiLog::default());
+        let served = Arc::clone(&log);
         let mut remaining = responses;
         remaining.reverse();
         tokio::spawn(async move {
@@ -1656,9 +1675,15 @@ mod tests {
                 };
                 let head = read_http_request(&mut socket).await;
                 let kind = request_kind(&head);
-                if kind == ApiRequestKind::CompleteText {
-                    served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }
+                let body = head
+                    .split_once("\r\n\r\n")
+                    .and_then(|(_, body)| serde_json::from_str(body).ok())
+                    .unwrap_or(serde_json::Value::Null);
+                served
+                    .requests
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((kind, body));
                 let (status, content_type, body) = if kind == ApiRequestKind::CountTokens {
                     (
                         200,
@@ -1687,7 +1712,7 @@ mod tests {
                 let _ = socket.shutdown().await;
             }
         });
-        (format!("http://{addr}"), summaries)
+        (format!("http://{addr}"), log)
     }
 
     async fn spawn_openai_api(responses: Vec<ApiResponse>) -> String {
@@ -2280,7 +2305,7 @@ mod tests {
             r#"{{"content":[{{"type":"text","text":"{}"}}]}}"#,
             "s".repeat(60_000)
         );
-        let (base_url, summaries) = spawn_anthropic_api_counting(
+        let (base_url, log) = spawn_anthropic_api_counting(
             110_000,
             vec![
                 ApiResponse::Error {
@@ -2307,9 +2332,43 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            summaries.load(std::sync::atomic::Ordering::SeqCst),
+            log.bodies(ApiRequestKind::CompleteText).len(),
             1,
             "the freshly compacted history must not be compacted again"
+        );
+    }
+
+    /// A declared small window must reach the wire: a flat 64k output budget is
+    /// more than such a model can produce, and the request 400s before any
+    /// context arithmetic gets a say.
+    #[tokio::test]
+    async fn declared_max_tokens_reaches_the_request() {
+        let (base_url, log) =
+            spawn_anthropic_api_counting(10, vec![ApiResponse::Ok(text_turn("hi", "end_turn"))])
+                .await;
+        let settings = serde_json::from_str(&format!(
+            r#"{{"apiKey": "k", "apiBaseUrl": "{base_url}",
+                 "models": [{{"id": "m", "contextWindow": 32768}}]}}"#
+        ))
+        .unwrap();
+        let client = crate::api::client::Client::from_settings_with(&settings, |_| {
+            Err(std::env::VarError::NotPresent)
+        })
+        .unwrap();
+        let session = test_session_with_client(client, None);
+        let mut ui = headless_hooks();
+        run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap();
+
+        let sent = log.bodies(ApiRequestKind::Stream);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0]
+                .get("max_tokens")
+                .and_then(serde_json::Value::as_u64),
+            Some(16_384),
+            "half the declared window, not the flat 64k default"
         );
     }
 

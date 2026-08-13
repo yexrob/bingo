@@ -192,7 +192,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
 | `providers` | object | 命名 provider：`{名: {protocol?, apiKey?, envKey?, apiBaseUrl?, supportsImages?, oauth?, models?}}`，`/provider <名>` 切换；`protocol` 为 `"anthropic"`（缺省）或 `"openai"`（Responses API，Bearer 认证；`apiBaseUrl` 缺省 `https://api.openai.com`）；`envKey` 写环境变量名取 key（凭据顺序 `apiKey` > `envKey` > 存储的 key / OAuth）；`oauth: {kind: "codex"}` 启用 OAuth 登录（`/provider login`，apiKey 优先） |
 | `model` | string | 默认模型（`/model` 选择写入）；优先级 `--model` > settings > 内置 `claude-sonnet-5` |
-| `models` | array | 默认 provider 的模型清单；各 provider 写在 `providers.<名>.models`。条目是模型 id（`"gpt-5.6-sol"`）或对象（`{id, display?, contextWindow?, thinking?}`）。声明即权威：`/model` 只列这些且零请求，元数据覆盖内置表。未声明的 provider 动态拉 `/v1/models`，结果落盘缓存 24 小时（菜单里 `r` 重拉） |
+| `models` | array | 默认 provider 的模型清单；各 provider 写在 `providers.<名>.models`。条目是模型 id（`"gpt-5.6-sol"`）或对象（`{id, display?, contextWindow?, maxTokens?, thinking?}`）。声明即权威：`/model` 只列这些且零请求，元数据覆盖内置表。`maxTokens` 是模型的输出上限——既作请求的 `max_tokens` 发出，也从输入窗口里预留出来，并 clamp 到窗口的一半，小 `contextWindow` 也留得下工作余量。未声明的 provider 动态拉 `/v1/models`，结果落盘缓存 24 小时（菜单里 `r` 重拉） |
 | `thinkingLevel` | string | `off` 不发 thinking 参数（兼容 DeepSeek，缺省）；`low`/`medium`/`high`/`xhigh`/`max` 发自适应 thinking + 对应档位的 `output_config.effort` |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto`（跟随终端背景）/ `dark` / `light` |

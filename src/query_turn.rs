@@ -6,7 +6,7 @@ use tokio::sync::watch;
 
 use crate::api::client::{AssistantAccumulator, ClientError};
 use crate::api::contract::{NeutralRequest, StreamApiErrorKind, StreamEvent, ThinkingLevel};
-use crate::api::types::{ContentBlock, DEFAULT_MAX_TOKENS, Message, Role};
+use crate::api::types::{ContentBlock, Message, Role};
 use crate::tool::executor::cancel_requested;
 use crate::tool::{Tool, tool_params};
 
@@ -161,9 +161,10 @@ async fn one_turn(
     } else {
         None
     };
+    let max_tokens = crate::budget::max_tokens_for(&session.client.models(), &model);
     let request = NeutralRequest {
         model,
-        max_tokens: DEFAULT_MAX_TOKENS,
+        max_tokens,
         system: session.system.clone(),
         messages: messages.to_vec(),
         tools: tool_params(tools),

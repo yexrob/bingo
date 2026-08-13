@@ -210,6 +210,10 @@ pub enum ModelEntry {
         display: Option<String>,
         #[serde(rename = "contextWindow", default)]
         context_window: Option<u64>,
+        /// Output ceiling sent as `max_tokens`; also the headroom the input
+        /// window reserves.
+        #[serde(rename = "maxTokens", default)]
+        max_tokens: Option<u32>,
         #[serde(default)]
         thinking: Option<bool>,
     },
@@ -234,6 +238,13 @@ impl ModelEntry {
         match self {
             ModelEntry::Id(_) => None,
             ModelEntry::Detailed { context_window, .. } => *context_window,
+        }
+    }
+
+    pub fn max_tokens(&self) -> Option<u32> {
+        match self {
+            ModelEntry::Id(_) => None,
+            ModelEntry::Detailed { max_tokens, .. } => *max_tokens,
         }
     }
 
