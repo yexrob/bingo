@@ -497,6 +497,13 @@ impl TeamTool {
                 summary.spawned.join(", ")
             ));
         }
+        if !summary.refreshed.is_empty() {
+            out.push(format!(
+                "refreshed {} already running (definition re-read, history kept): {}",
+                summary.refreshed.len(),
+                summary.refreshed.join(", ")
+            ));
+        }
         if !summary.reused.is_empty() {
             out.push(format!(
                 "reused {} already running: {}",
@@ -674,8 +681,9 @@ impl Tool for TeamTool {
          other directories, so one session manages a whole org chart; every action here spans it. status reads \
          every team's blueprint, rooms, member runtime states and the definitions available to draft with; \
          validate checks the chart against them; start opens the rooms and spawns every member in the tree \
-         (idempotent — members already up are reused, and each one restores its memory for its own team's \
-         directory and branch); stop takes them down keeping their histories; save writes this directory's \
+         (idempotent — members already up are kept, re-reading their definition when it has changed so an \
+         edited member picks it up with its history intact, and each one restores its memory for its own \
+         team's directory and branch); stop takes them down keeping their histories; save writes this directory's \
          blueprint (whole document: send the complete roster, since whoever you leave out is removed — child \
          teams are the exception and are always carried unchanged). Every action except status and validate is a \
          change the user confirms in person before it happens, so propose it in your reply first and say why — \

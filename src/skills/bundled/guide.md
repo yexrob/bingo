@@ -108,7 +108,7 @@ Example (.bingo/settings.json):
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` runs it directly) · `/context` (usage) · `/status` ·
 `/compact` (force compaction) · `/resume [name]` (restore a past session; no arg opens the session picker, Enter restores) · `/rename` · `/gc` (clean expired session storage; 30-day TTL, latest 100 inactive sessions, 24-hour activity grace) · `/clear` · `/exit`.
-`/team` (project-level crew): `list` (blueprint + runtime on one screen) · `start` (pull up / idempotent reuse) · `status` ·
+`/team` (project-level crew): `list` (blueprint + runtime on one screen) · `start` (pull up / idempotent reuse; a member already up that is not mid-turn re-reads its definition, keeping its history) · `status` ·
 `assign <member> <task>` (dispatch work) · `stop` · `validate` · `new` (scaffolds team.json + team-norms.md) ·
 `norms` (the crew's working agreement) · `memory list|gc` (cross-session memory management).
 
@@ -304,7 +304,10 @@ Example (.bingo/settings.json):
   `model`/`provider`/`thinking` pin the member's engine — which model does which job is part of the formation, so a crew can mix a cheap fast reviewer with a stronger designer; each falls back to the agent definition and then to the session, and a named `provider` other than the session's needs a `model` too.
   `/team validate` checks the engine against this session's providers, so a blueprint that passes still starts) pins multiple roles to one project; started by default at launch
   (`settings.team.autoStart`; `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,
-  only `/team assign` or channel messages start them; idempotency key = instance name, repeated start reuses). The `/team` command family
+  only `/team assign` or channel messages start them; idempotency key = instance name, so a repeated start never duplicates an instance —
+  it re-reads the definition of every member that is not mid-turn and applies it in place, history intact, reporting `refreshed ×N` beside `spawned ×N`/`reused ×N`,
+  so editing a member's `.md` or its blueprint row is stop-optional and delete-free: edit, `/team start`, the next turn runs on the new prompt/model.
+  A member mid-turn keeps the definition it started under until the next start; a stopped member comes back Idle). The `/team` command family
   manages it; team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (each member gets a readable `<name>.md` transcript beside the exact `<name>.json` record; a spawning member is *told where its transcript is* and starts with an empty context rather than having the history preloaded — that file is unbounded and monotonic, so loading it charged a growing invisible toll on the first turn for relevance that decays fast; read it when the task depends on what was already decided, not speculatively +
   append-only decision records; `/team memory list|gc` manages it).
   The model manages the same crew through the **Team tool** (`status`/`validate`/`start`/`stop`/`save`, main session only): reads are free,
@@ -426,7 +429,10 @@ Example (.bingo/settings.json):
   `model`/`provider`/`thinking` pin the member's engine, each falling back to the agent definition and then to the session; a named `provider` other than the session's needs a `model` too, and `/team validate` checks all of it, so a blueprint that passes still starts.
   `/team list` and `AgentControl list` report the engine each running instance is actually on) fixes several roles to one project; pulled up by default at startup
   (`settings.team.autoStart`, `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,
-  only `/team assign` or channel messages start them; idempotency key = instance name, repeated start reuses). Managed by the `/team` command family;
+  only `/team assign` or channel messages start them; idempotency key = instance name, so a repeated start never duplicates an instance —
+  it re-reads the definition of every member that is not mid-turn and applies it in place, history intact, reporting `refreshed ×N` beside `spawned ×N`/`reused ×N`,
+  so an edited member needs no delete: edit its `.md` or blueprint row, `/team start`, and the next turn runs on the new prompt/model.
+  A member mid-turn keeps the definition it started under until the next start; a stopped member comes back Idle). Managed by the `/team` command family;
   team memory is keyed by "project path hash + branch" in `~/.config/bingo/teams/` (each member gets a readable `<name>.md` transcript beside the exact `<name>.json` record; a spawning member is *told where its transcript is* and starts with an empty context rather than having the history preloaded — that file is unbounded and monotonic, so loading it charged a growing invisible toll on the first turn for relevance that decays fast; read it when the task depends on what was already decided, not speculatively +
   append-only decision records, managed via `/team memory list|gc`).
   The model manages the same crew through the **Team tool** (`status`/`validate`/`start`/`stop`/`save`, main session only): reads are free,
