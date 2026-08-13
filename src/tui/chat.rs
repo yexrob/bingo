@@ -3025,7 +3025,9 @@ impl Chat {
             self.push_slash_output("no session to export yet (the new session has not been persisted; send a message first).".to_string());
             return;
         };
-        let messages = match transcript.load_messages() {
+        // Human-facing export: the full canonical conversation, not the
+        // compacted projection the model sees.
+        let messages = match transcript.load_canonical() {
             Ok(m) => m,
             Err(e) => {
                 self.push_slash_error(format!("failed to read the session: {e}"));
@@ -3195,9 +3197,8 @@ impl Chat {
                         .join("\n")
                 })
                 .unwrap_or_default();
-            if let Some(t) = transcript {
-                let _ = t.replace_messages(&messages);
-            }
+            // Persistence happened inside compact() as an appended marker; the
+            // canonical lines are untouched (D74).
             let _ = events.send(UiEvent::ContextUsage {
                 used: crate::compact::estimate_tokens(&session.system, &messages, &[]),
                 window: crate::budget::context_window_for(
@@ -3206,8 +3207,9 @@ impl Chat {
                 ),
             });
             unpin();
+            let kept = messages.len().saturating_sub(1);
             let _ = events.send(UiEvent::SlashInfo(format!(
-                "✓ compacted {old_len} messages → summary + the latest 8.\nSummary: {summary}"
+                "✓ compacted {old_len} messages → summary + the latest {kept}.\nSummary: {summary}"
             )));
         });
     }

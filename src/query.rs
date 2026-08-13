@@ -152,7 +152,11 @@ fn task_reminder_turn_distances(messages: &[Message]) -> (u64, u64) {
 }
 
 /// Inject the task reminder: no Task tool for 10 turns + 10 turns since the last reminder.
-async fn maybe_inject_task_reminder(session: &Session, messages: &mut Vec<Message>) {
+async fn maybe_inject_task_reminder(
+    session: &Session,
+    messages: &mut Vec<Message>,
+    ui: &mut UiHooks,
+) {
     let (since_management, since_reminder) = task_reminder_turn_distances(messages);
     if since_management < TASK_REMINDER_TURNS || since_reminder < TASK_REMINDER_TURNS {
         return;
@@ -180,7 +184,7 @@ mention this reminder to the user."
             .join("\n");
         text.push_str(&format!("\n\nHere are the existing tasks:\n\n{list}"));
     }
-    messages.push(Message::user_text(text));
+    record(session, messages, Message::user_text(text), ui);
 }
 
 pub use crate::query_session::{Runtime, Session};
@@ -674,7 +678,7 @@ async fn query_loop(
         )
         .await;
         // task_reminder: no Task tool for 10 turns + 10 turns since the last reminder.
-        maybe_inject_task_reminder(session, &mut messages).await;
+        maybe_inject_task_reminder(session, &mut messages, ui).await;
         // Recovery sweep: event-driven SendMessage claims idle recipients immediately, while
         // this catches mail left behind by a failed run or deposited through another path.
         crate::tool::agent::flush_agent_inbox(session, &ctx.watch);
@@ -707,19 +711,32 @@ async fn query_loop(
             ));
         }
         if !notes.is_empty() {
-            messages.push(Message::user_text(format!(
-                "<task-notifications>\n{}\n</task-notifications>",
-                notes.join("\n")
-            )));
+            // record, not push: the model sees this message, so the canonical
+            // transcript must carry it too — a reload that lacks it diverges
+            // from the provider's cached prefix and from compact kept-counts.
+            record(
+                session,
+                &mut messages,
+                Message::user_text(format!(
+                    "<task-notifications>\n{}\n</task-notifications>",
+                    notes.join("\n")
+                )),
+                ui,
+            );
         }
         // Channel message injection (channels the hub is a member of): batched at turn
         // boundaries, in order.
         let mail = session.channels.drain_hub_mail();
         if !mail.is_empty() {
-            messages.push(Message::user_text(format!(
-                "<channel-messages>\n{}\n</channel-messages>",
-                mail.join("\n")
-            )));
+            record(
+                session,
+                &mut messages,
+                Message::user_text(format!(
+                    "<channel-messages>\n{}\n</channel-messages>",
+                    mail.join("\n")
+                )),
+                ui,
+            );
         }
         let context_tokens = gate.current(crate::compact::estimate_tokens(
             &session.system,
@@ -812,7 +829,12 @@ async fn query_loop(
             {
                 recovery_count += 1;
                 (ui.on_round_end)();
-                messages.push(Message::user_text(MAX_TOKENS_RESUME_PROMPT));
+                record(
+                    session,
+                    &mut messages,
+                    Message::user_text(MAX_TOKENS_RESUME_PROMPT),
+                    ui,
+                );
                 continue;
             }
             // Stop hooks: exit 2 → inject the blocking stderr into the model and retry once (loop guard).
@@ -826,9 +848,12 @@ async fn query_loop(
             {
                 stop_hook_fired = true;
                 (ui.on_round_end)();
-                messages.push(Message::user_text(format!(
-                    "(Stop hook blocked continuation)\n{blocking}"
-                )));
+                record(
+                    session,
+                    &mut messages,
+                    Message::user_text(format!("(Stop hook blocked continuation)\n{blocking}")),
+                    ui,
+                );
                 continue;
             }
             if !session.quiet {

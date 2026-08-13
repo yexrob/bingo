@@ -132,6 +132,9 @@ Example (.bingo/settings.json):
    an image a flat 1600), with a one-time warning on first fallback.
    If that estimate is low and either wire protocol rejects a request as a context overflow, bingo compacts
    the history and retries the rejected request once; a second overflow ends the turn instead of looping.
+   Compaction appends a summary marker to the session file instead of rewriting it: reloads and `/resume`
+   replay summary + recent tail without re-summarizing, while `/share` still exports the full original
+   conversation.
    If an upstream response completes without assistant content or tool calls (including an unclosed thinking block),
    bingo treats it as malformed and retries the side-effect-free attempt once instead of ending silently; if the retry
    is also empty, the turn shows the normal full-flow retry/back error. Transient error events received after a stream

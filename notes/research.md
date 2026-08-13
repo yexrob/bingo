@@ -1059,3 +1059,32 @@ documented output ceiling — kimi-k2.x, mistral — keep the conservative defau
 default server-side while the gate stays off). The old table's DeepSeek entry (128k/8k) had gone
 stale enough to strangle a real session mid-thought; the corrected 1M/384k reaching users through
 the file's `builtin` refresh is D73's mechanism doing its job on day one.
+
+### D74. Compaction is a marker line; canonical history is never rewritten
+
+Auto-compaction spliced its summary into the in-memory list and stopped there, while every user
+turn reloads history from the transcript. Above the threshold that meant a fresh summary request
+per turn — and since a summary is not deterministic, a byte-different request prefix per turn,
+resetting any provider prefix cache (DeepSeek bills cache hits at a fraction of misses; the
+Anthropic API caches explicitly) on every single turn. Manual `/compact` was worse: it rewrote the
+whole session file, destroying the only full record of the conversation.
+
+The transcript stays append-only and grows one new line kind: `{"type":"compact","summary":…,
+"kept":N}`. Message lines above a marker are canonical and permanent; `load_messages` projects
+through the *last* marker (synthetic summary message + the last `kept` message lines before it +
+everything after), so a reload replays exactly the bytes the in-memory splice produced — the
+summary is written once and reused until the next threshold crossing, making compaction the only
+point where the request prefix changes. `/share` reads `load_canonical` and still exports the full
+original conversation; a later marker supersedes an earlier one, which is also `/compact`'s repair
+path for a bad summary. Old bingo versions reading a new file hit the existing skip-bad-lines
+doctrine (a warning, summary lost, nothing corrupted); `kept` counts physical message lines, and a
+projection whose tail would begin with an orphan tool_result advances past it — the same invariant
+`safe_split` maintains — so a drifted count degrades to a slightly shorter tail, never a 400 loop.
+
+Two prefix-stability fixes ride along. Everything the model sees now goes through `record`: the
+task reminder, task notifications, channel mail, the max_tokens resume prompt and the stop-hook
+message were pushed to memory only, so the next turn's reload diverged from the provider's cached
+prefix at the injection point (and would have thrown off `kept`). And the Anthropic wire collapses
+`cache_control` to the last cacheable system block: a breakpoint caches the whole prefix before
+it, and the API rejects more than 4 — memory + crew + experience blocks together already crossed
+that line whenever `cacheControl` was on.

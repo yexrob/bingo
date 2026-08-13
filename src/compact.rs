@@ -276,12 +276,17 @@ async fn compact(
         }
     };
 
-    messages.splice(
-        ..split,
-        [Message::user_text(format!(
-            "(summary of the earlier conversation, from automatic compaction)\n{summary}"
-        ))],
-    );
+    // Persist the marker before splicing (the `record` discipline): canonical
+    // lines stay untouched, the next load projects instead of re-summarizing.
+    // A failed write degrades to today's behavior — the next load re-compacts.
+    if let Some(transcript) = session.runtime.transcript.borrow().clone()
+        && let Err(e) = transcript.append_compact(&summary, messages.len() - split)
+    {
+        notify(format!(
+            "compact marker write failed (the next load will re-compact): {e}"
+        ));
+    }
+    messages.splice(..split, [crate::transcript::summary_message(&summary)]);
 
     run_post_compact(
         &session.settings.hooks,
