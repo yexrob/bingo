@@ -204,7 +204,7 @@ mod tests {
         assert!(value["_doc"].as_str().unwrap().contains("overrides"));
         assert_eq!(
             value["builtin"]["deepseek"]["maxTokens"].as_u64(),
-            Some(8_000),
+            Some(384_000),
             "the seed mirrors the compiled table"
         );
         assert_eq!(value["overrides"], serde_json::json!({}));
@@ -234,7 +234,7 @@ mod tests {
         let value = read(&path);
         assert_eq!(
             value["builtin"]["deepseek"]["maxTokens"].as_u64(),
-            Some(8_000),
+            Some(384_000),
             "builtin is bingo's section and follows the binary"
         );
         assert_eq!(

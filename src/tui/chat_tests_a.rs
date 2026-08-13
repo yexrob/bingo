@@ -1460,7 +1460,7 @@ fn slash_model_switches_runtime_model() {
     chat.input = "/model deepseek-v4".to_string();
     chat.submit();
     assert_eq!(*chat.session.runtime.model.borrow(), "deepseek-v4");
-    assert_eq!(chat.context_usage.window, 128_000);
+    assert_eq!(chat.context_usage.window, 1_000_000);
     assert_eq!(chat.context_usage.used, 0);
     assert!(chat.slash_lines.join("\n").contains("deepseek-v4"));
     // No layer defines `model` → the USER layer gets it; the cwd stays

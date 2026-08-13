@@ -96,20 +96,23 @@ mod tests {
         }
     }
 
-    /// Known families keep their numbers, except DeepSeek: its real 8k output
-    /// ceiling hands 56k of wrongly reserved headroom back to the input window.
+    /// Known families carry their researched numbers (D73): window minus the
+    /// family's own output ceiling, threshold at 90% of what remains.
     #[test]
     fn per_family_output_budgets() {
         let models = ModelResolver::default();
-        assert_eq!(max_tokens_for(&models, "claude-sonnet-5"), 64_000);
+        assert_eq!(max_tokens_for(&models, "claude-sonnet-5"), 128_000);
         assert_eq!(
             autocompact_threshold_for(&models, "claude-sonnet-5"),
-            122_400
+            784_800
         );
-        assert_eq!(max_tokens_for(&models, "gpt-5.6-sol"), 64_000);
-        assert_eq!(autocompact_threshold_for(&models, "gpt-5.6-sol"), 302_400);
-        assert_eq!(max_tokens_for(&models, "deepseek-chat"), 8_000);
-        assert_eq!(autocompact_threshold_for(&models, "deepseek-chat"), 108_000);
+        assert_eq!(max_tokens_for(&models, "gpt-5.6-sol"), 128_000);
+        assert_eq!(autocompact_threshold_for(&models, "gpt-5.6-sol"), 829_800);
+        assert_eq!(max_tokens_for(&models, "deepseek-v4-flash"), 384_000);
+        assert_eq!(
+            autocompact_threshold_for(&models, "deepseek-v4-flash"),
+            554_400
+        );
     }
 
     /// A declared small window must keep the whole hierarchy standing: the clamp

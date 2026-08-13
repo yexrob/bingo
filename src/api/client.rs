@@ -910,14 +910,14 @@ mod tests {
             Client::from_settings_with(&settings, |_| Err(std::env::VarError::NotPresent)).unwrap();
         assert_eq!(
             client.models().context_window("claude-sonnet-5"),
-            200_000,
+            1_000_000,
             "default provider: the prefix table"
         );
         client.set_provider("narrow").unwrap();
         assert_eq!(client.models().context_window("claude-sonnet-5"), 32_000);
         // A forked client pins its own provider's ruler.
         let fork = client.with_provider("default").unwrap();
-        assert_eq!(fork.models().context_window("claude-sonnet-5"), 200_000);
+        assert_eq!(fork.models().context_window("claude-sonnet-5"), 1_000_000);
         assert_eq!(client.models().context_window("claude-sonnet-5"), 32_000);
     }
 

@@ -124,8 +124,9 @@ Example (.bingo/settings.json):
 2. **Model request fails/times out**: `/status` shows the current model; `/model` switches it; with multiple providers use
    `/provider <name>` (the settings `providers` section); `/context` shows usage —
    when close to the context window, `/compact` (auto-compaction threshold = 90% of the effective window,
-   which is the model's window minus its own output budget: 200k − 64k ≈ 122k for Claude,
-   128k − 8k → 108k for DeepSeek, and a declared `maxTokens` sets it for any other model). Endpoints without a
+   which is the model's window minus its own output budget: 1M − 128k ≈ 785k for current Claude models,
+   1M − 384k ≈ 554k for DeepSeek v4; family defaults live in `~/.config/bingo/model-catalog.json`, and a
+   declared `maxTokens` sets the budget for any model). Endpoints without a
    count_tokens API (DeepSeek/ollama; OpenAI-protocol providers — `count_tokens` is Anthropic-only)
    automatically fall back to local estimation (ASCII ≈ 4 characters per token, CJK ≈ 1 token per character,
    an image a flat 1600), with a one-time warning on first fallback.

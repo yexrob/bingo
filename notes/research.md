@@ -1049,3 +1049,13 @@ into that same visible note rather than a key that silently does nothing (the se
 doctrine, applied at parse time because this file has a schema and settings.json's layers do not).
 `Client` re-derives the config dir itself (XDG, then home) rather than threading a new parameter
 through both construction paths; maintenance runs once in main, construction only reads.
+
+The seed data itself (29 families across nine vendors) was researched against each vendor's official
+API docs on 2026-08-13 — windows, output ceilings, thinking support, and the prefix-shadowing pairs
+are recorded with per-claim sources in notes/research/model-catalog-params.md. Two rules carried
+into the table: no number enters it that a primary source did not publish (families with no
+documented output ceiling — kimi-k2.x, mistral — keep the conservative default), and
+`supports_thinking` describes bingo's wire parameters, not the model's ability (DeepSeek reasons by
+default server-side while the gate stays off). The old table's DeepSeek entry (128k/8k) had gone
+stale enough to strangle a real session mid-thought; the corrected 1M/384k reaching users through
+the file's `builtin` refresh is D73's mechanism doing its job on day one.
