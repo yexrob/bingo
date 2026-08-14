@@ -16,6 +16,7 @@ use ratatui::style::Color;
 use rsmarkdown_core::{MarkdownProcessor, Renderer};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::budget::MAX_RESULT_CHARS;
 use crate::permission::PermissionMode;
 use crate::query::{Session, run_query};
 use crate::tui::activities::{
@@ -723,6 +724,31 @@ fn bash_output_preview(lines: &[String]) -> Vec<String> {
         out.pop();
     }
     out
+}
+
+/// Expandable content of a finished tool row: the result text, blank lines dropped.
+///
+/// One rule for every call, grouped or standalone — the fold is a display state, not a
+/// different kind of result. The char budget is the one the model already lives under
+/// ([`MAX_RESULT_CHARS`]): results reach the UI clipped to it, and applying it here bounds
+/// what a row retains even for the paths that build their output without going through the
+/// clip (a tool error string, a denied call).
+fn result_content(name: &str, output: &str) -> Vec<Line> {
+    let bounded = match output.char_indices().nth(MAX_RESULT_CHARS) {
+        Some((end, _)) => &output[..end],
+        None => output,
+    };
+    let lines: Vec<String> = bounded.lines().map(str::to_string).collect();
+    let preview: Vec<String> = if name == "Bash" {
+        bash_output_preview(&lines)
+    } else {
+        lines
+    };
+    preview
+        .into_iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(Line::plain)
+        .collect()
 }
 
 /// Playful words for the thinking stage.
@@ -1786,35 +1812,24 @@ impl Chat {
                         let in_group = group_of.get(hint_idx).copied().flatten().is_some();
                         if in_group {
                             call.result_summary = result_summary(&done.name, &done.output);
-                        } else {
-                            // Standalone Bash (`!` commands): preview = the output itself (stripped of the
-                            // `$ cmd` echo and the `[Exited with code N]` footnote),
-                            // expanded by default (BashModeProgress shows the output directly).
+                        } else if done.name == "Skill" {
                             // Skill: the result row shows only `✦ <skill name>` (same family as the activity header
                             // `✦ Skill(input)`); the pointer path stays only in tool_result.
-                            if done.name == "Skill" {
-                                call.result_summary = done.output.lines().next().and_then(|l| {
-                                    l.strip_prefix("✦ ")
-                                        .and_then(|rest| rest.split(" — ").next())
-                                        .map(|name| format!("✦ {name}"))
-                                });
-                            }
-                            let lines: Vec<String> =
-                                done.output.lines().map(str::to_string).collect();
-                            let preview: Vec<String> = if done.name == "Bash" {
-                                bash_output_preview(&lines)
-                            } else {
-                                lines
-                            };
-                            let content: Vec<Line> = preview
-                                .into_iter()
-                                .filter(|l| !l.trim().is_empty())
-                                .map(Line::plain)
-                                .collect();
-                            hint.set_content(content);
-                            if done.name == "Bash" && !hint.expanded {
-                                hint.expanded = true;
-                            }
+                            call.result_summary = done.output.lines().next().and_then(|l| {
+                                l.strip_prefix("✦ ")
+                                    .and_then(|rest| rest.split(" — ").next())
+                                    .map(|name| format!("✦ {name}"))
+                            });
+                        }
+                        // Every finished call keeps its output, grouped or not: inside a fold the
+                        // row summary (`Read 173 lines`) is all that survives, so dropping the
+                        // content there makes the output unreachable for the rest of the session.
+                        hint.set_content(result_content(&done.name, &done.output));
+                        // Standalone Bash (`!` commands) is expanded by default
+                        // (BashModeProgress shows the output directly); a grouped call stays
+                        // folded until the group opens.
+                        if !in_group && done.name == "Bash" && !hint.expanded {
+                            hint.expanded = true;
                         }
                         break;
                     }
@@ -2036,6 +2051,18 @@ impl Chat {
                     return false;
                 };
                 g.expanded = !g.expanded;
+                // Members follow the group. Every row of an open group is wrapped in the
+                // group's own click target (the enclosing wrapper wins over the annotations
+                // inside it), so a member row cannot be opened on its own with the mouse:
+                // either the group carries its members' state or their output stays behind
+                // a keystroke.
+                let expanded = g.expanded;
+                let members = g.activities.clone();
+                for idx in members {
+                    if let Some(act) = msg.activities.get_mut(idx) {
+                        act.expanded = expanded;
+                    }
+                }
                 self.auto_scroll = false;
                 self.dirty = true;
                 true
@@ -3732,3 +3759,7 @@ mod tests_a;
 #[cfg(test)]
 #[path = "chat_tests_b.rs"]
 mod tests_b;
+
+#[cfg(test)]
+#[path = "chat_tests_c.rs"]
+mod tests_c;

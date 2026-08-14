@@ -1194,3 +1194,43 @@ and the number the compactor obeys cannot drift apart. `UiHooks::on_context_usag
 measurement whole rather than two loose integers — a receiver rebuilding the window or the trigger
 from its own model handle would be the second ruler this replaces. Label, bar and percentage are
 untouched.
+
+### D78. A folded tool result is still a result
+
+The transcript folds a run of reads and searches into one line (`Read 3 files (ctrl+o to
+expand)`), and that fold was where their output went to die. `ToolDone` stored the result text on
+the row only in the `!in_group` branch: a folded member got its one-line summary (`Read 173 lines`)
+and nothing else, and because `Activity::expandable()` is content-based, the row was not even
+offered as expandable. Opening the group revealed three summary rows over three empty bodies — the
+output of a call that had really run was unreachable for the rest of the session, and nothing else
+in the UI keeps it. The model's history holds the `tool_result`; the user's only recourse was to
+ask for the same file to be read again.
+
+Materialization is now one function for both branches (`result_content`): the fold is a display
+state, not a different kind of result, so it cannot be the thing that decides whether a result is
+kept. Same blank-line filter, same Bash `$ cmd` / `[Exited with code N]` strip, same budget. The
+budget is the one the model already lives under — `MAX_RESULT_CHARS`, applied to every result on
+its way to the UI by `clipped_result` — now also applied at the row, so the paths that build their
+own output without passing through the clip (a tool error string, a denied call) are bounded too.
+No new key, and no per-row cost the standalone path did not already pay: a group of N members
+retains exactly what N standalone rows retained.
+
+Three things this deliberately does not change. The collapsed row is untouched — the summary
+wording, the `· N failed` tally and the `⎿` hint under a running fold all read group state and
+never member content, so a fold looks exactly as it did. An interrupted member still keeps
+nothing: D76's early return sits above the capture, and a call stopped before it produced output
+must not borrow a body — its result line says `Interrupted` and there is nothing to open. And
+`Skill`'s summary rewrite and standalone Bash's auto-expand stay standalone-only; the first is
+about a pointer path that a folded row never shows, the second about `!` commands, which do not
+fold.
+
+One behaviour beyond storage. Every row of an *open* group is wrapped in that group's click target
+(`El` emits enclosing ranges first and click resolution takes the first match), so a member row
+cannot be clicked open on its own — with the content stored but the members left collapsed, the
+mouse could open a group and still not reach a single line of output. Members therefore follow the
+group: opening it opens them, folding it folds them. `ctrl+o` already expanded every activity and
+every group in one pass, so the keyboard route needed nothing.
+
+The tests went into a new `chat_tests_c.rs`: `chat_tests_b.rs` stood at 3785 lines against the
+discipline gate's 4000-line cap, and the split is what the gate asks for. `chat_tests_a` /
+`chat_tests_b` were already split by size alone.
