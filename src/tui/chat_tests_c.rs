@@ -913,7 +913,7 @@ async fn ctrl_e_toggles_the_bounded_preview() {
 async fn ask_user_question_keeps_its_own_shape() {
     let mut chat = test_chat();
     let (events_tx, _events_rx) = tokio::sync::mpsc::unbounded_channel();
-    let ui = crate::ui::tui_hooks(events_tx, chat.asks.clone());
+    let ui = crate::ui::tui_hooks(events_tx, chat.asks.clone(), chat.steer.clone());
     let answer = (ui.ask_question)(
         "Tech stack".to_string(),
         "Which library?".to_string(),
@@ -936,5 +936,152 @@ async fn ask_user_question_keeps_its_own_shape() {
     assert!(
         !flow.contains(ASK_RECEIPT_YES),
         "no permission receipt: {flow}"
+    );
+}
+
+/// D83: what the composer offers the running turn. A plain message can change what the
+/// turn does next; a slash command runs on this side and has nothing to say to it.
+#[test]
+fn only_plain_messages_are_offered_to_the_running_turn() {
+    let mut chat = chat_with_history("steer-offer");
+    chat.busy = true;
+    chat.set_input("use tabs");
+    chat.submit();
+    assert_eq!(
+        chat.steer.take(),
+        vec![crate::steer::SteerItem {
+            id: 0,
+            text: "use tabs".into()
+        }],
+        "a plain message is on offer at the next barrier"
+    );
+
+    let mut chat = chat_with_history("steer-offer-slash");
+    chat.busy = true;
+    chat.set_input("/clear");
+    chat.submit();
+    assert!(
+        chat.steer.is_empty(),
+        "a slash command stays for TurnEnd: it is dispatched here, not by the turn"
+    );
+    assert_eq!(chat.queued.len(), 1, "and it is still queued");
+
+    // Order survives: a plain message typed behind a slash command must not overtake it.
+    chat.set_input("and then this");
+    chat.submit();
+    assert!(
+        chat.steer.is_empty(),
+        "a message queued behind a slash command waits with it"
+    );
+}
+
+/// The absorbed message leaves the queue, lands in the flow under `↪`, and `↑` cannot
+/// bring it back — it is in the request already, and typing it again would send it twice.
+#[test]
+fn an_absorbed_message_moves_from_the_queue_into_the_flow() {
+    let mut chat = chat_with_history("steer-absorb");
+    chat.busy = true;
+    chat.set_input("first");
+    chat.submit();
+    chat.set_input("second");
+    chat.submit();
+    assert_eq!(chat.queued.len(), 2);
+
+    // The barrier takes what is on offer, exactly as `tui_hooks` does.
+    let taken = chat.steer.take();
+    assert_eq!(taken.len(), 2);
+    let _ = chat.events.send(UiEvent::Steered { items: taken });
+    chat.drain_events();
+
+    assert!(
+        chat.queued.is_empty(),
+        "absorbed messages stop being pending"
+    );
+    assert!(
+        chat.queue_lines().is_empty(),
+        "and stop being rendered as such"
+    );
+    let flow = visible(&mut chat, 100, 40);
+    assert!(
+        flow.contains("↪ first") && flow.contains("↪ second"),
+        "both land in the flow under the steering marker: {flow}"
+    );
+    assert!(
+        !flow.contains("❯ first"),
+        "not as a `❯` bubble — it landed inside a turn, not at the prompt: {flow}"
+    );
+
+    // ↑ on an empty input now finds nothing to pull back.
+    press(&mut chat, KeyCode::Up);
+    assert_ne!(
+        chat.input, "second",
+        "an absorbed message is not resurrected"
+    );
+}
+
+/// The race: the turn took the message between the composer offering it and the user
+/// pressing ↑. The turn wins; the pull-back is a no-op and the absorption event, still
+/// in flight, is what takes it out of the queue.
+#[test]
+fn a_pull_back_that_lost_the_race_does_nothing() {
+    let mut chat = chat_with_history("steer-race");
+    chat.busy = true;
+    chat.set_input("too late");
+    chat.submit();
+    let taken = chat.steer.take();
+    assert_eq!(taken.len(), 1);
+
+    press(&mut chat, KeyCode::Up);
+    assert_eq!(chat.input, "", "the composer is left alone");
+    assert_eq!(chat.queued.len(), 1, "the queue waits for the event");
+
+    let _ = chat.events.send(UiEvent::Steered { items: taken });
+    chat.drain_events();
+    assert!(chat.queued.is_empty(), "which then removes it");
+}
+
+/// CC's wording, and only while it is true: with no turn running the queue is about to
+/// submit itself, and there is no window in which editing it would mean anything.
+#[test]
+fn the_queue_hint_shows_exactly_while_a_busy_turn_holds_a_queue() {
+    let mut chat = chat_with_history("steer-hint");
+    assert_eq!(chat.queue_hint(), None, "idle and empty");
+    chat.busy = true;
+    assert_eq!(chat.queue_hint(), None, "busy with nothing queued");
+    chat.set_input("later");
+    chat.submit();
+    assert_eq!(chat.queue_hint(), Some("Press up to edit queued messages"));
+    chat.busy = false;
+    assert_eq!(
+        chat.queue_hint(),
+        None,
+        "the turn ended: the queue is going out"
+    );
+}
+
+/// The channel belongs to one turn. A message the ended turn never took must not be
+/// folded into the next one behind the user's back — it goes out as a turn of its own.
+#[tokio::test]
+async fn the_channel_is_re_armed_for_the_turn_that_actually_runs() {
+    let mut chat = chat_with_history("steer-rearm");
+    chat.busy = true;
+    chat.set_input("one");
+    chat.submit();
+    chat.set_input("two");
+    chat.submit();
+    assert_eq!(chat.steer.take().len(), 2);
+
+    // TurnEnd: "one" starts the next turn, and only what is still queued is on offer.
+    chat.busy = false;
+    chat.submit_queued();
+    chat.rearm_steer();
+    assert!(chat.busy, "the first queued message opened a turn");
+    assert_eq!(
+        chat.steer.take(),
+        vec![crate::steer::SteerItem {
+            id: 1,
+            text: "two".into()
+        }],
+        "the message that opened the turn is not also steered into it"
     );
 }

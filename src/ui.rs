@@ -175,6 +175,13 @@ pub enum UiEvent {
         meta: Option<ImageMeta>,
     },
     TurnEnd,
+    /// The running turn took these queued messages into its own context at a tool
+    /// barrier (D83). They are already in the request, so the composer must drop them
+    /// from its queue and show them in the flow where the model read them — the turn
+    /// side is the authority here, and a pull-back racing this event loses.
+    Steered {
+        items: Vec<crate::steer::SteerItem>,
+    },
     /// The user interrupted the turn. `marker` is the exact string the transcript
     /// recorded (`crate::query::INTERRUPT_MARKER` / `…_TOOL_USE`), echoed into the
     /// message flow so the screen and the model read the same sentence — a transient
@@ -269,8 +276,10 @@ fn ask_preview(ask: &crate::query::AskContext<'_>) -> Option<AskPreview> {
 pub fn tui_hooks(
     events: mpsc::UnboundedSender<UiEvent>,
     asks: mpsc::UnboundedSender<AskRequest>,
+    steer: crate::steer::SteerQueue,
 ) -> UiHooks {
     let tool_events = events.clone();
+    let steer_events = events.clone();
     let ready_events = events.clone();
     let retry_events = events.clone();
     let round_events = events.clone();
@@ -383,6 +392,19 @@ pub fn tui_hooks(
         on_warning: Box::new(move |message| {
             let _ = warn_events.send(UiEvent::Warning(message));
         }),
+        // Take and announce in one step, under the queue's own lock: whoever takes the
+        // items owns them, and the composer learns of it from the same act. Splitting
+        // the two would open a window in which an item is in the request and still
+        // pending on screen.
+        steer: Arc::new(move || {
+            let items = steer.take();
+            if !items.is_empty() {
+                let _ = steer_events.send(UiEvent::Steered {
+                    items: items.clone(),
+                });
+            }
+            items
+        }),
         ask: modal_ask(ask_asks),
         ask_question: Arc::new(move |title, question, options| {
             let mut request = PermissionRequest::new(title, question, Vec::new());
@@ -414,7 +436,7 @@ mod tests {
     fn tui_hooks_emit_live_token_samples_before_final_usage() {
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let (asks_tx, _asks_rx) = mpsc::unbounded_channel();
-        let mut ui = tui_hooks(events_tx, asks_tx);
+        let mut ui = tui_hooks(events_tx, asks_tx, crate::steer::SteerQueue::new());
 
         (ui.on_context_usage)(crate::context_usage::ContextUsage::new(
             12_345, 128_000, 100_000,
@@ -459,7 +481,7 @@ mod tests {
     async fn ask_question_hook_maps_confirm_and_cancel() {
         let (events_tx, _events_rx) = mpsc::unbounded_channel();
         let (asks_tx, mut asks_rx) = mpsc::unbounded_channel();
-        let ui = tui_hooks(events_tx, asks_tx);
+        let ui = tui_hooks(events_tx, asks_tx, crate::steer::SteerQueue::new());
 
         let fut = (ui.ask_question)(
             "Tech stack".to_string(),

@@ -1393,6 +1393,9 @@ fn json_hooks(
         // keeps the two-option prompt: widening it to D81's three options is a
         // protocol change, not a rendering one, and belongs to whoever versions
         // the protocol next. Session scope and previews stay TUI-side.
+        // Protocol v1 has no client-to-turn message channel: a JSON host queues
+        // nothing mid-turn, so the turn runs exactly as it did before D83.
+        steer: crate::query::no_steer(),
         ask: Arc::new(move |request| {
             let prompt_id = format!(
                 "prompt-{}",

@@ -402,6 +402,9 @@ fn subagent_hooks(
         // would fail the tool call as "user denied" without the user ever being asked — and
         // auto-allowing under bypassPermissions would silently clear the safety-check gate
         // that is supposed to survive bypass.
+        // A subagent is steered through its own inbox (`absorb_inbox`), drained at the
+        // top of every round; the composer's channel belongs to the foreground turn.
+        steer: crate::query::no_steer(),
         ask: std::sync::Arc::new(move |request| {
             // No prompt surface attached: both real entry points (TUI, headless) attach one at
             // startup, so this is the embedded/test path — fall back to denying.

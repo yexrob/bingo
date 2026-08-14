@@ -796,7 +796,7 @@ mod tests {
 
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (asks_tx, _asks_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut ui = crate::ui::tui_hooks(events_tx, asks_tx);
+        let mut ui = crate::ui::tui_hooks(events_tx, asks_tx, crate::steer::SteerQueue::new());
 
         let mut gate = gate_reading(warning_at.saturating_sub(1), estimate);
         let quiet =

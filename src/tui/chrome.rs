@@ -530,6 +530,9 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     for line in chat.queue_lines() {
         children.push(El::Row(dim_row(line, theme)));
     }
+    if let Some(hint) = chat.queue_hint() {
+        children.push(El::Row(dim_row(hint, theme)));
+    }
     if let Some(s) = suggestion_area.take() {
         children.push(s);
     }
@@ -598,6 +601,7 @@ mod tests {
         chat.queued.push(crate::tui::chat::QueuedInput {
             text: "queued message".into(),
             is_slash: false,
+            id: 0,
         });
         chat.notice = Some("Press ctrl-c again to exit");
         chat.search = Some(crate::tui::chat::HistorySearch::default());
@@ -646,6 +650,7 @@ mod tests {
                 + (2 + chat.prompt_lines().len())
                 + 1
                 + chat.queue_lines().len()
+                + usize::from(chat.queue_hint().is_some())
                 + suggestion_rows(
                     &chat.slash_suggestions,
                     chat.slash_selected,

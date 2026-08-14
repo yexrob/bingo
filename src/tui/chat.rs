@@ -149,10 +149,16 @@ fn parse_share_arg(arg: &str, flag: &str) -> bool {
 /// One queued input, submitted after TurnEnd: a slash command (dispatched through
 /// `run_slash`) or a plain message (`start_turn`). The marker keeps the two apart —
 /// a queued slash must never reach the model as literal text.
+///
+/// A plain entry may also leave earlier, through the steer channel (D83), which is why
+/// it carries an id: the turn reports back which entries it absorbed, and two identical
+/// messages are two messages.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueuedInput {
     pub text: String,
     pub is_slash: bool,
+    /// Session-unique, assigned on enqueue.
+    pub id: u64,
 }
 
 /// Footer model badge: `{model} · think {level}` (off = no level shown, keeps it concise).
@@ -449,6 +455,13 @@ pub(crate) fn is_ask_receipt(text: &str) -> bool {
 /// words in the user's mouth, and no send stamp, because nothing was sent.
 pub(crate) fn is_state_line(text: &str) -> bool {
     crate::query::is_interrupt_marker(text) || text == ASK_CANCELLED_TEXT || is_ask_receipt(text)
+}
+
+/// A message the running turn absorbed mid-turn (D83). Not a state line: the user wrote
+/// it and it reached the model, so it keeps its send stamp — it only loses the `❯`
+/// bubble, because the `↪` glyph is what marks where in the reply it landed.
+pub(crate) fn is_steer_line(text: &str) -> bool {
+    text.starts_with(crate::steer::STEER_FLOW_PREFIX)
 }
 
 /// Read/Search-style tool classification.
@@ -878,8 +891,15 @@ pub struct Chat {
     pub history: crate::tui::history::History,
     /// Whether the history file is writable (after one failure, never retry — avoid hitting the same error on every submit).
     pub(crate) history_writable: bool,
-    /// Messages queued while busy (submitted one by one after TurnEnd).
+    /// Messages queued while busy (submitted one by one after TurnEnd, or absorbed
+    /// earlier by the running turn through [`Chat::steer`]).
     pub queued: Vec<QueuedInput>,
+    /// Id of the next queued entry.
+    pub(crate) next_queue_id: u64,
+    /// Mid-turn steering channel (D83): the eligible prefix of `queued`, offered to the
+    /// turn that is running now. Re-armed from `queued` on every change, so it is a
+    /// projection of the queue rather than a second copy that could drift from it.
+    pub(crate) steer: crate::steer::SteerQueue,
     /// Whether the `?` shortcut panel is expanded.
     pub help_visible: bool,
     /// Bottom transient notice (`Press ctrl-c again to exit` etc.).
@@ -1272,6 +1292,8 @@ impl Chat {
             history,
             history_writable: true,
             queued: Vec::new(),
+            next_queue_id: 0,
+            steer: crate::steer::SteerQueue::new(),
             help_visible: false,
             notice: None,
             notice_until: None,
@@ -1966,6 +1988,13 @@ impl Chat {
                 self.stream_msg = None;
                 self.stream_attempt_checkpoint = None;
                 self.submit_queued();
+                // `start_turn` reset the channel for whatever turn just began; hand it
+                // the rest of the queue. With no turn running this only clears it —
+                // an offer with nothing to take it is an offer to the next turn.
+                self.rearm_steer();
+            }
+            UiEvent::Steered { items } => {
+                self.absorb_steered(&items);
             }
             UiEvent::Interrupted { marker } => {
                 self.push_interrupt_marker(marker);
@@ -2004,6 +2033,9 @@ impl Chat {
                     self.drop_empty_stream_message();
                     self.stream_msg = None;
                     self.stream_attempt_checkpoint = None;
+                    // No turn left to steer: the channel empties with it, and what is
+                    // still queued stays queued (D83).
+                    self.rearm_steer();
                 }
                 // A flow-level failure ends the turn on a screen the user has to
                 // come back to; a page-level one is a hint beside a session that
@@ -2200,7 +2232,11 @@ impl Chat {
                 }
             }
             let is_slash = text.starts_with('/');
-            self.queued.push(QueuedInput { text, is_slash });
+            let id = self.next_queue_id;
+            self.next_queue_id = self.next_queue_id.wrapping_add(1);
+            self.queued.push(QueuedInput { text, is_slash, id });
+            // The turn may take it before TurnEnd does (D83).
+            self.rearm_steer();
             self.update_slash_suggestions();
             return;
         }
@@ -3667,6 +3703,16 @@ pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<
         return vec![Row::new(Line::styled(
             crate::tui::markdown::truncate(text, width.max(1)),
             SegStyle::fg(theme.error),
+        ))];
+    }
+    // A message the running turn absorbed at a tool barrier (D83). The user did write
+    // it, so it keeps its send stamp — but it did not open a turn, it landed inside
+    // one, and the `↪` line says exactly that: the reply above was written without it,
+    // the reply below with it.
+    if is_steer_line(text) {
+        return vec![Row::new(Line::styled(
+            crate::tui::markdown::truncate(text, width.max(1)),
+            theme.dim(),
         ))];
     }
     // A dialog the turn outlived, or the receipt of one the user answered:

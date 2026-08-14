@@ -294,6 +294,21 @@ pub type ContextUsageFn = dyn Fn(crate::context_usage::ContextUsage) + Send + Sy
 /// subagent views key replacement of stale progress notices off this prefix.
 pub const RECONNECT_WARNING_PREFIX: &str = "Reconnecting... ";
 
+/// Mid-turn steering source (D83): what the composer has queued for the turn that is
+/// running right now.
+///
+/// Called once per tool barrier. The caller commits to appending whatever it returns to
+/// the message it is about to record, so an implementation must take atomically and
+/// announce what it took — see [`crate::steer::SteerQueue::take`]. Returning an empty
+/// vector is the whole contract for a host with no composer behind it.
+pub type SteerFn = dyn Fn() -> Vec<crate::steer::SteerItem> + Send + Sync;
+
+/// The steering source of a host that has no one to steer with: headless runs, the JSON
+/// protocol, and subagents, whose messages arrive through their own inbox instead.
+pub fn no_steer() -> Arc<SteerFn> {
+    Arc::new(Vec::new)
+}
+
 /// UI hooks: stream events, tool completion, permission prompts, non-fatal warnings.
 pub struct UiHooks {
     pub on_event: Box<dyn FnMut(&StreamEvent) + Send>,
@@ -308,6 +323,9 @@ pub struct UiHooks {
     /// the next turn's tools open a new group.
     pub on_round_end: Box<dyn Fn() + Send>,
     pub on_warning: Box<dyn Fn(String) + Send>,
+    /// Mid-turn steering: drained at each tool barrier of a turn that is continuing.
+    /// [`no_steer`] for hosts with no composer, which leaves the turn exactly as it was.
+    pub steer: Arc<SteerFn>,
     /// Permission prompt: tool name + reason → whether allowed (async: the TUI modal may wait for the user).
     pub ask: Arc<AskFn>,
     /// AskUserQuestion tool: title + question + options → selected index (async modal).
@@ -358,6 +376,8 @@ pub fn headless_hooks() -> UiHooks {
         on_tool_done: Box::new(|_| {}),
         on_round_end: Box::new(|| {}),
         on_warning: Box::new(|message| eprintln!("[bingo] warning: {message}")),
+        // No composer behind a headless run: nothing can be typed mid-turn.
+        steer: no_steer(),
         ask: stdin_ask(),
         ask_question: Arc::new(|title, question, options| {
             Box::pin(async move {
@@ -1255,6 +1275,21 @@ async fn query_loop(
         // orphan tool_use blocks in the transcript, and every future restore from history
         // would 400, permanently corrupting the session.
         fill_missing_tool_results(&turn.tool_uses, &mut blocks);
+        // The tool barrier (D83): results are assembled and the next request has not gone
+        // out yet, which is the one moment a correction can still change what the model
+        // does with them. Anything the user typed while this turn worked rides along in
+        // this same user message — appended *after* the tool_results, which the API
+        // requires to come first — so the model reads it before deciding the next step.
+        //
+        // Only a turn that is going to ask again may take them. An interrupt, a blocking
+        // Stop hook and a cancel between rounds all end the turn here, and a message
+        // folded into a request that is never sent would be a message swallowed: those
+        // stay in the composer's queue, where TurnEnd hands them to the next turn.
+        if !interrupted && !stop_after_tools && !is_cancelled(&cancel_rx) {
+            blocks.extend((ui.steer)().iter().map(|item| ContentBlock::Text {
+                text: item.block_text(),
+            }));
+        }
         record(
             session,
             &mut messages,
@@ -1925,7 +1960,7 @@ mod tests {
 
     /// Minimal Anthropic endpoint: count_tokens returns a fixed value; /v1/messages
     /// replies with preset SSE in order.
-    async fn spawn_api(responses: Vec<String>) -> String {
+    pub(super) async fn spawn_api(responses: Vec<String>) -> String {
         spawn_anthropic_api(responses.into_iter().map(ApiResponse::Ok).collect()).await
     }
 
@@ -2236,7 +2271,7 @@ mod tests {
         )])
     }
 
-    fn text_turn(text: &str, stop_reason: &str) -> String {
+    pub(super) fn text_turn(text: &str, stop_reason: &str) -> String {
         sse(&[
             (
                 "message_start",
@@ -2337,11 +2372,11 @@ mod tests {
         ])
     }
 
-    fn bash_tool_turn(id: &str, command: &str) -> String {
+    pub(super) fn bash_tool_turn(id: &str, command: &str) -> String {
         tool_turn(id, "Bash", serde_json::json!({ "command": command }))
     }
 
-    fn test_session(base_url: String, transcript: Option<Transcript>) -> Arc<Session> {
+    pub(super) fn test_session(base_url: String, transcript: Option<Transcript>) -> Arc<Session> {
         test_session_with_client(
             crate::api::client::Client::new("k".into(), base_url),
             transcript,
@@ -3840,3 +3875,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "query_steer_tests.rs"]
+mod steer_tests;

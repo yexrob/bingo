@@ -2202,7 +2202,8 @@ fn messages_queue_while_busy() {
         chat.queued,
         vec![QueuedInput {
             text: "first queued".into(),
-            is_slash: false
+            is_slash: false,
+            id: 0
         }]
     );
     assert_eq!(chat.input, "", "the input clears after enqueueing");
@@ -2267,7 +2268,8 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
         chat.queued,
         vec![QueuedInput {
             text: "/clear".into(),
-            is_slash: true
+            is_slash: true,
+            id: 0
         }],
         "non-whitelisted slash commands queue with a marker"
     );
@@ -2292,14 +2294,17 @@ async fn queued_slashes_drain_through_run_slash() {
         QueuedInput {
             text: "/think low".into(),
             is_slash: true,
+            id: 0,
         },
         QueuedInput {
             text: "/nope".into(),
             is_slash: true,
+            id: 1,
         },
         QueuedInput {
             text: "the message".into(),
             is_slash: false,
+            id: 2,
         },
     ];
     chat.submit_queued();
@@ -2544,6 +2549,7 @@ fn queue_lines_are_capped() {
         .map(|i| QueuedInput {
             text: format!("m{i}"),
             is_slash: false,
+            id: i,
         })
         .collect();
     assert_eq!(chat.queue_lines().len(), QUEUE_ROWS_MAX + 1);
@@ -2693,7 +2699,8 @@ fn paste_burst_inserts_newlines_and_collapses() {
         chat.queued,
         vec![QueuedInput {
             text: "hi".into(),
-            is_slash: false
+            is_slash: false,
+            id: 0
         }]
     );
 }

@@ -165,7 +165,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Shift+Tab` | cycle permission modes (default → acceptEdits → plan); in an approval prompt, take `Yes, and don't ask again this session` |
 | `Ctrl+E` | in an approval prompt, expand the full command/diff preview and the session rule it would install |
 | `Alt+T` | toggle thinking |
-| Enter while busy | queue the message; auto-sends when the turn ends |
+| Enter while busy | queue the message; the running turn folds it in at its next tool call, otherwise it sends when the turn ends |
 
 ### Slash commands (full list via `/help`)
 

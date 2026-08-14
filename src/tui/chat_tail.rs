@@ -853,6 +853,72 @@ impl super::Chat {
         self.start_turn(item.text, true);
     }
 
+    /// Re-arms the steer channel from the queue: the longest prefix of plain messages
+    /// the running turn may absorb (D83).
+    ///
+    /// It is a *prefix*, not a filter. A slash command runs on this side, so it cannot
+    /// travel to the turn — and letting a plain message queued behind one jump into the
+    /// turn would run the two in the opposite order from the one they were typed in.
+    /// The same goes for a message carrying images: mounting attachments is `start_turn`'s
+    /// path, so it waits for TurnEnd and everything after it waits with it.
+    ///
+    /// With no turn running there is nothing to steer, and the channel is emptied rather
+    /// than left holding an offer for whichever turn starts next.
+    pub(crate) fn rearm_steer(&mut self) {
+        if !self.busy {
+            self.steer.reset();
+            return;
+        }
+        let mut items = Vec::new();
+        for entry in &self.queued {
+            if entry.is_slash || !self.resolve_images(&entry.text).is_empty() {
+                break;
+            }
+            items.push(crate::steer::SteerItem {
+                id: entry.id,
+                text: entry.text.clone(),
+            });
+        }
+        self.steer.rearm(items);
+    }
+
+    /// The running turn took these queued messages into its own context at a tool
+    /// barrier: they are in the request already, so they leave the queue and enter the
+    /// flow where the model read them.
+    ///
+    /// The reply block is split there. One turn renders as one assistant message, so a
+    /// line merely pushed after it would sink below everything the turn still had to
+    /// say; closing the block and opening a continuation — the same move an
+    /// AskUserQuestion answer makes — puts the message between the reply written
+    /// without it and the reply written with it, which is the order the history holds.
+    pub(crate) fn absorb_steered(&mut self, items: &[crate::steer::SteerItem]) {
+        if items.is_empty() {
+            return;
+        }
+        self.queued
+            .retain(|entry| !items.iter().any(|item| item.id == entry.id));
+        for item in items {
+            self.push_steered_line(&item.text);
+        }
+        self.open_continuation_message();
+        self.rearm_steer();
+        self.dirty = true;
+    }
+
+    /// The transcript line a steered message leaves: the user's own words under the
+    /// `↪` marker, rendered as a single dim line rather than a `❯` bubble.
+    fn push_steered_line(&mut self, text: &str) {
+        self.messages.push(UiMessage {
+            role: Role::User,
+            text: format!("{}{text}", crate::steer::STEER_FLOW_PREFIX),
+            at: crate::channels::now_unix(),
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+    }
+
     /// System-triggered turn: a watchable signal/terminal notification wakes the main agent.
     /// No user input (the notification is injected in run_query's first round); user state is irrelevant.
     pub(crate) fn submit_auto(&mut self) {
@@ -947,6 +1013,11 @@ impl super::Chat {
         }
         self.busy = true;
         self.interrupted = false;
+        // The steer channel belongs to one turn (D83): whatever the previous turn chose
+        // not to take must not be folded into this one behind the user's back. The
+        // caller re-arms it against the queue once this turn is the running one.
+        self.steer.reset();
+        let steer = self.steer.clone();
         let session = self.session_for_turn();
         let events = self.events.clone();
         let asks = self.asks.clone();
@@ -958,7 +1029,7 @@ impl super::Chat {
         self.cancel_tx.send_replace(false);
         let handle = tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
-            let mut ui = crate::ui::tui_hooks(events.clone(), asks);
+            let mut ui = crate::ui::tui_hooks(events.clone(), asks, steer);
             let history = Self::load_history(&session, &mut ui.on_warning);
             let result =
                 run_query(&session, history, &text, &images, &mut ui, Some(cancel_rx)).await;
@@ -1019,6 +1090,9 @@ impl super::Chat {
         // without this, one interrupt followed by only `!` commands kept
         // background wake-ups suppressed for the rest of the session.
         self.interrupted = false;
+        // Same as start_turn: the channel is this turn's (D83).
+        self.steer.reset();
+        let steer = self.steer.clone();
         let session = self.session_for_turn();
         let events = self.events.clone();
         let asks = self.asks.clone();
@@ -1027,7 +1101,7 @@ impl super::Chat {
         self.cancel_tx.send_replace(false);
         let handle = tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
-            let mut ui = crate::ui::tui_hooks(events.clone(), asks);
+            let mut ui = crate::ui::tui_hooks(events.clone(), asks, steer);
             let history = Self::load_history(&session, &mut ui.on_warning);
             let result = crate::query::run_bash_command(
                 &session,
@@ -1667,9 +1741,19 @@ impl super::Chat {
     fn vertical(&mut self, down: bool) -> bool {
         // Pulling back a queued message only happens on empty input: what is being typed should not be clobbered.
         if !down && self.busy && self.input.is_empty() && !self.queued.is_empty() {
+            if let Some(entry) = self.queued.last() {
+                // The turn may have taken this one already (D83). It is in the request
+                // by then, so pulling it into the composer would send it twice: the
+                // turn wins, and the absorption event — already on its way — is what
+                // takes it out of the queue. Doing nothing here is the whole fix.
+                if self.steer.reclaim(entry.id) == crate::steer::Reclaim::Absorbed {
+                    return true;
+                }
+            }
             if let Some(item) = self.queued.pop() {
                 self.set_input(item.text);
             }
+            self.rearm_steer();
             return true;
         }
         let width = self.input_width();
@@ -2606,6 +2690,13 @@ impl super::Chat {
             ));
         }
         out
+    }
+
+    /// The hint under the queued rows, in CC's wording. It is only true while a turn is
+    /// running: with nothing in flight the queue is about to submit itself, and there is
+    /// no window in which editing it would mean anything.
+    pub fn queue_hint(&self) -> Option<&'static str> {
+        (self.busy && !self.queued.is_empty()).then_some("Press up to edit queued messages")
     }
 
     /// ctrl+r search hint line (`(reverse-i-search)`query': hit`).

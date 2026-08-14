@@ -33,7 +33,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "up/down",
-        description: "prompt history (queue while busy)",
+        description: "prompt history (edit queued messages while busy)",
     },
     Binding {
         keys: "ctrl+a/e",

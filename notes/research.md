@@ -1528,3 +1528,71 @@ the *collapse* direction of the old toggle now round-trip through the mouse clic
 the surviving in-place fold surface, and one that had become a duplicate of another is deleted.
 (c) The `(ctrl+o to expand)` copy is left exactly as it was: it was never wrong about what the key
 does, only about where it did it.
+
+### D83. Steering is a message that arrives while the work is still changeable
+
+Enter while busy queued the message; `submit_queued` drained the queue at TurnEnd. So a correction
+typed thirty seconds into a five-minute turn was read only after the work it was correcting had
+finished. The user's real choice was to wait it out or press Esc and lose the turn — and the queue,
+which looks like a way to speak mid-turn, was in fact a way to speak *after* it. Claude Code's
+`messageQueueManager` injects queued messages at the running turn's next tool barrier (its `next`
+priority), and that is the alignment target: the model reads the correction while it is still
+deciding what to do, without anything being cancelled.
+
+**The barrier is a place, not a moment we invent.** `query_loop` already has it: after
+`execute_calls`, once every `tool_use` has a paired `tool_result` in `blocks` and before those
+blocks are recorded as the next user message. The request has not gone out; the results are
+complete. Steered text is appended to that same message as extra `Text` blocks, *after* the
+tool_results — the API rejects a user message whose tool_result blocks are not first, and there is
+no second message to put them in without inventing a turn the model never asked for.
+
+The drain is guarded by "is this turn going to ask again": `!interrupted && !stop_after_tools &&
+!is_cancelled(&cancel_rx)`. Each of those three ends the turn a few lines below the record, and a
+message folded into a request that is never sent is a message swallowed. A reply with no tool call
+never reaches the barrier at all; TurnEnd's queue covers it exactly as before.
+
+**The marker.** The text arrives beside tool output, where an unlabelled paragraph reads as more
+tool output. It goes under `[Message from user, sent while you were working]` — the family already
+in use (`[DM from user]`, D64; `[Request interrupted by user]`, D76): a bracketed statement of fact
+with no instruction attached. Not XML: the codebase's user-interjection convention is a marker
+line, and inventing a tag here would have been a second convention for one caller.
+
+**The channel is a projection of the queue, not a second copy.** `SteerQueue` (new `src/steer.rs`)
+holds the eligible prefix of `Chat::queued` and is re-armed from it on every change — enqueue,
+pull-back, absorption, turn boundary. A *prefix*, deliberately: a slash command is dispatched on the
+client side and cannot travel to the turn, and a message queued behind one that jumped into the turn
+would run the two in the opposite order from the one they were typed in. Images take the same
+answer, for a smaller reason — mounting attachments is `start_turn`'s path and nothing at the
+barrier can do it — and rather than build a second attachment path for a case the user can trivially
+re-send, such an item stays queued and everything after it waits with it. The channel belongs to one
+turn and is `reset` at every turn start, so a message the previous turn declined is never folded
+into a turn the user never typed it at.
+
+**The race has one winner, by construction.** `take` is atomic and records the ids it took;
+`tui_hooks` takes and announces (`UiEvent::Steered`) in the same closure, so there is no window in
+which an item is in the request and still pending on screen. `↑` pull-back asks `reclaim` first: an
+item the turn already took answers `Absorbed`, and the pull-back does nothing — the event, already
+in flight, is what removes it from the queue. The taken-id ledger is what makes re-arming safe: the
+composer re-arms from a queue that still holds the absorbed item until that event lands, and without
+the ledger it would offer the same message to the next barrier.
+
+**On screen.** One turn renders as one assistant message, so a line merely pushed after it would
+sink below everything the turn still had to say. `absorb_steered` closes the reply block and opens a
+continuation — `open_continuation_message`, the move an AskUserQuestion answer already makes — so
+the line sits between the reply written without it and the reply written with it, which is the order
+the history holds. It renders as one dim line under `↪`, no `❯` bubble, but it keeps its send stamp:
+unlike D76's and D80's state lines, the user did write it and it did reach the model, so
+`is_steer_line` is deliberately *not* folded into `is_state_line`. The queued rows are unchanged and
+gain CC's verbatim `Press up to edit queued messages` beneath them, only while a turn is running.
+
+**Deviations and consequences.** (a) The steer line is marked by its `↪ ` text prefix rather than by
+a field on `UiMessage`, which has seventeen literal construction sites and no constructor; this is
+the convention `is_interrupt_marker` and `is_ask_receipt` already established, and the false
+positive it admits (a user message that itself begins with `↪ `) costs one bubble. (b) The three
+query-side barrier tests live in `src/query_steer_tests.rs` rather than inline: they are `query`'s
+loop tests and borrow that suite's mock-server helpers (four of which become `pub(super)`), but
+`query.rs` was at 3877 lines and adding them inline left thirteen lines of headroom under the cap.
+(c) `QueuedInput` gains an `id`. Matching absorbed items by text would have merged two identical
+messages into one. (d) Scope holds: subagents keep their inbox mechanics, and headless, `--print`
+and JSON protocol v1 pass `no_steer()`, which is `Vec::new` — those hosts have no composer, and the
+turn runs byte-identically to before.

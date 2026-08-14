@@ -39,6 +39,7 @@ mod settings;
 mod share;
 mod share_html;
 mod skills;
+mod steer;
 mod storage;
 mod system;
 mod tasks;
