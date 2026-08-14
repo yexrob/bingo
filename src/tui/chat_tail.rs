@@ -1250,7 +1250,9 @@ impl super::Chat {
                 && t.state == ThinkingState::Running
             {
                 t.state = ThinkingState::Done;
-                t.duration_ms = tick.saturating_sub(t.start_tick).saturating_mul(33);
+                t.duration_ms = tick
+                    .saturating_sub(t.start_tick)
+                    .saturating_mul(crate::tui::motion::TICK_MS);
             }
         }
     }
@@ -2210,6 +2212,19 @@ impl super::Chat {
         if self.has_dynamic_rows() {
             self.dirty = true;
         }
+        // `meter` (D87): aim the status row's token readout at the live count;
+        // a repeat target is a no-op, so this costs one comparison per frame.
+        let tokens = self.output_tokens;
+        self.token_meter.retarget(tokens, self.tick, self.motion);
+        // The terminal title's working animation (D79 machinery, D87 cadence):
+        // one frame per 960ms, and `set_title` drops a repeat, so a busy turn
+        // costs about one OSC 2 write per second. A pending permission prompt
+        // owns the title while it is up — it is the more urgent state.
+        if self.busy && self.pending_ask.is_none() {
+            let glyph = self.motion.title_glyph(self.tick);
+            self.notify
+                .set_title(crate::tui::notify::Title::Busy(glyph));
+        }
         // The bottom entity area follows the registry (agent states/channel counts); dirty only on change.
         if self.tick.is_multiple_of(15) {
             self.refresh_entities();
@@ -2243,7 +2258,10 @@ impl super::Chat {
                 if let ActivityKind::Thinking(t) = &mut act.kind
                     && t.state == ThinkingState::Running
                 {
-                    t.duration_ms = self.tick.saturating_sub(t.start_tick).saturating_mul(33);
+                    t.duration_ms = self
+                        .tick
+                        .saturating_sub(t.start_tick)
+                        .saturating_mul(crate::tui::motion::TICK_MS);
                 }
             }
         }
@@ -2252,7 +2270,7 @@ impl super::Chat {
     /// Frame number within the update-banner breathing window (animation running → Some; no banner / motion off /
     /// stopped by a keypress / window passed → None, resting). The 270-frame window = 9s = 3 breaths.
     fn update_banner_frame(&self) -> Option<u64> {
-        if self.update_banner.is_none() || self.motion_off || self.update_banner_stopped {
+        if self.update_banner.is_none() || self.motion.off() || self.update_banner_stopped {
             return None;
         }
         let frame = self.tick.saturating_sub(self.update_banner_start);
@@ -2284,6 +2302,7 @@ impl super::Chat {
                     .iter()
                     .any(|status| status.state == crate::agents::AgentState::Running))
             || self.update_anim_active()
+            || self.settling()
     }
 
     /// Whether the host's tick loop has work to do. Returns false when idle so the host skips the whole frame —
@@ -2365,7 +2384,7 @@ impl super::Chat {
         let mut header = Line::empty();
         if t.iter().any(|i| i.status == TodoStatus::InProgress) {
             header.push_styled(
-                format!("{} ", crate::tui::activities::spinner(self.tick)),
+                format!("{} ", self.motion.pulse(self.tick)),
                 SegStyle::fg(theme.claude),
             );
         }
@@ -2468,7 +2487,7 @@ impl super::Chat {
         Some(RunningStatus {
             verb,
             elapsed,
-            tokens: self.output_tokens,
+            tokens: self.token_meter.value(self.tick, self.motion),
         })
     }
 
@@ -2477,7 +2496,7 @@ impl super::Chat {
             return None;
         }
         self.token_rate
-            .label(std::time::Instant::now(), self.motion_off)
+            .label(std::time::Instant::now(), self.motion.off())
     }
 
     pub fn context_usage(&self) -> crate::context_usage::ContextUsage {
@@ -3027,8 +3046,14 @@ impl super::Chat {
         // message inside the loop would be quadratic on the hot path).
         let mut settled_flags = Vec::with_capacity(self.messages.len());
         let mut prefix_settled = true;
+        let settling = self.settling();
         for i in 0..self.messages.len() {
-            prefix_settled = prefix_settled && self.message_static_settled(i);
+            // A message inside the `settle` blink is not final yet: its
+            // completion row is still wearing the accent, and freezing it now
+            // would print that accent into scrollback for good (D87).
+            prefix_settled = prefix_settled
+                && self.message_static_settled(i)
+                && !(settling && i + 1 == self.messages.len());
             settled_flags.push(prefix_settled);
         }
 
@@ -3113,7 +3138,7 @@ impl super::Chat {
         // New-version banner (update-banner): breathing color inside the window; outside / no banner → resting rest or None.
         let banner = self.update_banner.as_deref().map(|v| {
             let frame = self.update_banner_frame().unwrap_or(UPDATE_BANNER_FRAMES);
-            (v, update_color(theme, frame, self.motion_off))
+            (v, self.motion.breath(theme, frame))
         });
         let provider = self.session.runtime.provider.borrow().clone();
         El::Rows(welcome_card_rows(
@@ -3217,6 +3242,10 @@ impl super::Chat {
         // Only rendered after the turn ends: while running, `✻ Baked for 0.4s` would appear
         // while tools are still running, contradicting the bottom running-status row.
         let show_done_line = i == self.messages.len() - 1 && self.stream_msg.is_none() || settled;
+        // The `settle` token (D87): the completion row of the turn that just
+        // ended carries the accent for one 120ms window. Only the last message
+        // can be settling — every earlier one finished long ago.
+        let settling = i + 1 == self.messages.len() && self.settling();
         // Built before the render closure takes its mutable borrows: the tail is the
         // same rows wherever the running command's row turns out to be inside this
         // message. Only the streaming message can hold one — the same rule the tool
@@ -3416,7 +3445,9 @@ impl super::Chat {
                         ActivityKind::Thinking(t)
                             if t.state == ThinkingState::Done && !a.content.is_empty() =>
                         {
-                            Some(crate::tui::activities::thinking_completion_line(t, theme))
+                            Some(crate::tui::activities::thinking_completion_line(
+                                t, theme, settling,
+                            ))
                         }
                         _ => None,
                     })
@@ -3670,8 +3701,6 @@ pub(crate) fn welcome_card_rows(
 /// Update-banner breathing window: 270 frames = 9s (3 breaths; each cycle is 90 frames = 3.0s @30fps).
 /// After the window it rests at the rest color and the banner stays (update-banner spec §2.3).
 pub const UPDATE_BANNER_FRAMES: u64 = 270;
-/// Breathing cycle in frames (one "in + out" every 3.0s at 30fps).
-pub const UPDATE_BANNER_PERIOD: u64 = 90;
 
 /// Banner truncation chain (update-banner spec §1.3, pure and testable): returns
 /// (pre, ver, mid, cmd) — the static segment and the two breathing segments are separate so the render layer can color them.
@@ -3712,49 +3741,6 @@ pub fn banner_segments(v: &str, width: usize) -> Option<(String, String, String,
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn banner_line(v: &str, width: usize) -> Option<String> {
     banner_segments(v, width).map(|(pre, ver, mid, cmd)| format!("{pre}{ver}{mid}{cmd}"))
-}
-
-/// Update-banner breathing colors (update-banner spec §2, pure and testable):
-/// - `motion_off` (settings `motion:"off"` or `BINGO_NO_MOTION`) → always rest (static, banner kept);
-/// - no truecolor (theme downgraded to 256 colors) → discrete two-step: 60-frame cycle, peak for the first 12 frames (≥400ms);
-/// - truecolor → sine breathing: `t = 0.5 − 0.5·cos(2π·phase/90)`, frame 0 = rest (trough), 45 = peak,
-///   90 = back to rest; linear interpolation per sRGB channel.
-///
-/// Stops: dark `#D77757 ↔ #E8896B` (≥6.24:1 throughout); light `#B05227 ↔ #9A4A24` (≥4.72:1 throughout).
-pub fn update_color(theme: &Theme, frame: u64, motion_off: bool) -> Color {
-    let rest = if theme.is_dark {
-        theme.claude
-    } else {
-        theme.claude_deep
-    };
-    if motion_off {
-        return rest;
-    }
-    let peak = if theme.is_dark {
-        theme.claude_strong
-    } else {
-        theme.claude_deep_strong
-    };
-    if !matches!(theme.claude_strong, Color::Rgb(..)) {
-        // Discrete two-step (256-color terminal): 60-frame cycle, peak 400ms (12 frames) → rest 1600ms.
-        return if frame % 60 < 12 { peak } else { rest };
-    }
-    let phase = (frame % UPDATE_BANNER_PERIOD) as f64;
-    let t = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * phase / UPDATE_BANNER_PERIOD as f64).cos();
-    lerp_color(rest, peak, t)
-}
-
-/// Per-channel sRGB linear interpolation (the two stops are close; no gamma correction — the spec notes it is out of scope).
-fn lerp_color(a: Color, b: Color, t: f64) -> Color {
-    let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) else {
-        return b;
-    };
-    let l = |x: u8, y: u8| {
-        (x as f64 + (y as f64 - x as f64) * t)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    };
-    Color::Rgb(l(ar, br), l(ag, bg), l(ab, bb))
 }
 
 /// Whether this activity is the foreground shell command the live tail belongs

@@ -908,6 +908,7 @@ fn streaming_content_is_not_flushed_until_settled() {
     );
 
     chat.handle(UiEvent::TurnEnd);
+    past_settle(&mut chat);
     chat.build_rows(80);
     assert_eq!(
         chat.doc.settled,
@@ -1099,6 +1100,7 @@ fn the_message_an_answer_closed_settles_without_waiting_for_the_turn() {
     );
 
     chat.handle(UiEvent::TurnEnd);
+    past_settle(&mut chat);
     chat.build_rows(80);
     assert_eq!(
         chat.doc.settled,
@@ -1125,6 +1127,7 @@ fn an_unused_continuation_message_is_dropped_at_turn_end() {
         "the empty continuation is dropped: hi + the model's text + the answer"
     );
     assert_eq!(chat.messages[2].role, Role::User, "the answer is last");
+    past_settle(&mut chat);
     chat.build_rows(80);
     chat.advance_flushed();
     assert_eq!(
@@ -1265,6 +1268,7 @@ fn streaming_with_resize_never_prints_a_row_twice() {
     flush_frame(&mut chat, 60, &mut printed);
     chat.handle(UiEvent::TextDelta("ending.".into()));
     chat.handle(UiEvent::TurnEnd);
+    past_settle(&mut chat);
     flush_frame(&mut chat, 60, &mut printed);
     // Idling a few frames must print nothing more.
     let after = printed.len();
@@ -1352,6 +1356,7 @@ fn settled_tracks_streaming_message() {
     assert!(chat.doc.rows.len() > welcome, "streaming message rendered");
     // Turn end: the message settles, all rows enter settled.
     chat.handle(UiEvent::TurnEnd);
+    past_settle(&mut chat);
     chat.build_rows(100);
     assert_eq!(
         chat.doc.settled,
@@ -1416,6 +1421,7 @@ fn settled_stops_before_permission_block() {
     // Turn end + request resolved → everything settles.
     chat.pending_ask = None;
     chat.handle(UiEvent::TurnEnd);
+    past_settle(&mut chat);
     chat.build_rows(100);
     assert_eq!(
         chat.doc.settled,
@@ -3704,4 +3710,65 @@ fn tool_use_interrupt_marker_renders_the_same_way() {
         rows[0].line.segs.first().map(|seg| seg.style.fg),
         Some(Some(Theme::dark().error))
     );
+}
+
+/// D87 `settle`: the turn's completion row wears the accent for one 120ms
+/// window and then rests — and the row does not enter scrollback until it has.
+/// Write-once is what makes the delay necessary rather than optional: a row
+/// frozen mid-blink would keep the accent for the rest of the session.
+#[test]
+fn the_completion_row_blinks_accent_before_it_freezes() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::User, "hi"));
+    chat.handle(UiEvent::TurnStart);
+    chat.handle(UiEvent::ThinkingDelta("weighing it up".into()));
+    chat.handle(UiEvent::TextDelta("done".into()));
+    chat.handle(UiEvent::TurnEnd);
+
+    let accent = chat.theme.claude;
+    let completion_color = |chat: &mut Chat| -> Option<ratatui::style::Color> {
+        chat.build_rows(80);
+        chat.doc
+            .rows
+            .iter()
+            .find(|row| {
+                row.line.plain_text().starts_with("✻ ") && row.line.plain_text().contains(" for ")
+            })
+            .and_then(|row| row.line.segs.first().and_then(|seg| seg.style.fg))
+    };
+    assert_eq!(
+        completion_color(&mut chat),
+        Some(accent),
+        "the turn ends on the blink"
+    );
+    assert!(
+        chat.doc.settled < chat.doc.rows.len(),
+        "and the blinking row is held out of scrollback while it blinks"
+    );
+
+    past_settle(&mut chat);
+    let rested = completion_color(&mut chat);
+    assert!(rested.is_some() && rested != Some(accent), "then it rests");
+    assert_eq!(
+        chat.doc.settled,
+        chat.doc.rows.len(),
+        "and only then is it final"
+    );
+}
+
+/// The blink is a beat, not a loop: it keeps the demand-gated tick alive for
+/// exactly its own window and hands the session straight back to zero-write idle.
+#[test]
+fn the_settle_blink_wakes_the_loop_only_for_itself() {
+    let mut chat = test_chat();
+    chat.handle(UiEvent::TurnStart);
+    chat.handle(UiEvent::TurnEnd);
+    assert!(chat.has_dynamic_rows(), "the blink keeps frames coming");
+    let mut frames = 0;
+    while chat.has_dynamic_rows() {
+        chat.tick();
+        frames += 1;
+        assert!(frames < 20, "the blink must end on its own");
+    }
+    assert_eq!(frames, 4, "≈120ms of frames at 33ms each, then idle");
 }

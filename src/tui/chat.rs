@@ -1055,9 +1055,22 @@ pub struct Chat {
     pub(crate) update_banner_start: u64,
     /// Animation stopped (triggered by the first keypress in the window; the banner stays, it just stops breathing).
     pub(crate) update_banner_stopped: bool,
-    /// motion off (settings `motion:"off"` or `BINGO_NO_MOTION=1`): breathing rests at the rest color
-    /// and the banner stays (update-banner spec §2.5 "the indicator does not disappear, it just stops").
-    pub(crate) motion_off: bool,
+    /// The motion gate and its seven tokens (D87). Resolved once from settings
+    /// (`motion: "off"` / `BINGO_NO_MOTION=1`); every animated surface asks this
+    /// rather than the raw tick, so the gate is honoured in one place instead of
+    /// two out of five.
+    pub(crate) motion: crate::tui::motion::Motion,
+    /// Tick of the last event that reached the TUI. `stall` measures from it:
+    /// three seconds of silence mid-turn is worth saying out loud.
+    pub(crate) last_progress_tick: u64,
+    /// Tick the last turn ended on — the origin of the `settle` blink window.
+    pub(crate) settle_at: Option<u64>,
+    /// The running verb, pinned for the whole turn: a second reasoning segment
+    /// used to re-roll it, so the status row changed its mind mid-thought.
+    pub(crate) turn_verb: &'static str,
+    /// Eased token counter for the status row (D87 `meter`): a count that jumps
+    /// by hundreds mid-stream reads as a glitch, so the display travels to it.
+    pub(crate) token_meter: crate::tui::motion::Meter,
     /// Attention channel (D79): builds the bell / notification OSC / terminal
     /// title bytes the host collects after each frame. Silent by default —
     /// only [`Chat::set_notifier`] gives it a channel.
@@ -1291,8 +1304,7 @@ impl Chat {
         // Update-banner (welcome card) data source + motion off: computed before the session moves into Self.
         // Store the bare version (rendering adds the `v` prefix in `banner_segments`).
         let update_banner = crate::update::latest_cached(&session.home).map(|v| v.to_string());
-        let motion_off = session.settings.motion.as_deref() == Some("off")
-            || std::env::var_os("BINGO_NO_MOTION").is_some();
+        let motion = crate::tui::motion::Motion::from_settings(&session.settings);
         let chat_avatars = session.settings.experimental.chat_avatars;
         let context_tokens = session
             .runtime
@@ -1406,7 +1418,11 @@ impl Chat {
             update_banner,
             update_banner_start: 0,
             update_banner_stopped: false,
-            motion_off,
+            motion,
+            last_progress_tick: 0,
+            settle_at: None,
+            turn_verb: THINKING_WORDS[0],
+            token_meter: crate::tui::motion::Meter::default(),
             notify: Notifier::default(),
             slash_lines: Vec::new(),
             slash_at: None,
@@ -1475,8 +1491,25 @@ impl Chat {
         changed |= self.drain_asks();
         if changed {
             self.dirty = true;
+            // The cheapest possible progress hook (D87): every stream delta,
+            // tool event and ask funnels through here, so one assignment is the
+            // whole `stall` baseline.
+            self.last_progress_tick = self.tick;
         }
         changed
+    }
+
+    /// Whether a busy turn has gone quiet past the `stall` threshold — the
+    /// status row turns warning-coloured and stops glimmering.
+    pub(crate) fn stalled(&self) -> bool {
+        self.busy && self.motion.stall(self.tick, self.last_progress_tick)
+    }
+
+    /// Whether the last turn's completion row is still inside its `settle`
+    /// blink. Also what holds that message out of scrollback for the window.
+    pub(crate) fn settling(&self) -> bool {
+        self.settle_at
+            .is_some_and(|at| self.motion.settle(self.tick, at))
     }
 
     fn handle(&mut self, event: UiEvent) {
@@ -1519,8 +1552,11 @@ impl Chat {
                 self.turn_started = Some(now);
                 self.output_tokens = 0;
                 self.output_round_tokens = 0;
+                self.token_meter.reset(0, self.tick);
+                self.settle_at = None;
                 self.token_rate.start(now);
-                self.notify.set_title(Title::Busy);
+                self.notify
+                    .set_title(Title::Busy(self.motion.title_glyph(self.tick)));
                 self.messages.push(UiMessage {
                     role: Role::Assistant,
                     text: String::new(),
@@ -1531,6 +1567,9 @@ impl Chat {
                     group_of: Vec::new(),
                 });
                 self.stream_msg = Some(self.messages.len() - 1);
+                // One verb per turn (D87): sampled here and reused by every
+                // reasoning segment the turn opens.
+                self.turn_verb = thinking_stage(self.messages.len());
                 self.stream_attempt_checkpoint = self
                     .stream_msg
                     .and_then(|index| self.messages.get(index).cloned());
@@ -1542,7 +1581,7 @@ impl Chat {
                 let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                     state: ThinkingState::Running,
                     duration_ms: 0,
-                    stage: thinking_stage(self.messages.len()),
+                    stage: self.turn_verb,
                     done_verb: Some(thinking_done_verb()),
                     start_tick: self.tick,
                     segments: 1,
@@ -1563,7 +1602,7 @@ impl Chat {
                     let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                         state: ThinkingState::Running,
                         duration_ms: 0,
-                        stage: thinking_stage(self.messages.len()),
+                        stage: self.turn_verb,
                         done_verb: Some(thinking_done_verb()),
                         start_tick: self.tick,
                         segments: 1,
@@ -1653,8 +1692,10 @@ impl Chat {
                                     if !was_open {
                                         t.segments += 1;
                                     }
-                                    t.duration_ms =
-                                        self.tick.saturating_sub(t.start_tick).saturating_mul(33);
+                                    t.duration_ms = self
+                                        .tick
+                                        .saturating_sub(t.start_tick)
+                                        .saturating_mul(crate::tui::motion::TICK_MS);
                                 }
                                 hint.set_content(content);
                             }
@@ -1668,8 +1709,9 @@ impl Chat {
                         let content = self.render_thinking(&buf);
                         let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                             state: ThinkingState::Running,
-                            duration_ms: self.tick.saturating_sub(self.turn_start_tick) * 33,
-                            stage: thinking_stage(self.messages.len()),
+                            duration_ms: self.tick.saturating_sub(self.turn_start_tick)
+                                * crate::tui::motion::TICK_MS,
+                            stage: self.turn_verb,
                             done_verb: Some(thinking_done_verb()),
                             start_tick: self.tick,
                             segments: 1,
@@ -1961,6 +2003,11 @@ impl Chat {
             UiEvent::TurnEnd => {
                 self.busy = false;
                 self.bash_tail = None;
+                // The `settle` blink starts here (D87): the completion row keeps
+                // the accent for one 120ms window, and the message it belongs to
+                // stays live for exactly that long, so the row freezes into
+                // scrollback at rest and write-once is never broken.
+                self.settle_at = Some(self.tick);
                 // A turn short enough to have been watched needs no
                 // notification; a long one is exactly what the user walked away
                 // from (D79). Read before the start time is cleared.
@@ -2037,8 +2084,10 @@ impl Chat {
                             && t.state == ThinkingState::Running
                         {
                             t.state = ThinkingState::Done;
-                            t.duration_ms =
-                                self.tick.saturating_sub(t.start_tick).saturating_mul(33);
+                            t.duration_ms = self
+                                .tick
+                                .saturating_sub(t.start_tick)
+                                .saturating_mul(crate::tui::motion::TICK_MS);
                             hint.expanded = false;
                         }
                     }
@@ -3838,7 +3887,9 @@ mod chat_tail;
 mod ask;
 
 #[cfg(test)]
-pub(crate) use chat_tail::{banner_line, banner_segments, update_color, welcome_card_rows};
+pub(crate) use crate::tui::motion::update_color;
+#[cfg(test)]
+pub(crate) use chat_tail::{banner_line, banner_segments, welcome_card_rows};
 
 #[cfg(test)]
 #[path = "chat_tests_a.rs"]

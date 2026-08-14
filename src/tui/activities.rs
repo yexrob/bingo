@@ -9,16 +9,6 @@ use crate::tui::line::Line;
 use crate::tui::theme::Theme;
 use crate::watch::WatchState;
 
-/// Spinner frames: a star that grows and shrinks (`·` → `✻`/`✽` → `·`),
-/// driven by the host tick. The sequence is a there-and-back cycle, so the
-/// glyph never jumps between sizes.
-pub const SPINNERS: [char; 8] = ['·', '✢', '*', '✻', '✽', '✻', '*', '✢'];
-
-/// Spinner frame for a given tick.
-pub fn spinner(frame: u64) -> char {
-    SPINNERS[(frame as usize) % SPINNERS.len()]
-}
-
 /// Result connector under a tool header (CC `  ⎿  `). Continuation lines line
 /// up with the text after it.
 pub const RESULT_CONNECTOR: &str = "  ⎿  ";
@@ -369,12 +359,18 @@ fn thinking_header(theme: &Theme) -> Line {
 
 /// Thinking completion line: `✻ {done_verb} for 40.0s`, rendered at the end
 /// of the message (after the body and all tools).
-pub fn thinking_completion_line(t: &Thinking, theme: &Theme) -> Line {
+///
+/// `settling` is the [`crate::tui::motion::Motion::settle`] token: for one
+/// 120 ms window after the turn ends the line carries the accent, then rests.
+/// The blink happens while the row is still live — it freezes into scrollback
+/// at rest, so write-once is never broken by it.
+pub fn thinking_completion_line(t: &Thinking, theme: &Theme, settling: bool) -> Line {
     let verb = t.done_verb.unwrap_or(t.stage);
-    Line::styled(
-        format!("✻ {verb} for {:.1}s", t.duration_ms as f64 / 1000.0),
-        theme.thinking(),
-    )
+    let text = format!("✻ {verb} for {:.1}s", t.duration_ms as f64 / 1000.0);
+    if settling {
+        return Line::styled(text, crate::tui::line::SegStyle::fg(theme.claude));
+    }
+    Line::styled(text, theme.thinking())
 }
 
 /// Status colour of the leading marker: running is muted, done is green,
@@ -742,7 +738,7 @@ mod tests {
             start_tick: 0,
             segments: 1,
         };
-        let line = thinking_completion_line(&t, &Theme::dark());
+        let line = thinking_completion_line(&t, &Theme::dark(), false);
         assert_eq!(text(&line), "✻ Churned for 40.0s");
         // None falls back to stage.
         let t2 = Thinking {
@@ -750,7 +746,7 @@ mod tests {
             done_verb: None,
             ..t
         };
-        let line2 = thinking_completion_line(&t2, &Theme::dark());
+        let line2 = thinking_completion_line(&t2, &Theme::dark(), false);
         assert_eq!(text(&line2), "✻ Churning for 40.0s");
     }
 
@@ -872,22 +868,6 @@ mod tests {
             text(&lines[1]),
             "  ⎿  Updated f.txt with 2 additions and 1 removal"
         );
-    }
-
-    #[test]
-    fn spinner_cycles() {
-        let a = spinner(0);
-        let b = spinner(1);
-        assert_ne!(a, b);
-        assert_eq!(
-            spinner(SPINNERS.len() as u64),
-            a,
-            "cycles after full rotation"
-        );
-        // Starburst glyph (CC): no longer braille.
-        assert_eq!(SPINNERS[0], '·');
-        assert!(SPINNERS.contains(&'✻'));
-        assert!(!SPINNERS.contains(&'⠋'));
     }
 
     #[test]

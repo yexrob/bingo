@@ -52,8 +52,9 @@ use crate::tui::term::{StdoutTerm, write_attention, write_transmits};
 use crate::tui::view;
 use ratatui::text::Line as TextLine;
 
-/// Per-frame tick interval (spinner/thinking timing).
-const TICK_MS: u64 = 33;
+/// Per-frame tick interval. Owned by the motion layer, which converts ticks to
+/// the milliseconds every animation cadence is actually specified in (D87).
+use crate::tui::motion::TICK_MS;
 /// Disk-snapshot refresh interval for the task list (in ticks).
 const TASKS_REFRESH_TICKS: u64 = 15;
 /// Rows scrolled per mouse wheel notch (fullscreen only).

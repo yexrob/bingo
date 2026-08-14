@@ -236,8 +236,9 @@ async fn modal_loop(
     // Avatars are ordinary kitty images: transmitted once per portrait, then
     // placed by the cells the message list paints.
     let image_cap = chat.image_cap;
-    let motion_off = chat.session.settings.motion.as_deref() == Some("off")
-        || std::env::var_os("BINGO_NO_MOTION").is_some();
+    // One gate for the whole app (D87): the modal used to resolve the setting a
+    // second time, which is exactly how the two copies drifted apart.
+    let motion_off = chat.motion.off();
     let mut transmits = gfx::Transmits::default();
     let mut scroll_content: Option<(Conv, usize)> = None;
     let (workspace, avatars) = blueprint(&chat.session, image_cap.is_some());

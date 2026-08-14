@@ -17,6 +17,17 @@ pub(super) fn all_slash_text(chat: &Chat) -> String {
         .join("\n")
 }
 
+/// Let the `settle` blink expire (D87). A finished turn's last message stays
+/// live for one 120 ms window so its completion row can wear the accent and then
+/// rest — freezing it mid-blink would print the accent into scrollback for good.
+/// Any test asserting the *final* scrollback state ticks past the window first,
+/// exactly as the host does 120 ms later.
+pub(super) fn past_settle(chat: &mut Chat) {
+    while chat.settling() {
+        chat.tick();
+    }
+}
+
 /// Segments covered by the latest settled checkpoint (checkpoint-equivalent read of the old aggregate field).
 pub(super) fn settled_segments(chat: &Chat) -> usize {
     chat.doc.settled_marks.last().map_or(0, |m| m.segments)
@@ -352,7 +363,7 @@ fn update_banner_animation_window_and_key_stop() {
     // motion off → never active (the banner stays as a static rest)
     let mut chat2 = test_chat();
     chat2.update_banner = Some("0.3.0".into());
-    chat2.motion_off = true;
+    chat2.motion = crate::tui::motion::Motion::new(false);
     chat2.tick = 10;
     assert!(!chat2.update_anim_active());
     assert!(!chat2.has_dynamic_rows());

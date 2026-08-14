@@ -43,6 +43,7 @@ pub mod line;
 pub mod markdown;
 pub mod math;
 pub mod model_menu;
+pub mod motion;
 pub mod notify;
 pub mod picker;
 pub mod slack;

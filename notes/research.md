@@ -1813,3 +1813,80 @@ literally; its meaning is unchanged and it now feeds the ring, because leaving i
 nothing reads would have broken `ctrl+y` after a `ctrl+k`. `ctrl+x`, `ctrl+p`, `ctrl+n`, `alt+d` and
 `alt+y` were free; `alt+backspace` was a plain backspace. `ctrl+x` inside the ctrl+b agent manager
 still stops an agent — the manager is judged before the composer, so the chord never sees it.
+
+### D87. Motion is a layer with one gate, not a habit each surface picked up
+
+bingo's animation was almost all absence. The only continuously moving thing in the app was the
+welcome card's update banner, breathing on a properly specified sine curve; everything else either
+did not move or moved without anyone deciding it should. The `motion` setting — the app's opt-out,
+and the determinism knob tests lean on — was resolved independently in three places and consulted at
+five, none of which was the spinner. So `motion: "off"` stilled the banner and the tok/s glyph while
+the loudest moving thing on screen kept spinning, which is worse than not having the setting: it
+answers the user's request with a partial no.
+
+And the spinner's own timing was an accident. `spinner(chat.tick)` indexed the 8-glyph star cycle by
+the raw frame counter, so at TICK_MS=33 a glyph lasted 33ms and a full cycle 264ms — about 3.6×
+Claude Code's rate. Nobody chose 33ms; it is what you get when the animation's clock *is* the render
+loop's clock. That is the shape of the whole problem, so the fix is structural rather than a set of
+new effects: **`src/tui/motion.rs` owns the frame interval, and nothing animated may read the tick
+again.** Every moving surface asks a `Motion` — one bool, built once from settings, copied to render
+sites — for a token, and each token converts ticks to milliseconds through `TICK_MS` so a cadence is
+stated in the unit it was designed in. A grep for tick reads afterwards leaves only the increment
+itself, the elapsed-time stopwatches (`duration_ms`, which now multiply by `motion::TICK_MS` instead
+of a literal 33), the 15-tick registry poll, and the two call sites that pass the tick *into* a
+token. There is one deliberate survivor: `token_rate.rs` picks its glyph from a wall clock on
+per-band cadences that v1.37 specified, so it keeps its own frame math and now takes only the gate
+from `Motion` — the drift that mattered was two copies of the gate, not two clocks.
+
+**The seven tokens.** `pulse` advances one glyph per 120ms through the unchanged sequence. `beam` is
+a 6-cell glimmer sweeping the running verb and its ellipsis once per 2s, returning a half-open
+character window that the render layer paints in a lighter tint of the same base — the sweep enters
+from the left and leaves off the right, so there is a dark beat between passes rather than a
+permanent bright spot. `stall` is 3s with no event of any kind reaching the TUI. `settle` is one
+120ms window at turn end. `breath` is the banner curve moved here verbatim, stops and all, with its
+wave test left where it was. `title_glyph` alternates `✳ ⠂ ✳ ⠐` on 960ms boundaries. `Meter` eases a
+jumped number to its target over 300ms, ease-out, and is wired to the status row's `↓ N tokens`.
+Every one of them takes the frame number as an argument and reads no clock, which is what makes
+animation testable without a timer and keeps the demand-gated loop deterministic.
+
+**The gate rests decoration and not information.** `motion: "off"` freezes the spinner on `✻`, kills
+the sweep, stills the banner and the title, and makes numbers snap. It deliberately does *not*
+silence `stall` or `settle`: those change a colour in order to say something, and a user who asked
+for stillness asked for less movement, not for less to be told. This is the same boundary the
+feedback spec already drew for `prefers-reduced-motion` ("the loading indicator itself must not be
+removed"), applied one level up — and it is why the two tokens are gate-independent by construction
+rather than by a comment asking callers to remember.
+
+**Stall says nothing new, because nothing new is known.** At three seconds the spinner and verb turn
+warning-coloured and the glimmer stops. The verb, the elapsed seconds and the Esc hint are
+untouched. The blueprint sketch had a second tier at 6s adding `(stalled?)` to the copy; that is a
+claim about a cause the TUI cannot see — an endpoint thinking hard and an endpoint hung look
+identical from here — so this batch ships the one tier the colour can honestly carry, and the
+question mark stays unwritten. Progress is recorded in `drain_all`, where every stream delta, tool
+event and ask already funnels through: one assignment covers the whole surface, and a hook per
+event variant would have been five copies of the same fact.
+
+**`settle` versus write-once, which is the interesting one.** The spec asks the completion row's `✻`
+to wear the accent for one frame-window and then rest. Printed scrollback rows are final, so a
+post-print colour change is impossible; the fallback offered was the live status row's last repaint,
+but that row is gone the instant `busy` clears, and painting the completion text there too would
+have shown the same line twice for 120ms. The resolution inverts the problem: **do not print the row
+until it has finished blinking.** `settle_at` is stamped at `TurnEnd`, the finished turn's last
+message is held out of the settled prefix for the window, and it freezes at rest. Nothing printed
+ever changes — the discipline is strengthened, not bent: a row whose colour is still moving is by
+definition not final. The cost is honest and visible: six existing tests asserted "everything
+settles after the turn ends" *immediately* after `TurnEnd`, and they now tick past the window first
+through a shared `past_settle` helper, which is exactly what the host does 120ms later.
+
+**The running verb is now pinned per turn.** It was `thinking_stage(self.messages.len())`, sampled
+afresh at each of the three sites that open a reasoning segment. In practice the message count
+rarely changed mid-turn so it usually held, but "usually" is not a property: a turn that pushed a
+message could change its mind about what it was doing. The verb is sampled once at `TurnStart` and
+reused. The tables themselves are unchanged — Claude Code carries ~180 words, bingo carries 12
+running and 8 completion, and a curated dozen that all read like the same voice is better than 180
+that do not. Expanding them is a copy decision, not a motion one.
+
+The title animation reuses D79's machinery entirely: `Title::Busy` carries the glyph, `set_title`
+already drops an unchanged title, so a busy turn costs about one `OSC 2` write per second and a
+`notifications: off` session still emits nothing. A pending permission prompt outranks the animation
+— the waiting title is never animated over, because it is the more urgent thing to say.

@@ -46,9 +46,16 @@ pub(crate) fn dim_row(text: impl Into<String>, theme: &Theme) -> Row {
 ///
 /// `esc_hint` is derived from the Esc layer stack, not assumed: with a dropdown
 /// or panel open over the turn, Esc closes that and the turn keeps running (D80).
+///
+/// This is the row the motion layer is for (D87): the spinner takes its glyph
+/// from `pulse`, the verb is swept by `beam`, and `stalled` — three seconds
+/// without a single event — repaints both in the warning colour and puts the
+/// glimmer out, because a stalled turn should look like one.
 fn status_row(
     status: &crate::tui::chat::RunningStatus,
-    spinner: char,
+    motion: crate::tui::motion::Motion,
+    tick: u64,
+    stalled: bool,
     esc_hint: &str,
     theme: &Theme,
 ) -> Row {
@@ -57,12 +64,55 @@ fn status_row(
         meta.push_str(&format!(" · ↓ {} tokens", status.tokens));
     }
     meta.push(')');
-    let mut line = Line::styled(
-        format!("  {spinner} {}… ", status.verb),
-        SegStyle::fg(theme.claude),
+    let base = if stalled { theme.warning } else { theme.claude };
+    let mut line = Line::styled(format!("  {} ", motion.pulse(tick)), SegStyle::fg(base));
+    // The glimmer travels over the verb and its ellipsis; a stalled turn is not
+    // glimmering at anything, so the sweep stops with the news.
+    let verb = format!("{}…", status.verb);
+    let window = (!stalled).then(|| motion.beam(tick, verb.chars().count()));
+    push_swept(
+        &mut line,
+        &verb,
+        window.flatten(),
+        base,
+        theme.claude_strong,
     );
+    line.push_styled(" ".to_string(), SegStyle::fg(base));
     line.push_styled(meta, SegStyle::fg(theme.inactive));
     Row::new(line)
+}
+
+/// Push `text` with the half-open character window `[start, end)` brightened —
+/// the rendered half of the `beam` token. Splitting on character indices (not
+/// bytes) is what keeps a CJK or accented verb from being cut mid-scalar.
+fn push_swept(
+    line: &mut Line,
+    text: &str,
+    window: Option<(usize, usize)>,
+    base: Color,
+    bright: Color,
+) {
+    let Some((start, end)) = window else {
+        line.push_styled(text.to_string(), SegStyle::fg(base));
+        return;
+    };
+    let mut before = String::new();
+    let mut lit = String::new();
+    let mut after = String::new();
+    for (i, ch) in text.chars().enumerate() {
+        if i < start {
+            before.push(ch);
+        } else if i < end {
+            lit.push(ch);
+        } else {
+            after.push(ch);
+        }
+    }
+    for (part, color) in [(before, base), (lit, bright), (after, base)] {
+        if !part.is_empty() {
+            line.push_styled(part, SegStyle::fg(color));
+        }
+    }
 }
 
 /// Permission-mode badge (`⏸ plan mode on`) + the `·` separator after it.
@@ -498,7 +548,9 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     if let Some(status) = chat.running_status() {
         children.push(El::Row(status_row(
             &status,
-            crate::tui::activities::spinner(chat.tick),
+            chat.motion,
+            chat.tick,
+            chat.stalled(),
             &chat.busy_hint(),
             theme,
         )));
@@ -1050,7 +1102,16 @@ mod tests {
             elapsed: 12.5,
             tokens: 0,
         };
-        let text = row_text(&status_row(&status, '✻', "esc to interrupt", &theme));
+        let motion = crate::tui::motion::Motion::new(true);
+        // Tick 0 = the first pulse frame; the sequence's mid-size star is frame 3.
+        let text = row_text(&status_row(
+            &status,
+            motion,
+            12,
+            false,
+            "esc to interrupt",
+            &theme,
+        ));
         assert!(
             text.contains("✻ Working… (esc to interrupt · 13s)"),
             "{text}"
@@ -1065,10 +1126,93 @@ mod tests {
             elapsed: 3.2,
             tokens: 1200,
         };
-        let text = row_text(&status_row(&status, '✽', "esc to interrupt", &theme));
+        let text = row_text(&status_row(
+            &status,
+            motion,
+            15,
+            false,
+            "esc to interrupt",
+            &theme,
+        ));
         assert!(
             text.contains("✽ $ cargo test… (esc to interrupt · 3s · ↓ 1200 tokens)"),
             "{text}"
+        );
+    }
+
+    /// A busy status row: `pulse` picks the glyph, `beam` brightens a moving
+    /// window of the verb, and neither changes a single character of the copy.
+    #[test]
+    fn status_row_glimmers_without_changing_its_text() {
+        let theme = Theme::dark();
+        let motion = crate::tui::motion::Motion::new(true);
+        let status = crate::tui::chat::RunningStatus {
+            verb: "Synthesizing".to_string(),
+            elapsed: 4.0,
+            tokens: 0,
+        };
+        // Everything but the spinner glyph, which `pulse` owns and does change.
+        let copy = "Synthesizing… (esc · 4s)";
+        let mut brightened = 0;
+        for tick in 0..61 {
+            let row = status_row(&status, motion, tick, false, "esc", &theme);
+            let text = row_text(&row);
+            assert!(
+                text.contains(copy),
+                "the sweep never edits the text: {text}"
+            );
+            if row
+                .line
+                .segs
+                .iter()
+                .any(|seg| seg.style.fg == Some(theme.claude_strong))
+            {
+                brightened += 1;
+            }
+        }
+        assert!(brightened > 0, "the verb is lit during the sweep");
+        assert!(brightened < 61, "and dark again between passes");
+        // Motion off: one colour, one glyph, all the way down.
+        let still = crate::tui::motion::Motion::new(false);
+        for tick in [0u64, 7, 40] {
+            let row = status_row(&status, still, tick, false, "esc", &theme);
+            let text = row_text(&row);
+            assert_eq!(text, format!("  ✻ {copy}"), "one glyph, all the way down");
+            assert!(
+                !row.line
+                    .segs
+                    .iter()
+                    .any(|seg| seg.style.fg == Some(theme.claude_strong)),
+                "nothing glimmers under the gate"
+            );
+        }
+    }
+
+    /// Three seconds without an event: the row says so in the warning colour and
+    /// stops glimmering — a stalled turn should not look like a busy one. The
+    /// copy is untouched, because nothing new is actually known.
+    #[test]
+    fn a_stalled_status_row_turns_warning_and_stops_sweeping() {
+        let theme = Theme::dark();
+        let motion = crate::tui::motion::Motion::new(true);
+        let status = crate::tui::chat::RunningStatus {
+            verb: "Churning".to_string(),
+            elapsed: 9.0,
+            tokens: 0,
+        };
+        let running = status_row(&status, motion, 20, false, "esc", &theme);
+        let stalled = status_row(&status, motion, 20, true, "esc", &theme);
+        assert_eq!(row_text(&running), row_text(&stalled), "same words");
+        let colors = |row: &Row| -> Vec<Option<Color>> {
+            row.line.segs.iter().map(|seg| seg.style.fg).collect()
+        };
+        assert!(colors(&running).contains(&Some(theme.claude)));
+        assert!(!colors(&running).contains(&Some(theme.warning)));
+        assert!(colors(&stalled).contains(&Some(theme.warning)));
+        assert!(!colors(&stalled).contains(&Some(theme.claude)));
+        assert!(
+            !colors(&stalled).contains(&Some(theme.claude_strong)),
+            "the glimmer stops with the news"
         );
     }
 

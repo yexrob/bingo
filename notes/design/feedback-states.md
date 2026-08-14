@@ -1,6 +1,6 @@
 # Feedback States Specification
 
-> Version: v1.55 · Status: in effect (2026-08-14)
+> Version: v1.56 · Status: in effect (2026-08-14)
 > Scope: the unified design conventions for every user-visible feedback state in bingo. The GUI (TUI) and CLI (headless) sides share a single source; qa acceptance anchors are at the end.
 
 ## General principles
@@ -40,6 +40,47 @@ Four reset actions (qa can assert each one; see "Acceptance anchors"):
 | Copy | Local buttons don't change copy (keep "Submit" → spinner in place); page-level shows "Loading…" |
 | Timeout | Tiered timeouts: **10s for reads, 15s for writes, applied to short synchronous operations** (list_models / count_tokens / complete_text etc.); on timeout, enter the corresponding error level with a retry hint, **primary action = retry**; **long agent turns (streaming + multi-round tools) do not apply 10s/15s** — continuous progress feedback already exists within a turn (status line + activity rows + `chat.busy`), so timeouts are backed by the transport layer (120s/60s) + user interruption; **if a long turn fails (transport timeout/interruption), it escalates to a flow-level error** (retry or return, never a silent local hint); **the timeout timer must be cancelled on success/failure/cancel** — otherwise a late error arriving after success will overwrite the success state. Cancellation mechanism: at the deadline the feedback layer **drops the future** (wrapped in tokio `timeout()`; the reqwest connection is cancelled with it); the sequence-number check is only a defensive fallback |
 
+### 1.1 Motion tokens (the animation contract)
+
+Every moving thing in the TUI is one of **seven tokens**, all issued by a single motion authority
+built once from the `motion` setting. Nothing animated reads the frame counter directly, and no
+surface carries a private copy of the gate — that split is what let `motion: "off"` cover the
+welcome banner while the spinner, the loudest moving thing on screen, kept spinning.
+
+| Token | What moves | Cadence | Under `motion: "off"` |
+|---|---|---|---|
+| `pulse` | the status-row spinner glyph, and the todo header's | one frame per **120ms** through the unchanged 8-glyph star cycle (`· ✢ * ✻ ✽ ✻ * ✢`) | frozen on `✻` |
+| `beam` | a 6-cell glimmer sweeping the running verb and its ellipsis | one pass per **2s**, with a dark beat between passes | no window; the verb is one flat colour |
+| `stall` | the spinner and verb turn warning-coloured | after **3s** with no event of any kind reaching the TUI; any event resets it | **still reports** — the colour changes, nothing moves |
+| `settle` | the turn's completion row (`✻ Churned for 40.0s`) wears the accent | one **120ms** window at turn end, then rest | **still reports** — one repaint, not a blink |
+| `breath` | the update banner's colour | unchanged: 90-frame sine, 270-frame window (see `update-banner.md`) | rests at the base colour, banner kept |
+| `title` | the terminal title's marker | `✳ ⠂ ✳ ⠐` at one frame per **960ms** | static `✳` |
+| `meter` | a numeric readout that jumped (the status row's `↓ N tokens`) | eases to the new value over **300ms**, ease-out | snaps |
+
+Three rules bind the set:
+
+1. **The gate rests decoration, never information.** `stall` and `settle` keep changing colour with
+   `motion: "off"`; `pulse`, `beam`, `breath`, `title` and `meter` stop. A user who asked for
+   stillness asked for less movement, not for less to be told — the same boundary §5 draws for
+   `prefers-reduced-motion` ("the loading indicator itself must not be removed").
+2. **Time is an argument.** Every token is a pure function of a frame number and takes no clock
+   reading of its own, so tests drive animation by passing numbers and the demand-gated render loop
+   stays deterministic. Cadences are stated in **milliseconds** and converted through the frame
+   interval; a token never counts frames.
+3. **Animation costs frames, so a token that ends must end.** Anything animating keeps the
+   demand-gated loop awake for exactly its own window and hands the session back to zero-write idle
+   after it — a still terminal writes no bytes.
+
+**Stall wording.** A stalled turn changes colour and nothing else: the verb, the elapsed seconds and
+the Esc hint stay exactly as they were. Nothing new is known at three seconds, so nothing new is
+claimed — the colour says "this has been quiet for a while", which is the whole of the truth.
+
+**Settle and write-once.** Printed scrollback rows are final, so the blink happens *before* the row
+freezes: the finished turn's last message is held out of scrollback for the 120ms window and enters
+it at rest. Freezing it mid-blink would print the accent into the transcript for the rest of the
+session.
+
+
 ## 2. Toast (light notification)
 
 | Item | Convention |
@@ -60,7 +101,7 @@ Every state above assumes eyes on the screen. A terminal session routinely runs 
 | Channel | One setting, `notifications`: `auto` (default) / `bell` / `iterm2` / `kitty` / `ghostty` / `off`. `auto` reads the terminal (`TERM_PROGRAM=iTerm.app` → `OSC 9`; kitty via `TERM_PROGRAM` or `TERM=xterm-kitty` → the three-part `OSC 99`; `TERM_PROGRAM=ghostty` → `OSC 777 ; notify`) and otherwise falls back to the **terminal bell**, which every terminal has. There is no capability probe — a notification protocol has no query, so a wrong guess is silence, and only a terminal that names itself gets its own protocol |
 | Triggers (exactly three) | (1) a permission prompt is surfaced — the turn is blocked and only the user can unblock it; (2) a turn whose wall time reached **10s** ended; (3) a turn failed at flow level. Nothing else notifies: a short turn was watched, and a page-level error sits beside a session that carries on |
 | Copy | One line, stating the state and nothing more: `Waiting for permission` · `Turn complete` · `Turn failed`. No counts, no summaries — the transcript is where detail belongs |
-| Terminal title | `OSC 2`, tracking the same states: busy `✳ bingo — working…`, waiting `✳ bingo — waiting for permission`, idle `bingo — <directory>`. Set once per state change (an unchanged title emits nothing), and handed back on teardown — including the panic path — but **only if this session ever took it** |
+| Terminal title | `OSC 2`, tracking the same states: busy `✳ bingo — working…`, waiting `✳ bingo — waiting for permission`, idle `bingo — <directory>`. While a turn runs the marker animates on the `title` token — `✳ ⠂ ✳ ⠐`, one frame per 960ms, static `✳` under `motion: "off"` — and a pending permission prompt outranks it: the waiting title is never animated over. Set once per state change (an unchanged title emits nothing, so a busy turn costs about one write per second), and handed back on teardown — including the panic path — but **only if this session ever took it** |
 | Multiplexers | Inside tmux the notification OSC travels in the passthrough envelope (tmux does not know 9/99/777 and drops them). The bell and the title stay bare: tmux acts on a bell it can see (`monitor-bell`), and `OSC 2` is a sequence it understands, sets as the pane title and propagates under `set-titles on` — passthrough would set the outer title behind its back and be overwritten on the next redraw |
 | Forbidden | Notifying per event (per tool call, per stream chunk); a notification carrying information that exists nowhere on screen; emitting anything at all under `off`, the terminal title included |
 | Ownership | The bytes are built by a pure module and written by the terminal driver, which stays the single owner of escape-sequence writes; they are emitted between frames, never inside a viewport diff |
@@ -202,9 +243,9 @@ the `src/error.rs` drift-guard unit tests (missing either turns CI red).
 | `aria-invalid` red outline | error-line highlight styling |
 | `aria-live` write-empty-string update | status-area content update (not row deletion) |
 | Focus transfer (async focus after render) | after the error line renders, scroll it into view + highlight |
-| `prefers-reduced-motion` | no such concept in TUI: spinner animation rate may degrade; the indicator itself is never removed |
+| `prefers-reduced-motion` | the `motion` setting (`auto` / `off`, or `BINGO_NO_MOTION=1`) is its exact analogue, and covers **every** animated surface through one gate (§1.1). Decoration rests; the indicator itself is never removed, and the two tokens that carry information (`stall`, `settle`) keep reporting |
 | requestAnimationFrame | TUI's frame loop is naturally post-render; not an issue |
-| Animation durations (150ms/120ms/100ms) | not applicable to TUI; expressed in frames (e.g. 1-2 frame fade-in), no exaggerated displacement |
+| Animation durations (150ms/120ms/100ms) | applicable, and stated in milliseconds: the seven tokens' cadences in §1.1 (120ms / 2s / 3s / 120ms / 300ms / 960ms). Durations are converted to frames at the render layer, never authored in frames |
 
 **TUI-side supplement (landed with #18)**: error **level/context is explicitly carried by the producer** (`UiEvent::Error { code, msg, level, context }`; chat.rs knows the trigger path when emitting), the render layer only consumes and never derives — level is not an inherent property of the code (`TIMEOUT` dual-slot, `PERMISSION_DENIED` dual-slot); the render layer and tests share the same event contract; duplicating a "code → level" mapping in the render layer or test side is forbidden.
 
@@ -230,6 +271,7 @@ Web-side conventions (for a future web frontend to reuse):
 - **Loading**: 200ms threshold triggers/hides correctly; local button in-place spinner; fullscreen overlay forbidden; **action-granularity de-dup (including Enter/form onSubmit)**.
 - **Toast**: 3s auto-dismiss, closable; hover/keyboard-focus pauses and resumes with the remaining time; max 2, oldest evicted only when full; same-kind de-dup replaces + resets the timer.
 - **Attention channel**: the byte sequence of each channel is a golden (bell = `\x07` alone; `OSC 9` / three-part `OSC 99` sharing one id per notification / `OSC 777 ; notify`); `auto` resolves over the full `TERM_PROGRAM`/`TERM` matrix and an explicit channel is never second-guessed; under tmux the notification OSC is wrapped and the bell and title are not; `off` emits zero bytes across every trigger, title included. Trigger coverage asserts the state machine, not the terminal: an accepted permission ask notifies (a queued one does not), a turn ≥10s notifies and a fresh one does not, a flow-level error notifies and a page-level one does not. Control characters never survive into a sequence.
+- **Motion tokens**: each of the seven is asserted as a pure function of a frame number — `pulse` advances exactly once per 120ms and preserves the glyph order; `beam` sweeps monotonically, stays inside the text and wraps once per 2s; `stall` never flips under 3s, flips on crossing it, and resets on progress; `settle` reports accent for exactly the first 120ms window; `meter` reaches its target within 300ms, monotonically, and re-aims from the displayed value; `title` alternates on 960ms boundaries. The gate is asserted twice over: `motion: "off"` rests every decoration (spinner on `✻`, no sweep, no breathing, static title, numbers snap) **and** leaves `stall`/`settle` reporting. Wiring is asserted at the surfaces: a stalled status row is warning-coloured with the glimmer out and its copy untouched, the busy title writes once per frame change and never over a pending prompt, and the completion row blinks accent while still live and enters scrollback at rest.
 - **Error states**: three levels + mixed state each trigger correctly; 401/403/500/offline map to the correct actions; field-level focuses the corresponding input; copy contains "what happened + what the user can do"; state resets after retry.
 - **Timeout**: read 10s / write 15s (short sync ops) time out into the corresponding error level; long turns go through the transport layer (120s/60s) + user interruption, escalating to flow-level on failure; **a late error arriving after success is cancelled**; the timeout timer is cancelled on success/failure.
 - **Interrupt**: a user interrupt is a persistent record, never a toast. The transcript keeps whatever the model already said and appends the marker the model reads — `[Request interrupted by user]` mid-stream, `[Request interrupted by user for tool use]` when tools were running; a turn that produced nothing records the marker alone. The transcript view renders that marker as a single error-coloured state line (no `❯` bubble, no send time), and a tool row stopped by the interrupt renders amber with the result line `Interrupted` — never the green completion glyph. Assert the marker in history and on screen, and that no transient "interrupted" warning is emitted alongside it.
@@ -240,6 +282,8 @@ Web-side conventions (for a future web frontend to reuse):
 - **Accessibility**: toast `aria-live` / error `role="alert"` readable by screen readers; under `prefers-reduced-motion`, motion is disabled but the loading indicator remains.
 
 ## Changelog
+
+- v1.56 (2026-08-14): motion becomes a layer instead of a habit (D87). bingo's only continuous animation was the update banner's breathing, the `motion` setting reached two surfaces out of five, and the main spinner — gated by nothing — advanced a glyph every frame, roughly four times Claude Code's rate. **Seven tokens now issue from one authority** (§1.1): `pulse` (120ms/glyph, same 8-glyph star cycle), `beam` (a 6-cell glimmer crossing the running verb once per 2s), `stall` (3s of silence turns the spinner and verb warning-coloured and puts the glimmer out), `settle` (the completion row wears the accent for one 120ms window before it freezes), `breath` (the banner curve, moved unchanged), `title` (`✳ ⠂ ✳ ⠐` at 960ms on the terminal title) and `meter` (a jumped number eases to its target over 300ms — applied to the status row's `↓ N tokens`). **The gate is now singular and honest**: `motion: "off"` / `BINGO_NO_MOTION=1` rests every decoration including the spinner, and deliberately does *not* silence `stall` or `settle`, which change colour to say something rather than to move. Every token is a pure function of a frame number, so animation is testable without a clock and the demand-gated loop stays deterministic; each token keeps the loop awake for its own window only. The stall state adds no copy — the verb, the seconds and the Esc hint are unchanged, because nothing new is known at three seconds. The settle blink respects write-once by happening *before* the row freezes rather than after.
 
 - v1.41 (2026-08-13): `/model` level-two feedback under D65 — a declared model list has no loading state and no failure state at all (it is read from settings, so no request can fail); a fetched list that fails while a cached one exists now renders **the cached list plus the reason row** (`⚠ <reason>; showing the last known list`) instead of the reason alone, applying the standing "degraded and visible" rule to a case that previously degraded to an empty menu. The page-level short-sync error row (§1 timeout tiering / §4.4 `TIMEOUT`) is unchanged and still fires. The level-two hint row gains `r refreshes` for fetched lists only.
 - v1.40 (2026-08-11): tool-output feedback hardening for issues #5/#22 — Bash stdout/stderr is streamed through the configurable `bashOutputMaxChars` cap (default/maximum 48,000) and appends a `[Content truncated: …]` recovery hint directing the agent to redirect output and use Read; invalid UTF-8 is replaced with an explicit note instead of silently dropping the stream. Read range calls keep the existing 20,000-character cap and append clear range/truncation notes after the bounded content.

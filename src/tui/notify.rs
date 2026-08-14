@@ -154,8 +154,11 @@ impl Attention {
 /// What the terminal title says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Title<'a> {
-    /// A turn is running.
-    Busy,
+    /// A turn is running. The glyph is the `title_glyph` motion token (D87):
+    /// `✳` and the braille half-cells alternating about once a second, or a
+    /// static `✳` when motion is off. The title is the one surface a user sees
+    /// while looking at another window, so it moves slowly and deliberately.
+    Busy(char),
     /// A permission prompt is waiting for an answer.
     WaitingPermission,
     /// Nothing is running; the title names where the session is.
@@ -165,7 +168,7 @@ pub enum Title<'a> {
 impl Title<'_> {
     fn text(self) -> String {
         match self {
-            Self::Busy => "✳ bingo — working…".to_string(),
+            Self::Busy(glyph) => format!("{glyph} bingo — working…"),
             Self::WaitingPermission => "✳ bingo — waiting for permission".to_string(),
             Self::Idle(cwd) => format!("bingo — {cwd}"),
         }
@@ -392,7 +395,7 @@ mod tests {
         // and tmux propagates it. Wrapped, it would set the outer terminal's
         // title behind tmux's back and be overwritten on the next redraw.
         let mut n = Notifier::new(NotifyChannel::Iterm2, &tmux);
-        n.set_title(Title::Busy);
+        n.set_title(Title::Busy('✳'));
         assert_eq!(
             n.take(),
             "\x1b]2;✳ bingo — working…\x07".as_bytes().to_vec()
@@ -475,21 +478,21 @@ mod tests {
         assert!(!n.enabled());
         n.attention(Attention::WaitingPermission);
         n.attention(Attention::TurnComplete);
-        n.set_title(Title::Busy);
+        n.set_title(Title::Busy('✳'));
         n.set_title(Title::Idle("bingo"));
         assert!(n.take().is_empty(), "disabled writes no bytes at all");
         // The default notifier is the disabled one: a Chat with no host attached
         // must not emit either.
         let mut d = Notifier::default();
         d.attention(Attention::TurnFailed);
-        d.set_title(Title::Busy);
+        d.set_title(Title::Busy('✳'));
         assert!(d.take().is_empty());
     }
 
     #[test]
     fn the_title_tracks_the_three_states_and_repeats_nothing() {
         let mut n = Notifier::new(NotifyChannel::Bell, &env(None, None, false));
-        n.set_title(Title::Busy);
+        n.set_title(Title::Busy('✳'));
         n.set_title(Title::WaitingPermission);
         n.set_title(Title::Idle("bingo"));
         assert_eq!(

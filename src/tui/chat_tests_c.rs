@@ -1311,3 +1311,81 @@ fn the_status_hint_offers_ctrl_b_only_while_a_command_runs() {
     drop(run);
     assert_eq!(chat.busy_hint(), "esc to interrupt");
 }
+
+// ---------------------------------------------------------------------------
+// D87 — the motion layer's two wired surfaces that are not the status row:
+// the terminal title's working animation, and the completion blink.
+// ---------------------------------------------------------------------------
+
+/// While a turn runs the title marker cycles, slowly and on a throttle: about
+/// one write per 960ms, and never a repeat of what the tab already says.
+#[test]
+fn the_busy_title_animates_once_a_second_and_repeats_nothing() {
+    let mut chat = chat_with_bell();
+    chat.handle(UiEvent::TurnStart);
+    assert_eq!(
+        emitted(&mut chat),
+        "\x1b]2;✳ bingo — working…\x07",
+        "the turn opens on the resting marker"
+    );
+
+    // Four seconds of frames produce four title changes, not a hundred and
+    // twenty: the tab is a surface for a user looking at another window.
+    let mut writes = Vec::new();
+    let four_seconds = 4_000 / crate::tui::motion::TICK_MS;
+    for _ in 0..four_seconds {
+        chat.tick();
+        let out = emitted(&mut chat);
+        if !out.is_empty() {
+            writes.push(out);
+        }
+    }
+    assert_eq!(
+        writes,
+        vec![
+            "\x1b]2;⠂ bingo — working…\x07".to_string(),
+            "\x1b]2;✳ bingo — working…\x07".to_string(),
+            "\x1b]2;⠐ bingo — working…\x07".to_string(),
+            "\x1b]2;✳ bingo — working…\x07".to_string(),
+        ],
+        "one write per frame change, and the marker comes back between them"
+    );
+
+    // Motion off: the same title, held still, for as long as the turn runs.
+    let mut still = chat_with_bell();
+    still.motion = crate::tui::motion::Motion::new(false);
+    still.handle(UiEvent::TurnStart);
+    assert_eq!(emitted(&mut still), "\x1b]2;✳ bingo — working…\x07");
+    for _ in 0..200 {
+        still.tick();
+    }
+    assert!(
+        emitted(&mut still).is_empty(),
+        "a still title writes nothing after the first"
+    );
+}
+
+/// A permission prompt outranks the animation: the title says what the session
+/// is waiting for until it is answered, and no frame overwrites it.
+#[test]
+fn a_pending_prompt_keeps_the_title_it_needs() {
+    let mut chat = chat_with_bell();
+    chat.handle(UiEvent::TurnStart);
+    let _ = emitted(&mut chat);
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    chat.asks
+        .send((
+            PermissionRequest::new("Allow running Bash", "cargo build", vec!["Allow".into()]),
+            tx,
+        ))
+        .unwrap();
+    assert!(chat.drain_asks());
+    let _ = emitted(&mut chat);
+    for _ in 0..200 {
+        chat.tick();
+    }
+    assert!(
+        emitted(&mut chat).is_empty(),
+        "the waiting title is not animated over"
+    );
+}
