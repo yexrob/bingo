@@ -21,7 +21,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "\\ + enter",
-        description: "insert newline (or ctrl+j)",
+        description: "insert newline (or ctrl+j · shift+enter)",
     },
     Binding {
         keys: "esc",
@@ -34,6 +34,10 @@ pub const BINDINGS: &[Binding] = &[
     Binding {
         keys: "up/down",
         description: "prompt history (edit queued messages while busy)",
+    },
+    Binding {
+        keys: "ctrl+p/n",
+        description: "prompt history (same as up/down)",
     },
     Binding {
         keys: "ctrl+a/e",
@@ -49,7 +53,11 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "alt+b/f",
-        description: "move one word",
+        description: "move one word (stops inside a path)",
+    },
+    Binding {
+        keys: "alt+d · alt+bksp",
+        description: "delete word forward / back",
     },
     Binding {
         keys: "ctrl+w/u/k",
@@ -57,7 +65,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+y",
-        description: "paste back last deletion",
+        description: "paste back last deletion (alt+y cycles earlier ones)",
     },
     Binding {
         keys: "ctrl+r",
@@ -97,7 +105,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+g",
-        description: "open agents / channels workspace",
+        description: "edit the prompt in $EDITOR (or ctrl+x ctrl+e)",
     },
     Binding {
         keys: "ctrl+b",
@@ -206,14 +214,42 @@ pub fn help_lines(width: usize, max_rows: usize) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// D86 moved ctrl+g from the workspace modal to the `$EDITOR` compose, and
+    /// the panel names the readline chord that does the same thing — the two
+    /// doors are one binding, so they are one row.
     #[test]
-    fn ctrl_g_help_opens_the_workspace_directly() {
+    fn ctrl_g_help_names_the_editor_and_its_chord() {
         let binding = BINDINGS
             .iter()
             .find(|binding| binding.keys == "ctrl+g")
             .unwrap_or_else(|| panic!("ctrl+g binding missing"));
-        assert_eq!(binding.description, "open agents / channels workspace");
-        assert!(!binding.description.contains("pick"));
+        assert_eq!(
+            binding.description,
+            "edit the prompt in $EDITOR (or ctrl+x ctrl+e)"
+        );
+        assert!(
+            !binding.description.contains("workspace"),
+            "the workspace is reached from the ctrl+b manager now"
+        );
+    }
+
+    /// The kill/yank family is documented as a family: a ring is only useful
+    /// if the key that cycles it is discoverable from the key that fills it.
+    #[test]
+    fn the_kill_ring_keys_name_each_other() {
+        let find = |keys: &str| {
+            BINDINGS
+                .iter()
+                .find(|binding| binding.keys == keys)
+                .unwrap_or_else(|| panic!("{keys} binding missing"))
+        };
+        assert!(find("ctrl+y").description.contains("alt+y"));
+        assert!(find("alt+d · alt+bksp").description.contains("word"));
+        assert!(find("ctrl+p/n").description.contains("history"));
+        assert!(
+            find("\\ + enter").description.contains("shift+enter"),
+            "the enhanced-terminal newline is named where the newline is"
+        );
     }
 
     /// ctrl+b reads the situation: a shell command running in the foreground is

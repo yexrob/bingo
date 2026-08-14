@@ -146,11 +146,15 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
   Ctrl+U. Interactive/TTY commands (top/vim/ssh/fzf, etc.) are rejected — use
   batch equivalents (`top -b -n 1`).
 - Large pastes collapse into a `[Pasted text #N +M lines]` placeholder and
-  expand to real content on send.
-- `Ctrl+R` reverse history search; `↑↓` history recall (move the cursor first
-  inside multi-line input).
-- `Ctrl+S` stash/restore the input, `Ctrl+Y` paste back deleted text,
-  `Ctrl+_` undo.
+  expand to real content on send. A paste is not typing: its newlines stay
+  newlines instead of sending, and an `@` or `/` inside it is a character
+  rather than a dropdown.
+- `Ctrl+R` reverse history search; `↑↓` (or `Ctrl+P`/`Ctrl+N`) history recall
+  (move the cursor first inside multi-line input).
+- `Ctrl+S` stash/restore the input, `Ctrl+Y` paste back deleted text (`Alt+Y`
+  right after it cycles the kill ring), `Ctrl+_` undo.
+- `Ctrl+G`, or the readline chord `Ctrl+X Ctrl+E`, composes the draft in
+  `$VISUAL`/`$EDITOR` and puts the saved content back as one undo step.
 - `@` at the start of a word opens the mention dropdown over the project's
   files (git-tracked and untracked-but-not-ignored inside a repository,
   otherwise a bounded walk) and the running agents; `Tab`/`Enter` inserts the
@@ -171,7 +175,12 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
 | `Ctrl+T` | toggle the task area |
 | `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `q` close) |
-| `Ctrl+G` | open the full workspace directly; `Ctrl+K` switches channels and DMs |
+| `Ctrl+G` | compose the draft in `$VISUAL`/`$EDITOR` (or the readline chord `Ctrl+X Ctrl+E`); a non-zero exit keeps the draft |
+| `Ctrl+P` / `Ctrl+N` | prompt history — the same keys as `↑`/`↓`, including pulling a queued message back |
+| `Alt+B` / `Alt+F` | move one word, stopping at `/` `-` `_` `.` so a path is walked a segment at a time |
+| `Alt+D` / `Alt+Backspace` | kill one word forward / back (`Ctrl+W` takes the whole whitespace token) |
+| `Ctrl+Y` / `Alt+Y` | yank the newest kill; `Alt+Y` right after it cycles the 10-entry kill ring |
+| `Shift+Enter` | insert a newline (wherever the terminal speaks the kitty keyboard protocol) |
 | `Ctrl+B` | move the running shell command to the background; with none running, manage background agents |
 | `Ctrl+L` | clear and redraw |
 | `@` | mention a project file or a running agent: fuzzy dropdown, `Tab`/`Enter` inserts the relative path (or `@name`) |

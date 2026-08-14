@@ -29,6 +29,60 @@ const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
 /// CSI ? 2026 l — end synchronized update.
 const SYNC_END: &[u8] = b"\x1b[?2026l";
 
+/// Whether the terminal answered the kitty keyboard-protocol query (D86).
+static KEYBOARD_ENHANCEMENT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Whether the flags are pushed right now, so [`pop_keyboard_enhancement`] can
+/// be called blind from every teardown path and emit exactly when there is
+/// something to pop.
+static ENHANCEMENT_PUSHED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Ask the terminal whether it speaks the kitty keyboard protocol (D86).
+///
+/// Runs once at startup, before raw mode, alongside the other `/dev/tty`
+/// probes: it is a query/response round trip, and crossterm pairs it with a
+/// primary-device-attributes query so a terminal that does not know the
+/// protocol still answers *something* and the call returns straight away. The
+/// answer is remembered, so the resume after an `$EDITOR` suspend pushes the
+/// flags again without asking twice.
+pub(crate) fn probe_keyboard_enhancement() {
+    let supported = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    KEYBOARD_ENHANCEMENT.store(supported, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Push `DISAMBIGUATE_ESCAPE_CODES` if the terminal admitted to understanding
+/// it. That one flag is the whole point: with it, `shift+enter` arrives as its
+/// own key instead of as a bare `\r` indistinguishable from Enter, which is
+/// what makes the newline binding every other editor has possible here. No
+/// other flag is pushed — event types and release events would change what
+/// every existing binding sees.
+pub(crate) fn push_keyboard_enhancement(out: &mut impl IoWrite) {
+    use std::sync::atomic::Ordering;
+    if !KEYBOARD_ENHANCEMENT.load(Ordering::SeqCst)
+        || ENHANCEMENT_PUSHED.swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+    let _ = crossterm::execute!(
+        out,
+        crossterm::event::PushKeyboardEnhancementFlags(
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        )
+    );
+}
+
+/// Pop the flags. Safe to call from any teardown path including the panic
+/// hook: with nothing pushed it writes nothing, and the flag it swaps makes a
+/// second call a no-op rather than a second pop off the terminal's stack.
+pub(crate) fn pop_keyboard_enhancement(out: &mut impl IoWrite) {
+    use std::sync::atomic::Ordering;
+    if !ENHANCEMENT_PUSHED.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let _ = crossterm::execute!(out, crossterm::event::PopKeyboardEnhancementFlags);
+}
+
 /// Raw byte access on top of a [`Backend`].
 ///
 /// Two concerns need bytes the `Backend` trait cannot express: synchronized-update bracketing and
@@ -795,6 +849,49 @@ mod tests {
 
     use super::*;
     use crate::tui::test_util::Recorder;
+
+    /// The keyboard-enhancement pair is a latch, not a counter (D86): the pop
+    /// is called blind from every teardown path — clean exit, panic hook, the
+    /// `$EDITOR` suspend — so it has to write nothing when nothing is pushed
+    /// and never pop twice off the terminal's own stack. One test, because the
+    /// flags are process-global and two would race.
+    #[test]
+    fn the_keyboard_enhancement_pair_is_a_latch() {
+        use std::sync::atomic::Ordering;
+        let probed = KEYBOARD_ENHANCEMENT.swap(false, Ordering::SeqCst);
+        let pushed = ENHANCEMENT_PUSHED.swap(false, Ordering::SeqCst);
+
+        // Unsupported terminal: no sequence, and the pop is still safe.
+        let mut out: Vec<u8> = Vec::new();
+        push_keyboard_enhancement(&mut out);
+        assert!(
+            out.is_empty(),
+            "nothing is emitted at a terminal that said no"
+        );
+        pop_keyboard_enhancement(&mut out);
+        assert!(out.is_empty(), "and the blind pop writes nothing");
+
+        // Supported: pushed once, popped once, whatever the call count.
+        KEYBOARD_ENHANCEMENT.store(true, Ordering::SeqCst);
+        push_keyboard_enhancement(&mut out);
+        let after_push = out.len();
+        assert!(after_push > 0, "the push reaches the terminal");
+        push_keyboard_enhancement(&mut out);
+        assert_eq!(
+            out.len(),
+            after_push,
+            "a second push is not a second stack entry"
+        );
+
+        pop_keyboard_enhancement(&mut out);
+        let after_pop = out.len();
+        assert!(after_pop > after_push, "the pop reaches the terminal");
+        pop_keyboard_enhancement(&mut out);
+        assert_eq!(out.len(), after_pop, "and only the first pop does");
+
+        KEYBOARD_ENHANCEMENT.store(probed, Ordering::SeqCst);
+        ENHANCEMENT_PUSHED.store(pushed, Ordering::SeqCst);
+    }
 
     fn term(width: u16, height: u16, row: u16) -> InlineTerm<Recorder> {
         let mut backend = Recorder::new(width, height);

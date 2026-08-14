@@ -130,8 +130,11 @@ bingo --continue            # 恢复最近一次会话
   前缀粘性保留；空输入 Esc/退格/Ctrl+U 退出。交互式/TTY 命令
   （top/vim/ssh/fzf 等）会被拒绝，请用批处理等价物（`top -b -n 1`）。
 - 大段粘贴自动折叠为 `[Pasted text #N +M lines]` 占位，发送时展开真实内容。
-- `Ctrl+R` 历史反向搜索；`↑↓` 历史回溯（多行输入内先移光标）。
-- `Ctrl+S` 暂存/恢复输入、`Ctrl+Y` 粘回删除、`Ctrl+_` 撤销。
+  粘贴不是打字：其中的换行仍是换行而不会发送，`@` 与 `/` 只是字符，不弹下拉。
+- `Ctrl+R` 历史反向搜索；`↑↓`（或 `Ctrl+P`/`Ctrl+N`）历史回溯（多行输入内先移光标）。
+- `Ctrl+S` 暂存/恢复输入、`Ctrl+Y` 粘回删除（紧接 `Alt+Y` 轮换 kill ring）、`Ctrl+_` 撤销。
+- `Ctrl+G`（或 readline 组合键 `Ctrl+X Ctrl+E`）用 `$VISUAL`/`$EDITOR` 编辑草稿，
+  保存后的内容作为一步撤销替换输入。
 - 词首输入 `@` 打开 mention 下拉：项目文件（git 仓库内取已跟踪与未忽略的未跟踪文件，
   否则走有界目录遍历）与正在运行的 agent，按 `@` 之后的内容模糊过滤；
   `Tab`/`Enter` 插入相对于会话目录的路径，agent 则插入 `@name`。
@@ -148,7 +151,12 @@ bingo --continue            # 恢复最近一次会话
 | `Ctrl+C` | busy 中断 / 有文本清空 / 空输入连按两次退出 |
 | `Ctrl+T` | 显隐任务区 |
 | `Ctrl+O` | 打开 transcript 视图：整段会话连同全部工具输出，独占一屏（`ctrl+e` 折叠 · `/` 搜索 · `q` 关闭） |
-| `Ctrl+G` | 直接打开全屏 Slack 式工作区；`Ctrl+K` 切换频道与 DM，alt+↑↓ 上下会话 |
+| `Ctrl+G` | 用 `$VISUAL`/`$EDITOR` 编辑当前草稿（也可用 readline 组合键 `Ctrl+X Ctrl+E`）；编辑器非零退出则保留原草稿 |
+| `Ctrl+P` / `Ctrl+N` | 提示历史——与 `↑`/`↓` 完全同键，包含把排队消息取回 |
+| `Alt+B` / `Alt+F` | 按词移动，在 `/` `-` `_` `.` 处停下，便于逐段走过路径 |
+| `Alt+D` / `Alt+Backspace` | 向后/向前删一个词（`Ctrl+W` 仍删整个空白分隔的词） |
+| `Ctrl+Y` / `Alt+Y` | 粘回最近一次删除；紧接着按 `Alt+Y` 在 10 条 kill ring 中轮换 |
+| `Shift+Enter` | 插入换行（终端支持 kitty 键盘协议时可用） |
 | `Ctrl+B` | 把正在前台运行的命令转入后台；没有命令在跑时管理后台 agent |
 | `Ctrl+L` | 清屏重画 |
 | `@` | mention 项目文件或运行中的 agent：模糊下拉，`Tab`/`Enter` 插入相对路径（或 `@name`） |

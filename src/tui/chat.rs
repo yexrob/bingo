@@ -877,8 +877,9 @@ pub struct Chat {
     pub input: String,
     /// Byte position of the caret in `input` (always on a char boundary).
     pub cursor: usize,
-    /// Text last deleted with ctrl+k/u/w (ctrl+y pastes it back).
-    pub(crate) kill: String,
+    /// Readline state for the prompt: the kill ring ctrl+k/u/w/alt+d feed and
+    /// ctrl+y/alt+y read, plus the `ctrl+x ctrl+e` chord (D86).
+    pub(crate) composer: crate::tui::composer::Composer,
     /// Edit undo stack (text + caret), capped at [`UNDO_MAX`].
     pub(crate) undo: Vec<(String, usize)>,
     /// Type of the last edit (consecutive same-kind edits merge in the undo stack).
@@ -925,6 +926,10 @@ pub struct Chat {
     /// Time of the last key press and the count of consecutive "fast" keys (paste-burst heuristic).
     pub(crate) last_key_at: Option<std::time::Instant>,
     pub(crate) burst_keys: usize,
+    /// This edit arrived as a paste rather than as typing — a detected burst
+    /// key or a bracketed `Event::Paste`. The completion surfaces read it and
+    /// close instead of recomputing (D86).
+    pub(crate) pasting: bool,
     /// Collapsed paste blocks: placeholder `[Pasted text #N +M lines]` → real content.
     pastes: Vec<(String, String)>,
     /// `!` commands run in this session (prefix completion for Tab in bash mode).
@@ -939,6 +944,10 @@ pub struct Chat {
     /// ctrl+o requests the transcript view: the host opens the alternate-screen
     /// pager over the whole session (cleared after consumption, D82).
     pub open_transcript: bool,
+    /// ctrl+g (or `ctrl+x ctrl+e`) requests the `$EDITOR` compose: the host
+    /// hands the terminal over and puts the edited draft back (cleared after
+    /// consumption, D86).
+    pub open_editor: bool,
     /// bash mode (`!` prefix): input executes directly, bypassing the model.
     pub bash_mode: bool,
     pub busy: bool,
@@ -1163,6 +1172,12 @@ pub enum AgentManager {
 /// Entity view to open from the main chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityOpen {
+    /// The workspace with nothing selected. Ctrl+G was its door until D86 gave
+    /// that key to `$EDITOR`; the modal itself is retired in D89 and the
+    /// conversation switcher that replaces this entry point is D90, so the
+    /// variant stays until one of them removes it. Agents still reach the
+    /// workspace through the ctrl+b manager (`Agent` below).
+    #[allow(dead_code)]
     Workspace,
     Agent(String),
 }
@@ -1308,7 +1323,7 @@ impl Chat {
             messages: Vec::new(),
             input: String::new(),
             cursor: 0,
-            kill: String::new(),
+            composer: crate::tui::composer::Composer::default(),
             undo: Vec::new(),
             last_edit: None,
             last_thinking: None,
@@ -1328,12 +1343,14 @@ impl Chat {
             esc_at: None,
             last_key_at: None,
             burst_keys: 0,
+            pasting: false,
             pastes: Vec::new(),
             bash_history: Vec::new(),
             search: None,
             permission_mode,
             force_redraw: false,
             open_transcript: false,
+            open_editor: false,
             bash_mode: false,
             busy: false,
             stream_msg: None,
@@ -2347,6 +2364,15 @@ impl Chat {
     /// The burst heuristic ([`PASTE_BURST_GAP`]) stays as the fallback for
     /// terminals that do not report bracketed paste.
     pub fn on_paste(&mut self, text: &str) {
+        // Everything below is one edit that the user did not type, so the
+        // completion surfaces close rather than reopen on whatever character
+        // the payload happens to end with (D86).
+        self.pasting = true;
+        self.paste_inner(text);
+        self.pasting = false;
+    }
+
+    fn paste_inner(&mut self, text: &str) {
         // Tests must not read the system clipboard: an image in it would turn
         // a text paste into an image placeholder (the bracketed_paste test was
         // once flaky because the host clipboard held an image).
@@ -3829,3 +3855,7 @@ mod tests_c;
 #[cfg(test)]
 #[path = "chat_tests_d.rs"]
 mod tests_d;
+
+#[cfg(test)]
+#[path = "chat_tests_e.rs"]
+mod tests_e;

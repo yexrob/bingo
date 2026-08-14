@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::sync::mpsc;
 
 use crate::query::Session;
+use crate::tui::composer::KillDir;
 use crate::ui::UiEvent;
 
 /// Everything Esc can dismiss, in the order it dismisses them (D80). The key
@@ -1302,6 +1303,16 @@ impl super::Chat {
         now: std::time::Instant,
     ) -> bool {
         let pasting = self.track_burst(now);
+        self.pasting = pasting;
+        // The two "immediately after" rules are counted in keys, not seconds
+        // (D86): the tick is what makes a kill coalesce with the kill before
+        // it and `alt+y` a yank-pop rather than a no-op.
+        self.composer.tick();
+        // `ctrl+x` arms its chord for exactly one key. Taking it here rather
+        // than in `control_key` is what makes "anything else" mean anything
+        // else — a plain character, Esc, a dialog key — and not just the
+        // control keys that reach the same handler.
+        let chord = self.composer.take_chord(now);
         // Update-banner breathing (P1): the first keypress in the window stops it immediately (the user's attention has moved to the input;
         // the banner itself stays, it just stops breathing).
         if self.update_anim_active() {
@@ -1375,7 +1386,7 @@ impl super::Chat {
         if modifiers.contains(KeyModifiers::CONTROL)
             && let KeyCode::Char(c) = code
         {
-            return self.control_key(c);
+            return self.control_key(c, chord, now);
         }
         if modifiers.contains(KeyModifiers::ALT)
             && let KeyCode::Char(c) = code
@@ -1406,6 +1417,19 @@ impl super::Chat {
             }
             KeyCode::Up => self.vertical(false),
             KeyCode::Down => self.vertical(true),
+            // Alt+Backspace is readline's `backward-kill-word`: the sub-word
+            // kill, so it stops inside a path where ctrl+w takes the whole
+            // token (D86).
+            KeyCode::Backspace if modifiers.contains(KeyModifiers::ALT) => {
+                self.snapshot(EditKind::Bulk);
+                let end = self.cursor;
+                let start = crate::tui::input::subword_left(&self.input, end);
+                let cut =
+                    crate::tui::input::kill_between(&mut self.input, &mut self.cursor, start, end);
+                self.composer.kill(cut, KillDir::Back);
+                self.after_edit();
+                true
+            }
             KeyCode::Backspace => {
                 // Empty-input backspace in bash mode exits shell mode (CC).
                 if self.bash_mode && self.input.is_empty() {
@@ -1451,12 +1475,14 @@ impl super::Chat {
                 true
             }
             // `?` on empty input toggles the shortcut panel; with text it is an ordinary character.
-            KeyCode::Char('?') if self.input.is_empty() && !self.bash_mode => {
+            // Inside a paste it is always the character: a payload that opens
+            // with `?` or `!` is text, not a command to this composer (D86).
+            KeyCode::Char('?') if self.input.is_empty() && !self.bash_mode && !pasting => {
                 self.help_visible = !self.help_visible;
                 true
             }
             // `!` on empty input enters shell mode (`!` itself never enters the input).
-            KeyCode::Char('!') if self.input.is_empty() && !self.bash_mode => {
+            KeyCode::Char('!') if self.input.is_empty() && !self.bash_mode && !pasting => {
                 self.bash_mode = true;
                 true
             }
@@ -1686,7 +1712,14 @@ impl super::Chat {
     }
 
     /// Ctrl+<char> editing commands (readline semantics).
-    fn control_key(&mut self, c: char) -> bool {
+    ///
+    /// `chord` says the previous key was `ctrl+x`, which turns this key's
+    /// `ctrl+e` into the readline chord for "compose in `$EDITOR`" (D86).
+    fn control_key(&mut self, c: char, chord: bool, now: std::time::Instant) -> bool {
+        if chord && c == 'e' {
+            self.compose_in_editor();
+            return true;
+        }
         match c {
             'a' => {
                 self.cursor = crate::tui::input::line_start(&self.input, self.cursor);
@@ -1698,7 +1731,8 @@ impl super::Chat {
             }
             'k' => {
                 self.snapshot(EditKind::Bulk);
-                self.kill = crate::tui::input::kill_to_end(&mut self.input, &mut self.cursor);
+                let cut = crate::tui::input::kill_to_end(&mut self.input, &mut self.cursor);
+                self.composer.kill(cut, KillDir::Forward);
                 self.after_edit();
                 true
             }
@@ -1709,27 +1743,32 @@ impl super::Chat {
                     return true;
                 }
                 self.snapshot(EditKind::Bulk);
-                self.kill = crate::tui::input::kill_to_start(&mut self.input, &mut self.cursor);
+                let cut = crate::tui::input::kill_to_start(&mut self.input, &mut self.cursor);
+                self.composer.kill(cut, KillDir::Back);
                 self.after_edit();
                 true
             }
             'w' => {
                 self.snapshot(EditKind::Bulk);
-                self.kill = crate::tui::input::kill_word(&mut self.input, &mut self.cursor);
+                let cut = crate::tui::input::kill_word(&mut self.input, &mut self.cursor);
+                self.composer.kill(cut, KillDir::Back);
                 self.after_edit();
                 true
             }
             'y' => {
-                if self.kill.is_empty() {
-                    return true;
-                }
-                self.snapshot(EditKind::Bulk);
-                let kill = std::mem::take(&mut self.kill);
-                crate::tui::input::insert(&mut self.input, &mut self.cursor, &kill);
-                self.kill = kill;
-                self.after_edit();
+                self.yank();
                 true
             }
+            // ctrl+x arms the `ctrl+x ctrl+e` chord and does nothing on its
+            // own. The next key clears it wherever it lands.
+            'x' => {
+                self.composer.arm_chord(now);
+                true
+            }
+            // ctrl+p/ctrl+n are ↑/↓ exactly — same function, so history
+            // browsing and D83's queue pull-back behave identically.
+            'p' => self.vertical(false),
+            'n' => self.vertical(true),
             // ctrl+d deletes the char after the caret only when there is text (empty input never quits).
             'd' => {
                 if self.input.is_empty() {
@@ -1744,10 +1783,11 @@ impl super::Chat {
                 self.insert_newline();
                 true
             }
-            // Ctrl+G opens the full agents/channels workspace.
+            // Ctrl+G composes the draft in `$EDITOR` (D86). It used to open
+            // the agents/channels workspace, which D89 retires and which the
+            // ctrl+b manager already reaches (Enter on an agent).
             'g' => {
-                self.open_entity = Some(EntityOpen::Workspace);
-                self.dirty = true;
+                self.compose_in_editor();
                 true
             }
             'l' => {
@@ -1793,23 +1833,75 @@ impl super::Chat {
         }
     }
 
-    /// Alt+<char>: word movement and the thinking toggle.
+    /// Alt+<char>: sub-word movement and kills, yank-pop, and the thinking
+    /// toggle. The motions here are readline's `backward-word` family, so they
+    /// stop inside a path (D86); `ctrl+w` keeps the whitespace word a shell has.
     fn alt_key(&mut self, c: char) -> bool {
         match c {
             'b' => {
-                self.cursor = crate::tui::input::word_left(&self.input, self.cursor);
+                self.cursor = crate::tui::input::subword_left(&self.input, self.cursor);
                 true
             }
             'f' => {
-                self.cursor = crate::tui::input::word_right(&self.input, self.cursor);
+                self.cursor = crate::tui::input::subword_right(&self.input, self.cursor);
                 true
             }
+            'd' => {
+                self.snapshot(EditKind::Bulk);
+                let start = self.cursor;
+                let end = crate::tui::input::subword_right(&self.input, self.cursor);
+                let cut =
+                    crate::tui::input::kill_between(&mut self.input, &mut self.cursor, start, end);
+                self.composer.kill(cut, KillDir::Forward);
+                self.after_edit();
+                true
+            }
+            'y' => self.yank_pop(),
             't' => {
                 self.toggle_thinking();
                 true
             }
             _ => false,
         }
+    }
+
+    /// Ctrl+Y: insert the top of the kill ring at the caret.
+    fn yank(&mut self) {
+        let Some(text) = self.composer.top().map(str::to_string) else {
+            return;
+        };
+        self.snapshot(EditKind::Bulk);
+        let start = self.cursor;
+        crate::tui::input::insert(&mut self.input, &mut self.cursor, &text);
+        self.composer.note_yank(start, text.len());
+        self.after_edit();
+    }
+
+    /// Alt+Y: rotate the ring in place over the text the previous key yanked.
+    /// Anywhere else it is not a binding at all — it does nothing and says
+    /// nothing, which is what readline does with `yank-pop` out of context.
+    fn yank_pop(&mut self) -> bool {
+        let Some((start, len, text)) = self.composer.yank_pop() else {
+            return false;
+        };
+        self.snapshot(EditKind::Bulk);
+        let end = (start + len).min(self.input.len());
+        let start = start.min(end);
+        self.input.replace_range(start..end, &text);
+        self.cursor = start + text.len();
+        self.after_edit();
+        true
+    }
+
+    /// Ctrl+G / `ctrl+x ctrl+e`: ask the host for the `$EDITOR` round trip.
+    /// A pending question keeps priority for the same reason ctrl+o does — the
+    /// dialog is blocking a turn and its keys are one keystroke from done.
+    fn compose_in_editor(&mut self) {
+        if self.pending_ask.is_some() {
+            return;
+        }
+        self.open_editor = true;
+        self.dirty = true;
     }
 
     /// ↑/↓: move within a multi-line input first, then switch history at the first/last row;
@@ -1883,9 +1975,23 @@ impl super::Chat {
     }
 
     /// Wrap-up after every edit: refresh the dropdown suggestions, leave history-browsing mode.
+    ///
+    /// While the edit is a paste rather than typing ([`Chat::pasting`], D86)
+    /// the completion surfaces are closed instead of recomputed. A dropdown is
+    /// an answer to typing, and pasted text that happens to contain `@` or `/`
+    /// is not asking the question — worse, an `@` dropdown opened mid-burst
+    /// claims the Enter that the rest of the paste needs as a newline, and the
+    /// funnel's file walk would run once per pasted character. The first
+    /// keystroke after the burst re-evaluates, which is the only moment the
+    /// end of a burst is observable at all.
     pub(crate) fn after_edit(&mut self) {
         self.history.detach();
-        self.update_slash_suggestions();
+        if self.pasting {
+            self.clear_slash_suggestions();
+            self.mention = None;
+        } else {
+            self.update_slash_suggestions();
+        }
         // G12: error/usage rows clear on the next input — the user has acted on them.
         if !self.slash_error_lines.is_empty() {
             self.slash_error_lines.clear();

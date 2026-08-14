@@ -405,6 +405,22 @@ pub async fn run_inline(
             dirty = true;
         }
 
+        // `$EDITOR` compose (ctrl+g / ctrl+x ctrl+e, D86). Unlike the pager
+        // this hands the terminal to a foreign process, so the event stream is
+        // replaced rather than reused; the return goes through the resize
+        // channel for the same reason the pager's does — the editor may well
+        // have been resized while it had the screen.
+        if std::mem::take(&mut chat.open_editor) {
+            crate::tui::composer::run_editor(&mut chat, &mut events);
+            if let Ok((w, h)) = crossterm::terminal::size() {
+                pending_resize = Some((Size::new(w, h), Instant::now()));
+            } else {
+                chat.force_redraw = true;
+            }
+            chat.dirty = true;
+            dirty = true;
+        }
+
         // Do not render before the resize storm quiets down (the terminal geometry has changed; old-width
         // frames only add noise); events are handled as usual and one frame catches up after the quiet.
         if pending_resize.is_some() {
@@ -643,6 +659,15 @@ pub async fn run_fullscreen(
         // canvas over directly; full repaint after return.
         if std::mem::take(&mut chat.open_transcript) {
             crate::tui::transcript::run_transcript_modal(&mut chat, &mut events, true).await?;
+            chat.force_redraw = true;
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // `$EDITOR` compose (D86): the suspend leaves the alternate screen and
+        // the resume re-enters it, so the canvas is repainted from scratch.
+        if std::mem::take(&mut chat.open_editor) {
+            crate::tui::composer::run_editor(&mut chat, &mut events);
             chat.force_redraw = true;
             chat.dirty = true;
             dirty = true;

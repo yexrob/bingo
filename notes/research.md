@@ -1724,3 +1724,92 @@ dropdown open used to take the name-phase shortcut ("complete and execute"), whi
 dispatched `/deepseek-chat` as a command; it is now gated on the name phase. And
 `apply_slash_suggestion` never moved the caret, so Tab-completing `/mo` into `/model ` left the
 cursor at column 3 — it now follows the text it completed.
+
+### D86. The composer is a readline, and a prompt worth writing is worth writing in your editor
+
+Four gaps, one surface. (a) A prompt longer than a sentence had to be composed in a single-line-ish
+box with `\`+Enter for newlines, while every shell and every git commit has had `$EDITOR` for
+decades. (b) `shift+enter` was already wired to insert a newline and could never fire: no terminal
+sends it distinguishably unless someone asks, and nobody asked. (c) The paste-burst heuristic
+protected Enter and nothing else, so a pasted `@` or `/` opened a dropdown mid-paste — and that
+dropdown then claimed the very Enter the rest of the paste needed as a newline. (d) The readline
+set was half there: `ctrl+a/e/k/u/w/y` and `alt+b/f` existed, but the kills all overwrote one
+`String` slot, so two kills meant the first was gone, and `ctrl+p/n`, `alt+d`, `alt+backspace` and
+`alt+y` were not bound at all.
+
+**`$EDITOR` (ctrl+g, and the readline chord `ctrl+x ctrl+e`).** `$VISUAL` first, then `$EDITOR`;
+neither set is not a dead key press but an info line naming the variable to set. The draft goes to a
+pid-and-counter-tagged temp file, the terminal is handed over in full, the editor runs as a child
+inheriting it, and the file comes back as the draft with one trailing newline trimmed. A non-zero
+exit **keeps** the draft — an abandoned editor is the one case where replacing the prompt would be
+unrecoverable — and says so. The replacement is one undo step, so `ctrl+_` returns to what was typed
+before the editor opened.
+
+Two things about the hand-over are not obvious and are the reason this is not three lines in
+`chat_tail.rs`. First, **the terminal goes through D77's claim protocol**, not through an ad-hoc
+`disable_raw_mode`: `suspend_terminal` performs the same release the clean teardown does, and the
+guard's `Drop` performs the resume, so a panic while the editor holds the screen restores exactly
+what a clean return would have. This also forced the setup sequence out of `run_tui_session` into
+`setup_terminal(fullscreen)` — the resume needs the same answer to "what does this host have
+switched on", and a second copy of it would have been a second answer. Second, **crossterm's
+`EventStream` has to be dropped first**. It parks a background thread inside `poll_internal`, which
+*reads* the terminal; an editor sharing that descriptor loses keystrokes to it. Dropping the stream
+wakes that thread and ends it, and the host continues on the fresh stream left in its place.
+
+The chord is armed by `ctrl+x` for exactly one key. Taking it at the top of `on_key_at` rather than
+inside `control_key` is what makes "anything else clears it" mean *anything* — a plain character,
+Esc, a dialog key — instead of only the control keys that reach the same handler. `ctrl+e` keeps
+being end-of-line everywhere else, and D81's dialog `ctrl+e` and D82's transcript `ctrl+e` are
+untouched, because neither ever sees an armed chord.
+
+**Kitty keyboard enhancement.** At setup, if `supports_keyboard_enhancement()` says yes, push
+`DISAMBIGUATE_ESCAPE_CODES` and nothing else — `REPORT_EVENT_TYPES` would add release events and
+change what every existing binding sees. That one flag is what makes `shift+enter` arrive as its own
+key rather than as a bare `\r`, so the newline binding that was already written finally fires. The
+pair is a **latch, not a counter**: the push is skipped if already pushed, the pop writes nothing if
+nothing is pushed, and every teardown path calls the pop blind. There is exactly one pop site —
+inside `restore_terminal` — which is how the clean exit, the panic hook, the setup-failure path and
+the `$EDITOR` suspend are all covered by construction rather than by four remembered calls.
+
+**Paste-burst hardening — what was already there and what is new.** Already handled: Enter inside a
+detected burst inserted a newline instead of submitting, and bracketed `Event::Paste` was one edit
+rather than one per character. New: during a burst *and* during a bracketed paste, `after_edit`
+**closes** the completion surfaces instead of recomputing them. A dropdown is an answer to typing,
+and pasted text containing `@` or `/` is not asking the question. This also removes a per-keystroke
+file walk and `load_skills` call from the middle of a large paste. The end of a burst is only
+observable from the next event, so the re-evaluation happens on the first keystroke that is not part
+of it — which is the honest reading of "re-evaluate once at the end". The empty-input meanings of
+`!` and `?` are suppressed the same way.
+
+**Known limit, stated rather than papered over**: the heuristic cannot see a paste's first
+`PASTE_BURST_KEYS` characters — they are indistinguishable from typing — so a burst-pasted payload
+whose *first* character is `!` still enters shell mode on terminals with no bracketed paste. That is
+what bracketed paste exists to fix and why it is the primary path; the burst heuristic remains the
+fallback it was documented as.
+
+**Readline motions and the kill ring.** `ctrl+p`/`ctrl+n` route through `vertical()` — the same
+function `↑`/`↓` use — so history browsing, multi-line caret movement and D83's queue pull-back
+(including losing the race to a turn that already took the message) are identical by construction
+rather than by parallel implementation. The kill ring is bounded at 10 and coalesces
+readline-style: consecutive kills in the same direction rebuild one entry in **text** order, so
+`ctrl+w ctrl+w` yanks both words back the way they were typed. `ctrl+y` inserts the top; `alt+y`
+immediately after rotates in place and wraps, and anywhere else does nothing at all rather than
+inserting something unasked. Both "immediately after" rules are counted in **keys, not seconds**: a
+key that went to a dialog or a dropdown still ticks the counter and so breaks the chain, which is
+exactly what readline means by an intervening command.
+
+Word motion splits in two, which is readline's own distinction and happens to be what a path needs.
+`alt+b`/`alt+f`/`alt+d`/`alt+backspace` use a new `subword_*` boundary — alphanumeric runs, so `/`,
+`-`, `_` and `.` are all stops and `src/tui/chat_tail.rs` is six stops rather than one. `ctrl+w`
+keeps the whitespace word, exactly as a shell does. `word_right` had no caller left afterwards and
+was deleted.
+
+**Key-conflict resolutions.** `ctrl+g` was the agents/channels workspace and is now the editor. The
+workspace keeps a door — the ctrl+b manager, Enter on an agent — and D89 retires the modal anyway,
+so `EntityOpen::Workspace` survives as an `#[allow(dead_code)]` variant with the batch that removes
+it named on it, rather than being deleted here as D89's work done early. `ctrl+k` was **already**
+bound to kill-to-end-of-line, so the "leave it unbound for D90" guard could not be honoured
+literally; its meaning is unchanged and it now feeds the ring, because leaving it writing to a slot
+nothing reads would have broken `ctrl+y` after a `ctrl+k`. `ctrl+x`, `ctrl+p`, `ctrl+n`, `alt+d` and
+`alt+y` were free; `alt+backspace` was a plain backspace. `ctrl+x` inside the ctrl+b agent manager
+still stops an agent — the manager is judged before the composer, so the chord never sees it.

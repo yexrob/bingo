@@ -2330,10 +2330,11 @@ async fn queued_slashes_drain_through_run_slash() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// Bottom entity area lists only running entities with their engine; Ctrl+G
-/// opens the full workspace directly instead of focusing an inline selector.
+/// Bottom entity area lists only running entities with their engine. Ctrl+G
+/// used to open the full workspace from here; D86 gave the key to the
+/// `$EDITOR` compose, and the workspace is reached from the ctrl+b manager.
 #[test]
-fn entity_area_filters_idle_agents_and_ctrl_g_opens_workspace() {
+fn entity_area_filters_idle_agents() {
     let mut chat = test_chat();
     chat.width = 100;
     assert!(chat.entity_rows(100).is_empty());
@@ -2377,7 +2378,8 @@ fn entity_area_filters_idle_agents_and_ctrl_g_opens_workspace() {
     assert!(summary.contains("◇ #table(0)"), "{summary}");
 
     assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
-    assert_eq!(chat.open_entity, Some(EntityOpen::Workspace));
+    assert_eq!(chat.open_entity, None, "ctrl+g is the editor now (D86)");
+    assert!(chat.open_editor, "and it asks the host for the round trip");
 }
 
 /// D80: running agents no longer claim ↑/↓. With a background agent up and an

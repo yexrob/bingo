@@ -11,6 +11,8 @@
 //!   (`ctrl+o`), the compensation for write-once scrollback.
 //! - [`slack`] is the Slack-shaped workspace skin (rail / sidebar / message
 //!   pane) that [`entity`] wears when a channel or instance is opened.
+//! - [`composer`] owns the prompt's readline state (kill ring, the
+//!   `ctrl+x ctrl+e` chord) and the `$EDITOR` round trip.
 //! - [`chat`] is the state machine and the transcript block builder
 //!   (`build_rows`); [`slash`] owns slash command metadata and pure
 //!   suggestion/help transformations; [`complete`] owns the fuzzy scorer, the
@@ -30,6 +32,7 @@ pub mod avatar;
 pub mod chat;
 mod chrome;
 pub mod complete;
+pub mod composer;
 pub mod el;
 mod entity;
 pub mod gfx;
@@ -110,6 +113,10 @@ fn restore_terminal(fullscreen: bool) {
         let _ = out.write_all(notify::RESET_TITLE);
         let _ = out.flush();
     }
+    // Paired with the push in `setup_terminal`, and a no-op when nothing was
+    // pushed — so every path out of the TUI, this one included, can call it
+    // without first working out whether the terminal took the flags (D86).
+    term::pop_keyboard_enhancement(&mut out);
     if fullscreen {
         let _ = execute!(
             out,
@@ -122,6 +129,76 @@ fn restore_terminal(fullscreen: bool) {
     }
     let _ = disable_raw_mode();
     let _ = execute!(out, crossterm::cursor::Show);
+}
+
+/// Take the terminal: raw mode, the host's screen, and the keyboard
+/// enhancement flags the terminal admitted to understanding. The claim goes in
+/// between, so a panic during the screen setup still owes a teardown.
+///
+/// Both the initial setup and the resume after an `$EDITOR` suspend go through
+/// here — the two used to be one inline block that only the startup path could
+/// reach, and a second entry point would have been a second answer to "what
+/// does this host have switched on".
+fn setup_terminal(fullscreen: bool) -> std::io::Result<()> {
+    enable_raw_mode()?;
+    claim_terminal(fullscreen);
+    let mut out = stdout();
+    if fullscreen {
+        execute!(
+            out,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
+    } else {
+        execute!(out, EnableBracketedPaste)?;
+    }
+    term::push_keyboard_enhancement(&mut out);
+    Ok(())
+}
+
+/// The terminal, handed to a child process for the length of its run (the
+/// `$EDITOR` compose, D86) and taken back afterwards.
+///
+/// The hand-over is the full teardown, not a partial one: an editor needs raw
+/// mode off, the alternate screen gone and the cursor visible, and it needs
+/// the panic hook to know the terminal is not ours while it runs. Taking it
+/// back is [`setup_terminal`] again, so the host resumes with exactly what it
+/// started with.
+pub(crate) struct TerminalSuspend {
+    fullscreen: bool,
+    resumed: bool,
+}
+
+impl TerminalSuspend {
+    /// Take the terminal back. Idempotent, and `Drop` runs it, so an early
+    /// return or a panic between suspend and resume cannot leave the host
+    /// without raw mode.
+    pub(crate) fn resume(&mut self) {
+        if self.resumed {
+            return;
+        }
+        self.resumed = true;
+        let _ = setup_terminal(self.fullscreen);
+    }
+}
+
+impl Drop for TerminalSuspend {
+    fn drop(&mut self) {
+        self.resume();
+    }
+}
+
+/// Hand the terminal back for a child process to use. When no host holds it
+/// (tests, headless), the guard is inert in both directions rather than
+/// enabling raw mode on a terminal nobody claimed.
+pub(crate) fn suspend_terminal() -> TerminalSuspend {
+    let fullscreen = TUI_FULLSCREEN.load(Ordering::SeqCst);
+    let held = release_terminal(restore_terminal);
+    TerminalSuspend {
+        fullscreen,
+        resumed: !held,
+    }
 }
 
 /// While an alternate-screen modal is open over the *inline* host, the teardown
@@ -204,6 +281,11 @@ pub async fn run_tui_session(
     // image bytes into scrollback, fullscreen places them in the live viewport
     // through the placement layer. Must happen before raw mode: the probe uses
     // the same /dev/tty query path.
+    // Kitty keyboard protocol (D86): a query/response round trip like the two
+    // above, and for the same reason it belongs here — before raw mode, before
+    // the event stream exists to compete for the answer.
+    term::probe_keyboard_enhancement();
+
     let image_probe = gfx::detect_image_cap().await;
     let image_cap = image_probe.cap;
     if std::env::var_os("BINGO_DEBUG").is_some() {
@@ -258,22 +340,9 @@ pub async fn run_tui_session(
     }
 
     install_panic_hook();
-    enable_raw_mode()?;
-    claim_terminal(fullscreen);
-    let mut out = stdout();
-    let setup = if fullscreen {
-        execute!(
-            out,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste
-        )
-    } else {
-        execute!(out, EnableBracketedPaste)
-    };
     // Even on setup failure the terminal is handed back (it would otherwise be
     // left half-configured).
-    if let Err(e) = setup {
+    if let Err(e) = setup_terminal(fullscreen) {
         release_terminal(restore_terminal);
         return Err(e.into());
     }

@@ -26,23 +26,29 @@ commands, and verification steps in conclusions. Never speculate about features 
 - Type `!` to enter bash mode (commands run directly without the model; the `!` prefix is sticky);
   try `!echo hello`. Interactive/fullscreen commands (top/vim/ssh/fzf/lazygit) are rejected —
   use batch alternatives: `top -b -n 1`; for `vim file` use the Edit tool.
-- Shortcuts (press `?` with an empty input for the full table): Enter sends · `\`+Enter / Ctrl+J newline (multi-line input) ·
+- Shortcuts (press `?` with an empty input for the full table): Enter sends · `\`+Enter / Ctrl+J newline (multi-line input;
+  Shift+Enter works too wherever the terminal speaks the kitty keyboard protocol, which bingo probes for and enables at startup) ·
   Esc closes the topmost open layer first — dialog, picker, agent manager, slash dropdown, ctrl+r search, info/error rows,
   the `?` panel, a manually opened task panel — and interrupts the turn when none of those is open (bash mode exits below
   the interrupt, so Esc stops a running `!` command first), then double-press clears input · Ctrl+C busy interrupt (unconditional, layers do not shield it) / clears text /
   empty input twice exits · ↑↓ history (move the cursor first in multi-line input; busy empty-input ↑ recalls queued messages, unless the turn has already taken one) ·
-  Ctrl+R reverse history search · Ctrl+A/E line start/end · Alt+B/F word movement · Ctrl+W/U/K delete word/to line
-  start/end · Ctrl+Y paste back deleted · Ctrl+S stash/restore input · Ctrl+_ undo · ctrl+o
+  Ctrl+P/N are ↑/↓ exactly (history, and the busy-turn queue pull-back) ·
+  Ctrl+R reverse history search · Ctrl+A/E line start/end · Alt+B/F move one word and Alt+D/Alt+Backspace kill one,
+  stopping at `/` `-` `_` `.` so a path is walked a segment at a time · Ctrl+W/U/K delete the whole whitespace word/to line
+  start/end · Ctrl+Y paste back the newest deletion and Alt+Y right after it cycles the 10-entry kill ring (consecutive
+  kills in the same direction come back as one span) · Ctrl+S stash/restore input · Ctrl+_ undo · ctrl+o
   opens the transcript view: an alternate-screen pager over the whole session with every tool output and thinking block
   expanded (ctrl+e collapses back to the summaries, `/` searches with n/N stepping through hits, j/k · PgUp/PgDn · g/G
   move, q/Esc/ctrl+o closes and puts the previous screen back; a permission dialog keeps priority, so ctrl+o is inert
-  while one is open) · Ctrl+T toggle the task area · Ctrl+G opens the fullscreen team/DM workspace directly (Ctrl+K switches channels and DMs; the DM view shows user/agent text while hiding tool activity; channel rooms let you speak directly as user) · Ctrl+B moves the shell command running in the foreground to the background (same process, same output, returns a task id and notifies on completion), and with none running manages running background agents · Ctrl+L clear and redraw · Shift+Tab cycles permission
+  while one is open) · Ctrl+T toggle the task area · Ctrl+G (or the readline chord Ctrl+X Ctrl+E) composes the current draft in `$VISUAL`/`$EDITOR`: the draft goes to a temp file, the editor gets the terminal, and the saved content replaces the input as one undo step; a non-zero exit keeps the draft and says so, and with neither variable set the info tier says `set $EDITOR to edit the prompt in your editor`. Composing while a turn runs is fine; a permission dialog keeps priority. The team/DM workspace is reached from the Ctrl+B manager (Enter on an agent): the DM view shows user/agent text while hiding tool activity, and channel rooms let you speak directly as user · Ctrl+B moves the shell command running in the foreground to the background (same process, same output, returns a task id and notifies on completion), and with none running manages running background agents · Ctrl+L clear and redraw · Shift+Tab cycles permission
   modes (default → acceptEdits → plan), and inside an approval prompt takes `Yes, and don't ask again this session` · Ctrl+E inside an approval prompt expands the full command/diff preview and the session rule it would install · Alt+T thinking toggle (off ↔ the last non-off level, default medium) · while busy, Enter queues the message; the running turn folds queued plain messages into its own context at its next tool call, marked `↪` in the flow, and whatever it did not take is sent automatically at turn end (a queued slash command always waits for turn end, and so does anything queued behind one or carrying an image; /think /model /provider /theme /status /context /tasks /help /skills run immediately) ·
 - During streamed output, the main footer shows a live `N tok/s` indicator; the speed band changes its character animation and cadence, and idle/stalled output hides it. Beside it, context usage stays visible as a four-cell bar, percentage, and `used/window` token count, using the active model's window; the colors count down to the auto-compaction trigger rather than to the window — warning within 20 percentage points of it, danger within 5. Once the count passes the warning point, the turn also emits a `context at N tokens; auto-compact at M` warning row. A running instance's DM composer shows the same indicators. `motion: "off"` freezes the rate frame but keeps the value.
 - `@` at the start of a word opens the mention dropdown: project files (git-tracked plus untracked-but-not-ignored inside a repository, otherwise a bounded walk that skips hidden and build directories, capped at 5000 entries) and the names of running background agents, fuzzy-filtered by what you type after the `@`. ↑↓ select, Tab or Enter inserts — a file as its path relative to the session directory, an agent as `@name` — plus a trailing space; Esc closes it and keeps what you typed. Inside a word (`user@example.com`) it is an ordinary character, and a permission dialog keeps priority so nothing opens behind it.
 - Large pastes auto-collapse to a `[Pasted text #N +M lines]` placeholder; the real content expands on send
   (precisely detected via terminal bracketed-paste events; terminals without that feature fall back to a
-  key-burst heuristic — extremely fast typing may misdetect, and pausing recovers).
+  key-burst heuristic — extremely fast typing may misdetect, and pausing recovers). A paste is not typing:
+  its newlines stay newlines instead of sending, and an `@` or `/` inside it is a character rather than a
+  dropdown. (The burst fallback cannot see a paste's first four characters, which is what bracketed paste is for.)
 - **Sending images**: on macOS, copy an image (screenshot etc.) and paste (Cmd+V) to attach it;
   the input shows a `#[image N]` placeholder; dragging/pasting image file paths (as their own line or
   `![alt](path)`) attaches on submit too. Message history keeps the placeholder text, and the image goes to the model as a

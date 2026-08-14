@@ -58,19 +58,46 @@ pub fn word_left(text: &str, cursor: usize) -> usize {
     i
 }
 
-/// End of the word after the cursor (skips leading whitespace first).
-pub fn word_right(text: &str, cursor: usize) -> usize {
+/// Start of the sub-word before the cursor: skip any run of non-alphanumeric
+/// characters, then the alphanumeric run itself.
+///
+/// This is readline's `backward-word`, and the difference from [`word_left`]
+/// (readline's *unix* word, whitespace only) is what makes it path-friendly:
+/// `/`, `-`, `_` and `.` are boundaries, so `src/tui/chat_tail.rs` is six stops
+/// rather than one. `alt+b`/`alt+f`/`alt+d`/`alt+backspace` use it; `ctrl+w`
+/// keeps the whitespace word, exactly as a shell does.
+pub fn subword_left(text: &str, cursor: usize) -> usize {
+    let mut i = cursor.min(text.len());
+    while i > 0 {
+        let p = prev_char(text, i);
+        if text[p..i].chars().all(char::is_alphanumeric) {
+            break;
+        }
+        i = p;
+    }
+    while i > 0 {
+        let p = prev_char(text, i);
+        if !text[p..i].chars().all(char::is_alphanumeric) {
+            break;
+        }
+        i = p;
+    }
+    i
+}
+
+/// End of the sub-word after the cursor: the mirror of [`subword_left`].
+pub fn subword_right(text: &str, cursor: usize) -> usize {
     let mut i = cursor.min(text.len());
     while i < text.len() {
         let n = next_char(text, i);
-        if !text[i..n].chars().all(char::is_whitespace) {
+        if text[i..n].chars().all(char::is_alphanumeric) {
             break;
         }
         i = n;
     }
     while i < text.len() {
         let n = next_char(text, i);
-        if text[i..n].chars().all(char::is_whitespace) {
+        if !text[i..n].chars().all(char::is_alphanumeric) {
             break;
         }
         i = n;
@@ -152,6 +179,17 @@ pub fn kill_word(text: &mut String, cursor: &mut usize) -> String {
     let start = word_left(text, at);
     let cut = text[start..at].to_string();
     text.replace_range(start..at, "");
+    *cursor = start;
+    cut
+}
+
+/// Cut the span a motion answered with and leave the cursor at its start.
+/// Both ends are clamped, so a motion that ran off the text cuts what is there.
+pub fn kill_between(text: &mut String, cursor: &mut usize, start: usize, end: usize) -> String {
+    let start = start.min(text.len());
+    let end = end.min(text.len()).max(start);
+    let cut = text[start..end].to_string();
+    text.replace_range(start..end, "");
     *cursor = start;
     cut
 }
@@ -255,14 +293,61 @@ mod tests {
         assert_eq!(next_char(text, text.len()), text.len(), "clamped at end");
     }
 
+    /// The whitespace word (`ctrl+w`'s): punctuation is part of it.
     #[test]
     fn word_motion_skips_whitespace_runs() {
         let text = "hello  brave world";
         assert_eq!(word_left(text, text.len()), "hello  brave ".len());
         assert_eq!(word_left(text, "hello  ".len()), 0);
-        assert_eq!(word_right(text, 0), "hello".len());
-        assert_eq!(word_right(text, "hello".len()), "hello  brave".len());
-        assert_eq!(word_right(text, text.len()), text.len());
+    }
+
+    /// The sub-word (`alt+b`/`alt+f`'s): a path is a run of stops, so a
+    /// mistyped segment can be fixed without retyping the whole path.
+    #[test]
+    fn subword_motion_stops_inside_a_path() {
+        let text = "src/tui/chat_tail.rs";
+        let mut at = text.len();
+        let mut stops = Vec::new();
+        while at > 0 {
+            at = subword_left(text, at);
+            stops.push(&text[at..]);
+        }
+        assert_eq!(
+            stops,
+            vec![
+                "rs",
+                "tail.rs",
+                "chat_tail.rs",
+                "tui/chat_tail.rs",
+                "src/tui/chat_tail.rs",
+            ],
+            "`/`, `_` and `.` are all boundaries"
+        );
+
+        // Forward is the mirror.
+        assert_eq!(subword_right(text, 0), "src".len());
+        assert_eq!(subword_right(text, "src".len()), "src/tui".len());
+        assert_eq!(subword_right(text, text.len()), text.len(), "clamped");
+        assert_eq!(subword_left(text, 0), 0, "clamped");
+    }
+
+    /// CJK counts as alphanumeric, so a sentence of it is one stop rather
+    /// than one per glyph.
+    #[test]
+    fn subword_motion_is_cjk_aware() {
+        let text = "修 中文字";
+        assert_eq!(subword_left(text, text.len()), "修 ".len());
+        assert_eq!(subword_right(text, 0), "修".len());
+    }
+
+    #[test]
+    fn kill_between_clamps_and_parks_the_cursor() {
+        let mut text = String::from("hello world");
+        let mut cursor = 11usize;
+        assert_eq!(kill_between(&mut text, &mut cursor, 6, 99), "world");
+        assert_eq!(text, "hello ");
+        assert_eq!(cursor, 6);
+        assert_eq!(kill_between(&mut text, &mut cursor, 4, 2), "", "inverted");
     }
 
     #[test]
