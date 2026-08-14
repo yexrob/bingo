@@ -274,6 +274,26 @@ impl Transcript {
         self.append_line(&serde_json::to_string(message)?)
     }
 
+    /// Append a turn marker: the next message line opens a user turn, and is
+    /// therefore a rewind checkpoint (D91). `at` is wall-clock unix seconds, so
+    /// the rewind list can stamp a turn the messages themselves never dated.
+    pub fn append_turn(&self, at: u64) -> Result<(), TranscriptError> {
+        self.append_line(&serde_json::to_string(&TurnLine {
+            tag: TurnTag::Turn,
+            at,
+        })?)
+    }
+
+    /// Raw line count — the index the next appended line lands on. A transcript
+    /// that has never been written is at zero.
+    pub fn line_count(&self) -> Result<usize, TranscriptError> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(content) => Ok(content.lines().count()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(TranscriptError::Io(error)),
+        }
+    }
+
     /// Append a compaction marker: the lines above it stay canonical, loads
     /// project through it (D74). The summary is written once and reused every
     /// load until the next threshold crossing, so compaction is the only point
@@ -301,36 +321,38 @@ impl Transcript {
     /// context): canonical lines projected through the latest compact marker.
     /// A session without markers loads exactly as written.
     pub fn load_messages(&self) -> Result<Vec<Message>, TranscriptError> {
+        Ok(project(self.load_lines()?)
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect())
+    }
+
+    /// The same history, with the transcript line each message came from and
+    /// the turn markers that make some of them rewind checkpoints (D91).
+    pub fn load_projection(&self) -> Result<Vec<Entry>, TranscriptError> {
         Ok(project(self.load_lines()?))
     }
 
     /// Every message ever written, ignoring compact markers — the full
     /// conversation for human-facing export (/share).
     pub fn load_canonical(&self) -> Result<Vec<Message>, TranscriptError> {
-        let mut messages: Vec<Message> = self
-            .load_lines()?
-            .into_iter()
-            .filter_map(|line| match line {
-                Line::Message(message) => Some(message),
-                Line::Compact(_) => None,
-            })
-            .collect();
-        drop_contentless(&mut messages);
-        Ok(messages)
+        let mut entries = message_entries(self.load_lines()?);
+        drop_contentless(&mut entries);
+        Ok(entries.into_iter().map(|entry| entry.message).collect())
     }
 
     /// Bad lines are skipped and counted with a warning: one truncated JSONL line must
     /// not make the whole session unrecoverable.
-    fn load_lines(&self) -> Result<Vec<Line>, TranscriptError> {
+    fn load_lines(&self) -> Result<Vec<(usize, Line)>, TranscriptError> {
         let content = std::fs::read_to_string(&self.path)?;
         let mut lines = Vec::new();
         let mut skipped = 0usize;
-        for line in content.lines() {
+        for (raw, line) in content.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
             match parse_line(line) {
-                Some(parsed) => lines.push(parsed),
+                Some(parsed) => lines.push((raw, parsed)),
                 None => skipped += 1,
             }
         }
@@ -341,6 +363,118 @@ impl Transcript {
             );
         }
         Ok(lines)
+    }
+}
+
+impl Transcript {
+    /// Cut the session so its projected history ends at (and includes) the
+    /// message written on raw line `line` (D91 rewind).
+    ///
+    /// The surviving prefix is copied byte for byte — never re-serialized — so
+    /// the request prefix the provider has cached is the one it gets back. Only
+    /// one line can ever be new: when the cut drops the last compaction marker,
+    /// the same summary is re-emitted with a `kept` count narrowed to the part
+    /// of its window that survived, because the marker's whole meaning is
+    /// positional. Without that, a cut into the kept tail would resurrect the
+    /// messages the summary already stands for.
+    ///
+    /// The replacement is atomic (temp + rename), and the append handle is
+    /// closed across the rename and reopened after it: on Unix it would
+    /// otherwise keep writing into the unlinked inode, and on Windows the
+    /// rename would fail outright.
+    pub fn truncate_at_line(&self, line: usize) -> Result<(), TranscriptError> {
+        let content = std::fs::read_to_string(&self.path)?;
+        let raw: Vec<&str> = content.lines().collect();
+        if line >= raw.len() {
+            return Err(TranscriptError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("rewind line {line} is past the end of the transcript"),
+            )));
+        }
+        let parsed: Vec<(usize, Line)> = raw
+            .iter()
+            .enumerate()
+            .filter(|(_, text)| !text.trim().is_empty())
+            .filter_map(|(index, text)| parse_line(text).map(|parsed| (index, parsed)))
+            .collect();
+        if !matches!(
+            parsed.iter().find(|(index, _)| *index == line),
+            Some((_, Line::Message(_)))
+        ) {
+            return Err(TranscriptError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("rewind line {line} is not a message"),
+            )));
+        }
+
+        let mut body: String = raw[..=line].join("\n");
+        body.push('\n');
+
+        // The last marker, and whether the cut takes it with it.
+        if let Some((marker, compact)) =
+            parsed
+                .iter()
+                .rev()
+                .find_map(|(index, parsed)| match parsed {
+                    Line::Compact(compact) => Some((*index, compact)),
+                    _ => None,
+                })
+            && marker > line
+        {
+            let window: Vec<usize> = parsed
+                .iter()
+                .filter(|(index, parsed)| *index < marker && matches!(parsed, Line::Message(_)))
+                .map(|(index, _)| *index)
+                .collect();
+            let tail = window.len().saturating_sub(compact.kept);
+            let kept = window[tail..].iter().filter(|kept| **kept <= line).count();
+            if kept == 0 {
+                // The cut lands in the span the summary already covers: honouring
+                // it would mean re-summarizing, which is not this operation.
+                return Err(TranscriptError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("rewind line {line} is inside a compacted span"),
+                )));
+            }
+            body.push_str(&serde_json::to_string(&CompactLine {
+                tag: CompactTag::Compact,
+                summary: compact.summary.clone(),
+                kept,
+            })?);
+            body.push('\n');
+        }
+
+        self.replace_contents(&body)
+    }
+
+    /// Swap the transcript's bytes under the active lock. The sidecar lock is
+    /// held throughout; only the data handle is closed and reopened.
+    fn replace_contents(&self, body: &str) -> Result<(), TranscriptError> {
+        let mut active = self.ensure_active_lock()?;
+        let Some((lock_file, data)) = active.take() else {
+            return Err(TranscriptError::Io(std::io::Error::other(
+                "transcript active lock missing",
+            )));
+        };
+        drop(data);
+        let tmp = self.path.with_extension("jsonl.rewind");
+        let swap = std::fs::write(&tmp, body).and_then(|()| std::fs::rename(&tmp, &self.path));
+        if swap.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        let reopened = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&self.path);
+        match reopened {
+            // The lock file goes back with the new handle, so the claim on this
+            // session never lapses.
+            Ok(file) => *active = Some((lock_file, file)),
+            Err(error) => return Err(TranscriptError::Io(error)),
+        }
+        swap.map_err(TranscriptError::Io)
     }
 }
 
@@ -362,19 +496,77 @@ struct CompactLine {
     kept: usize,
 }
 
+/// Marker value distinguishing a turn line from the others.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+enum TurnTag {
+    #[serde(rename = "turn")]
+    Turn,
+}
+
+/// A turn boundary (D91): the next message line opens a user turn, which makes
+/// it a rewind checkpoint. Every projection skips it, so it changes no request
+/// bytes and no compact `kept` accounting — and a session recorded before D91
+/// simply offers no checkpoints rather than guessing at them from message text,
+/// which the harness's own injections (reminders, notifications, resume
+/// prompts) are indistinguishable from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TurnLine {
+    #[serde(rename = "type")]
+    tag: TurnTag,
+    /// Wall-clock unix seconds. Absent in nothing yet, but defaulted so a
+    /// hand-written or future marker never costs the whole line.
+    #[serde(default)]
+    at: u64,
+}
+
 #[derive(Debug)]
 enum Line {
     Message(Message),
     Compact(CompactLine),
+    Turn(u64),
+}
+
+/// One message of the projected history, with what rewind needs to address it.
+#[derive(Debug, Clone)]
+pub struct Entry {
+    pub message: Message,
+    /// The transcript line it was written on. `None` for the compaction
+    /// summary, which is synthesized by the projection and was never a line.
+    pub line: Option<usize>,
+    /// A turn marker preceded it: this message opens a turn (D91), stamped
+    /// with the marker's wall clock. `None` means it does not open a turn.
+    pub opens_turn: Option<u64>,
 }
 
 fn parse_line(line: &str) -> Option<Line> {
     if let Ok(message) = serde_json::from_str::<Message>(line) {
         return Some(Line::Message(message));
     }
-    serde_json::from_str::<CompactLine>(line)
+    if let Ok(compact) = serde_json::from_str::<CompactLine>(line) {
+        return Some(Line::Compact(compact));
+    }
+    serde_json::from_str::<TurnLine>(line)
         .ok()
-        .map(Line::Compact)
+        .map(|turn| Line::Turn(turn.at))
+}
+
+/// Every message line as an entry, markers dropped — the shape `load_canonical`
+/// wants and the no-marker case of `project`.
+fn message_entries(lines: Vec<(usize, Line)>) -> Vec<Entry> {
+    let mut opens = None;
+    let mut entries = Vec::new();
+    for (raw, line) in lines {
+        match line {
+            Line::Turn(at) => opens = Some(at),
+            Line::Message(message) => entries.push(Entry {
+                message,
+                line: Some(raw),
+                opens_turn: std::mem::take(&mut opens),
+            }),
+            Line::Compact(_) => {}
+        }
+    }
+    entries
 }
 
 /// The summary's message form — shared by the in-memory splice
@@ -390,30 +582,36 @@ pub(crate) fn summary_message(summary: &str) -> Message {
 /// message after it. `kept` counts physical message lines, so it is applied
 /// before `drop_contentless` (the splice at compaction time counted the same
 /// in-memory list that `record` had persisted line by line).
-fn project(lines: Vec<Line>) -> Vec<Message> {
+fn project(lines: Vec<(usize, Line)>) -> Vec<Entry> {
     use crate::api::types::ContentBlock;
     let marker = lines
         .iter()
-        .rposition(|line| matches!(line, Line::Compact(_)));
+        .rposition(|(_, line)| matches!(line, Line::Compact(_)));
     let Some(marker) = marker else {
-        let mut messages: Vec<Message> = lines
-            .into_iter()
-            .filter_map(|line| match line {
-                Line::Message(message) => Some(message),
-                Line::Compact(_) => None,
-            })
-            .collect();
-        drop_contentless(&mut messages);
-        return messages;
+        let mut entries = message_entries(lines);
+        drop_contentless(&mut entries);
+        return entries;
     };
     let mut summary = String::new();
     let mut kept = 0usize;
-    let mut before: Vec<Message> = Vec::new();
-    let mut after: Vec<Message> = Vec::new();
-    for (index, line) in lines.into_iter().enumerate() {
+    let mut opens = None;
+    let mut before: Vec<Entry> = Vec::new();
+    let mut after: Vec<Entry> = Vec::new();
+    for (index, (raw, line)) in lines.into_iter().enumerate() {
         match line {
-            Line::Message(message) if index < marker => before.push(message),
-            Line::Message(message) => after.push(message),
+            Line::Turn(at) => opens = Some(at),
+            Line::Message(message) => {
+                let entry = Entry {
+                    message,
+                    line: Some(raw),
+                    opens_turn: std::mem::take(&mut opens),
+                };
+                if index < marker {
+                    before.push(entry);
+                } else {
+                    after.push(entry);
+                }
+            }
             Line::Compact(compact) if index == marker => {
                 summary = compact.summary;
                 kept = compact.kept;
@@ -424,7 +622,11 @@ fn project(lines: Vec<Line>) -> Vec<Message> {
     }
     let tail = before.len().saturating_sub(kept);
     let mut messages = Vec::with_capacity(1 + before.len() - tail + after.len());
-    messages.push(summary_message(&summary));
+    messages.push(Entry {
+        message: summary_message(&summary),
+        line: None,
+        opens_turn: None,
+    });
     messages.extend(before.into_iter().skip(tail));
     messages.extend(after);
     drop_contentless(&mut messages);
@@ -434,6 +636,7 @@ fn project(lines: Vec<Line>) -> Vec<Message> {
     // (the same invariant compact::safe_split maintains).
     while messages.len() > 1
         && messages[1]
+            .message
             .content
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
@@ -448,14 +651,14 @@ fn project(lines: Vec<Line>) -> Vec<Message> {
 /// ("content: at least one item required") — so the session it poisons can never be
 /// resumed. Blank text blocks go the same way, then messages left with no block at all.
 /// Only blocks that carry nothing are removed, so no tool_use ever loses its tool_result.
-fn drop_contentless(messages: &mut Vec<Message>) {
+fn drop_contentless(entries: &mut Vec<Entry>) {
     use crate::api::types::ContentBlock;
-    for message in messages.iter_mut() {
-        message.content.retain(
+    for entry in entries.iter_mut() {
+        entry.message.content.retain(
             |block| !matches!(block, ContentBlock::Text { text } if text.trim().is_empty()),
         );
     }
-    messages.retain(|message| !message.content.is_empty());
+    entries.retain(|entry| !entry.message.content.is_empty());
 }
 
 #[cfg(test)]

@@ -293,7 +293,7 @@ impl super::Chat {
     /// leaves. It renders as one dim line and carries no send stamp, because
     /// nothing was sent — and it never reaches the model, which learns the
     /// verdict from the gate instead.
-    fn push_user_line(&mut self, text: String) {
+    pub(super) fn push_user_line(&mut self, text: String) {
         self.messages.push(UiMessage {
             role: Role::User,
             text,

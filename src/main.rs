@@ -36,6 +36,7 @@ mod preapproved;
 mod query;
 mod query_session;
 mod query_turn;
+mod rewind;
 mod settings;
 mod share;
 mod share_html;

@@ -1695,3 +1695,63 @@ async fn a_dm_submission_never_steers_the_hubs_turn() {
         "the hub's composer still steers"
     );
 }
+
+/// D91: the rewind selector joined the stack just under the switcher, and Esc
+/// peels its two stages one press at a time before anything under it moves —
+/// the turn keeps running throughout.
+#[test]
+fn esc_peels_the_rewind_selector_one_stage_at_a_time() {
+    use crate::tui::chat::rewind_ui::Rewind;
+
+    assert_eq!(
+        EscLayer::ORDER
+            .iter()
+            .position(|layer| *layer == EscLayer::Rewind),
+        EscLayer::ORDER
+            .iter()
+            .position(|layer| *layer == EscLayer::Switcher)
+            .map(|i| i + 1),
+        "rewind sits just under the switcher, in the picker stratum"
+    );
+
+    let mut chat = test_chat();
+    chat.busy = true;
+    chat.help_visible = true;
+    chat.rewind = Some(Rewind {
+        points: vec![crate::rewind::Checkpoint {
+            line: 1,
+            index: 0,
+            label: "a question".to_string(),
+            text: "a question".to_string(),
+            at: 1_700_000_000,
+            coverage: Default::default(),
+        }],
+        selected: 0,
+        action: Some(0),
+    });
+
+    let t0 = std::time::Instant::now();
+    let mut order = Vec::new();
+    while let Some(layer) = chat.esc_layer() {
+        order.push(layer);
+        assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0));
+        if layer == EscLayer::Interrupt {
+            break;
+        }
+        assert!(
+            !chat.interrupted,
+            "a layer above the interrupt closed instead of the turn: {layer:?}"
+        );
+        assert!(chat.busy, "the turn kept running through {layer:?}");
+    }
+    assert_eq!(
+        order,
+        vec![
+            EscLayer::Rewind,
+            EscLayer::Rewind,
+            EscLayer::HelpPanel,
+            EscLayer::Interrupt,
+        ],
+        "the action list returns to the turn list before the selector closes"
+    );
+}

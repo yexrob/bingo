@@ -135,6 +135,7 @@ mod tests {
                 Box::pin(async { None })
             }),
             instance: None,
+            rewind: Default::default(),
         }
     }
 

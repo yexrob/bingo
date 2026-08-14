@@ -171,7 +171,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 
 | Key | Action |
 |---|---|
-| `Esc` | close the topmost dialog/menu/panel first / interrupt while busy / clear input on double-press |
+| `Esc` | close the topmost dialog/menu/panel first / interrupt while busy / on double-press: clear the input, or open Rewind when it is empty |
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
 | `Ctrl+T` | toggle the task area |
 | `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `q` close) |
@@ -468,6 +468,32 @@ in already *is* the destination. **Esc goes back to the hub** —
 navigation before interruption, so a turn running behind you keeps running and
 its Esc-to-interrupt waits for you at the hub. Ctrl+C is unchanged and stops the
 turn from anywhere.
+
+### Rewind
+
+Press `Esc` twice on an empty composer and bingo lists the turns you opened,
+newest first, with how many files each one and everything after it changed.
+Pick one and it asks what "back" should mean:
+
+1. `Restore code and conversation`
+2. `Restore conversation`
+3. `Restore code`
+4. `Summarize from here`
+5. `Never mind`
+
+**Restore conversation** cuts the session's history back to that message and
+puts its text into the composer, ready to be asked differently. **Restore code**
+puts the files back to what they were when that turn began — a file the turn
+created is removed, a file it edited is reverted — and leaves the conversation
+alone. **Summarize from here** replaces that turn and everything after it with
+a summary of them, when you want the outcome without the transcript.
+
+Pre-images are taken by `Edit` and `Write` just before they change anything,
+once per file per turn, and are kept under `~/.local/share/bingo/rewind/` —
+independent of git, bounded at 50 MB or 200 turns per session, oldest first.
+An option whose half is unavailable is dimmed and says why. **What rewind does
+not cover**: anything a `Bash` command wrote. A shell can change any file in any
+way and there is no pre-image to take before it does, so those changes stay.
 
 **What switching does**: the draft you were writing stays behind in the
 conversation you left and that conversation's own draft comes back; a `── @name ──`

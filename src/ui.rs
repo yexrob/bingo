@@ -207,6 +207,9 @@ pub enum UiEvent {
     /// Informational slash output (async producers): persists until the next
     /// input or Esc.
     SlashInfo(String),
+    /// A rewind that finished off the key path (D91): its state line, for the
+    /// flow rather than for a tier that expires.
+    RewindDone(String),
     /// Pin/replace a persistent panel (login flows, long operations): shown
     /// above the prompt until `Unpin` with the same id.
     PinPanel {

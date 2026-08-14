@@ -751,6 +751,7 @@ pub(crate) fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContex
         expand_tasks: session.expand_tasks.clone(),
         ask_question: ui.ask_question.clone(),
         instance: session.instance.clone(),
+        rewind: session.runtime.rewind.clone(),
     })
 }
 
@@ -852,6 +853,32 @@ fn fill_missing_tool_results(tool_uses: &[ContentBlock], blocks: &mut Vec<Conten
 
 /// Append to history + persist to the transcript (fixed order: persist first, then
 /// append, avoiding last().expect).
+/// Record the message that opens a turn and open the rewind checkpoint it is
+/// (D91). The marker goes down first, so the checkpoint is the user message's
+/// own line; a transcript that cannot take it costs this turn its checkpoint,
+/// never the turn itself.
+fn record_turn_open(
+    session: &Session,
+    messages: &mut Vec<Message>,
+    message: Message,
+    ui: &mut UiHooks,
+) {
+    match session.runtime.transcript.borrow().clone() {
+        Some(transcript) => match transcript
+            .append_turn(crate::channels::now_unix())
+            .and_then(|()| transcript.line_count())
+        {
+            Ok(line) => session.runtime.rewind.open(
+                crate::rewind::session_dir(&session.home, &transcript.name()),
+                line,
+            ),
+            Err(_) => session.runtime.rewind.close(),
+        },
+        None => session.runtime.rewind.close(),
+    }
+    record(session, messages, message, ui);
+}
+
 fn record(session: &Session, messages: &mut Vec<Message>, message: Message, ui: &mut UiHooks) {
     if let Some(t) = session.runtime.transcript.borrow().clone()
         && let Err(e) = t.append(&message)
@@ -1400,7 +1427,7 @@ pub async fn run_query(
         Some(recalled) => format!("{user_input}\n\n{recalled}"),
         None => user_input.to_string(),
     };
-    record(
+    record_turn_open(
         session,
         &mut messages,
         user_message_with_images(

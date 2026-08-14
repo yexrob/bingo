@@ -65,6 +65,10 @@ impl Tool for WriteTool {
                 )));
             }
         };
+        // The pre-image, before anything on disk changes (D91) — including the
+        // directories below, which a restore does not remove: an empty dir left
+        // behind is a smaller wrong than deleting one we did not make.
+        ctx.rewind.snapshot(&path);
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
             && let Err(e) = std::fs::create_dir_all(parent)
@@ -105,6 +109,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         }
     }
 

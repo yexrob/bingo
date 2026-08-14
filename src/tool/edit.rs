@@ -83,6 +83,10 @@ impl Tool for EditTool {
             )));
         }
         let replaced = replace(&content, &params);
+        // The pre-image, before the bytes change (D91). A snapshot that fails
+        // is written down as a miss and skipped: an edit the user asked for
+        // does not wait on the ability to undo it.
+        ctx.rewind.snapshot(&path);
         std::fs::write(&path, &replaced)
             .map_err(|e| ToolError::failed(format!("cannot write {}: {e}", path.display())))?;
         let mut text = format!(
@@ -124,6 +128,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
 
         EditTool
@@ -171,6 +176,7 @@ mod tests {
                     expand_tasks: tokio::sync::watch::channel(false).0,
                     ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
                     instance: None,
+                    rewind: Default::default(),
                 },
             )
             .await
@@ -206,6 +212,7 @@ mod tests {
                     expand_tasks: tokio::sync::watch::channel(false).0,
                     ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
                     instance: None,
+                    rewind: Default::default(),
                 },
             )
             .await

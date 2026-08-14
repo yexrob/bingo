@@ -55,6 +55,10 @@ pub struct ToolContext {
     /// Instance name of the calling session (None = main session). Watches registered here are
     /// addressed to it, so its notifications land at its own turn boundary.
     pub instance: Option<String>,
+    /// Rewind snapshots (D91): the pre-image a file-mutating tool takes before
+    /// it writes. Every host shares one recorder, so what rewind can undo does
+    /// not depend on which surface asked for the edit.
+    pub rewind: std::sync::Arc<crate::rewind::Recorder>,
 }
 
 impl ToolContext {

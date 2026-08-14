@@ -2336,6 +2336,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
         assert!(ctl.is_read_only(&serde_json::json!({"action": "list"})));
         assert!(!ctl.is_read_only(&serde_json::json!({"action": "stop", "agent": "scout"})));
@@ -2527,6 +2528,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         }
     }
 

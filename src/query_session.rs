@@ -29,6 +29,10 @@ pub struct Runtime {
     /// MCP connection manager (lazy connection cache; initialized from settings at main
     /// construction; tests default to an empty manager — no MCP tools, behavior unchanged).
     pub mcp: Arc<tokio::sync::Mutex<crate::mcp::McpManager>>,
+    /// Rewind checkpoint recorder (D91): which turn the file snapshots being
+    /// taken right now belong to. Starts detached, so a host that never opens a
+    /// checkpoint records nothing and costs nothing.
+    pub rewind: Arc<crate::rewind::Recorder>,
 }
 
 impl Runtime {
@@ -51,6 +55,7 @@ impl Runtime {
             provider,
             thinking_tx,
             thinking,
+            rewind: Arc::new(crate::rewind::Recorder::default()),
             mcp: Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
                 HashMap::new(),
                 Default::default(),

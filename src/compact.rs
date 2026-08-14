@@ -229,6 +229,38 @@ pub async fn compact_after_overflow(
     compacted
 }
 
+/// Summarize a slice of history under the compaction prompt and budget.
+/// `Err(Some)` is a failed call, `Err(None)` an empty summary.
+async fn summarize(session: &Session, messages: &[Message]) -> Result<String, Option<String>> {
+    let model = session.runtime.model.borrow().clone();
+    let models = session.client.models();
+    let max_tokens = SUMMARY_MAX_TOKENS.min(crate::budget::max_tokens_for(&models, &model));
+    let prompt_budget = crate::budget::effective_window_for(&models, &model)
+        .saturating_sub(max_tokens as u64)
+        .saturating_sub(SUMMARY_PROMPT_RESERVE);
+    let request = NeutralRequest {
+        model,
+        max_tokens,
+        system: Vec::new(),
+        messages: vec![Message::user_text(summary_prompt(messages, prompt_budget))],
+        tools: Vec::new(),
+        stream: false,
+        thinking: None,
+    };
+    match session.client.complete_text(&request).await {
+        Ok(summary) if !summary.trim().is_empty() => Ok(summary),
+        Ok(_) => Err(None),
+        Err(error) => Err(Some(error.to_string())),
+    }
+}
+
+/// Summarize an explicit range of turns (D91 rewind). Same prompt, same budget
+/// and the same failure discipline as compaction; what the summary replaces is
+/// the caller's decision, not this function's.
+pub async fn summarize_slice(session: &Session, messages: &[Message]) -> Option<String> {
+    summarize(session, messages).await.ok()
+}
+
 async fn compact(
     session: &Session,
     messages: &mut Vec<Message>,
@@ -243,34 +275,18 @@ async fn compact(
     )
     .await;
 
-    let model = session.runtime.model.borrow().clone();
-    let models = session.client.models();
-    let max_tokens = SUMMARY_MAX_TOKENS.min(crate::budget::max_tokens_for(&models, &model));
-    let prompt_budget = crate::budget::effective_window_for(&models, &model)
-        .saturating_sub(max_tokens as u64)
-        .saturating_sub(SUMMARY_PROMPT_RESERVE);
-    let request = NeutralRequest {
-        model,
-        max_tokens,
-        system: Vec::new(),
-        messages: vec![Message::user_text(summary_prompt(
-            &messages[..split],
-            prompt_budget,
-        ))],
-        tools: Vec::new(),
-        stream: false,
-        thinking: None,
-    };
-    let summary = match session.client.complete_text(&request).await {
-        Ok(summary) if !summary.trim().is_empty() => {
+    let summary = match summarize(session, &messages[..split]).await {
+        Ok(summary) => {
             session.compact_failures.store(0, Ordering::SeqCst);
             summary
         }
-        outcome => {
+        Err(outcome) => {
             session.compact_failures.fetch_add(1, Ordering::SeqCst);
             notify(match outcome {
-                Err(e) => format!("context compaction failed, history kept as-is: {e}"),
-                _ => "context compaction returned an empty summary, history kept as-is".to_string(),
+                Some(e) => format!("context compaction failed, history kept as-is: {e}"),
+                None => {
+                    "context compaction returned an empty summary, history kept as-is".to_string()
+                }
             });
             return false;
         }

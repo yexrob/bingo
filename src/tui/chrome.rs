@@ -577,6 +577,7 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     children.push(El::Lines(chat.entity_rows(width)));
     children.push(El::Rows(chat.agent_manager_rows(width)));
     children.push(El::Rows(chat.switcher_rows(width)));
+    children.push(El::Rows(chat.rewind_rows(width)));
 
     // Pinned panels (login flows, long-operation progress): persistent until
     // the owning flow unpins them — the one place a device code can wait out

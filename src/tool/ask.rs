@@ -247,6 +247,7 @@ mod tests {
                 Box::pin(async { Some(crate::query::AskAnswer::Option(1)) })
             }),
             instance: None,
+            rewind: Default::default(),
         };
         let tool = AskUserQuestionTool;
         let result = tool
@@ -284,6 +285,7 @@ mod tests {
                 Box::pin(async { Some(crate::query::AskAnswer::Other("use serde".to_string())) })
             }),
             instance: None,
+            rewind: Default::default(),
         };
         let tool = AskUserQuestionTool;
         let result = tool
@@ -315,6 +317,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
         let tool = AskUserQuestionTool;
         let result = tool
@@ -346,6 +349,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
         let tool = AskUserQuestionTool;
         let err = tool
@@ -377,6 +381,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
         let ask = AskUserQuestionTool;
         let bash = BashTool::new();

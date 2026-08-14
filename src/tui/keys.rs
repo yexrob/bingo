@@ -25,7 +25,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "esc",
-        description: "close dialog/menu/panel · back to hub · interrupt · esc esc clears",
+        description: "close dialog/menu/panel · back to hub · interrupt · esc esc clears or rewinds",
     },
     Binding {
         keys: "ctrl+c",

@@ -31,6 +31,13 @@ pub enum EscLayer {
     /// Menu-tier, beside the pickers rather than above them: it is a transient
     /// chooser over the composer, and it opens and closes on its own key.
     Switcher,
+    /// The esc-esc rewind selector (D91): the action list returns to the turn
+    /// list, the turn list closes.
+    ///
+    /// Menu-tier for the same reason as the switcher, and below it because a
+    /// switcher can be opened over a rewind list but not the other way round:
+    /// rewind only opens when nothing else is.
+    Rewind,
     /// The ctrl+b background-agent overlay (detail returns to the list, the list closes).
     AgentManager,
     /// Slash-command dropdown: closes, and takes a bare `/` query with it.
@@ -71,10 +78,11 @@ pub enum EscLayer {
 
 impl EscLayer {
     /// The stack, top first. The single source for Esc's priority.
-    pub const ORDER: [EscLayer; 15] = [
+    pub const ORDER: [EscLayer; 16] = [
         EscLayer::AskDialog,
         EscLayer::Menu,
         EscLayer::Switcher,
+        EscLayer::Rewind,
         EscLayer::AgentManager,
         EscLayer::SlashDropdown,
         EscLayer::MentionDropdown,
@@ -781,6 +789,11 @@ impl super::Chat {
         if self.switcher_key(code, modifiers) {
             return true;
         }
+        // The rewind selector is modal for the same reason (D91): it is a
+        // chooser over the composer, and a stray key must not reach the draft.
+        if self.rewind_key(code, modifiers) {
+            return true;
+        }
         // Interrupt (busy) and quit (idle) both live on Ctrl+C, judged before editing keys.
         // Unlike Esc, Ctrl+C skips the layer stack: it interrupts with anything open.
         if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
@@ -977,16 +990,37 @@ impl super::Chat {
     }
 
     /// Esc: dismisses the topmost open [`EscLayer`] and stops there — one press,
-    /// one level. With nothing open on an idle empty input it does nothing
-    /// (reserved for rewind, D91).
+    /// one level. With nothing open on an idle empty input, esc-esc opens the
+    /// rewind selector (D91) — the slot D80 left for it.
     fn escape(&mut self, now: std::time::Instant) -> bool {
         match self.esc_layer() {
             Some(layer) => self.esc_dismiss(layer, now),
-            None => {
-                self.notice = None;
-                false
-            }
+            None => self.esc_rewind(now),
         }
+    }
+
+    /// esc-esc on an empty idle composer: the second press inside [`ESC_WINDOW`]
+    /// opens the rewind selector, mirroring how the same two presses clear a
+    /// draft that is not empty.
+    ///
+    /// No hub check and no busy check are needed here and none is written:
+    /// `BackToHub` and `Interrupt` are both layers, so in a DM or under a
+    /// running turn `esc_layer()` answers before this ever runs. `open_rewind`
+    /// keeps its own guards for the paths that do not come through a key.
+    fn esc_rewind(&mut self, now: std::time::Instant) -> bool {
+        let armed = self
+            .esc_at
+            .is_some_and(|at| now.duration_since(at) <= ESC_WINDOW);
+        if armed {
+            self.esc_at = None;
+            self.notice = None;
+            self.open_rewind();
+            return true;
+        }
+        self.esc_at = Some(now);
+        self.notice = Some("Press esc again to rewind");
+        self.notice_until = Some(now + ESC_WINDOW);
+        true
     }
 
     /// The layer Esc acts on right now: the first entry of [`EscLayer::ORDER`]
@@ -1003,6 +1037,7 @@ impl super::Chat {
             EscLayer::AskDialog => self.pending_ask.is_some(),
             EscLayer::Menu => self.menu_open(),
             EscLayer::Switcher => self.switcher.is_some(),
+            EscLayer::Rewind => self.rewind.is_some(),
             EscLayer::AgentManager => self.agent_manager.is_some(),
             EscLayer::SlashDropdown => !self.slash_suggestions.is_empty(),
             EscLayer::MentionDropdown => self.mention.is_some(),
@@ -1039,6 +1074,7 @@ impl super::Chat {
                     || self.provider_menu_key(ESC, NONE)
             }
             EscLayer::Switcher => self.switcher_key(ESC, NONE),
+            EscLayer::Rewind => self.rewind_key(ESC, NONE),
             EscLayer::AgentManager => self.agent_manager_key(ESC, NONE),
             EscLayer::SlashDropdown => self.slash_menu_key(ESC, NONE),
             EscLayer::MentionDropdown => self.mention_menu_key(ESC, NONE),

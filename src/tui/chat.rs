@@ -408,6 +408,7 @@ pub(crate) fn is_state_line(text: &str) -> bool {
         || text == ASK_CANCELLED_TEXT
         || is_ask_receipt(text)
         || crate::tui::bufferview::is_route_receipt(text)
+        || rewind_ui::is_rewind_line(text)
 }
 
 /// A message the running turn absorbed mid-turn (D83). Not a state line: the user wrote
@@ -1108,6 +1109,8 @@ pub struct Chat {
     pub agent_manager: Option<AgentManager>,
     /// The ctrl+k conversation switcher (D90); `None` means it is closed.
     pub(crate) switcher: Option<crate::tui::switcher::Switcher>,
+    /// The esc-esc rewind selector (D91); `None` means it is closed.
+    pub(crate) rewind: Option<rewind_ui::Rewind>,
     /// Visits to conversations other than the hub (D89), oldest first. Each one
     /// is a segment of the flow: which rows it printed, and where in the hub's
     /// transcript it sits. `Chat::flow_order` reads them to decide what the one
@@ -1401,6 +1404,7 @@ impl Chat {
             entities: Vec::new(),
             agent_manager: None,
             switcher: None,
+            rewind: None,
             excursions: Vec::new(),
             interrupted: false,
             cancel_tx: tokio::sync::watch::channel(false).0,
@@ -2069,6 +2073,11 @@ impl Chat {
             }
             UiEvent::SlashInfo(message) => {
                 self.push_slash_info(message);
+            }
+            UiEvent::RewindDone(message) => {
+                self.push_user_line(message);
+                self.refresh_context_usage_from_transcript();
+                self.dirty = true;
             }
             UiEvent::PinPanel { id, lines } => {
                 self.pin_panel(&id, lines);
@@ -3550,6 +3559,9 @@ mod chat_menus;
 
 #[path = "chat_session.rs"]
 mod chat_session;
+
+#[path = "rewind_ui.rs"]
+pub mod rewind_ui;
 
 /// The `/resume` selector model, rendered by chrome.rs.
 pub use chat_session::ResumeMenu;

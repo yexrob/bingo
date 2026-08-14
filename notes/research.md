@@ -2158,3 +2158,88 @@ the one user-visible regression here and is why the `?` panel, both READMEs and 
 name `alt+k` beside the kills. The receipt predicate matches `→ ` followed by a sigil, so a line
 of prose in exactly that shape would render as a state line — the same tradeoff `is_ask_receipt`
 already accepts. 1266 + 13 tests before, 1295 + 13 after.
+
+### D91. Rewind: a turn you can take back
+
+**Problem.** bingo had no checkpoint, no undo, and no fork. A turn that edited the wrong files
+left the user reverting them by hand — with no record of which files it had touched — and the
+conversation that produced the wrong turn stayed in history forever, priming every turn after it.
+The audit filed this as a P0 against Claude Code's Rewind (esc-esc → pick a past user message →
+choose what to restore), and D80 had already left the slot open: Esc on an idle empty composer
+did nothing, "reserved for rewind, D91".
+
+**Decision.**
+
+*Identity.* A checkpoint is a turn-opening user message, addressed by **the transcript line it was
+written on**. `Message` is `{role, content}` and carries no id, so position is the only identity
+history offers; it is a stable one, because the transcript is append-only and rewind is the single
+operation that ever shortens it. Turn-openness is **recorded, not inferred**: `record_turn_open`
+appends a `{"type":"turn","at":…}` marker line before the user message, in the same idiom as D74's
+compact marker, and every projection skips it — so it changes no request bytes and no compact
+`kept` accounting. The alternative was sniffing message text, and the harness's own user-role
+injections (task reminders, `<task-notifications>`, `<channel-messages>`, the max-tokens resume
+prompt, Stop-hook blocks, D76 interrupt markers, D83 steered blocks) are indistinguishable from a
+real turn by content. The cost is that sessions recorded before this batch offer no rewind points,
+which is a better failure than offering the wrong ones.
+
+*Truncation.* `Transcript::truncate_at_line` copies the surviving prefix **byte for byte** — never
+re-serializing — so the request prefix the provider has cached is the one it gets back, and the
+replacement is atomic (temp + rename). Exactly one line can ever be new. The compaction marker's
+meaning is positional (`kept` counts physical message lines *before* it), so a cut that lands in
+its kept tail takes the marker with it, and the same summary is re-emitted with `kept` narrowed to
+the part of its window that survived; without that, a cut into the tail would resurrect verbatim
+the messages the summary already stands for. A cut inside a span the summary covers is refused
+outright — the projection never offers one, since a folded message is not in the projection at
+all, and that is the whole guarantee that rewind cannot cut across a compact boundary. Cutting at
+a turn-opening user message keeps every `tool_use`/`tool_result` pair intact by construction, the
+invariant `safe_split` and `project`'s orphan-skip loop exist to protect.
+
+*The store.* Pre-images live under `~/.local/share/bingo/rewind/<session>/<checkpoint>/`, one
+directory per checkpoint, `<hash>.pre` beside `<hash>.path`. Bytes are written first and the
+`.path` sidecar second, which makes the sidecar the commit: a crash between them leaves an orphan
+`.pre` that no restore reads, never a file wrongly marked as created-by-a-tool. The sidecar is
+also the once-per-`(checkpoint, path)` record — the *first* pre-image of a turn is the state the
+turn began in, and a second edit of the same file must not overwrite it. Restores replay
+checkpoints **newest first** so that where two turns edited one file the oldest pre-image is
+written last and wins. Bounded at 50 MB / 200 checkpoints per session, evicted oldest-first at
+checkpoint open; eviction names its own files and then `remove_dir`s, never a recursive delete.
+Git is not involved: a repository may not exist, and the working tree is not ours to commit.
+
+*Wiring.* The recorder hangs off `Runtime` (so no `Session` literal changed) and is handed to
+every tool through `ToolContext`, which is already built once per turn — so the TUI, `--print` and
+the JSON host record identically even though only the TUI can rewind this batch. `Edit` and
+`Write` are the only tools that write user files (there is no MultiEdit and no NotebookEdit here);
+each snapshots immediately before it changes anything.
+
+**Consequences.**
+
+- `chat.rs` was at 3960 of the 4000-line cap, so `/rename`, `/resume`, `/gc`, `/share` and the
+  resume picker moved to `chat_session.rs` first as a mechanical no-behavior-change commit
+  (386 lines; the four command entry points widened to `pub(super)`, `ResumeMenu` re-exported).
+- **Snapshot failures are disclosed at the decision, not as a toast.** The spec asked for
+  warn-tier, and tool code has no warning channel: `on_warning` lives on `UiHooks`, which is
+  deliberately not passed to tools, and converting it to a shareable `Arc` would have rippled
+  through `assemble_tools` and compaction's notify plumbing — unrelated debt, in a batch whose
+  load-bearing parts are elsewhere. A failure is instead recorded as a `.miss` sidecar and shown
+  in the selector as `3 files (+1 unsnapshotted)`, where the user is choosing whether to rely on
+  it. The edit always goes ahead either way, which was the requirement that mattered.
+- **Summarize from here shipped rather than being disabled.** It cuts *before* the chosen turn and
+  appends `(summary of the turns rewound from here)` after the previous message — deliberately not
+  compaction's `(summary of the earlier conversation, from automatic compaction)`, which is a byte
+  contract about the *prefix* of a request reproduced identically by the in-memory splice and by
+  every projection. Borrowing it for a tail would make a reload unable to tell the two apart. The
+  model call reuses compaction's prompt and budget via a new `compact::summarize_slice`, factored
+  out of `compact()` with no behavior change; the transcript surgery is `rewind::write_summary`,
+  synchronous and directly tested, so the async wrapper is thin.
+- **The ctrl+o transcript view does not shrink after a conversation restore** — verified, not
+  assumed: it is built from `chat.messages`, what this terminal printed, not from the session file.
+  Write-once scrollback makes the rows above the terminal's property anyway. What the model sees
+  and what a reload replays are truncated exactly; what the screen remembers is what happened.
+- Out of scope by construction and documented: `Bash` mutations (no pre-image is takeable), and
+  directories `Write` created on the way to a file (deleting a directory we may not have made is a
+  larger wrong than leaving an empty one).
+- `EscLayer::ORDER` grows to 16. `esc_at` is shared with `ClearInput`, so arming on a non-empty
+  draft and then emptying it within the second lets the next Esc open rewind — harmless, and
+  cheaper than a second timer.
+- 1295 + 13 tests before, 1327 + 13 after (32 new: 18 store/truncation/summary, 13 selector,
+  1 Esc-stack walk).
