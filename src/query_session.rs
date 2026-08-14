@@ -33,6 +33,12 @@ pub struct Runtime {
     /// taken right now belong to. Starts detached, so a host that never opens a
     /// checkpoint records nothing and costs nothing.
     pub rewind: Arc<crate::rewind::Recorder>,
+    /// The user's attention (D94): where a subagent's `notify_user` line lands,
+    /// and the per-agent rate limit in front of it. Session-scoped so a subagent
+    /// inherits the parent's handle and one agent cannot reset its own window by
+    /// being re-run. Starts detached, so a host that never attaches a surface
+    /// still rate limits and still answers the model the same way.
+    pub notify_user: Arc<crate::notify_user::Relay>,
 }
 
 impl Runtime {
@@ -56,6 +62,7 @@ impl Runtime {
             thinking_tx,
             thinking,
             rewind: Arc::new(crate::rewind::Recorder::default()),
+            notify_user: crate::notify_user::Relay::detached(),
             mcp: Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
                 HashMap::new(),
                 Default::default(),

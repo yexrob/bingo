@@ -65,6 +65,19 @@ pub(crate) fn is_route_receipt(text: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('@') || rest.starts_with('#'))
 }
 
+/// A `notify_user` relay (D94) opens with the bell, in both its shapes:
+/// `🔔 @scout → you: …` and `🔔 @scout: 3 more — see the DM`.
+///
+/// The glyph is the marker rather than a prefix constant per shape, because both
+/// shapes are built by [`crate::notify_user::Notice::line`] and there is exactly
+/// one producer. A user pasting a bell into the composer writes an ordinary
+/// message: this predicate only ever reads text the harness itself pushed.
+pub(crate) const RELAY_PREFIX: &str = "🔔 @";
+
+pub(crate) fn is_relay_line(text: &str) -> bool {
+    text.starts_with(RELAY_PREFIX)
+}
+
 /// `→ @scout: look at the parser` — one line, whitespace flattened, cut to
 /// [`RECEIPT_CHARS`].
 fn receipt_line(id: &BufferId, text: &str) -> String {
@@ -81,6 +94,17 @@ fn receipt_line(id: &BufferId, text: &str) -> String {
 /// after a layout at a known width, and a conversation's last thirty messages
 /// is a promise that can be kept at any width.
 pub const REPLAY_BUDGET: usize = 30;
+
+/// A replay minus its opening rule: everything that occupies a position in the
+/// conversation, in order. The rule is furniture the host prints once, so it is
+/// the one element that must not be counted — `seen` is a cursor into *this*
+/// list, and a divider inside it would put the poll one item out of step.
+fn replay_items(all: &[Replay]) -> Vec<Replay> {
+    all.iter()
+        .filter(|replay| !matches!(replay, Replay::Divider(_)))
+        .cloned()
+        .collect()
+}
 
 /// What a flow position is, beyond the hub's two roles.
 ///
@@ -259,35 +283,28 @@ impl Chat {
         // that follows appends only what arrives after this moment; the budget
         // decides how much of it goes on screen, not how much is counted.
         let all = self.buffers.rehydrate(&session, id, usize::MAX);
-        let messages: Vec<&Replay> = all
-            .iter()
-            .filter(|replay| matches!(replay, Replay::Message { .. }))
-            .collect();
-        let seen = messages.len();
+        let items: Vec<Replay> = replay_items(&all);
+        let seen = items.len();
         let start = seen.saturating_sub(REPLAY_BUDGET);
-        let shown: Vec<(String, UiMessage)> = messages[start..]
-            .iter()
-            .filter_map(|replay| match replay {
-                Replay::Message { who, message } => Some((who.clone(), message.clone())),
-                Replay::Divider(_) => None,
-            })
-            .collect();
+        let shown = items[start..].to_vec();
 
         // Where the hub had got to before any of this was appended: the point
         // its unprinted tail resumes from when the excursion closes.
         let at = self.messages.len();
         // The rule comes from the replay rather than being formatted again
-        // here: one shape, decided in one place.
+        // here: one shape, decided in one place — including the observer
+        // framing, which is a fact about the conversation rather than about
+        // the host that opened it.
         let rule = all
             .iter()
             .find_map(|replay| match replay {
                 Replay::Divider(text) => Some(text.clone()),
-                Replay::Message { .. } => None,
+                _ => None,
             })
             .unwrap_or_else(|| id.rule());
         let mut rows = vec![self.push_flow_divider(rule)];
-        for (who, message) in shown {
-            rows.push(self.push_flow_message(who, message));
+        for replay in shown {
+            rows.extend(self.push_replay(&replay));
         }
         self.excursions.push(Excursion {
             id: id.clone(),
@@ -296,6 +313,19 @@ impl Chat {
             seen,
             closed: false,
         });
+    }
+
+    /// One replayed element into the flow. A message keeps its sender; a note
+    /// is nobody's, so it takes the rule's row shape — one dim line, no name
+    /// and no stamp — which is what a `· scout joined ·` line has to be.
+    fn push_replay(&mut self, replay: &Replay) -> Option<FlowItem> {
+        match replay {
+            Replay::Message { who, message } => {
+                Some(self.push_flow_message(who.clone(), message.clone()))
+            }
+            Replay::Note(text) => Some(self.push_flow_divider(text.clone())),
+            Replay::Divider(_) => None,
+        }
     }
 
     /// Append the rule that opens (or closes) a conversation and return its
@@ -340,20 +370,14 @@ impl Chat {
         }
         let session = self.session.clone();
         let all = self.buffers.rehydrate(&session, &id, usize::MAX);
-        let fresh: Vec<(String, UiMessage)> = all
-            .iter()
-            .filter_map(|replay| match replay {
-                Replay::Message { who, message } => Some((who.clone(), message.clone())),
-                Replay::Divider(_) => None,
-            })
-            .collect();
+        let fresh: Vec<Replay> = replay_items(&all);
         let seen = self.open_excursion().map(|exc| exc.seen).unwrap_or(0);
         if fresh.len() <= seen {
             return;
         }
         let mut rows = Vec::new();
-        for (who, message) in fresh.into_iter().skip(seen) {
-            rows.push(self.push_flow_message(who, message));
+        for replay in fresh.into_iter().skip(seen) {
+            rows.extend(self.push_replay(&replay));
         }
         let total = seen + rows.len();
         if let Some(exc) = self.open_excursion() {
@@ -374,14 +398,14 @@ impl Chat {
     /// before the agent has said anything back.
     pub(crate) fn send_to_active(&mut self, text: String) {
         let id = self.active_buffer();
-        let target = self.buffers.route_submit(&id, &text);
+        let target = self.buffers.route_submit(&self.session, &id, &text);
         match crate::tui::buffer::deliver(&self.session, target) {
             Delivery::Sent => {
                 self.poll_active_conversation();
                 self.dirty = true;
             }
-            // The board's refusal and a delivery failure read the same way:
-            // information about what did not happen, above the composer.
+            // An observed room's refusal and a delivery failure read the same
+            // way: information about what did not happen, above the composer.
             Delivery::Rejected(why) => self.push_slash_info(why),
             // Unreachable — only the hub routes to a turn, and the hub does not
             // come through here — but a silent drop would be the worse answer.
@@ -399,7 +423,11 @@ impl Chat {
     /// arrives through [`Chat::poll_active_conversation`] as a settled message
     /// and disappears from here. That is why they never reach scrollback: the
     /// record is what gets printed, not the states on the way to it.
-    pub(crate) fn conversation_tail_el(&self, width: usize) -> Option<El> {
+    pub(crate) fn conversation_tail_el(
+        &self,
+        width: usize,
+        pal: &crate::tui::avatar::Palette,
+    ) -> Option<El> {
         let BufferId::Dm(name) = self.active_buffer() else {
             return None;
         };
@@ -413,14 +441,42 @@ impl Chat {
         if all.len() <= settled.len() {
             return None;
         }
-        let rows: Vec<Row> = all[settled.len()..]
+        let gutter = self.conversation_gutter(pal);
+        // Run tracking starts fresh at the tail: everything above it has
+        // already settled into the flow, and reaching back across that seam
+        // would mean re-deciding rows that are frozen.
+        let tail = &all[settled.len()..];
+        let runs = sender_runs(tail);
+        let rows: Vec<Row> = tail
             .iter()
-            .flat_map(|post| self.tail_post_rows(post, &name, width))
+            .zip(runs)
+            .flat_map(|(post, lead)| self.tail_post_rows(post, &name, width, gutter.as_ref(), lead))
             .collect();
         if rows.is_empty() {
             return None;
         }
         Some(El::Rows(rows))
+    }
+
+    /// The avatar gutter this view draws, or `None` where there is none.
+    ///
+    /// The hub is the one conversation without one: its grammar is Claude
+    /// Code's — two speakers, `⏺` markers, bodies running the full width — and
+    /// a portrait column beside it would be a second convention in the same
+    /// window. Rooms, DMs and the perspective page are group-shaped, and there
+    /// the face is what says who is talking.
+    pub(crate) fn conversation_gutter<'a>(
+        &'a self,
+        pal: &'a crate::tui::avatar::Palette,
+    ) -> Option<crate::tui::avatar::Gutter<'a>> {
+        if self.active_buffer() == BufferId::Hub {
+            return None;
+        }
+        Some(crate::tui::avatar::Gutter::new(
+            self.image_cap.is_some(),
+            pal,
+            &self.faces_pinned,
+        ))
     }
 
     /// The instance's live state, or `None` when the registry has never heard
@@ -445,8 +501,27 @@ impl Chat {
     /// you sent is your bubble, a step of the agent's work is one dim line, and
     /// the wait is the same spinner the rest of the app waits with (D87
     /// `pulse`), so a DM in flight and a hub turn in flight read alike.
-    fn tail_post_rows(&self, post: &Post, who: &str, width: usize) -> Vec<Row> {
+    fn tail_post_rows(
+        &self,
+        post: &Post,
+        who: &str,
+        width: usize,
+        gutter: Option<&crate::tui::avatar::Gutter<'_>>,
+        lead: bool,
+    ) -> Vec<Row> {
         let theme = &self.theme;
+        // The two live-only kinds are states, not messages: they get the
+        // indentation so the column does not jog, and no face, because nobody
+        // has said anything yet.
+        let indent = |rows: &mut Vec<Row>| {
+            if let Some(g) = gutter {
+                g.apply(rows, g.index_for(who), who, false);
+            }
+        };
+        let inner = match gutter {
+            Some(g) => width.saturating_sub(g.width()),
+            None => width,
+        };
         match post.kind {
             // The bare indicator: a reply is owed and nothing has arrived yet.
             // With text it *is* the stream, and renders as the reply it is
@@ -465,41 +540,32 @@ impl Chat {
                 // The wait wears the same colour the composer does (D90), so
                 // the spinner, the prompt and the teammate's name in the bar
                 // are one teammate rather than three unrelated accents.
-                vec![Row::new(Line::styled(
-                    one_line(&format!("{glyph} {who} is replying…{rate}"), width),
+                let mut rows = vec![Row::new(Line::styled(
+                    one_line(&format!("{glyph} {who} is replying…{rate}"), inner),
                     SegStyle::fg(self.teammate_tint().unwrap_or(theme.claude)),
-                ))]
+                ))];
+                indent(&mut rows);
+                rows
             }
             // Sent, not yet claimed by a run: the agent has it, the turn has
             // not started. Dim, so it reads as in transit rather than answered.
-            PostKind::Queued => wrap_words(&post.text, width)
-                .into_iter()
-                .map(|line| Row::new(Line::styled(line, SegStyle::fg(theme.text_secondary))))
-                .collect(),
-            // One dim line per work step, like the transcript's tool rows: cut,
-            // not wrapped, so a long command stays one row.
-            PostKind::Process => vec![Row::new(Line::styled(
-                one_line(&post.text, width),
-                SegStyle::fg(theme.text_secondary),
-            ))],
-            _ if post.you => user_message_rows(&post.text, width, theme),
-            _ => self.agent_text_rows(&post.text, width),
+            PostKind::Queued => {
+                let mut rows: Vec<Row> = wrap_words(&post.text, inner)
+                    .into_iter()
+                    .map(|line| Row::new(Line::styled(line, SegStyle::fg(theme.text_secondary))))
+                    .collect();
+                indent(&mut rows);
+                rows
+            }
+            _ => {
+                let sender = gutter.map(|g| Sender {
+                    gutter: *g,
+                    index: g.index_for(&post.from),
+                    lead,
+                });
+                settled_post_rows(theme, post, width, sender.as_ref())
+            }
         }
-    }
-
-    /// A subagent's prose, rendered the way the hub renders the model's.
-    ///
-    /// Uncached on purpose: this is the streaming tail, its text changes on
-    /// almost every frame, and a cache keyed on text that never repeats is a
-    /// leak with extra steps. The settled copy that lands in the flow goes
-    /// through the transcript's own cached path.
-    fn agent_text_rows(&self, text: &str, width: usize) -> Vec<Row> {
-        let mut processor = MarkdownProcessor::default();
-        let mut renderer =
-            MarkdownRenderer::with_theme(width.saturating_sub(2), self.theme.clone());
-        let doc = processor.process_streaming(text);
-        renderer.render(&doc);
-        text_rows(&self.theme, renderer.lines().to_vec())
     }
 
     // -- /open -------------------------------------------------------------
@@ -541,7 +607,6 @@ impl Chat {
         }
         let id = match sigil {
             '@' => BufferId::Dm(name.to_string()),
-            '#' if head == BufferId::Team.label() => BufferId::Team,
             '#' => BufferId::Channel(name.to_string()),
             _ => return None,
         };
@@ -556,7 +621,7 @@ impl Chat {
     /// routed from the hub is indistinguishable at the domain from one typed
     /// in the DM itself.
     pub(crate) fn route_from_hub(&mut self, id: BufferId, text: String) {
-        let target = self.buffers.route_submit(&id, &text);
+        let target = self.buffers.route_submit(&self.session, &id, &text);
         match crate::tui::buffer::deliver(&self.session, target) {
             Delivery::Sent => {
                 let receipt = receipt_line(&id, &text);
@@ -590,7 +655,8 @@ impl Chat {
         let arg = arg.trim();
         if arg.is_empty() {
             self.push_slash_info(
-                "usage: /open @agent · /open #channel · /open #team · /open hub".to_string(),
+                "usage: /open @agent · /open #room · /open hub · ctrl+t for the team directory"
+                    .to_string(),
             );
             return;
         }
@@ -599,6 +665,78 @@ impl Chat {
             None => self.push_slash_info(format!(
                 "no conversation called {arg} · /open lists what is open"
             )),
+        }
+    }
+
+    // -- rooms -------------------------------------------------------------
+
+    /// Which room a `/join` or `/leave` is about: the one named, or the one you
+    /// are standing in. Standing in it is the common case — you found it in the
+    /// directory, read it, and decided to speak — so naming it again would be
+    /// ceremony.
+    fn room_arg(&self, arg: &str) -> Option<String> {
+        let named = arg.trim().trim_start_matches('#').trim();
+        if !named.is_empty() {
+            return Some(named.to_string());
+        }
+        match self.active_buffer() {
+            BufferId::Channel(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// `/join [#room]` — stop watching and become a member.
+    ///
+    /// There is no quiet way in: the domain writes the join into the room's
+    /// record, so every member sees the same line the joiner does. That is the
+    /// whole reason observing is allowed to be free — the moment it stops being
+    /// reading and starts being participation, it is announced.
+    pub(crate) fn slash_join(&mut self, arg: &str) {
+        let Some(room) = self.room_arg(arg) else {
+            self.push_slash_info(
+                "usage: /join #room — or press j on a room in the team directory (ctrl+t)"
+                    .to_string(),
+            );
+            return;
+        };
+        match self.session.channels.invite(&room, USER_NAME) {
+            Ok(()) => {
+                self.refresh_conversations();
+                // The membership line lands in the room's log, so the flow you
+                // are looking at picks it up like any other arrival.
+                self.poll_active_conversation();
+                self.dirty = true;
+            }
+            Err(why) => self.push_slash_info(why),
+        }
+    }
+
+    /// `/leave [#room]` — stop being a member; the room stays readable.
+    pub(crate) fn slash_leave(&mut self, arg: &str) {
+        let Some(room) = self.room_arg(arg) else {
+            self.push_slash_info("usage: /leave #room".to_string());
+            return;
+        };
+        match self.session.channels.kick(&room, USER_NAME) {
+            Ok(()) => {
+                self.refresh_conversations();
+                self.poll_active_conversation();
+                self.dirty = true;
+            }
+            Err(why) => self.push_slash_info(why),
+        }
+    }
+
+    /// The standing hint under a room the user is only watching, or `None`
+    /// anywhere else. The composer is live — slash commands and `ctrl+k` mean
+    /// what they mean everywhere — but Enter will not put words in a room whose
+    /// roster the user is not on, and the hint says so before they try.
+    pub(crate) fn observer_hint(&self) -> Option<&'static str> {
+        match self.active_buffer() {
+            BufferId::Channel(name) if !self.session.channels.is_member(&name, USER_NAME) => {
+                Some(crate::tui::buffer::OBSERVER_HINT)
+            }
+            _ => None,
         }
     }
 
@@ -611,12 +749,6 @@ impl Chat {
         let arg = arg.trim();
         if arg.eq_ignore_ascii_case("hub") {
             return Some(BufferId::Hub);
-        }
-        if arg == "#team" || arg.eq_ignore_ascii_case("team") {
-            return self
-                .buffers
-                .get(&BufferId::Team)
-                .map(|buffer| buffer.id().clone());
         }
         let bare = arg.trim_start_matches(['@', '#']);
         if bare.is_empty() {
@@ -644,7 +776,6 @@ impl Chat {
                 let unread = buffer.unread();
                 let description = match (buffer.id(), unread) {
                     (BufferId::Hub, _) => "the conversation with the model".to_string(),
-                    (BufferId::Team, _) => "subagent lifecycle, read-only".to_string(),
                     (_, 0) => String::new(),
                     // A conversation that named you is worth saying out loud,
                     // because it is the one you were going to open anyway.
@@ -655,6 +786,94 @@ impl Chat {
             })
             .collect()
     }
+}
+
+/// A *settled* post as rows — the shapes any stored conversation can contain:
+/// a message somebody sent, a line nobody said, a step of an agent's work.
+///
+/// Split out of [`Chat::tail_post_rows`] for D96: the perspective page renders
+/// the same posts with no instance behind them, and a second renderer beside
+/// this one is exactly the thing the conversation engine has avoided since D89.
+/// The two live-only kinds stay with the host, because they need the running
+/// instance's clock and colour: [`PostKind::Typing`] and [`PostKind::Queued`].
+pub(crate) fn settled_post_rows(
+    theme: &crate::tui::theme::Theme,
+    post: &Post,
+    width: usize,
+    sender: Option<&Sender<'_>>,
+) -> Vec<Row> {
+    let width = match sender {
+        Some(s) => width.saturating_sub(s.gutter.width()),
+        None => width,
+    };
+    let mut rows = match post.kind {
+        // One dim line per work step, like the transcript's tool rows: cut,
+        // not wrapped, so a long command stays one row.
+        PostKind::Process => vec![Row::new(Line::styled(
+            one_line(&post.text, width),
+            SegStyle::fg(theme.text_secondary),
+        ))],
+        // Nobody said it, so it is furniture: the muted tier, one line, no name
+        // over it and no stamp beside it (the source puts its own clock in the
+        // text where it has one).
+        PostKind::Note => vec![Row::new(Line::styled(
+            one_line(&post.text, width),
+            SegStyle::fg(theme.text_muted),
+        ))],
+        _ if post.you => user_message_rows(&post.text, width, theme),
+        _ => agent_text_rows(theme, &post.text, width),
+    };
+    if let Some(s) = sender {
+        // Process and note rows take the indentation and none of the face: the
+        // message column stays one straight edge, and only somebody who spoke
+        // gets a portrait beside what they said.
+        let lead = s.lead && wears_a_face(post);
+        s.gutter.apply(&mut rows, s.index, &post.from, lead);
+    }
+    rows
+}
+
+/// Whether a post is somebody speaking — the only kind that wears a portrait.
+/// Work steps and runtime notes are furniture: nobody said them.
+fn wears_a_face(post: &Post) -> bool {
+    !matches!(post.kind, PostKind::Process | PostKind::Note)
+}
+
+/// Who a post is drawn as in a view that has an avatar gutter (D97): the
+/// sender's portrait, and whether this post opens their run.
+pub(crate) struct Sender<'a> {
+    pub gutter: crate::tui::avatar::Gutter<'a>,
+    pub index: usize,
+    pub lead: bool,
+}
+
+/// Which posts open a sender's run, in order.
+///
+/// A run is broken by somebody else speaking and by nothing else: an agent's
+/// tool rows sit inside its own turn, so a reply that resumes after them is
+/// still the same person talking and does not earn a second portrait.
+pub(crate) fn sender_runs(posts: &[Post]) -> Vec<bool> {
+    let mut out = Vec::with_capacity(posts.len());
+    let mut previous: Option<(bool, String)> = None;
+    for post in posts {
+        if !wears_a_face(post) {
+            out.push(false);
+            continue;
+        }
+        let key = (post.you, post.from.clone());
+        out.push(previous.as_ref() != Some(&key));
+        previous = Some(key);
+    }
+    out
+}
+
+/// An agent's prose, rendered the way the hub renders the model's.
+fn agent_text_rows(theme: &crate::tui::theme::Theme, text: &str, width: usize) -> Vec<Row> {
+    let mut processor = MarkdownProcessor::default();
+    let mut renderer = MarkdownRenderer::with_theme(width.saturating_sub(2), theme.clone());
+    let doc = processor.process_streaming(text);
+    renderer.render(&doc);
+    text_rows(theme, renderer.lines().to_vec())
 }
 
 #[cfg(test)]
@@ -716,8 +935,7 @@ mod tests {
         }
     }
 
-    /// A crew member: what makes a formation a formation, and so what puts
-    /// `#team` in the registry (D93).
+    /// A crew member (D53): a teammate from the blueprint rather than a hire.
     fn seed_crew(chat: &Chat, name: &str) {
         chat.session.agents.insert(
             name,
@@ -967,7 +1185,11 @@ mod tests {
         let mut chat = test_chat();
         chat.session
             .channels
-            .create("build", vec!["scout".to_string()], ChannelMode::Free)
+            .create(
+                "build",
+                vec![USER_NAME.to_string(), "scout".to_string()],
+                ChannelMode::Free,
+            )
             .expect("channel created");
         chat.refresh_conversations();
         chat.switch_to(BufferId::Channel("build".to_string()));
@@ -982,19 +1204,49 @@ mod tests {
         assert!(flow(&mut chat).contains("ship it"), "and it is on screen");
     }
 
-    /// The board is a record of what happened. Refusing to be spoken in is
-    /// information, so it lands in the info tier rather than as an error.
+    // -- observing a room --------------------------------------------------
+
+    /// The whole observer contract in one test: a room the user is not in opens
+    /// read-only under its own rule, the composer says so before and after the
+    /// attempt, and nothing lands in the log.
     #[tokio::test]
-    async fn the_board_refuses_to_be_spoken_in() {
+    async fn a_room_you_are_not_in_opens_read_only_and_says_why() {
         let mut chat = test_chat();
-        chat.buffers.note_watch_event(
-            "scout #1 · go",
-            crate::watch::WatchKind::Agent,
-            crate::watch::WatchState::Running,
-            None,
-            1,
+        chat.session
+            .channels
+            .create(
+                "parser",
+                vec!["scout".to_string(), "zoe".to_string()],
+                ChannelMode::Free,
+            )
+            .expect("room created");
+        chat.session
+            .channels
+            .post("scout", "parser", "the tokenizer is the problem")
+            .expect("posted");
+        chat.refresh_conversations();
+        assert!(
+            chat.buffers
+                .get(&BufferId::Channel("parser".to_string()))
+                .is_none(),
+            "it is not one of the user's conversations"
         );
-        chat.switch_to(BufferId::Team);
+
+        chat.switch_to(BufferId::Channel("parser".to_string()));
+        let text = flow(&mut chat);
+        assert!(
+            text.contains("── #parser · observer · read-only ──"),
+            "the rule frames it: {text}"
+        );
+        assert!(
+            text.contains("the tokenizer is the problem"),
+            "and reading is free: {text}"
+        );
+        assert_eq!(
+            chat.observer_hint(),
+            Some(crate::tui::buffer::OBSERVER_HINT),
+            "the composer says so standing still"
+        );
 
         chat.set_input("nice work everyone");
         chat.submit();
@@ -1002,14 +1254,77 @@ mod tests {
         assert!(
             chat.slash_info_lines
                 .iter()
-                .any(|line| line.contains("board")),
-            "the refusal is said out loud: {:?}",
+                .any(|line| line.contains("/join")),
+            "the refusal names the way in: {:?}",
             chat.slash_info_lines
         );
         assert!(
             chat.slash_error_lines.is_empty(),
             "and it is not an error: nothing failed"
         );
+        assert!(
+            chat.session.channels.log_of("parser").len() == 1,
+            "nothing was posted"
+        );
+
+        // Esc goes home, exactly as it does from every other conversation: the
+        // destination must not depend on how you arrived (D89's BackToHub). The
+        // info line is peeled first, as it is anywhere else.
+        chat.slash_info_lines.clear();
+        assert!(chat.on_key(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE
+        ));
+        assert_eq!(*chat.buffers.active(), BufferId::Hub);
+        assert_eq!(chat.observer_hint(), None, "and the hint went with it");
+    }
+
+    /// Joining is a membership event everyone in the room sees, and it is what
+    /// turns the room into one of the user's conversations.
+    #[tokio::test]
+    async fn joining_announces_itself_and_opens_the_composer() {
+        let mut chat = test_chat();
+        chat.session
+            .channels
+            .create("parser", vec!["scout".to_string()], ChannelMode::Free)
+            .expect("room created");
+        chat.refresh_conversations();
+        chat.switch_to(BufferId::Channel("parser".to_string()));
+
+        chat.run_slash("join");
+        assert!(
+            chat.session.channels.is_member("parser", USER_NAME),
+            "the user is on the roster"
+        );
+        assert!(
+            chat.buffers
+                .get(&BufferId::Channel("parser".to_string()))
+                .is_some(),
+            "the room is in the bar"
+        );
+        assert_eq!(chat.observer_hint(), None, "and the composer is live");
+        let text = flow(&mut chat);
+        assert!(
+            text.contains("· user joined ·"),
+            "everyone in the room is told: {text}"
+        );
+
+        // Speaking now lands, in the same room, through the ordinary path.
+        chat.set_input("ship it");
+        chat.submit();
+        let log = chat.session.channels.log_of("parser");
+        assert_eq!(log.last().map(|m| m.text.as_str()), Some("ship it"));
+
+        // And leaving is the counterpart: announced, and off the bar again.
+        chat.run_slash("leave");
+        assert!(!chat.session.channels.is_member("parser", USER_NAME));
+        assert!(
+            chat.buffers
+                .get(&BufferId::Channel("parser".to_string()))
+                .is_none(),
+            "a room you left is not your conversation"
+        );
+        assert!(flow(&mut chat).contains("· user left ·"));
     }
 
     /// Slash commands act on the application, so they mean the same thing in
@@ -1106,70 +1421,51 @@ mod tests {
         );
     }
 
-    // -- the #team board ---------------------------------------------------
+    // -- the team feed -----------------------------------------------------
 
-    /// The board renders as a conversation, through the same row builder every
-    /// other one uses, and each row says what happened as well as what was
-    /// reported.
+    /// `/team` answers into the team's feed, and the hub keeps one line saying
+    /// where the answer went. The feed is a column of the directory now, so the
+    /// pointer names the key that opens it rather than a buffer to switch to
+    /// (`the_board_renders_its_lifecycle_log` moved to `tui::directory`, which
+    /// is where those rows are now built).
     #[test]
-    fn the_board_renders_its_lifecycle_log() {
-        let mut chat = test_chat();
-        chat.buffers.note_watch_event(
-            "scout #1 · fix the parser",
-            crate::watch::WatchKind::Agent,
-            crate::watch::WatchState::Running,
-            None,
-            1,
-        );
-        chat.buffers.note_watch_event(
-            "scout #1 · fix the parser",
-            crate::watch::WatchKind::Agent,
-            crate::watch::WatchState::Done,
-            Some("fixed it"),
-            2,
-        );
-        chat.switch_to(BufferId::Team);
-
-        let text = flow(&mut chat);
-        assert!(text.contains("── #team ──"), "{text}");
-        assert!(text.contains("scout #1 · fix the parser"), "{text}");
-        assert!(text.contains("running"), "{text}");
-        assert!(
-            text.contains("done · fixed it"),
-            "a finished run reads as finished: {text}"
-        );
-    }
-
-    /// `/team` answers on the board it is about. Away from it, the board's
-    /// unread carries the answer and one info line says where it went — the
-    /// user is told, rather than left with a command that replied with nothing.
-    #[test]
-    fn team_output_lands_on_the_board_and_says_so() {
+    fn team_output_lands_in_the_feed_and_says_where() {
         let mut chat = test_chat();
         seed_crew(&chat, "dev");
         chat.refresh_conversations();
         chat.run_slash("team");
 
-        let board = chat
-            .buffers
-            .get(&BufferId::Team)
-            .expect("the board was created to hold the answer");
-        assert!(board.unread() > 0, "the answer counts as unread");
         assert!(
-            chat.slash_info_lines.iter().any(|line| line == "→ #team"),
-            "and the hub points at it: {:?}",
+            chat.buffers
+                .team_log()
+                .iter()
+                .any(|event| event.label == "/team"),
+            "the answer is in the feed: {:?}",
+            chat.buffers.team_log()
+        );
+        assert!(
+            chat.slash_info_lines
+                .iter()
+                .any(|line| line == "→ team (ctrl+t)"),
+            "and the hub points at the key that opens it: {:?}",
             chat.slash_info_lines
         );
         assert!(
             !chat
                 .messages
                 .iter()
-                .any(|message| message.text.contains("→ #team")),
+                .any(|message| message.text.contains("→ team")),
             "the pointer is an info line, not a message in the transcript"
         );
+        assert_eq!(
+            *chat.buffers.active(),
+            BufferId::Hub,
+            "and nothing was opened: the team is not a conversation"
+        );
 
-        // On the board, the same command prints where you are looking.
-        chat.switch_to(BufferId::Team);
+        // With the directory already open, the answer is where you are looking
+        // and there is nothing to point at.
+        chat.open_directory();
         chat.slash_info_lines.clear();
         chat.run_slash("team");
         assert!(
@@ -1177,15 +1473,11 @@ mod tests {
             "no pointer is needed when you are already there: {:?}",
             chat.slash_info_lines
         );
-        let text = flow(&mut chat);
         assert!(
-            text.contains("/team"),
-            "the entry names its command: {text}"
-        );
-        assert_eq!(
-            chat.buffers.get(&BufferId::Team).map(|b| b.unread()),
-            Some(0),
-            "and reading it is reading it"
+            chat.directory_rows()
+                .iter()
+                .any(|row| row.text.starts_with("/team")),
+            "the entry names its command"
         );
     }
 
@@ -1369,7 +1661,11 @@ mod tests {
         seed_crew(&chat, "dev");
         chat.session
             .channels
-            .create("build", vec!["scout".to_string()], ChannelMode::Free)
+            .create(
+                "build",
+                vec![USER_NAME.to_string(), "scout".to_string()],
+                ChannelMode::Free,
+            )
             .expect("channel created");
         chat.buffers.note_watch_event(
             "scout #1 · go",
@@ -1387,8 +1683,6 @@ mod tests {
             *chat.buffers.active(),
             BufferId::Channel("build".to_string())
         );
-        chat.run_slash("open #team");
-        assert_eq!(*chat.buffers.active(), BufferId::Team);
         chat.run_slash("open hub");
         assert_eq!(*chat.buffers.active(), BufferId::Hub);
         // The sigil is an accepted spelling, not a requirement.
@@ -1419,7 +1713,11 @@ mod tests {
         seed_agent(&chat, "scout", Vec::new());
         chat.session
             .channels
-            .create("build", vec!["scout".to_string()], ChannelMode::Free)
+            .create(
+                "build",
+                vec![USER_NAME.to_string(), "scout".to_string()],
+                ChannelMode::Free,
+            )
             .expect("channel created");
         chat.refresh_conversations();
 
@@ -1441,5 +1739,221 @@ mod tests {
                 "{name} was offered but does not resolve"
             );
         }
+    }
+    // -- the avatar gutter (D97) ------------------------------------------
+
+    /// Every document row with its leading columns intact — the gutter is
+    /// exactly what a `plain_text()` that filters blanks would throw away, so
+    /// these tests read the rows raw.
+    fn raw_rows(chat: &mut Chat) -> Vec<String> {
+        chat.build_rows(100);
+        chat.doc
+            .rows
+            .iter()
+            .map(|row| row.line.plain_text())
+            .collect()
+    }
+
+    /// The row a piece of text landed on, gutter and all.
+    fn row_with(rows: &[String], needle: &str) -> String {
+        rows.iter()
+            .find(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("no row contains {needle:?}: {rows:#?}"))
+            .clone()
+    }
+
+    /// A DM's messages sit in a gutter and the first row of a sender's run
+    /// carries their chip. Without the run rule a burst of replies would be a
+    /// column of repeated portraits, which is what Slack's grouping is for.
+    #[test]
+    fn a_dm_wears_a_face_on_the_first_row_of_each_run() {
+        let mut chat = test_chat();
+        seed_agent(
+            &chat,
+            "scout",
+            vec![
+                user("look at the parser"),
+                assistant("found it"),
+                assistant("and fixed it"),
+            ],
+        );
+        chat.refresh_conversations();
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+        let rows = raw_rows(&mut chat);
+
+        let gutter = crate::tui::avatar::gutter_width(false);
+        // The name row opens the run, so it is the row wearing the chip. The
+        // rule that opened the conversation names it too, and is not a message.
+        let name_row = rows
+            .iter()
+            .find(|row| row.contains("scout") && !row.contains('─'))
+            .unwrap_or_else(|| panic!("no name row: {rows:#?}"))
+            .clone();
+        assert!(
+            name_row.starts_with(" S") && name_row.trim_end().ends_with("scout"),
+            "the chip is the sender's initial on its colour, then the name: {name_row:?}"
+        );
+        // The second reply is the same sender continuing: no second chip.
+        let second = row_with(&rows, "and fixed it");
+        assert_eq!(
+            second.chars().take(gutter).collect::<String>(),
+            " ".repeat(gutter),
+            "a continuation row's gutter is blank: {second:?}"
+        );
+        let first_body = row_with(&rows, "found it");
+        assert_eq!(
+            first_body.chars().take(gutter).collect::<String>(),
+            " ".repeat(gutter),
+            "and so is a body row under the name that opened the run: {first_body:?}"
+        );
+    }
+
+    /// The hub keeps Claude Code's grammar: two speakers, no portrait column.
+    /// A gutter there would be a second convention in the same window.
+    #[test]
+    fn the_hub_flow_wears_no_gutter() {
+        let mut chat = test_chat();
+        hub_message(&mut chat, Role::Assistant, "hub prose");
+        let rows = raw_rows(&mut chat);
+        let row = row_with(&rows, "hub prose");
+        assert!(
+            !row.starts_with("    "),
+            "the hub's body is not indented into a gutter: {row:?}"
+        );
+    }
+
+    /// A tool row and a membership line take the indent and no face: the column
+    /// stays one straight edge, and only somebody who spoke gets a portrait.
+    #[test]
+    fn process_and_note_rows_take_the_indent_and_no_face() {
+        let theme = crate::tui::theme::Theme::dark();
+        let pal = crate::tui::avatar::Palette::new(&theme);
+        let pinned = std::collections::HashMap::new();
+        let gutter = crate::tui::avatar::Gutter::new(false, &pal, &pinned);
+        let width = gutter.width();
+        for kind in [PostKind::Process, PostKind::Note] {
+            let post = Post {
+                from: "scout".to_string(),
+                you: false,
+                at: 0,
+                text: "ran the tests".to_string(),
+                kind,
+            };
+            let sender = Sender {
+                gutter,
+                index: gutter.index_for("scout"),
+                lead: true,
+            };
+            let rows = settled_post_rows(&theme, &post, 60, Some(&sender));
+            let text = rows[0].line.plain_text();
+            assert_eq!(
+                text.chars().take(width).collect::<String>(),
+                " ".repeat(width),
+                "{kind:?} takes the indent and no face: {text:?}"
+            );
+        }
+    }
+
+    /// A run is broken by somebody else speaking, and by nothing else — an
+    /// agent's own tool rows are inside its turn.
+    #[test]
+    fn a_tool_row_does_not_break_a_senders_run() {
+        let said = |from: &str, you: bool, kind: PostKind| Post {
+            from: from.to_string(),
+            you,
+            at: 0,
+            text: "x".to_string(),
+            kind,
+        };
+        let posts = vec![
+            said("scout", false, PostKind::Said),
+            said("scout", false, PostKind::Process),
+            said("scout", false, PostKind::Said),
+            said("user", true, PostKind::Said),
+            said("scout", false, PostKind::Said),
+        ];
+        assert_eq!(
+            sender_runs(&posts),
+            vec![true, false, false, true, true],
+            "one face per run, and a work step is not a speaker"
+        );
+    }
+
+    /// The gutter comes out of the width before anything wraps. A body wrapped
+    /// at the full width and then indented would overrun the terminal by
+    /// exactly the gutter — and CJK, being two cells a character, is where that
+    /// shows up first.
+    #[test]
+    fn the_gutter_comes_out_of_the_width_before_cjk_wraps() {
+        let theme = crate::tui::theme::Theme::dark();
+        let pal = crate::tui::avatar::Palette::new(&theme);
+        let pinned = std::collections::HashMap::new();
+        let gutter = crate::tui::avatar::Gutter::new(false, &pal, &pinned);
+        let post = Post {
+            from: crate::channels::USER_NAME.to_string(),
+            you: true,
+            at: 0,
+            text: "他在解析器里找到了一个真正的问题".repeat(6),
+            kind: PostKind::Said,
+        };
+        let sender = Sender {
+            gutter,
+            index: gutter.index_for(crate::channels::USER_NAME),
+            lead: true,
+        };
+        let width = 40;
+        let rows = settled_post_rows(&theme, &post, width, Some(&sender));
+        assert!(
+            rows.len() > 1,
+            "the text has to wrap for this to mean anything"
+        );
+        for row in &rows {
+            let text = row.line.plain_text();
+            assert!(
+                crate::tui::line::text_width(&text) <= width,
+                "a gutter row must still fit the terminal: {} cells in {width}: {text:?}",
+                crate::tui::line::text_width(&text)
+            );
+        }
+    }
+
+    /// Where the terminal can place images the gutter cells are the portrait's
+    /// own — the kitty placeholder run, with the image id in the foreground.
+    /// Asserted at the sequence level, the way `avatar.rs` asserts its own.
+    #[test]
+    fn the_image_skin_puts_placeholder_cells_in_the_gutter() {
+        let theme = crate::tui::theme::Theme::dark();
+        let pal = crate::tui::avatar::Palette::new(&theme);
+        let pinned = std::collections::HashMap::new();
+        let gutter = crate::tui::avatar::Gutter::new(true, &pal, &pinned);
+        let index = gutter.index_for("scout");
+        let cells = gutter.cells(index, "scout", true);
+        assert_eq!(
+            cells.len(),
+            crate::tui::avatar::ROWS,
+            "two rows of portrait"
+        );
+        for (row, cell) in cells.iter().enumerate() {
+            let text = cell.plain_text();
+            assert!(
+                text.contains(crate::tui::gfx::PLACEHOLDER),
+                "row {row} is placeholder cells: {text:?}"
+            );
+            assert_eq!(
+                crate::tui::line::text_width(&text),
+                gutter.width(),
+                "and it measures the gutter exactly"
+            );
+        }
+        assert!(
+            gutter.cells(index, "scout", false).is_empty(),
+            "a continuation message spends no portrait"
+        );
+        let blank = gutter.blank().plain_text();
+        assert_eq!(
+            blank.trim(),
+            "",
+            "and the continuation gutter is blank: {blank:?}"
+        );
     }
 }

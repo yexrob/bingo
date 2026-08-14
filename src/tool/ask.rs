@@ -248,6 +248,7 @@ mod tests {
             }),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let tool = AskUserQuestionTool;
         let result = tool
@@ -286,6 +287,7 @@ mod tests {
             }),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let tool = AskUserQuestionTool;
         let result = tool
@@ -318,6 +320,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let tool = AskUserQuestionTool;
         let result = tool
@@ -350,6 +353,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let tool = AskUserQuestionTool;
         let err = tool
@@ -382,6 +386,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let ask = AskUserQuestionTool;
         let bash = BashTool::new();

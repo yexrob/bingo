@@ -2477,3 +2477,485 @@ non-zero-exit and unset-editor paths are untouched.
   suite was green without further change.
 - 1354 + 13 tests before, 1365 + 13 after (12 new: 2 vision projection, 3 scroll, 1 solo-hire board,
   3 stamp placement, 1 beam, 2 editor round trip; 1 deleted).
+
+### D94. The hub stops being the message bus
+
+**Problem.** Every agent lifecycle event in the session wrote into the user's conversation with the
+main agent. `UiEvent::WatchEvent` has one consumer (`chat.rs`), and when it could not find an
+existing row for the label it built one and hung it off `stream_msg` — or, with no turn running,
+off *the last assistant message it could find*. So a background hire finishing forty seconds after
+its turn ended, a continuation run opening under a new label (`scout #3 · …`, a new label every
+run), and an ack watchdog reporting a chase all appended `◉ name · task` + `⎿ done` under a reply
+that had nothing to do with them. The hub is supposed to be a 1v1 conversation; it was the system's
+message bus with the conversation mixed in.
+
+**The inventory**, taken before anything was changed, and where each item went:
+
+| What printed in the hub | Site | Now |
+|---|---|---|
+| `◉ name · task` + `⎿ done`, manufactured when no row matched the label | `chat.rs` else-branch | Not printed when no turn is running; bar presence + lifecycle log + the agent's DM carry it |
+| The same row updated in place (status flip, and the agent's whole final text stuffed into its ctrl+o content) | `chat.rs` found-branch | Unchanged — it is the running turn's own row, created by the turn that called `Agent` |
+| One new row **per continuation run** (`flush_agent_inbox` registers `{name} #{run} · {excerpt}`) | `agent.rs` | Gone from the hub with the manufacture branch |
+| Ack-retry scaffolding (`waiting for a reply, chased 1/3`, `not delivered: …`, `3 follow-ups and scout still has not replied`) — all `WatchKind::Agent` | `agent.rs` `spawn_ack_watchdog` | Same |
+| An auto hub turn on every terminal state (`submit_auto`) | `chat.rs` | **Untouched.** This is how `<task-notifications>` reaches the model; D94 changes what the user sees, not what any model reads |
+
+**Decision.**
+
+*The rule is about **when**, not about **what**.* The obvious change — drop agent watch rows — is
+wrong, because `Agent` is a hidden tool (`is_hidden_tool`): it renders no tool row of its own, so
+the watch row **is** the row for the Task call the user just watched the model make. Deleting it
+would delete the hub turn's only evidence of its own tool use. The discriminator is therefore
+`stream_msg`: a turn is running, so this event answers something the user did here, and the row
+stays; no turn is running, so this is the bus, and the row is not built. That is the same sentence
+the delivery matrix uses — "events that are answers to something the user did in hub within the
+current turn" — expressed in the one piece of state that already means it. `Command` and `Channel`
+watches keep the old walk-back untouched: a background shell command is the hub's own tool.
+
+*The event still falls through.* Suppressing the row must not suppress `submit_auto`, so the
+early-`return` the old code used for "no message to hang a row on" is preserved **only** for
+non-agent kinds, and an agent event with nowhere to draw carries on to the terminal-state handling.
+The model-side contracts — task notifications, D64 markers, D63 privacy, ack-retry — are byte-identical.
+
+*Nothing was needed to make a completion bump the DM.* This was verified rather than assumed: the
+final report already lands in the instance's history (`AgentRegistry::finish`), the DM's sequence is
+that history's length (`Buffers::refresh`), and `mention` is hardcoded true for every DM, so the
+badge and the `wants you` accent follow for free. The lifecycle event's own registry sweep is what
+re-reads it. A test now pins the whole chain end to end.
+
+*`notify_user` is the road that replaces the flood.* One tool, subagents only — the main agent holds
+the hub already, so a tool for "reaching the user" there would be a second and worse way to say
+something it can simply say. `assemble_tools` gains it in the `else` of the `depth == 0` gate,
+which is the first thing that branch has ever been used for. The description spends most of its
+words on when *not* to call it, because an agent that narrates progress through it turns the user's
+one quiet surface into a log.
+
+*The rate limit lives with the decision, not with the drawing.* `Relay::notify` returns
+`delivered` or `queued`, so the model learns the window exists and is told not to resend; the
+`queued` copy names where the text still is. One line per agent per 60s; extras are counted and
+reported once as `🔔 @name: N more — see the DM` when the window rolls, flushed on the host's tick
+so a rolled window pays what it owes even if the agent has gone quiet. `urgent` bypasses coalescing
+— a blocker is worth a line whenever it arrives — but not the attention ceiling: the D79 notifier
+fires at most once per agent per window, which is why `notifier: bool` is decided in the relay and
+merely obeyed by the renderer. **Nothing is lost by counting**: the text was written *as a tool
+call*, so it is in that agent's transcript and reaches the user through its DM regardless.
+
+*Time is a parameter.* Every entry point takes `now: Instant`, the `token_rate` pattern, so the
+window is driven by tests instead of slept through.
+
+*The relay is session-scoped, like `rewind`.* It lives on `Runtime` and `build_sub_session`
+inherits the parent's handle, which is what makes the rate-limit table the session's rather than the
+spawn's — an agent restarted in a loop cannot buy itself a fresh window. It also avoided threading a
+handle through `spawn_agent_loop`, `flush_agent_inbox` and their nine callers. The sink is
+interior-mutable because the session outlives the surface: the session is built first, the channel a
+notice travels on only exists once the host builds its screen, so the host `attach`es then.
+
+*The hub gets an unread count for the first time.* It is the one buffer with no domain sequence
+behind it — nothing could previously arrive in it that the user had not asked for, so there was
+nothing to count. A relay can arrive unasked, which is the entire point of it, so `Buffers` counts
+relays and observes the hub against them.
+
+*A relay is a state line that keeps its stamp.* It joins the dim, bubble-less family (interrupt
+marker, dialog receipts, the D90 route receipt) because the user did not write it — but it is the
+one member that is a real message, sent by someone, at a moment that matters: "the build broke"
+reads differently at 09:02 and at 17:40. The other members describe *now* and have nothing to stamp.
+
+**Consequences.**
+
+- A fourth D79 trigger, `Attention::AgentNotice` → `An agent needs you`. It is the first trigger the
+  *model* side can pull, which is why the ceiling is at the source rather than here. No name and no
+  count, by the same rule as the other three: the line is already in the hub.
+- Headless attaches a stderr sink, so a relay is not silent in a pipe (general principle 1). The
+  JSON protocol host takes a detached relay and **no new wire event this batch** — inventing a shape
+  before a client has asked for one would freeze it; the rate limiting still runs there, so the
+  model's contract does not vary by host.
+- Two D97-era avatar tests were pinning the row's appearance with no running turn; they now set
+  `stream_msg`, which is what a real spawn does. What they test — how the row looks — is unchanged.
+- `Buffers::team_log` is `#[cfg(test)]` for now: `rehydrate` is still the only production reader.
+  D95's directory is the second and un-gates it.
+- **Known limits, named rather than papered over.** (a) `set_state(Done)` broadcasts *before*
+  `finish()` stores the history, so a completion's DM badge can wait for the next 15-tick sweep;
+  the ordering was left alone because fixing it means restructuring the continuation match with no
+  test that can prove the race. (b) `release_hires()` can delete an instance before any sweep
+  observes the grown history, freezing that DM's badge — it only fires in a project with a live
+  crew, and it is a pre-existing hole rather than one D94 opened. (c) The DM's sequence counts raw
+  history entries, not rendered posts, so one report reads as `(2)` rather than `(1)`. (d) The
+  coalesce flush rides the tick, so a fully idle loop pays what it owes when it next wakes.
+- 1365 + 13 tests before, 1390 + 13 after (25 new: 7 relay arithmetic, 6 tool surface, 11 hub
+  routing and rendering, 1 tool registration).
+
+### D95. Rooms as first-class citizens, and the team as a directory
+
+**Problem.** Two things were wearing each other's clothes. A *channel* was a group chat whose
+roster the domain silently filled in — `create` seated `main` and `user` no matter what was asked
+for — so every room was the user's room by construction, and "an arbitrary subset of the team" was
+a sentence in the design that the code contradicted on line one. Meanwhile `#team` was a
+*conversation* you could open, that carried an unread badge, that sat in the bar and the switcher
+and `/open`, and that you could type into — where it refused politely, because there was nobody to
+refuse. The team is the organization. You cannot say anything to it. A read-only buffer with a
+badge was a conversation-shaped hole where a roster belonged.
+
+**The channel-domain inventory**, taken at `ebf632e` before anything changed:
+
+| Piece | Where | What D95 did |
+|---|---|---|
+| `ChannelRegistry` — members, mode, seq, log, seen, sent, frozen, watch id, share sync | `src/channels.rs` | Extended in place. This *is* the room domain; a parallel one was never on the table. |
+| `create(name, members, mode)` — force-seated `HUB_NAME` + `USER_NAME` | `src/channels.rs:247` | Seats exactly what it is given. Policy moved to the tool layer, which knows the caller. |
+| `invite` / `kick` — roster edits, silent; `kick` refused `user` and `main` | `src/channels.rs:306` | Both write a membership event; only `main` is still irremovable. |
+| `post` — stamping, serial staleness, budget gate, hub_mail | `src/channels.rs:368` | Staleness now reads speech only; the non-member error names the cure. |
+| `remove_member_everywhere` — called on AgentControl delete | `src/channels.rs:347` | Writes a `left` event per room it touches. |
+| `log_of` / `info` / `list` / `row_snapshot` — read surface for the TUI and the watch row | `src/channels.rs` | Unchanged, plus `is_member` and `rooms_of` for the display side. |
+| `ChannelTool` (create/invite/kick/list), **hub-only** | `src/tool/channel.rs:225`, `src/tools.rs:79` | Also registered for depth-1 sub-agents; description rewritten to explain rooms. |
+| `PostTool` (hub + depth-1), `deliver_post` shared by the tool and the TUI composer | `src/tool/channel.rs:80` | Unchanged mechanically; description says "room". |
+| Blueprint rooms `.bingo/team.json` | `src/team.rs:1292` | Names `main` + `user` explicitly, so declared rooms behave exactly as before. |
+
+**Vocabulary mapping.** Domain `channel` → UI/docs **room**; `ChannelRegistry` → the room domain;
+`BufferId::Channel(name)` → `#name`; `ChannelMessage{kind: Membership}` → the dim `· name joined ·`
+line. The domain keeps its own name deliberately: renaming a persisted share schema, a settings key
+(`experimental.agentChannels`), a tool (`Channel`) and a `WatchKind` to say the same word would be
+churn with a migration attached. The rule is that nothing a *user or an agent reads* says "channel".
+
+**Membership and its event schema.** `ChannelMessage` gained `kind: MessageKind` (`Said` |
+`Membership`), `#[serde(default)]` so a pre-D95 share document still reads as all speech. A
+membership entry is `{seq, from: <member>, text: "joined" | "left", at, kind: Membership}` and takes
+a real sequence number, because a reader has to be able to tell whether somebody spoke before or
+after they arrived. Three things it deliberately is **not**: delivered to anybody's inbox (waking N
+agents because a roster changed is the flooding D94 removed — an agent that wants the roster asks
+`Channel list`); counted by the serial commit check, which now filters `kind == Said`, so a join can
+never bounce a post already being drafted; or the "latest" in a room's watch-row detail, since a
+room whose last entry is a join has not gone quiet.
+
+**Membership is what the bar means.** `Buffers::refresh` lists a room while the user is a member and
+*removes* it when they are not. That is the one place D89's "never remove a buffer" rule is broken,
+and the reason is the distinction the rule was about: a stopped agent's DM is still your
+conversation, while a room you are not in was never yours. Rooms with no user are absent from the
+bar, the `Ctrl+K` switcher and `/open` — the directory is the only door.
+
+**Observing.** Opening a non-member room needs no new state: the active buffer is simply an id with
+no registry entry, and everything else derives from `channels.is_member`. The rule becomes
+`── #parser · observer · read-only ──` (via `Buffers::rule_for`, so the framing is a fact about the
+conversation rather than about the host), `route_submit` returns `Refused(OBSERVER_HINT)`, and the
+same sentence stands under the composer via `Chat::observer_hint` — one wording, so the answer to
+"why can't I type here" does not depend on whether you tried. **Esc goes to the hub**, unchanged:
+`BackToHub` already means "take me home" from every conversation, and a second meaning ("back to
+the directory") would have made Esc's destination depend on how you arrived.
+
+**The directory** (`src/tui/directory.rs`, new) is the second stop of `Ctrl+T`: tasks → team →
+closed. Roster with presence and each member's rooms, every room with its members and a
+`you're not in` mark, the last ten feed entries newest-first — all rebuilt from live sources every
+draw, because the roster is a dozen rows and a cached roster is a roster that can be wrong. ↑/↓ walk
+the *selectable* rows only, Enter opens a DM or a room, `j` joins the room under the cursor and
+leaves the panel open so the mark flipping is the confirmation. It is modal for bare keys (`j` must
+not also type a `j`) and transparent to chords (`Ctrl+T` has to close what it opened).
+
+**Deliberate scoping.** The directory navigates and informs; it does not stop, restart or inspect
+agents. Those verbs live in the `Ctrl+B` manager with their warning and their one stop path, which
+the `Ctrl+K` switcher already routes through rather than reimplementing. A second surface that could
+stop an agent would be a second place for "stop" to mean something slightly different.
+
+**Why `EscLayer::Directory` is its own layer** rather than a second meaning for `TaskPanel`: the two
+are one *gesture* but not one surface — different state, different dismissal, both reachable from
+the same key — and `ORDER` is the single place that says which one Esc closes. A shared slot would
+have had to answer that question somewhere else. It sits immediately above `TaskPanel`, and the walk
+test asserts both the adjacency and that `ORDER.len()` grew by exactly one (a variant in the enum
+and in both matches but missing from `ORDER` is a layer Esc can never reach — the one thing the
+compiler does not catch here).
+
+**Deviations from the dispatch, with reasons.**
+- *The join key is `/join` plus `j` in the directory, not a bare `J` in the composer.* The composer
+  stays live in observer mode so `/help`, `Ctrl+K` and Esc keep working; a bare letter there would
+  have to be either a letter or an action. `ctrl+j` was rejected outright — it is Enter on many
+  terminals. `/leave` came along for symmetry and to give the user a way out of a room they joined.
+- *The observer frame is the rule plus the composer hint, not a drawn border.* Scrollback is written
+  once (D38/D82), so a box around a flow that is still growing cannot be drawn without rewriting it.
+- *`PostKind::Note` now renders as a dim line everywhere*, not only for membership. Its own doc had
+  always said "one dim line instead of a quoted block with a name over it", and the flow rendered it
+  as a named message anyway; `Replay::Note` makes the code match the sentence, and DM wake-up
+  scaffolding gets the treatment it was documented to have.
+- *The D93 crew gate is deleted rather than moved.* It existed so a solo hire would not raise a
+  badge; a column in a panel the user opens has no badge to withhold.
+
+**Deleted tests, and where their claims went.**
+| Deleted | Disposition |
+|---|---|
+| `buffer::the_board_hears_agents_and_nothing_else` | → `the_feed_hears_agents_and_nothing_else_and_raises_no_conversation`: the `WatchKind` filter is kept, the buffer assertions become "no conversation is raised". |
+| `buffer::a_solo_hire_writes_the_log_without_raising_a_board` | Subject gone with the crew gate. Its surviving claim (the log fills for a hire) is asserted in the test above. |
+| `buffer::the_board_bounds_what_it_remembers` | → `the_feed_bounds_what_it_remembers`, unchanged but reading through `team_log()`. |
+| `buffer::the_board_replays_its_lifecycle_log` | → `the_feed_keeps_what_happened_and_what_was_reported` (the `state · detail` shape) + `directory::the_directory_shows_the_roster_the_rooms_and_what_just_happened` (the rows). |
+| `buffer::the_board_refuses_to_be_spoken_in` | → `a_room_you_are_watching_refuses_to_be_spoken_in`, which also asserts nothing was posted and that joining flips it. |
+| `bufferview::the_board_refuses_to_be_spoken_in` | → `a_room_you_are_not_in_opens_read_only_and_says_why`. |
+| `bufferview::the_board_renders_its_lifecycle_log` | → `directory::the_directory_shows_…`; the rows moved, so the test did. |
+| `bufferview::team_output_lands_on_the_board_and_says_so` | → `team_output_lands_in_the_feed_and_says_where` (pointer copy + the directory-open case). |
+| `#team` arms inside `an_id_names_its_conversation_in_one_vocabulary`, `conversations_materialize_from_the_domain_in_one_order`, `every_conversation_routes_to_its_own_path`, `open_reaches_every_conversation_…`, `convbar::the_bar_lists_the_registry_in_its_own_order` | Arms removed; the enum no longer has the variant. |
+| `tools::channel_tools_gated_by_experimental_flag`'s "channel management is hub-only" | Inverted: a direct sub-agent now gets `Channel`. |
+
+**Named limits.** While observing, the bar shows no active entry — the room is by definition not one
+of the user's conversations, and inventing a bar slot for it would contradict the rule the bar
+states. A membership line carries its clock inside its own text, because the row shape it renders as
+(the rule's) has nowhere to hang a right-aligned stamp. Agent↔agent rooms are only as discoverable
+as the directory: nothing announces that one was formed, which is the correct default for a room the
+user is not in, but it does mean a room can exist for a while before anyone looks.
+
+- 1390 + 13 tests before, 1405 + 13 after (15 new: 3 domain — roster subsets, join-never-stales,
+  pre-D95 share compatibility; 3 buffer — membership listing, membership notes, observer rule;
+  2 bufferview — observer mode, join/leave round trip; 6 directory — contents, feed order, Enter
+  navigation, `j` join, the scoping guard, the empty case; plus the switcher's non-member room and
+  three chat-tests for the `EscLayer` slot, the `Ctrl+T` cycle and the directory's key modality).
+
+### D96. The perspective page: every agent is the protagonist of its own record
+
+**Problem.** The model says an agent's communications are a thing you can look at — a grouped,
+read-only dossier, one thread per counterpart, with the agent's own work shown inside each. The code
+had no way to answer the question that page asks, because the page asks *who said this*, and by the
+time anything reaches an agent's history nobody knows. `AgentRegistry::deliver` takes a real `from`
+and `InboxItem::Direct` stores it; then `absorb_inbox` renders the batch into **one flat prompt
+string** and the name is gone. What survives is a handful of literal markers, and only some of them
+name anybody.
+
+**The attribution inventory**, taken at `c4f6fc2` before anything changed. Everything an agent's
+`Vec<Message>` can contain is produced by a `record()` call in `src/query.rs` (plus the compaction
+splice), and `Entry.history` is replaced wholesale by `AgentRegistry::finish` — there is no
+incremental push and no `from` field on a `Message`. So this table is the whole universe:
+
+| Shape in a user-role message | Composed at | Attributed to | Why |
+|---|---|---|---|
+| `[DM from user]` heading a line | `tool::agent::direct_text` (agent.rs:616) | **the user** | D64's one observable difference between "your manager" and "the human" |
+| `[Message from user, sent while you were working]` block | `steer::SteerItem::block_text` | **the user** | a real message from a real person that arrived beside a tool result |
+| unmarked prose | `direct_text`, single item | **the hub** | the hub is the one sender `direct_text` deliberately leaves unmarked |
+| `[follow-up instruction] …` | `direct_text`, batched | **the hub** | the label is added only when a batch makes boundaries ambiguous; the text beside it is a real instruction |
+| `[#{room} msg #{seq}] {from}: {text}` | `absorb_inbox` (agent.rs:666) | **timeline only** | the one marker that kept a sender's name — and the room's own log is the authoritative copy |
+| `[follow-up {n}/{m}] …` | `absorb_inbox` | **intake** | a chase; carries no instruction, only the fact that somebody is waiting |
+| `[SYSTEM NOTIFICATION - TASK REMINDER]` | `query::maybe_inject_task_reminder` | **intake** | a block, not a line: everything after it belongs to it |
+| `<task-notifications>` | `query.rs:988` | **intake** | owner-scoped, so a subagent really does receive these |
+| the first user message | the `Agent` tool's prompt | **intake** | unmarked prose, and still not the hub making conversation — it is the task that created the instance |
+| `[Request interrupted by user]` / `…for tool use` | `query::record_interrupt` | **timeline only** | nobody wrote it |
+| `(summary of the earlier conversation, from automatic compaction)` | `transcript::summary_message` | **timeline only** | ditto |
+| `(Stop hook blocked continuation)`, the max-tokens resume, `<channel-messages>` | `query` | **timeline only** | ditto |
+| `notify_user` tool_use in the agent's own turn | `tool::notify_user` | **the user's lane**, as a message | it is the agent speaking to the user, in the one tool that can |
+
+The last four rows are the load-bearing ones. They are recognised **not** because the page wants to
+show them but because the fallback rule is "unmarked prose is the hub" — so anything unrecognised
+would be filed as the hub speaking, and a page that puts the runtime's words in somebody's mouth is
+worse than a page that omits them.
+
+**What the domain cannot say.** Every production caller of `deliver` passes `main` or `user`:
+`SendMessageTool` (agent.rs:1497, hardcoded `HUB_NAME`), the DM composer (buffer.rs:598,
+`USER_NAME`), `/team assign` (team_cmd.rs:306, `USER_NAME`). And `SendMessage` is assembled only at
+depth 0 (`tools.rs:73`), pinned by `hub_agent_tools_only_at_depth_zero`. **Agent→agent direct
+messages do not exist**; agents reach each other through rooms, which arrive as `InboxItem::Channel`
+and never as `Direct`. The delivery matrix's "agent ↔ agent DM → both perspective pages" row
+therefore describes a capability the code cannot yet express, and this batch does not invent one.
+The counterpart lane is keyed by **name** rather than by an enum precisely so that the day `deliver`
+carries a real sender, the projection needs no change to show it.
+
+**One parser, two readers.** The markers were already half-parsed, in `buffer::scaffold_note` and
+`buffer::user_posts`, whose own header says a second parser beside them "was the one thing worth
+avoiding". So the shapes are now recognised once, in `buffer::line_source` → `LineSource`, and each
+caller takes what it needs: the DM view collapses them to dim notes and throws the source away (a
+pair conversation has two parties and the bubble already says which), while the page keeps the
+source and files by it. `scaffold_note` became a pure function of a `LineSource`, and `user_posts`
+walks the same enum — its output is byte-identical, which is what "the user's `@X` view is
+unchanged" means and why every pre-existing `dm_posts` test was left untouched rather than adjusted.
+
+This is also where a latent bug became visible and was deliberately **not** fixed: `[follow-up
+instruction] …` and `[follow-up {n}/{m}] …` share a prefix, and `scaffold_note` matched both, so a
+batched hub instruction rendered in the DM as `follow-up · waiting for a reply` with its text
+dropped. Pair purity was an acceptance constraint for this batch, so the DM keeps that behaviour;
+`line_source` distinguishes the two, and the perspective page shows the instruction correctly. The
+fix for the DM is a one-line change on top of the enum whenever it is wanted.
+
+**Structure, and one deviation.** The dispatch proposed `src/perspective.rs` (domain) plus
+`src/tui/perspective_ui.rs`. The projection landed at **`src/tui/perspective.rs`** instead, because
+what it produces is `Post` — a presentation type that lives in `tui::buffer` beside `dm_posts` and
+`channel_posts`, the two projections this one is a sibling of. A domain module would have had to
+either duplicate `Post` or invert the dependency, and inverting it to avoid a directory name is a
+worse trade than the name. `dossier()` is pure regardless: it takes a history, its stamps and the
+room logs as data, so every test builds a page without a `Session`.
+
+**The rules the walk applies**, each stated because each is a judgement:
+- **Room lanes come from the channel logs, never from history.** A room thread is `channel_posts` of
+  `log_of(room)` — the whole room with the agent's own rows marked (`you`), because a thread that
+  showed one voice would not be a thread. The relay lines in the agent's history are recorded in the
+  timeline and left out of the room lane, so a lane never disagrees with itself about its own count.
+- **The agent's turns attach to the counterpart it last heard from.** Where interleaving makes exact
+  reply-attribution impossible this is best effort by construction, and it is the reason the
+  timeline exists: completeness lives there, threads are the readable approximation.
+- **Counts are messages, not rows.** Process rows are the agent's work; an index reading `@main (47)`
+  because one turn made forty-five tool calls would be measuring the wrong thing.
+- **Empty lanes are dropped.** A page is a record of what happened.
+- **The timeline is a superset of the history-derived lanes, and deliberately not of the room lanes** —
+  it is complete about the *agent*, and a room's log contains speech the agent may never have been
+  woken for.
+
+**The modal** is the D82 transcript's shape: a self-driving alt-screen loop that owns every key while
+it is up and therefore takes **no `EscLayer` slot** — the same call `run_transcript_modal` makes, and
+the reason `EscLayer::ORDER` did not grow this batch. Both levels live in **one loop**: they share a
+snapshot, a theme and a frame, and two modals would have meant two claims on the terminal and a
+snapshot rebuilt on every Enter, which is exactly the live-ness the page does not want. The thread
+pager **is** `TranscriptState`, unchanged, so `j`/`k`, `g`/`G`, `/` and `n`/`N` mean there what they
+mean under `Ctrl+O`. The cursor at the index walks **lanes, not rows**, so it cannot land on a group
+heading (the D95 directory's rule). `q` closes from either depth and Esc walks one level — except
+while the search input is open, which owns every key, because there `q` is a letter and Esc cancels
+the search.
+
+**`ctrl+e` is unbound, and that is the omission worth naming.** In the transcript it forces
+`Activity::expanded` and `CollapseGroup::expanded` on the hub's messages and rebuilds; a thread's
+rows are `Post`s, which carry a tool call as one collapsed line and carry no output at all. There is
+no second state to show, so binding the key would have meant inventing one.
+
+**One renderer, still.** `Chat::tail_post_rows` was split: the three settled kinds (a message, a
+note, a step of the work) moved to a free `bufferview::settled_post_rows`, and the two live-only
+kinds — the typing indicator and a queued send, which need the running instance's clock and colour —
+stayed with the host. The page and the DM tail therefore print an agent's `⏺ Bash(git status)` with
+the same code rather than with two that agree today.
+
+**Deliberate scoping.** The page navigates and reads. It has no composer, no submit path and no verb:
+a test walks every key it handles and asserts none of them produces anything but movement, opening
+and closing. Live-ness is a snapshot on purpose (D82's precedent) — reopening is the refresh.
+
+**Named limits.** A page today has at most two counterpart lanes, because the domain has two senders.
+A compaction clears an instance's stamps outright (`agents.rs:936`), so a compacted agent's lanes
+sort by a clock that reads zero and the index shows no time beside them. The index has no windowing:
+an agent in more rooms than the terminal is tall scrolls off the bottom, which the thread level's
+pager would solve and the index's does not have. And the page reads the live registry only — an
+agent whose instance is gone has no history to show, while its DM buffer survives.
+
+- 1405 + 13 tests before, 1423 + 13 after (18 new: 9 projection — the attribution catalog, runtime
+  scaffolding staying out of threads, the protagonist rule, `notify_user` as a message, the room
+  thread, the timeline superset, lane ordering, counts, the empty page; 9 modal — the level walk,
+  `q` from either depth, the search input owning `q`/Esc, the lane cursor, snapshot semantics, the
+  read-only guard, the index's groups and counts, the thread's rule, the footer per level).
+
+### D97. Presentation: a gutter for faces, a floor for the bar, a door out for pictures
+
+**Three debts, one batch.** They share no code and one theme: the conversation model was complete and
+did not yet *look* like itself. The batch's rule was that none of the three may introduce a second
+renderer, a second convention or a new dependency.
+
+#### Inventory 1 — the avatar machinery
+
+`src/tui/avatar.rs` survived D89 intact: eight bundled portraits (`include_bytes!`, keyed by portrait
+rather than by sender so two members sharing a face share one transmit), `placeholder`/`transmits`
+over the D42 kitty path, `Palette`, `gutter_cell`, `sender_band`, and a private `gutter(images)`
+returning 5 (image skin: `COLS + 1`) or 4 (chip skin). What actually *rendered* before this batch was
+only two things: the `experimental.chatAvatars` sender band above hub messages (`chat_tail.rs:2689`),
+and a subagent watch row's portrait replacing `◉`/`⎿` where images place (`chat_tail.rs:2718`).
+Everything else was colour without a picture — `pal.avatars[…]` for the bar's teammate tint, `pal.unread`
+in the switcher. **DM, room, perspective and transcript rows carried no gutter and no face at all.**
+The retired shape is recoverable at `82bf32a^:src/tui/slack.rs` (`indent_rows`/`gutter_line`), and it
+is the shape this batch mirrors.
+
+Two obstacles the inventory turned up. First, the three post-row builders — `settled_post_rows`
+(free fn), `Chat::tail_post_rows` (`&self`), `perspective_ui::thread_rows` (free fn) — take neither a
+sender nor an indent, and `Post.from` was being discarded. Second, `Chat::faces` (the transmit sweep's
+source) is only writable from `&mut self`, which none of those three has.
+
+#### Inventory 2 — the chrome stack
+
+`chrome::chrome` is one function pushing ~20 conditional regions in order; `fullscreen` changes only
+where the suggestion area goes. Heights are never predicted (`el::height` renders and counts), and
+both hosts — `Frame::assemble` inline, `fullscreen_frame` — treat chrome as one opaque bottom-anchored
+block and truncate it **from the top**. So moving the bar is a one-line move inside `chrome()` and no
+host change at all. The states that touch the bottom rows: the busy status row (top of chrome, far
+above), the ask dialog (in the *document*, above all chrome, leaving only a `Waiting for permission…`
+row behind), the picker menus (all `return` early and replace the suggestion area, never stack), the
+D80 esc hints (text inside the status row, no rows of their own), and the D84 bash tail (inside the
+assistant message, not chrome at all). Nothing competes for the last row.
+
+#### Inventory 3 — where images enter
+
+Two disjoint worlds that never met. **Wire images** (`ImageAttachment`, base64) go to the model and
+into the transcript and are never drawn. **Display images** (`ImageMeta` + kitty) are decoded from
+markdown `![](url)` in message text, drawn, and never sent. Producers: the clipboard paste
+(`register_image`, macOS), a path in the composer (`expand_image_paths` — the `PathBuf` was known and
+thrown away one line later), the Read tool (`read.rs:79`, which produced an image block and registered
+nothing anywhere), MCP results, and `load_message_images` → `UiEvent::ImageReady`. The D93 vision
+projection is a `Cow` view taken at the send seam (`client.rs:407`); the history keeps its image
+blocks, so a registry built on the session's own data is untouched by it — confirmed rather than
+assumed. Click plumbing is `ClickTarget`/`ClickRange` resolved by `Chat::doc_click`, and clicks reach
+the fullscreen host only. The one existing detached spawn is `share::open_in_browser` (`cfg!` three-way,
+`spawn` not `status`, no test seam); the testable-process pattern is `composer.rs`, where the command
+is simply a parameter. Windows is CI-enforced on all three gates.
+
+**Piece 1 — the gutter.** Added `El::Gutter { cells, blank, child }`: the child renders first and the
+rows it produced are indented afterwards, so the *row count* is unchanged and every click range and
+the caret keep the offsets the walk computed. That is the whole argument for a wrapper over a second
+row builder, and a test asserts it directly. `avatar::Gutter` is the value threaded through all three
+surfaces — width, palette, the pinned table, `index_for`, `cells(index, name, lead)`, `apply` — so
+"how wide", "who gets a face" and "which skin" are decided once. `settled_post_rows` gained an
+`Option<&Sender>`; `sender_runs` marks which posts open a run. **The width comes out before anything
+wraps**, which is the failure the CJK test pins: a body wrapped at the full width and then indented
+overruns the terminal by exactly the gutter.
+
+Placement rules, all asserted: the portrait on the first row of a sender's run only (a work step does
+not break a run — a tool call is inside its own turn); blank gutter on continuation rows and on
+process/note rows, so the message column is one straight edge and only somebody who spoke gets a
+picture; and **no gutter in the hub**, keyed off `Decor::Said`, which is set by the conversation
+replay and by nothing else. The `faces` problem was solved by recording up front in `build_rows`
+(`&mut self`, before the loop takes its borrows) and by transmitting all eight portraits once when the
+perspective modal opens — the alternate screen is short-lived and knowing which faces a thread will
+show would mean laying out every lane before drawing one.
+
+**Piece 2 — the bar.** Moved from directly above the composer to the last row of the chrome. The old
+argument was that the bar is *about* the composer; the better reading is that it is this window's
+status area — where you are, what is unread — and a status area belongs at the bottom edge. One line
+moved in `chrome()`; no host change, as the inventory predicted. A new test drives busy + an open
+picker + a second conversation through both hosts and asserts the bar is last, the composer appears
+exactly once, and the busy row is above it all.
+
+**Piece 3 — the registry.** `src/tui/images.rs`. Entries are `(id, source, at, bytes, format, marker,
+origin)`, newest-first to every reader, deduplicated by source plus a hash of the head of the content
+so a repaint does not grow the list. `Origin` is the load-bearing distinction: an image **already on
+disk** is addressed where it lives — never copied, never removed — and an image that exists **only in
+memory** is written into a pid-tagged temp dir on first open and is the only thing eviction deletes,
+by the exact path it wrote. Bounds 100 entries / 50 MB, oldest first.
+
+Three tees, chosen to match the spec's own definition (a picture that *renders*): `UiEvent::ImageReady`
+on success (every markdown image — an agent's chart, a URL in the model's prose), `register_image`/
+`register_image_file` at the composer (clipboard and attached paths, where the source label was
+already being discarded), and `ToolDone` for the Read tool. That last one needed a contract: `read.rs`
+now owns `image_result_line` with `image_result_path` beside it, one formatter and one reader in one
+place, rather than the TUI guessing at prose. Avatars register nowhere, and the rule holds at the tee.
+
+Three doors, one action. A click resolves **before** the click ranges — an image inside a tool's
+output would otherwise be swallowed by the enclosing collapse group — and resolves either the row's
+own `ImageRef` URL or the `#[image N]` marker in a bubble (`api::image::first_marker`, one regex).
+`/images` is the `/theme` shell verbatim, which is why it costs no `EscLayer`: the existing `Menu`
+slot already covers it. `o` in the transcript opens the first image row in the window, because a pager
+has no cursor and the top of the window is where the reader's eye is. The open spawns detached with
+the platform triple `share.rs` already settled on, with the program as a value so the acceptance tests
+point it at a recording script — `composer.rs`'s pattern, no trait and no mock.
+
+**Deviations.**
+
+1. *Gutter width.* The dispatch asked for "a fixed 2-3 cells". The gutter is `avatar::gutter_width()`
+   — 5 with images, 4 with the chip — because `COLS` is the portrait's own width and anything narrower
+   would put body text over the image cells. `a_placeholder_row_measures_exactly_the_chip` has guarded
+   that number since D50.
+2. *Picker line.* Specified as `N. <source> · <stamp> · <WxH or size>`. It shows size: nothing in the
+   codebase retains an image's pixel dimensions (`ImageMeta` carries *cell* cols/rows, `prepare_image`
+   discards everything), and decoding a header per row to print `1920x1080` would be a new cost for a
+   field the spec offered an alternative to.
+3. *Transcript `o`.* Specified as "`o` on an image row". The pager has no cursor to be on a row with,
+   so it acts on the first image row in view and is a no-op when there is none.
+4. *Bar position.* Placed after the footer row, so it is the window's true last row rather than
+   second-to-last. "The LAST row of the chrome" is the dispatch's own wording, and a status area under
+   a hint row would read as a hint.
+5. *Read-tool images and the fullscreen click.* A Read-produced image registers and is openable by
+   `/images`, but it renders as a tool *result line* rather than as an image block, so there is no
+   picture on screen to click. That is a property of how the tool reports, not of the registry.
+
+**Named limits.** A row carrying `line.image` renders as placeholder cells with its text segments
+discarded (`view::to_line`), so an image block inside a gutter draws at column 0 rather than indented —
+rare in a DM and unchanged from the pre-D89 behaviour. The live tail starts its sender runs fresh
+rather than reaching back across the settled seam, because everything above it is frozen. And the
+perspective page transmits all eight portraits on open rather than the ones it will use.
+
+- 1423 + 13 tests before, 1447 + 13 after (24 new: 6 registry — newest-first labels, dedup, bounded
+  eviction that removes only its own file, on-disk materialization to itself, the platform opener and
+  detached spawn, size labels; 7 gutter — the run rule in a real DM, the hub's absence of one,
+  process/note taking the indent and no face, runs unbroken by tool rows, CJK width, the image skin's
+  placeholder cells, the perspective thread; 1 `El::Gutter` invariant — clicks and the caret unmoved;
+  1 chrome — every bottom state composing around the bar; 9 image flows — content vs avatars, a failed
+  load registering nothing, `/images` listing and Enter opening, the `Menu` Esc layer, the empty case,
+  the click target on both row shapes, an ordinary row not being one, transcript `o` and its footer,
+  and a failed open landing on the info tier).

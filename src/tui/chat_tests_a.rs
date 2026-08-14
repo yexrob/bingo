@@ -488,6 +488,10 @@ fn no_row_overflows_the_build_width() {
 fn agent_watch_rows_wear_the_instance_face_only_where_images_place() {
     let watch = |chat: &mut Chat| {
         chat.messages.push(msg(Role::Assistant, ""));
+        // The row belongs to the turn that spawned the agent (D94): outside a
+        // running turn an agent's lifecycle no longer writes into the hub at all,
+        // and what this test is about is how the row looks, not whether it exists.
+        chat.stream_msg = Some(chat.messages.len() - 1);
         chat.apply_event(UiEvent::WatchEvent {
             label: "林夏 · UI review".into(),
             kind: crate::watch::WatchKind::Agent,
@@ -614,6 +618,9 @@ fn without_the_switch_the_transcript_wears_no_face() {
     chat.image_cap = Some(ImageCap::default_cells());
     chat.messages.push(msg(Role::User, "hi"));
     chat.messages.push(msg(Role::Assistant, ""));
+    // Same as above: a watch row exists in the hub only as the running turn's own
+    // tool row (D94).
+    chat.stream_msg = Some(chat.messages.len() - 1);
     chat.apply_event(UiEvent::WatchEvent {
         label: "林夏 · UI review".into(),
         kind: crate::watch::WatchKind::Agent,
@@ -2848,6 +2855,7 @@ fn slash_dispatch_covers_every_table_entry() {
         ("model", "model"),
         ("cd", "cd"),
         ("theme", "theme"),
+        ("images", "images"),
         ("rename", "rename"),
         ("resume", "resume"),
         ("gc", "gc"),
@@ -2864,6 +2872,8 @@ fn slash_dispatch_covers_every_table_entry() {
         ("tasks", "tasks"),
         ("team", "team"),
         ("open", "open"),
+        ("join", "join"),
+        ("leave", "leave"),
     ];
     let table: HashSet<&str> = SLASH_COMMANDS.iter().map(|(n, _, _)| *n).collect();
     let arms: HashSet<&str> = dispatch.iter().map(|(a, _)| *a).collect();

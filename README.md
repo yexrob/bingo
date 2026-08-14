@@ -174,7 +174,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Esc` | close the topmost dialog/menu/panel first / interrupt while busy / on double-press: clear the input, or open Rewind when it is empty |
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
 | `Ctrl+T` | toggle the task area |
-| `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `q` close) |
+| `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `o` open the image in view · `q` close) |
 | `Ctrl+G` | compose the draft in `$VISUAL`/`$EDITOR` (or the readline chord `Ctrl+X Ctrl+E`); a non-zero exit keeps the draft |
 | `Ctrl+P` / `Ctrl+N` | prompt history — the same keys as `↑`/`↓`, including pulling a queued message back |
 | `Alt+B` / `Alt+F` | move one word, stopping at `/` `-` `_` `.` so a path is walked a segment at a time |
@@ -200,10 +200,12 @@ providers; `/provider login <name> [--device-auth|--manual <token>]` signs in
 to subscription endpoints, `logout` signs out),
 `/think [off|low|medium|high|xhigh|max]` (no argument
 opens the level picker; the choice persists), `/theme`,
+`/images` (the pictures this session has shown, newest first; Enter opens one in
+the system viewer),
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` executes directly),
-`/open <@agent|#channel|#team|hub>` (enter a conversation; Tab completes from
+`/open <@agent|#room|hub>` (enter a conversation; Tab completes from
 the ones that exist — `Ctrl+K` is the same door without typing a name),
 `/context` (usage),
 `/status`, `/config` (effective config with per-key source layer/env, current
@@ -344,6 +346,7 @@ schema from a single source of truth):
 | `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceOutcome`/`ExperienceForget` | cross-session experience library (see below) |
 | `AskUserQuestion` | asks the user multiple-choice questions (reuses the permission prompt modal in the TUI) |
 | `Skill` | skill invocation (see below) |
+| `notify_user` | sub-agents only: one deliberate line to the user through the hub (rate limited to one per agent per minute, extras coalesced; `level: "urgent"` also fires the terminal attention channel) |
 | `mcp__<server>__<tool>` | tools exposed via MCP (see below) |
 | `Channel` / `Post` | experimental: agent channel messaging (see below) |
 
@@ -351,14 +354,19 @@ schema from a single source of truth):
 
 - The main agent (depth 0) has `Agent`/`SendMessage`/`AgentControl`; sub-agents
   (depth ≥ 1) keep only `Agent` (they can spawn further) and cannot manage
-  siblings — hub-and-spoke topology.
+  siblings — hub-and-spoke topology. One tool runs the other way: `notify_user`
+  is assembled for sub-agents and withheld from the main agent, which already
+  holds the hub and reaches the user by answering.
 - **Named definitions**: `~/.config/bingo/agents/*.md` and `.bingo/agents/*.md`
   (walked upward from cwd; project-level wins on name clash); frontmatter
   `name/description/model/provider`, body = sub-agent system prompt; referenced
   via the Agent tool's `agent` parameter.
 - Instances have names (`name` parameter, defaults to the definition name/
-  `agent`, auto `-2`/`-3` on collisions); the transcript shows `◉ name · task`;
-  history is kept after completion.
+  `agent`, auto `-2`/`-3` on collisions); the turn that spawns one shows
+  `◉ name · task`, while a lifecycle event arriving when no turn is running no
+  longer writes into the hub at all — the conversation bar, the team lifecycle
+  log and the instance's own DM carry it instead; history is kept after
+  completion.
 - `SendMessage` sends follow-up instructions to an instance (context
   preserved); queued while busy, delivered automatically at the end of the
   current turn.
@@ -461,19 +469,19 @@ With `settings.experimental.agentChannels: true`:
 ## Conversations
 
 One terminal, one flow, one conversation at a time. The hub — your conversation
-with the model — is one of them; a DM with a running subagent, an agent channel
-and the `#team` board are the others, and they all wear the same composer, the
+with the model — is one of them; a DM with a running subagent and a room are
+the others, and they all wear the same composer, the
 same keys, the same approval dialogs and the same transcript rendering. There is
 no separate screen to enter and no second set of controls to learn.
 
 **Entering one** is `Ctrl+K` — every conversation in one list, most recently
 active first with the hub pinned on top, filtered as you type, opened with
-Enter — or `/open @agent`, `/open #channel`, `/open #team`, `/open hub` (Tab
-completes from the conversations that exist); a running agent's DM also opens
-from the Ctrl+B manager with Enter. Above the composer, a **conversation bar**
-lists what exists — presence for DMs (`●` running, `○` idle), an unread count,
-and the one you are in accented — and it appears only once there is more than
-one conversation to switch between.
+Enter — or `/open @agent`, `/open #room`, `/open hub` (Tab completes from the
+conversations that exist); a running agent's DM also opens from the Ctrl+B
+manager with Enter, and a member or a room from the team directory. On the
+window's last row, a **conversation bar** lists the conversations you are *in* — presence
+for DMs (`●` running, `○` idle), an unread count, and the one you are in
+accented — and it appears only once there is more than one to switch between.
 
 **Saying one thing without going there**: from the hub, a message that opens
 with a conversation's name delivers the rest to it and leaves you where you
@@ -526,10 +534,47 @@ rules mark it; `Ctrl+O` (the transcript view) remains the complete record of the
 hub session.
 
 **Sending**: what you type goes to the conversation you are in — a DM delivers
-to that instance under your name, a channel posts to the log, and `#team` is a
-record rather than a room and says so. None of it starts a model turn. Slash
+to that instance under your name, and a room posts to its log if you are a
+member of it. A room you are only watching refuses and says how to join. None of
+it starts a model turn. Slash
 commands are the exception and act on the application from anywhere, so `/model`
 in a DM is still `/model`.
+
+## Rooms and the team
+
+A **room** is the only group conversation bingo has, and its members are any
+subset of the team. It does not have to include you: agents form rooms among
+themselves to work something out, and creating one seats the creator and nobody
+else — `user` and `main` join only when named.
+
+A room you are in behaves like every other conversation: it is in the bar, in
+`Ctrl+K`, and you speak in it by typing. A room you are **not** in is not hidden
+— the team directory lists it, marked `you're not in`, and opening it gives you
+the same flow **read-only**, framed `── #parser · observer · read-only ──`, with
+`read-only · /join to speak in this room` standing under the composer. `/join`
+(or `j` on the room in the directory) makes you a member. There is no quiet way
+in: joining and leaving are written into the room as dim `· user joined · 14:32`
+lines that every member sees. `/leave` is the counterpart, and a room you leave
+drops off the bar while staying readable.
+
+**The team is not a conversation** — you cannot say anything to it, so it is a
+directory rather than a board with a badge. `Ctrl+T` cycles tasks → team →
+closed. The directory shows the roster with presence and each member's rooms,
+every room with its members, and the last ten lifecycle events (spawn, done, and
+`/team` output). ↑/↓ move, Enter opens a member's DM or a room, `j` joins the
+room under the cursor. It navigates and informs only — stopping an agent stays
+in the Ctrl+B manager.
+
+**Every agent has a page of its own.** `tab` on an agent in the Ctrl+B manager's
+detail opens its perspective page: a read-only, two-level dossier of everything
+it has said and been told. The index groups its threads — a merged `timeline`,
+its `direct messages` one row per counterpart, its `rooms`, and the `intake` it
+was handed — with a count and a clock on each; Enter opens a thread, Esc walks
+back, `q` closes. A thread reads as a conversation with that agent as the
+protagonist: its thinking and tool calls are shown in *every* thread, whoever it
+was talking to. This is the audit layer — the one place an agent's conversations
+with someone other than you are visible, while your own DM with it stays a pair
+conversation and mixes nothing in. It is a snapshot: reopening is the refresh.
 
 **Avatars**: on terminals that can place kitty images — the same capability
 behind inline image rendering (Ghostty/kitty, and tmux with passthrough) — each

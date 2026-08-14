@@ -1154,6 +1154,11 @@ pub(crate) fn build_sub_session(
     // parent's MCP handshake instead of starting from an empty manager (i.e. no MCP tools).
     runtime.permissions = parent.runtime.permissions.clone();
     runtime.mcp = parent.runtime.mcp.clone();
+    // `notify_user` exists precisely to cross from a subagent to the user's hub, so
+    // a fresh detached relay here would be a tool that does nothing. Inheriting the
+    // parent's handle also means the rate-limit table is the session's, not the
+    // spawn's: an agent restarted in a loop cannot buy itself a fresh window.
+    runtime.notify_user = parent.runtime.notify_user.clone();
     let _ = runtime.provider_tx.send(provider_name);
     let _ = runtime.thinking_tx.send(thinking);
     Ok(Arc::new(Session {
@@ -2337,6 +2342,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         assert!(ctl.is_read_only(&serde_json::json!({"action": "list"})));
         assert!(!ctl.is_read_only(&serde_json::json!({"action": "stop", "agent": "scout"})));
@@ -2529,6 +2535,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         }
     }
 

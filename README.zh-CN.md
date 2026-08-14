@@ -177,8 +177,9 @@ bingo --continue            # 恢复最近一次会话
 `/theme`、`/permissions [allow|deny|ask] [规则]`、
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
 `/skills`（清单，`/技能名` 直接执行）、
-`/open <@agent|#频道|#team|hub>`（进入某个会话，Tab 从已存在的会话补全；
+`/open <@agent|#房间|hub>`（进入某个会话，Tab 从已存在的会话补全；
 `Ctrl+K` 是同一扇门，不必打名字）、
+`/join [#房间]`、`/leave [#房间]`（加入房间以便发言，或退出；不带参数就是你正站着的那间）、
 `/context`（用量）、`/status`、
 `/config`（生效配置与来源：哪个层/环境变量赢了、当前端点、未知配置项提示）、
 `/compact`（强制压缩）、`/resume [名称]`（恢复历史会话）、`/rename`、
@@ -296,6 +297,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | 任务追踪（磁盘存储，TUI 任务区同源，含生命周期 hook） |
 | `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceOutcome`/`ExperienceForget` | 跨会话经验库（见下） |
 | `AskUserQuestion` | 向用户提选择题（TUI 复用权限询问模态） |
+| `notify_user` | 仅子代理装配：经 hub 给用户一行有意为之的通知（每 agent 每分钟一行，超出的合并计数；`level: "urgent"` 另外触发终端提醒通道） |
 | `Skill` | 技能调用（见下） |
 | `mcp__<server>__<tool>` | MCP 接入的工具（见下） |
 | `Channel` / `Post` | 实验：agent 频道互发（见下） |
@@ -304,12 +306,15 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 
 - 主 agent（depth 0）装配 `Agent`/`SendMessage`/`AgentControl`；子代理（depth ≥ 1）
   只保留 `Agent`（可再派生），无法管理兄弟——hub-and-spoke 拓扑。
+  反方向只有一个工具：`notify_user` 只装配给子代理，主 agent 没有——它本来就在
+  hub 里，开口即抵达用户。
 - **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`
   （从 cwd 向上逐层查找，同名项目层优先）；frontmatter
   `name/description/model/provider`，正文 = 子代理 system prompt；
   Agent 工具的 `agent` 参数引用定义。
 - 派生实例有名字（`name` 参数，缺省取定义名/`agent`，重名自动 `-2`/`-3`），
-  transcript 显示为 `◉ 名字 · 任务`；完成后历史保留。
+  派生它的那一轮显示为 `◉ 名字 · 任务`；而在没有轮次运行时到达的生命周期事件不再
+  写进 hub——改由会话栏、编队生命周期日志与该实例自己的 DM 承载；完成后历史保留。
 - `SendMessage` 向实例发后续指令（上下文保留）；实例忙时排队，当前回合结束
   自动送达。
 - `AgentControl` 可 `list`/`stop`/`delete`。
@@ -403,14 +408,15 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 ## 会话（Conversations）
 
 一个终端、一条流、同时只有一个会话。hub —— 你和模型的对话 —— 是其中之一；与
-运行中 subagent 的 DM、agent 频道、`#team` 看板是另外几个，它们共用同一个输入框、
+运行中 subagent 的 DM、房间是另外几个，它们共用同一个输入框、
 同一套按键、同一套授权对话框、同一套 transcript 渲染。没有另开的界面，也没有第二
 套操作要学。
 
 **进入**：`Ctrl+K` —— 所有会话列在一处，按最近活跃排序、hub 固定在首位，输入即
-过滤，`Enter` 进入；也可以用 `/open @agent`、`/open #频道`、`/open #team`、
+过滤，`Enter` 进入；也可以用 `/open @agent`、`/open #房间`、
 `/open hub`（Tab 从已存在的会话里补全）；运行中 agent 的 DM 也可以在 Ctrl+B
-管理器里按 Enter 打开。输入框上方有一条**会话栏**，列出当前有哪些会话：DM 显示
+管理器里按 Enter 打开，团队目录里对成员或房间按 Enter 也一样。输入框上方有一条
+**会话栏**，列出你**所在**的会话：DM 显示
 在线状态（`●` 运行中、`○` 空闲）、未读数，当前所在的那个高亮；只有存在一个以上
 会话时才会出现。
 
@@ -451,9 +457,37 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 因为 scrollback 只写一次、绝不回改，来回几趟之后同一个会话会在屏幕上出现不止一次。
 这是有意为之，分隔线会标出来；`Ctrl+O`（transcript 视图）仍是 hub 会话的完整记录。
 
-**发送**：你打的字发给你所在的会话——DM 以你的名义投递给那个实例，频道写进日志，
-`#team` 是记录而不是房间，它会直说。这些都不会启动模型回合。斜杠命令是例外，
+**发送**：你打的字发给你所在的会话——DM 以你的名义投递给那个实例；房间只有在你
+是成员时才写进日志，只是旁观的房间会直说怎么加入。这些都不会启动模型回合。斜杠命令是例外，
 在哪都作用于应用本身，所以在 DM 里 `/model` 仍然是 `/model`。
+
+## 房间与团队（Rooms & the team）
+
+**房间**是 bingo 里唯一的群聊，成员是团队的任意子集——不一定包含你：agent 之间会
+自己开房间把事情谈清楚。建房间只会把发起者坐进去，`user` 和 `main` 只有被点名时
+才在场。
+
+你在的房间和别的会话没有区别：出现在会话栏和 `Ctrl+K` 里，打字就能发言。你**不
+在**的房间也不藏着——团队目录会列出来并标 `you're not in`，打开是**只读**的同一
+条流，分隔线写作 `── #parser · observer · read-only ──`，输入框下方常驻
+`read-only · /join to speak in this room`。`/join`（或在目录里对该房间按 `j`）
+就成为成员。没有悄悄潜水再开口这回事：进出都会写进房间，成为每位成员都看得见的
+暗色行 `· user joined · 14:32`。`/leave` 是它的反面，退出后房间从会话栏消失，但
+仍然可读。
+
+**团队不是一个会话**——你没法对它说话，所以它是一份目录，而不是带未读徽标的看板。
+`Ctrl+T` 依次切换：任务区 → 团队目录 → 关闭。目录里有带在线状态的花名册与每人所
+在的房间、每个房间及其成员，以及最近十条生命周期事件（spawn、done，以及 `/team`
+的输出）。↑/↓ 移动，Enter 打开成员的 DM 或房间，`j` 加入光标所在的房间。它只负责
+导航与信息——停止 agent 仍归 Ctrl+B 管理器。
+
+**每个 agent 都有自己的一页。** 在 Ctrl+B 管理器的详情里按 `tab`，打开它的视角页：
+一份只读的两级档案，记录它说过什么、又被交办过什么。索引把它的线程分组——合并的
+`timeline`、按对端各一行的 `direct messages`、它所在的 `rooms`，以及它收到的
+`intake`——每行带条数与时钟；Enter 进入线程，Esc 返回，`q` 关闭。线程读起来就是一
+段对话，而这个 agent 是它自己那一页的主角：无论对端是谁，它的思考与工具调用在**每
+一个**线程里都显示。这是审计层——agent 与你之外的人的往来只在这里可见，而你和它的
+DM 仍是纯粹的一对一，不会混入别的东西。它是快照：重新打开即刷新。
 
 **头像**：能放置 kitty 图片的终端（与内联图片同一能力：Ghostty/kitty，以及开了
 passthrough 的 tmux）为每位发言者分配八张内置

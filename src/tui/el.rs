@@ -115,6 +115,19 @@ pub enum El {
         rows: Vec<Row>,
         clicks: Vec<LocalClick>,
     },
+    /// The child's rows sit to the right of a gutter: `cells[i]` prefixes the
+    /// child's `i`-th row, and `blank` prefixes every row past the cells.
+    ///
+    /// A wrapper rather than a second row builder because the row *count* is
+    /// unchanged: click ranges and the caret keep the offsets the walk already
+    /// computed, and the message underneath is built by the same code that
+    /// builds it without a gutter. The caller narrows the width it hands the
+    /// child — the gutter takes cells, and nothing here can wrap text back.
+    Gutter {
+        cells: Vec<Line>,
+        blank: Line,
+        child: Box<El>,
+    },
 }
 
 impl El {
@@ -135,6 +148,15 @@ impl El {
     pub fn caret(col: usize, child: El) -> Self {
         El::Caret {
             col,
+            child: Box::new(child),
+        }
+    }
+
+    /// Gutter wrapper sugar.
+    pub fn gutter(cells: Vec<Line>, blank: Line, child: El) -> Self {
+        El::Gutter {
+            cells,
+            blank,
             child: Box::new(child),
         }
     }
@@ -172,8 +194,27 @@ impl El {
             El::Col(children) => children
                 .iter_mut()
                 .find_map(|child| child.first_content_line_mut()),
-            El::Click { child, .. } | El::Caret { child, .. } => child.first_content_line_mut(),
+            El::Click { child, .. } | El::Caret { child, .. } | El::Gutter { child, .. } => {
+                child.first_content_line_mut()
+            }
         }
+    }
+}
+
+/// Prefix `rows` with a gutter: `cells[i]` on the `i`-th row, `blank` past the
+/// cells. The single implementation both [`El::Gutter`] and the row-level
+/// conversation builders use, so a message's indentation is decided once.
+///
+/// The row's own background is left alone. A user bubble spans the terminal by
+/// design, and re-applying its colour segment by segment after the gutter
+/// would make the bubble stop short of the right edge the moment it settles
+/// into scrollback ([`crate::tui::view::history_line`] pads from `Row::bg`).
+/// The avatar chip carries its own background, so it still reads as a chip.
+pub fn gutter_rows(rows: &mut [Row], cells: &[Line], blank: &Line) {
+    for (i, row) in rows.iter_mut().enumerate() {
+        let cell = cells.get(i).unwrap_or(blank);
+        row.line.segs.splice(0..0, cell.segs.iter().cloned());
+        row.line.sanitize();
     }
 }
 
@@ -243,6 +284,19 @@ fn walk(el: El, out: &mut Rendered) {
             }));
             out.rows.extend(rows);
         }
+        El::Gutter {
+            cells,
+            blank,
+            child,
+        } => {
+            // The child renders first and is indented afterwards: it produces
+            // the same rows it would without a gutter, and the row count it
+            // produced is the row count that comes out — which is what lets the
+            // click ranges and the caret it declared stay correct.
+            let start = out.rows.len();
+            walk(*child, out);
+            gutter_rows(&mut out.rows[start..], &cells, &blank);
+        }
     }
 }
 
@@ -253,6 +307,49 @@ mod tests {
 
     fn texts(rendered: &Rendered) -> Vec<String> {
         rendered.rows.iter().map(|r| r.line.plain_text()).collect()
+    }
+
+    /// A gutter indents without disturbing anything the walk computed: the row
+    /// count is the same, so the click range and the caret it declared still
+    /// point at the rows they were about. That invariant is the entire reason
+    /// the gutter is a wrapper instead of a second row builder.
+    #[test]
+    fn a_gutter_indents_without_moving_clicks_or_the_caret() {
+        let body = El::Lines(vec![
+            Line::styled("first", SegStyle::plain()),
+            Line::styled("second", SegStyle::plain()),
+            Line::styled("third", SegStyle::plain()),
+        ]);
+        let bare = render(El::col(vec![
+            El::Blank,
+            El::click(ClickTarget::AskOption(1), body.clone()),
+        ]));
+        let cells = vec![
+            Line::styled("AB  ", SegStyle::plain()),
+            Line::styled("CD  ", SegStyle::plain()),
+        ];
+        let blank = Line::styled("    ", SegStyle::plain());
+        let gutted = render(El::col(vec![
+            El::Blank,
+            El::gutter(
+                cells,
+                blank,
+                El::caret(2, El::click(ClickTarget::AskOption(1), body)),
+            ),
+        ]));
+
+        assert_eq!(bare.rows.len(), gutted.rows.len(), "same row count");
+        assert_eq!(
+            texts(&gutted)[1..],
+            ["AB  first", "CD  second", "    third"],
+            "cells on the portrait's rows, blank below"
+        );
+        assert_eq!(
+            (bare.clicks[0].start, bare.clicks[0].end),
+            (gutted.clicks[0].start, gutted.clicks[0].end),
+            "the click range is where it was"
+        );
+        assert_eq!(gutted.caret, Some((1, 2)), "and so is the caret");
     }
 
     #[test]

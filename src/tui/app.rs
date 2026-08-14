@@ -398,6 +398,26 @@ pub async fn run_inline(
             dirty = true;
         }
 
+        // The perspective page (D96) takes the same road as the transcript: a
+        // self-driving alt-screen modal over a snapshot, and the same rebuild
+        // of the inline window on the way back.
+        if let Some(agent) = std::mem::take(&mut chat.open_perspective) {
+            crate::tui::perspective_ui::run_perspective_modal(
+                &mut chat,
+                &mut events,
+                &agent,
+                false,
+            )
+            .await?;
+            if let Ok((w, h)) = crossterm::terminal::size() {
+                pending_resize = Some((Size::new(w, h), Instant::now()));
+            } else {
+                chat.force_redraw = true;
+            }
+            chat.dirty = true;
+            dirty = true;
+        }
+
         // `$EDITOR` compose (ctrl+g / ctrl+x ctrl+e, D86). Unlike the pager
         // this hands the terminal to a foreign process, so the event stream is
         // replaced rather than reused; the return goes through the resize
@@ -644,6 +664,15 @@ pub async fn run_fullscreen(
         // canvas over directly; full repaint after return.
         if std::mem::take(&mut chat.open_transcript) {
             crate::tui::transcript::run_transcript_modal(&mut chat, &mut events, true).await?;
+            chat.force_redraw = true;
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // Perspective page (D96), already on the alternate screen.
+        if let Some(agent) = std::mem::take(&mut chat.open_perspective) {
+            crate::tui::perspective_ui::run_perspective_modal(&mut chat, &mut events, &agent, true)
+                .await?;
             chat.force_redraw = true;
             chat.dirty = true;
             dirty = true;

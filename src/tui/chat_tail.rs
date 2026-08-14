@@ -55,6 +55,15 @@ pub enum EscLayer {
     InfoLines,
     /// The `?` shortcut panel.
     HelpPanel,
+    /// The team directory (D95), the second stop of the ctrl+t cycle.
+    ///
+    /// Its own layer, immediately above the task panel it cycles with, rather
+    /// than a second meaning for the [`EscLayer::TaskPanel`] slot. The two are
+    /// one *gesture* but not one surface — different state, different
+    /// dismissal, and both can be reached from the same key — and `ORDER` is
+    /// the single place that says which one Esc closes. A shared slot would
+    /// have had to answer that question somewhere else.
+    Directory,
     /// The task panel, when the user opened it themselves with ctrl+t.
     TaskPanel,
     /// A conversation other than the hub: Esc goes home (D89).
@@ -78,7 +87,7 @@ pub enum EscLayer {
 
 impl EscLayer {
     /// The stack, top first. The single source for Esc's priority.
-    pub const ORDER: [EscLayer; 16] = [
+    pub const ORDER: [EscLayer; 17] = [
         EscLayer::AskDialog,
         EscLayer::Menu,
         EscLayer::Switcher,
@@ -90,6 +99,7 @@ impl EscLayer {
         EscLayer::ErrorRow,
         EscLayer::InfoLines,
         EscLayer::HelpPanel,
+        EscLayer::Directory,
         EscLayer::TaskPanel,
         EscLayer::BackToHub,
         EscLayer::Interrupt,
@@ -139,14 +149,13 @@ impl super::Chat {
     }
 
     /// `/team <subcommand>` (D31 project-level formation): dispatched to
-    /// team_cmd, and the answer lands on the board it is about (D90).
+    /// team_cmd, and the answer lands in the team's own feed (D90, D95).
     ///
     /// It used to go to the hub's info tier, which put the formation's own
-    /// report everywhere except the buffer that exists to hold it. When the
-    /// board is what you are looking at, the output prints there directly; when
-    /// it is not, the board's unread count carries it and one info line says
-    /// where it went — the user is told, rather than left to wonder why the
-    /// command answered with nothing.
+    /// report everywhere except where the formation's history lives. The feed
+    /// is now a column of the directory rather than a board with a badge, so
+    /// the pointer names the key that opens it: an answer stored somewhere the
+    /// user cannot find is the same as no answer.
     pub(crate) fn slash_team(&mut self, arg: &str) {
         let lines = crate::team_cmd::run(&self.session, &std::path::PathBuf::from(&self.cwd), arg);
         let label = if arg.trim().is_empty() {
@@ -154,13 +163,9 @@ impl super::Chat {
         } else {
             format!("/team {}", arg.trim())
         };
-        let tick = self.tick;
-        self.buffers
-            .note_team_output(&label, &lines.join("\n"), tick);
-        if *self.buffers.active() == crate::tui::buffer::BufferId::Team {
-            self.poll_active_conversation();
-        } else {
-            self.push_slash_info(format!("→ {}", crate::tui::buffer::BufferId::Team.label()));
+        self.buffers.note_team_output(&label, &lines.join("\n"));
+        if self.directory.is_none() {
+            self.push_slash_info("→ team (ctrl+t)".to_string());
         }
         self.dirty = true;
     }
@@ -771,6 +776,9 @@ impl super::Chat {
         if self.theme_menu_key(code, modifiers) {
             return true;
         }
+        if self.images_menu_key(code, modifiers) {
+            return true;
+        }
         if self.resume_menu_key(code, modifiers) {
             return true;
         }
@@ -792,6 +800,12 @@ impl super::Chat {
         // The rewind selector is modal for the same reason (D91): it is a
         // chooser over the composer, and a stray key must not reach the draft.
         if self.rewind_key(code, modifiers) {
+            return true;
+        }
+        // The team directory (D95) is a chooser too, and modal for unmodified
+        // keys only: `j` joins a room, so it must not also type a `j`, while
+        // ctrl+t has to reach the cycle that closes the panel.
+        if self.directory_key(code, modifiers) {
             return true;
         }
         // Interrupt (busy) and quit (idle) both live on Ctrl+C, judged before editing keys.
@@ -1050,6 +1064,7 @@ impl super::Chat {
                 .is_some_and(|e| e.level != crate::error::ErrorLevel::Full),
             EscLayer::InfoLines => !self.slash_info_lines.is_empty(),
             EscLayer::HelpPanel => self.help_visible,
+            EscLayer::Directory => self.directory.is_some(),
             EscLayer::TaskPanel => self.tasks_visible && !self.tasks_auto,
             EscLayer::BackToHub => *self.buffers.active() != crate::tui::buffer::BufferId::Hub,
             EscLayer::Interrupt => self.busy,
@@ -1072,6 +1087,7 @@ impl super::Chat {
                     || self.theme_menu_key(ESC, NONE)
                     || self.resume_menu_key(ESC, NONE)
                     || self.provider_menu_key(ESC, NONE)
+                    || self.images_menu_key(ESC, NONE)
             }
             EscLayer::Switcher => self.switcher_key(ESC, NONE),
             EscLayer::Rewind => self.rewind_key(ESC, NONE),
@@ -1095,6 +1111,7 @@ impl super::Chat {
                 self.help_visible = false;
                 true
             }
+            EscLayer::Directory => self.directory_key(ESC, NONE),
             // The tasks panel opened with ctrl+t closes with Esc (it used to have
             // no exit at all — the ? panel closed, this one squatted).
             EscLayer::TaskPanel => {
@@ -1275,9 +1292,20 @@ impl super::Chat {
                 self.toggle_stash();
                 true
             }
+            // ctrl+t cycles the two things a key that means "show me the work"
+            // can mean (D95): the tasks in flight, then the team doing them,
+            // then back to the transcript. One key rather than two because they
+            // are the same question asked at two altitudes, and a second
+            // binding for the roster would have been a shortcut nobody found.
             't' => {
-                self.tasks_visible = !self.tasks_visible;
-                if self.tasks_visible {
+                if self.directory.is_some() {
+                    self.directory = None;
+                } else if self.tasks_visible {
+                    self.tasks_visible = false;
+                    self.tasks_auto = false;
+                    self.open_directory();
+                } else {
+                    self.tasks_visible = true;
                     // Manually opened: keep the panel even when everything is done (the user explicitly wants to see it).
                     self.tasks_auto = false;
                     self.refresh_tasks();
@@ -1699,6 +1727,14 @@ impl super::Chat {
         // repainting only when the bar's own entries change.
         if self.tick.is_multiple_of(15) {
             self.refresh_conversations();
+            // A rolled `notify_user` window owes its "N more" line even if the
+            // agent that filled it has gone quiet (D94), so the roll is checked
+            // on the clock rather than on the next notice. The relay emits back
+            // through the same channel, so the line arrives as an ordinary event.
+            self.session
+                .runtime
+                .notify_user
+                .flush_due(std::time::Instant::now());
         }
         // The conversation you are actually in follows every frame (D89). The
         // fifteen-tick poll is the right cadence for a registry sweep and the
@@ -2024,7 +2060,7 @@ impl super::Chat {
     /// Poll the domain registries into the conversation engine (D88).
     ///
     /// This used to also snapshot a presence summary of running agents and
-    /// channels for a strip above the composer. The conversation bar (D90) says
+    /// channels for a strip of chrome of its own. The conversation bar (D90) says
     /// the same things better — who exists, who is running, what is unread —
     /// so the strip is gone and only the poll it was hanging off remains (D93).
     pub fn refresh_conversations(&mut self) {
@@ -2150,6 +2186,15 @@ impl super::Chat {
                 // the session, and this switches the flow onto it.
                 KeyCode::Enter => {
                     self.switch_to(crate::tui::buffer::BufferId::Dm(name.clone()));
+                    false
+                }
+                // tab opens this agent's perspective page (D96): the read-only
+                // dossier of every conversation it has had, which is a
+                // different question from the one Enter answers ("take me to my
+                // DM with it") and deliberately does not switch the flow.
+                KeyCode::Tab => {
+                    self.open_perspective = Some(name.clone());
+                    self.dirty = true;
                     false
                 }
                 KeyCode::Char(' ') => false,
@@ -2328,7 +2373,7 @@ impl super::Chat {
                     )));
                 }
                 rows.push(Row::new(Line::styled(
-                    "←/Esc back · Enter opens DM · x stop",
+                    "←/Esc back · Enter opens DM · tab perspective · x stop",
                     SegStyle::fg(self.theme.text_secondary),
                 )));
                 manager_box(rows, width, &self.theme)
@@ -2501,6 +2546,25 @@ impl super::Chat {
             blocks.push(Block::settled(self.welcome_el(width, &theme), true));
         }
         let pal = crate::tui::avatar::Palette::new(&theme);
+        // The avatar gutter of the conversation on screen (D97). The pinned
+        // table is copied out because the row loop below needs `&mut self` —
+        // it is a handful of short strings, next to the theme clone this
+        // function already pays for.
+        let pinned = self.faces_pinned.clone();
+        let conversation_gutter = (self.active_buffer() != crate::tui::buffer::BufferId::Hub)
+            .then(|| crate::tui::avatar::Gutter::new(self.image_cap.is_some(), &pal, &pinned));
+        // The faces the live tail will draw, recorded before the rows are
+        // built: the transmit sweep reads `Chat::faces`, and a portrait whose
+        // placeholder cells reached the screen without its data is a hole.
+        if let Some(g) = &conversation_gutter {
+            let mut seen = vec![g.index_for(crate::channels::USER_NAME)];
+            if let crate::tui::buffer::BufferId::Dm(name) = self.active_buffer() {
+                seen.push(g.index_for(&name));
+            }
+            for index in seen {
+                self.faces.insert(index);
+            }
+        }
         let mut spoke: Option<String> = None;
         for (pos, item) in flow.iter().enumerate() {
             // Who the last row belonged to, tracked across the whole flow so a
@@ -2528,6 +2592,20 @@ impl super::Chat {
                 ));
                 continue;
             }
+            // A conversation message wears the gutter; the hub's own does not
+            // (D97). `Decor::Said` is exactly the distinction: it is set by the
+            // conversation replay and by nothing else, so the hub's two-speaker
+            // grammar is left alone without asking which buffer is active.
+            let said = match &item.decor {
+                Decor::Said(who) if role == Role::Assistant => Some(who.clone()),
+                Decor::Said(_) => Some(crate::channels::USER_NAME.to_string()),
+                _ => None,
+            };
+            let gutter = said.as_ref().and(conversation_gutter.as_ref());
+            let inner = match gutter {
+                Some(g) => width.saturating_sub(g.width()),
+                None => width,
+            };
             // The band is the experimental face (`experimental.chatAvatars`): switched
             // off, a message opens on its body, exactly as it did before D50.
             let band = self.chat_avatars.then(|| self.sender_band_el(role, &pal));
@@ -2537,7 +2615,7 @@ impl super::Chat {
             let name = match (&item.decor, role) {
                 (Decor::Said(who), Role::Assistant) if spoke != previous => {
                     Some(El::Rows(vec![Row::new(Line::styled(
-                        one_line(who, width),
+                        one_line(who, inner),
                         SegStyle::fg(theme.text).bold(),
                     ))]))
                 }
@@ -2546,26 +2624,54 @@ impl super::Chat {
             let body = match role {
                 Role::User => {
                     let mut rows =
-                        El::Rows(user_message_rows(&self.messages[i].text, width, &theme));
+                        El::Rows(user_message_rows(&self.messages[i].text, inner, &theme));
                     // Send time beside the bubble's first row (D93). A state line
                     // gets none: nothing was sent, and the line is a state, not a
                     // message.
-                    let time = if crate::tui::chat::is_state_line(&self.messages[i].text) {
+                    // A `notify_user` relay (D94) is the exception among state
+                    // lines: it *is* a message, sent by someone, at a moment that
+                    // matters — "the build broke" reads differently at 09:02 and
+                    // at 17:40. The others describe now and have nothing to stamp.
+                    let time = if crate::tui::chat::is_state_line(&self.messages[i].text)
+                        && !crate::tui::bufferview::is_relay_line(&self.messages[i].text)
+                    {
                         String::new()
                     } else {
                         crate::tui::buffer::stamp(self.messages[i].at)
                     };
-                    hang_stamp(&mut rows, &time, width, &theme);
+                    hang_stamp(&mut rows, &time, inner, &theme);
                     rows
                 }
-                Role::Assistant => self.assistant_el(i, width, &theme, settled, &pal),
+                Role::Assistant => self.assistant_el(i, inner, &theme, settled, &pal),
             };
             // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
             let mut stack = vec![El::Blank];
             stack.extend(band);
             stack.extend(name);
             stack.push(body);
-            blocks.push(Block::settled(El::col(stack), settled));
+            // The gutter wraps the name row and the body together: the portrait
+            // is two cells tall, so its second row rides the message's first
+            // body line — exactly the pair the workspace skin used to spend
+            // (D89 retired it, D97 brings it back as a row-builder concern).
+            // The blank spacing row stays outside it, so a portrait never sits
+            // beside nothing.
+            let block = match (gutter, said) {
+                (Some(g), Some(who)) => {
+                    let index = g.index_for(&who);
+                    self.faces.insert(index);
+                    let lead = spoke != previous;
+                    El::col(vec![
+                        El::Blank,
+                        El::gutter(
+                            g.cells(index, &who, lead),
+                            g.blank(),
+                            El::col(stack.split_off(1)),
+                        ),
+                    ])
+                }
+                _ => El::col(stack),
+            };
+            blocks.push(Block::settled(block, settled));
         }
         if let Some(ask) = self.ask_el(&theme) {
             blocks.push(Block::live(ask));
@@ -2574,7 +2680,7 @@ impl super::Chat {
         // its way, the work being done, the reply mid-arrival. Transient by
         // construction — everything here becomes a settled message the moment it
         // becomes record, and nothing that is still a state reaches scrollback.
-        if let Some(tail) = self.conversation_tail_el(width) {
+        if let Some(tail) = self.conversation_tail_el(width, &pal) {
             blocks.push(Block::transient(tail));
         }
         // Slash command output (/help /status /compact etc.): transient hints — rendered after messages and

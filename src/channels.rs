@@ -1,5 +1,17 @@
 //! Agent channels (D29 step two, experimental feature `experimental.agentChannels`).
 //!
+//! **Vocabulary** (D95): what this module calls a *channel* is what the UI and
+//! the docs call a **room** — the only group-chat primitive there is. The
+//! domain keeps its own name (renaming a persisted schema, a tool, a settings
+//! key and a watch kind to say the same thing would be churn, not clarity);
+//! everything a user or an agent reads says "room".
+//!
+//! A room's members are an **arbitrary subset of the team**. Neither the user
+//! nor the main agent is seated automatically: agents may form rooms among
+//! themselves, and a room the user is not in is one they can find and read but
+//! not speak in until they join. Who gets seated on creation is the tool
+//! layer's policy (it stamps the creator); this module only records the set.
+//!
 //! The engine has only four primitives; everything else is prompting:
 //! 1. A channel = a member list (visibility: messages go to every member's inbox,
 //!    delivered in total order);
@@ -23,9 +35,11 @@ use serde::{Deserialize, Serialize};
 
 /// Reserved member name of the main agent in channels.
 pub const HUB_NAME: &str = "main";
-/// Reserved member name of the user (a human) in channels: speaks under this identity
-/// in the TUI channel room, shown right-aligned in the WeChat-style view; like main,
-/// auto-seated, cannot be removed, exempt from budgets.
+/// Reserved member name of the user (a human) in channels: speaks under this
+/// identity in a room and is shown as the sender of their own messages. Exempt
+/// from budgets, like `main`. Since D95 the user is an *ordinary* member in
+/// every other respect: not seated automatically, and free to leave a room they
+/// joined — a roster the user could never leave was a roster, not a membership.
 pub const USER_NAME: &str = "user";
 
 /// Channel speaking mode.
@@ -53,6 +67,21 @@ impl ChannelMode {
     }
 }
 
+/// What a log entry is. A room's log holds two kinds of thing and they are not
+/// the same thing said twice: somebody spoke, or the roster changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    /// A member said this.
+    #[default]
+    Said,
+    /// A membership change: `from` joined or left the room. Nobody typed it, so
+    /// it renders as a dim system line rather than as speech, it is not
+    /// delivered into anybody's context, and it never counts as something a
+    /// serial sender had to have read before speaking.
+    Membership,
+}
+
 /// A channel message (seq is total order within the channel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
@@ -64,7 +93,16 @@ pub struct ChannelMessage {
     /// time stamp rather than inventing one.
     #[serde(default)]
     pub at: u64,
+    /// Speech or a roster change (D95). Defaulted rather than required: share
+    /// documents written before D95 hold only speech, and reading one must not
+    /// fail over a field that did not exist when it was written.
+    #[serde(default)]
+    pub kind: MessageKind,
 }
+
+/// The two roster changes, as they read in a room.
+pub const JOINED: &str = "joined";
+pub const LEFT: &str = "left";
 
 /// Wall-clock now in unix seconds (0 if the system clock predates the epoch).
 pub fn now_unix() -> u64 {
@@ -167,6 +205,28 @@ fn format_hub_line(channel: &str, msg: &ChannelMessage) -> String {
     format!("[#{channel} msg #{}] {}: {}", msg.seq, msg.from, msg.text)
 }
 
+/// Write a roster change into the room's record and hand back the entry.
+///
+/// It takes a sequence number because it *is* part of the room's total order —
+/// a reader must be able to tell whether a member spoke before or after they
+/// arrived. It is deliberately not delivered anywhere: waking every member
+/// because a roster changed is the flooding D94 removed, and an agent that
+/// wants the roster asks for it. Nor does it make anybody stale — the serial
+/// check reads speech only, so a join can never bounce a post already in
+/// flight.
+fn record_membership(channel: &mut Channel, member: &str, what: &str) -> ChannelMessage {
+    channel.seq += 1;
+    let event = ChannelMessage {
+        seq: channel.seq,
+        from: member.to_string(),
+        text: what.to_string(),
+        at: now_unix(),
+        kind: MessageKind::Membership,
+    };
+    channel.log.push(event.clone());
+    event
+}
+
 impl ChannelRegistry {
     pub fn new(limits: ChannelLimits) -> Arc<Self> {
         Arc::new(Self {
@@ -243,7 +303,17 @@ impl ChannelRegistry {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Create a channel (hub auto-joins as member). Member existence/depth is validated by the tool layer.
+    /// Create a room with exactly these members — an arbitrary subset of the
+    /// team, which need contain neither the user nor the main agent (D95).
+    ///
+    /// Nobody is seated behind the caller's back. Auto-seating `main` and
+    /// `user` made every room the user's room by construction, which is the one
+    /// thing the room model says a room is not: agents form rooms among
+    /// themselves, and the user reaches those by finding them in the directory
+    /// and joining. Who *should* be seated on creation is policy, and policy
+    /// lives at the tool layer, where the creator's identity is known
+    /// ([`crate::tool::channel`] stamps it) and where member existence and
+    /// depth are already validated.
     pub fn create(
         &self,
         name: &str,
@@ -252,16 +322,16 @@ impl ChannelRegistry {
     ) -> Result<(), String> {
         let name = name.trim_start_matches('#');
         if name.is_empty() {
-            return Err("channel name must not be empty".to_string());
+            return Err("room name must not be empty".to_string());
         }
         {
             let mut inner = self.lock();
             if inner.channels.contains_key(name) {
-                return Err(format!("channel #{name} already exists"));
+                return Err(format!("room #{name} already exists"));
             }
-            let mut all = vec![HUB_NAME.to_string(), USER_NAME.to_string()];
+            let mut all: Vec<String> = Vec::new();
             for m in members {
-                if m != HUB_NAME && m != USER_NAME && !all.contains(&m) {
+                if !m.is_empty() && !all.contains(&m) {
                     all.push(m);
                 }
             }
@@ -303,11 +373,36 @@ impl ChannelRegistry {
         }
     }
 
+    /// Is this name currently seated in the room? The one question the display
+    /// side asks: a room the user is in is a conversation of theirs (bar,
+    /// switcher, composer), a room they are not in is a place they can read.
+    pub fn is_member(&self, name: &str, member: &str) -> bool {
+        self.lock()
+            .channels
+            .get(name)
+            .is_some_and(|ch| ch.members.iter().any(|m| m == member))
+    }
+
+    /// Every room this member is seated in, by name, sorted. The directory
+    /// prints it beside the member; nothing else needs it.
+    pub fn rooms_of(&self, member: &str) -> Vec<String> {
+        let inner = self.lock();
+        let mut out: Vec<String> = inner
+            .channels
+            .iter()
+            .filter(|(_, ch)| ch.members.iter().any(|m| m == member))
+            .map(|(name, _)| name.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Seat a member and write the join into the room's record.
     pub fn invite(&self, name: &str, member: &str) -> Result<(), String> {
         {
             let mut inner = self.lock();
             let Some(ch) = inner.channels.get_mut(name) else {
-                return Err(format!("no channel #{name}"));
+                return Err(format!("no room #{name}"));
             };
             if ch.members.iter().any(|m| m == member) {
                 return Err(format!("{member} is already in #{name}"));
@@ -317,27 +412,35 @@ impl ChannelRegistry {
             // head (seen set to the current seq, so the serial check won't bounce on pre-join history).
             let seq = ch.seq;
             ch.seen.insert(member.to_string(), seq);
+            let event = record_membership(ch, member, JOINED);
+            self.sync_channel_message(name, &event);
         }
         self.sync_channel_meta(name);
         Ok(())
     }
 
+    /// Unseat a member and write the departure into the room's record.
+    ///
+    /// The user is removable like anybody else (that is what leaving a room
+    /// is); `main` is not, because the hub's relay path is seated through it.
     pub fn kick(&self, name: &str, member: &str) -> Result<(), String> {
-        if member == HUB_NAME || member == USER_NAME {
+        if member == HUB_NAME {
             return Err(format!(
-                "{member} is a reserved member and cannot be removed from a channel"
+                "{member} is a reserved member and cannot be removed from a room"
             ));
         }
         {
             let mut inner = self.lock();
             let Some(ch) = inner.channels.get_mut(name) else {
-                return Err(format!("no channel #{name}"));
+                return Err(format!("no room #{name}"));
             };
             let before = ch.members.len();
             ch.members.retain(|m| m != member);
             if ch.members.len() == before {
                 return Err(format!("{member} is not in #{name}"));
             }
+            let event = record_membership(ch, member, LEFT);
+            self.sync_channel_message(name, &event);
         }
         self.sync_channel_meta(name);
         Ok(())
@@ -352,12 +455,14 @@ impl ChannelRegistry {
                 let before = channel.members.len();
                 channel.members.retain(|candidate| candidate != member);
                 if channel.members.len() != before {
-                    changed.push(name.clone());
+                    let event = record_membership(channel, member, LEFT);
+                    changed.push((name.clone(), event));
                 }
             }
             changed
         };
-        for name in changed {
+        for (name, event) in changed {
+            self.sync_channel_message(&name, &event);
             self.sync_channel_meta(&name);
         }
     }
@@ -371,10 +476,12 @@ impl ChannelRegistry {
         let hub_line;
         let outcome = {
             let Some(ch) = inner.channels.get_mut(name) else {
-                return Err(format!("no channel #{name}"));
+                return Err(format!("no room #{name}"));
             };
             if !ch.members.iter().any(|m| m == from) {
-                return Err(format!("{from} is not a member of #{name}"));
+                return Err(format!(
+                    "{from} is not a member of #{name} — join the room before speaking in it"
+                ));
             }
             // Channel-level cap: team override wins, otherwise registry-level.
             let channel_total = ch.message_limit.unwrap_or(limits.channel_total);
@@ -384,12 +491,18 @@ impl ChannelRegistry {
                 ));
             }
             // Serial commit check: fall behind → bounce back + increments (the bounced
-            // content enters the context, counted as read).
+            // content enters the context, counted as read). Speech only: a roster
+            // change is not something a sender had to have read before speaking,
+            // so a join must never bounce a post that was already being drafted.
             if ch.mode == ChannelMode::Serial {
                 let seen = ch.seen.get(from).copied().unwrap_or(0);
-                if seen < ch.seq {
-                    let missed: Vec<ChannelMessage> =
-                        ch.log.iter().filter(|m| m.seq > seen).cloned().collect();
+                let missed: Vec<ChannelMessage> = ch
+                    .log
+                    .iter()
+                    .filter(|m| m.seq > seen && m.kind == MessageKind::Said)
+                    .cloned()
+                    .collect();
+                if !missed.is_empty() {
                     ch.seen.insert(from.to_string(), ch.seq);
                     return Ok(PostOutcome::Stale { missed });
                 }
@@ -416,6 +529,7 @@ impl ChannelRegistry {
                 from: from.to_string(),
                 text: text.to_string(),
                 at: now_unix(),
+                kind: MessageKind::Said,
             };
             ch.log.push(msg.clone());
             self.sync_channel_message(name, &msg);
@@ -461,26 +575,27 @@ impl ChannelRegistry {
         const TAIL: usize = 50;
         let inner = self.lock();
         let ch = inner.channels.get(name)?;
-        let detail = match ch.log.last() {
+        // "latest" means the latest thing anybody *said*. A room whose last
+        // entry is a join has not gone quiet, and a row reading `latest coder:
+        // joined` would say it had.
+        let detail = match ch.log.iter().rev().find(|m| m.kind == MessageKind::Said) {
             Some(last) => format!(
                 "{} msgs · latest {}: {}",
                 ch.seq,
                 last.from,
                 crate::tool::agent::excerpt(&last.text)
             ),
-            None => "0 msgs".to_string(),
+            None => format!("{} msgs", ch.seq),
         };
         let skipped = ch.log.len().saturating_sub(TAIL);
         let mut lines: Vec<String> = Vec::new();
         if skipped > 0 {
             lines.push(format!("… ({skipped} earlier msgs skipped)"));
         }
-        lines.extend(
-            ch.log
-                .iter()
-                .skip(skipped)
-                .map(|m| format!("{}. {}: {}", m.seq, m.from, m.text)),
-        );
+        lines.extend(ch.log.iter().skip(skipped).map(|m| match m.kind {
+            MessageKind::Said => format!("{}. {}: {}", m.seq, m.from, m.text),
+            MessageKind::Membership => format!("· {} {} ·", m.from, m.text),
+        }));
         Some((ch.watch_id, detail, lines.join("\n")))
     }
 
@@ -547,6 +662,8 @@ mod tests {
         }
     }
 
+    /// A room's roster is exactly what it was created with — an arbitrary
+    /// subset of the team, with nobody seated behind the caller's back (D95).
     #[test]
     fn create_invite_kick_and_list() {
         let reg = registry();
@@ -563,25 +680,40 @@ mod tests {
         let st = &reg.list()[0];
         assert_eq!(
             st.members,
-            vec!["main", "user", "a", "b"],
-            "hub and user auto-join and lead the list"
+            vec!["a", "b"],
+            "neither the user nor main is seated unless asked for"
+        );
+        assert!(
+            !reg.is_member("table", USER_NAME),
+            "so this is a room the user is not in"
         );
         reg.invite("table", "c").unwrap_or_else(|e| panic!("{e}"));
         assert!(reg.invite("table", "c").is_err(), "duplicate invite");
         reg.kick("table", "b").unwrap_or_else(|e| panic!("{e}"));
         assert!(reg.kick("table", "b").is_err(), "not present");
         assert!(reg.kick("table", "main").is_err(), "hub cannot be removed");
-        assert!(reg.kick("table", "user").is_err(), "user cannot be removed");
-        assert_eq!(reg.list()[0].members, vec!["main", "user", "a", "c"]);
+        assert_eq!(reg.list()[0].members, vec!["a", "c"]);
+        // The user joins and leaves like anybody else: that is what a
+        // membership is, and a member who cannot leave is a fixture.
+        reg.invite("table", USER_NAME)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(reg.is_member("table", USER_NAME));
+        assert_eq!(reg.rooms_of(USER_NAME), vec!["table"]);
+        reg.kick("table", USER_NAME)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(reg.rooms_of(USER_NAME).is_empty());
         reg.remove_member_everywhere("a");
-        assert_eq!(reg.list()[0].members, vec!["main", "user", "c"]);
-        // Single-channel snapshot and full-log accessors.
-        assert_eq!(
-            reg.info("table").unwrap_or_else(|| panic!("has one")).seq,
-            0
-        );
+        assert_eq!(reg.list()[0].members, vec!["c"]);
+        // Single-room snapshot and full-log accessors. The log is not empty:
+        // every one of those roster changes is in it.
+        assert!(reg.info("table").unwrap_or_else(|| panic!("has one")).seq > 0);
         assert!(reg.info("nope").is_none());
-        assert!(reg.log_of("table").is_empty());
+        assert!(
+            reg.log_of("table")
+                .iter()
+                .all(|m| m.kind == MessageKind::Membership),
+            "nobody has said anything yet"
+        );
     }
 
     #[test]
@@ -589,7 +721,13 @@ mod tests {
         let reg = registry();
         reg.create(
             "t",
-            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                HUB_NAME.into(),
+                USER_NAME.into(),
+                "a".into(),
+                "b".into(),
+                "c".into(),
+            ],
             ChannelMode::Free,
         )
         .unwrap_or_else(|e| panic!("{e}"));
@@ -699,7 +837,34 @@ mod tests {
             reg.post("late", "t", "I'm here")
                 .unwrap_or_else(|e| panic!("{e}")),
         );
-        assert_eq!(seq, 2);
+        assert_eq!(seq, 3, "the join took a place in the room's order too");
+    }
+
+    /// A roster change is in the record but is not something anyone had to have
+    /// read before speaking: joining a serial room must not bounce every member
+    /// who was already drafting.
+    #[test]
+    fn a_join_never_makes_anybody_stale() {
+        let reg = registry();
+        reg.create("t", vec!["a".into(), "b".into()], ChannelMode::Serial)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let _ = sent(reg.post("a", "t", "one").unwrap_or_else(|e| panic!("{e}")));
+        reg.mark_seen("b", "t", 1);
+        reg.invite("t", "c").unwrap_or_else(|e| panic!("{e}"));
+        reg.kick("t", "c").unwrap_or_else(|e| panic!("{e}"));
+        // b is up to date on everything *said*; two roster changes since then
+        // change nothing about that.
+        let (seq, _) = sent(reg.post("b", "t", "two").unwrap_or_else(|e| panic!("{e}")));
+        assert_eq!(seq, 4);
+        // And the membership entries are not delivered to anybody: only the
+        // post is.
+        match reg.post("a", "t", "three") {
+            Ok(PostOutcome::Stale { missed }) => {
+                assert_eq!(missed.len(), 1, "only speech is missed: {missed:?}");
+                assert_eq!(missed[0].text, "two");
+            }
+            other => panic!("a is behind by one message, got {other:?}"),
+        }
     }
 
     #[test]
@@ -758,35 +923,57 @@ mod tests {
         let reg = ChannelRegistry::new(ChannelLimits::default());
         reg.attach_share(store.clone());
 
-        // create → channel metadata (mode + members).
-        reg.create("t", vec!["a".into()], ChannelMode::Free)
+        // create → room metadata (mode + members).
+        reg.create("t", vec!["main".into(), "a".into()], ChannelMode::Free)
             .unwrap_or_else(|e| panic!("{e}"));
         let doc = store.snapshot();
         assert_eq!(doc.channels.len(), 1);
         assert_eq!(doc.channels[0].mode, "free");
-        assert_eq!(doc.channels[0].members, vec!["main", "user", "a"]);
+        assert_eq!(doc.channels[0].members, vec!["main", "a"]);
         assert!(doc.channels[0].messages.is_empty());
 
-        // invite/kick → member updates (messages kept).
+        // invite/kick → member updates, and the roster change itself is part of
+        // the record that gets persisted (D95).
         reg.invite("t", "b").unwrap_or_else(|e| panic!("{e}"));
         reg.kick("t", "a").unwrap_or_else(|e| panic!("{e}"));
         let doc = store.snapshot();
-        assert_eq!(doc.channels[0].members, vec!["main", "user", "b"]);
+        assert_eq!(doc.channels[0].members, vec!["main", "b"]);
+        assert_eq!(
+            doc.channels[0]
+                .messages
+                .iter()
+                .map(|m| (m.from.as_str(), m.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("b", JOINED), ("a", LEFT)]
+        );
 
-        // post Sent → message appended.
+        // post Sent → message appended after them.
         let (seq, _) = sent(reg.post("b", "t", "hi").unwrap_or_else(|e| panic!("{e}")));
-        assert_eq!(seq, 1);
+        assert_eq!(seq, 3);
         let doc = store.snapshot();
-        assert_eq!(doc.channels[0].messages.len(), 1);
-        assert_eq!(doc.channels[0].messages[0].from, "b");
-        assert_eq!(doc.channels[0].messages[0].text, "hi");
-        // Disk roundtrip: reloading yields identical data.
+        assert_eq!(doc.channels[0].messages.len(), 3);
+        assert_eq!(doc.channels[0].messages[2].from, "b");
+        assert_eq!(doc.channels[0].messages[2].text, "hi");
+        // Disk roundtrip: reloading yields identical data, kinds included.
         store.persist();
         let reloaded = crate::share::ShareStore::load_or_create(&root.join("s.json"))
             .unwrap_or_else(|e| panic!("{e}"));
         let doc = reloaded.snapshot();
-        assert_eq!(doc.channels[0].messages[0].seq, 1);
+        assert_eq!(doc.channels[0].messages[2].seq, 3);
+        assert_eq!(doc.channels[0].messages[0].kind, MessageKind::Membership);
+        assert_eq!(doc.channels[0].messages[2].kind, MessageKind::Said);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A share document written before D95 carries no `kind`, and reading one
+    /// must not fail over a field that did not exist: it is all speech.
+    #[test]
+    fn a_pre_d95_share_document_reads_as_speech() {
+        let json = r#"{"seq":1,"from":"a","text":"hello","at":7}"#;
+        let msg: ChannelMessage =
+            serde_json::from_str(json).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(msg.kind, MessageKind::Said);
+        assert_eq!(msg.at, 7);
     }
 
     #[test]
@@ -801,17 +988,18 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         let reg = ChannelRegistry::new(ChannelLimits::default());
         reg.attach_share(store);
-        reg.create("t", vec!["a".into(), "b".into()], ChannelMode::Free)
-            .unwrap_or_else(|error| panic!("{error}"));
+        reg.create(
+            "t",
+            vec!["main".into(), "a".into(), "b".into()],
+            ChannelMode::Free,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
 
         reg.remove_member_everywhere("a");
 
         let reloaded = crate::share::ShareStore::load_or_create(&path)
             .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(
-            reloaded.snapshot().channels[0].members,
-            vec!["main", "user", "b"]
-        );
+        assert_eq!(reloaded.snapshot().channels[0].members, vec!["main", "b"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -837,6 +1025,7 @@ mod tests {
                 from: "a".into(),
                 text: "destination session".into(),
                 at: 1,
+                kind: MessageKind::Said,
             },
         );
 
@@ -849,7 +1038,7 @@ mod tests {
 
         let doc = store.snapshot();
         assert_eq!(doc.channels.len(), 1);
-        assert_eq!(doc.channels[0].members, vec!["main", "user", "a"]);
+        assert_eq!(doc.channels[0].members, vec!["a"]);
         assert_eq!(doc.channels[0].messages.len(), 2);
         assert_eq!(doc.channels[0].messages[0].text, "destination session");
         assert_eq!(doc.channels[0].messages[1].seq, 11);

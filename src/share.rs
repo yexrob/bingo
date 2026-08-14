@@ -484,6 +484,7 @@ pub fn derive_share_doc(session: &str, messages: &[Message]) -> ShareDoc {
                             from: "main".to_string(),
                             text: text.to_string(),
                             at: 0,
+                            kind: crate::channels::MessageKind::Said,
                         });
                     }
                 }
@@ -559,6 +560,7 @@ mod tests {
                 from: "scout".into(),
                 text: "hello everyone".into(),
                 at: 0,
+                kind: crate::channels::MessageKind::Said,
             },
         );
         store
@@ -688,6 +690,7 @@ mod tests {
                 from: "a".into(),
                 text: "t".into(),
                 at: 0,
+                kind: crate::channels::MessageKind::Said,
             },
         );
         let doc = store.snapshot();
@@ -707,6 +710,7 @@ mod tests {
                 from: "x".into(),
                 text: "y".into(),
                 at: 0,
+                kind: crate::channels::MessageKind::Said,
             },
         );
         assert_eq!(store.snapshot().channels.len(), 1);

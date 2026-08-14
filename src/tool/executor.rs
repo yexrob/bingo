@@ -251,6 +251,7 @@ mod tests {
                 ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
                 instance: None,
                 rewind: Default::default(),
+                notify_user: Default::default(),
             },
             None,
         )
@@ -306,6 +307,7 @@ mod tests {
                 ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
                 instance: None,
                 rewind: Default::default(),
+                notify_user: Default::default(),
             },
             None,
         )
@@ -382,6 +384,7 @@ mod tests {
                 ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
                 instance: None,
                 rewind: Default::default(),
+                notify_user: Default::default(),
             },
             None,
         )
@@ -405,6 +408,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         }
     }
 

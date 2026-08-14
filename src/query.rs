@@ -96,7 +96,7 @@ impl InboxWake {
 
 /// Recovery injection after max_tokens truncation.
 const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
-const MAX_TOKENS_RESUME_PROMPT: &str =
+pub(crate) const MAX_TOKENS_RESUME_PROMPT: &str =
     "Output token limit hit. Resume directly from where you left off. Do not apologize or explain.";
 
 /// Task reminder thresholds (TURNS_SINCE_WRITE / TURNS_BETWEEN_REMINDERS).
@@ -752,6 +752,10 @@ pub(crate) fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContex
         ask_question: ui.ask_question.clone(),
         instance: session.instance.clone(),
         rewind: session.runtime.rewind.clone(),
+        // Session-scoped, like `rewind`: a subagent inherits the parent's handle in
+        // `build_sub_session`, so the per-agent rate limit is one table for the whole
+        // session rather than one per spawn.
+        notify_user: session.runtime.notify_user.clone(),
     })
 }
 

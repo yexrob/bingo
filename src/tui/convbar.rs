@@ -1,5 +1,10 @@
-//! The conversation bar (D90): one row above the composer saying which
+//! The conversation bar (D90): one row at the bottom of the window saying which
 //! conversations exist, which one you are in, and which of them want you.
+//!
+//! It sat directly on the composer until D97 moved it to the last row. It reads
+//! better as this window's status area — where you are, what is unread — and a
+//! status area belongs at the bottom edge, which is where the eye already goes
+//! for it.
 //!
 //! It is the only net-new chrome row the blueprint approves, and it earns the
 //! row by answering the question the unified conversation model created: once
@@ -42,7 +47,7 @@ const ELLIPSIS: &str = "…";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarEntry {
     pub id: BufferId,
-    /// `hub` / `#team` / `#build` / `@scout` — the label already carries its
+    /// `hub` / `#build` / `@scout` — the label already carries its
     /// sigil, so the bar never re-derives one and can never print a name the
     /// `/open` completion would not accept.
     pub label: String,
@@ -269,7 +274,7 @@ impl Chat {
 mod tests {
     use super::*;
     use crate::agents::AgentKind;
-    use crate::channels::ChannelMode;
+    use crate::channels::{ChannelMode, USER_NAME};
     use crate::tui::test_util::chat_at;
     use crate::tui::theme::{Theme, ThemeSetting};
 
@@ -287,7 +292,7 @@ mod tests {
         );
     }
 
-    /// A crew member: what puts `#team` in the registry (D93).
+    /// A crew member (D53): a teammate from the blueprint rather than a hire.
     fn seed_crew(chat: &Chat, name: &str) {
         chat.session.agents.insert(
             name,
@@ -324,7 +329,11 @@ mod tests {
         let mut chat = test_chat();
         chat.session
             .channels
-            .create("build", vec!["scout".to_string()], ChannelMode::Free)
+            .create(
+                "build",
+                vec![USER_NAME.to_string(), "scout".to_string()],
+                ChannelMode::Free,
+            )
             .expect("channel created");
         seed_agent(&chat, "zoe");
         seed_crew(&chat, "scout");
@@ -338,7 +347,7 @@ mod tests {
         chat.refresh_conversations();
 
         let text = bar_text(&chat, 100);
-        let order: Vec<&str> = ["hub", "#team", "#build", "@scout", "@zoe"].to_vec();
+        let order: Vec<&str> = ["hub", "#build", "@scout", "@zoe"].to_vec();
         let mut at = 0usize;
         for name in order {
             let found = text[at..]
@@ -355,7 +364,11 @@ mod tests {
         let mut chat = test_chat();
         chat.session
             .channels
-            .create("build", vec!["scout".to_string()], ChannelMode::Free)
+            .create(
+                "build",
+                vec![USER_NAME.to_string(), "scout".to_string()],
+                ChannelMode::Free,
+            )
             .expect("channel created");
         seed_agent(&chat, "scout");
         chat.refresh_conversations();

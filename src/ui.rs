@@ -159,6 +159,11 @@ pub enum UiEvent {
         payload: Option<serde_json::Value>,
         signal: Option<String>,
     },
+    /// A subagent reached for the user on purpose (D94): `notify_user` cleared its
+    /// rate limit and the hub owes a relay line. The decision — whether this one
+    /// prints, and whether it rings — was made in [`crate::notify_user::Relay`];
+    /// the renderer only draws what it is handed.
+    NotifyUser(crate::notify_user::Notice),
     /// `/model` secondary selector: a provider's model list finished fetching asynchronously
     /// (appended to the menu).
     ModelsLoaded {

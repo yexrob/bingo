@@ -56,6 +56,10 @@ pub enum Action {
     None,
     /// The presentation changed: rebuild the rows at the current `show_all`.
     Rebuild,
+    /// Open a content image in the desktop's viewer (D97). The pager cannot
+    /// spawn anything — it has no `Chat` and no terminal — so it names the row
+    /// and the loop, which has both, does the opening.
+    OpenImage(usize),
     /// Close the view.
     Close,
 }
@@ -279,6 +283,18 @@ impl TranscriptState {
             .collect()
     }
 
+    /// The first row on screen that carries a picture, if any. What `o` acts
+    /// on: a pager has no selection, and the top of the window is where the
+    /// reader's eye already is.
+    pub fn first_visible_image(&self) -> Option<usize> {
+        let end = (self.offset + self.viewport).min(self.rows.len());
+        (self.offset.min(end)..end).find(|i| {
+            self.rows
+                .get(*i)
+                .is_some_and(|row| row.line.image.is_some())
+        })
+    }
+
     /// Progress through the document, 0–100.
     pub fn percent(&self) -> usize {
         let max = self.max_offset();
@@ -400,8 +416,8 @@ fn hint_tiers(show_all: bool) -> [String; 3] {
         "ctrl+e expand all"
     };
     [
-        format!("j/k scroll · g/G ends · / search · n/N hits · {expand} · q close"),
-        format!("j/k scroll · / search · {expand} · q close"),
+        format!("j/k scroll · g/G ends · / search · n/N hits · o image · {expand} · q close"),
+        format!("j/k scroll · / search · o image · {expand} · q close"),
         format!("{expand} · q close"),
     ]
 }
@@ -509,6 +525,13 @@ pub fn on_key(state: &mut TranscriptState, code: KeyCode, modifiers: KeyModifier
     match code {
         KeyCode::Char('q') | KeyCode::Esc => Action::Close,
         KeyCode::Char('o' | 'c') if ctrl => Action::Close,
+        // `o` opens the picture in view. The pager has no cursor to sit on a
+        // row with, so "the image row" is the first one on screen — which is
+        // the one the reader stopped scrolling at.
+        KeyCode::Char('o') => match state.first_visible_image() {
+            Some(row) => Action::OpenImage(row),
+            None => Action::None,
+        },
         KeyCode::Char('e') if ctrl => {
             state.toggle_show_all();
             Action::Rebuild
@@ -700,6 +723,13 @@ async fn modal_loop(
                     Action::Rebuild => {
                         let rows = transcript_rows(chat, width, state.show_all);
                         state.set_rows(rows);
+                    }
+                    // The viewer is spawned detached, so the pager keeps the
+                    // terminal and the next key lands here as usual.
+                    Action::OpenImage(row) => {
+                        if let Some(id) = state.rows.get(row).and_then(|r| chat.image_at_row(r)) {
+                            chat.open_image(id);
+                        }
                     }
                     Action::None => {}
                 }

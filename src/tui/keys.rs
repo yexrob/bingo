@@ -97,7 +97,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+o",
-        description: "transcript view: full output (ctrl+e · / · q)",
+        description: "transcript view: full output (ctrl+e · / · o · q)",
     },
     Binding {
         keys: "ctrl+t",
@@ -109,7 +109,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+b",
-        description: "background the running command · manage background agents",
+        description: "background the running command · manage background agents (tab: perspective)",
     },
     Binding {
         keys: "ctrl+k",
@@ -117,7 +117,11 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "/open",
-        description: "open a conversation: @agent · #channel · #team · hub",
+        description: "open a conversation: @agent · #room · hub",
+    },
+    Binding {
+        keys: "ctrl+t",
+        description: "tasks, then the team directory (roster · rooms · recent)",
     },
     Binding {
         keys: "@name · #name",
@@ -325,7 +329,7 @@ mod tests {
             .unwrap_or_else(|| panic!("ctrl+b binding missing"));
         assert_eq!(
             binding.description,
-            "background the running command · manage background agents"
+            "background the running command · manage background agents (tab: perspective)"
         );
     }
 

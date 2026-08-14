@@ -46,6 +46,7 @@ pub const COMMANDS: &[SlashCommand] = &[
         "list/add permission rules",
     ),
     ("theme", "[dark|light|auto]", "switch the theme"),
+    ("images", "", "open an image from this session"),
     ("mcp", "[enable|disable|reconnect]", "manage MCP servers"),
     ("provider", "[name]", "list/switch API providers"),
     (
@@ -62,9 +63,11 @@ pub const COMMANDS: &[SlashCommand] = &[
     ),
     (
         "open",
-        "@agent|#channel|hub",
+        "@agent|#room|hub",
         "open a conversation in this terminal",
     ),
+    ("join", "[#room]", "join a room so you can speak in it"),
+    ("leave", "[#room]", "leave a room (it stays readable)"),
     ("exit", "", "exit the session"),
 ];
 
@@ -72,8 +75,8 @@ pub const COMMANDS: &[SlashCommand] = &[
 // `/open` is instant because switching conversations is exactly what a user
 // wants while a turn runs: the turn keeps going, and the flow follows the eye.
 pub const INSTANT_COMMANDS: &[&str] = &[
-    "think", "model", "provider", "theme", "status", "context", "tasks", "help", "skills",
-    "config", "gc", "open",
+    "think", "model", "provider", "theme", "images", "status", "context", "tasks", "help",
+    "skills", "config", "gc", "open",
 ];
 
 /// Slash dropdown suggestion item (`/name`, hint, and description).

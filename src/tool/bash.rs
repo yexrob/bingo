@@ -1167,6 +1167,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let command = r#"python3 -c 'import os,time; b="❤".encode(); os.write(1,b[:1]); time.sleep(.05); os.write(1,b[1:])'"#;
         let result = BashTool::new()
@@ -1194,6 +1195,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let result = BashTool::with_output_max_chars(32)
             .call(
@@ -1223,6 +1225,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let result = BashTool::new()
             .call(serde_json::json!({"command": r"printf '\377ok\n'"}), &ctx)
@@ -1248,6 +1251,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         #[cfg(unix)]
         let command = "printf 12345; printf 67890 >&2";
@@ -1294,6 +1298,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let tool = BashTool::new();
         let result = tool
@@ -1341,6 +1346,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let tool = BashTool::new();
         #[cfg(unix)]
@@ -1374,6 +1380,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let tool = BashTool::new();
         #[cfg(unix)]
@@ -1566,6 +1573,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         // The grandchild writes its pid then sleeps; the parent shell also sleeps to trigger the timeout.
         let command = format!(
@@ -1666,6 +1674,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let result = BashTool::new()
             .call(
@@ -1720,6 +1729,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         };
         let tool = BashTool::new();
         let err = tool
@@ -1752,6 +1762,7 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
+            notify_user: Default::default(),
         }
     }
 

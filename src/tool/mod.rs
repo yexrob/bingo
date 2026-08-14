@@ -19,6 +19,7 @@ pub mod executor;
 pub mod experience;
 pub mod glob;
 pub mod grep;
+pub mod notify_user;
 pub mod read;
 pub mod skill;
 pub mod task;
@@ -59,6 +60,12 @@ pub struct ToolContext {
     /// it writes. Every host shares one recorder, so what rewind can undo does
     /// not depend on which surface asked for the edit.
     pub rewind: std::sync::Arc<crate::rewind::Recorder>,
+    /// The user's attention (D94): where `notify_user` puts a subagent's
+    /// deliberate line, and the per-agent rate limit that keeps the hub scarce.
+    /// [`crate::notify_user::Relay::detached`] for a host with no user surface —
+    /// the limiting still runs, so the answer the model gets is the same
+    /// everywhere.
+    pub notify_user: std::sync::Arc<crate::notify_user::Relay>,
 }
 
 impl ToolContext {
