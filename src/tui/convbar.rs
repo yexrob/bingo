@@ -1,5 +1,10 @@
-//! The conversation bar (D90): one row above the composer saying which
+//! The conversation bar (D90): one row at the bottom of the window saying which
 //! conversations exist, which one you are in, and which of them want you.
+//!
+//! It sat directly on the composer until D97 moved it to the last row. It reads
+//! better as this window's status area — where you are, what is unread — and a
+//! status area belongs at the bottom edge, which is where the eye already goes
+//! for it.
 //!
 //! It is the only net-new chrome row the blueprint approves, and it earns the
 //! row by answering the question the unified conversation model created: once

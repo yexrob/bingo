@@ -159,7 +159,11 @@ pub fn on_key(state: &mut PerspectiveState, code: KeyCode, modifiers: KeyModifie
                 transcript::Action::Close => Action::Close,
                 // Nothing in a thread rebuilds: the rows are a snapshot and
                 // `ctrl+e` is unbound.
-                transcript::Action::Rebuild | transcript::Action::None => Action::None,
+                // A thread's rows come from a read-only snapshot and carry no
+                // image blocks of their own, so `o` has nothing to open here.
+                transcript::Action::Rebuild
+                | transcript::Action::OpenImage(_)
+                | transcript::Action::None => Action::None,
             }
         }
     }
@@ -266,7 +270,12 @@ fn lane_row(state: &PerspectiveState, index: usize, width: usize, theme: &Theme)
 /// A thread: its rule, then its posts through the conversation engine's own
 /// renderer. The protagonist's process rows are part of the thread, which is
 /// the whole point of the page.
-pub fn thread_rows(state: &PerspectiveState, width: usize, theme: &Theme) -> Vec<Row> {
+pub fn thread_rows(
+    state: &PerspectiveState,
+    width: usize,
+    theme: &Theme,
+    gutter: Option<&crate::tui::avatar::Gutter<'_>>,
+) -> Vec<Row> {
     let Some(lane) = state.selected_lane() else {
         return Vec::new();
     };
@@ -280,8 +289,17 @@ pub fn thread_rows(state: &PerspectiveState, width: usize, theme: &Theme) -> Vec
         )),
         Row::new(Line::empty()),
     ];
-    for post in &lane.posts {
-        rows.extend(settled_post_rows(theme, post, width));
+    // The thread is a conversation, so it wears the conversation's gutter —
+    // the same runs, the same portraits, the same width arithmetic the DM and
+    // room views use, because it is the same builder underneath.
+    let runs = crate::tui::bufferview::sender_runs(&lane.posts);
+    for (post, lead) in lane.posts.iter().zip(runs) {
+        let sender = gutter.map(|g| crate::tui::bufferview::Sender {
+            gutter: *g,
+            index: g.index_for(&post.from),
+            lead,
+        });
+        rows.extend(settled_post_rows(theme, post, width, sender.as_ref()));
     }
     rows
 }
@@ -407,8 +425,22 @@ async fn modal_loop(
     let mut width = size.width as usize;
     let theme = chat.theme.clone();
     let mut state = PerspectiveState::new(snapshot(chat, agent));
+    // The page draws the conversation gutter, so the portraits have to reach
+    // this screen too. All eight go once: the alternate screen is short-lived,
+    // the payload is a few kilobytes, and knowing which faces a thread will
+    // show would mean laying out every lane before drawing one.
+    let cap = chat.image_cap;
+    let pal = crate::tui::avatar::Palette::new(&theme);
+    let pinned = chat.faces_pinned.clone();
+    let gutter = crate::tui::avatar::Gutter::new(cap.is_some(), &pal, &pinned);
+    let mut transmits = crate::tui::gfx::Transmits::default();
 
     loop {
+        if let Some(cap) = cap {
+            let faces: Vec<usize> = (0..crate::tui::avatar::COUNT).collect();
+            let bytes = crate::tui::avatar::transmits(&faces, &cap, &mut transmits);
+            crate::tui::term::write_transmits(terminal.backend_mut(), &bytes)?;
+        }
         let visible = match state.level {
             Level::Index => index_rows(&state, width, &theme),
             Level::Thread => match &state.pager {
@@ -435,7 +467,7 @@ async fn modal_loop(
                     Action::Open => {
                         state.level = Level::Thread;
                         state.pager = Some(TranscriptState::new(
-                            thread_rows(&state, width, &theme),
+                            thread_rows(&state, width, &theme, Some(&gutter)),
                             viewport_of(size.height as usize),
                         ));
                     }
@@ -466,7 +498,7 @@ async fn modal_loop(
                 size = terminal.size()?;
                 width = size.width as usize;
                 if state.level == Level::Thread {
-                    let rows = thread_rows(&state, width, &theme);
+                    let rows = thread_rows(&state, width, &theme, Some(&gutter));
                     if let Some(pager) = &mut state.pager {
                         pager.set_viewport(viewport_of(size.height as usize));
                         pager.set_rows(rows);
@@ -684,6 +716,43 @@ mod tests {
         );
     }
 
+    /// A thread's posts wear the conversation gutter — the same builder, so the
+    /// page cannot drift from the DM view it is a dossier of.
+    #[test]
+    fn a_thread_wears_the_conversation_gutter() {
+        let mut state = page();
+        let user_lane = state
+            .page
+            .lanes
+            .iter()
+            .position(|l| l.id == LaneId::Dm(USER_NAME.to_string()))
+            .expect("a user lane");
+        state.selected = user_lane;
+        state.level = Level::Thread;
+        let theme = Theme::dark();
+        let pal = crate::tui::avatar::Palette::new(&theme);
+        let pinned = std::collections::HashMap::new();
+        let gutter = crate::tui::avatar::Gutter::new(false, &pal, &pinned);
+
+        let plain = thread_rows(&state, 80, &theme, None);
+        let gutted = thread_rows(&state, 80, &theme, Some(&gutter));
+        assert_eq!(
+            plain.len(),
+            gutted.len(),
+            "a gutter indents rows, it does not add or drop any"
+        );
+        let width = gutter.width();
+        let indented = gutted
+            .iter()
+            .skip(2)
+            .filter(|row| !row.line.plain_text().trim().is_empty())
+            .any(|row| {
+                let text = row.line.plain_text();
+                text.starts_with(&" ".repeat(width)) || text.starts_with(' ')
+            });
+        assert!(indented, "the posts moved right of the gutter");
+    }
+
     /// A thread opens under its own rule, and the rule says read-only.
     #[test]
     fn a_thread_opens_under_a_read_only_rule() {
@@ -697,7 +766,7 @@ mod tests {
         state.selected = user_lane;
         state.level = Level::Thread;
         let theme = Theme::dark();
-        let rows = thread_rows(&state, 80, &theme);
+        let rows = thread_rows(&state, 80, &theme, None);
         let first: String = rows[0]
             .line
             .segs

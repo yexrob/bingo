@@ -174,7 +174,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Esc` | close the topmost dialog/menu/panel first / interrupt while busy / on double-press: clear the input, or open Rewind when it is empty |
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
 | `Ctrl+T` | toggle the task area |
-| `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `q` close) |
+| `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `o` open the image in view · `q` close) |
 | `Ctrl+G` | compose the draft in `$VISUAL`/`$EDITOR` (or the readline chord `Ctrl+X Ctrl+E`); a non-zero exit keeps the draft |
 | `Ctrl+P` / `Ctrl+N` | prompt history — the same keys as `↑`/`↓`, including pulling a queued message back |
 | `Alt+B` / `Alt+F` | move one word, stopping at `/` `-` `_` `.` so a path is walked a segment at a time |
@@ -200,6 +200,8 @@ providers; `/provider login <name> [--device-auth|--manual <token>]` signs in
 to subscription endpoints, `logout` signs out),
 `/think [off|low|medium|high|xhigh|max]` (no argument
 opens the level picker; the choice persists), `/theme`,
+`/images` (the pictures this session has shown, newest first; Enter opens one in
+the system viewer),
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` executes directly),
@@ -476,8 +478,8 @@ no separate screen to enter and no second set of controls to learn.
 active first with the hub pinned on top, filtered as you type, opened with
 Enter — or `/open @agent`, `/open #room`, `/open hub` (Tab completes from the
 conversations that exist); a running agent's DM also opens from the Ctrl+B
-manager with Enter, and a member or a room from the team directory. Above the
-composer, a **conversation bar** lists the conversations you are *in* — presence
+manager with Enter, and a member or a room from the team directory. On the
+window's last row, a **conversation bar** lists the conversations you are *in* — presence
 for DMs (`●` running, `○` idle), an unread count, and the one you are in
 accented — and it appears only once there is more than one to switch between.
 

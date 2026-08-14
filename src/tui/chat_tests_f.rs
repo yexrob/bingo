@@ -19,6 +19,7 @@ use crate::api::types::{ContentBlock, Message};
 use crate::notify_user::{Notice, NotifyLevel};
 use crate::tui::buffer::BufferId;
 use crate::tui::notify::{Notifier, NotifyChannel, TerminalEnv};
+use crate::tui::test_util::chat_at;
 use crate::watch::{WatchKind, WatchState};
 
 // ---------------------------------------------------------------------------
@@ -413,4 +414,330 @@ fn a_relay_read_where_it_lands_raises_no_badge() {
         Some(0),
         "you are looking at it"
     );
+}
+
+// ---------------------------------------------------------------------------
+// D97 — the content-image registry and its open flows
+// ---------------------------------------------------------------------------
+
+/// A pid-tagged scratch directory for one test.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("bingo-d97-{name}-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn png_bytes(n: u8) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend(std::iter::repeat_n(n, 96));
+    bytes
+}
+
+/// A viewer that records the path it was handed instead of opening a window.
+/// The command is a value, exactly as `composer::compose_with` takes the
+/// editor's — no trait, no mock, just "the program is a parameter".
+#[cfg(unix)]
+fn recording_viewer(root: &std::path::Path, receipt: &std::path::Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join("viewer.sh");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" > '{}'\nexit 0\n",
+        receipt.display()
+    );
+    let _ = std::fs::write(&path, script);
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+    path.to_string_lossy().to_string()
+}
+
+/// The receipt the viewer wrote. The spawn is detached by design — the TUI must
+/// not wait on somebody's image viewer — so the test does the waiting the
+/// production path deliberately does not.
+fn wait_for(path: &std::path::Path) -> String {
+    for _ in 0..200 {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && !text.trim().is_empty()
+        {
+            return text;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("the viewer never ran: {}", path.display());
+}
+
+/// A picture the session showed and a picture a tool produced both land in the
+/// list, newest first, each named the way the user would name it. An avatar
+/// does not: it is chrome, and the rule has to hold at the tee, not in a
+/// reader's head.
+#[test]
+fn content_images_register_newest_first_and_avatars_do_not() {
+    let mut chat = chat_at(100, 40);
+    let dir = scratch("register");
+    let shot = dir.join("screenshot.png");
+    std::fs::write(&shot, png_bytes(7)).expect("write");
+
+    // A picture that placed on screen (agent prose, tool output, a URL).
+    chat.handle(crate::ui::UiEvent::ImageReady {
+        url: "https://example.com/plot.png".to_string(),
+        meta: Some(crate::ui::ImageMeta {
+            cols: 20,
+            rows: 10,
+            bytes: png_bytes(1),
+        }),
+    });
+    // A tool that handed the model a file.
+    chat.handle(crate::ui::UiEvent::ToolDone(crate::query::ToolCallDone {
+        tool_call_id: "1".to_string(),
+        name: "Read".to_string(),
+        summary: "Read".to_string(),
+        output: crate::tool::read::image_result_line(&shot, 104),
+        status: crate::query::ToolCallStatus::Done,
+        diff: None,
+        duration_ms: 1,
+    }));
+    // And a portrait, transmitted the same way and registered nowhere.
+    chat.faces.insert(crate::tui::avatar::index_of("scout"));
+
+    let listed: Vec<String> = chat
+        .image_registry
+        .newest_first()
+        .iter()
+        .map(|e| e.source.clone())
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            shot.display().to_string(),
+            "https://example.com/plot.png".to_string()
+        ],
+        "newest first, each under its own label"
+    );
+    assert!(
+        !listed.iter().any(|s| s.contains("avatar")),
+        "avatars are chrome and never register: {listed:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A failed image load is not a picture, so it is not in the list.
+#[test]
+fn a_failed_load_registers_nothing() {
+    let mut chat = chat_at(100, 40);
+    chat.handle(crate::ui::UiEvent::ImageReady {
+        url: "https://example.com/gone.png".to_string(),
+        meta: None,
+    });
+    assert!(
+        chat.image_registry.newest_first().is_empty(),
+        "nothing rendered, nothing to open"
+    );
+}
+
+/// `/images` lists what the session showed, and Enter opens the browsed one
+/// through the injected viewer.
+#[cfg(unix)]
+#[test]
+fn slash_images_lists_and_enter_opens_the_browsed_image() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let mut chat = chat_at(100, 40);
+    let dir = scratch("picker");
+    let receipt = dir.join("opened.txt");
+    chat.image_opener = Some(recording_viewer(&dir, &receipt));
+
+    let older = dir.join("older.png");
+    let newer = dir.join("newer.png");
+    std::fs::write(&older, png_bytes(1)).expect("write");
+    std::fs::write(&newer, png_bytes(2)).expect("write");
+    chat.image_registry.register_file(&older, 0, 104);
+    chat.image_registry.register_file(&newer, 0, 104);
+
+    chat.run_slash("images");
+    let menu = chat.images_menu.clone().expect("the picker opened");
+    let labels: Vec<String> = menu.items.iter().map(|i| i.label.clone()).collect();
+    assert!(
+        labels[0].contains("newer.png") && labels[1].contains("older.png"),
+        "newest first, with source and size: {labels:?}"
+    );
+    assert!(
+        labels[0].contains(" B"),
+        "the size is on the row: {labels:?}"
+    );
+
+    // ↓ to the older one, Enter opens it.
+    assert!(chat.images_menu_key(KeyCode::Down, KeyModifiers::NONE));
+    assert!(chat.images_menu_key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(chat.images_menu.is_none(), "Enter closes the picker");
+    let opened = wait_for(&receipt);
+    assert_eq!(
+        opened.trim(),
+        older.display().to_string(),
+        "the browsed row is the image that opened"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Esc closes the picker, and the Esc layer walk finds it — it reuses the
+/// `Menu` slot, so a new layer would have been a second way to say the same
+/// thing.
+#[test]
+fn the_images_picker_lives_in_the_menu_esc_layer() {
+    let mut chat = chat_at(100, 40);
+    let dir = scratch("esc");
+    let file = dir.join("a.png");
+    std::fs::write(&file, png_bytes(1)).expect("write");
+    chat.image_registry.register_file(&file, 0, 104);
+    chat.run_slash("images");
+    assert!(chat.menu_open(), "the picker is a menu");
+    assert_eq!(
+        chat.esc_layer(),
+        Some(crate::tui::chat::chat_tail::EscLayer::Menu),
+        "the layer walk finds it in the Menu slot"
+    );
+    assert!(chat.on_key(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE
+    ));
+    assert!(chat.images_menu.is_none(), "one Esc closes it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// With nothing to show, `/images` says so on the info tier instead of opening
+/// an empty surface.
+#[test]
+fn slash_images_says_so_when_there_is_nothing() {
+    let mut chat = chat_at(100, 40);
+    chat.run_slash("images");
+    assert!(chat.images_menu.is_none(), "no picker");
+    assert!(
+        chat.slash_info_lines
+            .iter()
+            .any(|l| l.contains("no images")),
+        "{:?}",
+        chat.slash_info_lines
+    );
+}
+
+/// A click on an image row resolves to that row's registry entry — both the
+/// picture itself and the `#[image N]` marker a user's bubble carries.
+#[cfg(unix)]
+#[test]
+fn a_click_on_an_image_row_opens_that_image() {
+    let mut chat = chat_at(100, 40);
+    let dir = scratch("click");
+    let receipt = dir.join("opened.txt");
+    chat.image_opener = Some(recording_viewer(&dir, &receipt));
+    let file = dir.join("chart.png");
+    std::fs::write(&file, png_bytes(4)).expect("write");
+    let id = chat.image_registry.register_file(&file, 0, 104);
+    chat.image_registry.set_marker(id, 3);
+
+    // The rendered image block: every row carries the URL it was loaded from.
+    let mut line = crate::tui::line::Line::styled("#[image]", SegStyle::plain());
+    line.image = Some(crate::tui::line::ImageRef {
+        url: file.display().to_string(),
+        cols: 4,
+        rows: 2,
+        row: 0,
+    });
+    assert_eq!(
+        chat.image_at_row(&crate::tui::chat::Row::new(line)),
+        Some(id),
+        "the image row addresses its entry"
+    );
+    // The marker inside a user's bubble is the same picture by another name.
+    let marker = crate::tui::chat::Row::new(crate::tui::line::Line::styled(
+        "look at #[image 3] please",
+        SegStyle::plain(),
+    ));
+    assert_eq!(
+        chat.image_at_row(&marker),
+        Some(id),
+        "and so does the marker the composer inserted"
+    );
+
+    chat.open_image(id);
+    let opened = wait_for(&receipt);
+    assert_eq!(opened.trim(), file.display().to_string());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A row with no picture behind it is not a click target: `doc_click` falls
+/// through to the collapse-group ranges it always had.
+#[test]
+fn an_ordinary_row_is_not_an_image_click() {
+    let chat = chat_at(100, 40);
+    let row = crate::tui::chat::Row::new(crate::tui::line::Line::styled(
+        "just prose",
+        SegStyle::plain(),
+    ));
+    assert_eq!(chat.image_at_row(&row), None);
+}
+
+/// In the transcript pager `o` acts on the picture in view, and the pager
+/// itself never spawns anything — it names the row and the loop opens it.
+#[test]
+fn the_transcript_o_key_names_the_visible_image_row() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let mut line = crate::tui::line::Line::styled("#[image]", SegStyle::plain());
+    line.image = Some(crate::tui::line::ImageRef {
+        url: "plot.png".to_string(),
+        cols: 4,
+        rows: 2,
+        row: 0,
+    });
+    let rows = vec![
+        crate::tui::chat::Row::new(crate::tui::line::Line::styled("prose", SegStyle::plain())),
+        crate::tui::chat::Row::new(line),
+    ];
+    let mut state = crate::tui::transcript::TranscriptState::new(rows, 10);
+    assert_eq!(
+        crate::tui::transcript::on_key(&mut state, KeyCode::Char('o'), KeyModifiers::NONE),
+        crate::tui::transcript::Action::OpenImage(1),
+        "`o` names the image row in view"
+    );
+    // ctrl+o still closes: the new binding is the bare letter only.
+    assert_eq!(
+        crate::tui::transcript::on_key(&mut state, KeyCode::Char('o'), KeyModifiers::CONTROL),
+        crate::tui::transcript::Action::Close
+    );
+    // And with nothing to open it is a no-op rather than an error.
+    let mut empty = crate::tui::transcript::TranscriptState::new(
+        vec![crate::tui::chat::Row::new(crate::tui::line::Line::styled(
+            "prose",
+            SegStyle::plain(),
+        ))],
+        10,
+    );
+    assert_eq!(
+        crate::tui::transcript::on_key(&mut empty, KeyCode::Char('o'), KeyModifiers::NONE),
+        crate::tui::transcript::Action::None
+    );
+    assert!(
+        crate::tui::transcript::footer(&state, 120, &crate::tui::theme::Theme::dark())
+            .plain_text()
+            .contains("o image"),
+        "and the footer says so"
+    );
+}
+
+/// A viewer that will not start is one info line — the tier for something the
+/// user asked to read and did not get — and never a panic or a hang.
+#[test]
+fn a_failed_open_lands_on_the_info_tier() {
+    let mut chat = chat_at(100, 40);
+    let dir = scratch("failopen");
+    let file = dir.join("x.png");
+    std::fs::write(&file, png_bytes(1)).expect("write");
+    let id = chat.image_registry.register_file(&file, 0, 104);
+    chat.image_opener = Some("bingo-no-such-viewer-d97".to_string());
+    chat.open_image(id);
+    assert!(
+        chat.slash_info_lines
+            .iter()
+            .any(|l| l.contains("could not open image")),
+        "{:?}",
+        chat.slash_info_lines
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -776,6 +776,9 @@ impl super::Chat {
         if self.theme_menu_key(code, modifiers) {
             return true;
         }
+        if self.images_menu_key(code, modifiers) {
+            return true;
+        }
         if self.resume_menu_key(code, modifiers) {
             return true;
         }
@@ -1084,6 +1087,7 @@ impl super::Chat {
                     || self.theme_menu_key(ESC, NONE)
                     || self.resume_menu_key(ESC, NONE)
                     || self.provider_menu_key(ESC, NONE)
+                    || self.images_menu_key(ESC, NONE)
             }
             EscLayer::Switcher => self.switcher_key(ESC, NONE),
             EscLayer::Rewind => self.rewind_key(ESC, NONE),
@@ -2056,7 +2060,7 @@ impl super::Chat {
     /// Poll the domain registries into the conversation engine (D88).
     ///
     /// This used to also snapshot a presence summary of running agents and
-    /// channels for a strip above the composer. The conversation bar (D90) says
+    /// channels for a strip of chrome of its own. The conversation bar (D90) says
     /// the same things better — who exists, who is running, what is unread —
     /// so the strip is gone and only the poll it was hanging off remains (D93).
     pub fn refresh_conversations(&mut self) {
@@ -2542,6 +2546,25 @@ impl super::Chat {
             blocks.push(Block::settled(self.welcome_el(width, &theme), true));
         }
         let pal = crate::tui::avatar::Palette::new(&theme);
+        // The avatar gutter of the conversation on screen (D97). The pinned
+        // table is copied out because the row loop below needs `&mut self` —
+        // it is a handful of short strings, next to the theme clone this
+        // function already pays for.
+        let pinned = self.faces_pinned.clone();
+        let conversation_gutter = (self.active_buffer() != crate::tui::buffer::BufferId::Hub)
+            .then(|| crate::tui::avatar::Gutter::new(self.image_cap.is_some(), &pal, &pinned));
+        // The faces the live tail will draw, recorded before the rows are
+        // built: the transmit sweep reads `Chat::faces`, and a portrait whose
+        // placeholder cells reached the screen without its data is a hole.
+        if let Some(g) = &conversation_gutter {
+            let mut seen = vec![g.index_for(crate::channels::USER_NAME)];
+            if let crate::tui::buffer::BufferId::Dm(name) = self.active_buffer() {
+                seen.push(g.index_for(&name));
+            }
+            for index in seen {
+                self.faces.insert(index);
+            }
+        }
         let mut spoke: Option<String> = None;
         for (pos, item) in flow.iter().enumerate() {
             // Who the last row belonged to, tracked across the whole flow so a
@@ -2569,6 +2592,20 @@ impl super::Chat {
                 ));
                 continue;
             }
+            // A conversation message wears the gutter; the hub's own does not
+            // (D97). `Decor::Said` is exactly the distinction: it is set by the
+            // conversation replay and by nothing else, so the hub's two-speaker
+            // grammar is left alone without asking which buffer is active.
+            let said = match &item.decor {
+                Decor::Said(who) if role == Role::Assistant => Some(who.clone()),
+                Decor::Said(_) => Some(crate::channels::USER_NAME.to_string()),
+                _ => None,
+            };
+            let gutter = said.as_ref().and(conversation_gutter.as_ref());
+            let inner = match gutter {
+                Some(g) => width.saturating_sub(g.width()),
+                None => width,
+            };
             // The band is the experimental face (`experimental.chatAvatars`): switched
             // off, a message opens on its body, exactly as it did before D50.
             let band = self.chat_avatars.then(|| self.sender_band_el(role, &pal));
@@ -2578,7 +2615,7 @@ impl super::Chat {
             let name = match (&item.decor, role) {
                 (Decor::Said(who), Role::Assistant) if spoke != previous => {
                     Some(El::Rows(vec![Row::new(Line::styled(
-                        one_line(who, width),
+                        one_line(who, inner),
                         SegStyle::fg(theme.text).bold(),
                     ))]))
                 }
@@ -2587,7 +2624,7 @@ impl super::Chat {
             let body = match role {
                 Role::User => {
                     let mut rows =
-                        El::Rows(user_message_rows(&self.messages[i].text, width, &theme));
+                        El::Rows(user_message_rows(&self.messages[i].text, inner, &theme));
                     // Send time beside the bubble's first row (D93). A state line
                     // gets none: nothing was sent, and the line is a state, not a
                     // message.
@@ -2602,17 +2639,39 @@ impl super::Chat {
                     } else {
                         crate::tui::buffer::stamp(self.messages[i].at)
                     };
-                    hang_stamp(&mut rows, &time, width, &theme);
+                    hang_stamp(&mut rows, &time, inner, &theme);
                     rows
                 }
-                Role::Assistant => self.assistant_el(i, width, &theme, settled, &pal),
+                Role::Assistant => self.assistant_el(i, inner, &theme, settled, &pal),
             };
             // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
             let mut stack = vec![El::Blank];
             stack.extend(band);
             stack.extend(name);
             stack.push(body);
-            blocks.push(Block::settled(El::col(stack), settled));
+            // The gutter wraps the name row and the body together: the portrait
+            // is two cells tall, so its second row rides the message's first
+            // body line — exactly the pair the workspace skin used to spend
+            // (D89 retired it, D97 brings it back as a row-builder concern).
+            // The blank spacing row stays outside it, so a portrait never sits
+            // beside nothing.
+            let block = match (gutter, said) {
+                (Some(g), Some(who)) => {
+                    let index = g.index_for(&who);
+                    self.faces.insert(index);
+                    let lead = spoke != previous;
+                    El::col(vec![
+                        El::Blank,
+                        El::gutter(
+                            g.cells(index, &who, lead),
+                            g.blank(),
+                            El::col(stack.split_off(1)),
+                        ),
+                    ])
+                }
+                _ => El::col(stack),
+            };
+            blocks.push(Block::settled(block, settled));
         }
         if let Some(ask) = self.ask_el(&theme) {
             blocks.push(Block::live(ask));
@@ -2621,7 +2680,7 @@ impl super::Chat {
         // its way, the work being done, the reply mid-arrival. Transient by
         // construction — everything here becomes a settled message the moment it
         // becomes record, and nothing that is still a state reaches scrollback.
-        if let Some(tail) = self.conversation_tail_el(width) {
+        if let Some(tail) = self.conversation_tail_el(width, &pal) {
             blocks.push(Block::transient(tail));
         }
         // Slash command output (/help /status /compact etc.): transient hints — rendered after messages and

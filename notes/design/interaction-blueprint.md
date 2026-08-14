@@ -197,7 +197,7 @@ feedback-states.md gains the attention-channel section.
 - **D89 Host merge**: the ctrl+g workspace modal retires; `entity.rs`/`slack.rs` palette and
   crippled composer die; day dividers / presence / sender grouping / avatars become transcript
   decorations of DM/channel buffers; single demand-gated tick loop.
-- **D90 Conversation bar + routing + #team**: persistent bar above the composer
+- **D90 Conversation bar + routing + #team**: persistent bar on the window's last row (moved below the composer in D97)
   (`1 ●hub 2 ●@scout 4 #build +2 …`), `ctrl+k` switcher (roster + task + unread, `x` stop agent —
   absorbs the ctrl+b manager and the ↑ entity selector), `alt+↑/↓`/`alt+1..9`, line-leading
   `@agent` / `#channel` routing with delivery receipts, `[DM from user]` marker preserved (D64),

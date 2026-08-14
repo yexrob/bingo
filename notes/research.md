@@ -2824,3 +2824,138 @@ agent whose instance is gone has no history to show, while its DM buffer survive
   thread, the timeline superset, lane ordering, counts, the empty page; 9 modal — the level walk,
   `q` from either depth, the search input owning `q`/Esc, the lane cursor, snapshot semantics, the
   read-only guard, the index's groups and counts, the thread's rule, the footer per level).
+
+### D97. Presentation: a gutter for faces, a floor for the bar, a door out for pictures
+
+**Three debts, one batch.** They share no code and one theme: the conversation model was complete and
+did not yet *look* like itself. The batch's rule was that none of the three may introduce a second
+renderer, a second convention or a new dependency.
+
+#### Inventory 1 — the avatar machinery
+
+`src/tui/avatar.rs` survived D89 intact: eight bundled portraits (`include_bytes!`, keyed by portrait
+rather than by sender so two members sharing a face share one transmit), `placeholder`/`transmits`
+over the D42 kitty path, `Palette`, `gutter_cell`, `sender_band`, and a private `gutter(images)`
+returning 5 (image skin: `COLS + 1`) or 4 (chip skin). What actually *rendered* before this batch was
+only two things: the `experimental.chatAvatars` sender band above hub messages (`chat_tail.rs:2689`),
+and a subagent watch row's portrait replacing `◉`/`⎿` where images place (`chat_tail.rs:2718`).
+Everything else was colour without a picture — `pal.avatars[…]` for the bar's teammate tint, `pal.unread`
+in the switcher. **DM, room, perspective and transcript rows carried no gutter and no face at all.**
+The retired shape is recoverable at `82bf32a^:src/tui/slack.rs` (`indent_rows`/`gutter_line`), and it
+is the shape this batch mirrors.
+
+Two obstacles the inventory turned up. First, the three post-row builders — `settled_post_rows`
+(free fn), `Chat::tail_post_rows` (`&self`), `perspective_ui::thread_rows` (free fn) — take neither a
+sender nor an indent, and `Post.from` was being discarded. Second, `Chat::faces` (the transmit sweep's
+source) is only writable from `&mut self`, which none of those three has.
+
+#### Inventory 2 — the chrome stack
+
+`chrome::chrome` is one function pushing ~20 conditional regions in order; `fullscreen` changes only
+where the suggestion area goes. Heights are never predicted (`el::height` renders and counts), and
+both hosts — `Frame::assemble` inline, `fullscreen_frame` — treat chrome as one opaque bottom-anchored
+block and truncate it **from the top**. So moving the bar is a one-line move inside `chrome()` and no
+host change at all. The states that touch the bottom rows: the busy status row (top of chrome, far
+above), the ask dialog (in the *document*, above all chrome, leaving only a `Waiting for permission…`
+row behind), the picker menus (all `return` early and replace the suggestion area, never stack), the
+D80 esc hints (text inside the status row, no rows of their own), and the D84 bash tail (inside the
+assistant message, not chrome at all). Nothing competes for the last row.
+
+#### Inventory 3 — where images enter
+
+Two disjoint worlds that never met. **Wire images** (`ImageAttachment`, base64) go to the model and
+into the transcript and are never drawn. **Display images** (`ImageMeta` + kitty) are decoded from
+markdown `![](url)` in message text, drawn, and never sent. Producers: the clipboard paste
+(`register_image`, macOS), a path in the composer (`expand_image_paths` — the `PathBuf` was known and
+thrown away one line later), the Read tool (`read.rs:79`, which produced an image block and registered
+nothing anywhere), MCP results, and `load_message_images` → `UiEvent::ImageReady`. The D93 vision
+projection is a `Cow` view taken at the send seam (`client.rs:407`); the history keeps its image
+blocks, so a registry built on the session's own data is untouched by it — confirmed rather than
+assumed. Click plumbing is `ClickTarget`/`ClickRange` resolved by `Chat::doc_click`, and clicks reach
+the fullscreen host only. The one existing detached spawn is `share::open_in_browser` (`cfg!` three-way,
+`spawn` not `status`, no test seam); the testable-process pattern is `composer.rs`, where the command
+is simply a parameter. Windows is CI-enforced on all three gates.
+
+**Piece 1 — the gutter.** Added `El::Gutter { cells, blank, child }`: the child renders first and the
+rows it produced are indented afterwards, so the *row count* is unchanged and every click range and
+the caret keep the offsets the walk computed. That is the whole argument for a wrapper over a second
+row builder, and a test asserts it directly. `avatar::Gutter` is the value threaded through all three
+surfaces — width, palette, the pinned table, `index_for`, `cells(index, name, lead)`, `apply` — so
+"how wide", "who gets a face" and "which skin" are decided once. `settled_post_rows` gained an
+`Option<&Sender>`; `sender_runs` marks which posts open a run. **The width comes out before anything
+wraps**, which is the failure the CJK test pins: a body wrapped at the full width and then indented
+overruns the terminal by exactly the gutter.
+
+Placement rules, all asserted: the portrait on the first row of a sender's run only (a work step does
+not break a run — a tool call is inside its own turn); blank gutter on continuation rows and on
+process/note rows, so the message column is one straight edge and only somebody who spoke gets a
+picture; and **no gutter in the hub**, keyed off `Decor::Said`, which is set by the conversation
+replay and by nothing else. The `faces` problem was solved by recording up front in `build_rows`
+(`&mut self`, before the loop takes its borrows) and by transmitting all eight portraits once when the
+perspective modal opens — the alternate screen is short-lived and knowing which faces a thread will
+show would mean laying out every lane before drawing one.
+
+**Piece 2 — the bar.** Moved from directly above the composer to the last row of the chrome. The old
+argument was that the bar is *about* the composer; the better reading is that it is this window's
+status area — where you are, what is unread — and a status area belongs at the bottom edge. One line
+moved in `chrome()`; no host change, as the inventory predicted. A new test drives busy + an open
+picker + a second conversation through both hosts and asserts the bar is last, the composer appears
+exactly once, and the busy row is above it all.
+
+**Piece 3 — the registry.** `src/tui/images.rs`. Entries are `(id, source, at, bytes, format, marker,
+origin)`, newest-first to every reader, deduplicated by source plus a hash of the head of the content
+so a repaint does not grow the list. `Origin` is the load-bearing distinction: an image **already on
+disk** is addressed where it lives — never copied, never removed — and an image that exists **only in
+memory** is written into a pid-tagged temp dir on first open and is the only thing eviction deletes,
+by the exact path it wrote. Bounds 100 entries / 50 MB, oldest first.
+
+Three tees, chosen to match the spec's own definition (a picture that *renders*): `UiEvent::ImageReady`
+on success (every markdown image — an agent's chart, a URL in the model's prose), `register_image`/
+`register_image_file` at the composer (clipboard and attached paths, where the source label was
+already being discarded), and `ToolDone` for the Read tool. That last one needed a contract: `read.rs`
+now owns `image_result_line` with `image_result_path` beside it, one formatter and one reader in one
+place, rather than the TUI guessing at prose. Avatars register nowhere, and the rule holds at the tee.
+
+Three doors, one action. A click resolves **before** the click ranges — an image inside a tool's
+output would otherwise be swallowed by the enclosing collapse group — and resolves either the row's
+own `ImageRef` URL or the `#[image N]` marker in a bubble (`api::image::first_marker`, one regex).
+`/images` is the `/theme` shell verbatim, which is why it costs no `EscLayer`: the existing `Menu`
+slot already covers it. `o` in the transcript opens the first image row in the window, because a pager
+has no cursor and the top of the window is where the reader's eye is. The open spawns detached with
+the platform triple `share.rs` already settled on, with the program as a value so the acceptance tests
+point it at a recording script — `composer.rs`'s pattern, no trait and no mock.
+
+**Deviations.**
+
+1. *Gutter width.* The dispatch asked for "a fixed 2-3 cells". The gutter is `avatar::gutter_width()`
+   — 5 with images, 4 with the chip — because `COLS` is the portrait's own width and anything narrower
+   would put body text over the image cells. `a_placeholder_row_measures_exactly_the_chip` has guarded
+   that number since D50.
+2. *Picker line.* Specified as `N. <source> · <stamp> · <WxH or size>`. It shows size: nothing in the
+   codebase retains an image's pixel dimensions (`ImageMeta` carries *cell* cols/rows, `prepare_image`
+   discards everything), and decoding a header per row to print `1920x1080` would be a new cost for a
+   field the spec offered an alternative to.
+3. *Transcript `o`.* Specified as "`o` on an image row". The pager has no cursor to be on a row with,
+   so it acts on the first image row in view and is a no-op when there is none.
+4. *Bar position.* Placed after the footer row, so it is the window's true last row rather than
+   second-to-last. "The LAST row of the chrome" is the dispatch's own wording, and a status area under
+   a hint row would read as a hint.
+5. *Read-tool images and the fullscreen click.* A Read-produced image registers and is openable by
+   `/images`, but it renders as a tool *result line* rather than as an image block, so there is no
+   picture on screen to click. That is a property of how the tool reports, not of the registry.
+
+**Named limits.** A row carrying `line.image` renders as placeholder cells with its text segments
+discarded (`view::to_line`), so an image block inside a gutter draws at column 0 rather than indented —
+rare in a DM and unchanged from the pre-D89 behaviour. The live tail starts its sender runs fresh
+rather than reaching back across the settled seam, because everything above it is frozen. And the
+perspective page transmits all eight portraits on open rather than the ones it will use.
+
+- 1423 + 13 tests before, 1447 + 13 after (24 new: 6 registry — newest-first labels, dedup, bounded
+  eviction that removes only its own file, on-disk materialization to itself, the platform opener and
+  detached spawn, size labels; 7 gutter — the run rule in a real DM, the hub's absence of one,
+  process/note taking the indent and no face, runs unbroken by tool rows, CJK width, the image skin's
+  placeholder cells, the perspective thread; 1 `El::Gutter` invariant — clicks and the caret unmoved;
+  1 chrome — every bottom state composing around the bar; 9 image flows — content vs avatars, a failed
+  load registering nothing, `/images` listing and Enter opening, the `Menu` Esc layer, the empty case,
+  the click target on both row shapes, an ordinary row not being one, transcript `o` and its footer,
+  and a failed open landing on the info tier).

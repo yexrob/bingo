@@ -964,6 +964,16 @@ pub fn dm_posts(
 /// local `HH:MM` today, `M/D HH:MM` on any other day. Empty when the source
 /// carries no timestamp — a missing clock renders as nothing rather than being
 /// invented (the [`ChannelMessage`] rule).
+/// Now, in the unix seconds every `at` in this module is measured in. One
+/// clock reading, so a caller that needs to stamp something does not have to
+/// know how the ones already stored were made.
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 pub fn stamp(at: u64) -> String {
     use chrono::TimeZone;
     if at == 0 {

@@ -95,7 +95,7 @@ impl Tool for ReadTool {
             })?;
             return Ok(ToolResult {
                 content: crate::api::types::tool_result_blocks(
-                    &format!("Image {} ({} bytes on disk)", path.display(), bytes.len()),
+                    &image_result_line(&path, bytes.len()),
                     &[crate::api::types::ImageAttachment {
                         media_type: prepared.media_type,
                         data: prepared.data,
@@ -277,6 +277,25 @@ async fn read_file_range(
         ));
     }
     Ok(selected)
+}
+
+/// What a successful image read reports.
+///
+/// A formatter with a reader beside it ([`image_result_path`]), because the UI
+/// has to recognise its own tool's image results to put them in the content
+/// registry (D97) and the alternative was the TUI guessing at prose. One
+/// sentence, written and read in one place.
+pub fn image_result_line(path: &std::path::Path, bytes: usize) -> String {
+    format!("Image {} ({bytes} bytes on disk)", path.display())
+}
+
+/// The path and byte count [`image_result_line`] wrote, or `None` for any other
+/// tool output.
+pub fn image_result_path(line: &str) -> Option<(std::path::PathBuf, usize)> {
+    let rest = line.strip_prefix("Image ")?;
+    let open = rest.rfind(" (")?;
+    let bytes = rest[open + 2..].strip_suffix(" bytes on disk)")?;
+    Some((std::path::PathBuf::from(&rest[..open]), bytes.parse().ok()?))
 }
 
 /// Extension-based image detection: matches what `prepare_image` can decode, and keeps text

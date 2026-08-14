@@ -46,6 +46,7 @@ pub mod el;
 pub mod gfx;
 pub mod highlight;
 pub mod history;
+pub mod images;
 pub mod input;
 pub mod keys;
 pub mod line;

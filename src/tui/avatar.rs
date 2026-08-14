@@ -197,8 +197,17 @@ impl Palette {
 const GUTTER: usize = 4;
 
 /// Message gutter: wide enough for whichever avatar the terminal can draw.
-fn gutter(images: bool) -> usize {
+///
+/// Public because the gutter is applied by the conversation row builders (D97),
+/// which have to take it out of the width *before* wrapping — a body wrapped at
+/// the full width and then indented would overrun the terminal by exactly this
+/// many cells.
+pub fn gutter_width(images: bool) -> usize {
     if images { COLS + 1 } else { GUTTER }
+}
+
+fn gutter(images: bool) -> usize {
+    gutter_width(images)
 }
 
 /// Avatar chip for terminals that cannot place images: the sender's initial on a
@@ -267,6 +276,76 @@ pub fn sender_band(
         return vec![head];
     }
     vec![head, gutter_cell(index, name, 1, images, pal)]
+}
+
+/// The message gutter of a conversation view (D97): how wide it is, which
+/// portrait a sender wears, and the cells that portrait occupies.
+///
+/// One value threaded through every conversation row builder — the DM and room
+/// flow, the live tail, the perspective page — so the three surfaces cannot
+/// drift on width, on who gets a face, or on which skin the terminal is in.
+/// The hub builds none: its grammar is Claude Code's, and it stays avatar-free.
+#[derive(Clone, Copy)]
+pub struct Gutter<'a> {
+    /// Whether the terminal can place images (chip fallback when it cannot).
+    pub images: bool,
+    pub pal: &'a Palette,
+    /// Portraits `.bingo/team.json` pinned, so a crew member keeps one face.
+    pub pinned: &'a std::collections::HashMap<String, usize>,
+}
+
+impl<'a> Gutter<'a> {
+    pub fn new(
+        images: bool,
+        pal: &'a Palette,
+        pinned: &'a std::collections::HashMap<String, usize>,
+    ) -> Self {
+        Self {
+            images,
+            pal,
+            pinned,
+        }
+    }
+
+    /// Cells the body has to give up on every row.
+    pub fn width(&self) -> usize {
+        gutter_width(self.images)
+    }
+
+    /// The empty gutter: continuation rows, and every row of a message that is
+    /// not the first of its sender's run.
+    pub fn blank(&self) -> Line {
+        Line::styled(" ".repeat(self.width()), SegStyle::fg(self.pal.main_dim))
+    }
+
+    /// The portrait `name` wears, honouring a blueprint pin before the hash.
+    pub fn index_for(&self, name: &str) -> usize {
+        self.pinned
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| index_of(name))
+    }
+
+    /// The gutter cells of one message: the face on its own rows, blank below.
+    /// `lead` is false for every message after the first of a sender's run —
+    /// Slack's convention, and the reason a burst of replies reads as one turn
+    /// instead of a column of repeated portraits.
+    pub fn cells(&self, index: usize, name: &str, lead: bool) -> Vec<Line> {
+        if !lead {
+            return Vec::new();
+        }
+        (0..ROWS)
+            .map(|row| gutter_cell(index, name, row, self.images, self.pal))
+            .collect()
+    }
+
+    /// Indent a message's rows in place. The only entry point the row builders
+    /// use, so "avatar on the first row of the run, blank everywhere else" is
+    /// stated once.
+    pub fn apply(&self, rows: &mut [crate::tui::el::Row], index: usize, name: &str, lead: bool) {
+        let cells = self.cells(index, name, lead);
+        crate::tui::el::gutter_rows(rows, &cells, &self.blank());
+    }
 }
 
 #[cfg(test)]

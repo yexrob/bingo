@@ -2855,6 +2855,7 @@ fn slash_dispatch_covers_every_table_entry() {
         ("model", "model"),
         ("cd", "cd"),
         ("theme", "theme"),
+        ("images", "images"),
         ("rename", "rename"),
         ("resume", "resume"),
         ("gc", "gc"),

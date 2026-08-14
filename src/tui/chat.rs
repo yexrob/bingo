@@ -237,6 +237,36 @@ impl ThemeMenu {
     }
 }
 
+/// `/images` picker (D97): the session's content images, newest first.
+///
+/// The thinnest shell in the family — no `current`, because there is no image
+/// "in effect"; the list is a history and Enter is an action on one of its
+/// entries rather than a setting being chosen.
+#[derive(Clone)]
+pub struct ImagesMenu {
+    /// Browsed index (❯): moves with ↑↓/1-9.
+    pub selected: usize,
+    /// Registry ids in the order the picker shows them, so Enter opens the
+    /// image the row named even after the registry has grown underneath.
+    pub ids: Vec<usize>,
+    /// The rows, pre-rendered at open time for the same reason.
+    pub items: Vec<crate::tui::picker::PickerItem>,
+}
+
+impl ImagesMenu {
+    pub fn picker(&self) -> crate::tui::picker::PickerModel {
+        crate::tui::picker::PickerModel::new(self.items.clone(), self.selected, None)
+    }
+
+    /// Number jump, no session-only: opening a viewer is not a setting.
+    pub fn keys() -> crate::tui::picker::PickerKeys {
+        crate::tui::picker::PickerKeys {
+            session_only: false,
+            number_jump: true,
+        }
+    }
+}
+
 /// `/provider` selector (picker-model.md commit D): static single-level (default + a settings
 /// providers snapshot), desc keeps the info column (URL + redacted key); Enter=switch+persist,
 /// s=this session only (consistent with /think).
@@ -973,7 +1003,7 @@ pub struct Chat {
     /// answer is a committed file and the crew does not change while you look at
     /// it, so re-reading it per frame would be waste (the workspace learned the
     /// same thing in D49).
-    faces_pinned: HashMap<String, usize>,
+    pub(crate) faces_pinned: HashMap<String, usize>,
     /// Faces in the transcript at all (`experimental.chatAvatars`, off by default).
     /// Off means no sender band and no portrait on a watch row — the transcript the
     /// hub wrote before D50. The workspace views keep their portraits either way:
@@ -989,6 +1019,16 @@ pub struct Chat {
     pub(crate) images_failed: HashSet<String>,
     /// Image cache version (bumped on load completion → invalidates the render cache).
     pub(crate) images_version: u64,
+    /// Content images the session has shown, newest first, openable in the
+    /// desktop's viewer (D97). Avatars are chrome and never land here.
+    pub(crate) image_registry: crate::tui::images::ImageRegistry,
+    /// The command that opens an image; `None` means the desktop's own handler
+    /// ([`crate::tui::images::desktop_opener`]). A value here is the seam the
+    /// acceptance tests spawn through, the way the editor command is a value
+    /// for [`crate::tui::composer::compose_with`].
+    pub(crate) image_opener: Option<String>,
+    /// The `/images` picker, when it is open.
+    pub(crate) images_menu: Option<ImagesMenu>,
     /// Whether the document needs rebuilding (set after writes like events/tick/expand; cleared after the layout layer consumes it).
     pub dirty: bool,
     /// Width of the last build_rows (markdown cache invalidated by width).
@@ -1345,6 +1385,9 @@ impl Chat {
             images_pending: HashSet::new(),
             images_failed: HashSet::new(),
             images_version: 1,
+            image_registry: crate::tui::images::ImageRegistry::default(),
+            image_opener: None,
+            images_menu: None,
             dirty: true,
             prev_build_width: 0,
             width: 80,
@@ -1473,6 +1516,17 @@ impl Chat {
                 match meta {
                     Some(meta) => {
                         self.images_failed.remove(&url);
+                        // A picture that placed on screen is a picture the user
+                        // can ask to see properly (D97). This is the tee for
+                        // everything that arrives as a markdown image — an
+                        // agent's chart, a tool's output, a URL in the model's
+                        // prose — and it fires here rather than at load time so
+                        // a failed fetch never lands in the list.
+                        self.image_registry.register_bytes(
+                            &url,
+                            crate::tui::buffer::now(),
+                            meta.bytes.clone(),
+                        );
                         self.images.insert(url.clone(), Arc::new(meta));
                     }
                     None => {
@@ -1953,6 +2007,15 @@ impl Chat {
                 if done.name == "Bash" {
                     self.bash_tail = None;
                 }
+                // A tool that handed the model a picture hands the user one too
+                // (D97). The file is on disk under the name the tool used, so
+                // the registry points at it and copies nothing.
+                if done.status == crate::query::ToolCallStatus::Done
+                    && let Some((path, bytes)) = crate::tool::read::image_result_path(&done.output)
+                {
+                    self.image_registry
+                        .register_file(&path, crate::tui::buffer::now(), bytes);
+                }
                 let Some(i) = self.stream_msg else {
                     return;
                 };
@@ -2260,6 +2323,20 @@ impl Chat {
     /// A click (doc row number) hitting a row → collapse/expand / permission-option confirm.
     /// Returns whether the click was handled.
     pub fn doc_click(&mut self, doc_row: usize) -> bool {
+        // An image row is its own click target and needs no range: the row
+        // already carries the URL its picture was loaded from, and a bubble
+        // carries the `#[image N]` marker. Checked before the ranges, because
+        // an image inside a tool's output would otherwise be swallowed by the
+        // enclosing collapse group.
+        let hit = self
+            .doc
+            .rows
+            .get(doc_row)
+            .and_then(|row| self.image_at_row(row));
+        if let Some(id) = hit {
+            self.open_image(id);
+            return true;
+        }
         let Some(range) = self
             .doc
             .click_ranges
@@ -2515,7 +2592,7 @@ impl Chat {
     /// Clipboard with an image (macOS): osascript reads the PNG → compress → register the attachment → placeholder id.
     fn paste_clipboard_image(&mut self) -> Option<usize> {
         let bytes = crate::tui::gfx::clipboard_image_png()?;
-        self.register_image(&bytes)
+        self.register_image(&bytes, "clipboard")
     }
 
     /// Swaps placeholders back to their real content (at submit time).
@@ -2558,14 +2635,79 @@ impl Chat {
     }
 
     /// Raw image bytes → compress (within the API limit) → register the attachment → placeholder id.
-    fn register_image(&mut self, bytes: &[u8]) -> Option<usize> {
-        self.session.attachments.register(bytes)
+    ///
+    /// The content registry is teed here too (D97): the wire copy is what the
+    /// model sees, the registry copy is what the user can open. `source` names
+    /// where the bytes came from, because a clipboard paste has no filename.
+    fn register_image(&mut self, bytes: &[u8], source: &str) -> Option<usize> {
+        let marker = self.session.attachments.register(bytes)?;
+        let id =
+            self.image_registry
+                .register_bytes(source, crate::tui::buffer::now(), bytes.to_vec());
+        self.image_registry.set_marker(id, marker);
+        Some(marker)
     }
 
     /// Image file → register the attachment (read failure / non-image → None).
     fn register_image_file(&mut self, path: &std::path::Path) -> Option<usize> {
         let bytes = std::fs::read(path).ok()?;
-        self.register_image(&bytes)
+        let marker = self.session.attachments.register(&bytes)?;
+        // The file is already on disk under a name the user chose, so the
+        // registry addresses it there instead of writing a second copy.
+        let id = self
+            .image_registry
+            .register_file(path, crate::tui::buffer::now(), bytes.len());
+        self.image_registry.set_marker(id, marker);
+        Some(marker)
+    }
+
+    /// Open a registry image in the desktop's viewer.
+    ///
+    /// Never blocks: the file is written if it was only in memory, the viewer
+    /// is spawned detached, and a failure is one info line — the tier for
+    /// something the user explicitly asked for and did not get.
+    pub(crate) fn open_image(&mut self, id: usize) {
+        // The confirmation names the picture the way the user knows it, not
+        // the temp path it happens to have been written to.
+        let label = self
+            .image_registry
+            .get(id)
+            .map(|e| e.source.clone())
+            .unwrap_or_else(|| format!("image {id}"));
+        let path = match self.image_registry.materialize(id) {
+            Ok(path) => path,
+            Err(e) => {
+                self.push_slash_info(format!("could not open image: {e}"));
+                return;
+            }
+        };
+        let opened = match &self.image_opener {
+            Some(program) => crate::tui::images::open_detached(program, &[], &path),
+            None => {
+                let (program, leading) = crate::tui::images::desktop_opener();
+                crate::tui::images::open_detached(program, leading, &path)
+            }
+        };
+        match opened {
+            Ok(()) => self.push_slash_output(format!("opening {label}")),
+            Err(e) => self.push_slash_info(format!("could not open image: {e}")),
+        }
+    }
+
+    /// The registry entry a document row addresses, if it addresses one: the
+    /// image block's own URL first, then the `#[image N]` marker a user bubble
+    /// carries. Both are rows the user can see a picture in, so both are rows
+    /// a click can open.
+    pub(crate) fn image_at_row(&self, row: &Row) -> Option<usize> {
+        if let Some(img) = &row.line.image
+            && let Some(entry) = self.image_registry.by_source(&img.url)
+        {
+            return Some(entry.id);
+        }
+        let text = row.line.plain_text();
+        crate::api::image::first_marker(&text)
+            .and_then(|marker| self.image_registry.by_marker(marker))
+            .map(|entry| entry.id)
     }
 
     /// The `Session` in effect for this turn: `Session` is immutable inside `Arc`, and shift+tab must
@@ -2640,6 +2782,7 @@ impl Chat {
             || self.theme_menu.is_some()
             || self.resume_menu.is_some()
             || self.provider_menu.is_some()
+            || self.images_menu.is_some()
     }
 
     /// The single mutual-exclusion point: every open_* goes through here —
@@ -2651,6 +2794,7 @@ impl Chat {
         self.theme_menu = None;
         self.resume_menu = None;
         self.provider_menu = None;
+        self.images_menu = None;
         self.dirty = true;
     }
 
@@ -2678,6 +2822,7 @@ impl Chat {
             "model" => self.slash_model(arg),
             "cd" => self.slash_cd(arg),
             "theme" => self.slash_theme(arg),
+            "images" => self.slash_images(),
             "rename" => self.slash_rename(arg),
             "resume" => self.slash_resume(arg),
             "gc" => self.slash_gc(),
@@ -3000,6 +3145,80 @@ impl Chat {
             &serde_json::json!({ "theme": name }),
         );
         self.push_slash_output(format!("✓ theme switched: {name}"));
+    }
+
+    /// `/images` — the session's content images, newest first.
+    ///
+    /// With nothing to show it says so on the info tier rather than opening an
+    /// empty picker: a menu with no rows is a surface that answers a question
+    /// by refusing to appear.
+    pub(crate) fn slash_images(&mut self) {
+        let entries = self.image_registry.newest_first();
+        if entries.is_empty() {
+            self.push_slash_info("no images in this session yet".to_string());
+            return;
+        }
+        let ids: Vec<usize> = entries.iter().map(|e| e.id).collect();
+        let items: Vec<crate::tui::picker::PickerItem> = entries
+            .iter()
+            .map(|e| crate::tui::picker::PickerItem::new(e.label(), e.id.to_string(), e.format))
+            .collect();
+        self.close_menus();
+        self.images_menu = Some(ImagesMenu {
+            selected: 0,
+            ids,
+            items,
+        });
+        self.clear_slash_suggestions();
+    }
+
+    /// Images menu keys: ↑↓/1-9 move, Enter opens the browsed image in the
+    /// desktop's viewer, Esc closes. Returns whether consumed.
+    pub(crate) fn images_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let Some(menu) = &mut self.images_menu else {
+            return false;
+        };
+        match code {
+            KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(1);
+                menu.selected = core.selected;
+                true
+            }
+            KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut core = menu.picker();
+                core.move_selection(-1);
+                menu.selected = core.selected;
+                true
+            }
+            KeyCode::Char(c)
+                if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                let mut core = menu.picker();
+                if let Some(n) = c.to_digit(10)
+                    && core.jump(n as usize)
+                {
+                    menu.selected = core.selected;
+                }
+                // Swallowed even out of range: a menu is a modal surface.
+                true
+            }
+            KeyCode::Enter => {
+                let id = menu.ids.get(menu.selected).copied();
+                self.images_menu = None;
+                if let Some(id) = id {
+                    self.open_image(id);
+                }
+                self.dirty = true;
+                true
+            }
+            KeyCode::Esc => {
+                self.images_menu = None;
+                self.dirty = true;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Open the `/theme` selector: preselect the current level (theme_setting), close other menus exclusively.

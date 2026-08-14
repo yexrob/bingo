@@ -27,6 +27,7 @@ pub(crate) struct Menus<'a> {
     pub theme: Option<&'a ThemeMenu>,
     pub resume: Option<&'a ResumeMenu>,
     pub provider: Option<&'a ProviderMenu>,
+    pub images: Option<&'a crate::tui::chat::ImagesMenu>,
     /// The `@` mention dropdown (D85). Not a picker menu — it renders in the
     /// same area and at the same tier as the slash dropdown, below every
     /// selector, so it is carried here rather than in a second parameter.
@@ -269,6 +270,15 @@ fn suggestion_rows(
                 rows.push(core.hint_row(crate::tui::chat::ThemeMenu::keys(), width, theme));
                 return rows;
             }
+            // `/images` picker (D97): the same thin-shell rendering.
+            if let Some(images_menu) = menus.images {
+                let core = images_menu.picker();
+                let mut rows: Vec<Row> = (0..core.items.len())
+                    .map(|i| core.row(i, width, theme))
+                    .collect();
+                rows.push(core.hint_row(crate::tui::chat::ImagesMenu::keys(), width, theme));
+                return rows;
+            }
             // `/provider` selector (picker-model.md commit D): the same thin-shell rendering.
             if let Some(provider_menu) = menus.provider {
                 let core = provider_menu.picker();
@@ -470,6 +480,7 @@ fn suggestions(chat: &Chat, width: usize) -> El {
             theme: chat.theme_menu.as_ref(),
             resume: chat.resume_menu.as_ref(),
             provider: chat.provider_menu.as_ref(),
+            images: chat.images_menu.as_ref(),
             mention: chat.mention.as_ref(),
         },
         chat.slash_no_match,
@@ -606,10 +617,6 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
         children.push(s);
     }
 
-    // The conversation bar sits directly on the composer, because it is about
-    // the composer: it says which conversation the next Enter reaches. It
-    // contributes no rows at all when there is only one conversation (D90).
-    children.push(El::Rows(chat.conversation_bar_rows(width)));
     children.push(prompt(chat, width));
 
     if let Some(line) = chat.search_line() {
@@ -636,6 +643,13 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     if chat.pending_ask.is_some() {
         children.push(El::Row(dim_row("Waiting for permission…", theme)));
     }
+    // The conversation bar owns the last row of the window (D97). It used to
+    // sit directly on the composer, on the argument that it is *about* the
+    // composer; the bar is better read as this window's status area — where
+    // you are, what is unread — and a status area belongs at the bottom edge,
+    // which is where the eye already goes for it. It still contributes no rows
+    // at all when there is only one conversation (D90).
+    children.push(El::Rows(chat.conversation_bar_rows(width)));
     El::Col(children)
 }
 
@@ -754,6 +768,7 @@ mod tests {
                         theme: chat.theme_menu.as_ref(),
                         resume: chat.resume_menu.as_ref(),
                         provider: chat.provider_menu.as_ref(),
+                        images: chat.images_menu.as_ref(),
                         mention: chat.mention.as_ref(),
                     },
                     chat.slash_no_match,
@@ -805,6 +820,7 @@ mod tests {
                     theme: None,
                     resume: None,
                     provider: None,
+                    images: None,
                     mention: None,
                 },
                 false,
@@ -835,6 +851,7 @@ mod tests {
                     theme: None,
                     resume: None,
                     provider: None,
+                    images: None,
                     mention: None,
                 },
                 false,
@@ -864,6 +881,7 @@ mod tests {
                     theme: None,
                     resume: None,
                     provider: None,
+                    images: None,
                     mention: None,
                 },
                 false,
@@ -893,6 +911,7 @@ mod tests {
                 theme: None,
                 resume: None,
                 provider: None,
+                images: None,
                 mention: None,
             },
             false,
@@ -930,6 +949,7 @@ mod tests {
                     theme: None,
                     resume: None,
                     provider: None,
+                    images: None,
                     mention: None,
                 },
                 false,
@@ -955,6 +975,7 @@ mod tests {
                 theme: None,
                 resume: None,
                 provider: None,
+                images: None,
                 mention: None,
             },
             false,
@@ -996,6 +1017,7 @@ mod tests {
                 theme: None,
                 resume: None,
                 provider: None,
+                images: None,
                 mention: None,
             },
             false,
@@ -1021,6 +1043,7 @@ mod tests {
                     theme: None,
                     resume: None,
                     provider: None,
+                    images: None,
                     mention: None,
                 },
                 false,
@@ -1048,6 +1071,7 @@ mod tests {
                 theme: None,
                 resume: None,
                 provider: None,
+                images: None,
                 mention: None,
             },
             false,
@@ -1091,6 +1115,7 @@ mod tests {
                     theme: None,
                     resume: None,
                     provider: None,
+                    images: None,
                     mention: None,
                 },
                 false,
@@ -1109,6 +1134,7 @@ mod tests {
                     theme: None,
                     resume: None,
                     provider: None,
+                    images: None,
                     mention: None,
                 },
                 false,
@@ -1482,8 +1508,8 @@ mod tests {
     }
 
     /// The bar is a chrome tier like every other, so it reaches both hosts from
-    /// the same tree and renders identically in each — and it sits directly on
-    /// the composer, which is the surface it is about.
+    /// the same tree and renders identically in each — and it owns the window's
+    /// last row, which is where a status area belongs (D97).
     #[test]
     fn the_conversation_bar_reaches_both_hosts_identically() {
         let mut chat = chat_at(100, 40);
@@ -1509,10 +1535,15 @@ mod tests {
                 .iter()
                 .position(|row| row_text(row).contains("@scout"))
                 .expect("the bar is rendered");
+            assert_eq!(
+                at + 1,
+                rows.len(),
+                "the bar is the last chrome row: {:?}",
+                rows.iter().map(row_text).collect::<Vec<_>>()
+            );
             assert!(
-                row_text(&rows[at + 1]).starts_with('╭'),
-                "the bar sits directly on the composer: {:?}",
-                row_text(&rows[at + 1])
+                rows[..at].iter().any(|row| row_text(row).starts_with('╭')),
+                "and the composer is above it"
             );
             row_text(&rows[at])
         };
@@ -1522,6 +1553,53 @@ mod tests {
             "both hosts render the same bar"
         );
         assert!(find_bar(false).contains("hub"), "and it names the hub too");
+    }
+
+    /// Every state that writes near the bottom composes around the bar without
+    /// overlapping it or displacing it: busy status, a pending permission, an
+    /// open picker, an observed room's hint. The bar is the floor of the
+    /// window and nothing else may end up under it.
+    #[test]
+    fn the_bottom_states_compose_around_the_bar() {
+        let mut chat = chat_at(100, 40);
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "research".into(),
+            chat.session.clone(),
+        );
+        chat.refresh_conversations();
+        chat.busy = true;
+        chat.set_input("/theme");
+        chat.run_slash("theme");
+
+        for fullscreen in [false, true] {
+            let rows = rows_of(chrome(&chat, 100, fullscreen));
+            let last = rows.last().map(row_text).unwrap_or_default();
+            assert!(
+                last.contains("@scout"),
+                "the bar is the last row in {}: {:?}",
+                if fullscreen { "fullscreen" } else { "inline" },
+                rows.iter().map(row_text).collect::<Vec<_>>()
+            );
+            let text: Vec<String> = rows.iter().map(row_text).collect();
+            assert_eq!(
+                text.iter().filter(|r| r.starts_with('╭')).count(),
+                1,
+                "one composer, once: {text:?}"
+            );
+            assert!(
+                text.iter().any(|r| r.contains("dark theme")),
+                "the open picker still renders: {text:?}"
+            );
+            assert!(
+                text.iter()
+                    .take(rows.len() - 1)
+                    .any(|r| r.contains("Working")),
+                "and the busy row is above it all: {text:?}"
+            );
+        }
     }
 
     /// The switcher renders where the ctrl+b manager does, in the same frame,

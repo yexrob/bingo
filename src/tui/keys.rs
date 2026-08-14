@@ -97,7 +97,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+o",
-        description: "transcript view: full output (ctrl+e · / · q)",
+        description: "transcript view: full output (ctrl+e · / · o · q)",
     },
     Binding {
         keys: "ctrl+t",
