@@ -1464,3 +1464,67 @@ AskUserQuestion is untouched: same options, same numbered `Other` row, same decl
 confirm guard, and `AskKind` on the request is what keeps the two shapes apart. The JSON host keeps
 protocol v1's two-option prompt — its reply is a `bool` on the wire, and widening that is a protocol
 version rather than a rendering change (recorded here so D8x does not mistake it for an oversight).
+
+### D82. The transcript view is what makes "ctrl+o to expand" true
+
+Every collapsed row has advertised `(ctrl+o to expand)`, and in the inline host that promise could
+not be kept. Inline is write-once scrollback: a settled row is printed into the terminal's own
+buffer and belongs to the terminal from that moment, so there is no row left to rewrite. What
+ctrl+o actually did was **reprint** — `expand_transcript` opened every fold, rewound the flush
+cursor to zero and set `dump_transcript`, and the next frame froze the entire session into
+scrollback again. The old collapsed copies stayed where they were, above the new expanded ones: one
+duplicate transcript per press, an accepted trade-off (D27) that got worse the longer the session
+ran. The fullscreen host, meanwhile, had a different key under the same name: `toggle_transcript`
+folded and unfolded the **last message only**, in place. Two behaviours, one binding, and neither
+of them was "show me the output".
+
+**The decision is Claude Code's**: `ctrl+o` opens a transcript view — an alternate-screen pager over
+the whole session — and `ctrl+e` inside it toggles show-all. The alternate screen is the entire
+point. Scrollback cannot be rewritten, but a screen that is discarded on exit can be redrawn as
+often as we like, and leaving it puts the previous screen back byte for byte. The compensation for
+write-once is not a cleverer write; it is a second surface.
+
+**The row builder is `Chat::build_rows`, borrowed.** The pager does not re-implement rendering: it
+sets the flush cursor to zero (so the document covers the whole session and not just the unflushed
+tail), opens every fold when `show_all`, calls the same builder both hosts draw from, and gives the
+fold state and the cursor straight back, setting `dirty` so the host rebuilds its own document
+before it draws again. Markdown, diffs, image placeholder rows, the CJK width machinery and the
+collapse summaries are therefore identical to the main screen by construction, and D78's retained
+group content is what the view has to show. A test asserts the borrow is returned — leaving it out
+would collapse the user's open rows and reprint the session, which is the bug this batch deletes.
+
+**Shape follows `entity.rs`** (the ctrl+G workspace): a self-drawing modal loop that owns the
+terminal while it is open, with `already_alt` so the fullscreen host does not nest a second
+alternate screen inside its own, and the same guarded enter/leave. One thing is added there:
+`AltScreenClaim` flips D77's `TUI_FULLSCREEN` latch for the lifetime of the modal, so a panic
+inside the pager over the *inline* host restores the alternate screen instead of leaving the user
+in it. The pager also declares `pub(super)` on `app::image_transmits` rather than copying it —
+the images the rows address were transmitted on the main screen, and a resize can purge the
+terminal's store.
+
+**Split for testability**: `TranscriptState` is pure state (rows, offset, viewport, show-all,
+query, matches, current) with pure transitions, `transcript_rows` is the builder over the session,
+`on_key` maps a key to `None` / `Rebuild` / `Close`, and the loop is the thin shell that owns the
+terminal. Fifteen tests cover the behaviour without one.
+
+**Details worth recording.** Show-all defaults **on**: a reader who opened the transcript came for
+what the fold hid, and CC's transcript shows detail. Toggling it re-anchors the reading position
+*proportionally* — expanding every fold moves every row number below the first one, so no absolute
+anchor survives, and the position in the session is what the reader cares about. Search folds case
+per character (`to_lowercase().next()`) so a hit found in the folded copy is still a byte range of
+the original; the highlight splits segments on the hit boundaries and leaves every other colour
+alone. `q` typed into an open search input is a letter, not an exit. With a permission dialog on
+screen ctrl+o is **inert**: the pager would bury the question blocking the turn, and the answer is
+one keystroke away.
+
+**Deviations from the dispatch.** (a) The dispatch left "refresh on close of search / on demand"
+optional; it is not built. The content is a snapshot at open — a running turn's events queue in
+their channels and drain after close (the `entity.rs` precedent) — and unlike `entity.rs` the loop
+does not tick, because draining would mutate the session behind rows the pager has already laid
+out. (b) `Chat::toggle_transcript` had become the convenient "open every fold" call in a dozen
+render tests. Rather than rewrite them all against `doc_click`, it is replaced by a `#[cfg(test)]`
+`expand_all_folds` with the rationale in its doc comment; the four tests that specifically covered
+the *collapse* direction of the old toggle now round-trip through the mouse click target, which is
+the surviving in-place fold surface, and one that had become a duplicate of another is deleted.
+(c) The `(ctrl+o to expand)` copy is left exactly as it was: it was never wrong about what the key
+does, only about where it did it.

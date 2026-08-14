@@ -26,8 +26,24 @@ fn interleaved_group_keeps_text_position() {
     assert!(text_pos < group_pos, "text before group: {joined}");
 }
 
+/// Toggle the message's collapse group the way the mouse does — the surviving
+/// in-place fold surface now that ctrl+o opens the transcript view instead (D82).
+fn click_group(chat: &mut Chat) {
+    chat.build_rows(120);
+    let row = chat
+        .doc
+        .click_ranges
+        .iter()
+        .find(|r| matches!(r.target, ClickTarget::Group { .. }))
+        .map(|r| r.start)
+        .expect("group fold row");
+    assert!(chat.doc_click(row), "the group row is clickable");
+}
+
+/// A finished group opens and closes again: the fold is a round trip, not a
+/// one-way door.
 #[test]
-fn ctrl_o_round_trip_collapses_group_back() {
+fn group_fold_round_trips_back_to_its_summary() {
     let mut chat = test_chat();
     start_group_done(&mut chat);
     finish_turn(&mut chat);
@@ -35,14 +51,14 @@ fn ctrl_o_round_trip_collapses_group_back() {
         visible(&mut chat, 120, 40).contains("Read 2 files"),
         "collapsed first"
     );
-    assert!(chat.toggle_transcript());
+    click_group(&mut chat);
     let expanded = visible(&mut chat, 120, 40);
     assert!(expanded.contains("Read a.md"), "expanded: {expanded}");
     assert!(
         !expanded.contains("Read 2 files"),
         "no collapse line: {expanded}"
     );
-    assert!(chat.toggle_transcript());
+    click_group(&mut chat);
     let collapsed = visible(&mut chat, 120, 40);
     assert!(
         collapsed.contains("Read 2 files"),
@@ -51,32 +67,6 @@ fn ctrl_o_round_trip_collapses_group_back() {
     assert!(
         !collapsed.contains("Read a.md"),
         "tools hidden: {collapsed}"
-    );
-}
-
-#[test]
-fn click_group_then_ctrl_o_collapses() {
-    let mut chat = test_chat();
-    start_group_done(&mut chat);
-    finish_turn(&mut chat);
-    chat.build_rows(120);
-    // Clicking the group fold row expands
-    let row = chat
-        .doc
-        .click_ranges
-        .iter()
-        .find(|r| matches!(r.target, ClickTarget::Group { .. }))
-        .map(|r| r.start)
-        .expect("group fold row");
-    assert!(chat.doc_click(row), "click expands group");
-    let expanded = visible(&mut chat, 120, 40);
-    assert!(expanded.contains("Read a.md"), "click expanded: {expanded}");
-    // ctrl+o collapses back
-    assert!(chat.toggle_transcript());
-    let collapsed = visible(&mut chat, 120, 40);
-    assert!(
-        collapsed.contains("Read 2 files"),
-        "ctrl+o collapsed: {collapsed}"
     );
 }
 
@@ -482,7 +472,7 @@ fn watch_event_renders_inline_and_updates() {
     let joined = visible(&mut chat, 120, 30);
     assert!(joined.contains("⏺ watch -n 2 ls"), "header: {joined}");
     assert!(joined.contains("  ⎿  round 2"), "result row: {joined}");
-    assert!(chat.toggle_transcript());
+    assert!(chat.expand_all_folds());
     let joined = visible(&mut chat, 120, 30);
     assert!(joined.contains("done output"), "expanded: {joined}");
 }
@@ -666,7 +656,7 @@ fn expand_running_then_complete_then_collapse_back() {
         visible(&mut chat, 120, 40).contains("Reading 2 files"),
         "running fold"
     );
-    assert!(chat.toggle_transcript());
+    assert!(chat.expand_all_folds());
     assert!(
         !visible(&mut chat, 120, 40).contains("Reading 2 files"),
         "expanded"
@@ -686,7 +676,7 @@ fn expand_running_then_complete_then_collapse_back() {
     }
     chat.drain_events();
     finish_turn(&mut chat);
-    assert!(chat.toggle_transcript());
+    click_group(&mut chat);
     let collapsed = visible(&mut chat, 120, 40);
     assert!(
         collapsed.contains("Read 2 files"),
@@ -745,12 +735,12 @@ fn collapse_after_expand_then_expand_again() {
     chat.drain_events();
     chat.stream_msg = None;
     for _ in 0..3 {
-        assert!(chat.toggle_transcript());
+        click_group(&mut chat);
         assert!(
             !visible(&mut chat, 120, 40).contains("Read 2 files"),
             "expanded state"
         );
-        assert!(chat.toggle_transcript());
+        click_group(&mut chat);
         assert!(
             visible(&mut chat, 120, 40).contains("Read 2 files"),
             "collapsed state"
@@ -1303,91 +1293,6 @@ fn streaming_with_resize_never_prints_a_row_twice() {
     assert!(
         chat.doc.rows.is_empty(),
         "the tail is empty after everything flushes"
-    );
-}
-
-/// inline ctrl+o replay: a no-op with nothing new; with flushed content or expandable items,
-/// it expands everything, rewinds the cursor, and requests a full freeze.
-#[test]
-fn expand_transcript_rewinds_and_expands_everything() {
-    let mut chat = test_chat();
-    // Empty session, everything on screen → no-op (the replay adds no information).
-    assert!(!chat.expand_transcript());
-    assert!(!chat.dump_transcript);
-    assert!(!chat.force_redraw);
-
-    // After a message flushed → replay: the cursor rewinds and the rebuilt doc contains all segments;
-    // clear the screen first, then write (top-aligned, same as resize).
-    chat.messages.push(msg(Role::Assistant, "reply"));
-    chat.build_rows(80);
-    chat.advance_flushed();
-    chat.build_rows(80);
-    assert!(
-        chat.doc.rows.is_empty(),
-        "the tail is empty after everything flushes"
-    );
-    assert!(chat.expand_transcript());
-    assert!(chat.dump_transcript);
-    assert!(
-        chat.force_redraw,
-        "the replay frame first clears the visible screen"
-    );
-    chat.build_rows(80);
-    let text: String = chat
-        .doc
-        .rows
-        .iter()
-        .map(|row| row.line.plain_text())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        text.contains("reply"),
-        "the replay document includes flushed messages: {text}"
-    );
-
-    // Historical messages with collapse groups → everything expands before the replay.
-    chat.dump_transcript = false;
-    start_group(&mut chat);
-    let _ = chat
-        .events
-        .send(UiEvent::ToolDone(crate::query::ToolCallDone {
-            tool_call_id: "test-tool".into(),
-            name: "Read".into(),
-            summary: "Read a.md".into(),
-            output: "l1\nl2\nl3".into(),
-            status: crate::query::ToolCallStatus::Done,
-            duration_ms: 0,
-            diff: None,
-        }));
-    chat.drain_events();
-    assert!(chat.expand_transcript());
-    assert!(chat.dump_transcript);
-    assert!(
-        chat.messages
-            .iter()
-            .flat_map(|m| &m.groups)
-            .all(|g| g.expanded || g.activities.is_empty()),
-        "all fold groups expanded"
-    );
-
-    // Fully expanded → the second press goes the collapse direction: back to aggregates (the app layer
-    // handles the clear-redraw + rehydration to close it up).
-    assert!(chat.transcript_fully_expanded());
-    assert!(chat.collapse_transcript());
-    assert!(
-        chat.messages
-            .iter()
-            .flat_map(|m| &m.groups)
-            .all(|g| !g.expanded),
-        "all fold groups closed"
-    );
-    assert!(
-        !chat.transcript_fully_expanded(),
-        "after closing, it returns to the expand direction"
-    );
-    assert!(
-        !chat.collapse_transcript(),
-        "already fully closed; closing again changes nothing"
     );
 }
 
@@ -3703,7 +3608,7 @@ fn interrupted_tool_row_reads_interrupted_in_the_warning_color() {
         "the interrupted call keeps its own status instead of borrowing Done"
     );
     // A single bash call still folds into a group; the row itself is what this asserts.
-    assert!(chat.toggle_transcript(), "expand the fold");
+    assert!(chat.expand_all_folds(), "expand the fold");
     let rendered = visible(&mut chat, 120, 30);
     assert!(
         rendered.contains("⎿  Interrupted"),

@@ -72,7 +72,7 @@ fn grouped_results_keep_their_output_for_expansion() {
         assert!(member.expandable(), "member {idx} kept its output");
     }
 
-    assert!(chat.toggle_transcript(), "ctrl+o opens the fold");
+    assert!(chat.expand_all_folds(), "ctrl+o opens the fold");
     let expanded = visible(&mut chat, 120, 40);
     for (_, output) in calls {
         for line in output.lines() {
@@ -240,7 +240,7 @@ fn an_interrupted_group_member_still_has_nothing_to_expand() {
         "its neighbour still keeps its own"
     );
 
-    assert!(chat.toggle_transcript(), "ctrl+o opens the fold");
+    assert!(chat.expand_all_folds(), "ctrl+o opens the fold");
     let expanded = visible(&mut chat, 120, 40);
     assert!(
         expanded.contains("⎿  Interrupted"),

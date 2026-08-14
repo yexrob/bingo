@@ -305,7 +305,10 @@ impl Activity {
         self.auto_expanded = false;
     }
 
-    /// Whether expanding reveals any content.
+    /// Whether expanding reveals any content. Production reads the content
+    /// directly (the layout decides row by row); this is the predicate the
+    /// retention tests assert on.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn expandable(&self) -> bool {
         !self.content.is_empty()
     }

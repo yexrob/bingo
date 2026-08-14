@@ -85,7 +85,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+o",
-        description: "expand / collapse output",
+        description: "transcript view: full output (ctrl+e · / · q)",
     },
     Binding {
         keys: "ctrl+t",
@@ -127,7 +127,10 @@ pub const BINDINGS: &[Binding] = &[
 
 /// Footer hint shown while idle (CC `? for shortcuts`).
 pub const FOOTER_IDLE_HINT: &str = "? for shortcuts";
-/// Footer hint that applies in both idle and busy states.
+/// Footer hint that applies in both idle and busy states. Still literally true
+/// after D82 — ctrl+o is how the folded content is reached — it just reaches it
+/// in the transcript view instead of by rewriting the screen, so the wording
+/// under every collapsed row stays as it is.
 pub const FOOTER_EXPAND_HINT: &str = "ctrl+o to expand";
 /// Empty-input placeholder (CC PromptInput placeholder).
 pub const INPUT_PLACEHOLDER: &str = "Try \"fix a bug\" · / for commands · ! for shell";

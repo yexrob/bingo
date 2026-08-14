@@ -3720,7 +3720,7 @@ fn ctrl_o_expands_group_to_individual_tools() {
             diff: None,
         }));
     chat.drain_events();
-    assert!(chat.toggle_transcript());
+    assert!(chat.expand_all_folds());
     let joined = visible(&mut chat, 120, 30);
     assert!(
         joined.contains("Read a.md"),

@@ -33,8 +33,10 @@ commands, and verification steps in conclusions. Never speculate about features 
   empty input twice exits · ↑↓ history (move the cursor first in multi-line input; busy empty-input ↑ recalls queued messages) ·
   Ctrl+R reverse history search · Ctrl+A/E line start/end · Alt+B/F word movement · Ctrl+W/U/K delete word/to line
   start/end · Ctrl+Y paste back deleted · Ctrl+S stash/restore input · Ctrl+_ undo · ctrl+o
-  expand/collapse toggle (expand = replays the full transcript for terminal scroll-up; press again to collapse back to
-  aggregates and clear/consolidate) · Ctrl+T toggle the task area · Ctrl+G opens the fullscreen team/DM workspace directly (Ctrl+K switches channels and DMs; the DM view shows user/agent text while hiding tool activity; channel rooms let you speak directly as user) · Ctrl+B manages running background agents · Ctrl+L clear and redraw · Shift+Tab cycles permission
+  opens the transcript view: an alternate-screen pager over the whole session with every tool output and thinking block
+  expanded (ctrl+e collapses back to the summaries, `/` searches with n/N stepping through hits, j/k · PgUp/PgDn · g/G
+  move, q/Esc/ctrl+o closes and puts the previous screen back; a permission dialog keeps priority, so ctrl+o is inert
+  while one is open) · Ctrl+T toggle the task area · Ctrl+G opens the fullscreen team/DM workspace directly (Ctrl+K switches channels and DMs; the DM view shows user/agent text while hiding tool activity; channel rooms let you speak directly as user) · Ctrl+B manages running background agents · Ctrl+L clear and redraw · Shift+Tab cycles permission
   modes (default → acceptEdits → plan), and inside an approval prompt takes `Yes, and don't ask again this session` · Ctrl+E inside an approval prompt expands the full command/diff preview and the session rule it would install · Alt+T thinking toggle (off ↔ the last non-off level, default medium) · while busy, Enter queues the message (sent automatically at turn end; /think /model /provider /theme /status /context /tasks /help /skills run immediately) ·
 - During streamed output, the main footer shows a live `N tok/s` indicator; the speed band changes its character animation and cadence, and idle/stalled output hides it. Beside it, context usage stays visible as a four-cell bar, percentage, and `used/window` token count, using the active model's window; the colors count down to the auto-compaction trigger rather than to the window — warning within 20 percentage points of it, danger within 5. Once the count passes the warning point, the turn also emits a `context at N tokens; auto-compact at M` warning row. A running instance's DM composer shows the same indicators. `motion: "off"` freezes the rate frame but keeps the value.
 - Large pastes auto-collapse to a `[Pasted text #N +M lines]` placeholder; the real content expands on send
@@ -180,9 +182,11 @@ Example (.bingo/settings.json):
    with non-empty input `!` is an ordinary character; Tab completes from this session's `!` history prefix.
 7. **Can't find a historical session**: transcripts live in `~/.local/share/bingo/transcripts` (`--continue`
    resumes the last one; `/resume` lists/switches). Session storage is cleaned at startup with a 30-day TTL and a latest-100 inactive-session cap plus a 24-hour activity grace; matching share snapshots follow transcript removal. `/gc` applies the same policy on demand. Prompt-history files use the same TTL with a 100-file cap.
-8. **Tool output collapsed**: ctrl+o expands all collapsed items and replays the full transcript to the
-   terminal (scroll up to read; printed old collapsed copies stay higher up — normal); pressing ctrl+o again in the fully expanded
-   state collapses — back to aggregates with a clear/consolidate; long output shows `+N lines`.
+8. **Tool output collapsed**: ctrl+o opens the transcript view — the whole session on its own screen with every
+   collapsed block expanded; ctrl+e toggles back to the collapsed presentation, `/` searches it, q closes and the
+   terminal is exactly as you left it. A row on the main screen still shows `+N lines` for what is folded. The
+   collapsed rows already printed into scrollback never change: they cannot, which is why the full text lives in a
+   view of its own.
 9. **Slash dropdown doesn't have the command you want**: type a prefix to filter (e.g. `/m` matches mcp/model/meye);
    Esc closes the menu; skills are listed in `/skills`, run with `/skill-name`.
 10. **Grep/Glob finds nothing**: `.git`/`target`/`node_modules` and dot-prefixed directories are skipped by default

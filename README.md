@@ -159,7 +159,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Esc` | close the topmost dialog/menu/panel first / interrupt while busy / clear input on double-press |
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
 | `Ctrl+T` | toggle the task area |
-| `Ctrl+O` | expand/collapse: expanded replays the full transcript for scrolling up |
+| `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `q` close) |
 | `Ctrl+G` | open the full workspace directly; `Ctrl+K` switches channels and DMs |
 | `Ctrl+L` | clear and redraw |
 | `Shift+Tab` | cycle permission modes (default → acceptEdits → plan); in an approval prompt, take `Yes, and don't ask again this session` |

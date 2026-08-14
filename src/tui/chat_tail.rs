@@ -1605,8 +1605,14 @@ impl super::Chat {
                 self.dirty = true;
                 true
             }
+            // Ctrl+O opens the transcript view (D82). A question on screen keeps
+            // priority: the pager would bury a dialog that is blocking a turn,
+            // and the answer is one keystroke away.
             'o' => {
-                self.toggle_transcript();
+                if self.pending_ask.is_none() {
+                    self.open_transcript = true;
+                    self.dirty = true;
+                }
                 true
             }
             'r' => {

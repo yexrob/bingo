@@ -909,9 +909,9 @@ pub struct Chat {
     pub permission_mode: PermissionMode,
     /// ctrl+l requests a full-screen repaint (cleared after the render layer consumes it).
     pub force_redraw: bool,
-    /// inline ctrl+o requests a full-transcript replay: everything expanded, the flush cursor
-    /// rewound; the app freezes the settled part into scrollback on the next frame (cleared after consumption).
-    pub dump_transcript: bool,
+    /// ctrl+o requests the transcript view: the host opens the alternate-screen
+    /// pager over the whole session (cleared after consumption, D82).
+    pub open_transcript: bool,
     /// bash mode (`!` prefix): input executes directly, bypassing the model.
     pub bash_mode: bool,
     pub busy: bool,
@@ -1285,7 +1285,7 @@ impl Chat {
             search: None,
             permission_mode,
             force_redraw: false,
-            dump_transcript: false,
+            open_transcript: false,
             bash_mode: false,
             busy: false,
             stream_msg: None,
@@ -2149,124 +2149,29 @@ impl Chat {
         }
     }
 
-    /// ctrl+o: globally expand/collapse the transcript (CC app:toggleTranscript).
-    /// Priority: expanded groups collapse back first; otherwise, if anything is collapsible → expand all; else collapse all.
-    pub fn toggle_transcript(&mut self) -> bool {
+    /// Open every fold of the most recent message.
+    ///
+    /// Test-facing only: it is the expanded *presentation* many render tests
+    /// assert on, and reaching it through the production surfaces would mean
+    /// driving a mouse click ([`Chat::doc_click`]) or an alternate-screen pager
+    /// ([`crate::tui::transcript`]) for a question about rows. The global
+    /// ctrl+o toggle this replaced is gone: in-place expansion could never work
+    /// in inline mode, where the rows it would rewrite already belong to the
+    /// terminal.
+    #[cfg(test)]
+    pub fn expand_all_folds(&mut self) -> bool {
         let Some(i) = self.messages.len().checked_sub(1) else {
             return false;
         };
-        if self.messages[i].groups.iter().any(|g| g.expanded) {
-            for g in &mut self.messages[i].groups {
-                g.expanded = false;
-            }
-            self.auto_scroll = false;
-            self.dirty = true;
-            return true;
-        }
-        let any_collapsed = self.messages[i]
-            .activities
-            .iter()
-            .any(|a| !a.expanded && a.expandable())
-            || self.messages[i]
-                .groups
-                .iter()
-                .any(|g| !g.expanded && !g.activities.is_empty());
         for act in &mut self.messages[i].activities {
-            act.expanded = any_collapsed;
+            act.expanded = true;
         }
-        for g in &mut self.messages[i].groups {
-            g.expanded = any_collapsed;
+        for group in &mut self.messages[i].groups {
+            group.expanded = true;
         }
         self.auto_scroll = false;
         self.dirty = true;
         true
-    }
-
-    /// inline ctrl+o expand direction (CC non-fullscreen transcript): rows already printed to scrollback
-    /// cannot change (write-once), so instead of a collapse toggle it does a **full replay** — every collapsible item
-    /// in all of history expands and the flush cursor rewinds; the app then freezes the whole transcript
-    /// into scrollback in one go, where the user can scroll back to read it. Old collapsed copies already
-    /// in scrollback cannot be retracted — duplicates are accepted (the same trade-off as rehydration). When everything
-    /// is already on screen with nothing to expand, it is a no-op: the replay adds no information.
-    ///
-    /// The replay frame uses `force_redraw` (clear the visible screen): same as resize, clear first then write,
-    /// replay content starts from the top of the screen with chrome right below — without clearing, the old frame and
-    /// the replay rows would align by viewport history, so short content appears twice on screen.
-    pub fn expand_transcript(&mut self) -> bool {
-        let mut changed = false;
-        for message in &mut self.messages {
-            for act in &mut message.activities {
-                if !act.expanded && act.expandable() {
-                    act.expanded = true;
-                    changed = true;
-                }
-            }
-            for group in &mut message.groups {
-                if !group.expanded && !group.activities.is_empty() {
-                    group.expanded = true;
-                    changed = true;
-                }
-            }
-        }
-        if !changed && self.flushed_segments == 0 {
-            return false;
-        }
-        self.reset_flushed();
-        self.dump_transcript = true;
-        self.force_redraw = true;
-        true
-    }
-
-    /// ctrl+o toggle direction: true only when the transcript has collapsible items and they are **all**
-    /// expanded (the next press collapses). Always false with nothing collapsible — ctrl+o then
-    /// degrades to a pure replay: pressing it repeatedly just reprints, never entering the collapse branch.
-    pub fn transcript_fully_expanded(&self) -> bool {
-        let mut any = false;
-        for message in &self.messages {
-            for act in &message.activities {
-                if act.expandable() {
-                    if !act.expanded {
-                        return false;
-                    }
-                    any = true;
-                }
-            }
-            for group in &message.groups {
-                if !group.activities.is_empty() {
-                    if !group.expanded {
-                        return false;
-                    }
-                    any = true;
-                }
-            }
-        }
-        any
-    }
-
-    /// inline ctrl+o collapse direction: all history folds back to the default aggregate state. Only the fold state
-    /// changes; the caller's display layer closes it up via the same path as resize (clear-redraw + rehydration), because
-    /// the expanded replay rows on screen are also write-once printed content — without clearing, they would
-    /// coexist on screen with the collapsed window.
-    pub fn collapse_transcript(&mut self) -> bool {
-        let mut changed = false;
-        for message in &mut self.messages {
-            for act in &mut message.activities {
-                if act.expanded {
-                    act.expanded = false;
-                    changed = true;
-                }
-            }
-            for group in &mut message.groups {
-                if group.expanded {
-                    group.expanded = false;
-                    changed = true;
-                }
-            }
-        }
-        if changed {
-            self.dirty = true;
-        }
-        changed
     }
 
     pub fn submit(&mut self) {

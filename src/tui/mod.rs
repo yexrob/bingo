@@ -7,6 +7,8 @@
 //! - [`statics`] is the Static region: the transcript as a block list with a
 //!   frozen prefix (write-once scrollback, lazy freezing — Ink `<Static>`).
 //! - [`chrome`] declares every section below the transcript.
+//! - [`transcript`] is the alternate-screen pager over the whole session
+//!   (`ctrl+o`), the compensation for write-once scrollback.
 //! - [`slack`] is the Slack-shaped workspace skin (rail / sidebar / message
 //!   pane) that [`entity`] wears when a channel or instance is opened.
 //! - [`chat`] is the state machine and the transcript block builder
@@ -47,6 +49,7 @@ pub(crate) mod term;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub mod theme;
+mod transcript;
 mod view;
 
 use std::io::{Write as IoWrite, stdout};
@@ -117,6 +120,26 @@ fn restore_terminal(fullscreen: bool) {
     }
     let _ = disable_raw_mode();
     let _ = execute!(out, crossterm::cursor::Show);
+}
+
+/// While an alternate-screen modal is open over the *inline* host, the teardown
+/// the panic hook owes changes shape: raw mode alone is no longer enough, the
+/// alternate screen and the mouse capture have to come off too. The guard flips
+/// [`TUI_FULLSCREEN`] for as long as the modal is up and puts the host's own
+/// answer back on the way out — so a panic inside the pager restores the same
+/// screen the pager would have restored.
+pub(crate) struct AltScreenClaim(bool);
+
+impl AltScreenClaim {
+    pub(crate) fn enter() -> Self {
+        Self(TUI_FULLSCREEN.swap(true, Ordering::SeqCst))
+    }
+}
+
+impl Drop for AltScreenClaim {
+    fn drop(&mut self) {
+        TUI_FULLSCREEN.store(self.0, Ordering::SeqCst);
+    }
 }
 
 /// Claim the terminal for the panic hook, on the thread that drives the host.
