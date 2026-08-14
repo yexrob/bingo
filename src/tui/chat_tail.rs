@@ -1056,113 +1056,12 @@ impl super::Chat {
         Self::supervise_turn(self.events.clone(), handle);
     }
 
-    /// Dialog key input (Select semantics):
-    /// digits/Enter confirm, ↑/↓ move the focus, Esc cancels; typing goes directly when the focus is on Other.
-    /// Returns whether it was consumed.
-    ///
-    /// Modifier-carrying chars are NOT consumed: crossterm reports ctrl+c as
-    /// `Char('c')` + CONTROL, so swallowing them here turned the interrupt (and
-    /// every readline chord) into literal letters inside the Other input.
-    pub fn ask_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        let Some((request, _)) = &self.pending_ask else {
-            return false;
-        };
-        if matches!(code, KeyCode::Char(_))
-            && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
-        {
-            return false;
-        }
-        let options_len = request.options.len();
-        let free_text = request.free_text;
-        let total = options_len + usize::from(free_text);
-        let in_other = free_text && self.ask_focus >= options_len;
-        match code {
-            KeyCode::Char(c) if in_other && !c.is_control() => {
-                self.ask_other.push(c);
-                true
-            }
-            KeyCode::Backspace if in_other => {
-                self.ask_other.pop();
-                true
-            }
-            KeyCode::Enter if in_other => {
-                let text = std::mem::take(&mut self.ask_other);
-                self.submit_ask_answer(text);
-                true
-            }
-            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                let index = (c as u8 - b'1') as usize;
-                if index < total {
-                    self.ask_focus = index;
-                    if !(index == options_len && free_text) {
-                        self.choose_ask_option(index);
-                    }
-                }
-                true
-            }
-            KeyCode::Up => {
-                if self.ask_focus > 0 {
-                    self.ask_focus -= 1;
-                }
-                true
-            }
-            KeyCode::Down => {
-                if self.ask_focus + 1 < total {
-                    self.ask_focus += 1;
-                }
-                true
-            }
-            KeyCode::Enter => {
-                let focus = self.ask_focus;
-                if focus >= options_len && free_text {
-                    let text = std::mem::take(&mut self.ask_other);
-                    self.submit_ask_answer(text);
-                } else {
-                    self.choose_ask_option(focus);
-                }
-                true
-            }
-            KeyCode::Esc => {
-                if let Some((request, tx)) = self.pending_ask.take() {
-                    if request.free_text {
-                        self.push_ask_message(ASK_DECLINED_TEXT.to_string());
-                    }
-                    let _ = tx.send(DialogAction::Cancel);
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// AskUserQuestion answer message: header + one line of `· question → answer`. Treated as
-    /// AskUserQuestion answer text: header + one `· question → answer` line. Enters the
-    /// message flow as an ordinary user message (no longer a transient block rendered above the input).
-    fn ask_answer_text(question: &str, answer: &str) -> String {
-        format!("User answered the questions:\n  · {question} → {answer}")
-    }
-
-    /// Records an answer/decline as an ordinary user message: rendered like user input
-    /// (bubble), settled and flushed into scrollback, persistent with the session — no transient residue.
-    fn push_ask_message(&mut self, text: String) {
-        self.messages.push(UiMessage {
-            role: Role::User,
-            text,
-            at: crate::channels::now_unix(),
-            activities: Vec::new(),
-            insert_points: Vec::new(),
-            groups: Vec::new(),
-            group_of: Vec::new(),
-        });
-        self.open_continuation_message();
-    }
-
     /// The answer lands mid-turn and the model keeps going. Without a message of its own, that
     /// continuation streams into the assistant message *above* the answer (`stream_msg` still
     /// points there), so everything the model does next renders above what the user just said
     /// and the answer stays pinned to the bottom until the turn ends. Close the old message and
     /// open a fresh one, the way a turn boundary would: the transcript then reads in clock order.
-    fn open_continuation_message(&mut self) {
+    pub(crate) fn open_continuation_message(&mut self) {
         let Some(prev) = self.stream_msg else { return };
         // Tool rows registered before the answer index into `prev`'s activities
         // (`pending_tools` holds those indices), so a call still in flight pins the stream here.
@@ -1220,42 +1119,6 @@ impl super::Chat {
             {
                 t.state = ThinkingState::Done;
                 t.duration_ms = tick.saturating_sub(t.start_tick).saturating_mul(33);
-            }
-        }
-    }
-
-    /// Submitting Other free text (CC SelectInputOption onSubmit: empty text = cancel).
-    fn submit_ask_answer(&mut self, text: String) {
-        if text.trim().is_empty() {
-            let free_text = self.pending_ask.as_ref().is_some_and(|(r, _)| r.free_text);
-            if free_text {
-                self.push_ask_message(ASK_DECLINED_TEXT.to_string());
-            }
-            if let Some((_, tx)) = self.pending_ask.take() {
-                let _ = tx.send(DialogAction::Cancel);
-            }
-            return;
-        }
-        if let Some((request, tx)) = self.pending_ask.take() {
-            let question = request.question.clone();
-            let answer = text.clone();
-            self.push_ask_message(Self::ask_answer_text(&question, &answer));
-            let _ = tx.send(DialogAction::Answer(text));
-        }
-    }
-
-    /// Confirms option `index` (0-based; out of range = cancel).
-    pub(crate) fn choose_ask_option(&mut self, index: usize) {
-        if let Some((request, tx)) = self.pending_ask.take() {
-            if index < request.options.len() {
-                if request.free_text {
-                    let question = request.question.clone();
-                    let answer = request.options[index].clone();
-                    self.push_ask_message(Self::ask_answer_text(&question, &answer));
-                }
-                let _ = tx.send(DialogAction::Confirm(index));
-            } else {
-                let _ = tx.send(DialogAction::Cancel);
             }
         }
     }
@@ -1326,7 +1189,7 @@ impl super::Chat {
         if code == KeyCode::Esc {
             return self.escape(now);
         }
-        if self.ask_key(code, modifiers) {
+        if self.ask_key_at(code, modifiers, now) {
             return true;
         }
         // A printable key that no menu claims (menus only take ↑↓/Enter/Esc/
@@ -1587,7 +1450,7 @@ impl super::Chat {
         const ESC: KeyCode = KeyCode::Esc;
         const NONE: KeyModifiers = KeyModifiers::NONE;
         match layer {
-            EscLayer::AskDialog => self.ask_key(ESC, NONE),
+            EscLayer::AskDialog => self.ask_key_at(ESC, NONE, now),
             EscLayer::Menu => {
                 self.model_menu_key(ESC, NONE)
                     || self.think_menu_key(ESC, NONE)
@@ -1670,70 +1533,6 @@ impl super::Chat {
         // The dialog goes with the turn: the user asked for everything in flight
         // to stop, and a dialog is in flight.
         self.cancel_asks(false);
-    }
-
-    /// Settles the permission dialogs a dead turn left behind (D80).
-    ///
-    /// The dialog and the turn used to have separate lifetimes: an interrupt
-    /// killed the task awaiting the answer and left the question on screen, so
-    /// the footer went on saying `Waiting for permission…` and every 1-9 the
-    /// user pressed answered a corpse — the reply went into a dropped oneshot
-    /// and nothing happened. Cancelling here closes both ends: an explicit
-    /// `Cancel` on the wire (the receiver reads it as a deny — fail closed),
-    /// the requests still queued behind it emptied the same way, and one dim
-    /// line in the flow where the dialog was.
-    ///
-    /// `dead_only` keeps a background agent out of the foreground turn's
-    /// cleanup: subagents share this modal queue, so at turn end the only
-    /// requests that belong to the turn that just ended are the ones whose
-    /// receiver is already gone. An explicit interrupt takes everything,
-    /// because that is what the user asked for.
-    pub(crate) fn cancel_asks(&mut self, dead_only: bool) -> bool {
-        let mut cancelled = false;
-        let settle = |ask: crate::ui::AskRequest| {
-            let _ = ask.1.send(crate::ui::DialogAction::Cancel);
-        };
-        if let Some(ask) = self.pending_ask.take() {
-            if dead_only && !ask.1.is_closed() {
-                self.pending_ask = Some(ask);
-            } else {
-                settle(ask);
-                cancelled = true;
-            }
-        }
-        // A request still in the channel has no row of its own yet; it is
-        // drained here so it cannot surface as a dialog for a turn that is
-        // already gone. Live ones go back in the same order they came out.
-        let mut keep = Vec::new();
-        while let Ok(ask) = self.asks_rx.try_recv() {
-            if dead_only && !ask.1.is_closed() {
-                keep.push(ask);
-            } else {
-                settle(ask);
-                cancelled = true;
-            }
-        }
-        for ask in keep {
-            let _ = self.asks.send(ask);
-        }
-        if cancelled {
-            self.ask_focus = 0;
-            self.ask_other.clear();
-            self.drop_empty_stream_message();
-            self.messages.push(UiMessage {
-                role: Role::User,
-                text: crate::tui::chat::ASK_CANCELLED_TEXT.to_string(),
-                at: crate::channels::now_unix(),
-                activities: Vec::new(),
-                insert_points: Vec::new(),
-                groups: Vec::new(),
-                group_of: Vec::new(),
-            });
-            // The title still announced a question nobody could answer.
-            self.notify_idle();
-            self.dirty = true;
-        }
-        cancelled
     }
 
     /// Ctrl+<char> editing commands (readline semantics).
@@ -3298,90 +3097,6 @@ impl super::Chat {
             }
         }
         El::Col(parts)
-    }
-
-    /// Permission/ask block (PermissionDialog / AskUserQuestion):
-    /// title (permission bold) + description (dim) + numbered options (Select:
-    /// `❯ n. label` focus marker, desc sub-row dim, Other free input) + shortcut hints.
-    fn ask_el(&self, theme: &Theme) -> Option<El> {
-        let (request, _) = self.pending_ask.as_ref()?;
-        let mut parts: Vec<El> = Vec::new();
-        let mut title = Line::styled("⏺ ", SegStyle::fg(theme.text));
-        title.push_styled(request.title.clone(), theme.permission());
-        parts.push(El::Line(title));
-        parts.push(El::Line(Line::styled(
-            format!("  {}", request.question),
-            SegStyle::fg(theme.text),
-        )));
-        // CC Select: one blank row between the question and the options.
-        parts.push(El::Blank);
-        let focus_color = theme.permission;
-        for (opt_idx, option) in request.options.iter().enumerate() {
-            let focused = opt_idx == self.ask_focus;
-            let mut line = Line::empty();
-            let style = if focused {
-                SegStyle::fg(focus_color)
-            } else {
-                SegStyle::fg(theme.inactive)
-            };
-            line.push_styled(if focused { "❯ " } else { "  " }, style);
-            line.push_styled(format!("{}. {option}", opt_idx + 1), style);
-            // Only the option row itself confirms; the description sub-row stays inert.
-            parts.push(El::click(ClickTarget::AskOption(opt_idx), El::Line(line)));
-            if let Some(desc) = request
-                .descriptions
-                .get(opt_idx)
-                .and_then(|d| d.as_deref())
-                .filter(|d| !d.is_empty())
-            {
-                parts.push(El::Line(Line::styled(
-                    format!("   {desc}"),
-                    if focused {
-                        SegStyle::fg(focus_color)
-                    } else {
-                        SegStyle::fg(theme.inactive)
-                    },
-                )));
-            }
-        }
-        if request.free_text {
-            let other_idx = request.options.len();
-            let focused = self.ask_focus >= other_idx;
-            let mut line = Line::empty();
-            let style = if focused {
-                SegStyle::fg(focus_color)
-            } else {
-                SegStyle::fg(theme.inactive)
-            };
-            line.push_styled(if focused { "❯ " } else { "  " }, style);
-            line.push_styled(format!("{}. Other", other_idx + 1), style);
-            parts.push(El::click(ClickTarget::AskOption(other_idx), El::Line(line)));
-            // No cursor glyph: the terminal cursor is the only caret in the app, and it stays
-            // anchored to the input box below (the ask block renders into the transcript).
-            let placeholder = if focused && !self.ask_other.is_empty() {
-                self.ask_other.clone()
-            } else {
-                "Type something.".to_string()
-            };
-            parts.push(El::Line(Line::styled(
-                format!("   {placeholder}"),
-                if focused {
-                    SegStyle::fg(focus_color)
-                } else {
-                    SegStyle::fg(theme.inactive)
-                },
-            )));
-        }
-        let hint = if request.free_text && self.ask_focus >= request.options.len() {
-            "enter to submit · esc to cancel"
-        } else {
-            "enter to select · ↑/↓ to navigate · esc to cancel"
-        };
-        parts.push(El::Line(Line::styled(
-            format!("  {hint}"),
-            SegStyle::fg(theme.inactive),
-        )));
-        Some(El::Col(parts))
     }
 
     /// Resets the flush cursor: after the message set is replaced wholesale (/clear, /resume), segment numbers

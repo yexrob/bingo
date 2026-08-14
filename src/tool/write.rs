@@ -34,18 +34,24 @@ impl Tool for WriteTool {
     fn is_edit_tool(&self, _input: &serde_json::Value) -> bool {
         true
     }
+    fn preview_diff(&self, input: &serde_json::Value, cwd: &std::path::Path) -> Option<String> {
+        let params: WriteInput = parse_input(input).ok()?;
+        let old = match std::fs::read_to_string(super::resolve_path(&params.file_path, cwd)) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            // Same refusal as `call`: a file that cannot be read is not a file
+            // whose overwrite can be previewed as "everything added".
+            Err(_) => return None,
+        };
+        super::diff::unified_diff(&params.file_path, &old, &params.content)
+    }
     async fn call(
         &self,
         input: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: WriteInput = parse_input(&input)?;
-        let path = std::path::PathBuf::from(&params.file_path);
-        let path = if path.is_absolute() {
-            path
-        } else {
-            ctx.cwd.join(path)
-        };
+        let path = super::resolve_path(&params.file_path, &ctx.cwd);
         // Failed reads of the old content were once treated as an empty file: binary/
         // non-UTF-8/permission-denied files would be silently overwritten and the diff would
         // show everything as added. Only "not found" means a new file.

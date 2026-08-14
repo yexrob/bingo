@@ -35,6 +35,34 @@ pub enum DialogAction {
     Cancel,
 }
 
+/// What approving a permission request would actually do, rendered above the
+/// options. The prompt names the tool; this shows the act.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskPreview {
+    /// The shell command that would run.
+    Command(String),
+    /// A dry-run unified diff of the file change that would be made — computed
+    /// without touching the file.
+    Diff(String),
+}
+
+/// Which dialog shape a request wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AskKind {
+    /// AskUserQuestion: the model's own options plus an Other free-text row.
+    #[default]
+    Question,
+    /// The permission gate: the three-option approval shape, whose refusal
+    /// option opens a feedback row instead of resolving immediately.
+    Permission,
+}
+
+/// Approval options, in CC's wording. Option 2 is only offered when a session
+/// rule could actually be installed ([`PermissionRequest::scope`]).
+pub const ASK_YES: &str = "Yes";
+pub const ASK_YES_SESSION: &str = "Yes, and don't ask again this session";
+pub const ASK_NO: &str = "No, and tell bingo what to do differently (esc)";
+
 /// Permission/question block to display.
 #[derive(Debug, Clone)]
 pub struct PermissionRequest {
@@ -46,8 +74,17 @@ pub struct PermissionRequest {
     pub options: Vec<String>,
     /// Description of options[i] (CC Select sub-line, dimmed).
     pub descriptions: Vec<Option<String>>,
-    /// AskUserQuestion: a "Other" free-form input is appended automatically (CC behavior).
+    /// A free-form input row is open: AskUserQuestion's "Other" (set from the
+    /// start), or a permission prompt's refusal feedback (opened on demand).
     pub free_text: bool,
+    /// Dialog shape.
+    pub kind: AskKind,
+    /// What approving would do (permission prompts).
+    pub preview: Option<AskPreview>,
+    /// The session-scoped allow rule the "don't ask again" option installs.
+    /// `None`: that option is not offered, because nothing could make the gate
+    /// stop asking about this call.
+    pub scope: Option<String>,
 }
 
 impl PermissionRequest {
@@ -62,7 +99,20 @@ impl PermissionRequest {
             options,
             descriptions: Vec::new(),
             free_text: false,
+            kind: AskKind::Question,
+            preview: None,
+            scope: None,
         }
+    }
+
+    /// Index of the "don't ask again this session" option, when it is offered.
+    pub fn session_option(&self) -> Option<usize> {
+        (self.kind == AskKind::Permission && self.scope.is_some()).then_some(1)
+    }
+
+    /// Index of the refusal option (always last on a permission prompt).
+    pub fn refusal_option(&self) -> Option<usize> {
+        (self.kind == AskKind::Permission).then(|| self.options.len().saturating_sub(1))
     }
 }
 
@@ -169,18 +219,50 @@ pub enum UiEvent {
 /// Permission prompt backed by the TUI modal. Shared by `tui_hooks` and the subagent prompt
 /// surface attached to the registry, so a subagent's request lands in the same modal queue.
 pub fn modal_ask(asks: mpsc::UnboundedSender<AskRequest>) -> Arc<crate::query::AskFn> {
-    Arc::new(move |tool_name, reason| {
-        let request = PermissionRequest::new(
-            format!("Allow running {tool_name}"),
-            reason,
-            vec!["Allow".to_string(), "Deny".to_string()],
-        );
+    use crate::query::AskOutcome;
+    Arc::new(move |ask| {
+        let mut options = vec![ASK_YES.to_string()];
+        if ask.scope.is_some() {
+            options.push(ASK_YES_SESSION.to_string());
+        }
+        options.push(ASK_NO.to_string());
+        let mut request =
+            PermissionRequest::new(format!("Allow running {}", ask.tool), ask.reason, options);
+        request.kind = AskKind::Permission;
+        request.scope = ask.scope.map(str::to_string);
+        request.preview = ask_preview(ask);
+        let session_option = request.session_option();
         let (tx, rx) = oneshot::channel();
         if asks.send((request, tx)).is_err() {
-            return Box::pin(async { false });
+            return Box::pin(async { AskOutcome::Deny { feedback: None } });
         }
-        Box::pin(async move { matches!(rx.await, Ok(DialogAction::Confirm(0))) })
+        Box::pin(async move {
+            match rx.await {
+                Ok(DialogAction::Confirm(0)) => AskOutcome::Allow,
+                Ok(DialogAction::Confirm(index)) if Some(index) == session_option => {
+                    AskOutcome::AllowSession
+                }
+                Ok(DialogAction::Answer(feedback)) => AskOutcome::Deny {
+                    feedback: Some(feedback),
+                },
+                // The refusal option, Esc, and a dialog the turn outlived all
+                // land here: fail closed, and say nothing on the user's behalf.
+                _ => AskOutcome::Deny { feedback: None },
+            }
+        })
     })
+}
+
+/// The preview rows: a file change shows the diff it would make, anything
+/// carrying a shell command shows the command.
+fn ask_preview(ask: &crate::query::AskContext<'_>) -> Option<AskPreview> {
+    if let Some(diff) = ask.diff {
+        return Some(AskPreview::Diff(diff.to_string()));
+    }
+    ask.input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .map(|command| AskPreview::Command(command.to_string()))
 }
 
 /// Wire query's UiHooks to the TUI channels.

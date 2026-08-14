@@ -407,6 +407,68 @@ pub fn can_use_tool(
     }
 }
 
+/// The narrowest allow rule that would cover this exact call, for the
+/// "don't ask again this session" option — or `None` when a session-scoped
+/// allow could not silence this prompt anyway.
+///
+/// `ask` rules (step 2) and the bypass-immune safety check (step 4) are both
+/// consulted before allow rules (step 7), so a rule derived for one of those
+/// prompts would be dead text and the option a lie: the caller offers it only
+/// when this returns `Some`.
+pub fn session_allow_rule(
+    tool: &dyn Tool,
+    input: &serde_json::Value,
+    ask_rules: &[String],
+    cwd: &std::path::Path,
+) -> Option<String> {
+    let name = tool.name();
+    if rule_hits(ask_rules, &name, input, MatchMode::Any, cwd) {
+        return None;
+    }
+    if safety_check(tool, input, cwd).is_some() {
+        return None;
+    }
+    let candidate = narrowest_rule(&name, input, cwd)?;
+    // Deriving a rule and matching one are two readings of the same grammar;
+    // only a rule that really matches this call is worth installing. This is
+    // what keeps `cd /tmp && rm -rf /` from being scoped to `Bash(cd:*)`.
+    rule_matches(&candidate, &name, input, MatchMode::All, cwd).then_some(candidate)
+}
+
+/// Rule shape per tool family: Bash by command prefix, WebFetch by host, file
+/// tools by directory, everything else by bare tool name.
+fn narrowest_rule(name: &str, input: &serde_json::Value, cwd: &std::path::Path) -> Option<String> {
+    if name == "Bash" {
+        let head = input
+            .get("command")
+            .and_then(|v| v.as_str())?
+            .split_whitespace()
+            .next()?;
+        return Some(format!("Bash({head}:*)"));
+    }
+    if name == "WebFetch" {
+        let url = input.get("url").and_then(|v| v.as_str())?;
+        let host = url::Url::parse(url).ok()?.host_str()?.to_string();
+        return Some(format!("WebFetch(domain:{host})"));
+    }
+    if matches!(name, "Read" | "Edit" | "Write" | "Grep" | "Glob") {
+        let target = input
+            .get("file_path")
+            .or_else(|| input.get("path"))
+            .and_then(|v| v.as_str())?;
+        let normalized = normalize_path(target, cwd);
+        let mut dir = std::path::Path::new(&normalized)
+            .parent()?
+            .to_string_lossy()
+            .into_owned();
+        if !dir.ends_with(std::path::MAIN_SEPARATOR) {
+            dir.push(std::path::MAIN_SEPARATOR);
+        }
+        return Some(format!("{name}({dir})"));
+    }
+    Some(name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +509,104 @@ mod tests {
         assert_eq!(
             decide(&tool, input, PermissionMode::Plan, &[]).behavior,
             PermissionBehavior::Deny
+        );
+    }
+
+    /// D81: "don't ask again this session" installs a rule, and the rule is what
+    /// makes the next call of the same shape pass without a dialog.
+    #[test]
+    fn a_session_allow_rule_stops_the_gate_asking_again() {
+        let cwd = std::env::temp_dir();
+        let tool = crate::tool::bash::BashTool::new();
+        let input = serde_json::json!({ "command": "cargo test --locked" });
+        assert_eq!(
+            can_use_tool(&tool, &input, PermissionMode::Default, &[], &[], &[], &cwd).behavior,
+            PermissionBehavior::Ask
+        );
+
+        let rule = session_allow_rule(&tool, &input, &[], &cwd)
+            .expect("a plain cargo call can be scoped to its command prefix");
+        assert_eq!(rule, "Bash(cargo:*)", "scoped to the command's first word");
+
+        let allow = vec![rule];
+        assert_eq!(
+            can_use_tool(
+                &tool,
+                &input,
+                PermissionMode::Default,
+                &[],
+                &[],
+                &allow,
+                &cwd
+            )
+            .behavior,
+            PermissionBehavior::Allow,
+            "the call that asked is itself covered"
+        );
+        let sibling = serde_json::json!({ "command": "cargo build" });
+        assert_eq!(
+            can_use_tool(
+                &tool,
+                &sibling,
+                PermissionMode::Default,
+                &[],
+                &[],
+                &allow,
+                &cwd
+            )
+            .behavior,
+            PermissionBehavior::Allow,
+            "and so is the next cargo call of the session"
+        );
+    }
+
+    /// A rule is only offered when it would really cover the call. `cd` is the
+    /// first word of `cd /tmp && rm -rf /`, and scoping to `Bash(cd:*)` would
+    /// have promised silence for a command it does not match.
+    #[test]
+    fn a_compound_command_gets_no_session_scope() {
+        let cwd = std::env::temp_dir();
+        let tool = crate::tool::bash::BashTool::new();
+        let input = serde_json::json!({ "command": "cd /tmp && rm -rf /" });
+        assert_eq!(session_allow_rule(&tool, &input, &[], &cwd), None);
+    }
+
+    /// Prompts that outrank allow rules get no session option at all: an `ask`
+    /// rule and the bypass-immune safety check are both read before allow, so a
+    /// rule installed for them would be dead text.
+    #[test]
+    fn prompts_that_outrank_allow_rules_offer_no_session_scope() {
+        let cwd = std::env::temp_dir();
+        let write = WriteTool;
+        let sensitive = serde_json::json!({
+            "file_path": cwd.join(".git").join("config").to_string_lossy(),
+            "content": "x",
+        });
+        assert!(safety_check(&write, &sensitive, &cwd).is_some());
+        assert_eq!(session_allow_rule(&write, &sensitive, &[], &cwd), None);
+
+        let ordinary = serde_json::json!({
+            "file_path": cwd.join("note.txt").to_string_lossy(),
+            "content": "x",
+        });
+        let scope = session_allow_rule(&write, &ordinary, &[], &cwd)
+            .expect("an ordinary write is scoped to its directory");
+        assert_eq!(
+            scope,
+            format!(
+                "Write({}{})",
+                cwd.to_string_lossy()
+                    .trim_end_matches(std::path::MAIN_SEPARATOR),
+                std::path::MAIN_SEPARATOR
+            ),
+            "a file tool is scoped to the directory it writes into"
+        );
+
+        let ask_rule = vec!["Write".to_string()];
+        assert_eq!(
+            session_allow_rule(&write, &ordinary, &ask_rule, &cwd),
+            None,
+            "a user's own ask rule keeps asking"
         );
     }
 

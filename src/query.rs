@@ -214,8 +214,55 @@ pub enum ToolCallStatus {
     Interrupted,
 }
 
-/// Async permission prompt callback: tool name + reason → whether allowed.
-pub type AskFn = dyn Fn(&str, &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+/// What the user decided at a permission prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskOutcome {
+    /// Allow this call; the next one of the same shape asks again.
+    Allow,
+    /// Allow this call and install [`AskContext::scope`] as a session-scoped
+    /// allow rule, so the rest of the session runs unasked. Nothing is written
+    /// to disk: "this session" is exactly what the user was offered.
+    AllowSession,
+    /// Refuse. `feedback` is what the user asked for instead; it travels to the
+    /// model inside the `<permission_error>` so a denial carries a direction
+    /// rather than only a wall.
+    Deny { feedback: Option<String> },
+}
+
+impl AskOutcome {
+    // Production reads the variants directly; the shorthand is what tests assert with.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn allowed(&self) -> bool {
+        matches!(self, Self::Allow | Self::AllowSession)
+    }
+}
+
+/// Everything a prompt surface needs to describe one pending permission request.
+///
+/// It travels as a struct rather than positional arguments because the prompt
+/// has to show *what* it is approving (the input, resolved against `cwd`, or the
+/// dry-run `diff`) and whether "don't ask again" can honestly be offered
+/// (`scope`) — a bool-returning `(name, reason)` callback could show neither.
+#[derive(Clone, Copy)]
+pub struct AskContext<'a> {
+    /// Tool being gated.
+    pub tool: &'a str,
+    /// Why the gate is asking (`can_use_tool`'s reason).
+    pub reason: &'a str,
+    /// The input the tool would run with, after PreToolUse hooks.
+    pub input: &'a serde_json::Value,
+    /// Session working directory: relative paths in `input` resolve against it.
+    pub cwd: &'a std::path::Path,
+    /// The allow rule "don't ask again this session" would install. `None`: the
+    /// prompt outranks allow rules (ask rule / safety check), so the option must
+    /// not be offered — it could not keep its promise.
+    pub scope: Option<&'a str>,
+    /// Dry-run unified diff of the change approving would make (edit tools).
+    pub diff: Option<&'a str>,
+}
+
+/// Async permission prompt callback: one pending request → the user's verdict.
+pub type AskFn = dyn Fn(&AskContext<'_>) -> std::pin::Pin<Box<dyn std::future::Future<Output = AskOutcome> + Send>>
     + Send
     + Sync;
 
@@ -270,8 +317,12 @@ pub struct UiHooks {
 /// Headless permission prompt (stderr question, stdin answer). Shared by `headless_hooks` and
 /// the subagent prompt surface attached to the registry, so both ask the same way.
 pub fn stdin_ask() -> Arc<AskFn> {
-    Arc::new(|tool_name, reason| {
-        let prompt = format!("Allow {tool_name} to run? ({reason}) [y/N] ");
+    Arc::new(|ask| {
+        // `s` is only listed when a session rule could actually be installed:
+        // offering it otherwise would promise silence the gate cannot deliver.
+        let scoped = ask.scope.is_some();
+        let keys = if scoped { "[y/s/N]" } else { "[y/N]" };
+        let prompt = format!("Allow {} to run? ({}) {keys} ", ask.tool, ask.reason);
         Box::pin(async move {
             eprintln!("{prompt}");
             let answer = tokio::task::spawn_blocking(move || {
@@ -283,7 +334,11 @@ pub fn stdin_ask() -> Arc<AskFn> {
             })
             .await
             .unwrap_or_default();
-            answer == "y" || answer == "yes"
+            match answer.as_str() {
+                "y" | "yes" => AskOutcome::Allow,
+                "s" | "session" if scoped => AskOutcome::AllowSession,
+                _ => AskOutcome::Deny { feedback: None },
+            }
         })
     })
 }
@@ -362,6 +417,54 @@ fn tool_result_error(tool_use_id: &str, text: impl Into<String>) -> ContentBlock
     }
 }
 
+/// What the permission gate settled on for one call.
+struct GateDecision {
+    behavior: PermissionBehavior,
+    reason: String,
+    /// Input after PreToolUse hooks (possibly rewritten).
+    input: serde_json::Value,
+    /// What the user asked for instead when refusing. Carried separately from
+    /// `reason` because it belongs after the parenthesised reason in the
+    /// sentence the model reads, not inside it.
+    guidance: Option<String>,
+}
+
+impl GateDecision {
+    fn settled(behavior: PermissionBehavior, reason: String, input: serde_json::Value) -> Self {
+        Self {
+            behavior,
+            reason,
+            input,
+            guidance: None,
+        }
+    }
+}
+
+/// Read the runtime rule table into an owned copy. The guard must not outlive
+/// the call: it is not `Send`, and one held across an await breaks the `Send`
+/// bound every spawned turn task depends on.
+fn permission_snapshot(
+    permissions: &Arc<std::sync::Mutex<crate::settings::PermissionRules>>,
+) -> crate::settings::PermissionRules {
+    permissions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Install a session-scoped allow rule. The runtime table is shared with
+/// subagents and `/permissions`, and is never persisted — the rule dies with
+/// the session, which is what the user was offered.
+fn install_session_rule(
+    permissions: &Arc<std::sync::Mutex<crate::settings::PermissionRules>>,
+    rule: String,
+) {
+    let mut rules = permissions.lock().unwrap_or_else(|e| e.into_inner());
+    if !rules.allow.contains(&rule) {
+        rules.allow.push(rule);
+    }
+}
+
 /// Permission gate + PreToolUse hook + UI prompt: returns the final decision and
 /// (possibly rewritten) input.
 async fn gate_tool(
@@ -369,39 +472,70 @@ async fn gate_tool(
     input: &serde_json::Value,
     mode: PermissionMode,
     hooks: &HooksConfig,
-    permissions: &crate::settings::PermissionRules,
+    permissions: &Arc<std::sync::Mutex<crate::settings::PermissionRules>>,
     ask: &AskFn,
     cwd: &std::path::Path,
-) -> (PermissionBehavior, String, serde_json::Value) {
+) -> GateDecision {
+    let name = tool.name();
     let (hook_behavior, hook_reason, hook_input) =
-        run_pre_tool_use(hooks, &tool.name(), input, permission_mode_str(mode), cwd).await;
+        run_pre_tool_use(hooks, &name, input, permission_mode_str(mode), cwd).await;
     if hook_behavior != PermissionBehavior::Allow {
-        return (hook_behavior, hook_reason, hook_input);
+        return GateDecision::settled(hook_behavior, hook_reason, hook_input);
     }
 
+    let rules = permission_snapshot(permissions);
     let decision = can_use_tool(
         tool,
         &hook_input,
         mode,
-        &permissions.deny,
-        &permissions.ask,
-        &permissions.allow,
+        &rules.deny,
+        &rules.ask,
+        &rules.allow,
         cwd,
     );
-    match decision.behavior {
-        PermissionBehavior::Ask => {
-            let reason = decision.reason;
-            if ask(&tool.name(), &reason).await {
-                (PermissionBehavior::Allow, String::new(), hook_input)
-            } else {
-                (
-                    PermissionBehavior::Deny,
-                    format!("user denied {}", tool.name()),
-                    hook_input,
-                )
-            }
+    if decision.behavior != PermissionBehavior::Ask {
+        return GateDecision::settled(decision.behavior, decision.reason, hook_input);
+    }
+    // Scope and preview are computed here, where the tool and the cwd are both
+    // in hand: a prompt surface has neither, and would have to guess at both.
+    let scope = crate::permission::session_allow_rule(tool, &hook_input, &rules.ask, cwd);
+    let diff = tool.preview_diff(&hook_input, cwd);
+    let outcome = ask(&AskContext {
+        tool: &name,
+        reason: &decision.reason,
+        input: &hook_input,
+        cwd,
+        scope: scope.as_deref(),
+        diff: diff.as_deref(),
+    })
+    .await;
+    match outcome {
+        AskOutcome::Allow => {
+            GateDecision::settled(PermissionBehavior::Allow, String::new(), hook_input)
         }
-        other => (other, decision.reason, hook_input),
+        AskOutcome::AllowSession => {
+            // Installed before the call runs, so the tool that asked is itself
+            // covered and the same shape never asks twice in one session.
+            if let Some(rule) = scope {
+                install_session_rule(permissions, rule);
+            }
+            GateDecision::settled(PermissionBehavior::Allow, String::new(), hook_input)
+        }
+        AskOutcome::Deny { feedback } => GateDecision {
+            behavior: PermissionBehavior::Deny,
+            reason: format!("user denied {name}"),
+            input: hook_input,
+            guidance: feedback.filter(|text| !text.trim().is_empty()),
+        },
+    }
+}
+
+/// The refusal sentence. Feedback the user typed at the dialog is appended so
+/// the model reads what to do instead, not only that it was stopped.
+fn permission_denial(subject: &str, guidance: Option<&str>) -> String {
+    match guidance {
+        Some(text) => format!("permission denied: {subject}. User guidance: {text}"),
+        None => format!("permission denied: {subject}"),
     }
 }
 
@@ -984,23 +1118,20 @@ async fn query_loop(
             };
             // AskUserQuestion: asking the user is itself the interaction (the dialog is the
             // approval), no permission gate.
-            let (behavior, reason, gated_input) = if name == "AskUserQuestion" {
-                (PermissionBehavior::Allow, String::new(), input.clone())
+            let GateDecision {
+                behavior,
+                reason,
+                input: gated_input,
+                guidance,
+            } = if name == "AskUserQuestion" {
+                GateDecision::settled(PermissionBehavior::Allow, String::new(), input.clone())
             } else {
-                // Clone into a local before awaiting: MutexGuard is not Send, and holding it
-                // across an await would break tokio::spawn's Send bound (sub-agent/turn tasks).
-                let permissions = session
-                    .runtime
-                    .permissions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
                 gate_tool(
                     tool,
                     &input,
                     session.permission_mode,
                     &session.settings.hooks,
-                    &permissions,
+                    &session.runtime.permissions,
                     &*ui.ask,
                     &ctx.cwd,
                 )
@@ -1013,11 +1144,11 @@ async fn query_loop(
                     input: gated_input,
                 }),
                 PermissionBehavior::Deny => {
+                    let guidance = guidance.as_deref();
+                    let denial = permission_denial(&format!("{name} ({reason})"), guidance);
                     blocks.push(tool_result_error(
                         &id,
-                        format!(
-                            "<permission_error>permission denied: {name} ({reason})</permission_error>"
-                        ),
+                        format!("<permission_error>{denial}</permission_error>"),
                     ));
                     // Denied tools also need UI closure: the tool row shows "denied"
                     // instead of spinning forever.
@@ -1026,7 +1157,7 @@ async fn query_loop(
                         tool_call_id: id,
                         name,
                         summary,
-                        output: format!("permission denied: {reason}"),
+                        output: permission_denial(&reason, guidance),
                         status: ToolCallStatus::Error,
                         diff: None,
                         duration_ms: 0,
@@ -1411,18 +1542,17 @@ pub async fn run_bash_command(
             (err, true, 0)
         }
         None => {
-            let permissions = session
-                .runtime
-                .permissions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let (behavior, reason, gated_input) = gate_tool(
+            let GateDecision {
+                behavior,
+                reason,
+                input: gated_input,
+                guidance,
+            } = gate_tool(
                 tool,
                 &input,
                 session.permission_mode,
                 &session.settings.hooks,
-                &permissions,
+                &session.runtime.permissions,
                 &*ui.ask,
                 &ctx.cwd,
             )
@@ -1480,7 +1610,9 @@ pub async fn run_bash_command(
                     }
                 }
                 PermissionBehavior::Deny => {
-                    let err = format!("permission denied: Bash ({reason})");
+                    // The `!` path has no tool_result to wrap: the same sentence
+                    // reaches the model inside the `<bash-stderr>` block below.
+                    let err = permission_denial(&format!("Bash ({reason})"), guidance.as_deref());
                     (err, true, 0)
                 }
                 PermissionBehavior::Ask => unreachable!("ask resolved by gate_tool"),
@@ -1625,6 +1757,50 @@ mod tests {
     use super::*;
 
     use crate::query_turn::STREAM_API_MAX_RETRIES;
+
+    /// D81: a refusal the user explained reaches the model as guidance appended
+    /// to the same sentence; a plain refusal keeps the wording it always had.
+    #[test]
+    fn a_refusal_carries_its_feedback_to_the_model() {
+        assert_eq!(
+            format!(
+                "<permission_error>{}</permission_error>",
+                permission_denial("Bash (Bash needs permission)", None)
+            ),
+            "<permission_error>permission denied: Bash (Bash needs permission)</permission_error>"
+        );
+        assert_eq!(
+            format!(
+                "<permission_error>{}</permission_error>",
+                permission_denial(
+                    "Bash (Bash needs permission)",
+                    Some("run the tests instead")
+                )
+            ),
+            "<permission_error>permission denied: Bash (Bash needs permission). \
+             User guidance: run the tests instead</permission_error>"
+        );
+        assert_eq!(
+            permission_denial("Bash needs permission", Some("use cargo nextest")),
+            "permission denied: Bash needs permission. User guidance: use cargo nextest",
+            "the transcript row shows why too"
+        );
+    }
+
+    /// A session allow lives in the runtime table only, and lands there once.
+    #[test]
+    fn a_session_allow_is_installed_once_and_stays_in_memory() {
+        let rules = Arc::new(std::sync::Mutex::new(
+            crate::settings::PermissionRules::default(),
+        ));
+        install_session_rule(&rules, "Bash(cargo:*)".to_string());
+        install_session_rule(&rules, "Bash(cargo:*)".to_string());
+        assert_eq!(permission_snapshot(&rules).allow, ["Bash(cargo:*)"]);
+        assert!(
+            permission_snapshot(&rules).deny.is_empty()
+                && permission_snapshot(&rules).ask.is_empty()
+        );
+    }
 
     /// A tool result carrying images must reach the API as protocol blocks. Re-stringifying it
     /// here is what would turn a screenshot into a wall of base64 text the model can't see.

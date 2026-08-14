@@ -3553,6 +3553,9 @@ fn ask_other_input_does_not_swallow_modifier_chords() {
             options: vec!["A".into()],
             descriptions: vec![None],
             free_text: true,
+            kind: crate::ui::AskKind::Question,
+            preview: None,
+            scope: None,
         },
         tx,
     ));

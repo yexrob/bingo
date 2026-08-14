@@ -1389,7 +1389,11 @@ fn json_hooks(
                 msg: sanitize_msg(&message),
             })));
         }),
-        ask: Arc::new(move |tool_name, reason| {
+        // Protocol v1's permission reply is a bool on the wire, so the JSON host
+        // keeps the two-option prompt: widening it to D81's three options is a
+        // protocol change, not a rendering one, and belongs to whoever versions
+        // the protocol next. Session scope and previews stay TUI-side.
+        ask: Arc::new(move |request| {
             let prompt_id = format!(
                 "prompt-{}",
                 permission_ids.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -1399,8 +1403,8 @@ fn json_hooks(
                 turn_id: permission_turn_id.clone(),
                 prompt_id,
                 kind: PromptKind::Permission,
-                title: format!("Allow running {tool_name}"),
-                question: reason.to_string(),
+                title: format!("Allow running {}", request.tool),
+                question: request.reason.to_string(),
                 options: vec![
                     PromptOption {
                         id: "allow".to_string(),
@@ -1418,10 +1422,11 @@ fn json_hooks(
             };
             let sent = permission_sender.send(AdapterEvent::Prompt(prompt)).is_ok();
             Box::pin(async move {
-                if !sent {
-                    return false;
+                if sent && receiver.await.unwrap_or(false) {
+                    crate::query::AskOutcome::Allow
+                } else {
+                    crate::query::AskOutcome::Deny { feedback: None }
                 }
-                receiver.await.unwrap_or(false)
             })
         }),
         ask_question: Arc::new(move |title, question, options| {

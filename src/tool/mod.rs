@@ -122,11 +122,30 @@ pub trait Tool: Send + Sync {
     fn confirm_reason(&self, _input: &serde_json::Value) -> Option<String> {
         None
     }
+    /// A dry run of the change this call would make, as a unified diff, so the
+    /// approval prompt can show what it is approving instead of naming it.
+    /// Reads the current file and nothing else — it must never write.
+    /// `None`: nothing to preview (or the change cannot be computed yet).
+    fn preview_diff(&self, _input: &serde_json::Value, _cwd: &std::path::Path) -> Option<String> {
+        None
+    }
     async fn call(
         &self,
         input: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError>;
+}
+
+/// A tool's `file_path` against the session cwd: absolute paths stand, relative
+/// ones hang off `cwd`. The approval preview and the write itself must resolve
+/// the same way, or the diff shown belongs to a different file.
+pub(crate) fn resolve_path(path: &str, cwd: &std::path::Path) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
 }
 
 /// Model-returned parameters → target type. Failure info is visible to the model (fed back via is_error).

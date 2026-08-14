@@ -16,6 +16,16 @@ pub struct EditInput {
     pub replace_all: bool,
 }
 
+/// The replacement itself. The approval preview and the write share it, so what
+/// the user approves is exactly what lands.
+fn replace(content: &str, params: &EditInput) -> String {
+    if params.replace_all {
+        content.replace(&params.old_string, &params.new_string)
+    } else {
+        content.replacen(&params.old_string, &params.new_string, 1)
+    }
+}
+
 /// Edit: exact replacement of old_string → new_string.
 pub struct EditTool;
 
@@ -41,18 +51,25 @@ impl Tool for EditTool {
     fn is_edit_tool(&self, _input: &serde_json::Value) -> bool {
         true
     }
+    fn preview_diff(&self, input: &serde_json::Value, cwd: &std::path::Path) -> Option<String> {
+        let params: EditInput = parse_input(input).ok()?;
+        if params.old_string.is_empty() {
+            return None;
+        }
+        let content = std::fs::read_to_string(super::resolve_path(&params.file_path, cwd)).ok()?;
+        if !content.contains(&params.old_string) {
+            return None;
+        }
+        let replaced = replace(&content, &params);
+        super::diff::unified_diff(&params.file_path, &content, &replaced)
+    }
     async fn call(
         &self,
         input: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: EditInput = parse_input(&input)?;
-        let path = std::path::PathBuf::from(&params.file_path);
-        let path = if path.is_absolute() {
-            path
-        } else {
-            ctx.cwd.join(path)
-        };
+        let path = super::resolve_path(&params.file_path, &ctx.cwd);
         if params.old_string.is_empty() {
             return Err(ToolError::failed("old_string must not be empty"));
         }
@@ -65,11 +82,7 @@ impl Tool for EditTool {
                 params.file_path
             )));
         }
-        let replaced = if params.replace_all {
-            content.replace(&params.old_string, &params.new_string)
-        } else {
-            content.replacen(&params.old_string, &params.new_string, 1)
-        };
+        let replaced = replace(&content, &params);
         std::fs::write(&path, &replaced)
             .map_err(|e| ToolError::failed(format!("cannot write {}: {e}", path.display())))?;
         let mut text = format!(

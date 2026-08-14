@@ -143,7 +143,8 @@ bingo --continue            # 恢复最近一次会话
 | `Ctrl+O` | 展开/闭合切换：展开 = 重放完整 transcript 供上滑翻看 |
 | `Ctrl+G` | 直接打开全屏 Slack 式工作区；`Ctrl+K` 切换频道与 DM，alt+↑↓ 上下会话 |
 | `Ctrl+L` | 清屏重画 |
-| `Shift+Tab` | 循环权限模式（default → acceptEdits → plan） |
+| `Shift+Tab` | 循环权限模式（default → acceptEdits → plan）；审批对话框中直接选中「本会话不再询问」 |
+| `Ctrl+E` | 审批对话框中展开完整命令/diff 预览与将写入的会话规则 |
 | `Alt+T` | 思考开关 |
 | busy 时回车 | 消息排队，回合结束自动发送 |
 
@@ -477,6 +478,24 @@ bingo 的 Tool trait：
   "ask":   ["Bash(git push)"]
 }
 ```
+
+### 审批对话框
+
+需要询问时，对话框先展示「将要发生什么」——Bash 的命令行、Edit/Write 的
+试运行 diff（不落盘计算）——再给三个选项：
+
+1. `Yes`
+2. `Yes, and don't ask again this session`——`Shift+Tab` 可直接选中。
+   仅当权限引擎能推出真正管用的最窄规则（`Bash(cargo:*)`、`Edit(/路径/)`、
+   `WebFetch(domain:…)` 或裸工具名）时才出现；你自己的 `ask` 规则与敏感路径 /
+   `confirm_reason` 检查排在 allow 之前，这类询问不显示该选项。
+   规则只存在于本会话内存中，不写入 settings。
+3. `No, and tell bingo what to do differently (esc)`——回车展开反馈输入行，
+   输入的内容会随拒绝一起交给模型；任何位置按 `Esc`、以及空反馈提交，
+   都是不带反馈的普通拒绝。
+
+`Ctrl+E` 展开完整预览，并显示选项 2 将写入的会话规则。对话框出现后的
+0.4 秒内忽略回车与数字键，避免已在途的按键误批。
 
 ## Hooks
 

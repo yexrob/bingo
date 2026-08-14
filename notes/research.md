@@ -1375,3 +1375,92 @@ capability that had no other home, "open this agent's DM", moved onto the ctrl+b
 view (Enter, which previously just closed the panel), so `EntityOpen::Agent` stays alive on the
 surface that replaced the selector. Ctrl+G still opens the workspace; it now rides in `control_key`
 with the rest of the ctrl chords instead of in a handler of its own.
+
+### D81. Approval is a decision about an act, not about a tool name
+
+The permission dialog was `⏺ Allow running Bash` over `Allow` / `Deny`. Three things were wrong
+with it, and they compound: the user approved a *category* while the actual command or file change
+stayed off screen; the only way to stop being asked was to quit and edit `settings.json` by hand;
+and a refusal reached the model as a wall (`permission denied: Bash (…)`) with no way to say what
+to do instead, so the model's next move was a guess. This batch replaces the dialog with CC's
+three-option shape and widens the contract underneath it enough to carry the extra meaning.
+
+**The verdict widens.** `AskFn` was `Fn(&str name, &str reason) -> bool`. A bool cannot express
+"allow, and stop asking", and two `&str` cannot describe what is about to happen. It is now
+`Fn(&AskContext<'_>) -> AskOutcome`, where `AskOutcome` is `Allow` / `AllowSession` /
+`Deny { feedback: Option<String> }` and `AskContext` carries `{ tool, reason, input, cwd, scope,
+diff }`. A struct rather than more positional arguments because both new fields are *derived*, not
+passed through: the preview needs the cwd to resolve a relative `file_path`, and the session option
+needs a rule the prompt surface has no business inventing. All four implementations moved with it —
+`modal_ask` (TUI), `stdin_ask` (headless, `y` / `s` / anything-else), the subagent forwarder in
+`tool/agent.rs`, and the JSON host.
+
+**Scope is the permission engine's answer, not the UI's.** `permission::session_allow_rule` derives
+the narrowest rule that matches this exact call — `Bash(<first word>:*)`, `Edit(<parent dir>/)`,
+`WebFetch(domain:<host>)`, or the bare tool name — and then *verifies* it with `rule_matches` under
+the same `MatchMode::All` the gate uses. Derivation and matching are two readings of one grammar and
+they are allowed to disagree; the verification is what keeps `cd /tmp && rm -rf /` from being scoped
+to `Bash(cd:*)`, which would have matched neither sub-command and silently promised nothing.
+
+The harder question is what to do when a session rule *cannot* work. `can_use_tool` consults `ask`
+rules (step 2) and the bypass-immune safety check (step 4) before allow rules (step 7), so for a
+write into `.git`, a `confirm_reason` tool (D46's Team confirmations), or the user's own
+`ask` rule, a rule pushed into `allow` is dead text. Two bad options were available: install it
+anyway (the option lies), or route around the safety check (a rule table consents to something D46
+decided a rule table must never consent to). Chosen instead: `session_allow_rule` returns `None`
+for those cases and the option is **not rendered** — the dialog shows `Yes` / `No…` and nothing
+promises anything. Deviation from the dispatch, which specified exactly three options; an option
+that cannot keep its word is worse than an option that is not there.
+
+On `AllowSession`, `gate_tool` pushes the rule into `session.runtime.permissions` before the tool
+runs, so the call that asked is covered by the rule it created. That table is the runtime one — the
+same handle `/permissions` edits and subagents share — and is never persisted: "this session" is
+what the user was offered, so this session is exactly how long it lives. The UI touches no file.
+
+**A refusal carries a direction.** Option 3 does not resolve the dialog; it opens a feedback row
+under itself (reusing the existing `free_text` / `DialogAction::Answer` mechanics, so nothing new
+was invented for the input). The text arrives as `Deny { feedback }`, travels through `GateDecision`
+alongside — not inside — the reason, and lands in both deny sites as
+`permission denied: {name} ({reason}). User guidance: {text}`. Without feedback the wording is
+byte-identical to before. `GateDecision` replaces the `(behavior, reason, input)` tuple `gate_tool`
+returned: guidance belongs *after* the parenthesised reason in the sentence the model reads, so it
+could not be folded into `reason` without corrupting a string other code formats. The `!` command's
+deny site has no `tool_result` to wrap; it gets the same sentence in the place it already put the
+denial, inside `<bash-stderr>`.
+
+**The preview is the tool's own dry run.** `Tool::preview_diff(input, cwd)` defaults to `None`;
+`EditTool` and `WriteTool` implement it by reading the file and computing the same replacement
+`call` would, through a shared `replace()` and a shared `resolve_path()` — one source of truth, so
+the diff shown is the diff that lands. It never writes. `gate_tool` calls it only when the decision
+is `Ask`. Bash needs no hook: its `command` field is the preview. Rendering bounds both (12 diff
+rows, 6 command rows) with `… N more lines`; `ctrl+e` lifts the bound and additionally prints
+`session rule: <rule>`, which is where the promise option 2 makes gets spelled out in full.
+`ctrl+e` is claimed only while a dialog is open and only when there is a preview, so it stays
+readline end-of-line everywhere else.
+
+**Two guards.** Enter and digits are inert for `ASK_CONFIRM_GUARD` (400ms) after a permission
+prompt appears, so a keystroke already in flight when the dialog rendered cannot approve anything;
+`ask_opened_at` is stamped in `drain_asks` and read against the `now` that `on_key_at` already
+threads, which is the whole test hook — no clock injection was needed. Esc, shift+tab and ctrl+e
+are not delayed: none of them is a key anyone types ahead. The guard is deliberately limited to
+permission prompts; a mistyped AskUserQuestion option costs a round trip, a mistyped approval runs
+a command.
+
+**The receipt.** The dialog is chrome and disappears with the answer, which left a transcript where
+a turn simply carried on with no record of who let it. Each resolution now leaves one dim state
+line where the dialog was — `> yes` · `> yes, don't ask again this session` · `> no` ·
+`> no — <feedback>` — extending D80's `is_state_line` rather than adding a parallel mechanism.
+Matching is exact for the three fixed lines and by the `> no — ` prefix for the fourth; a bare
+`> ` test would have turned every pasted markdown quote into a state line. Display only: the model
+learns the verdict from the gate, not from a message the user did not write.
+
+**Housekeeping.** The dialog's key handling and rendering moved out of `chat.rs`/`chat_tail.rs`
+into `src/tui/ask.rs` (`impl super::Chat`, same pattern as `chat_tail`). Both files were within a
+few hundred lines of the 4000-line cap and this batch adds to both; the move is what keeps the cap
+honest without touching the pre-existing debt. `cancel_asks`, `drain_asks`, `ask_click` and the
+answer-message helpers went with it, so the dialog's whole lifetime reads in one file.
+
+AskUserQuestion is untouched: same options, same numbered `Other` row, same decline message, no
+confirm guard, and `AskKind` on the request is what keeps the two shapes apart. The JSON host keeps
+protocol v1's two-option prompt — its reply is a `bool` on the wire, and widening that is a protocol
+version rather than a rendering change (recorded here so D8x does not mistake it for an oversight).

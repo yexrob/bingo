@@ -426,11 +426,29 @@ pub const ASK_DECLINED_TEXT: &str = "User declined to answer questions";
 /// the user, in the place the dialog used to be.
 pub const ASK_CANCELLED_TEXT: &str = "(pending permission dialog cancelled with the turn)";
 
+/// The receipt a resolved permission dialog leaves in the flow: the choice the
+/// user made, in the place the dialog was (D81). The dialog itself is chrome and
+/// disappears with the answer; without this the transcript would show a turn
+/// that simply carried on, with no record of who let it.
+pub const ASK_RECEIPT_YES: &str = "> yes";
+pub const ASK_RECEIPT_SESSION: &str = "> yes, don't ask again this session";
+pub const ASK_RECEIPT_NO: &str = "> no";
+/// A refusal that carried feedback: `> no — <what to do instead>`.
+pub const ASK_RECEIPT_NO_PREFIX: &str = "> no — ";
+
+/// Whether a line is a permission receipt. Matched whole for the three plain
+/// choices and by the em-dash prefix for a refusal with feedback — a bare `> `
+/// test would swallow every markdown quote the user ever pastes.
+pub(crate) fn is_ask_receipt(text: &str) -> bool {
+    matches!(text, ASK_RECEIPT_YES | ASK_RECEIPT_SESSION | ASK_RECEIPT_NO)
+        || text.starts_with(ASK_RECEIPT_NO_PREFIX)
+}
+
 /// A user-role message the user never wrote: the harness recorded it to state
 /// what happened. State lines render as a single line — no `❯` bubble putting
 /// words in the user's mouth, and no send stamp, because nothing was sent.
 pub(crate) fn is_state_line(text: &str) -> bool {
-    crate::query::is_interrupt_marker(text) || text == ASK_CANCELLED_TEXT
+    crate::query::is_interrupt_marker(text) || text == ASK_CANCELLED_TEXT || is_ask_receipt(text)
 }
 
 /// Read/Search-style tool classification.
@@ -934,10 +952,14 @@ pub struct Chat {
     pub cwd: String,
     /// Permission prompt: request + result receipt.
     pub pending_ask: Option<(PermissionRequest, oneshot::Sender<DialogAction>)>,
-    /// Dialog focus row (0..=options.len(); == options.len() = Other input).
+    /// Dialog focus row (0..=options.len(); == options.len() = free-text input).
     pub(crate) ask_focus: usize,
-    /// Buffer for Other free-form input.
+    /// Buffer for free-form input: AskUserQuestion's Other, or a refusal's feedback.
     pub(crate) ask_other: String,
+    /// When the pending dialog first appeared (D81 type-ahead guard).
+    pub(crate) ask_opened_at: Option<std::time::Instant>,
+    /// ctrl+e: the pre-approval preview is showing in full, not bounded.
+    pub(crate) ask_expanded: bool,
     /// Task-list disk snapshot cache (refreshed each tick).
     pub(crate) tasks_cache: Vec<TodoItem>,
     pub(crate) processor: MarkdownProcessor,
@@ -1285,6 +1307,8 @@ impl Chat {
             pending_ask: None,
             ask_focus: 0,
             ask_other: String::new(),
+            ask_opened_at: None,
+            ask_expanded: false,
             tasks_cache: Vec::new(),
             processor: MarkdownProcessor::default(),
             renderer: MarkdownRenderer::with_theme(80, theme.clone()),
@@ -1375,23 +1399,6 @@ impl Chat {
     fn notify_idle(&mut self) {
         let cwd = crate::tui::notify::cwd_short(&self.cwd).to_string();
         self.notify.set_title(Title::Idle(&cwd));
-    }
-
-    /// Drains the permission channel (one at a time: a new request is only accepted when none is pending).
-    pub fn drain_asks(&mut self) -> bool {
-        if self.pending_ask.is_none()
-            && let Ok(request) = self.asks_rx.try_recv()
-        {
-            self.ask_focus = 0;
-            self.ask_other.clear();
-            self.pending_ask = Some(request);
-            // The turn is blocked until this is answered, and the user may well
-            // be looking somewhere else by now (D79).
-            self.notify.attention(Attention::WaitingPermission);
-            self.notify.set_title(Title::WaitingPermission);
-            return true;
-        }
-        false
     }
 
     /// Drains all channels. Returns whether there is any new state.
@@ -2140,20 +2147,6 @@ impl Chat {
                 true
             }
         }
-    }
-
-    /// Click on a dialog option: the Other row → enter input mode; anything else confirms immediately.
-    fn ask_click(&mut self, index: usize) {
-        let Some((request, _)) = &self.pending_ask else {
-            return;
-        };
-        let options_len = request.options.len();
-        let free_text = request.free_text;
-        if index >= options_len && free_text {
-            self.ask_focus = index;
-            return;
-        }
-        self.choose_ask_option(index);
     }
 
     /// ctrl+o: globally expand/collapse the transcript (CC app:toggleTranscript).
@@ -3771,9 +3764,9 @@ pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<
             SegStyle::fg(theme.error),
         ))];
     }
-    // A dialog the turn outlived: nothing failed and nobody was denied, so it
-    // settles dim rather than in the error colour.
-    if text == ASK_CANCELLED_TEXT {
+    // A dialog the turn outlived, or the receipt of one the user answered:
+    // nothing failed, so both settle dim rather than in the error colour.
+    if text == ASK_CANCELLED_TEXT || is_ask_receipt(text) {
         return vec![Row::new(Line::styled(
             crate::tui::markdown::truncate(text, width.max(1)),
             theme.dim(),
@@ -3813,6 +3806,9 @@ pub(crate) fn text_rows(theme: &Theme, reply: Vec<Line>) -> Vec<Row> {
 
 #[path = "chat_tail.rs"]
 mod chat_tail;
+
+#[path = "ask.rs"]
+mod ask;
 
 #[cfg(test)]
 pub(crate) use chat_tail::{banner_line, banner_segments, update_color, welcome_card_rows};

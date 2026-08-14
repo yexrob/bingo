@@ -402,17 +402,31 @@ fn subagent_hooks(
         // would fail the tool call as "user denied" without the user ever being asked — and
         // auto-allowing under bypassPermissions would silently clear the safety-check gate
         // that is supposed to survive bypass.
-        ask: std::sync::Arc::new(move |tool_name, reason| {
+        ask: std::sync::Arc::new(move |request| {
             // No prompt surface attached: both real entry points (TUI, headless) attach one at
             // startup, so this is the embedded/test path — fall back to denying.
             let Some(ask) = ask.clone() else {
-                return Box::pin(async { false });
+                return Box::pin(async { crate::query::AskOutcome::Deny { feedback: None } });
             };
-            let request = format!("{instance} · {reason}");
-            let tool_name = tool_name.to_string();
+            // The forwarded request is rebuilt from owned copies: the borrowed
+            // one cannot cross into the future that waits on the gate lock.
+            let tool = request.tool.to_string();
+            let reason = format!("{instance} · {}", request.reason);
+            let input = request.input.clone();
+            let cwd = request.cwd.to_path_buf();
+            let scope = request.scope.map(str::to_string);
+            let diff = request.diff.map(str::to_string);
             Box::pin(async move {
                 let _serialized = ask_gate().lock().await;
-                ask(&tool_name, &request).await
+                ask(&crate::query::AskContext {
+                    tool: &tool,
+                    reason: &reason,
+                    input: &input,
+                    cwd: &cwd,
+                    scope: scope.as_deref(),
+                    diff: diff.as_deref(),
+                })
+                .await
             })
         }),
         // AskUserQuestion is not assembled for subagents (see `assemble_tools`); if one ever
@@ -3323,12 +3337,17 @@ mod tests {
     async fn subagent_ask_forwards_to_attached_prompt() {
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
         let recorder = seen.clone();
-        let ask: Arc<crate::query::AskFn> = Arc::new(move |tool, reason| {
+        let ask: Arc<crate::query::AskFn> = Arc::new(move |request| {
             recorder
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(format!("{tool}|{reason}"));
-            Box::pin(async { true })
+                .push(format!(
+                    "{}|{}|{}",
+                    request.tool,
+                    request.reason,
+                    request.scope.unwrap_or("-")
+                ));
+            Box::pin(async { crate::query::AskOutcome::Allow })
         });
         let watch = crate::watch::WatchRegistry::new();
         let registry = AgentRegistry::new();
@@ -3352,10 +3371,20 @@ mod tests {
             "worker".into(),
             Some(ask),
         );
-        assert!((ui.ask)("Write", "Write needs permission").await);
+        let input = serde_json::json!({ "file_path": "/tmp/x.txt" });
+        let request = crate::query::AskContext {
+            tool: "Write",
+            reason: "Write needs permission",
+            input: &input,
+            cwd: &std::env::temp_dir(),
+            scope: Some("Write(/tmp/)"),
+            diff: None,
+        };
+        assert!((ui.ask)(&request).await.allowed());
         assert_eq!(
             seen.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
-            ["Write|worker · Write needs permission"]
+            ["Write|worker · Write needs permission|Write(/tmp/)"],
+            "the instance stamps the reason; the scope travels untouched"
         );
 
         // Nothing attached (embedded/test path): deny rather than block on a modal nobody shows.
@@ -3372,6 +3401,9 @@ mod tests {
             "worker".into(),
             None,
         );
-        assert!(!(ui.ask)("Write", "Write needs permission").await);
+        assert_eq!(
+            (ui.ask)(&request).await,
+            crate::query::AskOutcome::Deny { feedback: None }
+        );
     }
 }

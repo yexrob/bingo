@@ -162,7 +162,8 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Ctrl+O` | expand/collapse: expanded replays the full transcript for scrolling up |
 | `Ctrl+G` | open the full workspace directly; `Ctrl+K` switches channels and DMs |
 | `Ctrl+L` | clear and redraw |
-| `Shift+Tab` | cycle permission modes (default → acceptEdits → plan) |
+| `Shift+Tab` | cycle permission modes (default → acceptEdits → plan); in an approval prompt, take `Yes, and don't ask again this session` |
+| `Ctrl+E` | in an approval prompt, expand the full command/diff preview and the session rule it would install |
 | `Alt+T` | toggle thinking |
 | Enter while busy | queue the message; auto-sends when the turn ends |
 
@@ -551,6 +552,28 @@ Example:
   "ask":   ["Bash(git push)"]
 }
 ```
+
+### The approval prompt
+
+When the gate asks, the prompt shows what it is about to do — a Bash call's
+command lines, an Edit/Write's dry-run diff (computed without touching the
+file) — above three options:
+
+1. `Yes`
+2. `Yes, and don't ask again this session` — `Shift+Tab` confirms it directly.
+   Offered only when the narrowest matching rule (`Bash(cargo:*)`,
+   `Edit(/path/to/)`, `WebFetch(domain:…)`, or the bare tool name) would really
+   stop the gate asking; an `ask` rule of yours and the sensitive-path /
+   `confirm_reason` checks outrank allow rules, so for those the option is not
+   shown at all. The rule lives in memory for this session and is never written
+   to settings.
+3. `No, and tell bingo what to do differently (esc)` — Enter opens a feedback
+   row; what you type reaches the model with the denial. `Esc` anywhere, and an
+   empty feedback submit, are the plain refusal.
+
+`Ctrl+E` expands the preview and shows the exact session rule option 2 would
+install. Enter and digits are ignored for the first 0.4s a prompt is on screen,
+so a keystroke already in flight cannot approve anything.
 
 ## Hooks
 

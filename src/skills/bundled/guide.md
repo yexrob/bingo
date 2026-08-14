@@ -35,7 +35,7 @@ commands, and verification steps in conclusions. Never speculate about features 
   start/end · Ctrl+Y paste back deleted · Ctrl+S stash/restore input · Ctrl+_ undo · ctrl+o
   expand/collapse toggle (expand = replays the full transcript for terminal scroll-up; press again to collapse back to
   aggregates and clear/consolidate) · Ctrl+T toggle the task area · Ctrl+G opens the fullscreen team/DM workspace directly (Ctrl+K switches channels and DMs; the DM view shows user/agent text while hiding tool activity; channel rooms let you speak directly as user) · Ctrl+B manages running background agents · Ctrl+L clear and redraw · Shift+Tab cycles permission
-  modes (default → acceptEdits → plan) · Alt+T thinking toggle (off ↔ the last non-off level, default medium) · while busy, Enter queues the message (sent automatically at turn end; /think /model /provider /theme /status /context /tasks /help /skills run immediately) ·
+  modes (default → acceptEdits → plan), and inside an approval prompt takes `Yes, and don't ask again this session` · Ctrl+E inside an approval prompt expands the full command/diff preview and the session rule it would install · Alt+T thinking toggle (off ↔ the last non-off level, default medium) · while busy, Enter queues the message (sent automatically at turn end; /think /model /provider /theme /status /context /tasks /help /skills run immediately) ·
 - During streamed output, the main footer shows a live `N tok/s` indicator; the speed band changes its character animation and cadence, and idle/stalled output hides it. Beside it, context usage stays visible as a four-cell bar, percentage, and `used/window` token count, using the active model's window; the colors count down to the auto-compaction trigger rather than to the window — warning within 20 percentage points of it, danger within 5. Once the count passes the warning point, the turn also emits a `context at N tokens; auto-compact at M` warning row. A running instance's DM composer shows the same indicators. `motion: "off"` freezes the rate frame but keeps the value.
 - Large pastes auto-collapse to a `[Pasted text #N +M lines]` placeholder; the real content expands on send
   (precisely detected via terminal bracketed-paste events; terminals without that feature fall back to a
@@ -166,6 +166,14 @@ Example (.bingo/settings.json):
    don't skip the prompt just because the server reports read-only; they need an explicit allow (`mcp__server` or
    `mcp__server__tool`). Edit `permissions.allow/deny/ask` or switch
    `permissionMode` (bypassPermissions allows everything; plan is read-only).
+   The prompt itself shows what it is approving — a Bash command, or an Edit/Write dry-run diff computed
+   without touching the file — over three options: `Yes` · `Yes, and don't ask again this session`
+   (Shift+Tab; only offered when the narrowest matching rule — `Bash(cargo:*)`, `Edit(/dir/)`,
+   `WebFetch(domain:…)`, or the bare tool name — would really stop the gate asking, so an `ask` rule of the
+   user's and the sensitive-path / Team-confirmation checks never show it; the rule stays in memory for the
+   session and is never written to settings) · `No, and tell bingo what to do differently (esc)` (Enter opens a
+   feedback row whose text reaches the model with the denial; Esc anywhere and an empty submit are the plain
+   refusal). Ctrl+E expands the preview; Enter and digits are inert for the first 0.4s a prompt is on screen.
 5. **`!` command rejected**: interactive/TTY commands (top/vim/ssh/sudo -i/fzf etc.) are rejected by design —
    use non-interactive equivalents (`top -b -n 1`, `ssh host 'cmd'`).
 6. **Stuck in bash mode/accidental trigger**: with an empty input, Esc/backspace/Ctrl+U all exit bash mode;
