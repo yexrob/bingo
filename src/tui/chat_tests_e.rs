@@ -45,6 +45,43 @@ fn fake_editor(root: &std::path::Path, name: &str, line: &str, code: i32) -> Str
     path.to_string_lossy().to_string()
 }
 
+/// A fake `$EDITOR` that saves the way vim's default `backupcopy=auto` does:
+/// write a sibling file, then rename it over the path. The path keeps its name
+/// and loses its inode, which is exactly what a read-back holding onto the old
+/// file would miss.
+#[cfg(unix)]
+fn renaming_editor(root: &std::path::Path, name: &str, line: &str, code: i32) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join(name);
+    let script = format!(
+        "#!/bin/sh\ncp \"$1\" \"$1.new\"\nprintf '\\n%s\\n' '{line}' >> \"$1.new\"\nmv -f \"$1.new\" \"$1\"\nexit {code}\n"
+    );
+    let _ = std::fs::write(&path, script);
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+    path.to_string_lossy().to_string()
+}
+
+/// D93/6: the round trip follows the *path*, not the file that was there when
+/// the draft was written. An editor that saves by renaming a new file over the
+/// path is the common case (vim, and every "atomic save" implementation), and
+/// its edit has to come back exactly like an in-place one's.
+#[cfg(unix)]
+#[test]
+fn a_rename_style_editor_round_trips_like_an_in_place_one() {
+    let root = scratch("editor-rename");
+    let editor = renaming_editor(&root, "rename.sh", "second line", 0);
+    let mut chat = test_chat();
+    chat.set_input("first line");
+
+    composer::compose_with(&mut chat, Some(&editor));
+    assert_eq!(
+        chat.input, "first line\nsecond line",
+        "a renamed-over file is the edit, not a stale inode"
+    );
+    assert!(info(&chat).is_empty(), "a successful edit is silent");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A saved edit replaces the draft, is one undo step, and says nothing — the
 /// new text on screen is the feedback.
 #[cfg(unix)]
@@ -66,6 +103,43 @@ fn editor_round_trip_replaces_the_draft() {
     // One undo step: ctrl+_ returns to what was typed before the editor opened.
     chat.undo_edit();
     assert_eq!(chat.input, "first line");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// D93, the way this round trip actually loses work: an editor that opens a
+/// window and returns straight away.
+///
+/// `code`/`zed`/`subl` without their wait flag exit zero before the user has
+/// typed anything, so the file is read back untouched and removed — and the
+/// edit they go on to save has nowhere left to land. It used to be reported as
+/// a successful edit, which is to say as silence: "I edited it and bingo threw
+/// it away", with nothing on screen saying so. Now it says so.
+#[cfg(unix)]
+#[test]
+fn an_editor_that_saves_nothing_no_longer_passes_for_a_saved_edit() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch("editor-detached");
+    let path = root.join("windowed.sh");
+    // Exits zero, having written nothing — which is what a windowed editor
+    // looks like from here at the moment the file is read back.
+    let _ = std::fs::write(&path, "#!/bin/sh\nexit 0\n");
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+    let editor = path.to_string_lossy().to_string();
+
+    let mut chat = test_chat();
+    chat.set_input("keep me");
+    composer::compose_with(&mut chat, Some(&editor));
+    assert_eq!(chat.input, "keep me", "the draft stands");
+    assert_eq!(
+        info(&chat),
+        composer::EDITOR_UNCHANGED_HINT,
+        "and the outcome is stated rather than swallowed"
+    );
+    assert!(
+        info(&chat).contains("wait flag"),
+        "the note names the cure: {}",
+        info(&chat)
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -487,6 +561,7 @@ fn ctrl_p_pulls_back_a_queued_message_and_loses_the_same_race() {
 fn a_saved_edit_is_the_only_silent_outcome() {
     assert!(EditorOutcome::Edited("x".into()).note().is_none());
     for outcome in [
+        EditorOutcome::Unchanged,
         EditorOutcome::Kept,
         EditorOutcome::Unset,
         EditorOutcome::Failed("boom".into()),

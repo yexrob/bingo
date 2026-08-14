@@ -138,6 +138,43 @@ impl El {
             child: Box::new(child),
         }
     }
+
+    /// The first row in this tree that has anything on it, as its line plus the
+    /// columns that row reserves on its right ([`Row::padding_right`]).
+    ///
+    /// Blank spacing rows are skipped: a trailer hung on one would float above
+    /// the block it belongs to instead of sitting beside it. Used to put a
+    /// message's send stamp on its opening row (D93).
+    pub fn first_content_line_mut(&mut self) -> Option<(&mut Line, usize)> {
+        fn from_rows(rows: &mut [Row]) -> Option<(&mut Line, usize)> {
+            rows.iter_mut()
+                .find(|row| has_content(&row.line))
+                .map(|row| {
+                    let padding = row.padding_right;
+                    (&mut row.line, padding)
+                })
+        }
+        fn has_content(line: &Line) -> bool {
+            line.image.is_some() || !line.plain_text().trim().is_empty()
+        }
+        match self {
+            El::Blank => None,
+            El::Line(line) => has_content(line).then_some((line, 0)),
+            El::Row(row) => {
+                let padding = row.padding_right;
+                has_content(&row.line).then_some((&mut row.line, padding))
+            }
+            El::Lines(lines) => lines
+                .iter_mut()
+                .find(|line| has_content(line))
+                .map(|l| (l, 0)),
+            El::Rows(rows) | El::Annotated { rows, .. } => from_rows(rows),
+            El::Col(children) => children
+                .iter_mut()
+                .find_map(|child| child.first_content_line_mut()),
+            El::Click { child, .. } | El::Caret { child, .. } => child.first_content_line_mut(),
+        }
+    }
 }
 
 /// The flat output of one render walk.

@@ -63,8 +63,30 @@ const PULSE_MS: u64 = 120;
 /// A glimmer crosses the running verb once per this period.
 const BEAM_PERIOD_MS: u64 = 2_000;
 
-/// How many cells the glimmer brightens at once.
-const BEAM_WIDTH: usize = 6;
+/// How many cells the glimmer brightens at once. Eight rather than six (D93):
+/// on a real terminal the six-cell window read as a rendering artefact rather
+/// than as a sweep — there was never enough lit at once to see it travel.
+const BEAM_WIDTH: usize = 8;
+
+/// How far the swept cells travel from the verb's own colour towards the theme's
+/// body text. The old glimmer moved `claude → claude_strong`, a step of ~18/255
+/// per channel that a dark terminal swallowed whole.
+const BEAM_LIFT: f64 = 0.55;
+
+/// **beam colour** — what a swept cell is painted, derived from the theme
+/// rather than named as a literal, so both presets and any user override stay
+/// in their own palette.
+///
+/// The pole is the theme's body text, which is the highest-contrast ink it owns
+/// and therefore the direction visibility lives in — nearly white over a dark
+/// ground, black over a light one. A dark theme's sweep brightens and a light
+/// theme's darkens, which is what a glimmer has to do in each to be seen at all;
+/// what they share is moving *away* from the verb's own colour rather than one
+/// step along the same ramp. Terminals without truecolor take the pole itself: a
+/// discrete two-tone sweep, the same trade the update banner makes.
+pub fn beam_color(theme: &Theme, base: Color) -> Color {
+    lerp_color(base, theme.text, BEAM_LIFT)
+}
 
 /// Silence longer than this, mid-turn, is worth saying out loud.
 pub const STALL_MS: u64 = 3_000;
@@ -408,6 +430,49 @@ mod tests {
             if let Some((start, end)) = ON.beam(tick, 3) {
                 assert!(start < end && end <= 3);
             }
+        }
+    }
+
+    /// D93: the sweep is wide enough and bright enough to be seen.
+    ///
+    /// The old glimmer moved one step along the accent ramp — `claude` to
+    /// `claude_strong`, about 18/255 per channel — over six cells, and on a
+    /// real dark terminal it read as nothing at all. Both halves are asserted
+    /// against the theme rather than against literals, so a retuned palette
+    /// keeps the property instead of silently losing it.
+    #[test]
+    fn the_beam_is_wide_and_bright_enough_to_notice() {
+        // Wide enough: a long verb is lit BEAM_WIDTH cells at a time.
+        let widest = (0..ticks_for(BEAM_PERIOD_MS))
+            .filter_map(|tick| ON.beam(tick, 40))
+            .map(|(start, end)| end - start)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            widest, 8,
+            "the window opens to its full width — eight cells, where six read              as an artefact rather than as a sweep"
+        );
+        assert_eq!(widest, BEAM_WIDTH, "and the constant is what it opens to");
+
+        // Bright enough, in both themes, and by a wider margin than the step it
+        // replaced.
+        let channel_distance = |a: Color, b: Color| match (a, b) {
+            (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+                (ar.abs_diff(br) as u32) + (ag.abs_diff(bg) as u32) + (ab.abs_diff(bb) as u32)
+            }
+            _ => u32::MAX,
+        };
+        for theme in [Theme::dark(), Theme::light()] {
+            let base = theme.claude;
+            let lit = beam_color(&theme, base);
+            assert_ne!(lit, base, "a glimmer the colour of the verb is not one");
+            let was = channel_distance(base, theme.claude_strong);
+            let now = channel_distance(base, lit);
+            assert!(
+                now > was * 2,
+                "dark={} old step {was}, new step {now}",
+                theme.is_dark
+            );
         }
     }
 

@@ -310,7 +310,7 @@ mod tests {
         for name in ["alpha", "bravo", "charlie"] {
             seed_agent(&chat, name);
         }
-        chat.refresh_entities();
+        chat.refresh_conversations();
         // Three separate ticks of activity, oldest first.
         chat.buffers
             .observe(BufferId::Dm("alpha".to_string()), 1, true, 10);
@@ -334,7 +334,7 @@ mod tests {
         for name in ["scout", "zoe"] {
             seed_agent(&chat, name);
         }
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.open_switcher();
 
         assert_eq!(labels(&chat).len(), 3, "hub + two DMs");
@@ -358,7 +358,7 @@ mod tests {
     fn enter_switches_and_esc_does_not() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout");
-        chat.refresh_entities();
+        chat.refresh_conversations();
 
         chat.open_switcher();
         assert!(key(&mut chat, KeyCode::Down));
@@ -383,7 +383,7 @@ mod tests {
     fn the_selection_clamps_at_both_ends() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout");
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.open_switcher();
 
         for _ in 0..8 {
@@ -407,7 +407,7 @@ mod tests {
     async fn ctrl_x_stops_the_highlighted_agent_and_keeps_its_conversation() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout");
-        chat.refresh_entities();
+        chat.refresh_conversations();
         assert_eq!(
             chat.session.agents.list()[0].state,
             crate::agents::AgentState::Running
@@ -446,7 +446,7 @@ mod tests {
     async fn the_switcher_is_inert_behind_a_dialog() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout");
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.open_switcher();
         assert!(chat.switcher.is_some());
         chat.switcher = None;
@@ -480,7 +480,7 @@ mod tests {
     fn the_rows_state_presence_unread_and_age() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout");
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.tick = 100;
         chat.buffers
             .observe(BufferId::Dm("scout".to_string()), 3, true, 40);

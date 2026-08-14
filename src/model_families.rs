@@ -46,8 +46,10 @@ pub struct FamilyMeta {
     pub max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
-    /// Whether the model accepts image input; feeds the prompt's capability
-    /// block (per-model, unlike the endpoint-wide `supportsImages`).
+    /// Whether the model accepts image input. Feeds the prompt's capability
+    /// block and, since D93, the request-time projection that keeps image
+    /// blocks off the wire for a model without vision (per-model, unlike the
+    /// endpoint-wide `supportsImages`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision: Option<bool>,
 }

@@ -2369,3 +2369,111 @@ diff renderer fails a test rather than drifting.
   at `crate::tui::avatar`, which carries the skin palette and comes down the same `to_ansi256`.
 - 1327 + 13 tests before, 1354 + 13 after (27 new: 6 palette/tier, 9 highlighter, 5 markdown
   fence, 5 diff gutter, 2 cross-surface).
+
+### D93. Six things a real terminal found
+
+**Problem.** The D76–D92 program shipped and was run, for the first time, on a real device against
+real work. Six faults came back — none of them visible from a test suite, and one of them expensive.
+
+1. **Images reached models that cannot read them.** `supports_vision` fed the system prompt and
+   nothing else, so pasting a screenshot while a text-only model was active put the whole base64
+   block on the wire. A single image is a large slice of a context window spent on bytes the model
+   discards. Worse, the only gate that existed (`user_message_with_images`, on the *endpoint*-wide
+   `supportsImages`) covered the input box alone: a screenshot a tool read off disk bypassed it
+   entirely.
+2. **A buffer switch left the viewport behind.** The rule and replay a switch prints land at the
+   end of the document, and the fullscreen host stayed where it was — the user had to scroll down
+   to find the conversation they had just opened.
+3. **Three surfaces for one agent.** The pre-blueprint presence strip above the composer (D80's
+   reduced `entity_rows`), the D90 conversation bar, and a `#team` entry nobody asked for — D88
+   materialized the board on the first agent lifecycle event, so hiring one subagent for one task
+   lit all three.
+4. **A clock under every message.** The issue-41 stamps rendered as standalone rows: one terminal
+   line per message spent on five characters, and down a transcript a column of times reading
+   louder than the words between them.
+5. **The D87 glimmer was invisible.** Six cells painted one step along the accent ramp
+   (`claude → claude_strong`, ~18/255 per channel). On a dark terminal there was nothing to see.
+6. **`$EDITOR` lost an edit** — reported as 改完没回填, "edited, not filled back".
+
+**Decision.**
+
+*Vision is a wire gate, not just a prompt fact.* The projection sits in `Client::stream` /
+`Client::complete_text` — the one seam every request funnels through — and not at the point history
+is built. Same philosophy as the D74 cache markers: **the history is the record and the request is a
+view of it.** For a model without vision, every `ContentBlock::Image` and every `{"type":"image"}`
+inside a tool result's untyped `content` array becomes
+`[image omitted: <model-id> has no vision]`. Two shapes are matched because images reach a request
+by two roads, and missing the second is what let a `Read` of a screenshot cost a window. Being at
+the seam means the turn loop, retries and the compaction summarizer inherit it without knowing it
+exists. `count_tokens` projects with the same function, because the contract says the count must
+measure the payload it predicts. `Cow` return: no image, no clone. The session file and the
+in-memory history are untouched, so switching to a model that can see shows the image again.
+
+*A rebuild reconciles against the document it just built.* `rebuild()` ran `reconcile_scroll` and
+then `build_rows`, so `max_scroll` was computed from the previous frame's document — any batch of
+rows arriving in one frame landed below the fold **even for a viewer who had never scrolled**. That
+is the root cause, and it is more general than the switch that exposed it; the two calls are now in
+the other order. `switch_to` additionally re-arms `auto_scroll`, which brings along a reader who
+*had* scrolled up: opening a conversation puts you at its tail, the way opening a chat anywhere does.
+
+*The bar is the presence strip's successor, so the strip goes.* `entity_rows`, the `entities`
+snapshot and `EntityRow` are deleted. `refresh_entities` is renamed `refresh_conversations`, which
+is all it still does — it existed to snapshot the strip and happened to also poll the conversation
+registry — and it takes its dirty signal from `bar_entries()`, so there is one answer to "did
+anything change" rather than two that can disagree. `AgentStatus::thinking` went with it: the strip
+was its only reader.
+
+*The board is a team's board.* `Buffers::refresh` lists `#team` when the agent registry holds an
+`AgentKind::Crew` — the discriminator the domain already keeps, and one a `Task`-spawned hire can
+never satisfy (`tool/agent.rs` hardcodes `Hire`). `note_watch_event` and `note_team_output` still
+fill the bounded log unconditionally and no longer materialize the buffer, so a crew formed later
+opens onto the history it missed rather than onto a board that starts when it was listed.
+
+*The stamp sits beside the message.* One helper, `push_right`, appends a trailer flush to a width
+with a minimum gap and reports whether it fit; one caller, `hang_stamp`, hangs the stamp on the
+first row of the message's element tree via `El::first_content_line_mut` (blank spacing rows
+skipped). Both stamp sites — the user bubble and the assistant reply — go through it, which is why
+DMs, channels and the `#team` board changed with them: they were always the same builder. Widths run
+through `text_width`, so CJK lands the stamp on the column ASCII does, and a bubble's reserved right
+column is subtracted rather than overrun. **Too narrow, and the stamp is the thing that goes** —
+nothing is wrapped or truncated to fit a clock.
+
+*The glimmer is eight cells, bold, and derived from the palette.* `beam_color(theme, base)` lerps
+the verb's colour 55% toward `theme.text` — the highest-contrast ink a theme owns, so a dark preset
+brightens and a light one darkens, both moving *away* from the base rather than one step along the
+same ramp. Bold carries it where colour cannot (256-colour terminals). Period and gate unchanged.
+
+*The reported `$EDITOR` cause was wrong, and the real one is worse.* The rename hypothesis — vim's
+`backupcopy=auto` writing a sibling and renaming it over the path, read back through a stale inode —
+was reproduced first and **does not exist**: `edit_draft` reads by path after the child exits, and a
+rename-style save has always round-tripped. There is also no mtime/content classification to
+misclassify; `a_saved_edit_is_the_only_silent_outcome` only ever tested `note()`. A test now pins the
+rename case so the belief cannot come back. What *does* lose work is an editor that opens its own
+window and returns immediately — `code`/`zed`/`subl` without their wait flag. It exits zero before
+the user has typed, the file is read back unchanged and removed, and the edit they then save has
+nowhere to land. That was classified `Edited(original)` and therefore **silent**. An unchanged file
+is now `EditorOutcome::Unchanged` and says so, naming the cure. The draft still stands, and the
+non-zero-exit and unset-editor paths are untouched.
+
+**Consequences.**
+
+- `supports_vision` is now a wire gate; the comments in `api/models.rs` and `model_families.rs`
+  that said it was prompt-only were wrong and are corrected. `estimate_tokens` in `compact.rs` still
+  charges `IMAGE_UNITS` for a block the request may drop — a local over-estimate that errs toward
+  compacting early, left as-is rather than duplicating the resolver into the estimator.
+- Deleted with the presence strip, and where their coverage went: `entity_area_filters_idle_agents`
+  (the strip's whole subject; its running/idle distinction is now `presence_marks_dms_and_only_dms`
+  in `convbar.rs`, its channel listing `the_bar_lists_the_registry_in_its_own_order`, and its
+  trailing ctrl+g assertion is verbatim `ctrl_g_requests_the_editor_unless_a_dialog_is_up`), and the
+  strip paragraph of `running_agents_leave_the_arrows_to_history` (a negative assertion about a hint
+  string that no longer renders; the test's real subject — ↑ recalls history, ctrl+b opens the DM —
+  is untouched). `list_reports_the_runtime_engine_and_thinking` lost its `thinking` assertion with
+  the field and is now `list_reports_the_runtime_engine`.
+- Four tests seeded an `AgentKind::Hire` and expected `#team`; they seed a `Crew` now, which is what
+  they always meant. `the_board_hears_agents_and_nothing_else` keeps its subject and gains a
+  sibling, `a_solo_hire_writes_the_log_without_raising_a_board`.
+- `rebuild`'s reordering changes scroll behaviour for *every* batch of rows, not only switches. It
+  is the more correct order and the render helper in `chat_tests_a.rs` already used it; the whole
+  suite was green without further change.
+- 1354 + 13 tests before, 1365 + 13 after (12 new: 2 vision projection, 3 scroll, 1 solo-hire board,
+  3 stamp placement, 1 beam, 2 editor round trip; 1 deleted).
