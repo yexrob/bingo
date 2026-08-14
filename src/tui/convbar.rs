@@ -287,6 +287,17 @@ mod tests {
         );
     }
 
+    /// A crew member: what puts `#team` in the registry (D93).
+    fn seed_crew(chat: &Chat, name: &str) {
+        chat.session.agents.insert(
+            name,
+            AgentKind::Crew,
+            None,
+            "crew member".to_string(),
+            chat.session.clone(),
+        );
+    }
+
     fn bar_text(chat: &Chat, width: usize) -> String {
         chat.conversation_bar_rows(width)
             .iter()
@@ -316,7 +327,7 @@ mod tests {
             .create("build", vec!["scout".to_string()], ChannelMode::Free)
             .expect("channel created");
         seed_agent(&chat, "zoe");
-        seed_agent(&chat, "scout");
+        seed_crew(&chat, "scout");
         chat.buffers.note_watch_event(
             "scout #1 · go",
             crate::watch::WatchKind::Agent,
@@ -324,7 +335,7 @@ mod tests {
             None,
             1,
         );
-        chat.refresh_entities();
+        chat.refresh_conversations();
 
         let text = bar_text(&chat, 100);
         let order: Vec<&str> = ["hub", "#team", "#build", "@scout", "@zoe"].to_vec();
@@ -347,7 +358,7 @@ mod tests {
             .create("build", vec!["scout".to_string()], ChannelMode::Free)
             .expect("channel created");
         seed_agent(&chat, "scout");
-        chat.refresh_entities();
+        chat.refresh_conversations();
 
         let entries = chat.bar_entries();
         let dm = entries
@@ -384,7 +395,7 @@ mod tests {
             )
             .expect("channel created");
         seed_agent(&chat, "scout");
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.session
             .channels
             .post("scout", "build", "@user look at this")
@@ -443,7 +454,7 @@ mod tests {
             let mut chat = test_chat();
             chat.theme = Theme::for_terminal(setting, None);
             seed_agent(&chat, "scout");
-            chat.refresh_entities();
+            chat.refresh_conversations();
             let rows = chat.conversation_bar_rows(100);
             assert_eq!(rows.len(), 1, "{setting:?}");
             let colors: Vec<_> = rows[0]
@@ -472,7 +483,7 @@ mod tests {
         for name in ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"] {
             seed_agent(&chat, name);
         }
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("foxtrot".to_string()));
 
         for width in 4..90 {

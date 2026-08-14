@@ -28,6 +28,13 @@ pub const CHORD_WINDOW: Duration = Duration::from_millis(1500);
 pub const NO_EDITOR_HINT: &str = "set $EDITOR to edit the prompt in your editor";
 /// The info-tier line when the editor exited non-zero: the draft it was handed stands.
 pub const EDITOR_KEPT_HINT: &str = "editor exited without saving · the prompt is unchanged";
+/// The info-tier line when the editor exited cleanly having written nothing.
+///
+/// Says the likely cause because the common one destroys work silently: an
+/// editor that opens a window and returns immediately (`code`, `zed`, `subl`
+/// and friends without their wait flag) is read back before the user has typed
+/// a character, so the edit lands in a file this call has already finished with.
+pub const EDITOR_UNCHANGED_HINT: &str = "the editor saved no changes · an editor that opens a window needs its wait flag (e.g. \"code -w\")";
 
 /// Which end of the cursor a kill ate. Consecutive kills in the same direction
 /// join into one ring entry (readline: a `ctrl+w ctrl+w` yanks both words back
@@ -157,6 +164,17 @@ impl Composer {
 pub enum EditorOutcome {
     /// The editor saved: the file's content, trailing newline trimmed.
     Edited(String),
+    /// The editor exited zero having left the file byte-identical to the draft
+    /// it was handed.
+    ///
+    /// Told apart from [`EditorOutcome::Edited`] on purpose. The two are the
+    /// same *result* — the draft stands — but not the same *event*, and
+    /// collapsing them made the one way this round trip loses work look like a
+    /// success: an editor that forks a window and returns is read back and its
+    /// file removed before the user has typed anything, so the edit they go on
+    /// to save has nowhere left to land. Silence there reads as "bingo dropped
+    /// my edit", which is exactly what happened, with nothing on screen saying so.
+    Unchanged,
     /// The editor exited non-zero. The draft it was handed stands.
     Kept,
     /// Neither `$VISUAL` nor `$EDITOR` names an editor.
@@ -171,6 +189,7 @@ impl EditorOutcome {
     pub fn note(&self) -> Option<String> {
         match self {
             EditorOutcome::Edited(_) => None,
+            EditorOutcome::Unchanged => Some(EDITOR_UNCHANGED_HINT.to_string()),
             EditorOutcome::Kept => Some(EDITOR_KEPT_HINT.to_string()),
             EditorOutcome::Unset => Some(NO_EDITOR_HINT.to_string()),
             EditorOutcome::Failed(e) => Some(format!("could not run the editor: {e}")),
@@ -229,7 +248,13 @@ pub fn edit_draft(command: &str, draft: &str) -> EditorOutcome {
     let outcome = match status {
         Err(e) => EditorOutcome::Failed(e.to_string()),
         Ok(status) if !status.success() => EditorOutcome::Kept,
+        // Read back by *path*, never through a handle opened before the child
+        // ran: the majority of editors save by writing a sibling file and
+        // renaming it over this one, which leaves the name pointing at a new
+        // inode. Anything holding the old one would read the draft back
+        // verbatim and call it an edit.
         Ok(_) => match std::fs::read_to_string(&path) {
+            Ok(text) if text == draft => EditorOutcome::Unchanged,
             Ok(text) => EditorOutcome::Edited(trim_trailing_newline(&text)),
             Err(e) => EditorOutcome::Failed(e.to_string()),
         },

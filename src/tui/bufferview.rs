@@ -242,6 +242,13 @@ impl Chat {
         if id != BufferId::Hub {
             self.open_conversation(&id);
         }
+        // A switch lands you at the tail, the way opening a chat anywhere does
+        // (D93). The rule and the replay print at the end of the document, so a
+        // viewer who had scrolled up would otherwise be looking at the old
+        // conversation with the new one somewhere below the fold. Re-arming the
+        // stick rather than writing an offset leaves the arithmetic to
+        // `reconcile_scroll`, which is the only thing that knows the viewport.
+        self.auto_scroll = true;
         self.dirty = true;
     }
 
@@ -709,6 +716,18 @@ mod tests {
         }
     }
 
+    /// A crew member: what makes a formation a formation, and so what puts
+    /// `#team` in the registry (D93).
+    fn seed_crew(chat: &Chat, name: &str) {
+        chat.session.agents.insert(
+            name,
+            AgentKind::Crew,
+            None,
+            "crew member".to_string(),
+            chat.session.clone(),
+        );
+    }
+
     fn hub_message(chat: &mut Chat, role: Role, text: &str) {
         chat.messages.push(UiMessage {
             role,
@@ -734,7 +753,7 @@ mod tests {
             "scout",
             vec![user("look at the parser"), assistant("found it")],
         );
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("scout".to_string()));
 
         let text = flow(&mut chat);
@@ -768,7 +787,7 @@ mod tests {
             .map(|i| assistant(&format!("message {i}")))
             .collect();
         seed_agent(&chat, "scout", history);
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("scout".to_string()));
 
         let text = flow(&mut chat);
@@ -791,7 +810,7 @@ mod tests {
     fn a_draft_waits_in_the_conversation_it_was_typed_in() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", Vec::new());
-        chat.refresh_entities();
+        chat.refresh_conversations();
 
         chat.set_input("half a hub thought");
         chat.switch_to(BufferId::Dm("scout".to_string()));
@@ -812,7 +831,7 @@ mod tests {
     fn switching_to_the_active_conversation_does_nothing() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", vec![assistant("hello")]);
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("scout".to_string()));
         let once = flow(&mut chat);
         let rows = chat.messages.len();
@@ -837,7 +856,7 @@ mod tests {
     fn an_excursion_holds_the_hubs_tail_until_you_come_back() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", vec![assistant("on it")]);
-        chat.refresh_entities();
+        chat.refresh_conversations();
         hub_message(&mut chat, Role::Assistant, "before you left");
 
         chat.switch_to(BufferId::Dm("scout".to_string()));
@@ -880,7 +899,7 @@ mod tests {
     fn the_print_order_only_ever_grows_at_the_end() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", vec![assistant("first")]);
-        chat.refresh_entities();
+        chat.refresh_conversations();
         hub_message(&mut chat, Role::Assistant, "hub one");
 
         let mut seen = chat.flow_order();
@@ -915,7 +934,7 @@ mod tests {
     async fn a_dm_submit_delivers_and_echoes_without_starting_a_turn() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", Vec::new());
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("scout".to_string()));
 
         chat.set_input("have a look at the parser");
@@ -950,7 +969,7 @@ mod tests {
             .channels
             .create("build", vec!["scout".to_string()], ChannelMode::Free)
             .expect("channel created");
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.switch_to(BufferId::Channel("build".to_string()));
 
         chat.set_input("ship it");
@@ -1000,7 +1019,7 @@ mod tests {
     fn a_slash_command_still_reaches_the_app_from_a_conversation() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", Vec::new());
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("scout".to_string()));
 
         chat.set_input("/help");
@@ -1024,7 +1043,7 @@ mod tests {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", Vec::new());
         seed_agent(&chat, "zoe", Vec::new());
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("scout".to_string()));
 
         chat.session
@@ -1059,7 +1078,7 @@ mod tests {
     async fn a_dm_in_flight_renders_in_the_tail() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", Vec::new());
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("scout".to_string()));
 
         chat.set_input("are you there");
@@ -1127,6 +1146,8 @@ mod tests {
     #[test]
     fn team_output_lands_on_the_board_and_says_so() {
         let mut chat = test_chat();
+        seed_crew(&chat, "dev");
+        chat.refresh_conversations();
         chat.run_slash("team");
 
         let board = chat
@@ -1177,7 +1198,7 @@ mod tests {
     async fn a_leading_name_delivers_from_the_hub_without_moving() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", Vec::new());
-        chat.refresh_entities();
+        chat.refresh_conversations();
 
         chat.set_input("@scout have a look at the parser");
         chat.submit();
@@ -1223,7 +1244,7 @@ mod tests {
                 ChannelMode::Free,
             )
             .expect("channel created");
-        chat.refresh_entities();
+        chat.refresh_conversations();
 
         chat.set_input("#build ship it");
         chat.submit();
@@ -1242,7 +1263,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_name_is_just_prose() {
         let mut chat = test_chat();
-        chat.refresh_entities();
+        chat.refresh_conversations();
 
         chat.set_input("@nobody are you there");
         chat.submit();
@@ -1271,7 +1292,7 @@ mod tests {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", Vec::new());
         seed_agent(&chat, "zoe", Vec::new());
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("scout".to_string()));
 
         chat.set_input("@zoe should look at this too");
@@ -1295,7 +1316,7 @@ mod tests {
     fn a_bare_name_is_not_a_route() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", Vec::new());
-        chat.refresh_entities();
+        chat.refresh_conversations();
         assert_eq!(chat.leading_route("@scout"), None);
         assert_eq!(chat.leading_route("@scout   "), None);
         assert_eq!(
@@ -1345,6 +1366,7 @@ mod tests {
     fn open_reaches_every_conversation_and_reports_the_ones_it_cannot() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", Vec::new());
+        seed_crew(&chat, "dev");
         chat.session
             .channels
             .create("build", vec!["scout".to_string()], ChannelMode::Free)
@@ -1356,7 +1378,7 @@ mod tests {
             None,
             1,
         );
-        chat.refresh_entities();
+        chat.refresh_conversations();
 
         chat.run_slash("open @scout");
         assert_eq!(*chat.buffers.active(), BufferId::Dm("scout".to_string()));
@@ -1399,7 +1421,7 @@ mod tests {
             .channels
             .create("build", vec!["scout".to_string()], ChannelMode::Free)
             .expect("channel created");
-        chat.refresh_entities();
+        chat.refresh_conversations();
 
         chat.set_input("/open ");
         let offered: Vec<String> = chat

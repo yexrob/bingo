@@ -328,7 +328,24 @@ impl Buffers {
                     .any(|m| m.seq > read && m.text.contains(&token));
             self.observe(id, status.seq, mention, tick);
         }
-        for status in session.agents.list() {
+        let agents = session.agents.list();
+        // The board is a *team's* board (D93). It appears once the user has
+        // actually formed one — a blueprint spawned into a crew — and not
+        // because the model hired a single agent to go read a file. A hire is
+        // reached through its own DM and says so in the bar; a `#team` entry
+        // nobody asked for was a third surface for the same one agent.
+        //
+        // The lifecycle log fills either way (`note_watch_event`), so a crew
+        // formed later opens onto the history it missed rather than onto a
+        // board that starts at the moment it was listed.
+        if agents
+            .iter()
+            .any(|status| status.kind == crate::agents::AgentKind::Crew)
+        {
+            let seq = self.team.len() as u64;
+            self.observe(BufferId::Team, seq, false, tick);
+        }
+        for status in agents {
             let seq = session
                 .agents
                 .view_of(&status.name)
@@ -344,8 +361,8 @@ impl Buffers {
     ///
     /// Only agent events reach the board. Channel events belong to their own
     /// buffer and command events are the hub's own tools, so neither is team
-    /// news. The board materializes on the first event rather than standing
-    /// empty in a session that never spawned anyone.
+    /// news. The log is written whether or not the board is listed (D93): what
+    /// lists it is a crew existing, which [`Buffers::refresh`] decides.
     pub fn note_watch_event(
         &mut self,
         label: &str,
@@ -363,11 +380,10 @@ impl Buffers {
             detail: detail.map(str::to_string),
             at: crate::channels::now_unix(),
         });
-        // The board is born with this event, so its first entry is news. The
-        // "first sight is read" rule exists to avoid badging history that
-        // predates you, and a board that did not exist a moment ago has none.
+        // A board nobody has been given does not get an unread badge. The
+        // events are kept regardless, so listing it later replays them.
         if self.get(&BufferId::Team).is_none() {
-            self.entry(BufferId::Team, 0, tick);
+            return;
         }
         let seq = self.team.len() as u64;
         self.observe(BufferId::Team, seq, false, tick);
@@ -389,7 +405,7 @@ impl Buffers {
             at: crate::channels::now_unix(),
         });
         if self.get(&BufferId::Team).is_none() {
-            self.entry(BufferId::Team, 0, tick);
+            return;
         }
         let seq = self.team.len() as u64;
         self.observe(BufferId::Team, seq, false, tick);
@@ -865,6 +881,18 @@ mod tests {
         }
     }
 
+    /// A crew member: the thing that makes a team a team, and so the thing
+    /// that puts `#team` in the registry (D93).
+    fn seed_crew(session: &Arc<Session>, name: &str) {
+        session.agents.insert(
+            name,
+            AgentKind::Crew,
+            None,
+            "crew member".to_string(),
+            session.clone(),
+        );
+    }
+
     fn ids(buffers: &Buffers) -> Vec<String> {
         buffers.iter().map(|b| b.id().label()).collect()
     }
@@ -916,7 +944,7 @@ mod tests {
             .create("alpha", vec!["scout".to_string()], ChannelMode::Free)
             .expect("channel created");
         seed_agent(&session, "zoe", Vec::new());
-        seed_agent(&session, "scout", Vec::new());
+        seed_crew(&session, "scout");
 
         let mut buffers = Buffers::new();
         buffers.refresh(&session, 1);
@@ -1099,11 +1127,15 @@ mod tests {
 
     #[test]
     fn the_board_hears_agents_and_nothing_else() {
+        let session = test_session();
+        seed_crew(&session, "scout");
         let mut buffers = Buffers::new();
+        buffers.refresh(&session, 1);
         buffers.note_watch_event("ls", WatchKind::Command, WatchState::Done, None, 1);
         buffers.note_watch_event("#build", WatchKind::Channel, WatchState::Running, None, 1);
-        assert!(
-            buffers.get(&BufferId::Team).is_none(),
+        assert_eq!(
+            buffers.team.len(),
+            0,
             "a command and a room post are not team news"
         );
 
@@ -1118,6 +1150,38 @@ mod tests {
         assert_eq!(board.unread(), 1);
         assert_eq!(board.last_activity, 4);
         assert_eq!(buffers.team.len(), 1);
+    }
+
+    /// D93: a solo hire is not a team. Its lifecycle still fills the log — a
+    /// crew formed later opens onto the history it missed — but nothing is
+    /// listed, so the bar shows the hub and its DM and no board.
+    #[test]
+    fn a_solo_hire_writes_the_log_without_raising_a_board() {
+        let session = test_session();
+        seed_agent(&session, "scout", Vec::new());
+        let mut buffers = Buffers::new();
+        buffers.refresh(&session, 1);
+        buffers.note_watch_event(
+            "scout #1 · fix it",
+            WatchKind::Agent,
+            WatchState::Running,
+            None,
+            1,
+        );
+        assert!(
+            buffers.get(&BufferId::Team).is_none(),
+            "one hire is not a formation"
+        );
+        assert_eq!(buffers.team.len(), 1, "the log kept it anyway");
+        assert_eq!(ids(&buffers), vec!["hub", "@scout"]);
+
+        // The user forms a crew: the board is listed, and the replay it opens
+        // onto is the log that was filling all along.
+        seed_crew(&session, "dev");
+        buffers.refresh(&session, 2);
+        assert!(buffers.get(&BufferId::Team).is_some(), "a crew has a board");
+        assert_eq!(buffers.team.len(), 1, "with the event it never lost");
+        assert_eq!(ids(&buffers), vec!["hub", "#team", "@dev", "@scout"]);
     }
 
     #[test]

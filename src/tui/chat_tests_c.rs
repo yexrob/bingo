@@ -1406,7 +1406,7 @@ fn esc_goes_home_before_it_interrupts() {
         "research".into(),
         chat.session.clone(),
     );
-    chat.refresh_entities();
+    chat.refresh_conversations();
     chat.busy = true;
     chat.switch_to(BufferId::Dm("scout".into()));
 
@@ -1459,7 +1459,7 @@ fn esc_peels_the_conversation_in_its_place_above_the_interrupt() {
         "research".into(),
         chat.session.clone(),
     );
-    chat.refresh_entities();
+    chat.refresh_conversations();
     chat.busy = true;
     chat.switch_to(BufferId::Dm("scout".into()));
     chat.help_visible = true;
@@ -1519,7 +1519,7 @@ fn esc_peels_the_switcher_and_nothing_under_it() {
         "research".into(),
         chat.session.clone(),
     );
-    chat.refresh_entities();
+    chat.refresh_conversations();
     chat.busy = true;
     chat.switch_to(BufferId::Dm("scout".into()));
     chat.help_visible = true;
@@ -1606,7 +1606,7 @@ async fn a_dialog_reaches_the_user_inside_a_conversation() {
         "research".into(),
         chat.session.clone(),
     );
-    chat.refresh_entities();
+    chat.refresh_conversations();
     chat.busy = true;
     chat.switch_to(BufferId::Dm("scout".into()));
 
@@ -1659,7 +1659,7 @@ async fn a_dm_submission_never_steers_the_hubs_turn() {
         "research".into(),
         chat.session.clone(),
     );
-    chat.refresh_entities();
+    chat.refresh_conversations();
     chat.busy = true;
 
     // From the hub, the same text would be on offer at the next barrier.

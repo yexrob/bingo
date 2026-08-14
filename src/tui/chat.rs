@@ -1103,8 +1103,6 @@ pub struct Chat {
     pub tasks_visible: bool,
     /// Whether the task area was auto-opened by TaskCreate (not manually via ctrl+t): hides automatically when everything is done.
     pub tasks_auto: bool,
-    /// Snapshot of the bottom entity area (running agent instances + channels; refreshed on tick/WatchEvent).
-    pub entities: Vec<EntityRow>,
     /// Main-view background-agent manager; `None` means the panel is closed.
     pub agent_manager: Option<AgentManager>,
     /// The ctrl+k conversation switcher (D90); `None` means it is closed.
@@ -1119,22 +1117,6 @@ pub struct Chat {
     pub(crate) excursions: Vec<crate::tui::bufferview::Excursion>,
     /// Interrupt signal: Ctrl+C / Esc while busy → send(true), aborting stream reads in the turn immediately.
     pub(crate) cancel_tx: tokio::sync::watch::Sender<bool>,
-}
-
-/// One row of the bottom entity area: a subagent instance or a channel.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EntityRow {
-    Agent {
-        name: String,
-        state: &'static str,
-        model: String,
-        thinking: Option<String>,
-    },
-    Channel {
-        name: String,
-        seq: u64,
-        frozen: bool,
-    },
 }
 
 /// Background-agent manager layered over the main chat.
@@ -1401,7 +1383,6 @@ impl Chat {
             models_cache: HashMap::new(),
             tasks_visible: false,
             tasks_auto: false,
-            entities: Vec::new(),
             agent_manager: None,
             switcher: None,
             rewind: None,
@@ -1786,8 +1767,10 @@ impl Chat {
                 payload,
                 signal,
             } => {
-                // Agent/channel lifecycle events also refresh the bottom entity area.
-                self.refresh_entities();
+                // The registry sweep goes first: it is what lists `#team` once a
+                // crew exists (D93), so the event below is observed against a
+                // board that is already there rather than creating one.
+                self.refresh_conversations();
                 self.buffers
                     .note_watch_event(&label, kind, status, detail.as_deref(), self.tick);
                 let found = self.messages.iter_mut().find_map(|m| {

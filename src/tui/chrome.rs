@@ -75,7 +75,7 @@ fn status_row(
         &verb,
         window.flatten(),
         base,
-        theme.claude_strong,
+        crate::tui::motion::beam_color(theme, base),
     );
     line.push_styled(" ".to_string(), SegStyle::fg(base));
     line.push_styled(meta, SegStyle::fg(theme.text_secondary));
@@ -85,6 +85,11 @@ fn status_row(
 /// Push `text` with the half-open character window `[start, end)` brightened —
 /// the rendered half of the `beam` token. Splitting on character indices (not
 /// bytes) is what keeps a CJK or accented verb from being cut mid-scalar.
+///
+/// The lit run carries weight as well as colour (D93): hue alone, at the step
+/// the old glimmer moved, was invisible on a real dark terminal, and bold is
+/// the one emphasis every terminal renders — including the 256-colour ones
+/// where `bright` collapses onto a neighbouring index.
 fn push_swept(
     line: &mut Line,
     text: &str,
@@ -108,9 +113,13 @@ fn push_swept(
             after.push(ch);
         }
     }
-    for (part, color) in [(before, base), (lit, bright), (after, base)] {
+    for (part, style) in [
+        (before, SegStyle::fg(base)),
+        (lit, SegStyle::fg(bright).bold()),
+        (after, SegStyle::fg(base)),
+    ] {
         if !part.is_empty() {
-            line.push_styled(part, SegStyle::fg(color));
+            line.push_styled(part, style);
         }
     }
 }
@@ -573,8 +582,6 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     for line in chat.help_lines() {
         children.push(El::Row(dim_row(line, theme)));
     }
-    // Bottom entity area (running agents + channels; Ctrl+G opens the workspace).
-    children.push(El::Lines(chat.entity_rows(width)));
     children.push(El::Rows(chat.agent_manager_rows(width)));
     children.push(El::Rows(chat.switcher_rows(width)));
     children.push(El::Rows(chat.rewind_rows(width)));
@@ -1167,6 +1174,7 @@ mod tests {
         };
         // Everything but the spinner glyph, which `pulse` owns and does change.
         let copy = "Synthesizing… (esc · 4s)";
+        let beam = crate::tui::motion::beam_color(&theme, theme.claude);
         let mut brightened = 0;
         for tick in 0..61 {
             let row = status_row(&status, motion, tick, false, "esc", &theme);
@@ -1179,7 +1187,7 @@ mod tests {
                 .line
                 .segs
                 .iter()
-                .any(|seg| seg.style.fg == Some(theme.claude_strong))
+                .any(|seg| seg.style.fg == Some(beam) && seg.style.bold)
             {
                 brightened += 1;
             }
@@ -1193,10 +1201,7 @@ mod tests {
             let text = row_text(&row);
             assert_eq!(text, format!("  ✻ {copy}"), "one glyph, all the way down");
             assert!(
-                !row.line
-                    .segs
-                    .iter()
-                    .any(|seg| seg.style.fg == Some(theme.claude_strong)),
+                !row.line.segs.iter().any(|seg| seg.style.fg == Some(beam)),
                 "nothing glimmers under the gate"
             );
         }
@@ -1434,7 +1439,7 @@ mod tests {
                 "research".into(),
                 chat.session.clone(),
             );
-            chat.refresh_entities();
+            chat.refresh_conversations();
 
             let hub = rows_of(prompt(&chat, 40));
             let default = Some(chat.theme.prompt_border);
@@ -1490,7 +1495,7 @@ mod tests {
             "research".into(),
             chat.session.clone(),
         );
-        chat.refresh_entities();
+        chat.refresh_conversations();
 
         let find_bar = |fullscreen: bool| {
             let rows = rows_of(chrome(&chat, 100, fullscreen));
@@ -1525,7 +1530,7 @@ mod tests {
             "research".into(),
             chat.session.clone(),
         );
-        chat.refresh_entities();
+        chat.refresh_conversations();
         assert!(
             !rows_of(chrome(&chat, 100, false))
                 .iter()

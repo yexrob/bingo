@@ -1695,12 +1695,13 @@ impl super::Chat {
             self.notify
                 .set_title(crate::tui::notify::Title::Busy(glyph));
         }
-        // The bottom entity area follows the registry (agent states/channel counts); dirty only on change.
+        // The registry (agent states, channel counts) follows on a slow poll;
+        // repainting only when the bar's own entries change.
         if self.tick.is_multiple_of(15) {
-            self.refresh_entities();
+            self.refresh_conversations();
         }
         // The conversation you are actually in follows every frame (D89). The
-        // fifteen-tick poll is the right cadence for a presence strip and the
+        // fifteen-tick poll is the right cadence for a registry sweep and the
         // wrong one for a message you are waiting on: it is one conversation's
         // worth of work, and it is the one on screen.
         self.poll_active_conversation();
@@ -2020,79 +2021,23 @@ impl super::Chat {
             .collect()
     }
 
-    /// Refreshes the bottom entity-area snapshot (running agents + channels). Dirty only on change.
-    pub fn refresh_entities(&mut self) {
-        // The conversation engine follows the same poll (D88): the registries
-        // are already being read here, and a second timer reading them again
-        // would only be a second chance to disagree. It touches no render
-        // state, so the entity strip below is unaffected either way.
+    /// Poll the domain registries into the conversation engine (D88).
+    ///
+    /// This used to also snapshot a presence summary of running agents and
+    /// channels for a strip above the composer. The conversation bar (D90) says
+    /// the same things better — who exists, who is running, what is unread —
+    /// so the strip is gone and only the poll it was hanging off remains (D93).
+    pub fn refresh_conversations(&mut self) {
+        // Repaint on what the bar would actually draw. The strip used to supply
+        // the dirty signal as a side effect of its own diff; taking the bar's
+        // own entries as the fingerprint keeps one answer to "did anything
+        // change" instead of two that can disagree.
+        let before = self.bar_entries();
         let session = self.session.clone();
         self.buffers.refresh(&session, self.tick);
-        let mut fresh: Vec<EntityRow> = self
-            .session
-            .agents
-            .list()
-            .into_iter()
-            .filter(|s| s.state == crate::agents::AgentState::Running)
-            .map(|s| EntityRow::Agent {
-                name: s.name,
-                state: s.state.label(),
-                model: s.model,
-                thinking: s.thinking,
-            })
-            .collect();
-        fresh.extend(
-            self.session
-                .channels
-                .list()
-                .into_iter()
-                .map(|c| EntityRow::Channel {
-                    name: c.name,
-                    seq: c.seq,
-                    frozen: c.frozen,
-                }),
-        );
-        if fresh != self.entities {
-            self.entities = fresh;
+        if self.bar_entries() != before {
             self.dirty = true;
         }
-    }
-
-    /// Bottom entity area: a compact presence summary of what is running.
-    ///
-    /// ↑/↓ used to open an inline selector here, which cost the composer its
-    /// history recall — the two keys a terminal user reaches for first. Running
-    /// agents are reached with ctrl+b and ctrl+g instead (D80).
-    pub fn entity_rows(&self, width: usize) -> Vec<Line> {
-        if self.entities.is_empty() {
-            return Vec::new();
-        }
-        let summary = self
-            .entities
-            .iter()
-            .map(|e| match e {
-                EntityRow::Agent {
-                    name,
-                    state,
-                    model,
-                    thinking,
-                } => format!(
-                    "◉ {name} · {model} · {} · {state}",
-                    thinking.as_deref().unwrap_or("off")
-                ),
-                EntityRow::Channel { name, seq, frozen } => {
-                    format!("◇ #{name}({seq}{})", if *frozen { "❄" } else { "" })
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" · ");
-        vec![Line::styled(
-            one_line(
-                &format!("  {summary} — /open to enter · ctrl+b manage"),
-                width,
-            ),
-            SegStyle::fg(self.theme.text_secondary),
-        )]
     }
 
     /// The running command's output so far: dim, indented under the `⎿` row it
@@ -2241,7 +2186,7 @@ impl super::Chat {
                     format!("stopped {name} · {dropped} queued instructions discarded")
                 });
                 self.notice_until = Some(std::time::Instant::now() + CTRL_C_WINDOW);
-                self.refresh_entities();
+                self.refresh_conversations();
             }
             Err(error) => self.push_warning(error),
         }
@@ -2600,19 +2545,18 @@ impl super::Chat {
             };
             let body = match role {
                 Role::User => {
-                    let mut rows = user_message_rows(&self.messages[i].text, width, &theme);
-                    // Send time under the bubble (issue #41), the same dim stamp
-                    // every view trails its message bodies with. A state line gets
-                    // none: nothing was sent, and the line is a state, not a message.
+                    let mut rows =
+                        El::Rows(user_message_rows(&self.messages[i].text, width, &theme));
+                    // Send time beside the bubble's first row (D93). A state line
+                    // gets none: nothing was sent, and the line is a state, not a
+                    // message.
                     let time = if crate::tui::chat::is_state_line(&self.messages[i].text) {
                         String::new()
                     } else {
                         crate::tui::buffer::stamp(self.messages[i].at)
                     };
-                    if !time.is_empty() {
-                        rows.push(Row::new(Line::styled(format!("  {time}"), theme.dim())));
-                    }
-                    El::Rows(rows)
+                    hang_stamp(&mut rows, &time, width, &theme);
+                    rows
                 }
                 Role::Assistant => self.assistant_el(i, width, &theme, settled, &pal),
             };
@@ -2987,27 +2931,14 @@ impl super::Chat {
         {
             parts.push(El::Line(line));
         }
-        // Send time after the body (issue #41): only once the turn has finished —
-        // a clock under still-streaming text would read as an ending. A markdown
-        // body may end in a blank line; the stamp belongs to the message, so it
-        // slots in before that spacing rather than floating under it.
+        // Send time beside the reply's opening row (D93), and only once the turn
+        // has finished — a clock arriving mid-stream would read as an ending.
         let time = crate::tui::buffer::stamp(self.messages[i].at);
-        if show_done_line && !time.is_empty() && !parts.is_empty() {
-            let stamp_line = Line::styled(format!("  {time}"), theme.muted());
-            match parts.last_mut() {
-                Some(El::Rows(rows)) => {
-                    let keep = rows
-                        .iter()
-                        .rposition(|r| {
-                            r.line.image.is_some() || !r.line.plain_text().trim().is_empty()
-                        })
-                        .map_or(0, |p| p + 1);
-                    rows.insert(keep, Row::new(stamp_line));
-                }
-                _ => parts.push(El::Line(stamp_line)),
-            }
+        let mut el = El::Col(parts);
+        if show_done_line {
+            hang_stamp(&mut el, &time, width, theme);
         }
-        El::Col(parts)
+        el
     }
 
     /// Resets the flush cursor: after the message set is replaced wholesale (/clear, /resume), segment numbers
@@ -3059,6 +2990,37 @@ impl super::Chat {
         }
         self.dirty = true;
     }
+}
+
+/// Columns a send stamp holds clear of the message it sits beside.
+const STAMP_GAP: usize = 2;
+
+/// Hang a message's send stamp on its own first row, right-aligned (D93).
+///
+/// The stamp used to be a row of its own under the body: a whole terminal line
+/// spent on five characters, and — repeated down a transcript — a column of
+/// clocks that read louder than the messages between them. Beside the opening
+/// row it is what it always was, furniture, and it costs nothing.
+///
+/// Where the row is too narrow to hold body and stamp [`STAMP_GAP`] apart, the
+/// stamp is simply not drawn. Content wins: no message is wrapped or truncated
+/// to make room for a clock.
+fn hang_stamp(el: &mut El, time: &str, width: usize, theme: &Theme) {
+    if time.is_empty() {
+        return;
+    }
+    let Some((line, padding_right)) = el.first_content_line_mut() else {
+        return;
+    };
+    // A bubble row reserves its rightmost column and the renderer clips to it,
+    // so the stamp aligns inside that edge rather than the terminal's.
+    crate::tui::line::push_right(
+        line,
+        time,
+        theme.muted(),
+        width.saturating_sub(padding_right),
+        STAMP_GAP,
+    );
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {

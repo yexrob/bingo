@@ -282,6 +282,33 @@ fn tokens(s: &str) -> Vec<(bool, &str)> {
     out
 }
 
+/// Append `trailer` flush to the right edge of `width`, holding at least `gap`
+/// blank columns clear of whatever the line already carries.
+///
+/// Reports whether it went on. It does not when the row is too narrow to hold
+/// both, and then the line is left exactly as it was: a trailer is furniture,
+/// and furniture never costs content a column — no wrapping it, no truncating
+/// what is already there to make room. Widths run through [`text_width`], so a
+/// CJK body lands the trailer on the same column an ASCII one does.
+pub fn push_right(
+    line: &mut Line,
+    trailer: &str,
+    style: SegStyle,
+    width: usize,
+    gap: usize,
+) -> bool {
+    if trailer.is_empty() {
+        return false;
+    }
+    let used = text_width(&line.plain_text());
+    let Some(pad) = width.checked_sub(used + text_width(trailer) + gap) else {
+        return false;
+    };
+    line.push_styled(" ".repeat(pad + gap), style);
+    line.push_styled(trailer.to_string(), style);
+    true
+}
+
 /// CJK-aware display width of a string.
 pub fn text_width(s: &str) -> usize {
     s.width()

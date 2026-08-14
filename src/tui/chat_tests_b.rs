@@ -2338,57 +2338,6 @@ async fn queued_slashes_drain_through_run_slash() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// Bottom entity area lists only running entities with their engine. Ctrl+G
-/// used to open the full workspace from here; D86 gave the key to the
-/// `$EDITOR` compose, and the workspace is reached from the ctrl+b manager.
-#[test]
-fn entity_area_filters_idle_agents() {
-    let mut chat = test_chat();
-    chat.width = 100;
-    assert!(chat.entity_rows(100).is_empty());
-
-    let running = chat.session.clone();
-    let _ = running.runtime.model_tx.send("gpt-5.6-sol".to_string());
-    let _ = running.runtime.thinking_tx.send(Some("max".to_string()));
-    chat.session.agents.insert(
-        "scout",
-        crate::agents::AgentKind::Hire,
-        None,
-        "research".into(),
-        running,
-    );
-    chat.session.agents.insert(
-        "reviewer",
-        crate::agents::AgentKind::Hire,
-        None,
-        "review".into(),
-        chat.session.clone(),
-    );
-    let _ = chat.session.agents.finish("reviewer", Vec::new(), 0);
-    chat.session
-        .channels
-        .create("table", vec![], crate::channels::ChannelMode::Serial)
-        .unwrap_or_else(|e| panic!("{e}"));
-
-    chat.refresh_entities();
-    assert_eq!(chat.entities.len(), 2, "running agent plus channel");
-    assert!(
-        chat.entities
-            .iter()
-            .all(|e| !matches!(e, EntityRow::Agent { name, .. } if name == "reviewer")),
-        "idle agents stay out of the compact entity area"
-    );
-    let summary = chat.entity_rows(100)[0].plain_text();
-    assert!(
-        summary.contains("◉ scout · gpt-5.6-sol · max · running"),
-        "{summary}"
-    );
-    assert!(summary.contains("◇ #table(0)"), "{summary}");
-
-    assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
-    assert!(chat.open_editor, "ctrl+g is the editor now (D86)");
-}
-
 /// D80: running agents no longer claim ↑/↓. With a background agent up and an
 /// empty composer, ↑ recalls the prompt history — the agent's DM is reached
 /// through the ctrl+b manager instead.
@@ -2402,7 +2351,7 @@ fn running_agents_leave_the_arrows_to_history() {
         "research".into(),
         chat.session.clone(),
     );
-    chat.refresh_entities();
+    chat.refresh_conversations();
     chat.history.record("earlier prompt");
     assert!(chat.input.is_empty());
 
@@ -2411,12 +2360,6 @@ fn running_agents_leave_the_arrows_to_history() {
         chat.input, "earlier prompt",
         "↑ recalls history, not agents"
     );
-    let summary = chat.entity_rows(100)[0].plain_text();
-    assert!(
-        !summary.contains("select agent"),
-        "the hint stops advertising a selector that is gone: {summary}"
-    );
-
     // Ctrl+B → Enter (list) → Enter (detail) opens that agent's DM. Since D89
     // that switches this terminal onto the conversation instead of raising a
     // modal over it.

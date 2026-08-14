@@ -1104,7 +1104,7 @@ mod tests {
             }],
             0,
         );
-        chat.refresh_entities();
+        chat.refresh_conversations();
         chat.messages.push(message(Role::User, "first question"));
         chat.switch_to(BufferId::Dm("scout".into()));
         chat.switch_to(BufferId::Hub);

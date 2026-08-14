@@ -3,6 +3,7 @@
 //! and the `/model` menu. Protocol behavior lives in the adapters
 //! (`api::providers`); consumers never see wire JSON.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -393,15 +394,43 @@ impl Client {
         })
     }
 
+    /// Vision projection (D93): a model that cannot see never receives base64
+    /// image bytes, whoever built the request.
+    ///
+    /// This sits at the send seam rather than at the point the history is
+    /// built, for the same reason the D74 cache markers do: the history is the
+    /// record and the request is a *view* of it. The image blocks stay on disk
+    /// and in memory, so switching to a model with vision shows them again;
+    /// only the payload loses them. Being here also means the paths that never
+    /// touched the input box — tool results carrying screenshots, a retried
+    /// turn, the compaction summarizer — inherit it without knowing it exists.
+    fn project_images<'a>(&self, request: &'a NeutralRequest) -> Cow<'a, NeutralRequest> {
+        if self.models().supports_vision(&request.model) {
+            return Cow::Borrowed(request);
+        }
+        let note = crate::api::types::image_omitted_note(&request.model);
+        match crate::api::types::project_images_out(&request.messages, &note) {
+            Some(messages) => Cow::Owned(NeutralRequest {
+                messages,
+                ..request.clone()
+            }),
+            None => Cow::Borrowed(request),
+        }
+    }
+
     /// Start a streaming request on the current provider.
     pub async fn stream(&self, request: &NeutralRequest) -> Result<BoxStream, ClientError> {
-        self.current().stream(request).await
+        self.current()
+            .stream(self.project_images(request).as_ref())
+            .await
     }
 
     /// Non-streaming completion on the current provider (compact summaries,
     /// memory extraction).
     pub async fn complete_text(&self, request: &NeutralRequest) -> Result<String, ClientError> {
-        self.current().complete_text(request).await
+        self.current()
+            .complete_text(self.project_images(request).as_ref())
+            .await
     }
 
     /// The models the current provider offers. A settings declaration answers
@@ -430,8 +459,23 @@ impl Client {
         messages: &[Message],
         tools: &[serde_json::Value],
     ) -> Result<u64, ClientError> {
+        // The count has to measure the payload it predicts (contract), and a
+        // model without vision is no longer sent its images (D93) — counting
+        // them here would put the footer's context band permanently ahead of
+        // the request that follows it.
+        let projected = (!self.models().supports_vision(model))
+            .then(|| {
+                let note = crate::api::types::image_omitted_note(model);
+                crate::api::types::project_images_out(messages, &note)
+            })
+            .flatten();
         self.current()
-            .count_tokens(model, system, messages, tools)
+            .count_tokens(
+                model,
+                system,
+                projected.as_deref().unwrap_or(messages),
+                tools,
+            )
             .await
     }
 
@@ -507,6 +551,99 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A request for a model with no vision carries no image bytes — not the
+    /// ones the user pasted, and not the ones a tool read off disk (D93).
+    ///
+    /// The request the caller holds is left alone, which is the whole point of
+    /// projecting here: the transcript on disk and the history in memory keep
+    /// the real blocks, so switching to a model that can see shows them again.
+    #[test]
+    fn a_model_without_vision_is_sent_no_image_bytes() {
+        use crate::api::types::{
+            ContentBlock, ImageAttachment, ImageSource, Role, tool_result_blocks,
+        };
+
+        let client = Client::from_settings_at_with(
+            &crate::settings::Settings::default(),
+            |_| Err(std::env::VarError::NotPresent),
+            &std::env::temp_dir().join(format!("bingo-vision-{}", std::process::id())),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let pasted = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "what is this".into(),
+                },
+                ContentBlock::Image {
+                    source: ImageSource::base64("image/png", "QUJDREVGRw=="),
+                },
+            ],
+        };
+        // The road the input-time gate never covered: a screenshot a tool read.
+        let from_a_tool = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(),
+                content: tool_result_blocks(
+                    "read shot.png",
+                    &[ImageAttachment {
+                        media_type: "image/png".into(),
+                        data: "SElKS0xNTk8=".into(),
+                    }],
+                ),
+                is_error: false,
+            }],
+        };
+        let request = NeutralRequest {
+            model: "deepseek-v4-flash".into(),
+            max_tokens: 1024,
+            system: Vec::new(),
+            messages: vec![pasted, from_a_tool],
+            tools: Vec::new(),
+            stream: true,
+            thinking: None,
+        };
+        assert!(
+            !client.models().supports_vision(&request.model),
+            "the fixture model has to be one that cannot see"
+        );
+
+        let projected = client.project_images(&request);
+        let wire = serde_json::to_string(&projected.messages).unwrap_or_default();
+        assert!(!wire.contains("\"type\":\"image\""), "{wire}");
+        assert!(
+            !wire.contains("QUJDREVGRw=="),
+            "pasted bytes reached the wire"
+        );
+        assert!(
+            !wire.contains("SElKS0xNTk8="),
+            "tool bytes reached the wire"
+        );
+        assert!(
+            wire.contains("[image omitted: deepseek-v4-flash has no vision]"),
+            "the gap is explained, and by which model: {wire}"
+        );
+        assert!(wire.contains("read shot.png"), "the tool's text survives");
+        assert!(wire.contains("what is this"), "the question survives");
+
+        // The record is not the payload: what the caller holds still has both.
+        let held = serde_json::to_string(&request.messages).unwrap_or_default();
+        assert!(held.contains("QUJDREVGRw=="), "history lost the image");
+        assert!(held.contains("SElKS0xNTk8="), "history lost the tool image");
+
+        // A model that can see gets the request untouched, borrowed not cloned.
+        let seeing = NeutralRequest {
+            model: "claude-sonnet-5".into(),
+            ..request.clone()
+        };
+        assert!(client.models().supports_vision(&seeing.model));
+        let untouched = client.project_images(&seeing);
+        assert!(matches!(untouched, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(untouched.messages, seeing.messages);
+    }
 
     #[test]
     fn explicit_home_routes_stored_credentials_outside_cwd() {

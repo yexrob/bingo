@@ -28,11 +28,15 @@ pub struct ModelMeta {
     /// `DEFAULT_MAX_TOKENS` both stops 400ing and gets that headroom back.
     pub max_tokens: u32,
     pub supports_thinking: bool,
-    /// Whether the model accepts image content blocks. Unlike
-    /// `supports_thinking` this is not a wire gate — bingo sends no vision
-    /// parameter — it is the capability the model itself is told about
-    /// (system prompt), so it will not take image-first tasks to a
-    /// text-only endpoint.
+    /// Whether the model accepts image content blocks.
+    ///
+    /// Read twice, and both readings matter. It is the capability the model is
+    /// told about in the system prompt, so it does not take image-first tasks
+    /// to an endpoint that cannot see — and since D93 it is also a wire gate:
+    /// `Client::stream` drops every image block from a request for a model
+    /// without vision rather than spending a context window on bytes it will
+    /// discard. Distinct from the endpoint-wide `Capabilities::supports_images`,
+    /// which is about what the *endpoint* accepts.
     pub supports_vision: bool,
 }
 

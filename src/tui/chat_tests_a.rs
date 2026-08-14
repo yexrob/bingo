@@ -1306,9 +1306,11 @@ fn single_turn_thinking_accumulates() {
     assert_eq!(thinking_text(&acts[0]), "ab");
 }
 
-/// Issue #41: every message trails its send time as a dim row — the same
-/// stamp brick every conversation uses — while a still-streaming reply
-/// shows none, and a message without a clock renders none.
+/// Every message carries its send time — the same stamp brick every
+/// conversation uses — while a still-streaming reply shows none, and a message
+/// without a clock renders none. D93 moved it beside the message from under it;
+/// the ordering asserted here holds either way, and
+/// [`a_stamp_sits_beside_its_message_not_under_it`] pins the placement.
 #[test]
 fn messages_trail_their_send_time() {
     let at = 1_760_000_000u64;
@@ -1350,6 +1352,106 @@ fn messages_trail_their_send_time() {
     chat.stream_msg = Some(1);
     chat.apply_event(UiEvent::TurnEnd);
     assert!(chat.messages[1].at > 5, "restamped at turn end");
+}
+
+/// D93: the stamp sits on the message's first row, flush right, and never on a
+/// row of its own — a clock under every message cost a terminal line each and
+/// read as a column of noise beside the words it was timing.
+#[test]
+fn a_stamp_sits_beside_its_message_not_under_it() {
+    let at = 1_760_000_000u64;
+    let want = crate::tui::buffer::stamp(at);
+    let mut chat = test_chat();
+    chat.messages.push(UiMessage {
+        at,
+        ..msg(Role::User, "hello there")
+    });
+    chat.messages.push(UiMessage {
+        at,
+        ..msg(Role::Assistant, "the reply")
+    });
+    chat.build_rows(60);
+    let rows: Vec<String> = chat
+        .doc
+        .rows
+        .iter()
+        .map(|row| row.line.plain_text())
+        .collect();
+
+    for body in ["hello there", "the reply"] {
+        let row = rows
+            .iter()
+            .find(|row| row.contains(body))
+            .unwrap_or_else(|| panic!("{body} row missing from {rows:?}"));
+        assert!(
+            row.trim_end().ends_with(&format!("  {want}")),
+            "the stamp is flush right on the body's own row, two columns clear: {row:?}"
+        );
+    }
+    assert!(
+        rows.iter().all(|row| row.trim() != want),
+        "no standalone stamp row survives: {rows:?}"
+    );
+}
+
+/// Content wins. Where the row cannot hold body and stamp two columns apart,
+/// the stamp is the thing that goes — nothing is wrapped or truncated to fit a
+/// clock in.
+#[test]
+fn a_stamp_too_wide_for_its_row_is_dropped_not_squeezed() {
+    let at = 1_760_000_000u64;
+    let want = crate::tui::buffer::stamp(at);
+    let mut chat = test_chat();
+    chat.messages.push(UiMessage {
+        at,
+        ..msg(Role::User, "a message with no room to spare")
+    });
+    chat.build_rows(18);
+    let rows: Vec<String> = chat
+        .doc
+        .rows
+        .iter()
+        .map(|row| row.line.plain_text())
+        .collect();
+    assert!(
+        rows.iter().all(|row| !row.contains(&want)),
+        "the stamp gave way: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("a message")),
+        "and the message did not: {rows:?}"
+    );
+    for row in &rows {
+        assert!(
+            crate::tui::line::text_width(row) <= 18,
+            "no row overflows: {row:?}"
+        );
+    }
+}
+
+/// The alignment is in display columns, not characters: a CJK body lands the
+/// stamp on the same column an ASCII one does.
+#[test]
+fn a_cjk_body_aligns_its_stamp_by_width() {
+    let at = 1_760_000_000u64;
+    let want = crate::tui::buffer::stamp(at);
+    let mut chat = test_chat();
+    chat.messages.push(UiMessage {
+        at,
+        ..msg(Role::User, "宽字符测试")
+    });
+    chat.build_rows(40);
+    let row = chat
+        .doc
+        .rows
+        .iter()
+        .map(|row| row.line.plain_text())
+        .find(|row| row.contains("宽字符测试"))
+        .expect("the CJK body");
+    assert!(row.trim_end().ends_with(&want), "{row:?}");
+    // The bubble reserves its rightmost column, so the stamp lands on 39 — a
+    // char-counting alignment would have run four columns past the edge.
+    assert_eq!(crate::tui::line::text_width(&row), 39, "{row:?}");
 }
 
 /// Interleaved rendering: text and activities cross by insert point (model output in text → tool → text order).
