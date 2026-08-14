@@ -1352,7 +1352,7 @@ fn json_hooks(
         // Stream retries and context usage have no protocol events yet; a later
         // commit can surface them once the schema grows fields for them.
         on_stream_retry: Box::new(|| {}),
-        on_context_usage: Arc::new(|_, _| {}),
+        on_context_usage: Arc::new(|_| {}),
         on_tool_ready: Box::new(move |tool_call_id, name, input, _standalone| {
             let summary = crate::query::summarize_input(&name, &input);
             let _ = ready_sender.send(AdapterEvent::Cli(Box::new(CliEvent::ToolReady {

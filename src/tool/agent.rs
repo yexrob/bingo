@@ -331,8 +331,8 @@ fn subagent_hooks(
                 );
             }
         }),
-        on_context_usage: Arc::new(move |used, _window| {
-            context_agents.set_context_tokens(&context_instance, used);
+        on_context_usage: Arc::new(move |usage| {
+            context_agents.set_context_tokens(&context_instance, usage.used);
         }),
         on_tool_ready: Box::new(move |_tool_call_id, name, input, _standalone| {
             tool_registry.touch(&tool_instance);

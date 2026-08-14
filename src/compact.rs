@@ -446,6 +446,9 @@ pub async fn check_and_compact(
         gate.project(estimate)
     };
 
+    // Per-turn progress, and only for the stream-to-stderr host: the TUI reads
+    // the same number off `UiHooks::on_context_usage` every turn, in the footer
+    // that also colours it — a warning row per turn would say it twice.
     if tokens > 0 && !session.quiet {
         eprintln!("[bingo] context: {tokens} tokens");
     }
@@ -461,8 +464,14 @@ pub async fn check_and_compact(
             gate.reset();
             return estimate_tokens(&session.system, messages, tools);
         }
-    } else if tokens >= warning_threshold_for(&models, &model) && !session.quiet {
-        eprintln!("[bingo] warning: context at {tokens} tokens, auto-compact at {threshold}");
+    } else if tokens >= warning_threshold_for(&models, &model) {
+        // The one notice the user can still act on — compaction has not happened
+        // yet. It went to stderr under `!quiet`, which is exactly the two hosts
+        // that never see stderr, so the surface that owns the screen was the one
+        // told nothing. Same channel as compaction's own report (D66).
+        notify(format!(
+            "context at {tokens} tokens; auto-compact at {threshold}"
+        ));
     }
     tokens
 }
@@ -754,5 +763,65 @@ mod tests {
             gate.project(1_000);
         }
         assert!(gate.wants_exact(1_000), "always measures after N rounds");
+    }
+
+    /// A gate holding `tokens` as its last exact count, primed so the next turn
+    /// extrapolates instead of asking the endpoint (no test ever goes online).
+    fn gate_reading(tokens: u64, estimate: u64) -> TokenGate {
+        let mut gate = TokenGate::new();
+        gate.record_exact(tokens, estimate);
+        assert!(!gate.wants_exact(estimate), "the next turn extrapolates");
+        gate
+    }
+
+    /// The pre-compaction warning is the last point at which the user can still
+    /// do something about the context, and it used to go to stderr under
+    /// `!quiet` — which is precisely the two hosts that never see stderr. It now
+    /// travels the same channel as compaction's own report, so it arrives as a
+    /// `UiEvent::Warning` row.
+    #[tokio::test]
+    async fn the_pre_compaction_warning_reaches_the_tui() {
+        let session = crate::tui::test_util::test_session();
+        let model = session.runtime.model.borrow().clone();
+        let models = session.client.models();
+        let threshold = autocompact_threshold_for(&models, &model);
+        let warning_at = warning_threshold_for(&models, &model);
+        assert!(
+            warning_at > 0 && warning_at < threshold,
+            "the warning band has to be a real range: {warning_at}..{threshold}"
+        );
+
+        let mut messages = vec![text(Role::User, "hi"), text(Role::Assistant, "hello")];
+        let estimate = estimate_tokens(&session.system, &messages, &[]);
+
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (asks_tx, _asks_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut ui = crate::ui::tui_hooks(events_tx, asks_tx);
+
+        let mut gate = gate_reading(warning_at.saturating_sub(1), estimate);
+        let quiet =
+            check_and_compact(&session, &mut messages, &mut gate, &[], &mut ui.on_warning).await;
+        assert_eq!(quiet, warning_at - 1);
+        assert!(
+            events_rx.try_recv().is_err(),
+            "one token below the band says nothing"
+        );
+
+        let mut gate = gate_reading(warning_at, estimate);
+        let tokens =
+            check_and_compact(&session, &mut messages, &mut gate, &[], &mut ui.on_warning).await;
+        assert_eq!(tokens, warning_at);
+        match events_rx.try_recv() {
+            Ok(crate::ui::UiEvent::Warning(message)) => assert_eq!(
+                message,
+                format!("context at {warning_at} tokens; auto-compact at {threshold}")
+            ),
+            other => panic!("expected a warning row, got {other:?}"),
+        }
+        assert_eq!(
+            messages.len(),
+            2,
+            "warning only — nothing is compacted below the threshold"
+        );
     }
 }

@@ -858,9 +858,10 @@ impl AgentRegistry {
         let inner = self.lock();
         let entry = inner.get(name)?;
         let model = entry.session.runtime.model.borrow().clone();
-        Some(crate::context_usage::ContextUsage::new(
+        Some(crate::context_usage::ContextUsage::for_model(
             entry.context_tokens,
-            crate::budget::context_window_for(&entry.session.client.models(), &model),
+            &entry.session.client.models(),
+            &model,
         ))
     }
 

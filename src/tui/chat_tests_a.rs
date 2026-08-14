@@ -1497,7 +1497,7 @@ fn slash_exit_requests_shutdown() {
 fn slash_clear_resets_session() {
     let mut chat = test_chat();
     chat.messages.push(msg(Role::User, "hi"));
-    chat.context_usage = crate::context_usage::ContextUsage::new(90_000, 200_000);
+    chat.context_usage = crate::context_usage::ContextUsage::new(90_000, 200_000, 160_000);
     chat.input = "/clear".to_string();
     chat.submit();
     assert!(chat.messages.is_empty(), "UI messages cleared");

@@ -1057,7 +1057,7 @@ mod tests {
     #[test]
     fn footer_keeps_context_usage_idle_and_colors_thresholds() {
         let mut chat = chat_at(100, 24);
-        chat.context_usage = crate::context_usage::ContextUsage::new(74_240, 128_000);
+        chat.context_usage = crate::context_usage::ContextUsage::new(74_240, 128_000, 100_000);
         let normal = footer_row(&chat, 100);
         let text = row_text(&normal);
         assert!(text.contains("▓▓░░ 58% 74240/128k"), "{text}");
@@ -1070,7 +1070,7 @@ mod tests {
                 .any(|seg| seg.text.contains("58%") && seg.style.fg == Some(chat.theme.inactive))
         );
 
-        chat.context_usage = crate::context_usage::ContextUsage::new(70, 100);
+        chat.context_usage = crate::context_usage::ContextUsage::new(70, 100, 90);
         let warning = footer_row(&chat, 100);
         assert!(
             warning.line.segs.iter().any(|seg| {
@@ -1078,7 +1078,7 @@ mod tests {
             })
         );
 
-        chat.context_usage = crate::context_usage::ContextUsage::new(91, 100);
+        chat.context_usage = crate::context_usage::ContextUsage::new(91, 100, 90);
         let danger = footer_row(&chat, 100);
         assert!(
             danger

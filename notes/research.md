@@ -1145,3 +1145,52 @@ error-coloured line rather than a `❯` bubble — the harness wrote it, not the
 no send time. `ToolStatus` finally has an `Interrupted` arm of its own: amber glyph, result line
 `Interrupted`, no borrowed output and nothing to expand. Interrupted rows are still not counted as
 failures inside a collapse summary, and `interrupted` auto-continue suppression is unchanged.
+
+### D77. The terminal is handed back on the way out, and the compaction warning goes where the user is
+
+Three ways the harness talked past the user, all of them about the last moment before something
+goes wrong.
+
+**The panic hook.** Everything outside the turn task ran with no safety net. A panic there left raw
+mode on, the alternate screen up and the cursor hidden — and printed its message into a terminal
+that could no longer render it, so the user got a frozen frame and a shell that answered nothing.
+`std::panic::set_hook` (installed once, at TUI setup) now restores the terminal first and delegates
+to the previous hook after, so the message still prints, into a terminal that can show it. The hook
+does nothing but emit fixed escape sequences: no allocation, no formatting, no lock. `TUI_ACTIVE` is
+claimed after `enable_raw_mode` and *swapped* on release, so the clean teardown and the hook cannot
+both restore — whichever gets there first wins and the other is a no-op — and `TUI_FULLSCREEN` says
+whether the teardown owes the alternate-screen steps. The setup-failure path takes the same release,
+which is also how it stops leaking the alternate screen when `execute!` fails halfway.
+
+One condition beyond the blueprint's `AtomicBool`: the restore also requires the panicking thread to
+be the one that claimed the terminal (a `Cell<bool>` in thread-local storage, no destructor, so the
+hook can read it at any point in a thread's life). The blueprint gates on "TUI active" alone, but a
+panic *inside a spawned task* is not the session's death — v1.31 built `supervise_turn` precisely to
+turn it into the recoverable `TURN_LOST` state, and pulling the screen out from under a session that
+is about to offer retry / go back would trade one broken terminal for another. The host is driven by
+the runtime's root future, which `block_on` polls on the calling thread and never migrates, so
+"panicked on the claiming thread" is exactly "this panic is unwinding out of `main`". Panics
+elsewhere keep the screen as it is, which is what they did before this batch.
+
+**The pre-compaction warning.** It was `eprintln!` under `!session.quiet`, and `quiet` is true for
+everything except `--print` — so the warning existed for the one host that did not need it and was
+silent for the TUI and the JSON client. D66 already moved compaction's own report onto
+`UiHooks::on_warning` for exactly this reason; the warning that precedes it now takes the same
+channel and reads `context at {tokens} tokens; auto-compact at {threshold}`. Headless behaviour is
+unchanged in substance: the default hooks are an `eprintln!`. The per-turn `context: N tokens`
+progress line stays on stderr and stays `quiet`-gated — the TUI already carries that number in the
+footer every turn, and a warning row repeating it would be the same fact twice, in the tier reserved
+for things that need attention.
+
+**The bands.** The footer coloured at 70% and 90% of the raw context window while auto-compaction
+fires at 90% of the *effective* window (the window minus that model's own output budget). The two
+denominators differ by a number that varies enormously between models, so the bands described no
+model correctly: 78% of the window for a current Claude model, 55% for DeepSeek v4 — where the
+danger band opened at 90%, thirty-five points after compaction had already run. Bands are now
+measured as a distance to the trigger, in percentage points of the window the label prints: warning
+within 20 points, danger within 5. `ContextUsage` therefore carries the trigger alongside used and
+window, and `ContextUsage::for_model` builds all three from one resolver, so the number on screen
+and the number the compactor obeys cannot drift apart. `UiHooks::on_context_usage` passes that
+measurement whole rather than two loose integers — a receiver rebuilding the window or the trigger
+from its own model handle would be the second ruler this replaces. Label, bar and percentage are
+untouched.

@@ -53,9 +53,10 @@ impl super::Chat {
                     ),
                 };
                 let model_now = session.runtime.model.borrow().clone();
-                self.context_usage = crate::context_usage::ContextUsage::new(
+                self.context_usage = crate::context_usage::ContextUsage::for_model(
                     self.context_usage.used,
-                    crate::budget::context_window_for(&session.client.models(), &model_now),
+                    &session.client.models(),
+                    &model_now,
                 );
                 self.provider_models.insert(name.clone(), model_now.clone());
                 self.provider_session_only = !persist;

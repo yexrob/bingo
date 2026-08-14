@@ -1180,10 +1180,6 @@ impl Chat {
         let motion_off = session.settings.motion.as_deref() == Some("off")
             || std::env::var_os("BINGO_NO_MOTION").is_some();
         let chat_avatars = session.settings.experimental.chat_avatars;
-        let context_window = crate::budget::context_window_for(
-            &session.client.models(),
-            &session.runtime.model.borrow().clone(),
-        );
         let context_tokens = session
             .runtime
             .transcript
@@ -1192,6 +1188,11 @@ impl Chat {
             .and_then(|transcript| transcript.load_messages().ok())
             .map(|messages| crate::compact::estimate_tokens(&session.system, &messages, &[]))
             .unwrap_or(0);
+        let context_usage = crate::context_usage::ContextUsage::for_model(
+            context_tokens,
+            &session.client.models(),
+            &session.runtime.model.borrow().clone(),
+        );
         Self {
             session,
             events,
@@ -1233,7 +1234,7 @@ impl Chat {
             output_tokens: 0,
             output_round_tokens: 0,
             token_rate: crate::token_rate::TokenRateSampler::default(),
-            context_usage: crate::context_usage::ContextUsage::new(context_tokens, context_window),
+            context_usage,
             tick: 0,
             turn_start_tick: 0,
             turn_started: None,
@@ -1544,8 +1545,8 @@ impl Chat {
                     }
                 }
             }
-            UiEvent::ContextUsage { used, window } => {
-                self.context_usage = crate::context_usage::ContextUsage::new(used, window);
+            UiEvent::ContextUsage(usage) => {
+                self.context_usage = usage;
             }
             UiEvent::OutputTokens {
                 tokens,
@@ -2583,17 +2584,16 @@ impl Chat {
 
     fn reset_context_usage(&mut self) {
         let model = self.session.runtime.model.borrow().clone();
-        self.context_usage = crate::context_usage::ContextUsage::new(
-            0,
-            crate::budget::context_window_for(&self.session.client.models(), &model),
-        );
+        self.context_usage =
+            crate::context_usage::ContextUsage::for_model(0, &self.session.client.models(), &model);
     }
 
     fn estimate_context_usage(&mut self, messages: &[crate::api::types::Message]) {
         let model = self.session.runtime.model.borrow().clone();
-        self.context_usage = crate::context_usage::ContextUsage::new(
+        self.context_usage = crate::context_usage::ContextUsage::for_model(
             crate::compact::estimate_tokens(&self.session.system, messages, &[]),
-            crate::budget::context_window_for(&self.session.client.models(), &model),
+            &self.session.client.models(),
+            &model,
         );
     }
 
@@ -3227,13 +3227,13 @@ impl Chat {
                 .unwrap_or_default();
             // Persistence happened inside compact() as an appended marker; the
             // canonical lines are untouched (D74).
-            let _ = events.send(UiEvent::ContextUsage {
-                used: crate::compact::estimate_tokens(&session.system, &messages, &[]),
-                window: crate::budget::context_window_for(
+            let _ = events.send(UiEvent::ContextUsage(
+                crate::context_usage::ContextUsage::for_model(
+                    crate::compact::estimate_tokens(&session.system, &messages, &[]),
                     &session.client.models(),
                     &session.runtime.model.borrow().clone(),
                 ),
-            });
+            ));
             unpin();
             let kept = messages.len().saturating_sub(1);
             let _ = events.send(UiEvent::SlashInfo(format!(

@@ -238,7 +238,10 @@ pub type AskQuestionFn = dyn Fn(
     + Send
     + Sync;
 
-pub type ContextUsageFn = dyn Fn(u64, u64) + Send + Sync;
+/// One measurement travels: used tokens, the window the footer shows, and the
+/// trigger the compactor obeys — a receiver that recomputed any of them from its
+/// own model handle would be a second ruler.
+pub type ContextUsageFn = dyn Fn(crate::context_usage::ContextUsage) + Send + Sync;
 
 /// Prefix of the in-stream reconnect progress warning (`Reconnecting... N/M`); the TUI and
 /// subagent views key replacement of stale progress notices off this prefix.
@@ -295,7 +298,7 @@ pub fn headless_hooks() -> UiHooks {
             }
         }),
         on_stream_retry: Box::new(|| {}),
-        on_context_usage: Arc::new(|_, _| {}),
+        on_context_usage: Arc::new(|_| {}),
         on_tool_ready: Box::new(|_tool_call_id, _name, _input, _standalone| {}),
         on_tool_done: Box::new(|_| {}),
         on_round_end: Box::new(|| {}),
@@ -696,6 +699,17 @@ fn record(session: &Session, messages: &mut Vec<Message>, message: Message, ui: 
     messages.push(message);
 }
 
+/// Publish the turn's context measurement. Every exit of the loop reports it, so
+/// the numbers are built in one place against the model in use right now — the
+/// window on screen and the trigger the compactor obeys come from one resolver.
+fn report_context_usage(session: &Session, ui: &UiHooks, tokens: u64) {
+    (ui.on_context_usage)(crate::context_usage::ContextUsage::for_model(
+        tokens,
+        &session.client.models(),
+        &session.runtime.model.borrow().clone(),
+    ));
+}
+
 /// queryLoop: multi-turn tool loop until end_turn (the loop body shared by `run_query`
 /// and `run_bash_command`). messages already contain this user input and the transcript
 /// write. cancel: when Some, stream reads can be interrupted by a watch signal
@@ -810,11 +824,7 @@ async fn query_loop(
             &messages,
             &tool_schemas,
         ));
-        let model = session.runtime.model.borrow().clone();
-        (ui.on_context_usage)(
-            context_tokens,
-            crate::budget::context_window_for(&session.client.models(), &model),
-        );
+        report_context_usage(session, ui, context_tokens);
         let turn = match one_turn_with_stream_retries(
             session,
             &messages,
@@ -945,13 +955,7 @@ async fn query_loop(
                 &messages,
                 &tool_schemas,
             ));
-            (ui.on_context_usage)(
-                context_tokens,
-                crate::budget::context_window_for(
-                    &session.client.models(),
-                    &session.runtime.model.borrow().clone(),
-                ),
-            );
+            report_context_usage(session, ui, context_tokens);
             return Ok(QueryOutcome {
                 messages,
                 end_reason,
@@ -1142,13 +1146,7 @@ async fn query_loop(
                 &messages,
                 &tool_schemas,
             ));
-            (ui.on_context_usage)(
-                context_tokens,
-                crate::budget::context_window_for(
-                    &session.client.models(),
-                    &session.runtime.model.borrow().clone(),
-                ),
-            );
+            report_context_usage(session, ui, context_tokens);
             return Ok(QueryOutcome {
                 messages,
                 end_reason: QueryEndReason::Completed,
@@ -1172,13 +1170,7 @@ async fn query_loop(
                 &messages,
                 &tool_schemas,
             ));
-            (ui.on_context_usage)(
-                context_tokens,
-                crate::budget::context_window_for(
-                    &session.client.models(),
-                    &session.runtime.model.borrow().clone(),
-                ),
-            );
+            report_context_usage(session, ui, context_tokens);
             return Ok(QueryOutcome {
                 messages,
                 end_reason: if empty_retry_count > 0 {
@@ -1471,13 +1463,7 @@ pub async fn run_bash_command(
                             &messages,
                             &tool_schemas,
                         );
-                        (ui.on_context_usage)(
-                            context_tokens,
-                            crate::budget::context_window_for(
-                                &session.client.models(),
-                                &session.runtime.model.borrow().clone(),
-                            ),
-                        );
+                        report_context_usage(session, ui, context_tokens);
                         return Ok(QueryOutcome {
                             messages,
                             end_reason: QueryEndReason::Completed,
@@ -1561,13 +1547,7 @@ pub async fn run_bash_command(
             .then(|| record_interrupt(session, &mut messages, None, INTERRUPT_MARKER, ui));
         let context_tokens =
             crate::compact::estimate_tokens(&session.system, &messages, &tool_schemas);
-        (ui.on_context_usage)(
-            context_tokens,
-            crate::budget::context_window_for(
-                &session.client.models(),
-                &session.runtime.model.borrow().clone(),
-            ),
-        );
+        report_context_usage(session, ui, context_tokens);
         return Ok(QueryOutcome {
             messages,
             end_reason: QueryEndReason::Completed,

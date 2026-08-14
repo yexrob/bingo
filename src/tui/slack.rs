@@ -2414,7 +2414,7 @@ mod tests {
     #[test]
     fn dm_composer_keeps_context_usage_and_rate_in_the_same_footer() {
         let ws = Workspace::default();
-        let usage = crate::context_usage::ContextUsage::new(74_240, 128_000);
+        let usage = crate::context_usage::ContextUsage::new(74_240, 128_000, 100_000);
         let rows = composer_rows(
             &ws,
             &Conv::Dm("scout".into()),
@@ -2456,7 +2456,7 @@ mod tests {
             &pal,
             80,
             None,
-            Some(crate::context_usage::ContextUsage::new(70, 100)),
+            Some(crate::context_usage::ContextUsage::new(70, 100, 90)),
         )
         .0;
         assert!(warning.last().is_some_and(|row| {
@@ -2471,7 +2471,7 @@ mod tests {
             &pal,
             80,
             None,
-            Some(crate::context_usage::ContextUsage::new(91, 100)),
+            Some(crate::context_usage::ContextUsage::new(91, 100, 90)),
         )
         .0;
         assert!(danger.last().is_some_and(|row| {

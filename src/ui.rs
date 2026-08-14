@@ -78,10 +78,7 @@ pub enum UiEvent {
     RoundEnd,
     TextDelta(String),
     ThinkingDelta(String),
-    ContextUsage {
-        used: u64,
-        window: u64,
-    },
+    ContextUsage(crate::context_usage::ContextUsage),
     /// Cumulative output token count for the current model response while it streams.
     /// `authoritative`: the end-of-round usage total (message_delta), an accounting
     /// correction rather than freshly streamed output — the rate sampler must not
@@ -275,8 +272,8 @@ pub fn tui_hooks(
             *retry_round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
             let _ = retry_events.send(UiEvent::StreamRetry);
         }),
-        on_context_usage: Arc::new(move |used, window| {
-            let _ = context_events.send(UiEvent::ContextUsage { used, window });
+        on_context_usage: Arc::new(move |usage| {
+            let _ = context_events.send(UiEvent::ContextUsage(usage));
         }),
         on_tool_ready: Box::new(move |tool_call_id, name, input, standalone| {
             let _ = ready_events.send(UiEvent::ToolReady {
@@ -337,13 +334,12 @@ mod tests {
         let (asks_tx, _asks_rx) = mpsc::unbounded_channel();
         let mut ui = tui_hooks(events_tx, asks_tx);
 
-        (ui.on_context_usage)(12_345, 128_000);
+        (ui.on_context_usage)(crate::context_usage::ContextUsage::new(
+            12_345, 128_000, 100_000,
+        ));
         assert!(matches!(
             events_rx.try_recv(),
-            Ok(UiEvent::ContextUsage {
-                used: 12_345,
-                window: 128_000
-            })
+            Ok(UiEvent::ContextUsage(usage)) if usage.used == 12_345 && usage.window == 128_000
         ));
 
         (ui.on_event)(&StreamEvent::TextDelta {
