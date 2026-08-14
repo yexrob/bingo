@@ -326,6 +326,11 @@ pub struct UiHooks {
     /// Mid-turn steering: drained at each tool barrier of a turn that is continuing.
     /// [`no_steer`] for hosts with no composer, which leaves the turn exactly as it was.
     pub steer: Arc<SteerFn>,
+    /// Foreground liveness (D84): the running shell command's output tail, and the
+    /// ctrl+b that moves it to the background. [`crate::live::LiveBash::detached`]
+    /// for hosts with no foreground surface — nothing is published and nothing can
+    /// be promoted.
+    pub live: Arc<crate::live::LiveBash>,
     /// Permission prompt: tool name + reason → whether allowed (async: the TUI modal may wait for the user).
     pub ask: Arc<AskFn>,
     /// AskUserQuestion tool: title + question + options → selected index (async modal).
@@ -378,6 +383,8 @@ pub fn headless_hooks() -> UiHooks {
         on_warning: Box::new(|message| eprintln!("[bingo] warning: {message}")),
         // No composer behind a headless run: nothing can be typed mid-turn.
         steer: no_steer(),
+        // Nor a screen to tail a command on, nor a key to press to background it.
+        live: crate::live::LiveBash::detached(),
         ask: stdin_ask(),
         ask_question: Arc::new(|title, question, options| {
             Box::pin(async move {
@@ -736,6 +743,7 @@ pub(crate) fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContex
         cwd: session.cwd(),
         home: session.home.clone(),
         watch: session.watch.clone(),
+        live: ui.live.clone(),
         http: tool_http()?,
         tasks: session.tasks.clone(),
         hooks: session.settings.hooks.clone(),

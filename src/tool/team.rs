@@ -785,6 +785,7 @@ mod tests {
             cwd: cwd.to_path_buf(),
             home: session.home.clone(),
             watch: session.watch.clone(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: session.tasks.clone(),
             hooks: Default::default(),

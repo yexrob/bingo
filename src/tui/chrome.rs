@@ -485,7 +485,7 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
         children.push(El::Row(status_row(
             &status,
             crate::tui::activities::spinner(chat.tick),
-            chat.esc_busy_hint(),
+            &chat.busy_hint(),
             theme,
         )));
     }

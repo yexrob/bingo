@@ -1018,6 +1018,7 @@ impl super::Chat {
         // caller re-arms it against the queue once this turn is the running one.
         self.steer.reset();
         let steer = self.steer.clone();
+        let live = self.live.clone();
         let session = self.session_for_turn();
         let events = self.events.clone();
         let asks = self.asks.clone();
@@ -1029,7 +1030,7 @@ impl super::Chat {
         self.cancel_tx.send_replace(false);
         let handle = tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
-            let mut ui = crate::ui::tui_hooks(events.clone(), asks, steer);
+            let mut ui = crate::ui::tui_hooks(events.clone(), asks, steer, live);
             let history = Self::load_history(&session, &mut ui.on_warning);
             let result =
                 run_query(&session, history, &text, &images, &mut ui, Some(cancel_rx)).await;
@@ -1093,6 +1094,7 @@ impl super::Chat {
         // Same as start_turn: the channel is this turn's (D83).
         self.steer.reset();
         let steer = self.steer.clone();
+        let live = self.live.clone();
         let session = self.session_for_turn();
         let events = self.events.clone();
         let asks = self.asks.clone();
@@ -1101,7 +1103,7 @@ impl super::Chat {
         self.cancel_tx.send_replace(false);
         let handle = tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
-            let mut ui = crate::ui::tui_hooks(events.clone(), asks, steer);
+            let mut ui = crate::ui::tui_hooks(events.clone(), asks, steer, live);
             let history = Self::load_history(&session, &mut ui.on_warning);
             let result = crate::query::run_bash_command(
                 &session,
@@ -1596,6 +1598,17 @@ impl super::Chat {
             Some(EscLayer::Interrupt) | None => "esc to interrupt",
             Some(_) => "esc to close",
         }
+    }
+
+    /// The whole hint on the running-status row. Esc is always offered; ctrl+b
+    /// joins it only while a foreground shell command is in flight, because that
+    /// is the only time it means "background this" (D84).
+    pub(crate) fn busy_hint(&self) -> String {
+        let esc = self.esc_busy_hint();
+        if self.live.running() {
+            return format!("{esc} · ctrl+b to run in background");
+        }
+        esc.to_string()
     }
 
     /// Interrupts the current turn (Esc / Ctrl+C while busy). The first request is stamped
@@ -2413,9 +2426,52 @@ impl super::Chat {
         )]
     }
 
-    /// Main-view entry for running background-agent management.
+    /// The running command's output so far: dim, indented under the `⎿` row it
+    /// belongs to (D84).
+    ///
+    /// These rows live in the redrawn tail region by construction — a running tool
+    /// keeps its message unsettled, so nothing here can reach scrollback, and a
+    /// finished command leaves nothing behind to unprint.
+    pub(crate) fn bash_tail_rows(&self, width: usize) -> Vec<Line> {
+        let Some(tail) = &self.bash_tail else {
+            return Vec::new();
+        };
+        let indent = crate::tui::activities::RESULT_INDENT;
+        let mut rows = Vec::new();
+        // What is being left out, before what is kept: five lines of five reads
+        // very differently from five lines of twelve hundred.
+        if tail.total_lines > tail.lines.len() {
+            rows.push(Line::styled(
+                one_line(&format!("{indent}… {} lines", tail.total_lines), width),
+                SegStyle::fg(self.theme.inactive),
+            ));
+        }
+        for line in &tail.lines {
+            rows.push(Line::styled(
+                one_line(&format!("{indent}{line}"), width),
+                SegStyle::fg(self.theme.inactive),
+            ));
+        }
+        rows
+    }
+
+    /// Main-view entry for running background-agent management — and, while a
+    /// shell command is running in the foreground, for moving that command to the
+    /// background instead (D84).
+    ///
+    /// The running command wins: it is the thing the key is about right now, it is
+    /// on screen with its tail under it, and it stops being promotable the moment
+    /// it exits — after which ctrl+b means what it meant before (D80).
     pub fn agent_manager_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+        if self.agent_manager.is_none() && code == KeyCode::Char('b') && ctrl && self.live.promote()
+        {
+            // The tail's rows go with the row they hung under; the command reappears
+            // in the task panel as the background task it now is.
+            self.bash_tail = None;
+            self.dirty = true;
+            return true;
+        }
         if self.agent_manager.is_none() && code == KeyCode::Char('b') && ctrl {
             self.agent_manager = Some(AgentManager::List { selected: 0 });
             self.dirty = true;
@@ -2992,6 +3048,15 @@ impl super::Chat {
         // Only rendered after the turn ends: while running, `✻ Baked for 0.4s` would appear
         // while tools are still running, contradicting the bottom running-status row.
         let show_done_line = i == self.messages.len() - 1 && self.stream_msg.is_none() || settled;
+        // Built before the render closure takes its mutable borrows: the tail is the
+        // same rows wherever the running command's row turns out to be inside this
+        // message. Only the streaming message can hold one — the same rule the tool
+        // events themselves follow — so every other message pays nothing.
+        let bash_tail = if self.stream_msg == Some(i) {
+            self.bash_tail_rows(width)
+        } else {
+            Vec::new()
+        };
         // Markdown render closure: borrows only disjoint fields to avoid conflicting with
         // the shared read borrow of `self.messages`.
         let mut render = {
@@ -3114,6 +3179,16 @@ impl super::Chat {
                         SegStyle::fg(theme.inactive),
                     )));
                 }
+                // The folded command is the one running: its tail belongs under the
+                // hint row, which is the only row the fold gives it (D84).
+                if in_progress
+                    && msg.groups[g]
+                        .activities
+                        .iter()
+                        .any(|&ai| msg.activities.get(ai).is_some_and(is_running_bash))
+                {
+                    parts.extend(bash_tail.iter().cloned().map(El::Line));
+                }
                 continue;
             }
             let (lines, local) = layout_activity(
@@ -3151,6 +3226,12 @@ impl super::Chat {
             } else {
                 activity
             });
+            // The command's output so far, under its own row. Outside the Annotated
+            // block: these rows are evidence, not a click target, and they are gone
+            // by the time the row is worth clicking.
+            if is_running_bash(act) {
+                parts.extend(bash_tail.iter().cloned().map(El::Line));
+            }
         }
         if rendered_bytes < text.len() {
             let reply = render(&text[rendered_bytes..]);
@@ -3505,4 +3586,11 @@ fn lerp_color(a: Color, b: Color, t: f64) -> Color {
             .clamp(0.0, 255.0) as u8
     };
     Color::Rgb(l(ar, br), l(ag, bg), l(ab, bb))
+}
+
+/// Whether this activity is the foreground shell command the live tail belongs
+/// to. Bash is never concurrency-safe, so Phase 2 runs it alone: at most one
+/// activity can answer yes at a time, which is why one tail slot is enough.
+fn is_running_bash(act: &Activity) -> bool {
+    matches!(&act.kind, ActivityKind::Tool(t) if t.status == ToolStatus::Running && t.name == "Bash")
 }

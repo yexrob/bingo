@@ -151,6 +151,10 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
   inside multi-line input).
 - `Ctrl+S` stash/restore the input, `Ctrl+Y` paste back deleted text,
   `Ctrl+_` undo.
+- A shell command running in the foreground shows the last five lines of its
+  output under its row while it runs, and `Ctrl+B` moves it to the background
+  without restarting it: the tool call returns a task id at once and the
+  completion arrives as a background-task notification.
 
 ### Key bindings (press `?` on an empty input for the full table)
 
@@ -161,6 +165,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Ctrl+T` | toggle the task area |
 | `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `q` close) |
 | `Ctrl+G` | open the full workspace directly; `Ctrl+K` switches channels and DMs |
+| `Ctrl+B` | move the running shell command to the background; with none running, manage background agents |
 | `Ctrl+L` | clear and redraw |
 | `Shift+Tab` | cycle permission modes (default → acceptEdits → plan); in an approval prompt, take `Yes, and don't ask again this session` |
 | `Ctrl+E` | in an approval prompt, expand the full command/diff preview and the session rule it would install |

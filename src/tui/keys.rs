@@ -97,7 +97,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+b",
-        description: "manage running background agents",
+        description: "background the running command · manage background agents",
     },
     Binding {
         keys: "ctrl+l",
@@ -212,13 +212,19 @@ mod tests {
         assert!(!binding.description.contains("pick"));
     }
 
+    /// ctrl+b reads the situation: a shell command running in the foreground is
+    /// what it backgrounds, and only when there is none does it open the manager
+    /// (D84). The panel names both, in the order the key tries them.
     #[test]
-    fn ctrl_b_help_opens_the_background_agent_manager() {
+    fn ctrl_b_help_names_both_of_its_meanings() {
         let binding = BINDINGS
             .iter()
             .find(|binding| binding.keys == "ctrl+b")
             .unwrap_or_else(|| panic!("ctrl+b binding missing"));
-        assert_eq!(binding.description, "manage running background agents");
+        assert_eq!(
+            binding.description,
+            "background the running command · manage background agents"
+        );
     }
 
     #[test]

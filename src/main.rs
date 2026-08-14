@@ -25,6 +25,7 @@ mod error;
 mod experience;
 mod hooks;
 mod json_events;
+mod live;
 mod mcp;
 mod memory;
 mod model_cache;

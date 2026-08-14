@@ -913,7 +913,12 @@ async fn ctrl_e_toggles_the_bounded_preview() {
 async fn ask_user_question_keeps_its_own_shape() {
     let mut chat = test_chat();
     let (events_tx, _events_rx) = tokio::sync::mpsc::unbounded_channel();
-    let ui = crate::ui::tui_hooks(events_tx, chat.asks.clone(), chat.steer.clone());
+    let ui = crate::ui::tui_hooks(
+        events_tx,
+        chat.asks.clone(),
+        chat.steer.clone(),
+        chat.live.clone(),
+    );
     let answer = (ui.ask_question)(
         "Tech stack".to_string(),
         "Which library?".to_string(),
@@ -1084,4 +1089,164 @@ async fn the_channel_is_re_armed_for_the_turn_that_actually_runs() {
         }],
         "the message that opened the turn is not also steered into it"
     );
+}
+
+/// A Bash tool call in flight, exactly as the query layer announces one.
+/// `standalone`: the `!` shell mode's own call, which never joins a fold group.
+fn running_bash(chat: &mut Chat, command: &str, standalone: bool) {
+    chat.messages.push(msg(Role::Assistant, ""));
+    chat.stream_msg = Some(0);
+    let _ = chat.events.send(UiEvent::ToolStart {
+        name: "Bash".into(),
+    });
+    chat.drain_events();
+    let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "bash-1".into(),
+        name: "Bash".into(),
+        input: json!({ "command": command }),
+        standalone,
+    });
+    chat.drain_events();
+}
+
+fn tail(chat: &mut Chat, lines: &[&str], total_lines: usize) {
+    let _ = chat.events.send(UiEvent::BashTail(crate::live::LiveTail {
+        lines: lines.iter().map(|l| (*l).to_string()).collect(),
+        total_lines,
+    }));
+    chat.drain_events();
+}
+
+/// D84: a folded Bash call gets one row — the command — and used to say nothing
+/// else until it exited. Its output now hangs under that row while it runs, and
+/// leaves with it.
+#[test]
+fn a_folded_command_shows_its_output_while_it_runs() {
+    let mut chat = test_chat();
+    running_bash(&mut chat, "cargo build --release", false);
+    assert!(
+        visible(&mut chat, 120, 40).contains("cargo build --release"),
+        "the folded row names the command"
+    );
+
+    tail(
+        &mut chat,
+        &["Compiling bingo v0.4.0", "Compiling serde v1"],
+        2,
+    );
+    let screen = visible(&mut chat, 120, 40);
+    assert!(screen.contains("Compiling bingo v0.4.0"), "{screen}");
+    assert!(screen.contains("Compiling serde v1"), "{screen}");
+    assert!(
+        !screen.contains("lines"),
+        "nothing is being left out yet: {screen}"
+    );
+
+    // A later sample replaces the rows rather than adding to them, and says how
+    // much of the output it is not showing.
+    tail(
+        &mut chat,
+        &["Compiling a", "Compiling b", "Compiling c", "Compiling d"],
+        128,
+    );
+    let screen = visible(&mut chat, 120, 40);
+    assert!(
+        !screen.contains("Compiling bingo v0.4.0"),
+        "the tail is replaced, not appended: {screen}"
+    );
+    assert!(screen.contains("Compiling d"), "{screen}");
+    assert!(screen.contains("… 128 lines"), "{screen}");
+
+    let _ = chat
+        .events
+        .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "bash-1".into(),
+            name: "Bash".into(),
+            summary: "cargo build --release".into(),
+            output: "Finished release".into(),
+            status: crate::query::ToolCallStatus::Done,
+            duration_ms: 10,
+            diff: None,
+        }));
+    chat.drain_events();
+    let screen = visible(&mut chat, 120, 40);
+    assert!(
+        !screen.contains("Compiling d") && !screen.contains("… 128 lines"),
+        "the finished call's own result row takes over: {screen}"
+    );
+}
+
+/// The `!` shell command is standalone (no fold group), and its running row is
+/// the activity's own — the tail has to find that one too.
+#[test]
+fn a_standalone_command_shows_its_output_under_its_own_row() {
+    let mut chat = test_chat();
+    running_bash(&mut chat, "pytest -q", true);
+    tail(&mut chat, &["collected 40 items", "test_one PASSED"], 2);
+    let screen = visible(&mut chat, 120, 40);
+    assert!(screen.contains("Running…"), "{screen}");
+    assert!(screen.contains("test_one PASSED"), "{screen}");
+}
+
+/// Long output belongs to the terminal width, not to the command: a tail row
+/// never wraps into a second row (the tail region's height would drift).
+#[test]
+fn a_long_tail_line_is_clipped_to_the_width() {
+    let mut chat = test_chat();
+    running_bash(&mut chat, "cargo test", false);
+    tail(&mut chat, &["x".repeat(400).as_str()], 1);
+    for row in chat.bash_tail_rows(60) {
+        assert!(
+            crate::tui::line::text_width(&row.plain_text()) <= 60,
+            "row overflows the width: {}",
+            row.plain_text()
+        );
+    }
+}
+
+/// D84: ctrl+b reads the situation. A command running in the foreground is what
+/// it backgrounds; with none running it keeps opening the manager (D80).
+#[test]
+fn ctrl_b_backgrounds_the_running_command_before_it_opens_the_manager() {
+    let mut chat = test_chat();
+    running_bash(&mut chat, "cargo build", false);
+    tail(&mut chat, &["Compiling bingo"], 1);
+    let (run, mut promote) = chat.live.arm();
+    assert!(chat.live.running());
+
+    assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    assert!(
+        *promote.borrow_and_update(),
+        "the running command was told to go to the background"
+    );
+    assert!(
+        chat.agent_manager.is_none(),
+        "the manager stays closed while a command owns the key"
+    );
+    assert!(
+        chat.bash_tail.is_none(),
+        "the tail leaves with the row it hung under"
+    );
+    assert!(!chat.live.running(), "a second press means something else");
+    drop(run);
+
+    assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    assert!(
+        chat.agent_manager.is_some(),
+        "with nothing running, ctrl+b is the background-agent manager"
+    );
+}
+
+/// The offer is only made while it is true.
+#[test]
+fn the_status_hint_offers_ctrl_b_only_while_a_command_runs() {
+    let chat = test_chat();
+    assert_eq!(chat.busy_hint(), "esc to interrupt");
+    let (run, _promote) = chat.live.arm();
+    assert_eq!(
+        chat.busy_hint(),
+        "esc to interrupt · ctrl+b to run in background"
+    );
+    drop(run);
+    assert_eq!(chat.busy_hint(), "esc to interrupt");
 }

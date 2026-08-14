@@ -1596,3 +1596,62 @@ loop tests and borrow that suite's mock-server helpers (four of which become `pu
 messages into one. (d) Scope holds: subagents keep their inbox mechanics, and headless, `--print`
 and JSON protocol v1 pass `no_steer()`, which is `Vec::new` — those hosts have no composer, and the
 turn runs byte-identically to before.
+
+### D84. A running command is evidence, not a spinner — and ctrl+b is the exit
+
+A foreground `Bash` call was a silent `⎿ Running…` from the moment it started until the moment it
+exited. The tool already streamed its output incrementally — `spawn_output_readers` has fed a shared
+buffer since the beginning — but nobody read that buffer until the command was done, so a two-minute
+`cargo build` and a hung `ssh` looked exactly alike, and the only key that reached a running command
+was Esc, which kills it. Claude Code shows a rolling tail under the tool row and lets ctrl+b move the
+running command to the background mid-flight; both are the alignment targets.
+
+**One command at a time, by construction.** `Bash::is_concurrency_safe` is always false, and
+`execute_calls` runs non-safe tools serially, so a session has at most one foreground command in
+flight. The whole feature is built on that: `src/live.rs`'s `LiveBash` has one slot, one promote
+signal, one tail. A second `arm()` would be a bug, and `debug_assert` says so; if it ever happened,
+the newcomer keeps its own sender inside its guard rather than evicting the incumbent, because an
+evicted (dropped) sender must never be read as "the user pressed ctrl+b". `promote_requested` parks
+forever on a closed channel for the same reason — the same shape as `executor::cancel_requested`.
+
+**The tail is its own buffer, not the result buffer.** `BoundedOutput` stores bytes verbatim and
+stops growing at `bashOutputMaxChars` (48k), which makes it useless as a tail twice over: a
+`\r` progress bar would paint hundreds of lines, and a long build would freeze the tail at the cap
+while the command kept running. `TailBuffer` applies terminal semantics as the bytes arrive —
+`\r` rewrites the current line, `\n` commits it, five lines are kept, escape sequences are dropped
+rather than handed to a renderer that would write them straight to the terminal (`line::sanitize`
+deliberately preserves ESC), and a newline-free stream is capped per line. The result the model
+reads is byte-identical to before.
+
+**Coalescing is a rule about the wire, so it is testable as one.** `TailCoalescer::admit` takes the
+clock as an argument: at most one event per 100ms, and never an event that would repaint rows the
+host already shows. A ticker samples every 50ms — faster than the floor on purpose, so the last
+write of a burst still lands once the floor passes rather than waiting for output that never comes.
+A thousand writes in one interval is one event.
+
+**Promotion moves the audience, not the process.** `promote_to_background` registers the watchable
+the background path already uses, feeds it the same `BashCell` that has been counting lines since the
+command started (so the task panel reports the elapsed time it really has), swaps the sink's tail for
+the task id, and spawns a task that owns the *same* `Child` and the *same* reader handles. Nothing
+is killed, nothing is restarted, the buffer is not lost, and the timeout is dropped because a
+background task is not bounded by the foreground call's budget. The model gets the exact shape
+`background: true` returns, plus a note saying the user did this and it did not.
+
+**Deviations and consequences.** (a) The tail event carries no `tool_use_id`. The TUI's activity
+model has no id key at all — `ToolReady` explicitly discards it and `ToolDone` finds its row by
+scanning for the first running call with a matching name — so an id would have been a field nothing
+could resolve; the renderer finds the running `Bash` row the same way `ToolDone` does, which the
+serial invariant makes unambiguous. (b) The tail rows are rendered in `chat_tail.rs`, not in
+`layout_activity`: a Bash call is usually *folded*, and a folded activity is never laid out at all —
+its only row is the group's `⎿` hint row — so both render paths need the rows, and only the caller
+knows the width they must be clipped to. (c) Output written before a promotion is not replayed into
+the notify conditions. It has already been on screen, and the completion payload still carries all of
+it; replaying it would fire a notification for an error the user just watched scroll past. (d) The
+blueprint's "line counter on the `⎿` row" is a `… N lines` row above the tail instead of a suffix on
+the row itself, which `activities.rs` renders from `ToolCall` alone — and it appears only when there
+is something to count, i.e. when the tail is not the whole output. (e) `ToolContext` gains a `live`
+field (37 literal construction sites, all tests, defaulting to a detached handle) rather than a
+task-local: `ask_question` already crosses from `UiHooks` into `ToolContext` this way, and hidden
+control flow was not worth saving 37 lines of mechanical diff. (f) Scope holds: headless, `--print`,
+JSON protocol v1 and every subagent hold `LiveBash::detached()` — no tail is produced, nothing can be
+promoted, no new wire event exists, and those hosts run byte-identically to before.

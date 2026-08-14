@@ -182,6 +182,13 @@ pub enum UiEvent {
     Steered {
         items: Vec<crate::steer::SteerItem>,
     },
+    /// A foreground shell command's output so far (D84): the last few lines, dim,
+    /// under the running tool row, replaced on every sample. No tool id travels with
+    /// it — Phase 2 runs non-concurrency-safe tools serially, so exactly one
+    /// foreground command can be in flight, and the renderer finds it the same way
+    /// [`UiEvent::ToolDone`] does. The rows live in the redrawn tail region and never
+    /// reach scrollback: a running tool row keeps its message unsettled.
+    BashTail(crate::live::LiveTail),
     /// The user interrupted the turn. `marker` is the exact string the transcript
     /// recorded (`crate::query::INTERRUPT_MARKER` / `…_TOOL_USE`), echoed into the
     /// message flow so the screen and the model read the same sentence — a transient
@@ -277,6 +284,7 @@ pub fn tui_hooks(
     events: mpsc::UnboundedSender<UiEvent>,
     asks: mpsc::UnboundedSender<AskRequest>,
     steer: crate::steer::SteerQueue,
+    live: Arc<crate::live::LiveBash>,
 ) -> UiHooks {
     let tool_events = events.clone();
     let steer_events = events.clone();
@@ -405,6 +413,7 @@ pub fn tui_hooks(
             }
             items
         }),
+        live,
         ask: modal_ask(ask_asks),
         ask_question: Arc::new(move |title, question, options| {
             let mut request = PermissionRequest::new(title, question, Vec::new());
@@ -436,7 +445,12 @@ mod tests {
     fn tui_hooks_emit_live_token_samples_before_final_usage() {
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let (asks_tx, _asks_rx) = mpsc::unbounded_channel();
-        let mut ui = tui_hooks(events_tx, asks_tx, crate::steer::SteerQueue::new());
+        let mut ui = tui_hooks(
+            events_tx,
+            asks_tx,
+            crate::steer::SteerQueue::new(),
+            crate::live::LiveBash::detached(),
+        );
 
         (ui.on_context_usage)(crate::context_usage::ContextUsage::new(
             12_345, 128_000, 100_000,
@@ -481,7 +495,12 @@ mod tests {
     async fn ask_question_hook_maps_confirm_and_cancel() {
         let (events_tx, _events_rx) = mpsc::unbounded_channel();
         let (asks_tx, mut asks_rx) = mpsc::unbounded_channel();
-        let ui = tui_hooks(events_tx, asks_tx, crate::steer::SteerQueue::new());
+        let ui = tui_hooks(
+            events_tx,
+            asks_tx,
+            crate::steer::SteerQueue::new(),
+            crate::live::LiveBash::detached(),
+        );
 
         let fut = (ui.ask_question)(
             "Tech stack".to_string(),

@@ -1396,6 +1396,9 @@ fn json_hooks(
         // Protocol v1 has no client-to-turn message channel: a JSON host queues
         // nothing mid-turn, so the turn runs exactly as it did before D83.
         steer: crate::query::no_steer(),
+        // Protocol v1 has no live-output or promote events either: a JSON host gets
+        // the command's result when it finishes, exactly as it did before D84.
+        live: crate::live::LiveBash::detached(),
         ask: Arc::new(move |request| {
             let prompt_id = format!(
                 "prompt-{}",

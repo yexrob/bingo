@@ -415,6 +415,7 @@ mod tests {
             cwd: std::path::PathBuf::from("/tmp"),
             home: std::env::temp_dir(),
             watch: session.watch.clone(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: session.tasks.clone(),
             hooks: crate::settings::HooksConfig::default(),

@@ -900,6 +900,13 @@ pub struct Chat {
     /// turn that is running now. Re-armed from `queued` on every change, so it is a
     /// projection of the queue rather than a second copy that could drift from it.
     pub(crate) steer: crate::steer::SteerQueue,
+    /// Foreground command liveness (D84): the seam the running Bash tool publishes
+    /// its output tail through, and the one ctrl+b reaches to background it.
+    pub(crate) live: std::sync::Arc<crate::live::LiveBash>,
+    /// The tail of the command running right now (None: no foreground command, or
+    /// it has not written anything yet). One slot, because Phase 2 runs non-safe
+    /// tools serially and Bash is never concurrency-safe.
+    pub(crate) bash_tail: Option<crate::live::LiveTail>,
     /// Whether the `?` shortcut panel is expanded.
     pub help_visible: bool,
     /// Bottom transient notice (`Press ctrl-c again to exit` etc.).
@@ -1275,6 +1282,13 @@ impl Chat {
             &session.client.models(),
             &session.runtime.model.borrow().clone(),
         );
+        // A running command's tail reaches the screen the way every other turn-side
+        // fact does: as a UiEvent on the channel the drain loop already wakes for.
+        // Nothing else in the TUI has to learn a second way to hear from a tool.
+        let tail_events = events.clone();
+        let live = crate::live::LiveBash::new(Arc::new(move |tail| {
+            let _ = tail_events.send(UiEvent::BashTail(tail));
+        }));
         Self {
             session,
             events,
@@ -1294,6 +1308,8 @@ impl Chat {
             queued: Vec::new(),
             next_queue_id: 0,
             steer: crate::steer::SteerQueue::new(),
+            live,
+            bash_tail: None,
             help_visible: false,
             notice: None,
             notice_until: None,
@@ -1465,6 +1481,9 @@ impl Chat {
                 self.thinking_buf.clear();
                 self.thinking_seg_open = false;
                 self.pending_tools_clear();
+                // No command of the previous turn may keep painting under a row of
+                // this one (an interrupt drops the tool future without a ToolDone).
+                self.bash_tail = None;
                 self.interrupt_at = None;
                 let now = std::time::Instant::now();
                 self.turn_started = Some(now);
@@ -1836,7 +1855,18 @@ impl Chat {
                     self.load_message_images(&text);
                 }
             }
+            UiEvent::BashTail(tail) => {
+                // Only worth keeping while there is a row to hang it under; the
+                // renderer decides that, and drops it the moment the call is done.
+                self.bash_tail = Some(tail);
+            }
             UiEvent::ToolDone(done) => {
+                // The finished call's own result row takes over from the tail. A
+                // sample still in flight when the command exited would otherwise
+                // paint output under a row that already reported it.
+                if done.name == "Bash" {
+                    self.bash_tail = None;
+                }
                 let Some(i) = self.stream_msg else {
                     return;
                 };
@@ -1900,6 +1930,7 @@ impl Chat {
             }
             UiEvent::TurnEnd => {
                 self.busy = false;
+                self.bash_tail = None;
                 // A turn short enough to have been watched needs no
                 // notification; a long one is exactly what the user walked away
                 // from (D79). Read before the start time is cleared.

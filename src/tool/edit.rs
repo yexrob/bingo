@@ -116,6 +116,7 @@ mod tests {
             cwd: root.clone(),
             home: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -159,6 +160,7 @@ mod tests {
                     cwd: Default::default(),
                     home: std::env::temp_dir(),
                     watch: crate::watch::WatchRegistry::new(),
+                    live: Default::default(),
                     http: reqwest::Client::new(),
                     tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
                         &std::env::temp_dir(),
@@ -193,6 +195,7 @@ mod tests {
                     cwd: Default::default(),
                     home: std::env::temp_dir(),
                     watch: crate::watch::WatchRegistry::new(),
+                    live: Default::default(),
                     http: reqwest::Client::new(),
                     tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
                         &std::env::temp_dir(),

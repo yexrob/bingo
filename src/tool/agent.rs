@@ -405,6 +405,10 @@ fn subagent_hooks(
         // A subagent is steered through its own inbox (`absorb_inbox`), drained at the
         // top of every round; the composer's channel belongs to the foreground turn.
         steer: crate::query::no_steer(),
+        // A subagent's shell output belongs to its own transcript, not to the main
+        // view's tail: its commands are not the foreground turn's commands, and its
+        // rows are not the rows ctrl+b talks about (D84).
+        live: crate::live::LiveBash::detached(),
         ask: std::sync::Arc::new(move |request| {
             // No prompt surface attached: both real entry points (TUI, headless) attach one at
             // startup, so this is the embedded/test path — fall back to denying.
@@ -2324,6 +2328,7 @@ mod tests {
             home: std::env::temp_dir(),
             cwd: std::path::PathBuf::from("/tmp"),
             watch: session.watch.clone(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: session.tasks.clone(),
             hooks: crate::settings::HooksConfig::default(),
@@ -2514,6 +2519,7 @@ mod tests {
             home: std::env::temp_dir(),
             cwd: std::path::PathBuf::from("/tmp"),
             watch: session.watch.clone(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: session.tasks.clone(),
             hooks: crate::settings::HooksConfig::default(),

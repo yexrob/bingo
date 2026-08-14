@@ -35,6 +35,10 @@ pub struct ToolContext {
     pub home: PathBuf,
     /// Watchable registry (background task lifecycle and notifications).
     pub watch: std::sync::Arc<crate::watch::WatchRegistry>,
+    /// Foreground liveness (D84): where a running shell command publishes its
+    /// output tail, and where the host's ctrl+b reaches it. Defaults to a
+    /// detached handle — a host with no foreground surface sees no difference.
+    pub live: std::sync::Arc<crate::live::LiveBash>,
     /// Shared HTTP client (WebFetch/WebSearch reuse the connection pool; does not follow redirects).
     pub http: reqwest::Client,
     /// Task store (Task tool family; shared with the TUI task panel).
