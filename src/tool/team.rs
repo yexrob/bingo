@@ -785,6 +785,7 @@ mod tests {
             cwd: cwd.to_path_buf(),
             home: session.home.clone(),
             watch: session.watch.clone(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: session.tasks.clone(),
             hooks: Default::default(),
@@ -792,6 +793,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         }
     }
 

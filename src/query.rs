@@ -49,6 +49,10 @@ pub struct QueryOutcome {
     pub end_reason: QueryEndReason,
     /// Turn aborted by the user (stream stopped; tools that already ran finish normally).
     pub aborted: bool,
+    /// The interrupt marker this turn appended to the transcript, when it recorded one
+    /// ([`INTERRUPT_MARKER`] / [`INTERRUPT_MARKER_TOOL_USE`]). The UI echoes exactly this
+    /// string, so the screen and the model read the same sentence.
+    pub interrupt_marker: Option<&'static str>,
 }
 
 pub(crate) struct InboxWake {
@@ -210,8 +214,55 @@ pub enum ToolCallStatus {
     Interrupted,
 }
 
-/// Async permission prompt callback: tool name + reason → whether allowed.
-pub type AskFn = dyn Fn(&str, &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+/// What the user decided at a permission prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskOutcome {
+    /// Allow this call; the next one of the same shape asks again.
+    Allow,
+    /// Allow this call and install [`AskContext::scope`] as a session-scoped
+    /// allow rule, so the rest of the session runs unasked. Nothing is written
+    /// to disk: "this session" is exactly what the user was offered.
+    AllowSession,
+    /// Refuse. `feedback` is what the user asked for instead; it travels to the
+    /// model inside the `<permission_error>` so a denial carries a direction
+    /// rather than only a wall.
+    Deny { feedback: Option<String> },
+}
+
+impl AskOutcome {
+    // Production reads the variants directly; the shorthand is what tests assert with.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn allowed(&self) -> bool {
+        matches!(self, Self::Allow | Self::AllowSession)
+    }
+}
+
+/// Everything a prompt surface needs to describe one pending permission request.
+///
+/// It travels as a struct rather than positional arguments because the prompt
+/// has to show *what* it is approving (the input, resolved against `cwd`, or the
+/// dry-run `diff`) and whether "don't ask again" can honestly be offered
+/// (`scope`) — a bool-returning `(name, reason)` callback could show neither.
+#[derive(Clone, Copy)]
+pub struct AskContext<'a> {
+    /// Tool being gated.
+    pub tool: &'a str,
+    /// Why the gate is asking (`can_use_tool`'s reason).
+    pub reason: &'a str,
+    /// The input the tool would run with, after PreToolUse hooks.
+    pub input: &'a serde_json::Value,
+    /// Session working directory: relative paths in `input` resolve against it.
+    pub cwd: &'a std::path::Path,
+    /// The allow rule "don't ask again this session" would install. `None`: the
+    /// prompt outranks allow rules (ask rule / safety check), so the option must
+    /// not be offered — it could not keep its promise.
+    pub scope: Option<&'a str>,
+    /// Dry-run unified diff of the change approving would make (edit tools).
+    pub diff: Option<&'a str>,
+}
+
+/// Async permission prompt callback: one pending request → the user's verdict.
+pub type AskFn = dyn Fn(&AskContext<'_>) -> std::pin::Pin<Box<dyn std::future::Future<Output = AskOutcome> + Send>>
     + Send
     + Sync;
 
@@ -234,11 +285,29 @@ pub type AskQuestionFn = dyn Fn(
     + Send
     + Sync;
 
-pub type ContextUsageFn = dyn Fn(u64, u64) + Send + Sync;
+/// One measurement travels: used tokens, the window the footer shows, and the
+/// trigger the compactor obeys — a receiver that recomputed any of them from its
+/// own model handle would be a second ruler.
+pub type ContextUsageFn = dyn Fn(crate::context_usage::ContextUsage) + Send + Sync;
 
 /// Prefix of the in-stream reconnect progress warning (`Reconnecting... N/M`); the TUI and
 /// subagent views key replacement of stale progress notices off this prefix.
 pub const RECONNECT_WARNING_PREFIX: &str = "Reconnecting... ";
+
+/// Mid-turn steering source (D83): what the composer has queued for the turn that is
+/// running right now.
+///
+/// Called once per tool barrier. The caller commits to appending whatever it returns to
+/// the message it is about to record, so an implementation must take atomically and
+/// announce what it took — see [`crate::steer::SteerQueue::take`]. Returning an empty
+/// vector is the whole contract for a host with no composer behind it.
+pub type SteerFn = dyn Fn() -> Vec<crate::steer::SteerItem> + Send + Sync;
+
+/// The steering source of a host that has no one to steer with: headless runs, the JSON
+/// protocol, and subagents, whose messages arrive through their own inbox instead.
+pub fn no_steer() -> Arc<SteerFn> {
+    Arc::new(Vec::new)
+}
 
 /// UI hooks: stream events, tool completion, permission prompts, non-fatal warnings.
 pub struct UiHooks {
@@ -254,6 +323,14 @@ pub struct UiHooks {
     /// the next turn's tools open a new group.
     pub on_round_end: Box<dyn Fn() + Send>,
     pub on_warning: Box<dyn Fn(String) + Send>,
+    /// Mid-turn steering: drained at each tool barrier of a turn that is continuing.
+    /// [`no_steer`] for hosts with no composer, which leaves the turn exactly as it was.
+    pub steer: Arc<SteerFn>,
+    /// Foreground liveness (D84): the running shell command's output tail, and the
+    /// ctrl+b that moves it to the background. [`crate::live::LiveBash::detached`]
+    /// for hosts with no foreground surface — nothing is published and nothing can
+    /// be promoted.
+    pub live: Arc<crate::live::LiveBash>,
     /// Permission prompt: tool name + reason → whether allowed (async: the TUI modal may wait for the user).
     pub ask: Arc<AskFn>,
     /// AskUserQuestion tool: title + question + options → selected index (async modal).
@@ -263,8 +340,12 @@ pub struct UiHooks {
 /// Headless permission prompt (stderr question, stdin answer). Shared by `headless_hooks` and
 /// the subagent prompt surface attached to the registry, so both ask the same way.
 pub fn stdin_ask() -> Arc<AskFn> {
-    Arc::new(|tool_name, reason| {
-        let prompt = format!("Allow {tool_name} to run? ({reason}) [y/N] ");
+    Arc::new(|ask| {
+        // `s` is only listed when a session rule could actually be installed:
+        // offering it otherwise would promise silence the gate cannot deliver.
+        let scoped = ask.scope.is_some();
+        let keys = if scoped { "[y/s/N]" } else { "[y/N]" };
+        let prompt = format!("Allow {} to run? ({}) {keys} ", ask.tool, ask.reason);
         Box::pin(async move {
             eprintln!("{prompt}");
             let answer = tokio::task::spawn_blocking(move || {
@@ -276,7 +357,11 @@ pub fn stdin_ask() -> Arc<AskFn> {
             })
             .await
             .unwrap_or_default();
-            answer == "y" || answer == "yes"
+            match answer.as_str() {
+                "y" | "yes" => AskOutcome::Allow,
+                "s" | "session" if scoped => AskOutcome::AllowSession,
+                _ => AskOutcome::Deny { feedback: None },
+            }
         })
     })
 }
@@ -291,11 +376,15 @@ pub fn headless_hooks() -> UiHooks {
             }
         }),
         on_stream_retry: Box::new(|| {}),
-        on_context_usage: Arc::new(|_, _| {}),
+        on_context_usage: Arc::new(|_| {}),
         on_tool_ready: Box::new(|_tool_call_id, _name, _input, _standalone| {}),
         on_tool_done: Box::new(|_| {}),
         on_round_end: Box::new(|| {}),
         on_warning: Box::new(|message| eprintln!("[bingo] warning: {message}")),
+        // No composer behind a headless run: nothing can be typed mid-turn.
+        steer: no_steer(),
+        // Nor a screen to tail a command on, nor a key to press to background it.
+        live: crate::live::LiveBash::detached(),
         ask: stdin_ask(),
         ask_question: Arc::new(|title, question, options| {
             Box::pin(async move {
@@ -355,6 +444,54 @@ fn tool_result_error(tool_use_id: &str, text: impl Into<String>) -> ContentBlock
     }
 }
 
+/// What the permission gate settled on for one call.
+struct GateDecision {
+    behavior: PermissionBehavior,
+    reason: String,
+    /// Input after PreToolUse hooks (possibly rewritten).
+    input: serde_json::Value,
+    /// What the user asked for instead when refusing. Carried separately from
+    /// `reason` because it belongs after the parenthesised reason in the
+    /// sentence the model reads, not inside it.
+    guidance: Option<String>,
+}
+
+impl GateDecision {
+    fn settled(behavior: PermissionBehavior, reason: String, input: serde_json::Value) -> Self {
+        Self {
+            behavior,
+            reason,
+            input,
+            guidance: None,
+        }
+    }
+}
+
+/// Read the runtime rule table into an owned copy. The guard must not outlive
+/// the call: it is not `Send`, and one held across an await breaks the `Send`
+/// bound every spawned turn task depends on.
+fn permission_snapshot(
+    permissions: &Arc<std::sync::Mutex<crate::settings::PermissionRules>>,
+) -> crate::settings::PermissionRules {
+    permissions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Install a session-scoped allow rule. The runtime table is shared with
+/// subagents and `/permissions`, and is never persisted — the rule dies with
+/// the session, which is what the user was offered.
+fn install_session_rule(
+    permissions: &Arc<std::sync::Mutex<crate::settings::PermissionRules>>,
+    rule: String,
+) {
+    let mut rules = permissions.lock().unwrap_or_else(|e| e.into_inner());
+    if !rules.allow.contains(&rule) {
+        rules.allow.push(rule);
+    }
+}
+
 /// Permission gate + PreToolUse hook + UI prompt: returns the final decision and
 /// (possibly rewritten) input.
 async fn gate_tool(
@@ -362,39 +499,70 @@ async fn gate_tool(
     input: &serde_json::Value,
     mode: PermissionMode,
     hooks: &HooksConfig,
-    permissions: &crate::settings::PermissionRules,
+    permissions: &Arc<std::sync::Mutex<crate::settings::PermissionRules>>,
     ask: &AskFn,
     cwd: &std::path::Path,
-) -> (PermissionBehavior, String, serde_json::Value) {
+) -> GateDecision {
+    let name = tool.name();
     let (hook_behavior, hook_reason, hook_input) =
-        run_pre_tool_use(hooks, &tool.name(), input, permission_mode_str(mode), cwd).await;
+        run_pre_tool_use(hooks, &name, input, permission_mode_str(mode), cwd).await;
     if hook_behavior != PermissionBehavior::Allow {
-        return (hook_behavior, hook_reason, hook_input);
+        return GateDecision::settled(hook_behavior, hook_reason, hook_input);
     }
 
+    let rules = permission_snapshot(permissions);
     let decision = can_use_tool(
         tool,
         &hook_input,
         mode,
-        &permissions.deny,
-        &permissions.ask,
-        &permissions.allow,
+        &rules.deny,
+        &rules.ask,
+        &rules.allow,
         cwd,
     );
-    match decision.behavior {
-        PermissionBehavior::Ask => {
-            let reason = decision.reason;
-            if ask(&tool.name(), &reason).await {
-                (PermissionBehavior::Allow, String::new(), hook_input)
-            } else {
-                (
-                    PermissionBehavior::Deny,
-                    format!("user denied {}", tool.name()),
-                    hook_input,
-                )
-            }
+    if decision.behavior != PermissionBehavior::Ask {
+        return GateDecision::settled(decision.behavior, decision.reason, hook_input);
+    }
+    // Scope and preview are computed here, where the tool and the cwd are both
+    // in hand: a prompt surface has neither, and would have to guess at both.
+    let scope = crate::permission::session_allow_rule(tool, &hook_input, &rules.ask, cwd);
+    let diff = tool.preview_diff(&hook_input, cwd);
+    let outcome = ask(&AskContext {
+        tool: &name,
+        reason: &decision.reason,
+        input: &hook_input,
+        cwd,
+        scope: scope.as_deref(),
+        diff: diff.as_deref(),
+    })
+    .await;
+    match outcome {
+        AskOutcome::Allow => {
+            GateDecision::settled(PermissionBehavior::Allow, String::new(), hook_input)
         }
-        other => (other, decision.reason, hook_input),
+        AskOutcome::AllowSession => {
+            // Installed before the call runs, so the tool that asked is itself
+            // covered and the same shape never asks twice in one session.
+            if let Some(rule) = scope {
+                install_session_rule(permissions, rule);
+            }
+            GateDecision::settled(PermissionBehavior::Allow, String::new(), hook_input)
+        }
+        AskOutcome::Deny { feedback } => GateDecision {
+            behavior: PermissionBehavior::Deny,
+            reason: format!("user denied {name}"),
+            input: hook_input,
+            guidance: feedback.filter(|text| !text.trim().is_empty()),
+        },
+    }
+}
+
+/// The refusal sentence. Feedback the user typed at the dialog is appended so
+/// the model reads what to do instead, not only that it was stopped.
+fn permission_denial(subject: &str, guidance: Option<&str>) -> String {
+    match guidance {
+        Some(text) => format!("permission denied: {subject}. User guidance: {text}"),
+        None => format!("permission denied: {subject}"),
     }
 }
 
@@ -575,6 +743,7 @@ pub(crate) fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContex
         cwd: session.cwd(),
         home: session.home.clone(),
         watch: session.watch.clone(),
+        live: ui.live.clone(),
         http: tool_http()?,
         tasks: session.tasks.clone(),
         hooks: session.settings.hooks.clone(),
@@ -582,6 +751,7 @@ pub(crate) fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContex
         expand_tasks: session.expand_tasks.clone(),
         ask_question: ui.ask_question.clone(),
         instance: session.instance.clone(),
+        rewind: session.runtime.rewind.clone(),
     })
 }
 
@@ -596,6 +766,69 @@ fn escape_xml(text: &str) -> String {
 /// Placeholder result for unanswered tool_use blocks when interrupted.
 const INTERRUPTED_TOOL_RESULT: &str =
     "<tool_use_error>interrupted by the user before this tool produced a result</tool_use_error>";
+
+/// Recorded when the user stops a reply mid-stream. Model-facing text, verbatim CC: the
+/// turn the user cut off has to say so in the history, or the model keeps answering a
+/// question it never learned was withdrawn.
+pub const INTERRUPT_MARKER: &str = "[Request interrupted by user]";
+/// Recorded when the interrupt landed while tools were running (the assistant message and
+/// the filled tool_results are already in history). Model-facing text, verbatim CC.
+pub const INTERRUPT_MARKER_TOOL_USE: &str = "[Request interrupted by user for tool use]";
+
+/// Whether a message body is one of the interrupt markers (the render layers strip the
+/// bubble off these: they are transcript facts, not something the user typed).
+pub fn is_interrupt_marker(text: &str) -> bool {
+    text == INTERRUPT_MARKER || text == INTERRUPT_MARKER_TOOL_USE
+}
+
+/// What survives from a reply the user cut off mid-stream: the text and the thinking that
+/// finished being signed. A tool_use block has no result and an unsigned thinking block
+/// fails signature verification on replay — either one would 400 every later request in
+/// the session, so the partial reply is trimmed to what can be replayed.
+fn interrupted_content(assistant: Message) -> Vec<ContentBlock> {
+    assistant
+        .content
+        .into_iter()
+        .filter(|block| match block {
+            ContentBlock::Text { text } => !text.trim().is_empty(),
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => !thinking.trim().is_empty() && !signature.is_empty(),
+            ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. }
+            | ContentBlock::Image { .. } => false,
+        })
+        .collect()
+}
+
+/// Close an interrupted turn honestly: keep whatever the model managed to say, then mark
+/// the interruption. Empty partials are skipped — an empty assistant message is another
+/// lie, and some endpoints reject it.
+fn record_interrupt(
+    session: &Session,
+    messages: &mut Vec<Message>,
+    partial: Option<Message>,
+    marker: &'static str,
+    ui: &mut UiHooks,
+) -> &'static str {
+    if let Some(partial) = partial {
+        let content = interrupted_content(partial);
+        if !content.is_empty() {
+            record(
+                session,
+                messages,
+                Message {
+                    role: Role::Assistant,
+                    content,
+                },
+                ui,
+            );
+        }
+    }
+    record(session, messages, Message::user_text(marker), ui);
+    marker
+}
 
 /// Whether blocks already contain a result for this tool_use.
 fn answered(blocks: &[ContentBlock], tool_use_id: &str) -> bool {
@@ -620,6 +853,32 @@ fn fill_missing_tool_results(tool_uses: &[ContentBlock], blocks: &mut Vec<Conten
 
 /// Append to history + persist to the transcript (fixed order: persist first, then
 /// append, avoiding last().expect).
+/// Record the message that opens a turn and open the rewind checkpoint it is
+/// (D91). The marker goes down first, so the checkpoint is the user message's
+/// own line; a transcript that cannot take it costs this turn its checkpoint,
+/// never the turn itself.
+fn record_turn_open(
+    session: &Session,
+    messages: &mut Vec<Message>,
+    message: Message,
+    ui: &mut UiHooks,
+) {
+    match session.runtime.transcript.borrow().clone() {
+        Some(transcript) => match transcript
+            .append_turn(crate::channels::now_unix())
+            .and_then(|()| transcript.line_count())
+        {
+            Ok(line) => session.runtime.rewind.open(
+                crate::rewind::session_dir(&session.home, &transcript.name()),
+                line,
+            ),
+            Err(_) => session.runtime.rewind.close(),
+        },
+        None => session.runtime.rewind.close(),
+    }
+    record(session, messages, message, ui);
+}
+
 fn record(session: &Session, messages: &mut Vec<Message>, message: Message, ui: &mut UiHooks) {
     if let Some(t) = session.runtime.transcript.borrow().clone()
         && let Err(e) = t.append(&message)
@@ -627,6 +886,17 @@ fn record(session: &Session, messages: &mut Vec<Message>, message: Message, ui: 
         (ui.on_warning)(format!("transcript append failed: {e}"));
     }
     messages.push(message);
+}
+
+/// Publish the turn's context measurement. Every exit of the loop reports it, so
+/// the numbers are built in one place against the model in use right now — the
+/// window on screen and the trigger the compactor obeys come from one resolver.
+fn report_context_usage(session: &Session, ui: &UiHooks, tokens: u64) {
+    (ui.on_context_usage)(crate::context_usage::ContextUsage::for_model(
+        tokens,
+        &session.client.models(),
+        &session.runtime.model.borrow().clone(),
+    ));
 }
 
 /// queryLoop: multi-turn tool loop until end_turn (the loop body shared by `run_query`
@@ -743,11 +1013,7 @@ async fn query_loop(
             &messages,
             &tool_schemas,
         ));
-        let model = session.runtime.model.borrow().clone();
-        (ui.on_context_usage)(
-            context_tokens,
-            crate::budget::context_window_for(&session.client.models(), &model),
-        );
+        report_context_usage(session, ui, context_tokens);
         let turn = match one_turn_with_stream_retries(
             session,
             &messages,
@@ -786,8 +1052,16 @@ async fn query_loop(
             outcome => outcome?,
         };
         if turn.aborted {
-            // Interrupted: the whole turn is discarded (assistant incomplete); neither
-            // executed nor pending tools are filled back.
+            // Interrupted mid-stream: what the model already said stays (the user is
+            // looking at it), followed by the marker that says it was cut off. Discarding
+            // the turn instead left the screen and the history telling different stories.
+            let marker = record_interrupt(
+                session,
+                &mut messages,
+                Some(turn.assistant),
+                INTERRUPT_MARKER,
+                ui,
+            );
             if !session.quiet {
                 println!();
             }
@@ -795,6 +1069,7 @@ async fn query_loop(
                 messages,
                 end_reason: QueryEndReason::Completed,
                 aborted: true,
+                interrupt_marker: Some(marker),
             });
         }
         let empty_assistant = turn.assistant.content.iter().all(|block| match block {
@@ -869,17 +1144,12 @@ async fn query_loop(
                 &messages,
                 &tool_schemas,
             ));
-            (ui.on_context_usage)(
-                context_tokens,
-                crate::budget::context_window_for(
-                    &session.client.models(),
-                    &session.runtime.model.borrow().clone(),
-                ),
-            );
+            report_context_usage(session, ui, context_tokens);
             return Ok(QueryOutcome {
                 messages,
                 end_reason,
                 aborted: false,
+                interrupt_marker: None,
             });
         }
 
@@ -903,23 +1173,20 @@ async fn query_loop(
             };
             // AskUserQuestion: asking the user is itself the interaction (the dialog is the
             // approval), no permission gate.
-            let (behavior, reason, gated_input) = if name == "AskUserQuestion" {
-                (PermissionBehavior::Allow, String::new(), input.clone())
+            let GateDecision {
+                behavior,
+                reason,
+                input: gated_input,
+                guidance,
+            } = if name == "AskUserQuestion" {
+                GateDecision::settled(PermissionBehavior::Allow, String::new(), input.clone())
             } else {
-                // Clone into a local before awaiting: MutexGuard is not Send, and holding it
-                // across an await would break tokio::spawn's Send bound (sub-agent/turn tasks).
-                let permissions = session
-                    .runtime
-                    .permissions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
                 gate_tool(
                     tool,
                     &input,
                     session.permission_mode,
                     &session.settings.hooks,
-                    &permissions,
+                    &session.runtime.permissions,
                     &*ui.ask,
                     &ctx.cwd,
                 )
@@ -932,11 +1199,11 @@ async fn query_loop(
                     input: gated_input,
                 }),
                 PermissionBehavior::Deny => {
+                    let guidance = guidance.as_deref();
+                    let denial = permission_denial(&format!("{name} ({reason})"), guidance);
                     blocks.push(tool_result_error(
                         &id,
-                        format!(
-                            "<permission_error>permission denied: {name} ({reason})</permission_error>"
-                        ),
+                        format!("<permission_error>{denial}</permission_error>"),
                     ));
                     // Denied tools also need UI closure: the tool row shows "denied"
                     // instead of spinning forever.
@@ -945,7 +1212,7 @@ async fn query_loop(
                         tool_call_id: id,
                         name,
                         summary,
-                        output: format!("permission denied: {reason}"),
+                        output: permission_denial(&reason, guidance),
                         status: ToolCallStatus::Error,
                         diff: None,
                         duration_ms: 0,
@@ -1043,6 +1310,21 @@ async fn query_loop(
         // orphan tool_use blocks in the transcript, and every future restore from history
         // would 400, permanently corrupting the session.
         fill_missing_tool_results(&turn.tool_uses, &mut blocks);
+        // The tool barrier (D83): results are assembled and the next request has not gone
+        // out yet, which is the one moment a correction can still change what the model
+        // does with them. Anything the user typed while this turn worked rides along in
+        // this same user message — appended *after* the tool_results, which the API
+        // requires to come first — so the model reads it before deciding the next step.
+        //
+        // Only a turn that is going to ask again may take them. An interrupt, a blocking
+        // Stop hook and a cancel between rounds all end the turn here, and a message
+        // folded into a request that is never sent would be a message swallowed: those
+        // stay in the composer's queue, where TurnEnd hands them to the next turn.
+        if !interrupted && !stop_after_tools && !is_cancelled(&cancel_rx) {
+            blocks.extend((ui.steer)().iter().map(|item| ContentBlock::Text {
+                text: item.block_text(),
+            }));
+        }
         record(
             session,
             &mut messages,
@@ -1053,6 +1335,10 @@ async fn query_loop(
             ui,
         );
         if interrupted {
+            // The assistant message and every tool_result are already in history; all the
+            // model still lacks is that the stop was the user's doing.
+            let marker =
+                record_interrupt(session, &mut messages, None, INTERRUPT_MARKER_TOOL_USE, ui);
             if !session.quiet {
                 println!();
             }
@@ -1061,17 +1347,12 @@ async fn query_loop(
                 &messages,
                 &tool_schemas,
             ));
-            (ui.on_context_usage)(
-                context_tokens,
-                crate::budget::context_window_for(
-                    &session.client.models(),
-                    &session.runtime.model.borrow().clone(),
-                ),
-            );
+            report_context_usage(session, ui, context_tokens);
             return Ok(QueryOutcome {
                 messages,
                 end_reason: QueryEndReason::Completed,
                 aborted: true,
+                interrupt_marker: Some(marker),
             });
         }
         // All tools in this batch are closed: RoundEnd only marks a batch boundary (image
@@ -1079,18 +1360,18 @@ async fn query_loop(
         // same fold group.
         (ui.on_round_end)();
         if stop_after_tools || is_cancelled(&cancel_rx) {
+            // The cancel landed between the last tool finishing and the next round: no
+            // tool row was cut short, but the turn still stops on the user's word and the
+            // model is owed the same marker. A Stop-hook halt is not an interrupt.
+            let marker = is_cancelled(&cancel_rx).then(|| {
+                record_interrupt(session, &mut messages, None, INTERRUPT_MARKER_TOOL_USE, ui)
+            });
             let context_tokens = gate.current(crate::compact::estimate_tokens(
                 &session.system,
                 &messages,
                 &tool_schemas,
             ));
-            (ui.on_context_usage)(
-                context_tokens,
-                crate::budget::context_window_for(
-                    &session.client.models(),
-                    &session.runtime.model.borrow().clone(),
-                ),
-            );
+            report_context_usage(session, ui, context_tokens);
             return Ok(QueryOutcome {
                 messages,
                 end_reason: if empty_retry_count > 0 {
@@ -1099,6 +1380,7 @@ async fn query_loop(
                     QueryEndReason::Completed
                 },
                 aborted: is_cancelled(&cancel_rx),
+                interrupt_marker: marker,
             });
         }
     }
@@ -1133,6 +1415,7 @@ pub async fn run_query(
             messages: initial_messages,
             end_reason: QueryEndReason::Completed,
             aborted: false,
+            interrupt_marker: None,
         });
     }
 
@@ -1144,7 +1427,7 @@ pub async fn run_query(
         Some(recalled) => format!("{user_input}\n\n{recalled}"),
         None => user_input.to_string(),
     };
-    record(
+    record_turn_open(
         session,
         &mut messages,
         user_message_with_images(
@@ -1329,18 +1612,17 @@ pub async fn run_bash_command(
             (err, true, 0)
         }
         None => {
-            let permissions = session
-                .runtime
-                .permissions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let (behavior, reason, gated_input) = gate_tool(
+            let GateDecision {
+                behavior,
+                reason,
+                input: gated_input,
+                guidance,
+            } = gate_tool(
                 tool,
                 &input,
                 session.permission_mode,
                 &session.settings.hooks,
-                &permissions,
+                &session.runtime.permissions,
                 &*ui.ask,
                 &ctx.cwd,
             )
@@ -1361,22 +1643,32 @@ pub async fn run_bash_command(
                     // interrupted: the `!` command's tool_use is not yet in history, so
                     // returning directly leaves no orphans.
                     let Some(outcome) = outcomes.into_iter().next().filter(|_| !interrupted) else {
+                        // The row must close with the turn: a tool left Running keeps its
+                        // message from ever settling, and the session's whole flush prefix
+                        // with it.
+                        (ui.on_tool_done)(&ToolCallDone {
+                            tool_call_id: tool_use_id,
+                            name: "Bash".to_string(),
+                            summary: format!("$ {command}"),
+                            output: "interrupted".to_string(),
+                            status: ToolCallStatus::Interrupted,
+                            diff: None,
+                            duration_ms: 0,
+                        });
+                        (ui.on_round_end)();
+                        let marker =
+                            record_interrupt(session, &mut messages, None, INTERRUPT_MARKER, ui);
                         let context_tokens = crate::compact::estimate_tokens(
                             &session.system,
                             &messages,
                             &tool_schemas,
                         );
-                        (ui.on_context_usage)(
-                            context_tokens,
-                            crate::budget::context_window_for(
-                                &session.client.models(),
-                                &session.runtime.model.borrow().clone(),
-                            ),
-                        );
+                        report_context_usage(session, ui, context_tokens);
                         return Ok(QueryOutcome {
                             messages,
                             end_reason: QueryEndReason::Completed,
                             aborted: true,
+                            interrupt_marker: Some(marker),
                         });
                     };
                     match outcome.result {
@@ -1388,7 +1680,9 @@ pub async fn run_bash_command(
                     }
                 }
                 PermissionBehavior::Deny => {
-                    let err = format!("permission denied: Bash ({reason})");
+                    // The `!` path has no tool_result to wrap: the same sentence
+                    // reaches the model inside the `<bash-stderr>` block below.
+                    let err = permission_denial(&format!("Bash ({reason})"), guidance.as_deref());
                     (err, true, 0)
                 }
                 PermissionBehavior::Ask => unreachable!("ask resolved by gate_tool"),
@@ -1449,19 +1743,18 @@ pub async fn run_bash_command(
         }
     }
     if !respond {
+        // `respond` is off for three reasons; only the interrupt owes the model a marker
+        // (the setting and the Stop hook are not the user pressing Esc).
+        let marker = is_cancelled(&cancel)
+            .then(|| record_interrupt(session, &mut messages, None, INTERRUPT_MARKER, ui));
         let context_tokens =
             crate::compact::estimate_tokens(&session.system, &messages, &tool_schemas);
-        (ui.on_context_usage)(
-            context_tokens,
-            crate::budget::context_window_for(
-                &session.client.models(),
-                &session.runtime.model.borrow().clone(),
-            ),
-        );
+        report_context_usage(session, ui, context_tokens);
         return Ok(QueryOutcome {
             messages,
             end_reason: QueryEndReason::Completed,
             aborted: is_cancelled(&cancel),
+            interrupt_marker: marker,
         });
     }
     query_loop(session, messages, ui, &tools, &ctx, cancel).await
@@ -1534,6 +1827,50 @@ mod tests {
     use super::*;
 
     use crate::query_turn::STREAM_API_MAX_RETRIES;
+
+    /// D81: a refusal the user explained reaches the model as guidance appended
+    /// to the same sentence; a plain refusal keeps the wording it always had.
+    #[test]
+    fn a_refusal_carries_its_feedback_to_the_model() {
+        assert_eq!(
+            format!(
+                "<permission_error>{}</permission_error>",
+                permission_denial("Bash (Bash needs permission)", None)
+            ),
+            "<permission_error>permission denied: Bash (Bash needs permission)</permission_error>"
+        );
+        assert_eq!(
+            format!(
+                "<permission_error>{}</permission_error>",
+                permission_denial(
+                    "Bash (Bash needs permission)",
+                    Some("run the tests instead")
+                )
+            ),
+            "<permission_error>permission denied: Bash (Bash needs permission). \
+             User guidance: run the tests instead</permission_error>"
+        );
+        assert_eq!(
+            permission_denial("Bash needs permission", Some("use cargo nextest")),
+            "permission denied: Bash needs permission. User guidance: use cargo nextest",
+            "the transcript row shows why too"
+        );
+    }
+
+    /// A session allow lives in the runtime table only, and lands there once.
+    #[test]
+    fn a_session_allow_is_installed_once_and_stays_in_memory() {
+        let rules = Arc::new(std::sync::Mutex::new(
+            crate::settings::PermissionRules::default(),
+        ));
+        install_session_rule(&rules, "Bash(cargo:*)".to_string());
+        install_session_rule(&rules, "Bash(cargo:*)".to_string());
+        assert_eq!(permission_snapshot(&rules).allow, ["Bash(cargo:*)"]);
+        assert!(
+            permission_snapshot(&rules).deny.is_empty()
+                && permission_snapshot(&rules).ask.is_empty()
+        );
+    }
 
     /// A tool result carrying images must reach the API as protocol blocks. Re-stringifying it
     /// here is what would turn a screenshot into a wall of base64 text the model can't see.
@@ -1658,7 +1995,7 @@ mod tests {
 
     /// Minimal Anthropic endpoint: count_tokens returns a fixed value; /v1/messages
     /// replies with preset SSE in order.
-    async fn spawn_api(responses: Vec<String>) -> String {
+    pub(super) async fn spawn_api(responses: Vec<String>) -> String {
         spawn_anthropic_api(responses.into_iter().map(ApiResponse::Ok).collect()).await
     }
 
@@ -1969,7 +2306,7 @@ mod tests {
         )])
     }
 
-    fn text_turn(text: &str, stop_reason: &str) -> String {
+    pub(super) fn text_turn(text: &str, stop_reason: &str) -> String {
         sse(&[
             (
                 "message_start",
@@ -2070,11 +2407,11 @@ mod tests {
         ])
     }
 
-    fn bash_tool_turn(id: &str, command: &str) -> String {
+    pub(super) fn bash_tool_turn(id: &str, command: &str) -> String {
         tool_turn(id, "Bash", serde_json::json!({ "command": command }))
     }
 
-    fn test_session(base_url: String, transcript: Option<Transcript>) -> Arc<Session> {
+    pub(super) fn test_session(base_url: String, transcript: Option<Transcript>) -> Arc<Session> {
         test_session_with_client(
             crate::api::client::Client::new("k".into(), base_url),
             transcript,
@@ -2991,16 +3328,194 @@ mod tests {
             "tool_use in the transcript is paired too; resuming will not 400"
         );
         let ContentBlock::ToolResult { is_error, .. } = &saved
-            .last()
-            .unwrap()
-            .content
             .iter()
+            .flat_map(|message| &message.content)
             .find(|b| matches!(b, ContentBlock::ToolResult { .. }))
             .unwrap()
         else {
             panic!("tool result");
         };
         assert!(is_error, "placeholder result is marked is_error");
+
+        // D76: the model is told the stop was the user's doing, in CC's words, and the
+        // marker closes both the returned history and the transcript.
+        assert_eq!(outcome.interrupt_marker, Some(INTERRUPT_MARKER_TOOL_USE));
+        for (label, messages) in [("history", &outcome.messages), ("transcript", &saved)] {
+            let last = messages.last().unwrap();
+            assert_eq!(last.role, Role::User, "{label} closes on a user message");
+            assert_eq!(
+                last.content,
+                vec![ContentBlock::Text {
+                    text: INTERRUPT_MARKER_TOOL_USE.to_string(),
+                }],
+                "{label} ends with the tool-use interrupt marker"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A stream that delivers its SSE prefix and then stalls: the only shape in which a
+    /// mid-stream interrupt is observable (the ordinary mock closes the body at once).
+    async fn spawn_stalling_api(prefix: String) -> String {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let prefix = prefix.clone();
+                tokio::spawn(async move {
+                    let head = read_http_request(&mut socket).await;
+                    // Only the stream stalls: a short synchronous call (count_tokens) is
+                    // not interruptible, so leaving it open would hang the turn instead.
+                    if request_kind(&head) == ApiRequestKind::CountTokens {
+                        let body = r#"{"input_tokens":10}"#;
+                        let _ = socket
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                            )
+                            .await;
+                        let _ = socket.shutdown().await;
+                        return;
+                    }
+                    // A content length the body never reaches: the connection stays open,
+                    // so the turn can only end by interruption.
+                    let _ = socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n{prefix}",
+                                prefix.len() + 1
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                    std::future::pending::<()>().await
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Run a turn against a stalling stream and interrupt it once the prefix has landed.
+    async fn interrupted_turn(prefix: String, transcript: Transcript) -> QueryOutcome {
+        let session = test_session(spawn_stalling_api(prefix).await, Some(transcript));
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn({
+            let session = session.clone();
+            async move {
+                let mut ui = headless_hooks();
+                run_query(&session, Vec::new(), "go", &[], &mut ui, Some(rx)).await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tx.send(true).unwrap();
+        handle.await.unwrap().unwrap()
+    }
+
+    fn text_of(message: &Message) -> String {
+        message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// D76: a reply the user cuts off mid-stream is kept, not discarded. What the model
+    /// already said stays in history (the user is looking at it), followed by the CC
+    /// marker — otherwise the next turn's request denies a reply the screen still shows.
+    #[tokio::test]
+    async fn interrupted_stream_records_the_partial_reply_and_the_marker() {
+        let home =
+            std::env::temp_dir().join(format!("bingo-interrupt-partial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let transcript = crate::transcript::create(&home, &home).unwrap();
+        let outcome = interrupted_turn(
+            sse(&[
+                (
+                    "message_start",
+                    r#"{"message":{"id":"m_1","model":"m"}}"#.into(),
+                ),
+                (
+                    "content_block_start",
+                    r#"{"index":0,"content_block":{"type":"text","text":""}}"#.into(),
+                ),
+                (
+                    "content_block_delta",
+                    r#"{"index":0,"delta":{"type":"text_delta","text":"half an answer"}}"#.into(),
+                ),
+            ]),
+            transcript.clone(),
+        )
+        .await;
+
+        assert!(outcome.aborted, "the turn closes as interrupted");
+        assert_eq!(outcome.interrupt_marker, Some(INTERRUPT_MARKER));
+        // The next turn reloads history from the transcript: both records must be there.
+        let saved = transcript.load_messages().unwrap();
+        for (label, messages) in [("history", &outcome.messages), ("transcript", &saved)] {
+            let tail: Vec<(Role, String)> = messages
+                .iter()
+                .rev()
+                .take(2)
+                .rev()
+                .map(|message| (message.role, text_of(message)))
+                .collect();
+            assert_eq!(
+                tail,
+                vec![
+                    (Role::Assistant, "half an answer".to_string()),
+                    (Role::User, INTERRUPT_MARKER.to_string()),
+                ],
+                "{label} keeps the partial reply and marks it interrupted"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// D76: nothing said, nothing recorded — an empty assistant message is another lie
+    /// (and some endpoints reject it), so the marker stands alone.
+    #[tokio::test]
+    async fn interrupt_before_any_content_records_the_marker_alone() {
+        let home =
+            std::env::temp_dir().join(format!("bingo-interrupt-silent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let transcript = crate::transcript::create(&home, &home).unwrap();
+        let outcome = interrupted_turn(
+            sse(&[(
+                "message_start",
+                r#"{"message":{"id":"m_1","model":"m"}}"#.into(),
+            )]),
+            transcript.clone(),
+        )
+        .await;
+
+        assert!(outcome.aborted);
+        assert_eq!(outcome.interrupt_marker, Some(INTERRUPT_MARKER));
+        let saved = transcript.load_messages().unwrap();
+        for (label, messages) in [("history", &outcome.messages), ("transcript", &saved)] {
+            assert!(
+                !messages.iter().any(|m| m.role == Role::Assistant),
+                "{label} records no empty assistant message"
+            );
+            assert_eq!(
+                messages.last().map(text_of),
+                Some(INTERRUPT_MARKER.to_string()),
+                "{label} ends with the marker"
+            );
+        }
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -3395,3 +3910,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "query_steer_tests.rs"]
+mod steer_tests;

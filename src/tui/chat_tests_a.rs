@@ -17,6 +17,17 @@ pub(super) fn all_slash_text(chat: &Chat) -> String {
         .join("\n")
 }
 
+/// Let the `settle` blink expire (D87). A finished turn's last message stays
+/// live for one 120 ms window so its completion row can wear the accent and then
+/// rest — freezing it mid-blink would print the accent into scrollback for good.
+/// Any test asserting the *final* scrollback state ticks past the window first,
+/// exactly as the host does 120 ms later.
+pub(super) fn past_settle(chat: &mut Chat) {
+    while chat.settling() {
+        chat.tick();
+    }
+}
+
 /// Segments covered by the latest settled checkpoint (checkpoint-equivalent read of the old aggregate field).
 pub(super) fn settled_segments(chat: &Chat) -> usize {
     chat.doc.settled_marks.last().map_or(0, |m| m.segments)
@@ -352,7 +363,7 @@ fn update_banner_animation_window_and_key_stop() {
     // motion off → never active (the banner stays as a static rest)
     let mut chat2 = test_chat();
     chat2.update_banner = Some("0.3.0".into());
-    chat2.motion_off = true;
+    chat2.motion = crate::tui::motion::Motion::new(false);
     chat2.tick = 10;
     assert!(!chat2.update_anim_active());
     assert!(!chat2.has_dynamic_rows());
@@ -1296,12 +1307,12 @@ fn single_turn_thinking_accumulates() {
 }
 
 /// Issue #41: every message trails its send time as a dim row — the same
-/// stamp brick the workspace views use — while a still-streaming reply
+/// stamp brick every conversation uses — while a still-streaming reply
 /// shows none, and a message without a clock renders none.
 #[test]
 fn messages_trail_their_send_time() {
     let at = 1_760_000_000u64;
-    let want = crate::tui::slack::stamp(at);
+    let want = crate::tui::buffer::stamp(at);
     let mut chat = test_chat();
     chat.messages.push(UiMessage {
         at,
@@ -1497,7 +1508,7 @@ fn slash_exit_requests_shutdown() {
 fn slash_clear_resets_session() {
     let mut chat = test_chat();
     chat.messages.push(msg(Role::User, "hi"));
-    chat.context_usage = crate::context_usage::ContextUsage::new(90_000, 200_000);
+    chat.context_usage = crate::context_usage::ContextUsage::new(90_000, 200_000, 160_000);
     chat.input = "/clear".to_string();
     chat.submit();
     assert!(chat.messages.is_empty(), "UI messages cleared");
@@ -2750,6 +2761,7 @@ fn slash_dispatch_covers_every_table_entry() {
         ("skills", "skills"),
         ("tasks", "tasks"),
         ("team", "team"),
+        ("open", "open"),
     ];
     let table: HashSet<&str> = SLASH_COMMANDS.iter().map(|(n, _, _)| *n).collect();
     let arms: HashSet<&str> = dispatch.iter().map(|(a, _)| *a).collect();
@@ -3720,7 +3732,7 @@ fn ctrl_o_expands_group_to_individual_tools() {
             diff: None,
         }));
     chat.drain_events();
-    assert!(chat.toggle_transcript());
+    assert!(chat.expand_all_folds());
     let joined = visible(&mut chat, 120, 30);
     assert!(
         joined.contains("Read a.md"),

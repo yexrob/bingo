@@ -226,6 +226,7 @@ mod tests {
             cwd,
             home: std::env::temp_dir(),
             watch: crate::watch::WatchRegistry::new(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -233,6 +234,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         }
     }
 

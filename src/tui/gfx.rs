@@ -346,7 +346,11 @@ fn kitty_chunks(png: &[u8], first_header: &str) -> Vec<Vec<u8>> {
 /// Wrap a payload in tmux's DCS passthrough. tmux forwards the body to the
 /// outer terminal verbatim except that every ESC has to be doubled. Needs
 /// tmux >= 3.3 with `allow-passthrough on`, otherwise the body is dropped.
-fn tmux_passthrough(payload: &[u8]) -> Vec<u8> {
+///
+/// Shared with [`crate::tui::notify`]: a desktop-notification OSC is a sequence
+/// tmux has never heard of, exactly like an image transmit, and travels the
+/// same way.
+pub(crate) fn tmux_passthrough(payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len() + 16);
     out.extend_from_slice(b"\x1bPtmux;");
     for &b in payload {

@@ -415,6 +415,7 @@ mod tests {
             cwd: std::path::PathBuf::from("/tmp"),
             home: std::env::temp_dir(),
             watch: session.watch.clone(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: session.tasks.clone(),
             hooks: crate::settings::HooksConfig::default(),
@@ -422,6 +423,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         }
     }
 

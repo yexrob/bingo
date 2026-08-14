@@ -16,6 +16,7 @@ use ratatui::style::Color;
 use rsmarkdown_core::{MarkdownProcessor, Renderer};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::budget::MAX_RESULT_CHARS;
 use crate::permission::PermissionMode;
 use crate::query::{Session, run_query};
 use crate::tui::activities::{
@@ -26,6 +27,7 @@ use crate::tui::avatar;
 use crate::tui::gfx::{self, ImageCap};
 use crate::tui::line::{Line, SegStyle, text_width, wrap_words};
 use crate::tui::markdown::MarkdownRenderer;
+use crate::tui::notify::{Attention, Notifier, Title};
 use crate::tui::theme::{Theme, ThemeSetting};
 use crate::ui::{AskRequest, DialogAction, ImageMeta, PermissionRequest, UiEvent};
 use crate::watch::WatchState;
@@ -139,18 +141,19 @@ pub use crate::tui::slash::{
     COMMANDS as SLASH_COMMANDS, INSTANT_COMMANDS as INSTANT_SLASH_COMMANDS, SlashSuggestion,
 };
 
-/// `/share` flag parser (`--public` / `--open`).
-fn parse_share_arg(arg: &str, flag: &str) -> bool {
-    arg.split_whitespace().any(|t| t == flag)
-}
-
 /// One queued input, submitted after TurnEnd: a slash command (dispatched through
 /// `run_slash`) or a plain message (`start_turn`). The marker keeps the two apart —
 /// a queued slash must never reach the model as literal text.
+///
+/// A plain entry may also leave earlier, through the steer channel (D83), which is why
+/// it carries an id: the turn reports back which entries it absorbed, and two identical
+/// messages are two messages.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueuedInput {
     pub text: String,
     pub is_slash: bool,
+    /// Session-unique, assigned on enqueue.
+    pub id: u64,
 }
 
 /// Footer model badge: `{model} · think {level}` (off = no level shown, keeps it concise).
@@ -234,51 +237,6 @@ impl ThemeMenu {
     }
 }
 
-/// /resume selector option cap (devex DX: sessions can be many; truncate to the latest N + a note row).
-pub const RESUME_PICKER_MAX: usize = 20;
-
-/// `/resume` session selector (picker-model.md commit C): dynamic single-level (disk snapshot),
-/// Enter switches the session; label=display name, value=session name; confirmation takes the snapshot by the selected index.
-#[derive(Clone)]
-pub struct ResumeMenu {
-    /// Browsed index (❯): moves with ↑↓/1-20, applied only on Enter.
-    pub selected: usize,
-    /// The current session's position in the list (●; None when absent or unset).
-    pub current: Option<usize>,
-    /// Session-list snapshot (same order as items; confirmation picks the Transcript by selected).
-    pub transcripts: Vec<crate::transcript::Transcript>,
-    /// The list was truncated (past RESUME_PICKER_MAX) → render a note row.
-    pub truncated: bool,
-}
-
-impl ResumeMenu {
-    pub fn picker(&self) -> crate::tui::picker::PickerModel {
-        crate::tui::picker::PickerModel::new(
-            self.transcripts
-                .iter()
-                .map(|t| {
-                    let count = t.load_messages().unwrap_or_default().len();
-                    crate::tui::picker::PickerItem::new(
-                        t.name(),
-                        t.name(),
-                        format!("{count} messages"),
-                    )
-                })
-                .collect(),
-            self.selected,
-            self.current,
-        )
-    }
-
-    /// Scene key configuration: no s (switching sessions is the intent), number jump 1-20.
-    pub fn keys() -> crate::tui::picker::PickerKeys {
-        crate::tui::picker::PickerKeys {
-            session_only: false,
-            number_jump: true,
-        }
-    }
-}
-
 /// `/provider` selector (picker-model.md commit D): static single-level (default + a settings
 /// providers snapshot), desc keeps the info column (URL + redacted key); Enter=switch+persist,
 /// s=this session only (consistent with /think).
@@ -339,8 +297,6 @@ pub const SLASH_SUGGESTIONS_MAX: usize = 5;
 pub const INPUT_ROWS_MAX: usize = 10;
 /// Max rows shown for queued messages (more collapse into `… +N more`).
 pub const QUEUE_ROWS_MAX: usize = 3;
-/// Max running agents shown while the compact entity selector is open.
-pub const ENTITY_ROWS_MAX: usize = 6;
 /// Max running agents shown at once in the background-agent manager.
 pub const AGENT_MANAGER_ROWS_MAX: usize = 8;
 /// Agent detail follows the reference dialog's bounded prompt preview.
@@ -419,6 +375,48 @@ pub const SLASH_OUTPUT_ERROR_TTL: std::time::Duration = std::time::Duration::fro
 /// User message text entering the message flow when AskUserQuestion is declined
 /// (Esc / empty Other submit) — an ordinary message, persistent with the flow.
 pub const ASK_DECLINED_TEXT: &str = "User declined to answer questions";
+
+/// The line a dialog leaves behind when the turn that asked it ended first
+/// (D80). Display-only: the model's history never carries it, because the tool
+/// call that opened the dialog went down with the turn — this is the record for
+/// the user, in the place the dialog used to be.
+pub const ASK_CANCELLED_TEXT: &str = "(pending permission dialog cancelled with the turn)";
+
+/// The receipt a resolved permission dialog leaves in the flow: the choice the
+/// user made, in the place the dialog was (D81). The dialog itself is chrome and
+/// disappears with the answer; without this the transcript would show a turn
+/// that simply carried on, with no record of who let it.
+pub const ASK_RECEIPT_YES: &str = "> yes";
+pub const ASK_RECEIPT_SESSION: &str = "> yes, don't ask again this session";
+pub const ASK_RECEIPT_NO: &str = "> no";
+/// A refusal that carried feedback: `> no — <what to do instead>`.
+pub const ASK_RECEIPT_NO_PREFIX: &str = "> no — ";
+
+/// Whether a line is a permission receipt. Matched whole for the three plain
+/// choices and by the em-dash prefix for a refusal with feedback — a bare `> `
+/// test would swallow every markdown quote the user ever pastes.
+pub(crate) fn is_ask_receipt(text: &str) -> bool {
+    matches!(text, ASK_RECEIPT_YES | ASK_RECEIPT_SESSION | ASK_RECEIPT_NO)
+        || text.starts_with(ASK_RECEIPT_NO_PREFIX)
+}
+
+/// A user-role message the user never wrote: the harness recorded it to state
+/// what happened. State lines render as a single line — no `❯` bubble putting
+/// words in the user's mouth, and no send stamp, because nothing was sent.
+pub(crate) fn is_state_line(text: &str) -> bool {
+    crate::query::is_interrupt_marker(text)
+        || text == ASK_CANCELLED_TEXT
+        || is_ask_receipt(text)
+        || crate::tui::bufferview::is_route_receipt(text)
+        || rewind_ui::is_rewind_line(text)
+}
+
+/// A message the running turn absorbed mid-turn (D83). Not a state line: the user wrote
+/// it and it reached the model, so it keeps its send stamp — it only loses the `❯`
+/// bubble, because the `↪` glyph is what marks where in the reply it landed.
+pub(crate) fn is_steer_line(text: &str) -> bool {
+    text.starts_with(crate::steer::STEER_FLOW_PREFIX)
+}
 
 /// Read/Search-style tool classification.
 pub fn classify_tool(name: &str, input: &serde_json::Value) -> Option<CollapseKind> {
@@ -725,6 +723,31 @@ fn bash_output_preview(lines: &[String]) -> Vec<String> {
     out
 }
 
+/// Expandable content of a finished tool row: the result text, blank lines dropped.
+///
+/// One rule for every call, grouped or standalone — the fold is a display state, not a
+/// different kind of result. The char budget is the one the model already lives under
+/// ([`MAX_RESULT_CHARS`]): results reach the UI clipped to it, and applying it here bounds
+/// what a row retains even for the paths that build their output without going through the
+/// clip (a tool error string, a denied call).
+fn result_content(name: &str, output: &str) -> Vec<Line> {
+    let bounded = match output.char_indices().nth(MAX_RESULT_CHARS) {
+        Some((end, _)) => &output[..end],
+        None => output,
+    };
+    let lines: Vec<String> = bounded.lines().map(str::to_string).collect();
+    let preview: Vec<String> = if name == "Bash" {
+        bash_output_preview(&lines)
+    } else {
+        lines
+    };
+    preview
+        .into_iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(Line::plain)
+        .collect()
+}
+
 /// Playful words for the thinking stage.
 const THINKING_WORDS: [&str; 12] = [
     "Bootstrapping",
@@ -808,8 +831,9 @@ pub struct Chat {
     pub input: String,
     /// Byte position of the caret in `input` (always on a char boundary).
     pub cursor: usize,
-    /// Text last deleted with ctrl+k/u/w (ctrl+y pastes it back).
-    pub(crate) kill: String,
+    /// Readline state for the prompt: the kill ring alt+k/ctrl+u/ctrl+w/alt+d feed and
+    /// ctrl+y/alt+y read, plus the `ctrl+x ctrl+e` chord (D86).
+    pub(crate) composer: crate::tui::composer::Composer,
     /// Edit undo stack (text + caret), capped at [`UNDO_MAX`].
     pub(crate) undo: Vec<(String, usize)>,
     /// Type of the last edit (consecutive same-kind edits merge in the undo stack).
@@ -822,8 +846,22 @@ pub struct Chat {
     pub history: crate::tui::history::History,
     /// Whether the history file is writable (after one failure, never retry — avoid hitting the same error on every submit).
     pub(crate) history_writable: bool,
-    /// Messages queued while busy (submitted one by one after TurnEnd).
+    /// Messages queued while busy (submitted one by one after TurnEnd, or absorbed
+    /// earlier by the running turn through [`Chat::steer`]).
     pub queued: Vec<QueuedInput>,
+    /// Id of the next queued entry.
+    pub(crate) next_queue_id: u64,
+    /// Mid-turn steering channel (D83): the eligible prefix of `queued`, offered to the
+    /// turn that is running now. Re-armed from `queued` on every change, so it is a
+    /// projection of the queue rather than a second copy that could drift from it.
+    pub(crate) steer: crate::steer::SteerQueue,
+    /// Foreground command liveness (D84): the seam the running Bash tool publishes
+    /// its output tail through, and the one ctrl+b reaches to background it.
+    pub(crate) live: std::sync::Arc<crate::live::LiveBash>,
+    /// The tail of the command running right now (None: no foreground command, or
+    /// it has not written anything yet). One slot, because Phase 2 runs non-safe
+    /// tools serially and Bash is never concurrency-safe.
+    pub(crate) bash_tail: Option<crate::live::LiveTail>,
     /// Whether the `?` shortcut panel is expanded.
     pub help_visible: bool,
     /// Bottom transient notice (`Press ctrl-c again to exit` etc.).
@@ -842,6 +880,10 @@ pub struct Chat {
     /// Time of the last key press and the count of consecutive "fast" keys (paste-burst heuristic).
     pub(crate) last_key_at: Option<std::time::Instant>,
     pub(crate) burst_keys: usize,
+    /// This edit arrived as a paste rather than as typing — a detected burst
+    /// key or a bracketed `Event::Paste`. The completion surfaces read it and
+    /// close instead of recomputing (D86).
+    pub(crate) pasting: bool,
     /// Collapsed paste blocks: placeholder `[Pasted text #N +M lines]` → real content.
     pastes: Vec<(String, String)>,
     /// `!` commands run in this session (prefix completion for Tab in bash mode).
@@ -853,9 +895,13 @@ pub struct Chat {
     pub permission_mode: PermissionMode,
     /// ctrl+l requests a full-screen repaint (cleared after the render layer consumes it).
     pub force_redraw: bool,
-    /// inline ctrl+o requests a full-transcript replay: everything expanded, the flush cursor
-    /// rewound; the app freezes the settled part into scrollback on the next frame (cleared after consumption).
-    pub dump_transcript: bool,
+    /// ctrl+o requests the transcript view: the host opens the alternate-screen
+    /// pager over the whole session (cleared after consumption, D82).
+    pub open_transcript: bool,
+    /// ctrl+g (or `ctrl+x ctrl+e`) requests the `$EDITOR` compose: the host
+    /// hands the terminal over and puts the edited draft back (cleared after
+    /// consumption, D86).
+    pub open_editor: bool,
     /// bash mode (`!` prefix): input executes directly, bypassing the model.
     pub bash_mode: bool,
     pub busy: bool,
@@ -896,10 +942,14 @@ pub struct Chat {
     pub cwd: String,
     /// Permission prompt: request + result receipt.
     pub pending_ask: Option<(PermissionRequest, oneshot::Sender<DialogAction>)>,
-    /// Dialog focus row (0..=options.len(); == options.len() = Other input).
+    /// Dialog focus row (0..=options.len(); == options.len() = free-text input).
     pub(crate) ask_focus: usize,
-    /// Buffer for Other free-form input.
+    /// Buffer for free-form input: AskUserQuestion's Other, or a refusal's feedback.
     pub(crate) ask_other: String,
+    /// When the pending dialog first appeared (D81 type-ahead guard).
+    pub(crate) ask_opened_at: Option<std::time::Instant>,
+    /// ctrl+e: the pre-approval preview is showing in full, not bounded.
+    pub(crate) ask_expanded: bool,
     /// Task-list disk snapshot cache (refreshed each tick).
     pub(crate) tasks_cache: Vec<TodoItem>,
     pub(crate) processor: MarkdownProcessor,
@@ -959,9 +1009,30 @@ pub struct Chat {
     pub(crate) update_banner_start: u64,
     /// Animation stopped (triggered by the first keypress in the window; the banner stays, it just stops breathing).
     pub(crate) update_banner_stopped: bool,
-    /// motion off (settings `motion:"off"` or `BINGO_NO_MOTION=1`): breathing rests at the rest color
-    /// and the banner stays (update-banner spec §2.5 "the indicator does not disappear, it just stops").
-    pub(crate) motion_off: bool,
+    /// The motion gate and its seven tokens (D87). Resolved once from settings
+    /// (`motion: "off"` / `BINGO_NO_MOTION=1`); every animated surface asks this
+    /// rather than the raw tick, so the gate is honoured in one place instead of
+    /// two out of five.
+    pub(crate) motion: crate::tui::motion::Motion,
+    /// Tick of the last event that reached the TUI. `stall` measures from it:
+    /// three seconds of silence mid-turn is worth saying out loud.
+    pub(crate) last_progress_tick: u64,
+    /// Tick the last turn ended on — the origin of the `settle` blink window.
+    pub(crate) settle_at: Option<u64>,
+    /// The running verb, pinned for the whole turn: a second reasoning segment
+    /// used to re-roll it, so the status row changed its mind mid-thought.
+    pub(crate) turn_verb: &'static str,
+    /// Eased token counter for the status row (D87 `meter`): a count that jumps
+    /// by hundreds mid-stream reads as a glitch, so the display travels to it.
+    pub(crate) token_meter: crate::tui::motion::Meter,
+    /// Attention channel (D79): builds the bell / notification OSC / terminal
+    /// title bytes the host collects after each frame. Silent by default —
+    /// only [`Chat::set_notifier`] gives it a channel.
+    pub notify: Notifier,
+    /// The conversation engine (D88): every conversation as one shape. The hub
+    /// is buffer 0 and the active one; DM / channel / team accounting shadows
+    /// the domain here so D89 can switch onto it. Nothing renders from it yet.
+    pub(crate) buffers: crate::tui::buffer::Buffers,
     /// Slash command output lines (/help /status etc.): rendered after messages, settled when idle.
     pub slash_lines: Vec<String>,
     /// When the slash output appeared (auto-dismissed by tick timeout).
@@ -996,6 +1067,16 @@ pub struct Chat {
     pub slash_suggestions: Vec<SlashSuggestion>,
     /// Selected index in the dropdown.
     pub slash_selected: usize,
+    /// Argument phase (D85): byte offset in [`Chat::input`] where the partial
+    /// argument starts. `Some` means the dropdown is offering *values* for a
+    /// command rather than command names — rendering drops the `/` prefix and
+    /// completion splices at this offset instead of replacing the whole line.
+    pub slash_arg_start: Option<usize>,
+    /// The `@` mention dropdown (D85); `None` means it is closed.
+    pub mention: Option<crate::tui::complete::MentionState>,
+    /// Esc dismissed the mention dropdown: it stays closed until the caret
+    /// leaves the `@` token, so the next keystroke does not reopen it.
+    pub mention_dismissed: bool,
     /// `/model` two-level selector (level-one endpoint → level-two model list; None = inactive).
     pub model_menu: Option<ModelMenu>,
     /// Last-used model per provider (session memory): switching back to a
@@ -1024,16 +1105,18 @@ pub struct Chat {
     pub tasks_auto: bool,
     /// Snapshot of the bottom entity area (running agent instances + channels; refreshed on tick/WatchEvent).
     pub entities: Vec<EntityRow>,
-    /// Selection in the compact running-agent list; `None` keeps the one-line presence summary.
-    pub entity_focus: Option<usize>,
     /// Main-view background-agent manager; `None` means the panel is closed.
     pub agent_manager: Option<AgentManager>,
-    /// Entity view pending open (app layer consumes → enters the fullscreen modal).
-    pub open_entity: Option<EntityOpen>,
-    /// Slack workspace view state. Lives here rather than in the modal so read
-    /// cursors, the open conversation and collapsed sections survive leaving
-    /// and re-entering the view.
-    pub slack: crate::tui::slack::Workspace,
+    /// The ctrl+k conversation switcher (D90); `None` means it is closed.
+    pub(crate) switcher: Option<crate::tui::switcher::Switcher>,
+    /// The esc-esc rewind selector (D91); `None` means it is closed.
+    pub(crate) rewind: Option<rewind_ui::Rewind>,
+    /// Visits to conversations other than the hub (D89), oldest first. Each one
+    /// is a segment of the flow: which rows it printed, and where in the hub's
+    /// transcript it sits. `Chat::flow_order` reads them to decide what the one
+    /// message store looks like on screen; the last one is open while a
+    /// conversation other than the hub is active.
+    pub(crate) excursions: Vec<crate::tui::bufferview::Excursion>,
     /// Interrupt signal: Ctrl+C / Esc while busy → send(true), aborting stream reads in the turn immediately.
     pub(crate) cancel_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -1061,13 +1144,6 @@ pub enum AgentManager {
     Detail { name: String },
 }
 
-/// Entity view to open from the main chat.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EntityOpen {
-    Workspace,
-    Agent(String),
-}
-
 impl Chat {
     /// Display TTL for non-fatal warnings: expired entries are no longer
     /// rendered (pruned on push).
@@ -1085,6 +1161,26 @@ impl Chat {
         if !self.warnings.iter().any(|(_, w)| w == &message) {
             self.warnings.push((std::time::Instant::now(), message));
         }
+    }
+
+    /// Echo the interrupt marker `query.rs` wrote into the message flow. It is a message,
+    /// not a warning: the record it mirrors is permanent, and a 10s toast that expires
+    /// while the marker stays in the history is exactly the split-brain this closes.
+    pub(crate) fn push_interrupt_marker(&mut self, marker: &'static str) {
+        // The turn's own cleanup still has to run against the message it opened, so the
+        // continuation drop happens before the marker lands after it (TurnEnd's second
+        // call then finds nothing to do).
+        self.drop_empty_stream_message();
+        self.messages.push(UiMessage {
+            role: Role::User,
+            text: marker.to_string(),
+            at: crate::channels::now_unix(),
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        self.dirty = true;
     }
 
     /// The warning currently displayed (`None` when nothing is
@@ -1157,13 +1253,8 @@ impl Chat {
         // Update-banner (welcome card) data source + motion off: computed before the session moves into Self.
         // Store the bare version (rendering adds the `v` prefix in `banner_segments`).
         let update_banner = crate::update::latest_cached(&session.home).map(|v| v.to_string());
-        let motion_off = session.settings.motion.as_deref() == Some("off")
-            || std::env::var_os("BINGO_NO_MOTION").is_some();
+        let motion = crate::tui::motion::Motion::from_settings(&session.settings);
         let chat_avatars = session.settings.experimental.chat_avatars;
-        let context_window = crate::budget::context_window_for(
-            &session.client.models(),
-            &session.runtime.model.borrow().clone(),
-        );
         let context_tokens = session
             .runtime
             .transcript
@@ -1172,6 +1263,18 @@ impl Chat {
             .and_then(|transcript| transcript.load_messages().ok())
             .map(|messages| crate::compact::estimate_tokens(&session.system, &messages, &[]))
             .unwrap_or(0);
+        let context_usage = crate::context_usage::ContextUsage::for_model(
+            context_tokens,
+            &session.client.models(),
+            &session.runtime.model.borrow().clone(),
+        );
+        // A running command's tail reaches the screen the way every other turn-side
+        // fact does: as a UiEvent on the channel the drain loop already wakes for.
+        // Nothing else in the TUI has to learn a second way to hear from a tool.
+        let tail_events = events.clone();
+        let live = crate::live::LiveBash::new(Arc::new(move |tail| {
+            let _ = tail_events.send(UiEvent::BashTail(tail));
+        }));
         Self {
             session,
             events,
@@ -1181,7 +1284,7 @@ impl Chat {
             messages: Vec::new(),
             input: String::new(),
             cursor: 0,
-            kill: String::new(),
+            composer: crate::tui::composer::Composer::default(),
             undo: Vec::new(),
             last_edit: None,
             last_thinking: None,
@@ -1189,6 +1292,10 @@ impl Chat {
             history,
             history_writable: true,
             queued: Vec::new(),
+            next_queue_id: 0,
+            steer: crate::steer::SteerQueue::new(),
+            live,
+            bash_tail: None,
             help_visible: false,
             notice: None,
             notice_until: None,
@@ -1197,12 +1304,14 @@ impl Chat {
             esc_at: None,
             last_key_at: None,
             burst_keys: 0,
+            pasting: false,
             pastes: Vec::new(),
             bash_history: Vec::new(),
             search: None,
             permission_mode,
             force_redraw: false,
-            dump_transcript: false,
+            open_transcript: false,
+            open_editor: false,
             bash_mode: false,
             busy: false,
             stream_msg: None,
@@ -1213,7 +1322,7 @@ impl Chat {
             output_tokens: 0,
             output_round_tokens: 0,
             token_rate: crate::token_rate::TokenRateSampler::default(),
-            context_usage: crate::context_usage::ContextUsage::new(context_tokens, context_window),
+            context_usage,
             tick: 0,
             turn_start_tick: 0,
             turn_started: None,
@@ -1224,6 +1333,8 @@ impl Chat {
             pending_ask: None,
             ask_focus: 0,
             ask_other: String::new(),
+            ask_opened_at: None,
+            ask_expanded: false,
             tasks_cache: Vec::new(),
             processor: MarkdownProcessor::default(),
             renderer: MarkdownRenderer::with_theme(80, theme.clone()),
@@ -1256,7 +1367,13 @@ impl Chat {
             update_banner,
             update_banner_start: 0,
             update_banner_stopped: false,
-            motion_off,
+            motion,
+            last_progress_tick: 0,
+            settle_at: None,
+            turn_verb: THINKING_WORDS[0],
+            token_meter: crate::tui::motion::Meter::default(),
+            notify: Notifier::default(),
+            buffers: crate::tui::buffer::Buffers::new(),
             slash_lines: Vec::new(),
             slash_at: None,
             slash_error_lines: Vec::new(),
@@ -1270,6 +1387,9 @@ impl Chat {
             mark_base: 0,
             slash_suggestions: Vec::new(),
             slash_selected: 0,
+            slash_arg_start: None,
+            mention: None,
+            mention_dismissed: false,
             model_menu: None,
             provider_models: std::collections::HashMap::new(),
             provider_session_only: false,
@@ -1282,10 +1402,10 @@ impl Chat {
             tasks_visible: false,
             tasks_auto: false,
             entities: Vec::new(),
-            entity_focus: None,
             agent_manager: None,
-            open_entity: None,
-            slack: Default::default(),
+            switcher: None,
+            rewind: None,
+            excursions: Vec::new(),
             interrupted: false,
             cancel_tx: tokio::sync::watch::channel(false).0,
         }
@@ -1301,17 +1421,19 @@ impl Chat {
         handled
     }
 
-    /// Drains the permission channel (one at a time: a new request is only accepted when none is pending).
-    pub fn drain_asks(&mut self) -> bool {
-        if self.pending_ask.is_none()
-            && let Ok(request) = self.asks_rx.try_recv()
-        {
-            self.ask_focus = 0;
-            self.ask_other.clear();
-            self.pending_ask = Some(request);
-            return true;
-        }
-        false
+    /// Install the attention channel and take the terminal title with it (D79).
+    /// The host does this once, at startup; everything else leaves the
+    /// default-silent notifier alone.
+    pub fn set_notifier(&mut self, notifier: Notifier) {
+        self.notify = notifier;
+        self.notify_idle();
+    }
+
+    /// Title the terminal for an idle session — no turn running, nothing
+    /// waiting on the user.
+    fn notify_idle(&mut self) {
+        let cwd = crate::tui::notify::cwd_short(&self.cwd).to_string();
+        self.notify.set_title(Title::Idle(&cwd));
     }
 
     /// Drains all channels. Returns whether there is any new state.
@@ -1320,8 +1442,25 @@ impl Chat {
         changed |= self.drain_asks();
         if changed {
             self.dirty = true;
+            // The cheapest possible progress hook (D87): every stream delta,
+            // tool event and ask funnels through here, so one assignment is the
+            // whole `stall` baseline.
+            self.last_progress_tick = self.tick;
         }
         changed
+    }
+
+    /// Whether a busy turn has gone quiet past the `stall` threshold — the
+    /// status row turns warning-coloured and stops glimmering.
+    pub(crate) fn stalled(&self) -> bool {
+        self.busy && self.motion.stall(self.tick, self.last_progress_tick)
+    }
+
+    /// Whether the last turn's completion row is still inside its `settle`
+    /// blink. Also what holds that message out of scrollback for the window.
+    pub(crate) fn settling(&self) -> bool {
+        self.settle_at
+            .is_some_and(|at| self.motion.settle(self.tick, at))
     }
 
     fn handle(&mut self, event: UiEvent) {
@@ -1356,12 +1495,19 @@ impl Chat {
                 self.thinking_buf.clear();
                 self.thinking_seg_open = false;
                 self.pending_tools_clear();
+                // No command of the previous turn may keep painting under a row of
+                // this one (an interrupt drops the tool future without a ToolDone).
+                self.bash_tail = None;
                 self.interrupt_at = None;
                 let now = std::time::Instant::now();
                 self.turn_started = Some(now);
                 self.output_tokens = 0;
                 self.output_round_tokens = 0;
+                self.token_meter.reset(0, self.tick);
+                self.settle_at = None;
                 self.token_rate.start(now);
+                self.notify
+                    .set_title(Title::Busy(self.motion.title_glyph(self.tick)));
                 self.messages.push(UiMessage {
                     role: Role::Assistant,
                     text: String::new(),
@@ -1372,6 +1518,9 @@ impl Chat {
                     group_of: Vec::new(),
                 });
                 self.stream_msg = Some(self.messages.len() - 1);
+                // One verb per turn (D87): sampled here and reused by every
+                // reasoning segment the turn opens.
+                self.turn_verb = thinking_stage(self.messages.len());
                 self.stream_attempt_checkpoint = self
                     .stream_msg
                     .and_then(|index| self.messages.get(index).cloned());
@@ -1383,7 +1532,7 @@ impl Chat {
                 let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                     state: ThinkingState::Running,
                     duration_ms: 0,
-                    stage: thinking_stage(self.messages.len()),
+                    stage: self.turn_verb,
                     done_verb: Some(thinking_done_verb()),
                     start_tick: self.tick,
                     segments: 1,
@@ -1404,7 +1553,7 @@ impl Chat {
                     let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                         state: ThinkingState::Running,
                         duration_ms: 0,
-                        stage: thinking_stage(self.messages.len()),
+                        stage: self.turn_verb,
                         done_verb: Some(thinking_done_verb()),
                         start_tick: self.tick,
                         segments: 1,
@@ -1494,8 +1643,10 @@ impl Chat {
                                     if !was_open {
                                         t.segments += 1;
                                     }
-                                    t.duration_ms =
-                                        self.tick.saturating_sub(t.start_tick).saturating_mul(33);
+                                    t.duration_ms = self
+                                        .tick
+                                        .saturating_sub(t.start_tick)
+                                        .saturating_mul(crate::tui::motion::TICK_MS);
                                 }
                                 hint.set_content(content);
                             }
@@ -1509,8 +1660,9 @@ impl Chat {
                         let content = self.render_thinking(&buf);
                         let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                             state: ThinkingState::Running,
-                            duration_ms: self.tick.saturating_sub(self.turn_start_tick) * 33,
-                            stage: thinking_stage(self.messages.len()),
+                            duration_ms: self.tick.saturating_sub(self.turn_start_tick)
+                                * crate::tui::motion::TICK_MS,
+                            stage: self.turn_verb,
                             done_verb: Some(thinking_done_verb()),
                             start_tick: self.tick,
                             segments: 1,
@@ -1524,8 +1676,8 @@ impl Chat {
                     }
                 }
             }
-            UiEvent::ContextUsage { used, window } => {
-                self.context_usage = crate::context_usage::ContextUsage::new(used, window);
+            UiEvent::ContextUsage(usage) => {
+                self.context_usage = usage;
             }
             UiEvent::OutputTokens {
                 tokens,
@@ -1636,6 +1788,8 @@ impl Chat {
             } => {
                 // Agent/channel lifecycle events also refresh the bottom entity area.
                 self.refresh_entities();
+                self.buffers
+                    .note_watch_event(&label, kind, status, detail.as_deref(), self.tick);
                 let found = self.messages.iter_mut().find_map(|m| {
                     m.activities
                         .iter_mut()
@@ -1726,7 +1880,18 @@ impl Chat {
                     self.load_message_images(&text);
                 }
             }
+            UiEvent::BashTail(tail) => {
+                // Only worth keeping while there is a row to hang it under; the
+                // renderer decides that, and drops it the moment the call is done.
+                self.bash_tail = Some(tail);
+            }
             UiEvent::ToolDone(done) => {
+                // The finished call's own result row takes over from the tail. A
+                // sample still in flight when the command exited would otherwise
+                // paint output under a row that already reported it.
+                if done.name == "Bash" {
+                    self.bash_tail = None;
+                }
                 let Some(i) = self.stream_msg else {
                     return;
                 };
@@ -1737,7 +1902,9 @@ impl Chat {
                     })
                 {
                     let diff = Diff::parse_unified(diff_text);
-                    let content = diff_lines(&diff, &self.theme);
+                    // `layout_activity` prefixes RESULT_INDENT to every content
+                    // row, so that is the width the diff itself has to fit in.
+                    let content = diff_lines(&diff, &self.theme, self.diff_width());
                     let mut hint = Activity::new(ActivityKind::Diff(diff));
                     hint.expand_hint = Some("ctrl+o to expand".to_string());
                     hint.set_content(content);
@@ -1751,44 +1918,38 @@ impl Chat {
                         && call.status == ToolStatus::Running
                     {
                         call.status = match done.status {
-                            crate::query::ToolCallStatus::Done
-                            | crate::query::ToolCallStatus::Interrupted => ToolStatus::Done,
+                            crate::query::ToolCallStatus::Done => ToolStatus::Done,
                             crate::query::ToolCallStatus::Error => ToolStatus::Error,
+                            crate::query::ToolCallStatus::Interrupted => ToolStatus::Interrupted,
                         };
                         call.summary = done.summary.clone();
                         call.duration_ms = done.duration_ms;
+                        if call.status == ToolStatus::Interrupted {
+                            // Nothing to summarize or expand: the call was stopped before
+                            // it produced a result, and the status line says so.
+                            break;
+                        }
                         let in_group = group_of.get(hint_idx).copied().flatten().is_some();
                         if in_group {
                             call.result_summary = result_summary(&done.name, &done.output);
-                        } else {
-                            // Standalone Bash (`!` commands): preview = the output itself (stripped of the
-                            // `$ cmd` echo and the `[Exited with code N]` footnote),
-                            // expanded by default (BashModeProgress shows the output directly).
+                        } else if done.name == "Skill" {
                             // Skill: the result row shows only `✦ <skill name>` (same family as the activity header
                             // `✦ Skill(input)`); the pointer path stays only in tool_result.
-                            if done.name == "Skill" {
-                                call.result_summary = done.output.lines().next().and_then(|l| {
-                                    l.strip_prefix("✦ ")
-                                        .and_then(|rest| rest.split(" — ").next())
-                                        .map(|name| format!("✦ {name}"))
-                                });
-                            }
-                            let lines: Vec<String> =
-                                done.output.lines().map(str::to_string).collect();
-                            let preview: Vec<String> = if done.name == "Bash" {
-                                bash_output_preview(&lines)
-                            } else {
-                                lines
-                            };
-                            let content: Vec<Line> = preview
-                                .into_iter()
-                                .filter(|l| !l.trim().is_empty())
-                                .map(Line::plain)
-                                .collect();
-                            hint.set_content(content);
-                            if done.name == "Bash" && !hint.expanded {
-                                hint.expanded = true;
-                            }
+                            call.result_summary = done.output.lines().next().and_then(|l| {
+                                l.strip_prefix("✦ ")
+                                    .and_then(|rest| rest.split(" — ").next())
+                                    .map(|name| format!("✦ {name}"))
+                            });
+                        }
+                        // Every finished call keeps its output, grouped or not: inside a fold the
+                        // row summary (`Read 173 lines`) is all that survives, so dropping the
+                        // content there makes the output unreachable for the rest of the session.
+                        hint.set_content(result_content(&done.name, &done.output));
+                        // Standalone Bash (`!` commands) is expanded by default
+                        // (BashModeProgress shows the output directly); a grouped call stays
+                        // folded until the group opens.
+                        if !in_group && done.name == "Bash" && !hint.expanded {
+                            hint.expanded = true;
                         }
                         break;
                     }
@@ -1796,11 +1957,32 @@ impl Chat {
             }
             UiEvent::TurnEnd => {
                 self.busy = false;
+                self.bash_tail = None;
+                // The `settle` blink starts here (D87): the completion row keeps
+                // the accent for one 120ms window, and the message it belongs to
+                // stays live for exactly that long, so the row freezes into
+                // scrollback at rest and write-once is never broken.
+                self.settle_at = Some(self.tick);
+                // A turn short enough to have been watched needs no
+                // notification; a long one is exactly what the user walked away
+                // from (D79). Read before the start time is cleared.
+                if self
+                    .turn_started
+                    .is_some_and(|at| at.elapsed() >= crate::tui::notify::LONG_TURN)
+                {
+                    self.notify.attention(Attention::TurnComplete);
+                }
+                self.notify_idle();
                 self.turn_started = None;
                 self.output_tokens = 0;
                 self.output_round_tokens = 0;
                 self.token_rate.stop();
                 self.thinking_seg_open = false;
+                // A turn that died on its own (error, lost task) leaves its
+                // dialog behind exactly as an interrupt did; the receiver is
+                // already gone, which is what tells it apart from a background
+                // agent's question (D80).
+                self.cancel_asks(true);
                 self.drop_empty_stream_message();
                 // AskUserQuestion answers are ordinary user messages (in the message flow,
                 // settled/flushed with it) — nothing to clean at turn end, they persist with the session.
@@ -1857,8 +2039,10 @@ impl Chat {
                             && t.state == ThinkingState::Running
                         {
                             t.state = ThinkingState::Done;
-                            t.duration_ms =
-                                self.tick.saturating_sub(t.start_tick).saturating_mul(33);
+                            t.duration_ms = self
+                                .tick
+                                .saturating_sub(t.start_tick)
+                                .saturating_mul(crate::tui::motion::TICK_MS);
                             hint.expanded = false;
                         }
                     }
@@ -1869,6 +2053,16 @@ impl Chat {
                 self.stream_msg = None;
                 self.stream_attempt_checkpoint = None;
                 self.submit_queued();
+                // `start_turn` reset the channel for whatever turn just began; hand it
+                // the rest of the queue. With no turn running this only clears it —
+                // an offer with nothing to take it is an offer to the next turn.
+                self.rearm_steer();
+            }
+            UiEvent::Steered { items } => {
+                self.absorb_steered(&items);
+            }
+            UiEvent::Interrupted { marker } => {
+                self.push_interrupt_marker(marker);
             }
             UiEvent::Warning(message) => {
                 self.push_warning(message);
@@ -1881,6 +2075,11 @@ impl Chat {
             }
             UiEvent::SlashInfo(message) => {
                 self.push_slash_info(message);
+            }
+            UiEvent::RewindDone(message) => {
+                self.push_user_line(message);
+                self.refresh_context_usage_from_transcript();
+                self.dirty = true;
             }
             UiEvent::PinPanel { id, lines } => {
                 self.pin_panel(&id, lines);
@@ -1904,6 +2103,16 @@ impl Chat {
                     self.drop_empty_stream_message();
                     self.stream_msg = None;
                     self.stream_attempt_checkpoint = None;
+                    // No turn left to steer: the channel empties with it, and what is
+                    // still queued stays queued (D83).
+                    self.rearm_steer();
+                }
+                // A flow-level failure ends the turn on a screen the user has to
+                // come back to; a page-level one is a hint beside a session that
+                // carries on, and carries no notification (D79).
+                if level == crate::error::ErrorLevel::Full {
+                    self.notify.attention(Attention::TurnFailed);
+                    self.notify_idle();
                 }
                 // #18: structured error-state record (code/msg/level/context); the render side uses it to
                 // produce the error row (Page/Field) or the full-screen state (Full) — independent of message-text
@@ -2007,6 +2216,18 @@ impl Chat {
                     return false;
                 };
                 g.expanded = !g.expanded;
+                // Members follow the group. Every row of an open group is wrapped in the
+                // group's own click target (the enclosing wrapper wins over the annotations
+                // inside it), so a member row cannot be opened on its own with the mouse:
+                // either the group carries its members' state or their output stays behind
+                // a keystroke.
+                let expanded = g.expanded;
+                let members = g.activities.clone();
+                for idx in members {
+                    if let Some(act) = msg.activities.get_mut(idx) {
+                        act.expanded = expanded;
+                    }
+                }
                 self.auto_scroll = false;
                 self.dirty = true;
                 true
@@ -2030,138 +2251,29 @@ impl Chat {
         }
     }
 
-    /// Click on a dialog option: the Other row → enter input mode; anything else confirms immediately.
-    fn ask_click(&mut self, index: usize) {
-        let Some((request, _)) = &self.pending_ask else {
-            return;
-        };
-        let options_len = request.options.len();
-        let free_text = request.free_text;
-        if index >= options_len && free_text {
-            self.ask_focus = index;
-            return;
-        }
-        self.choose_ask_option(index);
-    }
-
-    /// ctrl+o: globally expand/collapse the transcript (CC app:toggleTranscript).
-    /// Priority: expanded groups collapse back first; otherwise, if anything is collapsible → expand all; else collapse all.
-    pub fn toggle_transcript(&mut self) -> bool {
+    /// Open every fold of the most recent message.
+    ///
+    /// Test-facing only: it is the expanded *presentation* many render tests
+    /// assert on, and reaching it through the production surfaces would mean
+    /// driving a mouse click ([`Chat::doc_click`]) or an alternate-screen pager
+    /// ([`crate::tui::transcript`]) for a question about rows. The global
+    /// ctrl+o toggle this replaced is gone: in-place expansion could never work
+    /// in inline mode, where the rows it would rewrite already belong to the
+    /// terminal.
+    #[cfg(test)]
+    pub fn expand_all_folds(&mut self) -> bool {
         let Some(i) = self.messages.len().checked_sub(1) else {
             return false;
         };
-        if self.messages[i].groups.iter().any(|g| g.expanded) {
-            for g in &mut self.messages[i].groups {
-                g.expanded = false;
-            }
-            self.auto_scroll = false;
-            self.dirty = true;
-            return true;
-        }
-        let any_collapsed = self.messages[i]
-            .activities
-            .iter()
-            .any(|a| !a.expanded && a.expandable())
-            || self.messages[i]
-                .groups
-                .iter()
-                .any(|g| !g.expanded && !g.activities.is_empty());
         for act in &mut self.messages[i].activities {
-            act.expanded = any_collapsed;
+            act.expanded = true;
         }
-        for g in &mut self.messages[i].groups {
-            g.expanded = any_collapsed;
+        for group in &mut self.messages[i].groups {
+            group.expanded = true;
         }
         self.auto_scroll = false;
         self.dirty = true;
         true
-    }
-
-    /// inline ctrl+o expand direction (CC non-fullscreen transcript): rows already printed to scrollback
-    /// cannot change (write-once), so instead of a collapse toggle it does a **full replay** — every collapsible item
-    /// in all of history expands and the flush cursor rewinds; the app then freezes the whole transcript
-    /// into scrollback in one go, where the user can scroll back to read it. Old collapsed copies already
-    /// in scrollback cannot be retracted — duplicates are accepted (the same trade-off as rehydration). When everything
-    /// is already on screen with nothing to expand, it is a no-op: the replay adds no information.
-    ///
-    /// The replay frame uses `force_redraw` (clear the visible screen): same as resize, clear first then write,
-    /// replay content starts from the top of the screen with chrome right below — without clearing, the old frame and
-    /// the replay rows would align by viewport history, so short content appears twice on screen.
-    pub fn expand_transcript(&mut self) -> bool {
-        let mut changed = false;
-        for message in &mut self.messages {
-            for act in &mut message.activities {
-                if !act.expanded && act.expandable() {
-                    act.expanded = true;
-                    changed = true;
-                }
-            }
-            for group in &mut message.groups {
-                if !group.expanded && !group.activities.is_empty() {
-                    group.expanded = true;
-                    changed = true;
-                }
-            }
-        }
-        if !changed && self.flushed_segments == 0 {
-            return false;
-        }
-        self.reset_flushed();
-        self.dump_transcript = true;
-        self.force_redraw = true;
-        true
-    }
-
-    /// ctrl+o toggle direction: true only when the transcript has collapsible items and they are **all**
-    /// expanded (the next press collapses). Always false with nothing collapsible — ctrl+o then
-    /// degrades to a pure replay: pressing it repeatedly just reprints, never entering the collapse branch.
-    pub fn transcript_fully_expanded(&self) -> bool {
-        let mut any = false;
-        for message in &self.messages {
-            for act in &message.activities {
-                if act.expandable() {
-                    if !act.expanded {
-                        return false;
-                    }
-                    any = true;
-                }
-            }
-            for group in &message.groups {
-                if !group.activities.is_empty() {
-                    if !group.expanded {
-                        return false;
-                    }
-                    any = true;
-                }
-            }
-        }
-        any
-    }
-
-    /// inline ctrl+o collapse direction: all history folds back to the default aggregate state. Only the fold state
-    /// changes; the caller's display layer closes it up via the same path as resize (clear-redraw + rehydration), because
-    /// the expanded replay rows on screen are also write-once printed content — without clearing, they would
-    /// coexist on screen with the collapsed window.
-    pub fn collapse_transcript(&mut self) -> bool {
-        let mut changed = false;
-        for message in &mut self.messages {
-            for act in &mut message.activities {
-                if act.expanded {
-                    act.expanded = false;
-                    changed = true;
-                }
-            }
-            for group in &mut message.groups {
-                if group.expanded {
-                    group.expanded = false;
-                    changed = true;
-                }
-            }
-        }
-        if changed {
-            self.dirty = true;
-        }
-        changed
     }
 
     pub fn submit(&mut self) {
@@ -2171,6 +2283,42 @@ impl Chat {
         self.last_edit = None;
         if text.trim().is_empty() {
             self.set_input(text);
+            return;
+        }
+        // A conversation other than the hub owns the composer (D89): the text
+        // goes to it, not to the model. Slash commands are the exception and
+        // deliberately so — they act on the application, and `/model` in a DM
+        // is still `/model` — so they fall through to the path below unchanged.
+        //
+        // This sits above the busy branch because `busy` is the *hub's* state:
+        // a message to a subagent neither queues behind a running turn nor
+        // steers it (D83 offers only hub submissions), and the send must not
+        // start a turn of its own.
+        if self.buffers.active() != &crate::tui::buffer::BufferId::Hub && !text.starts_with('/') {
+            let text = self.expand_pastes(&text);
+            let text = self.expand_image_paths(&text);
+            self.record_history(&text);
+            self.send_to_active(text);
+            self.update_slash_suggestions();
+            return;
+        }
+        // A hub submit that opens with another conversation's name delivers the
+        // rest there and stays put (D90). Same placement and the same reason as
+        // the branch above: it is a delivery, not a turn, so it must neither
+        // queue behind a running one nor start one. Slash commands and bash
+        // mode are checked first — `/` and `!` decide what a line *is* before
+        // its first word decides where it goes.
+        if !self.bash_mode
+            && !text.starts_with('/')
+            && let Some((id, body)) = self.leading_route(&text)
+        {
+            let body = self.expand_pastes(&body);
+            let body = self.expand_image_paths(&body);
+            // The whole line goes into history, envelope included: ↑ brings
+            // back what was typed, not what was delivered.
+            self.record_history(&text);
+            self.route_from_hub(id, body);
+            self.update_slash_suggestions();
             return;
         }
         // Turn in progress: queue it, submitted one by one after TurnEnd (CC message queueing).
@@ -2190,7 +2338,11 @@ impl Chat {
                 }
             }
             let is_slash = text.starts_with('/');
-            self.queued.push(QueuedInput { text, is_slash });
+            let id = self.next_queue_id;
+            self.next_queue_id = self.next_queue_id.wrapping_add(1);
+            self.queued.push(QueuedInput { text, is_slash, id });
+            // The turn may take it before TurnEnd does (D83).
+            self.rearm_steer();
             self.update_slash_suggestions();
             return;
         }
@@ -2206,7 +2358,11 @@ impl Chat {
         if let Some(cmd) = text.strip_prefix('/') {
             // Enter with a partial prefix and dropdown suggestions: apply the selection and run it
             // (handleEnter: with suggestions present, Enter = complete + execute).
-            if !self.slash_suggestions.is_empty()
+            // Only in the command-NAME phase: an argument dropdown lists values,
+            // and running the selected one as a command would dispatch
+            // `/deepseek-chat` when the user meant `/model deepseek-chat`.
+            if self.slash_arg_start.is_none()
+                && !self.slash_suggestions.is_empty()
                 && !self
                     .slash_suggestions
                     .iter()
@@ -2253,6 +2409,15 @@ impl Chat {
     /// The burst heuristic ([`PASTE_BURST_GAP`]) stays as the fallback for
     /// terminals that do not report bracketed paste.
     pub fn on_paste(&mut self, text: &str) {
+        // Everything below is one edit that the user did not type, so the
+        // completion surfaces close rather than reopen on whatever character
+        // the payload happens to end with (D86).
+        self.pasting = true;
+        self.paste_inner(text);
+        self.pasting = false;
+    }
+
+    fn paste_inner(&mut self, text: &str) {
         // Tests must not read the system clipboard: an image in it would turn
         // a text paste into an image placeholder (the bracketed_paste test was
         // once flaky because the host clipboard held an image).
@@ -2428,10 +2593,12 @@ impl Chat {
         self.dirty = true;
     }
 
-    /// Clears the slash dropdown and its no-match flag together (single lifecycle).
+    /// Clears the slash dropdown, its no-match flag and its argument phase
+    /// together (single lifecycle).
     pub(crate) fn clear_slash_suggestions(&mut self) {
         self.slash_suggestions.clear();
         self.slash_no_match = false;
+        self.slash_arg_start = None;
     }
 
     /// Slash command dispatch. Returns true = consumed.
@@ -2465,6 +2632,7 @@ impl Chat {
             "skills" => self.slash_skills(),
             "tasks" => self.slash_tasks(),
             "team" => self.slash_team(arg),
+            "open" => self.slash_open(arg),
             other => {
                 // Skill name (prompt Command: skills share the registry with built-in commands; typing
                 // /skill-name runs it; the full body never enters the context, see the marker comment below).
@@ -2555,17 +2723,16 @@ impl Chat {
 
     fn reset_context_usage(&mut self) {
         let model = self.session.runtime.model.borrow().clone();
-        self.context_usage = crate::context_usage::ContextUsage::new(
-            0,
-            crate::budget::context_window_for(&self.session.client.models(), &model),
-        );
+        self.context_usage =
+            crate::context_usage::ContextUsage::for_model(0, &self.session.client.models(), &model);
     }
 
     fn estimate_context_usage(&mut self, messages: &[crate::api::types::Message]) {
         let model = self.session.runtime.model.borrow().clone();
-        self.context_usage = crate::context_usage::ContextUsage::new(
+        self.context_usage = crate::context_usage::ContextUsage::for_model(
             crate::compact::estimate_tokens(&self.session.system, messages, &[]),
-            crate::budget::context_window_for(&self.session.client.models(), &model),
+            &self.session.client.models(),
+            &model,
         );
     }
 
@@ -2723,6 +2890,31 @@ impl Chat {
         self.apply_theme(ThemeSetting::parse(Some(arg)));
     }
 
+    /// Width a diff body gets inside an activity's expanded content, once
+    /// `layout_activity` has prefixed [`RESULT_INDENT`].
+    pub(crate) fn diff_width(&self) -> usize {
+        self.width
+            .saturating_sub(crate::tui::activities::RESULT_INDENT.len())
+    }
+
+    /// Re-render every diff activity under the current theme and width.
+    ///
+    /// Diff rows are baked when the edit lands, so they carry the palette and
+    /// the gutter of that moment. `/theme` has to walk back over them, or the
+    /// switch would recolour the prose and leave the diffs behind. Rows already
+    /// committed to scrollback keep their old colours — that is the write-once
+    /// contract, not a gap here.
+    fn rebuild_diff_rows(&mut self) {
+        let (theme, width) = (self.theme.clone(), self.diff_width());
+        for message in &mut self.messages {
+            for activity in &mut message.activities {
+                if let ActivityKind::Diff(d) = &activity.kind {
+                    activity.content = diff_lines(d, &theme, width);
+                }
+            }
+        }
+    }
+
     /// Apply the theme: rebuild the renderer/cache, persist, update theme_setting (the menu's ● data source).
     fn apply_theme(&mut self, setting: ThemeSetting) {
         let name = match setting {
@@ -2736,6 +2928,7 @@ impl Chat {
         self.renderer =
             crate::tui::markdown::MarkdownRenderer::with_theme(self.width, self.theme.clone());
         self.reply_cache.clear();
+        self.rebuild_diff_rows();
         self.dirty = true;
         let cwd = std::path::PathBuf::from(&self.cwd);
         let _ = crate::settings::upsert_scoped_settings(
@@ -2817,335 +3010,6 @@ impl Chat {
         }
     }
 
-    fn slash_rename(&mut self, arg: &str) {
-        let Some(t) = self.session.runtime.transcript.borrow().clone() else {
-            self.push_slash_error("this session has no transcript; cannot rename.".to_string());
-            return;
-        };
-        let old_name = t.name();
-        match t.rename(arg) {
-            Ok(new_t) => {
-                let name = new_t.name();
-                if let Err(error) = self.session.tasks.rename_key(&old_name, &name) {
-                    self.push_warning(format!(
-                        "task data could not follow the renamed session ({error}); tasks remain under the previous session name"
-                    ));
-                }
-                if let Err(error) =
-                    crate::share::rename_session_sidecars(&self.session.home, &old_name, &name)
-                {
-                    self.push_warning(format!(
-                        "share data could not follow the renamed session ({error}); export may omit agent/channel history"
-                    ));
-                }
-                let _ = self.session.runtime.transcript_tx.send(Some(new_t.clone()));
-                self.attach_share_to_transcript(Some(&new_t));
-                self.push_slash_output(format!("✓ session renamed: {name}"));
-            }
-            Err(e) => self.push_slash_error(format!("rename failed: {e}")),
-        }
-    }
-
-    /// `/resume [name or keyword]`: no argument opens the session selector (picker-model.md commit C,
-    /// the same picker as CC's /resume); an argument takes the fast path (name/keyword match, kept as-is).
-    fn slash_resume(&mut self, arg: &str) {
-        let home = self.session.home.clone();
-        let transcripts = match crate::transcript::list(&home) {
-            Ok(t) => t,
-            Err(e) => {
-                self.push_slash_error(format!("cannot read the session list: {e}"));
-                return;
-            }
-        };
-        if arg.is_empty() {
-            if transcripts.is_empty() {
-                self.push_slash_output("no past sessions.".to_string());
-                return;
-            }
-            self.open_resume_menu(transcripts);
-            return;
-        }
-        self.switch_transcript(transcripts.iter().find(|t| t.name().contains(arg)), arg);
-    }
-
-    /// Fast-path switch (argument /resume): a hit switches, a miss errors.
-    fn switch_transcript(&mut self, found: Option<&crate::transcript::Transcript>, arg: &str) {
-        let Some(found) = found else {
-            self.push_slash_error(format!("no session contains '{arg}'."));
-            return;
-        };
-        if let Err(error) = found.activate() {
-            self.push_slash_error(format!("cannot resume session: {error}"));
-            return;
-        }
-        let count = found.load_messages().unwrap_or_default().len();
-        let _ = self.session.runtime.transcript_tx.send(Some(found.clone()));
-        self.rebind_tasks_to_transcript(Some(found));
-        self.attach_share_to_transcript(Some(found));
-        self.messages.clear();
-        self.slash_lines.clear();
-        self.reset_flushed();
-        self.refresh_context_usage_from_transcript();
-        self.push_slash_output(format!(
-            "✓ switched to session {} ({count} messages); the next reply uses its history.",
-            found.name()
-        ));
-    }
-
-    /// Open the `/resume` selector: truncate the disk snapshot to the latest RESUME_PICKER_MAX,
-    /// ● marks the current session (when in the list), other menus close exclusively.
-    fn open_resume_menu(&mut self, mut transcripts: Vec<crate::transcript::Transcript>) {
-        let truncated = transcripts.len() > RESUME_PICKER_MAX;
-        transcripts.truncate(RESUME_PICKER_MAX);
-        let current = self.session.runtime.transcript.borrow().clone();
-        let current = current
-            .as_ref()
-            .and_then(|cur| transcripts.iter().position(|t| t.path() == cur.path()));
-        let menu = ResumeMenu {
-            selected: current.unwrap_or(0),
-            current,
-            transcripts,
-            truncated,
-        };
-        if menu.picker().is_empty() {
-            return;
-        }
-        self.close_menus();
-        self.resume_menu = Some(menu);
-        self.clear_slash_suggestions();
-    }
-
-    /// Resume menu keys: ↑↓/1-N move (delegated to the PickerModel core),
-    /// Enter switches the session (by selected index into the snapshot), Esc exits.
-    pub(crate) fn resume_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        let Some(menu) = &mut self.resume_menu else {
-            return false;
-        };
-        match code {
-            KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
-                let mut core = menu.picker();
-                core.move_selection(1);
-                menu.selected = core.selected;
-                true
-            }
-            KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
-                let mut core = menu.picker();
-                core.move_selection(-1);
-                menu.selected = core.selected;
-                true
-            }
-            // Direct jump: 1..=min(len, 9) (past 9 items the number jump only covers the first 9).
-            KeyCode::Char(c)
-                if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                let mut core = menu.picker();
-                if let Some(n) = c.to_digit(10)
-                    && core.jump(n as usize)
-                {
-                    menu.selected = core.selected;
-                }
-                // Swallow even out-of-range digits: a menu is a modal surface —
-                // "4" on a 3-item picker used to type a literal 4 into the input.
-                true
-            }
-            KeyCode::Enter => {
-                // The confirm action takes the snapshot by the selected index (same order as items; the value≠label test anchor).
-                let Some(t) = menu.transcripts.get(menu.selected).cloned() else {
-                    return false;
-                };
-                if let Err(error) = t.activate() {
-                    self.resume_menu = None;
-                    self.push_slash_error(format!("cannot resume session: {error}"));
-                    return true;
-                }
-                let name = t.name();
-                let count = t.load_messages().unwrap_or_default().len();
-                self.resume_menu = None;
-                let _ = self.session.runtime.transcript_tx.send(Some(t.clone()));
-                self.rebind_tasks_to_transcript(Some(&t));
-                self.attach_share_to_transcript(Some(&t));
-                self.messages.clear();
-                self.slash_lines.clear();
-                self.reset_flushed();
-                self.refresh_context_usage_from_transcript();
-                self.push_slash_output(format!(
-                    "✓ switched to session {name} ({count} messages); the next reply uses its history."
-                ));
-                true
-            }
-            KeyCode::Esc => {
-                self.resume_menu = None;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn slash_gc(&mut self) {
-        if self.busy {
-            self.push_slash_error(format!(
-                "[error] code={} msg=cannot clean session data mid-turn (press Esc to interrupt, then retry)",
-                crate::error::SLASH_ERROR_BAD_ARGUMENT
-            ));
-            return;
-        }
-        let home = self.session.home.clone();
-        let protected = self
-            .session
-            .runtime
-            .transcript
-            .borrow()
-            .as_ref()
-            .map(|transcript| transcript.path().to_path_buf());
-        self.pin_panel("gc", vec!["⏳ cleaning session data…".to_string()]);
-        let result = crate::storage::cleanup(&home, protected.as_deref());
-        self.unpin_panel("gc");
-        match result {
-            Ok(report) => self.push_slash_info(format!("✓ {}", report.summary())),
-            Err(error) => {
-                self.last_error = Some(ErrorState {
-                    code: crate::error::map_error(&error),
-                    msg: format!(
-                        "session storage cleanup failed: {error}; check disk permissions and retry /gc"
-                    ),
-                    level: crate::error::ErrorLevel::Page,
-                    context: crate::error::ErrorContext::ShortSync,
-                });
-                self.dirty = true;
-            }
-        }
-    }
-
-    /// `/share` exports locally by default. Publishing a public link requires the
-    /// explicit `--public` opt-in; the warning is presented before bytes leave the machine.
-    fn slash_share(&mut self, arg: &str) {
-        let public = parse_share_arg(arg, "--public");
-        let open = parse_share_arg(arg, "--open");
-        let Some(transcript) = self.session.runtime.transcript.borrow().clone() else {
-            self.push_slash_output("no session to export yet (the new session has not been persisted; send a message first).".to_string());
-            return;
-        };
-        // Human-facing export: the full canonical conversation, not the
-        // compacted projection the model sees.
-        let messages = match transcript.load_canonical() {
-            Ok(m) => m,
-            Err(e) => {
-                self.push_slash_error(format!("failed to read the session: {e}"));
-                return;
-            }
-        };
-        let stem = transcript.name();
-        let share_path = crate::share::shares_dir(&self.session.home).join(format!("{stem}.json"));
-        let doc = match crate::share::ShareStore::load_or_create(&share_path) {
-            Ok(store) => store.snapshot(),
-            Err(e) => {
-                self.push_slash_error(format!(
-                    "cannot read the share document ({e}); exporting the conversation view only."
-                ));
-                crate::share::ShareDoc::new(stem.clone())
-            }
-        };
-        // Legacy-session fallback: without a share document, derive Team/DM/channel data from the main transcript.
-        let doc = if doc.agents.is_empty() && doc.channels.is_empty() {
-            crate::share::derive_share_doc(&stem, &messages)
-        } else {
-            doc
-        };
-        let html = crate::share_html::render(&doc, &messages);
-        let out = std::path::PathBuf::from(&self.cwd).join(format!("{stem}.html"));
-
-        // Local export is the safe default; `--open` only opens the generated file.
-        if !public {
-            let overwritten = out.exists();
-            if let Err(e) = crate::share::write_html_atomic(&out, &html) {
-                self.push_slash_error(format!("write failed: {e}"));
-                return;
-            }
-            let mut lines = vec![format!(
-                "✓ exported: {}{}",
-                out.display(),
-                if overwritten { " (overwritten)" } else { "" }
-            )];
-            if open {
-                match crate::share::open_in_browser(&out.display().to_string()) {
-                    Ok(_) => lines.push("opened in the browser.".to_string()),
-                    Err(e) => lines.push(format!("cannot open the browser: {e}")),
-                }
-            }
-            lines.push(
-                "note: this file contains the full conversation and tool outputs (possibly sensitive); review it before sharing."
-                    .to_string(),
-            );
-            self.push_slash_info(lines.join("\n"));
-            return;
-        }
-
-        // Public publishing is asynchronous so the TUI event loop remains responsive.
-        // The runtime settings snapshot is authoritative for the configured share service.
-        let base = self
-            .session
-            .settings
-            .share
-            .base_url
-            .clone()
-            .unwrap_or_else(|| crate::share::DEFAULT_SHARE_BASE.to_string());
-        let id = crate::share::share_id(&stem);
-        let events = self.events.clone();
-        self.pin_panel(
-            "share",
-            vec![
-                "⚠ about to publish publicly: anyone can access the full conversation and tool outputs, which may contain sensitive information."
-                    .to_string(),
-                "⏳ publishing the share page…".to_string(),
-            ],
-        );
-        tokio::spawn(async move {
-            let unpin = || {
-                let _ = events.send(UiEvent::Unpin {
-                    id: "share".to_string(),
-                });
-            };
-            match crate::share::upload_share(&base, &id, &html).await {
-                Ok(url) => {
-                    let mut lines = vec![format!("✓ published: {url}")];
-                    if open {
-                        match crate::share::open_in_browser(&url) {
-                            Ok(_) => lines.push("opened in the browser.".to_string()),
-                            Err(e) => lines.push(format!("cannot open the browser: {e}")),
-                        }
-                    }
-                    unpin();
-                    // The URL must survive long enough to copy — info tier.
-                    let _ = events.send(UiEvent::SlashInfo(lines.join("\n")));
-                }
-                Err(e) => {
-                    // Upload failure falls back to a local file + a notice (consistent with the bingo share subcommand).
-                    let mut lines = vec![format!(
-                        "upload failed ({e}); falling back to a local file."
-                    )];
-                    let overwritten = out.exists();
-                    match crate::share::write_html_atomic(&out, &html) {
-                        Ok(()) => lines.push(format!(
-                            "✓ exported: {}{}",
-                            out.display(),
-                            if overwritten { " (overwritten)" } else { "" }
-                        )),
-                        Err(write_err) => lines.push(format!("write failed: {write_err}")),
-                    }
-                    if open && crate::share::open_in_browser(&out.display().to_string()).is_ok() {
-                        lines.push("opened in the browser.".to_string());
-                    }
-                    lines.push(
-                        "note: this file contains the full conversation and tool outputs (possibly sensitive); review it before sharing."
-                            .to_string(),
-                    );
-                    unpin();
-                    let _ = events.send(UiEvent::SlashError(lines.join("\n")));
-                }
-            }
-        });
-    }
-
     fn slash_compact(&mut self) {
         let session = self.session.clone();
         let events = self.events.clone();
@@ -3199,13 +3063,13 @@ impl Chat {
                 .unwrap_or_default();
             // Persistence happened inside compact() as an appended marker; the
             // canonical lines are untouched (D74).
-            let _ = events.send(UiEvent::ContextUsage {
-                used: crate::compact::estimate_tokens(&session.system, &messages, &[]),
-                window: crate::budget::context_window_for(
+            let _ = events.send(UiEvent::ContextUsage(
+                crate::context_usage::ContextUsage::for_model(
+                    crate::compact::estimate_tokens(&session.system, &messages, &[]),
                     &session.client.models(),
                     &session.runtime.model.borrow().clone(),
                 ),
-            });
+            ));
             unpin();
             let kept = messages.len().saturating_sub(1);
             let _ = events.send(UiEvent::SlashInfo(format!(
@@ -3335,6 +3199,7 @@ impl Chat {
             "apiBaseUrl",
             "shell",
             "motion",
+            "notifications",
         ] {
             let entry = match lookup(key) {
                 Some((value, source)) => format!("  {key:18} = {value} ({source} layer)"),
@@ -3650,6 +3515,38 @@ pub(crate) fn one_line(text: &str, width: usize) -> String {
 }
 
 pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<Row> {
+    // An interrupt marker is a user-role message the user never wrote: the harness
+    // recorded it so the model learns the turn was cut off. It reads as a state line in
+    // the error colour, never as a `❯` bubble putting words in the user's mouth.
+    if crate::query::is_interrupt_marker(text) {
+        return vec![Row::new(Line::styled(
+            crate::tui::markdown::truncate(text, width.max(1)),
+            SegStyle::fg(theme.error),
+        ))];
+    }
+    // A message the running turn absorbed at a tool barrier (D83). The user did write
+    // it, so it keeps its send stamp — but it did not open a turn, it landed inside
+    // one, and the `↪` line says exactly that: the reply above was written without it,
+    // the reply below with it.
+    if is_steer_line(text) {
+        return vec![Row::new(Line::styled(
+            crate::tui::markdown::truncate(text, width.max(1)),
+            theme.dim(),
+        ))];
+    }
+    // A dialog the turn outlived, the receipt of one the user answered, or the
+    // receipt of a line routed out of the hub (D90): nothing failed, so they
+    // settle dim rather than in the error colour, and none of them wears the
+    // `❯` bubble — the user typed the envelope, not this line.
+    if text == ASK_CANCELLED_TEXT
+        || is_ask_receipt(text)
+        || crate::tui::bufferview::is_route_receipt(text)
+    {
+        return vec![Row::new(Line::styled(
+            crate::tui::markdown::truncate(text, width.max(1)),
+            theme.dim(),
+        ))];
+    }
     // 2 prefix columns + 1 column of right padding inside the bubble.
     let body_width = width.saturating_sub(3).max(1);
     let style = SegStyle::fg(theme.text);
@@ -3685,8 +3582,31 @@ pub(crate) fn text_rows(theme: &Theme, reply: Vec<Line>) -> Vec<Row> {
 #[path = "chat_tail.rs"]
 mod chat_tail;
 
+#[path = "chat_menus.rs"]
+mod chat_menus;
+
+#[path = "chat_session.rs"]
+mod chat_session;
+
+#[path = "rewind_ui.rs"]
+pub mod rewind_ui;
+
+/// The `/resume` selector model, rendered by chrome.rs.
+pub use chat_session::ResumeMenu;
 #[cfg(test)]
-pub(crate) use chat_tail::{banner_line, banner_segments, update_color, welcome_card_rows};
+pub(crate) use chat_session::parse_share_arg;
+
+/// The overlay frame the ctrl+b manager draws, reused by the ctrl+k switcher
+/// (D90) so the two overlays are the same object in the same place.
+pub(crate) use chat_tail::manager_box;
+
+#[path = "ask.rs"]
+mod ask;
+
+#[cfg(test)]
+pub(crate) use crate::tui::motion::update_color;
+#[cfg(test)]
+pub(crate) use chat_tail::{banner_line, banner_segments, welcome_card_rows};
 
 #[cfg(test)]
 #[path = "chat_tests_a.rs"]
@@ -3695,3 +3615,15 @@ mod tests_a;
 #[cfg(test)]
 #[path = "chat_tests_b.rs"]
 mod tests_b;
+
+#[cfg(test)]
+#[path = "chat_tests_c.rs"]
+mod tests_c;
+
+#[cfg(test)]
+#[path = "chat_tests_d.rs"]
+mod tests_d;
+
+#[cfg(test)]
+#[path = "chat_tests_e.rs"]
+mod tests_e;

@@ -130,22 +130,43 @@ bingo --continue            # 恢复最近一次会话
   前缀粘性保留；空输入 Esc/退格/Ctrl+U 退出。交互式/TTY 命令
   （top/vim/ssh/fzf 等）会被拒绝，请用批处理等价物（`top -b -n 1`）。
 - 大段粘贴自动折叠为 `[Pasted text #N +M lines]` 占位，发送时展开真实内容。
-- `Ctrl+R` 历史反向搜索；`↑↓` 历史回溯（多行输入内先移光标）。
-- `Ctrl+S` 暂存/恢复输入、`Ctrl+Y` 粘回删除、`Ctrl+_` 撤销。
+  粘贴不是打字：其中的换行仍是换行而不会发送，`@` 与 `/` 只是字符，不弹下拉。
+- `Ctrl+R` 历史反向搜索；`↑↓`（或 `Ctrl+P`/`Ctrl+N`）历史回溯（多行输入内先移光标）。
+- `Ctrl+S` 暂存/恢复输入、`Ctrl+Y` 粘回删除（紧接 `Alt+Y` 轮换 kill ring）、`Ctrl+_` 撤销。
+- `Ctrl+G`（或 readline 组合键 `Ctrl+X Ctrl+E`）用 `$VISUAL`/`$EDITOR` 编辑草稿，
+  保存后的内容作为一步撤销替换输入。
+- 词首输入 `@` 打开 mention 下拉：项目文件（git 仓库内取已跟踪与未忽略的未跟踪文件，
+  否则走有界目录遍历）与正在运行的 agent，按 `@` 之后的内容模糊过滤；
+  `Tab`/`Enter` 插入相对于会话目录的路径，agent 则插入 `@name`。
+  斜杠命令写完命令名之后，同一个下拉改为补全**参数**——`/model`、`/theme`、
+  `/think`、`/resume`、`/provider login`——取值一律来自命令自身校验所用的同一份数据。
+- 前台运行的命令会在自己那一行下方实时显示最后五行输出；`Ctrl+B` 把它转入后台
+  且不重启进程：工具调用立即返回 task id，完成时按后台任务通知送达。
 
 ### 快捷键（空输入按 `?` 看全表）
 
 | 键 | 功能 |
 |---|---|
-| `Esc` | busy 时中断 / 关闭下拉与面板 / 双击清空输入 |
+| `Esc` | 先关最上层弹窗/菜单/面板 / busy 时中断 / 双击清空输入，输入为空时双击打开 Rewind |
 | `Ctrl+C` | busy 中断 / 有文本清空 / 空输入连按两次退出 |
 | `Ctrl+T` | 显隐任务区 |
-| `Ctrl+O` | 展开/闭合切换：展开 = 重放完整 transcript 供上滑翻看 |
-| `Ctrl+G` | 直接打开全屏 Slack 式工作区；`Ctrl+K` 切换频道与 DM，alt+↑↓ 上下会话 |
+| `Ctrl+O` | 打开 transcript 视图：整段会话连同全部工具输出，独占一屏（`ctrl+e` 折叠 · `/` 搜索 · `q` 关闭） |
+| `Ctrl+G` | 用 `$VISUAL`/`$EDITOR` 编辑当前草稿（也可用 readline 组合键 `Ctrl+X Ctrl+E`）；编辑器非零退出则保留原草稿 |
+| `Ctrl+P` / `Ctrl+N` | 提示历史——与 `↑`/`↓` 完全同键，包含把排队消息取回 |
+| `Alt+B` / `Alt+F` | 按词移动，在 `/` `-` `_` `.` 处停下，便于逐段走过路径 |
+| `Alt+D` / `Alt+Backspace` | 向后/向前删一个词（`Ctrl+W` 仍删整个空白分隔的词） |
+| `Alt+K` | 删到行尾（切换器占用 `Ctrl+K` 之前，这个功能在 `Ctrl+K` 上） |
+| `Ctrl+Y` / `Alt+Y` | 粘回最近一次删除；紧接着按 `Alt+Y` 在 10 条 kill ring 中轮换 |
+| `Shift+Enter` | 插入换行（终端支持 kitty 键盘协议时可用） |
+| `Ctrl+K` | 切换会话：所有会话列在一处，输入即过滤，`Enter` 进入，`Ctrl+X` 停止运行中的 agent |
+| `Ctrl+B` | 把正在前台运行的命令转入后台；没有命令在跑时管理后台 agent |
 | `Ctrl+L` | 清屏重画 |
-| `Shift+Tab` | 循环权限模式（default → acceptEdits → plan） |
+| `@` | mention 项目文件或运行中的 agent：模糊下拉，`Tab`/`Enter` 插入相对路径（或 `@name`） |
+| `Tab` | 补全斜杠命令、命令参数、选中的 mention，或 `!` shell 历史前缀 |
+| `Shift+Tab` | 循环权限模式（default → acceptEdits → plan）；审批对话框中直接选中「本会话不再询问」 |
+| `Ctrl+E` | 审批对话框中展开完整命令/diff 预览与将写入的会话规则 |
 | `Alt+T` | 思考开关 |
-| busy 时回车 | 消息排队，回合结束自动发送 |
+| busy 时回车 | 消息排队；正在运行的回合会在下一次工具调用处把它并入，否则回合结束时发送 |
 
 ### Slash 命令（`/help` 全量清单）
 
@@ -155,7 +176,10 @@ bingo --continue            # 恢复最近一次会话
 `/think [off|low|medium|high|xhigh|max]`（无参进入等级选择器，选择持久化）、
 `/theme`、`/permissions [allow|deny|ask] [规则]`、
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
-`/skills`（清单，`/技能名` 直接执行）、`/context`（用量）、`/status`、
+`/skills`（清单，`/技能名` 直接执行）、
+`/open <@agent|#频道|#team|hub>`（进入某个会话，Tab 从已存在的会话补全；
+`Ctrl+K` 是同一扇门，不必打名字）、
+`/context`（用量）、`/status`、
 `/config`（生效配置与来源：哪个层/环境变量赢了、当前端点、未知配置项提示）、
 `/compact`（强制压缩）、`/resume [名称]`（恢复历史会话）、`/rename`、
 `/gc`（清理过期会话数据）、`/share [--public] [--open]`、`/clear`、`/exit`。
@@ -165,6 +189,19 @@ bingo --continue            # 恢复最近一次会话
 `/team`（项目团队）：`list`（图纸+运行区同屏）、`start`（拉起/幂等复用）、
 `status`、`assign <成员> <任务>`（派活）、`stop`、`validate`、`new`
 （脚手架生成 team.json + team-norms.md）、`norms`（团队规范）、`memory list|gc`。
+
+### 主题、代码与 diff
+
+两套主题全部以 RGB 写死，所见即 bingo 的调色板，而不是终端的 ANSI 映射（不支持
+truecolor 的终端会拿到同一组颜色的 256 色近似）。文字只落在三档上：正文用一档，
+说明正文的文字（结果行、工具输出、diff 上下文）用二档，纯装饰（提示、时间戳、
+分隔线、diff 行号栏）用三档。
+
+围栏代码块在标注了语言时高亮——`rust`、`python`、`javascript`/`typescript`、
+`json`、`bash`/`sh`、`toml`、`yaml`、`markdown`、`diff` 及另外十余种；未知或缺失
+的语言标签保持单色，不做猜测。diff（审批预览、完成的编辑行、transcript 视图三处
+同源）带 old/new 行号栏，过长的行折行显示且续行的行号栏留空，代码列始终对齐。
+`/theme` 切换即时生效。
 
 ### 图片渲染
 
@@ -202,7 +239,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `mcpServers` | object | 见下「MCP」 |
 | `disabledMcpServers` | string[] | 禁用的 MCP 服务器名单（`/mcp disable` 写入） |
 | `permissions` | object | `{allow[], deny[], ask[]}`，规则语法见「权限系统」 |
-| `experimental` | object | 实验特性：`agentChannels`、`channelMessageLimit`（默认 500）、`agentMessageLimit`（默认 50）、`chatAvatars`（默认 false = 主聊天不带脸；工作区视图不受此开关管辖） |
+| `experimental` | object | 实验特性：`agentChannels`、`channelMessageLimit`（默认 500）、`agentMessageLimit`（默认 50）、`chatAvatars`（默认 false = 消息上方不带脸） |
 | `team` | object | 团队启动行为：`{"autoStart": true}`（缺省 true = 项目绑定 team 时启动自动拉起；`--no-team` 或 false 关闭） |
 | `hooks` | object | 各事件 hook，见「Hooks」 |
 
@@ -361,15 +398,62 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 - `serial` 频道落后发言被弹回并附新增消息（agent 阅读后自行改口，报数式顺序
   由此涌现）；`free` 频道允许交叉。
 - 超限自动冻结频道并通知主 agent（`channelMessageLimit`/`agentMessageLimit` 预算闸）。
-- 频道在 transcript 显示为 `◇ #名字` 行；Ctrl+G 打开全屏工作区，直接以
-  user 身份发言。
+- 频道在 transcript 显示为 `◇ #名字` 行；`/open #名字` 进入，直接以 user 身份发言。
 
-## 工作区视图（Ctrl+G）
+## 会话（Conversations）
 
-整屏只有一栏会话：顶部一行标题（频道或实例名，右端是队名）、消息流、输入框。
-没有 rail、没有侧栏，也不画任何自己的底色——透出的是终端本身的背景。换会话靠
-**Ctrl+K**（快速跳转，列出全部会话及未读数）与 **alt+↑↓**；Tab 在消息区与输入框
-之间切换，Esc 返回。
+一个终端、一条流、同时只有一个会话。hub —— 你和模型的对话 —— 是其中之一；与
+运行中 subagent 的 DM、agent 频道、`#team` 看板是另外几个，它们共用同一个输入框、
+同一套按键、同一套授权对话框、同一套 transcript 渲染。没有另开的界面，也没有第二
+套操作要学。
+
+**进入**：`Ctrl+K` —— 所有会话列在一处，按最近活跃排序、hub 固定在首位，输入即
+过滤，`Enter` 进入；也可以用 `/open @agent`、`/open #频道`、`/open #team`、
+`/open hub`（Tab 从已存在的会话里补全）；运行中 agent 的 DM 也可以在 Ctrl+B
+管理器里按 Enter 打开。输入框上方有一条**会话栏**，列出当前有哪些会话：DM 显示
+在线状态（`●` 运行中、`○` 空闲）、未读数，当前所在的那个高亮；只有存在一个以上
+会话时才会出现。
+
+**不进去也能说一句**：在 hub 里，以某个会话的名字开头的消息会把后面的内容投递
+过去，而你留在原地 —— `@scout 看一下 parser` 送到 scout，流里留下一行暗色回执
+`→ @scout: 看一下 parser`。名字对不上时既不是错误也没有魔法：那就是普通文本，
+原样发给模型。在会话内部没有这条规则，因为你所在的会话本身就是目的地。
+**Esc 回 hub** —— 导航先于中断，所以背后正在跑的回合不受影响，它的
+「Esc 中断」在 hub 等你。Ctrl+C 语义不变，在哪都能中断。
+
+### Rewind（回退）
+
+输入框为空时连按两次 `Esc`，bingo 会列出你开过的回合，最近的在上，并标出每个
+回合及其之后一共动过几个文件。选中一个，它再问「回到」是什么意思：
+
+1. `Restore code and conversation`（代码与对话一起回退）
+2. `Restore conversation`（只回退对话）
+3. `Restore code`（只回退代码）
+4. `Summarize from here`（把这里往后总结成一段）
+5. `Never mind`（算了）
+
+**只回退对话**把会话历史截断到那条消息为止，并把它的原文放回输入框，方便换一种
+问法。**只回退代码**把文件恢复成那个回合开始时的样子——回合新建的文件会被删掉，
+改过的文件会还原——对话原样不动。**总结**用一段摘要替换那个回合及其之后的全部
+内容，适合只要结论不要过程的时候。
+
+前像由 `Edit` 和 `Write` 在动手之前采集，每回合每个文件只采一次，存放在
+`~/.local/share/bingo/rewind/`，与 git 无关，每个会话上限 50 MB 或 200 个回合，
+超出按最旧优先淘汰。某一半不可用的选项会置灰并说明原因。**不覆盖的部分**：
+`Bash` 命令写下的任何东西。shell 能以任意方式改任意文件，动手之前没有前像可采，
+所以那些改动会留在原地。
+
+**切换做了什么**：正在写的草稿留在你离开的那个会话里，目标会话自己的草稿回到输入框；
+流里打一条 `── @名字 ──` 的分隔线，后面跟这个会话最近 30 条消息。此后只有这个会话
+会上屏。其余会话继续在它们本来待的地方累积，并累加未读数——没有任何东西替你缓存，
+所以也不会因为你没看而丢失。回来时打一条 `── hub ──`，后面接 hub 在你离开期间完成的内容。
+
+因为 scrollback 只写一次、绝不回改，来回几趟之后同一个会话会在屏幕上出现不止一次。
+这是有意为之，分隔线会标出来；`Ctrl+O`（transcript 视图）仍是 hub 会话的完整记录。
+
+**发送**：你打的字发给你所在的会话——DM 以你的名义投递给那个实例，频道写进日志，
+`#team` 是记录而不是房间，它会直说。这些都不会启动模型回合。斜杠命令是例外，
+在哪都作用于应用本身，所以在 DM 里 `/model` 仍然是 `/model`。
 
 **头像**：能放置 kitty 图片的终端（与内联图片同一能力：Ghostty/kitty，以及开了
 passthrough 的 tmux）为每位发言者分配八张内置
@@ -384,8 +468,8 @@ Unicode 占位符格子定位。team 成员的头像钉在 `.bingo/team.json`（
 排版，消息内部的 `⏺` 也仍然负责把正文和工具行分开。能放图的终端给两行带子，退化时
 一行，带子底下没有东西依赖它的高度。一处已知退化：终端清空图片存储时（resize 会），
 还在屏幕上的脸会重画，已经滚进 scrollback 的消息则留下 4 列空白，名字还在。开关关掉
-则整条带子不出现，subagent 的 watch 行也保留 `◉`；开关只管主聊天，DM、频道、team
-视图照旧带脸——那里的头像占的是排版本来就花掉的装订线。
+则整条带子不出现，subagent 的 watch 行也保留 `◉`。DM 与频道里，发言者的名字无论
+开关如何都会压在同一个人的连续消息之上——一个房间里超过两个说话人时，名字不是装饰。
 
 ## 技能（Skills）
 
@@ -477,6 +561,24 @@ bingo 的 Tool trait：
   "ask":   ["Bash(git push)"]
 }
 ```
+
+### 审批对话框
+
+需要询问时，对话框先展示「将要发生什么」——Bash 的命令行、Edit/Write 的
+试运行 diff（不落盘计算）——再给三个选项：
+
+1. `Yes`
+2. `Yes, and don't ask again this session`——`Shift+Tab` 可直接选中。
+   仅当权限引擎能推出真正管用的最窄规则（`Bash(cargo:*)`、`Edit(/路径/)`、
+   `WebFetch(domain:…)` 或裸工具名）时才出现；你自己的 `ask` 规则与敏感路径 /
+   `confirm_reason` 检查排在 allow 之前，这类询问不显示该选项。
+   规则只存在于本会话内存中，不写入 settings。
+3. `No, and tell bingo what to do differently (esc)`——回车展开反馈输入行，
+   输入的内容会随拒绝一起交给模型；任何位置按 `Esc`、以及空反馈提交，
+   都是不带反馈的普通拒绝。
+
+`Ctrl+E` 展开完整预览，并显示选项 2 将写入的会话规则。对话框出现后的
+0.4 秒内忽略回车与数字键，避免已在途的按键误批。
 
 ## Hooks
 
@@ -571,7 +673,7 @@ src/
   budget.rs        token 预算常量
   memory.rs        memdir 记忆提取与加载
   watch.rs         后台任务注册与通知
-  tui/             ratatui 界面（chat / view / input / markdown / gfx …）
+  tui/             ratatui 界面（chat / view / input / markdown / highlight / gfx …）
   ui.rs            headless hooks 与共享渲染
   system.rs        system prompt 拼装（记忆 + 项目记忆 + 技能清单）
 tests/

@@ -1112,3 +1112,1260 @@ appended to the tail of the user message as a system-reminder — the tail is th
 never disturbs the cached request prefix (D74), and the recalled text is recorded with the turn,
 so the canonical transcript stays exactly what the model saw. Stale/degraded entries are never
 auto-injected; they remain reachable through explicit ExperienceQuery.
+
+### D76. An interrupted turn is recorded, not discarded
+
+Pressing Esc mid-stream threw the whole turn away: `query_loop`'s aborted branch returned
+without `record()`, so the partial reply stayed on the user's screen while the model's history
+denied it had said anything. The next turn then answered as if the interrupted attempt had never
+happened — a split-brain the harness institutionalized. The only signal was a 10s warning toast,
+and the tool rows that never ran closed with the green Done glyph.
+
+Both interrupt paths now close the turn honestly. Mid-stream: whatever the model managed to say is
+recorded as an assistant message, followed by a user-role message carrying CC's exact marker
+`[Request interrupted by user]`. During tool execution (assistant and filled orphan tool_results
+already in history) only the marker is appended, in CC's tool variant
+`[Request interrupted by user for tool use]`. The strings are model-facing and verbatim CC, so a
+bingo transcript reads the same as a Claude Code one. `QueryOutcome` carries which marker it wrote;
+the TUI echoes that exact string instead of inventing its own wording.
+
+Three edges decide themselves once the rule is "record what can be replayed". A partial reply is
+trimmed to text and *signed* thinking: an unfinished `tool_use` has no result and an unsigned
+thinking block fails signature verification, and either one would 400 every later request in the
+session — the same permanent corruption `fill_missing_tool_results` exists to prevent. Nothing
+accumulated means no assistant message at all: an empty message is a second lie, and endpoints
+reject it. And the marker follows every user-initiated stop, including the cancel that lands
+between a tool finishing and the next round, and the interrupted `!` command — where the tool row
+is now also closed as Interrupted, because a row left Running keeps its message from ever settling
+and freezes the session's whole flush prefix.
+
+On screen the marker is the record: the transient warning is deleted (it expired while the fact it
+reported stayed in the history), and a user message equal to either marker renders as a single
+error-coloured line rather than a `❯` bubble — the harness wrote it, not the user, and it carries
+no send time. `ToolStatus` finally has an `Interrupted` arm of its own: amber glyph, result line
+`Interrupted`, no borrowed output and nothing to expand. Interrupted rows are still not counted as
+failures inside a collapse summary, and `interrupted` auto-continue suppression is unchanged.
+
+### D77. The terminal is handed back on the way out, and the compaction warning goes where the user is
+
+Three ways the harness talked past the user, all of them about the last moment before something
+goes wrong.
+
+**The panic hook.** Everything outside the turn task ran with no safety net. A panic there left raw
+mode on, the alternate screen up and the cursor hidden — and printed its message into a terminal
+that could no longer render it, so the user got a frozen frame and a shell that answered nothing.
+`std::panic::set_hook` (installed once, at TUI setup) now restores the terminal first and delegates
+to the previous hook after, so the message still prints, into a terminal that can show it. The hook
+does nothing but emit fixed escape sequences: no allocation, no formatting, no lock. `TUI_ACTIVE` is
+claimed after `enable_raw_mode` and *swapped* on release, so the clean teardown and the hook cannot
+both restore — whichever gets there first wins and the other is a no-op — and `TUI_FULLSCREEN` says
+whether the teardown owes the alternate-screen steps. The setup-failure path takes the same release,
+which is also how it stops leaking the alternate screen when `execute!` fails halfway.
+
+One condition beyond the blueprint's `AtomicBool`: the restore also requires the panicking thread to
+be the one that claimed the terminal (a `Cell<bool>` in thread-local storage, no destructor, so the
+hook can read it at any point in a thread's life). The blueprint gates on "TUI active" alone, but a
+panic *inside a spawned task* is not the session's death — v1.31 built `supervise_turn` precisely to
+turn it into the recoverable `TURN_LOST` state, and pulling the screen out from under a session that
+is about to offer retry / go back would trade one broken terminal for another. The host is driven by
+the runtime's root future, which `block_on` polls on the calling thread and never migrates, so
+"panicked on the claiming thread" is exactly "this panic is unwinding out of `main`". Panics
+elsewhere keep the screen as it is, which is what they did before this batch.
+
+**The pre-compaction warning.** It was `eprintln!` under `!session.quiet`, and `quiet` is true for
+everything except `--print` — so the warning existed for the one host that did not need it and was
+silent for the TUI and the JSON client. D66 already moved compaction's own report onto
+`UiHooks::on_warning` for exactly this reason; the warning that precedes it now takes the same
+channel and reads `context at {tokens} tokens; auto-compact at {threshold}`. Headless behaviour is
+unchanged in substance: the default hooks are an `eprintln!`. The per-turn `context: N tokens`
+progress line stays on stderr and stays `quiet`-gated — the TUI already carries that number in the
+footer every turn, and a warning row repeating it would be the same fact twice, in the tier reserved
+for things that need attention.
+
+**The bands.** The footer coloured at 70% and 90% of the raw context window while auto-compaction
+fires at 90% of the *effective* window (the window minus that model's own output budget). The two
+denominators differ by a number that varies enormously between models, so the bands described no
+model correctly: 78% of the window for a current Claude model, 55% for DeepSeek v4 — where the
+danger band opened at 90%, thirty-five points after compaction had already run. Bands are now
+measured as a distance to the trigger, in percentage points of the window the label prints: warning
+within 20 points, danger within 5. `ContextUsage` therefore carries the trigger alongside used and
+window, and `ContextUsage::for_model` builds all three from one resolver, so the number on screen
+and the number the compactor obeys cannot drift apart. `UiHooks::on_context_usage` passes that
+measurement whole rather than two loose integers — a receiver rebuilding the window or the trigger
+from its own model handle would be the second ruler this replaces. Label, bar and percentage are
+untouched.
+
+### D78. A folded tool result is still a result
+
+The transcript folds a run of reads and searches into one line (`Read 3 files (ctrl+o to
+expand)`), and that fold was where their output went to die. `ToolDone` stored the result text on
+the row only in the `!in_group` branch: a folded member got its one-line summary (`Read 173 lines`)
+and nothing else, and because `Activity::expandable()` is content-based, the row was not even
+offered as expandable. Opening the group revealed three summary rows over three empty bodies — the
+output of a call that had really run was unreachable for the rest of the session, and nothing else
+in the UI keeps it. The model's history holds the `tool_result`; the user's only recourse was to
+ask for the same file to be read again.
+
+Materialization is now one function for both branches (`result_content`): the fold is a display
+state, not a different kind of result, so it cannot be the thing that decides whether a result is
+kept. Same blank-line filter, same Bash `$ cmd` / `[Exited with code N]` strip, same budget. The
+budget is the one the model already lives under — `MAX_RESULT_CHARS`, applied to every result on
+its way to the UI by `clipped_result` — now also applied at the row, so the paths that build their
+own output without passing through the clip (a tool error string, a denied call) are bounded too.
+No new key, and no per-row cost the standalone path did not already pay: a group of N members
+retains exactly what N standalone rows retained.
+
+Three things this deliberately does not change. The collapsed row is untouched — the summary
+wording, the `· N failed` tally and the `⎿` hint under a running fold all read group state and
+never member content, so a fold looks exactly as it did. An interrupted member still keeps
+nothing: D76's early return sits above the capture, and a call stopped before it produced output
+must not borrow a body — its result line says `Interrupted` and there is nothing to open. And
+`Skill`'s summary rewrite and standalone Bash's auto-expand stay standalone-only; the first is
+about a pointer path that a folded row never shows, the second about `!` commands, which do not
+fold.
+
+One behaviour beyond storage. Every row of an *open* group is wrapped in that group's click target
+(`El` emits enclosing ranges first and click resolution takes the first match), so a member row
+cannot be clicked open on its own — with the content stored but the members left collapsed, the
+mouse could open a group and still not reach a single line of output. Members therefore follow the
+group: opening it opens them, folding it folds them. `ctrl+o` already expanded every activity and
+every group in one pass, so the keyboard route needed nothing.
+
+The tests went into a new `chat_tests_c.rs`: `chat_tests_b.rs` stood at 3785 lines against the
+discipline gate's 4000-line cap, and the split is what the gate asks for. `chat_tests_a` /
+`chat_tests_b` were already split by size alone.
+
+### D79. Feedback for the user who is not looking
+
+bingo had no way of reaching a user who had switched away: no bell, no desktop notification, no
+terminal title. A permission prompt could block a turn for as long as it took someone to glance
+back at the window, and a ten-minute turn finished into an empty room. Every feedback state the
+project had specified assumed eyes on the screen — which contradicts the first principle of
+`feedback-states.md`, that feedback must not depend on the environment. The terminal *is* an
+environment where the user is routinely somewhere else.
+
+**The channel.** One settings key, `notifications`, with the usual three-layer merge and a `/config`
+line: `auto` (default), `bell`, `iterm2`, `kitty`, `ghostty`, `off`. `auto` reads the terminal —
+`TERM_PROGRAM=iTerm.app` → `OSC 9`, kitty (`TERM_PROGRAM` or `TERM=xterm-kitty`) → the three-part
+`OSC 99`, `TERM_PROGRAM=ghostty` → `OSC 777 ; notify` — and falls back to the terminal bell, which
+every terminal has. There is deliberately no probe. The image layer can afford one because the kitty
+graphics protocol answers a query; a notification protocol has none, so a wrong guess is not a
+failed handshake but silence, and the only safe default for an unknown terminal is the sequence that
+predates all of them. `off` silences the title too: a user who turned notifications off did not ask
+for their tab to be renamed either.
+
+**Who writes.** `notify.rs` builds bytes and writes nothing, the same split `gfx.rs` already has
+with the image transport. The inline host's rendering invariant is that `term.rs` is the single
+owner of escape-sequence writes, and a bell emitted from the state machine would land in the middle
+of a viewport diff. So the term layer grew one narrow pair — `write_attention` beside
+`write_transmits`, both over the same out-of-band helper — and the two hosts collect
+`chat.notify.take()` after their frame (the fullscreen host through the crossterm backend behind its
+`Terminal`, its equivalent single write point). Attention bytes are position-independent by the same
+contract the transmits have: no cursor moves, no cell is painted, so they need no synchronized-update
+bracket.
+
+**tmux.** A notification OSC goes in the passthrough envelope, reusing `gfx`'s `tmux_passthrough`:
+tmux has never heard of 9/99/777 and drops them. The bell does not — tmux acts on a bell it can
+see, and wrapping it would hide it from `monitor-bell`, which is the whole point of falling back to
+a bell inside a multiplexer. The **title** is bare for the mirror-image reason: `OSC 2` is a
+sequence tmux *does* understand, sets as the pane title, and propagates to the window title under
+`set-titles on`; passthrough would set the outer terminal's title behind tmux's back and tmux would
+overwrite it on its next redraw. The spec's "wrap OSC, not bell" rule sits under the notification
+sequences, and this is that rule read at the level it was written for — the title's correct
+envelope is decided by whether tmux understands the sequence, and it does.
+
+**When.** Three triggers, and nothing else: a permission ask accepted by `drain_asks` (the turn is
+blocked and only the user can unblock it), a `TurnEnd` whose wall time reached 10s, and a
+flow-level `UiEvent::Error`. A queued ask does not ring — the modal it would announce is already on
+screen. A short turn does not ring — it was watched. A page-level error does not ring — it is a hint
+beside a session that carries on, and a channel that fires for those is a channel users turn off.
+The bodies are one line each and say only the state: `Waiting for permission`, `Turn complete`,
+`Turn failed`. A body like `Turn complete · 214 tests passed` would put information in a
+notification that exists nowhere else, and notifications are not a surface anything can be read
+back from.
+
+**The title** carries the same three states continuously, which is the part that works while the
+user is looking *at* the tab bar: `✳ bingo — working…` at `TurnStart`, `✳ bingo — waiting for
+permission` when an ask lands, `bingo — {directory}` when idle. It repeats nothing (an unchanged
+title emits no bytes) and is handed back on the way out — an empty `OSC 2` from `restore_terminal`,
+so D77's panic hook covers it for free, and it was trivially reachable there because that function
+is already a list of fixed sequences that allocates nothing. It is gated on a `TUI_TITLE` latch set
+only when the channel is enabled: a session that never took the title must not clear whatever the
+shell had put there.
+
+**Environment sealing.** Library code does not read the environment — it is what keeps the test
+suite from depending on the shell that launched it, the same rule `Session::user_config_dir`
+follows for the config directory. `TerminalEnv` is read once in `tui::run_tui_session` and handed
+down resolved, so the auto-detection matrix is a table test over a struct rather than a test that
+mutates process state. `Notifier::default()` is the disabled channel, which makes every existing
+`Chat` in the suite silent by construction and makes "did this trigger fire?" a question about
+bytes rather than about a terminal.
+
+No focus tracking in this batch. A notification fires whether or not the terminal is in front, which
+is what CC does, and the alternative — a focus-tracking mode enabled with `CSI ?1004h` and drained
+out of the event stream — is a second piece of terminal state to own for a refinement nobody has
+asked for yet.
+
+### D80. Esc is one ordered stack, and a dialog does not outlive its turn
+
+Three findings from the interaction audit, all of them the same shape: a key's meaning was
+decided by the *order handlers happened to be written in*, and that order was wrong.
+
+**The stack.** `on_key_at` was a chain of nine `if handler(...) { return true }` calls, each with
+its own `KeyCode::Esc` arm, and `escape()` tested `self.busy` first. So Esc with a slash dropdown
+open over a running turn killed the turn — the user was looking at the dropdown, reached for the
+key that closes things, and lost the work instead. Esc now belongs to no handler. It is judged at
+the top of `on_key_at` against one list, `EscLayer::ORDER`, walked top-down; the first open layer
+is dismissed and nothing below it is consulted. The order, verbatim:
+
+```
+AskDialog › Menu › AgentManager › SlashDropdown › Search › ErrorRow › InfoLines
+          › HelpPanel › TaskPanel › Interrupt › BashMode › ClearInput
+```
+
+`Interrupt` sits *inside* the list, and that placement is the decision. Everything transient
+closes before the turn does; with nothing open, Esc still interrupts on the first press, exactly
+as before. `ClearInput` below it keeps esc-esc on a non-empty draft. With no layer at all — idle,
+empty input — Esc does nothing, which is the slot D91 will fill with rewind rather than a new key.
+`AgentManager` and `ErrorRow` are not in the original sketch: both were Esc-dismissable overlays
+already, and a stack that omits them is not a single source. `BashMode` moved the other way, below
+the interrupt instead of above it: the `!` prefix is sticky, so a running bash command *always* sits
+under an empty bash-mode composer, and a bash-mode-above-interrupt order would have meant Esc
+exiting the prompt prefix while `!sleep 100` ran on. `Ctrl+C` deliberately skips the stack
+and interrupts unconditionally — the layers are a refinement of "close what I'm looking at", not a
+shield around a running turn, and a user who wants out needs one key that always means out.
+
+The stack decides *which* layer hears the key; the layer keeps its own close semantics in its own
+handler (the model picker returns provider-list → menu one press at a time, search cancels without
+adopting its hit, the dropdown takes a bare `/` query with it). `esc_dismiss` delegates rather than
+reimplements, so D39's `close_menus` mutual-exclusion invariant and the digit-swallowing guards are
+untouched. The hint text reads the same list: the running-status row asks `esc_busy_hint()` and
+prints `(esc to close · Ns)` while a layer is stacked over the turn, `(esc to interrupt · Ns)`
+otherwise. A status row that promises an interrupt Esc will not perform is the original bug wearing
+a different hat.
+
+**The dialog's lifetime.** `pending_ask` was set by `drain_asks` and cleared only by answering it.
+An interrupt aborted the task awaiting the answer and left the question on screen: the footer went
+on saying `Waiting for permission…`, and 1-9 or Enter sent a `DialogAction` into a dropped oneshot
+— a dialog that had been dead for minutes and still took keys. Both ends of a turn now settle it
+through one mechanism, `cancel_asks`: an explicit `Cancel` on the wire (the receiver already reads
+`Cancel` and a closed channel identically, so this is fail-closed either way), the requests still
+queued in the mpsc emptied with it, and one dim line where the dialog was —
+`(pending permission dialog cancelled with the turn)`, display-only, because the tool call that
+asked went down with the turn and the model's history must not learn of an answer nobody gave. It
+is a user-role state line like D76's interrupt marker, rendered without the `❯` bubble and without
+a send stamp, through the same special case.
+
+Turn end and interrupt do not use the same rule, because subagents share this modal queue
+(`attach_ask` points them at it). A dialog on screen when a *foreground* turn ends normally belongs,
+by construction, to something else — the turn that owned it could not have finished while blocked
+on it. So `TurnEnd` cancels only requests whose receiver is already gone (`Sender::is_closed`,
+which is the fact rather than a proxy for it: the task was aborted, panicked, or was lost), and
+puts live ones back in order. An explicit interrupt takes everything, because that is what the
+user asked for. This is a deliberate deviation from "cancel any pending ask on TurnEnd": that rule
+would have denied a background agent's question every time an unrelated foreground turn happened
+to end first.
+
+**The arrows.** `entity_key` claimed plain ↑/↓ on an empty composer to open an inline
+running-agent selector, which cost the composer its prompt history the moment any agent was up —
+the two keys a terminal user reaches for first, taken by a feature reachable two other ways. The
+selector is deleted: `entity_focus`, its bounded list rendering, `ENTITY_ROWS_MAX` and the
+`↑↓ select agent` hint go with it, and the strip is a one-line presence summary again. Its one
+capability that had no other home, "open this agent's DM", moved onto the ctrl+b manager's detail
+view (Enter, which previously just closed the panel), so `EntityOpen::Agent` stays alive on the
+surface that replaced the selector. Ctrl+G still opens the workspace; it now rides in `control_key`
+with the rest of the ctrl chords instead of in a handler of its own.
+
+### D81. Approval is a decision about an act, not about a tool name
+
+The permission dialog was `⏺ Allow running Bash` over `Allow` / `Deny`. Three things were wrong
+with it, and they compound: the user approved a *category* while the actual command or file change
+stayed off screen; the only way to stop being asked was to quit and edit `settings.json` by hand;
+and a refusal reached the model as a wall (`permission denied: Bash (…)`) with no way to say what
+to do instead, so the model's next move was a guess. This batch replaces the dialog with CC's
+three-option shape and widens the contract underneath it enough to carry the extra meaning.
+
+**The verdict widens.** `AskFn` was `Fn(&str name, &str reason) -> bool`. A bool cannot express
+"allow, and stop asking", and two `&str` cannot describe what is about to happen. It is now
+`Fn(&AskContext<'_>) -> AskOutcome`, where `AskOutcome` is `Allow` / `AllowSession` /
+`Deny { feedback: Option<String> }` and `AskContext` carries `{ tool, reason, input, cwd, scope,
+diff }`. A struct rather than more positional arguments because both new fields are *derived*, not
+passed through: the preview needs the cwd to resolve a relative `file_path`, and the session option
+needs a rule the prompt surface has no business inventing. All four implementations moved with it —
+`modal_ask` (TUI), `stdin_ask` (headless, `y` / `s` / anything-else), the subagent forwarder in
+`tool/agent.rs`, and the JSON host.
+
+**Scope is the permission engine's answer, not the UI's.** `permission::session_allow_rule` derives
+the narrowest rule that matches this exact call — `Bash(<first word>:*)`, `Edit(<parent dir>/)`,
+`WebFetch(domain:<host>)`, or the bare tool name — and then *verifies* it with `rule_matches` under
+the same `MatchMode::All` the gate uses. Derivation and matching are two readings of one grammar and
+they are allowed to disagree; the verification is what keeps `cd /tmp && rm -rf /` from being scoped
+to `Bash(cd:*)`, which would have matched neither sub-command and silently promised nothing.
+
+The harder question is what to do when a session rule *cannot* work. `can_use_tool` consults `ask`
+rules (step 2) and the bypass-immune safety check (step 4) before allow rules (step 7), so for a
+write into `.git`, a `confirm_reason` tool (D46's Team confirmations), or the user's own
+`ask` rule, a rule pushed into `allow` is dead text. Two bad options were available: install it
+anyway (the option lies), or route around the safety check (a rule table consents to something D46
+decided a rule table must never consent to). Chosen instead: `session_allow_rule` returns `None`
+for those cases and the option is **not rendered** — the dialog shows `Yes` / `No…` and nothing
+promises anything. Deviation from the dispatch, which specified exactly three options; an option
+that cannot keep its word is worse than an option that is not there.
+
+On `AllowSession`, `gate_tool` pushes the rule into `session.runtime.permissions` before the tool
+runs, so the call that asked is covered by the rule it created. That table is the runtime one — the
+same handle `/permissions` edits and subagents share — and is never persisted: "this session" is
+what the user was offered, so this session is exactly how long it lives. The UI touches no file.
+
+**A refusal carries a direction.** Option 3 does not resolve the dialog; it opens a feedback row
+under itself (reusing the existing `free_text` / `DialogAction::Answer` mechanics, so nothing new
+was invented for the input). The text arrives as `Deny { feedback }`, travels through `GateDecision`
+alongside — not inside — the reason, and lands in both deny sites as
+`permission denied: {name} ({reason}). User guidance: {text}`. Without feedback the wording is
+byte-identical to before. `GateDecision` replaces the `(behavior, reason, input)` tuple `gate_tool`
+returned: guidance belongs *after* the parenthesised reason in the sentence the model reads, so it
+could not be folded into `reason` without corrupting a string other code formats. The `!` command's
+deny site has no `tool_result` to wrap; it gets the same sentence in the place it already put the
+denial, inside `<bash-stderr>`.
+
+**The preview is the tool's own dry run.** `Tool::preview_diff(input, cwd)` defaults to `None`;
+`EditTool` and `WriteTool` implement it by reading the file and computing the same replacement
+`call` would, through a shared `replace()` and a shared `resolve_path()` — one source of truth, so
+the diff shown is the diff that lands. It never writes. `gate_tool` calls it only when the decision
+is `Ask`. Bash needs no hook: its `command` field is the preview. Rendering bounds both (12 diff
+rows, 6 command rows) with `… N more lines`; `ctrl+e` lifts the bound and additionally prints
+`session rule: <rule>`, which is where the promise option 2 makes gets spelled out in full.
+`ctrl+e` is claimed only while a dialog is open and only when there is a preview, so it stays
+readline end-of-line everywhere else.
+
+**Two guards.** Enter and digits are inert for `ASK_CONFIRM_GUARD` (400ms) after a permission
+prompt appears, so a keystroke already in flight when the dialog rendered cannot approve anything;
+`ask_opened_at` is stamped in `drain_asks` and read against the `now` that `on_key_at` already
+threads, which is the whole test hook — no clock injection was needed. Esc, shift+tab and ctrl+e
+are not delayed: none of them is a key anyone types ahead. The guard is deliberately limited to
+permission prompts; a mistyped AskUserQuestion option costs a round trip, a mistyped approval runs
+a command.
+
+**The receipt.** The dialog is chrome and disappears with the answer, which left a transcript where
+a turn simply carried on with no record of who let it. Each resolution now leaves one dim state
+line where the dialog was — `> yes` · `> yes, don't ask again this session` · `> no` ·
+`> no — <feedback>` — extending D80's `is_state_line` rather than adding a parallel mechanism.
+Matching is exact for the three fixed lines and by the `> no — ` prefix for the fourth; a bare
+`> ` test would have turned every pasted markdown quote into a state line. Display only: the model
+learns the verdict from the gate, not from a message the user did not write.
+
+**Housekeeping.** The dialog's key handling and rendering moved out of `chat.rs`/`chat_tail.rs`
+into `src/tui/ask.rs` (`impl super::Chat`, same pattern as `chat_tail`). Both files were within a
+few hundred lines of the 4000-line cap and this batch adds to both; the move is what keeps the cap
+honest without touching the pre-existing debt. `cancel_asks`, `drain_asks`, `ask_click` and the
+answer-message helpers went with it, so the dialog's whole lifetime reads in one file.
+
+AskUserQuestion is untouched: same options, same numbered `Other` row, same decline message, no
+confirm guard, and `AskKind` on the request is what keeps the two shapes apart. The JSON host keeps
+protocol v1's two-option prompt — its reply is a `bool` on the wire, and widening that is a protocol
+version rather than a rendering change (recorded here so D8x does not mistake it for an oversight).
+
+### D82. The transcript view is what makes "ctrl+o to expand" true
+
+Every collapsed row has advertised `(ctrl+o to expand)`, and in the inline host that promise could
+not be kept. Inline is write-once scrollback: a settled row is printed into the terminal's own
+buffer and belongs to the terminal from that moment, so there is no row left to rewrite. What
+ctrl+o actually did was **reprint** — `expand_transcript` opened every fold, rewound the flush
+cursor to zero and set `dump_transcript`, and the next frame froze the entire session into
+scrollback again. The old collapsed copies stayed where they were, above the new expanded ones: one
+duplicate transcript per press, an accepted trade-off (D27) that got worse the longer the session
+ran. The fullscreen host, meanwhile, had a different key under the same name: `toggle_transcript`
+folded and unfolded the **last message only**, in place. Two behaviours, one binding, and neither
+of them was "show me the output".
+
+**The decision is Claude Code's**: `ctrl+o` opens a transcript view — an alternate-screen pager over
+the whole session — and `ctrl+e` inside it toggles show-all. The alternate screen is the entire
+point. Scrollback cannot be rewritten, but a screen that is discarded on exit can be redrawn as
+often as we like, and leaving it puts the previous screen back byte for byte. The compensation for
+write-once is not a cleverer write; it is a second surface.
+
+**The row builder is `Chat::build_rows`, borrowed.** The pager does not re-implement rendering: it
+sets the flush cursor to zero (so the document covers the whole session and not just the unflushed
+tail), opens every fold when `show_all`, calls the same builder both hosts draw from, and gives the
+fold state and the cursor straight back, setting `dirty` so the host rebuilds its own document
+before it draws again. Markdown, diffs, image placeholder rows, the CJK width machinery and the
+collapse summaries are therefore identical to the main screen by construction, and D78's retained
+group content is what the view has to show. A test asserts the borrow is returned — leaving it out
+would collapse the user's open rows and reprint the session, which is the bug this batch deletes.
+
+**Shape follows `entity.rs`** (the ctrl+G workspace): a self-drawing modal loop that owns the
+terminal while it is open, with `already_alt` so the fullscreen host does not nest a second
+alternate screen inside its own, and the same guarded enter/leave. One thing is added there:
+`AltScreenClaim` flips D77's `TUI_FULLSCREEN` latch for the lifetime of the modal, so a panic
+inside the pager over the *inline* host restores the alternate screen instead of leaving the user
+in it. The pager also declares `pub(super)` on `app::image_transmits` rather than copying it —
+the images the rows address were transmitted on the main screen, and a resize can purge the
+terminal's store.
+
+**Split for testability**: `TranscriptState` is pure state (rows, offset, viewport, show-all,
+query, matches, current) with pure transitions, `transcript_rows` is the builder over the session,
+`on_key` maps a key to `None` / `Rebuild` / `Close`, and the loop is the thin shell that owns the
+terminal. Fifteen tests cover the behaviour without one.
+
+**Details worth recording.** Show-all defaults **on**: a reader who opened the transcript came for
+what the fold hid, and CC's transcript shows detail. Toggling it re-anchors the reading position
+*proportionally* — expanding every fold moves every row number below the first one, so no absolute
+anchor survives, and the position in the session is what the reader cares about. Search folds case
+per character (`to_lowercase().next()`) so a hit found in the folded copy is still a byte range of
+the original; the highlight splits segments on the hit boundaries and leaves every other colour
+alone. `q` typed into an open search input is a letter, not an exit. With a permission dialog on
+screen ctrl+o is **inert**: the pager would bury the question blocking the turn, and the answer is
+one keystroke away.
+
+**Deviations from the dispatch.** (a) The dispatch left "refresh on close of search / on demand"
+optional; it is not built. The content is a snapshot at open — a running turn's events queue in
+their channels and drain after close (the `entity.rs` precedent) — and unlike `entity.rs` the loop
+does not tick, because draining would mutate the session behind rows the pager has already laid
+out. (b) `Chat::toggle_transcript` had become the convenient "open every fold" call in a dozen
+render tests. Rather than rewrite them all against `doc_click`, it is replaced by a `#[cfg(test)]`
+`expand_all_folds` with the rationale in its doc comment; the four tests that specifically covered
+the *collapse* direction of the old toggle now round-trip through the mouse click target, which is
+the surviving in-place fold surface, and one that had become a duplicate of another is deleted.
+(c) The `(ctrl+o to expand)` copy is left exactly as it was: it was never wrong about what the key
+does, only about where it did it.
+
+### D83. Steering is a message that arrives while the work is still changeable
+
+Enter while busy queued the message; `submit_queued` drained the queue at TurnEnd. So a correction
+typed thirty seconds into a five-minute turn was read only after the work it was correcting had
+finished. The user's real choice was to wait it out or press Esc and lose the turn — and the queue,
+which looks like a way to speak mid-turn, was in fact a way to speak *after* it. Claude Code's
+`messageQueueManager` injects queued messages at the running turn's next tool barrier (its `next`
+priority), and that is the alignment target: the model reads the correction while it is still
+deciding what to do, without anything being cancelled.
+
+**The barrier is a place, not a moment we invent.** `query_loop` already has it: after
+`execute_calls`, once every `tool_use` has a paired `tool_result` in `blocks` and before those
+blocks are recorded as the next user message. The request has not gone out; the results are
+complete. Steered text is appended to that same message as extra `Text` blocks, *after* the
+tool_results — the API rejects a user message whose tool_result blocks are not first, and there is
+no second message to put them in without inventing a turn the model never asked for.
+
+The drain is guarded by "is this turn going to ask again": `!interrupted && !stop_after_tools &&
+!is_cancelled(&cancel_rx)`. Each of those three ends the turn a few lines below the record, and a
+message folded into a request that is never sent is a message swallowed. A reply with no tool call
+never reaches the barrier at all; TurnEnd's queue covers it exactly as before.
+
+**The marker.** The text arrives beside tool output, where an unlabelled paragraph reads as more
+tool output. It goes under `[Message from user, sent while you were working]` — the family already
+in use (`[DM from user]`, D64; `[Request interrupted by user]`, D76): a bracketed statement of fact
+with no instruction attached. Not XML: the codebase's user-interjection convention is a marker
+line, and inventing a tag here would have been a second convention for one caller.
+
+**The channel is a projection of the queue, not a second copy.** `SteerQueue` (new `src/steer.rs`)
+holds the eligible prefix of `Chat::queued` and is re-armed from it on every change — enqueue,
+pull-back, absorption, turn boundary. A *prefix*, deliberately: a slash command is dispatched on the
+client side and cannot travel to the turn, and a message queued behind one that jumped into the turn
+would run the two in the opposite order from the one they were typed in. Images take the same
+answer, for a smaller reason — mounting attachments is `start_turn`'s path and nothing at the
+barrier can do it — and rather than build a second attachment path for a case the user can trivially
+re-send, such an item stays queued and everything after it waits with it. The channel belongs to one
+turn and is `reset` at every turn start, so a message the previous turn declined is never folded
+into a turn the user never typed it at.
+
+**The race has one winner, by construction.** `take` is atomic and records the ids it took;
+`tui_hooks` takes and announces (`UiEvent::Steered`) in the same closure, so there is no window in
+which an item is in the request and still pending on screen. `↑` pull-back asks `reclaim` first: an
+item the turn already took answers `Absorbed`, and the pull-back does nothing — the event, already
+in flight, is what removes it from the queue. The taken-id ledger is what makes re-arming safe: the
+composer re-arms from a queue that still holds the absorbed item until that event lands, and without
+the ledger it would offer the same message to the next barrier.
+
+**On screen.** One turn renders as one assistant message, so a line merely pushed after it would
+sink below everything the turn still had to say. `absorb_steered` closes the reply block and opens a
+continuation — `open_continuation_message`, the move an AskUserQuestion answer already makes — so
+the line sits between the reply written without it and the reply written with it, which is the order
+the history holds. It renders as one dim line under `↪`, no `❯` bubble, but it keeps its send stamp:
+unlike D76's and D80's state lines, the user did write it and it did reach the model, so
+`is_steer_line` is deliberately *not* folded into `is_state_line`. The queued rows are unchanged and
+gain CC's verbatim `Press up to edit queued messages` beneath them, only while a turn is running.
+
+**Deviations and consequences.** (a) The steer line is marked by its `↪ ` text prefix rather than by
+a field on `UiMessage`, which has seventeen literal construction sites and no constructor; this is
+the convention `is_interrupt_marker` and `is_ask_receipt` already established, and the false
+positive it admits (a user message that itself begins with `↪ `) costs one bubble. (b) The three
+query-side barrier tests live in `src/query_steer_tests.rs` rather than inline: they are `query`'s
+loop tests and borrow that suite's mock-server helpers (four of which become `pub(super)`), but
+`query.rs` was at 3877 lines and adding them inline left thirteen lines of headroom under the cap.
+(c) `QueuedInput` gains an `id`. Matching absorbed items by text would have merged two identical
+messages into one. (d) Scope holds: subagents keep their inbox mechanics, and headless, `--print`
+and JSON protocol v1 pass `no_steer()`, which is `Vec::new` — those hosts have no composer, and the
+turn runs byte-identically to before.
+
+### D84. A running command is evidence, not a spinner — and ctrl+b is the exit
+
+A foreground `Bash` call was a silent `⎿ Running…` from the moment it started until the moment it
+exited. The tool already streamed its output incrementally — `spawn_output_readers` has fed a shared
+buffer since the beginning — but nobody read that buffer until the command was done, so a two-minute
+`cargo build` and a hung `ssh` looked exactly alike, and the only key that reached a running command
+was Esc, which kills it. Claude Code shows a rolling tail under the tool row and lets ctrl+b move the
+running command to the background mid-flight; both are the alignment targets.
+
+**One command at a time, by construction.** `Bash::is_concurrency_safe` is always false, and
+`execute_calls` runs non-safe tools serially, so a session has at most one foreground command in
+flight. The whole feature is built on that: `src/live.rs`'s `LiveBash` has one slot, one promote
+signal, one tail. A second `arm()` would be a bug, and `debug_assert` says so; if it ever happened,
+the newcomer keeps its own sender inside its guard rather than evicting the incumbent, because an
+evicted (dropped) sender must never be read as "the user pressed ctrl+b". `promote_requested` parks
+forever on a closed channel for the same reason — the same shape as `executor::cancel_requested`.
+
+**The tail is its own buffer, not the result buffer.** `BoundedOutput` stores bytes verbatim and
+stops growing at `bashOutputMaxChars` (48k), which makes it useless as a tail twice over: a
+`\r` progress bar would paint hundreds of lines, and a long build would freeze the tail at the cap
+while the command kept running. `TailBuffer` applies terminal semantics as the bytes arrive —
+`\r` rewrites the current line, `\n` commits it, five lines are kept, escape sequences are dropped
+rather than handed to a renderer that would write them straight to the terminal (`line::sanitize`
+deliberately preserves ESC), and a newline-free stream is capped per line. The result the model
+reads is byte-identical to before.
+
+**Coalescing is a rule about the wire, so it is testable as one.** `TailCoalescer::admit` takes the
+clock as an argument: at most one event per 100ms, and never an event that would repaint rows the
+host already shows. A ticker samples every 50ms — faster than the floor on purpose, so the last
+write of a burst still lands once the floor passes rather than waiting for output that never comes.
+A thousand writes in one interval is one event.
+
+**Promotion moves the audience, not the process.** `promote_to_background` registers the watchable
+the background path already uses, feeds it the same `BashCell` that has been counting lines since the
+command started (so the task panel reports the elapsed time it really has), swaps the sink's tail for
+the task id, and spawns a task that owns the *same* `Child` and the *same* reader handles. Nothing
+is killed, nothing is restarted, the buffer is not lost, and the timeout is dropped because a
+background task is not bounded by the foreground call's budget. The model gets the exact shape
+`background: true` returns, plus a note saying the user did this and it did not.
+
+**Deviations and consequences.** (a) The tail event carries no `tool_use_id`. The TUI's activity
+model has no id key at all — `ToolReady` explicitly discards it and `ToolDone` finds its row by
+scanning for the first running call with a matching name — so an id would have been a field nothing
+could resolve; the renderer finds the running `Bash` row the same way `ToolDone` does, which the
+serial invariant makes unambiguous. (b) The tail rows are rendered in `chat_tail.rs`, not in
+`layout_activity`: a Bash call is usually *folded*, and a folded activity is never laid out at all —
+its only row is the group's `⎿` hint row — so both render paths need the rows, and only the caller
+knows the width they must be clipped to. (c) Output written before a promotion is not replayed into
+the notify conditions. It has already been on screen, and the completion payload still carries all of
+it; replaying it would fire a notification for an error the user just watched scroll past. (d) The
+blueprint's "line counter on the `⎿` row" is a `… N lines` row above the tail instead of a suffix on
+the row itself, which `activities.rs` renders from `ToolCall` alone — and it appears only when there
+is something to count, i.e. when the tail is not the whole output. (e) `ToolContext` gains a `live`
+field (37 literal construction sites, all tests, defaulting to a detached handle) rather than a
+task-local: `ask_question` already crosses from `UiHooks` into `ToolContext` this way, and hidden
+control flow was not worth saving 37 lines of mechanical diff. (f) Scope holds: headless, `--print`,
+JSON protocol v1 and every subagent hold `LiveBash::detached()` — no tail is produced, nothing can be
+promoted, no new wire event exists, and those hosts run byte-identically to before.
+
+### D85. Completion is one surface, and its candidates come from the command's own data
+
+The composer could complete exactly one thing: a slash command's **name**. `/model `, `/theme `,
+`/think `, `/resume `, `/provider login ` all take arguments from a small, enumerable, *already
+existing* set, and every one of them had to be typed blind — with a trailing space the dropdown even
+kept offering the command the user had just finished typing. There was no `@` at all: no way to
+name a file to read or an agent to talk to without typing the path by hand. Claude Code and Codex
+both have `@` and both complete arguments; this batch adds them, on one mechanism.
+
+**One scorer.** `src/tui/complete.rs` holds a hand-rolled fuzzy matcher (no new dependency): a
+case-insensitive subsequence match with a consecutive-run bonus (8), a word/path-boundary bonus
+(10), a base point per matched character and a capped "started late" penalty, ties broken lexically.
+Two details are load-bearing. (a) The match is found in **two passes** — forward for the earliest
+end position, then backward from that end for the tightest positions reaching it. A single greedy
+pass matching `ch` against `src/chat.rs` takes the `c` of `src` and scores a scattered match; the
+backward pass finds `ch` in `chat` and scores the run, which is the difference between a useful
+ranking and a random one. (b) Folding is **ASCII-only**: `char::to_lowercase` may expand one
+character into several and would break the 1:1 index alignment the scorer needs between the folded
+and the original candidate, so non-ASCII simply matches case-sensitively. Model ids, identifiers and
+paths — everything this ranks — are ASCII. An empty query matches everything with score 0 and
+`fuzzy_rank` then does **not sort at all**: a catalog lists its preferred model first and the
+session list lists the most recent session first, and re-sorting an unfiltered list would destroy
+information the source deliberately carried.
+
+**One registry.** `Chat::arg_candidates` is a single `match` on `(command, already-typed arguments)`
+— one arm per command, arity falling out of the tuple. Every arm reads the data its own handler
+validates against, never a copy: `/model` the D73 declared catalog (`client.declared_models`) and,
+failing that, the same two synchronous fallbacks the `/model` picker's level two uses, in the same
+order — this session's fetched list, then a *fresh* disk cache; `/theme` `THEME_LEVELS`; `/think`
+`THINK_LEVELS`; `/resume` the untruncated `transcript::list` that `/resume <keyword>` itself
+searches; `/provider` `provider_order()` plus its two subcommands, and after `login`/`logout` the
+strictly smaller set that `slash_provider_login` accepts (configured providers ∪ presets — pointedly
+*not* `default`, which login rejects). The picker's fourth tier is a network fetch and is
+deliberately absent: a dropdown rebuilt on every keystroke must not block on an endpoint. `None`
+from the registry means the argument is free-form, and nothing opens.
+
+**One dropdown.** `update_slash_suggestions` is now the composer's single completion funnel and
+picks exactly one surface per edit: an `@` token under the caret, else the argument phase, else the
+command-name phase. Because it is one funnel, every edit path that already refreshed the old
+dropdown refreshes the new ones for free, and the mention and slash dropdowns can never be open
+together — which is why `EscLayer::MentionDropdown` sits *adjacent* to `SlashDropdown` in D80's
+order rather than above or below it in any meaningful sense, and why the peel-order test walks the
+stack a second time instead of walking a longer one.
+
+**`@` mentions.** Opening is anchored at the caret and at a word boundary — start of input or after
+whitespace — which is what keeps `user@example.com` an email address rather than a mention of
+`example.com`. Files come from `git ls-files --cached --others --exclude-standard -z` inside a
+repository, so `.gitignore` is honoured for free and the list matches what the user means by "the
+project"; outside one, a bounded walk (depth ≤ 6, no hidden directories, no `target/`
+`node_modules/` …). Both are capped at 5000 entries and the cap is stated in the dropdown footer
+rather than silently swallowed. The gather happens **once per open**, not per keystroke: the
+snapshot lives in `MentionState::all` and the query only re-filters it. Selecting inserts a file as
+its relative path and an agent as `@name` — the agent keeps its `@` because that token is exactly
+what D90's routing will read.
+
+**Deviations from the blueprint sketch, and why.** (a) Tab is *accept*, not "longest common prefix
+then accept": with a live fuzzy-ranked list the top row is already the answer, and an LCP step would
+insert a prefix that matches nothing the user can see. (b) No directory entries with a trailing `/`:
+`git ls-files` yields files, and synthesising the directory set would roughly double the list to
+support a navigation gesture that fuzzy matching makes unnecessary. Both are recorded here rather
+than silently dropped; neither is hard to add later. (c) Line-leading `@agent` **routing** is
+untouched — this batch builds the completion surface only, per the D90 scope guard.
+
+**Two things fixed in passing, both inside the code this batch rewrites.** Enter with an argument
+dropdown open used to take the name-phase shortcut ("complete and execute"), which would have
+dispatched `/deepseek-chat` as a command; it is now gated on the name phase. And
+`apply_slash_suggestion` never moved the caret, so Tab-completing `/mo` into `/model ` left the
+cursor at column 3 — it now follows the text it completed.
+
+### D86. The composer is a readline, and a prompt worth writing is worth writing in your editor
+
+Four gaps, one surface. (a) A prompt longer than a sentence had to be composed in a single-line-ish
+box with `\`+Enter for newlines, while every shell and every git commit has had `$EDITOR` for
+decades. (b) `shift+enter` was already wired to insert a newline and could never fire: no terminal
+sends it distinguishably unless someone asks, and nobody asked. (c) The paste-burst heuristic
+protected Enter and nothing else, so a pasted `@` or `/` opened a dropdown mid-paste — and that
+dropdown then claimed the very Enter the rest of the paste needed as a newline. (d) The readline
+set was half there: `ctrl+a/e/k/u/w/y` and `alt+b/f` existed, but the kills all overwrote one
+`String` slot, so two kills meant the first was gone, and `ctrl+p/n`, `alt+d`, `alt+backspace` and
+`alt+y` were not bound at all.
+
+**`$EDITOR` (ctrl+g, and the readline chord `ctrl+x ctrl+e`).** `$VISUAL` first, then `$EDITOR`;
+neither set is not a dead key press but an info line naming the variable to set. The draft goes to a
+pid-and-counter-tagged temp file, the terminal is handed over in full, the editor runs as a child
+inheriting it, and the file comes back as the draft with one trailing newline trimmed. A non-zero
+exit **keeps** the draft — an abandoned editor is the one case where replacing the prompt would be
+unrecoverable — and says so. The replacement is one undo step, so `ctrl+_` returns to what was typed
+before the editor opened.
+
+Two things about the hand-over are not obvious and are the reason this is not three lines in
+`chat_tail.rs`. First, **the terminal goes through D77's claim protocol**, not through an ad-hoc
+`disable_raw_mode`: `suspend_terminal` performs the same release the clean teardown does, and the
+guard's `Drop` performs the resume, so a panic while the editor holds the screen restores exactly
+what a clean return would have. This also forced the setup sequence out of `run_tui_session` into
+`setup_terminal(fullscreen)` — the resume needs the same answer to "what does this host have
+switched on", and a second copy of it would have been a second answer. Second, **crossterm's
+`EventStream` has to be dropped first**. It parks a background thread inside `poll_internal`, which
+*reads* the terminal; an editor sharing that descriptor loses keystrokes to it. Dropping the stream
+wakes that thread and ends it, and the host continues on the fresh stream left in its place.
+
+The chord is armed by `ctrl+x` for exactly one key. Taking it at the top of `on_key_at` rather than
+inside `control_key` is what makes "anything else clears it" mean *anything* — a plain character,
+Esc, a dialog key — instead of only the control keys that reach the same handler. `ctrl+e` keeps
+being end-of-line everywhere else, and D81's dialog `ctrl+e` and D82's transcript `ctrl+e` are
+untouched, because neither ever sees an armed chord.
+
+**Kitty keyboard enhancement.** At setup, if `supports_keyboard_enhancement()` says yes, push
+`DISAMBIGUATE_ESCAPE_CODES` and nothing else — `REPORT_EVENT_TYPES` would add release events and
+change what every existing binding sees. That one flag is what makes `shift+enter` arrive as its own
+key rather than as a bare `\r`, so the newline binding that was already written finally fires. The
+pair is a **latch, not a counter**: the push is skipped if already pushed, the pop writes nothing if
+nothing is pushed, and every teardown path calls the pop blind. There is exactly one pop site —
+inside `restore_terminal` — which is how the clean exit, the panic hook, the setup-failure path and
+the `$EDITOR` suspend are all covered by construction rather than by four remembered calls.
+
+**Paste-burst hardening — what was already there and what is new.** Already handled: Enter inside a
+detected burst inserted a newline instead of submitting, and bracketed `Event::Paste` was one edit
+rather than one per character. New: during a burst *and* during a bracketed paste, `after_edit`
+**closes** the completion surfaces instead of recomputing them. A dropdown is an answer to typing,
+and pasted text containing `@` or `/` is not asking the question. This also removes a per-keystroke
+file walk and `load_skills` call from the middle of a large paste. The end of a burst is only
+observable from the next event, so the re-evaluation happens on the first keystroke that is not part
+of it — which is the honest reading of "re-evaluate once at the end". The empty-input meanings of
+`!` and `?` are suppressed the same way.
+
+**Known limit, stated rather than papered over**: the heuristic cannot see a paste's first
+`PASTE_BURST_KEYS` characters — they are indistinguishable from typing — so a burst-pasted payload
+whose *first* character is `!` still enters shell mode on terminals with no bracketed paste. That is
+what bracketed paste exists to fix and why it is the primary path; the burst heuristic remains the
+fallback it was documented as.
+
+**Readline motions and the kill ring.** `ctrl+p`/`ctrl+n` route through `vertical()` — the same
+function `↑`/`↓` use — so history browsing, multi-line caret movement and D83's queue pull-back
+(including losing the race to a turn that already took the message) are identical by construction
+rather than by parallel implementation. The kill ring is bounded at 10 and coalesces
+readline-style: consecutive kills in the same direction rebuild one entry in **text** order, so
+`ctrl+w ctrl+w` yanks both words back the way they were typed. `ctrl+y` inserts the top; `alt+y`
+immediately after rotates in place and wraps, and anywhere else does nothing at all rather than
+inserting something unasked. Both "immediately after" rules are counted in **keys, not seconds**: a
+key that went to a dialog or a dropdown still ticks the counter and so breaks the chain, which is
+exactly what readline means by an intervening command.
+
+Word motion splits in two, which is readline's own distinction and happens to be what a path needs.
+`alt+b`/`alt+f`/`alt+d`/`alt+backspace` use a new `subword_*` boundary — alphanumeric runs, so `/`,
+`-`, `_` and `.` are all stops and `src/tui/chat_tail.rs` is six stops rather than one. `ctrl+w`
+keeps the whitespace word, exactly as a shell does. `word_right` had no caller left afterwards and
+was deleted.
+
+**Key-conflict resolutions.** `ctrl+g` was the agents/channels workspace and is now the editor. The
+workspace keeps a door — the ctrl+b manager, Enter on an agent — and D89 retires the modal anyway,
+so `EntityOpen::Workspace` survives as an `#[allow(dead_code)]` variant with the batch that removes
+it named on it, rather than being deleted here as D89's work done early. `ctrl+k` was **already**
+bound to kill-to-end-of-line, so the "leave it unbound for D90" guard could not be honoured
+literally; its meaning is unchanged and it now feeds the ring, because leaving it writing to a slot
+nothing reads would have broken `ctrl+y` after a `ctrl+k`. `ctrl+x`, `ctrl+p`, `ctrl+n`, `alt+d` and
+`alt+y` were free; `alt+backspace` was a plain backspace. `ctrl+x` inside the ctrl+b agent manager
+still stops an agent — the manager is judged before the composer, so the chord never sees it.
+
+### D87. Motion is a layer with one gate, not a habit each surface picked up
+
+bingo's animation was almost all absence. The only continuously moving thing in the app was the
+welcome card's update banner, breathing on a properly specified sine curve; everything else either
+did not move or moved without anyone deciding it should. The `motion` setting — the app's opt-out,
+and the determinism knob tests lean on — was resolved independently in three places and consulted at
+five, none of which was the spinner. So `motion: "off"` stilled the banner and the tok/s glyph while
+the loudest moving thing on screen kept spinning, which is worse than not having the setting: it
+answers the user's request with a partial no.
+
+And the spinner's own timing was an accident. `spinner(chat.tick)` indexed the 8-glyph star cycle by
+the raw frame counter, so at TICK_MS=33 a glyph lasted 33ms and a full cycle 264ms — about 3.6×
+Claude Code's rate. Nobody chose 33ms; it is what you get when the animation's clock *is* the render
+loop's clock. That is the shape of the whole problem, so the fix is structural rather than a set of
+new effects: **`src/tui/motion.rs` owns the frame interval, and nothing animated may read the tick
+again.** Every moving surface asks a `Motion` — one bool, built once from settings, copied to render
+sites — for a token, and each token converts ticks to milliseconds through `TICK_MS` so a cadence is
+stated in the unit it was designed in. A grep for tick reads afterwards leaves only the increment
+itself, the elapsed-time stopwatches (`duration_ms`, which now multiply by `motion::TICK_MS` instead
+of a literal 33), the 15-tick registry poll, and the two call sites that pass the tick *into* a
+token. There is one deliberate survivor: `token_rate.rs` picks its glyph from a wall clock on
+per-band cadences that v1.37 specified, so it keeps its own frame math and now takes only the gate
+from `Motion` — the drift that mattered was two copies of the gate, not two clocks.
+
+**The seven tokens.** `pulse` advances one glyph per 120ms through the unchanged sequence. `beam` is
+a 6-cell glimmer sweeping the running verb and its ellipsis once per 2s, returning a half-open
+character window that the render layer paints in a lighter tint of the same base — the sweep enters
+from the left and leaves off the right, so there is a dark beat between passes rather than a
+permanent bright spot. `stall` is 3s with no event of any kind reaching the TUI. `settle` is one
+120ms window at turn end. `breath` is the banner curve moved here verbatim, stops and all, with its
+wave test left where it was. `title_glyph` alternates `✳ ⠂ ✳ ⠐` on 960ms boundaries. `Meter` eases a
+jumped number to its target over 300ms, ease-out, and is wired to the status row's `↓ N tokens`.
+Every one of them takes the frame number as an argument and reads no clock, which is what makes
+animation testable without a timer and keeps the demand-gated loop deterministic.
+
+**The gate rests decoration and not information.** `motion: "off"` freezes the spinner on `✻`, kills
+the sweep, stills the banner and the title, and makes numbers snap. It deliberately does *not*
+silence `stall` or `settle`: those change a colour in order to say something, and a user who asked
+for stillness asked for less movement, not for less to be told. This is the same boundary the
+feedback spec already drew for `prefers-reduced-motion` ("the loading indicator itself must not be
+removed"), applied one level up — and it is why the two tokens are gate-independent by construction
+rather than by a comment asking callers to remember.
+
+**Stall says nothing new, because nothing new is known.** At three seconds the spinner and verb turn
+warning-coloured and the glimmer stops. The verb, the elapsed seconds and the Esc hint are
+untouched. The blueprint sketch had a second tier at 6s adding `(stalled?)` to the copy; that is a
+claim about a cause the TUI cannot see — an endpoint thinking hard and an endpoint hung look
+identical from here — so this batch ships the one tier the colour can honestly carry, and the
+question mark stays unwritten. Progress is recorded in `drain_all`, where every stream delta, tool
+event and ask already funnels through: one assignment covers the whole surface, and a hook per
+event variant would have been five copies of the same fact.
+
+**`settle` versus write-once, which is the interesting one.** The spec asks the completion row's `✻`
+to wear the accent for one frame-window and then rest. Printed scrollback rows are final, so a
+post-print colour change is impossible; the fallback offered was the live status row's last repaint,
+but that row is gone the instant `busy` clears, and painting the completion text there too would
+have shown the same line twice for 120ms. The resolution inverts the problem: **do not print the row
+until it has finished blinking.** `settle_at` is stamped at `TurnEnd`, the finished turn's last
+message is held out of the settled prefix for the window, and it freezes at rest. Nothing printed
+ever changes — the discipline is strengthened, not bent: a row whose colour is still moving is by
+definition not final. The cost is honest and visible: six existing tests asserted "everything
+settles after the turn ends" *immediately* after `TurnEnd`, and they now tick past the window first
+through a shared `past_settle` helper, which is exactly what the host does 120ms later.
+
+**The running verb is now pinned per turn.** It was `thinking_stage(self.messages.len())`, sampled
+afresh at each of the three sites that open a reasoning segment. In practice the message count
+rarely changed mid-turn so it usually held, but "usually" is not a property: a turn that pushed a
+message could change its mind about what it was doing. The verb is sampled once at `TurnStart` and
+reused. The tables themselves are unchanged — Claude Code carries ~180 words, bingo carries 12
+running and 8 completion, and a curated dozen that all read like the same voice is better than 180
+that do not. Expanding them is a copy decision, not a motion one.
+
+The title animation reuses D79's machinery entirely: `Title::Busy` carries the glyph, `set_title`
+already drops an unchanged title, so a busy turn costs about one `OSC 2` write per second and a
+`notifications: off` session still emits nothing. A pending permission prompt outranks the animation
+— the waiting title is never animated over, because it is the more urgent thing to say.
+
+### D88. Every conversation is the same shape, and the hub is the first one
+
+bingo has three kinds of conversation and three unrelated implementations of "conversation". The hub
+is `Vec<UiMessage>` rendered by `build_rows` straight into scrollback. A DM or a channel is a
+`Conv`, sampled per frame into a `Snapshot` of `ChannelItem`/`DmItem`, rendered by `message_rows`
+inside a modal that owns its own composer, its own key map and its own palette. The team has no
+conversation at all: `/team` prints strings into the hub transcript, spawn/done/ack go to the watch
+registry and are then forgotten. Phase 4 retires the modal and puts all of them on one surface, so
+the first thing it needs is one shape. This batch builds it and moves nothing: **`src/tui/buffer.rs`
+is the engine, the hub is buffer 0, and the screen is bit-identical** — the 1255 tests that passed
+at D87 pass unchanged, and the 25 new ones are all the batch's own.
+
+**A buffer holds what is *about* a conversation, never what is *in* one.** Id, how far the source
+has got, how far you have read, whether it wants you, the draft you left in it, when it last moved.
+`BufferId::source()` names the store the transcript actually lives in — `ChannelLog`,
+`AgentHistory`, `TeamLog`, `HubFlow` — and that naming is the point: it is a key, so there is no
+second copy of any message to fall out of step with the first. The registry's ordering is the
+derived `Ord` on the enum (hub, `#team`, channels by name, DMs by name), which means the order is
+the declaration and there is no comparator to keep in agreement with it.
+
+**Unread is a subtraction, not a counter — the batch spec asked for event tees and the code was
+already right.** The workspace has never incremented anything: `entity.rs::snapshot` recomputes
+`seq - read_cursor` on every frame, against `ChannelStatus.seq` for a room and `history.len()` for a
+DM. The engine keeps that and gains its robustness for free: a counter fed by an event stream can
+drift from the thing it counts (a dropped event, a double delivery, a lagging broadcast receiver),
+and a cursor read from the source cannot. So "shadow accounting" is a *poll*, teed into
+`refresh_entities` — which already reads both registries on the same 15-tick gate D87 named. One
+read, one clock, no second timer to disagree with the first. Two rules come with it. A conversation
+seen for the first time starts read, because opening bingo on an hour-old session should not badge
+every turn that already happened; that is the workspace's rule, kept for the workspace's reason. And
+a cursor is clamped to the sequence, because a source can *shrink*: compacting a subagent rewrites
+its history shorter, and a cursor parked past the end would read as "nothing new" for the rest of
+the session.
+
+**Mention is per-source, because "addressed to you" means different things in a room and a DM.** A
+DM is addressed to you by construction — there is no other kind of message in one — so anything new
+in it is a mention. A channel is a room, and chatter in a room is not a summons: it wants you only
+when an unread post contains `@user`. The log is only read when the subtraction says something is
+unread, so the common case costs nothing.
+
+**The board is the one buffer that had to store something, and that is a fact about the domain.**
+Every other source already keeps its own transcript. Lifecycle events do not: they are broadcast
+through `WatchRegistry` and retained nowhere, so a board bound to "the lifecycle stream" has nothing
+to bind *to*. `Buffers` therefore keeps a bounded log of its own (200 events, oldest dropped) fed
+from the `UiEvent::WatchEvent` arm — and only from `WatchKind::Agent`, because a channel event
+belongs to that channel's buffer and a command event is the hub's own tool, and neither is team
+news. The board also materializes on its first event rather than standing empty in a session that
+never spawned anyone, and that first event counts as unread: "first sight is read" exists to avoid
+badging history that predates you, and a board born a moment ago has none.
+
+**Rehydrate produces `UiMessage`, because the replay path the spec told it to reuse does not
+exist.** `/resume` looks like a replay and is not: it clears `self.messages`, prints one line, and
+uses the loaded history only for a count and a token estimate. Nothing anywhere converts a stored
+`api::types::Message` into a transcript row. So the instruction "do not write a second renderer" was
+honoured one layer down instead: `rehydrate` extracts through `slack::dm_posts` and
+`slack::channel_posts` — which is where the D64 `[DM from user]` stripping and the batched-message
+splitting already live — and emits `UiMessage`, the unit `build_rows` already consumes. A test pins
+that equivalence by rendering the same history both ways. The consequence is a claim on D89: those
+two functions are the part of `slack.rs` worth keeping, and the `Snapshot`/`Workspace`/`Switcher`
+shell is the part that dies. One honest shortfall: `budget` counts messages, not rows. Rows exist
+only after a layout at a known width, which is the host's business; a parameter that said rows and
+meant messages would have been worse than one that says what it is.
+
+**Routing is data, and the marker stays where it was.** `route_submit` maps an id to a
+`SubmitTarget`; `deliver` performs it with the same two calls the workspace composer makes today, in
+the same order. The DM target carries `from = user` and *nothing else* — the `[DM from user]` line
+is added downstream in `absorb_inbox`, derived from that name, and adding it here too would double
+it. A test asserts the full round trip at the domain level: route, deliver, drain the inbox, absorb,
+and read the marker off the prompt the instance would actually see. `#team` returns a typed refusal;
+it is a record of what happened, not a room to speak in.
+
+**Persistence: none, deliberately.** Unread marks and drafts are session-local and in memory. They
+describe your attention in this sitting, and a badge restored from disk would be a claim about a
+conversation you may have read in another window. Buffers rebuild from the domain on the next start,
+which is the same reason the workspace never persisted its cursors either.
+
+Nothing in this batch renders, so `feedback-states.md` is unchanged and the guide and READMEs are
+untouched: there is no new state to document because there is no new state on screen. `chat.rs`
+gained seven lines (3912 → 3919) and needed no extraction pre-step. The module carries one
+`#![cfg_attr(not(test), allow(dead_code))]`, because an engine complete before its caller is exactly
+what a foundation batch produces — **D89 deletes that line**, and anything still unused afterwards
+is genuinely dead.
+
+### D89. The workspace retires: a conversation is entered, not opened in another screen
+
+D88 built the shape and moved nothing. This batch is the move, and it is a retirement: the
+alternate-screen workspace modal (`src/tui/entity.rs`, 835 lines) and the Slack skin it wore
+(`src/tui/slack.rs`, 2680) are gone, along with the test-only preview harness that shot frames of it
+(`src/tui/slack_preview.rs`, 439). What replaces them is not a smaller modal. It is the absence of
+one: **one terminal, one write-once flow, one active conversation**, with the hub as an ordinary
+member of the set rather than the place the real application lives.
+
+The modal was a second application reached with one key. It had its own composer, its own key map,
+its own row builder, its own palette and its own quick switcher — which meant that everything the
+program had learned in D76–D87 stopped at its border. The approval dialog, the steer queue, the
+readline and kill ring, the `$EDITOR` round trip, the motion tokens, the transcript view: all hub
+only. Every one of those is now available in a DM because a DM is not a different screen.
+
+**The hard part was not deletion, it was the flow.** `Chat::messages` is simultaneously the hub's
+transcript store and the list `build_rows` prints. Left alone, a hub turn completing while the user
+reads a DM appends to that list and prints into the DM — precisely the interleaving the design
+forbids. Three options presented themselves: buffer rows for inactive conversations (a holding pen,
+explicitly ruled out), give each conversation its own renderer (a second renderer, ruled out), or
+make the printed flow a *projection* of the one store. The third is what shipped.
+`Chat::flow_order` walks the store and returns the print order: hub messages up to the point where
+the user left, then that conversation's rows, and — while it is still open — nothing after them, so
+the hub's tail sits unprinted in the hub's own store until the return prints it under a `── hub ──`
+rule. Two properties make this the cheap answer rather than the clever one. It is **append-only**:
+an emitted position never moves, so `flushed_segments` keeps meaning what it meant and scrollback is
+never rewritten. And an excursion's rows are `UiMessage`s in the same list the hub's are, indexed the
+same way, so `assistant_el(i, …)` renders a replayed DM message with the code that renders a live hub
+reply — **there is no second renderer, and no imitation to keep in step**. A conversation's
+decoration (the rule, the speaker's name) is a property of the *flow position*, not of the message,
+which is why `UiMessage` gained no field and its nineteen construction sites went untouched.
+
+**Symmetry is the rule, including for the hub.** Switching stashes the outgoing draft and restores
+the incoming one, prints the rule, replays the last 30 messages, and makes that conversation the only
+one that prints live. Returning to the hub is the same operation. One deviation, recorded because it
+is a deviation: the hub's replay is **its unprinted tail rather than a cloned budget-bounded tail**.
+The hub's store *is* the flow, so its tail has never been printed and printing it is the rehydration;
+cloning the last thirty on top would print a third copy of rows still physically on the same screen,
+a couple of hundred milliseconds of scrolling away. The budget is meaningful exactly for the
+conversations whose store is somewhere else, and that is where it is applied.
+
+**Cadence.** D88's accounting rides the fifteen-tick registry poll, which is right for a presence
+strip and wrong for a message you are waiting on. The active conversation is polled **every** tick
+instead — one conversation's worth of work, and it is the one on screen — which is also what removes
+the window in which a landing message would have shown twice, once in the live tail and once in the
+flow. The retired modal did this much work per *frame*, for every conversation.
+
+**Esc is navigation before interruption.** `EscLayer::BackToHub` sits directly above `Interrupt` in
+D80's stack: transient layers over a conversation still peel first, then the conversation returns
+home, and only at the hub does Esc reach the turn. A turn running behind a DM survives the press, and
+the status row stops promising otherwise (`esc to hub`). Ctrl+C keeps the unconditional interrupt.
+The reasoning is the same one D80 used to put the interrupt *inside* the list rather than above it:
+Esc acts on the thing the user is looking at.
+
+**What the composer does** is decided before `busy` is consulted, because `busy` is the hub's state.
+In a conversation the text is delivered, not queued and not steered — D83 offers the running turn the
+hub's submissions only, which is now pinned by a test rather than true by accident. Slash commands
+fall through to the unchanged path from every conversation, so `/model` in a DM is still `/model`.
+
+**Access, interim.** `/open <@agent|#channel|#team|hub>` with argument completion from D85's registry
+(candidates are the buffer registry itself, so an offered name is a conversation that exists), Enter
+on an agent in the ctrl+b manager, and Esc home. The conversation bar, `ctrl+k`, `@`/`#` line-leading
+routing and the `#team` board's own rendering are D90 and were deliberately not built here.
+
+**Two further deviations from the brief, both for the same reason — no second renderer.** The brief
+said to leave `ctrl+o` showing the hub session alone. It shows the flow instead, excursions and
+their rules included, because D82 built the pager on `build_rows` precisely so it could never
+disagree with the screen, and `build_rows` now prints the flow; filtering the conversations back out
+would mean a second row builder in exchange for showing the reader less than their terminal actually
+printed. Which conversation the pager should be scoped to is a real question and belongs beside
+D90's bar, where there is a way to say "this one"; the behaviour is pinned by a test rather than
+left accidental. Second, **portraits did not follow DM and channel rows into the flow**. The gutter
+that carried them was the modal's message-list layout, and rebuilding it here would have been new
+avatar machinery, which the brief rules out. The plumbing survives where it was already used — the
+`experimental.chatAvatars` band and the watch row — and what a DM or channel row gets instead is the
+sender's name heading each run of messages, which is the part that was load-bearing: with more than
+two speakers in a room the name is not decoration.
+
+**Accepted costs, named.** Repeated excursions leave a conversation in scrollback more than once —
+write-once is what makes that unavoidable and the rules are what make it legible. Two capabilities
+died with the modal rather than being quietly carried: the per-instance
+context-usage meter, which only its composer footer displayed (`AgentRegistry::context_usage`, its
+setter and the field behind it are deleted; the `on_context_usage` hook stays wired so a later
+surface needs no re-plumbing), and `ChannelRegistry::seen_of`, whose only reader was the sidebar
+badge that D88's own accounting replaced. The instance's live token rate did *not* die — it moved to
+the `⠙ name is replying…` row, which is the same fact at the same moment.
+
+**D88's `#![cfg_attr(not(test), allow(dead_code))]` is deleted, as it said it would be.** Living up
+to the rest of that sentence — "anything still unused afterwards is genuinely dead" — cost `Source`
+and `BufferId::source()`, which named where a transcript lives but which nothing consults now that
+every store is reached through `rehydrate`, plus four accessors D90 can re-add as three-line getters
+when its bar reads them. In their place `BufferId::rule()` earned its keep: the replay and the
+hand-back to the hub both format the divider through it, so the two can never drift.
+
+`slack.rs`'s survivors moved rather than died. `Post`/`PostKind`/`channel_posts`/`dm_posts` and their
+private helpers went to `buffer.rs`, beside the engine that was already their only non-modal caller —
+D64's `[DM from user]` rules, the scaffolding collapse and the live-turn tail travel with them
+untouched. `Palette`, `sender_band`, `gutter_cell` and the chip fallback went to `avatar.rs`, which
+is what they are; `stamp` went to `buffer.rs`, because a send time is a conversation's. Net: 1979
+lines added against 4206 removed — **−2227** — across 21 files, one of them new (`bufferview.rs`,
+1056 lines, half of it tests); 34 tests deleted with the code they tested and 19 added, for
+1266 + 13 green; and both hosts render every conversation through the one builder they already
+shared, because there was never a second one to make agree.
+
+### D90. Conversation chrome: a bar, a switcher, and a way to speak without moving
+
+**Problem.** D88 gave every conversation one shape and D89 made it reachable, but nothing on
+screen ever said what existed. `/open` could enter a conversation and never named one, so a DM
+filling up behind you was invisible until you thought to ask; the only roster was the ctrl+b
+manager, which lists running agents rather than conversations. Three more gaps came with it:
+`/team` printed the formation's own report into the hub's info tier — everywhere except the one
+buffer that exists to hold it, where the board sat empty; the board's rows showed the detail an
+event carried and dropped the lifecycle word, so a finished run and a running one were told apart
+only by what the agent happened to say; and nothing on the composer said which conversation the
+next Enter would reach. The blueprint's D90 also wanted `ctrl+k`, which D86 had already spent on
+kill-to-end-of-line.
+
+**Decision.**
+
+1. **The bar** (`convbar.rs`, new) is one row directly on the composer, in `BufferId` order:
+   `hub  #team  #build (3)  ●@scout (2)  ○@zoe`. Presence (`●` running / `○` idle) is a DM's fact
+   and nobody else's — a channel has no pulse, so it gets no glyph rather than one that means
+   nothing — and it comes from the agent state the ctrl+b manager already reads, in one pass
+   rather than a registry lookup per entry. Unread is D88's derived `seq − read`; a conversation
+   that named you gets the accent instead of the plain unread colour, which is free because the
+   active conversation never carries a badge at all. **The bar renders only when there is more
+   than one conversation**: a session that never spawned an agent pays nothing, and a bar reading
+   `hub` alone would be a row spent saying that the only thing on screen is the thing on screen.
+   Overflow elides to `…` around a run grown outward from the active entry (forward first, so the
+   registry still reads left to right) — a pure function of widths, active index and budget, so
+   there is no scroll state to get stuck in and nothing to animate. Below the width of one entry
+   the active entry survives clamped and unmarked, because a chrome row that wrapped would throw
+   off every height the frame assembler measured.
+2. **`ctrl+k` is the switcher** (`switcher.rs`, new), an EscLayer in the Menu stratum. Ordered by
+   **recency** with the hub pinned on top — the bar answers "what exists" and must not move under
+   a glance, while a reader reaching for ctrl+k is asking "what just happened" — filtered through
+   D85's single scorer, `↑/↓` clamping like the manager's list, `Enter` switching through D89's
+   own `switch_to`, `Esc` peeling only the switcher. **The ctrl+b manager stays.** The blueprint
+   allows the switcher to absorb it eventually; this batch does not, because the two answer
+   different questions (which conversation am I in, versus what are my agents doing) and the
+   manager carries per-agent stats and prompts this list has no room for. What must not fork is
+   the stop action, so `ctrl+x` calls the manager's own `stop_agent_from_manager` — same warning,
+   same watch transition, and the same absence of a confirmation step. A stopped agent's
+   conversation stays listed, idle: it is still worth reading back.
+3. **`alt+k` takes the kill.** `ctrl+k` no longer edits text in any state. Same kill, same ring,
+   same `KillDir::Forward` as `alt+d`, so consecutive forward kills still coalesce in text order.
+4. **Line-leading routing, in the hub only.** A hub submit opening with a known conversation's
+   name delivers the rest there, does not switch and does not start a turn — placed beside D89's
+   non-hub branch and above the busy branch for the same reason: a delivery must neither queue
+   behind a running turn nor start one. The flow keeps a dim `→ @scout: …` receipt, a state line
+   like the interrupt marker and the dialog receipts — no `❯` bubble putting the envelope in the
+   user's mouth, no send stamp, nothing in the model's history. **An unresolved name is prose**,
+   not an error: `@nobody hi` opens an ordinary turn, verbatim. **In a conversation there is no
+   such rule**, and the asymmetry is the point: the buffer already *is* the target, so a leading
+   `@name` there is a person being addressed inside a sentence, and reading it as an envelope
+   would silently redirect a message meant for whoever you were talking to.
+5. **The `#team` board renders and receives.** `TeamEvent::state` becomes `Option<WatchState>`:
+   `Some` is a lifecycle event and renders as `state · detail`, `None` is output posted to the
+   board, which has no transition to name and must not claim one. `/team` writes there and the
+   board's own unread carries it; when the board is not what you are looking at, one info line
+   says `→ #team`, so the command is never apparently silent. The board stays read-only.
+6. **Teammate tinting.** While a DM is active the composer border, the `❯` glyph and the
+   `is replying…` row take that agent's colour from the palette the avatar machinery already
+   assigns the name — no new colours, both themes covered by the palette's own branch. Bash mode
+   still wins the border: what a surface *does* outranks who is on the other end of it.
+
+**Deviations, and why.** (a) The brief asked for bare `x` to stop an agent in the switcher. The
+switcher filters as you type, so `x` would have to be either a letter or an irreversible kill;
+it is `ctrl+x`, and the overlay's own hint row names it. (b) A running hub turn used to dim the
+composer's prompt unconditionally; in a DM it no longer does, because a DM submit is a delivery
+rather than a turn (D89) and the dim promised a wait that was not happening. (c) `alt+↑/↓` and
+`alt+1..9` positional switching, which the blueprint lists under D90, are not in this batch — the
+brief's scope did not include them and unrequested keybindings are cheap to add later and
+expensive to take back. (d) The board reuses the conversation row builder rather than getting a
+bespoke dim renderer, because D89's ruling is that there is no second renderer.
+
+**Consequences.** `chat_tail.rs` was at 3838 of the 4000-line cap before this batch, so the
+provider and think pickers moved to `chat_menus.rs` first as a mechanical no-behavior-change
+commit (639 lines; only the two key handlers widened to `pub(super)`). Two new modules, both
+carrying their own tests. `ctrl+k` changes meaning for anyone with the muscle memory, which is
+the one user-visible regression here and is why the `?` panel, both READMEs and the guide all
+name `alt+k` beside the kills. The receipt predicate matches `→ ` followed by a sigil, so a line
+of prose in exactly that shape would render as a state line — the same tradeoff `is_ask_receipt`
+already accepts. 1266 + 13 tests before, 1295 + 13 after.
+
+### D91. Rewind: a turn you can take back
+
+**Problem.** bingo had no checkpoint, no undo, and no fork. A turn that edited the wrong files
+left the user reverting them by hand — with no record of which files it had touched — and the
+conversation that produced the wrong turn stayed in history forever, priming every turn after it.
+The audit filed this as a P0 against Claude Code's Rewind (esc-esc → pick a past user message →
+choose what to restore), and D80 had already left the slot open: Esc on an idle empty composer
+did nothing, "reserved for rewind, D91".
+
+**Decision.**
+
+*Identity.* A checkpoint is a turn-opening user message, addressed by **the transcript line it was
+written on**. `Message` is `{role, content}` and carries no id, so position is the only identity
+history offers; it is a stable one, because the transcript is append-only and rewind is the single
+operation that ever shortens it. Turn-openness is **recorded, not inferred**: `record_turn_open`
+appends a `{"type":"turn","at":…}` marker line before the user message, in the same idiom as D74's
+compact marker, and every projection skips it — so it changes no request bytes and no compact
+`kept` accounting. The alternative was sniffing message text, and the harness's own user-role
+injections (task reminders, `<task-notifications>`, `<channel-messages>`, the max-tokens resume
+prompt, Stop-hook blocks, D76 interrupt markers, D83 steered blocks) are indistinguishable from a
+real turn by content. The cost is that sessions recorded before this batch offer no rewind points,
+which is a better failure than offering the wrong ones.
+
+*Truncation.* `Transcript::truncate_at_line` copies the surviving prefix **byte for byte** — never
+re-serializing — so the request prefix the provider has cached is the one it gets back, and the
+replacement is atomic (temp + rename). Exactly one line can ever be new. The compaction marker's
+meaning is positional (`kept` counts physical message lines *before* it), so a cut that lands in
+its kept tail takes the marker with it, and the same summary is re-emitted with `kept` narrowed to
+the part of its window that survived; without that, a cut into the tail would resurrect verbatim
+the messages the summary already stands for. A cut inside a span the summary covers is refused
+outright — the projection never offers one, since a folded message is not in the projection at
+all, and that is the whole guarantee that rewind cannot cut across a compact boundary. Cutting at
+a turn-opening user message keeps every `tool_use`/`tool_result` pair intact by construction, the
+invariant `safe_split` and `project`'s orphan-skip loop exist to protect.
+
+*The store.* Pre-images live under `~/.local/share/bingo/rewind/<session>/<checkpoint>/`, one
+directory per checkpoint, `<hash>.pre` beside `<hash>.path`. Bytes are written first and the
+`.path` sidecar second, which makes the sidecar the commit: a crash between them leaves an orphan
+`.pre` that no restore reads, never a file wrongly marked as created-by-a-tool. The sidecar is
+also the once-per-`(checkpoint, path)` record — the *first* pre-image of a turn is the state the
+turn began in, and a second edit of the same file must not overwrite it. Restores replay
+checkpoints **newest first** so that where two turns edited one file the oldest pre-image is
+written last and wins. Bounded at 50 MB / 200 checkpoints per session, evicted oldest-first at
+checkpoint open; eviction names its own files and then `remove_dir`s, never a recursive delete.
+Git is not involved: a repository may not exist, and the working tree is not ours to commit.
+
+*Wiring.* The recorder hangs off `Runtime` (so no `Session` literal changed) and is handed to
+every tool through `ToolContext`, which is already built once per turn — so the TUI, `--print` and
+the JSON host record identically even though only the TUI can rewind this batch. `Edit` and
+`Write` are the only tools that write user files (there is no MultiEdit and no NotebookEdit here);
+each snapshots immediately before it changes anything.
+
+**Consequences.**
+
+- `chat.rs` was at 3960 of the 4000-line cap, so `/rename`, `/resume`, `/gc`, `/share` and the
+  resume picker moved to `chat_session.rs` first as a mechanical no-behavior-change commit
+  (386 lines; the four command entry points widened to `pub(super)`, `ResumeMenu` re-exported).
+- **Snapshot failures are disclosed at the decision, not as a toast.** The spec asked for
+  warn-tier, and tool code has no warning channel: `on_warning` lives on `UiHooks`, which is
+  deliberately not passed to tools, and converting it to a shareable `Arc` would have rippled
+  through `assemble_tools` and compaction's notify plumbing — unrelated debt, in a batch whose
+  load-bearing parts are elsewhere. A failure is instead recorded as a `.miss` sidecar and shown
+  in the selector as `3 files (+1 unsnapshotted)`, where the user is choosing whether to rely on
+  it. The edit always goes ahead either way, which was the requirement that mattered.
+- **Summarize from here shipped rather than being disabled.** It cuts *before* the chosen turn and
+  appends `(summary of the turns rewound from here)` after the previous message — deliberately not
+  compaction's `(summary of the earlier conversation, from automatic compaction)`, which is a byte
+  contract about the *prefix* of a request reproduced identically by the in-memory splice and by
+  every projection. Borrowing it for a tail would make a reload unable to tell the two apart. The
+  model call reuses compaction's prompt and budget via a new `compact::summarize_slice`, factored
+  out of `compact()` with no behavior change; the transcript surgery is `rewind::write_summary`,
+  synchronous and directly tested, so the async wrapper is thin.
+- **The ctrl+o transcript view does not shrink after a conversation restore** — verified, not
+  assumed: it is built from `chat.messages`, what this terminal printed, not from the session file.
+  Write-once scrollback makes the rows above the terminal's property anyway. What the model sees
+  and what a reload replays are truncated exactly; what the screen remembers is what happened.
+- Out of scope by construction and documented: `Bash` mutations (no pre-image is takeable), and
+  directories `Write` created on the way to a file (deleting a directory we may not have made is a
+  larger wrong than leaving an empty one).
+- `EscLayer::ORDER` grows to 16. `esc_at` is shared with `ClearInput`, so arming on a non-empty
+  draft and then emptying it within the second lets the next Esc open rewind — harmless, and
+  cheaper than a second timer.
+- 1295 + 13 tests before, 1327 + 13 after (32 new: 18 store/truncation/summary, 13 selector,
+  1 Esc-stack walk).
+
+### D92. The dark theme grows up: a palette of our own, coloured code, numbered diffs
+
+**Problem.** Four faults, one root: the display layer had been finished everywhere except where
+colour lives.
+
+1. `Theme::dark()` spelled **21 of its slots as named ANSI** (`Cyan`, `DarkGray`, `Gray`, `Yellow`,
+   `Blue`, `Reset`, …) while `Theme::light()` was fully RGB. A named colour is the *terminal's*
+   palette, not ours: every markdown heading, list bullet, quote bar, link, table rule, thinking
+   block, tool-output gutter and diff line moved with whatever scheme the user had loaded — and
+   `to_ansi256` passes non-RGB through untouched, so the downgrade path could not save them
+   either. Most terminal users run dark, so the strictly worse half was the one almost everybody
+   saw.
+2. `markdown.rs`'s fenced-code arm opened with `let _ = lang;`. Every code block in every reply
+   rendered in one grey.
+3. Diffs had no line numbers, on any surface.
+4. The dim vocabulary was two slots and a habit: `inactive` at 75 call sites, and `subtle` — which
+   had **no accessor and zero readers in the whole repository**. "Dim" was a look, not a tier.
+
+**Decision.**
+
+*The palette is ours.* Both presets are RGB, end to end, and `both_presets_are_fully_rgb` asserts
+it over the struct so a new slot cannot quietly opt out. The enumeration that makes that possible
+is `Theme::slots_mut`, one list of `(name, &mut Color)` that `downgrade_to_256` now walks instead
+of the 35 hand-copied assignments it used to be — a field missing from the list is a field that
+opts out of *both* the downgrade and the test, which is the kind of omission that announces
+itself. The dark scheme is built around the brand orange on the terminal's own near-black, with a
+warm neutral ladder and desaturated structural tokens; the light preset, already RGB, moved
+exactly one slot.
+
+| Slot | Dark | Was | Why |
+|---|---|---|---|
+| `text` | `#EBE7E2` | `#FFFFFF` | warm off-white; pure white on near-black is a glare, not a contrast |
+| `text_secondary` | `#9A948D` | `#999999` (`inactive`) | same rung, warmed to the ladder |
+| `text_muted` | `#6B6660` | `#505050` (`subtle`) | the tier now carries text; 2.2:1 was not a tier, it was a hairline |
+| `claude` family | unchanged | — | the brand; nothing in this batch earns the right to move it |
+| `code_fg` | `#D9A05B` | `Yellow` | inline code as a warm sibling of the accent |
+| `link`, `headings[2]` | `#7FA7D9` | `Blue` | one blue in the palette, not three |
+| `math` | `#C08AD1` | `Magenta` | muted mauve, distinct from link and accent |
+| `headings[0]`, `table_header` | `#EBE7E2` | `White`, `Reset` | h1 and a table header *are* primary text, plus bold |
+| `headings[1]`, `tool_running`, `diff_hunk` | `#7FBFB4` | `Cyan` | one teal, in the `plan_mode` family |
+| `headings[3]`, `quote`, `list_marker`, `tool_output`, `diff_context` | `#9A948D` | `DarkGray`/`Gray`/`Cyan` | all tier 2 by meaning, so all tier 2 by colour |
+| `quote_bar`, `task_open`, `table_border`, `hr`, `footnote`, `thinking` | `#6B6660` | `Blue`/`DarkGray` | furniture, tier 3 |
+| `task_done` | `#4EBA65` | `Green` | the `success` value; one green |
+| `text_muted` (light) | `#8C8C8C` | `#AFAFAF` | the one light change: 2.3:1 on white is not readable |
+| `diff_edit` | *deleted* | `Yellow` | dead since it was written; the blueprint said use it or delete it |
+
+Every dark slot clears 3.1:1 against a `#0D0D0D` ground; the three tiers land at 15.8 / 6.5 / 3.4:1,
+and light mirrors them at 21 / 5.7 / 3.4:1.
+
+*Three tiers, named and employed.* `text` / `text_secondary` / `text_muted`, with `text()` /
+`dim()` / `muted()`. `inactive` was renamed rather than aliased — it named a *state* and was used
+for a *tier*, and 75 sites of honest name beat one line of indirection. `dim()` keeps its name
+because it is the tier-2 accessor at ~110 call sites and "secondary" is exactly what it meant.
+`muted()` is new, and the sweep gave it work: the expand hints (`(ctrl+o to expand)`, `… +N
+lines`), the send-time stamp under every message, the approval dialog's key hints, the transcript
+pager's footer (position, search and key rows), the conversation bar's separators and ellipses,
+the `manager_box` frame, the welcome-card border, the `(url)` trailing every link, the footer's
+`·` between token rate and context usage, and the new diff gutter. Not swept, and named rather
+than quietly skipped: the menu-gated hint rows (`/model`, `/provider`, `/resume`, the `@`
+completion dropdown, the ctrl+b agent manager, the rewind list) still sit on tier 2.
+
+*Highlighting: `synoptic`, and two narrowings around it.* Chosen over `syntect` because the
+comparison is not close — synoptic is one 1,900-line pure-Rust file over four small crates
+(`char_index`, `if_chain`, `nohash-hasher`, and the `regex` we already depend on: **four new lock
+entries**), ships grammars for every language the batch required, and offers `run`/`append` line
+APIs that fit a renderer. `syntect` with `regex-fancy` still drags in `plist`, `bincode`,
+`yaml-rust`, `walkdir` and either megabytes of Sublime grammar dumps or runtime `.sublime-syntax`
+parsing — for a feature whose entire job is to tint a code fence. The two narrowings live in
+`src/tui/highlight.rs`: `from_extension` answers `Some` for *every* string (an unknown extension
+yields a highlighter that tokenizes nothing), so `language_for` is an explicit allowlist and an
+unrecognised fence stays monochrome — **guessing is worse than not colouring**; and synoptic's ~30
+grammar-varying token names fold into eight `Class`es whose colours are existing theme tokens.
+That last choice is the one that pays: the dark and light highlight palettes are not two more
+tables to maintain, they are whatever the two presets already say `text_muted`, `success`,
+`claude`, `math`, `link`, `tool_running`, `code_fg`, `text_secondary` and `code_block_fg` are, so
+`/theme` moves them for free and a test asserts no class collides with the code background or with
+another class in either preset.
+
+*The cost seam is the memo, not the settled-line rule.* Rows are built once for scrollback (the
+hub's `MarkdownRenderer` caches per block, keyed on block source), but the DM tail in
+`bufferview.rs` builds a fresh renderer every frame on purpose. A "highlight only settled lines"
+rule would have needed the renderer to know whether a fence was still open, which the AST does not
+say. A bounded memo keyed on `(language, source)` gets the same result at the cheap seam: a block
+re-rendered without changing costs a hash lookup, so a live tail pays nothing per frame, and a
+block that *is* growing pays one pass per change — the same order as the markdown re-parse it
+arrives with. 256 entries, oldest-first eviction, thread-local rather than locked (rows are built
+on the UI thread and each test thread gets a clean memo). Blocks past 96 KB or 4,000 lines are
+returned unhighlighted rather than allowed to make a frame late. Tabs expand to four spaces in
+*both* paths, because synoptic expands before tokenizing and a fallback that passed `\t` through
+would put highlighted and monochrome fences on different grids.
+
+*The gutter goes in the one diff builder.* `Hunk` gains `old_start`/`new_start` (parsed from
+`@@ -a,b +c,d @@`; an unparsable header falls back to 1/1 rather than refusing to render), and
+`Hunk::numbered` walks the arithmetic — context advances both sides, an addition only the new, a
+removal only the old. Width comes from the largest number in the **whole diff**, so a hunk crossing
+99 → 100 does not shift the code column mid-block. `diff_lines` gained a `width`, which bought the
+second half: long lines now **wrap instead of being clipped**, with a blank gutter and a blank
+marker on continuations so the code column stays a straight edge. Code wraps on columns, never on
+words — a break mid-identifier is honest, a break that reflows indentation is not. The `@@` header
+stays flush left: it is a statement *about* the numbers, and indenting it into their column would
+say otherwise. Because `diff_lines` has exactly two callers, the gutter reached the approval
+preview, the completed-edit rows and the transcript view in one edit;
+`both_diff_surfaces_render_the_same_gutter` renders two of them and compares, so a future second
+diff renderer fails a test rather than drifting.
+
+**Consequences.**
+
+- `theme.inactive` → `theme.text_secondary` at 75 sites, mechanical; `subtle` → `text_muted`;
+  `diff_edit` deleted. `Theme::slots_mut` is now the single palette enumeration.
+- `diff_lines(d, theme)` → `diff_lines(d, theme, width)`. The dialog passes the live width and
+  re-renders each frame; the transcript path bakes at edit time with `width - RESULT_INDENT`, so a
+  **resize does not re-wrap rows already built** — a narrower terminal clips them, exactly as it
+  did before D92. Rebuilding on resize would mean either re-rendering baked activity content or
+  moving diff rendering into `layout_activity`; both are larger than this batch and neither is
+  needed while scrollback is written once.
+- `/theme` now re-renders the diff rows still in the live region (`rebuild_diff_rows`), which are
+  baked when the edit lands and would otherwise keep the old palette. Rows already in scrollback
+  keep theirs — the standing write-once contract, not a gap here.
+- One new dependency (`synoptic 2.2`), four new lock entries. `src/tui/highlight.rs` is new;
+  the blueprint suggested `src/highlight.rs`, but it reads `Theme` and produces spans for
+  `markdown.rs`, so it belongs beside them.
+- A stale intra-doc link in `theme.rs` pointing at `crate::tui::slack` (retired in D89) now points
+  at `crate::tui::avatar`, which carries the skin palette and comes down the same `to_ansi256`.
+- 1327 + 13 tests before, 1354 + 13 after (27 new: 6 palette/tier, 9 highlighter, 5 markdown
+  fence, 5 diff gutter, 2 cross-surface).

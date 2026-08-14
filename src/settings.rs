@@ -83,6 +83,12 @@ pub struct Settings {
     /// motion effects (welcome-card update hints breathing etc.) rest at the base color; the hints themselves stay.
     /// This is bingo's first motion toggle, serving both user opt-out and test determinism.
     pub motion: Option<String>,
+    /// Attention channel (`notifications`): auto (default) / bell / iterm2 /
+    /// kitty / ghostty / off. Decides how a waiting permission prompt, a turn
+    /// that ran long, and a failed turn reach a user who has looked away;
+    /// `auto` picks the terminal's own notification protocol and falls back to
+    /// the bell. `off` also silences the terminal title.
+    pub notifications: Option<String>,
     /// Send cache_control (prompt caching). Off by default: non-official endpoints
     /// handle it unreliably.
     #[serde(rename = "cacheControl")]
@@ -410,6 +416,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     if let Some(motion) = layer.motion {
         base.motion = Some(motion);
     }
+    if let Some(notifications) = layer.notifications {
+        base.notifications = Some(notifications);
+    }
     if let Some(cache) = layer.cache_control {
         base.cache_control = Some(cache);
     }
@@ -501,6 +510,7 @@ pub const KNOWN_KEYS: &[&str] = &[
     "permissionMode",
     "theme",
     "motion",
+    "notifications",
     "cacheControl",
     "respondToBashCommands",
     "bashOutputMaxChars",
@@ -754,6 +764,7 @@ mod tests {
             "permissionMode": "plan",
             "theme": "dark",
             "motion": "off",
+            "notifications": "bell",
             "cacheControl": true,
             "respondToBashCommands": false,
             "bashOutputMaxChars": 12345,

@@ -71,6 +71,11 @@ pub fn history_dir(home: &Path) -> PathBuf {
     data_dir(home).join("history")
 }
 
+/// Rewind snapshot store: ~/.local/share/bingo/rewind/<session>.
+pub fn rewind_dir(home: &Path) -> PathBuf {
+    data_dir(home).join("rewind")
+}
+
 pub fn shares_dir(home: &Path) -> PathBuf {
     data_dir(home).join("shares")
 }

@@ -35,6 +35,34 @@ pub enum DialogAction {
     Cancel,
 }
 
+/// What approving a permission request would actually do, rendered above the
+/// options. The prompt names the tool; this shows the act.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskPreview {
+    /// The shell command that would run.
+    Command(String),
+    /// A dry-run unified diff of the file change that would be made — computed
+    /// without touching the file.
+    Diff(String),
+}
+
+/// Which dialog shape a request wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AskKind {
+    /// AskUserQuestion: the model's own options plus an Other free-text row.
+    #[default]
+    Question,
+    /// The permission gate: the three-option approval shape, whose refusal
+    /// option opens a feedback row instead of resolving immediately.
+    Permission,
+}
+
+/// Approval options, in CC's wording. Option 2 is only offered when a session
+/// rule could actually be installed ([`PermissionRequest::scope`]).
+pub const ASK_YES: &str = "Yes";
+pub const ASK_YES_SESSION: &str = "Yes, and don't ask again this session";
+pub const ASK_NO: &str = "No, and tell bingo what to do differently (esc)";
+
 /// Permission/question block to display.
 #[derive(Debug, Clone)]
 pub struct PermissionRequest {
@@ -46,8 +74,17 @@ pub struct PermissionRequest {
     pub options: Vec<String>,
     /// Description of options[i] (CC Select sub-line, dimmed).
     pub descriptions: Vec<Option<String>>,
-    /// AskUserQuestion: a "Other" free-form input is appended automatically (CC behavior).
+    /// A free-form input row is open: AskUserQuestion's "Other" (set from the
+    /// start), or a permission prompt's refusal feedback (opened on demand).
     pub free_text: bool,
+    /// Dialog shape.
+    pub kind: AskKind,
+    /// What approving would do (permission prompts).
+    pub preview: Option<AskPreview>,
+    /// The session-scoped allow rule the "don't ask again" option installs.
+    /// `None`: that option is not offered, because nothing could make the gate
+    /// stop asking about this call.
+    pub scope: Option<String>,
 }
 
 impl PermissionRequest {
@@ -62,7 +99,20 @@ impl PermissionRequest {
             options,
             descriptions: Vec::new(),
             free_text: false,
+            kind: AskKind::Question,
+            preview: None,
+            scope: None,
         }
+    }
+
+    /// Index of the "don't ask again this session" option, when it is offered.
+    pub fn session_option(&self) -> Option<usize> {
+        (self.kind == AskKind::Permission && self.scope.is_some()).then_some(1)
+    }
+
+    /// Index of the refusal option (always last on a permission prompt).
+    pub fn refusal_option(&self) -> Option<usize> {
+        (self.kind == AskKind::Permission).then(|| self.options.len().saturating_sub(1))
     }
 }
 
@@ -78,10 +128,7 @@ pub enum UiEvent {
     RoundEnd,
     TextDelta(String),
     ThinkingDelta(String),
-    ContextUsage {
-        used: u64,
-        window: u64,
-    },
+    ContextUsage(crate::context_usage::ContextUsage),
     /// Cumulative output token count for the current model response while it streams.
     /// `authoritative`: the end-of-round usage total (message_delta), an accounting
     /// correction rather than freshly streamed output — the rate sampler must not
@@ -128,6 +175,27 @@ pub enum UiEvent {
         meta: Option<ImageMeta>,
     },
     TurnEnd,
+    /// The running turn took these queued messages into its own context at a tool
+    /// barrier (D83). They are already in the request, so the composer must drop them
+    /// from its queue and show them in the flow where the model read them — the turn
+    /// side is the authority here, and a pull-back racing this event loses.
+    Steered {
+        items: Vec<crate::steer::SteerItem>,
+    },
+    /// A foreground shell command's output so far (D84): the last few lines, dim,
+    /// under the running tool row, replaced on every sample. No tool id travels with
+    /// it — Phase 2 runs non-concurrency-safe tools serially, so exactly one
+    /// foreground command can be in flight, and the renderer finds it the same way
+    /// [`UiEvent::ToolDone`] does. The rows live in the redrawn tail region and never
+    /// reach scrollback: a running tool row keeps its message unsettled.
+    BashTail(crate::live::LiveTail),
+    /// The user interrupted the turn. `marker` is the exact string the transcript
+    /// recorded (`crate::query::INTERRUPT_MARKER` / `…_TOOL_USE`), echoed into the
+    /// message flow so the screen and the model read the same sentence — a transient
+    /// warning would have expired while the marker stayed in the history.
+    Interrupted {
+        marker: &'static str,
+    },
     /// Non-fatal warning (e.g. MCP connection failure), shown above the input
     /// box; expires after `WARNING_TTL` (10s, filtered at render time).
     Warning(String),
@@ -139,6 +207,9 @@ pub enum UiEvent {
     /// Informational slash output (async producers): persists until the next
     /// input or Esc.
     SlashInfo(String),
+    /// A rewind that finished off the key path (D91): its state line, for the
+    /// flow rather than for a tier that expires.
+    RewindDone(String),
     /// Pin/replace a persistent panel (login flows, long operations): shown
     /// above the prompt until `Unpin` with the same id.
     PinPanel {
@@ -165,26 +236,61 @@ pub enum UiEvent {
 /// Permission prompt backed by the TUI modal. Shared by `tui_hooks` and the subagent prompt
 /// surface attached to the registry, so a subagent's request lands in the same modal queue.
 pub fn modal_ask(asks: mpsc::UnboundedSender<AskRequest>) -> Arc<crate::query::AskFn> {
-    Arc::new(move |tool_name, reason| {
-        let request = PermissionRequest::new(
-            format!("Allow running {tool_name}"),
-            reason,
-            vec!["Allow".to_string(), "Deny".to_string()],
-        );
+    use crate::query::AskOutcome;
+    Arc::new(move |ask| {
+        let mut options = vec![ASK_YES.to_string()];
+        if ask.scope.is_some() {
+            options.push(ASK_YES_SESSION.to_string());
+        }
+        options.push(ASK_NO.to_string());
+        let mut request =
+            PermissionRequest::new(format!("Allow running {}", ask.tool), ask.reason, options);
+        request.kind = AskKind::Permission;
+        request.scope = ask.scope.map(str::to_string);
+        request.preview = ask_preview(ask);
+        let session_option = request.session_option();
         let (tx, rx) = oneshot::channel();
         if asks.send((request, tx)).is_err() {
-            return Box::pin(async { false });
+            return Box::pin(async { AskOutcome::Deny { feedback: None } });
         }
-        Box::pin(async move { matches!(rx.await, Ok(DialogAction::Confirm(0))) })
+        Box::pin(async move {
+            match rx.await {
+                Ok(DialogAction::Confirm(0)) => AskOutcome::Allow,
+                Ok(DialogAction::Confirm(index)) if Some(index) == session_option => {
+                    AskOutcome::AllowSession
+                }
+                Ok(DialogAction::Answer(feedback)) => AskOutcome::Deny {
+                    feedback: Some(feedback),
+                },
+                // The refusal option, Esc, and a dialog the turn outlived all
+                // land here: fail closed, and say nothing on the user's behalf.
+                _ => AskOutcome::Deny { feedback: None },
+            }
+        })
     })
+}
+
+/// The preview rows: a file change shows the diff it would make, anything
+/// carrying a shell command shows the command.
+fn ask_preview(ask: &crate::query::AskContext<'_>) -> Option<AskPreview> {
+    if let Some(diff) = ask.diff {
+        return Some(AskPreview::Diff(diff.to_string()));
+    }
+    ask.input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .map(|command| AskPreview::Command(command.to_string()))
 }
 
 /// Wire query's UiHooks to the TUI channels.
 pub fn tui_hooks(
     events: mpsc::UnboundedSender<UiEvent>,
     asks: mpsc::UnboundedSender<AskRequest>,
+    steer: crate::steer::SteerQueue,
+    live: Arc<crate::live::LiveBash>,
 ) -> UiHooks {
     let tool_events = events.clone();
+    let steer_events = events.clone();
     let ready_events = events.clone();
     let retry_events = events.clone();
     let round_events = events.clone();
@@ -268,8 +374,8 @@ pub fn tui_hooks(
             *retry_round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
             let _ = retry_events.send(UiEvent::StreamRetry);
         }),
-        on_context_usage: Arc::new(move |used, window| {
-            let _ = context_events.send(UiEvent::ContextUsage { used, window });
+        on_context_usage: Arc::new(move |usage| {
+            let _ = context_events.send(UiEvent::ContextUsage(usage));
         }),
         on_tool_ready: Box::new(move |tool_call_id, name, input, standalone| {
             let _ = ready_events.send(UiEvent::ToolReady {
@@ -297,6 +403,20 @@ pub fn tui_hooks(
         on_warning: Box::new(move |message| {
             let _ = warn_events.send(UiEvent::Warning(message));
         }),
+        // Take and announce in one step, under the queue's own lock: whoever takes the
+        // items owns them, and the composer learns of it from the same act. Splitting
+        // the two would open a window in which an item is in the request and still
+        // pending on screen.
+        steer: Arc::new(move || {
+            let items = steer.take();
+            if !items.is_empty() {
+                let _ = steer_events.send(UiEvent::Steered {
+                    items: items.clone(),
+                });
+            }
+            items
+        }),
+        live,
         ask: modal_ask(ask_asks),
         ask_question: Arc::new(move |title, question, options| {
             let mut request = PermissionRequest::new(title, question, Vec::new());
@@ -328,15 +448,19 @@ mod tests {
     fn tui_hooks_emit_live_token_samples_before_final_usage() {
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let (asks_tx, _asks_rx) = mpsc::unbounded_channel();
-        let mut ui = tui_hooks(events_tx, asks_tx);
+        let mut ui = tui_hooks(
+            events_tx,
+            asks_tx,
+            crate::steer::SteerQueue::new(),
+            crate::live::LiveBash::detached(),
+        );
 
-        (ui.on_context_usage)(12_345, 128_000);
+        (ui.on_context_usage)(crate::context_usage::ContextUsage::new(
+            12_345, 128_000, 100_000,
+        ));
         assert!(matches!(
             events_rx.try_recv(),
-            Ok(UiEvent::ContextUsage {
-                used: 12_345,
-                window: 128_000
-            })
+            Ok(UiEvent::ContextUsage(usage)) if usage.used == 12_345 && usage.window == 128_000
         ));
 
         (ui.on_event)(&StreamEvent::TextDelta {
@@ -374,7 +498,12 @@ mod tests {
     async fn ask_question_hook_maps_confirm_and_cancel() {
         let (events_tx, _events_rx) = mpsc::unbounded_channel();
         let (asks_tx, mut asks_rx) = mpsc::unbounded_channel();
-        let ui = tui_hooks(events_tx, asks_tx);
+        let ui = tui_hooks(
+            events_tx,
+            asks_tx,
+            crate::steer::SteerQueue::new(),
+            crate::live::LiveBash::detached(),
+        );
 
         let fut = (ui.ask_question)(
             "Tech stack".to_string(),

@@ -14,6 +14,7 @@ use unicode_width::UnicodeWidthStr;
 use rsmarkdown_core::{Alignment, Ast, Block, Document, Inline, ListItem, Renderer};
 
 use crate::tui::gfx::ImageCap;
+use crate::tui::highlight;
 use crate::tui::line::{ImageRef, Line, SegStyle, char_width};
 use crate::tui::theme::Theme;
 use crate::ui::ImageMeta;
@@ -214,8 +215,7 @@ fn render_into(block: &Block, out: &mut Vec<Line>, width: usize, indent: usize, 
             push_indented(out, lines, indent);
         }
         Block::Code { lang, text } => {
-            let _ = lang;
-            let body = render_code(text, width.saturating_sub(indent), theme);
+            let body = render_code(lang, text, width.saturating_sub(indent), theme);
             push_indented(out, body, indent);
         }
         Block::BlockQuote(children) => {
@@ -290,17 +290,72 @@ fn push_indented(out: &mut Vec<Line>, lines: Vec<Line>, indent: usize) {
     }
 }
 
-fn render_code(text: &str, width: usize, theme: &Theme) -> Vec<Line> {
+/// A fenced code block.
+///
+/// The fence's language tag decides whether the body is coloured; an unknown or
+/// absent tag renders exactly as before. Highlighting slots in here, at the
+/// point where a line becomes segments, so it inherits the per-block cache in
+/// [`MarkdownRenderer::render`] and every surface that renders markdown gets it
+/// at once.
+fn render_code(lang: &str, text: &str, width: usize, theme: &Theme) -> Vec<Line> {
+    let base = theme.code_block();
+    let highlighted = highlight::highlight(lang, text);
     let mut out = Vec::new();
-    for line in text.split('\n') {
-        if line.is_empty() {
+    for (y, raw) in text.split('\n').enumerate() {
+        if raw.is_empty() {
             out.push(Line::empty());
             continue;
         }
-        let line = truncate(line, width);
-        out.push(Line::styled(format!("  {line}"), theme.code_block()));
+        let mut line = Line::styled("  ", base);
+        match highlighted.as_ref().and_then(|h| h.get(y)) {
+            Some(spans) => push_code_spans(&mut line, spans, base, theme, width),
+            None => line.push_styled(truncate(&highlight::expand_tabs(raw), width), base),
+        }
+        out.push(line);
     }
     out
+}
+
+/// Append one highlighted source line, cut at `width` display columns.
+///
+/// Matches [`truncate`]'s contract so a coloured line and a monochrome one end
+/// at the same column: nothing is cut while the line fits, and a line that does
+/// not fit ends with `…` at column `width`.
+fn push_code_spans(
+    line: &mut Line,
+    spans: &[highlight::Span],
+    base: SegStyle,
+    theme: &Theme,
+    width: usize,
+) {
+    let total: usize = spans.iter().map(|(_, t)| t.width()).sum();
+    let budget = if total > width {
+        width.saturating_sub(1)
+    } else {
+        width
+    };
+    let mut col = 0usize;
+    for (class, text) in spans {
+        let style = base.patch(SegStyle::fg(class.color(theme)));
+        let mut piece = String::new();
+        for ch in text.chars() {
+            let w = char_width(ch);
+            if col + w > budget {
+                break;
+            }
+            piece.push(ch);
+            col += w;
+        }
+        if !piece.is_empty() {
+            line.push_styled(piece, style);
+        }
+        if col >= budget {
+            break;
+        }
+    }
+    if total > width {
+        line.push_styled("…", base);
+    }
 }
 
 fn render_list(
@@ -531,7 +586,7 @@ fn collect_inlines(inlines: &[Inline], style: SegStyle, theme: &Theme, out: &mut
                 collect_inlines(text, style.patch(theme.link()), theme, out);
                 out.push(Seg {
                     text: format!("({url})"),
-                    style: style.patch(theme.dim()),
+                    style: style.patch(theme.muted()),
                 });
             }
             Inline::Image { .. } => {
@@ -719,6 +774,104 @@ mod tests {
     fn code_block_keeps_lines() {
         let lines = render_to_plain("```\nlet x = 1;\n```", 40);
         assert_eq!(lines[0], "  let x = 1;");
+    }
+
+    /// Render a fence and return its first line's `(fg, text)` segments.
+    fn fence_segs(
+        lang: &str,
+        code: &str,
+        theme: &Theme,
+    ) -> Vec<(Option<ratatui::style::Color>, String)> {
+        let mut processor = MarkdownProcessor::default();
+        let mut renderer = MarkdownRenderer::with_theme(80, theme.clone());
+        let doc = processor.process_static(&format!("```{lang}\n{code}\n```"));
+        renderer.render(&doc);
+        renderer.lines()[0]
+            .segs
+            .iter()
+            .map(|s| (s.style.fg, s.text.clone()))
+            .collect()
+    }
+
+    /// D92: a tagged fence is coloured, and the three classes a reader actually
+    /// distinguishes come out as three different colours.
+    #[test]
+    fn a_rust_fence_is_highlighted_into_distinct_classes() {
+        let theme = Theme::dark();
+        let segs = fence_segs("rust", "let s = \"hi\"; // note", &theme);
+        let color_of = |needle: &str| {
+            segs.iter()
+                .find(|(_, t)| t.contains(needle))
+                .map(|(fg, _)| *fg)
+                .unwrap_or_else(|| panic!("no segment carrying {needle:?} in {segs:?}"))
+        };
+        let keyword = color_of("let");
+        let string = color_of("\"hi\"");
+        let comment = color_of("// note");
+        assert_eq!(keyword, Some(theme.claude), "keywords take the accent");
+        assert_eq!(string, Some(theme.success));
+        assert_eq!(comment, Some(theme.text_muted), "comments recede");
+        assert_ne!(keyword, string);
+        assert_ne!(string, comment);
+        // The block background survives highlighting — the fence is still a
+        // fence, not a run of loose coloured words.
+        let mut processor = MarkdownProcessor::default();
+        let mut renderer = MarkdownRenderer::with_theme(80, theme.clone());
+        renderer.render(&processor.process_static("```rust\nlet x = 1;\n```"));
+        for seg in &renderer.lines()[0].segs {
+            assert_eq!(seg.style.bg, Some(theme.code_block_bg));
+        }
+    }
+
+    /// An unknown or absent language is not a failure and not a guess: the
+    /// block renders exactly as it did before D92, in one colour.
+    #[test]
+    fn untagged_and_unknown_fences_stay_monochrome() {
+        let theme = Theme::dark();
+        for lang in ["", "brainfuck", "not-a-language"] {
+            let segs = fence_segs(lang, "let s = \"hi\"; // note", &theme);
+            let colors: Vec<_> = segs.iter().map(|(fg, _)| *fg).collect();
+            assert!(
+                colors.iter().all(|c| *c == Some(theme.code_block_fg)),
+                "{lang:?} should be monochrome, got {segs:?}"
+            );
+        }
+    }
+
+    /// The highlight palette is derived from the theme, so switching themes
+    /// switches the code colours with it.
+    #[test]
+    fn the_highlight_palette_follows_the_theme() {
+        let code = "let s = \"hi\";";
+        let dark = fence_segs("rust", code, &Theme::dark());
+        let light = fence_segs("rust", code, &Theme::light());
+        assert_eq!(
+            dark.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
+            light.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
+            "same text, different palette"
+        );
+        assert_ne!(
+            dark.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
+            light.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
+        );
+    }
+
+    /// A highlighted line is cut at the same column a monochrome one is: the
+    /// fence's right edge does not move because the language became known.
+    #[test]
+    fn highlighted_and_monochrome_lines_truncate_alike() {
+        let long = format!("let name = \"{}\";", "x".repeat(60));
+        let width = 30;
+        let render = |lang: &str| {
+            let mut renderer = MarkdownRenderer::with_theme(width, Theme::dark());
+            let mut p = MarkdownProcessor::default();
+            renderer.render(&p.process_static(&format!("```{lang}\n{long}\n```")));
+            renderer.lines()[0].plain_text()
+        };
+        let plain = render("");
+        let colored = render("rust");
+        assert_eq!(plain.width(), colored.width(), "{plain:?} vs {colored:?}");
+        assert!(plain.ends_with('…') && colored.ends_with('…'));
     }
 
     #[test]

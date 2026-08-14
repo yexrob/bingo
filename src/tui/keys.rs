@@ -21,11 +21,11 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "\\ + enter",
-        description: "insert newline (or ctrl+j)",
+        description: "insert newline (or ctrl+j · shift+enter)",
     },
     Binding {
         keys: "esc",
-        description: "interrupt · esc esc clears input",
+        description: "close dialog/menu/panel · back to hub · interrupt · esc esc clears or rewinds",
     },
     Binding {
         keys: "ctrl+c",
@@ -33,7 +33,11 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "up/down",
-        description: "prompt history (queue while busy)",
+        description: "prompt history (edit queued messages while busy)",
+    },
+    Binding {
+        keys: "ctrl+p/n",
+        description: "prompt history (same as up/down)",
     },
     Binding {
         keys: "ctrl+a/e",
@@ -49,15 +53,19 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "alt+b/f",
-        description: "move one word",
+        description: "move one word (stops inside a path)",
     },
     Binding {
-        keys: "ctrl+w/u/k",
+        keys: "alt+d · alt+bksp",
+        description: "delete word forward / back",
+    },
+    Binding {
+        keys: "ctrl+w/u · alt+k",
         description: "delete word / to start / to end",
     },
     Binding {
         keys: "ctrl+y",
-        description: "paste back last deletion",
+        description: "paste back last deletion (alt+y cycles earlier ones)",
     },
     Binding {
         keys: "ctrl+r",
@@ -65,7 +73,11 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "tab",
-        description: "complete slash / bash history",
+        description: "complete command / argument / mention / bash history",
+    },
+    Binding {
+        keys: "@",
+        description: "mention a project file or a running agent",
     },
     Binding {
         keys: "pgup/pgdn",
@@ -85,7 +97,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+o",
-        description: "expand / collapse output",
+        description: "transcript view: full output (ctrl+e · / · q)",
     },
     Binding {
         keys: "ctrl+t",
@@ -93,11 +105,23 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+g",
-        description: "open agents / channels workspace",
+        description: "edit the prompt in $EDITOR (or ctrl+x ctrl+e)",
     },
     Binding {
         keys: "ctrl+b",
-        description: "manage running background agents",
+        description: "background the running command · manage background agents",
+    },
+    Binding {
+        keys: "ctrl+k",
+        description: "switch conversation (type to filter · ctrl+x stops an agent)",
+    },
+    Binding {
+        keys: "/open",
+        description: "open a conversation: @agent · #channel · #team · hub",
+    },
+    Binding {
+        keys: "@name · #name",
+        description: "from the hub, send the rest of the line to that conversation",
     },
     Binding {
         keys: "ctrl+l",
@@ -127,7 +151,10 @@ pub const BINDINGS: &[Binding] = &[
 
 /// Footer hint shown while idle (CC `? for shortcuts`).
 pub const FOOTER_IDLE_HINT: &str = "? for shortcuts";
-/// Footer hint that applies in both idle and busy states.
+/// Footer hint that applies in both idle and busy states. Still literally true
+/// after D82 — ctrl+o is how the folded content is reached — it just reaches it
+/// in the transcript view instead of by rewriting the screen, so the wording
+/// under every collapsed row stays as it is.
 pub const FOOTER_EXPAND_HINT: &str = "ctrl+o to expand";
 /// Empty-input placeholder (CC PromptInput placeholder).
 pub const INPUT_PLACEHOLDER: &str = "Try \"fix a bug\" · / for commands · ! for shell";
@@ -199,23 +226,107 @@ pub fn help_lines(width: usize, max_rows: usize) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// D86 moved ctrl+g from the workspace modal to the `$EDITOR` compose, and
+    /// the panel names the readline chord that does the same thing — the two
+    /// doors are one binding, so they are one row.
     #[test]
-    fn ctrl_g_help_opens_the_workspace_directly() {
+    fn ctrl_g_help_names_the_editor_and_its_chord() {
         let binding = BINDINGS
             .iter()
             .find(|binding| binding.keys == "ctrl+g")
             .unwrap_or_else(|| panic!("ctrl+g binding missing"));
-        assert_eq!(binding.description, "open agents / channels workspace");
-        assert!(!binding.description.contains("pick"));
+        assert_eq!(
+            binding.description,
+            "edit the prompt in $EDITOR (or ctrl+x ctrl+e)"
+        );
     }
 
+    /// D89 retired the workspace modal: a conversation is entered in this
+    /// terminal, not in a screen over it. Nothing in the panel may still send
+    /// the reader looking for a view that no longer exists, and the two doors
+    /// that replaced it — `/open` and the way back — are both named.
     #[test]
-    fn ctrl_b_help_opens_the_background_agent_manager() {
+    fn the_panel_names_the_doors_that_replaced_the_workspace() {
+        for binding in BINDINGS {
+            assert!(
+                !binding.description.contains("workspace"),
+                "{} still advertises the retired workspace",
+                binding.keys
+            );
+        }
+        let find = |keys: &str| {
+            BINDINGS
+                .iter()
+                .find(|binding| binding.keys == keys)
+                .unwrap_or_else(|| panic!("{keys} binding missing"))
+        };
+        assert!(find("/open").description.contains("@agent"));
+        assert!(
+            find("esc").description.contains("back to hub"),
+            "and Esc says where it goes from one"
+        );
+    }
+
+    /// Three spellings of one destination — the switcher, the command and the
+    /// line-leading form — and the panel names all three, because a reader who
+    /// found one of them should be able to find the rest (D90).
+    #[test]
+    fn the_panel_names_every_door_into_a_conversation() {
+        let find = |keys: &str| {
+            BINDINGS
+                .iter()
+                .find(|binding| binding.keys == keys)
+                .unwrap_or_else(|| panic!("{keys} binding missing"))
+        };
+        let switcher = find("ctrl+k").description;
+        assert!(switcher.contains("filter"), "{switcher}");
+        assert!(
+            switcher.contains("ctrl+x"),
+            "the stop key is only discoverable from here: {switcher}"
+        );
+        assert!(find("@name · #name").description.contains("hub"));
+        // The kill ctrl+k used to be is still documented, under its new key.
+        assert!(find("ctrl+w/u · alt+k").description.contains("to end"));
+        assert!(
+            !BINDINGS
+                .iter()
+                .any(|binding| binding.keys.contains("ctrl+k") && binding.keys.contains('/')),
+            "ctrl+k is one meaning now, not a slash-joined family"
+        );
+    }
+
+    /// The kill/yank family is documented as a family: a ring is only useful
+    /// if the key that cycles it is discoverable from the key that fills it.
+    #[test]
+    fn the_kill_ring_keys_name_each_other() {
+        let find = |keys: &str| {
+            BINDINGS
+                .iter()
+                .find(|binding| binding.keys == keys)
+                .unwrap_or_else(|| panic!("{keys} binding missing"))
+        };
+        assert!(find("ctrl+y").description.contains("alt+y"));
+        assert!(find("alt+d · alt+bksp").description.contains("word"));
+        assert!(find("ctrl+p/n").description.contains("history"));
+        assert!(
+            find("\\ + enter").description.contains("shift+enter"),
+            "the enhanced-terminal newline is named where the newline is"
+        );
+    }
+
+    /// ctrl+b reads the situation: a shell command running in the foreground is
+    /// what it backgrounds, and only when there is none does it open the manager
+    /// (D84). The panel names both, in the order the key tries them.
+    #[test]
+    fn ctrl_b_help_names_both_of_its_meanings() {
         let binding = BINDINGS
             .iter()
             .find(|binding| binding.keys == "ctrl+b")
             .unwrap_or_else(|| panic!("ctrl+b binding missing"));
-        assert_eq!(binding.description, "manage running background agents");
+        assert_eq!(
+            binding.description,
+            "background the running command · manage background agents"
+        );
     }
 
     #[test]

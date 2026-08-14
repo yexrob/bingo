@@ -7,647 +7,107 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::sync::mpsc;
 
 use crate::query::Session;
+use crate::tui::bufferview::Decor;
+use crate::tui::composer::KillDir;
 use crate::ui::UiEvent;
 
-impl super::Chat {
-    /// Switch the provider: takes effect in the runtime immediately; persist=true writes settings (restored on restart).
+/// Everything Esc can dismiss, in the order it dismisses them (D80). The key
+/// handler walks [`EscLayer::ORDER`] top-down, acts on the first layer that is
+/// open and stops: one press closes one level.
+///
+/// The busy interrupt sits *inside* the list rather than above it, and that
+/// placement is the whole point. A dropdown, an info block or the `?` panel
+/// opened over a running turn is what the user is looking at when they reach
+/// for Esc; closing the turn instead was answering a question nobody asked.
+/// Ctrl+C keeps the unconditional interrupt — the layers do not shield it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscLayer {
+    /// Permission / question dialog: Esc denies it.
+    AskDialog,
+    /// `/model` `/think` `/theme` `/resume` `/provider` pickers (one level per press).
+    Menu,
+    /// The ctrl+k conversation switcher (D90): closes without switching.
     ///
-    /// provider+model is an atomic selection: switching endpoints must resolve the model (this session's last-used →
-    /// endpoint default → keep + warn) — the same rule as the subagent cross-provider check;
-    /// the main session used to keep the old model silently, and the next message 404'd on the new endpoint.
-    pub(crate) fn switch_provider(&mut self, name: &str, persist: bool) {
-        // A mid-turn protocol swap would send this conversation's accumulated
-        // thinking/reasoning blocks to the other protocol's endpoint — refuse
-        // instead of corrupting the running turn.
-        if self.busy {
-            self.push_slash_error(
-                "[error] code=BUSY msg=cannot switch providers mid-turn (press Esc to interrupt, then retry)".to_string(),
-            );
-            return;
-        }
-        let session = self.session.clone();
-        let name = name.to_string();
-        match session.client.set_provider(&name) {
-            Ok(()) => {
-                let (_, url) = session.client.current_endpoint();
-                let prev_provider = session.runtime.provider.borrow().clone();
-                let prev_model = session.runtime.model.borrow().clone();
-                if prev_provider != name {
-                    self.provider_models
-                        .insert(prev_provider, prev_model.clone());
-                }
-                let _ = session.runtime.provider_tx.send(name.clone());
-                let resolved = self
-                    .provider_models
-                    .get(&name)
-                    .cloned()
-                    .or_else(|| session.client.provider_default_model(&name));
-                let model_note = match &resolved {
-                    Some(model) if *model != prev_model => {
-                        let _ = session.runtime.model_tx.send(model.clone());
-                        format!(" · model {model}")
-                    }
-                    Some(_) => String::new(),
-                    None => format!(
-                        " · ⚠ model {prev_model} may not be available on this endpoint (pick with /model)"
-                    ),
-                };
-                let model_now = session.runtime.model.borrow().clone();
-                self.context_usage = crate::context_usage::ContextUsage::new(
-                    self.context_usage.used,
-                    crate::budget::context_window_for(&session.client.models(), &model_now),
-                );
-                self.provider_models.insert(name.clone(), model_now.clone());
-                self.provider_session_only = !persist;
-                if persist {
-                    // Same path as the /model menu: provider+model persist as a pair.
-                    self.persist_selection(&model_now, &name);
-                    self.push_slash_output(format!(
-                        "✓ provider switched: {name} ({url}){model_note}"
-                    ));
-                } else {
-                    self.push_slash_output(format!(
-                        "✓ provider switched: {name} ({url}){model_note} (this session only)"
-                    ));
-                }
-                // Credentials unavailable: the switch succeeds but the first request would fail — guide early (the criterion is
-                // "are credentials available", not just the auth kind — a keyless apiKey-style
-                // preset used to pass silently).
-                match session.client.auth_status(&name) {
-                    Some(crate::api::contract::AuthStatus::OAuth { account: None }) => {
-                        self.push_slash_output(format!(
-                            "⚠ {name} not logged in: /provider login {name}"
-                        ));
-                    }
-                    Some(crate::api::contract::AuthStatus::StoredKey { configured: false }) => {
-                        self.push_slash_output(format!(
-                            "⚠ {name} has no API key configured: /provider login {name} --manual <key>"
-                        ));
-                    }
-                    Some(crate::api::contract::AuthStatus::Unconfigured) => {
-                        self.push_slash_output(
-                            "⚠ default has no credentials: write apiKey in settings or /provider login codex"
-                                .to_string(),
-                        );
-                    }
-                    _ => {}
-                }
-            }
-            Err(e) => self.push_slash_error(e),
-        }
+    /// Menu-tier, beside the pickers rather than above them: it is a transient
+    /// chooser over the composer, and it opens and closes on its own key.
+    Switcher,
+    /// The esc-esc rewind selector (D91): the action list returns to the turn
+    /// list, the turn list closes.
+    ///
+    /// Menu-tier for the same reason as the switcher, and below it because a
+    /// switcher can be opened over a rewind list but not the other way round:
+    /// rewind only opens when nothing else is.
+    Rewind,
+    /// The ctrl+b background-agent overlay (detail returns to the list, the list closes).
+    AgentManager,
+    /// Slash-command dropdown: closes, and takes a bare `/` query with it.
+    SlashDropdown,
+    /// The `@` mention dropdown: closes, leaving the typed token alone.
+    /// Same stratum as [`EscLayer::SlashDropdown`] — both are transient
+    /// completion surfaces over the composer, and the two are mutually
+    /// exclusive, so their relative order is a formality.
+    MentionDropdown,
+    /// ctrl+r history search: cancels without adopting the hit.
+    Search,
+    /// A page/field-level error row above the prompt.
+    ErrorRow,
+    /// Info-tier lines (`/help` `/status` … output that persists until dismissed).
+    InfoLines,
+    /// The `?` shortcut panel.
+    HelpPanel,
+    /// The task panel, when the user opened it themselves with ctrl+t.
+    TaskPanel,
+    /// A conversation other than the hub: Esc goes home (D89).
+    ///
+    /// Above the interrupt on purpose — navigation before interruption. Esc in
+    /// a DM is "take me back", never "stop the model": a hub turn running
+    /// behind you keeps running, and its interrupt is reachable from the hub,
+    /// which is the only place it is the thing on screen. Ctrl+C is unchanged
+    /// and still stops the turn from anywhere.
+    BackToHub,
+    /// The running turn.
+    Interrupt,
+    /// Bash mode on an empty input. Below the interrupt, unlike every other
+    /// layer, because the `!` prefix is sticky: a running bash command always
+    /// sits under an empty bash-mode composer, and Esc there has to reach the
+    /// command rather than the prompt prefix.
+    BashMode,
+    /// A non-empty input: esc-esc clears it into history.
+    ClearInput,
+}
+
+impl EscLayer {
+    /// The stack, top first. The single source for Esc's priority.
+    pub const ORDER: [EscLayer; 16] = [
+        EscLayer::AskDialog,
+        EscLayer::Menu,
+        EscLayer::Switcher,
+        EscLayer::Rewind,
+        EscLayer::AgentManager,
+        EscLayer::SlashDropdown,
+        EscLayer::MentionDropdown,
+        EscLayer::Search,
+        EscLayer::ErrorRow,
+        EscLayer::InfoLines,
+        EscLayer::HelpPanel,
+        EscLayer::TaskPanel,
+        EscLayer::BackToHub,
+        EscLayer::Interrupt,
+        EscLayer::BashMode,
+        EscLayer::ClearInput,
+    ];
+}
+
+/// Who a flow position belongs to, for sender grouping. A rule belongs to
+/// nobody, which is what makes the first message after one carry its name.
+fn speaker_of(item: &crate::tui::bufferview::FlowItem) -> Option<String> {
+    match &item.decor {
+        crate::tui::bufferview::Decor::Said(who) => Some(who.clone()),
+        _ => None,
     }
+}
 
-    /// Option description: URL + redacted key (first 4 chars; short keys get no ellipsis — following the existing info column).
-    pub(crate) fn provider_desc(&self, name: &str) -> String {
-        let (key, url) = self
-            .session
-            .client
-            .provider_endpoint(name)
-            .unwrap_or_else(|| (None, "?".to_string()));
-        let protocol = self
-            .session
-            .client
-            .provider_protocol(name)
-            .unwrap_or_default();
-        let auth = match self.session.client.auth_status(name) {
-            Some(crate::api::contract::AuthStatus::ApiKey) => {
-                let key = key.unwrap_or_default();
-                if key.is_empty() {
-                    format!("○ not configured (/provider login {name})")
-                } else {
-                    let mut key_shown: String = key.chars().take(4).collect();
-                    if key.chars().count() > 4 {
-                        key_shown.push('…');
-                    }
-                    format!("key {key_shown}")
-                }
-            }
-            // The key in auth.json (--manual): configured reads live — logging in during this
-            // session immediately flips it from "not configured" to "configured".
-            Some(crate::api::contract::AuthStatus::StoredKey { configured: true }) => {
-                "✓ key (auth.json)".to_string()
-            }
-            Some(crate::api::contract::AuthStatus::StoredKey { configured: false }) => {
-                format!("○ not configured (/provider login {name} --manual <key>)")
-            }
-            Some(crate::api::contract::AuthStatus::OAuth { account: Some(acc) }) => {
-                format!("✓ {acc}")
-            }
-            Some(crate::api::contract::AuthStatus::OAuth { account: None }) => {
-                format!("○ not logged in (/provider login {name})")
-            }
-            Some(crate::api::contract::AuthStatus::Unconfigured) => {
-                "○ not configured (write apiKey in settings or /provider login codex)".to_string()
-            }
-            None => "?".to_string(),
-        };
-        let badge = if self.session.client.is_preset(name) {
-            " · built-in"
-        } else {
-            ""
-        };
-        format!("{url} ({auth} · {protocol}{badge})")
-    }
-
-    /// Open the `/provider` selector: default first (the top-level endpoint), then named providers;
-    /// ● marks the current provider, other menus close exclusively.
-    pub(crate) fn open_provider_menu(&mut self) {
-        let current = self.session.runtime.provider.borrow().clone();
-        // Order shares a source with /model's level one (provider_order): the number jump means the same in both places.
-        let names = self.provider_order();
-        let mut options = Vec::with_capacity(names.len());
-        for name in names {
-            options.push((name.clone(), self.provider_desc(&name)));
-        }
-        let current = options.iter().position(|(n, _)| *n == current);
-        let menu = ProviderMenu {
-            selected: current.unwrap_or(0),
-            current,
-            options,
-        };
-        if menu.picker().is_empty() {
-            return;
-        }
-        self.close_menus();
-        self.provider_menu = Some(menu);
-        self.clear_slash_suggestions();
-    }
-
-    /// Provider menu keys: ↑↓/1-N move (delegated to the PickerModel core),
-    /// Enter switches + persists, s = session-only (no settings write), Esc exits.
-    fn provider_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        let Some(menu) = &mut self.provider_menu else {
-            return false;
-        };
-        match code {
-            KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
-                let mut core = menu.picker();
-                core.move_selection(1);
-                menu.selected = core.selected;
-                true
-            }
-            KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
-                let mut core = menu.picker();
-                core.move_selection(-1);
-                menu.selected = core.selected;
-                true
-            }
-            KeyCode::Char(c)
-                if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                let mut core = menu.picker();
-                if let Some(n) = c.to_digit(10)
-                    && core.jump(n as usize)
-                {
-                    menu.selected = core.selected;
-                }
-                // Swallow even out-of-range digits: a menu is a modal surface —
-                // "4" on a 3-item picker used to type a literal 4 into the input.
-                true
-            }
-            KeyCode::Char('s') if !modifiers.contains(KeyModifiers::CONTROL) => {
-                let core = menu.picker();
-                let value = core
-                    .selected_item()
-                    .map(|i| i.value.clone())
-                    .unwrap_or_default();
-                self.provider_menu = None;
-                self.switch_provider(&value, false);
-                true
-            }
-            KeyCode::Enter => {
-                let core = menu.picker();
-                let value = core
-                    .selected_item()
-                    .map(|i| i.value.clone())
-                    .unwrap_or_default();
-                self.provider_menu = None;
-                self.switch_provider(&value, true);
-                true
-            }
-            KeyCode::Esc => {
-                self.provider_menu = None;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// `/provider login <name> [--device-auth|--manual <token>]`: OAuth login
-    /// for a provider with an `oauth` config (D33 §6). Default = loopback
-    /// PKCE (opens the browser); `--device-auth` prints URL + code and polls
-    /// (headless/SSH); `--manual` stores a pasted token (no refresh).
-    pub(crate) fn slash_provider_login(&mut self, arg: &str) {
-        let parts: Vec<&str> = arg.split_whitespace().collect();
-        let Some(name) = parts.first() else {
-            self.push_slash_output(
-                "usage: /provider login <name> [--device-auth|--manual <token>]".to_string(),
-            );
-            return;
-        };
-        let manual = parts
-            .iter()
-            .position(|p| *p == "--manual")
-            .and_then(|i| parts.get(i + 1).copied());
-        let device_auth = parts.contains(&"--device-auth");
-
-        let session = self.session.clone();
-        // Effective config = user settings ⊕ built-in preset (D34 §6.5):
-        // presets make official subscriptions loginable with zero config.
-        let preset = crate::api::providers::presets::preset(name);
-        let known = session.settings.providers.contains_key(*name) || preset.is_some();
-        if !known {
-            self.push_slash_error(format!(
-                "provider \"{name}\" not found (see /provider for the list)"
-            ));
-            return;
-        }
-        let oauth_kind = session
-            .settings
-            .providers
-            .get(*name)
-            .and_then(|c| c.oauth.as_ref().map(|o| o.kind.clone()))
-            .or_else(|| preset.and_then(|p| p.oauth_kind.map(str::to_string)));
-        let name = name.to_string();
-        let home = session.home.clone();
-        let events = self.events.clone();
-        let http = reqwest::Client::new();
-        let config = crate::api::auth::OauthFlowConfig::codex();
-
-        // --manual first: works for both apiKey presets (opencode-go, stores
-        // auth.json `{type:"api"}`) and oauth presets (pasted access token).
-        if let Some(token) = manual {
-            let token = token.to_string();
-            let api_preset = preset.map(|p| p.oauth_kind.is_none()).unwrap_or(false);
-            // Share the session Client's TokenProvider: saving through the
-            // same instance updates the adapter's cache + account mirror, so
-            // the login takes effect in this session (no restart).
-            let shared_tp = session.client.token_provider(&name);
-            tokio::spawn(async move {
-                if api_preset {
-                    let store = crate::auth::AuthStore::new(&home);
-                    match store.set(&name, crate::auth::AuthEntry::Api { key: token }) {
-                        Ok(()) => {
-                            let _ = events.send(UiEvent::SlashOutput(format!(
-                                "✓ saved {name}'s API key (subscription key)"
-                            )));
-                        }
-                        Err(e) => {
-                            let _ = events.send(UiEvent::SlashError(format!("✗ save failed: {e}")));
-                        }
-                    }
-                    return;
-                }
-                let tp = shared_tp.unwrap_or_else(|| {
-                    std::sync::Arc::new(crate::api::auth::TokenProvider::new(&home, &name, config))
-                });
-                let tokens = crate::api::auth::TokenSet {
-                    access_token: token,
-                    refresh_token: String::new(),
-                    id_token: None,
-                    expires_at: None,
-                    account_id: None,
-                };
-                match tp.save(&tokens).await {
-                    Ok(()) => {
-                        let _ = events.send(UiEvent::SlashOutput(format!(
-                            "✓ saved {name}'s login info (a --manual token does not auto-refresh)"
-                        )));
-                    }
-                    Err(e) => {
-                        let _ = events.send(UiEvent::SlashError(format!("✗ save failed: {e}")));
-                    }
-                }
-            });
-            return;
-        }
-
-        // OAuth gate: codex only in v1; apiKey presets guide the key paste.
-        let Some(oauth_kind) = oauth_kind else {
-            self.push_slash_info(format!(
-                "provider \"{name}\" requires an API key (subscription key):\n  1. get one at opencode.ai/auth\n  2. /provider login {name} --manual <key>"
-            ));
-            return;
-        };
-        if oauth_kind != "codex" {
-            self.push_slash_error(format!(
-                "unsupported oauth.kind \"{oauth_kind}\" (v1 supports only codex)"
-            ));
-            return;
-        }
-
-        if device_auth {
-            // headless/SSH: print the URL + one-time code, poll for authorization.
-            let shared_tp = session.client.token_provider(&name);
-            tokio::spawn(async move {
-                let flow = crate::api::auth::DeviceFlow::new(&http, &config);
-                match flow.start().await {
-                    Ok((prompt, device_auth_id, interval)) => {
-                        // Pinned: the code is valid for 15 minutes — it must
-                        // stay on screen for all of them (the 2s TTL burned
-                        // it before anyone could type it).
-                        let _ = events.send(UiEvent::PinPanel {
-                            id: "login".to_string(),
-                            lines: vec![
-                                format!("sign in to {name} (device authorization)"),
-                                format!("  1. open {}", prompt.verification_url),
-                                format!("  2. enter code {} (valid for 15 minutes)", prompt.user_code),
-                                "⏳ waiting for authorization… (Esc will not cancel; the panel disappears when done)".to_string(),
-                            ],
-                        });
-                        let outcome = flow
-                            .poll(&device_auth_id, &prompt.user_code, interval)
-                            .await;
-                        let _ = events.send(UiEvent::Unpin {
-                            id: "login".to_string(),
-                        });
-                        match outcome {
-                            Ok(tokens) => {
-                                let tp = shared_tp.unwrap_or_else(|| {
-                                    std::sync::Arc::new(crate::api::auth::TokenProvider::new(
-                                        &home, &name, config,
-                                    ))
-                                });
-                                match tp.save(&tokens).await {
-                                    Ok(()) => {
-                                        let _ = events.send(UiEvent::SlashOutput(format!(
-                                            "✓ signed in to {name}"
-                                        )));
-                                    }
-                                    Err(e) => {
-                                        let _ = events.send(UiEvent::SlashOutput(format!(
-                                            "✗ save failed: {e}"
-                                        )));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let _ = events
-                                    .send(UiEvent::SlashOutput(format!("✗ sign-in failed: {e}")));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
-                    }
-                }
-            });
-            return;
-        }
-
-        // Default: loopback PKCE (local callback + opening the browser).
-        let shared_tp = session.client.token_provider(&name);
-        tokio::spawn(async move {
-            let flow = crate::api::auth::LoopbackPkce::new(&http, &config);
-            match flow.authorize_url().await {
-                Ok((url, _redirect, _verifier, handle)) => {
-                    // Pinned, with the URL itself: on SSH/no-GUI hosts the
-                    // browser never opens and this line is the only way
-                    // through (it used to say "tried to open" and show nothing).
-                    let _ = events.send(UiEvent::PinPanel {
-                        id: "login".to_string(),
-                        lines: vec![
-                            format!("sign in to {name}: complete the authorization in the browser (tried to open it automatically)"),
-                            format!("  {url}"),
-                            format!("  browser did not open? /provider login {name} --device-auth"),
-                        ],
-                    });
-                    let _ = crate::share::open_in_browser(&url);
-                    let outcome = handle.await;
-                    let _ = events.send(UiEvent::Unpin {
-                        id: "login".to_string(),
-                    });
-                    match outcome {
-                        Ok(Ok(tokens)) => {
-                            let tp = shared_tp.unwrap_or_else(|| {
-                                std::sync::Arc::new(crate::api::auth::TokenProvider::new(
-                                    &home, &name, config,
-                                ))
-                            });
-                            match tp.save(&tokens).await {
-                                Ok(()) => {
-                                    let _ = events.send(UiEvent::SlashOutput(format!(
-                                        "✓ signed in to {name}"
-                                    )));
-                                }
-                                Err(e) => {
-                                    let _ = events
-                                        .send(UiEvent::SlashOutput(format!("✗ save failed: {e}")));
-                                }
-                            }
-                        }
-                        Ok(Err(e)) => {
-                            let _ =
-                                events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
-                        }
-                        Err(e) => {
-                            let _ = events
-                                .send(UiEvent::SlashError(format!("✗ sign-in interrupted: {e}")));
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
-                }
-            }
-        });
-    }
-
-    pub(crate) fn slash_provider_logout(&mut self, arg: &str) {
-        let name = arg.trim();
-        if name.is_empty() {
-            self.push_slash_error("usage: /provider logout <name>".to_string());
-            return;
-        }
-        let session = self.session.clone();
-        let preset = crate::api::providers::presets::preset(name);
-        let known = session.settings.providers.contains_key(name) || preset.is_some();
-        if !known {
-            self.push_slash_error(format!(
-                "provider \"{name}\" not found (see /provider for the list)"
-            ));
-            return;
-        }
-        let oauth_kind = session
-            .settings
-            .providers
-            .get(name)
-            .and_then(|c| c.oauth.as_ref().map(|o| o.kind.clone()))
-            .or_else(|| preset.and_then(|p| p.oauth_kind.map(str::to_string)));
-        let name = name.to_string();
-        let home = session.home.clone();
-        let events = self.events.clone();
-        let shared_tp = session.client.token_provider(&name);
-        tokio::spawn(async move {
-            if oauth_kind.as_deref() != Some("codex") {
-                // apiKey preset (opencode-go): only clears the auth.json entry.
-                match crate::auth::AuthStore::new(&home).remove(&name) {
-                    Ok(()) => {
-                        let _ = events.send(UiEvent::SlashOutput(format!(
-                            "✓ signed out of {name} (key cleared)"
-                        )));
-                    }
-                    Err(e) => {
-                        let _ = events.send(UiEvent::SlashError(format!("✗ sign-out failed: {e}")));
-                    }
-                }
-                return;
-            }
-            // Same shared instance as login: the session's adapter loses its
-            // cached token immediately (a stale cache kept requests working
-            // after logout).
-            let tp = shared_tp.unwrap_or_else(|| {
-                std::sync::Arc::new(crate::api::auth::TokenProvider::new(
-                    &home,
-                    &name,
-                    crate::api::auth::OauthFlowConfig::codex(),
-                ))
-            });
-            match tp.logout().await {
-                Ok(()) => {
-                    let _ = events.send(UiEvent::SlashOutput(format!(
-                        "✓ signed out of {name} (credentials cleared)"
-                    )));
-                }
-                Err(e) => {
-                    let _ = events.send(UiEvent::SlashError(format!("✗ sign-out failed: {e}")));
-                }
-            }
-        });
-    }
-
-    pub(crate) fn slash_think(&mut self, arg: &str) {
-        if arg.is_empty() {
-            self.open_think_menu();
-            return;
-        }
-        self.set_think_level(arg, true);
-    }
-
-    /// Sets the thinking level. Level table = off + THINKING_LEVELS: off sends no
-    /// parameter; the rest send adaptive thinking + output_config.effort.
-    /// `persist = false` applies to the current session only (no settings write).
-    fn set_think_level(&mut self, arg: &str, persist: bool) {
-        let level = if arg == "off" {
-            None
-        } else if crate::api::contract::THINKING_LEVELS.contains(&arg) {
-            Some(arg.to_string())
-        } else {
-            self.push_slash_error(format!(
-                "[error] code={} msg=usage: /think [off|low|medium|high|xhigh|max]",
-                crate::error::SLASH_ERROR_BAD_ARGUMENT
-            ));
-            return;
-        };
-        let _ = self.session.runtime.thinking_tx.send(level.clone());
-        let saved = level.as_deref().unwrap_or("off");
-        // The wire gate (query.rs) skips thinking for models that reject it —
-        // say so here, or the footer shows a level that never takes effect.
-        let model = self.session.runtime.model.borrow().clone();
-        let ignored = if level.is_some() && !self.session.client.models().supports_thinking(&model)
-        {
-            format!(" (⚠ {model} does not support thinking; the level will be ignored)")
-        } else {
-            String::new()
-        };
-        if persist {
-            let cwd = std::path::PathBuf::from(&self.cwd);
-            let _ = crate::settings::upsert_scoped_settings(
-                &self.session.user_config_dir,
-                &cwd,
-                &serde_json::json!({ "thinkingLevel": saved }),
-            );
-            self.push_slash_output(format!("✓ thinking level set: {saved}{ignored}"));
-        } else {
-            self.push_slash_output(format!(
-                "✓ thinking level set: {saved} (this session only){ignored}"
-            ));
-        }
-    }
-
-    /// Enters the `/think` level selector: preselects the current level (off when unset).
-    fn open_think_menu(&mut self) {
-        let current = self.session.runtime.thinking.borrow().clone();
-        let current = current.as_deref().unwrap_or("off");
-        let current = THINK_LEVELS
-            .iter()
-            .position(|(name, _)| *name == current)
-            .unwrap_or(0);
-        let menu = ThinkMenu {
-            selected: current,
-            current,
-        };
-        // Empty-table guard (THINK_LEVELS is a non-empty const; this defensive branch is unreachable): the menu stays closed.
-        if menu.picker().is_empty() {
-            return;
-        }
-        self.close_menus();
-        self.think_menu = Some(menu);
-        self.clear_slash_suggestions();
-    }
-
-    /// Think level menu keys: ↑↓/1-6 move (wraps, delegated to the PickerModel core),
-    /// Enter confirms + persists, s = session-only (no settings write), Esc exits.
-    /// Returns whether consumed.
-    fn think_menu_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        let Some(menu) = &mut self.think_menu else {
-            return false;
-        };
-        match code {
-            KeyCode::Down if !modifiers.contains(KeyModifiers::CONTROL) => {
-                let mut core = menu.picker();
-                core.move_selection(1);
-                menu.selected = core.selected;
-                true
-            }
-            KeyCode::Up if !modifiers.contains(KeyModifiers::CONTROL) => {
-                let mut core = menu.picker();
-                core.move_selection(-1);
-                menu.selected = core.selected;
-                true
-            }
-            // Direct jump: 1 = off … 6 = max (fixed 6-item table, §G10).
-            KeyCode::Char(c)
-                if c.is_ascii_digit() && !modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                let mut core = menu.picker();
-                if let Some(n) = c.to_digit(10)
-                    && core.jump(n as usize)
-                {
-                    menu.selected = core.selected;
-                }
-                // Swallow even out-of-range digits: a menu is a modal surface —
-                // "4" on a 3-item picker used to type a literal 4 into the input.
-                true
-            }
-            KeyCode::Char('s') if !modifiers.contains(KeyModifiers::CONTROL) => {
-                let core = menu.picker();
-                let value = core
-                    .selected_item()
-                    .map(|i| i.value.clone())
-                    .unwrap_or_default();
-                self.think_menu = None;
-                self.set_think_level(&value, false);
-                true
-            }
-            KeyCode::Enter => {
-                let core = menu.picker();
-                let value = core
-                    .selected_item()
-                    .map(|i| i.value.clone())
-                    .unwrap_or_default();
-                self.think_menu = None;
-                self.set_think_level(&value, true);
-                true
-            }
-            KeyCode::Esc => {
-                self.think_menu = None;
-                true
-            }
-            _ => false,
-        }
-    }
-
+impl super::Chat {
     pub(crate) fn slash_skills(&mut self) {
         let home = self.session.home.clone();
         let cwd = std::path::PathBuf::from(&self.cwd);
@@ -678,15 +138,70 @@ impl super::Chat {
         self.push_slash_info(text.join("\n"));
     }
 
-    /// `/team <subcommand>` (D31 project-level formation): dispatched to team_cmd, multi-line output queued at once.
+    /// `/team <subcommand>` (D31 project-level formation): dispatched to
+    /// team_cmd, and the answer lands on the board it is about (D90).
+    ///
+    /// It used to go to the hub's info tier, which put the formation's own
+    /// report everywhere except the buffer that exists to hold it. When the
+    /// board is what you are looking at, the output prints there directly; when
+    /// it is not, the board's unread count carries it and one info line says
+    /// where it went — the user is told, rather than left to wonder why the
+    /// command answered with nothing.
     pub(crate) fn slash_team(&mut self, arg: &str) {
         let lines = crate::team_cmd::run(&self.session, &std::path::PathBuf::from(&self.cwd), arg);
-        self.push_slash_info(lines.join("\n"));
+        let label = if arg.trim().is_empty() {
+            "/team".to_string()
+        } else {
+            format!("/team {}", arg.trim())
+        };
+        let tick = self.tick;
+        self.buffers
+            .note_team_output(&label, &lines.join("\n"), tick);
+        if *self.buffers.active() == crate::tui::buffer::BufferId::Team {
+            self.poll_active_conversation();
+        } else {
+            self.push_slash_info(format!("→ {}", crate::tui::buffer::BufferId::Team.label()));
+        }
+        self.dirty = true;
     }
 
-    /// Rebuilds the slash dropdown from the registry and currently loaded skills.
+    /// Rebuilds the composer's dropdown after an edit. One surface at a time,
+    /// in the order the caret decides: an `@` token under the caret (D85), else
+    /// the argument phase of a slash line (D85), else the command-name phase.
     pub(crate) fn update_slash_suggestions(&mut self) {
         self.clear_slash_suggestions();
+        self.update_mention();
+        if self.mention.is_some() {
+            return;
+        }
+        if let Some(ctx) = crate::tui::complete::arg_context(&self.input) {
+            // Past the command name, whatever happens next: a free-form
+            // argument offers nothing rather than falling back to re-offering
+            // the command the user has already finished typing.
+            if let Some(candidates) = self.arg_candidates(&ctx) {
+                let start = ctx.start;
+                let items =
+                    crate::tui::complete::fuzzy_rank(ctx.partial, candidates, |candidate| {
+                        candidate.value.as_str()
+                    });
+                self.slash_arg_start = Some(start);
+                self.slash_suggestions = items
+                    .into_iter()
+                    .map(|candidate| SlashSuggestion {
+                        name: candidate.value,
+                        hint: String::new(),
+                        description: candidate.description,
+                    })
+                    .collect();
+                self.slash_selected = self
+                    .slash_selected
+                    .min(self.slash_suggestions.len().saturating_sub(1));
+            }
+            // The name-phase "no matching commands" hint would be a lie here:
+            // an unmatched argument is still a legal thing to type.
+            self.slash_no_match = false;
+            return;
+        }
         let home = self.session.home.clone();
         let cwd = std::path::PathBuf::from(&self.cwd);
         let skills = crate::skills::load_skills(&home, &cwd)
@@ -745,17 +260,38 @@ impl super::Chat {
                 true
             }
             KeyCode::Esc => {
+                // The argument phase keeps its line: `/model dee` is a command
+                // the user is halfway through typing, not a stray query.
+                let name_phase = self.slash_arg_start.is_none();
                 self.clear_slash_suggestions();
+                // The name dropdown only exists for a pure `/`-query — dismissing
+                // it dismisses the query too (the leftover "/th" used to turn the
+                // next command into "//model").
+                if name_phase && self.input.starts_with('/') {
+                    self.set_input("");
+                }
                 true
             }
             _ => false,
         }
     }
 
-    /// Applies the selected suggestion (applyCommandSuggestion): fills `/name ` back into the input.
+    /// Applies the selected suggestion (applyCommandSuggestion). In the name
+    /// phase that is `/name ` for the whole line; in the argument phase (D85)
+    /// the value is spliced over the partial token, leaving the command and any
+    /// earlier arguments alone. Both end with a space, so the next argument's
+    /// dropdown opens straight away.
     fn apply_slash_suggestion(&mut self) {
         if let Some(s) = self.slash_suggestions.get(self.slash_selected) {
-            self.input = format!("/{} ", s.name);
+            match self.slash_arg_start {
+                Some(start) if start <= self.input.len() && self.input.is_char_boundary(start) => {
+                    self.input = format!("{}{} ", &self.input[..start], s.name);
+                }
+                _ => self.input = format!("/{} ", s.name),
+            }
+            // The caret follows the text it just completed; it used to stay
+            // where the partial word ended, leaving it mid-line.
+            self.cursor = self.input.len();
         }
         self.clear_slash_suggestions();
     }
@@ -786,6 +322,72 @@ impl super::Chat {
         }
         let item = self.queued.remove(0);
         self.start_turn(item.text, true);
+    }
+
+    /// Re-arms the steer channel from the queue: the longest prefix of plain messages
+    /// the running turn may absorb (D83).
+    ///
+    /// It is a *prefix*, not a filter. A slash command runs on this side, so it cannot
+    /// travel to the turn — and letting a plain message queued behind one jump into the
+    /// turn would run the two in the opposite order from the one they were typed in.
+    /// The same goes for a message carrying images: mounting attachments is `start_turn`'s
+    /// path, so it waits for TurnEnd and everything after it waits with it.
+    ///
+    /// With no turn running there is nothing to steer, and the channel is emptied rather
+    /// than left holding an offer for whichever turn starts next.
+    pub(crate) fn rearm_steer(&mut self) {
+        if !self.busy {
+            self.steer.reset();
+            return;
+        }
+        let mut items = Vec::new();
+        for entry in &self.queued {
+            if entry.is_slash || !self.resolve_images(&entry.text).is_empty() {
+                break;
+            }
+            items.push(crate::steer::SteerItem {
+                id: entry.id,
+                text: entry.text.clone(),
+            });
+        }
+        self.steer.rearm(items);
+    }
+
+    /// The running turn took these queued messages into its own context at a tool
+    /// barrier: they are in the request already, so they leave the queue and enter the
+    /// flow where the model read them.
+    ///
+    /// The reply block is split there. One turn renders as one assistant message, so a
+    /// line merely pushed after it would sink below everything the turn still had to
+    /// say; closing the block and opening a continuation — the same move an
+    /// AskUserQuestion answer makes — puts the message between the reply written
+    /// without it and the reply written with it, which is the order the history holds.
+    pub(crate) fn absorb_steered(&mut self, items: &[crate::steer::SteerItem]) {
+        if items.is_empty() {
+            return;
+        }
+        self.queued
+            .retain(|entry| !items.iter().any(|item| item.id == entry.id));
+        for item in items {
+            self.push_steered_line(&item.text);
+        }
+        self.open_continuation_message();
+        self.rearm_steer();
+        self.dirty = true;
+    }
+
+    /// The transcript line a steered message leaves: the user's own words under the
+    /// `↪` marker, rendered as a single dim line rather than a `❯` bubble.
+    fn push_steered_line(&mut self, text: &str) {
+        self.messages.push(UiMessage {
+            role: Role::User,
+            text: format!("{}{text}", crate::steer::STEER_FLOW_PREFIX),
+            at: crate::channels::now_unix(),
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
     }
 
     /// System-triggered turn: a watchable signal/terminal notification wakes the main agent.
@@ -830,9 +432,10 @@ impl super::Chat {
         session: &Arc<Session>,
         outcome: &crate::query::QueryOutcome,
     ) {
-        if outcome.aborted {
-            let _ = events.send(UiEvent::Warning("turn interrupted".to_string()));
-        } else {
+        if let Some(marker) = outcome.interrupt_marker {
+            let _ = events.send(UiEvent::Interrupted { marker });
+        }
+        if !outcome.aborted {
             match outcome.end_reason {
                 crate::query::QueryEndReason::EmptyResponseRetried => {
                     let _ = events.send(UiEvent::Warning(
@@ -881,6 +484,12 @@ impl super::Chat {
         }
         self.busy = true;
         self.interrupted = false;
+        // The steer channel belongs to one turn (D83): whatever the previous turn chose
+        // not to take must not be folded into this one behind the user's back. The
+        // caller re-arms it against the queue once this turn is the running one.
+        self.steer.reset();
+        let steer = self.steer.clone();
+        let live = self.live.clone();
         let session = self.session_for_turn();
         let events = self.events.clone();
         let asks = self.asks.clone();
@@ -892,7 +501,7 @@ impl super::Chat {
         self.cancel_tx.send_replace(false);
         let handle = tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
-            let mut ui = crate::ui::tui_hooks(events.clone(), asks);
+            let mut ui = crate::ui::tui_hooks(events.clone(), asks, steer, live);
             let history = Self::load_history(&session, &mut ui.on_warning);
             let result =
                 run_query(&session, history, &text, &images, &mut ui, Some(cancel_rx)).await;
@@ -953,6 +562,10 @@ impl super::Chat {
         // without this, one interrupt followed by only `!` commands kept
         // background wake-ups suppressed for the rest of the session.
         self.interrupted = false;
+        // Same as start_turn: the channel is this turn's (D83).
+        self.steer.reset();
+        let steer = self.steer.clone();
+        let live = self.live.clone();
         let session = self.session_for_turn();
         let events = self.events.clone();
         let asks = self.asks.clone();
@@ -961,7 +574,7 @@ impl super::Chat {
         self.cancel_tx.send_replace(false);
         let handle = tokio::spawn(async move {
             let _ = events.send(UiEvent::TurnStart);
-            let mut ui = crate::ui::tui_hooks(events.clone(), asks);
+            let mut ui = crate::ui::tui_hooks(events.clone(), asks, steer, live);
             let history = Self::load_history(&session, &mut ui.on_warning);
             let result = crate::query::run_bash_command(
                 &session,
@@ -990,113 +603,12 @@ impl super::Chat {
         Self::supervise_turn(self.events.clone(), handle);
     }
 
-    /// Dialog key input (Select semantics):
-    /// digits/Enter confirm, ↑/↓ move the focus, Esc cancels; typing goes directly when the focus is on Other.
-    /// Returns whether it was consumed.
-    ///
-    /// Modifier-carrying chars are NOT consumed: crossterm reports ctrl+c as
-    /// `Char('c')` + CONTROL, so swallowing them here turned the interrupt (and
-    /// every readline chord) into literal letters inside the Other input.
-    pub fn ask_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        let Some((request, _)) = &self.pending_ask else {
-            return false;
-        };
-        if matches!(code, KeyCode::Char(_))
-            && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
-        {
-            return false;
-        }
-        let options_len = request.options.len();
-        let free_text = request.free_text;
-        let total = options_len + usize::from(free_text);
-        let in_other = free_text && self.ask_focus >= options_len;
-        match code {
-            KeyCode::Char(c) if in_other && !c.is_control() => {
-                self.ask_other.push(c);
-                true
-            }
-            KeyCode::Backspace if in_other => {
-                self.ask_other.pop();
-                true
-            }
-            KeyCode::Enter if in_other => {
-                let text = std::mem::take(&mut self.ask_other);
-                self.submit_ask_answer(text);
-                true
-            }
-            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                let index = (c as u8 - b'1') as usize;
-                if index < total {
-                    self.ask_focus = index;
-                    if !(index == options_len && free_text) {
-                        self.choose_ask_option(index);
-                    }
-                }
-                true
-            }
-            KeyCode::Up => {
-                if self.ask_focus > 0 {
-                    self.ask_focus -= 1;
-                }
-                true
-            }
-            KeyCode::Down => {
-                if self.ask_focus + 1 < total {
-                    self.ask_focus += 1;
-                }
-                true
-            }
-            KeyCode::Enter => {
-                let focus = self.ask_focus;
-                if focus >= options_len && free_text {
-                    let text = std::mem::take(&mut self.ask_other);
-                    self.submit_ask_answer(text);
-                } else {
-                    self.choose_ask_option(focus);
-                }
-                true
-            }
-            KeyCode::Esc => {
-                if let Some((request, tx)) = self.pending_ask.take() {
-                    if request.free_text {
-                        self.push_ask_message(ASK_DECLINED_TEXT.to_string());
-                    }
-                    let _ = tx.send(DialogAction::Cancel);
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// AskUserQuestion answer message: header + one line of `· question → answer`. Treated as
-    /// AskUserQuestion answer text: header + one `· question → answer` line. Enters the
-    /// message flow as an ordinary user message (no longer a transient block rendered above the input).
-    fn ask_answer_text(question: &str, answer: &str) -> String {
-        format!("User answered the questions:\n  · {question} → {answer}")
-    }
-
-    /// Records an answer/decline as an ordinary user message: rendered like user input
-    /// (bubble), settled and flushed into scrollback, persistent with the session — no transient residue.
-    fn push_ask_message(&mut self, text: String) {
-        self.messages.push(UiMessage {
-            role: Role::User,
-            text,
-            at: crate::channels::now_unix(),
-            activities: Vec::new(),
-            insert_points: Vec::new(),
-            groups: Vec::new(),
-            group_of: Vec::new(),
-        });
-        self.open_continuation_message();
-    }
-
     /// The answer lands mid-turn and the model keeps going. Without a message of its own, that
     /// continuation streams into the assistant message *above* the answer (`stream_msg` still
     /// points there), so everything the model does next renders above what the user just said
     /// and the answer stays pinned to the bottom until the turn ends. Close the old message and
     /// open a fresh one, the way a turn boundary would: the transcript then reads in clock order.
-    fn open_continuation_message(&mut self) {
+    pub(crate) fn open_continuation_message(&mut self) {
         let Some(prev) = self.stream_msg else { return };
         // Tool rows registered before the answer index into `prev`'s activities
         // (`pending_tools` holds those indices), so a call still in flight pins the stream here.
@@ -1153,43 +665,9 @@ impl super::Chat {
                 && t.state == ThinkingState::Running
             {
                 t.state = ThinkingState::Done;
-                t.duration_ms = tick.saturating_sub(t.start_tick).saturating_mul(33);
-            }
-        }
-    }
-
-    /// Submitting Other free text (CC SelectInputOption onSubmit: empty text = cancel).
-    fn submit_ask_answer(&mut self, text: String) {
-        if text.trim().is_empty() {
-            let free_text = self.pending_ask.as_ref().is_some_and(|(r, _)| r.free_text);
-            if free_text {
-                self.push_ask_message(ASK_DECLINED_TEXT.to_string());
-            }
-            if let Some((_, tx)) = self.pending_ask.take() {
-                let _ = tx.send(DialogAction::Cancel);
-            }
-            return;
-        }
-        if let Some((request, tx)) = self.pending_ask.take() {
-            let question = request.question.clone();
-            let answer = text.clone();
-            self.push_ask_message(Self::ask_answer_text(&question, &answer));
-            let _ = tx.send(DialogAction::Answer(text));
-        }
-    }
-
-    /// Confirms option `index` (0-based; out of range = cancel).
-    pub(crate) fn choose_ask_option(&mut self, index: usize) {
-        if let Some((request, tx)) = self.pending_ask.take() {
-            if index < request.options.len() {
-                if request.free_text {
-                    let question = request.question.clone();
-                    let answer = request.options[index].clone();
-                    self.push_ask_message(Self::ask_answer_text(&question, &answer));
-                }
-                let _ = tx.send(DialogAction::Confirm(index));
-            } else {
-                let _ = tx.send(DialogAction::Cancel);
+                t.duration_ms = tick
+                    .saturating_sub(t.start_tick)
+                    .saturating_mul(crate::tui::motion::TICK_MS);
             }
         }
     }
@@ -1232,7 +710,9 @@ impl super::Chat {
     /// Keyboard events (`now` is injectable: the Ctrl+C double-press window and paste-burst detection both need a clock).
     ///
     /// Priority, top to bottom: dialog → `/model` menu → history search → interrupt/quit semantics
-    /// → editing keys. Returns whether it was consumed.
+    /// → editing keys. Esc is the exception: it belongs to no single overlay and walks
+    /// [`EscLayer::ORDER`] instead, so its priority can be read in one place rather than
+    /// inferred from the order of the handlers below. Returns whether it was consumed.
     pub fn on_key_at(
         &mut self,
         code: KeyCode,
@@ -1240,6 +720,16 @@ impl super::Chat {
         now: std::time::Instant,
     ) -> bool {
         let pasting = self.track_burst(now);
+        self.pasting = pasting;
+        // The two "immediately after" rules are counted in keys, not seconds
+        // (D86): the tick is what makes a kill coalesce with the kill before
+        // it and `alt+y` a yank-pop rather than a no-op.
+        self.composer.tick();
+        // `ctrl+x` arms its chord for exactly one key. Taking it here rather
+        // than in `control_key` is what makes "anything else" mean anything
+        // else — a plain character, Esc, a dialog key — and not just the
+        // control keys that reach the same handler.
+        let chord = self.composer.take_chord(now);
         // Update-banner breathing (P1): the first keypress in the window stops it immediately (the user's attention has moved to the input;
         // the banner itself stays, it just stops breathing).
         if self.update_anim_active() {
@@ -1251,7 +741,14 @@ impl super::Chat {
         {
             return self.error_screen_key(code, modifiers, now);
         }
-        if self.ask_key(code, modifiers) {
+        // Esc dismisses the topmost layer and nothing else (D80): it is judged
+        // before the handlers below because every one of them used to claim it,
+        // and the resulting order — busy interrupt first — meant Esc killed the
+        // turn instead of closing the dropdown the user was looking at.
+        if code == KeyCode::Esc {
+            return self.escape(now);
+        }
+        if self.ask_key_at(code, modifiers, now) {
             return true;
         }
         // A printable key that no menu claims (menus only take ↑↓/Enter/Esc/
@@ -1283,21 +780,32 @@ impl super::Chat {
         if self.search.is_some() {
             return self.search_key(code, modifiers);
         }
-        // Main-view agent management and the compact entity selector take precedence over global Esc/editing.
+        // Main-view agent management takes precedence over global editing keys.
         if self.agent_manager_key(code, modifiers) {
             return true;
         }
-        if self.entity_key(code, modifiers) {
+        // The conversation switcher is modal while it is open (D90): it filters
+        // as you type, so every key it does not act on is a key it swallows.
+        if self.switcher_key(code, modifiers) {
             return true;
         }
-        // Interrupt (busy) and quit (idle) both live on Ctrl+C / Esc, judged before editing keys.
+        // The rewind selector is modal for the same reason (D91): it is a
+        // chooser over the composer, and a stray key must not reach the draft.
+        if self.rewind_key(code, modifiers) {
+            return true;
+        }
+        // Interrupt (busy) and quit (idle) both live on Ctrl+C, judged before editing keys.
+        // Unlike Esc, Ctrl+C skips the layer stack: it interrupts with anything open.
         if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
             return self.ctrl_c(now);
         }
-        if code == KeyCode::Esc {
-            return self.escape(now);
-        }
         self.notice = None;
+        // Composer completion keys take priority over input. The `@` dropdown
+        // is judged first: it is anchored at the caret, and the two are
+        // mutually exclusive anyway (D85).
+        if !self.bash_mode && self.mention_menu_key(code, modifiers) {
+            return true;
+        }
         // Slash dropdown keys (Tab completes / Esc closes / ↑↓ navigate) take priority over input.
         if !self.bash_mode && self.slash_menu_key(code, modifiers) {
             return true;
@@ -1305,7 +813,7 @@ impl super::Chat {
         if modifiers.contains(KeyModifiers::CONTROL)
             && let KeyCode::Char(c) = code
         {
-            return self.control_key(c);
+            return self.control_key(c, chord, now);
         }
         if modifiers.contains(KeyModifiers::ALT)
             && let KeyCode::Char(c) = code
@@ -1336,6 +844,19 @@ impl super::Chat {
             }
             KeyCode::Up => self.vertical(false),
             KeyCode::Down => self.vertical(true),
+            // Alt+Backspace is readline's `backward-kill-word`: the sub-word
+            // kill, so it stops inside a path where ctrl+w takes the whole
+            // token (D86).
+            KeyCode::Backspace if modifiers.contains(KeyModifiers::ALT) => {
+                self.snapshot(EditKind::Bulk);
+                let end = self.cursor;
+                let start = crate::tui::input::subword_left(&self.input, end);
+                let cut =
+                    crate::tui::input::kill_between(&mut self.input, &mut self.cursor, start, end);
+                self.composer.kill(cut, KillDir::Back);
+                self.after_edit();
+                true
+            }
             KeyCode::Backspace => {
                 // Empty-input backspace in bash mode exits shell mode (CC).
                 if self.bash_mode && self.input.is_empty() {
@@ -1381,12 +902,14 @@ impl super::Chat {
                 true
             }
             // `?` on empty input toggles the shortcut panel; with text it is an ordinary character.
-            KeyCode::Char('?') if self.input.is_empty() && !self.bash_mode => {
+            // Inside a paste it is always the character: a payload that opens
+            // with `?` or `!` is text, not a command to this composer (D86).
+            KeyCode::Char('?') if self.input.is_empty() && !self.bash_mode && !pasting => {
                 self.help_visible = !self.help_visible;
                 true
             }
             // `!` on empty input enters shell mode (`!` itself never enters the input).
-            KeyCode::Char('!') if self.input.is_empty() && !self.bash_mode => {
+            KeyCode::Char('!') if self.input.is_empty() && !self.bash_mode && !pasting => {
                 self.bash_mode = true;
                 true
             }
@@ -1466,57 +989,138 @@ impl super::Chat {
         true
     }
 
-    /// Esc: interrupts when busy; closes menus/suggestions; double-press with text while idle clears (into history).
+    /// Esc: dismisses the topmost open [`EscLayer`] and stops there — one press,
+    /// one level. With nothing open on an idle empty input, esc-esc opens the
+    /// rewind selector (D91) — the slot D80 left for it.
     fn escape(&mut self, now: std::time::Instant) -> bool {
-        if self.busy {
-            self.interrupt(now);
-            return true;
+        match self.esc_layer() {
+            Some(layer) => self.esc_dismiss(layer, now),
+            None => self.esc_rewind(now),
         }
-        // A Page/Field error row is dismissable like every other overlay —
-        // it used to sit above the prompt until the next turn started.
-        if self
-            .last_error
-            .as_ref()
-            .is_some_and(|e| e.level != crate::error::ErrorLevel::Full)
-        {
-            self.last_error = None;
-            self.dirty = true;
-            return true;
-        }
-        if !self.slash_suggestions.is_empty() {
-            self.clear_slash_suggestions();
-            // The dropdown only exists for a pure `/`-query — dismissing it
-            // dismisses the query too (the leftover "/th" used to turn the
-            // next command into "//model").
-            if self.input.starts_with('/') {
-                self.set_input("");
-            }
-            return true;
-        }
-        if !self.slash_info_lines.is_empty() {
-            self.slash_info_lines.clear();
-            self.dirty = true;
-            return true;
-        }
-        if self.help_visible {
-            self.help_visible = false;
-            return true;
-        }
-        // The tasks panel opened with ctrl+t closes with Esc (it used to have
-        // no exit at all — the ? panel closed, this one squatted).
-        if self.tasks_visible && !self.tasks_auto {
-            self.tasks_visible = false;
-            self.dirty = true;
-            return true;
-        }
-        if self.bash_mode && self.input.is_empty() {
-            self.bash_mode = false;
-            return true;
-        }
-        if self.input.is_empty() {
+    }
+
+    /// esc-esc on an empty idle composer: the second press inside [`ESC_WINDOW`]
+    /// opens the rewind selector, mirroring how the same two presses clear a
+    /// draft that is not empty.
+    ///
+    /// No hub check and no busy check are needed here and none is written:
+    /// `BackToHub` and `Interrupt` are both layers, so in a DM or under a
+    /// running turn `esc_layer()` answers before this ever runs. `open_rewind`
+    /// keeps its own guards for the paths that do not come through a key.
+    fn esc_rewind(&mut self, now: std::time::Instant) -> bool {
+        let armed = self
+            .esc_at
+            .is_some_and(|at| now.duration_since(at) <= ESC_WINDOW);
+        if armed {
+            self.esc_at = None;
             self.notice = None;
-            return false;
+            self.open_rewind();
+            return true;
         }
+        self.esc_at = Some(now);
+        self.notice = Some("Press esc again to rewind");
+        self.notice_until = Some(now + ESC_WINDOW);
+        true
+    }
+
+    /// The layer Esc acts on right now: the first entry of [`EscLayer::ORDER`]
+    /// that is open. Key dispatch and the hint text both read this — they used
+    /// to disagree, because the order lived in the shape of an if-chain.
+    pub(crate) fn esc_layer(&self) -> Option<EscLayer> {
+        EscLayer::ORDER
+            .into_iter()
+            .find(|layer| self.esc_layer_open(*layer))
+    }
+
+    fn esc_layer_open(&self, layer: EscLayer) -> bool {
+        match layer {
+            EscLayer::AskDialog => self.pending_ask.is_some(),
+            EscLayer::Menu => self.menu_open(),
+            EscLayer::Switcher => self.switcher.is_some(),
+            EscLayer::Rewind => self.rewind.is_some(),
+            EscLayer::AgentManager => self.agent_manager.is_some(),
+            EscLayer::SlashDropdown => !self.slash_suggestions.is_empty(),
+            EscLayer::MentionDropdown => self.mention.is_some(),
+            EscLayer::Search => self.search.is_some(),
+            // The full-screen error state is not a layer: it owns the whole
+            // canvas and its own keys (`error_screen_key`).
+            EscLayer::ErrorRow => self
+                .last_error
+                .as_ref()
+                .is_some_and(|e| e.level != crate::error::ErrorLevel::Full),
+            EscLayer::InfoLines => !self.slash_info_lines.is_empty(),
+            EscLayer::HelpPanel => self.help_visible,
+            EscLayer::TaskPanel => self.tasks_visible && !self.tasks_auto,
+            EscLayer::BackToHub => *self.buffers.active() != crate::tui::buffer::BufferId::Hub,
+            EscLayer::Interrupt => self.busy,
+            EscLayer::BashMode => self.bash_mode && self.input.is_empty(),
+            EscLayer::ClearInput => !self.input.is_empty(),
+        }
+    }
+
+    /// Closes one layer. A layer with a key handler of its own keeps its close
+    /// semantics there (the model picker returns one level at a time, search
+    /// must not adopt its hit); the stack only decides which layer hears the key.
+    fn esc_dismiss(&mut self, layer: EscLayer, now: std::time::Instant) -> bool {
+        const ESC: KeyCode = KeyCode::Esc;
+        const NONE: KeyModifiers = KeyModifiers::NONE;
+        match layer {
+            EscLayer::AskDialog => self.ask_key_at(ESC, NONE, now),
+            EscLayer::Menu => {
+                self.model_menu_key(ESC, NONE)
+                    || self.think_menu_key(ESC, NONE)
+                    || self.theme_menu_key(ESC, NONE)
+                    || self.resume_menu_key(ESC, NONE)
+                    || self.provider_menu_key(ESC, NONE)
+            }
+            EscLayer::Switcher => self.switcher_key(ESC, NONE),
+            EscLayer::Rewind => self.rewind_key(ESC, NONE),
+            EscLayer::AgentManager => self.agent_manager_key(ESC, NONE),
+            EscLayer::SlashDropdown => self.slash_menu_key(ESC, NONE),
+            EscLayer::MentionDropdown => self.mention_menu_key(ESC, NONE),
+            EscLayer::Search => self.search_key(ESC, NONE),
+            // A Page/Field error row is dismissable like every other overlay —
+            // it used to sit above the prompt until the next turn started.
+            EscLayer::ErrorRow => {
+                self.last_error = None;
+                self.dirty = true;
+                true
+            }
+            EscLayer::InfoLines => {
+                self.slash_info_lines.clear();
+                self.dirty = true;
+                true
+            }
+            EscLayer::HelpPanel => {
+                self.help_visible = false;
+                true
+            }
+            // The tasks panel opened with ctrl+t closes with Esc (it used to have
+            // no exit at all — the ? panel closed, this one squatted).
+            EscLayer::TaskPanel => {
+                self.tasks_visible = false;
+                self.dirty = true;
+                true
+            }
+            EscLayer::BackToHub => {
+                self.switch_to(crate::tui::buffer::BufferId::Hub);
+                true
+            }
+            EscLayer::Interrupt => {
+                self.interrupt(now);
+                true
+            }
+            EscLayer::BashMode => {
+                self.bash_mode = false;
+                true
+            }
+            EscLayer::ClearInput => self.esc_clear_input(now),
+        }
+    }
+
+    /// esc-esc on a non-empty input: the second press inside [`ESC_WINDOW`]
+    /// clears the draft into history, retrievable with ↑.
+    fn esc_clear_input(&mut self, now: std::time::Instant) -> bool {
         let armed = self
             .esc_at
             .is_some_and(|at| now.duration_since(at) <= ESC_WINDOW);
@@ -1532,16 +1136,50 @@ impl super::Chat {
         true
     }
 
+    /// What Esc does to a running turn right now. With a layer stacked above
+    /// the interrupt, Esc closes that layer and the turn keeps running — the
+    /// status row must not promise otherwise.
+    pub(crate) fn esc_busy_hint(&self) -> &'static str {
+        match self.esc_layer() {
+            Some(EscLayer::Interrupt) | None => "esc to interrupt",
+            // Esc leaves the conversation rather than closing anything, and a
+            // turn running behind it survives the press (D89).
+            Some(EscLayer::BackToHub) => "esc to hub",
+            Some(_) => "esc to close",
+        }
+    }
+
+    /// The whole hint on the running-status row. Esc is always offered; ctrl+b
+    /// joins it only while a foreground shell command is in flight, because that
+    /// is the only time it means "background this" (D84).
+    pub(crate) fn busy_hint(&self) -> String {
+        let esc = self.esc_busy_hint();
+        if self.live.running() {
+            return format!("{esc} · ctrl+b to run in background");
+        }
+        esc.to_string()
+    }
+
     /// Interrupts the current turn (Esc / Ctrl+C while busy). The first request is stamped
     /// so Ctrl+C can tell "the turn is stopping" from "the turn is never going to answer".
     fn interrupt(&mut self, now: std::time::Instant) {
         self.interrupted = true;
         self.interrupt_at.get_or_insert(now);
         self.cancel_tx.send_replace(true);
+        // The dialog goes with the turn: the user asked for everything in flight
+        // to stop, and a dialog is in flight.
+        self.cancel_asks(false);
     }
 
     /// Ctrl+<char> editing commands (readline semantics).
-    fn control_key(&mut self, c: char) -> bool {
+    ///
+    /// `chord` says the previous key was `ctrl+x`, which turns this key's
+    /// `ctrl+e` into the readline chord for "compose in `$EDITOR`" (D86).
+    fn control_key(&mut self, c: char, chord: bool, now: std::time::Instant) -> bool {
+        if chord && c == 'e' {
+            self.compose_in_editor();
+            return true;
+        }
         match c {
             'a' => {
                 self.cursor = crate::tui::input::line_start(&self.input, self.cursor);
@@ -1551,10 +1189,13 @@ impl super::Chat {
                 self.cursor = crate::tui::input::line_end(&self.input, self.cursor);
                 true
             }
+            // Ctrl+K opens the conversation switcher (D90). The kill it used
+            // to be moved to alt+k, beside alt+d, its sibling in the ring: a
+            // switcher is what a reader reaches ctrl+k for in every other
+            // application that has conversations, and readline's kill has an
+            // alt-key family to belong to.
             'k' => {
-                self.snapshot(EditKind::Bulk);
-                self.kill = crate::tui::input::kill_to_end(&mut self.input, &mut self.cursor);
-                self.after_edit();
+                self.open_switcher();
                 true
             }
             'u' => {
@@ -1564,27 +1205,32 @@ impl super::Chat {
                     return true;
                 }
                 self.snapshot(EditKind::Bulk);
-                self.kill = crate::tui::input::kill_to_start(&mut self.input, &mut self.cursor);
+                let cut = crate::tui::input::kill_to_start(&mut self.input, &mut self.cursor);
+                self.composer.kill(cut, KillDir::Back);
                 self.after_edit();
                 true
             }
             'w' => {
                 self.snapshot(EditKind::Bulk);
-                self.kill = crate::tui::input::kill_word(&mut self.input, &mut self.cursor);
+                let cut = crate::tui::input::kill_word(&mut self.input, &mut self.cursor);
+                self.composer.kill(cut, KillDir::Back);
                 self.after_edit();
                 true
             }
             'y' => {
-                if self.kill.is_empty() {
-                    return true;
-                }
-                self.snapshot(EditKind::Bulk);
-                let kill = std::mem::take(&mut self.kill);
-                crate::tui::input::insert(&mut self.input, &mut self.cursor, &kill);
-                self.kill = kill;
-                self.after_edit();
+                self.yank();
                 true
             }
+            // ctrl+x arms the `ctrl+x ctrl+e` chord and does nothing on its
+            // own. The next key clears it wherever it lands.
+            'x' => {
+                self.composer.arm_chord(now);
+                true
+            }
+            // ctrl+p/ctrl+n are ↑/↓ exactly — same function, so history
+            // browsing and D83's queue pull-back behave identically.
+            'p' => self.vertical(false),
+            'n' => self.vertical(true),
             // ctrl+d deletes the char after the caret only when there is text (empty input never quits).
             'd' => {
                 if self.input.is_empty() {
@@ -1599,13 +1245,26 @@ impl super::Chat {
                 self.insert_newline();
                 true
             }
+            // Ctrl+G composes the draft in `$EDITOR` (D86). It used to open
+            // the agents/channels workspace, which D89 retires and which the
+            // ctrl+b manager already reaches (Enter on an agent).
+            'g' => {
+                self.compose_in_editor();
+                true
+            }
             'l' => {
                 self.force_redraw = true;
                 self.dirty = true;
                 true
             }
+            // Ctrl+O opens the transcript view (D82). A question on screen keeps
+            // priority: the pager would bury a dialog that is blocking a turn,
+            // and the answer is one keystroke away.
             'o' => {
-                self.toggle_transcript();
+                if self.pending_ask.is_none() {
+                    self.open_transcript = true;
+                    self.dirty = true;
+                }
                 true
             }
             'r' => {
@@ -1636,17 +1295,40 @@ impl super::Chat {
         }
     }
 
-    /// Alt+<char>: word movement and the thinking toggle.
+    /// Alt+<char>: sub-word movement and kills, yank-pop, and the thinking
+    /// toggle. The motions here are readline's `backward-word` family, so they
+    /// stop inside a path (D86); `ctrl+w` keeps the whitespace word a shell has.
     fn alt_key(&mut self, c: char) -> bool {
         match c {
             'b' => {
-                self.cursor = crate::tui::input::word_left(&self.input, self.cursor);
+                self.cursor = crate::tui::input::subword_left(&self.input, self.cursor);
                 true
             }
             'f' => {
-                self.cursor = crate::tui::input::word_right(&self.input, self.cursor);
+                self.cursor = crate::tui::input::subword_right(&self.input, self.cursor);
                 true
             }
+            'd' => {
+                self.snapshot(EditKind::Bulk);
+                let start = self.cursor;
+                let end = crate::tui::input::subword_right(&self.input, self.cursor);
+                let cut =
+                    crate::tui::input::kill_between(&mut self.input, &mut self.cursor, start, end);
+                self.composer.kill(cut, KillDir::Forward);
+                self.after_edit();
+                true
+            }
+            // Kill to end of line, formerly ctrl+k (D90). Same kill, same
+            // ring, same direction as alt+d, so consecutive forward kills
+            // still coalesce in text order.
+            'k' => {
+                self.snapshot(EditKind::Bulk);
+                let cut = crate::tui::input::kill_to_end(&mut self.input, &mut self.cursor);
+                self.composer.kill(cut, KillDir::Forward);
+                self.after_edit();
+                true
+            }
+            'y' => self.yank_pop(),
             't' => {
                 self.toggle_thinking();
                 true
@@ -1655,14 +1337,63 @@ impl super::Chat {
         }
     }
 
+    /// Ctrl+Y: insert the top of the kill ring at the caret.
+    fn yank(&mut self) {
+        let Some(text) = self.composer.top().map(str::to_string) else {
+            return;
+        };
+        self.snapshot(EditKind::Bulk);
+        let start = self.cursor;
+        crate::tui::input::insert(&mut self.input, &mut self.cursor, &text);
+        self.composer.note_yank(start, text.len());
+        self.after_edit();
+    }
+
+    /// Alt+Y: rotate the ring in place over the text the previous key yanked.
+    /// Anywhere else it is not a binding at all — it does nothing and says
+    /// nothing, which is what readline does with `yank-pop` out of context.
+    fn yank_pop(&mut self) -> bool {
+        let Some((start, len, text)) = self.composer.yank_pop() else {
+            return false;
+        };
+        self.snapshot(EditKind::Bulk);
+        let end = (start + len).min(self.input.len());
+        let start = start.min(end);
+        self.input.replace_range(start..end, &text);
+        self.cursor = start + text.len();
+        self.after_edit();
+        true
+    }
+
+    /// Ctrl+G / `ctrl+x ctrl+e`: ask the host for the `$EDITOR` round trip.
+    /// A pending question keeps priority for the same reason ctrl+o does — the
+    /// dialog is blocking a turn and its keys are one keystroke from done.
+    fn compose_in_editor(&mut self) {
+        if self.pending_ask.is_some() {
+            return;
+        }
+        self.open_editor = true;
+        self.dirty = true;
+    }
+
     /// ↑/↓: move within a multi-line input first, then switch history at the first/last row;
     /// ↑ while busy with a queue pulls back the last queued message.
     fn vertical(&mut self, down: bool) -> bool {
         // Pulling back a queued message only happens on empty input: what is being typed should not be clobbered.
         if !down && self.busy && self.input.is_empty() && !self.queued.is_empty() {
+            if let Some(entry) = self.queued.last() {
+                // The turn may have taken this one already (D83). It is in the request
+                // by then, so pulling it into the composer would send it twice: the
+                // turn wins, and the absorption event — already on its way — is what
+                // takes it out of the queue. Doing nothing here is the whole fix.
+                if self.steer.reclaim(entry.id) == crate::steer::Reclaim::Absorbed {
+                    return true;
+                }
+            }
             if let Some(item) = self.queued.pop() {
                 self.set_input(item.text);
             }
+            self.rearm_steer();
             return true;
         }
         let width = self.input_width();
@@ -1716,9 +1447,23 @@ impl super::Chat {
     }
 
     /// Wrap-up after every edit: refresh the dropdown suggestions, leave history-browsing mode.
+    ///
+    /// While the edit is a paste rather than typing ([`Chat::pasting`], D86)
+    /// the completion surfaces are closed instead of recomputed. A dropdown is
+    /// an answer to typing, and pasted text that happens to contain `@` or `/`
+    /// is not asking the question — worse, an `@` dropdown opened mid-burst
+    /// claims the Enter that the rest of the paste needs as a newline, and the
+    /// funnel's file walk would run once per pasted character. The first
+    /// keystroke after the burst re-evaluates, which is the only moment the
+    /// end of a burst is observable at all.
     pub(crate) fn after_edit(&mut self) {
         self.history.detach();
-        self.update_slash_suggestions();
+        if self.pasting {
+            self.clear_slash_suggestions();
+            self.mention = None;
+        } else {
+            self.update_slash_suggestions();
+        }
         // G12: error/usage rows clear on the next input — the user has acted on them.
         if !self.slash_error_lines.is_empty() {
             self.slash_error_lines.clear();
@@ -1937,10 +1682,28 @@ impl super::Chat {
         if self.has_dynamic_rows() {
             self.dirty = true;
         }
+        // `meter` (D87): aim the status row's token readout at the live count;
+        // a repeat target is a no-op, so this costs one comparison per frame.
+        let tokens = self.output_tokens;
+        self.token_meter.retarget(tokens, self.tick, self.motion);
+        // The terminal title's working animation (D79 machinery, D87 cadence):
+        // one frame per 960ms, and `set_title` drops a repeat, so a busy turn
+        // costs about one OSC 2 write per second. A pending permission prompt
+        // owns the title while it is up — it is the more urgent state.
+        if self.busy && self.pending_ask.is_none() {
+            let glyph = self.motion.title_glyph(self.tick);
+            self.notify
+                .set_title(crate::tui::notify::Title::Busy(glyph));
+        }
         // The bottom entity area follows the registry (agent states/channel counts); dirty only on change.
         if self.tick.is_multiple_of(15) {
             self.refresh_entities();
         }
+        // The conversation you are actually in follows every frame (D89). The
+        // fifteen-tick poll is the right cadence for a presence strip and the
+        // wrong one for a message you are waiting on: it is one conversation's
+        // worth of work, and it is the one on screen.
+        self.poll_active_conversation();
         // The bottom notice expires with the window it advertises.
         if let Some(until) = self.notice_until
             && std::time::Instant::now() >= until
@@ -1970,7 +1733,10 @@ impl super::Chat {
                 if let ActivityKind::Thinking(t) = &mut act.kind
                     && t.state == ThinkingState::Running
                 {
-                    t.duration_ms = self.tick.saturating_sub(t.start_tick).saturating_mul(33);
+                    t.duration_ms = self
+                        .tick
+                        .saturating_sub(t.start_tick)
+                        .saturating_mul(crate::tui::motion::TICK_MS);
                 }
             }
         }
@@ -1979,7 +1745,7 @@ impl super::Chat {
     /// Frame number within the update-banner breathing window (animation running → Some; no banner / motion off /
     /// stopped by a keypress / window passed → None, resting). The 270-frame window = 9s = 3 breaths.
     fn update_banner_frame(&self) -> Option<u64> {
-        if self.update_banner.is_none() || self.motion_off || self.update_banner_stopped {
+        if self.update_banner.is_none() || self.motion.off() || self.update_banner_stopped {
             return None;
         }
         let frame = self.tick.saturating_sub(self.update_banner_start);
@@ -2003,7 +1769,7 @@ impl super::Chat {
                     .tasks_cache
                     .iter()
                     .any(|t| t.status == TodoStatus::InProgress))
-            || (self.agent_manager.is_some()
+            || ((self.agent_manager.is_some() || self.switcher.is_some())
                 && self
                     .session
                     .agents
@@ -2011,6 +1777,7 @@ impl super::Chat {
                     .iter()
                     .any(|status| status.state == crate::agents::AgentState::Running))
             || self.update_anim_active()
+            || self.settling()
     }
 
     /// Whether the host's tick loop has work to do. Returns false when idle so the host skips the whole frame —
@@ -2092,7 +1859,7 @@ impl super::Chat {
         let mut header = Line::empty();
         if t.iter().any(|i| i.status == TodoStatus::InProgress) {
             header.push_styled(
-                format!("{} ", crate::tui::activities::spinner(self.tick)),
+                format!("{} ", self.motion.pulse(self.tick)),
                 SegStyle::fg(theme.claude),
             );
         }
@@ -2100,7 +1867,7 @@ impl super::Chat {
         let done = t.iter().filter(|i| i.status == TodoStatus::Done).count();
         header.push_styled(
             format!(" · {done}/{} tasks", t.len()),
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         );
         out.push(header);
         let done_indices: Vec<usize> = t
@@ -2114,7 +1881,7 @@ impl super::Chat {
         if hidden_done > 0 {
             out.push(Line::styled(
                 format!("… {} done", hidden_done),
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             ));
         }
         for &idx in done_indices.iter().skip(hidden_done) {
@@ -2138,7 +1905,7 @@ impl super::Chat {
         if active.len() > Self::TODO_SHOWN {
             out.push(Line::styled(
                 format!("… +{} more", active.len() - Self::TODO_SHOWN),
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             ));
         }
         out
@@ -2195,7 +1962,7 @@ impl super::Chat {
         Some(RunningStatus {
             verb,
             elapsed,
-            tokens: self.output_tokens,
+            tokens: self.token_meter.value(self.tick, self.motion),
         })
     }
 
@@ -2204,7 +1971,7 @@ impl super::Chat {
             return None;
         }
         self.token_rate
-            .label(std::time::Instant::now(), self.motion_off)
+            .label(std::time::Instant::now(), self.motion.off())
     }
 
     pub fn context_usage(&self) -> crate::context_usage::ContextUsage {
@@ -2255,6 +2022,12 @@ impl super::Chat {
 
     /// Refreshes the bottom entity-area snapshot (running agents + channels). Dirty only on change.
     pub fn refresh_entities(&mut self) {
+        // The conversation engine follows the same poll (D88): the registries
+        // are already being read here, and a second timer reading them again
+        // would only be a second chance to disagree. It touches no render
+        // state, so the entity strip below is unaffected either way.
+        let session = self.session.clone();
+        self.buffers.refresh(&session, self.tick);
         let mut fresh: Vec<EntityRow> = self
             .session
             .agents
@@ -2280,80 +2053,17 @@ impl super::Chat {
                 }),
         );
         if fresh != self.entities {
-            if let Some(selected) = self.entity_focus {
-                let agents = fresh
-                    .iter()
-                    .filter(|entity| matches!(entity, EntityRow::Agent { .. }))
-                    .count();
-                self.entity_focus = (agents > 0).then(|| selected.min(agents - 1));
-            }
             self.entities = fresh;
             self.dirty = true;
         }
     }
 
-    fn running_agent_rows(&self) -> Vec<&EntityRow> {
-        self.entities
-            .iter()
-            .filter(|entity| matches!(entity, EntityRow::Agent { .. }))
-            .collect()
-    }
-
-    /// Bottom entity area: a compact presence summary, or a selectable running-agent list.
+    /// Bottom entity area: a compact presence summary of what is running.
+    ///
+    /// ↑/↓ used to open an inline selector here, which cost the composer its
+    /// history recall — the two keys a terminal user reaches for first. Running
+    /// agents are reached with ctrl+b and ctrl+g instead (D80).
     pub fn entity_rows(&self, width: usize) -> Vec<Line> {
-        if let Some(selected) = self.entity_focus {
-            let agents = self.running_agent_rows();
-            if agents.is_empty() {
-                return Vec::new();
-            }
-            let cap = ENTITY_ROWS_MAX;
-            let selected = selected.min(agents.len() - 1);
-            let start = selected.saturating_sub(cap.saturating_sub(1));
-            let mut rows = agents
-                .iter()
-                .enumerate()
-                .skip(start)
-                .take(cap)
-                .map(|(index, entity)| {
-                    let EntityRow::Agent {
-                        name,
-                        state,
-                        model,
-                        thinking,
-                    } = entity
-                    else {
-                        unreachable!("running-agent list contains only agents")
-                    };
-                    let prefix = if index == selected { "❯ " } else { "  " };
-                    let style = if index == selected {
-                        SegStyle::fg(self.theme.permission)
-                    } else {
-                        SegStyle::fg(self.theme.inactive)
-                    };
-                    Line::styled(
-                        one_line(
-                            &format!(
-                                "{prefix}◉ {name} · {model} · {} · {state}",
-                                thinking.as_deref().unwrap_or("off")
-                            ),
-                            width,
-                        ),
-                        style,
-                    )
-                })
-                .collect::<Vec<_>>();
-            if agents.len() > cap {
-                rows.push(Line::styled(
-                    format!("  … {} running agents", agents.len()),
-                    SegStyle::fg(self.theme.inactive),
-                ));
-            }
-            rows.push(Line::styled(
-                "  ↑↓ select · enter opens DM · esc closes".to_string(),
-                SegStyle::fg(self.theme.inactive),
-            ));
-            return rows;
-        }
         if self.entities.is_empty() {
             return Vec::new();
         }
@@ -2378,75 +2088,61 @@ impl super::Chat {
             .join(" · ");
         vec![Line::styled(
             one_line(
-                &format!("  {summary} — ↑↓ select agent · ctrl+g workspace · ctrl+b manage"),
+                &format!("  {summary} — /open to enter · ctrl+b manage"),
                 width,
             ),
-            SegStyle::fg(self.theme.inactive),
+            SegStyle::fg(self.theme.text_secondary),
         )]
     }
 
-    /// Ctrl+G opens the full workspace. Plain ↑/↓ focuses running agents and Enter opens a DM.
-    pub fn entity_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-        if code == KeyCode::Char('g') && ctrl {
-            self.entity_focus = None;
-            self.open_entity = Some(EntityOpen::Workspace);
-            self.dirty = true;
-            return true;
-        }
-        if self.entity_focus.is_none()
-            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-            && matches!(code, KeyCode::Up | KeyCode::Down)
-            && self.input.is_empty()
-        {
-            self.refresh_entities();
-            let agents = self.running_agent_rows();
-            if agents.is_empty() {
-                return false;
-            }
-            self.entity_focus = Some(if code == KeyCode::Up {
-                agents.len() - 1
-            } else {
-                0
-            });
-            self.dirty = true;
-            return true;
-        }
-        let Some(selected) = self.entity_focus else {
-            return false;
+    /// The running command's output so far: dim, indented under the `⎿` row it
+    /// belongs to (D84).
+    ///
+    /// These rows live in the redrawn tail region by construction — a running tool
+    /// keeps its message unsettled, so nothing here can reach scrollback, and a
+    /// finished command leaves nothing behind to unprint.
+    pub(crate) fn bash_tail_rows(&self, width: usize) -> Vec<Line> {
+        let Some(tail) = &self.bash_tail else {
+            return Vec::new();
         };
-        let agents = self.running_agent_rows();
-        if agents.is_empty() {
-            self.entity_focus = None;
-            return false;
+        let indent = crate::tui::activities::RESULT_INDENT;
+        let mut rows = Vec::new();
+        // What is being left out, before what is kept: five lines of five reads
+        // very differently from five lines of twelve hundred.
+        if tail.total_lines > tail.lines.len() {
+            rows.push(Line::styled(
+                one_line(&format!("{indent}… {} lines", tail.total_lines), width),
+                SegStyle::fg(self.theme.text_secondary),
+            ));
         }
-        match code {
-            KeyCode::Up => {
-                self.entity_focus = Some(selected.saturating_sub(1));
-            }
-            KeyCode::Down => {
-                self.entity_focus = Some((selected + 1).min(agents.len() - 1));
-            }
-            KeyCode::Enter => {
-                self.open_entity = agents.get(selected).and_then(|entity| match entity {
-                    EntityRow::Agent { name, .. } => Some(EntityOpen::Agent(name.clone())),
-                    EntityRow::Channel { .. } => None,
-                });
-                self.entity_focus = None;
-            }
-            KeyCode::Esc => self.entity_focus = None,
-            _ => return false,
+        for line in &tail.lines {
+            rows.push(Line::styled(
+                one_line(&format!("{indent}{line}"), width),
+                SegStyle::fg(self.theme.text_secondary),
+            ));
         }
-        self.dirty = true;
-        true
+        rows
     }
 
-    /// Main-view entry for running background-agent management.
+    /// Main-view entry for running background-agent management — and, while a
+    /// shell command is running in the foreground, for moving that command to the
+    /// background instead (D84).
+    ///
+    /// The running command wins: it is the thing the key is about right now, it is
+    /// on screen with its tail under it, and it stops being promotable the moment
+    /// it exits — after which ctrl+b means what it meant before (D80).
     pub fn agent_manager_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+        if self.agent_manager.is_none() && code == KeyCode::Char('b') && ctrl && self.live.promote()
+        {
+            // The tail's rows go with the row they hung under; the command reappears
+            // in the task panel as the background task it now is.
+            self.bash_tail = None;
+            self.dirty = true;
+            return true;
+        }
         if self.agent_manager.is_none() && code == KeyCode::Char('b') && ctrl {
             self.agent_manager = Some(AgentManager::List { selected: 0 });
-            self.entity_focus = None;
             self.dirty = true;
             return true;
         }
@@ -2502,7 +2198,16 @@ impl super::Chat {
                     manager = AgentManager::List { selected: 0 };
                     true
                 }
-                KeyCode::Enter | KeyCode::Char(' ') => false,
+                // Enter opens this agent's DM. The entity strip used to be the
+                // only way in, at the cost of the composer's ↑/↓; the manager
+                // already has the agent in hand, so the way in moved here (D80).
+                // It used to raise a modal over the session; since D89 the DM is
+                // the session, and this switches the flow onto it.
+                KeyCode::Enter => {
+                    self.switch_to(crate::tui::buffer::BufferId::Dm(name.clone()));
+                    false
+                }
+                KeyCode::Char(' ') => false,
                 _ => {
                     self.agent_manager = Some(manager);
                     return true;
@@ -2516,7 +2221,10 @@ impl super::Chat {
         true
     }
 
-    fn stop_agent_from_manager(&mut self, name: &str) {
+    /// Stop an agent. The ctrl+b manager's `x` and the ctrl+k switcher's
+    /// `ctrl+x` are the same action and must stay so: one path, one warning,
+    /// one watch transition.
+    pub(crate) fn stop_agent_from_manager(&mut self, name: &str) {
         match self.session.agents.stop(name) {
             Ok((watch_id, dropped)) => {
                 if let Some(id) = watch_id {
@@ -2558,7 +2266,7 @@ impl super::Chat {
                 if running.is_empty() {
                     rows.push(Row::new(Line::styled(
                         "No agents currently running",
-                        SegStyle::fg(self.theme.inactive),
+                        SegStyle::fg(self.theme.text_secondary),
                     )));
                 } else {
                     let selected = (*selected).min(running.len() - 1);
@@ -2594,13 +2302,13 @@ impl super::Chat {
                     if running.len() > AGENT_MANAGER_ROWS_MAX {
                         rows.push(Row::new(Line::styled(
                             format!("  … {} running agents", running.len()),
-                            SegStyle::fg(self.theme.inactive),
+                            SegStyle::fg(self.theme.text_secondary),
                         )));
                     }
                 }
                 rows.push(Row::new(Line::styled(
                     "↑/↓ select · Enter details · x stop · Esc close",
-                    SegStyle::fg(self.theme.inactive),
+                    SegStyle::fg(self.theme.text_secondary),
                 )));
                 manager_box(rows, width, &self.theme)
             }
@@ -2616,17 +2324,17 @@ impl super::Chat {
                 if let Some(status) = status {
                     rows.push(Row::new(Line::styled(
                         format!("{} · {}", status.state.label(), format_agent_stats(status)),
-                        SegStyle::fg(self.theme.inactive),
+                        SegStyle::fg(self.theme.text_secondary),
                     )));
                     rows.push(Row::new(Line::empty()));
                     rows.push(Row::new(Line::styled(
                         "Progress",
-                        SegStyle::fg(self.theme.inactive).bold(),
+                        SegStyle::fg(self.theme.text_secondary).bold(),
                     )));
                     if status.recent_activity.is_empty() {
                         rows.push(Row::new(Line::styled(
                             "› initializing…",
-                            SegStyle::fg(self.theme.inactive),
+                            SegStyle::fg(self.theme.text_secondary),
                         )));
                     } else {
                         for (index, activity) in status.recent_activity.iter().enumerate() {
@@ -2640,7 +2348,7 @@ impl super::Chat {
                                 SegStyle::fg(if prefix == "› " {
                                     self.theme.text
                                 } else {
-                                    self.theme.inactive
+                                    self.theme.text_secondary
                                 }),
                             )));
                         }
@@ -2648,7 +2356,7 @@ impl super::Chat {
                     rows.push(Row::new(Line::empty()));
                     rows.push(Row::new(Line::styled(
                         "Prompt",
-                        SegStyle::fg(self.theme.inactive).bold(),
+                        SegStyle::fg(self.theme.text_secondary).bold(),
                     )));
                     let prompt = if status.prompt.is_empty() {
                         "(prompt unavailable)".to_string()
@@ -2665,18 +2373,18 @@ impl super::Chat {
                                 "… +{} prompt lines",
                                 prompt_rows.len() - AGENT_PROMPT_ROWS_MAX
                             ),
-                            SegStyle::fg(self.theme.inactive),
+                            SegStyle::fg(self.theme.text_secondary),
                         )));
                     }
                 } else {
                     rows.push(Row::new(Line::styled(
                         "Agent is no longer available",
-                        SegStyle::fg(self.theme.inactive),
+                        SegStyle::fg(self.theme.text_secondary),
                     )));
                 }
                 rows.push(Row::new(Line::styled(
-                    "←/Esc back · Enter close · x stop",
-                    SegStyle::fg(self.theme.inactive),
+                    "←/Esc back · Enter opens DM · x stop",
+                    SegStyle::fg(self.theme.text_secondary),
                 )));
                 manager_box(rows, width, &self.theme)
             }
@@ -2712,6 +2420,13 @@ impl super::Chat {
             ));
         }
         out
+    }
+
+    /// The hint under the queued rows, in CC's wording. It is only true while a turn is
+    /// running: with nothing in flight the queue is about to submit itself, and there is
+    /// no window in which editing it would mean anything.
+    pub fn queue_hint(&self) -> Option<&'static str> {
+        (self.busy && !self.queued.is_empty()).then_some("Press up to edit queued messages")
     }
 
     /// ctrl+r search hint line (`(reverse-i-search)`query': hit`).
@@ -2806,19 +2521,33 @@ impl super::Chat {
             self.reply_cache.clear();
         }
         let theme = self.theme.clone();
-        // Segment numbering: 0 = welcome card, i+1 = messages[i]. The clamp is defensive: if the message set
-        // is replaced wholesale (/clear, /resume) without the cursor resetting, better to re-render
+        // What the one message store looks like on screen (D89): the hub's own
+        // messages, with each conversation's rows spliced in where it was
+        // opened, and the hub's tail held back while a conversation is still
+        // open. Segment numbering counts *flow positions*, not message indices,
+        // because those are what the reader sees go by: 0 = welcome card,
+        // k+1 = flow[k]. The order is append-only, so the flush cursor keeps
+        // meaning what it meant.
+        let flow = self.flow_order();
+        // The clamp is defensive: if the message set is replaced wholesale
+        // (/clear, /resume) without the cursor resetting, better to re-render
         // than leave a blank screen.
-        let skip = self.flushed_segments.min(self.messages.len() + 1);
+        let skip = self.flushed_segments.min(flow.len() + 1);
         self.tail_start = 0;
         self.mark_base = 0;
 
         // Prefix-monotone settlement, precomputed in one pass (recursing per
         // message inside the loop would be quadratic on the hot path).
-        let mut settled_flags = Vec::with_capacity(self.messages.len());
+        let mut settled_flags = Vec::with_capacity(flow.len());
         let mut prefix_settled = true;
-        for i in 0..self.messages.len() {
-            prefix_settled = prefix_settled && self.message_static_settled(i);
+        let settling = self.settling();
+        for (pos, item) in flow.iter().enumerate() {
+            // A message inside the `settle` blink is not final yet: its
+            // completion row is still wearing the accent, and freezing it now
+            // would print that accent into scrollback for good (D87).
+            prefix_settled = prefix_settled
+                && self.message_static_settled(item.index)
+                && !(settling && pos + 1 == flow.len());
             settled_flags.push(prefix_settled);
         }
 
@@ -2826,22 +2555,60 @@ impl super::Chat {
         if skip == 0 {
             blocks.push(Block::settled(self.welcome_el(width, &theme), true));
         }
-        let pal = crate::tui::slack::Palette::new(&theme);
-        for (i, &settled) in settled_flags
-            .iter()
-            .enumerate()
-            .skip(skip.saturating_sub(1))
-        {
+        let pal = crate::tui::avatar::Palette::new(&theme);
+        let mut spoke: Option<String> = None;
+        for (pos, item) in flow.iter().enumerate() {
+            // Who the last row belonged to, tracked across the whole flow so a
+            // sender's name is not repeated over every message in a run — and
+            // is repeated the moment somebody else speaks (sender grouping,
+            // the one workspace decoration the flow keeps).
+            let previous = std::mem::replace(&mut spoke, speaker_of(item));
+            if pos + 1 < skip {
+                continue;
+            }
+            let settled = settled_flags[pos];
+            let i = item.index;
             let role = self.messages[i].role;
+            if item.decor == Decor::Divider {
+                // A rule is not a message: no band, no bubble, no stamp.
+                blocks.push(Block::settled(
+                    El::col(vec![
+                        El::Blank,
+                        El::Rows(vec![Row::new(Line::styled(
+                            one_line(&self.messages[i].text, width),
+                            theme.dim(),
+                        ))]),
+                    ]),
+                    settled,
+                ));
+                continue;
+            }
             // The band is the experimental face (`experimental.chatAvatars`): switched
             // off, a message opens on its body, exactly as it did before D50.
             let band = self.chat_avatars.then(|| self.sender_band_el(role, &pal));
+            // In a conversation with more than two speakers the name is not
+            // decoration, it is the only thing that says who is talking. Your
+            // own messages keep the `❯` bubble, which already says so.
+            let name = match (&item.decor, role) {
+                (Decor::Said(who), Role::Assistant) if spoke != previous => {
+                    Some(El::Rows(vec![Row::new(Line::styled(
+                        one_line(who, width),
+                        SegStyle::fg(theme.text).bold(),
+                    ))]))
+                }
+                _ => None,
+            };
             let body = match role {
                 Role::User => {
                     let mut rows = user_message_rows(&self.messages[i].text, width, &theme);
                     // Send time under the bubble (issue #41), the same dim stamp
-                    // every view trails its message bodies with.
-                    let time = crate::tui::slack::stamp(self.messages[i].at);
+                    // every view trails its message bodies with. A state line gets
+                    // none: nothing was sent, and the line is a state, not a message.
+                    let time = if crate::tui::chat::is_state_line(&self.messages[i].text) {
+                        String::new()
+                    } else {
+                        crate::tui::buffer::stamp(self.messages[i].at)
+                    };
                     if !time.is_empty() {
                         rows.push(Row::new(Line::styled(format!("  {time}"), theme.dim())));
                     }
@@ -2852,11 +2619,19 @@ impl super::Chat {
             // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
             let mut stack = vec![El::Blank];
             stack.extend(band);
+            stack.extend(name);
             stack.push(body);
             blocks.push(Block::settled(El::col(stack), settled));
         }
         if let Some(ask) = self.ask_el(&theme) {
             blocks.push(Block::live(ask));
+        }
+        // What the active conversation is doing right now (D89): the message on
+        // its way, the work being done, the reply mid-arrival. Transient by
+        // construction — everything here becomes a settled message the moment it
+        // becomes record, and nothing that is still a state reaches scrollback.
+        if let Some(tail) = self.conversation_tail_el(width) {
+            blocks.push(Block::transient(tail));
         }
         // Slash command output (/help /status /compact etc.): transient hints — rendered after messages and
         // above the input, **never settled or flushed**, auto-dismissed after the tick timeout (SLASH_OUTPUT_TTL).
@@ -2898,7 +2673,7 @@ impl super::Chat {
         // New-version banner (update-banner): breathing color inside the window; outside / no banner → resting rest or None.
         let banner = self.update_banner.as_deref().map(|v| {
             let frame = self.update_banner_frame().unwrap_or(UPDATE_BANNER_FRAMES);
-            (v, update_color(theme, frame, self.motion_off))
+            (v, self.motion.breath(theme, frame))
         });
         let provider = self.session.runtime.provider.borrow().clone();
         El::Rows(welcome_card_rows(
@@ -2915,14 +2690,12 @@ impl super::Chat {
     /// The band above a message: who is speaking, as a portrait and a name.
     ///
     /// The names are the room's own — `main` for the hub, and the human's own
-    /// messages read `You` exactly as the workspace already writes them
-    /// ([`crate::tui::slack::message_rows`]). So the name on the band is the name
-    /// that addresses the speaker, and the two views agree without a display-name
-    /// table to keep honest in both.
+    /// messages read `You`. So the name on the band is the name that addresses
+    /// the speaker, with no display-name table to keep honest beside it.
     ///
     /// Neither speaker is a blueprint member, so both faces come from the same
     /// name hash the workspace falls back to — pinning is for the crew.
-    fn sender_band_el(&mut self, role: Role, pal: &crate::tui::slack::Palette) -> El {
+    fn sender_band_el(&mut self, role: Role, pal: &crate::tui::avatar::Palette) -> El {
         let (name, shown) = match role {
             Role::User => (crate::channels::USER_NAME, "You"),
             Role::Assistant => (crate::channels::HUB_NAME, crate::channels::HUB_NAME),
@@ -2930,7 +2703,7 @@ impl super::Chat {
         let index = crate::tui::avatar::index_of(name);
         self.faces.insert(index);
         El::Rows(
-            crate::tui::slack::sender_band(index, name, shown, self.image_cap.is_some(), pal)
+            crate::tui::avatar::sender_band(index, name, shown, self.image_cap.is_some(), pal)
                 .into_iter()
                 .map(Row::new)
                 .collect(),
@@ -2952,7 +2725,7 @@ impl super::Chat {
     fn watch_portraits(
         &mut self,
         i: usize,
-        pal: &crate::tui::slack::Palette,
+        pal: &crate::tui::avatar::Palette,
     ) -> Vec<Option<Portrait>> {
         if !self.chat_avatars || self.image_cap.is_none() {
             return Vec::new();
@@ -2980,8 +2753,8 @@ impl super::Chat {
                     .unwrap_or_else(|| avatar::index_of(&name));
                 self.faces.insert(index);
                 Some(Portrait {
-                    top: crate::tui::slack::gutter_cell(index, &name, 0, true, pal),
-                    bottom: crate::tui::slack::gutter_cell(index, &name, 1, true, pal),
+                    top: crate::tui::avatar::gutter_cell(index, &name, 0, true, pal),
+                    bottom: crate::tui::avatar::gutter_cell(index, &name, 1, true, pal),
                 })
             })
             .collect()
@@ -2993,7 +2766,7 @@ impl super::Chat {
         width: usize,
         theme: &Theme,
         settled: bool,
-        pal: &crate::tui::slack::Palette,
+        pal: &crate::tui::avatar::Palette,
     ) -> El {
         let portraits = self.watch_portraits(i, pal);
         // Thinking completion row (CC SystemTextMessage `✻ Churned for 40s`):
@@ -3002,6 +2775,19 @@ impl super::Chat {
         // Only rendered after the turn ends: while running, `✻ Baked for 0.4s` would appear
         // while tools are still running, contradicting the bottom running-status row.
         let show_done_line = i == self.messages.len() - 1 && self.stream_msg.is_none() || settled;
+        // The `settle` token (D87): the completion row of the turn that just
+        // ended carries the accent for one 120ms window. Only the last message
+        // can be settling — every earlier one finished long ago.
+        let settling = i + 1 == self.messages.len() && self.settling();
+        // Built before the render closure takes its mutable borrows: the tail is the
+        // same rows wherever the running command's row turns out to be inside this
+        // message. Only the streaming message can hold one — the same rule the tool
+        // events themselves follow — so every other message pays nothing.
+        let bash_tail = if self.stream_msg == Some(i) {
+            self.bash_tail_rows(width)
+        } else {
+            Vec::new()
+        };
         // Markdown render closure: borrows only disjoint fields to avoid conflicting with
         // the shared read borrow of `self.messages`.
         let mut render = {
@@ -3105,7 +2891,7 @@ impl super::Chat {
                 }
                 line.push_styled(
                     " (ctrl+o to expand)".to_string(),
-                    SegStyle::fg(theme.inactive),
+                    SegStyle::fg(theme.text_secondary),
                 );
                 parts.push(El::click(
                     ClickTarget::Group {
@@ -3121,8 +2907,18 @@ impl super::Chat {
                 if in_progress && let Some(hint) = &msg.groups[g].last_hint {
                     parts.push(El::Line(Line::styled(
                         one_line(&format!("  ⎿  {hint}"), width),
-                        SegStyle::fg(theme.inactive),
+                        SegStyle::fg(theme.text_secondary),
                     )));
+                }
+                // The folded command is the one running: its tail belongs under the
+                // hint row, which is the only row the fold gives it (D84).
+                if in_progress
+                    && msg.groups[g]
+                        .activities
+                        .iter()
+                        .any(|&ai| msg.activities.get(ai).is_some_and(is_running_bash))
+                {
+                    parts.extend(bash_tail.iter().cloned().map(El::Line));
                 }
                 continue;
             }
@@ -3161,6 +2957,12 @@ impl super::Chat {
             } else {
                 activity
             });
+            // The command's output so far, under its own row. Outside the Annotated
+            // block: these rows are evidence, not a click target, and they are gone
+            // by the time the row is worth clicking.
+            if is_running_bash(act) {
+                parts.extend(bash_tail.iter().cloned().map(El::Line));
+            }
         }
         if rendered_bytes < text.len() {
             let reply = render(&text[rendered_bytes..]);
@@ -3176,7 +2978,9 @@ impl super::Chat {
                         ActivityKind::Thinking(t)
                             if t.state == ThinkingState::Done && !a.content.is_empty() =>
                         {
-                            Some(crate::tui::activities::thinking_completion_line(t, theme))
+                            Some(crate::tui::activities::thinking_completion_line(
+                                t, theme, settling,
+                            ))
                         }
                         _ => None,
                     })
@@ -3187,9 +2991,9 @@ impl super::Chat {
         // a clock under still-streaming text would read as an ending. A markdown
         // body may end in a blank line; the stamp belongs to the message, so it
         // slots in before that spacing rather than floating under it.
-        let time = crate::tui::slack::stamp(self.messages[i].at);
+        let time = crate::tui::buffer::stamp(self.messages[i].at);
         if show_done_line && !time.is_empty() && !parts.is_empty() {
-            let stamp_line = Line::styled(format!("  {time}"), theme.dim());
+            let stamp_line = Line::styled(format!("  {time}"), theme.muted());
             match parts.last_mut() {
                 Some(El::Rows(rows)) => {
                     let keep = rows
@@ -3204,90 +3008,6 @@ impl super::Chat {
             }
         }
         El::Col(parts)
-    }
-
-    /// Permission/ask block (PermissionDialog / AskUserQuestion):
-    /// title (permission bold) + description (dim) + numbered options (Select:
-    /// `❯ n. label` focus marker, desc sub-row dim, Other free input) + shortcut hints.
-    fn ask_el(&self, theme: &Theme) -> Option<El> {
-        let (request, _) = self.pending_ask.as_ref()?;
-        let mut parts: Vec<El> = Vec::new();
-        let mut title = Line::styled("⏺ ", SegStyle::fg(theme.text));
-        title.push_styled(request.title.clone(), theme.permission());
-        parts.push(El::Line(title));
-        parts.push(El::Line(Line::styled(
-            format!("  {}", request.question),
-            SegStyle::fg(theme.text),
-        )));
-        // CC Select: one blank row between the question and the options.
-        parts.push(El::Blank);
-        let focus_color = theme.permission;
-        for (opt_idx, option) in request.options.iter().enumerate() {
-            let focused = opt_idx == self.ask_focus;
-            let mut line = Line::empty();
-            let style = if focused {
-                SegStyle::fg(focus_color)
-            } else {
-                SegStyle::fg(theme.inactive)
-            };
-            line.push_styled(if focused { "❯ " } else { "  " }, style);
-            line.push_styled(format!("{}. {option}", opt_idx + 1), style);
-            // Only the option row itself confirms; the description sub-row stays inert.
-            parts.push(El::click(ClickTarget::AskOption(opt_idx), El::Line(line)));
-            if let Some(desc) = request
-                .descriptions
-                .get(opt_idx)
-                .and_then(|d| d.as_deref())
-                .filter(|d| !d.is_empty())
-            {
-                parts.push(El::Line(Line::styled(
-                    format!("   {desc}"),
-                    if focused {
-                        SegStyle::fg(focus_color)
-                    } else {
-                        SegStyle::fg(theme.inactive)
-                    },
-                )));
-            }
-        }
-        if request.free_text {
-            let other_idx = request.options.len();
-            let focused = self.ask_focus >= other_idx;
-            let mut line = Line::empty();
-            let style = if focused {
-                SegStyle::fg(focus_color)
-            } else {
-                SegStyle::fg(theme.inactive)
-            };
-            line.push_styled(if focused { "❯ " } else { "  " }, style);
-            line.push_styled(format!("{}. Other", other_idx + 1), style);
-            parts.push(El::click(ClickTarget::AskOption(other_idx), El::Line(line)));
-            // No cursor glyph: the terminal cursor is the only caret in the app, and it stays
-            // anchored to the input box below (the ask block renders into the transcript).
-            let placeholder = if focused && !self.ask_other.is_empty() {
-                self.ask_other.clone()
-            } else {
-                "Type something.".to_string()
-            };
-            parts.push(El::Line(Line::styled(
-                format!("   {placeholder}"),
-                if focused {
-                    SegStyle::fg(focus_color)
-                } else {
-                    SegStyle::fg(theme.inactive)
-                },
-            )));
-        }
-        let hint = if request.free_text && self.ask_focus >= request.options.len() {
-            "enter to submit · esc to cancel"
-        } else {
-            "enter to select · ↑/↓ to navigate · esc to cancel"
-        };
-        parts.push(El::Line(Line::styled(
-            format!("  {hint}"),
-            SegStyle::fg(theme.inactive),
-        )));
-        Some(El::Col(parts))
     }
 
     /// Resets the flush cursor: after the message set is replaced wholesale (/clear, /resume), segment numbers
@@ -3368,16 +3088,15 @@ fn format_agent_stats(status: &crate::agents::AgentStatus) -> String {
     )
 }
 
-fn manager_box(rows: Vec<Row>, width: usize, theme: &Theme) -> Vec<Row> {
+pub(crate) fn manager_box(rows: Vec<Row>, width: usize, theme: &Theme) -> Vec<Row> {
     let inner = width.saturating_sub(4).max(1);
     let border = "─".repeat(inner);
+    // The frame is furniture; what it frames is not.
+    let frame = theme.muted();
     let mut out = Vec::with_capacity(rows.len() + 2);
-    out.push(Row::new(Line::styled(
-        format!("╭{border}╮"),
-        SegStyle::fg(theme.inactive),
-    )));
+    out.push(Row::new(Line::styled(format!("╭{border}╮"), frame)));
     for row in rows {
-        let mut line = Line::styled("│ ", SegStyle::fg(theme.inactive));
+        let mut line = Line::styled("│ ", frame);
         let mut used = 0usize;
         for seg in row.line.segs {
             if used >= inner.saturating_sub(2) {
@@ -3390,17 +3109,14 @@ fn manager_box(rows: Vec<Row>, width: usize, theme: &Theme) -> Vec<Row> {
         }
         line.push_styled(
             format!("{} │", " ".repeat(inner.saturating_sub(used + 2))),
-            SegStyle::fg(theme.inactive),
+            frame,
         );
         let mut boxed = Row::new(line);
         boxed.bg = row.bg;
         boxed.padding_right = row.padding_right;
         out.push(boxed);
     }
-    out.push(Row::new(Line::styled(
-        format!("╰{border}╯"),
-        SegStyle::fg(theme.inactive),
-    )));
+    out.push(Row::new(Line::styled(format!("╰{border}╯"), frame)));
     out
 }
 
@@ -3490,7 +3206,7 @@ pub(crate) fn welcome_card_rows(
     banner: Option<(&str, Color)>,
     unconfigured: bool,
 ) -> Vec<Row> {
-    let gray = SegStyle::fg(theme.inactive);
+    let gray = theme.muted();
     let inner_w = width.saturating_sub(2);
     let mut rows = vec![Row::new(Line::styled(
         format!("╭{}╮", "─".repeat(inner_w)),
@@ -3514,8 +3230,6 @@ pub(crate) fn welcome_card_rows(
 /// Update-banner breathing window: 270 frames = 9s (3 breaths; each cycle is 90 frames = 3.0s @30fps).
 /// After the window it rests at the rest color and the banner stays (update-banner spec §2.3).
 pub const UPDATE_BANNER_FRAMES: u64 = 270;
-/// Breathing cycle in frames (one "in + out" every 3.0s at 30fps).
-pub const UPDATE_BANNER_PERIOD: u64 = 90;
 
 /// Banner truncation chain (update-banner spec §1.3, pure and testable): returns
 /// (pre, ver, mid, cmd) — the static segment and the two breathing segments are separate so the render layer can color them.
@@ -3558,45 +3272,9 @@ pub fn banner_line(v: &str, width: usize) -> Option<String> {
     banner_segments(v, width).map(|(pre, ver, mid, cmd)| format!("{pre}{ver}{mid}{cmd}"))
 }
 
-/// Update-banner breathing colors (update-banner spec §2, pure and testable):
-/// - `motion_off` (settings `motion:"off"` or `BINGO_NO_MOTION`) → always rest (static, banner kept);
-/// - no truecolor (theme downgraded to 256 colors) → discrete two-step: 60-frame cycle, peak for the first 12 frames (≥400ms);
-/// - truecolor → sine breathing: `t = 0.5 − 0.5·cos(2π·phase/90)`, frame 0 = rest (trough), 45 = peak,
-///   90 = back to rest; linear interpolation per sRGB channel.
-///
-/// Stops: dark `#D77757 ↔ #E8896B` (≥6.24:1 throughout); light `#B05227 ↔ #9A4A24` (≥4.72:1 throughout).
-pub fn update_color(theme: &Theme, frame: u64, motion_off: bool) -> Color {
-    let rest = if theme.is_dark {
-        theme.claude
-    } else {
-        theme.claude_deep
-    };
-    if motion_off {
-        return rest;
-    }
-    let peak = if theme.is_dark {
-        theme.claude_strong
-    } else {
-        theme.claude_deep_strong
-    };
-    if !matches!(theme.claude_strong, Color::Rgb(..)) {
-        // Discrete two-step (256-color terminal): 60-frame cycle, peak 400ms (12 frames) → rest 1600ms.
-        return if frame % 60 < 12 { peak } else { rest };
-    }
-    let phase = (frame % UPDATE_BANNER_PERIOD) as f64;
-    let t = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * phase / UPDATE_BANNER_PERIOD as f64).cos();
-    lerp_color(rest, peak, t)
-}
-
-/// Per-channel sRGB linear interpolation (the two stops are close; no gamma correction — the spec notes it is out of scope).
-fn lerp_color(a: Color, b: Color, t: f64) -> Color {
-    let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) else {
-        return b;
-    };
-    let l = |x: u8, y: u8| {
-        (x as f64 + (y as f64 - x as f64) * t)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    };
-    Color::Rgb(l(ar, br), l(ag, bg), l(ab, bb))
+/// Whether this activity is the foreground shell command the live tail belongs
+/// to. Bash is never concurrency-safe, so Phase 2 runs it alone: at most one
+/// activity can answer yes at a time, which is why one tail slot is enough.
+fn is_running_bash(act: &Activity) -> bool {
+    matches!(&act.kind, ActivityKind::Tool(t) if t.status == ToolStatus::Running && t.name == "Bash")
 }

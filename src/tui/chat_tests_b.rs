@@ -26,8 +26,24 @@ fn interleaved_group_keeps_text_position() {
     assert!(text_pos < group_pos, "text before group: {joined}");
 }
 
+/// Toggle the message's collapse group the way the mouse does — the surviving
+/// in-place fold surface now that ctrl+o opens the transcript view instead (D82).
+fn click_group(chat: &mut Chat) {
+    chat.build_rows(120);
+    let row = chat
+        .doc
+        .click_ranges
+        .iter()
+        .find(|r| matches!(r.target, ClickTarget::Group { .. }))
+        .map(|r| r.start)
+        .expect("group fold row");
+    assert!(chat.doc_click(row), "the group row is clickable");
+}
+
+/// A finished group opens and closes again: the fold is a round trip, not a
+/// one-way door.
 #[test]
-fn ctrl_o_round_trip_collapses_group_back() {
+fn group_fold_round_trips_back_to_its_summary() {
     let mut chat = test_chat();
     start_group_done(&mut chat);
     finish_turn(&mut chat);
@@ -35,14 +51,14 @@ fn ctrl_o_round_trip_collapses_group_back() {
         visible(&mut chat, 120, 40).contains("Read 2 files"),
         "collapsed first"
     );
-    assert!(chat.toggle_transcript());
+    click_group(&mut chat);
     let expanded = visible(&mut chat, 120, 40);
     assert!(expanded.contains("Read a.md"), "expanded: {expanded}");
     assert!(
         !expanded.contains("Read 2 files"),
         "no collapse line: {expanded}"
     );
-    assert!(chat.toggle_transcript());
+    click_group(&mut chat);
     let collapsed = visible(&mut chat, 120, 40);
     assert!(
         collapsed.contains("Read 2 files"),
@@ -51,32 +67,6 @@ fn ctrl_o_round_trip_collapses_group_back() {
     assert!(
         !collapsed.contains("Read a.md"),
         "tools hidden: {collapsed}"
-    );
-}
-
-#[test]
-fn click_group_then_ctrl_o_collapses() {
-    let mut chat = test_chat();
-    start_group_done(&mut chat);
-    finish_turn(&mut chat);
-    chat.build_rows(120);
-    // Clicking the group fold row expands
-    let row = chat
-        .doc
-        .click_ranges
-        .iter()
-        .find(|r| matches!(r.target, ClickTarget::Group { .. }))
-        .map(|r| r.start)
-        .expect("group fold row");
-    assert!(chat.doc_click(row), "click expands group");
-    let expanded = visible(&mut chat, 120, 40);
-    assert!(expanded.contains("Read a.md"), "click expanded: {expanded}");
-    // ctrl+o collapses back
-    assert!(chat.toggle_transcript());
-    let collapsed = visible(&mut chat, 120, 40);
-    assert!(
-        collapsed.contains("Read 2 files"),
-        "ctrl+o collapsed: {collapsed}"
     );
 }
 
@@ -482,7 +472,7 @@ fn watch_event_renders_inline_and_updates() {
     let joined = visible(&mut chat, 120, 30);
     assert!(joined.contains("⏺ watch -n 2 ls"), "header: {joined}");
     assert!(joined.contains("  ⎿  round 2"), "result row: {joined}");
-    assert!(chat.toggle_transcript());
+    assert!(chat.expand_all_folds());
     let joined = visible(&mut chat, 120, 30);
     assert!(joined.contains("done output"), "expanded: {joined}");
 }
@@ -666,7 +656,7 @@ fn expand_running_then_complete_then_collapse_back() {
         visible(&mut chat, 120, 40).contains("Reading 2 files"),
         "running fold"
     );
-    assert!(chat.toggle_transcript());
+    assert!(chat.expand_all_folds());
     assert!(
         !visible(&mut chat, 120, 40).contains("Reading 2 files"),
         "expanded"
@@ -686,7 +676,7 @@ fn expand_running_then_complete_then_collapse_back() {
     }
     chat.drain_events();
     finish_turn(&mut chat);
-    assert!(chat.toggle_transcript());
+    click_group(&mut chat);
     let collapsed = visible(&mut chat, 120, 40);
     assert!(
         collapsed.contains("Read 2 files"),
@@ -745,12 +735,12 @@ fn collapse_after_expand_then_expand_again() {
     chat.drain_events();
     chat.stream_msg = None;
     for _ in 0..3 {
-        assert!(chat.toggle_transcript());
+        click_group(&mut chat);
         assert!(
             !visible(&mut chat, 120, 40).contains("Read 2 files"),
             "expanded state"
         );
-        assert!(chat.toggle_transcript());
+        click_group(&mut chat);
         assert!(
             visible(&mut chat, 120, 40).contains("Read 2 files"),
             "collapsed state"
@@ -918,6 +908,7 @@ fn streaming_content_is_not_flushed_until_settled() {
     );
 
     chat.handle(UiEvent::TurnEnd);
+    past_settle(&mut chat);
     chat.build_rows(80);
     assert_eq!(
         chat.doc.settled,
@@ -1109,6 +1100,7 @@ fn the_message_an_answer_closed_settles_without_waiting_for_the_turn() {
     );
 
     chat.handle(UiEvent::TurnEnd);
+    past_settle(&mut chat);
     chat.build_rows(80);
     assert_eq!(
         chat.doc.settled,
@@ -1135,6 +1127,7 @@ fn an_unused_continuation_message_is_dropped_at_turn_end() {
         "the empty continuation is dropped: hi + the model's text + the answer"
     );
     assert_eq!(chat.messages[2].role, Role::User, "the answer is last");
+    past_settle(&mut chat);
     chat.build_rows(80);
     chat.advance_flushed();
     assert_eq!(
@@ -1275,6 +1268,7 @@ fn streaming_with_resize_never_prints_a_row_twice() {
     flush_frame(&mut chat, 60, &mut printed);
     chat.handle(UiEvent::TextDelta("ending.".into()));
     chat.handle(UiEvent::TurnEnd);
+    past_settle(&mut chat);
     flush_frame(&mut chat, 60, &mut printed);
     // Idling a few frames must print nothing more.
     let after = printed.len();
@@ -1303,91 +1297,6 @@ fn streaming_with_resize_never_prints_a_row_twice() {
     assert!(
         chat.doc.rows.is_empty(),
         "the tail is empty after everything flushes"
-    );
-}
-
-/// inline ctrl+o replay: a no-op with nothing new; with flushed content or expandable items,
-/// it expands everything, rewinds the cursor, and requests a full freeze.
-#[test]
-fn expand_transcript_rewinds_and_expands_everything() {
-    let mut chat = test_chat();
-    // Empty session, everything on screen → no-op (the replay adds no information).
-    assert!(!chat.expand_transcript());
-    assert!(!chat.dump_transcript);
-    assert!(!chat.force_redraw);
-
-    // After a message flushed → replay: the cursor rewinds and the rebuilt doc contains all segments;
-    // clear the screen first, then write (top-aligned, same as resize).
-    chat.messages.push(msg(Role::Assistant, "reply"));
-    chat.build_rows(80);
-    chat.advance_flushed();
-    chat.build_rows(80);
-    assert!(
-        chat.doc.rows.is_empty(),
-        "the tail is empty after everything flushes"
-    );
-    assert!(chat.expand_transcript());
-    assert!(chat.dump_transcript);
-    assert!(
-        chat.force_redraw,
-        "the replay frame first clears the visible screen"
-    );
-    chat.build_rows(80);
-    let text: String = chat
-        .doc
-        .rows
-        .iter()
-        .map(|row| row.line.plain_text())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        text.contains("reply"),
-        "the replay document includes flushed messages: {text}"
-    );
-
-    // Historical messages with collapse groups → everything expands before the replay.
-    chat.dump_transcript = false;
-    start_group(&mut chat);
-    let _ = chat
-        .events
-        .send(UiEvent::ToolDone(crate::query::ToolCallDone {
-            tool_call_id: "test-tool".into(),
-            name: "Read".into(),
-            summary: "Read a.md".into(),
-            output: "l1\nl2\nl3".into(),
-            status: crate::query::ToolCallStatus::Done,
-            duration_ms: 0,
-            diff: None,
-        }));
-    chat.drain_events();
-    assert!(chat.expand_transcript());
-    assert!(chat.dump_transcript);
-    assert!(
-        chat.messages
-            .iter()
-            .flat_map(|m| &m.groups)
-            .all(|g| g.expanded || g.activities.is_empty()),
-        "all fold groups expanded"
-    );
-
-    // Fully expanded → the second press goes the collapse direction: back to aggregates (the app layer
-    // handles the clear-redraw + rehydration to close it up).
-    assert!(chat.transcript_fully_expanded());
-    assert!(chat.collapse_transcript());
-    assert!(
-        chat.messages
-            .iter()
-            .flat_map(|m| &m.groups)
-            .all(|g| !g.expanded),
-        "all fold groups closed"
-    );
-    assert!(
-        !chat.transcript_fully_expanded(),
-        "after closing, it returns to the expand direction"
-    );
-    assert!(
-        !chat.collapse_transcript(),
-        "already fully closed; closing again changes nothing"
     );
 }
 
@@ -1447,6 +1356,7 @@ fn settled_tracks_streaming_message() {
     assert!(chat.doc.rows.len() > welcome, "streaming message rendered");
     // Turn end: the message settles, all rows enter settled.
     chat.handle(UiEvent::TurnEnd);
+    past_settle(&mut chat);
     chat.build_rows(100);
     assert_eq!(
         chat.doc.settled,
@@ -1511,6 +1421,7 @@ fn settled_stops_before_permission_block() {
     // Turn end + request resolved → everything settles.
     chat.pending_ask = None;
     chat.handle(UiEvent::TurnEnd);
+    past_settle(&mut chat);
     chat.build_rows(100);
     assert_eq!(
         chat.doc.settled,
@@ -1978,7 +1889,9 @@ fn cursor_moves_and_inserts_at_position() {
     assert_eq!(chat.cursor, 3, "one char back at a time (3 bytes)");
 }
 
-/// ctrl+k/u/w delete into the kill buffer, ctrl+y pastes back; ctrl+d deletes after the caret.
+/// alt+k, ctrl+u and ctrl+w delete into the kill buffer, ctrl+y pastes back;
+/// ctrl+d deletes after the caret. The kill to end of line moved to alt+k in
+/// D90, when ctrl+k became the conversation switcher — same kill, same ring.
 #[test]
 fn kill_ring_round_trip() {
     let mut chat = chat_with_history("kill");
@@ -1988,8 +1901,8 @@ fn kill_ring_round_trip() {
     assert!(ctrl(&mut chat, 'y'));
     assert_eq!(chat.input, "alpha beta", "ctrl+y pastes back");
     assert!(ctrl(&mut chat, 'a'));
-    assert!(ctrl(&mut chat, 'k'));
-    assert_eq!(chat.input, "", "ctrl+k deletes to the line end");
+    assert!(alt(&mut chat, 'k'));
+    assert_eq!(chat.input, "", "alt+k deletes to the line end");
     assert!(ctrl(&mut chat, 'y'));
     assert_eq!(chat.input, "alpha beta");
     assert!(ctrl(&mut chat, 'u'));
@@ -2206,7 +2119,8 @@ async fn a_lost_turn_reports_itself_instead_of_latching_busy() {
     );
 }
 
-/// Esc: interrupts when busy; closes suggestions/panels layer by layer; double-press with text clears and saves to history.
+/// Esc walks the layer stack: with nothing open it interrupts a busy turn, it closes
+/// suggestions/panels one level at a time, and a double-press with text clears it into history.
 #[test]
 fn esc_closes_layers_then_clears_input() {
     let mut chat = chat_with_history("esc");
@@ -2296,7 +2210,8 @@ fn messages_queue_while_busy() {
         chat.queued,
         vec![QueuedInput {
             text: "first queued".into(),
-            is_slash: false
+            is_slash: false,
+            id: 0
         }]
     );
     assert_eq!(chat.input, "", "the input clears after enqueueing");
@@ -2361,7 +2276,8 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
         chat.queued,
         vec![QueuedInput {
             text: "/clear".into(),
-            is_slash: true
+            is_slash: true,
+            id: 0
         }],
         "non-whitelisted slash commands queue with a marker"
     );
@@ -2386,14 +2302,17 @@ async fn queued_slashes_drain_through_run_slash() {
         QueuedInput {
             text: "/think low".into(),
             is_slash: true,
+            id: 0,
         },
         QueuedInput {
             text: "/nope".into(),
             is_slash: true,
+            id: 1,
         },
         QueuedInput {
             text: "the message".into(),
             is_slash: false,
+            id: 2,
         },
     ];
     chat.submit_queued();
@@ -2419,10 +2338,11 @@ async fn queued_slashes_drain_through_run_slash() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// Bottom entity area lists only running entities with their engine; Ctrl+G
-/// opens the full workspace directly instead of focusing an inline selector.
+/// Bottom entity area lists only running entities with their engine. Ctrl+G
+/// used to open the full workspace from here; D86 gave the key to the
+/// `$EDITOR` compose, and the workspace is reached from the ctrl+b manager.
 #[test]
-fn entity_area_filters_idle_agents_and_ctrl_g_opens_workspace() {
+fn entity_area_filters_idle_agents() {
     let mut chat = test_chat();
     chat.width = 100;
     assert!(chat.entity_rows(100).is_empty());
@@ -2466,12 +2386,14 @@ fn entity_area_filters_idle_agents_and_ctrl_g_opens_workspace() {
     assert!(summary.contains("◇ #table(0)"), "{summary}");
 
     assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
-    assert_eq!(chat.open_entity, Some(EntityOpen::Workspace));
+    assert!(chat.open_editor, "ctrl+g is the editor now (D86)");
 }
 
-/// Running agents can be selected from the entity area and Enter opens that exact DM.
+/// D80: running agents no longer claim ↑/↓. With a background agent up and an
+/// empty composer, ↑ recalls the prompt history — the agent's DM is reached
+/// through the ctrl+b manager instead.
 #[test]
-fn entity_area_selects_running_agent_and_enter_opens_dm() {
+fn running_agents_leave_the_arrows_to_history() {
     let mut chat = test_chat();
     chat.session.agents.insert(
         "scout",
@@ -2480,27 +2402,33 @@ fn entity_area_selects_running_agent_and_enter_opens_dm() {
         "research".into(),
         chat.session.clone(),
     );
-    chat.session.agents.insert(
-        "reviewer",
-        crate::agents::AgentKind::Hire,
-        None,
-        "review".into(),
-        chat.session.clone(),
-    );
     chat.refresh_entities();
+    chat.history.record("earlier prompt");
+    assert!(chat.input.is_empty());
 
-    assert!(chat.on_key(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(chat.entity_focus, Some(0));
-    assert!(
-        chat.entity_rows(100)[0]
-            .plain_text()
-            .contains("❯ ◉ reviewer")
+    assert!(chat.on_key(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(
+        chat.input, "earlier prompt",
+        "↑ recalls history, not agents"
     );
-    assert!(chat.on_key(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(chat.entity_focus, Some(1));
+    let summary = chat.entity_rows(100)[0].plain_text();
+    assert!(
+        !summary.contains("select agent"),
+        "the hint stops advertising a selector that is gone: {summary}"
+    );
+
+    // Ctrl+B → Enter (list) → Enter (detail) opens that agent's DM. Since D89
+    // that switches this terminal onto the conversation instead of raising a
+    // modal over it.
+    chat.set_input("");
+    assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(chat.open_entity, Some(EntityOpen::Agent("scout".into())));
-    assert_eq!(chat.entity_focus, None);
+    assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        *chat.buffers.active(),
+        crate::tui::buffer::BufferId::Dm("scout".into())
+    );
+    assert!(chat.agent_manager.is_none(), "the manager closes with it");
 }
 
 /// Ctrl+B owns list/detail navigation and x stops the selected running agent.
@@ -2634,6 +2562,7 @@ fn queue_lines_are_capped() {
         .map(|i| QueuedInput {
             text: format!("m{i}"),
             is_slash: false,
+            id: i,
         })
         .collect();
     assert_eq!(chat.queue_lines().len(), QUEUE_ROWS_MAX + 1);
@@ -2783,7 +2712,8 @@ fn paste_burst_inserts_newlines_and_collapses() {
         chat.queued,
         vec![QueuedInput {
             text: "hi".into(),
-            is_slash: false
+            is_slash: false,
+            id: 0
         }]
     );
 }
@@ -3024,7 +2954,7 @@ fn task_lines_use_checkbox_glyphs() {
     );
     assert_eq!(
         done_text.style.fg,
-        Some(chat.theme.inactive),
+        Some(chat.theme.text_secondary),
         "and render dimmed"
     );
 }
@@ -3043,7 +2973,7 @@ fn empty_prompt_shows_placeholder() {
         lines[0]
             .segs
             .iter()
-            .all(|s| s.style.fg == Some(chat.theme.inactive)),
+            .all(|s| s.style.fg == Some(chat.theme.text_secondary)),
         "the placeholder stays dim end to end"
     );
     chat.set_input("x");
@@ -3548,6 +3478,9 @@ fn ask_other_input_does_not_swallow_modifier_chords() {
             options: vec!["A".into()],
             descriptions: vec![None],
             free_text: true,
+            kind: crate::ui::AskKind::Question,
+            preview: None,
+            scope: None,
         },
         tx,
     ));
@@ -3649,4 +3582,198 @@ fn notice_expires_after_its_window() {
     chat.tick();
     assert!(chat.notice.is_none(), "cleared once expired");
     assert!(chat.notice_until.is_none());
+}
+
+/// D76: an interrupted tool row must not wear the completion glyph. It is amber, and its
+/// result line says `Interrupted` — a green ⏺ over an unfinished call reads as a result
+/// that was never produced.
+#[test]
+fn interrupted_tool_row_reads_interrupted_in_the_warning_color() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::Assistant, ""));
+    chat.stream_msg = Some(0);
+    let _ = chat.events.send(UiEvent::ToolStart {
+        name: "Bash".into(),
+    });
+    let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "tu_1".into(),
+        name: "Bash".into(),
+        input: json!({"command": "sleep 30"}),
+        standalone: false,
+    });
+    chat.drain_events();
+    let _ = chat
+        .events
+        .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "tu_1".into(),
+            name: "Bash".into(),
+            summary: "sleep 30".into(),
+            output: "interrupted".into(),
+            status: crate::query::ToolCallStatus::Interrupted,
+            duration_ms: 0,
+            diff: None,
+        }));
+    chat.drain_events();
+
+    let call = chat.messages[0]
+        .activities
+        .iter()
+        .find_map(|a| match &a.kind {
+            ActivityKind::Tool(t) if t.name == "Bash" => Some(t.clone()),
+            _ => None,
+        });
+    assert_eq!(
+        call.map(|t| t.status),
+        Some(ToolStatus::Interrupted),
+        "the interrupted call keeps its own status instead of borrowing Done"
+    );
+    // A single bash call still folds into a group; the row itself is what this asserts.
+    assert!(chat.expand_all_folds(), "expand the fold");
+    let rendered = visible(&mut chat, 120, 30);
+    assert!(
+        rendered.contains("⎿  Interrupted"),
+        "the result line names the state: {rendered}"
+    );
+    assert!(
+        !rendered.contains("⎿  Done"),
+        "never reported as done: {rendered}"
+    );
+    chat.build_rows(120);
+    let glyph = chat
+        .doc
+        .rows
+        .iter()
+        .find(|row| row.line.plain_text().starts_with("⏺ Bash"))
+        .and_then(|row| row.line.segs.first().map(|seg| seg.style.fg));
+    assert_eq!(
+        glyph,
+        Some(Some(Theme::dark().warning)),
+        "the glyph is amber: stopped, neither finished nor failed"
+    );
+}
+
+/// D76: the interrupt marker is the persistent record, rendered as a state line. A `❯`
+/// bubble would put words the user never typed in the user's mouth, and the old 10s
+/// warning let the screen forget what the transcript still says.
+#[test]
+fn interrupt_marker_renders_as_a_state_line_not_a_user_bubble() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::User, "run the tests"));
+    chat.messages.push(msg(Role::Assistant, "sure, starting"));
+    let _ = chat.events.send(UiEvent::Interrupted {
+        marker: crate::query::INTERRUPT_MARKER,
+    });
+    chat.drain_events();
+
+    let last = chat.messages.last().expect("the marker message");
+    assert_eq!(last.role, Role::User);
+    assert_eq!(last.text, crate::query::INTERRUPT_MARKER);
+    assert!(
+        chat.visible_warning().is_none(),
+        "the marker replaces the transient warning; no double signal"
+    );
+
+    let rows = crate::tui::chat::user_message_rows(&last.text, 60, &Theme::dark());
+    assert_eq!(rows.len(), 1, "a single line, not a wrapped bubble");
+    assert_eq!(rows[0].line.plain_text(), crate::query::INTERRUPT_MARKER);
+    assert_eq!(
+        rows[0].line.segs.first().map(|seg| seg.style.fg),
+        Some(Some(Theme::dark().error)),
+        "rendered in the error colour"
+    );
+
+    let rendered = visible(&mut chat, 120, 20);
+    assert!(
+        rendered.contains(crate::query::INTERRUPT_MARKER),
+        "the marker stays on screen: {rendered}"
+    );
+    assert!(
+        !rendered.contains(&format!("❯ {}", crate::query::INTERRUPT_MARKER)),
+        "no user bubble around it: {rendered}"
+    );
+    assert!(
+        rendered.contains("❯ run the tests"),
+        "real user input still gets its bubble: {rendered}"
+    );
+}
+
+/// The tool-use variant travels the same path (the model-facing strings differ, the
+/// treatment does not).
+#[test]
+fn tool_use_interrupt_marker_renders_the_same_way() {
+    let rows = crate::tui::chat::user_message_rows(
+        crate::query::INTERRUPT_MARKER_TOOL_USE,
+        80,
+        &Theme::dark(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].line.plain_text(),
+        crate::query::INTERRUPT_MARKER_TOOL_USE
+    );
+    assert_eq!(
+        rows[0].line.segs.first().map(|seg| seg.style.fg),
+        Some(Some(Theme::dark().error))
+    );
+}
+
+/// D87 `settle`: the turn's completion row wears the accent for one 120ms
+/// window and then rests — and the row does not enter scrollback until it has.
+/// Write-once is what makes the delay necessary rather than optional: a row
+/// frozen mid-blink would keep the accent for the rest of the session.
+#[test]
+fn the_completion_row_blinks_accent_before_it_freezes() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::User, "hi"));
+    chat.handle(UiEvent::TurnStart);
+    chat.handle(UiEvent::ThinkingDelta("weighing it up".into()));
+    chat.handle(UiEvent::TextDelta("done".into()));
+    chat.handle(UiEvent::TurnEnd);
+
+    let accent = chat.theme.claude;
+    let completion_color = |chat: &mut Chat| -> Option<ratatui::style::Color> {
+        chat.build_rows(80);
+        chat.doc
+            .rows
+            .iter()
+            .find(|row| {
+                row.line.plain_text().starts_with("✻ ") && row.line.plain_text().contains(" for ")
+            })
+            .and_then(|row| row.line.segs.first().and_then(|seg| seg.style.fg))
+    };
+    assert_eq!(
+        completion_color(&mut chat),
+        Some(accent),
+        "the turn ends on the blink"
+    );
+    assert!(
+        chat.doc.settled < chat.doc.rows.len(),
+        "and the blinking row is held out of scrollback while it blinks"
+    );
+
+    past_settle(&mut chat);
+    let rested = completion_color(&mut chat);
+    assert!(rested.is_some() && rested != Some(accent), "then it rests");
+    assert_eq!(
+        chat.doc.settled,
+        chat.doc.rows.len(),
+        "and only then is it final"
+    );
+}
+
+/// The blink is a beat, not a loop: it keeps the demand-gated tick alive for
+/// exactly its own window and hands the session straight back to zero-write idle.
+#[test]
+fn the_settle_blink_wakes_the_loop_only_for_itself() {
+    let mut chat = test_chat();
+    chat.handle(UiEvent::TurnStart);
+    chat.handle(UiEvent::TurnEnd);
+    assert!(chat.has_dynamic_rows(), "the blink keeps frames coming");
+    let mut frames = 0;
+    while chat.has_dynamic_rows() {
+        chat.tick();
+        frames += 1;
+        assert!(frames < 20, "the blink must end on its own");
+    }
+    assert_eq!(frames, 4, "≈120ms of frames at 33ms each, then idle");
 }

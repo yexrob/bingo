@@ -146,25 +146,51 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
   Ctrl+U. Interactive/TTY commands (top/vim/ssh/fzf, etc.) are rejected — use
   batch equivalents (`top -b -n 1`).
 - Large pastes collapse into a `[Pasted text #N +M lines]` placeholder and
-  expand to real content on send.
-- `Ctrl+R` reverse history search; `↑↓` history recall (move the cursor first
-  inside multi-line input).
-- `Ctrl+S` stash/restore the input, `Ctrl+Y` paste back deleted text,
-  `Ctrl+_` undo.
+  expand to real content on send. A paste is not typing: its newlines stay
+  newlines instead of sending, and an `@` or `/` inside it is a character
+  rather than a dropdown.
+- `Ctrl+R` reverse history search; `↑↓` (or `Ctrl+P`/`Ctrl+N`) history recall
+  (move the cursor first inside multi-line input).
+- `Ctrl+S` stash/restore the input, `Ctrl+Y` paste back deleted text (`Alt+Y`
+  right after it cycles the kill ring), `Ctrl+_` undo.
+- `Ctrl+G`, or the readline chord `Ctrl+X Ctrl+E`, composes the draft in
+  `$VISUAL`/`$EDITOR` and puts the saved content back as one undo step.
+- `@` at the start of a word opens the mention dropdown over the project's
+  files (git-tracked and untracked-but-not-ignored inside a repository,
+  otherwise a bounded walk) and the running agents; `Tab`/`Enter` inserts the
+  path relative to the session directory, or `@name` for an agent. Past a
+  slash command's name the dropdown completes its **argument** instead —
+  `/model`, `/theme`, `/think`, `/resume`, `/provider login` — always from the
+  same data the command itself validates against.
+- A shell command running in the foreground shows the last five lines of its
+  output under its row while it runs, and `Ctrl+B` moves it to the background
+  without restarting it: the tool call returns a task id at once and the
+  completion arrives as a background-task notification.
 
 ### Key bindings (press `?` on an empty input for the full table)
 
 | Key | Action |
 |---|---|
-| `Esc` | interrupt while busy / close dropdowns and panels / clear input on double-press |
+| `Esc` | close the topmost dialog/menu/panel first / interrupt while busy / on double-press: clear the input, or open Rewind when it is empty |
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
 | `Ctrl+T` | toggle the task area |
-| `Ctrl+O` | expand/collapse: expanded replays the full transcript for scrolling up |
-| `Ctrl+G` | open the full workspace directly; `Ctrl+K` switches channels and DMs |
+| `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `q` close) |
+| `Ctrl+G` | compose the draft in `$VISUAL`/`$EDITOR` (or the readline chord `Ctrl+X Ctrl+E`); a non-zero exit keeps the draft |
+| `Ctrl+P` / `Ctrl+N` | prompt history — the same keys as `↑`/`↓`, including pulling a queued message back |
+| `Alt+B` / `Alt+F` | move one word, stopping at `/` `-` `_` `.` so a path is walked a segment at a time |
+| `Alt+D` / `Alt+Backspace` | kill one word forward / back (`Ctrl+W` takes the whole whitespace token) |
+| `Alt+K` | kill to the end of the line (this was `Ctrl+K` before the switcher took that key) |
+| `Ctrl+Y` / `Alt+Y` | yank the newest kill; `Alt+Y` right after it cycles the 10-entry kill ring |
+| `Shift+Enter` | insert a newline (wherever the terminal speaks the kitty keyboard protocol) |
+| `Ctrl+K` | switch conversation: every conversation in one list, type to filter, `Enter` opens, `Ctrl+X` stops a running agent |
+| `Ctrl+B` | move the running shell command to the background; with none running, manage background agents |
 | `Ctrl+L` | clear and redraw |
-| `Shift+Tab` | cycle permission modes (default → acceptEdits → plan) |
+| `@` | mention a project file or a running agent: fuzzy dropdown, `Tab`/`Enter` inserts the relative path (or `@name`) |
+| `Tab` | complete the slash command, its argument, the selected mention, or a `!` shell-history prefix |
+| `Shift+Tab` | cycle permission modes (default → acceptEdits → plan); in an approval prompt, take `Yes, and don't ask again this session` |
+| `Ctrl+E` | in an approval prompt, expand the full command/diff preview and the session rule it would install |
 | `Alt+T` | toggle thinking |
-| Enter while busy | queue the message; auto-sends when the turn ends |
+| Enter while busy | queue the message; the running turn folds it in at its next tool call, otherwise it sends when the turn ends |
 
 ### Slash commands (full list via `/help`)
 
@@ -176,7 +202,10 @@ to subscription endpoints, `logout` signs out),
 opens the level picker; the choice persists), `/theme`,
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
-`/skills` (listing; `/skill-name` executes directly), `/context` (usage),
+`/skills` (listing; `/skill-name` executes directly),
+`/open <@agent|#channel|#team|hub>` (enter a conversation; Tab completes from
+the ones that exist — `Ctrl+K` is the same door without typing a name),
+`/context` (usage),
 `/status`, `/config` (effective config with per-key source layer/env, current
 endpoint, unknown-key hints), `/compact` (force compaction), `/resume [name]` (resume a past
 session), `/rename`, `/gc` (clean expired session data), `/share [--public] [--open]`, `/clear`, `/exit`.
@@ -189,6 +218,23 @@ published URL. The equivalent CLI is `bingo share [session] [--public]
 `status`, `assign <member> <task>`, `stop`, `validate`, `new` (scaffold
 `team.json` + `team-norms.md`), `norms` (the working agreement),
 `memory list|gc`.
+
+### Themes, code and diffs
+
+Both themes are spelled entirely in RGB, so what you see is bingo's palette
+rather than your terminal's ANSI mapping (terminals without truecolor get a
+256-colour approximation of the same colours). Text sits on one of three tiers:
+primary for content, secondary for text *about* content (result lines, tool
+output, diff context), muted for furniture (hints, stamps, rules, the diff
+gutter).
+
+Fenced code blocks are syntax-highlighted when the fence names a language —
+`rust`, `python`, `javascript`/`typescript`, `json`, `bash`/`sh`, `toml`,
+`yaml`, `markdown`, `diff` and a dozen more; an unknown or missing tag renders
+monochrome rather than guessing. Diffs — the approval preview, the completed
+edit rows and the transcript view alike — carry an old/new line-number gutter,
+and long lines wrap with the gutter left blank so the code column stays
+straight. `/theme` switches all of it live.
 
 ### Image rendering
 
@@ -231,7 +277,7 @@ otherwise the user layer — no `.bingo/` is conjured in arbitrary directories
 | `mcpServers` | object | see MCP below |
 | `disabledMcpServers` | string[] | disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`, rule syntax under Permission system below |
-| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50), `chatAvatars` (default false = no faces in the main chat; the workspace views keep theirs either way) |
+| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50), `chatAvatars` (default false = no faces above messages) |
 | `team` | object | team startup behavior: `{"autoStart": true}` (default true = auto-pull the project team at startup; `--no-team` or false disables) |
 | `hooks` | object | per-event hooks, see Hooks below |
 
@@ -409,17 +455,81 @@ With `settings.experimental.agentChannels: true`:
   channels allow interleaving.
 - Budget overflows freeze the channel and notify the main agent
   (`channelMessageLimit`/`agentMessageLimit` gates).
-- Channels appear as `◇ #name` rows in the transcript; Ctrl+G opens the
-  fullscreen workspace, where you can post as the user.
+- Channels appear as `◇ #name` rows in the transcript; `/open #name` enters one,
+  where you can post as the user.
 
-## Workspace view (Ctrl+G)
+## Conversations
 
-A single conversation pane, full width: a header naming the channel or instance
-(with the team's name at the right edge), the message list, and the composer.
-No rail, no sidebar, and no background of its own — the terminal's own
-background shows through. Navigation is **Ctrl+K** (the quick switcher, listing
-every conversation with its unread count) and **alt+↑↓**; Tab moves between the
-message list and the composer, Esc returns.
+One terminal, one flow, one conversation at a time. The hub — your conversation
+with the model — is one of them; a DM with a running subagent, an agent channel
+and the `#team` board are the others, and they all wear the same composer, the
+same keys, the same approval dialogs and the same transcript rendering. There is
+no separate screen to enter and no second set of controls to learn.
+
+**Entering one** is `Ctrl+K` — every conversation in one list, most recently
+active first with the hub pinned on top, filtered as you type, opened with
+Enter — or `/open @agent`, `/open #channel`, `/open #team`, `/open hub` (Tab
+completes from the conversations that exist); a running agent's DM also opens
+from the Ctrl+B manager with Enter. Above the composer, a **conversation bar**
+lists what exists — presence for DMs (`●` running, `○` idle), an unread count,
+and the one you are in accented — and it appears only once there is more than
+one conversation to switch between.
+
+**Saying one thing without going there**: from the hub, a message that opens
+with a conversation's name delivers the rest to it and leaves you where you
+are — `@scout have a look at the parser` reaches scout, and the flow keeps a
+dim `→ @scout: have a look at the parser` receipt. A name that matches nothing
+is not an error and not magic: it is prose, and it goes to the model as typed.
+Inside a conversation there is no such rule, because the conversation you are
+in already *is* the destination. **Esc goes back to the hub** —
+navigation before interruption, so a turn running behind you keeps running and
+its Esc-to-interrupt waits for you at the hub. Ctrl+C is unchanged and stops the
+turn from anywhere.
+
+### Rewind
+
+Press `Esc` twice on an empty composer and bingo lists the turns you opened,
+newest first, with how many files each one and everything after it changed.
+Pick one and it asks what "back" should mean:
+
+1. `Restore code and conversation`
+2. `Restore conversation`
+3. `Restore code`
+4. `Summarize from here`
+5. `Never mind`
+
+**Restore conversation** cuts the session's history back to that message and
+puts its text into the composer, ready to be asked differently. **Restore code**
+puts the files back to what they were when that turn began — a file the turn
+created is removed, a file it edited is reverted — and leaves the conversation
+alone. **Summarize from here** replaces that turn and everything after it with
+a summary of them, when you want the outcome without the transcript.
+
+Pre-images are taken by `Edit` and `Write` just before they change anything,
+once per file per turn, and are kept under `~/.local/share/bingo/rewind/` —
+independent of git, bounded at 50 MB or 200 turns per session, oldest first.
+An option whose half is unavailable is dimmed and says why. **What rewind does
+not cover**: anything a `Bash` command wrote. A shell can change any file in any
+way and there is no pre-image to take before it does, so those changes stay.
+
+**What switching does**: the draft you were writing stays behind in the
+conversation you left and that conversation's own draft comes back; a `── @name ──`
+rule goes into the flow, followed by that conversation's last 30 messages. From
+then on only that conversation prints. Everything else keeps accumulating where
+it already lives and counts up an unread badge — nothing is buffered on your
+behalf, so nothing can be lost by not looking at it. Coming back prints a
+`── hub ──` rule and whatever the hub finished while you were away.
+
+Because scrollback is written once and never rewritten, a couple of excursions
+leave the same conversation on screen more than once. That is deliberate and the
+rules mark it; `Ctrl+O` (the transcript view) remains the complete record of the
+hub session.
+
+**Sending**: what you type goes to the conversation you are in — a DM delivers
+to that instance under your name, a channel posts to the log, and `#team` is a
+record rather than a room and says so. None of it starts a model turn. Slash
+commands are the exception and act on the application from anywhere, so `/model`
+in a DM is still `/model`.
 
 **Avatars**: on terminals that can place kitty images — the same capability
 behind inline image rendering (Ghostty/kitty, and tmux with passthrough) — each
@@ -440,9 +550,9 @@ and one where they fall back to the chip — nothing below it depends on its
 height. One known degradation: a terminal that purges its image store (a resize
 does) gets the faces still on screen redrawn, but messages already in scrollback
 keep four blank columns where the portrait was, with the name intact. Switched
-off, the transcript carries no band and a subagent's watch row keeps its `◉`;
-the switch governs the main chat only — DM, channel and team views wear their
-faces regardless, where the portrait sits in a gutter the layout already spends.
+off, the transcript carries no band and a subagent's watch row keeps its `◉`.
+In a DM or a channel the sender's name heads each run of messages either way —
+with more than two speakers in a room, the name is not decoration.
 
 ## Skills
 
@@ -552,6 +662,28 @@ Example:
 }
 ```
 
+### The approval prompt
+
+When the gate asks, the prompt shows what it is about to do — a Bash call's
+command lines, an Edit/Write's dry-run diff (computed without touching the
+file) — above three options:
+
+1. `Yes`
+2. `Yes, and don't ask again this session` — `Shift+Tab` confirms it directly.
+   Offered only when the narrowest matching rule (`Bash(cargo:*)`,
+   `Edit(/path/to/)`, `WebFetch(domain:…)`, or the bare tool name) would really
+   stop the gate asking; an `ask` rule of yours and the sensitive-path /
+   `confirm_reason` checks outrank allow rules, so for those the option is not
+   shown at all. The rule lives in memory for this session and is never written
+   to settings.
+3. `No, and tell bingo what to do differently (esc)` — Enter opens a feedback
+   row; what you type reaches the model with the denial. `Esc` anywhere, and an
+   empty feedback submit, are the plain refusal.
+
+`Ctrl+E` expands the preview and shows the exact session rule option 2 would
+install. Enter and digits are ignored for the first 0.4s a prompt is on screen,
+so a keystroke already in flight cannot approve anything.
+
 ## Hooks
 
 Events in the `hooks` config: `PreToolUse` / `PostToolUse` / `PreCompact` /
@@ -655,7 +787,7 @@ src/
   budget.rs        token budget constants
   memory.rs        memdir memory extraction and loading
   watch.rs         background task registry & notifications
-  tui/             ratatui UI (chat / view / input / markdown / gfx …)
+  tui/             ratatui UI (chat / view / input / markdown / highlight / gfx …)
   ui.rs            headless hooks and shared rendering
   system.rs        system prompt assembly (memory + project memory + skills listing)
 tests/

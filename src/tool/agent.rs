@@ -236,8 +236,6 @@ fn subagent_hooks(
     let done_instance = instance.clone();
     let round_rate = token_rate.clone();
     let retry_rate = token_rate.clone();
-    let context_agents = registry.clone();
-    let context_instance = instance.clone();
     let round_units = Arc::new(Mutex::new(0u64));
     let retry_units = round_units.clone();
     let event_round_units = round_units.clone();
@@ -331,9 +329,11 @@ fn subagent_hooks(
                 );
             }
         }),
-        on_context_usage: Arc::new(move |used, _window| {
-            context_agents.set_context_tokens(&context_instance, used);
-        }),
+        // An instance's context usage had exactly one display, the workspace
+        // DM composer's footer, and it retired with the workspace (D89). The
+        // hook stays wired so the contract is unchanged and a later surface can
+        // read it again without re-plumbing the callback.
+        on_context_usage: Arc::new(move |_usage| {}),
         on_tool_ready: Box::new(move |_tool_call_id, name, input, _standalone| {
             tool_registry.touch(&tool_instance);
             let glyph = crate::tui::activities::tool_glyph(&name);
@@ -402,17 +402,38 @@ fn subagent_hooks(
         // would fail the tool call as "user denied" without the user ever being asked — and
         // auto-allowing under bypassPermissions would silently clear the safety-check gate
         // that is supposed to survive bypass.
-        ask: std::sync::Arc::new(move |tool_name, reason| {
+        // A subagent is steered through its own inbox (`absorb_inbox`), drained at the
+        // top of every round; the composer's channel belongs to the foreground turn.
+        steer: crate::query::no_steer(),
+        // A subagent's shell output belongs to its own transcript, not to the main
+        // view's tail: its commands are not the foreground turn's commands, and its
+        // rows are not the rows ctrl+b talks about (D84).
+        live: crate::live::LiveBash::detached(),
+        ask: std::sync::Arc::new(move |request| {
             // No prompt surface attached: both real entry points (TUI, headless) attach one at
             // startup, so this is the embedded/test path — fall back to denying.
             let Some(ask) = ask.clone() else {
-                return Box::pin(async { false });
+                return Box::pin(async { crate::query::AskOutcome::Deny { feedback: None } });
             };
-            let request = format!("{instance} · {reason}");
-            let tool_name = tool_name.to_string();
+            // The forwarded request is rebuilt from owned copies: the borrowed
+            // one cannot cross into the future that waits on the gate lock.
+            let tool = request.tool.to_string();
+            let reason = format!("{instance} · {}", request.reason);
+            let input = request.input.clone();
+            let cwd = request.cwd.to_path_buf();
+            let scope = request.scope.map(str::to_string);
+            let diff = request.diff.map(str::to_string);
             Box::pin(async move {
                 let _serialized = ask_gate().lock().await;
-                ask(&tool_name, &request).await
+                ask(&crate::query::AskContext {
+                    tool: &tool,
+                    reason: &reason,
+                    input: &input,
+                    cwd: &cwd,
+                    scope: scope.as_deref(),
+                    diff: diff.as_deref(),
+                })
+                .await
             })
         }),
         // AskUserQuestion is not assembled for subagents (see `assemble_tools`); if one ever
@@ -2307,6 +2328,7 @@ mod tests {
             home: std::env::temp_dir(),
             cwd: std::path::PathBuf::from("/tmp"),
             watch: session.watch.clone(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: session.tasks.clone(),
             hooks: crate::settings::HooksConfig::default(),
@@ -2314,6 +2336,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
         assert!(ctl.is_read_only(&serde_json::json!({"action": "list"})));
         assert!(!ctl.is_read_only(&serde_json::json!({"action": "stop", "agent": "scout"})));
@@ -2497,6 +2520,7 @@ mod tests {
             home: std::env::temp_dir(),
             cwd: std::path::PathBuf::from("/tmp"),
             watch: session.watch.clone(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: session.tasks.clone(),
             hooks: crate::settings::HooksConfig::default(),
@@ -2504,6 +2528,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         }
     }
 
@@ -3323,12 +3348,17 @@ mod tests {
     async fn subagent_ask_forwards_to_attached_prompt() {
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
         let recorder = seen.clone();
-        let ask: Arc<crate::query::AskFn> = Arc::new(move |tool, reason| {
+        let ask: Arc<crate::query::AskFn> = Arc::new(move |request| {
             recorder
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(format!("{tool}|{reason}"));
-            Box::pin(async { true })
+                .push(format!(
+                    "{}|{}|{}",
+                    request.tool,
+                    request.reason,
+                    request.scope.unwrap_or("-")
+                ));
+            Box::pin(async { crate::query::AskOutcome::Allow })
         });
         let watch = crate::watch::WatchRegistry::new();
         let registry = AgentRegistry::new();
@@ -3352,10 +3382,20 @@ mod tests {
             "worker".into(),
             Some(ask),
         );
-        assert!((ui.ask)("Write", "Write needs permission").await);
+        let input = serde_json::json!({ "file_path": "/tmp/x.txt" });
+        let request = crate::query::AskContext {
+            tool: "Write",
+            reason: "Write needs permission",
+            input: &input,
+            cwd: &std::env::temp_dir(),
+            scope: Some("Write(/tmp/)"),
+            diff: None,
+        };
+        assert!((ui.ask)(&request).await.allowed());
         assert_eq!(
             seen.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
-            ["Write|worker · Write needs permission"]
+            ["Write|worker · Write needs permission|Write(/tmp/)"],
+            "the instance stamps the reason; the scope travels untouched"
         );
 
         // Nothing attached (embedded/test path): deny rather than block on a modal nobody shows.
@@ -3372,6 +3412,9 @@ mod tests {
             "worker".into(),
             None,
         );
-        assert!(!(ui.ask)("Write", "Write needs permission").await);
+        assert_eq!(
+            (ui.ask)(&request).await,
+            crate::query::AskOutcome::Deny { feedback: None }
+        );
     }
 }

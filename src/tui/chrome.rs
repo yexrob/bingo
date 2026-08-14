@@ -27,33 +27,92 @@ pub(crate) struct Menus<'a> {
     pub theme: Option<&'a ThemeMenu>,
     pub resume: Option<&'a ResumeMenu>,
     pub provider: Option<&'a ProviderMenu>,
+    /// The `@` mention dropdown (D85). Not a picker menu — it renders in the
+    /// same area and at the same tier as the slash dropdown, below every
+    /// selector, so it is carried here rather than in a second parameter.
+    pub mention: Option<&'a crate::tui::complete::MentionState>,
 }
 
 /// A dim row indented two columns (help / queue / notice / search share it).
 pub(crate) fn dim_row(text: impl Into<String>, theme: &Theme) -> Row {
     Row::new(Line::styled(
         format!("  {}", text.into()),
-        SegStyle::fg(theme.inactive),
+        SegStyle::fg(theme.text_secondary),
     ))
 }
 
 /// Running status row (ActivityIndicator):
 /// `✻ {verb}… (esc to interrupt · {N}s · ↓ {tokens} tokens)`.
-fn status_row(status: &crate::tui::chat::RunningStatus, spinner: char, theme: &Theme) -> Row {
-    let mut meta = format!(
-        "(esc to interrupt · {}s",
-        status.elapsed.round().max(0.0) as u64
-    );
+///
+/// `esc_hint` is derived from the Esc layer stack, not assumed: with a dropdown
+/// or panel open over the turn, Esc closes that and the turn keeps running (D80).
+///
+/// This is the row the motion layer is for (D87): the spinner takes its glyph
+/// from `pulse`, the verb is swept by `beam`, and `stalled` — three seconds
+/// without a single event — repaints both in the warning colour and puts the
+/// glimmer out, because a stalled turn should look like one.
+fn status_row(
+    status: &crate::tui::chat::RunningStatus,
+    motion: crate::tui::motion::Motion,
+    tick: u64,
+    stalled: bool,
+    esc_hint: &str,
+    theme: &Theme,
+) -> Row {
+    let mut meta = format!("({esc_hint} · {}s", status.elapsed.round().max(0.0) as u64);
     if status.tokens > 0 {
         meta.push_str(&format!(" · ↓ {} tokens", status.tokens));
     }
     meta.push(')');
-    let mut line = Line::styled(
-        format!("  {spinner} {}… ", status.verb),
-        SegStyle::fg(theme.claude),
+    let base = if stalled { theme.warning } else { theme.claude };
+    let mut line = Line::styled(format!("  {} ", motion.pulse(tick)), SegStyle::fg(base));
+    // The glimmer travels over the verb and its ellipsis; a stalled turn is not
+    // glimmering at anything, so the sweep stops with the news.
+    let verb = format!("{}…", status.verb);
+    let window = (!stalled).then(|| motion.beam(tick, verb.chars().count()));
+    push_swept(
+        &mut line,
+        &verb,
+        window.flatten(),
+        base,
+        theme.claude_strong,
     );
-    line.push_styled(meta, SegStyle::fg(theme.inactive));
+    line.push_styled(" ".to_string(), SegStyle::fg(base));
+    line.push_styled(meta, SegStyle::fg(theme.text_secondary));
     Row::new(line)
+}
+
+/// Push `text` with the half-open character window `[start, end)` brightened —
+/// the rendered half of the `beam` token. Splitting on character indices (not
+/// bytes) is what keeps a CJK or accented verb from being cut mid-scalar.
+fn push_swept(
+    line: &mut Line,
+    text: &str,
+    window: Option<(usize, usize)>,
+    base: Color,
+    bright: Color,
+) {
+    let Some((start, end)) = window else {
+        line.push_styled(text.to_string(), SegStyle::fg(base));
+        return;
+    };
+    let mut before = String::new();
+    let mut lit = String::new();
+    let mut after = String::new();
+    for (i, ch) in text.chars().enumerate() {
+        if i < start {
+            before.push(ch);
+        } else if i < end {
+            lit.push(ch);
+        } else {
+            after.push(ch);
+        }
+    }
+    for (part, color) in [(before, base), (lit, bright), (after, base)] {
+        if !part.is_empty() {
+            line.push_styled(part, SegStyle::fg(color));
+        }
+    }
 }
 
 /// Permission-mode badge (`⏸ plan mode on`) + the `·` separator after it.
@@ -67,7 +126,7 @@ fn mode_badge(mode: PermissionMode, theme: &Theme) -> Vec<(String, Color)> {
     };
     vec![
         (format!("{symbol} {label}"), color),
-        ("·".to_string(), theme.inactive),
+        ("·".to_string(), theme.text_secondary),
     ]
 }
 
@@ -90,7 +149,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     if chat.bash_mode {
         left.push(("! for shell mode".to_string(), theme.bash_border));
     }
-    left.push((hints, theme.inactive));
+    left.push((hints, theme.text_secondary));
 
     let model_name = chat.session.runtime.model.borrow().clone();
     let thinking = chat.session.runtime.thinking.borrow().clone();
@@ -102,7 +161,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     } else {
         (
             model_footer_label(&model_name, thinking.as_deref()),
-            theme.inactive,
+            theme.text_secondary,
         )
     };
     let provider = chat.session.runtime.provider.borrow().clone();
@@ -115,7 +174,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     let usage = chat.context_usage();
     let usage_label = usage.label();
     let usage_color = match usage.band() {
-        crate::context_usage::ContextUsageBand::Normal => theme.inactive,
+        crate::context_usage::ContextUsageBand::Normal => theme.text_secondary,
         crate::context_usage::ContextUsageBand::Warning => theme.warning,
         crate::context_usage::ContextUsageBand::Danger => theme.error,
     };
@@ -123,7 +182,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     let mut status = Line::empty();
     if let Some(rate) = rate.as_deref() {
         status.push_styled(rate, SegStyle::fg(theme.claude));
-        status.push_styled(" · ", SegStyle::fg(theme.inactive));
+        status.push_styled(" · ", theme.muted());
     }
     status.push_styled(usage_label.clone(), SegStyle::fg(usage_color));
 
@@ -144,24 +203,24 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
         let mut prefix = Line::styled("  ", SegStyle::fg(theme.text));
         for (i, (text, color)) in left.iter().enumerate() {
             if i > 0 {
-                prefix.push_styled(" ", SegStyle::fg(theme.inactive));
+                prefix.push_styled(" ", SegStyle::fg(theme.text_secondary));
             }
             prefix.push_styled(text.clone(), SegStyle::fg(*color));
         }
         let left_text = crate::tui::chat::one_line(&prefix.plain_text(), prefix_width);
-        line = Line::styled(left_text.clone(), SegStyle::fg(theme.inactive));
+        line = Line::styled(left_text.clone(), SegStyle::fg(theme.text_secondary));
         let model_width = prefix_width.saturating_sub(text_width(&left_text) + 1);
         if model_width > 0 {
             let model = crate::tui::chat::one_line(&model, model_width);
             let gap = prefix_width
                 .saturating_sub(text_width(&left_text) + text_width(&model))
                 .max(1);
-            line.push_styled(" ".repeat(gap), SegStyle::fg(theme.inactive));
+            line.push_styled(" ".repeat(gap), SegStyle::fg(theme.text_secondary));
             line.push_styled(model, SegStyle::fg(model_color));
         }
     }
     let gap = content_width.saturating_sub(text_width(&line.plain_text()) + status_width);
-    line.push_styled(" ".repeat(gap), SegStyle::fg(theme.inactive));
+    line.push_styled(" ".repeat(gap), SegStyle::fg(theme.text_secondary));
     line.segs.extend(status.segs);
     Row::new(line)
 }
@@ -170,6 +229,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
 fn suggestion_rows(
     slash: &[SlashSuggestion],
     slash_selected: usize,
+    slash_arg: bool,
     menus: Menus<'_>,
     no_match: bool,
     theme: &Theme,
@@ -225,23 +285,26 @@ fn suggestion_rows(
                                 width.saturating_sub(2),
                             )
                         ),
-                        SegStyle::fg(theme.inactive),
+                        SegStyle::fg(theme.text_secondary),
                     )));
                 }
                 return rows;
             }
-            // No menu open: fall through to the slash dropdown / no-match hint.
+            // No menu open: the `@` dropdown, then the slash dropdown / no-match hint.
+            if let Some(mention) = menus.mention {
+                return crate::tui::complete::mention_rows(mention, theme, width);
+            }
             if slash.is_empty() {
                 // G9: a bare `/`-query with zero matches gets one dim hint row.
                 if no_match {
                     return vec![Row::new(Line::styled(
                         "  (no matching commands · type /help to see the available commands)",
-                        SegStyle::fg(theme.inactive),
+                        SegStyle::fg(theme.text_secondary),
                     ))];
                 }
                 return Vec::new();
             }
-            return slash_rows(slash, slash_selected, theme, width);
+            return slash_rows(slash, slash_selected, slash_arg, theme, width);
         };
         // `/model` two-level selector: level one `provider` (PickerModel core rendering,
         // with the same endpoint/auth description column as /provider), level two `model` (the same Picker
@@ -260,7 +323,7 @@ fn suggestion_rows(
                     "  {}",
                     crate::tui::markdown::truncate(&hint, width.saturating_sub(2))
                 ),
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             )));
             return rows;
         };
@@ -282,7 +345,7 @@ fn suggestion_rows(
             let mut rows = note(reason.clone());
             rows.push(Row::new(Line::styled(
                 "  Esc goes back up",
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             )));
             return rows;
         }
@@ -310,7 +373,7 @@ fn suggestion_rows(
                 "  {}",
                 crate::tui::markdown::truncate(&hint, width.saturating_sub(2))
             ),
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         )));
         rows
     }
@@ -322,6 +385,7 @@ fn suggestion_rows(
 fn slash_rows(
     slash: &[SlashSuggestion],
     slash_selected: usize,
+    slash_arg: bool,
     theme: &Theme,
     width: usize,
 ) -> Vec<Row> {
@@ -329,7 +393,7 @@ fn slash_rows(
         let color = if selected {
             theme.permission
         } else {
-            theme.inactive
+            theme.text_secondary
         };
         Row::new(Line::styled(line, SegStyle::fg(color)))
     };
@@ -353,7 +417,7 @@ fn slash_rows(
     let more = |n: usize| {
         Row::new(Line::styled(
             crate::tui::markdown::truncate(&format!("  … {n} more"), width.saturating_sub(2)),
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         ))
     };
     let mut rows = Vec::new();
@@ -363,10 +427,13 @@ fn slash_rows(
     rows.extend(slash[start..end].iter().enumerate().map(|(offset, s)| {
         let i = start + offset;
         let selected = i == slash_selected;
-        let cmd = if s.hint.is_empty() {
-            format!("/{}", s.name)
-        } else {
-            format!("/{} {}", s.name, s.hint)
+        // The argument phase lists values, not commands: no `/` in front of
+        // them. That single character is the whole visual difference — the
+        // rows are the same rows, in the same place, for the same keys.
+        let cmd = match (slash_arg, s.hint.is_empty()) {
+            (true, _) => s.name.clone(),
+            (false, true) => format!("/{}", s.name),
+            (false, false) => format!("/{} {}", s.name, s.hint),
         };
         let name_text = format!("{cmd:<name_col$}");
         let desc = crate::tui::markdown::truncate(&s.description, desc_width);
@@ -387,12 +454,14 @@ fn suggestions(chat: &Chat, width: usize) -> El {
     El::Rows(suggestion_rows(
         &chat.slash_suggestions,
         chat.slash_selected,
+        chat.slash_arg_start.is_some(),
         Menus {
             model: chat.model_menu.as_ref(),
             think: chat.think_menu.as_ref(),
             theme: chat.theme_menu.as_ref(),
             resume: chat.resume_menu.as_ref(),
             provider: chat.provider_menu.as_ref(),
+            mention: chat.mention.as_ref(),
         },
         chat.slash_no_match,
         &chat.theme,
@@ -421,20 +490,28 @@ fn caret_cell(chat: &Chat) -> (usize, usize) {
 /// to the input line it sits on.
 pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
     let theme = &chat.theme;
+    // While a DM is the conversation, the box wears that teammate's colour
+    // (D90). Bash mode still wins: `!` changes what the box *does*, and what a
+    // surface does outranks who is on the other end of it.
+    let tint = chat.teammate_tint();
     let border_color = if chat.bash_mode {
         theme.bash_border
     } else {
-        theme.prompt_border
+        tint.unwrap_or(theme.prompt_border)
     };
-    let prompt_style = if chat.busy {
-        theme.inactive
+    // A hub turn dims the hub's own prompt. It does not dim a DM's: a message
+    // to a subagent is a delivery, never a turn (D89), so the composer is live
+    // there whatever the model is doing, and dimming it would promise a wait
+    // that is not happening.
+    let prompt_style = if chat.busy && tint.is_none() {
+        theme.text_secondary
     } else {
         theme.text
     };
     let (prefix, prefix_color) = if chat.bash_mode {
         ("! ".to_string(), theme.bash_border)
     } else {
-        ("❯ ".to_string(), prompt_style)
+        ("❯ ".to_string(), tint.unwrap_or(prompt_style))
     };
     let bar = "─".repeat(width.saturating_sub(2));
     let mut children = vec![El::Line(Line::styled(
@@ -479,7 +556,10 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     if let Some(status) = chat.running_status() {
         children.push(El::Row(status_row(
             &status,
-            crate::tui::activities::spinner(chat.tick),
+            chat.motion,
+            chat.tick,
+            chat.stalled(),
+            &chat.busy_hint(),
             theme,
         )));
     }
@@ -493,9 +573,11 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     for line in chat.help_lines() {
         children.push(El::Row(dim_row(line, theme)));
     }
-    // Bottom entity area (running agents + channels; arrows open a DM, Ctrl+G opens the workspace).
+    // Bottom entity area (running agents + channels; Ctrl+G opens the workspace).
     children.push(El::Lines(chat.entity_rows(width)));
     children.push(El::Rows(chat.agent_manager_rows(width)));
+    children.push(El::Rows(chat.switcher_rows(width)));
+    children.push(El::Rows(chat.rewind_rows(width)));
 
     // Pinned panels (login flows, long-operation progress): persistent until
     // the owning flow unpins them — the one place a device code can wait out
@@ -516,6 +598,10 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
         children.push(s);
     }
 
+    // The conversation bar sits directly on the composer, because it is about
+    // the composer: it says which conversation the next Enter reaches. It
+    // contributes no rows at all when there is only one conversation (D90).
+    children.push(El::Rows(chat.conversation_bar_rows(width)));
     children.push(prompt(chat, width));
 
     if let Some(line) = chat.search_line() {
@@ -523,6 +609,9 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     }
     for line in chat.queue_lines() {
         children.push(El::Row(dim_row(line, theme)));
+    }
+    if let Some(hint) = chat.queue_hint() {
+        children.push(El::Row(dim_row(hint, theme)));
     }
     if let Some(s) = suggestion_area.take() {
         children.push(s);
@@ -551,7 +640,7 @@ pub(crate) fn error_screen(err: &crate::tui::chat::ErrorState, theme: &Theme) ->
         Line::plain(""),
         Line::styled(
             "Enter retries · Esc goes back",
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         ),
     ])
 }
@@ -592,13 +681,16 @@ mod tests {
         chat.queued.push(crate::tui::chat::QueuedInput {
             text: "queued message".into(),
             is_slash: false,
+            id: 0,
         });
         chat.notice = Some("Press ctrl-c again to exit");
         chat.search = Some(crate::tui::chat::HistorySearch::default());
         let rows = rows_of(chrome(&chat, 100, false));
         let text: Vec<String> = rows.iter().map(row_text).collect();
+        // Every layer is open here, so Esc closes one of them before it reaches
+        // the interrupt — the status row says what the key will actually do (D80).
         assert!(
-            text.iter().any(|l| l.contains("esc to interrupt")),
+            text.iter().any(|l| l.contains("esc to close")),
             "status row"
         );
         assert!(
@@ -638,15 +730,18 @@ mod tests {
                 + (2 + chat.prompt_lines().len())
                 + 1
                 + chat.queue_lines().len()
+                + usize::from(chat.queue_hint().is_some())
                 + suggestion_rows(
                     &chat.slash_suggestions,
                     chat.slash_selected,
+                    chat.slash_arg_start.is_some(),
                     Menus {
                         model: chat.model_menu.as_ref(),
                         think: chat.think_menu.as_ref(),
                         theme: chat.theme_menu.as_ref(),
                         resume: chat.resume_menu.as_ref(),
                         provider: chat.provider_menu.as_ref(),
+                        mention: chat.mention.as_ref(),
                     },
                     chat.slash_no_match,
                     &chat.theme,
@@ -674,11 +769,11 @@ mod tests {
             models: None,
         };
         assert_eq!(
-            suggestion_rows(&[], 0, Menus::default(), false, &theme, 80).len(),
+            suggestion_rows(&[], 0, false, Menus::default(), false, &theme, 80).len(),
             0
         );
         // G9: no-match shows one dim hint row instead of an empty gap.
-        let no_match = suggestion_rows(&[], 0, Menus::default(), true, &theme, 80);
+        let no_match = suggestion_rows(&[], 0, false, Menus::default(), true, &theme, 80);
         assert_eq!(no_match.len(), 1);
         assert!(
             row_text(&no_match[0]).contains("no matching commands"),
@@ -690,12 +785,14 @@ mod tests {
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -718,12 +815,14 @@ mod tests {
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -745,12 +844,14 @@ mod tests {
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -772,12 +873,14 @@ mod tests {
         let failed_rows = suggestion_rows(
             &[],
             0,
+            false,
             Menus {
                 model: Some(&menu),
                 think: None,
                 theme: None,
                 resume: None,
                 provider: None,
+                mention: None,
             },
             false,
             &theme,
@@ -807,12 +910,14 @@ mod tests {
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -830,12 +935,14 @@ mod tests {
         let think_rows = suggestion_rows(
             &[],
             0,
+            false,
             Menus {
                 model: None,
                 think: Some(&think),
                 theme: None,
                 resume: None,
                 provider: None,
+                mention: None,
             },
             false,
             &theme,
@@ -869,12 +976,14 @@ mod tests {
         let rows = suggestion_rows(
             &[],
             0,
+            false,
             Menus {
                 model: None,
                 think: Some(&overlap),
                 theme: None,
                 resume: None,
                 provider: None,
+                mention: None,
             },
             false,
             &theme,
@@ -892,12 +1001,14 @@ mod tests {
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: Some(&think),
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -917,12 +1028,14 @@ mod tests {
         let rows = suggestion_rows(
             &slash,
             0,
+            false,
             Menus {
                 model: Some(&menu),
                 think: None,
                 theme: None,
                 resume: None,
                 provider: None,
+                mention: None,
             },
             false,
             &theme,
@@ -933,7 +1046,7 @@ mod tests {
             "menu visible (rendering and key dispatch in the same order)"
         );
         // Without a menu the dropdown works as usual.
-        let rows = suggestion_rows(&slash, 0, Menus::default(), false, &theme, 80);
+        let rows = suggestion_rows(&slash, 0, false, Menus::default(), false, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(
             row_text(&rows[0]).starts_with("❯ /help"),
@@ -946,7 +1059,7 @@ mod tests {
             hint: "[off|low|medium|high|xhigh|max]".into(),
             description: "set the thinking level".into(),
         }];
-        let rows = suggestion_rows(&with_hint, 0, Menus::default(), false, &theme, 80);
+        let rows = suggestion_rows(&with_hint, 0, false, Menus::default(), false, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(
             row_text(&rows[0]).contains("/think [off|low|medium|high|xhigh|max]"),
@@ -958,12 +1071,14 @@ mod tests {
             for row in suggestion_rows(
                 &slash,
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
                     provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -974,12 +1089,14 @@ mod tests {
             for row in suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: None,
                     think: Some(&think),
                     theme: None,
                     resume: None,
                     provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -999,7 +1116,16 @@ mod tests {
             elapsed: 12.5,
             tokens: 0,
         };
-        let text = row_text(&status_row(&status, '✻', &theme));
+        let motion = crate::tui::motion::Motion::new(true);
+        // Tick 0 = the first pulse frame; the sequence's mid-size star is frame 3.
+        let text = row_text(&status_row(
+            &status,
+            motion,
+            12,
+            false,
+            "esc to interrupt",
+            &theme,
+        ));
         assert!(
             text.contains("✻ Working… (esc to interrupt · 13s)"),
             "{text}"
@@ -1014,10 +1140,93 @@ mod tests {
             elapsed: 3.2,
             tokens: 1200,
         };
-        let text = row_text(&status_row(&status, '✽', &theme));
+        let text = row_text(&status_row(
+            &status,
+            motion,
+            15,
+            false,
+            "esc to interrupt",
+            &theme,
+        ));
         assert!(
             text.contains("✽ $ cargo test… (esc to interrupt · 3s · ↓ 1200 tokens)"),
             "{text}"
+        );
+    }
+
+    /// A busy status row: `pulse` picks the glyph, `beam` brightens a moving
+    /// window of the verb, and neither changes a single character of the copy.
+    #[test]
+    fn status_row_glimmers_without_changing_its_text() {
+        let theme = Theme::dark();
+        let motion = crate::tui::motion::Motion::new(true);
+        let status = crate::tui::chat::RunningStatus {
+            verb: "Synthesizing".to_string(),
+            elapsed: 4.0,
+            tokens: 0,
+        };
+        // Everything but the spinner glyph, which `pulse` owns and does change.
+        let copy = "Synthesizing… (esc · 4s)";
+        let mut brightened = 0;
+        for tick in 0..61 {
+            let row = status_row(&status, motion, tick, false, "esc", &theme);
+            let text = row_text(&row);
+            assert!(
+                text.contains(copy),
+                "the sweep never edits the text: {text}"
+            );
+            if row
+                .line
+                .segs
+                .iter()
+                .any(|seg| seg.style.fg == Some(theme.claude_strong))
+            {
+                brightened += 1;
+            }
+        }
+        assert!(brightened > 0, "the verb is lit during the sweep");
+        assert!(brightened < 61, "and dark again between passes");
+        // Motion off: one colour, one glyph, all the way down.
+        let still = crate::tui::motion::Motion::new(false);
+        for tick in [0u64, 7, 40] {
+            let row = status_row(&status, still, tick, false, "esc", &theme);
+            let text = row_text(&row);
+            assert_eq!(text, format!("  ✻ {copy}"), "one glyph, all the way down");
+            assert!(
+                !row.line
+                    .segs
+                    .iter()
+                    .any(|seg| seg.style.fg == Some(theme.claude_strong)),
+                "nothing glimmers under the gate"
+            );
+        }
+    }
+
+    /// Three seconds without an event: the row says so in the warning colour and
+    /// stops glimmering — a stalled turn should not look like a busy one. The
+    /// copy is untouched, because nothing new is actually known.
+    #[test]
+    fn a_stalled_status_row_turns_warning_and_stops_sweeping() {
+        let theme = Theme::dark();
+        let motion = crate::tui::motion::Motion::new(true);
+        let status = crate::tui::chat::RunningStatus {
+            verb: "Churning".to_string(),
+            elapsed: 9.0,
+            tokens: 0,
+        };
+        let running = status_row(&status, motion, 20, false, "esc", &theme);
+        let stalled = status_row(&status, motion, 20, true, "esc", &theme);
+        assert_eq!(row_text(&running), row_text(&stalled), "same words");
+        let colors = |row: &Row| -> Vec<Option<Color>> {
+            row.line.segs.iter().map(|seg| seg.style.fg).collect()
+        };
+        assert!(colors(&running).contains(&Some(theme.claude)));
+        assert!(!colors(&running).contains(&Some(theme.warning)));
+        assert!(colors(&stalled).contains(&Some(theme.warning)));
+        assert!(!colors(&stalled).contains(&Some(theme.claude)));
+        assert!(
+            !colors(&stalled).contains(&Some(theme.claude_strong)),
+            "the glimmer stops with the news"
         );
     }
 
@@ -1057,7 +1266,7 @@ mod tests {
     #[test]
     fn footer_keeps_context_usage_idle_and_colors_thresholds() {
         let mut chat = chat_at(100, 24);
-        chat.context_usage = crate::context_usage::ContextUsage::new(74_240, 128_000);
+        chat.context_usage = crate::context_usage::ContextUsage::new(74_240, 128_000, 100_000);
         let normal = footer_row(&chat, 100);
         let text = row_text(&normal);
         assert!(text.contains("▓▓░░ 58% 74240/128k"), "{text}");
@@ -1067,10 +1276,11 @@ mod tests {
                 .line
                 .segs
                 .iter()
-                .any(|seg| seg.text.contains("58%") && seg.style.fg == Some(chat.theme.inactive))
+                .any(|seg| seg.text.contains("58%")
+                    && seg.style.fg == Some(chat.theme.text_secondary))
         );
 
-        chat.context_usage = crate::context_usage::ContextUsage::new(70, 100);
+        chat.context_usage = crate::context_usage::ContextUsage::new(70, 100, 90);
         let warning = footer_row(&chat, 100);
         assert!(
             warning.line.segs.iter().any(|seg| {
@@ -1078,7 +1288,7 @@ mod tests {
             })
         );
 
-        chat.context_usage = crate::context_usage::ContextUsage::new(91, 100);
+        chat.context_usage = crate::context_usage::ContextUsage::new(91, 100, 90);
         let danger = footer_row(&chat, 100);
         assert!(
             danger
@@ -1203,5 +1413,134 @@ mod tests {
             Some(chat.theme.bash_border),
             "border color swaps"
         );
+    }
+
+    /// D90: while a DM is the conversation, the composer wears that teammate's
+    /// colour — the border and the `❯` alike — and the hub restores the
+    /// default. Checked in both themes, because a tint verified in only one is
+    /// a tint that works in only one.
+    #[test]
+    fn a_dm_tints_the_composer_in_its_teammates_colour() {
+        use crate::tui::buffer::BufferId;
+        use crate::tui::theme::{Theme, ThemeSetting};
+
+        for setting in [ThemeSetting::Dark, ThemeSetting::Light] {
+            let mut chat = chat_at(80, 24);
+            chat.theme = Theme::for_terminal(setting, None);
+            chat.session.agents.insert(
+                "scout",
+                crate::agents::AgentKind::Hire,
+                None,
+                "research".into(),
+                chat.session.clone(),
+            );
+            chat.refresh_entities();
+
+            let hub = rows_of(prompt(&chat, 40));
+            let default = Some(chat.theme.prompt_border);
+            assert_eq!(hub[0].line.segs[0].style.fg, default, "{setting:?}");
+
+            chat.switch_to(BufferId::Dm("scout".into()));
+            let tint = chat.teammate_tint().expect("a DM has a teammate");
+            assert_ne!(
+                Some(tint),
+                default,
+                "the tint is a colour of its own in {setting:?}"
+            );
+            let dm = rows_of(prompt(&chat, 40));
+            assert_eq!(dm[0].line.segs[0].style.fg, Some(tint), "top {setting:?}");
+            assert_eq!(
+                dm[dm.len() - 1].line.segs[0].style.fg,
+                Some(tint),
+                "bottom {setting:?}"
+            );
+            assert!(row_text(&dm[1]).starts_with("❯ "), "{setting:?}");
+            assert_eq!(
+                dm[1].line.segs[0].style.fg,
+                Some(tint),
+                "the prompt glyph too, in {setting:?}"
+            );
+
+            chat.switch_to(BufferId::Hub);
+            let back = rows_of(prompt(&chat, 40));
+            assert_eq!(
+                back[0].line.segs[0].style.fg, default,
+                "the hub restores the default accent in {setting:?}"
+            );
+        }
+    }
+
+    /// The bar is a chrome tier like every other, so it reaches both hosts from
+    /// the same tree and renders identically in each — and it sits directly on
+    /// the composer, which is the surface it is about.
+    #[test]
+    fn the_conversation_bar_reaches_both_hosts_identically() {
+        let mut chat = chat_at(100, 40);
+        assert!(
+            !rows_of(chrome(&chat, 100, false))
+                .iter()
+                .any(|row| row_text(row).contains("hub")),
+            "a lone hub spends no row on a bar"
+        );
+
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "research".into(),
+            chat.session.clone(),
+        );
+        chat.refresh_entities();
+
+        let find_bar = |fullscreen: bool| {
+            let rows = rows_of(chrome(&chat, 100, fullscreen));
+            let at = rows
+                .iter()
+                .position(|row| row_text(row).contains("@scout"))
+                .expect("the bar is rendered");
+            assert!(
+                row_text(&rows[at + 1]).starts_with('╭'),
+                "the bar sits directly on the composer: {:?}",
+                row_text(&rows[at + 1])
+            );
+            row_text(&rows[at])
+        };
+        assert_eq!(
+            find_bar(false),
+            find_bar(true),
+            "both hosts render the same bar"
+        );
+        assert!(find_bar(false).contains("hub"), "and it names the hub too");
+    }
+
+    /// The switcher renders where the ctrl+b manager does, in the same frame,
+    /// so the two overlays are one object in one place.
+    #[test]
+    fn the_switcher_renders_as_an_overlay() {
+        let mut chat = chat_at(100, 40);
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "research".into(),
+            chat.session.clone(),
+        );
+        chat.refresh_entities();
+        assert!(
+            !rows_of(chrome(&chat, 100, false))
+                .iter()
+                .any(|row| row_text(row).contains("Switch conversation")),
+            "closed, it costs nothing"
+        );
+
+        chat.open_switcher();
+        let text = rows_of(chrome(&chat, 100, false))
+            .iter()
+            .map(row_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Switch conversation"), "{text}");
+        assert!(text.contains("@scout"), "{text}");
+        assert!(text.contains("Esc close"), "{text}");
     }
 }

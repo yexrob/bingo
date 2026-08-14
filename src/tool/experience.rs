@@ -528,6 +528,7 @@ mod tests {
         ToolContext {
             cwd: cwd.to_path_buf(),
             watch: crate::watch::WatchRegistry::new(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: Arc::new(crate::tasks::TaskStore::new(home, "test")),
             hooks: Settings::default().hooks,
@@ -536,6 +537,7 @@ mod tests {
             ask_question: Arc::new(|_t, _q, _o| Box::pin(async { None })),
             home: home.to_path_buf(),
             instance: None,
+            rewind: Default::default(),
         }
     }
 
