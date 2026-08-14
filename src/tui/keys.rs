@@ -117,7 +117,11 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "/open",
-        description: "open a conversation: @agent · #channel · #team · hub",
+        description: "open a conversation: @agent · #room · hub",
+    },
+    Binding {
+        keys: "ctrl+t",
+        description: "tasks, then the team directory (roster · rooms · recent)",
     },
     Binding {
         keys: "@name · #name",

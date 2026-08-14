@@ -2871,6 +2871,8 @@ fn slash_dispatch_covers_every_table_entry() {
         ("tasks", "tasks"),
         ("team", "team"),
         ("open", "open"),
+        ("join", "join"),
+        ("leave", "leave"),
     ];
     let table: HashSet<&str> = SLASH_COMMANDS.iter().map(|(n, _, _)| *n).collect();
     let arms: HashSet<&str> = dispatch.iter().map(|(a, _)| *a).collect();

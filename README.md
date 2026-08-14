@@ -203,7 +203,7 @@ opens the level picker; the choice persists), `/theme`,
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` executes directly),
-`/open <@agent|#channel|#team|hub>` (enter a conversation; Tab completes from
+`/open <@agent|#room|hub>` (enter a conversation; Tab completes from
 the ones that exist — `Ctrl+K` is the same door without typing a name),
 `/context` (usage),
 `/status`, `/config` (effective config with per-key source layer/env, current
@@ -467,19 +467,19 @@ With `settings.experimental.agentChannels: true`:
 ## Conversations
 
 One terminal, one flow, one conversation at a time. The hub — your conversation
-with the model — is one of them; a DM with a running subagent, an agent channel
-and the `#team` board are the others, and they all wear the same composer, the
+with the model — is one of them; a DM with a running subagent and a room are
+the others, and they all wear the same composer, the
 same keys, the same approval dialogs and the same transcript rendering. There is
 no separate screen to enter and no second set of controls to learn.
 
 **Entering one** is `Ctrl+K` — every conversation in one list, most recently
 active first with the hub pinned on top, filtered as you type, opened with
-Enter — or `/open @agent`, `/open #channel`, `/open #team`, `/open hub` (Tab
-completes from the conversations that exist); a running agent's DM also opens
-from the Ctrl+B manager with Enter. Above the composer, a **conversation bar**
-lists what exists — presence for DMs (`●` running, `○` idle), an unread count,
-and the one you are in accented — and it appears only once there is more than
-one conversation to switch between.
+Enter — or `/open @agent`, `/open #room`, `/open hub` (Tab completes from the
+conversations that exist); a running agent's DM also opens from the Ctrl+B
+manager with Enter, and a member or a room from the team directory. Above the
+composer, a **conversation bar** lists the conversations you are *in* — presence
+for DMs (`●` running, `○` idle), an unread count, and the one you are in
+accented — and it appears only once there is more than one to switch between.
 
 **Saying one thing without going there**: from the hub, a message that opens
 with a conversation's name delivers the rest to it and leaves you where you
@@ -532,10 +532,36 @@ rules mark it; `Ctrl+O` (the transcript view) remains the complete record of the
 hub session.
 
 **Sending**: what you type goes to the conversation you are in — a DM delivers
-to that instance under your name, a channel posts to the log, and `#team` is a
-record rather than a room and says so. None of it starts a model turn. Slash
+to that instance under your name, and a room posts to its log if you are a
+member of it. A room you are only watching refuses and says how to join. None of
+it starts a model turn. Slash
 commands are the exception and act on the application from anywhere, so `/model`
 in a DM is still `/model`.
+
+## Rooms and the team
+
+A **room** is the only group conversation bingo has, and its members are any
+subset of the team. It does not have to include you: agents form rooms among
+themselves to work something out, and creating one seats the creator and nobody
+else — `user` and `main` join only when named.
+
+A room you are in behaves like every other conversation: it is in the bar, in
+`Ctrl+K`, and you speak in it by typing. A room you are **not** in is not hidden
+— the team directory lists it, marked `you're not in`, and opening it gives you
+the same flow **read-only**, framed `── #parser · observer · read-only ──`, with
+`read-only · /join to speak in this room` standing under the composer. `/join`
+(or `j` on the room in the directory) makes you a member. There is no quiet way
+in: joining and leaving are written into the room as dim `· user joined · 14:32`
+lines that every member sees. `/leave` is the counterpart, and a room you leave
+drops off the bar while staying readable.
+
+**The team is not a conversation** — you cannot say anything to it, so it is a
+directory rather than a board with a badge. `Ctrl+T` cycles tasks → team →
+closed. The directory shows the roster with presence and each member's rooms,
+every room with its members, and the last ten lifecycle events (spawn, done, and
+`/team` output). ↑/↓ move, Enter opens a member's DM or a room, `j` joins the
+room under the cursor. It navigates and informs only — stopping an agent stays
+in the Ctrl+B manager.
 
 **Avatars**: on terminals that can place kitty images — the same capability
 behind inline image rendering (Ghostty/kitty, and tmux with passthrough) — each

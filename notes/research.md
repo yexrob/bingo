@@ -2582,3 +2582,121 @@ reads differently at 09:02 and at 17:40. The other members describe *now* and ha
   coalesce flush rides the tick, so a fully idle loop pays what it owes when it next wakes.
 - 1365 + 13 tests before, 1390 + 13 after (25 new: 7 relay arithmetic, 6 tool surface, 11 hub
   routing and rendering, 1 tool registration).
+
+### D95. Rooms as first-class citizens, and the team as a directory
+
+**Problem.** Two things were wearing each other's clothes. A *channel* was a group chat whose
+roster the domain silently filled in — `create` seated `main` and `user` no matter what was asked
+for — so every room was the user's room by construction, and "an arbitrary subset of the team" was
+a sentence in the design that the code contradicted on line one. Meanwhile `#team` was a
+*conversation* you could open, that carried an unread badge, that sat in the bar and the switcher
+and `/open`, and that you could type into — where it refused politely, because there was nobody to
+refuse. The team is the organization. You cannot say anything to it. A read-only buffer with a
+badge was a conversation-shaped hole where a roster belonged.
+
+**The channel-domain inventory**, taken at `ebf632e` before anything changed:
+
+| Piece | Where | What D95 did |
+|---|---|---|
+| `ChannelRegistry` — members, mode, seq, log, seen, sent, frozen, watch id, share sync | `src/channels.rs` | Extended in place. This *is* the room domain; a parallel one was never on the table. |
+| `create(name, members, mode)` — force-seated `HUB_NAME` + `USER_NAME` | `src/channels.rs:247` | Seats exactly what it is given. Policy moved to the tool layer, which knows the caller. |
+| `invite` / `kick` — roster edits, silent; `kick` refused `user` and `main` | `src/channels.rs:306` | Both write a membership event; only `main` is still irremovable. |
+| `post` — stamping, serial staleness, budget gate, hub_mail | `src/channels.rs:368` | Staleness now reads speech only; the non-member error names the cure. |
+| `remove_member_everywhere` — called on AgentControl delete | `src/channels.rs:347` | Writes a `left` event per room it touches. |
+| `log_of` / `info` / `list` / `row_snapshot` — read surface for the TUI and the watch row | `src/channels.rs` | Unchanged, plus `is_member` and `rooms_of` for the display side. |
+| `ChannelTool` (create/invite/kick/list), **hub-only** | `src/tool/channel.rs:225`, `src/tools.rs:79` | Also registered for depth-1 sub-agents; description rewritten to explain rooms. |
+| `PostTool` (hub + depth-1), `deliver_post` shared by the tool and the TUI composer | `src/tool/channel.rs:80` | Unchanged mechanically; description says "room". |
+| Blueprint rooms `.bingo/team.json` | `src/team.rs:1292` | Names `main` + `user` explicitly, so declared rooms behave exactly as before. |
+
+**Vocabulary mapping.** Domain `channel` → UI/docs **room**; `ChannelRegistry` → the room domain;
+`BufferId::Channel(name)` → `#name`; `ChannelMessage{kind: Membership}` → the dim `· name joined ·`
+line. The domain keeps its own name deliberately: renaming a persisted share schema, a settings key
+(`experimental.agentChannels`), a tool (`Channel`) and a `WatchKind` to say the same word would be
+churn with a migration attached. The rule is that nothing a *user or an agent reads* says "channel".
+
+**Membership and its event schema.** `ChannelMessage` gained `kind: MessageKind` (`Said` |
+`Membership`), `#[serde(default)]` so a pre-D95 share document still reads as all speech. A
+membership entry is `{seq, from: <member>, text: "joined" | "left", at, kind: Membership}` and takes
+a real sequence number, because a reader has to be able to tell whether somebody spoke before or
+after they arrived. Three things it deliberately is **not**: delivered to anybody's inbox (waking N
+agents because a roster changed is the flooding D94 removed — an agent that wants the roster asks
+`Channel list`); counted by the serial commit check, which now filters `kind == Said`, so a join can
+never bounce a post already being drafted; or the "latest" in a room's watch-row detail, since a
+room whose last entry is a join has not gone quiet.
+
+**Membership is what the bar means.** `Buffers::refresh` lists a room while the user is a member and
+*removes* it when they are not. That is the one place D89's "never remove a buffer" rule is broken,
+and the reason is the distinction the rule was about: a stopped agent's DM is still your
+conversation, while a room you are not in was never yours. Rooms with no user are absent from the
+bar, the `Ctrl+K` switcher and `/open` — the directory is the only door.
+
+**Observing.** Opening a non-member room needs no new state: the active buffer is simply an id with
+no registry entry, and everything else derives from `channels.is_member`. The rule becomes
+`── #parser · observer · read-only ──` (via `Buffers::rule_for`, so the framing is a fact about the
+conversation rather than about the host), `route_submit` returns `Refused(OBSERVER_HINT)`, and the
+same sentence stands under the composer via `Chat::observer_hint` — one wording, so the answer to
+"why can't I type here" does not depend on whether you tried. **Esc goes to the hub**, unchanged:
+`BackToHub` already means "take me home" from every conversation, and a second meaning ("back to
+the directory") would have made Esc's destination depend on how you arrived.
+
+**The directory** (`src/tui/directory.rs`, new) is the second stop of `Ctrl+T`: tasks → team →
+closed. Roster with presence and each member's rooms, every room with its members and a
+`you're not in` mark, the last ten feed entries newest-first — all rebuilt from live sources every
+draw, because the roster is a dozen rows and a cached roster is a roster that can be wrong. ↑/↓ walk
+the *selectable* rows only, Enter opens a DM or a room, `j` joins the room under the cursor and
+leaves the panel open so the mark flipping is the confirmation. It is modal for bare keys (`j` must
+not also type a `j`) and transparent to chords (`Ctrl+T` has to close what it opened).
+
+**Deliberate scoping.** The directory navigates and informs; it does not stop, restart or inspect
+agents. Those verbs live in the `Ctrl+B` manager with their warning and their one stop path, which
+the `Ctrl+K` switcher already routes through rather than reimplementing. A second surface that could
+stop an agent would be a second place for "stop" to mean something slightly different.
+
+**Why `EscLayer::Directory` is its own layer** rather than a second meaning for `TaskPanel`: the two
+are one *gesture* but not one surface — different state, different dismissal, both reachable from
+the same key — and `ORDER` is the single place that says which one Esc closes. A shared slot would
+have had to answer that question somewhere else. It sits immediately above `TaskPanel`, and the walk
+test asserts both the adjacency and that `ORDER.len()` grew by exactly one (a variant in the enum
+and in both matches but missing from `ORDER` is a layer Esc can never reach — the one thing the
+compiler does not catch here).
+
+**Deviations from the dispatch, with reasons.**
+- *The join key is `/join` plus `j` in the directory, not a bare `J` in the composer.* The composer
+  stays live in observer mode so `/help`, `Ctrl+K` and Esc keep working; a bare letter there would
+  have to be either a letter or an action. `ctrl+j` was rejected outright — it is Enter on many
+  terminals. `/leave` came along for symmetry and to give the user a way out of a room they joined.
+- *The observer frame is the rule plus the composer hint, not a drawn border.* Scrollback is written
+  once (D38/D82), so a box around a flow that is still growing cannot be drawn without rewriting it.
+- *`PostKind::Note` now renders as a dim line everywhere*, not only for membership. Its own doc had
+  always said "one dim line instead of a quoted block with a name over it", and the flow rendered it
+  as a named message anyway; `Replay::Note` makes the code match the sentence, and DM wake-up
+  scaffolding gets the treatment it was documented to have.
+- *The D93 crew gate is deleted rather than moved.* It existed so a solo hire would not raise a
+  badge; a column in a panel the user opens has no badge to withhold.
+
+**Deleted tests, and where their claims went.**
+| Deleted | Disposition |
+|---|---|
+| `buffer::the_board_hears_agents_and_nothing_else` | → `the_feed_hears_agents_and_nothing_else_and_raises_no_conversation`: the `WatchKind` filter is kept, the buffer assertions become "no conversation is raised". |
+| `buffer::a_solo_hire_writes_the_log_without_raising_a_board` | Subject gone with the crew gate. Its surviving claim (the log fills for a hire) is asserted in the test above. |
+| `buffer::the_board_bounds_what_it_remembers` | → `the_feed_bounds_what_it_remembers`, unchanged but reading through `team_log()`. |
+| `buffer::the_board_replays_its_lifecycle_log` | → `the_feed_keeps_what_happened_and_what_was_reported` (the `state · detail` shape) + `directory::the_directory_shows_the_roster_the_rooms_and_what_just_happened` (the rows). |
+| `buffer::the_board_refuses_to_be_spoken_in` | → `a_room_you_are_watching_refuses_to_be_spoken_in`, which also asserts nothing was posted and that joining flips it. |
+| `bufferview::the_board_refuses_to_be_spoken_in` | → `a_room_you_are_not_in_opens_read_only_and_says_why`. |
+| `bufferview::the_board_renders_its_lifecycle_log` | → `directory::the_directory_shows_…`; the rows moved, so the test did. |
+| `bufferview::team_output_lands_on_the_board_and_says_so` | → `team_output_lands_in_the_feed_and_says_where` (pointer copy + the directory-open case). |
+| `#team` arms inside `an_id_names_its_conversation_in_one_vocabulary`, `conversations_materialize_from_the_domain_in_one_order`, `every_conversation_routes_to_its_own_path`, `open_reaches_every_conversation_…`, `convbar::the_bar_lists_the_registry_in_its_own_order` | Arms removed; the enum no longer has the variant. |
+| `tools::channel_tools_gated_by_experimental_flag`'s "channel management is hub-only" | Inverted: a direct sub-agent now gets `Channel`. |
+
+**Named limits.** While observing, the bar shows no active entry — the room is by definition not one
+of the user's conversations, and inventing a bar slot for it would contradict the rule the bar
+states. A membership line carries its clock inside its own text, because the row shape it renders as
+(the rule's) has nowhere to hang a right-aligned stamp. Agent↔agent rooms are only as discoverable
+as the directory: nothing announces that one was formed, which is the correct default for a room the
+user is not in, but it does mean a room can exist for a while before anyone looks.
+
+- 1390 + 13 tests before, 1405 + 13 after (15 new: 3 domain — roster subsets, join-never-stales,
+  pre-D95 share compatibility; 3 buffer — membership listing, membership notes, observer rule;
+  2 bufferview — observer mode, join/leave round trip; 6 directory — contents, feed order, Enter
+  navigation, `j` join, the scoping guard, the empty case; plus the switcher's non-member room and
+  three chat-tests for the `EscLayer` slot, the `Ctrl+T` cycle and the directory's key modality).

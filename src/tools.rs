@@ -91,8 +91,15 @@ pub async fn assemble_tools(
         // when they choose to; this is the one line it may put in front of them.
         tools.push(Box::new(crate::tool::notify_user::NotifyUserTool));
         if channels_on && session.depth == 1 && session.instance.is_some() {
-            // Channel cohort (experimental): direct subagents only get the posting tool.
+            // Room cohort (experimental): a direct subagent both speaks in rooms
+            // and forms them (D95). Grouping used to be the main agent's alone,
+            // which made every room a room the top of the tree had convened; a
+            // room is an arbitrary subset of the team, and two members who need
+            // to work something out are exactly such a subset.
             tools.push(Box::new(crate::tool::channel::PostTool::new(
+                session.clone(),
+            )));
+            tools.push(Box::new(crate::tool::channel::ChannelTool::new(
                 session.clone(),
             )));
         }
@@ -298,8 +305,8 @@ mod tests {
             "cohort members can speak: {sub:?}"
         );
         assert!(
-            !sub.iter().any(|n| n == "Channel"),
-            "channel management is hub-only: {sub:?}"
+            sub.iter().any(|n| n == "Channel"),
+            "and form rooms of their own (D95): {sub:?}"
         );
         let deep = std::sync::Arc::new(Session {
             instance: Some("d".into()),

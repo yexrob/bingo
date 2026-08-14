@@ -1108,6 +1108,9 @@ pub struct Chat {
     pub agent_manager: Option<AgentManager>,
     /// The ctrl+k conversation switcher (D90); `None` means it is closed.
     pub(crate) switcher: Option<crate::tui::switcher::Switcher>,
+    /// The team directory (D95), second stop of the ctrl+t cycle; `None` means
+    /// it is closed. The team has no buffer — this panel is where it lives.
+    pub(crate) directory: Option<crate::tui::directory::Directory>,
     /// The esc-esc rewind selector (D91); `None` means it is closed.
     pub(crate) rewind: Option<rewind_ui::Rewind>,
     /// Visits to conversations other than the hub (D89), oldest first. Each one
@@ -1393,6 +1396,7 @@ impl Chat {
             tasks_auto: false,
             agent_manager: None,
             switcher: None,
+            directory: None,
             rewind: None,
             excursions: Vec::new(),
             interrupted: false,
@@ -1800,9 +1804,14 @@ impl Chat {
                 payload,
                 signal,
             } => {
-                // The registry sweep goes first: it is what lists `#team` once a
-                // crew exists (D93), so the event below is observed against a
-                // board that is already there rather than creating one.
+                // The registry sweep goes first: it is what materializes the
+                // conversation an event is about, so a DM's badge is observed
+                // against a buffer that is already there rather than one this
+                // event has to create. The lifecycle feed itself is ungated
+                // (D95) and does not depend on the order.
+                //
+                // No mut-borrow hazard: the sweep takes the session, the note
+                // takes the event.
                 self.refresh_conversations();
                 self.buffers
                     .note_watch_event(&label, kind, status, detail.as_deref(), self.tick);
@@ -2680,6 +2689,8 @@ impl Chat {
             "tasks" => self.slash_tasks(),
             "team" => self.slash_team(arg),
             "open" => self.slash_open(arg),
+            "join" => self.slash_join(arg),
+            "leave" => self.slash_leave(arg),
             other => {
                 // Skill name (prompt Command: skills share the registry with built-in commands; typing
                 // /skill-name runs it; the full body never enters the context, see the marker comment below).

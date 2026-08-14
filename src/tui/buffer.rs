@@ -1,7 +1,7 @@
 //! The conversation engine (D88): every conversation has the same shape.
 //!
-//! A buffer is one conversation — the hub, a DM with a subagent, an agent
-//! channel, or the team board. The engine holds what is *about* a conversation
+//! A buffer is one conversation — the hub, a DM with a subagent, or a room the
+//! user is in. The engine holds what is *about* a conversation
 //! (how far you have read, whether it wants you, the draft you left in it) and
 //! nothing of what is *in* one: a buffer's transcript stays where the domain
 //! already keeps it, and [`BufferId`] is the key that reaches it. There is no
@@ -39,23 +39,28 @@ use crate::query::Session;
 use crate::tui::chat::{Role, UiMessage};
 use crate::watch::{WatchKind, WatchState};
 
-/// How many lifecycle events the team board keeps. The board is the one buffer
-/// with no domain store behind it (spawn/done/ack are broadcast and retained
-/// nowhere), so it is also the one that has to bound itself.
+/// How many lifecycle events the team feed keeps. Spawn/done/ack are broadcast
+/// and retained nowhere else, so the feed is the one display-side store with no
+/// domain store behind it, and therefore the one that has to bound itself.
 const TEAM_LOG_MAX: usize = 200;
 
 /// Which conversation a buffer is.
 ///
-/// The derived ordering *is* the registry's ordering: hub, the team board,
-/// channels by name, then DMs by name. Declaration order carries it, so there
-/// is no second sort key to keep in step with this enum.
+/// The derived ordering *is* the registry's ordering: hub, rooms by name, then
+/// DMs by name. Declaration order carries it, so there is no second sort key to
+/// keep in step with this enum.
+///
+/// **There is no `Team` variant, and that is the D95 ruling.** The team is the
+/// organization, not a conversation: you cannot speak to it, and everything it
+/// had to say — who exists, what rooms there are, what just happened — is a
+/// directory (`ctrl+t`, [`crate::tui::directory`]) rather than a board you
+/// visit and a badge that asks you to. A read-only buffer in the bar was a
+/// conversation-shaped hole where a roster belonged.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BufferId {
     /// The main conversation with the model — the transcript already on screen.
     Hub,
-    /// The team board: subagent lifecycle, read-only.
-    Team,
-    /// An agent channel (D29).
+    /// A room the user is a member of (D29's channel, D95's vocabulary).
     Channel(String),
     /// A direct conversation with one subagent instance.
     Dm(String),
@@ -66,7 +71,6 @@ impl BufferId {
     pub fn label(&self) -> String {
         match self {
             Self::Hub => "hub".to_string(),
-            Self::Team => "#team".to_string(),
             Self::Channel(name) => format!("#{name}"),
             Self::Dm(name) => format!("@{name}"),
         }
@@ -135,6 +139,13 @@ pub enum Replay {
     /// `who` carries the sender the hub's two roles cannot express, for the
     /// decorations D89 hangs on it.
     Message { who: String, message: UiMessage },
+    /// Something that happened in the conversation that nobody said: a room's
+    /// membership change, a wake-up the runtime wrote into an instance's
+    /// history. One dim line, no name over it and no send stamp beside it,
+    /// because there is no sender and nothing was sent — the same row shape a
+    /// [`Replay::Divider`] gets, which is what [`PostKind::Note`] always
+    /// claimed to be and, until D95, was rendered as a quoted message anyway.
+    Note(String),
 }
 
 /// Where a composer submit belongs. Data only — [`deliver`] performs it.
@@ -149,9 +160,17 @@ pub enum SubmitTarget {
     Dm { agent: String, text: String },
     /// `tool::channel::deliver_post` under the user's name.
     Channel { channel: String, text: String },
-    /// The board is a record of what happened, not a room to speak in.
+    /// A room the user is only watching (D95): reading is free, speaking is a
+    /// membership event, so the composer says how to become a member rather
+    /// than posting under a name that is not on the roster.
     Refused(&'static str),
 }
+
+/// What the composer says under a room the user is observing. Stated once: the
+/// refusal on submit and the standing hint above the prompt are the same
+/// sentence, so the answer to "why can't I type here" does not depend on
+/// whether you tried.
+pub const OBSERVER_HINT: &str = "read-only · /join to speak in this room";
 
 /// What came of a routed submit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,14 +182,14 @@ pub enum Delivery {
     Rejected(String),
 }
 
-/// One entry on the team board.
+/// One entry in the team feed — the directory's "recent" column.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeamEvent {
     /// The watch label, which already carries the instance name and run — or
     /// the command that produced the entry, for the board's own output.
     pub label: String,
     /// The lifecycle state this entry reports. `None` means the entry is not a
-    /// lifecycle event at all but output posted to the board (`/team`, D90):
+    /// lifecycle event at all but output posted to the feed (`/team`, D90):
     /// there is no state to name, and naming one anyway would report a
     /// transition that never happened.
     pub state: Option<WatchState>,
@@ -179,13 +198,13 @@ pub struct TeamEvent {
     pub at: u64,
 }
 
-/// One board entry as a line.
+/// One feed entry as a line.
 ///
 /// A lifecycle event says what happened *and* what was reported, in that order:
 /// the detail alone used to be the whole row, so a finished run and a running
-/// one were told apart only by what the agent happened to say. Board output
+/// one were told apart only by what the agent happened to say. Feed output
 /// (`/team`) has no state and is its own text.
-fn team_line(event: &TeamEvent) -> String {
+pub(crate) fn team_line(event: &TeamEvent) -> String {
     match (event.state, &event.detail) {
         (Some(state), Some(detail)) => format!("{} · {detail}", state_word(state)),
         (Some(state), None) => state_word(state).to_string(),
@@ -317,9 +336,21 @@ impl Buffers {
     /// This does not remove buffers whose source is gone: a stopped instance
     /// still has a conversation worth reading back, and the workspace keeps its
     /// row too. D89 decides what a dead conversation looks like.
+    ///
+    /// **Rooms are the exception, and membership is why** (D95). A DM survives
+    /// its agent because the conversation was still yours; a room you are not
+    /// in was never yours to begin with — it is somebody else's conversation,
+    /// findable in the directory and readable there. So a room is listed while
+    /// the user is a member of it and drops out of the registry when they
+    /// leave, which is what makes the bar mean "conversations I am in".
     pub fn refresh(&mut self, session: &Arc<Session>, tick: u64) {
         let token = format!("@{USER_NAME}");
+        let mut mine: Vec<String> = Vec::new();
         for status in session.channels.list() {
+            if !status.members.iter().any(|m| m == USER_NAME) {
+                continue;
+            }
+            mine.push(status.name.clone());
             let id = BufferId::Channel(status.name.clone());
             let read = self.get(&id).map(|b| b.read).unwrap_or(status.seq);
             // Only worth reading the log when something in it is unread — this
@@ -333,23 +364,15 @@ impl Buffers {
                     .any(|m| m.seq > read && m.text.contains(&token));
             self.observe(id, status.seq, mention, tick);
         }
+        // A room the user has left (or that is gone) stops being one of their
+        // conversations — including the one they are standing in, which simply
+        // becomes a room they are observing. The flow does not move: reading
+        // was never the part that needed membership.
+        self.list.retain(|buffer| match buffer.id() {
+            BufferId::Channel(name) => mine.iter().any(|kept| kept == name),
+            _ => true,
+        });
         let agents = session.agents.list();
-        // The board is a *team's* board (D93). It appears once the user has
-        // actually formed one — a blueprint spawned into a crew — and not
-        // because the model hired a single agent to go read a file. A hire is
-        // reached through its own DM and says so in the bar; a `#team` entry
-        // nobody asked for was a third surface for the same one agent.
-        //
-        // The lifecycle log fills either way (`note_watch_event`), so a crew
-        // formed later opens onto the history it missed rather than onto a
-        // board that starts at the moment it was listed.
-        if agents
-            .iter()
-            .any(|status| status.kind == crate::agents::AgentKind::Crew)
-        {
-            let seq = self.team.len() as u64;
-            self.observe(BufferId::Team, seq, false, tick);
-        }
         for status in agents {
             let seq = session
                 .agents
@@ -364,17 +387,19 @@ impl Buffers {
 
     /// Tee of the lifecycle stream (`UiEvent::WatchEvent`).
     ///
-    /// Only agent events reach the board. Channel events belong to their own
-    /// buffer and command events are the hub's own tools, so neither is team
-    /// news. The log is written whether or not the board is listed (D93): what
-    /// lists it is a crew existing, which [`Buffers::refresh`] decides.
+    /// Only agent events reach the feed. Room events belong to their own
+    /// conversation and command events are the hub's own tools, so neither is
+    /// team news. Nothing here is gated any more: the feed is a column in a
+    /// directory the user opens, not a buffer that asks to be read, so there is
+    /// no badge to withhold and no reason to decide whether a formation counts
+    /// as a formation before writing down that an agent started.
     pub fn note_watch_event(
         &mut self,
         label: &str,
         kind: WatchKind,
         state: WatchState,
         detail: Option<&str>,
-        tick: u64,
+        _tick: u64,
     ) {
         if kind != WatchKind::Agent {
             return;
@@ -385,22 +410,11 @@ impl Buffers {
             detail: detail.map(str::to_string),
             at: crate::channels::now_unix(),
         });
-        // A board nobody has been given does not get an unread badge. The
-        // events are kept regardless, so listing it later replays them.
-        if self.get(&BufferId::Team).is_none() {
-            return;
-        }
-        let seq = self.team.len() as u64;
-        self.observe(BufferId::Team, seq, false, tick);
     }
 
-    /// The bounded lifecycle log, oldest first.
-    ///
-    /// The board replays it through `rehydrate`, and from D94 it is also the
-    /// *only* place a hub-idle spawn or completion is written down on the display
-    /// side. Test-only for now because that replay is still the sole production
-    /// reader; D95's team directory is the second, and un-gates it.
-    #[cfg(test)]
+    /// The bounded lifecycle log, oldest first — the team directory's feed, and
+    /// since D94 the only place a hub-idle spawn or completion is written down
+    /// on the display side.
     pub fn team_log(&self) -> &[TeamEvent] {
         &self.team
     }
@@ -421,12 +435,13 @@ impl Buffers {
         self.observe(BufferId::Hub, self.relays, true, tick);
     }
 
-    /// Post the host's own output to the board (D90).
+    /// Post the host's own output to the feed (D90).
     ///
-    /// `/team` reports what the formation is, and that is board news rather
-    /// than hub news: without this the answer landed in the hub's info tier,
-    /// scrolled away, and left the one buffer that exists to hold it empty.
-    pub fn note_team_output(&mut self, label: &str, text: &str, tick: u64) {
+    /// `/team` reports what the formation is, and that is team news rather than
+    /// hub news: without this the answer landed in the hub's info tier and
+    /// scrolled away. It goes where the rest of the formation's history goes,
+    /// and the hub keeps one line pointing at it.
+    pub fn note_team_output(&mut self, label: &str, text: &str) {
         if text.trim().is_empty() {
             return;
         }
@@ -436,14 +451,9 @@ impl Buffers {
             detail: Some(text.to_string()),
             at: crate::channels::now_unix(),
         });
-        if self.get(&BufferId::Team).is_none() {
-            return;
-        }
-        let seq = self.team.len() as u64;
-        self.observe(BufferId::Team, seq, false, tick);
     }
 
-    /// Append to the board's bounded log. The board is the one buffer with no
+    /// Append to the bounded feed. It is the one display-side store with no
     /// domain store behind it, so it is the one that has to bound itself.
     fn push_team(&mut self, event: TeamEvent) {
         self.team.push(event);
@@ -493,17 +503,6 @@ impl Buffers {
         }
         let posts: Vec<Post> = match id {
             BufferId::Hub => Vec::new(),
-            BufferId::Team => self
-                .team
-                .iter()
-                .map(|ev| Post {
-                    from: ev.label.clone(),
-                    you: false,
-                    at: ev.at,
-                    text: team_line(ev),
-                    kind: PostKind::Note,
-                })
-                .collect(),
             BufferId::Channel(name) => channel_posts(&session.channels.log_of(name), USER_NAME),
             BufferId::Dm(name) => match session.agents.view_of(name) {
                 // Settled history only: the live tail, the in-flight claim and
@@ -515,41 +514,65 @@ impl Buffers {
                 None => Vec::new(),
             },
         };
-        let mut out = vec![Replay::Divider(id.rule())];
+        let mut out = vec![Replay::Divider(self.rule_for(session, id))];
         let kept: Vec<&Post> = posts
             .iter()
             .filter(|p| matches!(p.kind, PostKind::Said | PostKind::Note))
             .collect();
         let start = kept.len().saturating_sub(budget);
-        out.extend(kept[start..].iter().map(|post| Replay::Message {
-            who: if post.you {
-                USER_NAME.to_string()
-            } else {
-                post.from.clone()
-            },
-            message: UiMessage {
-                role: if post.you {
-                    Role::User
+        out.extend(kept[start..].iter().map(|post| match post.kind {
+            // Nobody said it, so nothing renders a name over it or a clock
+            // beside it — the stamp, where the source has one, is part of the
+            // line's own text.
+            PostKind::Note => Replay::Note(post.text.clone()),
+            _ => Replay::Message {
+                who: if post.you {
+                    USER_NAME.to_string()
                 } else {
-                    Role::Assistant
+                    post.from.clone()
                 },
-                text: post.text.clone(),
-                at: post.at,
-                activities: Vec::new(),
-                insert_points: Vec::new(),
-                groups: Vec::new(),
-                group_of: Vec::new(),
+                message: UiMessage {
+                    role: if post.you {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
+                    text: post.text.clone(),
+                    at: post.at,
+                    activities: Vec::new(),
+                    insert_points: Vec::new(),
+                    groups: Vec::new(),
+                    group_of: Vec::new(),
+                },
             },
         }));
         out
     }
 
+    /// The rule a conversation opens under. A room the user is only watching
+    /// says so in the one place they cannot miss and cannot mistake for
+    /// somebody's message: `── #parser · observer · read-only ──`.
+    pub fn rule_for(&self, session: &Arc<Session>, id: &BufferId) -> String {
+        match id {
+            BufferId::Channel(name) if !session.channels.is_member(name, USER_NAME) => {
+                format!("── {} · observer · read-only ──", id.label())
+            }
+            _ => id.rule(),
+        }
+    }
+
     /// Where a composer submit in this conversation belongs.
-    pub fn route_submit(&self, id: &BufferId, text: &str) -> SubmitTarget {
+    ///
+    /// The session is here for one question — am I in this room — and it is
+    /// asked at the router rather than at the caller so that every way of
+    /// submitting (the composer, `#room …` from the hub) gets the same answer.
+    pub fn route_submit(&self, session: &Arc<Session>, id: &BufferId, text: &str) -> SubmitTarget {
         let text = text.to_string();
         match id {
             BufferId::Hub => SubmitTarget::Turn(text),
-            BufferId::Team => SubmitTarget::Refused("#team is a board, not a room"),
+            BufferId::Channel(name) if !session.channels.is_member(name, USER_NAME) => {
+                SubmitTarget::Refused(OBSERVER_HINT)
+            }
             BufferId::Channel(name) => SubmitTarget::Channel {
                 channel: name.clone(),
                 text,
@@ -642,15 +665,33 @@ pub struct Post {
     pub kind: PostKind,
 }
 
-/// Channel log → posts.
+/// Room log → posts. Speech becomes a message; a roster change becomes one dim
+/// line that carries its own clock, because the row it renders as has nowhere
+/// to hang a stamp (D93's convention, stated inside the text instead of beside
+/// it).
 pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
     log.iter()
-        .map(|m| Post {
-            from: m.from.clone(),
-            you: m.from == me,
-            at: m.at,
-            text: m.text.clone(),
-            kind: PostKind::Said,
+        .map(|m| match m.kind {
+            crate::channels::MessageKind::Said => Post {
+                from: m.from.clone(),
+                you: m.from == me,
+                at: m.at,
+                text: m.text.clone(),
+                kind: PostKind::Said,
+            },
+            crate::channels::MessageKind::Membership => {
+                let when = match stamp(m.at) {
+                    at if at.is_empty() => String::new(),
+                    at => format!(" {at}"),
+                };
+                Post {
+                    from: m.from.clone(),
+                    you: false,
+                    at: m.at,
+                    text: format!("· {} {} ·{when}", m.from, m.text),
+                    kind: PostKind::Note,
+                }
+            }
         })
         .collect()
 }
@@ -913,8 +954,7 @@ mod tests {
         }
     }
 
-    /// A crew member: the thing that makes a team a team, and so the thing
-    /// that puts `#team` in the registry (D93).
+    /// A crew member (D53): a teammate from the blueprint rather than a hire.
     fn seed_crew(session: &Arc<Session>, name: &str) {
         session.agents.insert(
             name,
@@ -923,6 +963,16 @@ mod tests {
             "crew member".to_string(),
             session.clone(),
         );
+    }
+
+    /// A room the user is in — the ordinary case for anything the bar shows.
+    fn seed_room(session: &Arc<Session>, name: &str, members: &[&str]) {
+        let mut roster = vec![USER_NAME.to_string()];
+        roster.extend(members.iter().map(|m| m.to_string()));
+        session
+            .channels
+            .create(name, roster, ChannelMode::Free)
+            .expect("room created");
     }
 
     fn ids(buffers: &Buffers) -> Vec<String> {
@@ -947,7 +997,6 @@ mod tests {
     #[test]
     fn an_id_names_its_conversation_in_one_vocabulary() {
         assert_eq!(BufferId::Hub.label(), "hub");
-        assert_eq!(BufferId::Team.label(), "#team");
         assert_eq!(BufferId::Channel("build".to_string()).label(), "#build");
         assert_eq!(BufferId::Dm("scout".to_string()).label(), "@scout");
         assert_eq!(BufferId::Dm("scout".to_string()).to_string(), "@scout");
@@ -955,7 +1004,6 @@ mod tests {
         // conversation differently from the way it is addressed.
         for id in [
             BufferId::Hub,
-            BufferId::Team,
             BufferId::Channel("build".to_string()),
             BufferId::Dm("scout".to_string()),
         ] {
@@ -967,14 +1015,8 @@ mod tests {
     #[test]
     fn conversations_materialize_from_the_domain_in_one_order() {
         let session = test_session();
-        session
-            .channels
-            .create("build", vec!["scout".to_string()], ChannelMode::Free)
-            .expect("channel created");
-        session
-            .channels
-            .create("alpha", vec!["scout".to_string()], ChannelMode::Free)
-            .expect("channel created");
+        seed_room(&session, "build", &["scout"]);
+        seed_room(&session, "alpha", &["scout"]);
         seed_agent(&session, "zoe", Vec::new());
         seed_crew(&session, "scout");
 
@@ -988,11 +1030,47 @@ mod tests {
             1,
         );
 
-        // Hub, the board, channels by name, DMs by name — and the hub stays at 0
-        // however many conversations arrive after it.
+        // Hub, rooms by name, DMs by name — and the hub stays at 0 however many
+        // conversations arrive after it. The team is not among them: it is a
+        // directory, not a conversation (D95).
         assert_eq!(
             ids(&buffers),
-            vec!["hub", "#team", "#alpha", "#build", "@scout", "@zoe"]
+            vec!["hub", "#alpha", "#build", "@scout", "@zoe"]
+        );
+    }
+
+    /// The bar is "conversations I am in". A room formed by two agents is real,
+    /// findable in the directory and readable — but it is not one of the user's
+    /// conversations, so it is not listed, and joining is what lists it.
+    #[test]
+    fn a_room_is_listed_exactly_while_the_user_is_in_it() {
+        let session = test_session();
+        session
+            .channels
+            .create(
+                "parser",
+                vec!["scout".to_string(), "zoe".to_string()],
+                ChannelMode::Free,
+            )
+            .expect("room created");
+        let mut buffers = Buffers::new();
+        buffers.refresh(&session, 1);
+        assert_eq!(ids(&buffers), vec!["hub"], "somebody else's room is theirs");
+
+        session
+            .channels
+            .invite("parser", USER_NAME)
+            .expect("joined");
+        buffers.refresh(&session, 2);
+        assert_eq!(ids(&buffers), vec!["hub", "#parser"], "joining lists it");
+
+        session.channels.kick("parser", USER_NAME).expect("left");
+        buffers.refresh(&session, 3);
+        assert_eq!(
+            ids(&buffers),
+            vec!["hub"],
+            "and leaving takes it off again — unlike a DM, a room you are not \
+             in was never your conversation"
         );
     }
 
@@ -1155,18 +1233,22 @@ mod tests {
         assert_eq!(buffers.get(&scout).map(Buffer::unread), Some(1));
     }
 
-    // ---- the team board -------------------------------------------------
+    // ---- the team feed ---------------------------------------------------
 
+    /// The feed hears agents and nothing else, and it hears them whoever they
+    /// are: the D93 crew gate is gone with the board it protected. A gate
+    /// existed because a badge asked to be read; a column in a directory the
+    /// user opens asks for nothing, so there is nothing to withhold.
     #[test]
-    fn the_board_hears_agents_and_nothing_else() {
+    fn the_feed_hears_agents_and_nothing_else_and_raises_no_conversation() {
         let session = test_session();
-        seed_crew(&session, "scout");
+        seed_agent(&session, "scout", Vec::new());
         let mut buffers = Buffers::new();
         buffers.refresh(&session, 1);
         buffers.note_watch_event("ls", WatchKind::Command, WatchState::Done, None, 1);
         buffers.note_watch_event("#build", WatchKind::Channel, WatchState::Running, None, 1);
         assert_eq!(
-            buffers.team.len(),
+            buffers.team_log().len(),
             0,
             "a command and a room post are not team news"
         );
@@ -1178,46 +1260,16 @@ mod tests {
             Some("done"),
             4,
         );
-        let board = buffers.get(&BufferId::Team).expect("the board appeared");
-        assert_eq!(board.unread(), 1);
-        assert_eq!(board.last_activity, 4);
-        assert_eq!(buffers.team.len(), 1);
-    }
-
-    /// D93: a solo hire is not a team. Its lifecycle still fills the log — a
-    /// crew formed later opens onto the history it missed — but nothing is
-    /// listed, so the bar shows the hub and its DM and no board.
-    #[test]
-    fn a_solo_hire_writes_the_log_without_raising_a_board() {
-        let session = test_session();
-        seed_agent(&session, "scout", Vec::new());
-        let mut buffers = Buffers::new();
-        buffers.refresh(&session, 1);
-        buffers.note_watch_event(
-            "scout #1 · fix it",
-            WatchKind::Agent,
-            WatchState::Running,
-            None,
-            1,
+        assert_eq!(buffers.team_log().len(), 1);
+        assert_eq!(
+            ids(&buffers),
+            vec!["hub", "@scout"],
+            "a lifecycle event opens no conversation and asks for nothing"
         );
-        assert!(
-            buffers.get(&BufferId::Team).is_none(),
-            "one hire is not a formation"
-        );
-        assert_eq!(buffers.team.len(), 1, "the log kept it anyway");
-        assert_eq!(ids(&buffers), vec!["hub", "@scout"]);
-
-        // The user forms a crew: the board is listed, and the replay it opens
-        // onto is the log that was filling all along.
-        seed_crew(&session, "dev");
-        buffers.refresh(&session, 2);
-        assert!(buffers.get(&BufferId::Team).is_some(), "a crew has a board");
-        assert_eq!(buffers.team.len(), 1, "with the event it never lost");
-        assert_eq!(ids(&buffers), vec!["hub", "#team", "@dev", "@scout"]);
     }
 
     #[test]
-    fn the_board_bounds_what_it_remembers() {
+    fn the_feed_bounds_what_it_remembers() {
         let mut buffers = Buffers::new();
         for i in 0..TEAM_LOG_MAX + 40 {
             buffers.note_watch_event(
@@ -1228,9 +1280,9 @@ mod tests {
                 1,
             );
         }
-        assert_eq!(buffers.team.len(), TEAM_LOG_MAX);
+        assert_eq!(buffers.team_log().len(), TEAM_LOG_MAX);
         assert_eq!(
-            buffers.team[0].label,
+            buffers.team_log()[0].label,
             format!("scout #{}", 40),
             "the oldest events fall off the front"
         );
@@ -1242,7 +1294,7 @@ mod tests {
         replay
             .iter()
             .map(|r| match r {
-                Replay::Divider(text) => text.clone(),
+                Replay::Divider(text) | Replay::Note(text) => text.clone(),
                 Replay::Message { message, .. } => message.text.clone(),
             })
             .collect()
@@ -1323,12 +1375,9 @@ mod tests {
     }
 
     #[test]
-    fn a_channel_replays_its_log() {
+    fn a_room_replays_its_log() {
         let session = test_session();
-        session
-            .channels
-            .create("build", vec!["scout".to_string()], ChannelMode::Free)
-            .expect("channel created");
+        seed_room(&session, "build", &["scout"]);
         session
             .channels
             .post("scout", "build", "one")
@@ -1340,6 +1389,55 @@ mod tests {
         let buffers = Buffers::new();
         let replay = buffers.rehydrate(&session, &BufferId::Channel("build".to_string()), 50);
         assert_eq!(texts(&replay), vec!["── #build ──", "one", "two"]);
+    }
+
+    /// A roster change is part of the room's record and reads as one dim line
+    /// nobody said — never as a message with a name over it, which is what it
+    /// would have been if it had come back as a [`Replay::Message`].
+    #[test]
+    fn a_room_replays_its_membership_changes_as_notes() {
+        let session = test_session();
+        seed_room(&session, "build", &["scout"]);
+        session
+            .channels
+            .post("scout", "build", "starting")
+            .expect("posted");
+        session.channels.invite("build", "coder").expect("joined");
+        session.channels.kick("build", "scout").expect("left");
+
+        let buffers = Buffers::new();
+        let replay = buffers.rehydrate(&session, &BufferId::Channel("build".to_string()), 50);
+        assert!(matches!(replay[1], Replay::Message { .. }), "{replay:?}");
+        match (&replay[2], &replay[3]) {
+            (Replay::Note(joined), Replay::Note(left)) => {
+                assert!(joined.starts_with("· coder joined ·"), "{joined}");
+                assert!(left.starts_with("· scout left ·"), "{left}");
+            }
+            other => panic!("membership changes are notes, got {other:?}"),
+        }
+    }
+
+    /// The observer framing is a fact about the conversation, so it is decided
+    /// where the rule is: the same room is `── #parser ──` to a member and
+    /// `── #parser · observer · read-only ──` to somebody watching it.
+    #[test]
+    fn a_room_you_are_not_in_opens_under_an_observer_rule() {
+        let session = test_session();
+        session
+            .channels
+            .create("parser", vec!["scout".to_string()], ChannelMode::Free)
+            .expect("room created");
+        let buffers = Buffers::new();
+        let id = BufferId::Channel("parser".to_string());
+        assert_eq!(
+            buffers.rule_for(&session, &id),
+            "── #parser · observer · read-only ──"
+        );
+        session
+            .channels
+            .invite("parser", USER_NAME)
+            .expect("joined");
+        assert_eq!(buffers.rule_for(&session, &id), "── #parser ──");
     }
 
     #[test]
@@ -1359,9 +1457,12 @@ mod tests {
         );
     }
 
+    /// The lifecycle log survived the board it used to back: it is the
+    /// directory's feed now, read through the same accessor the directory reads
+    /// (`the_board_replays_its_lifecycle_log`'s claim, moved to where the rows
+    /// are actually built — `tui::directory`).
     #[test]
-    fn the_board_replays_its_lifecycle_log() {
-        let session = test_session();
+    fn the_feed_keeps_what_happened_and_what_was_reported() {
         let mut buffers = Buffers::new();
         buffers.note_watch_event(
             "scout #1 · fix it",
@@ -1377,52 +1478,65 @@ mod tests {
             Some("fixed the parser"),
             2,
         );
-        let replay = buffers.rehydrate(&session, &BufferId::Team, 50);
-        assert_eq!(
-            texts(&replay),
-            vec!["── #team ──", "running", "done · fixed the parser"],
-            "a row says what happened as well as what was reported"
-        );
+        let lines: Vec<String> = buffers.team_log().iter().map(team_line).collect();
+        assert_eq!(lines, vec!["running", "done · fixed the parser"]);
     }
 
     // ---- submit routing -------------------------------------------------
 
     #[test]
     fn every_conversation_routes_to_its_own_path() {
+        let session = test_session();
+        seed_room(&session, "build", &["scout"]);
         let buffers = Buffers::new();
         assert_eq!(
-            buffers.route_submit(&BufferId::Hub, "hello"),
+            buffers.route_submit(&session, &BufferId::Hub, "hello"),
             SubmitTarget::Turn("hello".to_string())
         );
         assert_eq!(
-            buffers.route_submit(&BufferId::Dm("scout".to_string()), "hello"),
+            buffers.route_submit(&session, &BufferId::Dm("scout".to_string()), "hello"),
             SubmitTarget::Dm {
                 agent: "scout".to_string(),
                 text: "hello".to_string()
             }
         );
         assert_eq!(
-            buffers.route_submit(&BufferId::Channel("build".to_string()), "hello"),
+            buffers.route_submit(&session, &BufferId::Channel("build".to_string()), "hello"),
             SubmitTarget::Channel {
                 channel: "build".to_string(),
                 text: "hello".to_string()
             }
         );
-        assert!(matches!(
-            buffers.route_submit(&BufferId::Team, "hello"),
-            SubmitTarget::Refused(_)
-        ));
     }
 
+    /// Reading somebody else's room is free; speaking in it is membership. The
+    /// refusal names the way in rather than merely saying no.
     #[tokio::test]
-    async fn the_board_refuses_to_be_spoken_in() {
+    async fn a_room_you_are_watching_refuses_to_be_spoken_in() {
         let session = test_session();
+        session
+            .channels
+            .create("parser", vec!["scout".to_string()], ChannelMode::Free)
+            .expect("room created");
         let buffers = Buffers::new();
-        let target = buffers.route_submit(&BufferId::Team, "nice work everyone");
+        let id = BufferId::Channel("parser".to_string());
+        let target = buffers.route_submit(&session, &id, "nice work everyone");
         match deliver(&session, target) {
-            Delivery::Rejected(why) => assert_eq!(why, "#team is a board, not a room"),
-            other => panic!("the board is read-only, got {other:?}"),
+            Delivery::Rejected(why) => assert_eq!(why, OBSERVER_HINT),
+            other => panic!("an observed room is read-only, got {other:?}"),
         }
+        assert!(
+            session.channels.log_of("parser").is_empty(),
+            "and nothing was posted under a name that is not on the roster"
+        );
+
+        // Joining is the whole difference, and it is one call.
+        session
+            .channels
+            .invite("parser", USER_NAME)
+            .expect("joined");
+        let target = buffers.route_submit(&session, &id, "nice work everyone");
+        assert_eq!(deliver(&session, target), Delivery::Sent);
     }
 
     #[tokio::test]
@@ -1430,7 +1544,8 @@ mod tests {
         let session = test_session();
         seed_agent(&session, "scout", Vec::new());
         let buffers = Buffers::new();
-        let target = buffers.route_submit(&BufferId::Dm("scout".to_string()), "have a look");
+        let target =
+            buffers.route_submit(&session, &BufferId::Dm("scout".to_string()), "have a look");
         assert_eq!(deliver(&session, target), Delivery::Sent);
 
         // The shape the workspace composer produces: an inbox item from `user`,
@@ -1448,7 +1563,7 @@ mod tests {
     async fn a_dm_to_nobody_is_reported_not_swallowed() {
         let session = test_session();
         let buffers = Buffers::new();
-        let target = buffers.route_submit(&BufferId::Dm("ghost".to_string()), "hello?");
+        let target = buffers.route_submit(&session, &BufferId::Dm("ghost".to_string()), "hello?");
         assert!(matches!(deliver(&session, target), Delivery::Rejected(_)));
     }
 
@@ -1464,7 +1579,8 @@ mod tests {
             )
             .expect("channel created");
         let buffers = Buffers::new();
-        let target = buffers.route_submit(&BufferId::Channel("build".to_string()), "ship it");
+        let target =
+            buffers.route_submit(&session, &BufferId::Channel("build".to_string()), "ship it");
         assert_eq!(deliver(&session, target), Delivery::Sent);
 
         let log = session.channels.log_of("build");

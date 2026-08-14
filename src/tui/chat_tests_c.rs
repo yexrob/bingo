@@ -1755,3 +1755,118 @@ fn esc_peels_the_rewind_selector_one_stage_at_a_time() {
         "the action list returns to the turn list before the selector closes"
     );
 }
+
+/// D95: the team directory joined the stack in the slot directly above the task
+/// panel it cycles with. Its own layer rather than a second meaning for the task
+/// panel's, so `ORDER` — the single source of Esc's priority — can still answer
+/// which of the two a press closes.
+#[test]
+fn esc_peels_the_directory_in_the_slot_above_the_task_panel() {
+    let at = |wanted: EscLayer| {
+        EscLayer::ORDER
+            .iter()
+            .position(|layer| *layer == wanted)
+            .unwrap_or_else(|| panic!("{wanted:?} is in the stack"))
+    };
+    assert_eq!(
+        at(EscLayer::Directory) + 1,
+        at(EscLayer::TaskPanel),
+        "the two ctrl+t surfaces are adjacent, directory first"
+    );
+    assert_eq!(
+        EscLayer::ORDER.len(),
+        16 + 1,
+        "one layer was added, not two — a variant missing from ORDER is a \
+         layer Esc can never reach"
+    );
+
+    let mut chat = test_chat();
+    chat.busy = true;
+    chat.help_visible = true;
+    chat.open_directory();
+    assert!(chat.directory.is_some(), "ctrl+t opened it");
+
+    let t0 = std::time::Instant::now();
+    let mut order = Vec::new();
+    while let Some(layer) = chat.esc_layer() {
+        order.push(layer);
+        assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0));
+        if layer == EscLayer::Interrupt {
+            break;
+        }
+        if layer == EscLayer::Directory {
+            assert!(chat.directory.is_none(), "the directory closed");
+        }
+        assert!(
+            !chat.interrupted,
+            "a layer above the interrupt closed instead of the turn: {layer:?}"
+        );
+        assert!(chat.busy, "the turn kept running through {layer:?}");
+    }
+    assert_eq!(
+        order,
+        vec![
+            EscLayer::HelpPanel,
+            EscLayer::Directory,
+            EscLayer::Interrupt,
+        ],
+        "the stack is walked top-down, one entry per press"
+    );
+}
+
+/// D95: ctrl+t is one key with three stops — the tasks in flight, the team doing
+/// them, then back to the transcript. Two surfaces, never both at once, and the
+/// key that opened each is the key that closes it.
+#[test]
+fn ctrl_t_cycles_the_tasks_then_the_team_then_away() {
+    let mut chat = test_chat();
+    let ctrl_t = |chat: &mut Chat| chat.on_key(KeyCode::Char('t'), KeyModifiers::CONTROL);
+
+    assert!(ctrl_t(&mut chat));
+    assert!(chat.tasks_visible, "first stop: the task panel");
+    assert!(!chat.tasks_auto, "opened by hand, so it stays open");
+    assert!(chat.directory.is_none());
+
+    assert!(ctrl_t(&mut chat));
+    assert!(chat.directory.is_some(), "second stop: the team directory");
+    assert!(
+        !chat.tasks_visible,
+        "and only one of the two is on screen at a time"
+    );
+
+    assert!(ctrl_t(&mut chat));
+    assert!(
+        chat.directory.is_none(),
+        "third press: back to the transcript"
+    );
+    assert!(!chat.tasks_visible);
+
+    // Esc closes one stop rather than the whole cycle, and the panel underneath
+    // is not reopened on the way out.
+    assert!(ctrl_t(&mut chat));
+    assert!(ctrl_t(&mut chat));
+    assert!(chat.directory.is_some());
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(chat.directory.is_none());
+    assert!(
+        !chat.tasks_visible,
+        "Esc left the cycle, it did not rewind it"
+    );
+}
+
+/// The directory is modal for the keys it uses and transparent to the chords it
+/// does not: `j` joins a room instead of typing a letter, while ctrl+t still
+/// reaches the cycle and ctrl+k still reaches the switcher.
+#[test]
+fn the_directory_swallows_its_own_keys_and_passes_the_chords_through() {
+    let mut chat = test_chat();
+    chat.open_directory();
+
+    chat.set_input("draft");
+    assert!(chat.on_key(KeyCode::Char('j'), KeyModifiers::NONE));
+    assert_eq!(chat.input, "draft", "a bare key never reached the composer");
+
+    assert!(chat.on_key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert!(chat.switcher.is_some(), "but a chord did");
+    assert_eq!(chat.input, "draft");
+}

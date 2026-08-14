@@ -62,9 +62,11 @@ pub const COMMANDS: &[SlashCommand] = &[
     ),
     (
         "open",
-        "@agent|#channel|hub",
+        "@agent|#room|hub",
         "open a conversation in this terminal",
     ),
+    ("join", "[#room]", "join a room so you can speak in it"),
+    ("leave", "[#room]", "leave a room (it stays readable)"),
     ("exit", "", "exit the session"),
 ];
 

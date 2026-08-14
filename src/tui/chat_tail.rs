@@ -55,6 +55,15 @@ pub enum EscLayer {
     InfoLines,
     /// The `?` shortcut panel.
     HelpPanel,
+    /// The team directory (D95), the second stop of the ctrl+t cycle.
+    ///
+    /// Its own layer, immediately above the task panel it cycles with, rather
+    /// than a second meaning for the [`EscLayer::TaskPanel`] slot. The two are
+    /// one *gesture* but not one surface — different state, different
+    /// dismissal, and both can be reached from the same key — and `ORDER` is
+    /// the single place that says which one Esc closes. A shared slot would
+    /// have had to answer that question somewhere else.
+    Directory,
     /// The task panel, when the user opened it themselves with ctrl+t.
     TaskPanel,
     /// A conversation other than the hub: Esc goes home (D89).
@@ -78,7 +87,7 @@ pub enum EscLayer {
 
 impl EscLayer {
     /// The stack, top first. The single source for Esc's priority.
-    pub const ORDER: [EscLayer; 16] = [
+    pub const ORDER: [EscLayer; 17] = [
         EscLayer::AskDialog,
         EscLayer::Menu,
         EscLayer::Switcher,
@@ -90,6 +99,7 @@ impl EscLayer {
         EscLayer::ErrorRow,
         EscLayer::InfoLines,
         EscLayer::HelpPanel,
+        EscLayer::Directory,
         EscLayer::TaskPanel,
         EscLayer::BackToHub,
         EscLayer::Interrupt,
@@ -139,14 +149,13 @@ impl super::Chat {
     }
 
     /// `/team <subcommand>` (D31 project-level formation): dispatched to
-    /// team_cmd, and the answer lands on the board it is about (D90).
+    /// team_cmd, and the answer lands in the team's own feed (D90, D95).
     ///
     /// It used to go to the hub's info tier, which put the formation's own
-    /// report everywhere except the buffer that exists to hold it. When the
-    /// board is what you are looking at, the output prints there directly; when
-    /// it is not, the board's unread count carries it and one info line says
-    /// where it went — the user is told, rather than left to wonder why the
-    /// command answered with nothing.
+    /// report everywhere except where the formation's history lives. The feed
+    /// is now a column of the directory rather than a board with a badge, so
+    /// the pointer names the key that opens it: an answer stored somewhere the
+    /// user cannot find is the same as no answer.
     pub(crate) fn slash_team(&mut self, arg: &str) {
         let lines = crate::team_cmd::run(&self.session, &std::path::PathBuf::from(&self.cwd), arg);
         let label = if arg.trim().is_empty() {
@@ -154,13 +163,9 @@ impl super::Chat {
         } else {
             format!("/team {}", arg.trim())
         };
-        let tick = self.tick;
-        self.buffers
-            .note_team_output(&label, &lines.join("\n"), tick);
-        if *self.buffers.active() == crate::tui::buffer::BufferId::Team {
-            self.poll_active_conversation();
-        } else {
-            self.push_slash_info(format!("→ {}", crate::tui::buffer::BufferId::Team.label()));
+        self.buffers.note_team_output(&label, &lines.join("\n"));
+        if self.directory.is_none() {
+            self.push_slash_info("→ team (ctrl+t)".to_string());
         }
         self.dirty = true;
     }
@@ -794,6 +799,12 @@ impl super::Chat {
         if self.rewind_key(code, modifiers) {
             return true;
         }
+        // The team directory (D95) is a chooser too, and modal for unmodified
+        // keys only: `j` joins a room, so it must not also type a `j`, while
+        // ctrl+t has to reach the cycle that closes the panel.
+        if self.directory_key(code, modifiers) {
+            return true;
+        }
         // Interrupt (busy) and quit (idle) both live on Ctrl+C, judged before editing keys.
         // Unlike Esc, Ctrl+C skips the layer stack: it interrupts with anything open.
         if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
@@ -1050,6 +1061,7 @@ impl super::Chat {
                 .is_some_and(|e| e.level != crate::error::ErrorLevel::Full),
             EscLayer::InfoLines => !self.slash_info_lines.is_empty(),
             EscLayer::HelpPanel => self.help_visible,
+            EscLayer::Directory => self.directory.is_some(),
             EscLayer::TaskPanel => self.tasks_visible && !self.tasks_auto,
             EscLayer::BackToHub => *self.buffers.active() != crate::tui::buffer::BufferId::Hub,
             EscLayer::Interrupt => self.busy,
@@ -1095,6 +1107,7 @@ impl super::Chat {
                 self.help_visible = false;
                 true
             }
+            EscLayer::Directory => self.directory_key(ESC, NONE),
             // The tasks panel opened with ctrl+t closes with Esc (it used to have
             // no exit at all — the ? panel closed, this one squatted).
             EscLayer::TaskPanel => {
@@ -1275,9 +1288,20 @@ impl super::Chat {
                 self.toggle_stash();
                 true
             }
+            // ctrl+t cycles the two things a key that means "show me the work"
+            // can mean (D95): the tasks in flight, then the team doing them,
+            // then back to the transcript. One key rather than two because they
+            // are the same question asked at two altitudes, and a second
+            // binding for the roster would have been a shortcut nobody found.
             't' => {
-                self.tasks_visible = !self.tasks_visible;
-                if self.tasks_visible {
+                if self.directory.is_some() {
+                    self.directory = None;
+                } else if self.tasks_visible {
+                    self.tasks_visible = false;
+                    self.tasks_auto = false;
+                    self.open_directory();
+                } else {
+                    self.tasks_visible = true;
                     // Manually opened: keep the panel even when everything is done (the user explicitly wants to see it).
                     self.tasks_auto = false;
                     self.refresh_tasks();

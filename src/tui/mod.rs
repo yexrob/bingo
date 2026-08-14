@@ -41,6 +41,7 @@ mod chrome;
 pub mod complete;
 pub mod composer;
 pub mod convbar;
+pub mod directory;
 pub mod el;
 pub mod gfx;
 pub mod highlight;

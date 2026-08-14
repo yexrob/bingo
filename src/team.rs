@@ -1290,7 +1290,18 @@ fn open_rooms(
             .filter(|m| running.iter().any(|a| &a.name == m))
             .collect();
         if session.channels.info(&room.name).is_none() {
-            if let Err(e) = session.channels.create(&room.name, live, room.mode) {
+            // A room the blueprint declares is the project's room, so the two
+            // standing members of the project are seated in it: the user, who
+            // asked for the formation, and the main agent, who runs it. Since
+            // D95 the domain seats nobody on its own, so what used to be
+            // implicit is written here — the one place that knows these rooms
+            // are the user's rather than an agent's private working group.
+            let mut roster = vec![
+                crate::channels::HUB_NAME.to_string(),
+                crate::channels::USER_NAME.to_string(),
+            ];
+            roster.extend(live);
+            if let Err(e) = session.channels.create(&room.name, roster, room.mode) {
                 summary.failed.push((room.name.clone(), e));
                 continue;
             }

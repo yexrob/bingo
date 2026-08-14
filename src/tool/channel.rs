@@ -1,10 +1,18 @@
 //! Channel tools (experimental feature `experimental.agentChannels`).
 //!
-//! `Post`: any member (hub + depth-1 sub-agents) posts to a channel — the sender is stamped
-//! by the session instance name (the model cannot forge it); on a serial channel, lagging
+//! The domain calls them channels; everything anybody reads calls them **rooms**
+//! (D95). A room's roster is an arbitrary subset of the team, so this layer —
+//! the one place that knows *who is calling* — owns the seating policy: the
+//! creator is stamped into the roster it creates, and every other member has to
+//! be named. Nobody, including the user, is seated behind the caller's back.
+//!
+//! `Post`: any member (hub + depth-1 sub-agents) posts to a room — the sender is stamped
+//! by the session instance name (the model cannot forge it); on a serial room, lagging
 //! posts are bounced back with the increments attached (as a tool result, not an error —
 //! the model reads the increments in the same turn and decides whether to resend, amend,
-//! or drop). `Channel`: hub-only room management (create/invite/kick/list).
+//! or drop). `Channel`: room management (create/invite/kick/list), available to the
+//! main agent and to direct sub-agents alike, because a team that can only be
+//! grouped from the top is not a team that can organize itself.
 //! Delivery wake-up: messages land in every member's inbox; idle members are woken
 //! immediately, busy members get batched injection at turn boundaries; the hub is injected
 //! via hub_mail before the next round of reasoning. Silence = not calling Post.
@@ -135,9 +143,9 @@ impl Tool for PostTool {
     fn description(&self) -> String {
         let who = sender_of(&self.session);
         format!(
-            "Speak in an agent channel. Your name in the channel is {who} (the sender is stamped by the runtime and cannot be forged). \
-This tool is the only way to put words in the room: the text you write as your turn result goes to the hub, not to the channel, so deciding to answer means calling this. \
-Channel messages enter every member's context (in the same order); in a serial channel, if you are behind the latest message the send bounces back with the new content attached — read it, then decide to resend, amend, or drop. \
+            "Speak in a room. Your name in the room is {who} (the sender is stamped by the runtime and cannot be forged), and you can only speak in rooms you are a member of. \
+This tool is the only way to put words in the room: the text you write as your turn result goes to the hub, not to the room, so deciding to answer means calling this. \
+Room messages enter every member's context (in the same order); in a serial room, if you are behind the latest message the send bounces back with the new content attached — read it, then decide to resend, amend, or drop. \
 Every message wakes every other member, so who you are answering matters: when `user` or `main` addresses the room, answer once, briefly, the way a person answers the room they are in; when another member speaks you owe nothing unless they named you or you can unblock them; never answer an answer — that is what floods a room. When you have nothing to add, simply don't call this tool (silence costs nothing and wakes nobody). \
 The audience picks the lane: something every member should know belongs here; what concerns one agent alone goes to them directly — the hub reaches a member with SendMessage, a member reaches the hub in its turn text — not into everyone's context."
         )
@@ -189,13 +197,13 @@ Decide again from the latest content: resend as-is (call again unchanged), edit 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ChannelAction {
-    /// Create a channel (hub joins automatically).
+    /// Create a room (you are seated in it; everyone else must be named in members).
     Create,
-    /// Invite a member into the channel (starts listening from the current head, no backlog).
+    /// Invite a member into the room (starts listening from the current head, no backlog).
     Invite,
-    /// Kick a member out.
+    /// Remove a member from the room.
     Kick,
-    /// List all channels.
+    /// List all rooms and their members.
     List,
 }
 
@@ -203,15 +211,15 @@ pub enum ChannelAction {
 #[schemars(deny_unknown_fields)]
 pub struct ChannelInput {
     #[schemars(
-        description = "Action: create a channel / invite a member / kick a member / list channels"
+        description = "Action: create a room / invite a member / remove a member / list rooms"
     )]
     action: ChannelAction,
     #[serde(default)]
-    #[schemars(description = "Channel name (required for create/invite/kick; without #)")]
+    #[schemars(description = "Room name (required for create/invite/kick; without #)")]
     channel: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Member instance names: initial roster for create; target (single) for invite/kick"
+        description = "Member names: the roster to seat alongside you for create; the target (single) for invite/kick. Use \"user\" to seat the human and \"main\" to seat the main agent — neither is added for you."
     )]
     members: Option<Vec<String>>,
     #[serde(default)]
@@ -221,7 +229,7 @@ pub struct ChannelInput {
     mode: Option<String>,
 }
 
-/// Channel management (hub only): create, invite/kick members, list.
+/// Room management: create, invite/remove members, list.
 pub struct ChannelTool {
     session: Arc<Session>,
 }
@@ -237,12 +245,14 @@ impl ChannelTool {
             .as_deref()
             .map(|c| c.trim_start_matches('#'))
             .filter(|c| !c.is_empty())
-            .ok_or_else(|| ToolError::failed("channel parameter (channel name) is required"))
+            .ok_or_else(|| ToolError::failed("channel parameter (room name) is required"))
     }
 
-    /// Cohort validation: members must be existing direct sub-agents (depth==1).
+    /// Cohort validation: members must be existing direct sub-agents (depth==1),
+    /// the main agent, or the user — the last because a room that cannot invite
+    /// the human is a room the human can only ever gate-crash.
     fn validate_member(&self, member: &str) -> Result<(), ToolError> {
-        if member == HUB_NAME {
+        if member == HUB_NAME || member == crate::channels::USER_NAME {
             return Ok(());
         }
         match self.session.agents.depth_of(member) {
@@ -263,7 +273,14 @@ impl Tool for ChannelTool {
         "Channel".to_string()
     }
     fn description(&self) -> String {
-        "Manage agent channels: create one (members is the subagent instance roster; you join automatically as main; mode defaults to serial), invite/kick members, list channels. Channel messages enter all members' contexts (in the same order); members speak via Post.".to_string()
+        let who = sender_of(&self.session);
+        format!(
+            "Manage rooms. A room is the only group conversation there is: its members are any subset of the team, and it does not have to include the human. \
+Creating one seats you ({who}) and nobody else — every other member has to be named in `members`, including `user` (the human) and `main` (the main agent). \
+That is the point: you can form a room with the two agents you need to work something out, without putting it in front of anyone else. \
+Actions: create (mode defaults to serial), invite (the new member starts listening from the current head and gets no backlog), kick, list (rooms with their rosters). \
+Joins and departures are written into the room where everyone in it can see them, so there is no quiet way in or out. Messages reach every member's context in one order; members speak with Post."
+        )
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<ChannelInput>()
@@ -291,9 +308,15 @@ impl Tool for ChannelTool {
                     Some(m) => ChannelMode::parse(m).map_err(ToolError::failed)?,
                     None => ChannelMode::Serial,
                 };
+                // The runtime seats the caller, because the caller's identity is
+                // the one fact the model cannot state for itself; everyone else
+                // is exactly who was asked for. `create` de-duplicates, so
+                // naming yourself as well is harmless rather than an error.
+                let mut roster = vec![sender_of(&self.session)];
+                roster.extend(members.iter().cloned());
                 self.session
                     .channels
-                    .create(&name, members.clone(), mode)
+                    .create(&name, roster.clone(), mode)
                     .map_err(ToolError::failed)?;
                 let id = ctx.watch.register_with_conditions(
                     Box::new(ChannelWatch {
@@ -303,12 +326,13 @@ impl Tool for ChannelTool {
                     ctx.instance.clone(),
                 );
                 self.session.channels.set_watch(&name, id);
-                format!(
-                    "channel #{name} created ({}, members: main{}{})",
-                    mode.label(),
-                    if members.is_empty() { "" } else { ", " },
-                    members.join(", ")
-                )
+                let seated = self
+                    .session
+                    .channels
+                    .info(&name)
+                    .map(|status| status.members.join(", "))
+                    .unwrap_or_else(|| roster.join(", "));
+                format!("room #{name} created ({}, members: {seated})", mode.label())
             }
             ChannelAction::Invite => {
                 let name = Self::require_channel(&params)?.to_string();
@@ -346,7 +370,7 @@ impl Tool for ChannelTool {
             ChannelAction::List => {
                 let statuses = self.session.channels.list();
                 if statuses.is_empty() {
-                    "no channels right now".to_string()
+                    "no rooms right now".to_string()
                 } else {
                     statuses
                         .iter()
@@ -483,7 +507,7 @@ mod tests {
             .call(serde_json::json!({"action": "list"}), &ctx(&hub))
             .await
             .unwrap();
-        assert!(out.content.as_str().unwrap().contains("main, user, a"));
+        assert!(out.content.as_str().unwrap().contains("main, a"));
         assert!(tool.is_read_only(&serde_json::json!({"action": "list"})));
     }
 

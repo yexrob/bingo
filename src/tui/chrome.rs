@@ -584,6 +584,7 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     }
     children.push(El::Rows(chat.agent_manager_rows(width)));
     children.push(El::Rows(chat.switcher_rows(width)));
+    children.push(El::Rows(chat.directory_view_rows(width)));
     children.push(El::Rows(chat.rewind_rows(width)));
 
     // Pinned panels (login flows, long-operation progress): persistent until
@@ -618,6 +619,11 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
         children.push(El::Row(dim_row(line, theme)));
     }
     if let Some(hint) = chat.queue_hint() {
+        children.push(El::Row(dim_row(hint, theme)));
+    }
+    // A room the user is only watching says so where the answer is needed —
+    // under the composer, before they type into it (D95).
+    if let Some(hint) = chat.observer_hint() {
         children.push(El::Row(dim_row(hint, theme)));
     }
     if let Some(s) = suggestion_area.take() {

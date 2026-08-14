@@ -326,6 +326,35 @@ mod tests {
         );
     }
 
+    /// The switcher lists the user's conversations, and a room they are not in
+    /// is not one of them (D95): it is reachable through the team directory,
+    /// where the fact that it is somebody else's room can be stated.
+    #[test]
+    fn a_room_the_user_is_not_in_is_not_offered() {
+        let mut chat = test_chat();
+        chat.session
+            .channels
+            .create(
+                "parser",
+                vec!["scout".to_string(), "zoe".to_string()],
+                crate::channels::ChannelMode::Free,
+            )
+            .expect("room created");
+        chat.refresh_conversations();
+        assert_eq!(labels(&chat), vec!["hub"], "somebody else's room is theirs");
+
+        chat.session
+            .channels
+            .invite("parser", crate::channels::USER_NAME)
+            .expect("joined");
+        chat.refresh_conversations();
+        assert_eq!(
+            labels(&chat),
+            vec!["hub", "#parser"],
+            "joining it makes it one of yours"
+        );
+    }
+
     /// Typing filters through the app's one scorer, and the hub stays reachable
     /// at the top of whatever survives.
     #[test]
