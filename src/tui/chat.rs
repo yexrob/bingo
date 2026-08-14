@@ -1902,7 +1902,9 @@ impl Chat {
                     })
                 {
                     let diff = Diff::parse_unified(diff_text);
-                    let content = diff_lines(&diff, &self.theme);
+                    // `layout_activity` prefixes RESULT_INDENT to every content
+                    // row, so that is the width the diff itself has to fit in.
+                    let content = diff_lines(&diff, &self.theme, self.diff_width());
                     let mut hint = Activity::new(ActivityKind::Diff(diff));
                     hint.expand_hint = Some("ctrl+o to expand".to_string());
                     hint.set_content(content);
@@ -2888,6 +2890,31 @@ impl Chat {
         self.apply_theme(ThemeSetting::parse(Some(arg)));
     }
 
+    /// Width a diff body gets inside an activity's expanded content, once
+    /// `layout_activity` has prefixed [`RESULT_INDENT`].
+    pub(crate) fn diff_width(&self) -> usize {
+        self.width
+            .saturating_sub(crate::tui::activities::RESULT_INDENT.len())
+    }
+
+    /// Re-render every diff activity under the current theme and width.
+    ///
+    /// Diff rows are baked when the edit lands, so they carry the palette and
+    /// the gutter of that moment. `/theme` has to walk back over them, or the
+    /// switch would recolour the prose and leave the diffs behind. Rows already
+    /// committed to scrollback keep their old colours — that is the write-once
+    /// contract, not a gap here.
+    fn rebuild_diff_rows(&mut self) {
+        let (theme, width) = (self.theme.clone(), self.diff_width());
+        for message in &mut self.messages {
+            for activity in &mut message.activities {
+                if let ActivityKind::Diff(d) = &activity.kind {
+                    activity.content = diff_lines(d, &theme, width);
+                }
+            }
+        }
+    }
+
     /// Apply the theme: rebuild the renderer/cache, persist, update theme_setting (the menu's ● data source).
     fn apply_theme(&mut self, setting: ThemeSetting) {
         let name = match setting {
@@ -2901,6 +2928,7 @@ impl Chat {
         self.renderer =
             crate::tui::markdown::MarkdownRenderer::with_theme(self.width, self.theme.clone());
         self.reply_cache.clear();
+        self.rebuild_diff_rows();
         self.dirty = true;
         let cwd = std::path::PathBuf::from(&self.cwd);
         let _ = crate::settings::upsert_scoped_settings(

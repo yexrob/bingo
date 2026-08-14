@@ -2954,7 +2954,7 @@ fn task_lines_use_checkbox_glyphs() {
     );
     assert_eq!(
         done_text.style.fg,
-        Some(chat.theme.inactive),
+        Some(chat.theme.text_secondary),
         "and render dimmed"
     );
 }
@@ -2973,7 +2973,7 @@ fn empty_prompt_shows_placeholder() {
         lines[0]
             .segs
             .iter()
-            .all(|s| s.style.fg == Some(chat.theme.inactive)),
+            .all(|s| s.style.fg == Some(chat.theme.text_secondary)),
         "the placeholder stays dim end to end"
     );
     chat.set_input("x");

@@ -2243,3 +2243,129 @@ each snapshots immediately before it changes anything.
   cheaper than a second timer.
 - 1295 + 13 tests before, 1327 + 13 after (32 new: 18 store/truncation/summary, 13 selector,
   1 Esc-stack walk).
+
+### D92. The dark theme grows up: a palette of our own, coloured code, numbered diffs
+
+**Problem.** Four faults, one root: the display layer had been finished everywhere except where
+colour lives.
+
+1. `Theme::dark()` spelled **21 of its slots as named ANSI** (`Cyan`, `DarkGray`, `Gray`, `Yellow`,
+   `Blue`, `Reset`, …) while `Theme::light()` was fully RGB. A named colour is the *terminal's*
+   palette, not ours: every markdown heading, list bullet, quote bar, link, table rule, thinking
+   block, tool-output gutter and diff line moved with whatever scheme the user had loaded — and
+   `to_ansi256` passes non-RGB through untouched, so the downgrade path could not save them
+   either. Most terminal users run dark, so the strictly worse half was the one almost everybody
+   saw.
+2. `markdown.rs`'s fenced-code arm opened with `let _ = lang;`. Every code block in every reply
+   rendered in one grey.
+3. Diffs had no line numbers, on any surface.
+4. The dim vocabulary was two slots and a habit: `inactive` at 75 call sites, and `subtle` — which
+   had **no accessor and zero readers in the whole repository**. "Dim" was a look, not a tier.
+
+**Decision.**
+
+*The palette is ours.* Both presets are RGB, end to end, and `both_presets_are_fully_rgb` asserts
+it over the struct so a new slot cannot quietly opt out. The enumeration that makes that possible
+is `Theme::slots_mut`, one list of `(name, &mut Color)` that `downgrade_to_256` now walks instead
+of the 35 hand-copied assignments it used to be — a field missing from the list is a field that
+opts out of *both* the downgrade and the test, which is the kind of omission that announces
+itself. The dark scheme is built around the brand orange on the terminal's own near-black, with a
+warm neutral ladder and desaturated structural tokens; the light preset, already RGB, moved
+exactly one slot.
+
+| Slot | Dark | Was | Why |
+|---|---|---|---|
+| `text` | `#EBE7E2` | `#FFFFFF` | warm off-white; pure white on near-black is a glare, not a contrast |
+| `text_secondary` | `#9A948D` | `#999999` (`inactive`) | same rung, warmed to the ladder |
+| `text_muted` | `#6B6660` | `#505050` (`subtle`) | the tier now carries text; 2.2:1 was not a tier, it was a hairline |
+| `claude` family | unchanged | — | the brand; nothing in this batch earns the right to move it |
+| `code_fg` | `#D9A05B` | `Yellow` | inline code as a warm sibling of the accent |
+| `link`, `headings[2]` | `#7FA7D9` | `Blue` | one blue in the palette, not three |
+| `math` | `#C08AD1` | `Magenta` | muted mauve, distinct from link and accent |
+| `headings[0]`, `table_header` | `#EBE7E2` | `White`, `Reset` | h1 and a table header *are* primary text, plus bold |
+| `headings[1]`, `tool_running`, `diff_hunk` | `#7FBFB4` | `Cyan` | one teal, in the `plan_mode` family |
+| `headings[3]`, `quote`, `list_marker`, `tool_output`, `diff_context` | `#9A948D` | `DarkGray`/`Gray`/`Cyan` | all tier 2 by meaning, so all tier 2 by colour |
+| `quote_bar`, `task_open`, `table_border`, `hr`, `footnote`, `thinking` | `#6B6660` | `Blue`/`DarkGray` | furniture, tier 3 |
+| `task_done` | `#4EBA65` | `Green` | the `success` value; one green |
+| `text_muted` (light) | `#8C8C8C` | `#AFAFAF` | the one light change: 2.3:1 on white is not readable |
+| `diff_edit` | *deleted* | `Yellow` | dead since it was written; the blueprint said use it or delete it |
+
+Every dark slot clears 3.1:1 against a `#0D0D0D` ground; the three tiers land at 15.8 / 6.5 / 3.4:1,
+and light mirrors them at 21 / 5.7 / 3.4:1.
+
+*Three tiers, named and employed.* `text` / `text_secondary` / `text_muted`, with `text()` /
+`dim()` / `muted()`. `inactive` was renamed rather than aliased — it named a *state* and was used
+for a *tier*, and 75 sites of honest name beat one line of indirection. `dim()` keeps its name
+because it is the tier-2 accessor at ~110 call sites and "secondary" is exactly what it meant.
+`muted()` is new, and the sweep gave it work: the expand hints (`(ctrl+o to expand)`, `… +N
+lines`), the send-time stamp under every message, the approval dialog's key hints, the transcript
+pager's footer (position, search and key rows), the conversation bar's separators and ellipses,
+the `manager_box` frame, the welcome-card border, the `(url)` trailing every link, the footer's
+`·` between token rate and context usage, and the new diff gutter. Not swept, and named rather
+than quietly skipped: the menu-gated hint rows (`/model`, `/provider`, `/resume`, the `@`
+completion dropdown, the ctrl+b agent manager, the rewind list) still sit on tier 2.
+
+*Highlighting: `synoptic`, and two narrowings around it.* Chosen over `syntect` because the
+comparison is not close — synoptic is one 1,900-line pure-Rust file over four small crates
+(`char_index`, `if_chain`, `nohash-hasher`, and the `regex` we already depend on: **four new lock
+entries**), ships grammars for every language the batch required, and offers `run`/`append` line
+APIs that fit a renderer. `syntect` with `regex-fancy` still drags in `plist`, `bincode`,
+`yaml-rust`, `walkdir` and either megabytes of Sublime grammar dumps or runtime `.sublime-syntax`
+parsing — for a feature whose entire job is to tint a code fence. The two narrowings live in
+`src/tui/highlight.rs`: `from_extension` answers `Some` for *every* string (an unknown extension
+yields a highlighter that tokenizes nothing), so `language_for` is an explicit allowlist and an
+unrecognised fence stays monochrome — **guessing is worse than not colouring**; and synoptic's ~30
+grammar-varying token names fold into eight `Class`es whose colours are existing theme tokens.
+That last choice is the one that pays: the dark and light highlight palettes are not two more
+tables to maintain, they are whatever the two presets already say `text_muted`, `success`,
+`claude`, `math`, `link`, `tool_running`, `code_fg`, `text_secondary` and `code_block_fg` are, so
+`/theme` moves them for free and a test asserts no class collides with the code background or with
+another class in either preset.
+
+*The cost seam is the memo, not the settled-line rule.* Rows are built once for scrollback (the
+hub's `MarkdownRenderer` caches per block, keyed on block source), but the DM tail in
+`bufferview.rs` builds a fresh renderer every frame on purpose. A "highlight only settled lines"
+rule would have needed the renderer to know whether a fence was still open, which the AST does not
+say. A bounded memo keyed on `(language, source)` gets the same result at the cheap seam: a block
+re-rendered without changing costs a hash lookup, so a live tail pays nothing per frame, and a
+block that *is* growing pays one pass per change — the same order as the markdown re-parse it
+arrives with. 256 entries, oldest-first eviction, thread-local rather than locked (rows are built
+on the UI thread and each test thread gets a clean memo). Blocks past 96 KB or 4,000 lines are
+returned unhighlighted rather than allowed to make a frame late. Tabs expand to four spaces in
+*both* paths, because synoptic expands before tokenizing and a fallback that passed `\t` through
+would put highlighted and monochrome fences on different grids.
+
+*The gutter goes in the one diff builder.* `Hunk` gains `old_start`/`new_start` (parsed from
+`@@ -a,b +c,d @@`; an unparsable header falls back to 1/1 rather than refusing to render), and
+`Hunk::numbered` walks the arithmetic — context advances both sides, an addition only the new, a
+removal only the old. Width comes from the largest number in the **whole diff**, so a hunk crossing
+99 → 100 does not shift the code column mid-block. `diff_lines` gained a `width`, which bought the
+second half: long lines now **wrap instead of being clipped**, with a blank gutter and a blank
+marker on continuations so the code column stays a straight edge. Code wraps on columns, never on
+words — a break mid-identifier is honest, a break that reflows indentation is not. The `@@` header
+stays flush left: it is a statement *about* the numbers, and indenting it into their column would
+say otherwise. Because `diff_lines` has exactly two callers, the gutter reached the approval
+preview, the completed-edit rows and the transcript view in one edit;
+`both_diff_surfaces_render_the_same_gutter` renders two of them and compares, so a future second
+diff renderer fails a test rather than drifting.
+
+**Consequences.**
+
+- `theme.inactive` → `theme.text_secondary` at 75 sites, mechanical; `subtle` → `text_muted`;
+  `diff_edit` deleted. `Theme::slots_mut` is now the single palette enumeration.
+- `diff_lines(d, theme)` → `diff_lines(d, theme, width)`. The dialog passes the live width and
+  re-renders each frame; the transcript path bakes at edit time with `width - RESULT_INDENT`, so a
+  **resize does not re-wrap rows already built** — a narrower terminal clips them, exactly as it
+  did before D92. Rebuilding on resize would mean either re-rendering baked activity content or
+  moving diff rendering into `layout_activity`; both are larger than this batch and neither is
+  needed while scrollback is written once.
+- `/theme` now re-renders the diff rows still in the live region (`rebuild_diff_rows`), which are
+  baked when the edit lands and would otherwise keep the old palette. Rows already in scrollback
+  keep theirs — the standing write-once contract, not a gap here.
+- One new dependency (`synoptic 2.2`), four new lock entries. `src/tui/highlight.rs` is new;
+  the blueprint suggested `src/highlight.rs`, but it reads `Theme` and produces spans for
+  `markdown.rs`, so it belongs beside them.
+- A stale intra-doc link in `theme.rs` pointing at `crate::tui::slack` (retired in D89) now points
+  at `crate::tui::avatar`, which carries the skin palette and comes down the same `to_ansi256`.
+- 1327 + 13 tests before, 1354 + 13 after (27 new: 6 palette/tier, 9 highlighter, 5 markdown
+  fence, 5 diff gutter, 2 cross-surface).

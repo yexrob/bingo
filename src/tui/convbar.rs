@@ -85,7 +85,7 @@ fn label_style(entry: &BarEntry, theme: &Theme) -> SegStyle {
     } else if entry.unread > 0 {
         SegStyle::fg(theme.text)
     } else {
-        SegStyle::fg(theme.inactive)
+        SegStyle::fg(theme.text_secondary)
     }
 }
 
@@ -248,7 +248,7 @@ impl Chat {
         }
 
         let mut line = Line::styled(INDENT.to_string(), SegStyle::plain());
-        let dim = SegStyle::fg(theme.inactive);
+        let dim = theme.muted();
         if start > 0 {
             line.push_styled(format!("{ELLIPSIS}{GAP}"), dim);
         }
@@ -457,7 +457,7 @@ mod tests {
                 "the active conversation is accented in {setting:?}: {colors:?}"
             );
             assert!(
-                colors.contains(&chat.theme.inactive),
+                colors.contains(&chat.theme.text_secondary),
                 "and a quiet one is dim in {setting:?}: {colors:?}"
             );
         }

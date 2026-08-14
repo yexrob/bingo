@@ -1867,7 +1867,7 @@ impl super::Chat {
         let done = t.iter().filter(|i| i.status == TodoStatus::Done).count();
         header.push_styled(
             format!(" · {done}/{} tasks", t.len()),
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         );
         out.push(header);
         let done_indices: Vec<usize> = t
@@ -1881,7 +1881,7 @@ impl super::Chat {
         if hidden_done > 0 {
             out.push(Line::styled(
                 format!("… {} done", hidden_done),
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             ));
         }
         for &idx in done_indices.iter().skip(hidden_done) {
@@ -1905,7 +1905,7 @@ impl super::Chat {
         if active.len() > Self::TODO_SHOWN {
             out.push(Line::styled(
                 format!("… +{} more", active.len() - Self::TODO_SHOWN),
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             ));
         }
         out
@@ -2091,7 +2091,7 @@ impl super::Chat {
                 &format!("  {summary} — /open to enter · ctrl+b manage"),
                 width,
             ),
-            SegStyle::fg(self.theme.inactive),
+            SegStyle::fg(self.theme.text_secondary),
         )]
     }
 
@@ -2112,13 +2112,13 @@ impl super::Chat {
         if tail.total_lines > tail.lines.len() {
             rows.push(Line::styled(
                 one_line(&format!("{indent}… {} lines", tail.total_lines), width),
-                SegStyle::fg(self.theme.inactive),
+                SegStyle::fg(self.theme.text_secondary),
             ));
         }
         for line in &tail.lines {
             rows.push(Line::styled(
                 one_line(&format!("{indent}{line}"), width),
-                SegStyle::fg(self.theme.inactive),
+                SegStyle::fg(self.theme.text_secondary),
             ));
         }
         rows
@@ -2266,7 +2266,7 @@ impl super::Chat {
                 if running.is_empty() {
                     rows.push(Row::new(Line::styled(
                         "No agents currently running",
-                        SegStyle::fg(self.theme.inactive),
+                        SegStyle::fg(self.theme.text_secondary),
                     )));
                 } else {
                     let selected = (*selected).min(running.len() - 1);
@@ -2302,13 +2302,13 @@ impl super::Chat {
                     if running.len() > AGENT_MANAGER_ROWS_MAX {
                         rows.push(Row::new(Line::styled(
                             format!("  … {} running agents", running.len()),
-                            SegStyle::fg(self.theme.inactive),
+                            SegStyle::fg(self.theme.text_secondary),
                         )));
                     }
                 }
                 rows.push(Row::new(Line::styled(
                     "↑/↓ select · Enter details · x stop · Esc close",
-                    SegStyle::fg(self.theme.inactive),
+                    SegStyle::fg(self.theme.text_secondary),
                 )));
                 manager_box(rows, width, &self.theme)
             }
@@ -2324,17 +2324,17 @@ impl super::Chat {
                 if let Some(status) = status {
                     rows.push(Row::new(Line::styled(
                         format!("{} · {}", status.state.label(), format_agent_stats(status)),
-                        SegStyle::fg(self.theme.inactive),
+                        SegStyle::fg(self.theme.text_secondary),
                     )));
                     rows.push(Row::new(Line::empty()));
                     rows.push(Row::new(Line::styled(
                         "Progress",
-                        SegStyle::fg(self.theme.inactive).bold(),
+                        SegStyle::fg(self.theme.text_secondary).bold(),
                     )));
                     if status.recent_activity.is_empty() {
                         rows.push(Row::new(Line::styled(
                             "› initializing…",
-                            SegStyle::fg(self.theme.inactive),
+                            SegStyle::fg(self.theme.text_secondary),
                         )));
                     } else {
                         for (index, activity) in status.recent_activity.iter().enumerate() {
@@ -2348,7 +2348,7 @@ impl super::Chat {
                                 SegStyle::fg(if prefix == "› " {
                                     self.theme.text
                                 } else {
-                                    self.theme.inactive
+                                    self.theme.text_secondary
                                 }),
                             )));
                         }
@@ -2356,7 +2356,7 @@ impl super::Chat {
                     rows.push(Row::new(Line::empty()));
                     rows.push(Row::new(Line::styled(
                         "Prompt",
-                        SegStyle::fg(self.theme.inactive).bold(),
+                        SegStyle::fg(self.theme.text_secondary).bold(),
                     )));
                     let prompt = if status.prompt.is_empty() {
                         "(prompt unavailable)".to_string()
@@ -2373,18 +2373,18 @@ impl super::Chat {
                                 "… +{} prompt lines",
                                 prompt_rows.len() - AGENT_PROMPT_ROWS_MAX
                             ),
-                            SegStyle::fg(self.theme.inactive),
+                            SegStyle::fg(self.theme.text_secondary),
                         )));
                     }
                 } else {
                     rows.push(Row::new(Line::styled(
                         "Agent is no longer available",
-                        SegStyle::fg(self.theme.inactive),
+                        SegStyle::fg(self.theme.text_secondary),
                     )));
                 }
                 rows.push(Row::new(Line::styled(
                     "←/Esc back · Enter opens DM · x stop",
-                    SegStyle::fg(self.theme.inactive),
+                    SegStyle::fg(self.theme.text_secondary),
                 )));
                 manager_box(rows, width, &self.theme)
             }
@@ -2891,7 +2891,7 @@ impl super::Chat {
                 }
                 line.push_styled(
                     " (ctrl+o to expand)".to_string(),
-                    SegStyle::fg(theme.inactive),
+                    SegStyle::fg(theme.text_secondary),
                 );
                 parts.push(El::click(
                     ClickTarget::Group {
@@ -2907,7 +2907,7 @@ impl super::Chat {
                 if in_progress && let Some(hint) = &msg.groups[g].last_hint {
                     parts.push(El::Line(Line::styled(
                         one_line(&format!("  ⎿  {hint}"), width),
-                        SegStyle::fg(theme.inactive),
+                        SegStyle::fg(theme.text_secondary),
                     )));
                 }
                 // The folded command is the one running: its tail belongs under the
@@ -2993,7 +2993,7 @@ impl super::Chat {
         // slots in before that spacing rather than floating under it.
         let time = crate::tui::buffer::stamp(self.messages[i].at);
         if show_done_line && !time.is_empty() && !parts.is_empty() {
-            let stamp_line = Line::styled(format!("  {time}"), theme.dim());
+            let stamp_line = Line::styled(format!("  {time}"), theme.muted());
             match parts.last_mut() {
                 Some(El::Rows(rows)) => {
                     let keep = rows
@@ -3091,13 +3091,12 @@ fn format_agent_stats(status: &crate::agents::AgentStatus) -> String {
 pub(crate) fn manager_box(rows: Vec<Row>, width: usize, theme: &Theme) -> Vec<Row> {
     let inner = width.saturating_sub(4).max(1);
     let border = "─".repeat(inner);
+    // The frame is furniture; what it frames is not.
+    let frame = theme.muted();
     let mut out = Vec::with_capacity(rows.len() + 2);
-    out.push(Row::new(Line::styled(
-        format!("╭{border}╮"),
-        SegStyle::fg(theme.inactive),
-    )));
+    out.push(Row::new(Line::styled(format!("╭{border}╮"), frame)));
     for row in rows {
-        let mut line = Line::styled("│ ", SegStyle::fg(theme.inactive));
+        let mut line = Line::styled("│ ", frame);
         let mut used = 0usize;
         for seg in row.line.segs {
             if used >= inner.saturating_sub(2) {
@@ -3110,17 +3109,14 @@ pub(crate) fn manager_box(rows: Vec<Row>, width: usize, theme: &Theme) -> Vec<Ro
         }
         line.push_styled(
             format!("{} │", " ".repeat(inner.saturating_sub(used + 2))),
-            SegStyle::fg(theme.inactive),
+            frame,
         );
         let mut boxed = Row::new(line);
         boxed.bg = row.bg;
         boxed.padding_right = row.padding_right;
         out.push(boxed);
     }
-    out.push(Row::new(Line::styled(
-        format!("╰{border}╯"),
-        SegStyle::fg(theme.inactive),
-    )));
+    out.push(Row::new(Line::styled(format!("╰{border}╯"), frame)));
     out
 }
 
@@ -3210,7 +3206,7 @@ pub(crate) fn welcome_card_rows(
     banner: Option<(&str, Color)>,
     unconfigured: bool,
 ) -> Vec<Row> {
-    let gray = SegStyle::fg(theme.inactive);
+    let gray = theme.muted();
     let inner_w = width.saturating_sub(2);
     let mut rows = vec![Row::new(Line::styled(
         format!("╭{}╮", "─".repeat(inner_w)),

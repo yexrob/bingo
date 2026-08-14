@@ -467,13 +467,13 @@ impl Chat {
             // not started. Dim, so it reads as in transit rather than answered.
             PostKind::Queued => wrap_words(&post.text, width)
                 .into_iter()
-                .map(|line| Row::new(Line::styled(line, SegStyle::fg(theme.inactive))))
+                .map(|line| Row::new(Line::styled(line, SegStyle::fg(theme.text_secondary))))
                 .collect(),
             // One dim line per work step, like the transcript's tool rows: cut,
             // not wrapped, so a long command stays one row.
             PostKind::Process => vec![Row::new(Line::styled(
                 one_line(&post.text, width),
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             ))],
             _ if post.you => user_message_rows(&post.text, width, theme),
             _ => self.agent_text_rows(&post.text, width),

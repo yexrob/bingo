@@ -219,6 +219,23 @@ published URL. The equivalent CLI is `bingo share [session] [--public]
 `team.json` + `team-norms.md`), `norms` (the working agreement),
 `memory list|gc`.
 
+### Themes, code and diffs
+
+Both themes are spelled entirely in RGB, so what you see is bingo's palette
+rather than your terminal's ANSI mapping (terminals without truecolor get a
+256-colour approximation of the same colours). Text sits on one of three tiers:
+primary for content, secondary for text *about* content (result lines, tool
+output, diff context), muted for furniture (hints, stamps, rules, the diff
+gutter).
+
+Fenced code blocks are syntax-highlighted when the fence names a language —
+`rust`, `python`, `javascript`/`typescript`, `json`, `bash`/`sh`, `toml`,
+`yaml`, `markdown`, `diff` and a dozen more; an unknown or missing tag renders
+monochrome rather than guessing. Diffs — the approval preview, the completed
+edit rows and the transcript view alike — carry an old/new line-number gutter,
+and long lines wrap with the gutter left blank so the code column stays
+straight. `/theme` switches all of it live.
+
 ### Image rendering
 
 Markdown images in model replies (`![alt](path)`, supporting `~/`, relative
@@ -770,7 +787,7 @@ src/
   budget.rs        token budget constants
   memory.rs        memdir memory extraction and loading
   watch.rs         background task registry & notifications
-  tui/             ratatui UI (chat / view / input / markdown / gfx …)
+  tui/             ratatui UI (chat / view / input / markdown / highlight / gfx …)
   ui.rs            headless hooks and shared rendering
   system.rs        system prompt assembly (memory + project memory + skills listing)
 tests/

@@ -428,7 +428,7 @@ impl super::Chat {
                 }
                 rows.push(Row::new(Line::styled(
                     "↑/↓ select · Enter choose · Esc close",
-                    SegStyle::fg(theme.inactive),
+                    SegStyle::fg(theme.text_secondary),
                 )));
             }
             Some(chosen) => {
@@ -455,7 +455,7 @@ impl super::Chat {
                         false => format!(" ({})", offered.refusal(index)),
                     };
                     let color = match (allowed, selected) {
-                        (false, _) => theme.inactive,
+                        (false, _) => theme.text_secondary,
                         (true, true) => theme.permission,
                         (true, false) => theme.text,
                     };
@@ -470,7 +470,7 @@ impl super::Chat {
                 }
                 rows.push(Row::new(Line::styled(
                     "↑/↓ select · 1-5 jump · Enter confirm · Esc back",
-                    SegStyle::fg(theme.inactive),
+                    SegStyle::fg(theme.text_secondary),
                 )));
             }
         }

@@ -14,6 +14,11 @@ use crate::watch::WatchState;
 pub const RESULT_CONNECTOR: &str = "  ⎿  ";
 /// Indentation of the lines that continue a result block.
 pub const RESULT_INDENT: &str = "     ";
+
+/// Narrowest code column a diff row will wrap to. Below this the gutter would
+/// be eating the content it exists to index, so the row is allowed to overrun
+/// and be clipped instead — the same thing every other over-wide row does.
+const MIN_DIFF_BODY: usize = 16;
 /// Only commands slower than this get a duration on their result line —
 /// a millisecond count on every row is noise.
 pub const SLOW_TOOL_MS: u64 = 2_000;
@@ -149,8 +154,62 @@ pub enum DiffLine {
 pub struct Hunk {
     /// `@@ -a,b +c,d @@`
     pub header: String,
+    /// First line number on the old side (`a`), 1-based.
+    pub old_start: usize,
+    /// First line number on the new side (`c`), 1-based.
+    pub new_start: usize,
     /// Context / removed / added lines.
     pub lines: Vec<DiffLine>,
+}
+
+impl Hunk {
+    /// Walk the hunk, pairing each line with the numbers it carries: context
+    /// advances both sides, an addition only the new one, a removal only the
+    /// old one. This is the whole arithmetic behind the gutter.
+    fn numbered(&self) -> Vec<(Option<usize>, Option<usize>, &DiffLine)> {
+        let mut old = self.old_start;
+        let mut new = self.new_start;
+        let mut out = Vec::with_capacity(self.lines.len());
+        for line in &self.lines {
+            let entry = match line {
+                DiffLine::Context(_) => {
+                    let e = (Some(old), Some(new), line);
+                    old += 1;
+                    new += 1;
+                    e
+                }
+                DiffLine::Removed(_) => {
+                    let e = (Some(old), None, line);
+                    old += 1;
+                    e
+                }
+                DiffLine::Added(_) => {
+                    let e = (None, Some(new), line);
+                    new += 1;
+                    e
+                }
+            };
+            out.push(entry);
+        }
+        out
+    }
+}
+
+/// Parse the two starting line numbers out of `@@ -a,b +c,d @@`.
+///
+/// A malformed or absent header falls back to 1/1 rather than refusing to
+/// render: a diff we cannot number is still a diff worth showing.
+fn hunk_starts(header: &str) -> (usize, usize) {
+    let number = |part: Option<&str>, sigil: char| -> usize {
+        part.and_then(|p| p.strip_prefix(sigil))
+            .map(|p| p.split(',').next().unwrap_or(p))
+            .and_then(|p| p.parse::<usize>().ok())
+            .unwrap_or(1)
+    };
+    let mut parts = header.trim_start_matches('@').split_whitespace();
+    let old = number(parts.next(), '-');
+    let new = number(parts.next(), '+');
+    (old, new)
 }
 
 /// One file edit, presented as a git-style unified diff.
@@ -163,6 +222,19 @@ pub struct Diff {
 }
 
 impl Diff {
+    /// Digits the line-number gutter needs: the widest number anywhere in the
+    /// diff, so the code column sits at the same place in every hunk. A diff
+    /// that crosses from line 99 to line 100 does not shift under the reader.
+    fn gutter_digits(&self) -> usize {
+        let mut max = 1;
+        for hunk in &self.hunks {
+            for (old, new, _) in hunk.numbered() {
+                max = max.max(old.unwrap_or(0)).max(new.unwrap_or(0));
+            }
+        }
+        max.to_string().len()
+    }
+
     /// Count added/removed lines across all hunks.
     pub fn stats(&self) -> (usize, usize) {
         let mut added = 0;
@@ -194,8 +266,11 @@ impl Diff {
             }
             if let Some(header) = line.strip_prefix("@@") {
                 let header = format!("@@{header}");
+                let (old_start, new_start) = hunk_starts(&header);
                 hunks.push(Hunk {
                     header,
+                    old_start,
+                    new_start,
                     lines: Vec::new(),
                 });
                 continue;
@@ -227,23 +302,77 @@ impl Diff {
     }
 }
 
-/// Render a diff as styled lines: `@@` hunk headers, `-` red, `+` green.
-pub fn diff_lines(d: &Diff, theme: &Theme) -> Vec<Line> {
+/// Render a diff as styled lines: `@@` hunk headers, a muted old/new line-number
+/// gutter, then `-` red / `+` green.
+///
+/// `width` is the display width the rows have to live in *after* whatever the
+/// caller indents them by. Code lines are wrapped rather than clipped, and a
+/// continuation row gets a blank gutter and a blank marker column, so the code
+/// column stays a straight edge no matter how long a line is.
+///
+/// The hunk header stays flush left. It is a statement about the numbers, not a
+/// numbered line, and indenting it into the gutter would say otherwise.
+pub fn diff_lines(d: &Diff, theme: &Theme, width: usize) -> Vec<Line> {
+    let digits = d.gutter_digits();
+    // "{old:>digits} {new:>digits} " — two columns, one space between, one after.
+    let gutter_width = digits * 2 + 2;
+    // …and one more column for the -/+/space marker.
+    let body = width.saturating_sub(gutter_width + 1).max(MIN_DIFF_BODY);
+    let blank_gutter = " ".repeat(gutter_width);
     let mut out = Vec::new();
     for hunk in &d.hunks {
         out.push(Line::styled(hunk.header.clone(), theme.diff_hunk()));
-        for line in &hunk.lines {
-            let (prefix, style) = match line {
-                DiffLine::Context(_) => (" ", theme.diff_context()),
-                DiffLine::Removed(_) => ("-", theme.diff_removed()),
-                DiffLine::Added(_) => ("+", theme.diff_added()),
+        for (old, new, line) in hunk.numbered() {
+            let (marker, style) = match line {
+                DiffLine::Context(_) => (' ', theme.diff_context()),
+                DiffLine::Removed(_) => ('-', theme.diff_removed()),
+                DiffLine::Added(_) => ('+', theme.diff_added()),
             };
-            let text = match line {
-                DiffLine::Context(t) | DiffLine::Removed(t) | DiffLine::Added(t) => t.clone(),
+            let (DiffLine::Context(text) | DiffLine::Removed(text) | DiffLine::Added(text)) = line;
+            let cell = |n: Option<usize>| match n {
+                Some(n) => format!("{n:>digits$}"),
+                None => " ".repeat(digits),
             };
-            out.push(Line::styled(format!("{prefix}{text}"), style));
+            let gutter = format!("{} {} ", cell(old), cell(new));
+            for (i, chunk) in wrap_columns(text, body).into_iter().enumerate() {
+                let mut row = Line::styled(
+                    if i == 0 {
+                        gutter.clone()
+                    } else {
+                        blank_gutter.clone()
+                    },
+                    theme.muted(),
+                );
+                row.push_styled(
+                    format!("{}{chunk}", if i == 0 { marker } else { ' ' }),
+                    style,
+                );
+                out.push(row);
+            }
         }
     }
+    out
+}
+
+/// Hard-wrap by display columns (CJK-aware).
+///
+/// Code does not wrap on words — a break mid-identifier is honest, a break that
+/// silently reflows indentation is not — so this splits on columns and nothing
+/// else. Always returns at least one chunk, so an empty line still gets a row.
+fn wrap_columns(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut col = 0usize;
+    for ch in text.chars() {
+        let w = crate::tui::line::char_width(ch);
+        if col + w > width && !current.is_empty() {
+            out.push(std::mem::take(&mut current));
+            col = 0;
+        }
+        current.push(ch);
+        col += w;
+    }
+    out.push(current);
     out
 }
 
@@ -446,7 +575,7 @@ fn tool_result(t: &ToolCall, act: &Activity, theme: &Theme) -> Line {
     };
     let mut line = Line::styled(format!("{RESULT_CONNECTOR}{body}"), style);
     if let Some(hint) = expand_hint(act) {
-        line.push_styled(format!(" ({hint})"), theme.dim());
+        line.push_styled(format!(" ({hint})"), theme.muted());
     }
     line
 }
@@ -506,7 +635,7 @@ fn watch_result(w: &WatchCall, act: &Activity, theme: &Theme, portrait: Option<&
         None => Line::styled(format!("{RESULT_CONNECTOR}{body}"), style),
     };
     if let Some(hint) = expand_hint(act) {
-        line.push_styled(format!(" ({hint})"), theme.dim());
+        line.push_styled(format!(" ({hint})"), theme.muted());
     }
     line
 }
@@ -596,7 +725,7 @@ pub fn layout_activity(
 ) -> (Vec<Line>, Vec<ActivityRowRange>) {
     let mut header = header_for(act, theme, portrait);
     if let Some(tail) = fold_tail(act) {
-        header.push_styled(format!(" {tail}"), theme.dim());
+        header.push_styled(format!(" {tail}"), theme.muted());
     }
     let mut rows = vec![header];
     // Result line (CC `  ⎿  …`): tools, edits and watches always carry one —
@@ -796,7 +925,10 @@ mod tests {
         assert_eq!(text(&lines[0]), "⏺ Read(src/main.rs)");
         assert_eq!(text(&lines[1]), "  ⎿  Running…");
         // The running dot uses the weak colour and turns green when done.
-        assert_eq!(lines[0].segs[0].style.fg, Some(Theme::dark().inactive));
+        assert_eq!(
+            lines[0].segs[0].style.fg,
+            Some(Theme::dark().text_secondary)
+        );
     }
 
     /// Slow commands (>2s) fold the duration into the result line; error
@@ -868,6 +1000,105 @@ mod tests {
             text(&lines[1]),
             "  ⎿  Updated f.txt with 2 additions and 1 removal"
         );
+    }
+
+    /// The gutter's arithmetic, on a hunk that has all three line kinds:
+    /// context advances both sides, an addition only the new one, a removal
+    /// only the old one.
+    #[test]
+    fn diff_gutter_numbers_a_mixed_hunk() {
+        let d = Diff::parse_unified(
+            "--- a/f.rs\n+++ b/f.rs\n@@ -10,4 +10,4 @@\n keep\n-gone\n+new\n tail\n",
+        );
+        let rows: Vec<String> = diff_lines(&d, &Theme::dark(), 40)
+            .iter()
+            .map(text)
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                "@@ -10,4 +10,4 @@".to_string(),
+                "10 10  keep".to_string(),
+                "11    -gone".to_string(),
+                "   11 +new".to_string(),
+                "12 12  tail".to_string(),
+            ],
+        );
+    }
+
+    /// The gutter is sized from the largest number in the whole diff, not per
+    /// hunk: a diff that crosses 99 → 100 must not shift its code column
+    /// halfway down.
+    #[test]
+    fn diff_gutter_width_is_stable_across_digit_widths() {
+        let d = Diff::parse_unified("+++ b/f.rs\n@@ -1,1 +1,1 @@\n a\n@@ -99,2 +99,2 @@\n b\n+c\n");
+        let rows: Vec<String> = diff_lines(&d, &Theme::dark(), 40)
+            .iter()
+            .map(text)
+            .collect();
+        // Three digits, because the new side reaches 100.
+        assert_eq!(rows[1], "  1   1  a");
+        assert_eq!(rows[3], " 99  99  b");
+        assert_eq!(rows[4], "    100 +c");
+        // Same marker column in every row, first hunk and last alike: three
+        // digits, a space, three digits, a space, then the marker.
+        for row in rows.iter().filter(|r| !r.starts_with("@@")) {
+            assert!(
+                matches!(row.chars().nth(8), Some(' ' | '+' | '-')),
+                "the marker must sit at column 8: {row:?}"
+            );
+        }
+    }
+
+    /// A line too long for the width wraps instead of being clipped, and the
+    /// continuation carries a blank gutter and a blank marker — the code column
+    /// stays a straight edge.
+    #[test]
+    fn diff_wrapped_lines_get_blank_gutters() {
+        let long = "x".repeat(45);
+        let d = Diff::parse_unified(&format!("+++ b/f.rs\n@@ -1,1 +1,1 @@\n+{long}\n"));
+        // digits=1 → the gutter "  1 " is 4 wide and the marker 1, so 25 columns
+        // leave a 20-column body: 45 characters need three rows.
+        let rows: Vec<String> = diff_lines(&d, &Theme::dark(), 25)
+            .iter()
+            .map(text)
+            .collect();
+        assert_eq!(rows.len(), 4, "header + three wrapped rows, got {rows:?}");
+        assert_eq!(rows[1], format!("  1 +{}", "x".repeat(20)));
+        assert_eq!(
+            rows[2],
+            format!("     {}", "x".repeat(20)),
+            "blank gutter, blank marker"
+        );
+        assert_eq!(rows[3], format!("     {}", "x".repeat(5)));
+    }
+
+    /// The gutter is muted furniture; the markers keep the colours that carry
+    /// the meaning.
+    #[test]
+    fn diff_gutter_is_muted_and_markers_keep_their_colours() {
+        let theme = Theme::dark();
+        let d = Diff::parse_unified("+++ b/f.rs\n@@ -1,1 +1,2 @@\n a\n+b\n");
+        let rows = diff_lines(&d, &theme, 40);
+        for row in &rows[1..] {
+            assert_eq!(
+                row.segs[0].style.fg,
+                Some(theme.text_muted),
+                "gutter is tier 3"
+            );
+        }
+        assert_eq!(rows[1].segs[1].style.fg, Some(theme.diff_context));
+        assert_eq!(rows[2].segs[1].style.fg, Some(theme.success));
+    }
+
+    /// A diff with no `@@` header still renders: the numbers start at 1 rather
+    /// than the rows disappearing.
+    #[test]
+    fn diff_without_a_parsable_header_still_numbers_from_one() {
+        assert_eq!(hunk_starts("@@ -7,3 +9,4 @@"), (7, 9));
+        assert_eq!(hunk_starts("@@ -7 +9 @@"), (7, 9));
+        assert_eq!(hunk_starts("@@ garbage @@"), (1, 1));
+        assert_eq!(hunk_starts(""), (1, 1));
     }
 
     #[test]

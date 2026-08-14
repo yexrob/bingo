@@ -30,6 +30,10 @@ base64 = "0.22"
 sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 ratatui = { version = "0.30.2", features = ["scrolling-regions"] }
+# Syntax highlighting for fenced code blocks (D92). Pure Rust, regex-based, four
+# small dependencies; picked over syntect because syntect's pure-Rust backend still
+# drags in plist/bincode/yaml-rust plus megabytes of Sublime grammar dumps.
+synoptic = "2.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 flate2 = "1"
 tar = "0.4"

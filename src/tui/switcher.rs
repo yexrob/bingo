@@ -205,7 +205,7 @@ impl Chat {
         if items.is_empty() {
             rows.push(Row::new(Line::styled(
                 "No conversation matches",
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             )));
         } else {
             let selected = state.selected.min(items.len() - 1);
@@ -236,7 +236,7 @@ impl Chat {
                     } else if item.unread > 0 {
                         theme.text
                     } else {
-                        theme.inactive
+                        theme.text_secondary
                     }),
                 )));
             }
@@ -249,7 +249,7 @@ impl Chat {
         }
         rows.push(Row::new(Line::styled(
             "↑/↓ select · Enter open · ctrl+x stop · Esc close",
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         )));
         crate::tui::chat::manager_box(rows, width, theme)
     }

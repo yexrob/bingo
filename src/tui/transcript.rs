@@ -439,7 +439,7 @@ pub fn footer(state: &TranscriptState, width: usize, theme: &Theme) -> Line {
         );
         push(
             "  enter search · esc cancel".to_string(),
-            theme.dim(),
+            theme.muted(),
             &mut line,
             &mut used,
         );
@@ -455,7 +455,7 @@ pub fn footer(state: &TranscriptState, width: usize, theme: &Theme) -> Line {
     if state.max_offset() > 0 {
         push(
             format!(" {}%", state.percent()),
-            theme.dim(),
+            theme.muted(),
             &mut line,
             &mut used,
         );
@@ -478,7 +478,7 @@ pub fn footer(state: &TranscriptState, width: usize, theme: &Theme) -> Line {
         .find(|h| text_width(h) <= room)
         .or(hints.last());
     if let Some(hint) = hint {
-        push(format!(" · {hint}"), theme.dim(), &mut line, &mut used);
+        push(format!(" · {hint}"), theme.muted(), &mut line, &mut used);
     }
     line
 }

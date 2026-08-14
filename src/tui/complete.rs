@@ -358,14 +358,14 @@ pub fn mention_rows(state: &MentionState, theme: &Theme, width: usize) -> Vec<Ro
             section = Some(item.kind);
             rows.push(Row::new(Line::styled(
                 format!("  {}", item.kind.section()),
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             )));
         }
         let selected = i == state.selected;
         let color = if selected {
             theme.permission
         } else {
-            theme.inactive
+            theme.text_secondary
         };
         let line = crate::tui::markdown::truncate(
             &format!("{}{}", if selected { "❯ " } else { "  " }, item.insertion()),
@@ -389,7 +389,7 @@ pub fn mention_rows(state: &MentionState, theme: &Theme, width: usize) -> Vec<Ro
             "  {}",
             crate::tui::markdown::truncate(&hint, width.saturating_sub(2))
         ),
-        SegStyle::fg(theme.inactive),
+        SegStyle::fg(theme.text_secondary),
     )));
     rows
 }

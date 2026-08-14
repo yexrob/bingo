@@ -138,7 +138,7 @@ impl Palette {
             presence_on: theme.success,
             presence_off: rgb(0x776C62),
             main_text: theme.text,
-            main_dim: theme.inactive,
+            main_dim: theme.text_secondary,
             divider: rgb(0x38332D),
             accent: theme.claude,
             warning: theme.warning,

@@ -433,7 +433,7 @@ impl super::Chat {
             let style = if focused {
                 SegStyle::fg(focus_color)
             } else {
-                SegStyle::fg(theme.inactive)
+                SegStyle::fg(theme.text_secondary)
             };
             line.push_styled(if focused { "❯ " } else { "  " }, style);
             line.push_styled(format!("{}. {option}", opt_idx + 1), style);
@@ -450,7 +450,7 @@ impl super::Chat {
                     if focused {
                         SegStyle::fg(focus_color)
                     } else {
-                        SegStyle::fg(theme.inactive)
+                        SegStyle::fg(theme.text_secondary)
                     },
                 )));
             }
@@ -474,7 +474,7 @@ impl super::Chat {
             let style = if focused {
                 SegStyle::fg(focus_color)
             } else {
-                SegStyle::fg(theme.inactive)
+                SegStyle::fg(theme.text_secondary)
             };
             line.push_styled(if focused { "❯ " } else { "  " }, style);
             line.push_styled(format!("{}. Other", other_idx + 1), style);
@@ -486,13 +486,13 @@ impl super::Chat {
                 if focused {
                     SegStyle::fg(focus_color)
                 } else {
-                    SegStyle::fg(theme.inactive)
+                    SegStyle::fg(theme.text_secondary)
                 },
             )));
         }
         parts.push(El::Line(Line::styled(
             format!("  {}", self.ask_hint(request, expandable)),
-            SegStyle::fg(theme.inactive),
+            theme.muted(),
         )));
         Some(El::Col(parts))
     }
@@ -546,13 +546,19 @@ impl super::Chat {
                 ASK_COMMAND_ROWS,
             ),
             AskPreview::Diff(text) => (
-                diff_lines(&Diff::parse_unified(text), theme)
-                    .into_iter()
-                    .map(|mut line| {
-                        line.prepend_styled("  ", theme.dim());
-                        line
-                    })
-                    .collect::<Vec<_>>(),
+                // The dialog indents every preview row by two columns, so the
+                // diff gets the width that is actually left for it.
+                diff_lines(
+                    &Diff::parse_unified(text),
+                    theme,
+                    self.width.saturating_sub(2),
+                )
+                .into_iter()
+                .map(|mut line| {
+                    line.prepend_styled("  ", theme.dim());
+                    line
+                })
+                .collect::<Vec<_>>(),
                 ASK_DIFF_ROWS,
             ),
         };

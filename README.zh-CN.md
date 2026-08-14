@@ -190,6 +190,19 @@ bingo --continue            # 恢复最近一次会话
 `status`、`assign <成员> <任务>`（派活）、`stop`、`validate`、`new`
 （脚手架生成 team.json + team-norms.md）、`norms`（团队规范）、`memory list|gc`。
 
+### 主题、代码与 diff
+
+两套主题全部以 RGB 写死，所见即 bingo 的调色板，而不是终端的 ANSI 映射（不支持
+truecolor 的终端会拿到同一组颜色的 256 色近似）。文字只落在三档上：正文用一档，
+说明正文的文字（结果行、工具输出、diff 上下文）用二档，纯装饰（提示、时间戳、
+分隔线、diff 行号栏）用三档。
+
+围栏代码块在标注了语言时高亮——`rust`、`python`、`javascript`/`typescript`、
+`json`、`bash`/`sh`、`toml`、`yaml`、`markdown`、`diff` 及另外十余种；未知或缺失
+的语言标签保持单色，不做猜测。diff（审批预览、完成的编辑行、transcript 视图三处
+同源）带 old/new 行号栏，过长的行折行显示且续行的行号栏留空，代码列始终对齐。
+`/theme` 切换即时生效。
+
 ### 图片渲染
 
 模型回复中的 markdown 图片（`![alt](路径)`，支持 `~/`、相对路径、data:、http(s)）
@@ -660,7 +673,7 @@ src/
   budget.rs        token 预算常量
   memory.rs        memdir 记忆提取与加载
   watch.rs         后台任务注册与通知
-  tui/             ratatui 界面（chat / view / input / markdown / gfx …）
+  tui/             ratatui 界面（chat / view / input / markdown / highlight / gfx …）
   ui.rs            headless hooks 与共享渲染
   system.rs        system prompt 拼装（记忆 + 项目记忆 + 技能清单）
 tests/

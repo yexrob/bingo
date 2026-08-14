@@ -494,3 +494,129 @@ fn a_saved_edit_is_the_only_silent_outcome() {
         assert!(outcome.note().is_some(), "{outcome:?} says something");
     }
 }
+
+// -- D92: theme, highlighting, diff gutter -------------------------------
+
+/// The gutter is a property of the shared diff builder, so it has to show up on
+/// both diff surfaces at once — the approval preview and the completed-edit
+/// rows. If these two ever disagree, someone has grown a second diff renderer.
+#[test]
+fn both_diff_surfaces_render_the_same_gutter() {
+    const DIFF: &str = "--- a/f.rs\n+++ b/f.rs\n@@ -3,3 +3,3 @@\n keep\n-gone\n+new\n";
+
+    // Surface 1: the pre-approval preview inside the permission dialog.
+    let mut chat = test_chat();
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    chat.pending_ask = Some((
+        crate::ui::PermissionRequest {
+            title: "Edit file".into(),
+            question: "Make this edit?".into(),
+            options: vec!["Yes".into()],
+            descriptions: vec![None],
+            free_text: false,
+            kind: crate::ui::AskKind::Permission,
+            preview: Some(crate::ui::AskPreview::Diff(DIFF.to_string())),
+            scope: None,
+        },
+        tx,
+    ));
+    let dialog = visible(&mut chat, 120, 40);
+    assert!(dialog.contains("3 3  keep"), "preview gutter: {dialog}");
+    assert!(dialog.contains("4   -gone"), "preview removal: {dialog}");
+    assert!(dialog.contains("  4 +new"), "preview addition: {dialog}");
+
+    // Surface 2: the completed-edit rows in the flow.
+    let mut chat = test_chat();
+    chat.busy = true;
+    chat.messages.push(msg(Role::Assistant, ""));
+    chat.stream_msg = Some(0);
+    let _ = chat.events.send(UiEvent::ToolStart {
+        name: "Edit".into(),
+    });
+    chat.drain_events();
+    let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "edit-1".into(),
+        name: "Edit".into(),
+        input: serde_json::json!({ "file_path": "f.rs" }),
+        standalone: false,
+    });
+    chat.drain_events();
+    let _ = chat
+        .events
+        .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "edit-1".into(),
+            name: "Edit".into(),
+            summary: "f.rs".into(),
+            output: String::new(),
+            status: crate::query::ToolCallStatus::Done,
+            diff: Some(DIFF.to_string()),
+            duration_ms: 4,
+        }));
+    chat.drain_events();
+    if let Some(activity) = chat
+        .messages
+        .iter_mut()
+        .flat_map(|m| &mut m.activities)
+        .next()
+    {
+        activity.expanded = true;
+    }
+    let flow = visible(&mut chat, 120, 40);
+    assert!(flow.contains("3 3  keep"), "edit-row gutter: {flow}");
+    assert!(flow.contains("4   -gone"), "edit-row removal: {flow}");
+    assert!(flow.contains("  4 +new"), "edit-row addition: {flow}");
+}
+
+/// `/theme` has to reach the diff rows too. They are baked when the edit lands,
+/// so a switch that only rebuilt the markdown cache would recolour the prose and
+/// leave every diff on the old palette.
+#[test]
+fn switching_theme_recolours_baked_diff_rows() {
+    let mut chat = test_chat();
+    chat.busy = true;
+    chat.messages.push(msg(Role::Assistant, ""));
+    chat.stream_msg = Some(0);
+    let _ = chat.events.send(UiEvent::ToolStart {
+        name: "Edit".into(),
+    });
+    chat.drain_events();
+    let _ = chat.events.send(UiEvent::ToolReady {
+        tool_call_id: "edit-1".into(),
+        name: "Edit".into(),
+        input: serde_json::json!({ "file_path": "f.rs" }),
+        standalone: false,
+    });
+    chat.drain_events();
+    let _ = chat
+        .events
+        .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "edit-1".into(),
+            name: "Edit".into(),
+            summary: "f.rs".into(),
+            output: String::new(),
+            status: crate::query::ToolCallStatus::Done,
+            diff: Some("+++ b/f.rs\n@@ -1,1 +1,1 @@\n+added\n".to_string()),
+            duration_ms: 4,
+        }));
+    chat.drain_events();
+
+    let gutter_color = |chat: &Chat| {
+        chat.messages
+            .iter()
+            .flat_map(|m| &m.activities)
+            // Row 0 is the `@@` header; the gutter starts on the one after it.
+            .flat_map(|a| a.content.iter().skip(1))
+            .find_map(|line| line.segs.first().map(|s| s.style.fg))
+    };
+    chat.run_slash("theme light");
+    let light = gutter_color(&chat);
+    assert_eq!(
+        light,
+        Some(Some(chat.theme.text_muted)),
+        "the gutter follows the live theme"
+    );
+    chat.run_slash("theme dark");
+    let dark = gutter_color(&chat);
+    assert_eq!(dark, Some(Some(chat.theme.text_muted)));
+    assert_ne!(light, dark, "the two themes really do differ");
+}

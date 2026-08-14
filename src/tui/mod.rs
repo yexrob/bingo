@@ -43,6 +43,7 @@ pub mod composer;
 pub mod convbar;
 pub mod el;
 pub mod gfx;
+pub mod highlight;
 pub mod history;
 pub mod input;
 pub mod keys;

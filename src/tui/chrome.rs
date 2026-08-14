@@ -37,7 +37,7 @@ pub(crate) struct Menus<'a> {
 pub(crate) fn dim_row(text: impl Into<String>, theme: &Theme) -> Row {
     Row::new(Line::styled(
         format!("  {}", text.into()),
-        SegStyle::fg(theme.inactive),
+        SegStyle::fg(theme.text_secondary),
     ))
 }
 
@@ -78,7 +78,7 @@ fn status_row(
         theme.claude_strong,
     );
     line.push_styled(" ".to_string(), SegStyle::fg(base));
-    line.push_styled(meta, SegStyle::fg(theme.inactive));
+    line.push_styled(meta, SegStyle::fg(theme.text_secondary));
     Row::new(line)
 }
 
@@ -126,7 +126,7 @@ fn mode_badge(mode: PermissionMode, theme: &Theme) -> Vec<(String, Color)> {
     };
     vec![
         (format!("{symbol} {label}"), color),
-        ("·".to_string(), theme.inactive),
+        ("·".to_string(), theme.text_secondary),
     ]
 }
 
@@ -149,7 +149,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     if chat.bash_mode {
         left.push(("! for shell mode".to_string(), theme.bash_border));
     }
-    left.push((hints, theme.inactive));
+    left.push((hints, theme.text_secondary));
 
     let model_name = chat.session.runtime.model.borrow().clone();
     let thinking = chat.session.runtime.thinking.borrow().clone();
@@ -161,7 +161,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     } else {
         (
             model_footer_label(&model_name, thinking.as_deref()),
-            theme.inactive,
+            theme.text_secondary,
         )
     };
     let provider = chat.session.runtime.provider.borrow().clone();
@@ -174,7 +174,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     let usage = chat.context_usage();
     let usage_label = usage.label();
     let usage_color = match usage.band() {
-        crate::context_usage::ContextUsageBand::Normal => theme.inactive,
+        crate::context_usage::ContextUsageBand::Normal => theme.text_secondary,
         crate::context_usage::ContextUsageBand::Warning => theme.warning,
         crate::context_usage::ContextUsageBand::Danger => theme.error,
     };
@@ -182,7 +182,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     let mut status = Line::empty();
     if let Some(rate) = rate.as_deref() {
         status.push_styled(rate, SegStyle::fg(theme.claude));
-        status.push_styled(" · ", SegStyle::fg(theme.inactive));
+        status.push_styled(" · ", theme.muted());
     }
     status.push_styled(usage_label.clone(), SegStyle::fg(usage_color));
 
@@ -203,24 +203,24 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
         let mut prefix = Line::styled("  ", SegStyle::fg(theme.text));
         for (i, (text, color)) in left.iter().enumerate() {
             if i > 0 {
-                prefix.push_styled(" ", SegStyle::fg(theme.inactive));
+                prefix.push_styled(" ", SegStyle::fg(theme.text_secondary));
             }
             prefix.push_styled(text.clone(), SegStyle::fg(*color));
         }
         let left_text = crate::tui::chat::one_line(&prefix.plain_text(), prefix_width);
-        line = Line::styled(left_text.clone(), SegStyle::fg(theme.inactive));
+        line = Line::styled(left_text.clone(), SegStyle::fg(theme.text_secondary));
         let model_width = prefix_width.saturating_sub(text_width(&left_text) + 1);
         if model_width > 0 {
             let model = crate::tui::chat::one_line(&model, model_width);
             let gap = prefix_width
                 .saturating_sub(text_width(&left_text) + text_width(&model))
                 .max(1);
-            line.push_styled(" ".repeat(gap), SegStyle::fg(theme.inactive));
+            line.push_styled(" ".repeat(gap), SegStyle::fg(theme.text_secondary));
             line.push_styled(model, SegStyle::fg(model_color));
         }
     }
     let gap = content_width.saturating_sub(text_width(&line.plain_text()) + status_width);
-    line.push_styled(" ".repeat(gap), SegStyle::fg(theme.inactive));
+    line.push_styled(" ".repeat(gap), SegStyle::fg(theme.text_secondary));
     line.segs.extend(status.segs);
     Row::new(line)
 }
@@ -285,7 +285,7 @@ fn suggestion_rows(
                                 width.saturating_sub(2),
                             )
                         ),
-                        SegStyle::fg(theme.inactive),
+                        SegStyle::fg(theme.text_secondary),
                     )));
                 }
                 return rows;
@@ -299,7 +299,7 @@ fn suggestion_rows(
                 if no_match {
                     return vec![Row::new(Line::styled(
                         "  (no matching commands · type /help to see the available commands)",
-                        SegStyle::fg(theme.inactive),
+                        SegStyle::fg(theme.text_secondary),
                     ))];
                 }
                 return Vec::new();
@@ -323,7 +323,7 @@ fn suggestion_rows(
                     "  {}",
                     crate::tui::markdown::truncate(&hint, width.saturating_sub(2))
                 ),
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             )));
             return rows;
         };
@@ -345,7 +345,7 @@ fn suggestion_rows(
             let mut rows = note(reason.clone());
             rows.push(Row::new(Line::styled(
                 "  Esc goes back up",
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             )));
             return rows;
         }
@@ -373,7 +373,7 @@ fn suggestion_rows(
                 "  {}",
                 crate::tui::markdown::truncate(&hint, width.saturating_sub(2))
             ),
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         )));
         rows
     }
@@ -393,7 +393,7 @@ fn slash_rows(
         let color = if selected {
             theme.permission
         } else {
-            theme.inactive
+            theme.text_secondary
         };
         Row::new(Line::styled(line, SegStyle::fg(color)))
     };
@@ -417,7 +417,7 @@ fn slash_rows(
     let more = |n: usize| {
         Row::new(Line::styled(
             crate::tui::markdown::truncate(&format!("  … {n} more"), width.saturating_sub(2)),
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         ))
     };
     let mut rows = Vec::new();
@@ -504,7 +504,7 @@ pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
     // there whatever the model is doing, and dimming it would promise a wait
     // that is not happening.
     let prompt_style = if chat.busy && tint.is_none() {
-        theme.inactive
+        theme.text_secondary
     } else {
         theme.text
     };
@@ -640,7 +640,7 @@ pub(crate) fn error_screen(err: &crate::tui::chat::ErrorState, theme: &Theme) ->
         Line::plain(""),
         Line::styled(
             "Enter retries · Esc goes back",
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         ),
     ])
 }
@@ -1276,7 +1276,8 @@ mod tests {
                 .line
                 .segs
                 .iter()
-                .any(|seg| seg.text.contains("58%") && seg.style.fg == Some(chat.theme.inactive))
+                .any(|seg| seg.text.contains("58%")
+                    && seg.style.fg == Some(chat.theme.text_secondary))
         );
 
         chat.context_usage = crate::context_usage::ContextUsage::new(70, 100, 90);
