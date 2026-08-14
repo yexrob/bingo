@@ -60,7 +60,7 @@ pub const BINDINGS: &[Binding] = &[
         description: "delete word forward / back",
     },
     Binding {
-        keys: "ctrl+w/u/k",
+        keys: "ctrl+w/u · alt+k",
         description: "delete word / to start / to end",
     },
     Binding {
@@ -112,8 +112,16 @@ pub const BINDINGS: &[Binding] = &[
         description: "background the running command · manage background agents",
     },
     Binding {
+        keys: "ctrl+k",
+        description: "switch conversation (type to filter · ctrl+x stops an agent)",
+    },
+    Binding {
         keys: "/open",
         description: "open a conversation: @agent · #channel · #team · hub",
+    },
+    Binding {
+        keys: "@name · #name",
+        description: "from the hub, send the rest of the line to that conversation",
     },
     Binding {
         keys: "ctrl+l",
@@ -256,6 +264,34 @@ mod tests {
         assert!(
             find("esc").description.contains("back to hub"),
             "and Esc says where it goes from one"
+        );
+    }
+
+    /// Three spellings of one destination — the switcher, the command and the
+    /// line-leading form — and the panel names all three, because a reader who
+    /// found one of them should be able to find the rest (D90).
+    #[test]
+    fn the_panel_names_every_door_into_a_conversation() {
+        let find = |keys: &str| {
+            BINDINGS
+                .iter()
+                .find(|binding| binding.keys == keys)
+                .unwrap_or_else(|| panic!("{keys} binding missing"))
+        };
+        let switcher = find("ctrl+k").description;
+        assert!(switcher.contains("filter"), "{switcher}");
+        assert!(
+            switcher.contains("ctrl+x"),
+            "the stop key is only discoverable from here: {switcher}"
+        );
+        assert!(find("@name · #name").description.contains("hub"));
+        // The kill ctrl+k used to be is still documented, under its new key.
+        assert!(find("ctrl+w/u · alt+k").description.contains("to end"));
+        assert!(
+            !BINDINGS
+                .iter()
+                .any(|binding| binding.keys.contains("ctrl+k") && binding.keys.contains('/')),
+            "ctrl+k is one meaning now, not a slash-joined family"
         );
     }
 

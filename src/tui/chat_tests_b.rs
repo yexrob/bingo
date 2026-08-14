@@ -1889,7 +1889,9 @@ fn cursor_moves_and_inserts_at_position() {
     assert_eq!(chat.cursor, 3, "one char back at a time (3 bytes)");
 }
 
-/// ctrl+k/u/w delete into the kill buffer, ctrl+y pastes back; ctrl+d deletes after the caret.
+/// alt+k, ctrl+u and ctrl+w delete into the kill buffer, ctrl+y pastes back;
+/// ctrl+d deletes after the caret. The kill to end of line moved to alt+k in
+/// D90, when ctrl+k became the conversation switcher — same kill, same ring.
 #[test]
 fn kill_ring_round_trip() {
     let mut chat = chat_with_history("kill");
@@ -1899,8 +1901,8 @@ fn kill_ring_round_trip() {
     assert!(ctrl(&mut chat, 'y'));
     assert_eq!(chat.input, "alpha beta", "ctrl+y pastes back");
     assert!(ctrl(&mut chat, 'a'));
-    assert!(ctrl(&mut chat, 'k'));
-    assert_eq!(chat.input, "", "ctrl+k deletes to the line end");
+    assert!(alt(&mut chat, 'k'));
+    assert_eq!(chat.input, "", "alt+k deletes to the line end");
     assert!(ctrl(&mut chat, 'y'));
     assert_eq!(chat.input, "alpha beta");
     assert!(ctrl(&mut chat, 'u'));

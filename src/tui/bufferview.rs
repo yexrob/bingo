@@ -43,6 +43,40 @@ use crate::tui::el::El;
 use crate::tui::line::{Line, SegStyle, wrap_words};
 use crate::tui::markdown::MarkdownRenderer;
 
+/// The receipt a routed submit leaves in the hub flow: `→ @scout: look at…`.
+///
+/// Display-only, like the dialog receipts (D80/D81): the model's history never
+/// carries it, because nothing was said to the model. It exists so a line that
+/// left the hub is not simply gone — without it the composer would clear and
+/// the flow would show nothing at all, which is indistinguishable from a
+/// message that was dropped.
+pub const ROUTE_RECEIPT_PREFIX: &str = "→ ";
+
+/// How much of the delivered text the receipt echoes. Enough to recognize
+/// which message it was, not enough to reprint it into a flow it never
+/// belonged to.
+const RECEIPT_CHARS: usize = 40;
+
+/// Whether a line is a delivery receipt. Matched by the prefix *and* the sigil
+/// that has to follow it, so a line of prose that happens to open with an arrow
+/// is not mistaken for one.
+pub(crate) fn is_route_receipt(text: &str) -> bool {
+    text.strip_prefix(ROUTE_RECEIPT_PREFIX)
+        .is_some_and(|rest| rest.starts_with('@') || rest.starts_with('#'))
+}
+
+/// `→ @scout: look at the parser` — one line, whitespace flattened, cut to
+/// [`RECEIPT_CHARS`].
+fn receipt_line(id: &BufferId, text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let excerpt = if flat.chars().count() > RECEIPT_CHARS {
+        format!("{}…", flat.chars().take(RECEIPT_CHARS).collect::<String>())
+    } else {
+        flat
+    };
+    format!("{ROUTE_RECEIPT_PREFIX}{}: {excerpt}", id.label())
+}
+
 /// How many messages a switch replays. Messages, not rows: rows exist only
 /// after a layout at a known width, and a conversation's last thirty messages
 /// is a promise that can be kept at any width.
@@ -421,9 +455,12 @@ impl Chat {
                     .token_rate_label(who, std::time::Instant::now(), self.motion.off())
                     .map(|rate| format!(" · {rate}"))
                     .unwrap_or_default();
+                // The wait wears the same colour the composer does (D90), so
+                // the spinner, the prompt and the teammate's name in the bar
+                // are one teammate rather than three unrelated accents.
                 vec![Row::new(Line::styled(
                     one_line(&format!("{glyph} {who} is replying…{rate}"), width),
-                    SegStyle::fg(theme.claude),
+                    SegStyle::fg(self.teammate_tint().unwrap_or(theme.claude)),
                 ))]
             }
             // Sent, not yet claimed by a run: the agent has it, the turn has
@@ -460,8 +497,88 @@ impl Chat {
 
     // -- /open -------------------------------------------------------------
 
-    /// `/open <target>`: the interim door to a conversation until D90 draws the
-    /// bar and binds `ctrl+k`.
+    // -- line-leading routing ---------------------------------------------
+
+    /// A hub submit that opens with another conversation's name.
+    ///
+    /// `@scout look at the parser` delivers `look at the parser` to scout and
+    /// leaves the flow where it is: the point is to say one thing to a teammate
+    /// *without* the cost of going there and coming back, which is the whole
+    /// difference between this and `ctrl+k`.
+    ///
+    /// **Only from the hub.** In a DM or a channel the buffer already *is* the
+    /// target, so a leading `@name` there is what it looks like — a person
+    /// being addressed inside a message — and treating it as an envelope would
+    /// silently redirect a sentence the user meant to send where they were.
+    /// The asymmetry is deliberate and it is the reason this is not a general
+    /// composer feature.
+    ///
+    /// **Names resolve exactly.** The sigil is required and the name is matched
+    /// case-sensitively against the registry, so `@unknown hi` is not an error
+    /// and not magic — it is prose, and it submits to the hub verbatim. D85's
+    /// completion offers the names that do resolve, which is where discovery
+    /// belongs.
+    pub(crate) fn leading_route(&self, text: &str) -> Option<(BufferId, String)> {
+        if *self.buffers.active() != BufferId::Hub {
+            return None;
+        }
+        let (head, rest) = text.split_once(' ')?;
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return None;
+        }
+        let sigil = head.chars().next()?;
+        let name = &head[sigil.len_utf8()..];
+        if name.is_empty() {
+            return None;
+        }
+        let id = match sigil {
+            '@' => BufferId::Dm(name.to_string()),
+            '#' if head == BufferId::Team.label() => BufferId::Team,
+            '#' => BufferId::Channel(name.to_string()),
+            _ => return None,
+        };
+        self.buffers.get(&id)?;
+        Some((id, rest.to_string()))
+    }
+
+    /// Deliver a routed submit and leave the receipt for it.
+    ///
+    /// The delivery is [`crate::tui::buffer::deliver`], the same call a submit
+    /// made from inside that conversation performs — one path, so a message
+    /// routed from the hub is indistinguishable at the domain from one typed
+    /// in the DM itself.
+    pub(crate) fn route_from_hub(&mut self, id: BufferId, text: String) {
+        let target = self.buffers.route_submit(&id, &text);
+        match crate::tui::buffer::deliver(&self.session, target) {
+            Delivery::Sent => {
+                let receipt = receipt_line(&id, &text);
+                self.messages.push(UiMessage {
+                    role: Role::User,
+                    text: receipt,
+                    at: crate::channels::now_unix(),
+                    activities: Vec::new(),
+                    insert_points: Vec::new(),
+                    groups: Vec::new(),
+                    group_of: Vec::new(),
+                });
+                self.dirty = true;
+            }
+            // The board's refusal and a failed delivery both say what did not
+            // happen, above the composer — never as a receipt, which would
+            // claim something was delivered.
+            Delivery::Rejected(why) => self.push_slash_info(why),
+            // Unreachable: a leading name always carries a sigil, and the hub
+            // has none — but a silent drop would be the worse answer.
+            Delivery::Turn(text) => self.start_turn(text, true),
+        }
+    }
+
+    /// `/open <target>`: a conversation by name.
+    ///
+    /// It stays beside `ctrl+k` (D90) rather than being replaced by it: the
+    /// switcher is recognition and this is recall, it is scriptable and
+    /// completable, and it is the spelling the docs can quote.
     pub(crate) fn slash_open(&mut self, arg: &str) {
         let arg = arg.trim();
         if arg.is_empty() {
@@ -968,6 +1085,256 @@ mod tests {
             chat.doc.transient_rows > 0,
             "the tail is transient, so it never freezes into scrollback"
         );
+    }
+
+    // -- the #team board ---------------------------------------------------
+
+    /// The board renders as a conversation, through the same row builder every
+    /// other one uses, and each row says what happened as well as what was
+    /// reported.
+    #[test]
+    fn the_board_renders_its_lifecycle_log() {
+        let mut chat = test_chat();
+        chat.buffers.note_watch_event(
+            "scout #1 · fix the parser",
+            crate::watch::WatchKind::Agent,
+            crate::watch::WatchState::Running,
+            None,
+            1,
+        );
+        chat.buffers.note_watch_event(
+            "scout #1 · fix the parser",
+            crate::watch::WatchKind::Agent,
+            crate::watch::WatchState::Done,
+            Some("fixed it"),
+            2,
+        );
+        chat.switch_to(BufferId::Team);
+
+        let text = flow(&mut chat);
+        assert!(text.contains("── #team ──"), "{text}");
+        assert!(text.contains("scout #1 · fix the parser"), "{text}");
+        assert!(text.contains("running"), "{text}");
+        assert!(
+            text.contains("done · fixed it"),
+            "a finished run reads as finished: {text}"
+        );
+    }
+
+    /// `/team` answers on the board it is about. Away from it, the board's
+    /// unread carries the answer and one info line says where it went — the
+    /// user is told, rather than left with a command that replied with nothing.
+    #[test]
+    fn team_output_lands_on_the_board_and_says_so() {
+        let mut chat = test_chat();
+        chat.run_slash("team");
+
+        let board = chat
+            .buffers
+            .get(&BufferId::Team)
+            .expect("the board was created to hold the answer");
+        assert!(board.unread() > 0, "the answer counts as unread");
+        assert!(
+            chat.slash_info_lines.iter().any(|line| line == "→ #team"),
+            "and the hub points at it: {:?}",
+            chat.slash_info_lines
+        );
+        assert!(
+            !chat
+                .messages
+                .iter()
+                .any(|message| message.text.contains("→ #team")),
+            "the pointer is an info line, not a message in the transcript"
+        );
+
+        // On the board, the same command prints where you are looking.
+        chat.switch_to(BufferId::Team);
+        chat.slash_info_lines.clear();
+        chat.run_slash("team");
+        assert!(
+            chat.slash_info_lines.is_empty(),
+            "no pointer is needed when you are already there: {:?}",
+            chat.slash_info_lines
+        );
+        let text = flow(&mut chat);
+        assert!(
+            text.contains("/team"),
+            "the entry names its command: {text}"
+        );
+        assert_eq!(
+            chat.buffers.get(&BufferId::Team).map(|b| b.unread()),
+            Some(0),
+            "and reading it is reading it"
+        );
+    }
+
+    // -- line-leading routing ---------------------------------------------
+
+    /// The central promise: the message reaches the teammate, the flow does not
+    /// move, and no turn starts. The domain assertion is the one the DM-buffer
+    /// submit makes, because it has to be the same delivery.
+    #[tokio::test]
+    async fn a_leading_name_delivers_from_the_hub_without_moving() {
+        let mut chat = test_chat();
+        seed_agent(&chat, "scout", Vec::new());
+        chat.refresh_entities();
+
+        chat.set_input("@scout have a look at the parser");
+        chat.submit();
+
+        assert!(!chat.busy, "a delivery is not a turn");
+        assert_eq!(*chat.buffers.active(), BufferId::Hub, "the flow stayed put");
+        assert!(
+            chat.queued.is_empty(),
+            "and it did not queue behind the hub"
+        );
+
+        // Byte-identical to what a submit inside the DM produces (D88/D89).
+        let items = chat.session.agents.take_running("scout", 0);
+        let (prompt, _) = crate::tool::agent::absorb_inbox(&chat.session.channels, "scout", &items);
+        assert_eq!(
+            prompt,
+            format!(
+                "{}\nhave a look at the parser",
+                crate::tool::agent::DM_FROM_USER_MARKER
+            )
+        );
+
+        let text = flow(&mut chat);
+        assert!(
+            text.contains("→ @scout: have a look at the parser"),
+            "the receipt says where it went: {text}"
+        );
+        assert!(
+            !text.contains("── @scout ──"),
+            "and nothing opened a conversation: {text}"
+        );
+    }
+
+    /// A channel is the same rule with the other sigil.
+    #[tokio::test]
+    async fn a_leading_channel_name_posts_without_moving() {
+        let mut chat = test_chat();
+        chat.session
+            .channels
+            .create(
+                "build",
+                vec!["scout".to_string(), USER_NAME.to_string()],
+                ChannelMode::Free,
+            )
+            .expect("channel created");
+        chat.refresh_entities();
+
+        chat.set_input("#build ship it");
+        chat.submit();
+
+        assert!(!chat.busy);
+        assert_eq!(*chat.buffers.active(), BufferId::Hub);
+        let log = chat.session.channels.log_of("build");
+        assert_eq!(log.len(), 1, "one post: {log:?}");
+        assert_eq!(log[0].from, USER_NAME);
+        assert_eq!(log[0].text, "ship it");
+        assert!(flow(&mut chat).contains("→ #build: ship it"));
+    }
+
+    /// No magic and no error: a name that resolves to nothing is prose, and
+    /// prose submits to the hub exactly as typed.
+    #[tokio::test]
+    async fn an_unknown_name_is_just_prose() {
+        let mut chat = test_chat();
+        chat.refresh_entities();
+
+        chat.set_input("@nobody are you there");
+        chat.submit();
+
+        assert!(chat.busy, "it opened an ordinary hub turn");
+        assert_eq!(
+            chat.last_prompt, "@nobody are you there",
+            "verbatim, envelope and all"
+        );
+        assert!(
+            chat.slash_error_lines.is_empty(),
+            "nothing failed, so nothing is reported: {:?}",
+            chat.slash_error_lines
+        );
+        assert!(
+            !flow(&mut chat).contains("→ @nobody"),
+            "and no receipt was written for a delivery that never happened"
+        );
+    }
+
+    /// The asymmetry, stated as a test: inside a conversation the buffer *is*
+    /// the target, so a leading name is a person being addressed in a sentence
+    /// rather than an envelope around one.
+    #[tokio::test]
+    async fn a_conversation_reads_a_leading_name_as_text() {
+        let mut chat = test_chat();
+        seed_agent(&chat, "scout", Vec::new());
+        seed_agent(&chat, "zoe", Vec::new());
+        chat.refresh_entities();
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+
+        chat.set_input("@zoe should look at this too");
+        chat.submit();
+
+        let items = chat.session.agents.take_running("scout", 0);
+        let (prompt, _) = crate::tool::agent::absorb_inbox(&chat.session.channels, "scout", &items);
+        assert!(
+            prompt.contains("@zoe should look at this too"),
+            "the whole line went to scout: {prompt}"
+        );
+        assert!(
+            chat.session.agents.pending_of("zoe").is_empty(),
+            "zoe heard nothing"
+        );
+    }
+
+    /// A name with nothing after it is not an envelope — it is someone being
+    /// mentioned, and it belongs to the hub like any other sentence.
+    #[test]
+    fn a_bare_name_is_not_a_route() {
+        let mut chat = test_chat();
+        seed_agent(&chat, "scout", Vec::new());
+        chat.refresh_entities();
+        assert_eq!(chat.leading_route("@scout"), None);
+        assert_eq!(chat.leading_route("@scout   "), None);
+        assert_eq!(
+            chat.leading_route("scout hello"),
+            None,
+            "the sigil is required"
+        );
+        assert_eq!(
+            chat.leading_route("@Scout hello"),
+            None,
+            "and the name resolves exactly, not case-insensitively"
+        );
+        assert_eq!(
+            chat.leading_route("@scout hello"),
+            Some((BufferId::Dm("scout".to_string()), "hello".to_string()))
+        );
+    }
+
+    /// The receipt is a state line: one dim row, no `❯` bubble putting the
+    /// envelope in the user's mouth, no send stamp, and long messages cut.
+    #[test]
+    fn the_receipt_is_a_state_line() {
+        let long = "x".repeat(80);
+        let id = BufferId::Dm("scout".to_string());
+        let line = receipt_line(&id, &long);
+        assert!(line.starts_with("→ @scout: "), "{line}");
+        assert!(line.ends_with('…'), "a long message is cut: {line}");
+        assert!(
+            crate::tui::chat::is_state_line(&line),
+            "so it renders as a state, not as a message: {line}"
+        );
+        assert!(is_route_receipt(&line));
+        // Newlines are flattened: the receipt is one row by construction.
+        assert_eq!(
+            receipt_line(&id, "two\nlines"),
+            "→ @scout: two lines".to_string()
+        );
+        // Prose that merely opens with an arrow is not a receipt.
+        assert!(!is_route_receipt("→ and then we shipped it"));
     }
 
     // -- /open -------------------------------------------------------------

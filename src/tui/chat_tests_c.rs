@@ -1493,6 +1493,103 @@ fn esc_peels_the_conversation_in_its_place_above_the_interrupt() {
     assert!(chat.interrupted, "the last press reached the turn");
 }
 
+/// D90: the ctrl+k switcher joined the stack in the Menu stratum, and Esc peels
+/// exactly it — the conversation underneath is untouched, the turn keeps
+/// running, and the layers stacked over it still close in their own order.
+#[test]
+fn esc_peels_the_switcher_and_nothing_under_it() {
+    use crate::tui::buffer::BufferId;
+
+    assert_eq!(
+        EscLayer::ORDER
+            .iter()
+            .position(|layer| *layer == EscLayer::Switcher),
+        EscLayer::ORDER
+            .iter()
+            .position(|layer| *layer == EscLayer::Menu)
+            .map(|i| i + 1),
+        "the switcher sits in the picker stratum"
+    );
+
+    let mut chat = test_chat();
+    chat.session.agents.insert(
+        "scout",
+        crate::agents::AgentKind::Hire,
+        None,
+        "research".into(),
+        chat.session.clone(),
+    );
+    chat.refresh_entities();
+    chat.busy = true;
+    chat.switch_to(BufferId::Dm("scout".into()));
+    chat.help_visible = true;
+    chat.open_switcher();
+    assert!(chat.switcher.is_some(), "ctrl+k opened it");
+
+    let t0 = std::time::Instant::now();
+    let mut order = Vec::new();
+    while let Some(layer) = chat.esc_layer() {
+        order.push(layer);
+        assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0));
+        if layer == EscLayer::Interrupt {
+            break;
+        }
+        if layer == EscLayer::Switcher {
+            assert!(chat.switcher.is_none(), "the switcher closed");
+            assert_eq!(
+                *chat.buffers.active(),
+                BufferId::Dm("scout".into()),
+                "and one press took only the switcher — the conversation stayed"
+            );
+        }
+        assert!(
+            !chat.interrupted,
+            "a layer above the interrupt closed instead of the turn: {layer:?}"
+        );
+        assert!(chat.busy, "the turn kept running through {layer:?}");
+    }
+    assert_eq!(
+        order,
+        vec![
+            EscLayer::Switcher,
+            EscLayer::HelpPanel,
+            EscLayer::BackToHub,
+            EscLayer::Interrupt,
+        ],
+        "the stack is walked top-down, one entry per press"
+    );
+}
+
+/// D90: ctrl+k is one meaning now. It opens the switcher and never edits the
+/// draft — the kill it used to be answers to alt+k, which still feeds the ring.
+#[test]
+fn ctrl_k_switches_and_alt_k_kills() {
+    let mut chat = test_chat();
+    chat.set_input("alpha beta");
+    chat.cursor = 0;
+
+    assert!(chat.on_key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert_eq!(chat.input, "alpha beta", "ctrl+k left the draft alone");
+    assert!(chat.switcher.is_some(), "and opened the switcher instead");
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+
+    // Busy, in a conversation, with a dropdown open — ctrl+k never types a `k`.
+    chat.busy = true;
+    chat.set_input("/");
+    assert!(chat.on_key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert_eq!(chat.input, "/", "not even behind a dropdown");
+    assert!(chat.switcher.is_some(), "it opened there too");
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    chat.busy = false;
+
+    chat.set_input("alpha beta");
+    chat.cursor = 6;
+    assert!(chat.on_key(KeyCode::Char('k'), KeyModifiers::ALT));
+    assert_eq!(chat.input, "alpha ", "alt+k kills to the end of the line");
+    assert!(chat.on_key(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(chat.input, "alpha beta", "and the kill fed the ring");
+}
+
 /// D89: a permission dialog is the model's turn asking a question, and it has
 /// to reach whoever is at the terminal — including a user reading a DM. The
 /// dialog is modal and sits at the top of D80's stack, so it renders over the

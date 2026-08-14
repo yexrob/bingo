@@ -40,6 +40,7 @@ pub mod chat;
 mod chrome;
 pub mod complete;
 pub mod composer;
+pub mod convbar;
 pub mod el;
 pub mod gfx;
 pub mod history;
@@ -54,6 +55,7 @@ pub mod notify;
 pub mod picker;
 pub mod slash;
 pub mod statics;
+pub mod switcher;
 pub(crate) mod term;
 #[cfg(test)]
 pub(crate) mod test_util;

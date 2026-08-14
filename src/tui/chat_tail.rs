@@ -26,6 +26,11 @@ pub enum EscLayer {
     AskDialog,
     /// `/model` `/think` `/theme` `/resume` `/provider` pickers (one level per press).
     Menu,
+    /// The ctrl+k conversation switcher (D90): closes without switching.
+    ///
+    /// Menu-tier, beside the pickers rather than above them: it is a transient
+    /// chooser over the composer, and it opens and closes on its own key.
+    Switcher,
     /// The ctrl+b background-agent overlay (detail returns to the list, the list closes).
     AgentManager,
     /// Slash-command dropdown: closes, and takes a bare `/` query with it.
@@ -66,9 +71,10 @@ pub enum EscLayer {
 
 impl EscLayer {
     /// The stack, top first. The single source for Esc's priority.
-    pub const ORDER: [EscLayer; 14] = [
+    pub const ORDER: [EscLayer; 15] = [
         EscLayer::AskDialog,
         EscLayer::Menu,
+        EscLayer::Switcher,
         EscLayer::AgentManager,
         EscLayer::SlashDropdown,
         EscLayer::MentionDropdown,
@@ -124,10 +130,31 @@ impl super::Chat {
         self.push_slash_info(text.join("\n"));
     }
 
-    /// `/team <subcommand>` (D31 project-level formation): dispatched to team_cmd, multi-line output queued at once.
+    /// `/team <subcommand>` (D31 project-level formation): dispatched to
+    /// team_cmd, and the answer lands on the board it is about (D90).
+    ///
+    /// It used to go to the hub's info tier, which put the formation's own
+    /// report everywhere except the buffer that exists to hold it. When the
+    /// board is what you are looking at, the output prints there directly; when
+    /// it is not, the board's unread count carries it and one info line says
+    /// where it went — the user is told, rather than left to wonder why the
+    /// command answered with nothing.
     pub(crate) fn slash_team(&mut self, arg: &str) {
         let lines = crate::team_cmd::run(&self.session, &std::path::PathBuf::from(&self.cwd), arg);
-        self.push_slash_info(lines.join("\n"));
+        let label = if arg.trim().is_empty() {
+            "/team".to_string()
+        } else {
+            format!("/team {}", arg.trim())
+        };
+        let tick = self.tick;
+        self.buffers
+            .note_team_output(&label, &lines.join("\n"), tick);
+        if *self.buffers.active() == crate::tui::buffer::BufferId::Team {
+            self.poll_active_conversation();
+        } else {
+            self.push_slash_info(format!("→ {}", crate::tui::buffer::BufferId::Team.label()));
+        }
+        self.dirty = true;
     }
 
     /// Rebuilds the composer's dropdown after an edit. One surface at a time,
@@ -749,6 +776,11 @@ impl super::Chat {
         if self.agent_manager_key(code, modifiers) {
             return true;
         }
+        // The conversation switcher is modal while it is open (D90): it filters
+        // as you type, so every key it does not act on is a key it swallows.
+        if self.switcher_key(code, modifiers) {
+            return true;
+        }
         // Interrupt (busy) and quit (idle) both live on Ctrl+C, judged before editing keys.
         // Unlike Esc, Ctrl+C skips the layer stack: it interrupts with anything open.
         if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
@@ -970,6 +1002,7 @@ impl super::Chat {
         match layer {
             EscLayer::AskDialog => self.pending_ask.is_some(),
             EscLayer::Menu => self.menu_open(),
+            EscLayer::Switcher => self.switcher.is_some(),
             EscLayer::AgentManager => self.agent_manager.is_some(),
             EscLayer::SlashDropdown => !self.slash_suggestions.is_empty(),
             EscLayer::MentionDropdown => self.mention.is_some(),
@@ -1005,6 +1038,7 @@ impl super::Chat {
                     || self.resume_menu_key(ESC, NONE)
                     || self.provider_menu_key(ESC, NONE)
             }
+            EscLayer::Switcher => self.switcher_key(ESC, NONE),
             EscLayer::AgentManager => self.agent_manager_key(ESC, NONE),
             EscLayer::SlashDropdown => self.slash_menu_key(ESC, NONE),
             EscLayer::MentionDropdown => self.mention_menu_key(ESC, NONE),
@@ -1119,11 +1153,13 @@ impl super::Chat {
                 self.cursor = crate::tui::input::line_end(&self.input, self.cursor);
                 true
             }
+            // Ctrl+K opens the conversation switcher (D90). The kill it used
+            // to be moved to alt+k, beside alt+d, its sibling in the ring: a
+            // switcher is what a reader reaches ctrl+k for in every other
+            // application that has conversations, and readline's kill has an
+            // alt-key family to belong to.
             'k' => {
-                self.snapshot(EditKind::Bulk);
-                let cut = crate::tui::input::kill_to_end(&mut self.input, &mut self.cursor);
-                self.composer.kill(cut, KillDir::Forward);
-                self.after_edit();
+                self.open_switcher();
                 true
             }
             'u' => {
@@ -1242,6 +1278,16 @@ impl super::Chat {
                 let end = crate::tui::input::subword_right(&self.input, self.cursor);
                 let cut =
                     crate::tui::input::kill_between(&mut self.input, &mut self.cursor, start, end);
+                self.composer.kill(cut, KillDir::Forward);
+                self.after_edit();
+                true
+            }
+            // Kill to end of line, formerly ctrl+k (D90). Same kill, same
+            // ring, same direction as alt+d, so consecutive forward kills
+            // still coalesce in text order.
+            'k' => {
+                self.snapshot(EditKind::Bulk);
+                let cut = crate::tui::input::kill_to_end(&mut self.input, &mut self.cursor);
                 self.composer.kill(cut, KillDir::Forward);
                 self.after_edit();
                 true
@@ -1687,7 +1733,7 @@ impl super::Chat {
                     .tasks_cache
                     .iter()
                     .any(|t| t.status == TodoStatus::InProgress))
-            || (self.agent_manager.is_some()
+            || ((self.agent_manager.is_some() || self.switcher.is_some())
                 && self
                     .session
                     .agents
@@ -2139,7 +2185,10 @@ impl super::Chat {
         true
     }
 
-    fn stop_agent_from_manager(&mut self, name: &str) {
+    /// Stop an agent. The ctrl+b manager's `x` and the ctrl+k switcher's
+    /// `ctrl+x` are the same action and must stay so: one path, one warning,
+    /// one watch transition.
+    pub(crate) fn stop_agent_from_manager(&mut self, name: &str) {
         match self.session.agents.stop(name) {
             Ok((watch_id, dropped)) => {
                 if let Some(id) = watch_id {
@@ -3003,7 +3052,7 @@ fn format_agent_stats(status: &crate::agents::AgentStatus) -> String {
     )
 }
 
-fn manager_box(rows: Vec<Row>, width: usize, theme: &Theme) -> Vec<Row> {
+pub(crate) fn manager_box(rows: Vec<Row>, width: usize, theme: &Theme) -> Vec<Row> {
     let inner = width.saturating_sub(4).max(1);
     let border = "─".repeat(inner);
     let mut out = Vec::with_capacity(rows.len() + 2);

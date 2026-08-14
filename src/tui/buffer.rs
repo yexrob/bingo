@@ -113,6 +113,13 @@ impl Buffer {
     pub fn mention(&self) -> bool {
         self.mention
     }
+    /// Tick of the last observed change in the source. The switcher orders by
+    /// it (D90), which is the reason it is readable at all: a registry sorted
+    /// by name answers "what exists", and a reader reaching for ctrl+k is
+    /// asking "what just happened".
+    pub fn last_activity(&self) -> u64 {
+        self.last_activity
+    }
 }
 
 /// One element of a buffer's replay.
@@ -156,15 +163,35 @@ pub enum Delivery {
     Rejected(String),
 }
 
-/// One lifecycle event on the team board.
+/// One entry on the team board.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeamEvent {
-    /// The watch label, which already carries the instance name and run.
+    /// The watch label, which already carries the instance name and run — or
+    /// the command that produced the entry, for the board's own output.
     pub label: String,
-    pub state: WatchState,
+    /// The lifecycle state this entry reports. `None` means the entry is not a
+    /// lifecycle event at all but output posted to the board (`/team`, D90):
+    /// there is no state to name, and naming one anyway would report a
+    /// transition that never happened.
+    pub state: Option<WatchState>,
     pub detail: Option<String>,
     /// Unix seconds.
     pub at: u64,
+}
+
+/// One board entry as a line.
+///
+/// A lifecycle event says what happened *and* what was reported, in that order:
+/// the detail alone used to be the whole row, so a finished run and a running
+/// one were told apart only by what the agent happened to say. Board output
+/// (`/team`) has no state and is its own text.
+fn team_line(event: &TeamEvent) -> String {
+    match (event.state, &event.detail) {
+        (Some(state), Some(detail)) => format!("{} · {detail}", state_word(state)),
+        (Some(state), None) => state_word(state).to_string(),
+        (None, Some(detail)) => detail.clone(),
+        (None, None) => String::new(),
+    }
 }
 
 /// The word a lifecycle state goes by on the board.
@@ -330,16 +357,12 @@ impl Buffers {
         if kind != WatchKind::Agent {
             return;
         }
-        self.team.push(TeamEvent {
+        self.push_team(TeamEvent {
             label: label.to_string(),
-            state,
+            state: Some(state),
             detail: detail.map(str::to_string),
             at: crate::channels::now_unix(),
         });
-        if self.team.len() > TEAM_LOG_MAX {
-            let over = self.team.len() - TEAM_LOG_MAX;
-            self.team.drain(..over);
-        }
         // The board is born with this event, so its first entry is news. The
         // "first sight is read" rule exists to avoid badging history that
         // predates you, and a board that did not exist a moment ago has none.
@@ -348,6 +371,38 @@ impl Buffers {
         }
         let seq = self.team.len() as u64;
         self.observe(BufferId::Team, seq, false, tick);
+    }
+
+    /// Post the host's own output to the board (D90).
+    ///
+    /// `/team` reports what the formation is, and that is board news rather
+    /// than hub news: without this the answer landed in the hub's info tier,
+    /// scrolled away, and left the one buffer that exists to hold it empty.
+    pub fn note_team_output(&mut self, label: &str, text: &str, tick: u64) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.push_team(TeamEvent {
+            label: label.to_string(),
+            state: None,
+            detail: Some(text.to_string()),
+            at: crate::channels::now_unix(),
+        });
+        if self.get(&BufferId::Team).is_none() {
+            self.entry(BufferId::Team, 0, tick);
+        }
+        let seq = self.team.len() as u64;
+        self.observe(BufferId::Team, seq, false, tick);
+    }
+
+    /// Append to the board's bounded log. The board is the one buffer with no
+    /// domain store behind it, so it is the one that has to bound itself.
+    fn push_team(&mut self, event: TeamEvent) {
+        self.team.push(event);
+        if self.team.len() > TEAM_LOG_MAX {
+            let over = self.team.len() - TEAM_LOG_MAX;
+            self.team.drain(..over);
+        }
     }
 
     /// Mark everything in a conversation read.
@@ -397,10 +452,7 @@ impl Buffers {
                     from: ev.label.clone(),
                     you: false,
                     at: ev.at,
-                    text: ev
-                        .detail
-                        .clone()
-                        .unwrap_or_else(|| state_word(ev.state).to_string()),
+                    text: team_line(ev),
                     kind: PostKind::Note,
                 })
                 .collect(),
@@ -1232,7 +1284,8 @@ mod tests {
         let replay = buffers.rehydrate(&session, &BufferId::Team, 50);
         assert_eq!(
             texts(&replay),
-            vec!["── #team ──", "running", "fixed the parser"]
+            vec!["── #team ──", "running", "done · fixed the parser"],
+            "a row says what happened as well as what was reported"
         );
     }
 

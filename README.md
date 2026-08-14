@@ -179,8 +179,10 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Ctrl+P` / `Ctrl+N` | prompt history — the same keys as `↑`/`↓`, including pulling a queued message back |
 | `Alt+B` / `Alt+F` | move one word, stopping at `/` `-` `_` `.` so a path is walked a segment at a time |
 | `Alt+D` / `Alt+Backspace` | kill one word forward / back (`Ctrl+W` takes the whole whitespace token) |
+| `Alt+K` | kill to the end of the line (this was `Ctrl+K` before the switcher took that key) |
 | `Ctrl+Y` / `Alt+Y` | yank the newest kill; `Alt+Y` right after it cycles the 10-entry kill ring |
 | `Shift+Enter` | insert a newline (wherever the terminal speaks the kitty keyboard protocol) |
+| `Ctrl+K` | switch conversation: every conversation in one list, type to filter, `Enter` opens, `Ctrl+X` stops a running agent |
 | `Ctrl+B` | move the running shell command to the background; with none running, manage background agents |
 | `Ctrl+L` | clear and redraw |
 | `@` | mention a project file or a running agent: fuzzy dropdown, `Tab`/`Enter` inserts the relative path (or `@name`) |
@@ -202,7 +204,8 @@ opens the level picker; the choice persists), `/theme`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` executes directly),
 `/open <@agent|#channel|#team|hub>` (enter a conversation; Tab completes from
-the ones that exist), `/context` (usage),
+the ones that exist — `Ctrl+K` is the same door without typing a name),
+`/context` (usage),
 `/status`, `/config` (effective config with per-key source layer/env, current
 endpoint, unknown-key hints), `/compact` (force compaction), `/resume [name]` (resume a past
 session), `/rename`, `/gc` (clean expired session data), `/share [--public] [--open]`, `/clear`, `/exit`.
@@ -446,9 +449,22 @@ and the `#team` board are the others, and they all wear the same composer, the
 same keys, the same approval dialogs and the same transcript rendering. There is
 no separate screen to enter and no second set of controls to learn.
 
-**Entering one** is `/open @agent`, `/open #channel`, `/open #team` or
-`/open hub` (Tab completes from the conversations that exist); a running agent's
-DM also opens from the Ctrl+B manager with Enter. **Esc goes back to the hub** —
+**Entering one** is `Ctrl+K` — every conversation in one list, most recently
+active first with the hub pinned on top, filtered as you type, opened with
+Enter — or `/open @agent`, `/open #channel`, `/open #team`, `/open hub` (Tab
+completes from the conversations that exist); a running agent's DM also opens
+from the Ctrl+B manager with Enter. Above the composer, a **conversation bar**
+lists what exists — presence for DMs (`●` running, `○` idle), an unread count,
+and the one you are in accented — and it appears only once there is more than
+one conversation to switch between.
+
+**Saying one thing without going there**: from the hub, a message that opens
+with a conversation's name delivers the rest to it and leaves you where you
+are — `@scout have a look at the parser` reaches scout, and the flow keeps a
+dim `→ @scout: have a look at the parser` receipt. A name that matches nothing
+is not an error and not magic: it is prose, and it goes to the model as typed.
+Inside a conversation there is no such rule, because the conversation you are
+in already *is* the destination. **Esc goes back to the hub** —
 navigation before interruption, so a turn running behind you keeps running and
 its Esc-to-interrupt waits for you at the hub. Ctrl+C is unchanged and stops the
 turn from anywhere.

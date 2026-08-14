@@ -155,8 +155,10 @@ bingo --continue            # 恢复最近一次会话
 | `Ctrl+P` / `Ctrl+N` | 提示历史——与 `↑`/`↓` 完全同键，包含把排队消息取回 |
 | `Alt+B` / `Alt+F` | 按词移动，在 `/` `-` `_` `.` 处停下，便于逐段走过路径 |
 | `Alt+D` / `Alt+Backspace` | 向后/向前删一个词（`Ctrl+W` 仍删整个空白分隔的词） |
+| `Alt+K` | 删到行尾（切换器占用 `Ctrl+K` 之前，这个功能在 `Ctrl+K` 上） |
 | `Ctrl+Y` / `Alt+Y` | 粘回最近一次删除；紧接着按 `Alt+Y` 在 10 条 kill ring 中轮换 |
 | `Shift+Enter` | 插入换行（终端支持 kitty 键盘协议时可用） |
+| `Ctrl+K` | 切换会话：所有会话列在一处，输入即过滤，`Enter` 进入，`Ctrl+X` 停止运行中的 agent |
 | `Ctrl+B` | 把正在前台运行的命令转入后台；没有命令在跑时管理后台 agent |
 | `Ctrl+L` | 清屏重画 |
 | `@` | mention 项目文件或运行中的 agent：模糊下拉，`Tab`/`Enter` 插入相对路径（或 `@name`） |
@@ -175,7 +177,8 @@ bingo --continue            # 恢复最近一次会话
 `/theme`、`/permissions [allow|deny|ask] [规则]`、
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
 `/skills`（清单，`/技能名` 直接执行）、
-`/open <@agent|#频道|#team|hub>`（进入某个会话，Tab 从已存在的会话补全）、
+`/open <@agent|#频道|#team|hub>`（进入某个会话，Tab 从已存在的会话补全；
+`Ctrl+K` 是同一扇门，不必打名字）、
 `/context`（用量）、`/status`、
 `/config`（生效配置与来源：哪个层/环境变量赢了、当前端点、未知配置项提示）、
 `/compact`（强制压缩）、`/resume [名称]`（恢复历史会话）、`/rename`、
@@ -391,8 +394,17 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 同一套按键、同一套授权对话框、同一套 transcript 渲染。没有另开的界面，也没有第二
 套操作要学。
 
-**进入**：`/open @agent`、`/open #频道`、`/open #team`、`/open hub`（Tab 从已存在
-的会话里补全）；运行中 agent 的 DM 也可以在 Ctrl+B 管理器里按 Enter 打开。
+**进入**：`Ctrl+K` —— 所有会话列在一处，按最近活跃排序、hub 固定在首位，输入即
+过滤，`Enter` 进入；也可以用 `/open @agent`、`/open #频道`、`/open #team`、
+`/open hub`（Tab 从已存在的会话里补全）；运行中 agent 的 DM 也可以在 Ctrl+B
+管理器里按 Enter 打开。输入框上方有一条**会话栏**，列出当前有哪些会话：DM 显示
+在线状态（`●` 运行中、`○` 空闲）、未读数，当前所在的那个高亮；只有存在一个以上
+会话时才会出现。
+
+**不进去也能说一句**：在 hub 里，以某个会话的名字开头的消息会把后面的内容投递
+过去，而你留在原地 —— `@scout 看一下 parser` 送到 scout，流里留下一行暗色回执
+`→ @scout: 看一下 parser`。名字对不上时既不是错误也没有魔法：那就是普通文本，
+原样发给模型。在会话内部没有这条规则，因为你所在的会话本身就是目的地。
 **Esc 回 hub** —— 导航先于中断，所以背后正在跑的回合不受影响，它的
 「Esc 中断」在 hub 等你。Ctrl+C 语义不变，在哪都能中断。
 

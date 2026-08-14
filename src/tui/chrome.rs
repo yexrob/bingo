@@ -490,12 +490,20 @@ fn caret_cell(chat: &Chat) -> (usize, usize) {
 /// to the input line it sits on.
 pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
     let theme = &chat.theme;
+    // While a DM is the conversation, the box wears that teammate's colour
+    // (D90). Bash mode still wins: `!` changes what the box *does*, and what a
+    // surface does outranks who is on the other end of it.
+    let tint = chat.teammate_tint();
     let border_color = if chat.bash_mode {
         theme.bash_border
     } else {
-        theme.prompt_border
+        tint.unwrap_or(theme.prompt_border)
     };
-    let prompt_style = if chat.busy {
+    // A hub turn dims the hub's own prompt. It does not dim a DM's: a message
+    // to a subagent is a delivery, never a turn (D89), so the composer is live
+    // there whatever the model is doing, and dimming it would promise a wait
+    // that is not happening.
+    let prompt_style = if chat.busy && tint.is_none() {
         theme.inactive
     } else {
         theme.text
@@ -503,7 +511,7 @@ pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
     let (prefix, prefix_color) = if chat.bash_mode {
         ("! ".to_string(), theme.bash_border)
     } else {
-        ("❯ ".to_string(), prompt_style)
+        ("❯ ".to_string(), tint.unwrap_or(prompt_style))
     };
     let bar = "─".repeat(width.saturating_sub(2));
     let mut children = vec![El::Line(Line::styled(
@@ -568,6 +576,7 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     // Bottom entity area (running agents + channels; Ctrl+G opens the workspace).
     children.push(El::Lines(chat.entity_rows(width)));
     children.push(El::Rows(chat.agent_manager_rows(width)));
+    children.push(El::Rows(chat.switcher_rows(width)));
 
     // Pinned panels (login flows, long-operation progress): persistent until
     // the owning flow unpins them — the one place a device code can wait out
@@ -588,6 +597,10 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
         children.push(s);
     }
 
+    // The conversation bar sits directly on the composer, because it is about
+    // the composer: it says which conversation the next Enter reaches. It
+    // contributes no rows at all when there is only one conversation (D90).
+    children.push(El::Rows(chat.conversation_bar_rows(width)));
     children.push(prompt(chat, width));
 
     if let Some(line) = chat.search_line() {
@@ -1398,5 +1411,134 @@ mod tests {
             Some(chat.theme.bash_border),
             "border color swaps"
         );
+    }
+
+    /// D90: while a DM is the conversation, the composer wears that teammate's
+    /// colour — the border and the `❯` alike — and the hub restores the
+    /// default. Checked in both themes, because a tint verified in only one is
+    /// a tint that works in only one.
+    #[test]
+    fn a_dm_tints_the_composer_in_its_teammates_colour() {
+        use crate::tui::buffer::BufferId;
+        use crate::tui::theme::{Theme, ThemeSetting};
+
+        for setting in [ThemeSetting::Dark, ThemeSetting::Light] {
+            let mut chat = chat_at(80, 24);
+            chat.theme = Theme::for_terminal(setting, None);
+            chat.session.agents.insert(
+                "scout",
+                crate::agents::AgentKind::Hire,
+                None,
+                "research".into(),
+                chat.session.clone(),
+            );
+            chat.refresh_entities();
+
+            let hub = rows_of(prompt(&chat, 40));
+            let default = Some(chat.theme.prompt_border);
+            assert_eq!(hub[0].line.segs[0].style.fg, default, "{setting:?}");
+
+            chat.switch_to(BufferId::Dm("scout".into()));
+            let tint = chat.teammate_tint().expect("a DM has a teammate");
+            assert_ne!(
+                Some(tint),
+                default,
+                "the tint is a colour of its own in {setting:?}"
+            );
+            let dm = rows_of(prompt(&chat, 40));
+            assert_eq!(dm[0].line.segs[0].style.fg, Some(tint), "top {setting:?}");
+            assert_eq!(
+                dm[dm.len() - 1].line.segs[0].style.fg,
+                Some(tint),
+                "bottom {setting:?}"
+            );
+            assert!(row_text(&dm[1]).starts_with("❯ "), "{setting:?}");
+            assert_eq!(
+                dm[1].line.segs[0].style.fg,
+                Some(tint),
+                "the prompt glyph too, in {setting:?}"
+            );
+
+            chat.switch_to(BufferId::Hub);
+            let back = rows_of(prompt(&chat, 40));
+            assert_eq!(
+                back[0].line.segs[0].style.fg, default,
+                "the hub restores the default accent in {setting:?}"
+            );
+        }
+    }
+
+    /// The bar is a chrome tier like every other, so it reaches both hosts from
+    /// the same tree and renders identically in each — and it sits directly on
+    /// the composer, which is the surface it is about.
+    #[test]
+    fn the_conversation_bar_reaches_both_hosts_identically() {
+        let mut chat = chat_at(100, 40);
+        assert!(
+            !rows_of(chrome(&chat, 100, false))
+                .iter()
+                .any(|row| row_text(row).contains("hub")),
+            "a lone hub spends no row on a bar"
+        );
+
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "research".into(),
+            chat.session.clone(),
+        );
+        chat.refresh_entities();
+
+        let find_bar = |fullscreen: bool| {
+            let rows = rows_of(chrome(&chat, 100, fullscreen));
+            let at = rows
+                .iter()
+                .position(|row| row_text(row).contains("@scout"))
+                .expect("the bar is rendered");
+            assert!(
+                row_text(&rows[at + 1]).starts_with('╭'),
+                "the bar sits directly on the composer: {:?}",
+                row_text(&rows[at + 1])
+            );
+            row_text(&rows[at])
+        };
+        assert_eq!(
+            find_bar(false),
+            find_bar(true),
+            "both hosts render the same bar"
+        );
+        assert!(find_bar(false).contains("hub"), "and it names the hub too");
+    }
+
+    /// The switcher renders where the ctrl+b manager does, in the same frame,
+    /// so the two overlays are one object in one place.
+    #[test]
+    fn the_switcher_renders_as_an_overlay() {
+        let mut chat = chat_at(100, 40);
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "research".into(),
+            chat.session.clone(),
+        );
+        chat.refresh_entities();
+        assert!(
+            !rows_of(chrome(&chat, 100, false))
+                .iter()
+                .any(|row| row_text(row).contains("Switch conversation")),
+            "closed, it costs nothing"
+        );
+
+        chat.open_switcher();
+        let text = rows_of(chrome(&chat, 100, false))
+            .iter()
+            .map(row_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Switch conversation"), "{text}");
+        assert!(text.contains("@scout"), "{text}");
+        assert!(text.contains("Esc close"), "{text}");
     }
 }

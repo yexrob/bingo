@@ -2077,3 +2077,84 @@ lines added against 4206 removed — **−2227** — across 21 files, one of the
 1056 lines, half of it tests); 34 tests deleted with the code they tested and 19 added, for
 1266 + 13 green; and both hosts render every conversation through the one builder they already
 shared, because there was never a second one to make agree.
+
+### D90. Conversation chrome: a bar, a switcher, and a way to speak without moving
+
+**Problem.** D88 gave every conversation one shape and D89 made it reachable, but nothing on
+screen ever said what existed. `/open` could enter a conversation and never named one, so a DM
+filling up behind you was invisible until you thought to ask; the only roster was the ctrl+b
+manager, which lists running agents rather than conversations. Three more gaps came with it:
+`/team` printed the formation's own report into the hub's info tier — everywhere except the one
+buffer that exists to hold it, where the board sat empty; the board's rows showed the detail an
+event carried and dropped the lifecycle word, so a finished run and a running one were told apart
+only by what the agent happened to say; and nothing on the composer said which conversation the
+next Enter would reach. The blueprint's D90 also wanted `ctrl+k`, which D86 had already spent on
+kill-to-end-of-line.
+
+**Decision.**
+
+1. **The bar** (`convbar.rs`, new) is one row directly on the composer, in `BufferId` order:
+   `hub  #team  #build (3)  ●@scout (2)  ○@zoe`. Presence (`●` running / `○` idle) is a DM's fact
+   and nobody else's — a channel has no pulse, so it gets no glyph rather than one that means
+   nothing — and it comes from the agent state the ctrl+b manager already reads, in one pass
+   rather than a registry lookup per entry. Unread is D88's derived `seq − read`; a conversation
+   that named you gets the accent instead of the plain unread colour, which is free because the
+   active conversation never carries a badge at all. **The bar renders only when there is more
+   than one conversation**: a session that never spawned an agent pays nothing, and a bar reading
+   `hub` alone would be a row spent saying that the only thing on screen is the thing on screen.
+   Overflow elides to `…` around a run grown outward from the active entry (forward first, so the
+   registry still reads left to right) — a pure function of widths, active index and budget, so
+   there is no scroll state to get stuck in and nothing to animate. Below the width of one entry
+   the active entry survives clamped and unmarked, because a chrome row that wrapped would throw
+   off every height the frame assembler measured.
+2. **`ctrl+k` is the switcher** (`switcher.rs`, new), an EscLayer in the Menu stratum. Ordered by
+   **recency** with the hub pinned on top — the bar answers "what exists" and must not move under
+   a glance, while a reader reaching for ctrl+k is asking "what just happened" — filtered through
+   D85's single scorer, `↑/↓` clamping like the manager's list, `Enter` switching through D89's
+   own `switch_to`, `Esc` peeling only the switcher. **The ctrl+b manager stays.** The blueprint
+   allows the switcher to absorb it eventually; this batch does not, because the two answer
+   different questions (which conversation am I in, versus what are my agents doing) and the
+   manager carries per-agent stats and prompts this list has no room for. What must not fork is
+   the stop action, so `ctrl+x` calls the manager's own `stop_agent_from_manager` — same warning,
+   same watch transition, and the same absence of a confirmation step. A stopped agent's
+   conversation stays listed, idle: it is still worth reading back.
+3. **`alt+k` takes the kill.** `ctrl+k` no longer edits text in any state. Same kill, same ring,
+   same `KillDir::Forward` as `alt+d`, so consecutive forward kills still coalesce in text order.
+4. **Line-leading routing, in the hub only.** A hub submit opening with a known conversation's
+   name delivers the rest there, does not switch and does not start a turn — placed beside D89's
+   non-hub branch and above the busy branch for the same reason: a delivery must neither queue
+   behind a running turn nor start one. The flow keeps a dim `→ @scout: …` receipt, a state line
+   like the interrupt marker and the dialog receipts — no `❯` bubble putting the envelope in the
+   user's mouth, no send stamp, nothing in the model's history. **An unresolved name is prose**,
+   not an error: `@nobody hi` opens an ordinary turn, verbatim. **In a conversation there is no
+   such rule**, and the asymmetry is the point: the buffer already *is* the target, so a leading
+   `@name` there is a person being addressed inside a sentence, and reading it as an envelope
+   would silently redirect a message meant for whoever you were talking to.
+5. **The `#team` board renders and receives.** `TeamEvent::state` becomes `Option<WatchState>`:
+   `Some` is a lifecycle event and renders as `state · detail`, `None` is output posted to the
+   board, which has no transition to name and must not claim one. `/team` writes there and the
+   board's own unread carries it; when the board is not what you are looking at, one info line
+   says `→ #team`, so the command is never apparently silent. The board stays read-only.
+6. **Teammate tinting.** While a DM is active the composer border, the `❯` glyph and the
+   `is replying…` row take that agent's colour from the palette the avatar machinery already
+   assigns the name — no new colours, both themes covered by the palette's own branch. Bash mode
+   still wins the border: what a surface *does* outranks who is on the other end of it.
+
+**Deviations, and why.** (a) The brief asked for bare `x` to stop an agent in the switcher. The
+switcher filters as you type, so `x` would have to be either a letter or an irreversible kill;
+it is `ctrl+x`, and the overlay's own hint row names it. (b) A running hub turn used to dim the
+composer's prompt unconditionally; in a DM it no longer does, because a DM submit is a delivery
+rather than a turn (D89) and the dim promised a wait that was not happening. (c) `alt+↑/↓` and
+`alt+1..9` positional switching, which the blueprint lists under D90, are not in this batch — the
+brief's scope did not include them and unrequested keybindings are cheap to add later and
+expensive to take back. (d) The board reuses the conversation row builder rather than getting a
+bespoke dim renderer, because D89's ruling is that there is no second renderer.
+
+**Consequences.** `chat_tail.rs` was at 3838 of the 4000-line cap before this batch, so the
+provider and think pickers moved to `chat_menus.rs` first as a mechanical no-behavior-change
+commit (639 lines; only the two key handlers widened to `pub(super)`). Two new modules, both
+carrying their own tests. `ctrl+k` changes meaning for anyone with the muscle memory, which is
+the one user-visible regression here and is why the `?` panel, both READMEs and the guide all
+name `alt+k` beside the kills. The receipt predicate matches `→ ` followed by a sigil, so a line
+of prose in exactly that shape would render as a state line — the same tradeoff `is_ask_receipt`
+already accepts. 1266 + 13 tests before, 1295 + 13 after.

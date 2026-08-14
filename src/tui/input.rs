@@ -151,11 +151,11 @@ pub fn delete(text: &mut String, cursor: &mut usize) -> bool {
     true
 }
 
-/// Cut from the cursor to the end of the logical line (ctrl+k).
+/// Cut from the cursor to the end of the logical line (alt+k since D90).
 pub fn kill_to_end(text: &mut String, cursor: &mut usize) -> String {
     let at = (*cursor).min(text.len());
     let end = line_end(text, at);
-    // On an empty tail, eat the newline itself so repeated ctrl+k joins lines.
+    // On an empty tail, eat the newline itself so repeated kills join lines.
     let end = if end == at { next_char(text, at) } else { end };
     let cut = text[at..end].to_string();
     text.replace_range(at..end, "");
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(cursor, "first\n".len());
         assert_eq!(kill_to_end(&mut text, &mut cursor), "cond");
         assert_eq!(text, "first\n");
-        // Empty tail: ctrl+k eats the newline and joins the next line up.
+        // Empty tail: the kill eats the newline and joins the next line up.
         let mut text = String::from("a\nb");
         let mut cursor = 1usize;
         assert_eq!(kill_to_end(&mut text, &mut cursor), "\n");

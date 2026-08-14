@@ -454,7 +454,10 @@ pub(crate) fn is_ask_receipt(text: &str) -> bool {
 /// what happened. State lines render as a single line — no `❯` bubble putting
 /// words in the user's mouth, and no send stamp, because nothing was sent.
 pub(crate) fn is_state_line(text: &str) -> bool {
-    crate::query::is_interrupt_marker(text) || text == ASK_CANCELLED_TEXT || is_ask_receipt(text)
+    crate::query::is_interrupt_marker(text)
+        || text == ASK_CANCELLED_TEXT
+        || is_ask_receipt(text)
+        || crate::tui::bufferview::is_route_receipt(text)
 }
 
 /// A message the running turn absorbed mid-turn (D83). Not a state line: the user wrote
@@ -877,7 +880,7 @@ pub struct Chat {
     pub input: String,
     /// Byte position of the caret in `input` (always on a char boundary).
     pub cursor: usize,
-    /// Readline state for the prompt: the kill ring ctrl+k/u/w/alt+d feed and
+    /// Readline state for the prompt: the kill ring alt+k/ctrl+u/ctrl+w/alt+d feed and
     /// ctrl+y/alt+y read, plus the `ctrl+x ctrl+e` chord (D86).
     pub(crate) composer: crate::tui::composer::Composer,
     /// Edit undo stack (text + caret), capped at [`UNDO_MAX`].
@@ -1153,6 +1156,8 @@ pub struct Chat {
     pub entities: Vec<EntityRow>,
     /// Main-view background-agent manager; `None` means the panel is closed.
     pub agent_manager: Option<AgentManager>,
+    /// The ctrl+k conversation switcher (D90); `None` means it is closed.
+    pub(crate) switcher: Option<crate::tui::switcher::Switcher>,
     /// Visits to conversations other than the hub (D89), oldest first. Each one
     /// is a segment of the flow: which rows it printed, and where in the hub's
     /// transcript it sits. `Chat::flow_order` reads them to decide what the one
@@ -1445,6 +1450,7 @@ impl Chat {
             tasks_auto: false,
             entities: Vec::new(),
             agent_manager: None,
+            switcher: None,
             excursions: Vec::new(),
             interrupted: false,
             cancel_tx: tokio::sync::watch::channel(false).0,
@@ -2332,6 +2338,25 @@ impl Chat {
             let text = self.expand_image_paths(&text);
             self.record_history(&text);
             self.send_to_active(text);
+            self.update_slash_suggestions();
+            return;
+        }
+        // A hub submit that opens with another conversation's name delivers the
+        // rest there and stays put (D90). Same placement and the same reason as
+        // the branch above: it is a delivery, not a turn, so it must neither
+        // queue behind a running one nor start one. Slash commands and bash
+        // mode are checked first — `/` and `!` decide what a line *is* before
+        // its first word decides where it goes.
+        if !self.bash_mode
+            && !text.starts_with('/')
+            && let Some((id, body)) = self.leading_route(&text)
+        {
+            let body = self.expand_pastes(&body);
+            let body = self.expand_image_paths(&body);
+            // The whole line goes into history, envelope included: ↑ brings
+            // back what was typed, not what was delivered.
+            self.record_history(&text);
+            self.route_from_hub(id, body);
             self.update_slash_suggestions();
             return;
         }
@@ -3851,9 +3876,14 @@ pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<
             theme.dim(),
         ))];
     }
-    // A dialog the turn outlived, or the receipt of one the user answered:
-    // nothing failed, so both settle dim rather than in the error colour.
-    if text == ASK_CANCELLED_TEXT || is_ask_receipt(text) {
+    // A dialog the turn outlived, the receipt of one the user answered, or the
+    // receipt of a line routed out of the hub (D90): nothing failed, so they
+    // settle dim rather than in the error colour, and none of them wears the
+    // `❯` bubble — the user typed the envelope, not this line.
+    if text == ASK_CANCELLED_TEXT
+        || is_ask_receipt(text)
+        || crate::tui::bufferview::is_route_receipt(text)
+    {
         return vec![Row::new(Line::styled(
             crate::tui::markdown::truncate(text, width.max(1)),
             theme.dim(),
@@ -3896,6 +3926,10 @@ mod chat_tail;
 
 #[path = "chat_menus.rs"]
 mod chat_menus;
+
+/// The overlay frame the ctrl+b manager draws, reused by the ctrl+k switcher
+/// (D90) so the two overlays are the same object in the same place.
+pub(crate) use chat_tail::manager_box;
 
 #[path = "ask.rs"]
 mod ask;
