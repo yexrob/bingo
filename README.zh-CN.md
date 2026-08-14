@@ -296,6 +296,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | 任务追踪（磁盘存储，TUI 任务区同源，含生命周期 hook） |
 | `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceOutcome`/`ExperienceForget` | 跨会话经验库（见下） |
 | `AskUserQuestion` | 向用户提选择题（TUI 复用权限询问模态） |
+| `notify_user` | 仅子代理装配：经 hub 给用户一行有意为之的通知（每 agent 每分钟一行，超出的合并计数；`level: "urgent"` 另外触发终端提醒通道） |
 | `Skill` | 技能调用（见下） |
 | `mcp__<server>__<tool>` | MCP 接入的工具（见下） |
 | `Channel` / `Post` | 实验：agent 频道互发（见下） |
@@ -304,12 +305,15 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 
 - 主 agent（depth 0）装配 `Agent`/`SendMessage`/`AgentControl`；子代理（depth ≥ 1）
   只保留 `Agent`（可再派生），无法管理兄弟——hub-and-spoke 拓扑。
+  反方向只有一个工具：`notify_user` 只装配给子代理，主 agent 没有——它本来就在
+  hub 里，开口即抵达用户。
 - **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`
   （从 cwd 向上逐层查找，同名项目层优先）；frontmatter
   `name/description/model/provider`，正文 = 子代理 system prompt；
   Agent 工具的 `agent` 参数引用定义。
 - 派生实例有名字（`name` 参数，缺省取定义名/`agent`，重名自动 `-2`/`-3`），
-  transcript 显示为 `◉ 名字 · 任务`；完成后历史保留。
+  派生它的那一轮显示为 `◉ 名字 · 任务`；而在没有轮次运行时到达的生命周期事件不再
+  写进 hub——改由会话栏、编队生命周期日志与该实例自己的 DM 承载；完成后历史保留。
 - `SendMessage` 向实例发后续指令（上下文保留）；实例忙时排队，当前回合结束
   自动送达。
 - `AgentControl` 可 `list`/`stop`/`delete`。

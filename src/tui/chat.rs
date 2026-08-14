@@ -408,6 +408,7 @@ pub(crate) fn is_state_line(text: &str) -> bool {
         || text == ASK_CANCELLED_TEXT
         || is_ask_receipt(text)
         || crate::tui::bufferview::is_route_receipt(text)
+        || crate::tui::bufferview::is_relay_line(text)
         || rewind_ui::is_rewind_line(text)
 }
 
@@ -1257,6 +1258,13 @@ impl Chat {
         let live = crate::live::LiveBash::new(Arc::new(move |tail| {
             let _ = tail_events.send(UiEvent::BashTail(tail));
         }));
+        // The relay was built with the session, so a subagent already inherits it;
+        // what it lacked until now is somewhere to draw. Same road as the tail
+        // above: one more UiEvent on the channel the drain loop already wakes for.
+        let relay_events = events.clone();
+        session.runtime.notify_user.attach(Arc::new(move |notice| {
+            let _ = relay_events.send(UiEvent::NotifyUser(notice));
+        }));
         Self {
             session,
             events,
@@ -1758,6 +1766,31 @@ impl Chat {
                     CollapseKind::AgentDelete => self.messages[i].groups[g].agent_deletes += 1,
                 }
             }
+            UiEvent::NotifyUser(notice) => {
+                // The rate limit already ran: everything that arrives here prints.
+                // The line goes into the flow whether or not the hub is what the
+                // user is looking at — an excursion holds the hub's tail back and
+                // replays it on the way home (D89), so nothing is buffered here.
+                let ring = matches!(
+                    notice,
+                    crate::notify_user::Notice::Relay { notifier: true, .. }
+                );
+                self.messages.push(UiMessage {
+                    role: Role::User,
+                    text: notice.line(),
+                    at: crate::channels::now_unix(),
+                    activities: Vec::new(),
+                    insert_points: Vec::new(),
+                    groups: Vec::new(),
+                    group_of: Vec::new(),
+                });
+                self.buffers.note_relay(self.tick);
+                if ring {
+                    self.notify
+                        .attention(crate::tui::notify::Attention::AgentNotice);
+                }
+                self.dirty = true;
+            }
             UiEvent::WatchEvent {
                 label,
                 kind,
@@ -1795,29 +1828,60 @@ impl Chat {
                         hint.set_content(content);
                     }
                 } else {
+                    // D94: which message, if any, this event may hang a row on.
+                    //
+                    // A running turn owns its own tools. `Agent` renders no tool
+                    // row of its own (`is_hidden_tool`), so this watch row *is*
+                    // the row for the Task call the user just watched the model
+                    // make — hub content, and it stays.
+                    //
+                    // With no turn running, the old code walked back to the last
+                    // assistant message and stapled the row there. That is the
+                    // message bus writing into the user's conversation: a
+                    // background hire finishing, a continuation run opening under
+                    // a new label, an ack watchdog reporting a chase — none of
+                    // them answers anything the user did, and all of them landed
+                    // under a reply that had nothing to do with them. The signal
+                    // survives elsewhere: presence and unread on the bar, the
+                    // bounded lifecycle log `note_watch_event` just filled, and
+                    // the agent's own DM, whose unread follows its history.
+                    //
+                    // Command and channel watches keep the old walk-back: a
+                    // background shell command is the hub's own tool, and a
+                    // channel row belongs to the conversation it names.
                     let target = match self.stream_msg {
-                        Some(i) => i,
-                        None => match self
+                        Some(i) => Some(i),
+                        None if kind == crate::watch::WatchKind::Agent => None,
+                        None => self
                             .messages
                             .iter()
-                            .rposition(|m| m.role == Role::Assistant)
-                        {
-                            Some(i) => i,
-                            None => return,
-                        },
+                            .rposition(|m| m.role == Role::Assistant),
                     };
-                    let mut hint = Activity::new(ActivityKind::Watch(WatchCall {
-                        label: label.clone(),
-                        kind,
-                        status,
-                        detail: detail.clone(),
-                        duration_ms,
-                    }));
-                    hint.expand_hint = Some("ctrl+o to expand".to_string());
-                    let text_len = self.messages[target].text.chars().count();
-                    self.messages[target].activities.push(hint);
-                    self.messages[target].insert_points.push(text_len);
-                    self.messages[target].group_of.push(None);
+                    match target {
+                        Some(target) => {
+                            let mut hint = Activity::new(ActivityKind::Watch(WatchCall {
+                                label: label.clone(),
+                                kind,
+                                status,
+                                detail: detail.clone(),
+                                duration_ms,
+                            }));
+                            hint.expand_hint = Some("ctrl+o to expand".to_string());
+                            let text_len = self.messages[target].text.chars().count();
+                            self.messages[target].activities.push(hint);
+                            self.messages[target].insert_points.push(text_len);
+                            self.messages[target].group_of.push(None);
+                        }
+                        // No message to hang a row on and not an agent event:
+                        // the pre-D94 contract returned here, and the terminal
+                        // handling below has never run for this case.
+                        None if kind != crate::watch::WatchKind::Agent => return,
+                        // An agent event with no row is the routing above doing
+                        // its job. It must still fall through: `submit_auto` is
+                        // how the completion reaches the *model*, and D94 changes
+                        // only what the user sees.
+                        None => {}
+                    }
                 }
                 let terminal = matches!(
                     status,
@@ -3521,9 +3585,13 @@ pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<
     // receipt of a line routed out of the hub (D90): nothing failed, so they
     // settle dim rather than in the error colour, and none of them wears the
     // `❯` bubble — the user typed the envelope, not this line.
+    // A `notify_user` relay (D94) joins them: an agent said something to the user
+    // through the hub, and the hub shows it as a state rather than as a message —
+    // the user did not write it, and neither did the agent write it *here*.
     if text == ASK_CANCELLED_TEXT
         || is_ask_receipt(text)
         || crate::tui::bufferview::is_route_receipt(text)
+        || crate::tui::bufferview::is_relay_line(text)
     {
         return vec![Row::new(Line::styled(
             crate::tui::markdown::truncate(text, width.max(1)),
@@ -3610,3 +3678,7 @@ mod tests_d;
 #[cfg(test)]
 #[path = "chat_tests_e.rs"]
 mod tests_e;
+
+#[cfg(test)]
+#[path = "chat_tests_f.rs"]
+mod tests_f;

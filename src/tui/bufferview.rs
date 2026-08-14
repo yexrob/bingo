@@ -65,6 +65,19 @@ pub(crate) fn is_route_receipt(text: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('@') || rest.starts_with('#'))
 }
 
+/// A `notify_user` relay (D94) opens with the bell, in both its shapes:
+/// `🔔 @scout → you: …` and `🔔 @scout: 3 more — see the DM`.
+///
+/// The glyph is the marker rather than a prefix constant per shape, because both
+/// shapes are built by [`crate::notify_user::Notice::line`] and there is exactly
+/// one producer. A user pasting a bell into the composer writes an ordinary
+/// message: this predicate only ever reads text the harness itself pushed.
+pub(crate) const RELAY_PREFIX: &str = "🔔 @";
+
+pub(crate) fn is_relay_line(text: &str) -> bool {
+    text.starts_with(RELAY_PREFIX)
+}
+
 /// `→ @scout: look at the parser` — one line, whitespace flattened, cut to
 /// [`RECEIPT_CHARS`].
 fn receipt_line(id: &BufferId, text: &str) -> String {

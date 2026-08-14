@@ -212,6 +212,10 @@ pub struct Buffers {
     list: Vec<Buffer>,
     active: BufferId,
     team: Vec<TeamEvent>,
+    /// How many `notify_user` relays the hub has been given (D94). The hub's
+    /// sequence, and the only one bingo counts itself — every other buffer
+    /// derives its sequence from a domain store.
+    relays: u64,
 }
 
 impl Default for Buffers {
@@ -233,6 +237,7 @@ impl Buffers {
             }],
             active: BufferId::Hub,
             team: Vec::new(),
+            relays: 0,
         }
     }
 
@@ -387,6 +392,33 @@ impl Buffers {
         }
         let seq = self.team.len() as u64;
         self.observe(BufferId::Team, seq, false, tick);
+    }
+
+    /// The bounded lifecycle log, oldest first.
+    ///
+    /// The board replays it through `rehydrate`, and from D94 it is also the
+    /// *only* place a hub-idle spawn or completion is written down on the display
+    /// side. Test-only for now because that replay is still the sole production
+    /// reader; D95's team directory is the second, and un-gates it.
+    #[cfg(test)]
+    pub fn team_log(&self) -> &[TeamEvent] {
+        &self.team
+    }
+
+    /// Tee of a `notify_user` relay (D94).
+    ///
+    /// The hub is the one buffer with no domain sequence behind it: it is the
+    /// user's own conversation, and until now nothing could arrive in it that the
+    /// user had not asked for, so an unread count would have had nothing to
+    /// count. A relay can arrive unasked — which is the entire point of it — so
+    /// the hub finally needs one. The line is put in the flow either way; the
+    /// badge is how the bar says it landed while the user was somewhere else.
+    ///
+    /// `mention` is true because a relay is addressed to the user by
+    /// construction: `notify_user` has no other recipient.
+    pub fn note_relay(&mut self, tick: u64) {
+        self.relays += 1;
+        self.observe(BufferId::Hub, self.relays, true, tick);
     }
 
     /// Post the host's own output to the board (D90).

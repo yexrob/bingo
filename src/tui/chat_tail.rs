@@ -1699,6 +1699,14 @@ impl super::Chat {
         // repainting only when the bar's own entries change.
         if self.tick.is_multiple_of(15) {
             self.refresh_conversations();
+            // A rolled `notify_user` window owes its "N more" line even if the
+            // agent that filled it has gone quiet (D94), so the roll is checked
+            // on the clock rather than on the next notice. The relay emits back
+            // through the same channel, so the line arrives as an ordinary event.
+            self.session
+                .runtime
+                .notify_user
+                .flush_due(std::time::Instant::now());
         }
         // The conversation you are actually in follows every frame (D89). The
         // fifteen-tick poll is the right cadence for a registry sweep and the
@@ -2550,7 +2558,13 @@ impl super::Chat {
                     // Send time beside the bubble's first row (D93). A state line
                     // gets none: nothing was sent, and the line is a state, not a
                     // message.
-                    let time = if crate::tui::chat::is_state_line(&self.messages[i].text) {
+                    // A `notify_user` relay (D94) is the exception among state
+                    // lines: it *is* a message, sent by someone, at a moment that
+                    // matters — "the build broke" reads differently at 09:02 and
+                    // at 17:40. The others describe now and have nothing to stamp.
+                    let time = if crate::tui::chat::is_state_line(&self.messages[i].text)
+                        && !crate::tui::bufferview::is_relay_line(&self.messages[i].text)
+                    {
                         String::new()
                     } else {
                         crate::tui::buffer::stamp(self.messages[i].at)

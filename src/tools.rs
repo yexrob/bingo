@@ -83,11 +83,19 @@ pub async fn assemble_tools(
                 session.clone(),
             )));
         }
-    } else if channels_on && session.depth == 1 && session.instance.is_some() {
-        // Channel cohort (experimental): direct subagents only get the posting tool.
-        tools.push(Box::new(crate::tool::channel::PostTool::new(
-            session.clone(),
-        )));
+    } else {
+        // The other direction (D94): only an agent the user is *not* looking at needs
+        // a way to reach them. The main agent already holds the hub — everything it
+        // says arrives by being said, so a notify tool there would be a second and
+        // worse way to speak. A subagent's work lives in its DM, which the user reads
+        // when they choose to; this is the one line it may put in front of them.
+        tools.push(Box::new(crate::tool::notify_user::NotifyUserTool));
+        if channels_on && session.depth == 1 && session.instance.is_some() {
+            // Channel cohort (experimental): direct subagents only get the posting tool.
+            tools.push(Box::new(crate::tool::channel::PostTool::new(
+                session.clone(),
+            )));
+        }
     }
     let mcp = {
         let mgr = session.runtime.mcp.clone();
@@ -226,6 +234,36 @@ mod tests {
             assert!(
                 !sub.iter().any(|n| n == absent),
                 "{absent} must not be handed down: {sub:?}"
+            );
+        }
+    }
+
+    /// D94: `notify_user` runs the other way down the spoke. The main agent holds
+    /// the hub already — a tool for "reaching the user" there would be a second
+    /// and worse way to say something it can simply say — so it is the one tool
+    /// assembled for subagents and withheld from the session that owns the UI.
+    #[tokio::test]
+    async fn notify_user_is_a_subagent_tool_only() {
+        let mut warn = |_: String| {};
+        let hub: Vec<String> = assemble_tools(&session_at_depth(0), &mut warn)
+            .await
+            .iter()
+            .map(|t| t.name())
+            .collect();
+        assert!(
+            !hub.iter().any(|n| n == "notify_user"),
+            "the main agent talks to the user by talking: {hub:?}"
+        );
+
+        for depth in [1, 2] {
+            let sub: Vec<String> = assemble_tools(&session_at_depth(depth), &mut warn)
+                .await
+                .iter()
+                .map(|t| t.name())
+                .collect();
+            assert!(
+                sub.iter().any(|n| n == "notify_user"),
+                "a subagent at depth {depth} needs a road to the user: {sub:?}"
             );
         }
     }

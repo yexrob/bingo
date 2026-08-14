@@ -228,6 +228,11 @@ Example (.bingo/settings.json):
   Team (the project crew, main session only — reads are free, every change asks the user),
   the Task family (task tracking), AskUserQuestion (main session only — a subagent has no prompt surface),
   Skill (skill invocation),
+  notify_user (subagents only — one deliberate line to the user through the hub, for finishing the
+  whole task, being blocked on them, or a finding that changes what they are doing; rate limited to
+  one line per agent per minute, with extras coalesced into a "N more — see the DM" line, and
+  `level: "urgent"` additionally firing the terminal attention channel. The main agent does not have
+  it — it already holds the hub, so it reaches the user by answering),
   ExperiencePropose/Commit/Query/Outcome/Forget (project experience capture, retrieval, and verified-use feedback).
 - **Provider protocols**: anthropic (Messages API, default — all existing configs) and openai (Responses API,
   per named provider via `protocol: "openai"` in the settings `providers` section; bearer auth, `reasoning.effort`
@@ -264,7 +269,10 @@ Example (.bingo/settings.json):
   `~/.config/bingo/experience/<project-key>/entries/` (user-level, not in the project repo);
   the project key is derived from the git remote URL (normalized) → git root → normalized absolute path, stable across directories/machines.
 - **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
-  auto-suffix -2/-3), shown in the transcript as `◉ name · task`; history is kept after completion, and the main agent can
+  auto-suffix -2/-3), shown as `◉ name · task` in the turn that spawns them — a lifecycle event arriving
+  when no turn is running no longer writes into the hub at all (D94), and is carried instead by the
+  conversation bar's presence and unread, the team lifecycle log, and the instance's own DM;
+  history is kept after completion, and the main agent can
   SendMessage to continue, or manage with AgentControl list/messages/stop/delete; each list row includes relative last activity
   (`active now`, `active 3s ago`, `active 2min ago`) so a quiet idle instance is distinguishable from one that just finished.
   **Messaging**: SendMessage returns a `message_id` after enqueueing and dispatches immediately: an idle instance starts
@@ -384,6 +392,11 @@ Example (.bingo/settings.json):
   Team (the project crew, main session only — reads are free, every change asks the user in person),
   the Task family (task tracking), AskUserQuestion (main session only — a subagent has no prompt surface),
   Skill (skill invocation),
+  notify_user (subagents only — one deliberate line to the user through the hub, for finishing the
+  whole task, being blocked on them, or a finding that changes what they are doing; rate limited to
+  one line per agent per minute, with extras coalesced into a "N more — see the DM" line, and
+  `level: "urgent"` additionally firing the terminal attention channel. The main agent does not have
+  it — it already holds the hub, so it reaches the user by answering),
   ExperiencePropose/Commit/Query/Outcome/Forget (project experience capture, retrieval, and verified-use feedback).
 - **Experience**: reuses rerunnable workflows across sessions. At session start, this project's active
   experience index is injected (≤10 entries, explicit observed outcomes ranked before the legacy commit count, nothing when empty); full text is searched via ExperienceQuery by trigger
@@ -397,7 +410,10 @@ Example (.bingo/settings.json):
   `~/.config/bingo/experience/<project-key>/entries/` (user-level, never in the project repo),
   the project key comes from the git remote URL (normalized) → git root → normalized absolute path, stable across directories/machines.
 - **Subagents**: instances spawned by Agent have names (the `name` arg, defaulting to the definition name/agent; name collisions
-  auto-suffix -2/-3), shown in the transcript as `◉ name · task`; history is kept after completion, and the main agent can
+  auto-suffix -2/-3), shown as `◉ name · task` in the turn that spawns them — a lifecycle event arriving
+  when no turn is running no longer writes into the hub at all (D94), and is carried instead by the
+  conversation bar's presence and unread, the team lifecycle log, and the instance's own DM;
+  history is kept after completion, and the main agent can
   SendMessage to continue, or manage with AgentControl list/messages/stop/delete; each list row includes relative last activity
   (`active now`, `active 3s ago`, `active 2min ago`) so a quiet idle instance is distinguishable from one that just finished.
   **Messaging**: SendMessage returns a `message_id` after enqueueing and dispatches immediately: an idle instance starts now,

@@ -2477,3 +2477,108 @@ non-zero-exit and unset-editor paths are untouched.
   suite was green without further change.
 - 1354 + 13 tests before, 1365 + 13 after (12 new: 2 vision projection, 3 scroll, 1 solo-hire board,
   3 stamp placement, 1 beam, 2 editor round trip; 1 deleted).
+
+### D94. The hub stops being the message bus
+
+**Problem.** Every agent lifecycle event in the session wrote into the user's conversation with the
+main agent. `UiEvent::WatchEvent` has one consumer (`chat.rs`), and when it could not find an
+existing row for the label it built one and hung it off `stream_msg` — or, with no turn running,
+off *the last assistant message it could find*. So a background hire finishing forty seconds after
+its turn ended, a continuation run opening under a new label (`scout #3 · …`, a new label every
+run), and an ack watchdog reporting a chase all appended `◉ name · task` + `⎿ done` under a reply
+that had nothing to do with them. The hub is supposed to be a 1v1 conversation; it was the system's
+message bus with the conversation mixed in.
+
+**The inventory**, taken before anything was changed, and where each item went:
+
+| What printed in the hub | Site | Now |
+|---|---|---|
+| `◉ name · task` + `⎿ done`, manufactured when no row matched the label | `chat.rs` else-branch | Not printed when no turn is running; bar presence + lifecycle log + the agent's DM carry it |
+| The same row updated in place (status flip, and the agent's whole final text stuffed into its ctrl+o content) | `chat.rs` found-branch | Unchanged — it is the running turn's own row, created by the turn that called `Agent` |
+| One new row **per continuation run** (`flush_agent_inbox` registers `{name} #{run} · {excerpt}`) | `agent.rs` | Gone from the hub with the manufacture branch |
+| Ack-retry scaffolding (`waiting for a reply, chased 1/3`, `not delivered: …`, `3 follow-ups and scout still has not replied`) — all `WatchKind::Agent` | `agent.rs` `spawn_ack_watchdog` | Same |
+| An auto hub turn on every terminal state (`submit_auto`) | `chat.rs` | **Untouched.** This is how `<task-notifications>` reaches the model; D94 changes what the user sees, not what any model reads |
+
+**Decision.**
+
+*The rule is about **when**, not about **what**.* The obvious change — drop agent watch rows — is
+wrong, because `Agent` is a hidden tool (`is_hidden_tool`): it renders no tool row of its own, so
+the watch row **is** the row for the Task call the user just watched the model make. Deleting it
+would delete the hub turn's only evidence of its own tool use. The discriminator is therefore
+`stream_msg`: a turn is running, so this event answers something the user did here, and the row
+stays; no turn is running, so this is the bus, and the row is not built. That is the same sentence
+the delivery matrix uses — "events that are answers to something the user did in hub within the
+current turn" — expressed in the one piece of state that already means it. `Command` and `Channel`
+watches keep the old walk-back untouched: a background shell command is the hub's own tool.
+
+*The event still falls through.* Suppressing the row must not suppress `submit_auto`, so the
+early-`return` the old code used for "no message to hang a row on" is preserved **only** for
+non-agent kinds, and an agent event with nowhere to draw carries on to the terminal-state handling.
+The model-side contracts — task notifications, D64 markers, D63 privacy, ack-retry — are byte-identical.
+
+*Nothing was needed to make a completion bump the DM.* This was verified rather than assumed: the
+final report already lands in the instance's history (`AgentRegistry::finish`), the DM's sequence is
+that history's length (`Buffers::refresh`), and `mention` is hardcoded true for every DM, so the
+badge and the `wants you` accent follow for free. The lifecycle event's own registry sweep is what
+re-reads it. A test now pins the whole chain end to end.
+
+*`notify_user` is the road that replaces the flood.* One tool, subagents only — the main agent holds
+the hub already, so a tool for "reaching the user" there would be a second and worse way to say
+something it can simply say. `assemble_tools` gains it in the `else` of the `depth == 0` gate,
+which is the first thing that branch has ever been used for. The description spends most of its
+words on when *not* to call it, because an agent that narrates progress through it turns the user's
+one quiet surface into a log.
+
+*The rate limit lives with the decision, not with the drawing.* `Relay::notify` returns
+`delivered` or `queued`, so the model learns the window exists and is told not to resend; the
+`queued` copy names where the text still is. One line per agent per 60s; extras are counted and
+reported once as `🔔 @name: N more — see the DM` when the window rolls, flushed on the host's tick
+so a rolled window pays what it owes even if the agent has gone quiet. `urgent` bypasses coalescing
+— a blocker is worth a line whenever it arrives — but not the attention ceiling: the D79 notifier
+fires at most once per agent per window, which is why `notifier: bool` is decided in the relay and
+merely obeyed by the renderer. **Nothing is lost by counting**: the text was written *as a tool
+call*, so it is in that agent's transcript and reaches the user through its DM regardless.
+
+*Time is a parameter.* Every entry point takes `now: Instant`, the `token_rate` pattern, so the
+window is driven by tests instead of slept through.
+
+*The relay is session-scoped, like `rewind`.* It lives on `Runtime` and `build_sub_session`
+inherits the parent's handle, which is what makes the rate-limit table the session's rather than the
+spawn's — an agent restarted in a loop cannot buy itself a fresh window. It also avoided threading a
+handle through `spawn_agent_loop`, `flush_agent_inbox` and their nine callers. The sink is
+interior-mutable because the session outlives the surface: the session is built first, the channel a
+notice travels on only exists once the host builds its screen, so the host `attach`es then.
+
+*The hub gets an unread count for the first time.* It is the one buffer with no domain sequence
+behind it — nothing could previously arrive in it that the user had not asked for, so there was
+nothing to count. A relay can arrive unasked, which is the entire point of it, so `Buffers` counts
+relays and observes the hub against them.
+
+*A relay is a state line that keeps its stamp.* It joins the dim, bubble-less family (interrupt
+marker, dialog receipts, the D90 route receipt) because the user did not write it — but it is the
+one member that is a real message, sent by someone, at a moment that matters: "the build broke"
+reads differently at 09:02 and at 17:40. The other members describe *now* and have nothing to stamp.
+
+**Consequences.**
+
+- A fourth D79 trigger, `Attention::AgentNotice` → `An agent needs you`. It is the first trigger the
+  *model* side can pull, which is why the ceiling is at the source rather than here. No name and no
+  count, by the same rule as the other three: the line is already in the hub.
+- Headless attaches a stderr sink, so a relay is not silent in a pipe (general principle 1). The
+  JSON protocol host takes a detached relay and **no new wire event this batch** — inventing a shape
+  before a client has asked for one would freeze it; the rate limiting still runs there, so the
+  model's contract does not vary by host.
+- Two D97-era avatar tests were pinning the row's appearance with no running turn; they now set
+  `stream_msg`, which is what a real spawn does. What they test — how the row looks — is unchanged.
+- `Buffers::team_log` is `#[cfg(test)]` for now: `rehydrate` is still the only production reader.
+  D95's directory is the second and un-gates it.
+- **Known limits, named rather than papered over.** (a) `set_state(Done)` broadcasts *before*
+  `finish()` stores the history, so a completion's DM badge can wait for the next 15-tick sweep;
+  the ordering was left alone because fixing it means restructuring the continuation match with no
+  test that can prove the race. (b) `release_hires()` can delete an instance before any sweep
+  observes the grown history, freezing that DM's badge — it only fires in a project with a live
+  crew, and it is a pre-existing hole rather than one D94 opened. (c) The DM's sequence counts raw
+  history entries, not rendered posts, so one report reads as `(2)` rather than `(1)`. (d) The
+  coalesce flush rides the tick, so a fully idle loop pays what it owes when it next wakes.
+- 1365 + 13 tests before, 1390 + 13 after (25 new: 7 relay arithmetic, 6 tool surface, 11 hub
+  routing and rendering, 1 tool registration).

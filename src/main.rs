@@ -30,6 +30,7 @@ mod mcp;
 mod memory;
 mod model_cache;
 mod model_families;
+mod notify_user;
 mod permission;
 mod platform;
 mod preapproved;
@@ -548,6 +549,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // Subagents borrow the same stdin prompt (serialized in the Agent tool), so a
             // background instance can still ask rather than having the call auto-denied.
             session.agents.attach_ask(crate::query::stdin_ask());
+            // No hub to put a relay line in, but there is still a user in front of
+            // a terminal (feedback-states general principle 1: the feedback may not
+            // depend on the environment). A notice goes to stderr, beside the
+            // warnings, rather than nowhere.
+            session
+                .runtime
+                .notify_user
+                .attach(notify_user::stderr_sink());
             let mut ui = headless_hooks();
             let outcome =
                 run_query(&session, initial_messages, &prompt, &[], &mut ui, None).await?;

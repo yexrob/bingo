@@ -752,6 +752,10 @@ pub(crate) fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContex
         ask_question: ui.ask_question.clone(),
         instance: session.instance.clone(),
         rewind: session.runtime.rewind.clone(),
+        // Session-scoped, like `rewind`: a subagent inherits the parent's handle in
+        // `build_sub_session`, so the per-agent rate limit is one table for the whole
+        // session rather than one per spawn.
+        notify_user: session.runtime.notify_user.clone(),
     })
 }
 

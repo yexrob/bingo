@@ -344,6 +344,7 @@ schema from a single source of truth):
 | `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceOutcome`/`ExperienceForget` | cross-session experience library (see below) |
 | `AskUserQuestion` | asks the user multiple-choice questions (reuses the permission prompt modal in the TUI) |
 | `Skill` | skill invocation (see below) |
+| `notify_user` | sub-agents only: one deliberate line to the user through the hub (rate limited to one per agent per minute, extras coalesced; `level: "urgent"` also fires the terminal attention channel) |
 | `mcp__<server>__<tool>` | tools exposed via MCP (see below) |
 | `Channel` / `Post` | experimental: agent channel messaging (see below) |
 
@@ -351,14 +352,19 @@ schema from a single source of truth):
 
 - The main agent (depth 0) has `Agent`/`SendMessage`/`AgentControl`; sub-agents
   (depth ≥ 1) keep only `Agent` (they can spawn further) and cannot manage
-  siblings — hub-and-spoke topology.
+  siblings — hub-and-spoke topology. One tool runs the other way: `notify_user`
+  is assembled for sub-agents and withheld from the main agent, which already
+  holds the hub and reaches the user by answering.
 - **Named definitions**: `~/.config/bingo/agents/*.md` and `.bingo/agents/*.md`
   (walked upward from cwd; project-level wins on name clash); frontmatter
   `name/description/model/provider`, body = sub-agent system prompt; referenced
   via the Agent tool's `agent` parameter.
 - Instances have names (`name` parameter, defaults to the definition name/
-  `agent`, auto `-2`/`-3` on collisions); the transcript shows `◉ name · task`;
-  history is kept after completion.
+  `agent`, auto `-2`/`-3` on collisions); the turn that spawns one shows
+  `◉ name · task`, while a lifecycle event arriving when no turn is running no
+  longer writes into the hub at all — the conversation bar, the team lifecycle
+  log and the instance's own DM carry it instead; history is kept after
+  completion.
 - `SendMessage` sends follow-up instructions to an instance (context
   preserved); queued while busy, delivered automatically at the end of the
   current turn.
