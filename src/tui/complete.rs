@@ -654,6 +654,9 @@ impl Chat {
                 Some(items)
             }
             ("provider", ["login"] | ["logout"]) => Some(self.login_provider_candidates()),
+            // The registry itself, so a name the dropdown offers is a
+            // conversation that exists (D89).
+            ("open", []) => Some(self.open_candidates()),
             _ => None,
         }
     }

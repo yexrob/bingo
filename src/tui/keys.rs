@@ -25,7 +25,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "esc",
-        description: "close dialog/menu/panel · interrupt · esc esc clears",
+        description: "close dialog/menu/panel · back to hub · interrupt · esc esc clears",
     },
     Binding {
         keys: "ctrl+c",
@@ -110,6 +110,10 @@ pub const BINDINGS: &[Binding] = &[
     Binding {
         keys: "ctrl+b",
         description: "background the running command · manage background agents",
+    },
+    Binding {
+        keys: "/open",
+        description: "open a conversation: @agent · #channel · #team · hub",
     },
     Binding {
         keys: "ctrl+l",
@@ -227,9 +231,31 @@ mod tests {
             binding.description,
             "edit the prompt in $EDITOR (or ctrl+x ctrl+e)"
         );
+    }
+
+    /// D89 retired the workspace modal: a conversation is entered in this
+    /// terminal, not in a screen over it. Nothing in the panel may still send
+    /// the reader looking for a view that no longer exists, and the two doors
+    /// that replaced it — `/open` and the way back — are both named.
+    #[test]
+    fn the_panel_names_the_doors_that_replaced_the_workspace() {
+        for binding in BINDINGS {
+            assert!(
+                !binding.description.contains("workspace"),
+                "{} still advertises the retired workspace",
+                binding.keys
+            );
+        }
+        let find = |keys: &str| {
+            BINDINGS
+                .iter()
+                .find(|binding| binding.keys == keys)
+                .unwrap_or_else(|| panic!("{keys} binding missing"))
+        };
+        assert!(find("/open").description.contains("@agent"));
         assert!(
-            !binding.description.contains("workspace"),
-            "the workspace is reached from the ctrl+b manager now"
+            find("esc").description.contains("back to hub"),
+            "and Esc says where it goes from one"
         );
     }
 

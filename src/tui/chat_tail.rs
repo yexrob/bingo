@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::sync::mpsc;
 
 use crate::query::Session;
+use crate::tui::bufferview::Decor;
 use crate::tui::composer::KillDir;
 use crate::ui::UiEvent;
 
@@ -44,6 +45,14 @@ pub enum EscLayer {
     HelpPanel,
     /// The task panel, when the user opened it themselves with ctrl+t.
     TaskPanel,
+    /// A conversation other than the hub: Esc goes home (D89).
+    ///
+    /// Above the interrupt on purpose — navigation before interruption. Esc in
+    /// a DM is "take me back", never "stop the model": a hub turn running
+    /// behind you keeps running, and its interrupt is reachable from the hub,
+    /// which is the only place it is the thing on screen. Ctrl+C is unchanged
+    /// and still stops the turn from anywhere.
+    BackToHub,
     /// The running turn.
     Interrupt,
     /// Bash mode on an empty input. Below the interrupt, unlike every other
@@ -57,7 +66,7 @@ pub enum EscLayer {
 
 impl EscLayer {
     /// The stack, top first. The single source for Esc's priority.
-    pub const ORDER: [EscLayer; 13] = [
+    pub const ORDER: [EscLayer; 14] = [
         EscLayer::AskDialog,
         EscLayer::Menu,
         EscLayer::AgentManager,
@@ -68,10 +77,20 @@ impl EscLayer {
         EscLayer::InfoLines,
         EscLayer::HelpPanel,
         EscLayer::TaskPanel,
+        EscLayer::BackToHub,
         EscLayer::Interrupt,
         EscLayer::BashMode,
         EscLayer::ClearInput,
     ];
+}
+
+/// Who a flow position belongs to, for sender grouping. A rule belongs to
+/// nobody, which is what makes the first message after one carry its name.
+fn speaker_of(item: &crate::tui::bufferview::FlowItem) -> Option<String> {
+    match &item.decor {
+        crate::tui::bufferview::Decor::Said(who) => Some(who.clone()),
+        _ => None,
+    }
 }
 
 impl super::Chat {
@@ -1603,6 +1622,7 @@ impl super::Chat {
             EscLayer::InfoLines => !self.slash_info_lines.is_empty(),
             EscLayer::HelpPanel => self.help_visible,
             EscLayer::TaskPanel => self.tasks_visible && !self.tasks_auto,
+            EscLayer::BackToHub => *self.buffers.active() != crate::tui::buffer::BufferId::Hub,
             EscLayer::Interrupt => self.busy,
             EscLayer::BashMode => self.bash_mode && self.input.is_empty(),
             EscLayer::ClearInput => !self.input.is_empty(),
@@ -1651,6 +1671,10 @@ impl super::Chat {
                 self.dirty = true;
                 true
             }
+            EscLayer::BackToHub => {
+                self.switch_to(crate::tui::buffer::BufferId::Hub);
+                true
+            }
             EscLayer::Interrupt => {
                 self.interrupt(now);
                 true
@@ -1687,6 +1711,9 @@ impl super::Chat {
     pub(crate) fn esc_busy_hint(&self) -> &'static str {
         match self.esc_layer() {
             Some(EscLayer::Interrupt) | None => "esc to interrupt",
+            // Esc leaves the conversation rather than closing anything, and a
+            // turn running behind it survives the press (D89).
+            Some(EscLayer::BackToHub) => "esc to hub",
             Some(_) => "esc to close",
         }
     }
@@ -2229,6 +2256,11 @@ impl super::Chat {
         if self.tick.is_multiple_of(15) {
             self.refresh_entities();
         }
+        // The conversation you are actually in follows every frame (D89). The
+        // fifteen-tick poll is the right cadence for a presence strip and the
+        // wrong one for a message you are waiting on: it is one conversation's
+        // worth of work, and it is the one on screen.
+        self.poll_active_conversation();
         // The bottom notice expires with the window it advertises.
         if let Some(until) = self.notice_until
             && std::time::Instant::now() >= until
@@ -2613,7 +2645,7 @@ impl super::Chat {
             .join(" · ");
         vec![Line::styled(
             one_line(
-                &format!("  {summary} — ctrl+g workspace · ctrl+b manage"),
+                &format!("  {summary} — /open to enter · ctrl+b manage"),
                 width,
             ),
             SegStyle::fg(self.theme.inactive),
@@ -2726,8 +2758,10 @@ impl super::Chat {
                 // Enter opens this agent's DM. The entity strip used to be the
                 // only way in, at the cost of the composer's ↑/↓; the manager
                 // already has the agent in hand, so the way in moved here (D80).
+                // It used to raise a modal over the session; since D89 the DM is
+                // the session, and this switches the flow onto it.
                 KeyCode::Enter => {
-                    self.open_entity = Some(EntityOpen::Agent(name.clone()));
+                    self.switch_to(crate::tui::buffer::BufferId::Dm(name.clone()));
                     false
                 }
                 KeyCode::Char(' ') => false,
@@ -3041,25 +3075,33 @@ impl super::Chat {
             self.reply_cache.clear();
         }
         let theme = self.theme.clone();
-        // Segment numbering: 0 = welcome card, i+1 = messages[i]. The clamp is defensive: if the message set
-        // is replaced wholesale (/clear, /resume) without the cursor resetting, better to re-render
+        // What the one message store looks like on screen (D89): the hub's own
+        // messages, with each conversation's rows spliced in where it was
+        // opened, and the hub's tail held back while a conversation is still
+        // open. Segment numbering counts *flow positions*, not message indices,
+        // because those are what the reader sees go by: 0 = welcome card,
+        // k+1 = flow[k]. The order is append-only, so the flush cursor keeps
+        // meaning what it meant.
+        let flow = self.flow_order();
+        // The clamp is defensive: if the message set is replaced wholesale
+        // (/clear, /resume) without the cursor resetting, better to re-render
         // than leave a blank screen.
-        let skip = self.flushed_segments.min(self.messages.len() + 1);
+        let skip = self.flushed_segments.min(flow.len() + 1);
         self.tail_start = 0;
         self.mark_base = 0;
 
         // Prefix-monotone settlement, precomputed in one pass (recursing per
         // message inside the loop would be quadratic on the hot path).
-        let mut settled_flags = Vec::with_capacity(self.messages.len());
+        let mut settled_flags = Vec::with_capacity(flow.len());
         let mut prefix_settled = true;
         let settling = self.settling();
-        for i in 0..self.messages.len() {
+        for (pos, item) in flow.iter().enumerate() {
             // A message inside the `settle` blink is not final yet: its
             // completion row is still wearing the accent, and freezing it now
             // would print that accent into scrollback for good (D87).
             prefix_settled = prefix_settled
-                && self.message_static_settled(i)
-                && !(settling && i + 1 == self.messages.len());
+                && self.message_static_settled(item.index)
+                && !(settling && pos + 1 == flow.len());
             settled_flags.push(prefix_settled);
         }
 
@@ -3067,16 +3109,49 @@ impl super::Chat {
         if skip == 0 {
             blocks.push(Block::settled(self.welcome_el(width, &theme), true));
         }
-        let pal = crate::tui::slack::Palette::new(&theme);
-        for (i, &settled) in settled_flags
-            .iter()
-            .enumerate()
-            .skip(skip.saturating_sub(1))
-        {
+        let pal = crate::tui::avatar::Palette::new(&theme);
+        let mut spoke: Option<String> = None;
+        for (pos, item) in flow.iter().enumerate() {
+            // Who the last row belonged to, tracked across the whole flow so a
+            // sender's name is not repeated over every message in a run — and
+            // is repeated the moment somebody else speaks (sender grouping,
+            // the one workspace decoration the flow keeps).
+            let previous = std::mem::replace(&mut spoke, speaker_of(item));
+            if pos + 1 < skip {
+                continue;
+            }
+            let settled = settled_flags[pos];
+            let i = item.index;
             let role = self.messages[i].role;
+            if item.decor == Decor::Divider {
+                // A rule is not a message: no band, no bubble, no stamp.
+                blocks.push(Block::settled(
+                    El::col(vec![
+                        El::Blank,
+                        El::Rows(vec![Row::new(Line::styled(
+                            one_line(&self.messages[i].text, width),
+                            theme.dim(),
+                        ))]),
+                    ]),
+                    settled,
+                ));
+                continue;
+            }
             // The band is the experimental face (`experimental.chatAvatars`): switched
             // off, a message opens on its body, exactly as it did before D50.
             let band = self.chat_avatars.then(|| self.sender_band_el(role, &pal));
+            // In a conversation with more than two speakers the name is not
+            // decoration, it is the only thing that says who is talking. Your
+            // own messages keep the `❯` bubble, which already says so.
+            let name = match (&item.decor, role) {
+                (Decor::Said(who), Role::Assistant) if spoke != previous => {
+                    Some(El::Rows(vec![Row::new(Line::styled(
+                        one_line(who, width),
+                        SegStyle::fg(theme.text).bold(),
+                    ))]))
+                }
+                _ => None,
+            };
             let body = match role {
                 Role::User => {
                     let mut rows = user_message_rows(&self.messages[i].text, width, &theme);
@@ -3086,7 +3161,7 @@ impl super::Chat {
                     let time = if crate::tui::chat::is_state_line(&self.messages[i].text) {
                         String::new()
                     } else {
-                        crate::tui::slack::stamp(self.messages[i].at)
+                        crate::tui::buffer::stamp(self.messages[i].at)
                     };
                     if !time.is_empty() {
                         rows.push(Row::new(Line::styled(format!("  {time}"), theme.dim())));
@@ -3098,11 +3173,19 @@ impl super::Chat {
             // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
             let mut stack = vec![El::Blank];
             stack.extend(band);
+            stack.extend(name);
             stack.push(body);
             blocks.push(Block::settled(El::col(stack), settled));
         }
         if let Some(ask) = self.ask_el(&theme) {
             blocks.push(Block::live(ask));
+        }
+        // What the active conversation is doing right now (D89): the message on
+        // its way, the work being done, the reply mid-arrival. Transient by
+        // construction — everything here becomes a settled message the moment it
+        // becomes record, and nothing that is still a state reaches scrollback.
+        if let Some(tail) = self.conversation_tail_el(width) {
+            blocks.push(Block::transient(tail));
         }
         // Slash command output (/help /status /compact etc.): transient hints — rendered after messages and
         // above the input, **never settled or flushed**, auto-dismissed after the tick timeout (SLASH_OUTPUT_TTL).
@@ -3161,14 +3244,12 @@ impl super::Chat {
     /// The band above a message: who is speaking, as a portrait and a name.
     ///
     /// The names are the room's own — `main` for the hub, and the human's own
-    /// messages read `You` exactly as the workspace already writes them
-    /// ([`crate::tui::slack::message_rows`]). So the name on the band is the name
-    /// that addresses the speaker, and the two views agree without a display-name
-    /// table to keep honest in both.
+    /// messages read `You`. So the name on the band is the name that addresses
+    /// the speaker, with no display-name table to keep honest beside it.
     ///
     /// Neither speaker is a blueprint member, so both faces come from the same
     /// name hash the workspace falls back to — pinning is for the crew.
-    fn sender_band_el(&mut self, role: Role, pal: &crate::tui::slack::Palette) -> El {
+    fn sender_band_el(&mut self, role: Role, pal: &crate::tui::avatar::Palette) -> El {
         let (name, shown) = match role {
             Role::User => (crate::channels::USER_NAME, "You"),
             Role::Assistant => (crate::channels::HUB_NAME, crate::channels::HUB_NAME),
@@ -3176,7 +3257,7 @@ impl super::Chat {
         let index = crate::tui::avatar::index_of(name);
         self.faces.insert(index);
         El::Rows(
-            crate::tui::slack::sender_band(index, name, shown, self.image_cap.is_some(), pal)
+            crate::tui::avatar::sender_band(index, name, shown, self.image_cap.is_some(), pal)
                 .into_iter()
                 .map(Row::new)
                 .collect(),
@@ -3198,7 +3279,7 @@ impl super::Chat {
     fn watch_portraits(
         &mut self,
         i: usize,
-        pal: &crate::tui::slack::Palette,
+        pal: &crate::tui::avatar::Palette,
     ) -> Vec<Option<Portrait>> {
         if !self.chat_avatars || self.image_cap.is_none() {
             return Vec::new();
@@ -3226,8 +3307,8 @@ impl super::Chat {
                     .unwrap_or_else(|| avatar::index_of(&name));
                 self.faces.insert(index);
                 Some(Portrait {
-                    top: crate::tui::slack::gutter_cell(index, &name, 0, true, pal),
-                    bottom: crate::tui::slack::gutter_cell(index, &name, 1, true, pal),
+                    top: crate::tui::avatar::gutter_cell(index, &name, 0, true, pal),
+                    bottom: crate::tui::avatar::gutter_cell(index, &name, 1, true, pal),
                 })
             })
             .collect()
@@ -3239,7 +3320,7 @@ impl super::Chat {
         width: usize,
         theme: &Theme,
         settled: bool,
-        pal: &crate::tui::slack::Palette,
+        pal: &crate::tui::avatar::Palette,
     ) -> El {
         let portraits = self.watch_portraits(i, pal);
         // Thinking completion row (CC SystemTextMessage `✻ Churned for 40s`):
@@ -3464,7 +3545,7 @@ impl super::Chat {
         // a clock under still-streaming text would read as an ending. A markdown
         // body may end in a blank line; the stamp belongs to the message, so it
         // slots in before that spacing rather than floating under it.
-        let time = crate::tui::slack::stamp(self.messages[i].at);
+        let time = crate::tui::buffer::stamp(self.messages[i].at);
         if show_done_line && !time.is_empty() && !parts.is_empty() {
             let stamp_line = Line::styled(format!("  {time}"), theme.dim());
             match parts.last_mut() {

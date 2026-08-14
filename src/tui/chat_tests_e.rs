@@ -126,7 +126,6 @@ fn ctrl_g_requests_the_editor_unless_a_dialog_is_up() {
     let mut chat = test_chat();
     assert!(ctrl(&mut chat, 'g'));
     assert!(chat.open_editor, "the host is asked to open the editor");
-    assert_eq!(chat.open_entity, None, "and not the workspace (D86)");
 
     chat.open_editor = false;
     let (tx, _rx) = oneshot::channel();

@@ -1389,3 +1389,212 @@ fn a_pending_prompt_keeps_the_title_it_needs() {
         "the waiting title is not animated over"
     );
 }
+
+/// D89: Esc in a conversation other than the hub is navigation, and navigation
+/// comes before interruption. A hub turn running behind it keeps running — its
+/// interrupt is reachable from the hub, which is the only place it is the thing
+/// on screen. Ctrl+C is unchanged and still stops the turn from anywhere.
+#[test]
+fn esc_goes_home_before_it_interrupts() {
+    use crate::tui::buffer::BufferId;
+
+    let mut chat = test_chat();
+    chat.session.agents.insert(
+        "scout",
+        crate::agents::AgentKind::Hire,
+        None,
+        "research".into(),
+        chat.session.clone(),
+    );
+    chat.refresh_entities();
+    chat.busy = true;
+    chat.switch_to(BufferId::Dm("scout".into()));
+
+    assert_eq!(chat.esc_layer(), Some(EscLayer::BackToHub));
+    assert_eq!(
+        chat.esc_busy_hint(),
+        "esc to hub",
+        "the status row says where the key goes"
+    );
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(
+        *chat.buffers.active(),
+        BufferId::Hub,
+        "one press, one level"
+    );
+    assert!(!chat.interrupted, "and the turn survived it");
+    assert!(chat.busy);
+
+    // Home again, Esc means exactly what it meant before D89.
+    assert_eq!(chat.esc_layer(), Some(EscLayer::Interrupt));
+    assert_eq!(chat.esc_busy_hint(), "esc to interrupt");
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(chat.interrupted, "the turn is reachable from the hub");
+}
+
+/// D89: the return home takes its place in the walk rather than shortcutting
+/// it. Transient layers stacked over a conversation still peel first, and only
+/// when nothing is left above it does Esc leave the conversation — one press
+/// per level, all the way down to the turn.
+#[test]
+fn esc_peels_the_conversation_in_its_place_above_the_interrupt() {
+    use crate::tui::buffer::BufferId;
+
+    assert_eq!(
+        EscLayer::ORDER
+            .iter()
+            .position(|layer| *layer == EscLayer::BackToHub)
+            .map(|i| i + 1),
+        EscLayer::ORDER
+            .iter()
+            .position(|layer| *layer == EscLayer::Interrupt),
+        "the way home sits directly above the interrupt"
+    );
+
+    let mut chat = test_chat();
+    chat.session.agents.insert(
+        "scout",
+        crate::agents::AgentKind::Hire,
+        None,
+        "research".into(),
+        chat.session.clone(),
+    );
+    chat.refresh_entities();
+    chat.busy = true;
+    chat.switch_to(BufferId::Dm("scout".into()));
+    chat.help_visible = true;
+    chat.push_slash_info("session status".to_string());
+
+    let t0 = std::time::Instant::now();
+    let mut order = Vec::new();
+    while let Some(layer) = chat.esc_layer() {
+        order.push(layer);
+        assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0));
+        if layer == EscLayer::Interrupt {
+            break;
+        }
+        assert!(
+            !chat.interrupted,
+            "a layer above the interrupt closed instead of the turn: {layer:?}"
+        );
+        assert!(chat.busy, "the turn kept running through {layer:?}");
+    }
+    assert_eq!(
+        order,
+        vec![
+            EscLayer::InfoLines,
+            EscLayer::HelpPanel,
+            EscLayer::BackToHub,
+            EscLayer::Interrupt,
+        ],
+        "the stack is walked top-down, one entry per press"
+    );
+    assert_eq!(*chat.buffers.active(), BufferId::Hub);
+    assert!(chat.interrupted, "the last press reached the turn");
+}
+
+/// D89: a permission dialog is the model's turn asking a question, and it has
+/// to reach whoever is at the terminal — including a user reading a DM. The
+/// dialog is modal and sits at the top of D80's stack, so it renders over the
+/// conversation and takes the keys before the conversation's own Esc does.
+#[tokio::test]
+async fn a_dialog_reaches_the_user_inside_a_conversation() {
+    use crate::tui::buffer::BufferId;
+
+    let mut chat = test_chat();
+    chat.session.agents.insert(
+        "scout",
+        crate::agents::AgentKind::Hire,
+        None,
+        "research".into(),
+        chat.session.clone(),
+    );
+    chat.refresh_entities();
+    chat.busy = true;
+    chat.switch_to(BufferId::Dm("scout".into()));
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    chat.asks
+        .send((
+            PermissionRequest::new("Allow running Bash", "cargo build", vec!["Allow".into()]),
+            tx,
+        ))
+        .unwrap();
+    assert!(chat.drain_asks(), "the request is accepted from a DM");
+
+    let flow = visible(&mut chat, 100, 40);
+    assert!(
+        flow.contains("── @scout ──"),
+        "the conversation is still what is on screen: {flow}"
+    );
+    assert!(
+        flow.contains("Allow running Bash"),
+        "and the question is on top of it: {flow}"
+    );
+
+    // The dialog outranks the way home: Esc answers the question, and the
+    // conversation is still the one on screen afterwards.
+    assert_eq!(chat.esc_layer(), Some(EscLayer::AskDialog));
+    assert!(chat.on_key(KeyCode::Char('1'), KeyModifiers::NONE));
+    assert!(
+        matches!(rx.await, Ok(crate::ui::DialogAction::Confirm(0))),
+        "the keys work where the user is"
+    );
+    assert_eq!(
+        *chat.buffers.active(),
+        BufferId::Dm("scout".into()),
+        "answering it did not move the user"
+    );
+}
+
+/// D89: steering offers the running turn what the *hub's* composer submitted.
+/// A message typed into a DM is addressed to a subagent, so it must not reach
+/// the model's turn — neither as a steer nor as a queued item behind it.
+#[tokio::test]
+async fn a_dm_submission_never_steers_the_hubs_turn() {
+    use crate::tui::buffer::BufferId;
+
+    let mut chat = chat_with_history("steer-dm");
+    chat.session.agents.insert(
+        "scout",
+        crate::agents::AgentKind::Hire,
+        None,
+        "research".into(),
+        chat.session.clone(),
+    );
+    chat.refresh_entities();
+    chat.busy = true;
+
+    // From the hub, the same text would be on offer at the next barrier.
+    chat.switch_to(BufferId::Dm("scout".into()));
+    chat.set_input("use tabs");
+    chat.submit();
+
+    assert!(
+        chat.steer.is_empty(),
+        "a DM message is not the turn's to read"
+    );
+    assert!(chat.queued.is_empty(), "and it is not waiting for TurnEnd");
+    assert!(chat.busy, "the turn is untouched");
+    assert!(
+        chat.session
+            .agents
+            .pending_of("scout")
+            .contains(&"use tabs".to_string())
+            || !chat.session.agents.take_running("scout", 0).is_empty(),
+        "it went to the instance instead"
+    );
+
+    // Back at the hub the offer works exactly as D83 left it.
+    chat.switch_to(BufferId::Hub);
+    chat.set_input("use tabs");
+    chat.submit();
+    assert_eq!(
+        chat.steer.take(),
+        vec![crate::steer::SteerItem {
+            id: 0,
+            text: "use tabs".into()
+        }],
+        "the hub's composer still steers"
+    );
+}

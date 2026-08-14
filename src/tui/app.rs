@@ -377,19 +377,6 @@ pub async fn run_inline(
             },
         }
 
-        // Entity view (Ctrl+G): the alternate-screen modal takes over; afterwards, a deterministic
-        // redraw goes through the resize channel (clear + rehydrate, without guessing whether alt-screen restore works).
-        if let Some(open) = chat.open_entity.take() {
-            crate::tui::entity::run_entity_modal(&mut chat, &mut events, open, false).await?;
-            if let Ok((w, h)) = crossterm::terminal::size() {
-                pending_resize = Some((Size::new(w, h), Instant::now()));
-            } else {
-                chat.force_redraw = true;
-            }
-            chat.dirty = true;
-            dirty = true;
-        }
-
         // Transcript view (Ctrl+O, D82): the same alternate-screen contract as the
         // entity modal. Scrollback is untouched while it is open — that is what
         // lets a fold be opened at all in a host that can never rewrite a printed
@@ -646,14 +633,6 @@ pub async fn run_fullscreen(
                     dirty = true;
                 }
             },
-        }
-
-        // Entity view: already on the alternate screen, the modal takes over the canvas directly; full repaint after return.
-        if let Some(open) = chat.open_entity.take() {
-            crate::tui::entity::run_entity_modal(&mut chat, &mut events, open, true).await?;
-            chat.force_redraw = true;
-            chat.dirty = true;
-            dirty = true;
         }
 
         // Transcript view: already on the alternate screen, so the pager takes the

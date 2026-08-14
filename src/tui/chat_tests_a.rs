@@ -1307,12 +1307,12 @@ fn single_turn_thinking_accumulates() {
 }
 
 /// Issue #41: every message trails its send time as a dim row — the same
-/// stamp brick the workspace views use — while a still-streaming reply
+/// stamp brick every conversation uses — while a still-streaming reply
 /// shows none, and a message without a clock renders none.
 #[test]
 fn messages_trail_their_send_time() {
     let at = 1_760_000_000u64;
-    let want = crate::tui::slack::stamp(at);
+    let want = crate::tui::buffer::stamp(at);
     let mut chat = test_chat();
     chat.messages.push(UiMessage {
         at,
@@ -2761,6 +2761,7 @@ fn slash_dispatch_covers_every_table_entry() {
         ("skills", "skills"),
         ("tasks", "tasks"),
         ("team", "team"),
+        ("open", "open"),
     ];
     let table: HashSet<&str> = SLASH_COMMANDS.iter().map(|(n, _, _)| *n).collect();
     let arms: HashSet<&str> = dispatch.iter().map(|(a, _)| *a).collect();

@@ -1153,12 +1153,12 @@ pub struct Chat {
     pub entities: Vec<EntityRow>,
     /// Main-view background-agent manager; `None` means the panel is closed.
     pub agent_manager: Option<AgentManager>,
-    /// Entity view pending open (app layer consumes → enters the fullscreen modal).
-    pub open_entity: Option<EntityOpen>,
-    /// Slack workspace view state. Lives here rather than in the modal so read
-    /// cursors, the open conversation and collapsed sections survive leaving
-    /// and re-entering the view.
-    pub slack: crate::tui::slack::Workspace,
+    /// Visits to conversations other than the hub (D89), oldest first. Each one
+    /// is a segment of the flow: which rows it printed, and where in the hub's
+    /// transcript it sits. `Chat::flow_order` reads them to decide what the one
+    /// message store looks like on screen; the last one is open while a
+    /// conversation other than the hub is active.
+    pub(crate) excursions: Vec<crate::tui::bufferview::Excursion>,
     /// Interrupt signal: Ctrl+C / Esc while busy → send(true), aborting stream reads in the turn immediately.
     pub(crate) cancel_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -1184,19 +1184,6 @@ pub enum EntityRow {
 pub enum AgentManager {
     List { selected: usize },
     Detail { name: String },
-}
-
-/// Entity view to open from the main chat.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EntityOpen {
-    /// The workspace with nothing selected. Ctrl+G was its door until D86 gave
-    /// that key to `$EDITOR`; the modal itself is retired in D89 and the
-    /// conversation switcher that replaces this entry point is D90, so the
-    /// variant stays until one of them removes it. Agents still reach the
-    /// workspace through the ctrl+b manager (`Agent` below).
-    #[allow(dead_code)]
-    Workspace,
-    Agent(String),
 }
 
 impl Chat {
@@ -1458,8 +1445,7 @@ impl Chat {
             tasks_auto: false,
             entities: Vec::new(),
             agent_manager: None,
-            open_entity: None,
-            slack: Default::default(),
+            excursions: Vec::new(),
             interrupted: false,
             cancel_tx: tokio::sync::watch::channel(false).0,
         }
@@ -2332,6 +2318,23 @@ impl Chat {
             self.set_input(text);
             return;
         }
+        // A conversation other than the hub owns the composer (D89): the text
+        // goes to it, not to the model. Slash commands are the exception and
+        // deliberately so — they act on the application, and `/model` in a DM
+        // is still `/model` — so they fall through to the path below unchanged.
+        //
+        // This sits above the busy branch because `busy` is the *hub's* state:
+        // a message to a subagent neither queues behind a running turn nor
+        // steers it (D83 offers only hub submissions), and the send must not
+        // start a turn of its own.
+        if self.buffers.active() != &crate::tui::buffer::BufferId::Hub && !text.starts_with('/') {
+            let text = self.expand_pastes(&text);
+            let text = self.expand_image_paths(&text);
+            self.record_history(&text);
+            self.send_to_active(text);
+            self.update_slash_suggestions();
+            return;
+        }
         // Turn in progress: queue it, submitted one by one after TurnEnd (CC message queueing).
         if self.busy {
             let text = self.expand_pastes(&text);
@@ -2643,6 +2646,7 @@ impl Chat {
             "skills" => self.slash_skills(),
             "tasks" => self.slash_tasks(),
             "team" => self.slash_team(arg),
+            "open" => self.slash_open(arg),
             other => {
                 // Skill name (prompt Command: skills share the registry with built-in commands; typing
                 // /skill-name runs it; the full body never enters the context, see the marker comment below).

@@ -20,6 +20,8 @@
 use ratatui::style::Color;
 
 use crate::tui::gfx::{self, ImageCap, Transmits};
+use crate::tui::line::{Line, SegStyle, text_width};
+use crate::tui::theme::Theme;
 
 /// Cell footprint of one avatar.
 pub const COLS: usize = 4;
@@ -98,6 +100,173 @@ pub fn transmits(indices: &[usize], cap: &ImageCap, sent: &mut Transmits) -> Vec
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// The palette and the gutter (moved here when the workspace skin retired, D89)
+// ---------------------------------------------------------------------------
+
+/// The colours a sender is drawn in. Accents come from the terminal theme, so a
+/// face moves with the rest of the app instead of pinning a second brand on top
+/// of it. Foregrounds only: the one background left is the avatar chip, which is
+/// a mark that means something rather than chrome.
+#[derive(Debug, Clone, Copy)]
+pub struct Palette {
+    pub badge_bg: Color,
+    pub badge_fg: Color,
+    pub presence_on: Color,
+    pub presence_off: Color,
+    pub main_text: Color,
+    pub main_dim: Color,
+    pub divider: Color,
+    pub accent: Color,
+    pub warning: Color,
+    pub danger: Color,
+    pub unread: Color,
+    pub avatars: [Color; 6],
+}
+
+const fn rgb(hex: u32) -> Color {
+    Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+impl Palette {
+    pub fn new(theme: &Theme) -> Self {
+        let base = Palette {
+            badge_bg: theme.claude_deep_strong,
+            badge_fg: rgb(0xFFFFFF),
+            presence_on: theme.success,
+            presence_off: rgb(0x776C62),
+            main_text: theme.text,
+            main_dim: theme.inactive,
+            divider: rgb(0x38332D),
+            accent: theme.claude,
+            warning: theme.warning,
+            danger: theme.error,
+            unread: theme.claude_strong,
+            avatars: [
+                rgb(0x4C9AE0),
+                rgb(0x3FA96B),
+                rgb(0xC9922E),
+                rgb(0xCB5A74),
+                rgb(0x7C6BD0),
+                rgb(0xC1743C),
+            ],
+        };
+        let pal = if theme.is_dark {
+            base
+        } else {
+            Palette {
+                main_text: rgb(0x1D1C1D),
+                main_dim: rgb(0x616061),
+                divider: rgb(0xDDDDDD),
+                accent: theme.claude_deep,
+                ..base
+            }
+        };
+        if Theme::terminal_supports_truecolor() {
+            pal
+        } else {
+            pal.downgrade_to_256()
+        }
+    }
+
+    /// Terminals without 24-bit colour ignore RGB sequences outright, so the
+    /// whole palette has to come down to the 256-colour cube together.
+    fn downgrade_to_256(self) -> Self {
+        let f = crate::tui::theme::to_ansi256;
+        Palette {
+            badge_bg: f(self.badge_bg),
+            badge_fg: f(self.badge_fg),
+            presence_on: f(self.presence_on),
+            presence_off: f(self.presence_off),
+            main_text: f(self.main_text),
+            main_dim: f(self.main_dim),
+            divider: f(self.divider),
+            accent: f(self.accent),
+            warning: f(self.warning),
+            danger: f(self.danger),
+            unread: f(self.unread),
+            avatars: self.avatars.map(f),
+        }
+    }
+}
+
+/// Left gutter of a message block when the avatar is a text chip: ` X ` plus one
+/// space. With image avatars it is [`COLS`] plus one — see [`gutter`].
+const GUTTER: usize = 4;
+
+/// Message gutter: wide enough for whichever avatar the terminal can draw.
+fn gutter(images: bool) -> usize {
+    if images { COLS + 1 } else { GUTTER }
+}
+
+/// Avatar chip for terminals that cannot place images: the sender's initial on a
+/// colour, occupying the same gutter the portrait would. The colour is keyed to
+/// the same portrait index, so a pinned member keeps one identity in both skins.
+fn chip(name: &str, index: usize, pal: &Palette) -> Line {
+    let initial = name
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "·".to_string());
+    let cell = if text_width(&initial) > 1 {
+        initial
+    } else {
+        format!("{initial} ")
+    };
+    Line::styled(
+        format!(" {cell}"),
+        SegStyle::fg(pal.badge_fg)
+            .with_bg(pal.avatars[index % pal.avatars.len()])
+            .bold(),
+    )
+}
+
+/// The `row`-th gutter cell of a message block: the avatar's own rows when the
+/// terminal can place images, blank indentation otherwise. Row 0 rides the name
+/// line, row 1 the first body line — which is why the portrait costs no rows the
+/// layout was not already spending.
+///
+/// The portrait index is resolved by the caller: the transcript knows it before
+/// it knows the name (neither the hub nor the human is a blueprint member), and
+/// a table to look it up in would have been cloned every frame.
+pub fn gutter_cell(index: usize, name: &str, row: usize, images: bool, pal: &Palette) -> Line {
+    if images {
+        if let Some((cells, id)) = placeholder(index, row) {
+            let mut line = Line::styled(cells, SegStyle::fg(id));
+            line.push_styled(" ", SegStyle::fg(pal.main_text));
+            return line;
+        }
+    } else if row == 0 {
+        let mut line = chip(name, index, pal);
+        line.push_styled(" ", SegStyle::fg(pal.main_text));
+        return line;
+    }
+    Line::styled(" ".repeat(gutter(images)), SegStyle::fg(pal.main_dim))
+}
+
+/// A sender band: the portrait beside the name, as the rows a transcript puts
+/// *above* a message rather than beside it. The main chat has no gutter — its
+/// bodies run the full width and its `⏺` markers separate prose from tool rows
+/// inside one message — so the face goes overhead, where it costs two rows once
+/// per message and nothing below it has to move.
+///
+/// One row where the terminal cannot place images: unlike the workspace gutter,
+/// nothing here depends on the two skins having equal height.
+pub fn sender_band(
+    index: usize,
+    name: &str,
+    shown: &str,
+    images: bool,
+    pal: &Palette,
+) -> Vec<Line> {
+    let mut head = gutter_cell(index, name, 0, images, pal);
+    head.push_styled(shown.to_string(), SegStyle::fg(pal.main_text).bold());
+    if !images {
+        return vec![head];
+    }
+    vec![head, gutter_cell(index, name, 1, images, pal)]
 }
 
 #[cfg(test)]

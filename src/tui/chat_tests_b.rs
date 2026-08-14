@@ -2384,8 +2384,7 @@ fn entity_area_filters_idle_agents() {
     assert!(summary.contains("◇ #table(0)"), "{summary}");
 
     assert!(chat.on_key(KeyCode::Char('g'), KeyModifiers::CONTROL));
-    assert_eq!(chat.open_entity, None, "ctrl+g is the editor now (D86)");
-    assert!(chat.open_editor, "and it asks the host for the round trip");
+    assert!(chat.open_editor, "ctrl+g is the editor now (D86)");
 }
 
 /// D80: running agents no longer claim ↑/↓. With a background agent up and an
@@ -2410,19 +2409,23 @@ fn running_agents_leave_the_arrows_to_history() {
         chat.input, "earlier prompt",
         "↑ recalls history, not agents"
     );
-    assert_eq!(chat.open_entity, None);
     let summary = chat.entity_rows(100)[0].plain_text();
     assert!(
         !summary.contains("select agent"),
         "the hint stops advertising a selector that is gone: {summary}"
     );
 
-    // Ctrl+B → Enter (list) → Enter (detail) opens that agent's DM.
+    // Ctrl+B → Enter (list) → Enter (detail) opens that agent's DM. Since D89
+    // that switches this terminal onto the conversation instead of raising a
+    // modal over it.
     chat.set_input("");
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(chat.open_entity, Some(EntityOpen::Agent("scout".into())));
+    assert_eq!(
+        *chat.buffers.active(),
+        crate::tui::buffer::BufferId::Dm("scout".into())
+    );
     assert!(chat.agent_manager.is_none(), "the manager closes with it");
 }
 

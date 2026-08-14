@@ -9,13 +9,15 @@
 //! - [`chrome`] declares every section below the transcript.
 //! - [`transcript`] is the alternate-screen pager over the whole session
 //!   (`ctrl+o`), the compensation for write-once scrollback.
-//! - [`slack`] is the Slack-shaped workspace skin (rail / sidebar / message
-//!   pane) that [`entity`] wears when a channel or instance is opened.
 //! - [`composer`] owns the prompt's readline state (kill ring, the
 //!   `ctrl+x ctrl+e` chord) and the `$EDITOR` round trip.
 //! - [`buffer`] is the conversation engine (D88): every conversation — hub, DM,
 //!   channel, team board — as one shape, holding read cursors and drafts while
 //!   the transcripts stay in the domain stores they already live in.
+//! - [`bufferview`] is its host side (D89): one terminal, one flow, one active
+//!   conversation. Switching splices a divider and a replay into the flow and
+//!   holds the conversations you are not in; the composer routes to whichever
+//!   one is active.
 //! - [`chat`] is the state machine and the transcript block builder
 //!   (`build_rows`); [`slash`] owns slash command metadata and pure
 //!   suggestion/help transformations; [`complete`] owns the fuzzy scorer, the
@@ -33,12 +35,12 @@ pub mod activities;
 mod app;
 pub mod avatar;
 pub mod buffer;
+pub mod bufferview;
 pub mod chat;
 mod chrome;
 pub mod complete;
 pub mod composer;
 pub mod el;
-mod entity;
 pub mod gfx;
 pub mod history;
 pub mod input;
@@ -50,9 +52,6 @@ pub mod model_menu;
 pub mod motion;
 pub mod notify;
 pub mod picker;
-pub mod slack;
-#[cfg(test)]
-mod slack_preview;
 pub mod slash;
 pub mod statics;
 pub(crate) mod term;

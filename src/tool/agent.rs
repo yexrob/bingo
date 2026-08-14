@@ -236,8 +236,6 @@ fn subagent_hooks(
     let done_instance = instance.clone();
     let round_rate = token_rate.clone();
     let retry_rate = token_rate.clone();
-    let context_agents = registry.clone();
-    let context_instance = instance.clone();
     let round_units = Arc::new(Mutex::new(0u64));
     let retry_units = round_units.clone();
     let event_round_units = round_units.clone();
@@ -331,9 +329,11 @@ fn subagent_hooks(
                 );
             }
         }),
-        on_context_usage: Arc::new(move |usage| {
-            context_agents.set_context_tokens(&context_instance, usage.used);
-        }),
+        // An instance's context usage had exactly one display, the workspace
+        // DM composer's footer, and it retired with the workspace (D89). The
+        // hook stays wired so the contract is unchanged and a later surface can
+        // read it again without re-plumbing the callback.
+        on_context_usage: Arc::new(move |_usage| {}),
         on_tool_ready: Box::new(move |_tool_call_id, name, input, _standalone| {
             tool_registry.touch(&tool_instance);
             let glyph = crate::tui::activities::tool_glyph(&name);

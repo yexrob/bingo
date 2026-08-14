@@ -174,7 +174,9 @@ bingo --continue            # 恢复最近一次会话
 `/think [off|low|medium|high|xhigh|max]`（无参进入等级选择器，选择持久化）、
 `/theme`、`/permissions [allow|deny|ask] [规则]`、
 `/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
-`/skills`（清单，`/技能名` 直接执行）、`/context`（用量）、`/status`、
+`/skills`（清单，`/技能名` 直接执行）、
+`/open <@agent|#频道|#team|hub>`（进入某个会话，Tab 从已存在的会话补全）、
+`/context`（用量）、`/status`、
 `/config`（生效配置与来源：哪个层/环境变量赢了、当前端点、未知配置项提示）、
 `/compact`（强制压缩）、`/resume [名称]`（恢复历史会话）、`/rename`、
 `/gc`（清理过期会话数据）、`/share [--public] [--open]`、`/clear`、`/exit`。
@@ -221,7 +223,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `mcpServers` | object | 见下「MCP」 |
 | `disabledMcpServers` | string[] | 禁用的 MCP 服务器名单（`/mcp disable` 写入） |
 | `permissions` | object | `{allow[], deny[], ask[]}`，规则语法见「权限系统」 |
-| `experimental` | object | 实验特性：`agentChannels`、`channelMessageLimit`（默认 500）、`agentMessageLimit`（默认 50）、`chatAvatars`（默认 false = 主聊天不带脸；工作区视图不受此开关管辖） |
+| `experimental` | object | 实验特性：`agentChannels`、`channelMessageLimit`（默认 500）、`agentMessageLimit`（默认 50）、`chatAvatars`（默认 false = 消息上方不带脸） |
 | `team` | object | 团队启动行为：`{"autoStart": true}`（缺省 true = 项目绑定 team 时启动自动拉起；`--no-team` 或 false 关闭） |
 | `hooks` | object | 各事件 hook，见「Hooks」 |
 
@@ -380,15 +382,31 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 - `serial` 频道落后发言被弹回并附新增消息（agent 阅读后自行改口，报数式顺序
   由此涌现）；`free` 频道允许交叉。
 - 超限自动冻结频道并通知主 agent（`channelMessageLimit`/`agentMessageLimit` 预算闸）。
-- 频道在 transcript 显示为 `◇ #名字` 行；Ctrl+G 打开全屏工作区，直接以
-  user 身份发言。
+- 频道在 transcript 显示为 `◇ #名字` 行；`/open #名字` 进入，直接以 user 身份发言。
 
-## 工作区视图（Ctrl+G）
+## 会话（Conversations）
 
-整屏只有一栏会话：顶部一行标题（频道或实例名，右端是队名）、消息流、输入框。
-没有 rail、没有侧栏，也不画任何自己的底色——透出的是终端本身的背景。换会话靠
-**Ctrl+K**（快速跳转，列出全部会话及未读数）与 **alt+↑↓**；Tab 在消息区与输入框
-之间切换，Esc 返回。
+一个终端、一条流、同时只有一个会话。hub —— 你和模型的对话 —— 是其中之一；与
+运行中 subagent 的 DM、agent 频道、`#team` 看板是另外几个，它们共用同一个输入框、
+同一套按键、同一套授权对话框、同一套 transcript 渲染。没有另开的界面，也没有第二
+套操作要学。
+
+**进入**：`/open @agent`、`/open #频道`、`/open #team`、`/open hub`（Tab 从已存在
+的会话里补全）；运行中 agent 的 DM 也可以在 Ctrl+B 管理器里按 Enter 打开。
+**Esc 回 hub** —— 导航先于中断，所以背后正在跑的回合不受影响，它的
+「Esc 中断」在 hub 等你。Ctrl+C 语义不变，在哪都能中断。
+
+**切换做了什么**：正在写的草稿留在你离开的那个会话里，目标会话自己的草稿回到输入框；
+流里打一条 `── @名字 ──` 的分隔线，后面跟这个会话最近 30 条消息。此后只有这个会话
+会上屏。其余会话继续在它们本来待的地方累积，并累加未读数——没有任何东西替你缓存，
+所以也不会因为你没看而丢失。回来时打一条 `── hub ──`，后面接 hub 在你离开期间完成的内容。
+
+因为 scrollback 只写一次、绝不回改，来回几趟之后同一个会话会在屏幕上出现不止一次。
+这是有意为之，分隔线会标出来；`Ctrl+O`（transcript 视图）仍是 hub 会话的完整记录。
+
+**发送**：你打的字发给你所在的会话——DM 以你的名义投递给那个实例，频道写进日志，
+`#team` 是记录而不是房间，它会直说。这些都不会启动模型回合。斜杠命令是例外，
+在哪都作用于应用本身，所以在 DM 里 `/model` 仍然是 `/model`。
 
 **头像**：能放置 kitty 图片的终端（与内联图片同一能力：Ghostty/kitty，以及开了
 passthrough 的 tmux）为每位发言者分配八张内置
@@ -403,8 +421,8 @@ Unicode 占位符格子定位。team 成员的头像钉在 `.bingo/team.json`（
 排版，消息内部的 `⏺` 也仍然负责把正文和工具行分开。能放图的终端给两行带子，退化时
 一行，带子底下没有东西依赖它的高度。一处已知退化：终端清空图片存储时（resize 会），
 还在屏幕上的脸会重画，已经滚进 scrollback 的消息则留下 4 列空白，名字还在。开关关掉
-则整条带子不出现，subagent 的 watch 行也保留 `◉`；开关只管主聊天，DM、频道、team
-视图照旧带脸——那里的头像占的是排版本来就花掉的装订线。
+则整条带子不出现，subagent 的 watch 行也保留 `◉`。DM 与频道里，发言者的名字无论
+开关如何都会压在同一个人的连续消息之上——一个房间里超过两个说话人时，名字不是装饰。
 
 ## 技能（Skills）
 

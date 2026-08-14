@@ -425,8 +425,6 @@ struct Entry {
     progress: Option<Arc<Mutex<AgentProgress>>>,
     /// Per-turn token-rate sampler, shared with the instance view.
     token_rate: Option<Arc<Mutex<crate::token_rate::TokenRateSampler>>>,
-    /// Latest context-window usage reported for this instance.
-    context_tokens: u64,
 }
 
 const RECENT_AGENT_ACTIVITIES: usize = 5;
@@ -664,7 +662,6 @@ impl AgentRegistry {
                 live: None,
                 progress: None,
                 token_rate: None,
-                context_tokens: 0,
             },
         );
         self.sync_share(name);
@@ -846,23 +843,6 @@ impl AgentRegistry {
     ) -> Option<String> {
         let rate = self.lock().get(name)?.token_rate.clone()?;
         rate.lock().ok()?.label(now, motion_off)
-    }
-
-    pub fn set_context_tokens(&self, name: &str, tokens: u64) {
-        if let Some(entry) = self.lock().get_mut(name) {
-            entry.context_tokens = tokens;
-        }
-    }
-
-    pub fn context_usage(&self, name: &str) -> Option<crate::context_usage::ContextUsage> {
-        let inner = self.lock();
-        let entry = inner.get(name)?;
-        let model = entry.session.runtime.model.borrow().clone();
-        Some(crate::context_usage::ContextUsage::for_model(
-            entry.context_tokens,
-            &entry.session.client.models(),
-            &model,
-        ))
     }
 
     /// Instance depth (channel cohort check: only direct subagents with depth==1 may join a channel).

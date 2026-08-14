@@ -60,13 +60,20 @@ pub const COMMANDS: &[SlashCommand] = &[
         "start|status|assign|stop|list",
         "manage the project team",
     ),
+    (
+        "open",
+        "@agent|#channel|hub",
+        "open a conversation in this terminal",
+    ),
     ("exit", "", "exit the session"),
 ];
 
 /// Slash commands that execute immediately while a model turn is active.
+// `/open` is instant because switching conversations is exactly what a user
+// wants while a turn runs: the turn keeps going, and the flow follows the eye.
 pub const INSTANT_COMMANDS: &[&str] = &[
     "think", "model", "provider", "theme", "status", "context", "tasks", "help", "skills",
-    "config", "gc",
+    "config", "gc", "open",
 ];
 
 /// Slash dropdown suggestion item (`/name`, hint, and description).

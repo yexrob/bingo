@@ -453,16 +453,6 @@ impl ChannelRegistry {
         }
     }
 
-    /// How far a member has read (0 = nothing). The sidebar turns this into an
-    /// unread badge for `user`.
-    pub fn seen_of(&self, member: &str, name: &str) -> u64 {
-        self.lock()
-            .channels
-            .get(name)
-            .and_then(|ch| ch.seen.get(member).copied())
-            .unwrap_or(0)
-    }
-
     /// Display-row snapshot: (watch_id, detail, tail text of the log).
     pub fn row_snapshot(
         &self,

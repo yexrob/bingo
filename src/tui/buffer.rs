@@ -20,26 +20,23 @@
 //!   the transcript and prints a line; the hub's row builder (`build_rows`)
 //!   reads `Vec<UiMessage>` and only the live flow ever fills it. So
 //!   [`Buffers::rehydrate`] produces `UiMessage` — the unit that builder already
-//!   consumes — and extracts it with the functions the workspace extracts posts
-//!   with (`slack::dm_posts`, `slack::channel_posts`), which is where the D64
-//!   `[DM from user]` rules and the batching rules already live. Writing a
-//!   second parser next to those would have been the one thing worth avoiding.
+//!   consumes — and extracts it with the functions the workspace extracted posts
+//!   with ([`dm_posts`], [`channel_posts`], which moved here when the workspace
+//!   retired), and that is where the D64 `[DM from user]` rules and the batching
+//!   rules live. Writing a second parser next to them would have been the one
+//!   thing worth avoiding.
 //!
-//! Nothing outside tests routes a submit or rehydrates yet: D89 moves the
-//! workspace's viewing and composing onto this, D90 draws the bar.
-
-// The engine is complete before it has a caller — that is what a foundation
-// batch is — so the surface D89 consumes is unreachable from the binary until
-// D89 lands. One allow with one reason beats fifteen scattered ones; **D89
-// deletes this line**, and anything still unused afterwards is genuinely dead.
-#![cfg_attr(not(test), allow(dead_code))]
+//! [`crate::tui::bufferview`] is the host side: it switches conversations, puts
+//! a replay on screen and routes what the composer sends. The extraction rules
+//! that turn a domain store into displayable messages live at the bottom of this
+//! file, where the workspace skin left them (D89).
 
 use std::sync::Arc;
 
-use crate::channels::USER_NAME;
+use crate::api::types::{ContentBlock, Message, Role as ApiRole};
+use crate::channels::{ChannelMessage, USER_NAME};
 use crate::query::Session;
 use crate::tui::chat::{Role, UiMessage};
-use crate::tui::slack::{Post, PostKind, channel_posts, dm_posts};
 use crate::watch::{WatchKind, WatchState};
 
 /// How many lifecycle events the team board keeps. The board is the one buffer
@@ -75,16 +72,11 @@ impl BufferId {
         }
     }
 
-    /// Where this buffer's transcript actually lives. Named rather than implied,
-    /// because "the id is the binding" is the whole reason the engine stores no
-    /// transcript of its own.
-    pub fn source(&self) -> Source {
-        match self {
-            Self::Hub => Source::HubFlow,
-            Self::Team => Source::TeamLog,
-            Self::Channel(name) => Source::ChannelLog(name.clone()),
-            Self::Dm(name) => Source::AgentHistory(name.clone()),
-        }
+    /// The rule that opens this conversation in the flow, and the one that
+    /// closes it. One formatter, so a replay and the hand-back to the hub can
+    /// never drift into two shapes.
+    pub fn rule(&self) -> String {
+        format!("── {} ──", self.label())
     }
 }
 
@@ -92,21 +84,6 @@ impl std::fmt::Display for BufferId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.label())
     }
-}
-
-/// The domain store a buffer reads through. A key, never a copy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Source {
-    /// The hub's live flow: `Chat::messages`, already on screen.
-    HubFlow,
-    /// [`Buffers`]'s own bounded lifecycle log — the only source the engine
-    /// keeps itself, because the events it is made of are broadcast and stored
-    /// nowhere else.
-    TeamLog,
-    /// `ChannelRegistry::log_of`.
-    ChannelLog(String),
-    /// `AgentRegistry::view_of` — the instance's own message history.
-    AgentHistory(String),
 }
 
 /// One conversation's accounting.
@@ -135,15 +112,6 @@ impl Buffer {
     }
     pub fn mention(&self) -> bool {
         self.mention
-    }
-    pub fn seq(&self) -> u64 {
-        self.seq
-    }
-    pub fn last_activity(&self) -> u64 {
-        self.last_activity
-    }
-    pub fn draft(&self) -> &str {
-        &self.draft
     }
 }
 
@@ -257,21 +225,6 @@ impl Buffers {
 
     pub fn iter(&self) -> impl Iterator<Item = &Buffer> {
         self.list.iter()
-    }
-
-    pub fn len(&self) -> usize {
-        self.list.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        // The hub is always present, so this is always false; it exists because
-        // clippy asks for it next to `len`.
-        self.list.is_empty()
-    }
-
-    /// The team board's log, oldest first.
-    pub fn team_log(&self) -> &[TeamEvent] {
-        &self.team
     }
 
     /// Materialize a buffer, or reach the one that is already there.
@@ -462,7 +415,7 @@ impl Buffers {
                 None => Vec::new(),
             },
         };
-        let mut out = vec![Replay::Divider(format!("── {} ──", id.label()))];
+        let mut out = vec![Replay::Divider(id.rule())];
         let kept: Vec<&Post> = posts
             .iter()
             .filter(|p| matches!(p.kind, PostKind::Said | PostKind::Note))
@@ -546,6 +499,288 @@ pub fn deliver(session: &Arc<Session>, target: SubmitTarget) -> Delivery {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Extraction: a domain store's messages → posts
+//
+// These rules moved here from the retired workspace skin (D89). They are the
+// one place a stored conversation becomes displayable messages — the D64
+// `[DM from user]` handling, the scaffolding collapse and the live-turn tail
+// all live in `dm_posts`, and a second parser beside it was the one thing worth
+// avoiding.
+// ---------------------------------------------------------------------------
+
+/// What a message row shows besides its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostKind {
+    /// An ordinary message.
+    Said,
+    /// Sent but still in the inbox — delivery happens at the next turn boundary.
+    Queued,
+    /// The streaming tail of a running turn (Slack's "…is typing").
+    Typing,
+    /// Wake-up scaffolding the runtime wrote into the instance's history — a
+    /// relayed channel message, a follow-up chase, the task reminder. Nobody
+    /// typed it, so it gets one dim line instead of a quoted block with a name
+    /// and an avatar over it.
+    Note,
+    /// A step of the agent's work — a tool call or a reasoning phase — shown
+    /// the way the main transcript shows it: one dim line under the agent's
+    /// name, kept after the turn lands (the history's ToolUse/Thinking blocks
+    /// re-render the same rows).
+    Process,
+}
+
+/// One rendered message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Post {
+    pub from: String,
+    /// Written by the human sitting in front of the terminal.
+    pub you: bool,
+    /// Unix seconds; 0 when the source carries no clock.
+    pub at: u64,
+    pub text: String,
+    pub kind: PostKind,
+}
+
+/// Channel log → posts.
+pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
+    log.iter()
+        .map(|m| Post {
+            from: m.from.clone(),
+            you: m.from == me,
+            at: m.at,
+            text: m.text.clone(),
+            kind: PostKind::Said,
+        })
+        .collect()
+}
+
+/// One line of runtime scaffolding → how it reads collapsed, or `None` for text
+/// a person actually wrote. The shapes are the ones `absorb_inbox` and the task
+/// reminder compose, so this stays in step with them by construction: anything
+/// the runtime wraps in its own brackets is not a message from the user.
+fn scaffold_note(line: &str) -> Option<String> {
+    let line = line.trim_end();
+    if let Some(rest) = line.strip_prefix("[#")
+        && let Some((head, body)) = rest.split_once("] ")
+        && let Some((channel, _)) = head.split_once(' ')
+    {
+        return Some(format!("#{channel} · {body}"));
+    }
+    if line.starts_with("[follow-up ") {
+        return Some("follow-up · waiting for a reply".to_string());
+    }
+    None
+}
+
+/// A user-role message → posts. Runtime scaffolding collapses to [`PostKind::Note`]
+/// lines; whatever a person actually wrote stays a message.
+fn user_posts(text: &str, at: u64, me: &str) -> Vec<Post> {
+    let mut out = Vec::new();
+    let mut plain: Vec<&str> = Vec::new();
+    let flush = |plain: &mut Vec<&str>, out: &mut Vec<Post>| {
+        let joined = plain.join("\n");
+        plain.clear();
+        if joined.trim().is_empty() {
+            return;
+        }
+        out.push(Post {
+            from: me.to_string(),
+            you: true,
+            at,
+            text: joined,
+            kind: PostKind::Said,
+        });
+    };
+    for line in text.lines() {
+        // The task reminder is a block, not a line: its marker heads a paragraph
+        // of instructions and the current task list, and everything after it in
+        // this message belongs to it.
+        if line.starts_with(crate::query::TASK_REMINDER_MARKER) {
+            flush(&mut plain, &mut out);
+            out.push(Post {
+                from: me.to_string(),
+                you: true,
+                at: 0,
+                text: "system note · task tools".to_string(),
+                kind: PostKind::Note,
+            });
+            return out;
+        }
+        // The user's own DM marker is transport scaffolding: the bubble already says who
+        // spoke, so the line is dropped rather than shown — but it still flushes, so two
+        // batched DMs stay two bubbles instead of one merged paragraph.
+        if line.trim_end() == crate::tool::agent::DM_FROM_USER_MARKER {
+            flush(&mut plain, &mut out);
+            continue;
+        }
+        match scaffold_note(line) {
+            Some(note) => {
+                flush(&mut plain, &mut out);
+                out.push(Post {
+                    from: me.to_string(),
+                    you: true,
+                    at: 0,
+                    text: note,
+                    kind: PostKind::Note,
+                });
+            }
+            None => plain.push(line),
+        }
+    }
+    flush(&mut plain, &mut out);
+    out
+}
+
+/// The collapsed reasoning row, exactly the transcript's header: the phase is
+/// shown, the stream is not.
+const THINKING_ROW: &str = "✻ Thinking";
+
+/// A stored tool-use block → the transcript's call line (`⏺ Bash(git status)`),
+/// the same brick `on_tool_ready` builds the live tail from.
+fn tool_call_line(name: &str, input: &serde_json::Value) -> String {
+    let glyph = crate::tui::activities::tool_glyph(name);
+    let shown = crate::tui::activities::display_tool_name(name);
+    let summary = crate::query::summarize_input(name, input);
+    if summary.is_empty() {
+        format!("{glyph}{shown}")
+    } else {
+        format!("{glyph}{shown}({summary})")
+    }
+}
+
+/// Subagent history + live turn → posts. User turns and assistant prose form
+/// the conversation; the work between them — tool calls and reasoning phases —
+/// shows as dim [`PostKind::Process`] rows, mirroring the main transcript
+/// (which keeps `⏺ Tool(…)` lines and the collapsed `✻ Thinking` header in the
+/// scrollback). `in_flight` is the messages already claimed by the running turn
+/// but not yet landed in history: rendered as ordinary sent messages, so a
+/// message never vanishes between the send and the turn's end.
+pub fn dm_posts(
+    history: &[Message],
+    stamps: &[u64],
+    in_flight: &[String],
+    live: &[crate::agents::LiveBlock],
+    pending: &[String],
+    who: &str,
+    me: &str,
+) -> Vec<Post> {
+    let mut out = Vec::new();
+    let process = |text: String| Post {
+        from: who.to_string(),
+        you: false,
+        at: 0,
+        text,
+        kind: PostKind::Process,
+    };
+    for (i, msg) in history.iter().enumerate() {
+        // `stamps[i]` is when `history[i]` landed in the record (0 = no clock).
+        let at = stamps.get(i).copied().unwrap_or(0);
+        for block in &msg.content {
+            match (msg.role, block) {
+                (ApiRole::User, ContentBlock::Text { text }) => {
+                    out.extend(user_posts(text, at, me))
+                }
+                (ApiRole::Assistant, ContentBlock::Text { text }) => out.push(Post {
+                    from: who.to_string(),
+                    you: false,
+                    at,
+                    text: text.clone(),
+                    kind: PostKind::Said,
+                }),
+                (ApiRole::Assistant, ContentBlock::ToolUse { name, input, .. }) => {
+                    out.push(process(tool_call_line(name, input)));
+                }
+                (ApiRole::Assistant, ContentBlock::Thinking { .. }) => {
+                    out.push(process(THINKING_ROW.to_string()));
+                }
+                _ => {}
+            }
+        }
+    }
+    // Claimed by the running turn, not yet in the record: an ordinary message
+    // (it is one — the run's prompt carries it), just without a landing clock.
+    for text in in_flight {
+        out.push(Post {
+            from: me.to_string(),
+            you: true,
+            at: 0,
+            text: text.clone(),
+            kind: PostKind::Said,
+        });
+    }
+    for text in pending {
+        out.push(Post {
+            from: me.to_string(),
+            you: true,
+            at: 0,
+            text: text.clone(),
+            kind: PostKind::Queued,
+        });
+    }
+    let typing_at = match live.last() {
+        Some(crate::agents::LiveBlock::Text(t)) if !t.trim().is_empty() => Some(live.len() - 1),
+        _ => None,
+    };
+    for (i, block) in live.iter().enumerate() {
+        match block {
+            crate::agents::LiveBlock::Text(text) if !text.trim().is_empty() => out.push(Post {
+                from: who.to_string(),
+                you: false,
+                at: 0,
+                text: text.clone(),
+                kind: if Some(i) == typing_at {
+                    PostKind::Typing
+                } else {
+                    PostKind::Said
+                },
+            }),
+            crate::agents::LiveBlock::Tool(text) => out.push(process(text.clone())),
+            crate::agents::LiveBlock::Thinking(_) => out.push(process(THINKING_ROW.to_string())),
+            crate::agents::LiveBlock::Text(_) => {}
+        }
+    }
+    // The indicator spans the whole stretch the agent owes a reply: from the
+    // instant a message is on its way (queued or claimed, before the stream
+    // says anything) through tool waits and round gaps. Without the early leg
+    // the DM sits silent for exactly the send-to-first-delta latency.
+    if typing_at.is_none() && !(live.is_empty() && in_flight.is_empty() && pending.is_empty()) {
+        out.push(Post {
+            from: who.to_string(),
+            you: false,
+            at: 0,
+            text: String::new(),
+            kind: PostKind::Typing,
+        });
+    }
+    out
+}
+
+/// Send-time stamp trailing a message body (issue #41), the same in every view:
+/// local `HH:MM` today, `M/D HH:MM` on any other day. Empty when the source
+/// carries no timestamp — a missing clock renders as nothing rather than being
+/// invented (the [`ChannelMessage`] rule).
+pub fn stamp(at: u64) -> String {
+    use chrono::TimeZone;
+    if at == 0 {
+        return String::new();
+    }
+    chrono::Local
+        .timestamp_opt(at as i64, 0)
+        .single()
+        .map(|t| stamp_of(&t, chrono::Local::now().date_naive()))
+        .unwrap_or_default()
+}
+
+/// [`stamp`] with "today" injected, so tests pin both sides of the day boundary.
+fn stamp_of(t: &chrono::DateTime<chrono::Local>, today: chrono::NaiveDate) -> String {
+    if t.date_naive() == today {
+        t.format("%H:%M").to_string()
+    } else {
+        t.format("%-m/%-d %H:%M").to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,23 +827,29 @@ mod tests {
         assert_eq!(buffers.get(&BufferId::Hub).map(Buffer::unread), Some(0));
     }
 
+    /// One vocabulary for naming a conversation: the label the id goes by, the
+    /// rule the flow opens it with, and `Display`. D88 stated this as a `Source`
+    /// enum nothing consulted; D89 made [`BufferId::rule`] load-bearing (the
+    /// replay and the hand-back to the hub both read it), so the property is
+    /// checked where it is now used.
     #[test]
-    fn an_id_is_a_key_into_the_domain_not_a_copy_of_it() {
-        // The binding every buffer reads through. Named here so that "the engine
-        // stores no transcript" is a property something checks, not a promise in
-        // a doc comment.
-        assert_eq!(BufferId::Hub.source(), Source::HubFlow);
-        assert_eq!(BufferId::Team.source(), Source::TeamLog);
-        assert_eq!(
-            BufferId::Channel("build".to_string()).source(),
-            Source::ChannelLog("build".to_string())
-        );
-        assert_eq!(
-            BufferId::Dm("scout".to_string()).source(),
-            Source::AgentHistory("scout".to_string())
-        );
+    fn an_id_names_its_conversation_in_one_vocabulary() {
+        assert_eq!(BufferId::Hub.label(), "hub");
+        assert_eq!(BufferId::Team.label(), "#team");
+        assert_eq!(BufferId::Channel("build".to_string()).label(), "#build");
+        assert_eq!(BufferId::Dm("scout".to_string()).label(), "@scout");
         assert_eq!(BufferId::Dm("scout".to_string()).to_string(), "@scout");
-        assert!(!Buffers::new().is_empty(), "the hub is always there");
+        // The rule is the label and nothing else, so a divider can never name a
+        // conversation differently from the way it is addressed.
+        for id in [
+            BufferId::Hub,
+            BufferId::Team,
+            BufferId::Channel("build".to_string()),
+            BufferId::Dm("scout".to_string()),
+        ] {
+            assert_eq!(id.rule(), format!("── {} ──", id.label()));
+        }
+        assert_eq!(Buffers::new().iter().count(), 1, "the hub is always there");
     }
 
     #[test]
@@ -649,7 +890,7 @@ mod tests {
         seed_agent(&session, "scout", Vec::new());
         let mut buffers = Buffers::new();
         buffers.refresh(&session, 1);
-        let before = buffers.len();
+        let before = buffers.iter().count();
         buffers.stash_draft(
             &BufferId::Dm("scout".to_string()),
             "half a thought".to_string(),
@@ -658,11 +899,11 @@ mod tests {
         buffers.refresh(&session, 2);
         buffers.refresh(&session, 3);
         buffers.refresh(&session, 4);
-        assert_eq!(buffers.len(), before, "refresh is idempotent");
+        assert_eq!(buffers.iter().count(), before, "refresh is idempotent");
         assert_eq!(
             buffers
                 .get(&BufferId::Dm("scout".to_string()))
-                .map(Buffer::draft),
+                .map(|buffer| buffer.draft.as_str()),
             Some("half a thought")
         );
     }
@@ -691,23 +932,23 @@ mod tests {
         let mut buffers = Buffers::new();
         buffers.refresh(&session, 1);
         let id = BufferId::Dm("scout".to_string());
-        assert_eq!(buffers.get(&id).map(Buffer::last_activity), Some(1));
+        assert_eq!(buffers.get(&id).map(|buffer| buffer.last_activity), Some(1));
 
         session.agents.finish("scout", vec![assistant("one")], 0);
         buffers.refresh(&session, 7);
         assert_eq!(buffers.get(&id).map(Buffer::unread), Some(1));
-        assert_eq!(buffers.get(&id).map(Buffer::last_activity), Some(7));
+        assert_eq!(buffers.get(&id).map(|buffer| buffer.last_activity), Some(7));
 
         session
             .agents
             .finish("scout", vec![assistant("one"), assistant("two")], 0);
         buffers.refresh(&session, 9);
         assert_eq!(buffers.get(&id).map(Buffer::unread), Some(2));
-        assert_eq!(buffers.get(&id).map(Buffer::last_activity), Some(9));
+        assert_eq!(buffers.get(&id).map(|buffer| buffer.last_activity), Some(9));
 
         // A poll that finds nothing new leaves the stamp where it was.
         buffers.refresh(&session, 30);
-        assert_eq!(buffers.get(&id).map(Buffer::last_activity), Some(9));
+        assert_eq!(buffers.get(&id).map(|buffer| buffer.last_activity), Some(9));
     }
 
     #[test]
@@ -781,7 +1022,10 @@ mod tests {
             buffers.refresh(&session, tick);
         }
         assert_eq!(buffers.get(&BufferId::Hub).map(Buffer::unread), Some(0));
-        assert_eq!(buffers.get(&BufferId::Hub).map(Buffer::seq), Some(0));
+        assert_eq!(
+            buffers.get(&BufferId::Hub).map(|buffer| buffer.seq),
+            Some(0)
+        );
     }
 
     #[test]
@@ -820,8 +1064,8 @@ mod tests {
         );
         let board = buffers.get(&BufferId::Team).expect("the board appeared");
         assert_eq!(board.unread(), 1);
-        assert_eq!(board.last_activity(), 4);
-        assert_eq!(buffers.team_log().len(), 1);
+        assert_eq!(board.last_activity, 4);
+        assert_eq!(buffers.team.len(), 1);
     }
 
     #[test]
@@ -836,9 +1080,9 @@ mod tests {
                 1,
             );
         }
-        assert_eq!(buffers.team_log().len(), TEAM_LOG_MAX);
+        assert_eq!(buffers.team.len(), TEAM_LOG_MAX);
         assert_eq!(
-            buffers.team_log()[0].label,
+            buffers.team[0].label,
             format!("scout #{}", 40),
             "the oldest events fall off the front"
         );
@@ -1097,7 +1341,7 @@ mod tests {
 
         assert_eq!(buffers.take_draft(&scout), "half a thought");
         assert_eq!(
-            buffers.get(&zoe).map(Buffer::draft),
+            buffers.get(&zoe).map(|buffer| buffer.draft.as_str()),
             Some("a different thought"),
             "taking one draft leaves the others alone"
         );

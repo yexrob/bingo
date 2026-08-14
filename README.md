@@ -200,7 +200,9 @@ to subscription endpoints, `logout` signs out),
 opens the level picker; the choice persists), `/theme`,
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
-`/skills` (listing; `/skill-name` executes directly), `/context` (usage),
+`/skills` (listing; `/skill-name` executes directly),
+`/open <@agent|#channel|#team|hub>` (enter a conversation; Tab completes from
+the ones that exist), `/context` (usage),
 `/status`, `/config` (effective config with per-key source layer/env, current
 endpoint, unknown-key hints), `/compact` (force compaction), `/resume [name]` (resume a past
 session), `/rename`, `/gc` (clean expired session data), `/share [--public] [--open]`, `/clear`, `/exit`.
@@ -255,7 +257,7 @@ otherwise the user layer — no `.bingo/` is conjured in arbitrary directories
 | `mcpServers` | object | see MCP below |
 | `disabledMcpServers` | string[] | disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`, rule syntax under Permission system below |
-| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50), `chatAvatars` (default false = no faces in the main chat; the workspace views keep theirs either way) |
+| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50), `chatAvatars` (default false = no faces above messages) |
 | `team` | object | team startup behavior: `{"autoStart": true}` (default true = auto-pull the project team at startup; `--no-team` or false disables) |
 | `hooks` | object | per-event hooks, see Hooks below |
 
@@ -433,17 +435,42 @@ With `settings.experimental.agentChannels: true`:
   channels allow interleaving.
 - Budget overflows freeze the channel and notify the main agent
   (`channelMessageLimit`/`agentMessageLimit` gates).
-- Channels appear as `◇ #name` rows in the transcript; Ctrl+G opens the
-  fullscreen workspace, where you can post as the user.
+- Channels appear as `◇ #name` rows in the transcript; `/open #name` enters one,
+  where you can post as the user.
 
-## Workspace view (Ctrl+G)
+## Conversations
 
-A single conversation pane, full width: a header naming the channel or instance
-(with the team's name at the right edge), the message list, and the composer.
-No rail, no sidebar, and no background of its own — the terminal's own
-background shows through. Navigation is **Ctrl+K** (the quick switcher, listing
-every conversation with its unread count) and **alt+↑↓**; Tab moves between the
-message list and the composer, Esc returns.
+One terminal, one flow, one conversation at a time. The hub — your conversation
+with the model — is one of them; a DM with a running subagent, an agent channel
+and the `#team` board are the others, and they all wear the same composer, the
+same keys, the same approval dialogs and the same transcript rendering. There is
+no separate screen to enter and no second set of controls to learn.
+
+**Entering one** is `/open @agent`, `/open #channel`, `/open #team` or
+`/open hub` (Tab completes from the conversations that exist); a running agent's
+DM also opens from the Ctrl+B manager with Enter. **Esc goes back to the hub** —
+navigation before interruption, so a turn running behind you keeps running and
+its Esc-to-interrupt waits for you at the hub. Ctrl+C is unchanged and stops the
+turn from anywhere.
+
+**What switching does**: the draft you were writing stays behind in the
+conversation you left and that conversation's own draft comes back; a `── @name ──`
+rule goes into the flow, followed by that conversation's last 30 messages. From
+then on only that conversation prints. Everything else keeps accumulating where
+it already lives and counts up an unread badge — nothing is buffered on your
+behalf, so nothing can be lost by not looking at it. Coming back prints a
+`── hub ──` rule and whatever the hub finished while you were away.
+
+Because scrollback is written once and never rewritten, a couple of excursions
+leave the same conversation on screen more than once. That is deliberate and the
+rules mark it; `Ctrl+O` (the transcript view) remains the complete record of the
+hub session.
+
+**Sending**: what you type goes to the conversation you are in — a DM delivers
+to that instance under your name, a channel posts to the log, and `#team` is a
+record rather than a room and says so. None of it starts a model turn. Slash
+commands are the exception and act on the application from anywhere, so `/model`
+in a DM is still `/model`.
 
 **Avatars**: on terminals that can place kitty images — the same capability
 behind inline image rendering (Ghostty/kitty, and tmux with passthrough) — each
@@ -464,9 +491,9 @@ and one where they fall back to the chip — nothing below it depends on its
 height. One known degradation: a terminal that purges its image store (a resize
 does) gets the faces still on screen redrawn, but messages already in scrollback
 keep four blank columns where the portrait was, with the name intact. Switched
-off, the transcript carries no band and a subagent's watch row keeps its `◉`;
-the switch governs the main chat only — DM, channel and team views wear their
-faces regardless, where the portrait sits in a gutter the layout already spends.
+off, the transcript carries no band and a subagent's watch row keeps its `◉`.
+In a DM or a channel the sender's name heads each run of messages either way —
+with more than two speakers in a room, the name is not decoration.
 
 ## Skills
 

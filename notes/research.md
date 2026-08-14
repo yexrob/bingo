@@ -1973,3 +1973,107 @@ gained seven lines (3912 → 3919) and needed no extraction pre-step. The module
 `#![cfg_attr(not(test), allow(dead_code))]`, because an engine complete before its caller is exactly
 what a foundation batch produces — **D89 deletes that line**, and anything still unused afterwards
 is genuinely dead.
+
+### D89. The workspace retires: a conversation is entered, not opened in another screen
+
+D88 built the shape and moved nothing. This batch is the move, and it is a retirement: the
+alternate-screen workspace modal (`src/tui/entity.rs`, 835 lines) and the Slack skin it wore
+(`src/tui/slack.rs`, 2680) are gone, along with the test-only preview harness that shot frames of it
+(`src/tui/slack_preview.rs`, 439). What replaces them is not a smaller modal. It is the absence of
+one: **one terminal, one write-once flow, one active conversation**, with the hub as an ordinary
+member of the set rather than the place the real application lives.
+
+The modal was a second application reached with one key. It had its own composer, its own key map,
+its own row builder, its own palette and its own quick switcher — which meant that everything the
+program had learned in D76–D87 stopped at its border. The approval dialog, the steer queue, the
+readline and kill ring, the `$EDITOR` round trip, the motion tokens, the transcript view: all hub
+only. Every one of those is now available in a DM because a DM is not a different screen.
+
+**The hard part was not deletion, it was the flow.** `Chat::messages` is simultaneously the hub's
+transcript store and the list `build_rows` prints. Left alone, a hub turn completing while the user
+reads a DM appends to that list and prints into the DM — precisely the interleaving the design
+forbids. Three options presented themselves: buffer rows for inactive conversations (a holding pen,
+explicitly ruled out), give each conversation its own renderer (a second renderer, ruled out), or
+make the printed flow a *projection* of the one store. The third is what shipped.
+`Chat::flow_order` walks the store and returns the print order: hub messages up to the point where
+the user left, then that conversation's rows, and — while it is still open — nothing after them, so
+the hub's tail sits unprinted in the hub's own store until the return prints it under a `── hub ──`
+rule. Two properties make this the cheap answer rather than the clever one. It is **append-only**:
+an emitted position never moves, so `flushed_segments` keeps meaning what it meant and scrollback is
+never rewritten. And an excursion's rows are `UiMessage`s in the same list the hub's are, indexed the
+same way, so `assistant_el(i, …)` renders a replayed DM message with the code that renders a live hub
+reply — **there is no second renderer, and no imitation to keep in step**. A conversation's
+decoration (the rule, the speaker's name) is a property of the *flow position*, not of the message,
+which is why `UiMessage` gained no field and its nineteen construction sites went untouched.
+
+**Symmetry is the rule, including for the hub.** Switching stashes the outgoing draft and restores
+the incoming one, prints the rule, replays the last 30 messages, and makes that conversation the only
+one that prints live. Returning to the hub is the same operation. One deviation, recorded because it
+is a deviation: the hub's replay is **its unprinted tail rather than a cloned budget-bounded tail**.
+The hub's store *is* the flow, so its tail has never been printed and printing it is the rehydration;
+cloning the last thirty on top would print a third copy of rows still physically on the same screen,
+a couple of hundred milliseconds of scrolling away. The budget is meaningful exactly for the
+conversations whose store is somewhere else, and that is where it is applied.
+
+**Cadence.** D88's accounting rides the fifteen-tick registry poll, which is right for a presence
+strip and wrong for a message you are waiting on. The active conversation is polled **every** tick
+instead — one conversation's worth of work, and it is the one on screen — which is also what removes
+the window in which a landing message would have shown twice, once in the live tail and once in the
+flow. The retired modal did this much work per *frame*, for every conversation.
+
+**Esc is navigation before interruption.** `EscLayer::BackToHub` sits directly above `Interrupt` in
+D80's stack: transient layers over a conversation still peel first, then the conversation returns
+home, and only at the hub does Esc reach the turn. A turn running behind a DM survives the press, and
+the status row stops promising otherwise (`esc to hub`). Ctrl+C keeps the unconditional interrupt.
+The reasoning is the same one D80 used to put the interrupt *inside* the list rather than above it:
+Esc acts on the thing the user is looking at.
+
+**What the composer does** is decided before `busy` is consulted, because `busy` is the hub's state.
+In a conversation the text is delivered, not queued and not steered — D83 offers the running turn the
+hub's submissions only, which is now pinned by a test rather than true by accident. Slash commands
+fall through to the unchanged path from every conversation, so `/model` in a DM is still `/model`.
+
+**Access, interim.** `/open <@agent|#channel|#team|hub>` with argument completion from D85's registry
+(candidates are the buffer registry itself, so an offered name is a conversation that exists), Enter
+on an agent in the ctrl+b manager, and Esc home. The conversation bar, `ctrl+k`, `@`/`#` line-leading
+routing and the `#team` board's own rendering are D90 and were deliberately not built here.
+
+**Two further deviations from the brief, both for the same reason — no second renderer.** The brief
+said to leave `ctrl+o` showing the hub session alone. It shows the flow instead, excursions and
+their rules included, because D82 built the pager on `build_rows` precisely so it could never
+disagree with the screen, and `build_rows` now prints the flow; filtering the conversations back out
+would mean a second row builder in exchange for showing the reader less than their terminal actually
+printed. Which conversation the pager should be scoped to is a real question and belongs beside
+D90's bar, where there is a way to say "this one"; the behaviour is pinned by a test rather than
+left accidental. Second, **portraits did not follow DM and channel rows into the flow**. The gutter
+that carried them was the modal's message-list layout, and rebuilding it here would have been new
+avatar machinery, which the brief rules out. The plumbing survives where it was already used — the
+`experimental.chatAvatars` band and the watch row — and what a DM or channel row gets instead is the
+sender's name heading each run of messages, which is the part that was load-bearing: with more than
+two speakers in a room the name is not decoration.
+
+**Accepted costs, named.** Repeated excursions leave a conversation in scrollback more than once —
+write-once is what makes that unavoidable and the rules are what make it legible. Two capabilities
+died with the modal rather than being quietly carried: the per-instance
+context-usage meter, which only its composer footer displayed (`AgentRegistry::context_usage`, its
+setter and the field behind it are deleted; the `on_context_usage` hook stays wired so a later
+surface needs no re-plumbing), and `ChannelRegistry::seen_of`, whose only reader was the sidebar
+badge that D88's own accounting replaced. The instance's live token rate did *not* die — it moved to
+the `⠙ name is replying…` row, which is the same fact at the same moment.
+
+**D88's `#![cfg_attr(not(test), allow(dead_code))]` is deleted, as it said it would be.** Living up
+to the rest of that sentence — "anything still unused afterwards is genuinely dead" — cost `Source`
+and `BufferId::source()`, which named where a transcript lives but which nothing consults now that
+every store is reached through `rehydrate`, plus four accessors D90 can re-add as three-line getters
+when its bar reads them. In their place `BufferId::rule()` earned its keep: the replay and the
+hand-back to the hub both format the divider through it, so the two can never drift.
+
+`slack.rs`'s survivors moved rather than died. `Post`/`PostKind`/`channel_posts`/`dm_posts` and their
+private helpers went to `buffer.rs`, beside the engine that was already their only non-modal caller —
+D64's `[DM from user]` rules, the scaffolding collapse and the live-turn tail travel with them
+untouched. `Palette`, `sender_band`, `gutter_cell` and the chip fallback went to `avatar.rs`, which
+is what they are; `stamp` went to `buffer.rs`, because a send time is a conversation's. Net: 1979
+lines added against 4206 removed — **−2227** — across 21 files, one of them new (`bufferview.rs`,
+1056 lines, half of it tests); 34 tests deleted with the code they tested and 19 added, for
+1266 + 13 green; and both hosts render every conversation through the one builder they already
+shared, because there was never a second one to make agree.
