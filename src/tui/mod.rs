@@ -13,6 +13,8 @@
 //!   (`build_rows`); [`slash`] owns slash command metadata and pure
 //!   suggestion/help transformations.
 //! - [`app`] is the event loop and the frame assembly.
+//! - [`notify`] builds the attention channel's bytes (bell, notification OSC,
+//!   terminal title); like [`gfx`], it builds and never writes.
 //! - [`view`] converts document rows to ratatui text; [`term`] is the only
 //!   module that writes to the terminal.
 //!
@@ -34,6 +36,7 @@ pub mod line;
 pub mod markdown;
 pub mod math;
 pub mod model_menu;
+pub mod notify;
 pub mod picker;
 pub mod slack;
 #[cfg(test)]
@@ -46,7 +49,7 @@ pub(crate) mod test_util;
 pub mod theme;
 mod view;
 
-use std::io::stdout;
+use std::io::{Write as IoWrite, stdout};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -70,6 +73,10 @@ use crate::tui::theme::{Theme, ThemeSetting};
 static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Which teardown the active host owes (alternate screen or inline).
 static TUI_FULLSCREEN: AtomicBool = AtomicBool::new(false);
+/// Whether this session ever set a terminal title (D79). The teardown hands the
+/// title back only when it took it: a session with `notifications: "off"` never
+/// wrote one, and clearing it would throw away whatever the shell had put there.
+static TUI_TITLE: AtomicBool = AtomicBool::new(false);
 static PANIC_HOOK: std::sync::Once = std::sync::Once::new();
 
 std::thread_local! {
@@ -92,6 +99,12 @@ std::thread_local! {
 /// panic hook — nothing here allocates a message or unwinds.
 fn restore_terminal(fullscreen: bool) {
     let mut out = stdout();
+    // The title is this session's only mark outside its own screen area, so it
+    // goes back first, and only if it was ever taken (D79).
+    if TUI_TITLE.swap(false, Ordering::SeqCst) {
+        let _ = out.write_all(notify::RESET_TITLE);
+        let _ = out.flush();
+    }
     if fullscreen {
         let _ = execute!(
             out,
@@ -195,6 +208,17 @@ pub async fn run_tui_session(
         detected_background,
     );
     chat.image_cap = image_cap;
+    // Attention channel (D79). The environment is read here, once, and handed
+    // down resolved: `notify` decides nothing about the terminal on its own, so
+    // its tests do not depend on the shell that launched them.
+    let notifier = notify::Notifier::new(
+        notify::NotifyChannel::parse(session.settings.notifications.as_deref()),
+        &notify::TerminalEnv::from_env(),
+    );
+    if notifier.enabled() {
+        TUI_TITLE.store(true, Ordering::SeqCst);
+    }
+    chat.set_notifier(notifier);
     // Inside tmux, a failed passthrough probe (outer terminal lacking kitty
     // support, passthrough off, or an unfocused pane) yields a one-time hint
     // explaining why images stay `#[image]` placeholders.

@@ -79,6 +79,24 @@ impl<W: IoWrite> RawWrite for CrosstermBackend<W> {
 /// paints no cells), so no cursor bookkeeping and no synchronized-update
 /// bracket are needed.
 pub fn write_transmits<B: RawWrite>(backend: &mut B, bytes: &[u8]) -> Result<(), B::Error> {
+    write_out_of_band(backend, bytes)
+}
+
+/// Write attention bytes — bell, desktop-notification OSC, `OSC 2` title — and
+/// flush. Built by [`crate::tui::notify`], emitted here: this module stays the
+/// only writer of escape sequences, so the payload lands between frames instead
+/// of inside a viewport diff.
+///
+/// Position-independent for the same reason the transmits are: none of these
+/// sequences moves the cursor or paints a cell, so they need no cursor
+/// bookkeeping and no synchronized-update bracket.
+pub fn write_attention<B: RawWrite>(backend: &mut B, bytes: &[u8]) -> Result<(), B::Error> {
+    write_out_of_band(backend, bytes)
+}
+
+/// Bytes that belong to no cell: written verbatim at whatever position the
+/// cursor happens to be parked at, then flushed.
+fn write_out_of_band<B: RawWrite>(backend: &mut B, bytes: &[u8]) -> Result<(), B::Error> {
     if bytes.is_empty() {
         return Ok(());
     }
@@ -164,6 +182,12 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
     /// Emit image transmit bytes; see [`write_transmits`].
     pub fn write_transmits(&mut self, bytes: &[u8]) -> Result<(), B::Error> {
         write_transmits(&mut self.backend, bytes)
+    }
+
+    /// Emit attention bytes (bell / notification OSC / title); see
+    /// [`write_attention`]. Called between frames, never inside one.
+    pub fn write_attention(&mut self, bytes: &[u8]) -> Result<(), B::Error> {
+        write_attention(&mut self.backend, bytes)
     }
 
     /// Accept a new terminal size.
@@ -790,6 +814,26 @@ mod tests {
         write_transmits(&mut backend, b"\x1b_Ga=T\x1b\\").unwrap();
         let raw = String::from_utf8_lossy(&backend.raw);
         assert_eq!(raw, "\x1b_Ga=T\x1b\\");
+    }
+
+    /// D79: the attention bytes take the same out-of-band path as the image
+    /// transmits — verbatim, no synchronized-update bracket, no cursor move —
+    /// and the driver still owns the write, so nothing else in the crate has to
+    /// touch stdout to ring a bell.
+    #[test]
+    fn write_attention_is_verbatim_and_skips_empty() {
+        let mut backend = Recorder::new(20, 6);
+        write_attention(&mut backend, &[]).unwrap();
+        assert!(backend.raw.is_empty(), "empty bytes are a no-op");
+
+        let mut term = term(20, 6, 3);
+        term.write_attention(b"\x07\x1b]2;bingo\x07").unwrap();
+        let backend = term.finish().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&backend.raw),
+            "\x07\x1b]2;bingo\x07",
+            "the payload goes out as it was built"
+        );
     }
 
     /// Fill the viewport buffer with `rows`, top-down.

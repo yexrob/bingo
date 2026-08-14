@@ -27,6 +27,7 @@ use crate::tui::avatar;
 use crate::tui::gfx::{self, ImageCap};
 use crate::tui::line::{Line, SegStyle, text_width, wrap_words};
 use crate::tui::markdown::MarkdownRenderer;
+use crate::tui::notify::{Attention, Notifier, Title};
 use crate::tui::theme::{Theme, ThemeSetting};
 use crate::ui::{AskRequest, DialogAction, ImageMeta, PermissionRequest, UiEvent};
 use crate::watch::WatchState;
@@ -988,6 +989,10 @@ pub struct Chat {
     /// motion off (settings `motion:"off"` or `BINGO_NO_MOTION=1`): breathing rests at the rest color
     /// and the banner stays (update-banner spec §2.5 "the indicator does not disappear, it just stops").
     pub(crate) motion_off: bool,
+    /// Attention channel (D79): builds the bell / notification OSC / terminal
+    /// title bytes the host collects after each frame. Silent by default —
+    /// only [`Chat::set_notifier`] gives it a channel.
+    pub notify: Notifier,
     /// Slash command output lines (/help /status etc.): rendered after messages, settled when idle.
     pub slash_lines: Vec<String>,
     /// When the slash output appeared (auto-dismissed by tick timeout).
@@ -1304,6 +1309,7 @@ impl Chat {
             update_banner_start: 0,
             update_banner_stopped: false,
             motion_off,
+            notify: Notifier::default(),
             slash_lines: Vec::new(),
             slash_at: None,
             slash_error_lines: Vec::new(),
@@ -1348,6 +1354,21 @@ impl Chat {
         handled
     }
 
+    /// Install the attention channel and take the terminal title with it (D79).
+    /// The host does this once, at startup; everything else leaves the
+    /// default-silent notifier alone.
+    pub fn set_notifier(&mut self, notifier: Notifier) {
+        self.notify = notifier;
+        self.notify_idle();
+    }
+
+    /// Title the terminal for an idle session — no turn running, nothing
+    /// waiting on the user.
+    fn notify_idle(&mut self) {
+        let cwd = crate::tui::notify::cwd_short(&self.cwd).to_string();
+        self.notify.set_title(Title::Idle(&cwd));
+    }
+
     /// Drains the permission channel (one at a time: a new request is only accepted when none is pending).
     pub fn drain_asks(&mut self) -> bool {
         if self.pending_ask.is_none()
@@ -1356,6 +1377,10 @@ impl Chat {
             self.ask_focus = 0;
             self.ask_other.clear();
             self.pending_ask = Some(request);
+            // The turn is blocked until this is answered, and the user may well
+            // be looking somewhere else by now (D79).
+            self.notify.attention(Attention::WaitingPermission);
+            self.notify.set_title(Title::WaitingPermission);
             return true;
         }
         false
@@ -1409,6 +1434,7 @@ impl Chat {
                 self.output_tokens = 0;
                 self.output_round_tokens = 0;
                 self.token_rate.start(now);
+                self.notify.set_title(Title::Busy);
                 self.messages.push(UiMessage {
                     role: Role::Assistant,
                     text: String::new(),
@@ -1837,6 +1863,16 @@ impl Chat {
             }
             UiEvent::TurnEnd => {
                 self.busy = false;
+                // A turn short enough to have been watched needs no
+                // notification; a long one is exactly what the user walked away
+                // from (D79). Read before the start time is cleared.
+                if self
+                    .turn_started
+                    .is_some_and(|at| at.elapsed() >= crate::tui::notify::LONG_TURN)
+                {
+                    self.notify.attention(Attention::TurnComplete);
+                }
+                self.notify_idle();
                 self.turn_started = None;
                 self.output_tokens = 0;
                 self.output_round_tokens = 0;
@@ -1948,6 +1984,13 @@ impl Chat {
                     self.drop_empty_stream_message();
                     self.stream_msg = None;
                     self.stream_attempt_checkpoint = None;
+                }
+                // A flow-level failure ends the turn on a screen the user has to
+                // come back to; a page-level one is a hint beside a session that
+                // carries on, and carries no notification (D79).
+                if level == crate::error::ErrorLevel::Full {
+                    self.notify.attention(Attention::TurnFailed);
+                    self.notify_idle();
                 }
                 // #18: structured error-state record (code/msg/level/context); the render side uses it to
                 // produce the error row (Page/Field) or the full-screen state (Full) — independent of message-text
@@ -3390,6 +3433,7 @@ impl Chat {
             "apiBaseUrl",
             "shell",
             "motion",
+            "notifications",
         ] {
             let entry = match lookup(key) {
                 Some((value, source)) => format!("  {key:18} = {value} ({source} layer)"),

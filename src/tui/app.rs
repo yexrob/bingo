@@ -50,7 +50,7 @@ use crate::tui::el;
 use crate::tui::gfx;
 use crate::tui::line::{Line, SegStyle};
 use crate::tui::statics::pick_flush_mark;
-use crate::tui::term::{StdoutTerm, write_transmits};
+use crate::tui::term::{StdoutTerm, write_attention, write_transmits};
 use crate::tui::view;
 use ratatui::text::Line as TextLine;
 
@@ -505,6 +505,9 @@ pub async fn run_inline(
             bytes.extend_from_slice(&avatar_transmits(cap, &chat.faces, &mut transmits));
             term.write_transmits(&bytes)?;
         }
+        // Attention channel (D79): bell / notification OSC / terminal title,
+        // emitted after the frame so it never lands mid-diff.
+        term.write_attention(&chat.notify.take())?;
         if chat.exit {
             break;
         }
@@ -689,6 +692,9 @@ pub async fn run_fullscreen(
             bytes.extend_from_slice(&avatar_transmits(cap, &chat.faces, &mut transmits));
             write_transmits(terminal.backend_mut(), &bytes)?;
         }
+        // Attention channel (D79). The fullscreen host has no inline driver, so
+        // its single write point is the crossterm backend behind the Terminal.
+        write_attention(terminal.backend_mut(), &chat.notify.take())?;
         if chat.exit {
             break;
         }

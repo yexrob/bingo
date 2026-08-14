@@ -254,3 +254,172 @@ fn an_interrupted_group_member_still_has_nothing_to_expand() {
         "the finished call is readable: {expanded}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// D79 — the attention channel's trigger points.
+//
+// The byte goldens live in `notify.rs`; these assert who pulls the trigger, in
+// the state machine that actually pulls it. The notifier is the mock writer:
+// nothing reaches a terminal, and `take()` returns exactly what would have.
+// ---------------------------------------------------------------------------
+
+use crate::tui::notify::{Notifier, NotifyChannel, TerminalEnv};
+
+/// A chat wired to the bell channel, its startup title already collected.
+fn chat_with_bell() -> Chat {
+    let mut chat = crate::tui::test_util::chat_at(80, 24);
+    chat.set_notifier(Notifier::new(NotifyChannel::Bell, &TerminalEnv::default()));
+    let startup = String::from_utf8_lossy(&chat.notify.take()).to_string();
+    assert!(
+        startup.starts_with("\x1b]2;bingo — "),
+        "a session names its directory as soon as it has the terminal: {startup:?}"
+    );
+    chat
+}
+
+fn emitted(chat: &mut Chat) -> String {
+    String::from_utf8_lossy(&chat.notify.take()).to_string()
+}
+
+/// The title an idle session wears, for this chat's directory.
+fn idle_title(chat: &Chat) -> String {
+    format!(
+        "\x1b]2;bingo — {}\x07",
+        crate::tui::notify::cwd_short(&chat.cwd)
+    )
+}
+
+/// Move the running turn's start stamp far enough back to cross the threshold.
+fn age_the_turn(chat: &mut Chat) {
+    chat.turn_started = Some(
+        std::time::Instant::now()
+            .checked_sub(crate::tui::notify::LONG_TURN + std::time::Duration::from_secs(1))
+            .expect("the process has been running for longer than the threshold"),
+    );
+}
+
+/// A permission prompt blocks the turn until it is answered, and the user is
+/// the only one who can answer it — so it is the one event that notifies
+/// regardless of how long the turn has run.
+#[test]
+fn a_waiting_permission_prompt_rings() {
+    let mut chat = chat_with_bell();
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    chat.asks
+        .send((
+            PermissionRequest::new("Allow running Bash", "cargo build", vec!["Allow".into()]),
+            tx,
+        ))
+        .unwrap();
+    assert!(chat.drain_asks(), "the request is accepted");
+    assert_eq!(
+        emitted(&mut chat),
+        "\x07\x1b]2;✳ bingo — waiting for permission\x07",
+        "bell first, then the title that says what it is waiting for"
+    );
+
+    // A second request cannot be accepted while one is pending, so it cannot
+    // ring either — the modal is already on screen.
+    let (tx2, _rx2) = tokio::sync::oneshot::channel();
+    chat.asks
+        .send((
+            PermissionRequest::new("Allow running Bash", "cargo test", vec!["Allow".into()]),
+            tx2,
+        ))
+        .unwrap();
+    assert!(!chat.drain_asks());
+    assert!(
+        emitted(&mut chat).is_empty(),
+        "no second bell for a queued ask"
+    );
+}
+
+/// A turn the user sat through is not news. The threshold is wall time, taken
+/// before `TurnEnd` clears the start stamp.
+#[test]
+fn only_a_long_turn_announces_its_end() {
+    let mut chat = chat_with_bell();
+
+    chat.handle(UiEvent::TurnStart);
+    assert_eq!(
+        emitted(&mut chat),
+        "\x1b]2;✳ bingo — working…\x07",
+        "the title goes busy the moment the turn opens"
+    );
+    let idle = idle_title(&chat);
+    chat.handle(UiEvent::TurnEnd);
+    assert_eq!(
+        emitted(&mut chat),
+        idle,
+        "a turn that just started rings nothing; it only hands the title back"
+    );
+
+    chat.handle(UiEvent::TurnStart);
+    let _ = chat.notify.take();
+    age_the_turn(&mut chat);
+    chat.handle(UiEvent::TurnEnd);
+    assert_eq!(
+        emitted(&mut chat),
+        format!("\x07{idle}"),
+        "a turn long enough to walk away from rings, then goes idle"
+    );
+}
+
+/// A flow-level failure is the end of the turn; a page-level one is a hint
+/// beside a session that carries on, and interrupting the user for it would
+/// make the channel worthless.
+#[test]
+fn only_a_flow_level_failure_announces_itself() {
+    let mut chat = chat_with_bell();
+
+    chat.handle(UiEvent::TurnStart);
+    let _ = chat.notify.take();
+    chat.handle(UiEvent::Error {
+        code: "SERVER_ERROR",
+        msg: "model list unavailable".into(),
+        level: crate::error::ErrorLevel::Page,
+        context: crate::error::ErrorContext::ShortSync,
+    });
+    assert!(
+        emitted(&mut chat).is_empty(),
+        "a page-level error keeps the busy title and stays quiet"
+    );
+
+    let idle = idle_title(&chat);
+    chat.handle(UiEvent::Error {
+        code: "TIMEOUT",
+        msg: "long turn interrupted".into(),
+        level: crate::error::ErrorLevel::Full,
+        context: crate::error::ErrorContext::LongTurn,
+    });
+    assert_eq!(
+        emitted(&mut chat),
+        format!("\x07{idle}"),
+        "the failure rings, and the title stops claiming work is in progress"
+    );
+}
+
+/// The whole channel is opt-out in one key: a chat left with the default
+/// notifier drives every trigger and writes nothing.
+#[test]
+fn the_default_chat_is_silent_on_every_trigger() {
+    let mut chat = crate::tui::test_util::chat_at(80, 24);
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    chat.asks
+        .send((
+            PermissionRequest::new("Allow running Bash", "cargo build", vec!["Allow".into()]),
+            tx,
+        ))
+        .unwrap();
+    assert!(chat.drain_asks());
+    chat.handle(UiEvent::TurnStart);
+    age_the_turn(&mut chat);
+    chat.handle(UiEvent::TurnEnd);
+    chat.handle(UiEvent::Error {
+        code: "TIMEOUT",
+        msg: "long turn interrupted".into(),
+        level: crate::error::ErrorLevel::Full,
+        context: crate::error::ErrorContext::LongTurn,
+    });
+    assert!(chat.notify.take().is_empty());
+}

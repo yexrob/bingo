@@ -1234,3 +1234,74 @@ every group in one pass, so the keyboard route needed nothing.
 The tests went into a new `chat_tests_c.rs`: `chat_tests_b.rs` stood at 3785 lines against the
 discipline gate's 4000-line cap, and the split is what the gate asks for. `chat_tests_a` /
 `chat_tests_b` were already split by size alone.
+
+### D79. Feedback for the user who is not looking
+
+bingo had no way of reaching a user who had switched away: no bell, no desktop notification, no
+terminal title. A permission prompt could block a turn for as long as it took someone to glance
+back at the window, and a ten-minute turn finished into an empty room. Every feedback state the
+project had specified assumed eyes on the screen — which contradicts the first principle of
+`feedback-states.md`, that feedback must not depend on the environment. The terminal *is* an
+environment where the user is routinely somewhere else.
+
+**The channel.** One settings key, `notifications`, with the usual three-layer merge and a `/config`
+line: `auto` (default), `bell`, `iterm2`, `kitty`, `ghostty`, `off`. `auto` reads the terminal —
+`TERM_PROGRAM=iTerm.app` → `OSC 9`, kitty (`TERM_PROGRAM` or `TERM=xterm-kitty`) → the three-part
+`OSC 99`, `TERM_PROGRAM=ghostty` → `OSC 777 ; notify` — and falls back to the terminal bell, which
+every terminal has. There is deliberately no probe. The image layer can afford one because the kitty
+graphics protocol answers a query; a notification protocol has none, so a wrong guess is not a
+failed handshake but silence, and the only safe default for an unknown terminal is the sequence that
+predates all of them. `off` silences the title too: a user who turned notifications off did not ask
+for their tab to be renamed either.
+
+**Who writes.** `notify.rs` builds bytes and writes nothing, the same split `gfx.rs` already has
+with the image transport. The inline host's rendering invariant is that `term.rs` is the single
+owner of escape-sequence writes, and a bell emitted from the state machine would land in the middle
+of a viewport diff. So the term layer grew one narrow pair — `write_attention` beside
+`write_transmits`, both over the same out-of-band helper — and the two hosts collect
+`chat.notify.take()` after their frame (the fullscreen host through the crossterm backend behind its
+`Terminal`, its equivalent single write point). Attention bytes are position-independent by the same
+contract the transmits have: no cursor moves, no cell is painted, so they need no synchronized-update
+bracket.
+
+**tmux.** A notification OSC goes in the passthrough envelope, reusing `gfx`'s `tmux_passthrough`:
+tmux has never heard of 9/99/777 and drops them. The bell does not — tmux acts on a bell it can
+see, and wrapping it would hide it from `monitor-bell`, which is the whole point of falling back to
+a bell inside a multiplexer. The **title** is bare for the mirror-image reason: `OSC 2` is a
+sequence tmux *does* understand, sets as the pane title, and propagates to the window title under
+`set-titles on`; passthrough would set the outer terminal's title behind tmux's back and tmux would
+overwrite it on its next redraw. The spec's "wrap OSC, not bell" rule sits under the notification
+sequences, and this is that rule read at the level it was written for — the title's correct
+envelope is decided by whether tmux understands the sequence, and it does.
+
+**When.** Three triggers, and nothing else: a permission ask accepted by `drain_asks` (the turn is
+blocked and only the user can unblock it), a `TurnEnd` whose wall time reached 10s, and a
+flow-level `UiEvent::Error`. A queued ask does not ring — the modal it would announce is already on
+screen. A short turn does not ring — it was watched. A page-level error does not ring — it is a hint
+beside a session that carries on, and a channel that fires for those is a channel users turn off.
+The bodies are one line each and say only the state: `Waiting for permission`, `Turn complete`,
+`Turn failed`. A body like `Turn complete · 214 tests passed` would put information in a
+notification that exists nowhere else, and notifications are not a surface anything can be read
+back from.
+
+**The title** carries the same three states continuously, which is the part that works while the
+user is looking *at* the tab bar: `✳ bingo — working…` at `TurnStart`, `✳ bingo — waiting for
+permission` when an ask lands, `bingo — {directory}` when idle. It repeats nothing (an unchanged
+title emits no bytes) and is handed back on the way out — an empty `OSC 2` from `restore_terminal`,
+so D77's panic hook covers it for free, and it was trivially reachable there because that function
+is already a list of fixed sequences that allocates nothing. It is gated on a `TUI_TITLE` latch set
+only when the channel is enabled: a session that never took the title must not clear whatever the
+shell had put there.
+
+**Environment sealing.** Library code does not read the environment — it is what keeps the test
+suite from depending on the shell that launched it, the same rule `Session::user_config_dir`
+follows for the config directory. `TerminalEnv` is read once in `tui::run_tui_session` and handed
+down resolved, so the auto-detection matrix is a table test over a struct rather than a test that
+mutates process state. `Notifier::default()` is the disabled channel, which makes every existing
+`Chat` in the suite silent by construction and makes "did this trigger fire?" a question about
+bytes rather than about a terminal.
+
+No focus tracking in this batch. A notification fires whether or not the terminal is in front, which
+is what CC does, and the alternative — a focus-tracking mode enabled with `CSI ?1004h` and drained
+out of the event stream — is a second piece of terminal state to own for a refinement nobody has
+asked for yet.
