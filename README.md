@@ -563,6 +563,17 @@ every room with its members, and the last ten lifecycle events (spawn, done, and
 room under the cursor. It navigates and informs only — stopping an agent stays
 in the Ctrl+B manager.
 
+**Every agent has a page of its own.** `tab` on an agent in the Ctrl+B manager's
+detail opens its perspective page: a read-only, two-level dossier of everything
+it has said and been told. The index groups its threads — a merged `timeline`,
+its `direct messages` one row per counterpart, its `rooms`, and the `intake` it
+was handed — with a count and a clock on each; Enter opens a thread, Esc walks
+back, `q` closes. A thread reads as a conversation with that agent as the
+protagonist: its thinking and tool calls are shown in *every* thread, whoever it
+was talking to. This is the audit layer — the one place an agent's conversations
+with someone other than you are visible, while your own DM with it stays a pair
+conversation and mixes nothing in. It is a snapshot: reopening is the refresh.
+
 **Avatars**: on terminals that can place kitty images — the same capability
 behind inline image rendering (Ghostty/kitty, and tmux with passthrough) — each
 sender wears one of eight bundled [anime-style portraits](assets/avatars/), 4×2

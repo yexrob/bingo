@@ -696,22 +696,83 @@ pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
         .collect()
 }
 
-/// One line of runtime scaffolding → how it reads collapsed, or `None` for text
-/// a person actually wrote. The shapes are the ones `absorb_inbox` and the task
-/// reminder compose, so this stays in step with them by construction: anything
-/// the runtime wraps in its own brackets is not a message from the user.
-fn scaffold_note(line: &str) -> Option<String> {
+/// What one line of a stored user-role message *is*, by the shape the runtime
+/// composed it in (`absorb_inbox`, the task reminder, the steer path).
+///
+/// One parser, two readers. The DM view collapses these to dim notes and throws
+/// the source away, because a pair conversation has only two parties and the
+/// bubble already says which. The perspective page (D96) needs the source
+/// itself, to decide which thread a line belongs to. Recognising the shapes
+/// twice was the one thing worth avoiding, so they are recognised here and each
+/// caller takes what it needs.
+///
+/// Anything the runtime wraps in its own brackets is not a message somebody
+/// typed; `None` is prose, which is the hub's default voice (the hub is the one
+/// sender `direct_text` leaves unmarked).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LineSource {
+    /// The human, under the D64 marker.
+    User,
+    /// A room message relayed into the agent's context. `body` is the relay's
+    /// own `from: text`, the one scaffolding shape that kept a sender's name.
+    Room { channel: String, body: String },
+    /// The hub, labelled because a batch made the boundaries ambiguous. Unlike
+    /// every other bracketed shape this one carries a real instruction.
+    HubBatched { text: String },
+    /// An automatic chase for a hub message nobody answered. Carries no
+    /// instruction — only the fact that somebody is still waiting.
+    Chase,
+    /// The task reminder. A *block*, not a line: everything after it in the
+    /// same message belongs to it.
+    TaskReminder,
+}
+
+/// The scaffolding shapes, recognised once. See [`LineSource`].
+pub fn line_source(line: &str) -> Option<LineSource> {
     let line = line.trim_end();
+    if line.starts_with(crate::query::TASK_REMINDER_MARKER) {
+        return Some(LineSource::TaskReminder);
+    }
+    if line == crate::tool::agent::DM_FROM_USER_MARKER {
+        return Some(LineSource::User);
+    }
     if let Some(rest) = line.strip_prefix("[#")
         && let Some((head, body)) = rest.split_once("] ")
         && let Some((channel, _)) = head.split_once(' ')
     {
-        return Some(format!("#{channel} · {body}"));
+        return Some(LineSource::Room {
+            channel: channel.to_string(),
+            body: body.to_string(),
+        });
     }
-    if line.starts_with("[follow-up ") {
-        return Some("follow-up · waiting for a reply".to_string());
+    if let Some(rest) = line.strip_prefix("[follow-up ") {
+        // `[follow-up instruction] …` and `[follow-up 2/3] …` share a prefix and
+        // mean opposite things: the first is the hub talking, the second is the
+        // runtime reporting silence.
+        return Some(match rest.strip_prefix("instruction]") {
+            Some(text) => LineSource::HubBatched {
+                text: text.trim_start().to_string(),
+            },
+            None => LineSource::Chase,
+        });
     }
     None
+}
+
+/// One line of runtime scaffolding → how it reads collapsed, or `None` for text
+/// a person actually wrote.
+fn scaffold_note(source: &LineSource) -> Option<String> {
+    match source {
+        LineSource::Room { channel, body } => Some(format!("#{channel} · {body}")),
+        // Both follow-up shapes collapse to one line here. The DM view has
+        // nowhere to put the distinction — see the perspective page, which does.
+        LineSource::HubBatched { .. } | LineSource::Chase => {
+            Some("follow-up · waiting for a reply".to_string())
+        }
+        // Handled by `user_posts` before it gets this far: one is dropped, the
+        // other ends the message.
+        LineSource::User | LineSource::TaskReminder => None,
+    }
 }
 
 /// A user-role message → posts. Runtime scaffolding collapses to [`PostKind::Note`]
@@ -734,37 +795,39 @@ fn user_posts(text: &str, at: u64, me: &str) -> Vec<Post> {
         });
     };
     for line in text.lines() {
-        // The task reminder is a block, not a line: its marker heads a paragraph
-        // of instructions and the current task list, and everything after it in
-        // this message belongs to it.
-        if line.starts_with(crate::query::TASK_REMINDER_MARKER) {
-            flush(&mut plain, &mut out);
-            out.push(Post {
-                from: me.to_string(),
-                you: true,
-                at: 0,
-                text: "system note · task tools".to_string(),
-                kind: PostKind::Note,
-            });
-            return out;
-        }
-        // The user's own DM marker is transport scaffolding: the bubble already says who
-        // spoke, so the line is dropped rather than shown — but it still flushes, so two
-        // batched DMs stay two bubbles instead of one merged paragraph.
-        if line.trim_end() == crate::tool::agent::DM_FROM_USER_MARKER {
-            flush(&mut plain, &mut out);
-            continue;
-        }
-        match scaffold_note(line) {
-            Some(note) => {
+        match line_source(line) {
+            // The task reminder is a block, not a line: its marker heads a
+            // paragraph of instructions and the current task list, and
+            // everything after it in this message belongs to it.
+            Some(LineSource::TaskReminder) => {
                 flush(&mut plain, &mut out);
                 out.push(Post {
                     from: me.to_string(),
                     you: true,
                     at: 0,
-                    text: note,
+                    text: "system note · task tools".to_string(),
                     kind: PostKind::Note,
                 });
+                return out;
+            }
+            // The user's own DM marker is transport scaffolding: the bubble already says who
+            // spoke, so the line is dropped rather than shown — but it still flushes, so two
+            // batched DMs stay two bubbles instead of one merged paragraph.
+            Some(LineSource::User) => {
+                flush(&mut plain, &mut out);
+                continue;
+            }
+            Some(source) => {
+                if let Some(note) = scaffold_note(&source) {
+                    flush(&mut plain, &mut out);
+                    out.push(Post {
+                        from: me.to_string(),
+                        you: true,
+                        at: 0,
+                        text: note,
+                        kind: PostKind::Note,
+                    });
+                }
             }
             None => plain.push(line),
         }
@@ -775,11 +838,11 @@ fn user_posts(text: &str, at: u64, me: &str) -> Vec<Post> {
 
 /// The collapsed reasoning row, exactly the transcript's header: the phase is
 /// shown, the stream is not.
-const THINKING_ROW: &str = "✻ Thinking";
+pub(crate) const THINKING_ROW: &str = "✻ Thinking";
 
 /// A stored tool-use block → the transcript's call line (`⏺ Bash(git status)`),
 /// the same brick `on_tool_ready` builds the live tail from.
-fn tool_call_line(name: &str, input: &serde_json::Value) -> String {
+pub(crate) fn tool_call_line(name: &str, input: &serde_json::Value) -> String {
     let glyph = crate::tui::activities::tool_glyph(name);
     let shown = crate::tui::activities::display_tool_name(name);
     let summary = crate::query::summarize_input(name, input);

@@ -500,30 +500,8 @@ impl Chat {
                 .into_iter()
                 .map(|line| Row::new(Line::styled(line, SegStyle::fg(theme.text_secondary))))
                 .collect(),
-            // One dim line per work step, like the transcript's tool rows: cut,
-            // not wrapped, so a long command stays one row.
-            PostKind::Process => vec![Row::new(Line::styled(
-                one_line(&post.text, width),
-                SegStyle::fg(theme.text_secondary),
-            ))],
-            _ if post.you => user_message_rows(&post.text, width, theme),
-            _ => self.agent_text_rows(&post.text, width),
+            _ => settled_post_rows(theme, post, width),
         }
-    }
-
-    /// A subagent's prose, rendered the way the hub renders the model's.
-    ///
-    /// Uncached on purpose: this is the streaming tail, its text changes on
-    /// almost every frame, and a cache keyed on text that never repeats is a
-    /// leak with extra steps. The settled copy that lands in the flow goes
-    /// through the transcript's own cached path.
-    fn agent_text_rows(&self, text: &str, width: usize) -> Vec<Row> {
-        let mut processor = MarkdownProcessor::default();
-        let mut renderer =
-            MarkdownRenderer::with_theme(width.saturating_sub(2), self.theme.clone());
-        let doc = processor.process_streaming(text);
-        renderer.render(&doc);
-        text_rows(&self.theme, renderer.lines().to_vec())
     }
 
     // -- /open -------------------------------------------------------------
@@ -744,6 +722,47 @@ impl Chat {
             })
             .collect()
     }
+}
+
+/// A *settled* post as rows — the shapes any stored conversation can contain:
+/// a message somebody sent, a line nobody said, a step of an agent's work.
+///
+/// Split out of [`Chat::tail_post_rows`] for D96: the perspective page renders
+/// the same posts with no instance behind them, and a second renderer beside
+/// this one is exactly the thing the conversation engine has avoided since D89.
+/// The two live-only kinds stay with the host, because they need the running
+/// instance's clock and colour: [`PostKind::Typing`] and [`PostKind::Queued`].
+pub(crate) fn settled_post_rows(
+    theme: &crate::tui::theme::Theme,
+    post: &Post,
+    width: usize,
+) -> Vec<Row> {
+    match post.kind {
+        // One dim line per work step, like the transcript's tool rows: cut,
+        // not wrapped, so a long command stays one row.
+        PostKind::Process => vec![Row::new(Line::styled(
+            one_line(&post.text, width),
+            SegStyle::fg(theme.text_secondary),
+        ))],
+        // Nobody said it, so it is furniture: the muted tier, one line, no name
+        // over it and no stamp beside it (the source puts its own clock in the
+        // text where it has one).
+        PostKind::Note => vec![Row::new(Line::styled(
+            one_line(&post.text, width),
+            SegStyle::fg(theme.text_muted),
+        ))],
+        _ if post.you => user_message_rows(&post.text, width, theme),
+        _ => agent_text_rows(theme, &post.text, width),
+    }
+}
+
+/// An agent's prose, rendered the way the hub renders the model's.
+fn agent_text_rows(theme: &crate::tui::theme::Theme, text: &str, width: usize) -> Vec<Row> {
+    let mut processor = MarkdownProcessor::default();
+    let mut renderer = MarkdownRenderer::with_theme(width.saturating_sub(2), theme.clone());
+    let doc = processor.process_streaming(text);
+    renderer.render(&doc);
+    text_rows(theme, renderer.lines().to_vec())
 }
 
 #[cfg(test)]

@@ -96,7 +96,7 @@ impl InboxWake {
 
 /// Recovery injection after max_tokens truncation.
 const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
-const MAX_TOKENS_RESUME_PROMPT: &str =
+pub(crate) const MAX_TOKENS_RESUME_PROMPT: &str =
     "Output token limit hit. Resume directly from where you left off. Do not apologize or explain.";
 
 /// Task reminder thresholds (TURNS_SINCE_WRITE / TURNS_BETWEEN_REMINDERS).

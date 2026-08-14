@@ -109,7 +109,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+b",
-        description: "background the running command · manage background agents",
+        description: "background the running command · manage background agents (tab: perspective)",
     },
     Binding {
         keys: "ctrl+k",
@@ -329,7 +329,7 @@ mod tests {
             .unwrap_or_else(|| panic!("ctrl+b binding missing"));
         assert_eq!(
             binding.description,
-            "background the running command · manage background agents"
+            "background the running command · manage background agents (tab: perspective)"
         );
     }
 

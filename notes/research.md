@@ -2700,3 +2700,127 @@ user is not in, but it does mean a room can exist for a while before anyone look
   2 bufferview — observer mode, join/leave round trip; 6 directory — contents, feed order, Enter
   navigation, `j` join, the scoping guard, the empty case; plus the switcher's non-member room and
   three chat-tests for the `EscLayer` slot, the `Ctrl+T` cycle and the directory's key modality).
+
+### D96. The perspective page: every agent is the protagonist of its own record
+
+**Problem.** The model says an agent's communications are a thing you can look at — a grouped,
+read-only dossier, one thread per counterpart, with the agent's own work shown inside each. The code
+had no way to answer the question that page asks, because the page asks *who said this*, and by the
+time anything reaches an agent's history nobody knows. `AgentRegistry::deliver` takes a real `from`
+and `InboxItem::Direct` stores it; then `absorb_inbox` renders the batch into **one flat prompt
+string** and the name is gone. What survives is a handful of literal markers, and only some of them
+name anybody.
+
+**The attribution inventory**, taken at `c4f6fc2` before anything changed. Everything an agent's
+`Vec<Message>` can contain is produced by a `record()` call in `src/query.rs` (plus the compaction
+splice), and `Entry.history` is replaced wholesale by `AgentRegistry::finish` — there is no
+incremental push and no `from` field on a `Message`. So this table is the whole universe:
+
+| Shape in a user-role message | Composed at | Attributed to | Why |
+|---|---|---|---|
+| `[DM from user]` heading a line | `tool::agent::direct_text` (agent.rs:616) | **the user** | D64's one observable difference between "your manager" and "the human" |
+| `[Message from user, sent while you were working]` block | `steer::SteerItem::block_text` | **the user** | a real message from a real person that arrived beside a tool result |
+| unmarked prose | `direct_text`, single item | **the hub** | the hub is the one sender `direct_text` deliberately leaves unmarked |
+| `[follow-up instruction] …` | `direct_text`, batched | **the hub** | the label is added only when a batch makes boundaries ambiguous; the text beside it is a real instruction |
+| `[#{room} msg #{seq}] {from}: {text}` | `absorb_inbox` (agent.rs:666) | **timeline only** | the one marker that kept a sender's name — and the room's own log is the authoritative copy |
+| `[follow-up {n}/{m}] …` | `absorb_inbox` | **intake** | a chase; carries no instruction, only the fact that somebody is waiting |
+| `[SYSTEM NOTIFICATION - TASK REMINDER]` | `query::maybe_inject_task_reminder` | **intake** | a block, not a line: everything after it belongs to it |
+| `<task-notifications>` | `query.rs:988` | **intake** | owner-scoped, so a subagent really does receive these |
+| the first user message | the `Agent` tool's prompt | **intake** | unmarked prose, and still not the hub making conversation — it is the task that created the instance |
+| `[Request interrupted by user]` / `…for tool use` | `query::record_interrupt` | **timeline only** | nobody wrote it |
+| `(summary of the earlier conversation, from automatic compaction)` | `transcript::summary_message` | **timeline only** | ditto |
+| `(Stop hook blocked continuation)`, the max-tokens resume, `<channel-messages>` | `query` | **timeline only** | ditto |
+| `notify_user` tool_use in the agent's own turn | `tool::notify_user` | **the user's lane**, as a message | it is the agent speaking to the user, in the one tool that can |
+
+The last four rows are the load-bearing ones. They are recognised **not** because the page wants to
+show them but because the fallback rule is "unmarked prose is the hub" — so anything unrecognised
+would be filed as the hub speaking, and a page that puts the runtime's words in somebody's mouth is
+worse than a page that omits them.
+
+**What the domain cannot say.** Every production caller of `deliver` passes `main` or `user`:
+`SendMessageTool` (agent.rs:1497, hardcoded `HUB_NAME`), the DM composer (buffer.rs:598,
+`USER_NAME`), `/team assign` (team_cmd.rs:306, `USER_NAME`). And `SendMessage` is assembled only at
+depth 0 (`tools.rs:73`), pinned by `hub_agent_tools_only_at_depth_zero`. **Agent→agent direct
+messages do not exist**; agents reach each other through rooms, which arrive as `InboxItem::Channel`
+and never as `Direct`. The delivery matrix's "agent ↔ agent DM → both perspective pages" row
+therefore describes a capability the code cannot yet express, and this batch does not invent one.
+The counterpart lane is keyed by **name** rather than by an enum precisely so that the day `deliver`
+carries a real sender, the projection needs no change to show it.
+
+**One parser, two readers.** The markers were already half-parsed, in `buffer::scaffold_note` and
+`buffer::user_posts`, whose own header says a second parser beside them "was the one thing worth
+avoiding". So the shapes are now recognised once, in `buffer::line_source` → `LineSource`, and each
+caller takes what it needs: the DM view collapses them to dim notes and throws the source away (a
+pair conversation has two parties and the bubble already says which), while the page keeps the
+source and files by it. `scaffold_note` became a pure function of a `LineSource`, and `user_posts`
+walks the same enum — its output is byte-identical, which is what "the user's `@X` view is
+unchanged" means and why every pre-existing `dm_posts` test was left untouched rather than adjusted.
+
+This is also where a latent bug became visible and was deliberately **not** fixed: `[follow-up
+instruction] …` and `[follow-up {n}/{m}] …` share a prefix, and `scaffold_note` matched both, so a
+batched hub instruction rendered in the DM as `follow-up · waiting for a reply` with its text
+dropped. Pair purity was an acceptance constraint for this batch, so the DM keeps that behaviour;
+`line_source` distinguishes the two, and the perspective page shows the instruction correctly. The
+fix for the DM is a one-line change on top of the enum whenever it is wanted.
+
+**Structure, and one deviation.** The dispatch proposed `src/perspective.rs` (domain) plus
+`src/tui/perspective_ui.rs`. The projection landed at **`src/tui/perspective.rs`** instead, because
+what it produces is `Post` — a presentation type that lives in `tui::buffer` beside `dm_posts` and
+`channel_posts`, the two projections this one is a sibling of. A domain module would have had to
+either duplicate `Post` or invert the dependency, and inverting it to avoid a directory name is a
+worse trade than the name. `dossier()` is pure regardless: it takes a history, its stamps and the
+room logs as data, so every test builds a page without a `Session`.
+
+**The rules the walk applies**, each stated because each is a judgement:
+- **Room lanes come from the channel logs, never from history.** A room thread is `channel_posts` of
+  `log_of(room)` — the whole room with the agent's own rows marked (`you`), because a thread that
+  showed one voice would not be a thread. The relay lines in the agent's history are recorded in the
+  timeline and left out of the room lane, so a lane never disagrees with itself about its own count.
+- **The agent's turns attach to the counterpart it last heard from.** Where interleaving makes exact
+  reply-attribution impossible this is best effort by construction, and it is the reason the
+  timeline exists: completeness lives there, threads are the readable approximation.
+- **Counts are messages, not rows.** Process rows are the agent's work; an index reading `@main (47)`
+  because one turn made forty-five tool calls would be measuring the wrong thing.
+- **Empty lanes are dropped.** A page is a record of what happened.
+- **The timeline is a superset of the history-derived lanes, and deliberately not of the room lanes** —
+  it is complete about the *agent*, and a room's log contains speech the agent may never have been
+  woken for.
+
+**The modal** is the D82 transcript's shape: a self-driving alt-screen loop that owns every key while
+it is up and therefore takes **no `EscLayer` slot** — the same call `run_transcript_modal` makes, and
+the reason `EscLayer::ORDER` did not grow this batch. Both levels live in **one loop**: they share a
+snapshot, a theme and a frame, and two modals would have meant two claims on the terminal and a
+snapshot rebuilt on every Enter, which is exactly the live-ness the page does not want. The thread
+pager **is** `TranscriptState`, unchanged, so `j`/`k`, `g`/`G`, `/` and `n`/`N` mean there what they
+mean under `Ctrl+O`. The cursor at the index walks **lanes, not rows**, so it cannot land on a group
+heading (the D95 directory's rule). `q` closes from either depth and Esc walks one level — except
+while the search input is open, which owns every key, because there `q` is a letter and Esc cancels
+the search.
+
+**`ctrl+e` is unbound, and that is the omission worth naming.** In the transcript it forces
+`Activity::expanded` and `CollapseGroup::expanded` on the hub's messages and rebuilds; a thread's
+rows are `Post`s, which carry a tool call as one collapsed line and carry no output at all. There is
+no second state to show, so binding the key would have meant inventing one.
+
+**One renderer, still.** `Chat::tail_post_rows` was split: the three settled kinds (a message, a
+note, a step of the work) moved to a free `bufferview::settled_post_rows`, and the two live-only
+kinds — the typing indicator and a queued send, which need the running instance's clock and colour —
+stayed with the host. The page and the DM tail therefore print an agent's `⏺ Bash(git status)` with
+the same code rather than with two that agree today.
+
+**Deliberate scoping.** The page navigates and reads. It has no composer, no submit path and no verb:
+a test walks every key it handles and asserts none of them produces anything but movement, opening
+and closing. Live-ness is a snapshot on purpose (D82's precedent) — reopening is the refresh.
+
+**Named limits.** A page today has at most two counterpart lanes, because the domain has two senders.
+A compaction clears an instance's stamps outright (`agents.rs:936`), so a compacted agent's lanes
+sort by a clock that reads zero and the index shows no time beside them. The index has no windowing:
+an agent in more rooms than the terminal is tall scrolls off the bottom, which the thread level's
+pager would solve and the index's does not have. And the page reads the live registry only — an
+agent whose instance is gone has no history to show, while its DM buffer survives.
+
+- 1405 + 13 tests before, 1423 + 13 after (18 new: 9 projection — the attribution catalog, runtime
+  scaffolding staying out of threads, the protagonist rule, `notify_user` as a message, the room
+  thread, the timeline superset, lane ordering, counts, the empty page; 9 modal — the level walk,
+  `q` from either depth, the search input owning `q`/Esc, the lane cursor, snapshot semantics, the
+  read-only guard, the index's groups and counts, the thread's rule, the footer per level).

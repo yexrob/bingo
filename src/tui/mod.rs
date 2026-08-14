@@ -54,6 +54,8 @@ pub mod math;
 pub mod model_menu;
 pub mod motion;
 pub mod notify;
+pub mod perspective;
+pub mod perspective_ui;
 pub mod picker;
 pub mod slash;
 pub mod statics;
@@ -62,7 +64,7 @@ pub(crate) mod term;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub mod theme;
-mod transcript;
+pub(crate) mod transcript;
 mod view;
 
 use std::io::{Write as IoWrite, stdout};

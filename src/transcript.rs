@@ -572,10 +572,11 @@ fn message_entries(lines: Vec<(usize, Line)>) -> Vec<Entry> {
 /// The summary's message form — shared by the in-memory splice
 /// (`compact::compact`) and this projection so both produce the same bytes:
 /// a reloaded session must hand the provider the prefix it already cached.
+pub(crate) const COMPACT_SUMMARY_PREFIX: &str =
+    "(summary of the earlier conversation, from automatic compaction)";
+
 pub(crate) fn summary_message(summary: &str) -> Message {
-    Message::user_text(format!(
-        "(summary of the earlier conversation, from automatic compaction)\n{summary}"
-    ))
+    Message::user_text(format!("{COMPACT_SUMMARY_PREFIX}\n{summary}"))
 }
 
 /// Apply the last compact marker: [summary] + the kept tail before it + every

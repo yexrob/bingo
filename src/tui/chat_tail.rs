@@ -2184,6 +2184,15 @@ impl super::Chat {
                     self.switch_to(crate::tui::buffer::BufferId::Dm(name.clone()));
                     false
                 }
+                // tab opens this agent's perspective page (D96): the read-only
+                // dossier of every conversation it has had, which is a
+                // different question from the one Enter answers ("take me to my
+                // DM with it") and deliberately does not switch the flow.
+                KeyCode::Tab => {
+                    self.open_perspective = Some(name.clone());
+                    self.dirty = true;
+                    false
+                }
                 KeyCode::Char(' ') => false,
                 _ => {
                     self.agent_manager = Some(manager);
@@ -2360,7 +2369,7 @@ impl super::Chat {
                     )));
                 }
                 rows.push(Row::new(Line::styled(
-                    "←/Esc back · Enter opens DM · x stop",
+                    "←/Esc back · Enter opens DM · tab perspective · x stop",
                     SegStyle::fg(self.theme.text_secondary),
                 )));
                 manager_box(rows, width, &self.theme)
