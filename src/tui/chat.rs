@@ -341,8 +341,6 @@ pub const SLASH_SUGGESTIONS_MAX: usize = 5;
 pub const INPUT_ROWS_MAX: usize = 10;
 /// Max rows shown for queued messages (more collapse into `… +N more`).
 pub const QUEUE_ROWS_MAX: usize = 3;
-/// Max running agents shown while the compact entity selector is open.
-pub const ENTITY_ROWS_MAX: usize = 6;
 /// Max running agents shown at once in the background-agent manager.
 pub const AGENT_MANAGER_ROWS_MAX: usize = 8;
 /// Agent detail follows the reference dialog's bounded prompt preview.
@@ -421,6 +419,19 @@ pub const SLASH_OUTPUT_ERROR_TTL: std::time::Duration = std::time::Duration::fro
 /// User message text entering the message flow when AskUserQuestion is declined
 /// (Esc / empty Other submit) — an ordinary message, persistent with the flow.
 pub const ASK_DECLINED_TEXT: &str = "User declined to answer questions";
+
+/// The line a dialog leaves behind when the turn that asked it ended first
+/// (D80). Display-only: the model's history never carries it, because the tool
+/// call that opened the dialog went down with the turn — this is the record for
+/// the user, in the place the dialog used to be.
+pub const ASK_CANCELLED_TEXT: &str = "(pending permission dialog cancelled with the turn)";
+
+/// A user-role message the user never wrote: the harness recorded it to state
+/// what happened. State lines render as a single line — no `❯` bubble putting
+/// words in the user's mouth, and no send stamp, because nothing was sent.
+pub(crate) fn is_state_line(text: &str) -> bool {
+    crate::query::is_interrupt_marker(text) || text == ASK_CANCELLED_TEXT
+}
 
 /// Read/Search-style tool classification.
 pub fn classify_tool(name: &str, input: &serde_json::Value) -> Option<CollapseKind> {
@@ -1055,8 +1066,6 @@ pub struct Chat {
     pub tasks_auto: bool,
     /// Snapshot of the bottom entity area (running agent instances + channels; refreshed on tick/WatchEvent).
     pub entities: Vec<EntityRow>,
-    /// Selection in the compact running-agent list; `None` keeps the one-line presence summary.
-    pub entity_focus: Option<usize>,
     /// Main-view background-agent manager; `None` means the panel is closed.
     pub agent_manager: Option<AgentManager>,
     /// Entity view pending open (app layer consumes → enters the fullscreen modal).
@@ -1335,7 +1344,6 @@ impl Chat {
             tasks_visible: false,
             tasks_auto: false,
             entities: Vec::new(),
-            entity_focus: None,
             agent_manager: None,
             open_entity: None,
             slack: Default::default(),
@@ -1878,6 +1886,11 @@ impl Chat {
                 self.output_round_tokens = 0;
                 self.token_rate.stop();
                 self.thinking_seg_open = false;
+                // A turn that died on its own (error, lost task) leaves its
+                // dialog behind exactly as an interrupt did; the receiver is
+                // already gone, which is what tells it apart from a background
+                // agent's question (D80).
+                self.cancel_asks(true);
                 self.drop_empty_stream_message();
                 // AskUserQuestion answers are ordinary user messages (in the message flow,
                 // settled/flushed with it) — nothing to clean at turn end, they persist with the session.
@@ -3756,6 +3769,14 @@ pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<
         return vec![Row::new(Line::styled(
             crate::tui::markdown::truncate(text, width.max(1)),
             SegStyle::fg(theme.error),
+        ))];
+    }
+    // A dialog the turn outlived: nothing failed and nobody was denied, so it
+    // settles dim rather than in the error colour.
+    if text == ASK_CANCELLED_TEXT {
+        return vec![Row::new(Line::styled(
+            crate::tui::markdown::truncate(text, width.max(1)),
+            theme.dim(),
         ))];
     }
     // 2 prefix columns + 1 column of right padding inside the bubble.

@@ -9,6 +9,64 @@ use tokio::sync::mpsc;
 use crate::query::Session;
 use crate::ui::UiEvent;
 
+/// Everything Esc can dismiss, in the order it dismisses them (D80). The key
+/// handler walks [`EscLayer::ORDER`] top-down, acts on the first layer that is
+/// open and stops: one press closes one level.
+///
+/// The busy interrupt sits *inside* the list rather than above it, and that
+/// placement is the whole point. A dropdown, an info block or the `?` panel
+/// opened over a running turn is what the user is looking at when they reach
+/// for Esc; closing the turn instead was answering a question nobody asked.
+/// Ctrl+C keeps the unconditional interrupt — the layers do not shield it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscLayer {
+    /// Permission / question dialog: Esc denies it.
+    AskDialog,
+    /// `/model` `/think` `/theme` `/resume` `/provider` pickers (one level per press).
+    Menu,
+    /// The ctrl+b background-agent overlay (detail returns to the list, the list closes).
+    AgentManager,
+    /// Slash-command dropdown: closes, and takes a bare `/` query with it.
+    SlashDropdown,
+    /// ctrl+r history search: cancels without adopting the hit.
+    Search,
+    /// A page/field-level error row above the prompt.
+    ErrorRow,
+    /// Info-tier lines (`/help` `/status` … output that persists until dismissed).
+    InfoLines,
+    /// The `?` shortcut panel.
+    HelpPanel,
+    /// The task panel, when the user opened it themselves with ctrl+t.
+    TaskPanel,
+    /// The running turn.
+    Interrupt,
+    /// Bash mode on an empty input. Below the interrupt, unlike every other
+    /// layer, because the `!` prefix is sticky: a running bash command always
+    /// sits under an empty bash-mode composer, and Esc there has to reach the
+    /// command rather than the prompt prefix.
+    BashMode,
+    /// A non-empty input: esc-esc clears it into history.
+    ClearInput,
+}
+
+impl EscLayer {
+    /// The stack, top first. The single source for Esc's priority.
+    pub const ORDER: [EscLayer; 12] = [
+        EscLayer::AskDialog,
+        EscLayer::Menu,
+        EscLayer::AgentManager,
+        EscLayer::SlashDropdown,
+        EscLayer::Search,
+        EscLayer::ErrorRow,
+        EscLayer::InfoLines,
+        EscLayer::HelpPanel,
+        EscLayer::TaskPanel,
+        EscLayer::Interrupt,
+        EscLayer::BashMode,
+        EscLayer::ClearInput,
+    ];
+}
+
 impl super::Chat {
     /// Switch the provider: takes effect in the runtime immediately; persist=true writes settings (restored on restart).
     ///
@@ -747,6 +805,12 @@ impl super::Chat {
             }
             KeyCode::Esc => {
                 self.clear_slash_suggestions();
+                // The dropdown only exists for a pure `/`-query — dismissing it
+                // dismisses the query too (the leftover "/th" used to turn the
+                // next command into "//model").
+                if self.input.starts_with('/') {
+                    self.set_input("");
+                }
                 true
             }
             _ => false,
@@ -1234,7 +1298,9 @@ impl super::Chat {
     /// Keyboard events (`now` is injectable: the Ctrl+C double-press window and paste-burst detection both need a clock).
     ///
     /// Priority, top to bottom: dialog → `/model` menu → history search → interrupt/quit semantics
-    /// → editing keys. Returns whether it was consumed.
+    /// → editing keys. Esc is the exception: it belongs to no single overlay and walks
+    /// [`EscLayer::ORDER`] instead, so its priority can be read in one place rather than
+    /// inferred from the order of the handlers below. Returns whether it was consumed.
     pub fn on_key_at(
         &mut self,
         code: KeyCode,
@@ -1252,6 +1318,13 @@ impl super::Chat {
             && err.level == crate::error::ErrorLevel::Full
         {
             return self.error_screen_key(code, modifiers, now);
+        }
+        // Esc dismisses the topmost layer and nothing else (D80): it is judged
+        // before the handlers below because every one of them used to claim it,
+        // and the resulting order — busy interrupt first — meant Esc killed the
+        // turn instead of closing the dropdown the user was looking at.
+        if code == KeyCode::Esc {
+            return self.escape(now);
         }
         if self.ask_key(code, modifiers) {
             return true;
@@ -1285,19 +1358,14 @@ impl super::Chat {
         if self.search.is_some() {
             return self.search_key(code, modifiers);
         }
-        // Main-view agent management and the compact entity selector take precedence over global Esc/editing.
+        // Main-view agent management takes precedence over global editing keys.
         if self.agent_manager_key(code, modifiers) {
             return true;
         }
-        if self.entity_key(code, modifiers) {
-            return true;
-        }
-        // Interrupt (busy) and quit (idle) both live on Ctrl+C / Esc, judged before editing keys.
+        // Interrupt (busy) and quit (idle) both live on Ctrl+C, judged before editing keys.
+        // Unlike Esc, Ctrl+C skips the layer stack: it interrupts with anything open.
         if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
             return self.ctrl_c(now);
-        }
-        if code == KeyCode::Esc {
-            return self.escape(now);
         }
         self.notice = None;
         // Slash dropdown keys (Tab completes / Esc closes / ↑↓ navigate) take priority over input.
@@ -1468,57 +1536,106 @@ impl super::Chat {
         true
     }
 
-    /// Esc: interrupts when busy; closes menus/suggestions; double-press with text while idle clears (into history).
+    /// Esc: dismisses the topmost open [`EscLayer`] and stops there — one press,
+    /// one level. With nothing open on an idle empty input it does nothing
+    /// (reserved for rewind, D91).
     fn escape(&mut self, now: std::time::Instant) -> bool {
-        if self.busy {
-            self.interrupt(now);
-            return true;
-        }
-        // A Page/Field error row is dismissable like every other overlay —
-        // it used to sit above the prompt until the next turn started.
-        if self
-            .last_error
-            .as_ref()
-            .is_some_and(|e| e.level != crate::error::ErrorLevel::Full)
-        {
-            self.last_error = None;
-            self.dirty = true;
-            return true;
-        }
-        if !self.slash_suggestions.is_empty() {
-            self.clear_slash_suggestions();
-            // The dropdown only exists for a pure `/`-query — dismissing it
-            // dismisses the query too (the leftover "/th" used to turn the
-            // next command into "//model").
-            if self.input.starts_with('/') {
-                self.set_input("");
+        match self.esc_layer() {
+            Some(layer) => self.esc_dismiss(layer, now),
+            None => {
+                self.notice = None;
+                false
             }
-            return true;
         }
-        if !self.slash_info_lines.is_empty() {
-            self.slash_info_lines.clear();
-            self.dirty = true;
-            return true;
+    }
+
+    /// The layer Esc acts on right now: the first entry of [`EscLayer::ORDER`]
+    /// that is open. Key dispatch and the hint text both read this — they used
+    /// to disagree, because the order lived in the shape of an if-chain.
+    pub(crate) fn esc_layer(&self) -> Option<EscLayer> {
+        EscLayer::ORDER
+            .into_iter()
+            .find(|layer| self.esc_layer_open(*layer))
+    }
+
+    fn esc_layer_open(&self, layer: EscLayer) -> bool {
+        match layer {
+            EscLayer::AskDialog => self.pending_ask.is_some(),
+            EscLayer::Menu => self.menu_open(),
+            EscLayer::AgentManager => self.agent_manager.is_some(),
+            EscLayer::SlashDropdown => !self.slash_suggestions.is_empty(),
+            EscLayer::Search => self.search.is_some(),
+            // The full-screen error state is not a layer: it owns the whole
+            // canvas and its own keys (`error_screen_key`).
+            EscLayer::ErrorRow => self
+                .last_error
+                .as_ref()
+                .is_some_and(|e| e.level != crate::error::ErrorLevel::Full),
+            EscLayer::InfoLines => !self.slash_info_lines.is_empty(),
+            EscLayer::HelpPanel => self.help_visible,
+            EscLayer::TaskPanel => self.tasks_visible && !self.tasks_auto,
+            EscLayer::Interrupt => self.busy,
+            EscLayer::BashMode => self.bash_mode && self.input.is_empty(),
+            EscLayer::ClearInput => !self.input.is_empty(),
         }
-        if self.help_visible {
-            self.help_visible = false;
-            return true;
+    }
+
+    /// Closes one layer. A layer with a key handler of its own keeps its close
+    /// semantics there (the model picker returns one level at a time, search
+    /// must not adopt its hit); the stack only decides which layer hears the key.
+    fn esc_dismiss(&mut self, layer: EscLayer, now: std::time::Instant) -> bool {
+        const ESC: KeyCode = KeyCode::Esc;
+        const NONE: KeyModifiers = KeyModifiers::NONE;
+        match layer {
+            EscLayer::AskDialog => self.ask_key(ESC, NONE),
+            EscLayer::Menu => {
+                self.model_menu_key(ESC, NONE)
+                    || self.think_menu_key(ESC, NONE)
+                    || self.theme_menu_key(ESC, NONE)
+                    || self.resume_menu_key(ESC, NONE)
+                    || self.provider_menu_key(ESC, NONE)
+            }
+            EscLayer::AgentManager => self.agent_manager_key(ESC, NONE),
+            EscLayer::SlashDropdown => self.slash_menu_key(ESC, NONE),
+            EscLayer::Search => self.search_key(ESC, NONE),
+            // A Page/Field error row is dismissable like every other overlay —
+            // it used to sit above the prompt until the next turn started.
+            EscLayer::ErrorRow => {
+                self.last_error = None;
+                self.dirty = true;
+                true
+            }
+            EscLayer::InfoLines => {
+                self.slash_info_lines.clear();
+                self.dirty = true;
+                true
+            }
+            EscLayer::HelpPanel => {
+                self.help_visible = false;
+                true
+            }
+            // The tasks panel opened with ctrl+t closes with Esc (it used to have
+            // no exit at all — the ? panel closed, this one squatted).
+            EscLayer::TaskPanel => {
+                self.tasks_visible = false;
+                self.dirty = true;
+                true
+            }
+            EscLayer::Interrupt => {
+                self.interrupt(now);
+                true
+            }
+            EscLayer::BashMode => {
+                self.bash_mode = false;
+                true
+            }
+            EscLayer::ClearInput => self.esc_clear_input(now),
         }
-        // The tasks panel opened with ctrl+t closes with Esc (it used to have
-        // no exit at all — the ? panel closed, this one squatted).
-        if self.tasks_visible && !self.tasks_auto {
-            self.tasks_visible = false;
-            self.dirty = true;
-            return true;
-        }
-        if self.bash_mode && self.input.is_empty() {
-            self.bash_mode = false;
-            return true;
-        }
-        if self.input.is_empty() {
-            self.notice = None;
-            return false;
-        }
+    }
+
+    /// esc-esc on a non-empty input: the second press inside [`ESC_WINDOW`]
+    /// clears the draft into history, retrievable with ↑.
+    fn esc_clear_input(&mut self, now: std::time::Instant) -> bool {
         let armed = self
             .esc_at
             .is_some_and(|at| now.duration_since(at) <= ESC_WINDOW);
@@ -1534,12 +1651,89 @@ impl super::Chat {
         true
     }
 
+    /// What Esc does to a running turn right now. With a layer stacked above
+    /// the interrupt, Esc closes that layer and the turn keeps running — the
+    /// status row must not promise otherwise.
+    pub(crate) fn esc_busy_hint(&self) -> &'static str {
+        match self.esc_layer() {
+            Some(EscLayer::Interrupt) | None => "esc to interrupt",
+            Some(_) => "esc to close",
+        }
+    }
+
     /// Interrupts the current turn (Esc / Ctrl+C while busy). The first request is stamped
     /// so Ctrl+C can tell "the turn is stopping" from "the turn is never going to answer".
     fn interrupt(&mut self, now: std::time::Instant) {
         self.interrupted = true;
         self.interrupt_at.get_or_insert(now);
         self.cancel_tx.send_replace(true);
+        // The dialog goes with the turn: the user asked for everything in flight
+        // to stop, and a dialog is in flight.
+        self.cancel_asks(false);
+    }
+
+    /// Settles the permission dialogs a dead turn left behind (D80).
+    ///
+    /// The dialog and the turn used to have separate lifetimes: an interrupt
+    /// killed the task awaiting the answer and left the question on screen, so
+    /// the footer went on saying `Waiting for permission…` and every 1-9 the
+    /// user pressed answered a corpse — the reply went into a dropped oneshot
+    /// and nothing happened. Cancelling here closes both ends: an explicit
+    /// `Cancel` on the wire (the receiver reads it as a deny — fail closed),
+    /// the requests still queued behind it emptied the same way, and one dim
+    /// line in the flow where the dialog was.
+    ///
+    /// `dead_only` keeps a background agent out of the foreground turn's
+    /// cleanup: subagents share this modal queue, so at turn end the only
+    /// requests that belong to the turn that just ended are the ones whose
+    /// receiver is already gone. An explicit interrupt takes everything,
+    /// because that is what the user asked for.
+    pub(crate) fn cancel_asks(&mut self, dead_only: bool) -> bool {
+        let mut cancelled = false;
+        let settle = |ask: crate::ui::AskRequest| {
+            let _ = ask.1.send(crate::ui::DialogAction::Cancel);
+        };
+        if let Some(ask) = self.pending_ask.take() {
+            if dead_only && !ask.1.is_closed() {
+                self.pending_ask = Some(ask);
+            } else {
+                settle(ask);
+                cancelled = true;
+            }
+        }
+        // A request still in the channel has no row of its own yet; it is
+        // drained here so it cannot surface as a dialog for a turn that is
+        // already gone. Live ones go back in the same order they came out.
+        let mut keep = Vec::new();
+        while let Ok(ask) = self.asks_rx.try_recv() {
+            if dead_only && !ask.1.is_closed() {
+                keep.push(ask);
+            } else {
+                settle(ask);
+                cancelled = true;
+            }
+        }
+        for ask in keep {
+            let _ = self.asks.send(ask);
+        }
+        if cancelled {
+            self.ask_focus = 0;
+            self.ask_other.clear();
+            self.drop_empty_stream_message();
+            self.messages.push(UiMessage {
+                role: Role::User,
+                text: crate::tui::chat::ASK_CANCELLED_TEXT.to_string(),
+                at: crate::channels::now_unix(),
+                activities: Vec::new(),
+                insert_points: Vec::new(),
+                groups: Vec::new(),
+                group_of: Vec::new(),
+            });
+            // The title still announced a question nobody could answer.
+            self.notify_idle();
+            self.dirty = true;
+        }
+        cancelled
     }
 
     /// Ctrl+<char> editing commands (readline semantics).
@@ -1599,6 +1793,12 @@ impl super::Chat {
             }
             'j' => {
                 self.insert_newline();
+                true
+            }
+            // Ctrl+G opens the full agents/channels workspace.
+            'g' => {
+                self.open_entity = Some(EntityOpen::Workspace);
+                self.dirty = true;
                 true
             }
             'l' => {
@@ -2282,80 +2482,17 @@ impl super::Chat {
                 }),
         );
         if fresh != self.entities {
-            if let Some(selected) = self.entity_focus {
-                let agents = fresh
-                    .iter()
-                    .filter(|entity| matches!(entity, EntityRow::Agent { .. }))
-                    .count();
-                self.entity_focus = (agents > 0).then(|| selected.min(agents - 1));
-            }
             self.entities = fresh;
             self.dirty = true;
         }
     }
 
-    fn running_agent_rows(&self) -> Vec<&EntityRow> {
-        self.entities
-            .iter()
-            .filter(|entity| matches!(entity, EntityRow::Agent { .. }))
-            .collect()
-    }
-
-    /// Bottom entity area: a compact presence summary, or a selectable running-agent list.
+    /// Bottom entity area: a compact presence summary of what is running.
+    ///
+    /// ↑/↓ used to open an inline selector here, which cost the composer its
+    /// history recall — the two keys a terminal user reaches for first. Running
+    /// agents are reached with ctrl+b and ctrl+g instead (D80).
     pub fn entity_rows(&self, width: usize) -> Vec<Line> {
-        if let Some(selected) = self.entity_focus {
-            let agents = self.running_agent_rows();
-            if agents.is_empty() {
-                return Vec::new();
-            }
-            let cap = ENTITY_ROWS_MAX;
-            let selected = selected.min(agents.len() - 1);
-            let start = selected.saturating_sub(cap.saturating_sub(1));
-            let mut rows = agents
-                .iter()
-                .enumerate()
-                .skip(start)
-                .take(cap)
-                .map(|(index, entity)| {
-                    let EntityRow::Agent {
-                        name,
-                        state,
-                        model,
-                        thinking,
-                    } = entity
-                    else {
-                        unreachable!("running-agent list contains only agents")
-                    };
-                    let prefix = if index == selected { "❯ " } else { "  " };
-                    let style = if index == selected {
-                        SegStyle::fg(self.theme.permission)
-                    } else {
-                        SegStyle::fg(self.theme.inactive)
-                    };
-                    Line::styled(
-                        one_line(
-                            &format!(
-                                "{prefix}◉ {name} · {model} · {} · {state}",
-                                thinking.as_deref().unwrap_or("off")
-                            ),
-                            width,
-                        ),
-                        style,
-                    )
-                })
-                .collect::<Vec<_>>();
-            if agents.len() > cap {
-                rows.push(Line::styled(
-                    format!("  … {} running agents", agents.len()),
-                    SegStyle::fg(self.theme.inactive),
-                ));
-            }
-            rows.push(Line::styled(
-                "  ↑↓ select · enter opens DM · esc closes".to_string(),
-                SegStyle::fg(self.theme.inactive),
-            ));
-            return rows;
-        }
         if self.entities.is_empty() {
             return Vec::new();
         }
@@ -2380,67 +2517,11 @@ impl super::Chat {
             .join(" · ");
         vec![Line::styled(
             one_line(
-                &format!("  {summary} — ↑↓ select agent · ctrl+g workspace · ctrl+b manage"),
+                &format!("  {summary} — ctrl+g workspace · ctrl+b manage"),
                 width,
             ),
             SegStyle::fg(self.theme.inactive),
         )]
-    }
-
-    /// Ctrl+G opens the full workspace. Plain ↑/↓ focuses running agents and Enter opens a DM.
-    pub fn entity_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-        if code == KeyCode::Char('g') && ctrl {
-            self.entity_focus = None;
-            self.open_entity = Some(EntityOpen::Workspace);
-            self.dirty = true;
-            return true;
-        }
-        if self.entity_focus.is_none()
-            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-            && matches!(code, KeyCode::Up | KeyCode::Down)
-            && self.input.is_empty()
-        {
-            self.refresh_entities();
-            let agents = self.running_agent_rows();
-            if agents.is_empty() {
-                return false;
-            }
-            self.entity_focus = Some(if code == KeyCode::Up {
-                agents.len() - 1
-            } else {
-                0
-            });
-            self.dirty = true;
-            return true;
-        }
-        let Some(selected) = self.entity_focus else {
-            return false;
-        };
-        let agents = self.running_agent_rows();
-        if agents.is_empty() {
-            self.entity_focus = None;
-            return false;
-        }
-        match code {
-            KeyCode::Up => {
-                self.entity_focus = Some(selected.saturating_sub(1));
-            }
-            KeyCode::Down => {
-                self.entity_focus = Some((selected + 1).min(agents.len() - 1));
-            }
-            KeyCode::Enter => {
-                self.open_entity = agents.get(selected).and_then(|entity| match entity {
-                    EntityRow::Agent { name, .. } => Some(EntityOpen::Agent(name.clone())),
-                    EntityRow::Channel { .. } => None,
-                });
-                self.entity_focus = None;
-            }
-            KeyCode::Esc => self.entity_focus = None,
-            _ => return false,
-        }
-        self.dirty = true;
-        true
     }
 
     /// Main-view entry for running background-agent management.
@@ -2448,7 +2529,6 @@ impl super::Chat {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         if self.agent_manager.is_none() && code == KeyCode::Char('b') && ctrl {
             self.agent_manager = Some(AgentManager::List { selected: 0 });
-            self.entity_focus = None;
             self.dirty = true;
             return true;
         }
@@ -2504,7 +2584,14 @@ impl super::Chat {
                     manager = AgentManager::List { selected: 0 };
                     true
                 }
-                KeyCode::Enter | KeyCode::Char(' ') => false,
+                // Enter opens this agent's DM. The entity strip used to be the
+                // only way in, at the cost of the composer's ↑/↓; the manager
+                // already has the agent in hand, so the way in moved here (D80).
+                KeyCode::Enter => {
+                    self.open_entity = Some(EntityOpen::Agent(name.clone()));
+                    false
+                }
+                KeyCode::Char(' ') => false,
                 _ => {
                     self.agent_manager = Some(manager);
                     return true;
@@ -2677,7 +2764,7 @@ impl super::Chat {
                     )));
                 }
                 rows.push(Row::new(Line::styled(
-                    "←/Esc back · Enter close · x stop",
+                    "←/Esc back · Enter opens DM · x stop",
                     SegStyle::fg(self.theme.inactive),
                 )));
                 manager_box(rows, width, &self.theme)
@@ -2842,9 +2929,9 @@ impl super::Chat {
                 Role::User => {
                     let mut rows = user_message_rows(&self.messages[i].text, width, &theme);
                     // Send time under the bubble (issue #41), the same dim stamp
-                    // every view trails its message bodies with. An interrupt marker gets
+                    // every view trails its message bodies with. A state line gets
                     // none: nothing was sent, and the line is a state, not a message.
-                    let time = if crate::query::is_interrupt_marker(&self.messages[i].text) {
+                    let time = if crate::tui::chat::is_state_line(&self.messages[i].text) {
                         String::new()
                     } else {
                         crate::tui::slack::stamp(self.messages[i].at)

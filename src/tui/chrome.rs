@@ -39,11 +39,16 @@ pub(crate) fn dim_row(text: impl Into<String>, theme: &Theme) -> Row {
 
 /// Running status row (ActivityIndicator):
 /// `✻ {verb}… (esc to interrupt · {N}s · ↓ {tokens} tokens)`.
-fn status_row(status: &crate::tui::chat::RunningStatus, spinner: char, theme: &Theme) -> Row {
-    let mut meta = format!(
-        "(esc to interrupt · {}s",
-        status.elapsed.round().max(0.0) as u64
-    );
+///
+/// `esc_hint` is derived from the Esc layer stack, not assumed: with a dropdown
+/// or panel open over the turn, Esc closes that and the turn keeps running (D80).
+fn status_row(
+    status: &crate::tui::chat::RunningStatus,
+    spinner: char,
+    esc_hint: &str,
+    theme: &Theme,
+) -> Row {
+    let mut meta = format!("({esc_hint} · {}s", status.elapsed.round().max(0.0) as u64);
     if status.tokens > 0 {
         meta.push_str(&format!(" · ↓ {} tokens", status.tokens));
     }
@@ -480,6 +485,7 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
         children.push(El::Row(status_row(
             &status,
             crate::tui::activities::spinner(chat.tick),
+            chat.esc_busy_hint(),
             theme,
         )));
     }
@@ -493,7 +499,7 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     for line in chat.help_lines() {
         children.push(El::Row(dim_row(line, theme)));
     }
-    // Bottom entity area (running agents + channels; arrows open a DM, Ctrl+G opens the workspace).
+    // Bottom entity area (running agents + channels; Ctrl+G opens the workspace).
     children.push(El::Lines(chat.entity_rows(width)));
     children.push(El::Rows(chat.agent_manager_rows(width)));
 
@@ -597,8 +603,10 @@ mod tests {
         chat.search = Some(crate::tui::chat::HistorySearch::default());
         let rows = rows_of(chrome(&chat, 100, false));
         let text: Vec<String> = rows.iter().map(row_text).collect();
+        // Every layer is open here, so Esc closes one of them before it reaches
+        // the interrupt — the status row says what the key will actually do (D80).
         assert!(
-            text.iter().any(|l| l.contains("esc to interrupt")),
+            text.iter().any(|l| l.contains("esc to close")),
             "status row"
         );
         assert!(
@@ -999,7 +1007,7 @@ mod tests {
             elapsed: 12.5,
             tokens: 0,
         };
-        let text = row_text(&status_row(&status, '✻', &theme));
+        let text = row_text(&status_row(&status, '✻', "esc to interrupt", &theme));
         assert!(
             text.contains("✻ Working… (esc to interrupt · 13s)"),
             "{text}"
@@ -1014,7 +1022,7 @@ mod tests {
             elapsed: 3.2,
             tokens: 1200,
         };
-        let text = row_text(&status_row(&status, '✽', &theme));
+        let text = row_text(&status_row(&status, '✽', "esc to interrupt", &theme));
         assert!(
             text.contains("✽ $ cargo test… (esc to interrupt · 3s · ↓ 1200 tokens)"),
             "{text}"

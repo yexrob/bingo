@@ -2206,7 +2206,8 @@ async fn a_lost_turn_reports_itself_instead_of_latching_busy() {
     );
 }
 
-/// Esc: interrupts when busy; closes suggestions/panels layer by layer; double-press with text clears and saves to history.
+/// Esc walks the layer stack: with nothing open it interrupts a busy turn, it closes
+/// suggestions/panels one level at a time, and a double-press with text clears it into history.
 #[test]
 fn esc_closes_layers_then_clears_input() {
     let mut chat = chat_with_history("esc");
@@ -2469,9 +2470,11 @@ fn entity_area_filters_idle_agents_and_ctrl_g_opens_workspace() {
     assert_eq!(chat.open_entity, Some(EntityOpen::Workspace));
 }
 
-/// Running agents can be selected from the entity area and Enter opens that exact DM.
+/// D80: running agents no longer claim ↑/↓. With a background agent up and an
+/// empty composer, ↑ recalls the prompt history — the agent's DM is reached
+/// through the ctrl+b manager instead.
 #[test]
-fn entity_area_selects_running_agent_and_enter_opens_dm() {
+fn running_agents_leave_the_arrows_to_history() {
     let mut chat = test_chat();
     chat.session.agents.insert(
         "scout",
@@ -2480,27 +2483,29 @@ fn entity_area_selects_running_agent_and_enter_opens_dm() {
         "research".into(),
         chat.session.clone(),
     );
-    chat.session.agents.insert(
-        "reviewer",
-        crate::agents::AgentKind::Hire,
-        None,
-        "review".into(),
-        chat.session.clone(),
-    );
     chat.refresh_entities();
+    chat.history.record("earlier prompt");
+    assert!(chat.input.is_empty());
 
-    assert!(chat.on_key(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(chat.entity_focus, Some(0));
-    assert!(
-        chat.entity_rows(100)[0]
-            .plain_text()
-            .contains("❯ ◉ reviewer")
+    assert!(chat.on_key(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(
+        chat.input, "earlier prompt",
+        "↑ recalls history, not agents"
     );
-    assert!(chat.on_key(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(chat.entity_focus, Some(1));
+    assert_eq!(chat.open_entity, None);
+    let summary = chat.entity_rows(100)[0].plain_text();
+    assert!(
+        !summary.contains("select agent"),
+        "the hint stops advertising a selector that is gone: {summary}"
+    );
+
+    // Ctrl+B → Enter (list) → Enter (detail) opens that agent's DM.
+    chat.set_input("");
+    assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(chat.open_entity, Some(EntityOpen::Agent("scout".into())));
-    assert_eq!(chat.entity_focus, None);
+    assert!(chat.agent_manager.is_none(), "the manager closes with it");
 }
 
 /// Ctrl+B owns list/detail navigation and x stops the selected running agent.

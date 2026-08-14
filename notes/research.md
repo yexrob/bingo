@@ -1305,3 +1305,73 @@ No focus tracking in this batch. A notification fires whether or not the termina
 is what CC does, and the alternative — a focus-tracking mode enabled with `CSI ?1004h` and drained
 out of the event stream — is a second piece of terminal state to own for a refinement nobody has
 asked for yet.
+
+### D80. Esc is one ordered stack, and a dialog does not outlive its turn
+
+Three findings from the interaction audit, all of them the same shape: a key's meaning was
+decided by the *order handlers happened to be written in*, and that order was wrong.
+
+**The stack.** `on_key_at` was a chain of nine `if handler(...) { return true }` calls, each with
+its own `KeyCode::Esc` arm, and `escape()` tested `self.busy` first. So Esc with a slash dropdown
+open over a running turn killed the turn — the user was looking at the dropdown, reached for the
+key that closes things, and lost the work instead. Esc now belongs to no handler. It is judged at
+the top of `on_key_at` against one list, `EscLayer::ORDER`, walked top-down; the first open layer
+is dismissed and nothing below it is consulted. The order, verbatim:
+
+```
+AskDialog › Menu › AgentManager › SlashDropdown › Search › ErrorRow › InfoLines
+          › HelpPanel › TaskPanel › Interrupt › BashMode › ClearInput
+```
+
+`Interrupt` sits *inside* the list, and that placement is the decision. Everything transient
+closes before the turn does; with nothing open, Esc still interrupts on the first press, exactly
+as before. `ClearInput` below it keeps esc-esc on a non-empty draft. With no layer at all — idle,
+empty input — Esc does nothing, which is the slot D91 will fill with rewind rather than a new key.
+`AgentManager` and `ErrorRow` are not in the original sketch: both were Esc-dismissable overlays
+already, and a stack that omits them is not a single source. `BashMode` moved the other way, below
+the interrupt instead of above it: the `!` prefix is sticky, so a running bash command *always* sits
+under an empty bash-mode composer, and a bash-mode-above-interrupt order would have meant Esc
+exiting the prompt prefix while `!sleep 100` ran on. `Ctrl+C` deliberately skips the stack
+and interrupts unconditionally — the layers are a refinement of "close what I'm looking at", not a
+shield around a running turn, and a user who wants out needs one key that always means out.
+
+The stack decides *which* layer hears the key; the layer keeps its own close semantics in its own
+handler (the model picker returns provider-list → menu one press at a time, search cancels without
+adopting its hit, the dropdown takes a bare `/` query with it). `esc_dismiss` delegates rather than
+reimplements, so D39's `close_menus` mutual-exclusion invariant and the digit-swallowing guards are
+untouched. The hint text reads the same list: the running-status row asks `esc_busy_hint()` and
+prints `(esc to close · Ns)` while a layer is stacked over the turn, `(esc to interrupt · Ns)`
+otherwise. A status row that promises an interrupt Esc will not perform is the original bug wearing
+a different hat.
+
+**The dialog's lifetime.** `pending_ask` was set by `drain_asks` and cleared only by answering it.
+An interrupt aborted the task awaiting the answer and left the question on screen: the footer went
+on saying `Waiting for permission…`, and 1-9 or Enter sent a `DialogAction` into a dropped oneshot
+— a dialog that had been dead for minutes and still took keys. Both ends of a turn now settle it
+through one mechanism, `cancel_asks`: an explicit `Cancel` on the wire (the receiver already reads
+`Cancel` and a closed channel identically, so this is fail-closed either way), the requests still
+queued in the mpsc emptied with it, and one dim line where the dialog was —
+`(pending permission dialog cancelled with the turn)`, display-only, because the tool call that
+asked went down with the turn and the model's history must not learn of an answer nobody gave. It
+is a user-role state line like D76's interrupt marker, rendered without the `❯` bubble and without
+a send stamp, through the same special case.
+
+Turn end and interrupt do not use the same rule, because subagents share this modal queue
+(`attach_ask` points them at it). A dialog on screen when a *foreground* turn ends normally belongs,
+by construction, to something else — the turn that owned it could not have finished while blocked
+on it. So `TurnEnd` cancels only requests whose receiver is already gone (`Sender::is_closed`,
+which is the fact rather than a proxy for it: the task was aborted, panicked, or was lost), and
+puts live ones back in order. An explicit interrupt takes everything, because that is what the
+user asked for. This is a deliberate deviation from "cancel any pending ask on TurnEnd": that rule
+would have denied a background agent's question every time an unrelated foreground turn happened
+to end first.
+
+**The arrows.** `entity_key` claimed plain ↑/↓ on an empty composer to open an inline
+running-agent selector, which cost the composer its prompt history the moment any agent was up —
+the two keys a terminal user reaches for first, taken by a feature reachable two other ways. The
+selector is deleted: `entity_focus`, its bounded list rendering, `ENTITY_ROWS_MAX` and the
+`↑↓ select agent` hint go with it, and the strip is a one-line presence summary again. Its one
+capability that had no other home, "open this agent's DM", moved onto the ctrl+b manager's detail
+view (Enter, which previously just closed the panel), so `EntityOpen::Agent` stays alive on the
+surface that replaced the selector. Ctrl+G still opens the workspace; it now rides in `control_key`
+with the rest of the ctrl chords instead of in a handler of its own.

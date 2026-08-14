@@ -3,6 +3,7 @@
 //! `chat_tests_a` / `chat_tests_b` split by size alone (the 4000-line file cap); this
 //! file continues them.
 
+use super::chat_tail::EscLayer;
 use super::tests_a::*;
 use super::*;
 use serde_json::json;
@@ -422,4 +423,195 @@ fn the_default_chat_is_silent_on_every_trigger() {
         context: crate::error::ErrorContext::LongTurn,
     });
     assert!(chat.notify.take().is_empty());
+}
+
+/// Chrome rows above/below the transcript, as plain text.
+fn chrome_text(chat: &Chat) -> String {
+    crate::tui::el::render(crate::tui::chrome::chrome(chat, 100, false))
+        .rows
+        .iter()
+        .map(|r| r.line.plain_text())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// D80: the layer stack is one ordered list, and Esc peels it one entry per
+/// press. The busy interrupt is an entry like any other, so everything stacked
+/// above it closes first and the turn survives.
+#[test]
+fn esc_peels_one_layer_per_press_before_it_reaches_the_turn() {
+    let mut chat = test_chat();
+    chat.busy = true;
+    chat.help_visible = true;
+    chat.push_slash_info("session status".to_string());
+    chat.set_input("/");
+    assert!(!chat.slash_suggestions.is_empty(), "dropdown open");
+
+    let t0 = std::time::Instant::now();
+    let mut order = Vec::new();
+    while let Some(layer) = chat.esc_layer() {
+        order.push(layer);
+        assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0));
+        if layer == EscLayer::Interrupt {
+            break;
+        }
+        assert!(
+            !chat.interrupted,
+            "a layer above the interrupt closed instead of the turn: {layer:?}"
+        );
+        assert!(chat.busy, "the turn kept running through {layer:?}");
+    }
+    assert_eq!(
+        order,
+        vec![
+            EscLayer::SlashDropdown,
+            EscLayer::InfoLines,
+            EscLayer::HelpPanel,
+            EscLayer::Interrupt,
+        ],
+        "the stack is walked top-down, one entry per press"
+    );
+    assert!(chat.interrupted, "the last press reached the turn");
+}
+
+/// The dropdown closes and the turn keeps running; the status row says so
+/// while the layer is up, and goes back to promising the interrupt after.
+#[test]
+fn esc_over_a_busy_turn_closes_the_dropdown_and_says_so() {
+    let mut chat = test_chat();
+    chat.busy = true;
+    chat.set_input("/");
+    assert_eq!(chat.esc_busy_hint(), "esc to close");
+
+    let t0 = std::time::Instant::now();
+    assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0));
+    assert!(chat.slash_suggestions.is_empty(), "the dropdown closed");
+    assert!(chat.busy && !chat.interrupted, "the turn is still running");
+    assert_eq!(chat.esc_busy_hint(), "esc to interrupt");
+
+    assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0));
+    assert!(chat.interrupted, "with nothing left open, Esc interrupts");
+}
+
+/// Info lines are reading the user asked for; Esc dismisses the reading, not
+/// the work.
+#[test]
+fn esc_clears_info_lines_without_ending_the_turn() {
+    let mut chat = test_chat();
+    chat.busy = true;
+    chat.push_slash_info("context: 12k/200k".to_string());
+
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+    assert!(chat.slash_info_lines.is_empty(), "the info block cleared");
+    assert!(chat.busy && !chat.interrupted, "the turn is still running");
+}
+
+/// Ctrl+C is the one key the layers do not shield: it interrupts with the
+/// dialog still on screen.
+#[test]
+fn an_interrupt_settles_the_dialog_it_leaves_behind() {
+    let mut chat = test_chat();
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    chat.asks
+        .send((
+            PermissionRequest::new("Allow running Bash", "rm -rf /", vec!["Allow".into()]),
+            tx,
+        ))
+        .unwrap();
+    assert!(chat.drain_asks());
+    chat.busy = true;
+    assert!(chrome_text(&chat).contains("Waiting for permission…"));
+
+    assert!(chat.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(chat.interrupted, "ctrl+c still interrupts through a dialog");
+    assert!(chat.pending_ask.is_none(), "the dialog went with the turn");
+    assert_eq!(
+        rx.try_recv(),
+        Ok(DialogAction::Cancel),
+        "the waiting side is told, not left hanging"
+    );
+    assert!(
+        !chrome_text(&chat).contains("Waiting for permission…"),
+        "the footer stops claiming a question is open"
+    );
+    let flow = visible(&mut chat, 100, 40);
+    assert!(
+        flow.contains(crate::tui::chat::ASK_CANCELLED_TEXT),
+        "the block settles as cancelled: {flow}"
+    );
+
+    // The keys that answered the dialog are ordinary composer keys again, and
+    // the dropped receiver is never sent to a second time.
+    drop(rx);
+    assert!(chat.on_key(KeyCode::Char('1'), KeyModifiers::empty()));
+    assert_eq!(chat.input, "1", "the digit is text now, not an answer");
+    assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
+    assert!(chat.pending_ask.is_none(), "nothing came back to life");
+    assert_eq!(
+        chat.queued.last().map(|q| q.text.as_str()),
+        Some("1"),
+        "Enter queued a message instead of confirming an option"
+    );
+}
+
+/// A turn that died on its own takes its dialog and everything queued behind it.
+/// The receiver being gone is what marks a request as the dead turn's — a
+/// background agent's question is still live, and stays.
+#[test]
+fn turn_end_settles_the_asks_whose_turn_is_gone() {
+    let mut chat = test_chat();
+    let (dead_tx, dead_rx) = tokio::sync::oneshot::channel();
+    let (live_tx, _live_rx) = tokio::sync::oneshot::channel();
+    chat.asks
+        .send((
+            PermissionRequest::new("Allow running Bash", "cargo test", vec!["Allow".into()]),
+            dead_tx,
+        ))
+        .unwrap();
+    chat.asks
+        .send((
+            PermissionRequest::new("Allow running Edit", "src/main.rs", vec!["Allow".into()]),
+            live_tx,
+        ))
+        .unwrap();
+    assert!(chat.drain_asks(), "the first request is on screen");
+    chat.busy = true;
+    drop(dead_rx); // the turn awaiting the answer is gone
+
+    chat.handle(UiEvent::TurnEnd);
+
+    assert!(chat.pending_ask.is_none(), "the dead dialog is settled");
+    let flow = visible(&mut chat, 100, 40);
+    assert!(
+        flow.contains(crate::tui::chat::ASK_CANCELLED_TEXT),
+        "the block settles as cancelled: {flow}"
+    );
+    assert!(
+        chat.drain_asks(),
+        "the request still being waited on stays in the queue"
+    );
+    assert!(
+        chat.pending_ask
+            .as_ref()
+            .is_some_and(|(r, _)| r.title == "Allow running Edit"),
+        "and surfaces next"
+    );
+}
+
+/// The `!` prefix is sticky, so a running bash command always sits under an
+/// empty bash-mode composer: Esc has to reach the command, not the prefix.
+#[test]
+fn esc_stops_a_running_bash_command_before_it_leaves_bash_mode() {
+    let mut chat = test_chat();
+    chat.bash_mode = true;
+    chat.busy = true;
+
+    assert_eq!(chat.esc_layer(), Some(EscLayer::Interrupt));
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+    assert!(chat.interrupted, "the command stops first");
+    assert!(chat.bash_mode, "and the prompt is still a shell prompt");
+
+    chat.busy = false;
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+    assert!(!chat.bash_mode, "idle, the same key leaves bash mode");
 }

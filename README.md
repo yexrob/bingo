@@ -156,7 +156,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 
 | Key | Action |
 |---|---|
-| `Esc` | interrupt while busy / close dropdowns and panels / clear input on double-press |
+| `Esc` | close the topmost dialog/menu/panel first / interrupt while busy / clear input on double-press |
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
 | `Ctrl+T` | toggle the task area |
 | `Ctrl+O` | expand/collapse: expanded replays the full transcript for scrolling up |
