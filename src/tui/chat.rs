@@ -3894,6 +3894,9 @@ pub(crate) fn text_rows(theme: &Theme, reply: Vec<Line>) -> Vec<Row> {
 #[path = "chat_tail.rs"]
 mod chat_tail;
 
+#[path = "chat_menus.rs"]
+mod chat_menus;
+
 #[path = "ask.rs"]
 mod ask;
 
