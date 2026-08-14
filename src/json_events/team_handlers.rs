@@ -860,19 +860,39 @@ impl<W: Write> JsonSession<W> {
                 );
             }
         };
-        let encoded = match crate::team::team_avatar_thumbnail(&tree, avatar, 128) {
+        let path = tree.nodes().iter().find_map(|node| {
+            crate::team::project_avatar_path(&node.dir, avatar).filter(|path| path.is_file())
+        });
+        let Some(path) = path else {
+            return self.emit_error(
+                ErrorScope::Command,
+                Some(command_id),
+                None,
+                "CONFIG_INVALID",
+                "avatar is not available in the current team tree",
+                EventErrorLevel::Field,
+                true,
+            );
+        };
+        let encoded = match std::fs::read(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                let image = image::load_from_memory(&bytes).map_err(|error| error.to_string())?;
+                let thumbnail =
+                    image.resize_to_fill(128, 128, image::imageops::FilterType::Lanczos3);
+                let mut output = std::io::Cursor::new(Vec::new());
+                thumbnail
+                    .write_to(&mut output, image::ImageFormat::Png)
+                    .map_err(|error| error.to_string())?;
+                Ok(output.into_inner())
+            }) {
             Ok(encoded) => encoded,
             Err(error) => {
-                let code = if matches!(error, crate::team::TeamError::Io(_)) {
-                    "STORAGE_ERROR"
-                } else {
-                    error.error_code()
-                };
                 return self.emit_error(
                     ErrorScope::Command,
                     Some(command_id),
                     None,
-                    code,
+                    "STORAGE_ERROR",
                     &format!("failed to read team avatar: {error}"),
                     EventErrorLevel::Field,
                     true,

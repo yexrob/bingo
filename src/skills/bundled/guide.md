@@ -65,8 +65,7 @@ commands, and verification steps in conclusions. Never speculate about features 
 - **JSON-events Team workspace**: `team.workspace.v1` and the related Team v2 capabilities expose
   role documents, stable member profiles and project avatars, the durable branch-scoped task board,
   lobby history, and preview-first `.bingo-team` import/export. Role and team saves use revisions;
-  preset updates require an explicit keep/update resolution and never carry credentials. Clients with
-  `team.avatar.read.v1` may read a 128px thumbnail for an avatar already present in the current team tree.
+  preset updates require an explicit keep/update resolution and never carry credentials.
 
 ## Config guide (settings.json)
 
@@ -308,9 +307,9 @@ Example (.bingo/settings.json):
   once it is not from today — the same stamp the main transcript trails its messages with. DMs show user messages and agent text only—historical and live tool activity stays hidden—while reusing the main transcript's user bubbles, assistant markdown, prefixes, wrapping, and row structure; the existing DM name/avatar gutter stays unchanged. A working indicator remains during silent tool waits. DM headers show model/thinking; channel headers list model/thinking when the names fit and otherwise use one bounded aggregate, so the composer stays visible. There is no rail and no sidebar, and the view paints no background of its own — the terminal's own
   background shows through. Navigation is Ctrl+K (the quick switcher, which lists every conversation with its unread count)
   and alt+↑↓. **Avatars**: on terminals that can place kitty images (the same capability that renders inline images), each
-  sender gets one of 20 bundled portraits (the original eight plus 12 geometric identicons), 4×2 cells beside the name; elsewhere it falls back to the sender's
+  sender gets one of eight bundled anime-style portraits, 4×2 cells beside the name; elsewhere it falls back to the sender's
   initial on a colour, and the row count is identical either way. A team member's portrait is pinned in `.bingo/team.json`
-  (`"avatar": "sora"`), so a crew keeps a fixed cast; unpinned identities use a stable geometric face, while new fixed members are assigned one geometric face once and persist it. The **main chat** wears
+  (`"avatar": "sora"`), so a crew keeps a fixed cast; everyone else gets a face derived from their name. The **main chat** wears
   the same faces behind `experimental.chatAvatars` (off by default): each message carries a band above it with the speaker's
   portrait and name (`main` for the hub, `You` for your own),
   two rows where portraits place and one where they fall back to the chip. Nothing below the band moves — bodies still run the full
@@ -442,9 +441,9 @@ Example (.bingo/settings.json):
   dividers, every message body trailed by its dim send time (`HH:MM`, dated `M/D HH:MM` across days — the same stamp the main transcript uses); DMs contain only user messages and agent text, with all historical/live tool activity hidden; their bodies reuse the main transcript's bubble/markdown/prefix/wrapping row builders while the existing DM name/avatar gutter stays unchanged, and silent tool waits retain a working indicator). DM headers include model/thinking; channel headers list model/thinking when it fits and otherwise use one bounded aggregate. No rail and no sidebar,
   the view paints no background of its own — the terminal's own background shows through; switching conversations is Ctrl+K (quick switcher listing
   every conversation and its unread count) and alt+↑↓. **Avatars**: terminals that can place kitty images (the same capability behind inline images)
-  assign each speaker one of 20 bundled portraits (eight legacy portraits plus 12 geometric identicons), 4×2 cells to the left of the name; other terminals fall back to an initial-on-color
+  assign each speaker one of eight bundled anime-style portraits, 4×2 cells to the left of the name; other terminals fall back to an initial-on-color
   chip, and both skins keep the same row count. Team members' avatars are pinned in `.bingo/team.json` (`"avatar": "sora"`),
-  so a crew has a fixed cast; unpinned identities use a stable geometric face. Project avatar IDs remain content-addressed and are only readable through the current team tree. The **main chat** uses the same faces behind `experimental.chatAvatars` (off by default): every message gets a band
+  so a crew has a fixed cast; other instances get a face by name. The **main chat** uses the same faces behind `experimental.chatAvatars` (off by default): every message gets a band
   above it carrying the speaker's portrait and name (`main` for the hub, `You` for your own); message bodies are unchanged underneath.
   Off, the transcript has no band and a subagent's watch row keeps its `◉`; the switch governs the main chat only. Runtime-injected wake scaffolding (channel-message relays,
   task reminders) collapses into a single dim hint line instead of being quoted as a whole message. Sending from the bottom input box: in a channel you speak as `user` (the same delivery

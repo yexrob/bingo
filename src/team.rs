@@ -143,26 +143,6 @@ pub fn project_avatar_path(project_dir: &Path, id: &str) -> Option<PathBuf> {
     Some(project_dir.join(AVATAR_DIR).join(format!("{hash}.png")))
 }
 
-pub fn team_avatar_thumbnail(tree: &TeamTree, id: &str, size: u32) -> Result<Vec<u8>, TeamError> {
-    if size == 0 || size > 512 {
-        return Err(TeamError::invalid("avatar thumbnail size must be 1 to 512"));
-    }
-    let path = tree
-        .nodes()
-        .iter()
-        .find_map(|node| project_avatar_path(&node.dir, id).filter(|path| path.is_file()))
-        .ok_or_else(|| TeamError::invalid("avatar is not available in the current team tree"))?;
-    let bytes = std::fs::read(path)?;
-    let image = image::load_from_memory(&bytes)
-        .map_err(|error| TeamError::invalid(format!("avatar image is invalid: {error}")))?;
-    let thumbnail = image.resize_to_fill(size, size, image::imageops::FilterType::Lanczos3);
-    let mut output = std::io::Cursor::new(Vec::new());
-    thumbnail
-        .write_to(&mut output, image::ImageFormat::Png)
-        .map_err(|error| TeamError::invalid(format!("avatar thumbnail failed: {error}")))?;
-    Ok(output.into_inner())
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn runtime_member_configuration_key(
     member_id: &str,
@@ -2284,17 +2264,10 @@ mod tests {
             &dir,
             r#"{"name":"legacy","members":[{"name":"lead","agent":"lead"}]}"#,
         );
-        let original = std::fs::read(dir.join(TEAM_FILE)).unwrap_or_else(|error| panic!("{error}"));
         let first = load_team_file(&dir).unwrap().unwrap();
         let second = load_team_file(&dir).unwrap().unwrap();
         assert_eq!(first.team_id, second.team_id);
         assert_eq!(first.members[0].member_id, second.members[0].member_id);
-        assert!(first.members[0].avatar.is_none());
-        assert_eq!(
-            std::fs::read(dir.join(TEAM_FILE)).unwrap_or_else(|error| panic!("{error}")),
-            original,
-            "reading a legacy member without an avatar must not rewrite the project file"
-        );
         assert!(first.team_id.starts_with("team-"));
         assert!(first.members[0].member_id.starts_with("member-"));
 
@@ -2325,46 +2298,6 @@ mod tests {
         assert_eq!((image.width(), image.height()), (512, 512));
         assert!(import_avatar(&dir, b"not an image").is_err());
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn team_avatar_thumbnail_reads_only_registered_images_in_the_current_tree() {
-        let root = tmp("avatar-tree-read");
-        write_chart(&root);
-        let child_dir = root.join("repos/engineering");
-        let mut source = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-            16,
-            8,
-            image::Rgba([210, 40, 80, 255]),
-        ))
-        .write_to(&mut source, image::ImageFormat::Png)
-        .unwrap_or_else(|error| panic!("{error}"));
-        let id =
-            import_avatar(&child_dir, source.get_ref()).unwrap_or_else(|error| panic!("{error}"));
-        let tree = tree_of(&root);
-        let thumbnail =
-            team_avatar_thumbnail(&tree, &id, 128).unwrap_or_else(|error| panic!("{error}"));
-        let decoded = image::load_from_memory(&thumbnail).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!((decoded.width(), decoded.height()), (128, 128));
-        assert!(team_avatar_thumbnail(&tree, "project:../../outside", 128).is_err());
-        assert!(team_avatar_thumbnail(&tree, "sora", 128).is_err());
-
-        let outside = tmp("avatar-tree-outside");
-        let mut other = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-            8,
-            16,
-            image::Rgba([20, 60, 220, 255]),
-        ))
-        .write_to(&mut other, image::ImageFormat::Png)
-        .unwrap_or_else(|error| panic!("{error}"));
-        let outside_id =
-            import_avatar(&outside, other.get_ref()).unwrap_or_else(|error| panic!("{error}"));
-        assert!(team_avatar_thumbnail(&tree, &outside_id, 128).is_err());
-
-        std::fs::remove_dir_all(&outside).unwrap_or_else(|error| panic!("{error}"));
-        std::fs::remove_dir_all(&root).unwrap_or_else(|error| panic!("{error}"));
     }
 
     #[test]

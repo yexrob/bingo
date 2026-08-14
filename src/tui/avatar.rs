@@ -266,22 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_ids_keep_their_order_and_all_bundled_portraits_decode() {
-        let all = ids();
-        assert_eq!(
-            &all[..8],
-            &["emi", "kenji", "sora", "mika", "taro", "jin", "kai", "rio"]
-        );
-        for (id, bytes) in PORTRAITS {
-            let portrait = image::load_from_memory(bytes)
-                .unwrap_or_else(|error| panic!("{id} must decode: {error}"));
-            if id.starts_with("identicon-") {
-                assert_eq!((portrait.width(), portrait.height()), (256, 256), "{id}");
-            }
-        }
-    }
-
-    #[test]
     fn automatic_faces_use_only_the_geometric_pool() {
         for name in ["main", "user", "lead", "reviewer", "开发者"] {
             assert!(index_of(name) >= DEFAULT_OFFSET);

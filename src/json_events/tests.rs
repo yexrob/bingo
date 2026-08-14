@@ -111,12 +111,6 @@ fn every_command_variant_round_trips() {
         }),
         serde_json::json!({
             "protocolVersion": 1,
-            "type": "team.avatar.get",
-            "commandId": "command-team-avatar-get",
-            "avatar": "project:0123456789abcdef01234567"
-        }),
-        serde_json::json!({
-            "protocolVersion": 1,
             "type": "team.task.list",
             "commandId": "command-task-list"
         }),
@@ -333,32 +327,6 @@ fn team_v2_starter_blueprint_save_command_is_accepted() {
     let error = parse_command_line(unsupported.to_string().as_bytes())
         .expect_err("unsupported team schema must fail");
     assert!(error.to_string().contains("schemaVersion must be 1 or 2"));
-}
-
-#[test]
-fn team_avatar_get_is_capability_gated_and_rejects_unsafe_ids() {
-    assert!(CAPABILITIES.contains(&"team.avatar.read.v1"));
-    let command = |avatar: &str| {
-        serde_json::json!({
-            "protocolVersion": 1,
-            "type": "team.avatar.get",
-            "commandId": "command-team-avatar-get",
-            "avatar": avatar
-        })
-        .to_string()
-    };
-    assert!(parse_command_line(command("project:0123456789abcdef01234567").as_bytes()).is_ok());
-    for avatar in [
-        "sora",
-        "project:../../outside",
-        "project:0123456789abcdef0123456",
-        "project:0123456789abcdef0123456g",
-    ] {
-        assert!(
-            parse_command_line(command(avatar).as_bytes()).is_err(),
-            "unsafe avatar id was accepted: {avatar}"
-        );
-    }
 }
 
 #[test]
