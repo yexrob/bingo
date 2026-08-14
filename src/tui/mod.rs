@@ -13,7 +13,8 @@
 //!   pane) that [`entity`] wears when a channel or instance is opened.
 //! - [`chat`] is the state machine and the transcript block builder
 //!   (`build_rows`); [`slash`] owns slash command metadata and pure
-//!   suggestion/help transformations.
+//!   suggestion/help transformations; [`complete`] owns the fuzzy scorer, the
+//!   `@` mention dropdown and the per-command argument sources.
 //! - [`app`] is the event loop and the frame assembly.
 //! - [`notify`] builds the attention channel's bytes (bell, notification OSC,
 //!   terminal title); like [`gfx`], it builds and never writes.
@@ -28,6 +29,7 @@ mod app;
 pub mod avatar;
 pub mod chat;
 mod chrome;
+pub mod complete;
 pub mod el;
 mod entity;
 pub mod gfx;

@@ -474,6 +474,67 @@ fn esc_peels_one_layer_per_press_before_it_reaches_the_turn() {
     assert!(chat.interrupted, "the last press reached the turn");
 }
 
+/// D85: the `@` dropdown joined the stack in the slash dropdown's stratum, so
+/// the same walk holds with a mention on screen instead of a command query.
+/// The two can never be open together — `update_slash_suggestions` hands the
+/// composer to exactly one of them — which is why this is a second walk rather
+/// than a longer one.
+#[test]
+fn esc_peels_the_mention_dropdown_in_the_slash_dropdowns_place() {
+    assert_eq!(
+        EscLayer::ORDER
+            .iter()
+            .position(|layer| *layer == EscLayer::MentionDropdown),
+        EscLayer::ORDER
+            .iter()
+            .position(|layer| *layer == EscLayer::SlashDropdown)
+            .map(|i| i + 1),
+        "the two completion surfaces are adjacent"
+    );
+
+    // Its own empty project dir: the file source has a bounded, known answer
+    // instead of whatever the shared temp directory happens to hold.
+    let root = std::env::temp_dir().join(format!("bingo-d85-{}-peel", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    let mut chat = test_chat_home(root.clone());
+    chat.busy = true;
+    chat.help_visible = true;
+    chat.push_slash_info("session status".to_string());
+    chat.set_input("read @");
+    assert!(
+        chat.mention.is_some(),
+        "an empty project still opens the layer"
+    );
+
+    let t0 = std::time::Instant::now();
+    let mut order = Vec::new();
+    while let Some(layer) = chat.esc_layer() {
+        order.push(layer);
+        assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0));
+        if layer == EscLayer::Interrupt {
+            break;
+        }
+        assert!(
+            !chat.interrupted,
+            "a layer above the interrupt closed instead of the turn: {layer:?}"
+        );
+        assert!(chat.busy, "the turn kept running through {layer:?}");
+    }
+    assert_eq!(
+        order,
+        vec![
+            EscLayer::MentionDropdown,
+            EscLayer::InfoLines,
+            EscLayer::HelpPanel,
+            EscLayer::Interrupt,
+        ],
+        "the mention peels where the slash dropdown would have"
+    );
+    assert!(chat.interrupted, "the last press reached the turn");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The dropdown closes and the turn keeps running; the status row says so
 /// while the layer is up, and goes back to promising the interrupt after.
 #[test]

@@ -27,6 +27,10 @@ pub(crate) struct Menus<'a> {
     pub theme: Option<&'a ThemeMenu>,
     pub resume: Option<&'a ResumeMenu>,
     pub provider: Option<&'a ProviderMenu>,
+    /// The `@` mention dropdown (D85). Not a picker menu — it renders in the
+    /// same area and at the same tier as the slash dropdown, below every
+    /// selector, so it is carried here rather than in a second parameter.
+    pub mention: Option<&'a crate::tui::complete::MentionState>,
 }
 
 /// A dim row indented two columns (help / queue / notice / search share it).
@@ -175,6 +179,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
 fn suggestion_rows(
     slash: &[SlashSuggestion],
     slash_selected: usize,
+    slash_arg: bool,
     menus: Menus<'_>,
     no_match: bool,
     theme: &Theme,
@@ -235,7 +240,10 @@ fn suggestion_rows(
                 }
                 return rows;
             }
-            // No menu open: fall through to the slash dropdown / no-match hint.
+            // No menu open: the `@` dropdown, then the slash dropdown / no-match hint.
+            if let Some(mention) = menus.mention {
+                return crate::tui::complete::mention_rows(mention, theme, width);
+            }
             if slash.is_empty() {
                 // G9: a bare `/`-query with zero matches gets one dim hint row.
                 if no_match {
@@ -246,7 +254,7 @@ fn suggestion_rows(
                 }
                 return Vec::new();
             }
-            return slash_rows(slash, slash_selected, theme, width);
+            return slash_rows(slash, slash_selected, slash_arg, theme, width);
         };
         // `/model` two-level selector: level one `provider` (PickerModel core rendering,
         // with the same endpoint/auth description column as /provider), level two `model` (the same Picker
@@ -327,6 +335,7 @@ fn suggestion_rows(
 fn slash_rows(
     slash: &[SlashSuggestion],
     slash_selected: usize,
+    slash_arg: bool,
     theme: &Theme,
     width: usize,
 ) -> Vec<Row> {
@@ -368,10 +377,13 @@ fn slash_rows(
     rows.extend(slash[start..end].iter().enumerate().map(|(offset, s)| {
         let i = start + offset;
         let selected = i == slash_selected;
-        let cmd = if s.hint.is_empty() {
-            format!("/{}", s.name)
-        } else {
-            format!("/{} {}", s.name, s.hint)
+        // The argument phase lists values, not commands: no `/` in front of
+        // them. That single character is the whole visual difference — the
+        // rows are the same rows, in the same place, for the same keys.
+        let cmd = match (slash_arg, s.hint.is_empty()) {
+            (true, _) => s.name.clone(),
+            (false, true) => format!("/{}", s.name),
+            (false, false) => format!("/{} {}", s.name, s.hint),
         };
         let name_text = format!("{cmd:<name_col$}");
         let desc = crate::tui::markdown::truncate(&s.description, desc_width);
@@ -392,12 +404,14 @@ fn suggestions(chat: &Chat, width: usize) -> El {
     El::Rows(suggestion_rows(
         &chat.slash_suggestions,
         chat.slash_selected,
+        chat.slash_arg_start.is_some(),
         Menus {
             model: chat.model_menu.as_ref(),
             think: chat.think_menu.as_ref(),
             theme: chat.theme_menu.as_ref(),
             resume: chat.resume_menu.as_ref(),
             provider: chat.provider_menu.as_ref(),
+            mention: chat.mention.as_ref(),
         },
         chat.slash_no_match,
         &chat.theme,
@@ -654,12 +668,14 @@ mod tests {
                 + suggestion_rows(
                     &chat.slash_suggestions,
                     chat.slash_selected,
+                    chat.slash_arg_start.is_some(),
                     Menus {
                         model: chat.model_menu.as_ref(),
                         think: chat.think_menu.as_ref(),
                         theme: chat.theme_menu.as_ref(),
                         resume: chat.resume_menu.as_ref(),
                         provider: chat.provider_menu.as_ref(),
+                        mention: chat.mention.as_ref(),
                     },
                     chat.slash_no_match,
                     &chat.theme,
@@ -687,11 +703,11 @@ mod tests {
             models: None,
         };
         assert_eq!(
-            suggestion_rows(&[], 0, Menus::default(), false, &theme, 80).len(),
+            suggestion_rows(&[], 0, false, Menus::default(), false, &theme, 80).len(),
             0
         );
         // G9: no-match shows one dim hint row instead of an empty gap.
-        let no_match = suggestion_rows(&[], 0, Menus::default(), true, &theme, 80);
+        let no_match = suggestion_rows(&[], 0, false, Menus::default(), true, &theme, 80);
         assert_eq!(no_match.len(), 1);
         assert!(
             row_text(&no_match[0]).contains("no matching commands"),
@@ -703,12 +719,14 @@ mod tests {
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -731,12 +749,14 @@ mod tests {
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -758,12 +778,14 @@ mod tests {
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -785,12 +807,14 @@ mod tests {
         let failed_rows = suggestion_rows(
             &[],
             0,
+            false,
             Menus {
                 model: Some(&menu),
                 think: None,
                 theme: None,
                 resume: None,
                 provider: None,
+                mention: None,
             },
             false,
             &theme,
@@ -820,12 +844,14 @@ mod tests {
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -843,12 +869,14 @@ mod tests {
         let think_rows = suggestion_rows(
             &[],
             0,
+            false,
             Menus {
                 model: None,
                 think: Some(&think),
                 theme: None,
                 resume: None,
                 provider: None,
+                mention: None,
             },
             false,
             &theme,
@@ -882,12 +910,14 @@ mod tests {
         let rows = suggestion_rows(
             &[],
             0,
+            false,
             Menus {
                 model: None,
                 think: Some(&overlap),
                 theme: None,
                 resume: None,
                 provider: None,
+                mention: None,
             },
             false,
             &theme,
@@ -905,12 +935,14 @@ mod tests {
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: Some(&think),
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -930,12 +962,14 @@ mod tests {
         let rows = suggestion_rows(
             &slash,
             0,
+            false,
             Menus {
                 model: Some(&menu),
                 think: None,
                 theme: None,
                 resume: None,
                 provider: None,
+                mention: None,
             },
             false,
             &theme,
@@ -946,7 +980,7 @@ mod tests {
             "menu visible (rendering and key dispatch in the same order)"
         );
         // Without a menu the dropdown works as usual.
-        let rows = suggestion_rows(&slash, 0, Menus::default(), false, &theme, 80);
+        let rows = suggestion_rows(&slash, 0, false, Menus::default(), false, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(
             row_text(&rows[0]).starts_with("❯ /help"),
@@ -959,7 +993,7 @@ mod tests {
             hint: "[off|low|medium|high|xhigh|max]".into(),
             description: "set the thinking level".into(),
         }];
-        let rows = suggestion_rows(&with_hint, 0, Menus::default(), false, &theme, 80);
+        let rows = suggestion_rows(&with_hint, 0, false, Menus::default(), false, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(
             row_text(&rows[0]).contains("/think [off|low|medium|high|xhigh|max]"),
@@ -971,12 +1005,14 @@ mod tests {
             for row in suggestion_rows(
                 &slash,
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
                     provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -987,12 +1023,14 @@ mod tests {
             for row in suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: None,
                     think: Some(&think),
                     theme: None,
                     resume: None,
                     provider: None,
+                    mention: None,
                 },
                 false,
                 &theme,

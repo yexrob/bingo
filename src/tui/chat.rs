@@ -1087,6 +1087,16 @@ pub struct Chat {
     pub slash_suggestions: Vec<SlashSuggestion>,
     /// Selected index in the dropdown.
     pub slash_selected: usize,
+    /// Argument phase (D85): byte offset in [`Chat::input`] where the partial
+    /// argument starts. `Some` means the dropdown is offering *values* for a
+    /// command rather than command names — rendering drops the `/` prefix and
+    /// completion splices at this offset instead of replacing the whole line.
+    pub slash_arg_start: Option<usize>,
+    /// The `@` mention dropdown (D85); `None` means it is closed.
+    pub mention: Option<crate::tui::complete::MentionState>,
+    /// Esc dismissed the mention dropdown: it stays closed until the caret
+    /// leaves the `@` token, so the next keystroke does not reopen it.
+    pub mention_dismissed: bool,
     /// `/model` two-level selector (level-one endpoint → level-two model list; None = inactive).
     pub model_menu: Option<ModelMenu>,
     /// Last-used model per provider (session memory): switching back to a
@@ -1394,6 +1404,9 @@ impl Chat {
             mark_base: 0,
             slash_suggestions: Vec::new(),
             slash_selected: 0,
+            slash_arg_start: None,
+            mention: None,
+            mention_dismissed: false,
             model_menu: None,
             provider_models: std::collections::HashMap::new(),
             provider_session_only: false,
@@ -2283,7 +2296,11 @@ impl Chat {
         if let Some(cmd) = text.strip_prefix('/') {
             // Enter with a partial prefix and dropdown suggestions: apply the selection and run it
             // (handleEnter: with suggestions present, Enter = complete + execute).
-            if !self.slash_suggestions.is_empty()
+            // Only in the command-NAME phase: an argument dropdown lists values,
+            // and running the selected one as a command would dispatch
+            // `/deepseek-chat` when the user meant `/model deepseek-chat`.
+            if self.slash_arg_start.is_none()
+                && !self.slash_suggestions.is_empty()
                 && !self
                     .slash_suggestions
                     .iter()
@@ -2505,10 +2522,12 @@ impl Chat {
         self.dirty = true;
     }
 
-    /// Clears the slash dropdown and its no-match flag together (single lifecycle).
+    /// Clears the slash dropdown, its no-match flag and its argument phase
+    /// together (single lifecycle).
     pub(crate) fn clear_slash_suggestions(&mut self) {
         self.slash_suggestions.clear();
         self.slash_no_match = false;
+        self.slash_arg_start = None;
     }
 
     /// Slash command dispatch. Returns true = consumed.
@@ -3806,3 +3825,7 @@ mod tests_b;
 #[cfg(test)]
 #[path = "chat_tests_c.rs"]
 mod tests_c;
+
+#[cfg(test)]
+#[path = "chat_tests_d.rs"]
+mod tests_d;

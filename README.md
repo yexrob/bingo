@@ -151,6 +151,13 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
   inside multi-line input).
 - `Ctrl+S` stash/restore the input, `Ctrl+Y` paste back deleted text,
   `Ctrl+_` undo.
+- `@` at the start of a word opens the mention dropdown over the project's
+  files (git-tracked and untracked-but-not-ignored inside a repository,
+  otherwise a bounded walk) and the running agents; `Tab`/`Enter` inserts the
+  path relative to the session directory, or `@name` for an agent. Past a
+  slash command's name the dropdown completes its **argument** instead —
+  `/model`, `/theme`, `/think`, `/resume`, `/provider login` — always from the
+  same data the command itself validates against.
 - A shell command running in the foreground shows the last five lines of its
   output under its row while it runs, and `Ctrl+B` moves it to the background
   without restarting it: the tool call returns a task id at once and the
@@ -167,6 +174,8 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Ctrl+G` | open the full workspace directly; `Ctrl+K` switches channels and DMs |
 | `Ctrl+B` | move the running shell command to the background; with none running, manage background agents |
 | `Ctrl+L` | clear and redraw |
+| `@` | mention a project file or a running agent: fuzzy dropdown, `Tab`/`Enter` inserts the relative path (or `@name`) |
+| `Tab` | complete the slash command, its argument, the selected mention, or a `!` shell-history prefix |
 | `Shift+Tab` | cycle permission modes (default → acceptEdits → plan); in an approval prompt, take `Yes, and don't ask again this session` |
 | `Ctrl+E` | in an approval prompt, expand the full command/diff preview and the session rule it would install |
 | `Alt+T` | toggle thinking |

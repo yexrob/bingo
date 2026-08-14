@@ -28,6 +28,11 @@ pub enum EscLayer {
     AgentManager,
     /// Slash-command dropdown: closes, and takes a bare `/` query with it.
     SlashDropdown,
+    /// The `@` mention dropdown: closes, leaving the typed token alone.
+    /// Same stratum as [`EscLayer::SlashDropdown`] — both are transient
+    /// completion surfaces over the composer, and the two are mutually
+    /// exclusive, so their relative order is a formality.
+    MentionDropdown,
     /// ctrl+r history search: cancels without adopting the hit.
     Search,
     /// A page/field-level error row above the prompt.
@@ -51,11 +56,12 @@ pub enum EscLayer {
 
 impl EscLayer {
     /// The stack, top first. The single source for Esc's priority.
-    pub const ORDER: [EscLayer; 12] = [
+    pub const ORDER: [EscLayer; 13] = [
         EscLayer::AskDialog,
         EscLayer::Menu,
         EscLayer::AgentManager,
         EscLayer::SlashDropdown,
+        EscLayer::MentionDropdown,
         EscLayer::Search,
         EscLayer::ErrorRow,
         EscLayer::InfoLines,
@@ -743,9 +749,43 @@ impl super::Chat {
         self.push_slash_info(lines.join("\n"));
     }
 
-    /// Rebuilds the slash dropdown from the registry and currently loaded skills.
+    /// Rebuilds the composer's dropdown after an edit. One surface at a time,
+    /// in the order the caret decides: an `@` token under the caret (D85), else
+    /// the argument phase of a slash line (D85), else the command-name phase.
     pub(crate) fn update_slash_suggestions(&mut self) {
         self.clear_slash_suggestions();
+        self.update_mention();
+        if self.mention.is_some() {
+            return;
+        }
+        if let Some(ctx) = crate::tui::complete::arg_context(&self.input) {
+            // Past the command name, whatever happens next: a free-form
+            // argument offers nothing rather than falling back to re-offering
+            // the command the user has already finished typing.
+            if let Some(candidates) = self.arg_candidates(&ctx) {
+                let start = ctx.start;
+                let items =
+                    crate::tui::complete::fuzzy_rank(ctx.partial, candidates, |candidate| {
+                        candidate.value.as_str()
+                    });
+                self.slash_arg_start = Some(start);
+                self.slash_suggestions = items
+                    .into_iter()
+                    .map(|candidate| SlashSuggestion {
+                        name: candidate.value,
+                        hint: String::new(),
+                        description: candidate.description,
+                    })
+                    .collect();
+                self.slash_selected = self
+                    .slash_selected
+                    .min(self.slash_suggestions.len().saturating_sub(1));
+            }
+            // The name-phase "no matching commands" hint would be a lie here:
+            // an unmatched argument is still a legal thing to type.
+            self.slash_no_match = false;
+            return;
+        }
         let home = self.session.home.clone();
         let cwd = std::path::PathBuf::from(&self.cwd);
         let skills = crate::skills::load_skills(&home, &cwd)
@@ -804,11 +844,14 @@ impl super::Chat {
                 true
             }
             KeyCode::Esc => {
+                // The argument phase keeps its line: `/model dee` is a command
+                // the user is halfway through typing, not a stray query.
+                let name_phase = self.slash_arg_start.is_none();
                 self.clear_slash_suggestions();
-                // The dropdown only exists for a pure `/`-query — dismissing it
-                // dismisses the query too (the leftover "/th" used to turn the
+                // The name dropdown only exists for a pure `/`-query — dismissing
+                // it dismisses the query too (the leftover "/th" used to turn the
                 // next command into "//model").
-                if self.input.starts_with('/') {
+                if name_phase && self.input.starts_with('/') {
                     self.set_input("");
                 }
                 true
@@ -817,10 +860,22 @@ impl super::Chat {
         }
     }
 
-    /// Applies the selected suggestion (applyCommandSuggestion): fills `/name ` back into the input.
+    /// Applies the selected suggestion (applyCommandSuggestion). In the name
+    /// phase that is `/name ` for the whole line; in the argument phase (D85)
+    /// the value is spliced over the partial token, leaving the command and any
+    /// earlier arguments alone. Both end with a space, so the next argument's
+    /// dropdown opens straight away.
     fn apply_slash_suggestion(&mut self) {
         if let Some(s) = self.slash_suggestions.get(self.slash_selected) {
-            self.input = format!("/{} ", s.name);
+            match self.slash_arg_start {
+                Some(start) if start <= self.input.len() && self.input.is_char_boundary(start) => {
+                    self.input = format!("{}{} ", &self.input[..start], s.name);
+                }
+                _ => self.input = format!("/{} ", s.name),
+            }
+            // The caret follows the text it just completed; it used to stay
+            // where the partial word ended, leaving it mid-line.
+            self.cursor = self.input.len();
         }
         self.clear_slash_suggestions();
     }
@@ -1307,6 +1362,12 @@ impl super::Chat {
             return self.ctrl_c(now);
         }
         self.notice = None;
+        // Composer completion keys take priority over input. The `@` dropdown
+        // is judged first: it is anchored at the caret, and the two are
+        // mutually exclusive anyway (D85).
+        if !self.bash_mode && self.mention_menu_key(code, modifiers) {
+            return true;
+        }
         // Slash dropdown keys (Tab completes / Esc closes / ↑↓ navigate) take priority over input.
         if !self.bash_mode && self.slash_menu_key(code, modifiers) {
             return true;
@@ -1503,6 +1564,7 @@ impl super::Chat {
             EscLayer::Menu => self.menu_open(),
             EscLayer::AgentManager => self.agent_manager.is_some(),
             EscLayer::SlashDropdown => !self.slash_suggestions.is_empty(),
+            EscLayer::MentionDropdown => self.mention.is_some(),
             EscLayer::Search => self.search.is_some(),
             // The full-screen error state is not a layer: it owns the whole
             // canvas and its own keys (`error_screen_key`).
@@ -1536,6 +1598,7 @@ impl super::Chat {
             }
             EscLayer::AgentManager => self.agent_manager_key(ESC, NONE),
             EscLayer::SlashDropdown => self.slash_menu_key(ESC, NONE),
+            EscLayer::MentionDropdown => self.mention_menu_key(ESC, NONE),
             EscLayer::Search => self.search_key(ESC, NONE),
             // A Page/Field error row is dismissable like every other overlay —
             // it used to sit above the prompt until the next turn started.

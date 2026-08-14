@@ -132,6 +132,11 @@ bingo --continue            # 恢复最近一次会话
 - 大段粘贴自动折叠为 `[Pasted text #N +M lines]` 占位，发送时展开真实内容。
 - `Ctrl+R` 历史反向搜索；`↑↓` 历史回溯（多行输入内先移光标）。
 - `Ctrl+S` 暂存/恢复输入、`Ctrl+Y` 粘回删除、`Ctrl+_` 撤销。
+- 词首输入 `@` 打开 mention 下拉：项目文件（git 仓库内取已跟踪与未忽略的未跟踪文件，
+  否则走有界目录遍历）与正在运行的 agent，按 `@` 之后的内容模糊过滤；
+  `Tab`/`Enter` 插入相对于会话目录的路径，agent 则插入 `@name`。
+  斜杠命令写完命令名之后，同一个下拉改为补全**参数**——`/model`、`/theme`、
+  `/think`、`/resume`、`/provider login`——取值一律来自命令自身校验所用的同一份数据。
 - 前台运行的命令会在自己那一行下方实时显示最后五行输出；`Ctrl+B` 把它转入后台
   且不重启进程：工具调用立即返回 task id，完成时按后台任务通知送达。
 
@@ -146,6 +151,8 @@ bingo --continue            # 恢复最近一次会话
 | `Ctrl+G` | 直接打开全屏 Slack 式工作区；`Ctrl+K` 切换频道与 DM，alt+↑↓ 上下会话 |
 | `Ctrl+B` | 把正在前台运行的命令转入后台；没有命令在跑时管理后台 agent |
 | `Ctrl+L` | 清屏重画 |
+| `@` | mention 项目文件或运行中的 agent：模糊下拉，`Tab`/`Enter` 插入相对路径（或 `@name`） |
+| `Tab` | 补全斜杠命令、命令参数、选中的 mention，或 `!` shell 历史前缀 |
 | `Shift+Tab` | 循环权限模式（default → acceptEdits → plan）；审批对话框中直接选中「本会话不再询问」 |
 | `Ctrl+E` | 审批对话框中展开完整命令/diff 预览与将写入的会话规则 |
 | `Alt+T` | 思考开关 |

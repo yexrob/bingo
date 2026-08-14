@@ -65,7 +65,11 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "tab",
-        description: "complete slash / bash history",
+        description: "complete command / argument / mention / bash history",
+    },
+    Binding {
+        keys: "@",
+        description: "mention a project file or a running agent",
     },
     Binding {
         keys: "pgup/pgdn",

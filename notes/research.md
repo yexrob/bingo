@@ -1655,3 +1655,72 @@ task-local: `ask_question` already crosses from `UiHooks` into `ToolContext` thi
 control flow was not worth saving 37 lines of mechanical diff. (f) Scope holds: headless, `--print`,
 JSON protocol v1 and every subagent hold `LiveBash::detached()` — no tail is produced, nothing can be
 promoted, no new wire event exists, and those hosts run byte-identically to before.
+
+### D85. Completion is one surface, and its candidates come from the command's own data
+
+The composer could complete exactly one thing: a slash command's **name**. `/model `, `/theme `,
+`/think `, `/resume `, `/provider login ` all take arguments from a small, enumerable, *already
+existing* set, and every one of them had to be typed blind — with a trailing space the dropdown even
+kept offering the command the user had just finished typing. There was no `@` at all: no way to
+name a file to read or an agent to talk to without typing the path by hand. Claude Code and Codex
+both have `@` and both complete arguments; this batch adds them, on one mechanism.
+
+**One scorer.** `src/tui/complete.rs` holds a hand-rolled fuzzy matcher (no new dependency): a
+case-insensitive subsequence match with a consecutive-run bonus (8), a word/path-boundary bonus
+(10), a base point per matched character and a capped "started late" penalty, ties broken lexically.
+Two details are load-bearing. (a) The match is found in **two passes** — forward for the earliest
+end position, then backward from that end for the tightest positions reaching it. A single greedy
+pass matching `ch` against `src/chat.rs` takes the `c` of `src` and scores a scattered match; the
+backward pass finds `ch` in `chat` and scores the run, which is the difference between a useful
+ranking and a random one. (b) Folding is **ASCII-only**: `char::to_lowercase` may expand one
+character into several and would break the 1:1 index alignment the scorer needs between the folded
+and the original candidate, so non-ASCII simply matches case-sensitively. Model ids, identifiers and
+paths — everything this ranks — are ASCII. An empty query matches everything with score 0 and
+`fuzzy_rank` then does **not sort at all**: a catalog lists its preferred model first and the
+session list lists the most recent session first, and re-sorting an unfiltered list would destroy
+information the source deliberately carried.
+
+**One registry.** `Chat::arg_candidates` is a single `match` on `(command, already-typed arguments)`
+— one arm per command, arity falling out of the tuple. Every arm reads the data its own handler
+validates against, never a copy: `/model` the D73 declared catalog (`client.declared_models`) and,
+failing that, the same two synchronous fallbacks the `/model` picker's level two uses, in the same
+order — this session's fetched list, then a *fresh* disk cache; `/theme` `THEME_LEVELS`; `/think`
+`THINK_LEVELS`; `/resume` the untruncated `transcript::list` that `/resume <keyword>` itself
+searches; `/provider` `provider_order()` plus its two subcommands, and after `login`/`logout` the
+strictly smaller set that `slash_provider_login` accepts (configured providers ∪ presets — pointedly
+*not* `default`, which login rejects). The picker's fourth tier is a network fetch and is
+deliberately absent: a dropdown rebuilt on every keystroke must not block on an endpoint. `None`
+from the registry means the argument is free-form, and nothing opens.
+
+**One dropdown.** `update_slash_suggestions` is now the composer's single completion funnel and
+picks exactly one surface per edit: an `@` token under the caret, else the argument phase, else the
+command-name phase. Because it is one funnel, every edit path that already refreshed the old
+dropdown refreshes the new ones for free, and the mention and slash dropdowns can never be open
+together — which is why `EscLayer::MentionDropdown` sits *adjacent* to `SlashDropdown` in D80's
+order rather than above or below it in any meaningful sense, and why the peel-order test walks the
+stack a second time instead of walking a longer one.
+
+**`@` mentions.** Opening is anchored at the caret and at a word boundary — start of input or after
+whitespace — which is what keeps `user@example.com` an email address rather than a mention of
+`example.com`. Files come from `git ls-files --cached --others --exclude-standard -z` inside a
+repository, so `.gitignore` is honoured for free and the list matches what the user means by "the
+project"; outside one, a bounded walk (depth ≤ 6, no hidden directories, no `target/`
+`node_modules/` …). Both are capped at 5000 entries and the cap is stated in the dropdown footer
+rather than silently swallowed. The gather happens **once per open**, not per keystroke: the
+snapshot lives in `MentionState::all` and the query only re-filters it. Selecting inserts a file as
+its relative path and an agent as `@name` — the agent keeps its `@` because that token is exactly
+what D90's routing will read.
+
+**Deviations from the blueprint sketch, and why.** (a) Tab is *accept*, not "longest common prefix
+then accept": with a live fuzzy-ranked list the top row is already the answer, and an LCP step would
+insert a prefix that matches nothing the user can see. (b) No directory entries with a trailing `/`:
+`git ls-files` yields files, and synthesising the directory set would roughly double the list to
+support a navigation gesture that fuzzy matching makes unnecessary. Both are recorded here rather
+than silently dropped; neither is hard to add later. (c) Line-leading `@agent` **routing** is
+untouched — this batch builds the completion surface only, per the D90 scope guard.
+
+**Two things fixed in passing, both inside the code this batch rewrites.** Enter with an argument
+dropdown open used to take the name-phase shortcut ("complete and execute"), which would have
+dispatched `/deepseek-chat` as a command; it is now gated on the name phase. And
+`apply_slash_suggestion` never moved the caret, so Tab-completing `/mo` into `/model ` left the
+cursor at column 3 — it now follows the text it completed.
