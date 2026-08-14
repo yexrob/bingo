@@ -1890,3 +1890,86 @@ The title animation reuses D79's machinery entirely: `Title::Busy` carries the g
 already drops an unchanged title, so a busy turn costs about one `OSC 2` write per second and a
 `notifications: off` session still emits nothing. A pending permission prompt outranks the animation
 — the waiting title is never animated over, because it is the more urgent thing to say.
+
+### D88. Every conversation is the same shape, and the hub is the first one
+
+bingo has three kinds of conversation and three unrelated implementations of "conversation". The hub
+is `Vec<UiMessage>` rendered by `build_rows` straight into scrollback. A DM or a channel is a
+`Conv`, sampled per frame into a `Snapshot` of `ChannelItem`/`DmItem`, rendered by `message_rows`
+inside a modal that owns its own composer, its own key map and its own palette. The team has no
+conversation at all: `/team` prints strings into the hub transcript, spawn/done/ack go to the watch
+registry and are then forgotten. Phase 4 retires the modal and puts all of them on one surface, so
+the first thing it needs is one shape. This batch builds it and moves nothing: **`src/tui/buffer.rs`
+is the engine, the hub is buffer 0, and the screen is bit-identical** — the 1255 tests that passed
+at D87 pass unchanged, and the 25 new ones are all the batch's own.
+
+**A buffer holds what is *about* a conversation, never what is *in* one.** Id, how far the source
+has got, how far you have read, whether it wants you, the draft you left in it, when it last moved.
+`BufferId::source()` names the store the transcript actually lives in — `ChannelLog`,
+`AgentHistory`, `TeamLog`, `HubFlow` — and that naming is the point: it is a key, so there is no
+second copy of any message to fall out of step with the first. The registry's ordering is the
+derived `Ord` on the enum (hub, `#team`, channels by name, DMs by name), which means the order is
+the declaration and there is no comparator to keep in agreement with it.
+
+**Unread is a subtraction, not a counter — the batch spec asked for event tees and the code was
+already right.** The workspace has never incremented anything: `entity.rs::snapshot` recomputes
+`seq - read_cursor` on every frame, against `ChannelStatus.seq` for a room and `history.len()` for a
+DM. The engine keeps that and gains its robustness for free: a counter fed by an event stream can
+drift from the thing it counts (a dropped event, a double delivery, a lagging broadcast receiver),
+and a cursor read from the source cannot. So "shadow accounting" is a *poll*, teed into
+`refresh_entities` — which already reads both registries on the same 15-tick gate D87 named. One
+read, one clock, no second timer to disagree with the first. Two rules come with it. A conversation
+seen for the first time starts read, because opening bingo on an hour-old session should not badge
+every turn that already happened; that is the workspace's rule, kept for the workspace's reason. And
+a cursor is clamped to the sequence, because a source can *shrink*: compacting a subagent rewrites
+its history shorter, and a cursor parked past the end would read as "nothing new" for the rest of
+the session.
+
+**Mention is per-source, because "addressed to you" means different things in a room and a DM.** A
+DM is addressed to you by construction — there is no other kind of message in one — so anything new
+in it is a mention. A channel is a room, and chatter in a room is not a summons: it wants you only
+when an unread post contains `@user`. The log is only read when the subtraction says something is
+unread, so the common case costs nothing.
+
+**The board is the one buffer that had to store something, and that is a fact about the domain.**
+Every other source already keeps its own transcript. Lifecycle events do not: they are broadcast
+through `WatchRegistry` and retained nowhere, so a board bound to "the lifecycle stream" has nothing
+to bind *to*. `Buffers` therefore keeps a bounded log of its own (200 events, oldest dropped) fed
+from the `UiEvent::WatchEvent` arm — and only from `WatchKind::Agent`, because a channel event
+belongs to that channel's buffer and a command event is the hub's own tool, and neither is team
+news. The board also materializes on its first event rather than standing empty in a session that
+never spawned anyone, and that first event counts as unread: "first sight is read" exists to avoid
+badging history that predates you, and a board born a moment ago has none.
+
+**Rehydrate produces `UiMessage`, because the replay path the spec told it to reuse does not
+exist.** `/resume` looks like a replay and is not: it clears `self.messages`, prints one line, and
+uses the loaded history only for a count and a token estimate. Nothing anywhere converts a stored
+`api::types::Message` into a transcript row. So the instruction "do not write a second renderer" was
+honoured one layer down instead: `rehydrate` extracts through `slack::dm_posts` and
+`slack::channel_posts` — which is where the D64 `[DM from user]` stripping and the batched-message
+splitting already live — and emits `UiMessage`, the unit `build_rows` already consumes. A test pins
+that equivalence by rendering the same history both ways. The consequence is a claim on D89: those
+two functions are the part of `slack.rs` worth keeping, and the `Snapshot`/`Workspace`/`Switcher`
+shell is the part that dies. One honest shortfall: `budget` counts messages, not rows. Rows exist
+only after a layout at a known width, which is the host's business; a parameter that said rows and
+meant messages would have been worse than one that says what it is.
+
+**Routing is data, and the marker stays where it was.** `route_submit` maps an id to a
+`SubmitTarget`; `deliver` performs it with the same two calls the workspace composer makes today, in
+the same order. The DM target carries `from = user` and *nothing else* — the `[DM from user]` line
+is added downstream in `absorb_inbox`, derived from that name, and adding it here too would double
+it. A test asserts the full round trip at the domain level: route, deliver, drain the inbox, absorb,
+and read the marker off the prompt the instance would actually see. `#team` returns a typed refusal;
+it is a record of what happened, not a room to speak in.
+
+**Persistence: none, deliberately.** Unread marks and drafts are session-local and in memory. They
+describe your attention in this sitting, and a badge restored from disk would be a claim about a
+conversation you may have read in another window. Buffers rebuild from the domain on the next start,
+which is the same reason the workspace never persisted its cursors either.
+
+Nothing in this batch renders, so `feedback-states.md` is unchanged and the guide and READMEs are
+untouched: there is no new state to document because there is no new state on screen. `chat.rs`
+gained seven lines (3912 → 3919) and needed no extraction pre-step. The module carries one
+`#![cfg_attr(not(test), allow(dead_code))]`, because an engine complete before its caller is exactly
+what a foundation batch produces — **D89 deletes that line**, and anything still unused afterwards
+is genuinely dead.

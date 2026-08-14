@@ -13,6 +13,9 @@
 //!   pane) that [`entity`] wears when a channel or instance is opened.
 //! - [`composer`] owns the prompt's readline state (kill ring, the
 //!   `ctrl+x ctrl+e` chord) and the `$EDITOR` round trip.
+//! - [`buffer`] is the conversation engine (D88): every conversation — hub, DM,
+//!   channel, team board — as one shape, holding read cursors and drafts while
+//!   the transcripts stay in the domain stores they already live in.
 //! - [`chat`] is the state machine and the transcript block builder
 //!   (`build_rows`); [`slash`] owns slash command metadata and pure
 //!   suggestion/help transformations; [`complete`] owns the fuzzy scorer, the
@@ -29,6 +32,7 @@
 pub mod activities;
 mod app;
 pub mod avatar;
+pub mod buffer;
 pub mod chat;
 mod chrome;
 pub mod complete;

@@ -1075,6 +1075,10 @@ pub struct Chat {
     /// title bytes the host collects after each frame. Silent by default —
     /// only [`Chat::set_notifier`] gives it a channel.
     pub notify: Notifier,
+    /// The conversation engine (D88): every conversation as one shape. The hub
+    /// is buffer 0 and the active one; DM / channel / team accounting shadows
+    /// the domain here so D89 can switch onto it. Nothing renders from it yet.
+    pub(crate) buffers: crate::tui::buffer::Buffers,
     /// Slash command output lines (/help /status etc.): rendered after messages, settled when idle.
     pub slash_lines: Vec<String>,
     /// When the slash output appeared (auto-dismissed by tick timeout).
@@ -1424,6 +1428,7 @@ impl Chat {
             turn_verb: THINKING_WORDS[0],
             token_meter: crate::tui::motion::Meter::default(),
             notify: Notifier::default(),
+            buffers: crate::tui::buffer::Buffers::new(),
             slash_lines: Vec::new(),
             slash_at: None,
             slash_error_lines: Vec::new(),
@@ -1837,6 +1842,8 @@ impl Chat {
             } => {
                 // Agent/channel lifecycle events also refresh the bottom entity area.
                 self.refresh_entities();
+                self.buffers
+                    .note_watch_event(&label, kind, status, detail.as_deref(), self.tick);
                 let found = self.messages.iter_mut().find_map(|m| {
                     m.activities
                         .iter_mut()

@@ -2547,6 +2547,12 @@ impl super::Chat {
 
     /// Refreshes the bottom entity-area snapshot (running agents + channels). Dirty only on change.
     pub fn refresh_entities(&mut self) {
+        // The conversation engine follows the same poll (D88): the registries
+        // are already being read here, and a second timer reading them again
+        // would only be a second chance to disagree. It touches no render
+        // state, so the entity strip below is unaffected either way.
+        let session = self.session.clone();
+        self.buffers.refresh(&session, self.tick);
         let mut fresh: Vec<EntityRow> = self
             .session
             .agents
