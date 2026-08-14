@@ -92,6 +92,8 @@ pub struct Session {
     pub agents: Arc<crate::agents::AgentRegistry>,
     /// Agent channel registry (experimental; sub-sessions share the same table).
     pub channels: Arc<crate::channels::ChannelRegistry>,
+    /// Persistent team-task registry, scoped to the session's project and branch.
+    pub team_tasks: Arc<crate::team_tasks::TeamTaskRegistry>,
     /// This session's instance name (sub-agents = Some(registry name); main session None,
     /// channel member name main).
     pub instance: Option<String>,

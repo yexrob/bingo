@@ -54,7 +54,7 @@ impl ChannelMode {
 }
 
 /// A channel message (seq is total order within the channel).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelMessage {
     pub seq: u64,
     pub from: String,
@@ -161,6 +161,8 @@ pub struct ChannelRegistry {
     inner: Mutex<Inner>,
     /// Share persistence (Option semantics: behavior is unchanged when not attached; once attached, create/invite/kick/post sync snapshots).
     share: Mutex<Option<Arc<crate::share::ShareStore>>>,
+    /// Optional durable task transcript sink and task-state delivery gate.
+    team_tasks: Mutex<Option<Arc<crate::team_tasks::TeamTaskRegistry>>>,
 }
 
 fn format_hub_line(channel: &str, msg: &ChannelMessage) -> String {
@@ -176,7 +178,15 @@ impl ChannelRegistry {
                 limits,
             }),
             share: Mutex::new(None),
+            team_tasks: Mutex::new(None),
         })
+    }
+
+    pub fn attach_team_tasks(&self, registry: Arc<crate::team_tasks::TeamTaskRegistry>) {
+        *self
+            .team_tasks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(registry);
     }
 
     /// Replace share persistence and ensure existing channels can accept future messages.
@@ -366,6 +376,16 @@ impl ChannelRegistry {
     /// caller from the session instance name; the model can't specify it), serial staleness
     /// check, and the budget gate; what to say / whether to resend is entirely up to the model.
     pub fn post(&self, from: &str, name: &str, text: &str) -> Result<PostOutcome, String> {
+        let team_tasks = self
+            .team_tasks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(tasks) = &team_tasks {
+            tasks
+                .accepts_post(name, from)
+                .map_err(|error| error.to_string())?;
+        }
         let mut inner = self.lock();
         let limits = inner.limits;
         let hub_line;
@@ -418,6 +438,13 @@ impl ChannelRegistry {
                 at: now_unix(),
             };
             ch.log.push(msg.clone());
+            if let Some(tasks) = &team_tasks
+                && let Err(error) = tasks.record_message(name, from, text, msg.at)
+            {
+                ch.log.pop();
+                ch.seq = ch.seq.saturating_sub(1);
+                return Err(error.to_string());
+            }
             self.sync_channel_message(name, &msg);
             ch.seen.insert(from.to_string(), ch.seq);
             *ch.sent.entry(from.to_string()).or_insert(0) += 1;

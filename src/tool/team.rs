@@ -575,6 +575,16 @@ impl TeamTool {
             crate::channels::ChannelMode::parse(mode).map_err(ToolError::failed)?;
         }
         let old = blueprint(cwd);
+        let previous_member_ids = old
+            .as_ref()
+            .map(|definition| {
+                definition
+                    .members
+                    .iter()
+                    .map(|member| member.member_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let had_rooms = old.as_ref().is_some_and(|d| !d.channels.is_empty());
         // Rooms come from the call, or are carried from disk. Configuring the one-room
         // shorthand on a team that declares its own rooms would silently delete them, so
@@ -614,21 +624,61 @@ impl TeamTool {
                 Vec::new(),
             ),
         };
+        let mut taken_avatars = old
+            .as_ref()
+            .into_iter()
+            .flat_map(|definition| definition.members.iter())
+            .filter_map(|member| member.avatar.clone())
+            .collect::<Vec<_>>();
+        let roster = members
+            .iter()
+            .map(|member| {
+                let previous = old.as_ref().and_then(|definition| {
+                    definition
+                        .members
+                        .iter()
+                        .find(|candidate| candidate.name == member.name)
+                });
+                let avatar = trimmed(&member.avatar)
+                    .or_else(|| previous.and_then(|candidate| candidate.avatar.clone()))
+                    .unwrap_or_else(|| {
+                        crate::tui::avatar::random_default_id(
+                            taken_avatars.iter().map(String::as_str),
+                            &member.name,
+                        )
+                        .to_string()
+                    });
+                if !taken_avatars.contains(&avatar) {
+                    taken_avatars.push(avatar.clone());
+                }
+                TeamMember {
+                    member_id: previous
+                        .map(|candidate| candidate.member_id.clone())
+                        .unwrap_or_default(),
+                    name: member.name.trim().to_string(),
+                    agent: member.agent.trim().to_string(),
+                    avatar: Some(avatar),
+                    model: trimmed(&member.model),
+                    provider: trimmed(&member.provider),
+                    thinking: trimmed(&member.thinking),
+                    profile: previous
+                        .map(|candidate| candidate.profile.clone())
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
         let def = TeamDef {
+            team_id: old
+                .as_ref()
+                .map(|definition| definition.team_id.clone())
+                .unwrap_or_default(),
             name: name.to_string(),
+            leader: old
+                .as_ref()
+                .and_then(|definition| definition.leader.clone()),
             channel,
             channels,
-            members: members
-                .iter()
-                .map(|m| TeamMember {
-                    name: m.name.trim().to_string(),
-                    agent: m.agent.trim().to_string(),
-                    avatar: trimmed(&m.avatar),
-                    model: trimmed(&m.model),
-                    provider: trimmed(&m.provider),
-                    thinking: trimmed(&m.thinking),
-                })
-                .collect(),
+            members: roster,
             // The org chart is the user's: set up by hand across directories, pointing at
             // other repos, and no business of a roster edit. It travels every save intact.
             teams: old.map(|d| d.teams).unwrap_or_default(),
@@ -637,9 +687,24 @@ impl TeamTool {
         // blueprint that lands on disk is one that can be brought up. The chart it would
         // root is checked with it — a rewrite that breaks a child's room is refused rather
         // than persisted and then complained about.
-        crate::team::build_tree(def.clone(), cwd).map_err(|e| ToolError::failed(e.to_string()))?;
+        let tree = crate::team::build_tree(def.clone(), cwd)
+            .map_err(|e| ToolError::failed(e.to_string()))?;
         crate::team::validate(&def, defs, &self.session)
             .map_err(|e| ToolError::failed(e.to_string()))?;
+        let current_member_ids = tree
+            .root()
+            .def
+            .members
+            .iter()
+            .map(|member| member.member_id.clone())
+            .collect::<Vec<_>>();
+        crate::team::reconcile_member_experience(
+            &self.session.home,
+            cwd,
+            &previous_member_ids,
+            &current_member_ids,
+        )
+        .map_err(|error| ToolError::failed(error.to_string()))?;
         crate::team::write_team_file(cwd, &def).map_err(|e| ToolError::failed(e.to_string()))?;
         let rooms: Vec<String> = crate::team::rooms(&def)
             .into_iter()
@@ -774,6 +839,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
+            team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         });

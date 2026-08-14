@@ -1,4 +1,4 @@
-//! Sender avatars: eight bundled portraits placed as kitty images.
+//! Sender avatars: bundled portraits placed as kitty images.
 //!
 //! An avatar is not a new rendering mechanism — it is the D42 image path used at
 //! chip size. The portrait is transmitted once per id and the cells it occupies are
@@ -18,6 +18,7 @@
 //! the gutter and nowhere else.
 
 use ratatui::style::Color;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::tui::gfx::{self, ImageCap, Transmits};
 
@@ -28,7 +29,7 @@ pub const ROWS: usize = 2;
 /// The bundled portraits (`assets/avatars`, CC0 — see that directory's README).
 /// The name is the id `.bingo/team.json` pins with, so a crew member keeps one face
 /// across sessions instead of whatever a hash of its instance name lands on.
-const PORTRAITS: [(&str, &[u8]); 8] = [
+const PORTRAITS: [(&str, &[u8]); 20] = [
     ("emi", include_bytes!("../../assets/avatars/emi.png")),
     ("kenji", include_bytes!("../../assets/avatars/kenji.png")),
     ("sora", include_bytes!("../../assets/avatars/sora.png")),
@@ -37,7 +38,72 @@ const PORTRAITS: [(&str, &[u8]); 8] = [
     ("jin", include_bytes!("../../assets/avatars/jin.png")),
     ("kai", include_bytes!("../../assets/avatars/kai.png")),
     ("rio", include_bytes!("../../assets/avatars/rio.png")),
+    (
+        "identicon-01",
+        include_bytes!("../../assets/avatars/identicon-01.png"),
+    ),
+    (
+        "identicon-02",
+        include_bytes!("../../assets/avatars/identicon-02.png"),
+    ),
+    (
+        "identicon-03",
+        include_bytes!("../../assets/avatars/identicon-03.png"),
+    ),
+    (
+        "identicon-04",
+        include_bytes!("../../assets/avatars/identicon-04.png"),
+    ),
+    (
+        "identicon-05",
+        include_bytes!("../../assets/avatars/identicon-05.png"),
+    ),
+    (
+        "identicon-06",
+        include_bytes!("../../assets/avatars/identicon-06.png"),
+    ),
+    (
+        "identicon-07",
+        include_bytes!("../../assets/avatars/identicon-07.png"),
+    ),
+    (
+        "identicon-08",
+        include_bytes!("../../assets/avatars/identicon-08.png"),
+    ),
+    (
+        "identicon-09",
+        include_bytes!("../../assets/avatars/identicon-09.png"),
+    ),
+    (
+        "identicon-10",
+        include_bytes!("../../assets/avatars/identicon-10.png"),
+    ),
+    (
+        "identicon-11",
+        include_bytes!("../../assets/avatars/identicon-11.png"),
+    ),
+    (
+        "identicon-12",
+        include_bytes!("../../assets/avatars/identicon-12.png"),
+    ),
 ];
+
+const DEFAULT_IDS: [&str; 12] = [
+    "identicon-01",
+    "identicon-02",
+    "identicon-03",
+    "identicon-04",
+    "identicon-05",
+    "identicon-06",
+    "identicon-07",
+    "identicon-08",
+    "identicon-09",
+    "identicon-10",
+    "identicon-11",
+    "identicon-12",
+];
+const DEFAULT_OFFSET: usize = PORTRAITS.len() - DEFAULT_IDS.len();
+static DEFAULT_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// Every portrait id, in order — the vocabulary a blueprint may pin.
 pub fn ids() -> [&'static str; COUNT] {
@@ -46,6 +112,7 @@ pub fn ids() -> [&'static str; COUNT] {
 
 /// The number of distinct portraits, so a roster can hand out different ones.
 pub const COUNT: usize = PORTRAITS.len();
+pub const DEFAULT_COUNT: usize = DEFAULT_IDS.len();
 
 /// A pinned id → its portrait. Unknown ids fall through to the hash, so a typo in
 /// team.json costs a face, not a crash.
@@ -59,7 +126,54 @@ pub fn index_of(name: &str) -> usize {
     let hash = name
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-    hash as usize % PORTRAITS.len()
+    DEFAULT_OFFSET + hash as usize % DEFAULT_COUNT
+}
+
+/// Choose one geometric avatar once, preferring an id not already used by the team.
+/// The choice is persisted by the caller; the clock and nonce only spread new picks.
+pub fn random_default_id<'a>(taken: impl IntoIterator<Item = &'a str>, seed: &str) -> &'static str {
+    let mut reserved = [false; DEFAULT_COUNT];
+    for id in [
+        PORTRAITS[index_of(crate::channels::HUB_NAME)].0,
+        PORTRAITS[index_of(crate::channels::USER_NAME)].0,
+    ] {
+        if let Some(index) = DEFAULT_IDS.iter().position(|candidate| *candidate == id) {
+            reserved[index] = true;
+        }
+    }
+    let mut unavailable = [false; DEFAULT_COUNT];
+    unavailable.copy_from_slice(&reserved);
+    for id in taken {
+        if let Some(index) = DEFAULT_IDS.iter().position(|candidate| *candidate == id) {
+            unavailable[index] = true;
+        }
+    }
+    let clock = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or_default();
+    let counter = DEFAULT_NONCE.fetch_add(1, Ordering::Relaxed);
+    let hash = seed
+        .bytes()
+        .fold(clock ^ counter.rotate_left(17), |value, byte| {
+            value
+                .wrapping_mul(1_099_511_628_211)
+                .wrapping_add(u64::from(byte))
+        });
+    let start = hash as usize % DEFAULT_COUNT;
+    for offset in 0..DEFAULT_COUNT {
+        let index = (start + offset) % DEFAULT_COUNT;
+        if !unavailable[index] {
+            return DEFAULT_IDS[index];
+        }
+    }
+    for offset in 0..DEFAULT_COUNT {
+        let index = (start + offset) % DEFAULT_COUNT;
+        if !reserved[index] {
+            return DEFAULT_IDS[index];
+        }
+    }
+    unreachable!("the automatic avatar pool must contain an unreserved portrait")
 }
 
 /// The image key a portrait is transmitted and addressed under. Keyed by portrait
@@ -124,7 +238,7 @@ mod tests {
         let (_, bottom) = placeholder(3, 1).unwrap_or_else(|| panic!("row 1"));
         assert_eq!(top, bottom, "same image");
         assert_eq!(index_of("scout"), index_of("scout"));
-        // Different names generally differ; the set is only eight, so this asserts
+        // Different names generally differ; this asserts
         // the mapping is a function of the name, not that it is injective.
         let spread: std::collections::HashSet<usize> =
             ["scout", "qa", "dev", "ui", "main", "user", "docs", "ops"]
@@ -148,6 +262,19 @@ mod tests {
             index_of_id("nobody"),
             None,
             "unknown ids are not recognized; fall back to the hash"
+        );
+    }
+
+    #[test]
+    fn automatic_faces_use_only_the_geometric_pool() {
+        for name in ["main", "user", "lead", "reviewer", "开发者"] {
+            assert!(index_of(name) >= DEFAULT_OFFSET);
+            assert!(DEFAULT_IDS.contains(&PORTRAITS[index_of(name)].0));
+        }
+        let taken = DEFAULT_IDS[..DEFAULT_COUNT - 1].iter().copied();
+        assert_eq!(
+            random_default_id(taken, "last-slot"),
+            DEFAULT_IDS[DEFAULT_COUNT - 1]
         );
     }
 

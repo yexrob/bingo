@@ -374,8 +374,11 @@ pub const PASTE_COLLAPSE_LINES: usize = 10;
 
 /// Expands a `~` prefix to the home directory (returns unchanged when there is no home).
 fn expand_home(path: &str) -> String {
-    if let (Some(rest), Ok(home)) = (path.strip_prefix("~/"), std::env::var("HOME")) {
-        return format!("{home}/{rest}");
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = crate::platform::home_dir();
+        if !home.as_os_str().is_empty() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
     }
     path.to_string()
 }
@@ -3642,43 +3645,8 @@ impl Chat {
     }
 }
 
-pub(crate) fn one_line(text: &str, width: usize) -> String {
-    let flat = crate::tui::line::sanitize(text);
-    crate::tui::markdown::truncate(flat.as_ref(), width.max(1))
-}
-
-pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<Row> {
-    // 2 prefix columns + 1 column of right padding inside the bubble.
-    let body_width = width.saturating_sub(3).max(1);
-    let style = SegStyle::fg(theme.text);
-    wrap_words(text, body_width)
-        .into_iter()
-        .enumerate()
-        .map(|(i, text)| {
-            let mut line = Line::styled(if i == 0 { "❯ " } else { "  " }, style);
-            line.push_styled(text, style);
-            Row::bubble(line, theme.user_message_bg)
-        })
-        .collect()
-}
-
-pub(crate) fn text_rows(theme: &Theme, reply: Vec<Line>) -> Vec<Row> {
-    let claude = theme.claude;
-    reply
-        .into_iter()
-        .enumerate()
-        .map(|(j, line)| {
-            if j == 0 {
-                let mut styled = Line::styled("⏺ ", SegStyle::fg(claude));
-                styled.image = line.image.clone();
-                styled.segs.extend(line.segs);
-                Row::new(styled)
-            } else {
-                Row::new(line)
-            }
-        })
-        .collect()
-}
+mod chat_helpers;
+pub(crate) use chat_helpers::{one_line, text_rows, user_message_rows};
 
 #[path = "chat_tail.rs"]
 mod chat_tail;

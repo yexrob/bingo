@@ -34,12 +34,27 @@ use crate::query::Session;
 
 /// Team config file (project-level `.bingo/team.json`, checked into version control).
 pub const TEAM_FILE: &str = ".bingo/team.json";
+pub const TEAM_SCHEMA_VERSION: u8 = 2;
 /// The crew's working agreement (project-level `.bingo/team-norms.md`, checked into
 /// version control beside the blueprint). Prose rather than a schema on purpose: it is
 /// read by models and reviewed by people, and neither wants a config format (D53).
 pub const NORMS_FILE: &str = ".bingo/team-norms.md";
+pub const AVATAR_DIR: &str = ".bingo/assets/avatars";
 /// Memory root directory: `~/.config/bingo/teams/`.
 const TEAM_MEMORY_ROOT: &str = "teams";
+
+pub(crate) fn lock_team_file(project_dir: &Path) -> Result<std::fs::File, TeamError> {
+    let directory = project_dir.join(".bingo");
+    std::fs::create_dir_all(&directory)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(directory.join(".team.lock"))?;
+    file.lock()?;
+    Ok(file)
+}
 
 #[derive(Debug, Error)]
 pub enum TeamError {
@@ -63,6 +78,93 @@ impl TeamError {
     fn invalid(msg: impl Into<String>) -> Self {
         Self::Invalid(msg.into())
     }
+}
+
+pub fn import_avatar(project_dir: &Path, bytes: &[u8]) -> Result<String, TeamError> {
+    let (id, encoded) = normalize_avatar(bytes)?;
+    let hash = id
+        .strip_prefix("project:")
+        .ok_or_else(|| TeamError::invalid("normalized avatar id is invalid"))?;
+    let dir = project_dir.join(AVATAR_DIR);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{hash}.png"));
+    if !path.exists() {
+        crate::storage::write_atomic(&path, &encoded)?;
+    }
+    Ok(id)
+}
+
+pub(crate) fn normalize_avatar(bytes: &[u8]) -> Result<(String, Vec<u8>), TeamError> {
+    if bytes.is_empty() || bytes.len() > 20 * 1024 * 1024 {
+        return Err(TeamError::invalid(
+            "avatar image must be between 1 byte and 20 MiB",
+        ));
+    }
+    let image = image::load_from_memory(bytes)
+        .map_err(|error| TeamError::invalid(format!("avatar image is invalid: {error}")))?;
+    let normalized = image.resize_to_fill(512, 512, image::imageops::FilterType::Lanczos3);
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    normalized
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .map_err(|error| TeamError::invalid(format!("avatar normalization failed: {error}")))?;
+    let encoded = encoded.into_inner();
+    let hash = crate::update::sha256_hex(&encoded);
+    let id = format!("project:{}", &hash[..24]);
+    Ok((id, encoded))
+}
+
+pub fn project_avatar_ids(project_dir: &Path) -> Result<Vec<String>, TeamError> {
+    let dir = project_dir.join(AVATAR_DIR);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut ids = std::fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().is_some_and(|extension| extension == "png"))
+                .then(|| {
+                    path.file_stem()?
+                        .to_str()
+                        .map(|stem| format!("project:{stem}"))
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    ids.sort();
+    Ok(ids)
+}
+
+pub fn project_avatar_path(project_dir: &Path, id: &str) -> Option<PathBuf> {
+    let hash = id.strip_prefix("project:")?;
+    if hash.len() != 24 || !hash.chars().all(|character| character.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(project_dir.join(AVATAR_DIR).join(format!("{hash}.png")))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn runtime_member_configuration_key(
+    member_id: &str,
+    agent: &str,
+    system: &str,
+    inherit_system: bool,
+    provider: &str,
+    model: &str,
+    thinking: Option<&str>,
+    profile: &MemberProfile,
+) -> String {
+    let value = serde_json::json!({
+        "memberId": member_id,
+        "agent": agent,
+        "system": system,
+        "inheritSystem": inherit_system,
+        "provider": provider,
+        "model": model,
+        "thinking": thinking,
+        "profile": profile,
+    });
+    crate::update::sha256_hex(&serde_json::to_vec(&value).unwrap_or_default())
 }
 
 /// How deep a team tree may go. A cap rather than none, because a blueprint is a
@@ -139,6 +241,216 @@ pub struct Room {
     pub members: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberCommunication {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+}
+
+fn prompt_enforcement() -> String {
+    "prompt".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BehaviorConstraint {
+    pub kind: String,
+    pub instruction: String,
+    #[serde(default = "prompt_enforcement")]
+    pub enforcement: String,
+}
+
+impl Default for BehaviorConstraint {
+    fn default() -> Self {
+        Self {
+            kind: "custom".to_string(),
+            instruction: String::new(),
+            enforcement: prompt_enforcement(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<MemberIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub communication: Option<MemberCommunication>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<BehaviorConstraint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferences: Vec<String>,
+}
+
+impl MemberProfile {
+    pub fn merged(defaults: &Self, overrides: &Self) -> Self {
+        let identity = merge_identity(defaults.identity.as_ref(), overrides.identity.as_ref());
+        let communication = merge_communication(
+            defaults.communication.as_ref(),
+            overrides.communication.as_ref(),
+        );
+        let mut constraints = defaults.constraints.clone();
+        constraints.extend(overrides.constraints.clone());
+        let mut preferences = defaults.preferences.clone();
+        preferences.extend(overrides.preferences.clone());
+        Self {
+            identity,
+            personality: non_empty(overrides.personality.clone())
+                .or_else(|| non_empty(defaults.personality.clone())),
+            communication,
+            constraints: dedupe_constraints(constraints),
+            preferences: dedupe_strings(preferences),
+        }
+    }
+
+    pub fn with_constraints(&self, constraints: &[BehaviorConstraint]) -> Self {
+        let mut profile = self.clone();
+        profile.constraints.extend_from_slice(constraints);
+        profile.constraints = dedupe_constraints(profile.constraints);
+        profile
+    }
+
+    pub fn prompt_block(&self, member_name: &str) -> Option<String> {
+        let mut lines = vec![format!("Fixed team member profile for {member_name}:")];
+        if let Some(identity) = &self.identity {
+            if let Some(title) = non_empty(identity.title.clone()) {
+                lines.push(format!("Identity title: {title}"));
+            }
+            if let Some(background) = non_empty(identity.background.clone()) {
+                lines.push(format!("Identity background: {background}"));
+            }
+        }
+        if let Some(personality) = non_empty(self.personality.clone()) {
+            lines.push(format!("Personality: {personality}"));
+        }
+        if let Some(communication) = &self.communication {
+            if let Some(language) = non_empty(communication.language.clone()) {
+                lines.push(format!("Conversation language: {language}"));
+            }
+            if let Some(tone) = non_empty(communication.tone.clone()) {
+                lines.push(format!("Conversation tone: {tone}"));
+            }
+            if let Some(verbosity) = non_empty(communication.verbosity.clone()) {
+                lines.push(format!("Conversation verbosity: {verbosity}"));
+            }
+            if let Some(instructions) = non_empty(communication.instructions.clone()) {
+                lines.push(format!("Conversation style instructions: {instructions}"));
+            }
+        }
+        let constraints = self
+            .constraints
+            .iter()
+            .filter_map(|constraint| non_empty(Some(constraint.instruction.clone())))
+            .collect::<Vec<_>>();
+        if !constraints.is_empty() {
+            lines.push(
+                "MUST behavior constraints (prompt guidance, not a security sandbox):".to_string(),
+            );
+            lines.extend(constraints.into_iter().map(|value| format!("- {value}")));
+            lines.push(
+                "If a task requires breaking one of these constraints, stop and report the conflict to the user."
+                    .to_string(),
+            );
+        }
+        let preferences = self
+            .preferences
+            .iter()
+            .filter_map(|preference| non_empty(Some(preference.clone())))
+            .collect::<Vec<_>>();
+        if !preferences.is_empty() {
+            lines.push("SHOULD working preferences:".to_string());
+            lines.extend(preferences.into_iter().map(|value| format!("- {value}")));
+        }
+        (lines.len() > 1).then(|| lines.join("\n"))
+    }
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn merge_identity(
+    defaults: Option<&MemberIdentity>,
+    overrides: Option<&MemberIdentity>,
+) -> Option<MemberIdentity> {
+    let value = MemberIdentity {
+        title: overrides
+            .and_then(|value| non_empty(value.title.clone()))
+            .or_else(|| defaults.and_then(|value| non_empty(value.title.clone()))),
+        background: overrides
+            .and_then(|value| non_empty(value.background.clone()))
+            .or_else(|| defaults.and_then(|value| non_empty(value.background.clone()))),
+    };
+    (value.title.is_some() || value.background.is_some()).then_some(value)
+}
+
+fn merge_communication(
+    defaults: Option<&MemberCommunication>,
+    overrides: Option<&MemberCommunication>,
+) -> Option<MemberCommunication> {
+    let choose = |field: fn(&MemberCommunication) -> &Option<String>| {
+        overrides
+            .and_then(|value| non_empty(field(value).clone()))
+            .or_else(|| defaults.and_then(|value| non_empty(field(value).clone())))
+    };
+    let value = MemberCommunication {
+        language: choose(|value| &value.language),
+        tone: choose(|value| &value.tone),
+        verbosity: choose(|value| &value.verbosity),
+        instructions: choose(|value| &value.instructions),
+    };
+    (value.language.is_some()
+        || value.tone.is_some()
+        || value.verbosity.is_some()
+        || value.instructions.is_some())
+    .then_some(value)
+}
+
+fn dedupe_strings(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .into_iter()
+        .filter_map(|value| non_empty(Some(value)))
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
+fn dedupe_constraints(values: Vec<BehaviorConstraint>) -> Vec<BehaviorConstraint> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .into_iter()
+        .filter_map(|mut value| {
+            value.kind = non_empty(Some(value.kind)).unwrap_or_else(|| "custom".to_string());
+            value.instruction = non_empty(Some(value.instruction))?;
+            value.enforcement = "prompt".to_string();
+            Some(value)
+        })
+        .filter(|value| seen.insert((value.kind.clone(), value.instruction.clone())))
+        .collect()
+}
+
 /// A single member: `name` (instance name) + `agent` (referenced AgentDef name),
 /// plus the portrait it wears. The face is part of the blueprint because a crew is
 /// a standing cast: pinned here, a member keeps one face across sessions instead of
@@ -151,7 +463,10 @@ pub struct Room {
 /// agent definition and then to the parent session, exactly as an explicit `Agent`
 /// call's parameters do (see [`crate::tool::agent::build_sub_session`]).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TeamMember {
+    #[serde(default, alias = "member_id", skip_serializing_if = "String::is_empty")]
+    pub member_id: String,
     pub name: String,
     pub agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +477,12 @@ pub struct TeamMember {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    #[serde(default, skip_serializing_if = "profile_is_empty")]
+    pub profile: MemberProfile,
+}
+
+pub(crate) fn profile_is_empty(profile: &MemberProfile) -> bool {
+    profile == &MemberProfile::default()
 }
 
 /// Team definition (blueprint). Parsing and writing share this one struct: the file
@@ -169,7 +490,12 @@ pub struct TeamMember {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamDef {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub team_id: String,
     pub name: String,
+    /// Default task leader. Omitted blueprints fall back to the first selected member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader: Option<String>,
     /// One-room shorthand, used only when `channels` is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ChannelSpec>,
@@ -226,15 +552,57 @@ fn read_team_file(path: &Path) -> Result<Option<TeamDef>, TeamError> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Ok(None);
     };
-    let def: TeamDef = serde_json::from_str(&raw)?;
+    let value: serde_json::Value = serde_json::from_str(&raw)?;
+    let schema_version = value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    if schema_version != 1 && schema_version != u64::from(TEAM_SCHEMA_VERSION) {
+        return Err(TeamError::invalid(format!(
+            "{}: schemaVersion: unsupported version {schema_version} (this bingo supports versions 1 and {TEAM_SCHEMA_VERSION})",
+            path.display()
+        )));
+    }
+    let mut def: TeamDef = serde_json::from_value(value)?;
+    migrate_team_ids(&mut def, path, schema_version);
     validate_structure(&def, path)?;
     Ok(Some(def))
 }
 
+fn migrate_team_ids(def: &mut TeamDef, path: &Path, schema_version: u64) {
+    if schema_version == u64::from(TEAM_SCHEMA_VERSION) {
+        return;
+    }
+    if def.team_id.trim().is_empty() {
+        def.team_id = stable_blueprint_id("team", path, &def.name);
+    }
+    for member in &mut def.members {
+        if member.member_id.trim().is_empty() {
+            member.member_id = stable_blueprint_id("member", path, &member.name);
+        }
+    }
+}
+
+fn stable_blueprint_id(kind: &str, path: &Path, name: &str) -> String {
+    let source = format!("{kind}\0{}\0{name}", path.display());
+    format!(
+        "{kind}-{}",
+        crate::update::sha256_hex(source.as_bytes())
+            .chars()
+            .take(24)
+            .collect::<String>()
+    )
+}
+
 /// Structural validation (no AgentDef list needed): name/channel mode/member constraints.
 /// Shares the error format with `validate` (three parts: file path + field path + expectation).
-fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
+pub(crate) fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
     let file = path.display();
+    if !valid_stable_id(&def.team_id) {
+        return Err(TeamError::invalid(format!(
+            "{file}: teamId: must contain 1-128 letters, numbers, hyphens, or underscores"
+        )));
+    }
     if def.name.trim().is_empty() {
         return Err(TeamError::invalid(format!(
             "{file}: name: must not be empty (a team needs a name to be distinguishable)"
@@ -259,7 +627,13 @@ fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
         }
     }
     let mut seen = std::collections::HashSet::new();
+    let mut member_ids = std::collections::HashSet::new();
     for (i, m) in def.members.iter().enumerate() {
+        if !valid_stable_id(&m.member_id) {
+            return Err(TeamError::invalid(format!(
+                "{file}: members[{i}].memberId: must contain 1-128 letters, numbers, hyphens, or underscores"
+            )));
+        }
         if m.name.trim().is_empty() {
             return Err(TeamError::invalid(format!(
                 "{file}: members[{i}].name: must not be empty"
@@ -276,6 +650,20 @@ fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
                 m.name
             )));
         }
+        if !member_ids.insert(m.member_id.as_str()) {
+            return Err(TeamError::invalid(format!(
+                "{file}: members[{i}].memberId: duplicate \"{}\" within the config",
+                m.member_id
+            )));
+        }
+        validate_profile(&m.profile, &format!("{file}: members[{i}].profile"))?;
+    }
+    if let Some(leader) = def.leader.as_deref()
+        && !def.members.iter().any(|member| member.name == leader)
+    {
+        return Err(TeamError::invalid(format!(
+            "{file}: leader: \"{leader}\" must name a root team member"
+        )));
     }
     let mut rooms_seen = std::collections::HashSet::new();
     for (i, c) in def.channels.iter().enumerate() {
@@ -340,20 +728,68 @@ fn validate_structure(def: &TeamDef, path: &Path) -> Result<(), TeamError> {
     Ok(())
 }
 
+fn valid_stable_id(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.chars().count() <= 128
+        && value
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+pub fn validate_profile(profile: &MemberProfile, field: &str) -> Result<(), TeamError> {
+    if let Some(verbosity) = profile
+        .communication
+        .as_ref()
+        .and_then(|communication| communication.verbosity.as_deref())
+        && !matches!(verbosity, "concise" | "balanced" | "detailed")
+    {
+        return Err(TeamError::invalid(format!(
+            "{field}.communication.verbosity: expected concise, balanced, or detailed"
+        )));
+    }
+    for (index, constraint) in profile.constraints.iter().enumerate() {
+        if !matches!(
+            constraint.kind.as_str(),
+            "noNetwork" | "noShell" | "readOnly" | "reviewOnly" | "custom"
+        ) {
+            return Err(TeamError::invalid(format!(
+                "{field}.constraints[{index}].kind: unsupported behavior constraint kind"
+            )));
+        }
+        if constraint.instruction.trim().is_empty() {
+            return Err(TeamError::invalid(format!(
+                "{field}.constraints[{index}].instruction: must not be empty"
+            )));
+        }
+        if constraint.enforcement != "prompt" {
+            return Err(TeamError::invalid(format!(
+                "{field}.constraints[{index}].enforcement: only prompt is supported"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Write the blueprint to `.bingo/team.json` (creating `.bingo/` if needed).
 /// Structural validation runs first and shares its source with `load_team_file`:
 /// what this writes must parse back, so a written file can never be one the reader
 /// rejects. Reference validation (`validate`) stays with the caller — it needs the
 /// AgentDef list, which the format itself doesn't carry.
 pub fn write_team_file(project_dir: &Path, def: &TeamDef) -> Result<(), TeamError> {
+    let _lock = lock_team_file(project_dir)?;
     let path = project_dir.join(TEAM_FILE);
-    validate_structure(def, &path)?;
+    let mut def = def.clone();
+    migrate_team_ids(&mut def, &path, 1);
+    validate_structure(&def, &path)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut json = serde_json::to_string_pretty(def)?;
+    let mut value = serde_json::to_value(def)?;
+    value["schemaVersion"] = serde_json::Value::from(TEAM_SCHEMA_VERSION);
+    let mut json = serde_json::to_string_pretty(&value)?;
     json.push('\n');
-    std::fs::write(&path, json)?;
+    crate::storage::write_atomic(&path, json.as_bytes())?;
     Ok(())
 }
 
@@ -458,8 +894,9 @@ pub fn load_team_tree(project_dir: &Path) -> Result<Option<TeamTree>, TeamError>
 /// read from disk, this one is the value in hand. What `Team save` checks before it
 /// writes, so a rewrite that would break the chart is refused rather than persisted
 /// and then complained about.
-pub fn build_tree(def: TeamDef, project_dir: &Path) -> Result<TeamTree, TeamError> {
+pub fn build_tree(mut def: TeamDef, project_dir: &Path) -> Result<TeamTree, TeamError> {
     let file = project_dir.join(TEAM_FILE);
+    migrate_team_ids(&mut def, &file, 1);
     validate_structure(&def, &file)?;
     let mut nodes = Vec::new();
     let mut visited = std::collections::HashSet::new();
@@ -564,6 +1001,7 @@ fn add_node(
 fn check_unique_names(tree: &TeamTree) -> Result<(), TeamError> {
     let mut teams: HashMap<&str, &Path> = HashMap::new();
     let mut members: HashMap<&str, &Path> = HashMap::new();
+    let mut member_ids: HashMap<&str, &Path> = HashMap::new();
     let mut rooms_seen: HashMap<String, &Path> = HashMap::new();
     let clash = |what: &str, name: &str, first: &Path, second: &Path, why: &str| {
         TeamError::invalid(format!(
@@ -590,6 +1028,15 @@ fn check_unique_names(tree: &TeamTree) -> Result<(), TeamError> {
                     first,
                     &node.file,
                     "member names are unique across the tree: a name is how SendMessage reaches a member from anywhere in it",
+                ));
+            }
+            if let Some(first) = member_ids.insert(&m.member_id, &node.file) {
+                return Err(clash(
+                    "memberId",
+                    &m.member_id,
+                    first,
+                    &node.file,
+                    "stable member identities are unique across the tree so experience and task occupancy cannot cross-link",
                 ));
             }
         }
@@ -1001,9 +1448,21 @@ pub fn project_key(project_dir: &Path) -> String {
     format!("{name}-{}", crate::memory::path_hash(project_dir))
 }
 
-/// Current branch name (falls back to "detached" when not a git repo / no branch).
+/// Current Git scope: branch name, detached commit SHA, or `no-git`.
 pub fn current_branch(project_dir: &Path) -> String {
-    std::process::Command::new("git")
+    let inside = std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_dir)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_some_and(|value| value.trim() == "true");
+    if !inside {
+        return "no-git".to_string();
+    }
+    if let Some(branch) = std::process::Command::new("git")
         .arg("-C")
         .arg(project_dir)
         .args(["branch", "--show-current"])
@@ -1013,7 +1472,20 @@ pub fn current_branch(project_dir: &Path) -> String {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "detached".to_string())
+    {
+        return branch;
+    }
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "no-git".to_string())
 }
 
 /// Memory directory of a team under a project + branch:
@@ -1176,7 +1648,10 @@ fn spawn_members(
         // re-spawned — but it is brought up to date (D69): the definition files are what
         // the user edits between runs, and the alternative was deleting the instance,
         // which took its history with it.
-        let existing = session.agents.is_in_project(&member.name, project_dir);
+        let existing = session
+            .agents
+            .state_in_project(&member.name, project_dir)
+            .is_some();
         let name = if existing {
             member.name.clone()
         } else {
@@ -1204,16 +1679,36 @@ fn spawn_members(
             }
         };
         let description = agent_def.description.clone();
+        let profile = MemberProfile::merged(&agent_def.profile, &member.profile);
+        let configuration_key = runtime_member_configuration_key(
+            &member.member_id,
+            &member.agent,
+            &agent_def.system,
+            agent_def.inherit_system,
+            &sub.runtime.provider.borrow(),
+            &sub.runtime.model.borrow(),
+            sub.runtime.thinking.borrow().as_deref(),
+            &profile,
+        );
         if existing {
             match session
                 .agents
                 .refresh(&name, Some(member.agent.clone()), description, sub)
             {
-                // Everything else counts as the reuse it has always been: a member
-                // mid-turn keeps the definition it started under (the next start catches
-                // it), a name a hire took first is not the blueprint's to rewrite, and
-                // Missing cannot happen — the name was just seen in the registry.
-                crate::agents::Refresh::Refreshed => summary.refreshed.push(name),
+                crate::agents::Refresh::Refreshed => {
+                    session
+                        .agents
+                        .set_configuration_key(&name, configuration_key);
+                    summary.refreshed.push(name);
+                }
+                crate::agents::Refresh::Unchanged => {
+                    session
+                        .agents
+                        .set_configuration_key(&name, configuration_key);
+                    summary.reused.push(name);
+                }
+                // A member mid-turn keeps the definition it started under, and a hire
+                // that claimed the name is not rewritten as a standing crew member.
                 _ => summary.reused.push(name),
             }
             continue;
@@ -1225,6 +1720,9 @@ fn spawn_members(
             description,
             sub,
         );
+        session
+            .agents
+            .set_configuration_key(&name, configuration_key);
         // Spawn ≠ wake: mark Idle after insert (zero-token standby; the turn only starts with SendMessage).
         session.agents.mark_idle(&name);
         summary.spawned.push(name);
@@ -1252,10 +1750,18 @@ fn build_member(
     name: &str,
 ) -> Result<Arc<Session>, String> {
     ensure_transcript(home, project_dir, branch, team, name);
+    let task_note = session.team_tasks.member_context_note(&member.name);
+    let standing = [standing, task_note]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let context = crate::tool::agent::MemberContext {
         memory: member_memory_note(home, project_dir, branch, team, name),
         norms,
-        standing,
+        standing: (!standing.is_empty()).then_some(standing),
+        profile: Some(member.profile.clone()),
+        experience: member_experience_note(home, project_dir, &member.member_id),
         cwd: Some(project_dir.to_path_buf()),
     };
     crate::tool::agent::build_sub_session(
@@ -1468,6 +1974,115 @@ pub fn member_memory_note(
     ))
 }
 
+fn member_experience_path(home: &Path, project_dir: &Path, member_id: &str) -> PathBuf {
+    crate::storage::team_member_experience_dir(home)
+        .join(project_key(project_dir))
+        .join(format!("{member_id}.md"))
+}
+
+pub fn member_experience_note(home: &Path, project_dir: &Path, member_id: &str) -> Option<String> {
+    let path = member_experience_path(home, project_dir, member_id);
+    path.is_file().then(|| {
+        format!(
+            "Confirmed project experience for this fixed identity is stored at `{}`. Read it only when it is relevant to the current work.",
+            path.display()
+        )
+    })
+}
+
+pub fn append_member_experience(
+    home: &Path,
+    project_dir: &Path,
+    member_id: &str,
+    task_id: &str,
+    title: &str,
+    summary: &str,
+) -> Result<PathBuf, TeamError> {
+    if !valid_stable_id(member_id) {
+        return Err(TeamError::invalid(
+            "member experience requires a stable memberId",
+        ));
+    }
+    let path = member_experience_path(home, project_dir, member_id);
+    let parent = path
+        .parent()
+        .ok_or_else(|| TeamError::invalid("member experience path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(parent.join(".lock"))?;
+    lock_file.lock()?;
+    let mut content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| format!("# Confirmed experience for `{member_id}`\n"));
+    content.push_str(&format!(
+        "\n## {} · `{}`\n\n- Confirmed at: {}\n- Task: {}\n\n{}\n",
+        title.trim(),
+        task_id,
+        crate::channels::now_unix(),
+        title.trim(),
+        summary.trim()
+    ));
+    crate::storage::write_atomic(&path, content.as_bytes())?;
+    Ok(path)
+}
+
+pub fn reconcile_member_experience(
+    home: &Path,
+    project_dir: &Path,
+    previous_member_ids: &[String],
+    current_member_ids: &[String],
+) -> Result<(), TeamError> {
+    let previous = previous_member_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    let current = current_member_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    for member_id in previous.iter().chain(current.iter()) {
+        if !valid_stable_id(member_id) {
+            return Err(TeamError::invalid(
+                "member experience reconciliation requires stable memberIds",
+            ));
+        }
+    }
+    let removed = previous.difference(&current).copied().collect::<Vec<_>>();
+    let restored = current.difference(&previous).copied().collect::<Vec<_>>();
+    if removed.is_empty() && restored.is_empty() {
+        return Ok(());
+    }
+    let directory = crate::storage::team_member_experience_dir(home).join(project_key(project_dir));
+    std::fs::create_dir_all(&directory)?;
+    let archive = directory.join("archived");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(directory.join(".lock"))?;
+    lock_file.lock()?;
+
+    for member_id in removed {
+        let source = directory.join(format!("{member_id}.md"));
+        if !source.is_file() {
+            continue;
+        }
+        std::fs::create_dir_all(&archive)?;
+        let content = std::fs::read(&source)?;
+        crate::storage::write_atomic(&archive.join(format!("{member_id}.md")), &content)?;
+    }
+    for member_id in restored {
+        let destination = directory.join(format!("{member_id}.md"));
+        let archived = archive.join(format!("{member_id}.md"));
+        if !destination.exists() && archived.is_file() {
+            crate::storage::write_atomic(&destination, &std::fs::read(archived)?)?;
+        }
+    }
+    Ok(())
+}
+
 /// Load member history (missing/corrupt → empty, silently fall back).
 pub fn load_member_history(
     home: &Path,
@@ -1521,7 +2136,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::agents::AgentRegistry;
-    use crate::channels::{ChannelLimits, ChannelRegistry};
+    use crate::channels::ChannelLimits;
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("bingo-team-{}-{}", name, std::process::id()));
@@ -1575,6 +2190,165 @@ mod tests {
     }
 
     #[test]
+    fn member_profile_merge_preserves_role_defaults_and_appends_prompt_rules() {
+        let role = MemberProfile {
+            identity: Some(MemberIdentity {
+                title: Some("Staff engineer".into()),
+                background: Some("Distributed systems".into()),
+            }),
+            personality: Some("Methodical".into()),
+            communication: Some(MemberCommunication {
+                language: Some("auto".into()),
+                tone: Some("neutral".into()),
+                verbosity: Some("balanced".into()),
+                instructions: None,
+            }),
+            constraints: vec![BehaviorConstraint {
+                kind: "noNetwork".into(),
+                instruction: "Do not access the network.".into(),
+                enforcement: "prompt".into(),
+            }],
+            preferences: vec!["Run focused tests first.".into()],
+        };
+        let member = MemberProfile {
+            identity: Some(MemberIdentity {
+                title: Some("Release lead".into()),
+                background: None,
+            }),
+            personality: Some("Calm and direct".into()),
+            communication: Some(MemberCommunication {
+                language: Some("zh-CN".into()),
+                tone: None,
+                verbosity: Some("concise".into()),
+                instructions: Some("Lead with the outcome.".into()),
+            }),
+            constraints: vec![
+                role.constraints[0].clone(),
+                BehaviorConstraint {
+                    kind: "reviewOnly".into(),
+                    instruction: "Only review the proposed changes.".into(),
+                    enforcement: "prompt".into(),
+                },
+            ],
+            preferences: vec![
+                "Run focused tests first.".into(),
+                "Call out unresolved risks.".into(),
+            ],
+        };
+
+        let merged = MemberProfile::merged(&role, &member);
+        let identity = merged
+            .identity
+            .as_ref()
+            .unwrap_or_else(|| panic!("identity"));
+        assert_eq!(identity.title.as_deref(), Some("Release lead"));
+        assert_eq!(identity.background.as_deref(), Some("Distributed systems"));
+        assert_eq!(merged.personality.as_deref(), Some("Calm and direct"));
+        assert_eq!(merged.constraints.len(), 2);
+        assert_eq!(merged.preferences.len(), 2);
+        let prompt = merged
+            .prompt_block("Lin")
+            .unwrap_or_else(|| panic!("prompt"));
+        let profile_at = prompt.find("Fixed team member profile").unwrap();
+        let must_at = prompt.find("MUST behavior constraints").unwrap();
+        let should_at = prompt.find("SHOULD working preferences").unwrap();
+        assert!(profile_at < must_at && must_at < should_at, "{prompt}");
+        assert!(prompt.contains("prompt guidance, not a security sandbox"));
+        assert!(prompt.contains("stop and report the conflict"));
+    }
+
+    #[test]
+    fn legacy_team_v1_gets_stable_ids_and_saves_as_v2() {
+        let dir = tmp("legacy-v1");
+        write_team(
+            &dir,
+            r#"{"name":"legacy","members":[{"name":"lead","agent":"lead"}]}"#,
+        );
+        let first = load_team_file(&dir).unwrap().unwrap();
+        let second = load_team_file(&dir).unwrap().unwrap();
+        assert_eq!(first.team_id, second.team_id);
+        assert_eq!(first.members[0].member_id, second.members[0].member_id);
+        assert!(first.team_id.starts_with("team-"));
+        assert!(first.members[0].member_id.starts_with("member-"));
+
+        write_team_file(&dir, &first).unwrap_or_else(|error| panic!("{error}"));
+        let raw = std::fs::read_to_string(dir.join(TEAM_FILE)).unwrap();
+        assert!(raw.contains("\"schemaVersion\": 2"), "{raw}");
+        assert!(raw.contains("\"memberId\""), "{raw}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn avatar_import_normalizes_content_and_reuses_hash() {
+        let dir = tmp("avatar-import");
+        let mut source = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(16, 8)
+            .write_to(&mut source, image::ImageFormat::Png)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let first = import_avatar(&dir, source.get_ref()).unwrap_or_else(|error| panic!("{error}"));
+        let second =
+            import_avatar(&dir, source.get_ref()).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(first, second);
+        assert_eq!(
+            project_avatar_ids(&dir).unwrap_or_else(|error| panic!("{error}")),
+            vec![first.clone()]
+        );
+        let image = image::open(project_avatar_path(&dir, &first).unwrap())
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!((image.width(), image.height()), (512, 512));
+        assert!(import_avatar(&dir, b"not an image").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn confirmed_experience_is_scoped_to_project_and_stable_member_id() {
+        let home = tmp("experience-home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let path = append_member_experience(
+            &home,
+            &project,
+            "member-reviewer",
+            "task-1",
+            "Review release",
+            "Found and confirmed the compatibility fix.",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        append_member_experience(
+            &home,
+            &project,
+            "member-reviewer",
+            "task-2",
+            "Verify release",
+            "Confirmed the final package.",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Review release") && content.contains("Verify release"));
+        assert!(member_experience_note(&home, &project, "member-reviewer").is_some());
+        reconcile_member_experience(&home, &project, &["member-reviewer".to_string()], &[])
+            .unwrap_or_else(|error| panic!("{error}"));
+        let archived = path
+            .parent()
+            .unwrap_or_else(|| panic!("experience directory"))
+            .join("archived/member-reviewer.md");
+        assert_eq!(
+            std::fs::read(&archived).unwrap(),
+            std::fs::read(&path).unwrap()
+        );
+        let held = path.with_extension("held");
+        std::fs::rename(&path, &held).unwrap_or_else(|error| panic!("{error}"));
+        reconcile_member_experience(&home, &project, &[], &["member-reviewer".to_string()])
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            std::fs::read(&archived).unwrap()
+        );
+        assert!(append_member_experience(&home, &project, "", "task", "title", "summary").is_err());
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
     fn missing_file_returns_none() {
         let dir = tmp("missing");
         assert!(load_team_file(&dir).unwrap().is_none());
@@ -1618,18 +2392,21 @@ mod tests {
     fn write_team_file_round_trips_and_rejects_invalid() {
         let dir = tmp("write");
         let def = TeamDef {
+            team_id: "team-dev".into(),
             name: "dev-room".into(),
             channel: Some(ChannelSpec {
                 mode: Some("free".into()),
                 message_limit: Some(80),
             }),
             members: vec![TeamMember {
+                member_id: "member-qa".into(),
                 name: "qa".into(),
                 agent: "qa".into(),
                 avatar: Some("sora".into()),
                 model: Some("sub-model".into()),
                 provider: Some("ds".into()),
                 thinking: Some("xhigh".into()),
+                profile: MemberProfile::default(),
             }],
             ..Default::default()
         };
@@ -1679,6 +2456,7 @@ mod tests {
             thinking: None,
             system: "s".into(),
             inherit_system: true,
+            profile: MemberProfile::default(),
             source: AgentDefSource::Project,
         };
         let ok = TeamDef {
@@ -1788,6 +2566,7 @@ mod tests {
             thinking: None,
             system: format!("You are {name}."),
             inherit_system: true,
+            profile: MemberProfile::default(),
             source: AgentDefSource::Project,
         }
     }
@@ -1824,7 +2603,8 @@ mod tests {
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
-            channels: ChannelRegistry::new(ChannelLimits::default()),
+            channels: crate::channels::ChannelRegistry::new(ChannelLimits::default()),
+            team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })
@@ -1874,6 +2654,23 @@ mod tests {
         assert_eq!(second.reused.len(), 3, "{second:?}");
         assert!(second.refreshed.is_empty(), "nothing moved: {second:?}");
         assert_eq!(s.agents.list().len(), 3, "no duplicate instances");
+
+        let _ = s.agents.stop("ui");
+        let third = spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            third.spawned.is_empty(),
+            "stopped members keep their instance"
+        );
+        assert_eq!(third.reused.len(), 3, "{third:?}");
+        assert!(third.refreshed.is_empty(), "the definition did not move");
+        assert_eq!(
+            s.agents
+                .list()
+                .into_iter()
+                .find(|member| member.name == "ui")
+                .map(|member| member.state),
+            Some(crate::agents::AgentState::Idle)
+        );
         std::fs::remove_dir_all(&home).unwrap();
     }
 
@@ -2695,6 +3492,19 @@ mod tests {
                 Ok(_) => panic!("should have been refused"),
             }
         };
+
+        let root_member_id = tree_of(&root).root().def.members[0].member_id.clone();
+        let mut same_identity = member("Sora", "analyst");
+        same_identity.member_id = root_member_id;
+        let dup_member_id = rewrite(TeamDef {
+            name: "strategy".into(),
+            members: vec![same_identity],
+            ..Default::default()
+        });
+        assert!(
+            dup_member_id.contains("duplicate memberId"),
+            "{dup_member_id}"
+        );
 
         let dup_member = rewrite(TeamDef {
             name: "strategy".into(),

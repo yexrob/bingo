@@ -519,7 +519,8 @@ pub async fn load_image(url: &str, cwd: &Path, cap: &ImageCap) -> Option<crate::
 
 /// Fetch the raw bytes by url type.
 async fn fetch_bytes(url: &str, cwd: &Path) -> Option<Vec<u8>> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = crate::platform::home_dir();
+    let home = (!home.as_os_str().is_empty()).then_some(home);
     fetch_bytes_with_home(url, cwd, home.as_deref()).await
 }
 

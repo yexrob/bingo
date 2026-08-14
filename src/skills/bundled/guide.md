@@ -46,6 +46,26 @@ commands, and verification steps in conclusions. Never speculate about features 
   that speaks the protocol but rejects images, and then only the text is sent. The attachment table belongs to the session,
   not to the input box: any subagent resolves the same `#[image N]` marker, so an opted-out session can still get an image
   looked at by forking one onto a provider that accepts them.
+- **JSON-events image input**: clients advertising against `attachments.input.v1` add one image at a
+  time with `attachment.add`, wait for `attachment.ready`, then include the returned `#[image N]`
+  marker in `turn.start`. The same decoder, 32 MiB input ceiling, 2000px scaling, and provider
+  capability rules used by the TUI apply; image bytes, filenames, and paths are not echoed in errors.
+- **JSON-events session workspace**: `session.workspace.v1` transcripts carry a versioned absolute
+  workspace record. Resume from that directory, or explicitly relocate an exact session with
+  `--json-events --session <id> --bind-session-workspace`; binding appends metadata without rewriting
+  prior messages. Legacy transcripts remain unbound until a client makes that explicit choice.
+- **JSON-events context usage**: clients advertising against `session.context.v1` send
+  `context.subscribe` once per process. Bingo replies with `context.usage` carrying the initial
+  estimate and then emits turn-scoped updates from the same token gate used by the query loop.
+  Clients that do not subscribe receive no context events.
+- **JSON-events session forks and cancellation**: `session.fork.v1` creates an immutable child for
+  editing the final prompt or recovering an interrupted turn; the source transcript is unchanged.
+  Turn cancellation persists completed context only and pairs interrupted tool calls before a later
+  continuation. A rejected `prompt.respond` leaves the live prompt available for a corrected retry.
+- **JSON-events Team workspace**: `team.workspace.v1` and the related Team v2 capabilities expose
+  role documents, stable member profiles and project avatars, the durable branch-scoped task board,
+  lobby history, and preview-first `.bingo-team` import/export. Role and team saves use revisions;
+  preset updates require an explicit keep/update resolution and never carry credentials.
 
 ## Config guide (settings.json)
 
@@ -196,9 +216,10 @@ Example (.bingo/settings.json):
   for thinking levels, no count_tokens endpoint → local-estimation fallback). The top-level `apiKey`/`apiBaseUrl`
   always form the anthropic "default" provider; subagent cross-provider rules apply across protocols
   (explicit `model` required when forking to a different provider). opencode-go (subscription) lands as
-  `{"protocol": "openai", "apiKey": "<go-key>", "apiBaseUrl": "https://opencode.ai/zen/go"}` — its Responses
-  models (e.g. gpt-5.6-luna) work through the openai adapter; its chat/completions models need an adapter
-  that is not implemented yet; its anthropic-protocol models can be added as a separate provider entry.
+  `{"protocol": "openai", "apiKey": "<go-key>", "apiBaseUrl": "https://opencode.ai/zen/go"}`.
+  `/model` reads the live `/v1/models` catalogue instead of a frozen allowlist. Responses models work through
+  the openai adapter; chat/completions models need an adapter that is not implemented yet, and
+  anthropic-protocol models can be added as a separate provider entry.
 - **Built-in provider presets (zero-config)**: official subscriptions ship inside bingo — `codex` (ChatGPT,
   `protocol: openai` + `oauth.kind: codex` → chatgpt.com/backend-api/codex/responses) and `opencode-go`
   (`protocol: openai` + apiKey → opencode.ai/zen/go) are visible in `/provider` (built-in badge) and loginable with
@@ -300,8 +321,12 @@ Example (.bingo/settings.json):
   immediate dispatch path as SendMessage (shown as pending only until the receiver claims it). Keys: Tab switches between the message
   list and the composer, ↑↓ or the mouse wheel scrolls the transcript (three rows per wheel notch), alt+↑↓ switches conversation,
   Ctrl+K is the quick switcher, Esc returns.
-- **agent team** (project-scoped roster): `.bingo/team.json` (camelCase: `name`/`channel{mode,messageLimit}`/`channels[{name,mode?,messageLimit?,members?}]`/`teams[{name?,path}]`/
-  `members[{name,agent,avatar?,model?,provider?,thinking?}]`, members reference AgentDefs; `name` is the name shown on the member's messages, so make it a person's name, and `avatar` pins one of the bundled portraits.
+- **agent team** (project-scoped roster): `.bingo/team.json` (Team v2 camelCase:
+  `schemaVersion`/`teamId`/`name`/`channel{mode,messageLimit}`/`channels[{name,mode?,messageLimit?,members?}]`/`teams[{name?,path}]`/
+  `members[{memberId,name,agent,avatar?,model?,provider?,thinking?,profile?}]`; members reference AgentDefs).
+  `teamId` and `memberId` are durable identities; `name` remains the address shown on messages.
+  `profile` composes identity, communication preferences, prompt-level constraints, and preferences
+  over the reusable role. `avatar` accepts a bundled portrait or a content-addressed project image.
   `model`/`provider`/`thinking` pin the member's engine — which model does which job is part of the formation, so a crew can mix a cheap fast reviewer with a stronger designer; each falls back to the agent definition and then to the session, and a named `provider` other than the session's needs a `model` too.
   `/team validate` checks the engine against this session's providers, so a blueprint that passes still starts) pins multiple roles to one project; started by default at launch
   (`settings.team.autoStart`; `--no-team` turns it off; starting ≠ waking — members stand by Idle at zero tokens,

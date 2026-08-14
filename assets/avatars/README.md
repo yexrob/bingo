@@ -1,7 +1,8 @@
 # Message avatars
 
-Eight portraits, bundled into the binary and shown next to a sender's name in the
-workspace conversation (`src/tui/avatar.rs`).
+Twenty avatars, bundled into the binary and shown next to a sender's name in the
+workspace conversation (`src/tui/avatar.rs`). Existing portrait ids stay stable;
+new identities are assigned from the geometric set.
 
 - **Style**: [Lorelei](https://www.dicebear.com/styles/lorelei/) by Lisa Wischofsky,
   rendered through the [DiceBear](https://www.dicebear.com/) HTTP API.
@@ -27,6 +28,17 @@ https://api.dicebear.com/9.x/lorelei/png
 | `jin.png` | Jin | `fde68a` |
 | `kai.png` | Kai | `fecaca` |
 | `rio.png` | Rio | `d1d4f9` |
+
+## Geometric identicons
+
+`identicon-01.png` through `identicon-12.png` are 256x256, five-by-five symmetric
+grids generated locally by `scripts/generate-identicons.mjs`. The script uses
+fixed seeds and palettes, Node's standard PNG primitives, and no network service or
+runtime dependency. They are released under CC0 with the portrait set.
+
+These twelve ids form the automatic-assignment pool. The eight Lorelei portraits
+remain selectable so existing blueprints and task snapshots keep rendering exactly
+the avatar they pinned.
 
 The file name is the portrait's id: `.bingo/team.json` pins one to a member with
 `"avatar": "sora"`, so a crew member keeps the same face across sessions instead of

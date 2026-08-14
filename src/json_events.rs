@@ -2,6 +2,8 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 use std::sync::Arc;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -11,12 +13,28 @@ use crate::error::{ErrorCode, error_code_boxed, sanitize_msg};
 use crate::query::{AskAnswer, Session, ToolCallStatus, UiHooks, run_query};
 use crate::transcript::Transcript;
 
+mod team_handlers;
+
 pub const PROTOCOL_VERSION: u8 = 1;
-pub const MAX_COMMAND_LINE_BYTES: usize = 1024 * 1024;
+pub const MAX_COMMAND_LINE_BYTES: usize = 48 * 1024 * 1024;
 pub const MAX_EVENT_LINE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 1_000_000;
 pub const MAX_RESPONSE_CHARS: usize = 100_000;
 pub const MAX_RENAME_CHARS: usize = 80;
+pub const CAPABILITIES: &[&str] = &[
+    "settings.inspect.v1",
+    "session.context.v1",
+    "session.workspace.v1",
+    "team.workspace.v1",
+    "team.tasks.v1",
+    "team.blueprint.v2",
+    "team.lobby.v1",
+    "team.presets.v1",
+    "team.member.profile.v1",
+    "team.avatar.read.v1",
+    "attachments.input.v1",
+    "session.fork.v1",
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum JsonEventsError {
@@ -40,6 +58,16 @@ impl ErrorCode for JsonEventsError {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum ClientCommand {
+    #[serde(rename = "attachment.add")]
+    AttachmentAdd {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(rename = "attachmentId")]
+        attachment_id: String,
+        data: String,
+    },
     #[serde(rename = "turn.start")]
     TurnStart {
         #[serde(rename = "protocolVersion")]
@@ -84,6 +112,342 @@ pub enum ClientCommand {
         #[serde(rename = "commandId")]
         command_id: String,
     },
+    #[serde(rename = "settings.get")]
+    SettingsGet {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+    },
+    #[serde(rename = "context.subscribe")]
+    ContextSubscribe {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+    },
+    #[serde(rename = "team.subscribe")]
+    TeamSubscribe {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+    },
+    #[serde(rename = "team.refresh")]
+    TeamRefresh {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+    },
+    #[serde(rename = "team.validate")]
+    TeamValidate {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+    },
+    #[serde(rename = "team.save")]
+    TeamSave {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(rename = "baseRevision")]
+        base_revision: String,
+        definition: serde_json::Value,
+    },
+    #[serde(rename = "team.start")]
+    TeamStart {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+    },
+    #[serde(rename = "team.stop")]
+    TeamStop {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+    },
+    #[serde(rename = "team.lobby.get")]
+    TeamLobbyGet {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(default, rename = "beforeSeq")]
+        before_seq: Option<u64>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    #[serde(rename = "team.lobby.post")]
+    TeamLobbyPost {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        text: String,
+        #[serde(default)]
+        targets: Vec<String>,
+    },
+    #[serde(rename = "team.avatar.import")]
+    TeamAvatarImport {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(rename = "fileName")]
+        file_name: String,
+        data: String,
+    },
+    #[serde(rename = "team.avatar.get")]
+    TeamAvatarGet {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        avatar: String,
+    },
+    #[serde(rename = "team.preset.inspect")]
+    TeamPresetInspect {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        data: String,
+    },
+    #[serde(rename = "team.preset.import")]
+    TeamPresetImport {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        data: String,
+        #[serde(rename = "baseRevision")]
+        base_revision: String,
+        #[serde(default)]
+        resolutions: std::collections::HashMap<String, String>,
+        #[serde(default, rename = "modelMappings")]
+        model_mappings:
+            std::collections::HashMap<String, crate::team_presets::TeamPresetModelMapping>,
+    },
+    #[serde(rename = "team.preset.export")]
+    TeamPresetExport {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+    },
+    #[serde(rename = "team.member.restart")]
+    TeamMemberRestart {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        member: String,
+    },
+    #[serde(rename = "team.member.useful")]
+    TeamMemberUseful {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        member: String,
+    },
+    #[serde(rename = "team.member.promote")]
+    TeamMemberPromote {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        member: String,
+        #[serde(rename = "baseRevision")]
+        base_revision: String,
+    },
+    #[serde(rename = "team.task.list")]
+    TeamTaskList {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+    },
+    #[serde(rename = "team.task.get")]
+    TeamTaskGet {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(rename = "taskId")]
+        task_id: String,
+        #[serde(default, rename = "beforeSeq")]
+        before_seq: Option<u64>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    #[serde(rename = "team.task.create")]
+    TeamTaskCreate {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        title: String,
+        description: String,
+        #[serde(default)]
+        participants: Option<Vec<String>>,
+        #[serde(default)]
+        leader: Option<String>,
+        #[serde(
+            default,
+            rename = "contextMessageSeqs",
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        context_message_seqs: Vec<u64>,
+        #[serde(
+            default,
+            rename = "additionalConstraints",
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        additional_constraints: Vec<crate::team::BehaviorConstraint>,
+    },
+    #[serde(rename = "team.task.post")]
+    TeamTaskPost {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(rename = "taskId")]
+        task_id: String,
+        text: String,
+    },
+    #[serde(rename = "team.task.pause")]
+    TeamTaskPause {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(rename = "taskId")]
+        task_id: String,
+    },
+    #[serde(rename = "team.task.resume")]
+    TeamTaskResume {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(rename = "taskId")]
+        task_id: String,
+        #[serde(default)]
+        message: Option<String>,
+    },
+    #[serde(rename = "team.task.complete")]
+    TeamTaskComplete {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(rename = "taskId")]
+        task_id: String,
+    },
+    #[serde(rename = "team.task.cancel")]
+    TeamTaskCancel {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(rename = "taskId")]
+        task_id: String,
+    },
+    #[serde(rename = "agent.message")]
+    AgentMessage {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        member: String,
+        message: String,
+    },
+    #[serde(rename = "agent.stop")]
+    AgentStop {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        member: String,
+    },
+    #[serde(rename = "agent.remove")]
+    AgentRemove {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        member: String,
+    },
+    #[serde(rename = "agent.activity.get")]
+    AgentActivityGet {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        member: String,
+    },
+    #[serde(rename = "agent.definition.list")]
+    AgentDefinitionList {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+    },
+    #[serde(rename = "agent.definition.get")]
+    AgentDefinitionGet {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        scope: String,
+        id: String,
+    },
+    #[serde(rename = "agent.definition.save")]
+    AgentDefinitionSave {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        scope: String,
+        id: String,
+        #[serde(default, rename = "baseRevision")]
+        base_revision: Option<String>,
+        definition: Box<crate::agents::AgentDefinitionInput>,
+    },
+    #[serde(rename = "agent.definition.archive")]
+    AgentDefinitionArchive {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        scope: String,
+        id: String,
+        #[serde(rename = "baseRevision")]
+        base_revision: String,
+    },
+    #[serde(rename = "channel.post")]
+    ChannelPost {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        channel: String,
+        text: String,
+    },
+    #[serde(rename = "channel.history.get")]
+    ChannelHistoryGet {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        channel: String,
+    },
     #[serde(rename = "session.rename")]
     SessionRename {
         #[serde(rename = "protocolVersion")]
@@ -99,6 +463,18 @@ pub enum ClientCommand {
         #[serde(rename = "commandId")]
         command_id: String,
     },
+    #[serde(rename = "session.fork")]
+    SessionFork {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        reason: crate::transcript::ForkReason,
+        #[serde(default, rename = "sourceTurnId")]
+        source_turn_id: Option<String>,
+        #[serde(default, rename = "sourceRevision")]
+        source_revision: Option<String>,
+    },
     #[serde(rename = "session.close")]
     SessionClose {
         #[serde(rename = "protocolVersion")]
@@ -111,7 +487,10 @@ pub enum ClientCommand {
 impl ClientCommand {
     fn protocol_version(&self) -> u8 {
         match self {
-            Self::TurnStart {
+            Self::AttachmentAdd {
+                protocol_version, ..
+            }
+            | Self::TurnStart {
                 protocol_version, ..
             }
             | Self::TurnCancel {
@@ -126,10 +505,121 @@ impl ClientCommand {
             | Self::ProvidersList {
                 protocol_version, ..
             }
+            | Self::SettingsGet {
+                protocol_version, ..
+            }
+            | Self::ContextSubscribe {
+                protocol_version, ..
+            }
+            | Self::TeamSubscribe {
+                protocol_version, ..
+            }
+            | Self::TeamRefresh {
+                protocol_version, ..
+            }
+            | Self::TeamValidate {
+                protocol_version, ..
+            }
+            | Self::TeamSave {
+                protocol_version, ..
+            }
+            | Self::TeamStart {
+                protocol_version, ..
+            }
+            | Self::TeamStop {
+                protocol_version, ..
+            }
+            | Self::TeamLobbyGet {
+                protocol_version, ..
+            }
+            | Self::TeamLobbyPost {
+                protocol_version, ..
+            }
+            | Self::TeamAvatarImport {
+                protocol_version, ..
+            }
+            | Self::TeamAvatarGet {
+                protocol_version, ..
+            }
+            | Self::TeamPresetInspect {
+                protocol_version, ..
+            }
+            | Self::TeamPresetImport {
+                protocol_version, ..
+            }
+            | Self::TeamPresetExport {
+                protocol_version, ..
+            }
+            | Self::TeamMemberRestart {
+                protocol_version, ..
+            }
+            | Self::TeamMemberUseful {
+                protocol_version, ..
+            }
+            | Self::TeamMemberPromote {
+                protocol_version, ..
+            }
+            | Self::TeamTaskList {
+                protocol_version, ..
+            }
+            | Self::TeamTaskGet {
+                protocol_version, ..
+            }
+            | Self::TeamTaskCreate {
+                protocol_version, ..
+            }
+            | Self::TeamTaskPost {
+                protocol_version, ..
+            }
+            | Self::TeamTaskPause {
+                protocol_version, ..
+            }
+            | Self::TeamTaskResume {
+                protocol_version, ..
+            }
+            | Self::TeamTaskComplete {
+                protocol_version, ..
+            }
+            | Self::TeamTaskCancel {
+                protocol_version, ..
+            }
+            | Self::AgentMessage {
+                protocol_version, ..
+            }
+            | Self::AgentStop {
+                protocol_version, ..
+            }
+            | Self::AgentRemove {
+                protocol_version, ..
+            }
+            | Self::AgentActivityGet {
+                protocol_version, ..
+            }
+            | Self::AgentDefinitionList {
+                protocol_version, ..
+            }
+            | Self::AgentDefinitionGet {
+                protocol_version, ..
+            }
+            | Self::AgentDefinitionSave {
+                protocol_version, ..
+            }
+            | Self::AgentDefinitionArchive {
+                protocol_version, ..
+            }
+            | Self::ChannelPost {
+                protocol_version, ..
+            }
+            | Self::ChannelHistoryGet {
+                protocol_version, ..
+            }
             | Self::SessionRename {
                 protocol_version, ..
             }
             | Self::SessionDelete {
+                protocol_version, ..
+            }
+            | Self::SessionFork {
                 protocol_version, ..
             }
             | Self::SessionClose {
@@ -140,13 +630,51 @@ impl ClientCommand {
 
     fn command_id(&self) -> &str {
         match self {
-            Self::TurnStart { command_id, .. }
+            Self::AttachmentAdd { command_id, .. }
+            | Self::TurnStart { command_id, .. }
             | Self::TurnCancel { command_id, .. }
             | Self::PromptRespond { command_id, .. }
             | Self::ModelsList { command_id, .. }
             | Self::ProvidersList { command_id, .. }
+            | Self::SettingsGet { command_id, .. }
+            | Self::ContextSubscribe { command_id, .. }
+            | Self::TeamSubscribe { command_id, .. }
+            | Self::TeamRefresh { command_id, .. }
+            | Self::TeamValidate { command_id, .. }
+            | Self::TeamSave { command_id, .. }
+            | Self::TeamStart { command_id, .. }
+            | Self::TeamStop { command_id, .. }
+            | Self::TeamLobbyGet { command_id, .. }
+            | Self::TeamLobbyPost { command_id, .. }
+            | Self::TeamAvatarImport { command_id, .. }
+            | Self::TeamAvatarGet { command_id, .. }
+            | Self::TeamPresetInspect { command_id, .. }
+            | Self::TeamPresetImport { command_id, .. }
+            | Self::TeamPresetExport { command_id, .. }
+            | Self::TeamMemberRestart { command_id, .. }
+            | Self::TeamMemberUseful { command_id, .. }
+            | Self::TeamMemberPromote { command_id, .. }
+            | Self::TeamTaskList { command_id, .. }
+            | Self::TeamTaskGet { command_id, .. }
+            | Self::TeamTaskCreate { command_id, .. }
+            | Self::TeamTaskPost { command_id, .. }
+            | Self::TeamTaskPause { command_id, .. }
+            | Self::TeamTaskResume { command_id, .. }
+            | Self::TeamTaskComplete { command_id, .. }
+            | Self::TeamTaskCancel { command_id, .. }
+            | Self::AgentMessage { command_id, .. }
+            | Self::AgentStop { command_id, .. }
+            | Self::AgentRemove { command_id, .. }
+            | Self::AgentActivityGet { command_id, .. }
+            | Self::AgentDefinitionList { command_id, .. }
+            | Self::AgentDefinitionGet { command_id, .. }
+            | Self::AgentDefinitionSave { command_id, .. }
+            | Self::AgentDefinitionArchive { command_id, .. }
+            | Self::ChannelPost { command_id, .. }
+            | Self::ChannelHistoryGet { command_id, .. }
             | Self::SessionRename { command_id, .. }
             | Self::SessionDelete { command_id, .. }
+            | Self::SessionFork { command_id, .. }
             | Self::SessionClose { command_id, .. } => command_id,
         }
     }
@@ -164,6 +692,23 @@ impl ClientCommand {
             ));
         }
         match self {
+            Self::AttachmentAdd {
+                attachment_id,
+                data,
+                ..
+            } => {
+                if attachment_id.is_empty() || attachment_id.chars().count() > 128 {
+                    return Err(JsonEventsError::BadArgument(
+                        "attachmentId must contain 1-128 characters".to_string(),
+                    ));
+                }
+                let max_base64_chars = crate::api::image::MAX_DECODE_BYTES.div_ceil(3) * 4;
+                if data.is_empty() || data.len() > max_base64_chars {
+                    return Err(JsonEventsError::BadArgument(
+                        "attachment data must encode an image no larger than 32 MiB".to_string(),
+                    ));
+                }
+            }
             Self::TurnStart {
                 turn_id, prompt, ..
             } => {
@@ -198,10 +743,162 @@ impl ClientCommand {
                 }
                 *name = trimmed.to_string();
             }
+            Self::SessionFork {
+                reason,
+                source_turn_id,
+                source_revision,
+                ..
+            } => match reason {
+                crate::transcript::ForkReason::EditLastPrompt => {
+                    if source_turn_id.is_some() != source_revision.is_some() {
+                        return Err(JsonEventsError::BadArgument(
+                            "sourceTurnId and sourceRevision must be provided together".to_string(),
+                        ));
+                    }
+                    if source_turn_id.as_ref().is_some_and(String::is_empty) {
+                        return Err(JsonEventsError::BadArgument(
+                            "sourceTurnId must not be empty".to_string(),
+                        ));
+                    }
+                    if source_revision.as_ref().is_some_and(|revision| {
+                        revision.len() != 64
+                            || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    }) {
+                        return Err(JsonEventsError::BadArgument(
+                            "sourceRevision must be a 64-character SHA-256 hex string".to_string(),
+                        ));
+                    }
+                }
+                crate::transcript::ForkReason::RecoverInterrupted => {
+                    if source_turn_id.is_some() || source_revision.is_some() {
+                        return Err(JsonEventsError::BadArgument(
+                            "recover-interrupted does not accept a source turn".to_string(),
+                        ));
+                    }
+                }
+            },
+            Self::TeamSave {
+                base_revision,
+                definition,
+                ..
+            } => {
+                if base_revision.len() != 64
+                    || !base_revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(JsonEventsError::BadArgument(
+                        "baseRevision must be a 64-character SHA-256 hex string".to_string(),
+                    ));
+                }
+                let schema_version = definition
+                    .get("schemaVersion")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(1);
+                if schema_version != 1
+                    && schema_version != u64::from(crate::team::TEAM_SCHEMA_VERSION)
+                {
+                    return Err(JsonEventsError::BadArgument(format!(
+                        "team definition schemaVersion must be 1 or {}",
+                        crate::team::TEAM_SCHEMA_VERSION
+                    )));
+                }
+            }
+            Self::TeamAvatarGet { avatar, .. } => {
+                if crate::team::project_avatar_path(Path::new("."), avatar).is_none() {
+                    return Err(JsonEventsError::BadArgument(
+                        "avatar must be a project:<24 hex characters> id".to_string(),
+                    ));
+                }
+            }
+            Self::AgentMessage {
+                member, message, ..
+            } => validate_named_message("member", member, "message", message)?,
+            Self::ChannelPost { channel, text, .. } => {
+                validate_named_message("channel", channel, "text", text)?
+            }
+            Self::AgentStop { member, .. }
+            | Self::AgentRemove { member, .. }
+            | Self::AgentActivityGet { member, .. } => validate_name("member", member)?,
+            Self::AgentDefinitionGet { scope, id, .. }
+            | Self::AgentDefinitionSave { scope, id, .. }
+            | Self::AgentDefinitionArchive { scope, id, .. } => {
+                crate::agents::AgentDefinitionScope::parse(scope)
+                    .map_err(|error| JsonEventsError::BadArgument(error.to_string()))?;
+                validate_name("id", id)?;
+            }
+            Self::ChannelHistoryGet { channel, .. } => validate_name("channel", channel)?,
+            Self::TeamTaskGet { task_id, limit, .. } => {
+                validate_name("taskId", task_id)?;
+                if limit.is_some_and(|limit| limit == 0 || limit > 200) {
+                    return Err(JsonEventsError::BadArgument(
+                        "limit must be between 1 and 200".to_string(),
+                    ));
+                }
+            }
+            Self::TeamTaskCreate {
+                title,
+                description,
+                participants,
+                leader,
+                ..
+            } => {
+                validate_named_message("title", title, "description", description)?;
+                if participants.as_ref().is_some_and(Vec::is_empty) {
+                    return Err(JsonEventsError::BadArgument(
+                        "participants must not be empty".to_string(),
+                    ));
+                }
+                if let Some(leader) = leader {
+                    validate_name("leader", leader)?;
+                }
+            }
+            Self::TeamTaskPost { task_id, text, .. } => {
+                validate_named_message("taskId", task_id, "text", text)?;
+            }
+            Self::TeamTaskResume {
+                task_id, message, ..
+            } => {
+                validate_name("taskId", task_id)?;
+                if message
+                    .as_ref()
+                    .is_some_and(|message| message.chars().count() > MAX_PROMPT_CHARS)
+                {
+                    return Err(JsonEventsError::BadArgument(format!(
+                        "message must be at most {MAX_PROMPT_CHARS} characters"
+                    )));
+                }
+            }
+            Self::TeamTaskPause { task_id, .. }
+            | Self::TeamTaskComplete { task_id, .. }
+            | Self::TeamTaskCancel { task_id, .. } => validate_name("taskId", task_id)?,
             _ => {}
         }
         Ok(())
     }
+}
+
+fn validate_named_message(
+    name_label: &str,
+    name: &str,
+    message_label: &str,
+    message: &str,
+) -> Result<(), JsonEventsError> {
+    validate_name(name_label, name)?;
+    let chars = message.chars().count();
+    if message.trim().is_empty() || chars > MAX_PROMPT_CHARS {
+        return Err(JsonEventsError::BadArgument(format!(
+            "{message_label} must contain non-whitespace text and be at most {MAX_PROMPT_CHARS} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_name(label: &str, value: &str) -> Result<(), JsonEventsError> {
+    if value.trim().is_empty() {
+        return Err(JsonEventsError::BadArgument(format!(
+            "{label} must not be empty"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -238,6 +935,12 @@ pub struct CliSessionMetadata {
     pub shell: String,
     /// Syntax family of `shell`: `posix` / `powershell` / `cmd` / `unknown`.
     pub shell_dialect: String,
+    pub capabilities: Vec<String>,
+    pub transcript_revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork_reason: Option<crate::transcript::ForkReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -245,6 +948,7 @@ pub struct CliSessionMetadata {
 pub struct ProbeMetadata {
     pub bingo_version: String,
     pub protocol_version: u8,
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -256,6 +960,120 @@ pub struct ProviderInfo {
     pub supports_images: bool,
     pub credential_configured: bool,
     pub builtin: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsLayerInfo {
+    pub name: String,
+    pub path: String,
+    pub exists: bool,
+    pub keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SanitizedSettings {
+    pub api_base_url: String,
+    pub provider: String,
+    pub model: String,
+    pub thinking_level: String,
+    pub permission_mode: String,
+    pub theme: String,
+    pub motion: String,
+    pub send_images: bool,
+    pub cache_control: bool,
+    pub respond_to_bash_commands: bool,
+    pub shell: String,
+    pub credential_configured: bool,
+    pub provider_count: usize,
+    pub mcp_server_count: usize,
+    pub disabled_mcp_servers: Vec<String>,
+    pub permission_allow: Vec<String>,
+    pub permission_ask: Vec<String>,
+    pub permission_deny: Vec<String>,
+    pub team_auto_start: bool,
+    pub agent_channels: bool,
+    pub channel_message_limit: u64,
+    pub agent_message_limit: u64,
+    pub share_base_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamMemberSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_id: Option<String>,
+    pub name: String,
+    pub agent: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_data_url: Option<String>,
+    pub status: String,
+    pub pending: usize,
+    pub unacked: usize,
+    pub model: String,
+    pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::team::MemberProfile>,
+    pub kind: String,
+    pub recommended: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub restart_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamChannelSnapshot {
+    pub name: String,
+    pub mode: String,
+    pub seq: u64,
+    pub frozen: bool,
+    pub members: Vec<String>,
+    pub messages: Vec<crate::channels::ChannelMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDefinitionSnapshot {
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    pub profile: crate::team::MemberProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamSnapshot {
+    pub available: bool,
+    pub path: String,
+    pub revision: String,
+    pub branch: String,
+    pub validation: Option<String>,
+    pub definition: Option<serde_json::Value>,
+    pub agent_definitions: Vec<AgentDefinitionSnapshot>,
+    pub avatars: Vec<String>,
+    pub members: Vec<TeamMemberSnapshot>,
+    pub channels: Vec<TeamChannelSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActivityItem {
+    pub id: String,
+    pub kind: String,
+    pub summary: String,
+    pub status: String,
 }
 
 /// Provider inventory for `providers.result`, in the same order as the /provider
@@ -298,6 +1116,90 @@ pub fn provider_inventory(client: &crate::api::client::Client) -> Vec<ProviderIn
         .collect()
 }
 
+fn capabilities() -> Vec<String> {
+    CAPABILITIES
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect()
+}
+
+fn sanitized_settings(
+    settings: &crate::settings::Settings,
+    client: &crate::api::client::Client,
+) -> SanitizedSettings {
+    let credential_configured = client
+        .provider_endpoint("default")
+        .and_then(|(key, _)| key)
+        .is_some_and(|key| !key.is_empty());
+    SanitizedSettings {
+        api_base_url: settings.api_base_url.clone().unwrap_or_default(),
+        provider: settings
+            .provider
+            .clone()
+            .unwrap_or_else(|| "default".to_string()),
+        model: settings
+            .model
+            .clone()
+            .unwrap_or_else(|| crate::api::types::DEFAULT_MODEL.to_string()),
+        thinking_level: settings
+            .thinking_level
+            .clone()
+            .unwrap_or_else(|| "off".to_string()),
+        permission_mode: settings
+            .permission_mode
+            .clone()
+            .unwrap_or_else(|| "default".to_string()),
+        theme: settings.theme.clone().unwrap_or_else(|| "auto".to_string()),
+        motion: settings
+            .motion
+            .clone()
+            .unwrap_or_else(|| "auto".to_string()),
+        send_images: settings.send_images.unwrap_or(true),
+        cache_control: settings.cache_control.unwrap_or(false),
+        respond_to_bash_commands: settings.respond_to_bash_commands.unwrap_or(true),
+        shell: settings.shell.clone().unwrap_or_default(),
+        credential_configured,
+        provider_count: provider_inventory(client).len(),
+        mcp_server_count: settings.mcp_servers.len(),
+        disabled_mcp_servers: settings.disabled_mcp_servers.clone(),
+        permission_allow: settings.permissions.allow.clone(),
+        permission_ask: settings.permissions.ask.clone(),
+        permission_deny: settings.permissions.deny.clone(),
+        team_auto_start: settings.team.auto_start.unwrap_or(true),
+        agent_channels: settings.experimental.agent_channels,
+        channel_message_limit: settings.experimental.channel_message_limit.unwrap_or(500),
+        agent_message_limit: settings.experimental.agent_message_limit.unwrap_or(50),
+        share_base_url: settings.share.base_url.clone().unwrap_or_default(),
+    }
+}
+
+fn settings_layers(user_dir: &Path, project_dir: &Path) -> Vec<SettingsLayerInfo> {
+    let names = ["user", "project", "local"];
+    crate::settings::layer_paths(user_dir, project_dir)
+        .into_iter()
+        .zip(names)
+        .map(|(path, name)| {
+            let raw = std::fs::read_to_string(&path).ok();
+            let mut keys = raw
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                .and_then(|value| {
+                    value
+                        .as_object()
+                        .map(|object| object.keys().cloned().collect())
+                })
+                .unwrap_or_else(Vec::new);
+            keys.sort();
+            SettingsLayerInfo {
+                name: name.to_string(),
+                path: path.display().to_string(),
+                exists: raw.is_some(),
+                keys,
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptOption {
@@ -310,11 +1212,36 @@ pub struct PromptOption {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum CliEvent {
+    #[serde(rename = "attachment.ready")]
+    AttachmentReady {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(rename = "attachmentId")]
+        attachment_id: String,
+        marker: String,
+        #[serde(rename = "mediaType")]
+        media_type: String,
+    },
     #[serde(rename = "session.ready")]
     SessionReady {
         #[serde(flatten)]
         base: EventBase,
         metadata: CliSessionMetadata,
+    },
+    #[serde(rename = "context.usage")]
+    ContextUsage {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId", skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        #[serde(rename = "turnId", skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(rename = "usedTokens")]
+        used_tokens: u64,
+        #[serde(rename = "contextWindow")]
+        context_window: u64,
     },
     #[serde(rename = "protocol.ready")]
     ProtocolReady {
@@ -330,6 +1257,8 @@ pub enum CliEvent {
         command_id: String,
         #[serde(rename = "turnId")]
         turn_id: String,
+        #[serde(rename = "promptRevision")]
+        prompt_revision: String,
     },
     #[serde(rename = "text.delta")]
     TextDelta {
@@ -409,6 +1338,209 @@ pub enum CliEvent {
         command_id: String,
         providers: Vec<ProviderInfo>,
     },
+    #[serde(rename = "settings.result")]
+    SettingsResult {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        settings: SanitizedSettings,
+        layers: Vec<SettingsLayerInfo>,
+    },
+    #[serde(rename = "team.snapshot")]
+    TeamSnapshot {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId", skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        snapshot: TeamSnapshot,
+    },
+    #[serde(rename = "team.tasks.snapshot")]
+    TeamTasksSnapshot {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId", skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        branch: String,
+        tasks: Vec<crate::team_tasks::TeamTaskSummary>,
+    },
+    #[serde(rename = "team.lobby.snapshot")]
+    TeamLobbySnapshot {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId", skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        lobby: crate::team_tasks::TeamLobby,
+    },
+    #[serde(rename = "team.lobby.message")]
+    TeamLobbyMessage {
+        #[serde(flatten)]
+        base: EventBase,
+        message: crate::team_tasks::TeamLobbyMessage,
+    },
+    #[serde(rename = "team.avatar.imported")]
+    TeamAvatarImported {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        avatar: String,
+        snapshot: TeamSnapshot,
+    },
+    #[serde(rename = "team.avatar.loaded")]
+    TeamAvatarLoaded {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        avatar: String,
+        #[serde(rename = "dataUrl")]
+        data_url: String,
+    },
+    #[serde(rename = "team.preset.preview")]
+    TeamPresetPreview {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        preview: crate::team_presets::TeamPresetPreview,
+    },
+    #[serde(rename = "team.preset.imported")]
+    TeamPresetImported {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        preview: crate::team_presets::TeamPresetPreview,
+        snapshot: TeamSnapshot,
+    },
+    #[serde(rename = "team.preset.exported")]
+    TeamPresetExported {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(rename = "fileName")]
+        file_name: String,
+        data: String,
+    },
+    #[serde(rename = "team.member.configured")]
+    TeamMemberConfigured {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        action: String,
+        member: String,
+        #[serde(rename = "memberId", skip_serializing_if = "Option::is_none")]
+        member_id: Option<String>,
+        snapshot: TeamSnapshot,
+    },
+    #[serde(rename = "team.task.updated")]
+    TeamTaskUpdated {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId", skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        action: String,
+        task: crate::team_tasks::TeamTaskSummary,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<crate::team_tasks::TeamTask>,
+    },
+    #[serde(rename = "team.task.message")]
+    TeamTaskMessage {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "taskId")]
+        task_id: String,
+        message: crate::team_tasks::TeamTaskMessage,
+    },
+    #[serde(rename = "team.member.updated")]
+    TeamMemberUpdated {
+        #[serde(flatten)]
+        base: EventBase,
+        member: String,
+        status: String,
+        #[serde(rename = "taskId", skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+    },
+    #[serde(rename = "team.validation")]
+    TeamValidation {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        valid: bool,
+        msg: String,
+    },
+    #[serde(rename = "team.updated")]
+    TeamUpdated {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        action: String,
+        msg: String,
+        snapshot: TeamSnapshot,
+    },
+    #[serde(rename = "agent.updated")]
+    AgentUpdated {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        action: String,
+        member: String,
+        msg: String,
+        snapshot: TeamSnapshot,
+    },
+    #[serde(rename = "agent.activity")]
+    AgentActivity {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        member: String,
+        activity: Vec<AgentActivityItem>,
+    },
+    #[serde(rename = "agent.definitions.snapshot")]
+    AgentDefinitionsSnapshot {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        definitions: Vec<crate::agents::AgentDefinitionDocument>,
+    },
+    #[serde(rename = "agent.definition.updated")]
+    AgentDefinitionUpdated {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        action: String,
+        definition: crate::agents::AgentDefinitionDocument,
+        #[serde(rename = "archivePath", skip_serializing_if = "Option::is_none")]
+        archive_path: Option<String>,
+    },
+    #[serde(rename = "channel.updated")]
+    ChannelUpdated {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        channel: String,
+        msg: String,
+        snapshot: TeamSnapshot,
+    },
+    #[serde(rename = "channel.message")]
+    ChannelMessage {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId", skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        channel: String,
+        message: crate::channels::ChannelMessage,
+    },
     #[serde(rename = "inspection.ready")]
     InspectionReady {
         #[serde(flatten)]
@@ -463,6 +1595,18 @@ pub enum CliEvent {
         #[serde(rename = "deletedSessionId")]
         deleted_session_id: String,
     },
+    #[serde(rename = "session.forked")]
+    SessionForked {
+        #[serde(flatten)]
+        base: EventBase,
+        #[serde(rename = "commandId")]
+        command_id: String,
+        #[serde(rename = "sourceSessionId")]
+        source_session_id: String,
+        reason: crate::transcript::ForkReason,
+        metadata: CliSessionMetadata,
+        warnings: Vec<String>,
+    },
     #[serde(rename = "session.closed")]
     SessionClosed {
         #[serde(flatten)]
@@ -489,7 +1633,9 @@ pub enum CliEvent {
 impl CliEvent {
     fn set_base(&mut self, base: EventBase) {
         match self {
-            Self::SessionReady { base: slot, .. }
+            Self::AttachmentReady { base: slot, .. }
+            | Self::SessionReady { base: slot, .. }
+            | Self::ContextUsage { base: slot, .. }
             | Self::ProtocolReady { base: slot, .. }
             | Self::InspectionReady { base: slot, .. }
             | Self::TurnStarted { base: slot, .. }
@@ -500,11 +1646,34 @@ impl CliEvent {
             | Self::PromptResolved { base: slot, .. }
             | Self::ModelsResult { base: slot, .. }
             | Self::ProvidersResult { base: slot, .. }
+            | Self::SettingsResult { base: slot, .. }
+            | Self::TeamSnapshot { base: slot, .. }
+            | Self::TeamTasksSnapshot { base: slot, .. }
+            | Self::TeamLobbySnapshot { base: slot, .. }
+            | Self::TeamLobbyMessage { base: slot, .. }
+            | Self::TeamAvatarImported { base: slot, .. }
+            | Self::TeamAvatarLoaded { base: slot, .. }
+            | Self::TeamPresetPreview { base: slot, .. }
+            | Self::TeamPresetImported { base: slot, .. }
+            | Self::TeamPresetExported { base: slot, .. }
+            | Self::TeamMemberConfigured { base: slot, .. }
+            | Self::TeamTaskUpdated { base: slot, .. }
+            | Self::TeamTaskMessage { base: slot, .. }
+            | Self::TeamMemberUpdated { base: slot, .. }
+            | Self::TeamValidation { base: slot, .. }
+            | Self::TeamUpdated { base: slot, .. }
+            | Self::AgentUpdated { base: slot, .. }
+            | Self::AgentActivity { base: slot, .. }
+            | Self::AgentDefinitionsSnapshot { base: slot, .. }
+            | Self::AgentDefinitionUpdated { base: slot, .. }
+            | Self::ChannelUpdated { base: slot, .. }
+            | Self::ChannelMessage { base: slot, .. }
             | Self::Warning { base: slot, .. }
             | Self::TurnCompleted { base: slot, .. }
             | Self::TurnCancelled { base: slot, .. }
             | Self::SessionRenamed { base: slot, .. }
             | Self::SessionDeleted { base: slot, .. }
+            | Self::SessionForked { base: slot, .. }
             | Self::SessionClosed { base: slot, .. }
             | Self::Error { base: slot, .. } => *slot = base,
         }
@@ -630,6 +1799,21 @@ pub fn parse_command_line(line: &[u8]) -> Result<ClientCommand, JsonEventsError>
     Ok(command)
 }
 
+fn avatar_thumbnail_data_url(project_dir: &Path, id: Option<&str>) -> Option<String> {
+    let path = crate::team::project_avatar_path(project_dir, id?)?;
+    let bytes = std::fs::read(path).ok()?;
+    let image = image::load_from_memory(&bytes).ok()?;
+    let thumbnail = image.thumbnail(96, 96);
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    thumbnail
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .ok()?;
+    Some(format!(
+        "data:image/png;base64,{}",
+        BASE64.encode(encoded.into_inner())
+    ))
+}
+
 pub fn resolve_session(home: &Path, stem: &str) -> Result<Transcript, JsonEventsError> {
     if stem.is_empty()
         || stem == "."
@@ -661,6 +1845,10 @@ impl From<crate::transcript::TranscriptError> for JsonEventsError {
         match error {
             crate::transcript::TranscriptError::Io(error) => Self::Io(error),
             crate::transcript::TranscriptError::Parse(error) => Self::Json(error),
+            crate::transcript::TranscriptError::ForkPointUnavailable(message)
+            | crate::transcript::TranscriptError::SessionStale(message) => {
+                Self::BadArgument(message)
+            }
         }
     }
 }
@@ -668,6 +1856,13 @@ impl From<crate::transcript::TranscriptError> for JsonEventsError {
 #[derive(Debug)]
 enum AdapterEvent {
     Cli(Box<CliEvent>),
+    ContextUsage {
+        turn_id: String,
+        used_tokens: u64,
+        context_window: u64,
+    },
+    TeamTask(crate::team_tasks::TeamTaskEvent),
+    Agent(crate::agents::AgentEvent),
     Prompt(PendingPrompt),
     TurnFinished {
         turn_id: String,
@@ -693,6 +1888,22 @@ enum PromptReply {
     Question(oneshot::Sender<Option<AskAnswer>>),
 }
 
+fn prompt_response_matches(prompt: &PendingPrompt, response: &PromptResponse) -> bool {
+    match (&prompt.reply, response) {
+        (PromptReply::Permission(_), PromptResponse::Option { option_id }) => {
+            matches!(option_id.as_str(), "allow" | "deny")
+        }
+        (PromptReply::Permission(_), PromptResponse::Cancel) => true,
+        (PromptReply::Question(_), PromptResponse::Option { option_id }) => prompt
+            .options
+            .iter()
+            .any(|option| option.id == option_id.as_str()),
+        (PromptReply::Question(_), PromptResponse::Text { .. }) => prompt.allow_free_text,
+        (PromptReply::Question(_), PromptResponse::Cancel) => true,
+        (PromptReply::Permission(_), PromptResponse::Text { .. }) => false,
+    }
+}
+
 struct ActiveTurn {
     id: String,
     cancel: watch::Sender<bool>,
@@ -710,8 +1921,19 @@ pub struct JsonSession<W> {
     event_tx: mpsc::UnboundedSender<AdapterEvent>,
     event_rx: mpsc::UnboundedReceiver<AdapterEvent>,
     next_prompt_id: Arc<std::sync::atomic::AtomicU64>,
+    context_subscribed: Arc<std::sync::atomic::AtomicBool>,
     closing: bool,
     exit_code: i32,
+}
+
+struct TeamTaskCreateRequest {
+    command_id: String,
+    title: String,
+    description: String,
+    participants: Option<Vec<String>>,
+    leader: Option<String>,
+    context_message_seqs: Vec<u64>,
+    additional_constraints: Vec<crate::team::BehaviorConstraint>,
 }
 
 impl<W: Write> JsonSession<W> {
@@ -731,6 +1953,7 @@ impl<W: Write> JsonSession<W> {
             event_tx,
             event_rx,
             next_prompt_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            context_subscribed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             closing: false,
             exit_code: 0,
         }
@@ -747,6 +1970,36 @@ impl<W: Write> JsonSession<W> {
             base: EventBase::default(),
             metadata: self.metadata.clone(),
         })?;
+        let sender = self.event_tx.clone();
+        let mut task_events = self.session.team_tasks.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match task_events.recv().await {
+                    Ok(event) => {
+                        if sender.send(AdapterEvent::TeamTask(event)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        let sender = self.event_tx.clone();
+        let mut agent_events = self.session.agents.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match agent_events.recv().await {
+                    Ok(event) => {
+                        if sender.send(AdapterEvent::Agent(event)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
         let (command_tx, mut command_rx) = mpsc::unbounded_channel();
         tokio::task::spawn_blocking(move || read_commands(reader, command_tx));
 
@@ -797,6 +2050,12 @@ impl<W: Write> JsonSession<W> {
             );
         }
         match command {
+            ClientCommand::AttachmentAdd {
+                command_id,
+                attachment_id,
+                data,
+                ..
+            } => self.add_attachment(command_id, attachment_id, data),
             ClientCommand::TurnStart {
                 command_id,
                 turn_id,
@@ -824,6 +2083,183 @@ impl<W: Write> JsonSession<W> {
                 ..
             } => self.list_models(command_id, provider).await,
             ClientCommand::ProvidersList { command_id, .. } => self.list_providers(command_id),
+            ClientCommand::SettingsGet { command_id, .. } => self.get_settings(command_id),
+            ClientCommand::ContextSubscribe { command_id, .. } => {
+                self.subscribe_context(command_id)
+            }
+            ClientCommand::TeamSubscribe { command_id, .. }
+            | ClientCommand::TeamRefresh { command_id, .. } => self.refresh_team(command_id),
+            ClientCommand::TeamValidate { command_id, .. } => self.validate_team(command_id),
+            ClientCommand::TeamSave {
+                command_id,
+                base_revision,
+                definition,
+                ..
+            } => self.save_team(command_id, &base_revision, definition),
+            ClientCommand::TeamStart { command_id, .. } => self.start_team(command_id),
+            ClientCommand::TeamStop { command_id, .. } => self.stop_team(command_id),
+            ClientCommand::TeamLobbyGet {
+                command_id,
+                before_seq,
+                limit,
+                ..
+            } => self.get_team_lobby(command_id, before_seq, limit),
+            ClientCommand::TeamLobbyPost {
+                command_id,
+                text,
+                targets,
+                ..
+            } => self.post_team_lobby(command_id, &text, &targets),
+            ClientCommand::TeamAvatarImport {
+                command_id,
+                file_name,
+                data,
+                ..
+            } => self.import_team_avatar(command_id, &file_name, &data),
+            ClientCommand::TeamAvatarGet {
+                command_id, avatar, ..
+            } => self.get_team_avatar(command_id, &avatar),
+            ClientCommand::TeamPresetInspect {
+                command_id, data, ..
+            } => self.inspect_team_preset(command_id, &data),
+            ClientCommand::TeamPresetImport {
+                command_id,
+                data,
+                base_revision,
+                resolutions,
+                model_mappings,
+                ..
+            } => self.import_team_preset(
+                command_id,
+                &data,
+                &base_revision,
+                &resolutions,
+                &model_mappings,
+            ),
+            ClientCommand::TeamPresetExport { command_id, .. } => {
+                self.export_team_preset(command_id)
+            }
+            ClientCommand::TeamMemberRestart {
+                command_id, member, ..
+            } => self.restart_team_member(command_id, &member),
+            ClientCommand::TeamMemberUseful {
+                command_id, member, ..
+            } => self.mark_team_member_useful(command_id, &member),
+            ClientCommand::TeamMemberPromote {
+                command_id,
+                member,
+                base_revision,
+                ..
+            } => self.promote_team_member(command_id, &member, &base_revision),
+            ClientCommand::TeamTaskList { command_id, .. } => self.list_team_tasks(command_id),
+            ClientCommand::TeamTaskGet {
+                command_id,
+                task_id,
+                before_seq,
+                limit,
+                ..
+            } => self.get_team_task(command_id, &task_id, before_seq, limit),
+            ClientCommand::TeamTaskCreate {
+                command_id,
+                title,
+                description,
+                participants,
+                leader,
+                context_message_seqs,
+                additional_constraints,
+                ..
+            } => self.create_team_task(TeamTaskCreateRequest {
+                command_id,
+                title,
+                description,
+                participants,
+                leader,
+                context_message_seqs,
+                additional_constraints,
+            }),
+            ClientCommand::TeamTaskPost {
+                command_id,
+                task_id,
+                text,
+                ..
+            } => self.post_team_task(command_id, &task_id, &text),
+            ClientCommand::TeamTaskPause {
+                command_id,
+                task_id,
+                ..
+            } => self.pause_team_task(command_id, &task_id),
+            ClientCommand::TeamTaskResume {
+                command_id,
+                task_id,
+                message,
+                ..
+            } => self.resume_team_task(command_id, &task_id, message.as_deref()),
+            ClientCommand::TeamTaskComplete {
+                command_id,
+                task_id,
+                ..
+            } => self.complete_team_task(command_id, &task_id),
+            ClientCommand::TeamTaskCancel {
+                command_id,
+                task_id,
+                ..
+            } => self.cancel_team_task(command_id, &task_id),
+            ClientCommand::AgentMessage {
+                command_id,
+                member,
+                message,
+                ..
+            } => self.message_agent(command_id, &member, &message),
+            ClientCommand::AgentStop {
+                command_id, member, ..
+            } => self.stop_agent(command_id, &member),
+            ClientCommand::AgentRemove {
+                command_id, member, ..
+            } => self.remove_agent(command_id, &member),
+            ClientCommand::AgentActivityGet {
+                command_id, member, ..
+            } => self.agent_activity(command_id, &member),
+            ClientCommand::AgentDefinitionList { command_id, .. } => {
+                self.list_agent_definitions(command_id)
+            }
+            ClientCommand::AgentDefinitionGet {
+                command_id,
+                scope,
+                id,
+                ..
+            } => self.get_agent_definition(command_id, &scope, &id),
+            ClientCommand::AgentDefinitionSave {
+                command_id,
+                scope,
+                id,
+                base_revision,
+                definition,
+                ..
+            } => self.save_agent_definition(
+                command_id,
+                &scope,
+                &id,
+                base_revision.as_deref(),
+                *definition,
+            ),
+            ClientCommand::AgentDefinitionArchive {
+                command_id,
+                scope,
+                id,
+                base_revision,
+                ..
+            } => self.archive_agent_definition(command_id, &scope, &id, &base_revision),
+            ClientCommand::ChannelPost {
+                command_id,
+                channel,
+                text,
+                ..
+            } => self.post_channel(command_id, &channel, &text),
+            ClientCommand::ChannelHistoryGet {
+                command_id,
+                channel,
+                ..
+            } => self.channel_history(command_id, &channel),
             ClientCommand::SessionRename {
                 command_id, name, ..
             } => self.rename_session(command_id, &name),
@@ -831,6 +2267,21 @@ impl<W: Write> JsonSession<W> {
                 self.delete_session(command_id)?;
                 self.closing = true;
                 Ok(())
+            }
+            ClientCommand::SessionFork {
+                command_id,
+                reason,
+                source_turn_id,
+                source_revision,
+                ..
+            } => {
+                self.fork_session(
+                    command_id,
+                    reason,
+                    source_turn_id.as_deref(),
+                    source_revision.as_deref(),
+                )
+                .await
             }
             ClientCommand::SessionClose { command_id, .. } => {
                 if let Some(active_turn_id) = self.active.as_ref().map(|active| active.id.clone()) {
@@ -850,6 +2301,59 @@ impl<W: Write> JsonSession<W> {
         }
     }
 
+    fn add_attachment(
+        &mut self,
+        command_id: String,
+        attachment_id: String,
+        data: String,
+    ) -> Result<(), JsonEventsError> {
+        if self.active.is_some() {
+            return self.emit_error(
+                ErrorScope::Command,
+                Some(command_id),
+                self.active.as_ref().map(|active| active.id.clone()),
+                "BAD_ARGUMENT",
+                "attachments can only be added while the session is idle",
+                EventErrorLevel::Page,
+                true,
+            );
+        }
+        let bytes = match BASE64.decode(data.as_bytes()) {
+            Ok(bytes) if bytes.len() <= crate::api::image::MAX_DECODE_BYTES => bytes,
+            _ => {
+                return self.emit_error(
+                    ErrorScope::Command,
+                    Some(command_id),
+                    None,
+                    "BAD_ARGUMENT",
+                    "attachment data is invalid or exceeds the 32 MiB limit",
+                    EventErrorLevel::Field,
+                    true,
+                );
+            }
+        };
+        let Some(prepared) = crate::api::image::prepare_image(&bytes) else {
+            return self.emit_error(
+                ErrorScope::Command,
+                Some(command_id),
+                None,
+                "BAD_ARGUMENT",
+                "attachment is not a supported PNG, JPEG, or GIF image",
+                EventErrorLevel::Field,
+                true,
+            );
+        };
+        let media_type = prepared.media_type.clone();
+        let id = self.session.attachments.register_prepared(prepared);
+        self.emit(CliEvent::AttachmentReady {
+            base: EventBase::default(),
+            command_id,
+            attachment_id,
+            marker: crate::api::image::marker(id),
+            media_type,
+        })
+    }
+
     fn start_turn(
         &mut self,
         command_id: String,
@@ -867,10 +2371,36 @@ impl<W: Write> JsonSession<W> {
                 true,
             );
         }
+        let Some(transcript) = self.session.runtime.transcript.borrow().clone() else {
+            return self.emit_error(
+                ErrorScope::Command,
+                Some(command_id),
+                Some(turn_id),
+                "STORAGE_ERROR",
+                "this session has no transcript",
+                EventErrorLevel::Page,
+                true,
+            );
+        };
+        let prompt_revision = match transcript.begin_turn(&turn_id, &prompt) {
+            Ok(revision) => revision,
+            Err(error) => {
+                return self.emit_error(
+                    ErrorScope::Command,
+                    Some(command_id),
+                    Some(turn_id),
+                    error.error_code(),
+                    &error.to_string(),
+                    EventErrorLevel::Page,
+                    true,
+                );
+            }
+        };
         self.emit(CliEvent::TurnStarted {
             base: EventBase::default(),
             command_id,
             turn_id: turn_id.clone(),
+            prompt_revision,
         })?;
         self.cancel_command_id = None;
         self.close_command_id = None;
@@ -882,11 +2412,25 @@ impl<W: Write> JsonSession<W> {
         });
         let session = self.session.clone();
         let sender = self.event_tx.clone();
-        let hooks = json_hooks(sender.clone(), turn_id.clone(), self.next_prompt_id.clone());
+        let hooks = json_hooks(
+            sender.clone(),
+            turn_id.clone(),
+            self.next_prompt_id.clone(),
+            self.context_subscribed.clone(),
+        );
         tokio::spawn(async move {
             let mut ui = hooks;
             let history = load_history(&session, &sender, &turn_id);
-            let result = run_query(&session, history, &prompt, &[], &mut ui, Some(cancel_rx)).await;
+            let images = session.attachments.resolve(&prompt);
+            let result = run_query(
+                &session,
+                history,
+                &prompt,
+                &images,
+                &mut ui,
+                Some(cancel_rx),
+            )
+            .await;
             let _ = sender.send(AdapterEvent::TurnFinished { turn_id, result });
         });
         Ok(())
@@ -945,6 +2489,17 @@ impl<W: Write> JsonSession<W> {
                 true,
             );
         };
+        if !prompt_response_matches(&self.prompts[index], &response) {
+            return self.emit_error(
+                ErrorScope::Command,
+                Some(command_id),
+                Some(self.prompts[index].turn_id.clone()),
+                "BAD_ARGUMENT",
+                "response does not match the prompt",
+                EventErrorLevel::Field,
+                true,
+            );
+        }
         let prompt = self.prompts.remove(index);
         let PendingPrompt {
             turn_id,
@@ -1047,6 +2602,57 @@ impl<W: Write> JsonSession<W> {
         })
     }
 
+    fn get_settings(&mut self, command_id: String) -> Result<(), JsonEventsError> {
+        let project_dir = std::path::PathBuf::from(&self.metadata.cwd);
+        self.emit(CliEvent::SettingsResult {
+            base: EventBase::default(),
+            command_id,
+            settings: sanitized_settings(&self.session.settings, &self.session.client),
+            layers: settings_layers(&self.session.user_config_dir, &project_dir),
+        })
+    }
+
+    fn subscribe_context(&mut self, command_id: String) -> Result<(), JsonEventsError> {
+        self.context_subscribed
+            .store(true, std::sync::atomic::Ordering::Release);
+        let messages = self
+            .session
+            .runtime
+            .transcript
+            .borrow()
+            .clone()
+            .and_then(|transcript| transcript.load_messages().ok())
+            .unwrap_or_default();
+        let used_tokens = crate::compact::estimate_tokens(&self.session.system, &messages, &[]);
+        let model = self.session.runtime.model.borrow().clone();
+        self.emit(CliEvent::ContextUsage {
+            base: EventBase::default(),
+            command_id: Some(command_id),
+            turn_id: None,
+            used_tokens,
+            context_window: crate::budget::context_window_for(
+                &self.session.client.models(),
+                &model,
+            ),
+        })
+    }
+
+    fn require_idle(&mut self, command_id: &str, operation: &str) -> Result<bool, JsonEventsError> {
+        if self.active.is_none() {
+            return Ok(true);
+        }
+        self.emit_error(
+            ErrorScope::Command,
+            Some(command_id.to_string()),
+            self.active.as_ref().map(|active| active.id.clone()),
+            "BAD_ARGUMENT",
+            &format!("{operation} is only available while the main session is idle"),
+            EventErrorLevel::Page,
+            true,
+        )?;
+        Ok(false)
+    }
+
     fn rename_session(&mut self, command_id: String, name: &str) -> Result<(), JsonEventsError> {
         if self.active.is_some() {
             return self.emit_error(
@@ -1073,12 +2679,30 @@ impl<W: Write> JsonSession<W> {
         };
         match transcript.rename(name) {
             Ok(transcript) => {
+                let renamed_session_id = transcript.name();
+                if let Err(error) = self
+                    .session
+                    .tasks
+                    .rename_key(&previous_session_id, &renamed_session_id)
+                {
+                    return self.emit_error(
+                        ErrorScope::Command,
+                        Some(command_id),
+                        None,
+                        error.error_code(),
+                        &format!(
+                            "session was renamed, but its Task list could not follow it: {error}"
+                        ),
+                        EventErrorLevel::Page,
+                        true,
+                    );
+                }
                 let _ = self
                     .session
                     .runtime
                     .transcript_tx
                     .send(Some(transcript.clone()));
-                self.metadata.session_id = transcript.name();
+                self.metadata.session_id = renamed_session_id;
                 self.metadata.transcript_path = transcript.path().display().to_string();
                 self.writer
                     .set_session_id(Some(self.metadata.session_id.clone()));
@@ -1144,9 +2768,183 @@ impl<W: Write> JsonSession<W> {
         })
     }
 
+    async fn fork_session(
+        &mut self,
+        command_id: String,
+        reason: crate::transcript::ForkReason,
+        source_turn_id: Option<&str>,
+        source_revision: Option<&str>,
+    ) -> Result<(), JsonEventsError> {
+        if self.active.is_some() {
+            return self.emit_error(
+                ErrorScope::Command,
+                Some(command_id),
+                self.active.as_ref().map(|active| active.id.clone()),
+                "SESSION_BUSY",
+                "session.fork is only available while the main session is idle",
+                EventErrorLevel::Page,
+                true,
+            );
+        }
+        if reason == crate::transcript::ForkReason::EditLastPrompt
+            && (self.session.agents.has_running_work()
+                || self.session.team_tasks.has_running_work())
+        {
+            return self.emit_error(
+                ErrorScope::Command,
+                Some(command_id),
+                None,
+                "SESSION_BUSY",
+                "editing is unavailable while background Agent or Team work is running",
+                EventErrorLevel::Page,
+                true,
+            );
+        }
+        let source_session_id = self.metadata.session_id.clone();
+        let Some(transcript) = self.session.runtime.transcript.borrow().clone() else {
+            return self.emit_error(
+                ErrorScope::Command,
+                Some(command_id),
+                None,
+                "STORAGE_ERROR",
+                "this session has no transcript",
+                EventErrorLevel::Page,
+                true,
+            );
+        };
+        let result = match reason {
+            crate::transcript::ForkReason::EditLastPrompt => transcript.fork_edit_last_prompt(
+                &self.session.home,
+                &self.session.cwd(),
+                crate::transcript::EditForkPoint {
+                    turn_id: source_turn_id,
+                    content_revision: source_revision,
+                },
+            ),
+            crate::transcript::ForkReason::RecoverInterrupted => {
+                transcript.fork_recover_interrupted(&self.session.home, &self.session.cwd())
+            }
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                return self.emit_error(
+                    ErrorScope::Command,
+                    Some(command_id),
+                    None,
+                    error.error_code(),
+                    &error.to_string(),
+                    EventErrorLevel::Page,
+                    true,
+                );
+            }
+        };
+        if let Err(error) = self.session.tasks.fork_to(&result.transcript.name()).await {
+            let _ = result.transcript.delete();
+            return self.emit_error(
+                ErrorScope::Command,
+                Some(command_id),
+                None,
+                error.error_code(),
+                &error.to_string(),
+                EventErrorLevel::Page,
+                true,
+            );
+        }
+        let mut metadata = self.metadata.clone();
+        metadata.session_id = result.transcript.name();
+        metadata.transcript_path = result.transcript.path().display().to_string();
+        metadata.resumed = true;
+        metadata.transcript_revision = match result.transcript.transcript_revision() {
+            Ok(revision) => revision,
+            Err(error) => {
+                return self.emit_error(
+                    ErrorScope::Command,
+                    Some(command_id),
+                    None,
+                    error.error_code(),
+                    &error.to_string(),
+                    EventErrorLevel::Page,
+                    true,
+                );
+            }
+        };
+        metadata.parent_session_id = Some(source_session_id.clone());
+        metadata.fork_reason = Some(reason);
+        // session.forked is a cross-process handoff. On Windows the child cannot even be
+        // read while these exclusive handles remain open, so release them before the event
+        // becomes observable to the GUI.
+        result.transcript.release_active_lock();
+        self.emit(CliEvent::SessionForked {
+            base: EventBase::default(),
+            command_id,
+            source_session_id,
+            reason,
+            metadata,
+            warnings: result.warnings,
+        })
+    }
+
     fn handle_adapter_event(&mut self, event: AdapterEvent) -> Result<(), JsonEventsError> {
         match event {
             AdapterEvent::Cli(event) => self.emit(*event),
+            AdapterEvent::ContextUsage {
+                turn_id,
+                used_tokens,
+                context_window,
+            } => self.emit(CliEvent::ContextUsage {
+                base: EventBase::default(),
+                command_id: None,
+                turn_id: Some(turn_id),
+                used_tokens,
+                context_window,
+            }),
+            AdapterEvent::TeamTask(event) => match event {
+                crate::team_tasks::TeamTaskEvent::Updated(task) => {
+                    self.emit(CliEvent::TeamTaskUpdated {
+                        base: EventBase::default(),
+                        command_id: None,
+                        action: "changed".to_string(),
+                        task,
+                        detail: None,
+                    })
+                }
+                crate::team_tasks::TeamTaskEvent::Message { task_id, message } => {
+                    self.emit(CliEvent::TeamTaskMessage {
+                        base: EventBase::default(),
+                        task_id,
+                        message,
+                    })
+                }
+                crate::team_tasks::TeamTaskEvent::LobbyMessage(message) => {
+                    self.emit(CliEvent::TeamLobbyMessage {
+                        base: EventBase::default(),
+                        message,
+                    })
+                }
+            },
+            AdapterEvent::Agent(event) => {
+                let _ = self
+                    .session
+                    .team_tasks
+                    .settle_ready_tasks(&self.session.agents);
+                let task_id = self
+                    .session
+                    .team_tasks
+                    .active_task_for_member(&event.name)
+                    .map(|task| task.id);
+                let status = event
+                    .state
+                    .map(crate::agents::AgentState::label)
+                    .unwrap_or("offline")
+                    .to_string();
+                self.emit(CliEvent::TeamMemberUpdated {
+                    base: EventBase::default(),
+                    member: event.name,
+                    status,
+                    task_id,
+                })
+            }
             AdapterEvent::Prompt(prompt) => {
                 self.emit(CliEvent::PromptRequest {
                     base: EventBase::default(),
@@ -1186,6 +2984,7 @@ impl<W: Write> JsonSession<W> {
                     } else {
                         (None, TurnCancelledReason::StdinEof)
                     };
+                    self.finish_turn_index(&turn_id, crate::transcript::TurnStatus::Cancelled)?;
                     self.emit(CliEvent::TurnCancelled {
                         base: EventBase::default(),
                         turn_id,
@@ -1208,6 +3007,7 @@ impl<W: Write> JsonSession<W> {
                             TurnCancelledReason::StdinEof
                         };
                         let command_id = self.cancel_command_id.take();
+                        self.finish_turn_index(&turn_id, crate::transcript::TurnStatus::Cancelled)?;
                         self.emit(CliEvent::TurnCancelled {
                             base: EventBase::default(),
                             turn_id,
@@ -1215,13 +3015,17 @@ impl<W: Write> JsonSession<W> {
                             reason,
                         })
                     }
-                    Ok(_) => self.emit(CliEvent::TurnCompleted {
-                        base: EventBase::default(),
-                        turn_id,
-                        output_tokens: None,
-                    }),
+                    Ok(_) => {
+                        self.finish_turn_index(&turn_id, crate::transcript::TurnStatus::Completed)?;
+                        self.emit(CliEvent::TurnCompleted {
+                            base: EventBase::default(),
+                            turn_id,
+                            output_tokens: None,
+                        })
+                    }
                     Err(error) => {
                         self.exit_code = 1;
+                        self.finish_turn_index(&turn_id, crate::transcript::TurnStatus::Error)?;
                         self.emit_error(
                             ErrorScope::Turn,
                             None,
@@ -1244,6 +3048,25 @@ impl<W: Write> JsonSession<W> {
             self.closing = true;
         } else {
             self.closing = true;
+        }
+        Ok(())
+    }
+
+    fn finish_turn_index(
+        &mut self,
+        turn_id: &str,
+        status: crate::transcript::TurnStatus,
+    ) -> Result<(), JsonEventsError> {
+        let Some(transcript) = self.session.runtime.transcript.borrow().clone() else {
+            return Ok(());
+        };
+        if let Err(error) = transcript.finish_turn(turn_id, status) {
+            self.emit(CliEvent::Warning {
+                base: EventBase::default(),
+                turn_id: Some(turn_id.to_string()),
+                code: Some(error.error_code().to_string()),
+                msg: sanitize_msg(&format!("failed to update turn index: {error}")),
+            })?;
         }
         Ok(())
     }
@@ -1293,6 +3116,71 @@ impl<W: Write> JsonSession<W> {
     }
 }
 
+fn merge_team_value(existing: serde_json::Value, incoming: serde_json::Value) -> serde_json::Value {
+    let mut incoming = match incoming {
+        serde_json::Value::Object(incoming) => incoming,
+        other => return other,
+    };
+    let existing = match existing {
+        serde_json::Value::Object(existing) => existing,
+        _ => return serde_json::Value::Object(incoming),
+    };
+    let known_root = [
+        "schemaVersion",
+        "name",
+        "leader",
+        "channel",
+        "channels",
+        "members",
+        "teams",
+    ];
+    let mut merged: serde_json::Map<String, serde_json::Value> = existing
+        .iter()
+        .filter(|(key, _)| !known_root.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+
+    if let Some(serde_json::Value::Object(channel)) = incoming.get_mut("channel")
+        && let Some(serde_json::Value::Object(existing_channel)) = existing.get("channel")
+    {
+        for (key, value) in existing_channel {
+            if !matches!(key.as_str(), "mode" | "messageLimit") && !channel.contains_key(key) {
+                channel.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    if let Some(serde_json::Value::Array(members)) = incoming.get_mut("members")
+        && let Some(serde_json::Value::Array(existing_members)) = existing.get("members")
+    {
+        for member in members {
+            let serde_json::Value::Object(member_object) = member else {
+                continue;
+            };
+            let name = member_object
+                .get("name")
+                .and_then(serde_json::Value::as_str);
+            let Some(serde_json::Value::Object(existing_member)) =
+                existing_members.iter().find(|candidate| {
+                    candidate.get("name").and_then(serde_json::Value::as_str) == name
+                })
+            else {
+                continue;
+            };
+            for (key, value) in existing_member {
+                if !matches!(
+                    key.as_str(),
+                    "name" | "agent" | "avatar" | "model" | "provider" | "thinking"
+                ) && !member_object.contains_key(key)
+                {
+                    member_object.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+    merged.extend(incoming);
+    serde_json::Value::Object(merged)
+}
+
 fn read_commands<R: BufRead>(
     mut reader: R,
     sender: mpsc::UnboundedSender<Result<ClientCommand, JsonEventsError>>,
@@ -1327,6 +3215,7 @@ fn json_hooks(
     sender: mpsc::UnboundedSender<AdapterEvent>,
     turn_id: String,
     next_prompt_id: Arc<std::sync::atomic::AtomicU64>,
+    context_subscribed: Arc<std::sync::atomic::AtomicBool>,
 ) -> UiHooks {
     let event_sender = sender.clone();
     let ready_sender = sender.clone();
@@ -1336,9 +3225,11 @@ fn json_hooks(
     let permission_turn_id = turn_id.clone();
     let ready_turn_id = turn_id.clone();
     let permission_ids = next_prompt_id.clone();
-    let question_sender = sender;
+    let question_sender = sender.clone();
     let question_turn_id = turn_id.clone();
     let done_turn_id = turn_id.clone();
+    let context_sender = sender.clone();
+    let context_turn_id = turn_id.clone();
     UiHooks {
         on_event: Box::new(move |event| {
             if let StreamEvent::TextDelta { text, .. } = event {
@@ -1349,10 +3240,16 @@ fn json_hooks(
                 })));
             }
         }),
-        // Stream retries and context usage have no protocol events yet; a later
-        // commit can surface them once the schema grows fields for them.
         on_stream_retry: Box::new(|| {}),
-        on_context_usage: Arc::new(|_, _| {}),
+        on_context_usage: Arc::new(move |used_tokens, context_window| {
+            if context_subscribed.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = context_sender.send(AdapterEvent::ContextUsage {
+                    turn_id: context_turn_id.clone(),
+                    used_tokens,
+                    context_window,
+                });
+            }
+        }),
         on_tool_ready: Box::new(move |tool_call_id, name, input, _standalone| {
             let summary = crate::query::summarize_input(&name, &input);
             let _ = ready_sender.send(AdapterEvent::Cli(Box::new(CliEvent::ToolReady {
@@ -1364,6 +3261,8 @@ fn json_hooks(
             })));
         }),
         on_tool_done: Box::new(move |done| {
+            // TODO(upstream JSON-events issue): tool.done currently flattens output to text. Preserve
+            // image blocks through a bounded reference or chunked JSON-events extension.
             let status = match done.status {
                 ToolCallStatus::Done => ToolEventStatus::Done,
                 ToolCallStatus::Error => ToolEventStatus::Error,
@@ -1514,6 +3413,7 @@ pub fn probe_event<W: Write>(mut writer: W) -> Result<(), JsonEventsError> {
         metadata: ProbeMetadata {
             bingo_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: PROTOCOL_VERSION,
+            capabilities: capabilities(),
         },
     })
 }
@@ -1523,6 +3423,9 @@ pub fn probe_event<W: Write>(mut writer: W) -> Result<(), JsonEventsError> {
 /// `session.close` over NDJSON. Never creates a transcript or runs hooks/teams.
 pub async fn run_inspect<R: BufRead, W: Write>(
     client: crate::api::client::Client,
+    settings: crate::settings::Settings,
+    user_dir: &Path,
+    project_dir: &Path,
     reader: R,
     mut writer: W,
 ) -> Result<i32, JsonEventsError> {
@@ -1532,6 +3435,7 @@ pub async fn run_inspect<R: BufRead, W: Write>(
         metadata: ProbeMetadata {
             bingo_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: PROTOCOL_VERSION,
+            capabilities: capabilities(),
         },
     })?;
     let mut seen_command_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1600,6 +3504,14 @@ pub async fn run_inspect<R: BufRead, W: Write>(
                     models,
                 })?;
             }
+            ClientCommand::SettingsGet { .. } => {
+                event_writer.emit(CliEvent::SettingsResult {
+                    base: EventBase::default(),
+                    command_id,
+                    settings: sanitized_settings(&settings, &client),
+                    layers: settings_layers(user_dir, project_dir),
+                })?;
+            }
             ClientCommand::SessionClose { .. } => {
                 event_writer.emit(CliEvent::SessionClosed {
                     base: EventBase::default(),
@@ -1609,7 +3521,7 @@ pub async fn run_inspect<R: BufRead, W: Write>(
             }
             _ => {
                 return Err(JsonEventsError::BadArgument(
-                    "command is not allowed in inspect mode (only providers.list, models.list, session.close)"
+                    "command is not allowed in inspect mode (only providers.list, models.list, settings.get, session.close)"
                         .to_string(),
                 ));
             }
@@ -1619,204 +3531,4 @@ pub async fn run_inspect<R: BufRead, W: Write>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn turn_start(prompt: String) -> String {
-        serde_json::json!({
-            "protocolVersion": 1,
-            "type": "turn.start",
-            "commandId": "command-1",
-            "turnId": "turn-1",
-            "prompt": prompt,
-        })
-        .to_string()
-    }
-
-    #[test]
-    fn command_round_trip_uses_protocol_v1_shape() {
-        let command = parse_command_line(turn_start("hello".to_string()).as_bytes())
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(
-            command,
-            ClientCommand::TurnStart {
-                protocol_version: 1,
-                command_id: "command-1".to_string(),
-                turn_id: "turn-1".to_string(),
-                prompt: "hello".to_string(),
-            }
-        );
-        let value = serde_json::to_value(command).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(value["type"], "turn.start");
-        assert_eq!(value["protocolVersion"], 1);
-    }
-
-    #[test]
-    fn every_command_variant_round_trips() {
-        let values = [
-            serde_json::json!({
-                "protocolVersion": 1,
-                "type": "turn.cancel",
-                "commandId": "command-1",
-                "turnId": "turn-1"
-            }),
-            serde_json::json!({
-                "protocolVersion": 1,
-                "type": "prompt.respond",
-                "commandId": "command-2",
-                "promptId": "prompt-1",
-                "response": {"kind": "option", "optionId": "allow"}
-            }),
-            serde_json::json!({
-                "protocolVersion": 1,
-                "type": "models.list",
-                "commandId": "command-3",
-                "provider": "default"
-            }),
-            serde_json::json!({
-                "protocolVersion": 1,
-                "type": "session.rename",
-                "commandId": "command-4",
-                "name": "Renamed"
-            }),
-            serde_json::json!({
-                "protocolVersion": 1,
-                "type": "session.delete",
-                "commandId": "command-5"
-            }),
-            serde_json::json!({
-                "protocolVersion": 1,
-                "type": "session.close",
-                "commandId": "command-6"
-            }),
-        ];
-        for value in values {
-            let line = value.to_string();
-            let command = parse_command_line(line.as_bytes())
-                .unwrap_or_else(|error| panic!("{value}: {error}"));
-            assert_eq!(
-                serde_json::to_value(command).unwrap_or_else(|error| panic!("{error}")),
-                value
-            );
-        }
-    }
-
-    #[test]
-    fn prompt_and_rename_bounds_count_unicode_scalars() {
-        assert!(parse_command_line(turn_start("x".repeat(MAX_PROMPT_CHARS)).as_bytes()).is_ok());
-        assert!(
-            parse_command_line(turn_start("x".repeat(MAX_PROMPT_CHARS + 1)).as_bytes()).is_err()
-        );
-        assert!(parse_command_line(turn_start(" \n\t ".to_string()).as_bytes()).is_err());
-
-        let response = |text: String| {
-            serde_json::json!({
-                "protocolVersion": 1,
-                "type": "prompt.respond",
-                "commandId": "command-1",
-                "promptId": "prompt-1",
-                "response": {"kind": "text", "text": text}
-            })
-            .to_string()
-        };
-        assert!(parse_command_line(response("界".repeat(MAX_RESPONSE_CHARS)).as_bytes()).is_ok());
-        assert!(
-            parse_command_line(response("界".repeat(MAX_RESPONSE_CHARS + 1)).as_bytes()).is_err()
-        );
-
-        let rename = |name: String| {
-            serde_json::json!({
-                "protocolVersion": 1,
-                "type": "session.rename",
-                "commandId": "command-1",
-                "name": name,
-            })
-            .to_string()
-        };
-        assert!(parse_command_line(rename("界".repeat(MAX_RENAME_CHARS)).as_bytes()).is_ok());
-        assert!(parse_command_line(rename("界".repeat(MAX_RENAME_CHARS + 1)).as_bytes()).is_err());
-    }
-
-    #[test]
-    fn command_line_cap_is_enforced_before_parsing() {
-        let line = vec![b'x'; MAX_COMMAND_LINE_BYTES + 1];
-        let error = parse_command_line(&line).expect_err("oversized line must fail");
-        assert!(error.to_string().contains("byte limit"));
-    }
-
-    #[test]
-    fn version_and_unknown_commands_are_rejected() {
-        let wrong_version = serde_json::json!({
-            "protocolVersion": 2,
-            "type": "session.close",
-            "commandId": "command-1"
-        });
-        assert!(parse_command_line(wrong_version.to_string().as_bytes()).is_err());
-        let unknown = serde_json::json!({
-            "protocolVersion": 1,
-            "type": "unknown",
-            "commandId": "command-1"
-        });
-        assert!(parse_command_line(unknown.to_string().as_bytes()).is_err());
-    }
-
-    #[test]
-    fn event_writer_assigns_gapless_sequence_and_ndjson_lines() {
-        let mut output = Vec::new();
-        {
-            let mut writer = EventWriter::new(&mut output);
-            writer.set_session_id(Some("session-1".to_string()));
-            writer
-                .emit(CliEvent::Warning {
-                    base: EventBase::default(),
-                    turn_id: None,
-                    code: None,
-                    msg: "one".to_string(),
-                })
-                .unwrap_or_else(|error| panic!("{error}"));
-            writer
-                .emit(CliEvent::Warning {
-                    base: EventBase::default(),
-                    turn_id: None,
-                    code: None,
-                    msg: "two".to_string(),
-                })
-                .unwrap_or_else(|error| panic!("{error}"));
-        }
-        let lines: Vec<serde_json::Value> = std::str::from_utf8(&output)
-            .unwrap_or_else(|error| panic!("{error}"))
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}")))
-            .collect();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["seq"], 1);
-        assert_eq!(lines[1]["seq"], 2);
-        assert_eq!(lines[0]["sessionId"], "session-1");
-        assert!(output.ends_with(b"\n"));
-    }
-
-    #[test]
-    fn exact_session_resolution_rejects_fragments_and_paths() {
-        let root =
-            std::env::temp_dir().join(format!("bingo-json-session-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let home = root.join("home");
-        let cwd = root.join("project");
-        std::fs::create_dir_all(&cwd).unwrap_or_else(|error| panic!("{error}"));
-        let transcript =
-            crate::transcript::create(&home, &cwd).unwrap_or_else(|error| panic!("{error}"));
-        transcript
-            .append(&Message::user_text("hello"))
-            .unwrap_or_else(|error| panic!("{error}"));
-        let stem = transcript.name();
-        assert_eq!(
-            resolve_session(&home, &stem)
-                .unwrap_or_else(|error| panic!("{error}"))
-                .path(),
-            transcript.path()
-        );
-        assert!(resolve_session(&home, &stem[..stem.len() - 1]).is_err());
-        assert!(resolve_session(&home, "../session").is_err());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-}
+mod tests;

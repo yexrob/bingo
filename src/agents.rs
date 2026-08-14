@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::api::types::Message;
+use crate::error::ErrorCode;
 use crate::query::Session;
 
 /// Definition source layer (D31 `/team list` badge; same-name first-wins across layers picks the project layer).
@@ -41,6 +44,8 @@ pub struct AgentDef {
     /// Replacing also drops the environment info, CLAUDE.md/AGENTS.md and project memory, so it
     /// is opt-in: `inherit_system: false` in the frontmatter.
     pub inherit_system: bool,
+    /// Reusable identity, conversation style and prompt-level working rules.
+    pub profile: crate::team::MemberProfile,
     /// First origin (the loading layer before first-wins dedup).
     pub source: AgentDefSource,
 }
@@ -96,6 +101,7 @@ fn load_dir(dir: &Path, source: AgentDefSource, out: &mut Vec<AgentDef>) {
             thinking: None,
             system: body.trim_end().to_string(),
             inherit_system: true,
+            profile: crate::team::MemberProfile::default(),
             source,
         };
         for (key, value) in pairs {
@@ -111,7 +117,7 @@ fn load_dir(dir: &Path, source: AgentDefSource, out: &mut Vec<AgentDef>) {
                         "false" | "no" | "off" | "0"
                     )
                 }
-                _ => {}
+                _ => apply_profile_pair(&mut def.profile, &key, value),
             }
         }
         if def.description.is_empty() {
@@ -136,6 +142,635 @@ pub fn load_agent_defs(home: &Path, cwd: &Path) -> Vec<AgentDef> {
     defs
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentDefinitionScope {
+    Project,
+    User,
+}
+
+impl AgentDefinitionScope {
+    pub fn parse(value: &str) -> Result<Self, AgentDefinitionError> {
+        match value {
+            "project" => Ok(Self::Project),
+            "user" => Ok(Self::User),
+            _ => Err(AgentDefinitionError::Invalid(
+                "scope must be project or user".to_string(),
+            )),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::User => "user",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDefinitionDocument {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    pub revision: String,
+    pub path: String,
+    pub overridden: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    pub inherit_system: bool,
+    pub profile: crate::team::MemberProfile,
+    pub system: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDefinitionInput {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub thinking: Option<String>,
+    #[serde(default = "agent_definition_inherit_default")]
+    pub inherit_system: bool,
+    #[serde(default, skip_serializing_if = "crate::team::profile_is_empty")]
+    pub profile: crate::team::MemberProfile,
+    #[serde(default)]
+    pub system: String,
+}
+
+fn agent_definition_inherit_default() -> bool {
+    true
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AgentDefinitionError {
+    #[error("agent definition storage failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("agent definition {0} does not exist")]
+    NotFound(String),
+    #[error("invalid agent definition: {0}")]
+    Invalid(String),
+    #[error("agent definition changed on disk; refresh before saving")]
+    Conflict,
+}
+
+impl ErrorCode for AgentDefinitionError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "STORAGE_ERROR",
+            Self::Conflict => "CONFIG_CONFLICT",
+            Self::Invalid(_) => "CONFIG_INVALID",
+            Self::NotFound(_) => "BAD_ARGUMENT",
+        }
+    }
+}
+
+pub fn list_agent_definition_documents(
+    home: &Path,
+    cwd: &Path,
+) -> Result<Vec<AgentDefinitionDocument>, AgentDefinitionError> {
+    let mut documents = Vec::new();
+    load_definition_documents(
+        &cwd.join(".bingo").join("agents"),
+        AgentDefinitionScope::Project,
+        &mut documents,
+    )?;
+    load_definition_documents(
+        &user_agents_dir(home),
+        AgentDefinitionScope::User,
+        &mut documents,
+    )?;
+    let project_names = documents
+        .iter()
+        .filter(|document| document.source == "project")
+        .map(|document| document.name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    for document in &mut documents {
+        document.overridden = document.source == "user" && project_names.contains(&document.name);
+    }
+    documents.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.source.cmp(&right.source))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(documents)
+}
+
+pub fn get_agent_definition_document(
+    home: &Path,
+    cwd: &Path,
+    scope: AgentDefinitionScope,
+    id: &str,
+) -> Result<AgentDefinitionDocument, AgentDefinitionError> {
+    validate_definition_id(id)?;
+    let path = definition_path(home, cwd, scope, id);
+    let raw = std::fs::read(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            AgentDefinitionError::NotFound(id.to_string())
+        } else {
+            AgentDefinitionError::Io(error)
+        }
+    })?;
+    document_from_raw(scope, id, &path, &raw, false)
+}
+
+pub fn save_agent_definition_document(
+    home: &Path,
+    cwd: &Path,
+    scope: AgentDefinitionScope,
+    id: &str,
+    base_revision: Option<&str>,
+    input: AgentDefinitionInput,
+) -> Result<AgentDefinitionDocument, AgentDefinitionError> {
+    validate_definition_id(id)?;
+    validate_definition_input(&input)?;
+    let path = definition_path(home, cwd, scope, id);
+    let _lock = lock_definition_directory(&path)?;
+    let existing = match std::fs::read(&path) {
+        Ok(raw) => Some(raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    match (&existing, base_revision) {
+        (Some(raw), Some(revision)) if crate::update::sha256_hex(raw) == revision => {}
+        (None, None | Some("")) => {}
+        _ => return Err(AgentDefinitionError::Conflict),
+    }
+    if let Some(raw) = &existing {
+        let current = document_from_raw(scope, id, &path, raw, false)?;
+        if current.name != input.name.trim() {
+            return Err(AgentDefinitionError::Invalid(
+                "role names are immutable; save as a new role to rename it".to_string(),
+            ));
+        }
+    }
+    ensure_unique_definition_name(&path, scope, id, input.name.trim())?;
+    let unknown = existing
+        .as_deref()
+        .and_then(|raw| std::str::from_utf8(raw).ok())
+        .map(|raw| crate::skills::parse_frontmatter_pairs(raw).0)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(key, _)| !is_known_definition_key(key))
+        .collect::<Vec<_>>();
+    let encoded = encode_agent_definition(&input, &unknown);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_definition_atomic(&path, encoded.as_bytes())?;
+    let raw = std::fs::read(&path)?;
+    document_from_raw(scope, id, &path, &raw, false)
+}
+
+pub fn archive_agent_definition_document(
+    home: &Path,
+    cwd: &Path,
+    scope: AgentDefinitionScope,
+    id: &str,
+    base_revision: &str,
+) -> Result<(AgentDefinitionDocument, PathBuf), AgentDefinitionError> {
+    validate_definition_id(id)?;
+    let source = definition_path(home, cwd, scope, id);
+    let _lock = lock_definition_directory(&source)?;
+    let document = get_agent_definition_document(home, cwd, scope, id)?;
+    if document.revision != base_revision {
+        return Err(AgentDefinitionError::Conflict);
+    }
+    let archive_dir = source
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".archive");
+    std::fs::create_dir_all(&archive_dir)?;
+    let timestamp = crate::channels::now_unix();
+    let mut suffix = 0u64;
+    let destination = loop {
+        let tail = if suffix == 0 {
+            format!("{id}-{timestamp}.md")
+        } else {
+            format!("{id}-{timestamp}-{suffix}.md")
+        };
+        let candidate = archive_dir.join(tail);
+        if !candidate.exists() {
+            break candidate;
+        }
+        suffix += 1;
+    };
+    std::fs::rename(&source, &destination)?;
+    Ok((document, destination))
+}
+
+fn load_definition_documents(
+    dir: &Path,
+    scope: AgentDefinitionScope,
+    out: &mut Vec<AgentDefinitionDocument>,
+) -> Result<(), AgentDefinitionError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        let Some(id) = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+        else {
+            continue;
+        };
+        let raw = std::fs::read(&path)?;
+        out.push(document_from_raw(scope, &id, &path, &raw, false)?);
+    }
+    Ok(())
+}
+
+pub(crate) fn document_from_raw(
+    scope: AgentDefinitionScope,
+    id: &str,
+    path: &Path,
+    raw: &[u8],
+    overridden: bool,
+) -> Result<AgentDefinitionDocument, AgentDefinitionError> {
+    let text = std::str::from_utf8(raw).map_err(|error| {
+        AgentDefinitionError::Invalid(format!("{} is not valid UTF-8: {error}", path.display()))
+    })?;
+    let (pairs, body) = crate::skills::parse_frontmatter_pairs(text);
+    let mut input = AgentDefinitionInput {
+        name: id.to_string(),
+        description: String::new(),
+        model: None,
+        provider: None,
+        thinking: None,
+        inherit_system: true,
+        profile: crate::team::MemberProfile::default(),
+        system: body.trim_end().to_string(),
+    };
+    for (key, value) in pairs {
+        match key.as_str() {
+            "name" => input.name = value,
+            "description" => input.description = value,
+            "model" => input.model = non_empty_option(value),
+            "provider" => input.provider = non_empty_option(value),
+            "thinking" => input.thinking = non_empty_option(value),
+            "inherit_system" => {
+                input.inherit_system = !matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "false" | "no" | "off" | "0"
+                );
+            }
+            _ => apply_profile_pair(&mut input.profile, &key, value),
+        }
+    }
+    if input.description.is_empty() {
+        input.description = crate::skills::first_line(&input.system);
+    }
+    Ok(AgentDefinitionDocument {
+        id: id.to_string(),
+        name: input.name,
+        description: input.description,
+        source: scope.label().to_string(),
+        revision: crate::update::sha256_hex(raw),
+        path: path.display().to_string(),
+        overridden,
+        model: input.model,
+        provider: input.provider,
+        thinking: input.thinking,
+        inherit_system: input.inherit_system,
+        profile: input.profile,
+        system: input.system,
+    })
+}
+
+pub(crate) fn definition_path(
+    home: &Path,
+    cwd: &Path,
+    scope: AgentDefinitionScope,
+    id: &str,
+) -> PathBuf {
+    let dir = match scope {
+        AgentDefinitionScope::Project => cwd.join(".bingo").join("agents"),
+        AgentDefinitionScope::User => user_agents_dir(home),
+    };
+    dir.join(format!("{id}.md"))
+}
+
+fn validate_definition_id(id: &str) -> Result<(), AgentDefinitionError> {
+    let id = id.trim();
+    if id.is_empty()
+        || id.chars().count() > 80
+        || !id
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err(AgentDefinitionError::Invalid(
+            "id must contain 1-80 letters, numbers, hyphens, or underscores".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_definition_input(input: &AgentDefinitionInput) -> Result<(), AgentDefinitionError> {
+    if input.name.trim().is_empty() {
+        return Err(AgentDefinitionError::Invalid(
+            "name must not be empty".to_string(),
+        ));
+    }
+    if input.system.trim().is_empty() {
+        return Err(AgentDefinitionError::Invalid(
+            "system prompt must not be empty".to_string(),
+        ));
+    }
+    if let Some(thinking) = input.thinking.as_deref() {
+        crate::tool::agent::normalize_thinking(thinking).map_err(AgentDefinitionError::Invalid)?;
+    }
+    crate::team::validate_profile(&input.profile, "profile")
+        .map_err(|error| AgentDefinitionError::Invalid(error.to_string()))?;
+    Ok(())
+}
+
+fn lock_definition_directory(path: &Path) -> Result<std::fs::File, AgentDefinitionError> {
+    let directory = path.parent().ok_or_else(|| {
+        AgentDefinitionError::Invalid("agent definition path has no parent directory".to_string())
+    })?;
+    std::fs::create_dir_all(directory)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(directory.join(".definitions.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn ensure_unique_definition_name(
+    path: &Path,
+    scope: AgentDefinitionScope,
+    id: &str,
+    name: &str,
+) -> Result<(), AgentDefinitionError> {
+    let directory = path.parent().ok_or_else(|| {
+        AgentDefinitionError::Invalid("agent definition path has no parent directory".to_string())
+    })?;
+    let mut documents = Vec::new();
+    load_definition_documents(directory, scope, &mut documents)?;
+    if let Some(existing) = documents
+        .iter()
+        .find(|document| document.id != id && document.name == name)
+    {
+        return Err(AgentDefinitionError::Invalid(format!(
+            "role name {name:?} is already used by {} in the {} scope",
+            existing.id,
+            scope.label()
+        )));
+    }
+    Ok(())
+}
+
+fn is_known_definition_key(key: &str) -> bool {
+    matches!(
+        key,
+        "name"
+            | "description"
+            | "model"
+            | "provider"
+            | "thinking"
+            | "inherit_system"
+            | "identity_title"
+            | "identity_background"
+            | "personality"
+            | "communication_language"
+            | "communication_tone"
+            | "communication_verbosity"
+            | "communication_instructions"
+            | "constraints"
+            | "preferences"
+    )
+}
+
+fn non_empty_option(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
+}
+
+fn encode_agent_definition(input: &AgentDefinitionInput, unknown: &[(String, String)]) -> String {
+    let mut output = String::from("---\n");
+    push_definition_field(&mut output, "name", input.name.trim());
+    if !input.description.trim().is_empty() {
+        push_definition_field(&mut output, "description", input.description.trim());
+    }
+    if let Some(model) = input
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        push_definition_field(&mut output, "model", model);
+    }
+    if let Some(provider) = input
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        push_definition_field(&mut output, "provider", provider);
+    }
+    if let Some(thinking) = input
+        .thinking
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        push_definition_field(&mut output, "thinking", thinking);
+    }
+    push_definition_field(
+        &mut output,
+        "inherit_system",
+        if input.inherit_system {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    encode_profile(&mut output, &input.profile);
+    for (key, value) in unknown {
+        push_definition_field(&mut output, key, value);
+    }
+    output.push_str("---\n");
+    output.push_str(input.system.trim_end());
+    output.push('\n');
+    output
+}
+
+fn apply_profile_pair(profile: &mut crate::team::MemberProfile, key: &str, value: String) {
+    let optional = || non_empty_option(value.clone());
+    match key {
+        "identity_title" => {
+            profile.identity.get_or_insert_default().title = optional();
+        }
+        "identity_background" => {
+            profile.identity.get_or_insert_default().background = optional();
+        }
+        "personality" => profile.personality = optional(),
+        "communication_language" => {
+            profile.communication.get_or_insert_default().language = optional();
+        }
+        "communication_tone" => {
+            profile.communication.get_or_insert_default().tone = optional();
+        }
+        "communication_verbosity" => {
+            profile.communication.get_or_insert_default().verbosity = optional();
+        }
+        "communication_instructions" => {
+            profile.communication.get_or_insert_default().instructions = optional();
+        }
+        "constraints" => profile.constraints = parse_constraints(&value),
+        "preferences" => profile.preferences = parse_list(&value),
+        _ => {}
+    }
+}
+
+fn parse_list(value: &str) -> Vec<String> {
+    value
+        .lines()
+        .map(str::trim)
+        .map(|line| line.strip_prefix("- ").unwrap_or(line).trim())
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn parse_constraints(value: &str) -> Vec<crate::team::BehaviorConstraint> {
+    parse_list(value)
+        .into_iter()
+        .map(|value| {
+            let (kind, instruction) = value
+                .split_once(": ")
+                .filter(|(kind, _)| {
+                    matches!(
+                        *kind,
+                        "noNetwork" | "noShell" | "readOnly" | "reviewOnly" | "custom"
+                    )
+                })
+                .map(|(kind, instruction)| (kind.to_string(), instruction.to_string()))
+                .unwrap_or_else(|| ("custom".to_string(), value));
+            crate::team::BehaviorConstraint {
+                kind,
+                instruction,
+                enforcement: "prompt".to_string(),
+            }
+        })
+        .collect()
+}
+
+fn encode_profile(output: &mut String, profile: &crate::team::MemberProfile) {
+    if let Some(identity) = &profile.identity {
+        if let Some(value) = identity
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            push_definition_field(output, "identity_title", value);
+        }
+        if let Some(value) = identity
+            .background
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            push_definition_field(output, "identity_background", value);
+        }
+    }
+    if let Some(value) = profile
+        .personality
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        push_definition_field(output, "personality", value);
+    }
+    if let Some(communication) = &profile.communication {
+        for (key, value) in [
+            ("communication_language", communication.language.as_deref()),
+            ("communication_tone", communication.tone.as_deref()),
+            (
+                "communication_verbosity",
+                communication.verbosity.as_deref(),
+            ),
+            (
+                "communication_instructions",
+                communication.instructions.as_deref(),
+            ),
+        ] {
+            if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+                push_definition_field(output, key, value);
+            }
+        }
+    }
+    if !profile.constraints.is_empty() {
+        let value = profile
+            .constraints
+            .iter()
+            .filter(|constraint| !constraint.instruction.trim().is_empty())
+            .map(|constraint| format!("- {}: {}", constraint.kind, constraint.instruction.trim()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !value.is_empty() {
+            push_definition_field(output, "constraints", &format!("{value}\n"));
+        }
+    }
+    if !profile.preferences.is_empty() {
+        let value = profile
+            .preferences
+            .iter()
+            .map(|preference| preference.trim())
+            .filter(|preference| !preference.is_empty())
+            .map(|preference| format!("- {preference}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !value.is_empty() {
+            push_definition_field(output, "preferences", &format!("{value}\n"));
+        }
+    }
+}
+
+fn push_definition_field(output: &mut String, key: &str, value: &str) {
+    if value.contains('\n') {
+        output.push_str(key);
+        output.push_str(": |-\n");
+        for line in value.lines() {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    } else {
+        output.push_str(key);
+        output.push_str(": ");
+        output.push_str(value);
+        output.push('\n');
+    }
+}
+
+fn write_definition_atomic(path: &Path, content: &[u8]) -> Result<(), AgentDefinitionError> {
+    crate::storage::write_atomic(path, content)?;
+    Ok(())
+}
+
 /// Instance lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
@@ -145,6 +780,14 @@ pub enum AgentState {
     Idle,
     /// Stopped (no longer receives messages; the name is released after delete).
     Stopped,
+}
+
+/// Runtime lifecycle change used by JSON clients and task pause draining.
+#[derive(Debug, Clone)]
+pub struct AgentEvent {
+    pub name: String,
+    /// `None` means the instance was removed from the registry.
+    pub state: Option<AgentState>,
 }
 
 impl AgentState {
@@ -227,6 +870,10 @@ pub struct AgentStatus {
     pub model: String,
     pub provider: String,
     pub thinking: Option<String>,
+    pub successful_runs: u64,
+    pub useful: bool,
+    pub task_id: Option<String>,
+    pub configuration_key: Option<String>,
     /// Elapsed time of the current run; absent while idle or stopped.
     pub elapsed: Option<Duration>,
     /// Cumulative output tokens reported by the current model run.
@@ -416,6 +1063,8 @@ struct Entry {
     abort: Option<tokio::task::AbortHandle>,
     /// Cumulative run count (watch lines are labeled `#N`).
     runs: u64,
+    /// Model turns that reached normal completion rather than the failure path.
+    successful_runs: u64,
     /// Watch line of the current turn (used to set Cancelled on stop/delete).
     watch_id: Option<crate::watch::WatchId>,
     /// Streaming output of the current turn (shares the same Arc with subagent_hooks;
@@ -427,6 +1076,9 @@ struct Entry {
     token_rate: Option<Arc<Mutex<crate::token_rate::TokenRateSampler>>>,
     /// Latest context-window usage reported for this instance.
     context_tokens: u64,
+    useful: bool,
+    task_id: Option<String>,
+    configuration_key: Option<String>,
 }
 
 const RECENT_AGENT_ACTIVITIES: usize = 5;
@@ -526,18 +1178,43 @@ pub struct AgentRegistry {
     /// Inbox generation: every accepted item advances this watch channel. Receivers wait on it
     /// between tool rounds so a busy agent does not depend on the sender reaching a boundary.
     inbox_tx: tokio::sync::watch::Sender<u64>,
+    /// Best-effort lifecycle feed. State remains authoritative in `inner`.
+    events: tokio::sync::broadcast::Sender<AgentEvent>,
+    /// Optional task ownership gate attached by the root session.
+    team_tasks: Mutex<Option<Arc<crate::team_tasks::TeamTaskRegistry>>>,
 }
 
 impl AgentRegistry {
     pub fn new() -> Arc<Self> {
         let (inbox_tx, _) = tokio::sync::watch::channel(0);
+        let (events, _) = tokio::sync::broadcast::channel(256);
         Arc::new(Self {
             inner: Mutex::new(HashMap::new()),
             share: Mutex::new(None),
             ask: Mutex::new(None),
             next_msg: std::sync::atomic::AtomicU64::new(1),
             inbox_tx,
+            events,
+            team_tasks: Mutex::new(None),
         })
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AgentEvent> {
+        self.events.subscribe()
+    }
+
+    pub fn attach_team_tasks(&self, registry: Arc<crate::team_tasks::TeamTaskRegistry>) {
+        *self
+            .team_tasks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(registry);
+    }
+
+    fn emit_state(&self, name: &str, state: Option<AgentState>) {
+        let _ = self.events.send(AgentEvent {
+            name: name.to_string(),
+            state,
+        });
     }
 
     pub fn subscribe_inbox(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -660,14 +1337,19 @@ impl AgentRegistry {
                 session,
                 abort: None,
                 runs: 0,
+                successful_runs: 0,
                 watch_id: None,
                 live: None,
                 progress: None,
                 token_rate: None,
                 context_tokens: 0,
+                useful: false,
+                task_id: None,
+                configuration_key: None,
             },
         );
         self.sync_share(name);
+        self.emit_state(name, Some(AgentState::Running));
     }
 
     /// Re-point an existing instance at a freshly built session: the definition on disk
@@ -767,6 +1449,10 @@ impl AgentRegistry {
             false
         });
         released.sort();
+        drop(inner);
+        for name in &released {
+            self.emit_state(name, None);
+        }
         released
     }
 
@@ -829,13 +1515,6 @@ impl AgentRegistry {
                 .collect(),
             entry.state,
         ))
-    }
-
-    /// Whether an instance belongs to the given project directory.
-    pub fn is_in_project(&self, name: &str, cwd: &Path) -> bool {
-        self.lock()
-            .get(name)
-            .is_some_and(|entry| entry.session.cwd() == cwd)
     }
 
     pub fn token_rate_label(
@@ -965,9 +1644,11 @@ impl AgentRegistry {
             if entry.state == AgentState::Stopped {
                 None
             } else if entry.inbox.is_empty() {
+                entry.successful_runs += 1;
                 entry.state = AgentState::Idle;
                 None
             } else {
+                entry.successful_runs += 1;
                 entry.runs += 1;
                 let items = drain_inbox(entry, entry.runs, 0);
                 entry.state = AgentState::Running;
@@ -979,6 +1660,8 @@ impl AgentRegistry {
             }
         };
         self.sync_share(name);
+        let state = self.lock().get(name).map(|entry| entry.state);
+        self.emit_state(name, state);
         result
     }
 
@@ -1007,6 +1690,7 @@ impl AgentRegistry {
         }
         for wake in &woken {
             self.sync_share(&wake.name);
+            self.emit_state(&wake.name, Some(AgentState::Running));
         }
         woken
     }
@@ -1089,6 +1773,8 @@ impl AgentRegistry {
             entry.state = AgentState::Idle;
             entry.last_active = Instant::now();
         }
+        let state = self.lock().get(name).map(|entry| entry.state);
+        self.emit_state(name, state);
     }
 
     /// Queue a hub command. Returns the message id — the receipt the sender uses to check the
@@ -1104,6 +1790,18 @@ impl AgentRegistry {
         images: Vec<crate::api::types::ImageAttachment>,
         ack_timeout: Option<Duration>,
     ) -> Result<MsgId, String> {
+        if let Some(tasks) = self
+            .team_tasks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+            && let Some(task) = tasks.active_task_for_member(name)
+        {
+            return Err(format!(
+                "{name} is assigned to team task {} ({}) and does not accept direct messages",
+                task.id, task.title
+            ));
+        }
         let id = self.mint_msg_id();
         let mut inner = self.lock();
         let Some(entry) = inner.get_mut(name) else {
@@ -1247,6 +1945,7 @@ impl AgentRegistry {
             }
         };
         self.sync_share(name);
+        self.emit_state(name, Some(AgentState::Stopped));
         Ok(result)
     }
 
@@ -1255,7 +1954,24 @@ impl AgentRegistry {
     pub fn remove(&self, name: &str) -> Result<(Option<crate::watch::WatchId>, usize), String> {
         let outcome = self.stop(name)?;
         self.lock().remove(name);
+        self.emit_state(name, None);
         Ok(outcome)
+    }
+
+    pub fn state_in_project(&self, name: &str, cwd: &Path) -> Option<AgentState> {
+        self.lock()
+            .get(name)
+            .filter(|entry| entry.session.cwd() == cwd)
+            .map(|entry| entry.state)
+    }
+
+    /// Drop task-channel mail that must not start another turn after a pause request.
+    pub fn discard_channel_inbox(&self, name: &str, channel: &str) {
+        if let Some(entry) = self.lock().get_mut(name) {
+            entry.inbox.retain(|item| {
+                !matches!(item, InboxItem::Channel { channel: item_channel, .. } if item_channel == channel)
+            });
+        }
     }
 
     /// Snapshot of all instances (sorted by name for stable list output).
@@ -1282,6 +1998,10 @@ impl AgentRegistry {
                     model: e.session.runtime.model.borrow().clone(),
                     provider: e.session.runtime.provider.borrow().clone(),
                     thinking: e.session.runtime.thinking.borrow().clone(),
+                    successful_runs: e.successful_runs,
+                    useful: e.useful,
+                    task_id: e.task_id.clone(),
+                    configuration_key: e.configuration_key.clone(),
                     elapsed: progress
                         .as_ref()
                         .and_then(|p| p.started_at.map(|started| started.elapsed())),
@@ -1294,6 +2014,53 @@ impl AgentRegistry {
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
+    }
+
+    pub fn has_running_work(&self) -> bool {
+        self.lock().values().any(|entry| {
+            entry.state == AgentState::Running
+                || !entry.inbox.is_empty()
+                || entry.acks.iter().any(|ack| ack.state.is_outstanding())
+        })
+    }
+
+    pub fn mark_useful(&self, name: &str) -> Result<(), String> {
+        let mut inner = self.lock();
+        let entry = inner
+            .get_mut(name)
+            .ok_or_else(|| format!("agent {name:?} does not exist"))?;
+        if entry.kind != AgentKind::Hire {
+            return Err(format!("agent {name:?} is already a fixed team member"));
+        }
+        entry.useful = true;
+        let state = entry.state;
+        drop(inner);
+        self.emit_state(name, Some(state));
+        Ok(())
+    }
+
+    pub fn associate_task(&self, name: &str, task_id: String) -> Result<(), String> {
+        let mut inner = self.lock();
+        let entry = inner
+            .get_mut(name)
+            .ok_or_else(|| format!("agent {name:?} does not exist"))?;
+        if entry.kind != AgentKind::Hire {
+            return Err(format!("agent {name:?} is a fixed team member"));
+        }
+        entry.task_id = Some(task_id);
+        Ok(())
+    }
+
+    pub fn task_id_of(&self, name: &str) -> Option<String> {
+        self.lock()
+            .get(name)
+            .and_then(|entry| entry.task_id.clone())
+    }
+
+    pub fn set_configuration_key(&self, name: &str, key: String) {
+        if let Some(entry) = self.lock().get_mut(name) {
+            entry.configuration_key = Some(key);
+        }
     }
 }
 
@@ -1440,6 +2207,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
+            team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })
@@ -1504,6 +2272,180 @@ mod tests {
         // No frontmatter: name comes from the file name, description falls back to the first body line.
         assert_eq!(defs[1].description, "For research.");
         assert_eq!(defs[1].source, AgentDefSource::Project);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn definition_documents_mark_shadowed_user_roles() {
+        let root =
+            std::env::temp_dir().join(format!("bingo-agents-{}-documents", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let project = root.join("project");
+        write(
+            &home.join(".config/bingo/agents/user-reviewer.md"),
+            "---\nname: reviewer\n---\nUser reviewer.\n",
+        );
+        write(
+            &project.join(".bingo/agents/project-reviewer.md"),
+            "---\nname: reviewer\n---\nProject reviewer.\n",
+        );
+
+        let documents = list_agent_definition_documents(&home, &project)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let user = documents
+            .iter()
+            .find(|document| document.source == "user")
+            .unwrap_or_else(|| panic!("user role exists"));
+        let project_role = documents
+            .iter()
+            .find(|document| document.source == "project")
+            .unwrap_or_else(|| panic!("project role exists"));
+        assert!(user.overridden);
+        assert!(!project_role.overridden);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn definition_save_preserves_unknown_fields_and_rejects_stale_revisions() {
+        let root =
+            std::env::temp_dir().join(format!("bingo-agents-{}-revision", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let project = root.join("project");
+        let path = project.join(".bingo/agents/reviewer.md");
+        write(
+            &path,
+            "---\nname: reviewer\ndescription: Initial\ncustom_key: keep-me\n---\nReview changes.\n",
+        );
+        let original = get_agent_definition_document(
+            &home,
+            &project,
+            AgentDefinitionScope::Project,
+            "reviewer",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let updated = save_agent_definition_document(
+            &home,
+            &project,
+            AgentDefinitionScope::Project,
+            "reviewer",
+            Some(&original.revision),
+            AgentDefinitionInput {
+                name: "reviewer".to_string(),
+                description: "Updated".to_string(),
+                model: Some("deepseek-chat".to_string()),
+                provider: Some("deepseek".to_string()),
+                thinking: None,
+                inherit_system: false,
+                profile: crate::team::MemberProfile {
+                    identity: Some(crate::team::MemberIdentity {
+                        title: Some("Senior reviewer".to_string()),
+                        background: Some("Release engineering".to_string()),
+                    }),
+                    personality: Some("Skeptical but constructive".to_string()),
+                    communication: Some(crate::team::MemberCommunication {
+                        language: Some("zh-CN".to_string()),
+                        tone: Some("direct".to_string()),
+                        verbosity: Some("concise".to_string()),
+                        instructions: Some("Lead with blocking findings.".to_string()),
+                    }),
+                    constraints: vec![crate::team::BehaviorConstraint {
+                        kind: "reviewOnly".to_string(),
+                        instruction: "Do not implement changes.".to_string(),
+                        enforcement: "prompt".to_string(),
+                    }],
+                    preferences: vec!["Cite file and line references.".to_string()],
+                },
+                system: "Review carefully.".to_string(),
+            },
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{error}"));
+        assert!(raw.contains("custom_key: keep-me"));
+        assert!(raw.contains("identity_title: Senior reviewer"), "{raw}");
+        assert!(raw.contains("constraints: |-"), "{raw}");
+        assert!(
+            raw.contains("- reviewOnly: Do not implement changes."),
+            "{raw}"
+        );
+        assert!(raw.contains("preferences: |-"), "{raw}");
+        let round_trip = get_agent_definition_document(
+            &home,
+            &project,
+            AgentDefinitionScope::Project,
+            "reviewer",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(round_trip.profile, updated.profile);
+        assert!(matches!(
+            save_agent_definition_document(
+                &home,
+                &project,
+                AgentDefinitionScope::Project,
+                "reviewer",
+                Some(&original.revision),
+                AgentDefinitionInput {
+                    name: "reviewer".to_string(),
+                    description: "Stale".to_string(),
+                    model: None,
+                    provider: None,
+                    thinking: None,
+                    inherit_system: true,
+                    profile: crate::team::MemberProfile::default(),
+                    system: "Stale edit.".to_string(),
+                },
+            ),
+            Err(AgentDefinitionError::Conflict)
+        ));
+        let (_, archived) = archive_agent_definition_document(
+            &home,
+            &project,
+            AgentDefinitionScope::Project,
+            "reviewer",
+            &updated.revision,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(!path.exists());
+        assert!(archived.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn definition_save_rejects_duplicate_names_in_the_same_scope() {
+        let root = std::env::temp_dir().join(format!(
+            "bingo-agents-{}-duplicate-name",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let project = root.join("project");
+        write(
+            &project.join(".bingo/agents/first.md"),
+            "---\nname: reviewer\n---\nReview changes.\n",
+        );
+
+        let error = save_agent_definition_document(
+            &home,
+            &project,
+            AgentDefinitionScope::Project,
+            "second",
+            None,
+            AgentDefinitionInput {
+                name: "reviewer".to_string(),
+                description: "Another reviewer".to_string(),
+                model: None,
+                provider: None,
+                thinking: None,
+                inherit_system: true,
+                profile: crate::team::MemberProfile::default(),
+                system: "Review other changes.".to_string(),
+            },
+        )
+        .expect_err("duplicate role names in one scope must be rejected");
+
+        assert!(error.to_string().contains("already used"), "{error}");
+        assert!(!project.join(".bingo/agents/second.md").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

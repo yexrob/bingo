@@ -43,6 +43,8 @@ mod system;
 mod tasks;
 mod team;
 mod team_cmd;
+mod team_presets;
+mod team_tasks;
 mod token_rate;
 mod tool;
 mod tools;
@@ -70,6 +72,10 @@ struct Cli {
     /// Resume one exact transcript stem in JSON-events mode
     #[arg(long, requires = "json_events")]
     session: Option<String>,
+
+    /// Append the current directory as the resumed session's workspace
+    #[arg(long, requires_all = ["json_events", "session"])]
+    bind_session_workspace: bool,
 
     /// Side-effect-free capability probe in JSON-events mode (protocol.ready, then exit 0)
     #[arg(
@@ -254,7 +260,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.json_events && cli.inspect {
         let reader = std::io::BufReader::new(std::io::stdin());
         let writer = std::io::BufWriter::new(std::io::stdout());
-        let exit_code = crate::json_events::run_inspect(client, reader, writer).await?;
+        let exit_code = crate::json_events::run_inspect(
+            client,
+            settings,
+            &user_dir,
+            &project_dir,
+            reader,
+            writer,
+        )
+        .await?;
         if exit_code != 0 {
             std::process::exit(exit_code);
         }
@@ -295,6 +309,17 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(stem) = cli.session.as_deref() {
             let transcript = crate::json_events::resolve_session(&home, stem)?;
             transcript.activate()?;
+            if cli.bind_session_workspace {
+                transcript.bind_workspace(&project_dir)?;
+            } else if let Some(metadata) = transcript.session_metadata()?
+                && !workspace_paths_match(&metadata.cwd, &project_dir)
+            {
+                return Err(crate::json_events::JsonEventsError::BadArgument(format!(
+                    "session belongs to workspace {}; launch bingo from that directory or pass --bind-session-workspace to relocate it",
+                    metadata.cwd
+                ))
+                .into());
+            }
             let messages = transcript.load_messages()?;
             (Some(transcript), messages, true)
         } else if cli.continue_ {
@@ -393,6 +418,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &client.models(),
     ));
     let channel_limits = crate::channels::ChannelLimits::from_settings(&settings);
+    let team_tasks = crate::team_tasks::TeamTaskRegistry::load(&home, &project_dir)?;
     let session = Arc::new(Session {
         client,
         runtime,
@@ -410,9 +436,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         expand_tasks: expand_tx,
         agents: crate::agents::AgentRegistry::new(),
         channels: crate::channels::ChannelRegistry::new(channel_limits),
+        team_tasks,
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
+    session.agents.attach_team_tasks(session.team_tasks.clone());
+    session
+        .channels
+        .attach_team_tasks(session.team_tasks.clone());
 
     // Share persistence: incrementally records subagent/channel snapshots per session (the data source for `bingo share`).
     // Same key as the task list = transcript file stem; create/read failures only warn (an enhancement, not a contract).
@@ -480,6 +511,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         drop(startup_notes.drain(..));
     }
 
+    let mut json_exit_code = None;
     let result = async {
         if cli.json_events {
             drop(initial_messages);
@@ -488,13 +520,17 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     "JSON-events mode requires a transcript".to_string(),
                 )
             })?;
+            let turn_index = transcript.turn_index()?;
             let metadata = crate::json_events::CliSessionMetadata {
                 bingo_version: env!("CARGO_PKG_VERSION").to_string(),
                 protocol_version: crate::json_events::PROTOCOL_VERSION,
                 session_id: transcript.name(),
                 transcript_path: transcript.path().display().to_string(),
                 resumed,
-                cwd: project_dir.display().to_string(),
+                cwd: transcript
+                    .session_metadata()?
+                    .map(|metadata| metadata.cwd)
+                    .unwrap_or_else(|| project_dir.display().to_string()),
                 provider: session.runtime.provider.borrow().clone(),
                 model: session.runtime.model.borrow().clone(),
                 thinking_level: session
@@ -513,6 +549,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 supports_images: session.client.supports_images(),
                 shell: crate::platform::shell().to_string(),
                 shell_dialect: crate::platform::shell_dialect().as_str().to_string(),
+                capabilities: crate::json_events::CAPABILITIES
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect(),
+                transcript_revision: transcript.transcript_revision()?,
+                parent_session_id: turn_index
+                    .as_ref()
+                    .and_then(|index| index.parent_session_id.clone()),
+                fork_reason: turn_index.and_then(|index| index.fork_reason),
             };
             let reader = std::io::BufReader::new(std::io::stdin());
             let writer = std::io::BufWriter::new(std::io::stdout());
@@ -520,7 +565,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .run(reader)
                 .await?;
             if exit_code != 0 {
-                std::process::exit(exit_code);
+                json_exit_code = Some(exit_code);
             }
         } else if cli.print {
             let prompt = if !cli.prompt.is_empty() {
@@ -559,10 +604,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // D31 session-end persistence: latest history of team members (for cross-session
     // restore; failures are silent).
-    if !cli.json_events && !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
-        persist_team_memory(&session, &home, &session.cwd());
-    }
+    persist_team_memory(&session, &home, &session.cwd());
     crate::hooks::run_session_end(&session.settings.hooks, mode_str, &session.cwd()).await;
+    if let Some(exit_code) = json_exit_code {
+        std::process::exit(exit_code);
+    }
     result
 }
 
@@ -663,6 +709,21 @@ async fn run_share(
         }
     }
     Ok(())
+}
+
+fn workspace_paths_match(recorded: &str, current: &Path) -> bool {
+    let recorded = std::fs::canonicalize(recorded).unwrap_or_else(|_| PathBuf::from(recorded));
+    let current = std::fs::canonicalize(current).unwrap_or_else(|_| current.to_path_buf());
+    #[cfg(windows)]
+    {
+        recorded
+            .to_string_lossy()
+            .eq_ignore_ascii_case(current.to_string_lossy().as_ref())
+    }
+    #[cfg(not(windows))]
+    {
+        recorded == current
+    }
 }
 
 fn json_events_exit_code(error: &(dyn std::error::Error + 'static)) -> i32 {
@@ -788,6 +849,30 @@ mod tests {
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
+    }
+
+    #[test]
+    fn workspace_binding_requires_json_events_and_exact_session() {
+        for args in [
+            vec!["bingo", "--bind-session-workspace"],
+            vec!["bingo", "--json-events", "--bind-session-workspace"],
+        ] {
+            let error = Cli::try_parse_from(args).expect_err("binding needs JSON session resume");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+        }
+
+        let cli = Cli::try_parse_from([
+            "bingo",
+            "--json-events",
+            "--session",
+            "project-123",
+            "--bind-session-workspace",
+        ])
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(cli.bind_session_workspace);
     }
 
     #[test]

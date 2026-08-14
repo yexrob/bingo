@@ -2031,6 +2031,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
+            team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })
@@ -2759,11 +2760,16 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
+            team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         });
         let mut ui = headless_hooks();
-        let outcome = run_bash_command(&session, "printf '%s' 'a<b&c>'", Vec::new(), &mut ui, None)
+        #[cfg(unix)]
+        let command = "printf '%s' 'a<b&c>'";
+        #[cfg(windows)]
+        let command = "[Console]::Write('a<b&c>')";
+        let outcome = run_bash_command(&session, command, Vec::new(), &mut ui, None)
             .await
             .unwrap();
         assert!(!outcome.aborted);
@@ -2780,7 +2786,7 @@ mod tests {
         );
         let merged = text_of(&outcome.messages[1]);
         assert!(
-            merged.contains("<bash-input>printf '%s' 'a<b&c>'</bash-input>"),
+            merged.contains(&format!("<bash-input>{command}</bash-input>")),
             "{merged}"
         );
         assert!(merged.contains("<bash-stdout>"), "{merged}");
@@ -3136,6 +3142,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
+            team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         });

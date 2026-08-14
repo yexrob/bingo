@@ -376,18 +376,17 @@ fn validate(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     }
 }
 
-/// The portraits a scaffolded crew may wear: every one except the two the hub
-/// and the human already occupy in the transcript.
-fn crew_portraits() -> Vec<&'static str> {
-    let taken = [
-        crate::tui::avatar::index_of(crate::channels::HUB_NAME),
-        crate::tui::avatar::index_of(crate::channels::USER_NAME),
-    ];
-    crate::tui::avatar::ids()
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| !taken.contains(i))
-        .map(|(_, id)| id)
+fn crew_portraits(team: &str, defs: &[crate::agents::AgentDef]) -> Vec<&'static str> {
+    let mut taken = Vec::new();
+    defs.iter()
+        .map(|definition| {
+            let avatar = crate::tui::avatar::random_default_id(
+                taken.iter().copied(),
+                &format!("{team}\0{}", definition.name),
+            );
+            taken.push(avatar);
+            avatar
+        })
         .collect()
 }
 
@@ -416,8 +415,11 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
                 .to_string(),
         ];
     }
+    let portraits = crew_portraits(&name, &defs);
     let def = crate::team::TeamDef {
+        team_id: String::new(),
         name,
+        leader: None,
         channel: Some(crate::team::ChannelSpec {
             mode: Some("serial".to_string()),
             message_limit: None,
@@ -426,16 +428,12 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
         // invented org in it is one the user has to undo before they can use it.
         channels: Vec::new(),
         teams: Vec::new(),
-        // Portraits handed out in roster order rather than by hashing the name:
-        // a scaffolded crew should come out with distinct faces, and a hash of
-        // four role names collides more often than not. The two the hub and the
-        // human wear are dealt out of the deck (D50) — they are in every room the
-        // crew appears in, so a member sharing one collides on sight. Derived
-        // from the same hash they use rather than named here, so the reservation
-        // follows if either the hash or the portrait list changes.
+        // New crews receive one-time random geometric portraits. Unused ids are
+        // preferred so a starter roster is easy to scan, while legacy portrait ids
+        // remain valid for blueprints that already pin them.
         members: defs
             .iter()
-            .zip(crew_portraits().into_iter().cycle())
+            .zip(portraits)
             .map(|(d, avatar)| crate::team::TeamMember {
                 name: d.name.clone(),
                 agent: d.name.clone(),
@@ -652,6 +650,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
+            team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         });
@@ -696,7 +695,7 @@ mod tests {
         let (s, project) = session("faces");
         // More members than there are free portraits, so the deal wraps and any
         // reserved face would certainly surface.
-        for i in 0..crate::tui::avatar::COUNT + 1 {
+        for i in 0..crate::tui::avatar::DEFAULT_COUNT + 1 {
             std::fs::write(
                 project.join(format!(".bingo/agents/a{i}.md")),
                 "You are A.\n",
@@ -705,16 +704,15 @@ mod tests {
         }
         let _ = new_team(&s, &project, "wide");
         let def = crate::team::load_team_file(&project).unwrap().unwrap();
+        let ids = crate::tui::avatar::ids();
         let taken = [
-            crate::tui::avatar::index_of(crate::channels::HUB_NAME),
-            crate::tui::avatar::index_of(crate::channels::USER_NAME),
+            ids[crate::tui::avatar::index_of(crate::channels::HUB_NAME)],
+            ids[crate::tui::avatar::index_of(crate::channels::USER_NAME)],
         ];
         for m in &def.members {
             let id = m.avatar.as_deref().unwrap_or_default();
-            let index = crate::tui::avatar::index_of_id(id)
-                .unwrap_or_else(|| panic!("{} wears an unknown portrait {id:?}", m.name));
             assert!(
-                !taken.contains(&index),
+                !taken.contains(&id),
                 "{} took a reserved face ({id})",
                 m.name
             );
@@ -727,7 +725,11 @@ mod tests {
             .collect();
         assert_eq!(
             dealt.len(),
-            crate::tui::avatar::COUNT - taken.len(),
+            crate::tui::avatar::DEFAULT_COUNT
+                - taken
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
             "every unreserved portrait is used: {dealt:?}"
         );
         let _ = std::fs::remove_dir_all(project.parent().unwrap());

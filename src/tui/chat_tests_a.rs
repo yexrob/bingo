@@ -50,6 +50,7 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: crate::agents::AgentRegistry::new(),
         channels: crate::channels::ChannelRegistry::new(Default::default()),
+        team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -1082,6 +1083,7 @@ async fn bash_submit_runs_command_and_ends_turn() {
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: crate::agents::AgentRegistry::new(),
         channels: crate::channels::ChannelRegistry::new(Default::default()),
+        team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -2049,17 +2051,19 @@ fn slash_output_rows_render_transient() {
 #[tokio::test]
 async fn slash_skill_submits_marker_not_full_content() {
     let mut chat = test_chat();
+    Arc::get_mut(&mut chat.session).unwrap().client =
+        crate::api::client::Client::new("test-key".to_string(), "http://127.0.0.1:9".to_string());
     chat.input = "/guide".to_string();
     chat.submit();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         chat.drain_all();
-        if !chat.busy && !chat.messages.is_empty() {
+        if !chat.messages.is_empty() {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the skill turn did not end"
+            "the skill marker was not submitted"
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
@@ -2073,6 +2077,7 @@ async fn slash_skill_submits_marker_not_full_content() {
         !chat.messages[0].text.contains("Diagnostic guide"),
         "the full body no longer enters the context"
     );
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
 }
 
 /// Unknown slash commands still point to /help (no mis-consumption when the skill name does not match).
@@ -2172,7 +2177,12 @@ fn slash_provider_list_masks_short_keys() {
         ..Default::default()
     };
     Arc::get_mut(&mut chat.session).unwrap().client =
-        crate::api::client::Client::from_settings(&settings).unwrap();
+        crate::api::client::Client::from_settings_at_with(
+            &settings,
+            |_| Err(std::env::VarError::NotPresent),
+            &std::env::temp_dir().join(format!("bingo-provider-test-home-{}", std::process::id())),
+        )
+        .unwrap();
     chat.input = "/provider".to_string();
     chat.submit();
     // No argument → opens the selector: the info column (URL + redacted key) goes into desc (picker-model.md commit D).

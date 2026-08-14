@@ -1059,3 +1059,47 @@ documented output ceiling — kimi-k2.x, mistral — keep the conservative defau
 default server-side while the gate stays off). The old table's DeepSeek entry (128k/8k) had gone
 stale enough to strangle a real session mid-thought; the corrected 1M/384k reaching users through
 the file's `builtin` refresh is D73's mechanism doing its job on day one.
+### D74. The GUI boundary is a bounded command/event protocol, not a second runtime
+
+`--json-events` exposes the existing session through versioned NDJSON commands and events. Every
+command carries a unique `commandId`; emitted records carry a gapless sequence and the active
+session id. `--probe` remains side-effect free, while `--inspect` loads only provider and sanitized
+settings data. Capabilities are explicit strings so a client can hide unsupported surfaces instead
+of guessing from the binary version. Command and event lines are bounded, credentials are never
+serialized, and invalid commands fail at their own scope without terminating a recoverable session.
+
+Prompts are live protocol resources. An invalid `prompt.respond` does not consume one: the client
+may correct the field and retry until the turn resolves, is cancelled, or the session closes. The
+adapter delegates query, permission, attachment, provider, Team, Agent, Channel, and transcript
+behavior to the same core objects as the TUI; it does not maintain a parallel application model.
+
+### D75. Session history is workspace-bound, indexed by turn, and forked immutably
+
+New JSON sessions reserve their transcript and claim its sidecar lock before `session.ready` is
+observable. A versioned absolute workspace record travels in the JSONL; legacy sessions remain readable and can
+be bound explicitly without rewriting their prior bytes. A sidecar turn index records prompt line,
+status, content revision, parent session, and fork reason. Editing the last prompt and recovering an
+interrupted turn create a child transcript, leaving the source byte-identical; recovery repairs
+orphaned tool calls with explicit error results and drops only a provably truncated tail.
+
+The sidecar is the active-session claim; the data file remains unlocked as required by D72.
+Cross-process fork handoff releases the claim and open data handle before emitting
+`session.forked`, and session deletion removes the transcript, turn index, and generated lock
+sidecar together. Cancellation persists only completed history, so a later turn can continue
+without replaying partial model output or side effects.
+
+### D76. Team v2 separates durable identity, work, and portable configuration
+
+Team v2 gives teams and members stable ids while keeping names as human-facing runtime addresses.
+Reusable role definitions and member overrides compose identity, communication preferences, and
+prompt-enforced behavior constraints. Project avatars are content-addressed normalized PNGs.
+Definition writes use optimistic revisions plus a scope lock, and one scope cannot contain two role
+documents with the same logical name; a project role may still override a user role.
+
+Long-running team tasks and the lobby are durable, branch-scoped records under the user data root.
+A task snapshots its participants and engine/profile configuration, owns a serial conversation, and
+reserves those members until completion or cancellation. Restart converts in-flight work to paused
+rather than claiming it continued. `.bingo-team` bundles carry a Team v2 root blueprint, referenced
+roles, and project avatars without credentials. Import is preview-first: every update needs an
+explicit keep/update resolution, model remapping is explicit, all embedded assets are validated
+before writes begin, and keep items remain byte-identical.

@@ -65,6 +65,10 @@ pub async fn assemble_tools(
     // hub-and-spoke: continuation and lifecycle management only on the main session
     // (subagents don't manage siblings).
     let channels_on = session.settings.experimental.agent_channels;
+    let task_member = session
+        .instance
+        .as_deref()
+        .and_then(|member| session.team_tasks.active_task_for_member(member));
     if session.depth == 0 {
         // Only the session that owns the UI can question the user. A subagent's answer
         // channel is its return value, not a modal — shipping the tool there would just
@@ -83,6 +87,13 @@ pub async fn assemble_tools(
                 session.clone(),
             )));
         }
+    } else if session.depth == 1 && session.instance.is_some() && task_member.is_some() {
+        tools.push(Box::new(crate::tool::channel::PostTool::new(
+            session.clone(),
+        )));
+        tools.push(Box::new(crate::tool::team_task::TeamTaskTool::new(
+            session.clone(),
+        )));
     } else if channels_on && session.depth == 1 && session.instance.is_some() {
         // Channel cohort (experimental): direct subagents only get the posting tool.
         tools.push(Box::new(crate::tool::channel::PostTool::new(
@@ -159,6 +170,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
+            team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })

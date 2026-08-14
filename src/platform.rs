@@ -7,8 +7,24 @@
 //! - Default shell: macOS `/bin/zsh`, other Unix `/bin/bash`, Windows `powershell.exe`;
 //!   overridable via `settings.shell` (see `init_shell`).
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+/// Resolve the user home directory from the conventional environment variables.
+/// `HOME` takes precedence, with `USERPROFILE` as the Windows fallback.
+pub fn home_dir() -> PathBuf {
+    home_dir_with(&|name| std::env::var_os(name))
+}
+
+/// Pure lookup core so home resolution can be tested without mutating process state.
+fn home_dir_with(lookup: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
+    lookup("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| lookup("USERPROFILE").filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
 
 /// Process-wide shell selection: `settings.shell` wins, otherwise the platform default.
 /// Settled once at startup — the shell never changes mid-process.
@@ -191,6 +207,31 @@ pub fn open_tty() -> Option<Box<dyn TtyIo>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_dir_prefers_home_and_falls_back_to_userprofile() {
+        let both = |name: &str| match name {
+            "HOME" => Some(OsString::from("/home/user")),
+            "USERPROFILE" => Some(OsString::from(r"C:\Users\user")),
+            _ => None,
+        };
+        assert_eq!(home_dir_with(&both), Path::new("/home/user"));
+
+        let windows_only = |name: &str| match name {
+            "USERPROFILE" => Some(OsString::from(r"C:\Users\user")),
+            _ => None,
+        };
+        assert_eq!(home_dir_with(&windows_only), Path::new(r"C:\Users\user"));
+
+        let empty_home = |name: &str| match name {
+            "HOME" => Some(OsString::new()),
+            "USERPROFILE" => Some(OsString::from(r"C:\Users\fallback")),
+            _ => None,
+        };
+        assert_eq!(home_dir_with(&empty_home), Path::new(r"C:\Users\fallback"));
+
+        assert!(home_dir_with(&|_| None).as_os_str().is_empty());
+    }
 
     #[test]
     fn default_shell_is_platform_appropriate() {

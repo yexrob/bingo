@@ -90,6 +90,9 @@ pub(crate) fn deliver_post(
             // Deposit first, then claim idle members in one pass. Running members observe the
             // inbox signal and absorb everything waiting at their next tool round.
             for (member, msg) in deliveries {
+                if !session.team_tasks.can_deposit(&member, channel) {
+                    continue;
+                }
                 session.agents.deposit(
                     &member,
                     crate::agents::InboxItem::Channel {
@@ -396,6 +399,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
+            team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })

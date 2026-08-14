@@ -12,7 +12,7 @@ pub const IMAGE_MAX_DIMENSION: u32 = 2000;
 pub const IMAGE_TARGET_RAW_SIZE: usize = 3 * 1024 * 1024 + 768 * 1024;
 /// Decode ceiling: oversized files are rejected outright instead of wasting
 /// decode time.
-const MAX_DECODE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_DECODE_BYTES: usize = 32 * 1024 * 1024;
 
 /// A sendable image: encoding format + base64 data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,12 +57,17 @@ impl Attachments {
     /// Raw bytes → compressed attachment; returns the 1-based placeholder id (None = not an image).
     pub fn register(&self, bytes: &[u8]) -> Option<usize> {
         let prepared = prepare_image(bytes)?;
+        Some(self.register_prepared(prepared))
+    }
+
+    /// Store an image that has already passed the shared decoder and size policy.
+    pub fn register_prepared(&self, prepared: PreparedImage) -> usize {
         let mut inner = self.lock();
         inner.push(crate::api::types::ImageAttachment {
             media_type: prepared.media_type,
             data: prepared.data,
         });
-        Some(inner.len())
+        inner.len()
     }
 
     /// Markers in `text` → attachments, deduplicated, in order of first appearance.

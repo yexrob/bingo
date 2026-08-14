@@ -123,6 +123,47 @@ impl TaskStore {
         Ok(())
     }
 
+    /// Copy this session-scoped list to a newly reserved session key. The destination keeps
+    /// task ids and dependency references, then evolves independently from the source.
+    pub async fn fork_to(&self, key: &str) -> Result<usize, TaskError> {
+        if self.fixed_list_id.is_some() {
+            return Ok(0);
+        }
+        let _guard = self.lock.lock().await;
+        let destination = self.root.join(key);
+        if destination.exists() {
+            return Err(TaskError::CreateConflict(key.to_string()));
+        }
+        let mut tasks = Vec::new();
+        for id in self.list_ids_unlocked()? {
+            if let Some(task) = Self::read_file(&self.task_path(&id)?)? {
+                tasks.push(task);
+            }
+        }
+        if tasks.is_empty() {
+            return Ok(0);
+        }
+        let temporary = self
+            .root
+            .join(format!(".{key}.fork-{}", std::process::id()));
+        if temporary.exists() {
+            return Err(TaskError::CreateConflict(key.to_string()));
+        }
+        std::fs::create_dir_all(&temporary).map_err(TaskError::Io)?;
+        for task in &tasks {
+            if let Err(error) = Self::write_file(&temporary.join(format!("{}.json", task.id)), task)
+            {
+                let _ = std::fs::remove_dir_all(&temporary);
+                return Err(error);
+            }
+        }
+        if let Err(error) = std::fs::rename(&temporary, &destination) {
+            let _ = std::fs::remove_dir_all(&temporary);
+            return Err(TaskError::Io(error));
+        }
+        Ok(tasks.len())
+    }
+
     /// TUI/query share the same store instance (Arc<TaskStore>).
     fn task_path(&self, id: &str) -> Result<PathBuf, TaskError> {
         // ids are internally generated numeric strings; defends against path traversal.
@@ -468,6 +509,36 @@ mod tests {
                     .unwrap()
                     .is_empty()
             );
+            let _ = std::fs::remove_dir_all(tmp);
+        });
+    }
+
+    #[test]
+    fn fork_copies_tasks_and_then_isolates_both_lists() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let tmp = env::temp_dir().join(format!("bingo-tasks-fork-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let home = tmp.join("home");
+            let source = TaskStore::new(&home, "source");
+            let id = source.create(&task("source task")).await.unwrap();
+            assert_eq!(source.fork_to("child").await.unwrap(), 1);
+            let child = TaskStore::new(&home, "child");
+            child
+                .update(
+                    &id,
+                    &TaskPatch {
+                        subject: Some("child task".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                source.get(&id).await.unwrap().unwrap().subject,
+                "source task"
+            );
+            assert_eq!(child.get(&id).await.unwrap().unwrap().subject, "child task");
             let _ = std::fs::remove_dir_all(tmp);
         });
     }

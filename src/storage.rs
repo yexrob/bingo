@@ -1,6 +1,8 @@
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use thiserror::Error;
@@ -13,6 +15,35 @@ pub const RETENTION_MAX_HISTORY_FILES: usize = 100;
 const RECENT_ACTIVITY_GRACE_SECS: u64 = 24 * 60 * 60;
 
 static CLEANUP_LOCK: Mutex<()> = Mutex::new(());
+static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} has no parent directory", path.display()),
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let nonce = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let extension = path
+        .extension()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_default();
+    let temporary = path.with_extension(format!("{extension}.tmp-{}-{nonce}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    drop(file);
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
+}
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -77,6 +108,18 @@ pub fn shares_dir(home: &Path) -> PathBuf {
 
 pub fn tasks_dir(home: &Path) -> PathBuf {
     data_dir(home).join("tasks")
+}
+
+pub fn team_tasks_dir(home: &Path) -> PathBuf {
+    data_dir(home).join("team-tasks")
+}
+
+pub fn team_lobbies_dir(home: &Path) -> PathBuf {
+    data_dir(home).join("team-lobbies")
+}
+
+pub fn team_member_experience_dir(home: &Path) -> PathBuf {
+    data_dir(home).join("team-member-experience")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -169,6 +212,7 @@ fn cleanup_with_policy_at(
         if !remove_inactive_transcript(&path)? {
             continue;
         }
+        remove_turn_index_files(&path)?;
         report.transcripts += 1;
         if let Some(key) = session_key {
             report.shares += remove_share_files(&shares_dir(home), &key)?;
@@ -193,6 +237,33 @@ fn cleanup_with_policy_at(
     }
 
     Ok(report)
+}
+
+fn remove_turn_index_files(transcript: &Path) -> Result<(), StorageError> {
+    let index = transcript.with_extension("turns.json");
+    let _ = remove_file(&index)?;
+    let Some(directory) = index.parent() else {
+        return Ok(());
+    };
+    let Some(prefix) = index
+        .file_name()
+        .map(|name| format!("{}.", name.to_string_lossy()))
+    else {
+        return Ok(());
+    };
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(io_error("read turn index directory", directory, source)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|source| io_error("read turn index entry", directory, source))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(&prefix) && (name.contains(".tmp-") || name.contains(".bak-")) {
+            let _ = remove_file(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn remove_share_files(dir: &Path, session_key: &str) -> Result<usize, StorageError> {
@@ -482,10 +553,18 @@ mod tests {
         let recent = transcripts_dir(&home).join("recent.jsonl");
         let overflow = transcripts_dir(&home).join("overflow.jsonl");
         let expired = transcripts_dir(&home).join("expired.jsonl");
+        let recent_index = recent.with_extension("turns.json");
+        let expired_index = expired.with_extension("turns.json");
+        let expired_index_tmp = transcripts_dir(&home).join("expired.turns.json.tmp-123");
+        let expired_index_backup = transcripts_dir(&home).join("expired.turns.json.bak-123");
         write_at(&current, now - Duration::from_secs(60 * 24 * 60 * 60));
         write_at(&recent, now - Duration::from_secs(60));
         write_at(&overflow, now - Duration::from_secs(120));
         write_at(&expired, now - Duration::from_secs(31 * 24 * 60 * 60));
+        write_at(&recent_index, now);
+        write_at(&expired_index, now);
+        write_at(&expired_index_tmp, now);
+        write_at(&expired_index_backup, now);
 
         let report = cleanup_with_policy_at(&home, Some(&current), test_policy(1), now).unwrap();
 
@@ -493,6 +572,13 @@ mod tests {
         assert!(recent.exists(), "the newest non-active session is retained");
         assert!(!overflow.exists(), "the count cap removes older overflow");
         assert!(!expired.exists(), "the TTL removes expired sessions");
+        assert!(
+            recent_index.exists(),
+            "a retained session keeps its turn index"
+        );
+        assert!(!expired_index.exists());
+        assert!(!expired_index_tmp.exists());
+        assert!(!expired_index_backup.exists());
         assert_eq!(report.transcripts, 2);
         let _ = std::fs::remove_dir_all(home);
     }

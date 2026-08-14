@@ -354,7 +354,7 @@ async fn fetch(
         let bytes = read_body_capped(response).await?;
         let html = String::from_utf8_lossy(&bytes).into_owned();
         let markdown = if content_type.contains("text/html") {
-            html2md::parse_html(&html)
+            super::html_to_markdown::convert(&html)
         } else {
             html
         };

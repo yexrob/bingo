@@ -768,6 +768,15 @@ pub(crate) fn spawn_agent_loop(
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let output_chars = text.chars().count();
+                    let associated_task = loop_registry.task_id_of(&name);
+                    let _ = session.team_tasks.record_agent_result_for_task(
+                        &name,
+                        associated_task.as_deref(),
+                        &text,
+                    );
+                    if let Some(channel) = session.team_tasks.pausing_channel_for_member(&name) {
+                        loop_registry.discard_channel_inbox(&name, &channel);
+                    }
                     loop_registry.set_live(&name, None, None);
                     loop_registry.set_progress(&name, None);
                     watch.set_state(
@@ -776,7 +785,9 @@ pub(crate) fn spawn_agent_loop(
                         Some("done".to_string()),
                         Some(serde_json::json!(non_empty(text))),
                     );
-                    match loop_registry.finish(&name, outcome.messages, output_chars) {
+                    let continuation = loop_registry.finish(&name, outcome.messages, output_chars);
+                    let _ = session.team_tasks.settle_ready_tasks(&loop_registry);
+                    match continuation {
                         Some(next) => {
                             history = next.history;
                             current_items = next.items;
@@ -808,6 +819,7 @@ pub(crate) fn spawn_agent_loop(
                         None,
                     );
                     loop_registry.mark_idle(&name);
+                    let _ = session.team_tasks.settle_ready_tasks(&loop_registry);
                     break;
                 }
             }
@@ -873,6 +885,14 @@ impl AgentTool {
             description.clone(),
             sub_session.clone(),
         );
+        if let Some(task) = self
+            .session
+            .instance
+            .as_deref()
+            .and_then(|parent| self.session.team_tasks.active_task_for_member(parent))
+        {
+            let _ = self.session.agents.associate_task(&name, task.id);
+        }
         record_hire(&self.session, cwd, &name, &description);
         Ok((name, description, sub_session))
     }
@@ -974,6 +994,8 @@ fn hire_context(cwd: &std::path::Path) -> MemberContext {
         memory: None,
         norms: crate::team::load_norms(cwd).map(|n| crate::team::norms_block(&team.name, &n)),
         standing: Some(crate::team::hire_note(&team.name)),
+        profile: None,
+        experience: None,
         cwd: None,
     }
 }
@@ -991,13 +1013,17 @@ pub(crate) struct MemberContext {
     pub norms: Option<String>,
     /// Where this instance stands relative to the crew — set only for a temporary hire.
     pub standing: Option<String>,
+    /// Fixed-member overrides layered on the referenced AgentDef profile.
+    pub profile: Option<crate::team::MemberProfile>,
+    /// Project-level confirmed experience for the stable member identity.
+    pub experience: Option<String>,
     /// Override the parent session's working directory for a team rooted elsewhere.
     pub cwd: Option<std::path::PathBuf>,
 }
 
 impl MemberContext {
     fn blocks(self) -> impl Iterator<Item = String> {
-        [self.norms, self.standing, self.memory]
+        [self.norms, self.experience, self.standing, self.memory]
             .into_iter()
             .flatten()
     }
@@ -1098,6 +1124,15 @@ pub(crate) fn build_sub_session(
         Some(d) => vec![persona(&d.system)],
         None => parent.system.clone(),
     };
+    let empty_profile = crate::team::MemberProfile::default();
+    let effective_profile = crate::team::MemberProfile::merged(
+        def.map(|definition| &definition.profile)
+            .unwrap_or(&empty_profile),
+        context.profile.as_ref().unwrap_or(&empty_profile),
+    );
+    if let Some(block) = effective_profile.prompt_block(instance) {
+        system.push(persona(&block));
+    }
     // Uncached on purpose: a short tail block is not worth another cache breakpoint.
     system.push(SystemBlock {
         text: SUBAGENT_NOTE.to_string(),
@@ -1112,7 +1147,9 @@ pub(crate) fn build_sub_session(
         crate::system::with_model_capabilities(&system, &model, &provider_name, &client.models());
     // Only when the feature is on: channel etiquette is noise for a solo subagent that will
     // never see a room.
-    if parent.settings.experimental.agent_channels {
+    if parent.settings.experimental.agent_channels
+        || parent.team_tasks.active_task_for_member(instance).is_some()
+    {
         system.push(SystemBlock {
             text: CHANNEL_NOTE.to_string(),
             cache: false,
@@ -1152,6 +1189,7 @@ pub(crate) fn build_sub_session(
         expand_tasks: parent.expand_tasks.clone(),
         agents: parent.agents.clone(),
         channels: parent.channels.clone(),
+        team_tasks: parent.team_tasks.clone(),
         instance: Some(instance.to_string()),
         attachments: parent.attachments.clone(),
     }))
@@ -1821,6 +1859,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
             channels: crate::channels::ChannelRegistry::new(Default::default()),
+            team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         });
@@ -1858,6 +1897,7 @@ mod tests {
             thinking: Some("high".into()),
             system: "You are the reviewer.".into(),
             inherit_system: true,
+            profile: crate::team::MemberProfile::default(),
             source: crate::agents::AgentDefSource::Unknown,
         }
     }
@@ -2993,6 +3033,80 @@ mod tests {
                 .any(|b| b.text.contains("your past is at")),
             "an ad-hoc subagent is told nothing about a past it does not have"
         );
+    }
+
+    #[test]
+    fn fixed_member_prompt_orders_role_profile_rules_and_task_context() {
+        let (parent, _client) = parent_session();
+        let mut role = def("reviewer");
+        role.system = "ROLE PROMPT".to_string();
+        role.profile.personality = Some("Methodical role default".to_string());
+        role.profile.preferences = vec!["Prefer focused checks.".to_string()];
+        let profile = crate::team::MemberProfile {
+            identity: Some(crate::team::MemberIdentity {
+                title: Some("Release reviewer".to_string()),
+                background: None,
+            }),
+            personality: None,
+            communication: None,
+            constraints: vec![crate::team::BehaviorConstraint {
+                kind: "noNetwork".to_string(),
+                instruction: "Do not use network tools.".to_string(),
+                enforcement: "prompt".to_string(),
+            }],
+            preferences: vec!["Report unresolved risks.".to_string()],
+        };
+        let sub = build_sub_session(
+            &parent,
+            None,
+            None,
+            None,
+            Some(&role),
+            "reviewer",
+            MemberContext {
+                norms: Some("TEAM NORMS".to_string()),
+                experience: Some("CONFIRMED EXPERIENCE".to_string()),
+                standing: Some("TASK CONTEXT".to_string()),
+                memory: Some("HISTORY REFERENCE".to_string()),
+                profile: Some(profile),
+                cwd: None,
+            },
+        )
+        .unwrap_or_else(|error| panic!("spawn: {error}"));
+        let texts = sub
+            .system
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>();
+        let index = |needle: &str| {
+            texts
+                .iter()
+                .position(|text| text.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle}: {texts:?}"))
+        };
+        let role_at = index("ROLE PROMPT");
+        let profile_at = index("Fixed team member profile for reviewer");
+        let norms_at = index("TEAM NORMS");
+        let experience_at = index("CONFIRMED EXPERIENCE");
+        let task_at = index("TASK CONTEXT");
+        let history_at = index("HISTORY REFERENCE");
+        assert!(
+            role_at < profile_at
+                && profile_at < norms_at
+                && norms_at < experience_at
+                && experience_at < task_at
+                && task_at < history_at,
+            "{texts:?}"
+        );
+        let profile_text = texts[profile_at];
+        assert!(profile_text.contains("Methodical role default"));
+        assert!(profile_text.contains("MUST behavior constraints"));
+        assert!(profile_text.contains("Do not use network tools."));
+        assert!(profile_text.contains("SHOULD working preferences"));
+        assert!(Arc::ptr_eq(
+            &sub.runtime.permissions,
+            &parent.runtime.permissions
+        ));
     }
 
     /// No named definition: the parent's system carries over, plus the note.

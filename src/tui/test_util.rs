@@ -47,6 +47,7 @@ pub fn test_session() -> Arc<Session> {
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: crate::agents::AgentRegistry::new(),
         channels: crate::channels::ChannelRegistry::new(Default::default()),
+        team_tasks: crate::team_tasks::TeamTaskRegistry::transient(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })

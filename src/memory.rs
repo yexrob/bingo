@@ -209,13 +209,20 @@ mod tests {
 
     #[test]
     fn dedupes_and_truncates() {
-        let home = Path::new("/tmp/bingo-mem-test");
+        let home = std::env::temp_dir().join(format!(
+            "bingo-mem-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let cwd = home.join("p");
-        std::fs::create_dir_all(memdir_dir(home)).unwrap();
-        let path = memory_file(home, &cwd);
+        std::fs::create_dir_all(memdir_dir(&home)).unwrap();
+        let path = memory_file(&home, &cwd);
         std::fs::write(&path, "fact one\nfact two\n").unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content.lines().count(), 2);
-        std::fs::remove_dir_all(home).unwrap();
+        std::fs::remove_dir_all(&home).unwrap();
     }
 }

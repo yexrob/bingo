@@ -324,6 +324,7 @@ mod tests {
         assert!(text.contains("# Environment"));
         assert!(text.contains(std::env::consts::OS));
         assert!(text.contains(std::env::consts::ARCH));
+        assert!(text.contains(crate::platform::shell()));
         assert!(text.contains("Unix timestamp"));
         assert!(text.contains("Working directory"));
     }
